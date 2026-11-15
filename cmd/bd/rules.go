@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,6 +29,9 @@ type RuleFile struct {
 	Body      string   `json:"body,omitempty"`
 	Keywords  []string `json:"keywords"`
 	Tokens    int      `json:"tokens"`
+	// NotCarried holds the trimmed nonblank lines that are not part of a
+	// directive, so a composite drops them.
+	NotCarried []string `json:"-"`
 }
 
 // ContradictionReport describes a tension between two rules.
@@ -123,7 +128,7 @@ func ParseRuleFile(path string) (RuleFile, error) {
 	}
 
 	// Extract Do and Don't blocks
-	rf.DoLines, rf.DontLines = extractAllDirectives(content)
+	rf.DoLines, rf.DontLines, rf.NotCarried = extractAllDirectives(content)
 
 	// Extract keywords from Do/Don't lines first, fallback to body
 	allDirectives := append(rf.DoLines, rf.DontLines...)
@@ -136,9 +141,10 @@ func ParseRuleFile(path string) (RuleFile, error) {
 	return rf, nil
 }
 
-// extractAllDirectives parses Do and Don't blocks from rule content.
+// extractAllDirectives parses Do and Don't blocks from rule content, and
+// returns the trimmed nonblank lines it did not take into a directive.
 // Don't patterns are checked first to avoid false matches (since "Don't" contains "Do").
-func extractAllDirectives(content string) (doLines, dontLines []string) {
+func extractAllDirectives(content string) (doLines, dontLines, notCarried []string) {
 	lines := strings.Split(content, "\n")
 
 	// blockType: 0=none, 1=do, 2=dont
@@ -177,10 +183,15 @@ func extractAllDirectives(content string) (doLines, dontLines []string) {
 					} else {
 						dontLines = append(dontLines, text)
 					}
+				} else {
+					notCarried = append(notCarried, trimmed)
 				}
 			} else if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "**") {
 				// End of block
 				blockType = 0
+				if trimmed != "" {
+					notCarried = append(notCarried, trimmed)
+				}
 			} else {
 				// Plain continuation text
 				if blockType == 1 {
@@ -189,9 +200,11 @@ func extractAllDirectives(content string) (doLines, dontLines []string) {
 					dontLines = append(dontLines, trimmed)
 				}
 			}
+		} else if trimmed != "" {
+			notCarried = append(notCarried, trimmed)
 		}
 	}
-	return doLines, dontLines
+	return doLines, dontLines, notCarried
 }
 
 // ExtractKeywords tokenizes lines, removes stop words, lowercases, and deduplicates.
@@ -643,8 +656,33 @@ var rulesAuditCmd = &cobra.Command{
 }
 
 var rulesCompactCmd = &cobra.Command{
-	Use:           "compact",
-	Short:         "Merge related rules into composites",
+	Use:   "compact",
+	Short: "Merge related rules into composites",
+	Long: `Merge related rules into composites.
+
+A composite keeps only the **Do:** and **Don't:** lines of its sources, plus a
+"Source rules:" line naming them. Any other prose is not carried over: the
+preview lists every dropped line by source. A rule with no **Do:** or **Don't:**
+lines is skipped by --auto and refused by --group.
+
+Without --force, compact only previews: it prints the composite, the dropped
+lines, and the files it would back up and delete, and writes nothing. --force
+is the consent to apply. It writes the composite, copies each source to
+<name>.md.backup, and only then deletes the sources. Backups are not rules,
+so audit ignores them.
+
+Compact refuses a group whose composite or any backup path already exists,
+including one of its own sources; nothing is written for that group. If a
+backup or delete fails, the error names what was written, backed up and
+deleted, and every backup is kept.
+
+To undo a merge, delete the composite, then rename each <name>.md.backup back
+to <name>.md (a source that was not deleted still has its original name).
+
+Examples:
+  bd rules compact --auto                    # Preview the audit's suggested merges
+  bd rules compact --auto --force            # Apply them
+  bd rules compact --group alpha,beta --force`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE:          runRulesCompact,
@@ -658,8 +696,9 @@ func init() {
 	// Compact command flags
 	rulesCompactCmd.Flags().String("path", ".claude/rules/", "Path to rules directory")
 	rulesCompactCmd.Flags().StringSlice("group", nil, "Rule names to merge")
-	rulesCompactCmd.Flags().Bool("auto", false, "Apply audit suggestions")
-	rulesCompactCmd.Flags().Bool("dry-run", false, "Preview without applying")
+	rulesCompactCmd.Flags().Bool("auto", false, "Use audit suggestions to select merge groups")
+	rulesCompactCmd.Flags().Bool("dry-run", false, "Preview without applying (the default without --force)")
+	rulesCompactCmd.Flags().Bool("force", false, "Write the composite and delete the source files (without this flag, shows preview)")
 
 	// Register subcommands
 	rulesCmd.AddCommand(rulesAuditCmd)
@@ -732,7 +771,7 @@ func runRulesAudit(cmd *cobra.Command, args []string) error {
 			suggested := strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md"
 			fmt.Printf("    Suggested: merge into %s\n\n", suggested)
 		}
-		fmt.Printf("Run `bd rules compact --auto` to apply suggested merges.\n")
+		fmt.Printf("Run `bd rules compact --auto` to preview these merges, then add --force to apply them.\n")
 	}
 	return nil
 }
@@ -751,6 +790,8 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 	groupNames, _ := cmd.Flags().GetStringSlice("group")
 	autoMode, _ := cmd.Flags().GetBool("auto")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	force, _ := cmd.Flags().GetBool("force")
+	apply := force && !dryRun
 
 	if !autoMode && len(groupNames) == 0 {
 		return HandleErrorRespectJSON("specify --group <rule1,rule2,...> or --auto")
@@ -771,24 +812,46 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 		}
 
 		type compactResult struct {
-			Group   string `json:"group"`
-			Output  string `json:"output"`
-			Rules   int    `json:"rules_merged"`
-			Applied bool   `json:"applied"`
+			Group   string          `json:"group"`
+			Output  string          `json:"output"`
+			Rules   int             `json:"rules_merged"`
+			Applied bool            `json:"applied"`
+			Error   string          `json:"error,omitempty"`
+			Sources []compactSource `json:"sources"`
 		}
-		var results []compactResult
+		type compactPlan struct {
+			label, outName, merged string
+			rules                  []RuleFile
+			refused                error
+		}
 
+		// Plan and check every group before any is applied, so a preview
+		// refuses the same groups an apply would.
+		var plans []compactPlan
+		planned := make(map[string]bool)
 		for _, mc := range result.MergeCandidates {
 			// Parse the actual rule files for this group
 			var groupRules []RuleFile
 			for _, ruleName := range mc.Rules {
 				path := filepath.Join(rulesPath, ruleName)
-				rf, err := ParseRuleFile(path)
+				rf, err := parseCompactSource(path)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: skipping %s: %v\n", ruleName, err)
 					continue
 				}
+				if !hasDirectives(rf) {
+					fmt.Fprintf(os.Stderr, "Warning: skipping %s: it has no **Do:** or **Don't:** lines, so a composite would carry none of it\n", ruleName)
+					continue
+				}
 				groupRules = append(groupRules, rf)
+			}
+			if len(groupRules) < 2 {
+				names := make([]string, 0, len(groupRules))
+				for _, rf := range groupRules {
+					names = append(names, filepath.Base(rf.Path))
+				}
+				fmt.Fprintf(os.Stderr, "Warning: skipping group %q: fewer than two of its rules can be merged (%s); nothing written, backed up or deleted\n", mc.GroupLabel, strings.Join(names, ", "))
+				continue
 			}
 
 			merged, err := CompactRules(groupRules, mc.GroupLabel)
@@ -797,44 +860,67 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
-			applied := false
-			if !dryRun {
-				outName := strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md"
-				outPath := filepath.Join(rulesPath, outName)
-				if err := os.WriteFile(outPath, []byte(merged), 0o600); err != nil {
-					fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", outPath, err)
-					continue
-				}
-				// Delete source files
-				for _, ruleName := range mc.Rules {
-					srcPath := filepath.Join(rulesPath, ruleName)
-					_ = os.Remove(srcPath)
-				}
-				applied = true
+			plan := compactPlan{
+				label:   mc.GroupLabel,
+				outName: strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md",
+				merged:  merged,
+				rules:   groupRules,
 			}
+			outPath := filepath.Join(rulesPath, plan.outName)
+			if planned[outPath] {
+				plan.refused = fmt.Errorf("%s is also the composite of another group; refusing to write it twice. Merge one of the groups with --group, then re-run", outPath)
+			} else {
+				planned[outPath] = true
+				plan.refused = checkCompactDestinations(outPath, groupRules)
+			}
+			plans = append(plans, plan)
+		}
 
-			results = append(results, compactResult{
-				Group:   mc.GroupLabel,
-				Output:  merged,
-				Rules:   len(groupRules),
-				Applied: applied,
-			})
+		results := make([]compactResult, 0, len(plans))
+		failed := 0
+		for _, plan := range plans {
+			res := compactResult{
+				Group:  plan.label,
+				Output: plan.merged,
+				Rules:  len(plan.rules),
+			}
+			var done compactApplied
+			switch {
+			case plan.refused != nil:
+				fmt.Fprintf(os.Stderr, "Error: %v\n", plan.refused)
+				res.Error = plan.refused.Error()
+				failed++
+			case apply:
+				var err error
+				done, err = writeCompactedRule(filepath.Join(rulesPath, plan.outName), plan.merged, plan.rules)
+				res.Applied = done.Written
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					res.Error = err.Error()
+					failed++
+				}
+			}
+			res.Sources = compactSources(plan.rules, done)
+			results = append(results, res)
 
 			if !jsonOutput {
-				if dryRun {
-					fmt.Printf("Preview merge → %s.md:\n", mc.GroupLabel)
+				if plan.refused != nil {
+					printCompactRefused(plan.outName, res.Sources)
 				} else {
-					fmt.Printf("Merged → %s.md:\n", mc.GroupLabel)
+					printCompactPreview(plan.outName, plan.merged, res.Sources, res.Applied, res.Error == "")
 				}
-				fmt.Println(strings.Repeat("─", 40))
-				fmt.Print(merged)
-				fmt.Println(strings.Repeat("─", 40))
-				fmt.Println()
 			}
 		}
 
 		if jsonOutput {
-			return outputJSON(results)
+			if err := outputJSON(results); err != nil {
+				return err
+			}
+		} else if !apply {
+			fmt.Println(compactPreviewFooter)
+		}
+		if failed > 0 {
+			return &exitError{Code: 1}
 		}
 		return nil
 	}
@@ -855,6 +941,11 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 	if len(groupRules) < 2 {
 		return HandleErrorRespectJSON("need at least 2 rules to merge")
 	}
+	for _, rf := range groupRules {
+		if !hasDirectives(rf) {
+			return HandleErrorRespectJSON("refusing to merge this group: %s has no **Do:** or **Don't:** lines, so the composite would carry none of it. Drop it from --group, then re-run", filepath.Base(rf.Path))
+		}
+	}
 
 	label := findGroupLabel(groupRules, makeRange(len(groupRules)))
 	merged, err := CompactRules(groupRules, label)
@@ -862,34 +953,305 @@ func runRulesCompact(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("compact failed: %v", err)
 	}
 
+	outName := strings.ReplaceAll(label, " ", "-") + ".md"
+	outPath := filepath.Join(rulesPath, outName)
+	var done compactApplied
+	applyErr := checkCompactDestinations(outPath, groupRules)
+	refused := applyErr != nil
+	if apply && !refused {
+		done, applyErr = writeCompactedRule(outPath, merged, groupRules)
+	}
+	written := done.Written
+	sources := compactSources(groupRules, done)
+
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{
+		result := map[string]interface{}{
 			"group":   label,
 			"output":  merged,
 			"rules":   len(groupRules),
-			"dry_run": dryRun,
-		})
+			"dry_run": !apply,
+			"applied": written,
+			"sources": sources,
+		}
+		if applyErr != nil {
+			result["error"] = applyErr.Error()
+		}
+		if err := outputJSON(result); err != nil {
+			return err
+		}
+		if applyErr != nil {
+			return &exitError{Code: 1}
+		}
+		return nil
 	}
 
-	outName := strings.ReplaceAll(label, " ", "-") + ".md"
-	if dryRun {
-		fmt.Printf("Preview merge → %s:\n", outName)
-	} else {
+	if refused {
+		printCompactRefused(outName, sources)
+		return HandleError("%v", applyErr)
+	}
+	if applyErr != nil && !written {
+		return HandleError("%v", applyErr)
+	}
+	printCompactPreview(outName, merged, sources, written, applyErr == nil)
+	if applyErr != nil {
+		return HandleError("%v", applyErr)
+	}
+	if !apply {
+		fmt.Println(compactPreviewFooter)
+	}
+	return nil
+}
+
+const compactPreviewFooter = "Preview only, nothing written. Re-run with --force to write the composite, back up each source file to <name>.md.backup, and delete the sources."
+
+// compactSource is one source rule of a composite as compact reports it.
+type compactSource struct {
+	File       string   `json:"file"`
+	Backup     string   `json:"backup"`
+	NotCarried []string `json:"not_carried"`
+	BackedUp   bool     `json:"backed_up"`
+	Deleted    bool     `json:"deleted"`
+}
+
+// ruleBackupPath is where compact copies a source rule before deleting it.
+// The .backup suffix keeps the copy out of audit and compact, which read only
+// top-level *.md files.
+func ruleBackupPath(path string) string {
+	return path + ".backup"
+}
+
+// compactSources lists each distinct source of a composite, marking the ones
+// whose backup completed and the ones deleted.
+func compactSources(rules []RuleFile, done compactApplied) []compactSource {
+	sources := make([]compactSource, 0, len(rules))
+	seen := make(map[string]bool, len(rules))
+	for _, rf := range rules {
+		if seen[rf.Path] {
+			continue
+		}
+		seen[rf.Path] = true
+		notCarried := rf.NotCarried
+		if notCarried == nil {
+			notCarried = []string{}
+		}
+		sources = append(sources, compactSource{
+			File:       rf.Path,
+			Backup:     ruleBackupPath(rf.Path),
+			NotCarried: notCarried,
+			BackedUp:   done.BackedUp[rf.Path],
+			Deleted:    done.Deleted[rf.Path],
+		})
+	}
+	return sources
+}
+
+// printCompactPreview shows a composite and the source files it replaces.
+func printCompactPreview(outName, merged string, sources []compactSource, applied, sourcesDeleted bool) {
+	if applied {
 		fmt.Printf("Merged → %s:\n", outName)
+	} else {
+		fmt.Printf("Preview merge → %s:\n", outName)
 	}
 	fmt.Println(strings.Repeat("─", 40))
 	fmt.Print(merged)
 	fmt.Println(strings.Repeat("─", 40))
+	printNotCarried(sources)
+	names := make([]string, 0, len(sources))
+	var backups, backedUp, deleted, kept []string
+	for _, s := range sources {
+		name := filepath.Base(s.File)
+		names = append(names, name)
+		backups = append(backups, name+" → "+filepath.Base(s.Backup))
+		if s.BackedUp {
+			backedUp = append(backedUp, name+" → "+filepath.Base(s.Backup))
+		}
+		if s.Deleted {
+			deleted = append(deleted, name)
+		} else {
+			kept = append(kept, name)
+		}
+	}
+	if !applied {
+		fmt.Printf("Would back up: %s\n", strings.Join(backups, ", "))
+		fmt.Printf("Would delete: %s\n\n", strings.Join(names, ", "))
+		return
+	}
+	if len(backedUp) > 0 {
+		fmt.Printf("Backed up: %s\n", strings.Join(backedUp, ", "))
+	}
+	switch {
+	case sourcesDeleted:
+		fmt.Printf("Created %s, deleted %d source files: %s\n\n", outName, len(names), strings.Join(names, ", "))
+	case len(deleted) == 0:
+		fmt.Printf("Created %s, but no source file was deleted (see the error).\n\n", outName)
+	case len(kept) == 0:
+		fmt.Printf("Created %s and deleted %s, but a delete failed (see the error); every backup is kept.\n\n", outName, strings.Join(deleted, ", "))
+	default:
+		fmt.Printf("Created %s and deleted %s, but could not delete %s (see the error); every backup is kept.\n\n", outName, strings.Join(deleted, ", "), strings.Join(kept, ", "))
+	}
+}
 
-	if !dryRun {
-		outPath := filepath.Join(rulesPath, outName)
-		if err := os.WriteFile(outPath, []byte(merged), 0o600); err != nil {
-			return HandleErrorRespectJSON("write merged file: %v", err)
+// printNotCarried lists, by source, the lines a composite drops.
+func printNotCarried(sources []compactSource) {
+	dropped := false
+	for _, s := range sources {
+		if len(s.NotCarried) > 0 {
+			dropped = true
 		}
-		for _, rf := range groupRules {
-			_ = os.Remove(rf.Path)
+	}
+	if !dropped {
+		fmt.Println("Every nonblank line of the sources is carried (a composite keeps only **Do:** and **Don't:** lines).")
+		return
+	}
+	fmt.Println("Not carried into the composite (a composite keeps only **Do:** and **Don't:** lines; each backup keeps its source's full text):")
+	for _, s := range sources {
+		fmt.Printf("  %s:\n", filepath.Base(s.File))
+		if len(s.NotCarried) == 0 {
+			fmt.Println("    (nothing)")
 		}
-		fmt.Printf("\nCreated %s, deleted %d source files.\n", outName, len(groupRules))
+		for _, line := range s.NotCarried {
+			fmt.Printf("    %s\n", line)
+		}
+	}
+}
+
+// hasDirectives reports whether rf has a Do or Don't entry a composite can
+// carry.
+func hasDirectives(rf RuleFile) bool {
+	return len(rf.DoLines)+len(rf.DontLines) > 0
+}
+
+// parseCompactSource parses an --auto group's rule again after the audit did;
+// tests replace it to fail a parse in between.
+var parseCompactSource = ParseRuleFile
+
+// printCompactRefused reports a group compact will not merge, without showing
+// it as a preview that is safe to apply.
+func printCompactRefused(outName string, sources []compactSource) {
+	names := make([]string, 0, len(sources))
+	for _, s := range sources {
+		names = append(names, filepath.Base(s.File))
+	}
+	fmt.Printf("Refused merge → %s: nothing written, backed up or deleted for %s (see the error).\n\n", outName, strings.Join(names, ", "))
+}
+
+// checkCompactDestinations refuses a group whose composite or backup path
+// already exists, dangling symlinks included, before anything is written. A
+// clean check does not guarantee the apply succeeds: writeCompactedRule still
+// creates each file exclusively.
+func checkCompactDestinations(outPath string, sources []RuleFile) error {
+	paths := []string{outPath}
+	for _, s := range compactSources(sources, compactApplied{}) {
+		paths = append(paths, s.Backup)
+	}
+	var conflicts []string
+	for _, p := range paths {
+		_, err := os.Lstat(p)
+		switch {
+		case err == nil:
+			conflicts = append(conflicts, p+" already exists")
+		case !errors.Is(err, fs.ErrNotExist):
+			conflicts = append(conflicts, fmt.Sprintf("cannot check %s: %v", p, err))
+		}
+	}
+	if len(conflicts) > 0 {
+		return fmt.Errorf("refusing to compact into %s: %s. Rename or move those files (and update --group if it names them), then re-run", outPath, strings.Join(conflicts, "; "))
+	}
+	return nil
+}
+
+// compactApplied is what writeCompactedRule did, including when it failed
+// part way.
+type compactApplied struct {
+	Written  bool            // the composite was created
+	BackedUp map[string]bool // source path -> backup completed
+	Deleted  map[string]bool // source path -> source removed
+}
+
+// removeRuleSource deletes a source rule once its backup exists; tests replace
+// it to fail a delete.
+var removeRuleSource = os.Remove
+
+// writeCompactedRule creates outPath, copies every source to its backup path,
+// and only then removes the sources. It reports what it did even when a later
+// step fails. It never replaces an existing file: a composite named like one
+// of its own sources would otherwise be written and then deleted with them,
+// one named like an unrelated rule would silently replace it, and an existing
+// backup may be the only copy left of an earlier compaction's source.
+func writeCompactedRule(outPath, merged string, sources []RuleFile) (compactApplied, error) {
+	done := compactApplied{
+		BackedUp: make(map[string]bool, len(sources)),
+		Deleted:  make(map[string]bool, len(sources)),
+	}
+	// #nosec G304 -- path comes from controlled filepath.Join of user-specified rules directory
+	f, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return done, fmt.Errorf("%s already exists; refusing to overwrite it. Rename or move that file (and update --group if it names it), then re-run", outPath)
+	}
+	if err != nil {
+		return done, fmt.Errorf("write %s: %w", outPath, err)
+	}
+	if _, err := f.WriteString(merged); err != nil {
+		_ = f.Close()
+		_ = os.Remove(outPath)
+		return done, fmt.Errorf("write %s: %w", outPath, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(outPath)
+		return done, fmt.Errorf("write %s: %w", outPath, err)
+	}
+	done.Written = true
+
+	for _, rf := range sources {
+		if done.BackedUp[rf.Path] {
+			continue
+		}
+		if err := backupRuleSource(rf.Path, ruleBackupPath(rf.Path)); err != nil {
+			return done, fmt.Errorf("wrote %s but %w; no source file was deleted", outPath, err)
+		}
+		done.BackedUp[rf.Path] = true
+	}
+
+	var failures []string
+	for _, rf := range sources {
+		if err := removeRuleSource(rf.Path); err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		done.Deleted[rf.Path] = true
+	}
+	if len(failures) > 0 {
+		return done, fmt.Errorf("wrote %s but could not delete %d source file(s): %s", outPath, len(failures), strings.Join(failures, "; "))
+	}
+	return done, nil
+}
+
+// backupRuleSource copies the bytes of src (following a symlink) into a new
+// regular file at backup. It refuses an existing backup path, and removes only
+// the incomplete copy it created itself when a write fails.
+func backupRuleSource(src, backup string) error {
+	// #nosec G304 -- path comes from controlled filepath.Join of user-specified rules directory
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("could not back up %s: %w", src, err)
+	}
+	// #nosec G304 -- path comes from controlled filepath.Join of user-specified rules directory
+	f, err := os.OpenFile(backup, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("could not back up %s: %s already exists; refusing to overwrite it", src, backup)
+	}
+	if err != nil {
+		return fmt.Errorf("could not back up %s: %w", src, err)
+	}
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		if rerr := os.Remove(backup); rerr != nil {
+			return fmt.Errorf("could not back up %s to %s: %v (and could not remove the incomplete backup: %v)", src, backup, werr, rerr)
+		}
+		return fmt.Errorf("could not back up %s to %s: %w", src, backup, werr)
 	}
 	return nil
 }

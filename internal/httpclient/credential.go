@@ -196,7 +196,10 @@ func (p *BearerProvider) Source() string {
 	case "":
 		return ""
 	case credentialsFileSourceName:
-		return fmt.Sprintf("the credentials file [%s:%d]", p.host, p.port)
+		// The rung reads the first of these sections that has a password
+		// key. An IPv6 host's section has two spellings, so both are named,
+		// in that order; any other host's has one.
+		return "the credentials file [" + strings.Join(configfile.CredentialsSectionKeys(p.host, p.port), "] or [") + "]"
 	default:
 		// The env and token-command rungs carry their env var name as the slug,
 		// which is exactly the source to name.

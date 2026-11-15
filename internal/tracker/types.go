@@ -210,8 +210,13 @@ type IssueConversion struct {
 type DependencyInfo struct {
 	FromExternalID string // External identifier of the dependent issue
 	ToExternalID   string // External identifier of the dependency target
-	Type           string // Beads dependency type (blocks, related, duplicates, parent-child)
-	Source         DependencySource
+	// FromIdentityKey and ToIdentityKey are the endpoints' IdentityKeyer
+	// keys, "" when the tracker records none. An endpoint whose issue moved
+	// (a renamed project) still resolves by its identity.
+	FromIdentityKey string
+	ToIdentityKey   string
+	Type            string // Beads dependency type (blocks, related, duplicates, parent-child)
+	Source          DependencySource
 }
 
 // DependencySource identifies which tracker relationship produced a dependency.

@@ -63,8 +63,9 @@ observation either way. There is no purely-local, low-friction fix.
 
 The only code that creates a local `<dolt-data-dir>/<database>/.dolt` is
 `doltserver.Start()` (via `ensureDoltInit`), called exclusively from
-local-server-management sites. None reaches a remote host. So where
-`isRemoteServerHost(host)` is true (`internal/doltserver/physical_root.go`),
+local-server-management sites. None reaches a server bd does not run. So where
+`configfile.BdRunsServerAt(host)` is false (`internal/configfile/dolt_host.go`,
+applied in `internal/doltserver/physical_root.go`),
 the fine-grained probe is **permanently** silent — not only at fresh-clone
 time but for the life of that workspace. The probe is a sound partial answer,
 not a complete replacement.
@@ -170,6 +171,7 @@ would need new mechanism for no safety gain.
   `guardMissingServerDatabaseAt`.
 - Guard matrix: `cmd/bd/init_guard_test.go`.
 - Operator-facing limits: `docs/recovery/init-safety.md`.
-- Host locality predicate: `isRemoteServerHost`,
+- Host ownership predicate: `configfile.BdRunsServerAt`,
+  `internal/configfile/dolt_host.go`, applied in
   `internal/doltserver/physical_root.go`.
 - Prior init-safety decisions: [ADR 0002](0002-init-safety-invariants.md).

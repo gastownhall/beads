@@ -9,8 +9,10 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -221,25 +223,50 @@ func validateSettingKey(key string) error {
 }
 
 // validateSettingWrite is the role's own write rules, restated: the key rule
-// above, the protected key, and the one value whose shape is checked because it
-// is PROJECTED rather than merely stored.
+// above, the two storage length bounds, the config.yaml-only keys (#7559), the
+// protected key, the one value whose
+// shape is checked because it is PROJECTED rather than merely stored, and the
+// one checked because it is a SAFETY rule every sweep reads (types.retained,
+// whose check is the shared syntax validator itself rather than a restatement
+// of it).
 //
-// ALL THREE ARE THE ROLE'S AND NOT THE SERVER'S, which is the line this function
-// draws and the reason it stops where it does. The server applies its own EDGE
-// bounds on top — a key past 255 characters on the write (but not on the
-// remove), a value past types.MaxTextBytes BYTES, a media type — and this client
-// restates none of them: those are one server release away from moving, and a
-// second copy here would either drift or refuse a request a newer server would
-// take. They travel as the 400 the mapper turns into the same ErrValidation, and
-// the difference that makes to a local leg is ledgered (L-config-bounds).
+// ALL OF THEM ARE THE ROLE'S AND NOT THE SERVER'S, which is the line this
+// function draws and the reason it stops where it does. The length bounds — a
+// key past types.MaxFieldLen characters on the write (but not on the remove), a
+// value past types.MaxTextBytes BYTES — used to be the server's EDGE alone and
+// were ledgered as such (L-config-bounds, now retired): they moved onto
+// workapi.ValidateSettingWrite, so every leg refuses them, and from then on
+// they are restated here for the same reason as the rest. The server's other
+// edge rules — a media type, the body's own size — are still its own and are
+// not restated.
 //
-// The three below cannot travel that way for the reason every restated role rule
+// They cannot travel as the server's 400 for the reason every restated role rule
 // on this seam cannot: a request the role's own contract calls invalid must not
 // spend a round trip to be told so, and must not bind its classification to a
 // problem body a future server release might spell differently.
 func validateSettingWrite(key, value string) error {
 	if err := validateSettingKey(key); err != nil {
 		return err
+	}
+	// Storage's own constants, counted the way each column counts: the key in
+	// characters, the value in bytes. Both carry types.ErrFieldTooLong beside
+	// ErrValidation, as the role's refusal does.
+	if err := types.CheckFieldLen("config key", key); err != nil {
+		return fmt.Errorf("%w: %w", issueops.ErrValidation, err)
+	}
+	if err := types.CheckTextLen("config value", value); err != nil {
+		return fmt.Errorf("%w: %w", issueops.ErrValidation, err)
+	}
+	// A CONFIG.YAML-ONLY KEY NEVER BECOMES A ROW (#7559): this table is
+	// replicated by bd dolt push, and these keys include the tracker secrets.
+	// The role refuses them on every leg; this leg restates the refusal for a
+	// reason of its own as well — a server that predates the rule would store
+	// the secret and push it. Exactly the role's predicate, so the refused set
+	// is the same; mail.delegate (also a command setting) is refused here too,
+	// with the role naming the more precise rule. The value is never echoed.
+	if config.IsYamlOnlyKey(key) {
+		return invalid("%q is a config.yaml-only key and is never stored in the workspace settings table, "+
+			"whose rows bd dolt push replicates to every remote; set it with \"bd config set %s <value>\" in the workspace instead", key, key)
 	}
 	// The prefix is owned by `bd init --prefix`, `bd bootstrap` and
 	// `bd rename-prefix`, each of which does work this plane cannot: rewriting
@@ -263,6 +290,17 @@ func validateSettingWrite(key, value string) error {
 			return invalid("invalid %s value: %v", key, err)
 		}
 	}
+	// types.retained is the SAFETY setting every sweep reads, so a value the
+	// type-list parse would read as something other than the list the operator
+	// wrote must not become a row. This leg has a reason of its own to refuse
+	// before the dial: a server that predates the rule stores the value. The
+	// check is the shared validator through its storageops delegate, so there
+	// is no second copy to drift.
+	if key == issueops.SettingKeyTypesRetained {
+		if err := storageops.ValidateRetainedTypesValue(value); err != nil {
+			return invalid("invalid %s value: %v", key, err)
+		}
+	}
 	return nil
 }
 
@@ -280,9 +318,11 @@ const settingKeyIssuePrefixDashed = "issue-prefix"
 //
 // A REDACTED KEY IS THE ONE PLACE THE PROJECTION CANNOT ANSWER, and the fallback
 // is the request rather than a guess. The operation PERMITS writing a
-// credential-bearing key — refusing would leave a workspace's credentials
-// visible as present and permanently unconfigurable through this door — and then
-// withholds the value from its own answer, exactly as the read withholds it. So
+// credential-bearing key that is not config.yaml-only — refusing would leave a
+// workspace's credentials visible as present and permanently unconfigurable
+// through this door; the tracker secrets are config.yaml-only and are refused
+// before the dial (#7559) — and then withholds the value from its own answer,
+// exactly as the read withholds it. So
 // `value` is absent on a write that certainly stored something, and reporting ""
 // would tell a caller the plane holds nothing there: the write-side spelling of
 // the confusion RedactedSettingError exists to prevent on the read side (L9).

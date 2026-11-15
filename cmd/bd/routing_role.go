@@ -143,7 +143,8 @@ func logRolePath(branch, path string, redirected bool) string {
 
 // rolePathNotARepoWarned limits warnIfRolePathIsNotARepo to one warning per
 // process: an ID lookup falls back to auto-routing once per missing ID
-// (resolveViaAutoRouting), and every fallback re-runs role detection.
+// (resolveViaAutoRoutingWithAccess), and every fallback re-runs role
+// detection.
 var rolePathNotARepoWarned bool
 
 // warnIfRolePathIsNotARepo warns when role detection is about to read beads.role

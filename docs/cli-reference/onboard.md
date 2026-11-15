@@ -1,6 +1,6 @@
 ---
 title: "bd onboard"
-description: "Display a minimal snippet to add to your agent instructions file for bd integration."
+description: "Display minimal snippet for agent instructions file"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

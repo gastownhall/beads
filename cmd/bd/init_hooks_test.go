@@ -231,20 +231,50 @@ func TestGenerateHookSection_Timeout(t *testing.T) {
 	if !strings.Contains(section, `"$_bd_timeout_command" -- "$_bd_timeout"`) {
 		t.Error("section missing GNU timeout argv separator")
 	}
-	if !strings.Contains(section, "perl -e 'alarm shift; exec @ARGV' --") {
-		t.Error("section missing perl alarm fallback for stock macOS")
+	// The Perl fallback must supervise bd, not alarm+exec it: a pending alarm
+	// survives exec and the Go runtime ignores SIGALRM (GH#7753). It signals
+	// bd's own process group, because bd catches the first SIGTERM and keeps
+	// waiting on its children. TestGeneratedHookTimeoutProcessBoundary drives
+	// this program on a real Perl.
+	if strings.Contains(section, "alarm shift; exec @ARGV") {
+		t.Error("section still execs bd under a pending perl alarm")
+	}
+	for _, want := range []string{
+		"my $pid = fork;",
+		"setpgrp(0, 0); exec { $ARGV[0] } @ARGV",
+		"kill $sig, -$pid",
+		"for qw(HUP INT TERM)",
+		"exit 142 if $sent;",
+		`' -- "$_bd_timeout" bd hooks run pre-push "$@"; then`,
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("section missing perl supervisor fragment %q", want)
+		}
+	}
+	// The supervisor is one single-quoted shell word inside the managed
+	// section, so it must not end an orphaned section early (a blank line) or
+	// look like the shim's exec line.
+	for _, hookName := range managedHookNames {
+		for i, line := range strings.Split(strings.TrimSuffix(generateHookSection(hookName), "\n"), "\n") {
+			if strings.TrimSpace(line) == "" {
+				t.Errorf("%s section line %d is blank", hookName, i+1)
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "exec") {
+				t.Errorf("%s section line %d starts with exec: %q", hookName, i+1, line)
+			}
+		}
 	}
 	if !strings.Contains(section, "_bd_timeout_backend=perl") {
 		t.Error("section missing scoped perl backend marker")
 	}
 
-	// GNU deadline statuses and Perl SIGALRM are scoped to the backend that can
-	// synthesize them. The direct fallback must not swallow a natural 124/142.
+	// GNU deadline statuses and the Perl supervisor's 142 are scoped to the
+	// backend that can synthesize them. The direct fallback must not swallow a natural 124/142.
 	if !strings.Contains(section, `"$_bd_exit" -eq 124`) {
 		t.Error("section missing timeout exit code handling")
 	}
 	if !strings.Contains(section, `"$_bd_timeout_backend" = perl`) || !strings.Contains(section, `"$_bd_exit" -eq 142`) {
-		t.Error("section missing perl-scoped SIGALRM timeout exit code handling")
+		t.Error("section missing perl-scoped supervisor timeout exit code handling")
 	}
 	if !strings.Contains(section, "timed out") {
 		t.Error("section missing timeout warning message")

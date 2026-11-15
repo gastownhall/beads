@@ -239,6 +239,12 @@ type Step struct {
 	// Either Needs or DependsOn can be used; they are merged during cooking.
 	Needs []string `json:"needs,omitempty" toml:"needs,omitempty"`
 
+	// generatedNeeds lists the Needs entries a transform added on its own
+	// (loop iteration chaining, compose.branch, advice) rather than the
+	// formula text. FilterStepsByCondition routes such an edge around a step
+	// it drops; a reference the formula wrote to that step is an error.
+	generatedNeeds []string
+
 	// WaitsFor specifies a fanout gate type for this step.
 	// Values: "all-children" (wait for all dynamic children) or "any-children" (wait for first).
 	// When set, the cooked issue gets a "gate:<value>" label.
@@ -268,8 +274,11 @@ type Step struct {
 	Children []*Step `json:"children,omitempty"`
 
 	// Gate defines an async wait condition for this step.
-	// When set, bd cook creates a gate issue that blocks this step.
-	// Close the gate issue (bd close bd-xxx.gate-stepid) to unblock.
+	// When set, bd cook creates a companion gate issue that blocks this step
+	// (an entry-gate). Close the gate issue (bd close bd-xxx.gate-stepid) to
+	// unblock. If the step is declared type = "gate", the companion is an
+	// exit-gate instead: the step becomes a task that blocks the companion,
+	// and steps that reference the step id wait for both (GH#3316).
 	Gate *Gate `json:"gate,omitempty"`
 
 	// Loop defines iteration for this step.
@@ -295,6 +304,8 @@ type Step struct {
 // Gate defines an async wait condition for formula steps.
 // When a step has a Gate, bd cook creates a gate issue that blocks the step.
 // The gate must be closed (manually or via watchers) to unblock the step.
+// For a step declared type = "gate" the direction is reversed: the step's
+// task blocks the gate, and steps referencing the step wait on both.
 type Gate struct {
 	// Type is the condition type: gh:run, gh:pr, timer, human, mail.
 	Type string `json:"type"`

@@ -13,8 +13,11 @@
 #
 # The manifest (tools/bazel/pin_shards.py writes it from measured test.xml
 # durations) has one "<pinned shard> <TestName>" line per pinned test, pinned
-# shards numbered 1..P with none empty; '#' starts a comment. With Bazel's
-# shard_count N > P:
+# shards numbered 1..P with none empty, and, written with --record-measured,
+# one "rr <TestName>" line per other test it measured, which changes no
+# sharding (scripts/pinned_shards_sources_test.go reads them to tell a test
+# added since from a measured one); a name appears once, '#' starts a comment.
+# With Bazel's shard_count N > P:
 #   Bazel shards 0..P-1   run exactly their pinned tests (-test.run), with the
 #                         binary's own sharding switched off;
 #   Bazel shards P..N-1   are the binary's own round-robin shards 0..N-P-1 over
@@ -23,7 +26,7 @@
 # So every test runs in exactly one shard: a pinned test only in its pinned
 # shard, any other test (one added since the manifest was written included)
 # where the binary's round-robin puts it. A manifest name with no test runs
-# nothing (scripts/pinned_shards_test.go rejects one). Unsharded (no
+# nothing (scripts/pinned_shards_sources_test.go rejects one). Unsharded (no
 # TEST_TOTAL_SHARDS, e.g. --test_sharding_strategy=disabled) the binary runs
 # every test.
 #
@@ -45,24 +48,33 @@ index="${TEST_SHARD_INDEX:?TEST_TOTAL_SHARDS is set but TEST_SHARD_INDEX is not}
 
 # No associative array (bash >= 4): macOS runs this under /bin/bash 3.2
 # (scripts/pinned_shards_test.go on the main workflow's macOS job), so the
-# "pinned twice" check is a membership test on the "|"-joined names, which
-# the name pattern above keeps free of "|".
+# "listed twice" checks are membership tests on the "|"-joined names, which
+# the name pattern below keeps free of "|".
 declare -a pinned_by_shard=()
 pinned_shards=0
 all=""
+rr=""
 lineno=0
 while IFS= read -r line || [[ -n "$line" ]]; do
 	lineno=$((lineno + 1))
 	line="${line%%#*}"
 	read -r shard name extra <<<"$line" || true
 	[[ -z "${shard:-}" ]] && continue
-	if ! [[ "$shard" =~ ^[1-9][0-9]*$ && "${name:-}" =~ ^Test[A-Za-z0-9_]*$ && -z "${extra:-}" ]]; then
-		echo "$manifest:$lineno: want \"<pinned shard> <TestName>\", got: $line" >&2
+	if ! [[ "$shard" == rr || "$shard" =~ ^[1-9][0-9]*$ ]] || ! [[ "${name:-}" =~ ^Test[A-Za-z0-9_]*$ && -z "${extra:-}" ]]; then
+		echo "$manifest:$lineno: want \"<pinned shard> <TestName>\" or \"rr <TestName>\", got: $line" >&2
 		exit 1
 	fi
 	if [[ "|$all|" == *"|$name|"* ]]; then
-		echo "$manifest:$lineno: $name is pinned twice" >&2
+		echo "$manifest:$lineno: $name is pinned, and listed again" >&2
 		exit 1
+	fi
+	if [[ "|$rr|" == *"|$name|"* ]]; then
+		echo "$manifest:$lineno: $name is listed rr, and listed again" >&2
+		exit 1
+	fi
+	if [[ "$shard" == rr ]]; then
+		rr="${rr:+$rr|}$name"
+		continue
 	fi
 	pinned_by_shard[shard]="${pinned_by_shard[shard]:+${pinned_by_shard[shard]}|}$name"
 	all="${all:+$all|}$name"

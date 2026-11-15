@@ -43,7 +43,13 @@ const bulkParkBead = "ga-6lbny"
 
 func newServedSweeperFixture(t *testing.T, prefix string) conformance.SweeperFixture {
 	t.Helper()
-	env := newServedEnv(t, prefix)
+	return newServedSweeperFixtureOnEnv(t, newServedEnv(t, prefix))
+}
+
+// newServedSweeperFixtureOnEnv builds the Sweeper fixture over an existing
+// served environment, for a contract that composes more of its roles.
+func newServedSweeperFixtureOnEnv(t *testing.T, env *servedEnv) conformance.SweeperFixture {
+	t.Helper()
 	sweeper, err := env.subject.Sweeper()
 	if err != nil {
 		t.Fatalf("Sweeper(): %v", err)
@@ -207,6 +213,14 @@ func TestServedDeleterCascadeFromAWispRootDeletesTheClosure(t *testing.T) {
 	conformance.RunDeleterCascadeFromAWispRootDeletesTheClosure(t, t.Context(), newServedDeleterFixture(t, "hx05"))
 }
 
+func TestServedDeleterCascadeFollowsOnlyContainment(t *testing.T) {
+	conformance.RunDeleterCascadeFollowsOnlyContainment(t, t.Context(), newServedDeleterFixture(t, "hx23"))
+}
+
+func TestServedDeleterCascadeReportsSurvivingDependents(t *testing.T) {
+	conformance.RunDeleterCascadeReportsSurvivingDependents(t, t.Context(), newServedDeleterFixture(t, "hx24"))
+}
+
 func TestServedDeleterGuardsAWispNamedWithADurableDependent(t *testing.T) {
 	skipKnownDivergence(t, "L-delete-dependents", bulkParkBead, parkDeleteDependents)
 	conformance.RunDeleterGuardsAWispNamedWithADurableDependent(t, t.Context(), newServedDeleterFixture(t, "hx06"))
@@ -235,6 +249,10 @@ func TestServedDeleterCollapsesDuplicateIDs(t *testing.T) {
 
 func TestServedDeleterRewritesReferencesInNeighbors(t *testing.T) {
 	conformance.RunDeleterRewritesReferencesInNeighbors(t, t.Context(), newServedDeleterFixture(t, "hx12"))
+}
+
+func TestServedDeleterAttributesTheRewriteToTheActor(t *testing.T) {
+	conformance.RunDeleterAttributesTheRewriteToTheActor(t, t.Context(), newServedDeleterFixture(t, "hxat"))
 }
 
 func TestServedDeleterDryRunChangesNothing(t *testing.T) {
@@ -274,6 +292,26 @@ func TestServedDeleterVersionOutranksForceAndCascade(t *testing.T) {
 
 func TestServedDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t *testing.T) {
 	conformance.RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t, t.Context(), newServedDeleterFixture(t, "hx19"))
+}
+
+// The two single-winner races, run for real over this wire: sixteen goroutines
+// dial sixteen concurrent POST /v0/beads/issues:delete requests carrying one
+// expected_version against the same in-process server. A loser's 404 not_found
+// decodes to issueops.ErrNotFound and a 409 precondition_failed naming
+// expected_version to ErrVersionMismatch (internal/httpclient/wire/problem.go),
+// so the contract's loser check reads the same here as on a store leg.
+//
+// THIS SERVER IS THE ROLES ARM over embedded Dolt, whose engine admits one
+// writer at a time, so on this leg the race is serialized below the handler and
+// the case pins the wire's outcome and its history, not the fence. The fence a
+// production `bd serve` relies on sits under its per-request provider arm, which
+// these cases do not reach.
+func TestServedDeleterExpectedVersionSingleWinnerUnderConcurrency(t *testing.T) {
+	conformance.RunDeleterExpectedVersionSingleWinnerUnderConcurrency(t, t.Context(), newServedDeleterFixture(t, "hx25"))
+}
+
+func TestServedDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency(t *testing.T) {
+	conformance.RunDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency(t, t.Context(), newServedDeleterFixture(t, "hx26"))
 }
 
 // The three BLOCKED-STATE postconditions of a delete, which map onto the wire
@@ -565,6 +603,24 @@ func TestServedBatchCreateStampsEachItemsCreatedByFromTheActor(t *testing.T) {
 
 func TestServedBatchCreatorCreatesEveryItemAsOneAct(t *testing.T) {
 	conformance.RunBatchCreatorCreatesEveryItemAsOneAct(t, t.Context(), newServedBatchCreatorFixture(t, "hb00"))
+}
+
+// TestServedBatchCreatorMintsADistinctIDForEachIdenticalItem is parked with
+// the timestamp echo below: the case makes its two items identical by giving
+// both one Issue.CreatedAt, and the wire's item publishes no timestamp member,
+// so the client refuses it before the dial. Over http the server stamps each
+// item's created_at itself, so the request cannot ask for the twin.
+func TestServedBatchCreatorMintsADistinctIDForEachIdenticalItem(t *testing.T) {
+	skipKnownDivergence(t, "W-BatchCreateItem.Issue", bulkParkBead,
+		"the case seeds the same Issue.CreatedAt on both items, and the wire's item publishes no timestamp "+
+			"member — the client refuses items[0].Issue.CreatedAt before any request is sent.")
+	conformance.RunBatchCreatorMintsADistinctIDForEachIdenticalItem(t, t.Context(), newServedBatchCreatorFixture(t, "hb13"))
+}
+
+func TestServedBatchCreatorMintsPastAnIDALaterItemNames(t *testing.T) {
+	skipKnownDivergence(t, "W-BatchCreateItem.Issue", bulkParkBead,
+		"the case's second item names the id the first item's counter mint would draw. "+parkBatchExplicitID)
+	conformance.RunBatchCreatorMintsPastAnIDALaterItemNames(t, t.Context(), newServedBatchCreatorFixture(t, "hb14"))
 }
 
 func TestServedBatchCreatorRefusesEverythingWhenOneItemRefuses(t *testing.T) {

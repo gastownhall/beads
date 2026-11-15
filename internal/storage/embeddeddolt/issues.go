@@ -113,15 +113,36 @@ func (s *EmbeddedDoltStore) UpdateIssueChecked(ctx context.Context, id string, u
 }
 
 // HeartbeatIssue refreshes the lease on an issue actor holds in_progress.
-// Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
+// Delegates SQL work to issueops. A REFRESH writes only the dolt_ignored
+// leases row, so it stages nothing and mints no Dolt commit; a RE-ARM is
+// recorded as a mutation and gets the one version-control commit
+// issueops.LeaseRearmVersionCommit names.
 func (s *EmbeddedDoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error {
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+	// A refusal that read the issue row COMMITS (it may have deleted the
+	// caller's orphaned lease row) and is returned after; one whose issue read
+	// failed is returned from the callback, so its transaction rolls back
+	// (issueops.LeaseRenewalRefusalCommits).
+	var refusal error
+	if err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
+		refusal = nil
 		if issueops.IsActiveWispInTx(ctx, tx, id) {
 			// Wisps are ephemeral and never leased; nothing to heartbeat.
-			return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
+			return nil, "", fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
 		}
-		return issueops.HeartbeatIssueInTx(ctx, tx, id, actor)
-	})
+		renewal, err := issueops.RenewLeaseInTx(ctx, tx, id, actor)
+		if issueops.LeaseRenewalRefusalCommits(err) {
+			refusal = err
+			return nil, "", nil
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		tables, msg := issueops.LeaseRearmVersionCommit(id, renewal.Rearmed)
+		return tables, msg, nil
+	}); err != nil {
+		return err
+	}
+	return refusal
 }
 
 // ReclaimExpiredLeases reverts in_progress issues whose lease expired more than
@@ -196,6 +217,18 @@ func (s *EmbeddedDoltStore) IsBlocked(ctx context.Context, issueID string) (bool
 		return err
 	})
 	return blocked, blockers, err
+}
+
+// IsBlockedWithBlockersBatch answers IsBlocked for every id in one
+// connection (storage.BlockersBatchStore).
+func (s *EmbeddedDoltStore) IsBlockedWithBlockersBatch(ctx context.Context, ids []string) (map[string][]string, error) {
+	var result map[string][]string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.IsBlockedWithBlockersBatchInTx(ctx, tx, ids)
+		return err
+	})
+	return result, err
 }
 
 // IsBlockedBatch returns the denormalized transitive is_blocked flag for each id

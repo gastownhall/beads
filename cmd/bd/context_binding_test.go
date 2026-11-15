@@ -753,6 +753,58 @@ func TestDetectUserRoleForActiveRepoWarnsWhenRolePathIsNotARepo(t *testing.T) {
 	}
 }
 
+// TestActiveRepoPathForRoutingHonorsChangeDirSelectionOfNonGitProject pins
+// the routing knock-on of GH#5700: `bd -C T` from git repository A, with T in
+// no repository, must read the role at T (with the one-time non-repo warning),
+// not silently at A because RepoContext was rooted at the caller's repo.
+func TestActiveRepoPathForRoutingHonorsChangeDirSelectionOfNonGitProject(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+	resetRolePathWarningForTest(t)
+
+	callerDir := filepath.Join(t.TempDir(), "caller")
+	initGitRepoForContextTest(t, callerDir)
+	targetDir := t.TempDir()
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	writeTestConfigYAML(t, targetBeadsDir, "")
+	if err := os.WriteFile(filepath.Join(targetBeadsDir, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+
+	t.Chdir(callerDir)
+	t.Setenv("BEADS_DIR", targetBeadsDir)
+	setBeadsDirStartupProvenanceForTest(t, false)
+	setChangeDirForTest(t, targetDir)
+
+	assertActiveRepoPath(t, activeRepoPathForRouting(), targetDir,
+		"bd -C <non-git project> must route by the selected project, not the caller's repo")
+
+	readStderr, writeStderr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writeStderr
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		_ = readStderr.Close()
+		_ = writeStderr.Close()
+	})
+
+	for range 2 {
+		if _, err := detectUserRoleForActiveRepo(); err != nil {
+			t.Fatalf("detectUserRoleForActiveRepo: %v", err)
+		}
+	}
+	_ = writeStderr.Close()
+	stderrOutput, readErr := io.ReadAll(readStderr)
+	if readErr != nil {
+		t.Fatalf("read stderr: %v", readErr)
+	}
+	if n := strings.Count(string(stderrOutput), "is not a git repository"); n != 1 {
+		t.Fatalf("non-repo role path warned %d times, want exactly once; stderr:\n%s", n, stderrOutput)
+	}
+}
+
 // unsetRoutingConfigEnvForTest removes every env spelling of the routing keys.
 // Blanking them is not enough: GetValueSource counts a set-but-empty variable
 // as an env source, viper then answers with the key's default, and the

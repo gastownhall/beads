@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -19,13 +20,13 @@ import (
 // table. The probe was added by be-bv7x so a not-yet-created cursor table
 // never poisons the pooled Dolt session with a failing statement.
 func expectCursorProbe(mock sqlmock.Sqlmock, table string, exists bool) {
-	present := 0
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	rows := sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("issues")
 	if exists {
-		present = 1
+		rows.AddRow(table)
 	}
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.tables`).
-		WithArgs(table).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(present))
+	mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(rows)
 }
 
 func expectVersionQuery(mock sqlmock.Sqlmock, version int) {

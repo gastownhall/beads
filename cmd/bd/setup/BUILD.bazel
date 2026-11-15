@@ -25,6 +25,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//internal/config",
+        "//internal/git",
         "//internal/recipes",
         "//internal/templates",
         "//internal/templates/agents",
@@ -37,6 +38,7 @@ go_test(
     srcs = [
         "agents_marker_test.go",
         "aider_test.go",
+        "claude_artifacts_golden_test.go",
         "claude_test.go",
         "codex_test.go",
         "cursor_test.go",
@@ -49,12 +51,13 @@ go_test(
         "project_output_test.go",
         "utils_test.go",
     ],
-    data = [
+    data = glob(["testdata/**"]) + [
         "//:.claude-plugin/marketplace.json",
         "//plugins/beads:plugin_files",
     ],
     embed = [":setup"],
     deps = [
+        "//internal/git",
         "//internal/templates",
         "//internal/templates/agents",
         "@in_gopkg_yaml_v3//:yaml_v3",

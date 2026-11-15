@@ -6,6 +6,7 @@
 package httpclient
 
 import (
+	"context"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
@@ -60,6 +61,64 @@ func TestServedJournalContract(t *testing.T) {
 	t.Run("HeadSurvivesAFullPrune", func(t *testing.T) {
 		conformance.RunJournalHeadSurvivesAFullPrune(t, ctx, fixture)
 	})
+	t.Run("ArrivalStampsAWispCreateWithItsRecordSeq", func(t *testing.T) {
+		conformance.RunJournalArrivalStampsAWispCreateWithItsRecordSeq(t, ctx, fixture)
+	})
+	t.Run("ArrivalOrdersABatchByItem", func(t *testing.T) {
+		conformance.RunJournalArrivalOrdersABatchByItem(t, ctx, fixture)
+	})
+	t.Run("ArrivalIsOnEveryReadPath", func(t *testing.T) {
+		conformance.RunJournalArrivalIsOnEveryReadPath(t, ctx, fixture)
+	})
+	t.Run("ArrivalNeverChanges", func(t *testing.T) {
+		conformance.RunJournalArrivalNeverChanges(t, ctx, fixture)
+	})
+	t.Run("ArrivalOnlyWhileJournaling", func(t *testing.T) {
+		conformance.RunJournalArrivalOnlyWhileJournaling(t, ctx, fixture)
+	})
+	t.Run("ArrivalOnlyOnTheWispPlane", func(t *testing.T) {
+		conformance.RunJournalArrivalOnlyOnTheWispPlane(t, ctx, fixture)
+	})
+	t.Run("ArrivalRecoversCreateOrderAfterTruncation", func(t *testing.T) {
+		conformance.RunJournalArrivalRecoversCreateOrderAfterTruncation(t, ctx, fixture)
+	})
+	t.Run("ArrivalIsNeverReused", func(t *testing.T) {
+		conformance.RunJournalArrivalIsNeverReused(t, ctx, fixture)
+	})
+	t.Run("ArrivalIgnoresSuppliedValues", func(t *testing.T) {
+		conformance.RunJournalArrivalIgnoresSuppliedValues(t, ctx, fixture)
+	})
+	t.Run("ArrivalReimportKeepsTheStamp", func(t *testing.T) {
+		conformance.RunJournalArrivalReimportKeepsTheStamp(t, ctx, fixture)
+	})
+	t.Run("ArrivalFirstCreateRecordStampsAnUnstampedRow", func(t *testing.T) {
+		conformance.RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow(t, ctx, fixture)
+	})
+	t.Run("ArrivalRenameKeepsTheStamp", func(t *testing.T) {
+		conformance.RunJournalArrivalRenameKeepsTheStamp(t, ctx, fixture)
+	})
+	t.Run("EveryMutationKindRecordsItsActor", func(t *testing.T) {
+		// Not a ledger divergence: the operation publishes each record's
+		// actor (eventsjournal.Record.Actor) and the server fills it; this
+		// client's journalRow drops it, so every Row.Actor reads empty.
+		t.Skip("WAITING ON donnabox fixes-b B14 (HTTP client journal keeps the actor): " +
+			"internal/httpclient/journal.go journalRow does not copy record.Actor onto journalops.Row; " +
+			"delete this line with that fix")
+		conformance.RunJournalEveryMutationKindRecordsItsActor(t, ctx, fixture)
+	})
+	t.Run("DerivedRecordsCarryTheCausingActor", func(t *testing.T) {
+		// Parked on B14 for EveryMutationKindRecordsItsActor's reason: read
+		// through this client every Row.Actor is empty, so the case would fail
+		// on every record, the request's own included, and say nothing about
+		// the derived ones. The served half of this property is held without
+		// the client's decode by TestServedLifecycleJournalRecordsCarryTheRequestActor,
+		// which reads GET /v0/beads/events as raw JSON, the way an external
+		// journal consumer does.
+		t.Skip("WAITING ON donnabox fixes-b B14 (HTTP client journal keeps the actor): " +
+			"internal/httpclient/journal.go journalRow does not copy record.Actor onto journalops.Row; " +
+			"delete this line with that fix")
+		conformance.RunJournalDerivedRecordsCarryTheCausingActor(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})
@@ -91,5 +150,31 @@ func newServedJournalFixture(t *testing.T, env *servedEnv) conformance.JournalFi
 		// client agrees with itself: the question this contract asks is whether
 		// the client can READ the journal a server wrote.
 		Mutations: servedJournalMutations(reference),
+		Arrival:   servedArrivalHooks(t, env),
 	}
+}
+
+// servedArrivalHooks binds the arrival cases' creates and reads to the CLIENT,
+// which is the question this leg asks of them: that a stamp the server's store
+// wrote reaches a caller over the wire on every Issue-shaped response.
+// Activation and promotion stay on the reference store, by the same harness
+// rule as the mutations above.
+//
+// CreateWispClaiming is nil: the client builds its create body from the
+// request's accepted fields, so a forged arrival_seq never reaches the wire to
+// be ignored, and the property is the server store's (its own legs pin it).
+// CreateWispBatch is nil too: a batch create over the wire cannot name its
+// items' ids (W-BatchCreateItem.Issue), which OrdersABatchByItem needs, and the
+// item-order property is the server store's, pinned by its own legs. Import is
+// nil because the client hands out no Importer: the wire publishes no import
+// operation, so the import cases skip here and run on the store legs.
+func servedArrivalHooks(t *testing.T, env *servedEnv) *conformance.JournalArrivalHooks {
+	t.Helper()
+	reference := env.reference
+	hooks := conformance.ArrivalHooksFromSource(t, env.subject, func(ctx context.Context, id string) error {
+		return reference.PromoteFromEphemeral(ctx, id, "actor")
+	})
+	hooks.CreateWispClaiming = nil
+	hooks.CreateWispBatch = nil
+	return hooks
 }

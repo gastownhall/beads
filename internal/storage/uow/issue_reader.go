@@ -122,7 +122,7 @@ func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publ
 		if req.ReadyFlag {
 			page, err = uw.IssueUseCase().GetReadyWorkWithCounts(ctx, workapi.ReadyFilterFromIssueFilter(filter))
 		} else {
-			page, err = uw.IssueUseCase().SearchIssuesWithCounts(ctx, "", filter)
+			page, err = uw.IssueUseCase().SearchIssuesWithCounts(ctx, req.Query, filter)
 		}
 		if err != nil {
 			return publicops.IssuePage{}, err

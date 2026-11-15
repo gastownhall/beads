@@ -220,8 +220,8 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 
 	// `bd list`'s PAGE is on issueops.Reader. The filter is still built here
 	// because --watch and the hierarchical --parent tree consume it as a VALUE:
-	// the poll loop re-runs it on a ticker and the tree walk re-parents a copy
-	// of it at every level, neither of which a page can express. Building it
+	// the poll loop re-runs it every poll interval and the tree walk re-parents
+	// a copy of it at every level, neither of which a page can express. Building it
 	// unconditionally also keeps the page query ahead of the tree branch, so
 	// `--parent --pretty --max-rows N` still refuses on the cap where it did.
 	cfg, err := workapi.LoadStoreListConfig(rootCtx, store)
@@ -321,7 +321,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 				return nil
 			}
 
-			allDeps, depErr := activeStore.GetAllDependencyRecords(ctx)
+			allDeps, depErr := listDependencyRecords(ctx, activeStore, treeIssues)
 			if depErr != nil && in.depsMode != "" {
 				return HandleError("loading dependencies for --deps: %v", depErr)
 			}
@@ -332,13 +332,14 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			return nil
 		}
 
-		allDeps, depErr := activeStore.GetAllDependencyRecords(ctx)
+		allDeps, depErr := listDependencyRecords(ctx, activeStore, issues)
 		if depErr != nil && in.depsMode != "" {
 			return HandleError("loading dependencies for --deps: %v", depErr)
 		}
-		// allDeps is already the whole rig's edge map, so the gate decoration
-		// adds ONE call here — the hydration of the gate candidates it names,
-		// itself an id-set read of a few round trips. Per page, never per row.
+		// allDeps already holds every edge the page's rows own, so the gate
+		// decoration adds ONE call here — the hydration of the gate candidates
+		// it names, itself an id-set read of a few round trips. Per page, never
+		// per row.
 		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse,
 			gatedIssueIDs(ctx, activeStore, issues, allDeps))
 		printTruncationHint(truncated, in.effectiveLimit)
@@ -347,7 +348,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if in.formatStr != "" {
-		depsByIssueID, _ := activeStore.GetAllDependencyRecords(ctx)
+		depsByIssueID, _ := listDependencyRecords(ctx, activeStore, issues)
 		if err := outputFormattedList(out, issues, depsByIssueID, in.formatStr); err != nil {
 			return HandleError("%v", err)
 		}

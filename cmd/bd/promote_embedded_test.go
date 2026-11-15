@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // bdPromote runs "bd promote" with the given args and returns stdout.
@@ -38,6 +40,49 @@ func bdPromoteFail(t *testing.T, bd, dir string, args ...string) string {
 		t.Fatalf("expected bd promote %s to fail, but succeeded:\n%s", strings.Join(args, " "), out)
 	}
 	return string(out)
+}
+
+// plantCountingHook installs the workspace hook name as a script that appends
+// its issue id ($1) to a log, one line per firing, and returns the log's path.
+func plantCountingHook(t *testing.T, beadsDir, name string) string {
+	t.Helper()
+	hookLog := filepath.Join(t.TempDir(), name+".log")
+	hooksDir := filepath.Join(beadsDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	script := "#!/bin/sh\necho \"$1\" >> " + shellQuote(hookLog) + "\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, name), []byte(script), 0o755); err != nil { //nolint:gosec // G306: a hook must be executable to run at all
+		t.Fatalf("plant %s: %v", name, err)
+	}
+	return hookLog
+}
+
+// waitForHookLines polls a plantCountingHook log until it names id want times.
+// The command has returned by then, and a command waits for the hooks it
+// fired before it exits, so a count past want is a hook that fired too often.
+func waitForHookLines(t *testing.T, hookLog, id string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		data, _ := os.ReadFile(hookLog) // #nosec G304 -- this test's own temp file
+		got := 0
+		for _, line := range strings.Fields(string(data)) {
+			if line == id {
+				got++
+			}
+		}
+		if got > want {
+			t.Fatalf("hook fired %d times for %s, want %d; log:\n%s", got, id, want, data)
+		}
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("hook fired %d times for %s, want %d; log:\n%s", got, id, want, data)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func TestEmbeddedPromoteCLI(t *testing.T) {
@@ -151,6 +196,66 @@ func TestEmbeddedPromoteCLI(t *testing.T) {
 			t.Fatalf("expected promote with no args to fail, got: %s", out)
 		}
 	})
+}
+
+// TestEmbeddedPromoteMovesAWispParent pins what the direct route's
+// persistence move carries for a wisp with children, a dependency and a
+// comment. The dependency and the comment reach the durable tables, the
+// children keep their parent, and the child counter carries, so the next
+// `bd create --parent` mints .3 rather than colliding with the wisp child .1.
+// `bd comments` lists the promotion reason, and on_update fires twice: once
+// for the move and once for the promotion comment.
+func TestEmbeddedPromoteMovesAWispParent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pw")
+
+	target := bdCreate(t, bd, dir, "Promote dep target", "--type", "task")
+	parent := bdCreate(t, bd, dir, "Promoted wisp parent", "--ephemeral")
+	var children []string
+	for i := 1; i <= 2; i++ {
+		child := bdCreate(t, bd, dir, fmt.Sprintf("Wisp child %d", i), "--ephemeral", "--parent", parent.ID)
+		if want := fmt.Sprintf("%s.%d", parent.ID, i); child.ID != want {
+			t.Fatalf("wisp child %d is %s, want %s", i, child.ID, want)
+		}
+		children = append(children, child.ID)
+	}
+	bdDepAdd(t, bd, dir, parent.ID, target.ID)
+	bdComment(t, bd, dir, parent.ID, "pre-promote note")
+
+	// Planted after the setup, so every line it logs is the promote's.
+	hookLog := plantCountingHook(t, beadsDir, "on_update")
+	bdPromote(t, bd, dir, parent.ID, "--reason", "worth keeping")
+	waitForHookLines(t, hookLog, parent.ID, 2)
+
+	if got := bdShow(t, bd, dir, parent.ID); got.Ephemeral {
+		t.Errorf("%s still ephemeral after promote", parent.ID)
+	}
+	assertDepExists(t, beadsDir, "pw", parent.ID, target.ID)
+	for _, id := range children {
+		var shown struct {
+			Parent *string `json:"parent"`
+		}
+		if err := json.Unmarshal(parseShowJSON(t, bdShowJSON(t, bd, dir, id)), &shown); err != nil {
+			t.Fatalf("decode bd show %s: %v", id, err)
+		}
+		if shown.Parent == nil || *shown.Parent != parent.ID {
+			t.Errorf("%s parent after promote = %v, want %s", id, shown.Parent, parent.ID)
+		}
+	}
+	comments := bdComments(t, bd, dir, parent.ID)
+	for _, text := range []string{"pre-promote note", "Promoted from Level 0: worth keeping"} {
+		if !strings.Contains(comments, text) {
+			t.Errorf("bd comments %s does not list %q:\n%s", parent.ID, text, comments)
+		}
+	}
+	if next := bdCreate(t, bd, dir, "Child after promote", "--parent", parent.ID); next.ID != parent.ID+".3" {
+		t.Errorf("next child of the promoted parent is %s, want %s", next.ID, parent.ID+".3")
+	}
 }
 
 // TestEmbeddedPromoteCLIConcurrent exercises promote concurrently.

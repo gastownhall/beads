@@ -3,7 +3,9 @@
 // Writes land in a temporary file in the same directory as the target,
 // are fsynced, then atomically renamed into place. Readers never see a
 // partial or truncated file — only the previous complete version or the
-// new complete version.
+// new complete version. Windows refuses to rename over a file another
+// handle holds open, so there the rename waits a bounded time for readers
+// to close the target (see rename).
 package atomicfile
 
 import (
@@ -66,6 +68,8 @@ func (w *Writer) Write(p []byte) (int, error) {
 // Close fsyncs the temp file and atomically renames it to the target path.
 // After Close returns successfully, the target contains exactly the data
 // written. On error the temp file is removed and the target is untouched.
+// On Windows a rename that another open handle on the target blocks is
+// retried for up to about two seconds.
 func (w *Writer) Close() error {
 	if w.done {
 		return nil
@@ -90,7 +94,7 @@ func (w *Writer) Close() error {
 		return fmt.Errorf("atomicfile: close: %w", err)
 	}
 
-	if err := os.Rename(w.f.Name(), w.target); err != nil {
+	if err := rename(w.f.Name(), w.target); err != nil {
 		_ = os.Remove(w.f.Name())
 		return fmt.Errorf("atomicfile: rename: %w", err)
 	}

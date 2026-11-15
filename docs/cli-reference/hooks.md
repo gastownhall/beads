@@ -1,6 +1,6 @@
 ---
 title: "bd hooks"
-description: "Install, uninstall, or list git hooks for beads integration."
+description: "Manage git hooks for beads integration"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,7 +17,7 @@ The hooks provide:
 - prepare-commit-msg: Add agent identity trailers for forensics
 
 ```
-bd hooks [flags]
+bd hooks [command]
 ```
 
 ## bd hooks install
@@ -47,8 +47,8 @@ bd hooks install [flags]
 
 ```
       --beads    Install hooks to .beads/hooks/ (recommended for Dolt backend)
-      --chain    Chain with existing hooks (run them before bd hooks)
-      --force    Overwrite existing hooks without backup
+      --chain    No-op, kept for compatibility (existing hook content always runs alongside the bd section)
+      --force    No-op, kept for compatibility (section markers always preserve non-bd content)
       --shared   Install hooks to .beads-hooks/ (versioned) instead of .git/hooks/
 ```
 
@@ -72,8 +72,9 @@ Supported hooks:
   - post-checkout: Run chained hooks after branch checkout
   - prepare-commit-msg: Add agent identity trailers for forensics
 
-The thin shim pattern ensures hook logic is always in sync with the
-installed bd version - upgrading bd automatically updates hook behavior.
+The thin shim keeps delegated hook logic in sync with the installed bd
+version. Upgrading bd updates that delegated behavior. To adopt changes to the
+shim's generated shell policy, refresh it with 'bd hooks install'.
 
 ```
 bd hooks run <hook-name> [args...] [flags]

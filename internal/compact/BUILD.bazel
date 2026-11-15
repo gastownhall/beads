@@ -13,6 +13,7 @@ go_library(
         "//internal/audit",
         "//internal/beads",
         "//internal/config",
+        "//internal/endpointtrust",
         "//internal/telemetry",
         "//internal/types",
         "@com_github_anthropics_anthropic_sdk_go//:anthropic-sdk-go",

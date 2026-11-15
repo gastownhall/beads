@@ -255,9 +255,10 @@ func (s *Store) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
 // stored value equals the value sent for every key this plane accepts, because
 // the one key with a normalization step is the one key the role refuses.
 //
-// The two EDGE BOUNDS the operation adds — a key past 255 characters on the
-// write, a value past types.MaxTextBytes bytes — are the server's and are not
-// restated here (L-config-bounds).
+// The two length bounds — a key past 255 characters on the write, a value past
+// types.MaxTextBytes bytes — are the ROLE's (workapi.ValidateSettingWrite) and
+// are restated in validateSettingWrite, so an oversized write never dials. They
+// were once the operation's alone (L-config-bounds, now retired).
 func (s *Store) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
 	return httpWorkspaceConfig{store: s}, nil
 }
@@ -392,4 +393,21 @@ func (s *Store) BatchGetter() (issueops.BatchGetter, error) {
 // retries a POST. See leasereclaimer.go.
 func (s *Store) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
 	return &httpLeaseReclaimer{store: s}, nil
+}
+
+// Heartbeater serves heartbeatIssue (POST /v0/beads/issues/{id}:heartbeat) —
+// the lease refresh behind `bd heartbeat`. Like
+// LeaseReclaimer it dials through the store directly rather than through
+// roleWire: Store.dispatch preflights issues.heartbeat, so an older server is
+// refused before the dial naming the token. See heartbeater.go.
+func (s *Store) Heartbeater() (issueops.Heartbeater, error) {
+	return &httpHeartbeater{store: s}, nil
+}
+
+// BlockedLister serves listBlockedIssues (GET /v0/beads/blocked), the
+// listing behind `bd blocked`. Store.dispatch preflights blocked.list, so an
+// older server is refused before the dial naming the token. See
+// blockedlister.go.
+func (s *Store) BlockedLister() (issueops.BlockedLister, error) {
+	return &httpBlockedLister{store: s}, nil
 }

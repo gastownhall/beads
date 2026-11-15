@@ -844,6 +844,30 @@ func TestDependencyTypeAffectsReadyWork(t *testing.T) {
 	}
 }
 
+// TestReadyAffectingDependencyTypes pins that the list SQL renders (the ready
+// read guard) is exactly the set AffectsReadyWork classifies as blocking, in
+// both directions, so the two cannot drift.
+func TestReadyAffectingDependencyTypes(t *testing.T) {
+	listed := make(map[DependencyType]bool)
+	for _, d := range ReadyAffectingDependencyTypes() {
+		if listed[d] {
+			t.Errorf("ReadyAffectingDependencyTypes() lists %q twice", d)
+		}
+		listed[d] = true
+		if !d.AffectsReadyWork() {
+			t.Errorf("ReadyAffectingDependencyTypes() lists %q, but AffectsReadyWork() is false", d)
+		}
+	}
+	for _, d := range append(WellKnownDependencyTypes(), DependencyType("custom-type")) {
+		if d.AffectsReadyWork() && !listed[d] {
+			t.Errorf("%q affects ready work but ReadyAffectingDependencyTypes() omits it", d)
+		}
+	}
+	if len(listed) == 0 {
+		t.Fatal("ReadyAffectingDependencyTypes() is empty")
+	}
+}
+
 func TestParseWaitsForGateMetadata(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -2043,5 +2067,38 @@ func TestCheckFieldLen(t *testing.T) {
 	err := CheckFieldLen("assignee", strings.Repeat("é", MaxFieldLen+1))
 	if !errors.Is(err, ErrFieldTooLong) {
 		t.Errorf("CheckFieldLen(256 runes) = %v, want errors.Is(ErrFieldTooLong)", err)
+	}
+}
+
+// TestArrivalSeqSerializesOnlyWhenStamped pins the wire shape of the stamp the
+// journal's create seam writes on a wisp row: absent when there is none (so
+// every unstamped row, and every reader that predates the member, sees exactly
+// what it saw before), the number when there is one, and no part of the
+// content identity — a stamp is assigned by storage, not authored.
+func TestArrivalSeqSerializesOnlyWhenStamped(t *testing.T) {
+	unstamped, err := json.Marshal(Issue{ID: "test-1", Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(unstamped), "arrival_seq") {
+		t.Errorf("an unstamped issue serializes arrival_seq: %s", unstamped)
+	}
+	stamped, err := json.Marshal(Issue{ID: "test-1", Title: "t", ArrivalSeq: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stamped), `"arrival_seq":42`) {
+		t.Errorf("a stamped issue does not serialize arrival_seq 42: %s", stamped)
+	}
+	var back Issue
+	if err := json.Unmarshal(stamped, &back); err != nil || back.ArrivalSeq != 42 {
+		t.Errorf("round trip = %d, %v; want 42", back.ArrivalSeq, err)
+	}
+
+	a := Issue{ID: "test-1", Title: "t", Status: StatusOpen}
+	b := a
+	b.ArrivalSeq = 7
+	if a.ComputeContentHash() != b.ComputeContentHash() {
+		t.Error("arrival_seq changed the content hash; it is storage-assigned metadata, not content")
 	}
 }

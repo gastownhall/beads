@@ -102,7 +102,7 @@ func TestServedLifecycleCreateRefusesAForeignIDPrefix(t *testing.T) {
 // park will outlive the ones above.
 func TestServedLifecycleCreateWritesEveryScalarField(t *testing.T) {
 	skipKnownDivergence(t, "W-CreateRequest.Issue", createParkBead,
-		"the case sets spec_id, await_id, closed_by_session, created_at and a created_by naming someone other than its actor; createIssue publishes none of them and the client refuses each per member rather than dropping it (asserted by TestCreateRefusesEveryMemberTheWireExcludes)")
+		"the case sets spec_id, closed_by_session, created_at and a created_by naming someone other than its actor; createIssue publishes none of them and the client refuses each per member rather than dropping it (asserted by TestCreateRefusesEveryMemberTheWireExcludes)")
 	conformance.RunLifecycleCreateWritesEveryScalarField(t, t.Context(), newServedCreateFixture(t, "hlc5"))
 }
 
@@ -122,6 +122,20 @@ func TestServedLifecycleCreateEchoesSubSecondTimestamps(t *testing.T) {
 
 func TestServedLifecycleCreateAppliesTheDefaultPriority(t *testing.T) {
 	conformance.RunLifecycleCreateAppliesTheDefaultPriority(t, t.Context(), newServedCreateFixture(t, "hlcprio"))
+}
+
+// TestServedLifecycleCreateWritesTheGateMembers RUNS: the
+// served Config advertises issues.create.gates, and this client sends
+// await_type, await_id, timeout and waiters to a server that does. The two
+// cases were parked on W-CreateRequest.Issue until the client slice.
+func TestServedLifecycleCreateWritesTheGateMembers(t *testing.T) {
+	conformance.RunLifecycleCreateWritesTheGateMembers(t, t.Context(), newServedCreateFixture(t, "hlcgate"))
+}
+
+// TestServedLifecycleCreateBoundsTheGateMembers RUNS: each bound is the
+// role's, reached through the server's 400 naming the member.
+func TestServedLifecycleCreateBoundsTheGateMembers(t *testing.T) {
+	conformance.RunLifecycleCreateBoundsTheGateMembers(t, t.Context(), newServedCreateFixture(t, "hlcgbnd"))
 }
 
 // createParkBead is the bead the create-side parks cite. It is separate from

@@ -135,6 +135,17 @@ func ExecuteCreateBatch(ctx context.Context, tx *sql.Tx, request publicops.Creat
 	}
 	infraTypes := ResolveInfraTypesInTx(ctx, tx)
 
+	// EVERY ID IS ASSIGNED BEFORE ANY ROW IS WRITTEN, so the generator's probe
+	// cannot see an id this batch has already spoken for. claimed is that set:
+	// every explicit id an item names, up front, and each id as it is minted.
+	// Without it two items can be handed one id and the second refused at
+	// insert as ErrAlreadyExists, on a create that named no id.
+	claimed := make(map[string]bool, len(attempt.Items))
+	for _, item := range attempt.Items {
+		if item.Issue.ID != "" {
+			claimed[item.Issue.ID] = true
+		}
+	}
 	issues := make([]*types.Issue, len(attempt.Items))
 	for i, item := range attempt.Items {
 		prepared, err := PreparePublicCreateRequest(CreateBatchItemRequest(attempt, item), createContext)
@@ -153,9 +164,10 @@ func ExecuteCreateBatch(ctx context.Context, tx *sql.Tx, request publicops.Creat
 		if !issue.Ephemeral && !issue.NoHistory && issue.WispType != "" {
 			issue.Ephemeral = true
 		}
-		if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor); err != nil {
+		if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor, claimed); err != nil {
 			return publicops.CreateBatchResult{}, nil, CreateBatchItemError(i, ClassifyPublicCreateError(err))
 		}
+		claimed[issue.ID] = true
 		issue.Dependencies = storage.CreatePublicCreateDependencies(issue.ID, prepared)
 		issues[i] = issue
 	}

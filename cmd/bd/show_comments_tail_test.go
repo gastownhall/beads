@@ -314,3 +314,45 @@ func TestRenderWatchComments_HonoursTail(t *testing.T) {
 		t.Errorf("expected elision line %q in watch output, got:\n%s", wantLine, out)
 	}
 }
+
+// stripTrailingShowTip removes the one tip block maybeShowTip (tips.go) may
+// append after a direct-route text render — "\n💡 Tip: <message>\n" at the
+// very end of stdout — and nothing else. Whether a tip prints is a per-run
+// probability roll behind a per-tip frequency gate recorded in the store,
+// independent of --comments-tail, so of two renders that are otherwise
+// identical one can carry the tip and the other not. A tip anywhere but the
+// end, or output that does not end in a newline, is returned unchanged; in
+// particular no trailing newline is ever normalized away, so the route tests
+// that compare two renders (assertCommentsTailOff) still see one.
+func stripTrailingShowTip(out string) string {
+	i := strings.LastIndex(out, "\n💡 Tip: ")
+	if i < 0 || !strings.HasSuffix(out, "\n") {
+		return out
+	}
+	if strings.Count(out[i+1:], "\n") != 1 {
+		return out // the tip is not the last line
+	}
+	return out[:i]
+}
+
+func TestStripTrailingShowTip(t *testing.T) {
+	const render = "○ ct-1 · Tail me\n\nComments (1):\n  CT-NEWEST-CHARLIE\n"
+	const tip = "\n💡 Tip: run `bd prime` after a compaction\n"
+	cases := []struct{ name, in, want string }{
+		{"no_tip_unchanged", render, render},
+		{"trailing_tip_block_stripped", render + tip, render},
+		{"stray_trailing_blank_line_kept", render + "\n", render + "\n"},
+		{"blank_line_after_tip_kept", render + tip + "\n", render + tip + "\n"},
+		{"tip_followed_by_output_kept", render + tip + "more\n", render + tip + "more\n"},
+		{"tip_as_first_line_kept", "💡 Tip: x\n" + render, "💡 Tip: x\n" + render},
+		{"no_final_newline_kept", render + "\n💡 Tip: x", render + "\n💡 Tip: x"},
+		{"empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripTrailingShowTip(tc.in); got != tc.want {
+				t.Errorf("stripTrailingShowTip(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

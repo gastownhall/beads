@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 	bdhttp "github.com/steveyegge/beads/backend/http"
-	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -93,6 +92,23 @@ Examples:
 		beadsDir := resolveInitBeadsDir()
 		if beadsDir == "" {
 			return HandleError("cannot resolve a workspace directory for connect (set BEADS_DIR, or run from inside a writable directory)")
+		}
+		// Admission checked the workspace discovery found, which is not always
+		// this one: in a linked worktree with no .beads of its own, discovery
+		// passes over a main-checkout .beads that only a legacy config.json
+		// declares, and connect still attaches it. Refuse here what admission
+		// refuses from that workspace's own contents (a historical SQLite
+		// workspace, a removed or unrecognized backend, a legacy Dolt
+		// workspace; admitForeignWorkspace), with admission's text and the
+		// .beads it refuses, before the handshake dials and before
+		// configfile.Load migrates that config.json.
+		//
+		// --clear is refused too, even for an attach a bd without this check
+		// made: it rewrites metadata.json, which this build does not do to a
+		// workspace it refuses. Such an attach is undone by hand: delete
+		// .beads/http_target.json and restore metadata.json's "backend".
+		if _, err := admitForeignWorkspace(beadsDir); err != nil {
+			return handleWorkspaceGuardError(fmt.Errorf("%s: %w", beadsDir, err))
 		}
 
 		if connectClear {
@@ -251,6 +267,13 @@ Examples:
 		if err != nil {
 			return HandleError("connecting to %s: %v", redactedURL, err)
 		}
+		// The check at the top of RunE ran before the dial, and the workspace
+		// can change while the handshake is in flight. Check
+		// again before anything below writes the workspace: the .gitignore
+		// would otherwise land in it before Attach's own check refused it.
+		if _, err := admitForeignWorkspace(beadsDir); err != nil {
+			return handleWorkspaceGuardError(fmt.Errorf("%s: %w", beadsDir, err))
+		}
 		if target.ExpectProjectID == "" {
 			// Nothing was pinned (a genuine first connect, or --force
 			// dropped the prior pin above): record what the server said so
@@ -274,8 +297,11 @@ Examples:
 		// Ensure one before writing the sidecar, the same way bd init and
 		// doctor --fix do, so http_target.json (which carries a bearer
 		// credential's host and, soon, DialOptions) is never a candidate for
-		// `git add .` in the first commit after connect.
-		if err := doctor.EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		// `git add .` in the first commit after connect. A permission-only
+		// failure (patterns in place, tightening chmod failed) warns instead
+		// of failing connect (#6225); anything else still aborts here,
+		// before http_target.json is written.
+		if err := ensureBeadsGitignore(beadsDir); err != nil {
 			return HandleError("ensuring %s/.gitignore: %v", beadsDir, err)
 		}
 		// bdhttp.Attach writes both of this backend's files: the gitignored

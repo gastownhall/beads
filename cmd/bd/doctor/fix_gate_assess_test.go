@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -252,6 +253,34 @@ func assertPresentButUnopenable(t *testing.T, gate FixGate) {
 		if gate.AllowsFix(name) {
 			t.Errorf("AllowsFix(%q) = true; a migrating open is the hazard this gate exists for", name)
 		}
+	}
+	assertAgentAdviceHoldsNoBacktick(t, gate)
+}
+
+// assertAgentAdviceHoldsNoBacktick fails when the advice a blocked gate
+// writes into a bd doctor --agent command holds a backtick. bd doctor --agent
+// shows each command as a code span, and pasting a span whose text holds a
+// backtick outside single quotes runs what the backticks enclose: here the
+// 'bd doctor --fix' the gate withholds, which SanitizeFixRecommendation's
+// advice repeats from gate.Reason. It runs every agent enricher and the
+// generic fallback, and fails as well if no command was rewritten, which
+// would prove nothing.
+func assertAgentAdviceHoldsNoBacktick(t *testing.T, gate FixGate) {
+	t.Helper()
+	rewritten := 0
+	for _, name := range append(AgentEnricherNames(), "Unenriched Check") {
+		ad := EnrichForAgent(DoctorCheck{Name: name, Status: StatusWarning, Message: "m", Fix: "bd doctor --fix"}, gate)
+		for _, c := range ad.Commands {
+			if strings.Contains(c, originalTipMarker) {
+				rewritten++
+			}
+			if strings.Contains(c, "`") {
+				t.Errorf("%s: bd doctor --agent advice holds a backtick, which a paste runs: %q", name, c)
+			}
+		}
+	}
+	if rewritten == 0 {
+		t.Errorf("no agent command was rewritten under gate %+v; the check proves nothing", gate)
 	}
 }
 

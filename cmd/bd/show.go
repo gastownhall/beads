@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
@@ -81,7 +82,10 @@ var showCmd = &cobra.Command{
 			if len(args) > 0 {
 				return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
 			}
-			currentID := resolveCurrentIssueID(ctx)
+			currentID, err := resolveCurrentIssueID(ctx)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			if currentID == "" {
 				return HandleErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
 			}
@@ -140,7 +144,7 @@ var showCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
 					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
 				} else {
-					fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+					fmt.Fprintf(os.Stderr, "Error fetching %s: %s\n", id, remedy.PrintedMessage(err))
 				}
 				continue
 			}

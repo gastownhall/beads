@@ -4,11 +4,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -142,4 +144,124 @@ func runBDExecWithBinary(t *testing.T, bdBinary string, dir string, env []string
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// TestE2E_NestedServerInitStartsItsOwnServer runs bd init --server in a
+// project nested in a workspace whose config.yaml names dolt.port, the port
+// of that workspace's running server, with no port named for the new
+// project. Init loads that config.yaml before the project's .beads exists;
+// on main its store took that port, created the project's database on the
+// enclosing workspace's server and pinned the port in the project's port
+// file. It must instead start a server of the project's own, on a port of
+// its own, as init does for a project nested in nothing, and leave the
+// enclosing workspace's server without the project's database. With a
+// user-level dolt.port that nothing answers on, that port is the project's
+// own, as it is for a project nested in nothing: init starts the project's
+// server on it.
+func TestE2E_NestedServerInitStartsItsOwnServer(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	if runtime.GOOS == windowsOS {
+		t.Skip("repo-local dolt lifecycle integration test not supported on windows")
+	}
+
+	bdBinary := buildLifecycleTestBinary(t)
+	t.Run("no port of its own", func(t *testing.T) {
+		runNestedServerInit(t, bdBinary, 0)
+	})
+	t.Run("user-level dolt.port nothing answers on", func(t *testing.T) {
+		runNestedServerInit(t, bdBinary, freeLoopbackPort(t))
+	})
+}
+
+// runNestedServerInit is TestE2E_NestedServerInitStartsItsOwnServer with
+// userPort, when nonzero, as the user-level config.yaml dolt.port.
+func runNestedServerInit(t *testing.T, bdBinary string, userPort int) {
+	root := t.TempDir()
+	home := t.TempDir()
+	town := filepath.Join(root, "town")
+	rig := filepath.Join(town, "rig")
+	townBeads, rigBeads := filepath.Join(town, ".beads"), filepath.Join(rig, ".beads")
+	stopDoltServerCleanup(t, townBeads)
+	stopDoltServerCleanup(t, rigBeads)
+	for _, dir := range []string{town, rig} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := runCommandInDir(dir, "git", "init"); err != nil {
+			t.Fatalf("git init %s failed: %v", dir, err)
+		}
+	}
+
+	env := append(os.Environ(),
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"BEADS_DIR=",
+		"BEADS_CEILING_DIRECTORIES="+root,
+		"BEADS_TEST_MODE=",
+		"GT_ROOT=",
+		"BEADS_DOLT_AUTO_START=",
+		"BEADS_DOLT_SERVER_PORT=",
+		"BEADS_DOLT_PORT=",
+		"BEADS_DOLT_SERVER_HOST=",
+		"BEADS_DOLT_SERVER_SOCKET=",
+		"BEADS_DOLT_SERVER_MODE=",
+		"BEADS_DOLT_SHARED_SERVER=",
+		"BD_NON_INTERACTIVE=1",
+		"BD_DISABLE_METRICS=1",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+
+	if out, err := runBDExecWithBinary(t, bdBinary, town, env, "init", "--server", "--prefix", "town", "--quiet", "--skip-hooks", "--skip-agents"); err != nil {
+		t.Fatalf("bd init in the town failed: %v\n%s", err, out)
+	}
+	townPort, err := os.ReadFile(filepath.Join(townBeads, "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("read the town's dolt-server.port: %v", err)
+	}
+	// The town pins its server's port, as a Gas Town town does.
+	if err := os.WriteFile(filepath.Join(townBeads, "config.yaml"), []byte("dolt:\n  port: "+strings.TrimSpace(string(townPort))+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if userPort != 0 {
+		userConfig := filepath.Join(home, ".config", "bd", "config.yaml")
+		if err := os.MkdirAll(filepath.Dir(userConfig), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(userConfig, []byte(fmt.Sprintf("dolt:\n  port: %d\n", userPort)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, err := runBDExecWithBinary(t, bdBinary, rig, env, "init", "--server", "--prefix", "rig", "--quiet", "--skip-hooks", "--skip-agents")
+	if err != nil {
+		t.Fatalf("bd init in the nested rig failed: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(filepath.Join(townBeads, "dolt", "rig")); err == nil {
+		t.Errorf("bd init in the nested rig created its database on the town's server (%s exists):\n%s", filepath.Join(townBeads, "dolt", "rig"), out)
+	}
+	rigPort, err := os.ReadFile(filepath.Join(rigBeads, "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("read the rig's dolt-server.port: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(string(rigPort)) == strings.TrimSpace(string(townPort)) {
+		t.Errorf("the rig's port file names the town's port %s:\n%s", strings.TrimSpace(string(townPort)), out)
+	}
+	if userPort != 0 && strings.TrimSpace(string(rigPort)) != strconv.Itoa(userPort) {
+		t.Errorf("the rig's port file names %s, want the user-level dolt.port %d:\n%s", strings.TrimSpace(string(rigPort)), userPort, out)
+	}
+	if _, err := os.Stat(filepath.Join(rigBeads, "dolt", "rig")); err != nil {
+		t.Errorf("the rig's database is not in the rig's own server data directory: %v\n%s", err, out)
+	}
+
+	if out, err := runBDExecWithBinary(t, bdBinary, rig, env, "create", "made in the rig", "--json"); err != nil {
+		t.Fatalf("bd create in the rig failed: %v\n%s", err, out)
+	}
+	listOut, err := runBDExecWithBinary(t, bdBinary, town, env, "list", "--json")
+	if err != nil {
+		t.Fatalf("bd list in the town failed: %v\n%s", err, listOut)
+	}
+	if strings.Contains(listOut, "made in the rig") {
+		t.Errorf("the town lists the rig's issue:\n%s", listOut)
+	}
 }

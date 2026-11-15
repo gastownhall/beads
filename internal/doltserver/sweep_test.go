@@ -367,7 +367,7 @@ func TestCanonicalRootsForSweep(t *testing.T) {
 func TestTempDirRootsBoundTheOrphanArm(t *testing.T) {
 	roots := tempDirRoots()
 	if len(roots) == 0 {
-		t.Fatal("tempDirRoots() is empty; the deleted-cwd arm could never fire")
+		t.Fatalf("tempDirRoots() is empty (%s); the deleted-cwd arm could never fire", rootsWitnesses())
 	}
 	dir := t.TempDir()
 	resolved, err := filepath.EvalSymlinks(dir)
@@ -375,7 +375,8 @@ func TestTempDirRootsBoundTheOrphanArm(t *testing.T) {
 		resolved = dir
 	}
 	if !underAnyRoot(dir, roots) && !underAnyRoot(resolved, roots) {
-		t.Errorf("t.TempDir() %q (resolved %q) is under none of tempDirRoots() %v", dir, resolved, roots)
+		t.Errorf("t.TempDir() %q (resolved %q) is under none of tempDirRoots() %v (%s)",
+			dir, resolved, roots, rootsWitnesses())
 	}
 	if underAnyRoot("/Users/dev/project/.beads/dolt", roots) {
 		t.Errorf("a production workspace path matched tempDirRoots() %v", roots)
@@ -560,7 +561,7 @@ func TestIsCredibleTempRoot(t *testing.T) {
 		{"/Users/other", true},
 	}
 	for _, tc := range cases {
-		if got := isCredibleTempRoot(tc.root, home); got != tc.want {
+		if got := isCredibleTempRoot(tc.root, home, "", false, nil); got != tc.want {
 			t.Errorf("isCredibleTempRoot(%q, %q) = %v, want %v", tc.root, home, got, tc.want)
 		}
 	}
@@ -582,16 +583,16 @@ func TestIsCredibleTempRoot(t *testing.T) {
 		{"/tmp", "/tmp", false},
 	}
 	for _, tc := range sandboxCases {
-		if got := isCredibleTempRoot(tc.root, tc.home); got != tc.want {
+		if got := isCredibleTempRoot(tc.root, tc.home, "", false, nil); got != tc.want {
 			t.Errorf("isCredibleTempRoot(%q, %q) = %v, want %v", tc.root, tc.home, got, tc.want)
 		}
 	}
 
 	// With no home known, only the structural rejections apply.
-	if !isCredibleTempRoot("/Users/dev", "") {
+	if !isCredibleTempRoot("/Users/dev", "", "", false, nil) {
 		t.Error("isCredibleTempRoot with no home should accept an ordinary absolute path")
 	}
-	if isCredibleTempRoot("/", "") {
+	if isCredibleTempRoot("/", "", "", false, nil) {
 		t.Error("isCredibleTempRoot must reject the filesystem root even with no home")
 	}
 }
@@ -644,17 +645,28 @@ func TestSandboxHomeUnderPerUserTempRoot(t *testing.T) {
 	})
 
 	// End to end on THIS platform: HOME inside the real os.TempDir() must not
-	// cost us os.TempDir() as a root.
+	// cost us os.TempDir() as a root. The HOME takes the shape this package's
+	// TestMain builds: a root made under os.TempDir() and claimed with this
+	// process's owner marker. On macOS and on a /tmp host the fixed-location
+	// witness vouches for it alone; on a host whose TMPDIR is a disk path such
+	// as /data/tmp only the marker does (TestSandboxHomeUnderNonStandardTMPDIR).
 	t.Run("HOME inside the real os.TempDir keeps it a root", func(t *testing.T) {
-		home := filepath.Join(os.TempDir(), "beads-sandbox-home-probe")
+		home, err := os.MkdirTemp("", "beads-sandbox-home-probe-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(home) })
+		if err := WriteSuiteOwnerMarker(home); err != nil {
+			t.Fatal(err)
+		}
 		t.Setenv("HOME", home)
 		roots := tempDirRoots()
 		if len(roots) == 0 {
-			t.Fatal("tempDirRoots() is empty; the deleted-cwd arm could never fire")
+			t.Fatalf("tempDirRoots() is empty (%s); the deleted-cwd arm could never fire", rootsWitnesses())
 		}
 		if !underAnyRoot(filepath.Join(os.TempDir(), "beads-bd-tests-xyz", ".beads", "dolt"), roots) {
-			t.Errorf("tempDirRoots() = %v with HOME=%s, want os.TempDir() %q still covered",
-				roots, home, os.TempDir())
+			t.Errorf("tempDirRoots() = %v (%s), want os.TempDir() %q still covered",
+				roots, rootsWitnesses(), os.TempDir())
 		}
 	})
 }
@@ -781,6 +793,303 @@ func TestSandboxHomeUnderVarTmpTMPDIR(t *testing.T) {
 		// come through, or the arm would be inert rather than scoped.
 		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
 			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
+		}
+	})
+}
+
+// pinAccountHome replaces accountHomeDir for the duration of t, so the
+// account-database bound is deterministic whatever host runs the test.
+func pinAccountHome(t *testing.T, home string) {
+	t.Helper()
+	orig := accountHomeDir
+	accountHomeDir = func() string { return home }
+	t.Cleanup(func() { accountHomeDir = orig })
+}
+
+// pinSuiteHome makes homeIsSuiteRoot claim exactly home for the duration of t,
+// as this process's owner marker in it would, for suite roots at paths no test
+// can create (/srv/...).
+func pinSuiteHome(t *testing.T, home string) {
+	t.Helper()
+	orig := homeIsSuiteRoot
+	homeIsSuiteRoot = func(h string) bool { return h == home }
+	t.Cleanup(func() { homeIsSuiteRoot = orig })
+}
+
+// rootsWitnesses names what tempDirRoots judged its roots by, for failure
+// messages: HOME, whether this process claimed it as its suite root, and the
+// account home.
+func rootsWitnesses() string {
+	home, _ := os.UserHomeDir()
+	claimed := home != "" && homeIsSuiteRoot(home)
+	return fmt.Sprintf("HOME %q, suite root %v, account home %q", home, claimed, accountHomeDir())
+}
+
+// TestSandboxHomeUnderNonStandardTMPDIR is the general case behind
+// TestSandboxHomeUnderVarTmpTMPDIR: a gate host can point TMPDIR at ANY
+// disk-backed directory (e.g. /data/tmp), not just one under /var/tmp, and
+// this package's TestMain makes its suite root under TMPDIR and points HOME at
+// it. The fixed-location witness cannot vouch for that HOME, so previously it
+// disqualified os.TempDir() itself and tempDirRoots() collapsed to [/tmp],
+// failing TestTempDirRootsBoundTheOrphanArm and the end-to-end subtest of
+// TestSandboxHomeUnderPerUserTempRoot on such hosts.
+//
+// The suite's owner marker is the second witness: it names this very process,
+// so it proves HOME is the throwaway root TestMain claimed. A HOME that merely
+// points away from the account home proves nothing: the root user with
+// HOME=/srv/apps/svc under TMPDIR=/srv/apps looks just the same, and a dolt
+// server whose workspace there was deleted must stay out of the kill arm. Even
+// a claimed HOME rescues only a TMPDIR nested below a top-level directory, and
+// never a root that holds the account home.
+func TestSandboxHomeUnderNonStandardTMPDIR(t *testing.T) {
+	const account = "/home/beads-fixture"
+
+	t.Run("credibility table", func(t *testing.T) {
+		const suiteRoot = "/data/tmp/beads-doltserver-tests-abc123"
+		cases := []struct {
+			name, root, home, account, tmpdir string
+			claimed, want                     bool
+		}{
+			{"suite-claimed HOME under a non-standard TMPDIR keeps it", "/data/tmp", suiteRoot, account, "/data/tmp", true, true},
+			{"unclaimed HOME: conservative, as before", "/data/tmp", suiteRoot, account, "/data/tmp", false, false},
+			{"re-pointed persistent HOME under a nested TMPDIR is not a sandbox", "/srv/apps", "/srv/apps/svc", "/root", "/srv/apps", false, false},
+			{"witness never rescues a root that is not TMPDIR", "/data/tmp", suiteRoot, account, "/srv/beads-gate-probe/tmp", true, false},
+			{"GOTMPDIR containing a fixture HOME is still dropped", "/home", "/home/beads-fixture", "/root", "/tmp/bbt.abc123/tmp", true, false},
+			{"re-pointed persistent HOME under a top-level TMPDIR is not a sandbox", "/home", "/home/runner", "/root", "/home", false, false},
+			{"a top-level TMPDIR never gets the witness", "/data", "/data/beads-doltserver-tests-abc123", account, "/data", true, false},
+			{"HOME is the account home: TMPDIR cannot vote", "/home", "/home/runner", "/home/runner", "/home", false, false},
+			{"root containing the account home is never credible", "/data/users", "/data/users/beads-doltserver-tests-abc123", "/data/users/dev", "/data/users", true, false},
+			{"root containing the account home, no HOME known", "/home", "", account, "/home", false, false},
+			{"root that IS the account home", account, "", account, account, false, false},
+			{"unclaimed HOME nested in the account home is not a sandbox", account + "/tmp", account + "/tmp/x/home", account, account + "/tmp", false, false},
+			{"suite-claimed HOME under a TMPDIR inside the account home keeps it", account + "/tmp", account + "/tmp/beads-doltserver-tests-abc123", account, account + "/tmp", true, true},
+			{"root inside the account home, HOME is the account home", account + "/tmp", account, account, account + "/tmp", false, true},
+			{"root that IS the suite-claimed HOME", suiteRoot, suiteRoot, account, suiteRoot, true, false},
+			{"shared root stays bounded", "/var/tmp", "/var/tmp/tmp.abc123/home", account, "/var/tmp", true, false},
+			{"filesystem root stays out", "/", suiteRoot, account, "/", true, false},
+		}
+		for _, tc := range cases {
+			if got := isCredibleTempRoot(tc.root, tc.home, tc.account, tc.claimed, []string{tc.tmpdir}); got != tc.want {
+				t.Errorf("%s: isCredibleTempRoot(%q, %q, %q, %v, %q) = %v, want %v",
+					tc.name, tc.root, tc.home, tc.account, tc.claimed, tc.tmpdir, got, tc.want)
+			}
+		}
+
+		// Every form of TMPDIR counts: a TMPDIR=/home that resolves to
+		// /data/home gets no witness under its nested, resolved name either,
+		// not even for a HOME this suite claimed.
+		const home = "/data/home/beads-doltserver-tests-abc123"
+		tmpdirs := []string{"/home", "/data/home"}
+		if isCredibleTempRoot("/data/home", home, "/root", true, tmpdirs) {
+			t.Errorf("isCredibleTempRoot(%q, %q, %q, true, %q) = true, want a top-level TMPDIR refused under its resolved name too",
+				"/data/home", home, "/root", tmpdirs)
+		}
+	})
+
+	// The claim is read from disk, and only a marker naming THIS process
+	// counts: a root another run claimed, or that nobody claimed, vouches for
+	// nothing.
+	t.Run("only this process's owner marker claims HOME", func(t *testing.T) {
+		root := t.TempDir()
+		if homeIsSuiteRoot(root) {
+			t.Errorf("homeIsSuiteRoot(%q) = true with no owner marker", root)
+		}
+		if err := writeSuiteOwnerMarkerPID(root, os.Getpid()+1); err != nil {
+			t.Fatal(err)
+		}
+		if homeIsSuiteRoot(root) {
+			t.Errorf("homeIsSuiteRoot(%q) = true for a marker naming another process", root)
+		}
+		if err := WriteSuiteOwnerMarker(root); err != nil {
+			t.Fatal(err)
+		}
+		if !homeIsSuiteRoot(root) {
+			t.Errorf("homeIsSuiteRoot(%q) = false for a root this process claimed", root)
+		}
+	})
+
+	// End to end: the exact shape this package's TestMain builds under
+	// TMPDIR=/data/tmp, with a TMPDIR path that is under no fixed temp
+	// location.
+	const tmpdir = "/srv/beads-gate-probe/tmp"
+	const suiteRoot = tmpdir + "/beads-doltserver-tests-abc123"
+	t.Run("HOME the suite claimed inside a non-standard TMPDIR keeps it a root", func(t *testing.T) {
+		pinAccountHome(t, account)
+		pinSuiteHome(t, suiteRoot)
+		t.Setenv("TMPDIR", tmpdir)
+		t.Setenv("GOTMPDIR", "")
+		t.Setenv("HOME", suiteRoot)
+
+		roots := tempDirRoots()
+		if !underAnyRoot(tmpdir+"/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v with TMPDIR=%s, want it still covered", roots, tmpdir)
+		}
+		const sibling = "/srv/beads-gate-probe/production/.beads/dolt"
+		if underAnyRoot(sibling, roots) {
+			t.Errorf("tempDirRoots() = %v credited unrelated sibling path %q", roots, sibling)
+		}
+		if underAnyRoot(account+"/project/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v covers a workspace under the account home", roots)
+		}
+	})
+
+	// A nested TMPDIR holding a persistent HOME is the case the account home
+	// cannot settle: the root user with HOME=/srv/apps/svc has pointed HOME
+	// away from the account home exactly as a harness does. Nothing claimed
+	// that HOME, so TMPDIR is judged as it always was, and a server whose
+	// workspace under the HOME was deleted stays out of the kill arm.
+	t.Run("re-pointed persistent HOME under a nested TMPDIR is still dropped", func(t *testing.T) {
+		pinAccountHome(t, "/root")
+		t.Setenv("TMPDIR", "/srv/apps")
+		t.Setenv("GOTMPDIR", "")
+		t.Setenv("HOME", "/srv/apps/svc")
+
+		roots := tempDirRoots()
+		candidates := []serverCandidate{
+			{pid: 601, cmdline: "dolt sql-server -P 3307", cwd: "/srv/apps/svc/project/.beads/dolt", cwdDeleted: true},
+		}
+		if got := selectOrphanTestServers(candidates, nil, roots); got != nil {
+			t.Errorf("selectOrphanTestServers() = %v with tempDirRoots() = %v, want the server under the persistent HOME left alone", got, roots)
+		}
+		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
+		}
+	})
+
+	// The CI shape that caught an earlier draft of this fix: under Bazel the
+	// account home is not under /home. GOTMPDIR=/home must be dropped even if
+	// the fixture HOME in it were this suite's own root, because the witness
+	// only ever rescues TMPDIR's own root. TMPDIR is the nested one
+	// tools/bazel/test_env.sh exports, which the witness does consider.
+	t.Run("GOTMPDIR containing a fixture HOME is still dropped", func(t *testing.T) {
+		pinAccountHome(t, "/root")
+		pinSuiteHome(t, "/home/beads-fixture")
+		t.Setenv("TMPDIR", "/tmp/bbt.abc123/tmp")
+		t.Setenv("GOTMPDIR", "/home")
+		t.Setenv("HOME", "/home/beads-fixture")
+
+		roots := tempDirRoots()
+		if underAnyRoot("/home/beads-fixture/project/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v covers a workspace under the fixture home", roots)
+		}
+	})
+
+	// A top-level TMPDIR holds the homes of the whole box, so it gets no
+	// witness even around a HOME this suite really claimed.
+	t.Run("a top-level TMPDIR is dropped around the suite's own HOME", func(t *testing.T) {
+		const home = "/home/beads-doltserver-tests-abc123"
+		pinAccountHome(t, "/root")
+		pinSuiteHome(t, home)
+		t.Setenv("TMPDIR", "/home")
+		t.Setenv("GOTMPDIR", "")
+		t.Setenv("HOME", home)
+
+		roots := tempDirRoots()
+		if underAnyRoot("/home/runner/project/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v covers a workspace under another home in /home", roots)
+		}
+		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
+		}
+	})
+
+	// TMPDIR=/home with the user's REAL home: unchanged by the new witness.
+	t.Run("TMPDIR containing the real home is still dropped", func(t *testing.T) {
+		pinAccountHome(t, "/home/runner")
+		t.Setenv("TMPDIR", "/home")
+		t.Setenv("GOTMPDIR", "")
+		t.Setenv("HOME", "/home/runner")
+
+		roots := tempDirRoots()
+		if underAnyRoot("/home/runner/project/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v covers a workspace under the real home", roots)
+		}
+		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
+		}
+	})
+
+	// The same TMPDIR=/home, but HOME is a persistent home re-pointed away
+	// from the account home: the root user running with HOME=/home/runner.
+	// HOME is outside the account home, yet it is no sandbox, and a server
+	// whose workspace under it was deleted must stay out of the kill arm.
+	t.Run("re-pointed persistent HOME under a top-level TMPDIR is still dropped", func(t *testing.T) {
+		pinAccountHome(t, "/root")
+		t.Setenv("TMPDIR", "/home")
+		t.Setenv("GOTMPDIR", "")
+		t.Setenv("HOME", "/home/runner")
+
+		roots := tempDirRoots()
+		candidates := []serverCandidate{
+			{pid: 600, cmdline: "dolt sql-server -P 3307", cwd: "/home/runner/project/.beads/dolt", cwdDeleted: true},
+		}
+		if got := selectOrphanTestServers(candidates, nil, roots); got != nil {
+			t.Errorf("selectOrphanTestServers() = %v with tempDirRoots() = %v, want the server under the re-pointed HOME left alone", got, roots)
+		}
+		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
+		}
+	})
+
+	// A CGO-free build's user.Current() answers with $HOME itself for a uid
+	// missing from /etc/passwd (with $USER set), so the account home can BE
+	// the sandbox HOME. Trusted, it would refuse /tmp for holding the account
+	// home and leave tempDirRoots() empty; tempDirRoots ignores an account
+	// home in a fixed temp location instead.
+	t.Run("an account home that echoes a sandbox HOME is ignored", func(t *testing.T) {
+		const sandbox = "/tmp/beads-test-env-abc123/home"
+		pinAccountHome(t, sandbox)
+		t.Setenv("TMPDIR", "")
+		t.Setenv("GOTMPDIR", "")
+		t.Setenv("HOME", sandbox)
+
+		roots := tempDirRoots()
+		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v with the account home pinned to HOME=%s, want /tmp still covered", roots, sandbox)
+		}
+	})
+
+	// The same echo where the HOME is this suite's own root under a
+	// non-standard TMPDIR: that root is the directory os.MkdirTemp made for
+	// this run, so it cannot be a real account home either. Trusted, it would
+	// refuse TMPDIR for holding the account home.
+	t.Run("an account home that echoes the suite's own HOME is ignored", func(t *testing.T) {
+		pinAccountHome(t, suiteRoot)
+		pinSuiteHome(t, suiteRoot)
+		t.Setenv("TMPDIR", tmpdir)
+		t.Setenv("GOTMPDIR", "")
+		t.Setenv("HOME", suiteRoot)
+
+		roots := tempDirRoots()
+		if !underAnyRoot(tmpdir+"/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v with the account home pinned to HOME=%s, want TMPDIR %s still covered", roots, suiteRoot, tmpdir)
+		}
+	})
+
+	// The echo test judges every form of the account home, given as a path
+	// and its symlink-resolved name, so a home that reaches /tmp through a
+	// symlink counts as the temp location it really is. A real account home
+	// is never discarded, not even when it is HOME itself (the ordinary case).
+	t.Run("echoed account homes", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			forms   []string
+			home    string
+			claimed bool
+			want    bool
+		}{
+			{"a real account home that is HOME", []string{"/home/ci"}, "/home/ci", false, false},
+			{"a real account home beside the suite's own HOME", []string{"/home/ci"}, suiteRoot, true, false},
+			{"an echo of a sandbox HOME under /tmp", []string{"/tmp/beads-test-env-abc123/home"}, "/tmp/beads-test-env-abc123/home", false, true},
+			{"a home that reaches /tmp through a symlink", []string{"/home/ci", "/tmp/ci-home"}, "/home/ci", false, true},
+			{"an echo of the suite's own HOME", []string{suiteRoot}, suiteRoot, true, true},
+			{"the same path as an unclaimed HOME", []string{suiteRoot}, suiteRoot, false, false},
+		}
+		for _, tc := range cases {
+			if got := isEchoedAccountHome(tc.forms, tc.home, tc.claimed); got != tc.want {
+				t.Errorf("%s: isEchoedAccountHome(%q, %q, %v) = %v, want %v",
+					tc.name, tc.forms, tc.home, tc.claimed, got, tc.want)
+			}
 		}
 	})
 }

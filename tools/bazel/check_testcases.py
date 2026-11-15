@@ -2,7 +2,7 @@
 """Fail if a Bazel test (or any shard of it) ran no Go tests.
 
 Usage: check_testcases.py --bep <build_event_json_file> [--testlogs DIR]
-                          [--not-go LABEL ...]
+                          [--not-go LABEL ...] [--label LABEL ...]
 
 A test target whose Go binary matches no test still exits 0: a shard script
 whose manifest assigns a shard nothing ("no tests assigned"), a -test.run
@@ -22,8 +22,26 @@ cannot linger. //pkg:all exempts every test in that package (one that holds
 only non-Go tests, such as //scripts/repochecks), and must match at least one
 tested target.
 
-Exit status: 0 if every test.xml lists a test, 1 otherwise (including a BEP
-with no test results at all).
+--label LABEL (repeatable) restricts which tested targets this invocation
+judges, by exact label; a requested label absent from the BEP is itself a
+failure (a typo or a stale label must not silently narrow the check to
+nothing). item 5 A2: bazel-dolt-int's union BEP has both tiers' targets, and
+its two "Every target and shard ran tests (<tier>)" steps each pass only
+their own tier's labels, so a cmd-dolt zero-testcase shard reaches only
+cmd_dolt_result (classify_tier_results.py's --check), not server-storage's,
+and vice versa. Omitted (bazel-test and every other lane's own step,
+unchanged): every tested target in the BEP, as before.
+
+--skip-census FILE (bazel.yml: every Dolt-tier lane's step, with
+tools/bazel/skip_census.txt) also fails on a skipped test or subtest of a
+judged target that FILE does not list, and on a FILE line whose test now
+runs (check_skip_census.py; --label narrows it like the count).
+--skip-census-report-only prints those findings without failing: the lanes
+pass it in modes cache and local, which execute on the runner.
+
+Exit status: 0 if every test.xml lists a test (and, with --skip-census, the
+census agrees), 1 otherwise (including a BEP with no test results at all, or
+a --label naming a target the BEP has no result for).
 """
 
 import argparse
@@ -45,9 +63,18 @@ def count_testcases(xml_path):
     return n
 
 
-def check(tested, testlogs, not_go=()):
-    """Return ([(xml path, count)], [problems]) for {label: shard_count}."""
+def check(tested, testlogs, not_go=(), labels=None):
+    """Return ([(xml path, count)], [problems]) for {label: shard_count}.
+
+    labels, if given (a set), restricts the check to those exact labels; a
+    label with no entry in tested is itself a problem (see the module
+    docstring's --label section).
+    """
     counts, problems = [], []
+    if labels is not None:
+        for label in sorted(set(labels) - set(tested)):
+            problems.append(f"{label}: --label, but the BEP has no result for it")
+        tested = {l: n for l, n in tested.items() if l in labels}
     if not tested:
         problems.append("the BEP lists no test results")
     def exempt(label, entry):
@@ -83,15 +110,38 @@ def main(argv=None):
     ap.add_argument("--testlogs", default=None, help="default: from the BEP, else ./bazel-testlogs")
     ap.add_argument("--not-go", action="append", default=[], metavar="LABEL",
                     help="a tested non-Go target to leave out of the count (repeatable)")
+    ap.add_argument("--label", action="append", default=None, metavar="LABEL",
+                    help="restrict to this exact target label (repeatable); default: every tested target in the BEP")
+    ap.add_argument("--skip-census", default=None, metavar="FILE",
+                    help="also fail on a skip FILE does not list, or a FILE line whose test now runs (check_skip_census.py)")
+    ap.add_argument("--skip-census-report-only", action="store_true",
+                    help="print --skip-census's findings without failing (modes cache and local)")
     args = ap.parse_args(argv)
+    if args.skip_census_report_only and not args.skip_census:
+        ap.error("--skip-census-report-only needs --skip-census")
 
     tested, _, bep_testlogs = read_bep(args.bep)
     testlogs = args.testlogs or bep_testlogs or "bazel-testlogs"
-    counts, problems = check(tested, testlogs, set(args.not_go))
+    labels = set(args.label) if args.label else None
+    counts, problems = check(tested, testlogs, set(args.not_go), labels=labels)
     for rel, n in counts:
         print(f"{n:5d}  {rel}")
     total = sum(n for _, n in counts)
     print(f"{len(tested)} targets, {len(counts)} test.xml, {total} top-level tests")
+    if args.skip_census:
+        # Imported only here: lanes without --skip-census (bazel-integration) never load it.
+        from check_skip_census import census_problems
+
+        lines, census_failures, notes = census_problems(tested, testlogs, args.skip_census, labels=labels)
+        for line in lines:
+            print(line)
+        for note in notes:
+            print(f"note: skip census: {note}")
+        if args.skip_census_report_only:
+            for p in census_failures:
+                print(f"note: skip census (report only): {p}")
+        else:
+            problems += [f"skip census: {p}" for p in census_failures]
     for p in problems:
         print(f"FAIL: {p}", file=sys.stderr)
     return 1 if problems else 0

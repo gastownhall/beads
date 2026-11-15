@@ -80,8 +80,8 @@ func TestServedMemoriesRecallReportsAMissAsNotFoundNotAnError(t *testing.T) {
 	conformance.RunMemoriesRecallReportsAMissAsNotFoundNotAnError(t, t.Context(), newServedMemoriesFixture(t, "hm09"))
 }
 
-func TestServedMemoriesRecallConflatesStoredEmptyWithAbsent(t *testing.T) {
-	conformance.RunMemoriesRecallConflatesStoredEmptyWithAbsent(t, t.Context(), newServedMemoriesFixture(t, "hm10"))
+func TestServedMemoriesEmptyRowIsPresentUntilForgotten(t *testing.T) {
+	conformance.RunMemoriesEmptyRowIsPresentUntilForgotten(t, t.Context(), newServedMemoriesFixture(t, "hm10"))
 }
 
 func TestServedMemoriesForgetRemovesExactlyTheNamedRow(t *testing.T) {

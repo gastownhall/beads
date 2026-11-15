@@ -14,6 +14,7 @@ and exercises exactly one primitive.
 | `branch-fanin.formula.toml`   | `ComposeRules.branch` | Fork-join: parallel steps fan in to a single join step. |
 | `condition.formula.toml`      | `Step.condition`   | Variable-driven step inclusion at cook time. |
 | `gate-timer.formula.toml`     | `Step.gate`        | Sibling `gate`-typed issue with `await_type` blocks the target step. |
+| `gate-typed.formula.toml`     | `Step.gate` + `type = "gate"` | Exit-gate: the step becomes a `task` that blocks its `gate`-typed companion; later steps that reference it wait on both. |
 
 For the full schema index - every exported struct declared in
 `internal/formula/types.go`, with field types and tags -

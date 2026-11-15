@@ -43,7 +43,7 @@ func bdRunOK(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-// TestReassignFenceCLI drives the bd-98s5c live-claim reassign fence
+// TestEmbeddedReassignFenceCLI drives the bd-98s5c live-claim reassign fence
 // end-to-end: plain `bd update -a` and `bd assign` were the last unfenced
 // cross-actor takeover path (--claim, unclaim, and close all refuse without
 // --force). The fence must refuse ONLY the silent steamroll — a different
@@ -51,7 +51,7 @@ func bdRunOK(t *testing.T, bd, dir string, args ...string) string {
 // leave routine dispatch untouched: open-bead reassigns, self-edits,
 // idempotent re-asserts, pool-alias takes, and holder-aware --if-assignee
 // transfers all proceed without --force.
-func TestReassignFenceCLI(t *testing.T) {
+func TestEmbeddedReassignFenceCLI(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

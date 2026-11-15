@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -147,7 +149,8 @@ Examples:
 			for _, conflict := range conflicts {
 				fmt.Printf("  - %s\n", conflict.Field)
 			}
-			fmt.Printf("\nResolve conflicts with: bd vc merge %s --strategy [ours|theirs]\n\n", branchName)
+			branch, note := remedy.CommandArg(runtime.GOOS, branchName, "<branch>")
+			fmt.Printf("\nResolve conflicts with: bd vc merge %s --strategy [ours|theirs]%s\n\n", branch, note)
 			return nil
 		}
 

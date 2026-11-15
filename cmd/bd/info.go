@@ -228,6 +228,132 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.3.4",
+		Date:    "2026-11-04",
+		Changes: []string{
+			"STABLE: first stable 1.3.4 release. Same code as 1.3.4-rc.1; only the version stamp changed. No new migration file and the embedded Dolt engine is unchanged, so upgrading from 1.3.x or 1.3.4-rc.1 is a binary swap. The 1.3.4-rc.1 entry below applies (GT_ROOT from a rig's .beads/.env is imported again). Coming from 1.3.2 or earlier, also read the 1.3.3-rc.1 SECURITY, CHANGE and UPGRADE lines. Whichever release you come from, the known issues in the 1.3.3-rc.1 entry's last UPGRADE line are not fixed in 1.3.4: the #7039 restore (#8047) is not in 1.3.4, so do not run 'bd compact' or 'bd flatten' on a clone that adopted migration 0062 by pull or bootstrap, or was cloned after it. The 1.3.2 upgrade note still applies: run 'bd recompute-blocked' once per workspace whose store crossed migration 0059 under bd 1.3.0 or later, which includes any workspace first created by bd 1.2.x or earlier (#7037).",
+		},
+	},
+	{
+		Version: "1.3.4-rc.1",
+		Date:    "2026-11-04",
+		Changes: []string{
+			"RC: first candidate for 1.3.4, 1.3.3 plus one fix (#8118). No new migration file and the embedded Dolt engine is unchanged, so upgrading from 1.3.x is a binary swap. The 1.3.3 entries below still apply, except the GT_ROOT issue fixed here.",
+			"FIX: GT_ROOT in a rig's .beads/.env is imported again (exact key only; other GT_* keys stay refused). 1.3.3 dropped it with 'beads: ignoring GT_ROOT from .beads/.env' on stderr for every bd command in a Gas City rig. Released gc could then report a failed bd command there as that notice instead of bd's --json error, and bd run in a rig without GT_ROOT exported stopped searching $GT_ROOT/.beads/formulas and loading $GT_ROOT/.beads/molecules.jsonl (#8117).",
+		},
+	},
+	{
+		Version: "1.3.3",
+		Date:    "2026-11-03",
+		Changes: []string{
+			"STABLE: first stable 1.3.3 release. Same code as 1.3.3-rc.1; only the version stamp changed. No new migration file and the embedded Dolt engine is unchanged, so upgrading from 1.3.x or 1.3.3-rc.1 is a binary swap. The 1.3.3-rc.1 entry below applies in full: read its SECURITY, CHANGE and UPGRADE lines, including the known issues, before upgrading from 1.3.2 or earlier. The 1.3.2 upgrade note still applies: run 'bd recompute-blocked' once per workspace whose store crossed migration 0059 under bd 1.3.0 or later, which includes any workspace first created by bd 1.2.x or earlier (#7037).",
+		},
+	},
+	{
+		Version: "1.3.3-rc.1",
+		Date:    "2026-11-03",
+		Changes: []string{
+			"RC: first candidate for 1.3.3, 1.3.2 plus security, data-loss and dependency backports (#8083). No new migration file and the embedded Dolt engine is unchanged, so upgrading from 1.3.x is a binary swap; a store from an older release still runs its pending migrations, now without restamping updated_at. The 1.3.2 upgrade note still applies: run 'bd recompute-blocked' once per workspace whose store crossed migration 0059 under bd 1.3.0 or later, which includes any workspace first created by bd 1.2.x or earlier, whichever 1.3.x release it is on now; on an unaffected workspace it changes nothing (#7037).",
+			"SECURITY: .beads/.env imports only an allowlist: BEADS_*/BD_* keys other than the command keys and the credential redirects BEADS_DOLT_SERVER_HOST, BEADS_CREDENTIALS_FILE, BEADS_CENTRAL_CONFIG and BEADS_HTTP_CA_FILE, plus DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD. Every other key (credential commands, mail delegates, EDITOR/VISUAL/PAGER/BD_PAGER, BEADS_DOLT_BIN, those redirects, GITHUB_TOKEN, LINEAR_API_KEY, other DOLT_*) is ignored with 'beads: ignoring <KEY> from .beads/.env' on every command; move them to the shell environment or ~/.config/bd/config.yaml (#7879, fixes #7878). The other BD_* keys still set config values, so the file can still name an endpoint that receives credentials (BD_AI_BASE_URL, BD_DOLT_HOST): see known issue (0) below.",
+			"SECURITY: 'bd mail' reads mail.delegate only from BEADS_MAIL_DELEGATE/BD_MAIL_DELEGATE or ~/.config/bd/config.yaml; 'bd config set mail.delegate' writes there, a project config.yaml or database value is ignored (a database row prints a notice), and PUT /v0/beads/config/mail.delegate returns 400. Re-run 'bd config set mail.delegate <cmd>' on each machine that uses 'bd mail' (#7879).",
+			"SECURITY: remote URLs that git or ssh would read as options (a leading '-', also after git+, or an ssh:// user or host starting with '-') are refused in sync.remote, sync.git-remote, routing.*, repos.additional and federation.remote. 'bd init' stops before writing; 'bd bootstrap' does not contact the remote. reset-data and the refs/dolt/data probe pass URLs to git after '--'; beads-mcp passes values as --flag=value and ids/text after '--' (#7881, fixes #7880).",
+			"SECURITY: dependency updates: go-jose v4.1.6, x/net v0.62.0 and x/* by MVS (#7925), kin-openapi v0.149.0 (#7812); release workflow uv 0.13.6 and Python 3.14.10; beads-mcp opentelemetry-api 1.45.1 (#7813), fastmcp 3.4.11 + certifi 2026.10.23 (#7814, adapted), joserfc 1.7.7, mcp 1.30.0, pyjwt 2.15.1, urllib3 2.8.0 (#7466), authlib 1.9.1, dnspython 2.9.0 on Python >=3.11. govulncheck: 2 reachable advisories -> 0; one dnspython advisory remains on Python 3.10, with no fix.",
+			"FIX: a managed-local proxied server whose Dolt port another process takes first no longer reports ready against that process's listener (#7184). Readiness waits for dolt's own ready line, a taken port fails with 'dolt sql-server listener port is already in use', and a Beads-chosen port moves to a free one (up to 5 ports in all) via .beads/dolt/proxy-child.runtime-config.yaml; config.yaml is never rewritten. A hand-set port is pinned and not moved: the command fails after ~15s, usually with 'timeout waiting for proxy to become ready', and the 'listener port is already in use' error with the port and remedy is in .beads/dolt/server.log. New generated configs record the chosen port on a '# beads-chosen-listener-port' line.",
+			"FIX: 'bd doctor --fix' imports issues.jsonl only into a database its repair created or found with no issues, never over a server database's live rows (#7899).",
+			"FIX: 'bd compact' replays recent commits in commit_order (#6644), refuses a history whose commit dates are out of order across the cutoff (--force does not override; --dry-run reports it), and aborts with main untouched if the replay differs from main as compact read it (#8050, fixes #6645).",
+			"FIX: 'bd compact' keeps writes that reach main while it runs: main moves by soft reset, working-set changes stay pending, and a commit that landed meanwhile is kept in one follow-up commit 'compact: commit changes that reached main during compaction'. If that commit fails, run 'bd dolt commit' (#8046).",
+			"FIX: 'bd dolt remote reset-data' refuses a file:// remote whose directory is a git repository (bare or a checkout) instead of clearing it; replace the remote with a fresh URL (#7902, partial).",
+			"FIX: 'bd doctor' Classic Artifacts cleanup (--fix, --check=artifacts --clean) deletes only what one positive-ownership plan marks safe, and never database state (*.db, SQLite files, Dolt stores, backups, or links to them); everything else is reported for review (#7828).",
+			"FIX: 'bd github' sync is scoped to the configured repository: a pulled issue no longer overwrites a bead linked to another repository's same-numbered issue, push/conflict detection skip beads linked elsewhere, and a renamed or transferred repository keeps syncing (#8068, fixes #7781).",
+			"FIX: schema migrations 0035/0041/0046/0047/0053 and ignored 0003/0007/0011 no longer restamp issue and wisp updated_at, including rows they only join; the guard probes columns with SHOW COLUMNS, not INFORMATION_SCHEMA. Values an earlier upgrade already stamped are not repaired (#8053, #8080, refs #5981).",
+			"CHANGE: 'bd rules compact' previews unless --force; add --force to scripts that apply merges with --auto or --group. Applying backs up each source to <name>.md.backup before deleting it. JSON groups gain 'sources' (file, backup, not_carried, backed_up, deleted) and 'error'; a refused group exits non-zero (#8051, fixes #5719).",
+			"CHANGE: 'bd delete' requires exact ids on preview and --force: an abbreviation, or a deleted id that begins a surviving id, is refused with 'bd delete needs the full issue id', naming the matching ids. Pass the full id (#7375).",
+			"CHANGE: 'bd github' makes one extra API request per command (GET /repos/{owner}/{repo}) plus one per other same-host repository a local bead's link names, to recognize a renamed or transferred repository's former names. Beads linked under a name that lookup does not tie to the repository (the request failed, or the old name now belongs to another repository) count as another repository's: relink them with 'bd update <id> --external-ref <new-url>', or the next pull imports their issues again as new beads (#8068).",
+			"UPGRADE: after a Dolt port move, the Dolt child runs with --config <root>/proxy-child.runtime-config.yaml and <root>/proxy-child.pid (field 'port'; <root> is .beads/dolt by default) and the proxy DSN carry the effective port; tools that find bd's Dolt by a --config ending in config.yaml, or read its port from config.yaml, should also accept the runtime config and read the port from proxy-child.pid, not proxy.pid (#7184).",
+			"UPGRADE: known issues not fixed in 1.3.3, with workarounds. (0) Credentials (tracker tokens, AI key, BEADS_DOLT_PASSWORD) go to whatever endpoint the workspace configures, including committed .beads/config.yaml, metadata.json, a BD_* key in .beads/.env, or the replicated config table (#7886); in a clone you do not trust, check its endpoints before running bd with credentials set, or unset them. Read the Dolt host from the files first, since in server mode any bd command that opens the database ('bd config list' included) sends BEADS_DOLT_PASSWORD to it: dolt_server_host in metadata.json, dolt.host in config.yaml/config.local.yaml, BD_DOLT_HOST in .beads/.env. Then check ai.base_url (BD_AI_BASE_URL in .beads/.env) and github.url, gitlab.url, ado.url, jira.url, linear.api_endpoint in 'bd config list'. Fixed on main by #7887. (1) Server mode where the Dolt server bd connects to does not serve .beads/dolt but .beads/dolt/<db> still holds a database: push/pull use that copy, and 'bd dolt push --force' or reset-data can replace the remote with it; move the copy out of .beads/dolt first. (2) 'bd dolt remote reset-data' through a sql-server can leave the remote empty: restart the Dolt server right before running it; if a reset already emptied the remote, restart and re-run 'bd dolt remote reset-data <name> --yes'; never delete refs/dolt/data by hand. (3) Clones that adopted migration 0062 by pull or bootstrap, or were cloned after it, start with an empty events table (#7039); the restore (#8047) is on main and NOT in 1.3.3, so do not run 'bd compact' or 'bd flatten' on such a clone until you run a release that includes #8047.",
+		},
+	},
+	{
+		Version: "1.3.2",
+		Date:    "2026-10-23",
+		Changes: []string{
+			"STABLE: first stable 1.3.2 release. Same code as 1.3.2-rc.3; only the version stamp changed. No schema migration, so upgrading from 1.3.1 or any 1.3.2 RC is a binary swap. The 1.3.2-rc.3, rc.2 and rc.1 entries below all apply; after upgrading from bd <=1.3.0, run 'bd recompute-blocked' once per workspace (#7037).",
+		},
+	},
+	{
+		Version: "1.3.2-rc.3",
+		Date:    "2026-10-23",
+		Changes: []string{
+			"RC: third candidate for 1.3.2, rc.2 plus three fixes and security bumps, with no schema migration, so upgrading from 1.3.1 or an earlier 1.3.2 RC is a binary swap. The rc.1 upgrade note still applies: after upgrading from bd <=1.3.0, run 'bd recompute-blocked' once per workspace (#7037).",
+			"FIX: a least-privilege Dolt user (EXECUTE on dolt_add/dolt_commit only) can write again: the no-op DOLT_CHECKOUT on fresh connections is skipped when the session is already on the branch (#7322).",
+			"FIX: bd export --all no longer stalls on workspaces with many wisps: bulk readers read at most 200 ids per IN list, and a repeated id is read once (#6444, #7785).",
+			"FIX: bd purge --limit N without --force now suggests a --force command that keeps --limit, and a negative --older-than overflow is refused (#7540).",
+			"SECURITY: builds with Go 1.26.10 (eMudhra CA distrust); x/net v0.60.0, x/crypto v0.57.0, grpc v1.83.2, thrift v0.24.0.",
+		},
+	},
+	{
+		Version: "1.3.2-rc.2",
+		Date:    "2026-10-10",
+		Changes: []string{
+			"RC: second candidate for 1.3.2, rc.1 plus one fix, with no schema migration, so upgrading from 1.3.1 or 1.3.2-rc.1 is a binary swap. The rc.1 upgrade note still applies: after upgrading from bd <=1.3.0, run 'bd recompute-blocked' once per workspace (#7037).",
+			"FIX: the post-commit blocked-state recheck publishes its Dolt commit after its own transaction commits (#7030, backport of #6876). Minted inside the transaction, DOLT_ADD staged issues from the BEGIN-time root and could write concurrently committed rows back to their old values while unblocking writes raced. A failed trailing commit now counts as post_tx_commit_dropped instead of a recheck failure.",
+		},
+	},
+	{
+		Version: "1.3.2-rc.1",
+		Date:    "2026-10-05",
+		Changes: []string{
+			"RC: first candidate for 1.3.2, a patch on top of 1.3.1 with no schema migration, so upgrading from 1.3.1 is a binary swap.",
+			"UPGRADE: after upgrading from bd <=1.3.0, run 'bd recompute-blocked' once per workspace (#7037). Migration 0059 (first shipped in 1.3.0) recomputes is_blocked with a recursive query whose parent-child filter is dropped by a Dolt query-planner bug on Dolt servers older than 2.4.0 and on the embedded engine (dolthub/dolt#11886). Blockedness then spreads across relates-to, discovered-from, tracks and other edges, and unblocked beads silently vanish from 'bd ready'. The flag is stored, so the damage persists until recomputed. This includes a workspace now on 1.3.1 that was first created by 1.2.x or earlier. The command is idempotent and reports rows_corrected.",
+			"FIX: 'bd purge' keeps every closed bead in a chain above a live bead, not just the one a live bead points at directly (#7031). A closed root over a closed child over an open grandchild used to lose its root, orphaning the rest; --wisps-plane retention sweeps hit this.",
+			"FIX: auto-backup records the Dolt commit read before the sync as its watermark (#7032). A commit landing during the sync used to be recorded as backed up although the snapshot lacked it, and auto-backup then reported 'no changes' until HEAD moved again.",
+		},
+	},
+	{
+		Version: "1.3.1",
+		Date:    "2026-09-30",
+		Changes: []string{
+			"STABLE: first stable 1.3.1 release. Same code as 1.3.1-rc.2; only the version stamp changed. No schema migration, so upgrading from 1.3.0 or any 1.3.1 RC is a binary swap. Coming from 1.3.0, the 1.3.1-rc.2 and 1.3.1-rc.1 entries below both apply; read the [1.3.1-rc.2] upgrade notes in CHANGELOG.md.",
+		},
+	},
+	{
+		Version: "1.3.1-rc.2",
+		Date:    "2026-09-29",
+		Changes: []string{
+			"RC: second candidate for the 1.3.1 patch line. Still no schema migration, so upgrading from 1.3.0 or 1.3.1-rc.1 is a binary swap. The 1.3.1-rc.1 entry below still applies.",
+			"NEW: on a proxied-server workspace whose Dolt server bd runs (managed-local, the default), 'bd backup init/sync/status/restore/remove' now work, and 'backup.enabled=true' turns on auto-backup (default stays OFF). On an external or team-server proxied topology the family stays refused with 'proxy.backup.unsupported' and \"reason\": \"design\". Proxied refusals now carry a 'reason' field ('design' or 'unimplemented'). A per-workspace '.beads/backup.lock' serializes backups: 'bd backup sync' fails after 5s if another backup is running.",
+			"NEW: 'bd purge --wisps-plane --older-than <age> --force [--limit N] --json' can replace a raw DELETE FROM wisps retention step. With --limit it purges oldest-closed first and reports 'remaining' and 'has_more'; loop while has_more is true.",
+			"CHANGE: 'bd purge' ALWAYS keeps a closed bead that a not-done bead depends on through parent-child, tracks or blocks, and reports the count as 'live_dependent_skipped'. There is no flag to disable it.",
+			"CHANGE: '--older-than' on 'bd purge' and 'bd prune' takes hour values exactly: '12h' no longer rounds up to a day and '36h' no longer floors to one, so 'bd prune --older-than 12h' now deletes rows closed 12-24 hours ago. Day values (7, 7d, 2w) are unchanged; a value too large to represent is refused.",
+			"CHANGE: 'bd show --watch <id>' works under --proxied-server, and on both routes a watch whose id cannot be found exits 1 instead of 0.",
+			"CHANGE: 'bd sql' classifies statements with the SQL parser. Proxied CTE queries ('WITH ... AS (...) SELECT') return their rows instead of 'OK, 0 rows affected', and CALL result sets are printed. In direct server mode a multi-statement write, or a write the parser cannot classify, prints 'OK' / {\"status\":\"ok\"} instead of 'OK, N rows affected' / {\"rows_affected\":N}. 'bd sql --readonly' refuses statements it cannot parse (e.g. PRAGMA).",
+			"CHANGE: 'bd types' lists exactly what 'bd create --type' accepts, with a new 'System types' section and an additive 'system_types' JSON field. A failure to read custom types now fails 'bd types', 'bd create --graph' and 'bd config set storage-class.*' instead of meaning 'no custom types'.",
+			"CHANGE: an explicit BEADS_DIR is authoritative. Point it at the .beads directory itself: a BEADS_DIR naming a project root, or a .beads that does not exist yet, now fails with 'no beads database found' instead of resolving to the nearest workspace above the current directory. 'bd init' initializes the named directory.",
+			"CHANGE: 'bd close' with several ids exits non-zero when any id fails to close (the rest still close). With --json, a summary naming the failed ids goes to stderr.",
+			"CHANGE: an unflagged piped 'bd query' is no longer capped at 50 rows; it follows the 'bd list' limit policy.",
+			"CHANGE: on a proxied workspace, dolt.auto-commit=batch/off now defers Dolt history commits and 'bd dolt commit' is supported as the flush point. Explicit commit points ('bd batch', 'bd mol bond/pour/squash', 'bd mol wisp create') still commit. The default 'on' is unchanged.",
+			"CHANGE: 'bd ready' and 'bd list --ready' include issues whose custom status is in the 'active' category; 'bd list --status <s> --ready' honors --status; bare 'bd list --wisp-type' is refused (use --include-ephemeral); 'bd doctor' warns about a missing .beads/dolt-server-config.yaml gitignore pattern until 'bd doctor --fix'.",
+			"CHANGE: on a proxied-server workspace or under 'bd serve', opening a store against an unreachable Dolt server retries for up to ~40s before failing, instead of failing at once.",
+			"FIX: two blockers of one dependent removed at the same time (parallel closes, a close racing 'bd dep remove' or a delete) no longer leave the dependent stuck blocked and hidden from 'bd ready' (#6716), on every store route including --proxied-server.",
+			"FIX: a proxy whose Dolt backend exits cleanly now retires, so the next command starts a fresh one; 'bd dolt status' reports it as not serving.",
+			"FIX: a server workspace with an empty .beads/dolt is no longer refused as a legacy workspace; 'bd init' writes the version marker.",
+			"FIX: the smart migrate gate no longer auto-migrates a clone whose data is behind its remote. It stops with 'run bd dolt pull, then retry', and 'bd dolt pull' works from that state.",
+			"FIX: deleting or purging a wisp no longer orphans wisp_dependencies, wisp_labels, wisp_events, wisp_comments or wisp_child_counters rows on stores without the wisp foreign keys (existing orphans are not cleaned). A clone missing its dolt-ignored events tables recreates them on open.",
+		},
+	},
+	{
+		Version: "1.3.1-rc.1",
+		Date:    "2026-09-16",
+		Changes: []string{
+			"RC: first candidate for the 1.3.1 patch line, on top of 1.3.0. It carries fixes only — no schema migration, so upgrading from 1.3.0 is a binary swap. If you are coming from 1.2.2 or earlier, the [1.3.0] entry below still describes everything you meet, including the migration and backup notes; read it first.",
+			"CHANGE: 'bd dolt start' on a PROXIED workspace is now a typed refusal with code 'proxy.dolt_start.conflict' instead of starting a second sql-server over the proxy's own data directory. It previously either stranded ordinary bd commands on 'invalid connection' or adopted the proxy's dolt child into bd's classic PID/port records, leaving two managers for one process. The proxy owns its backend's lifecycle: it starts on demand, and 'bd dolt stop' shuts it down. Direct-server and embedded workspaces are unaffected.",
+			"CHANGE: 'bd dolt status --json' changes shape on a proxied workspace. It now reports the proxy and its dolt backend separately — {\"mode\": \"proxied-server\", \"running\": <proxy up>, \"proxy_pid\", \"proxy_port\", \"backend_managed\", \"backend_running\", \"backend_pid\", \"backend_port\", \"backend_endpoint\", \"idle_timeout\", \"root\"} — instead of the always-false {\"running\": false, \"pid\": 0, \"port\": 0} it emitted by reading a PID file proxied mode never writes. 'pid' and 'port' are gone, replaced by the proxy_*/backend_* pairs. 'running' now describes the proxy, the endpoint every bd command connects through, so it is usually true where it used to be always false; 'backend_managed' is false on external proxied topologies, where 'backend_endpoint' names the server bd does not manage. A script parsing the old payload changes behavior on upgrade.",
+			"FIX: a dotted config key now round-trips — what 'bd config set' writes is what 'bd config get' and bd's own readers find. Setting a key like 'sync.remote' or 'dolt.host' into a config.yaml with no matching section used to append a top-level key whose NAME contained the dot, which Viper finds and the direct reader GetStringFromDir does not; 'bd init --remote' in a fresh workspace was the ordinary way in, recording a remote no reader could locate. Dotted keys are written nested now, an existing flat spelling is migrated, and 'bd config unset' removes the nested form (it only ever matched the flat one, so unsetting 'sync.remote' silently left the remote live).",
+			"CHANGE: writing a dotted key nested has a consequence outside bd — 'bd config set <dotted.key>' DELETES a flat top-level key of the same literal name. Writing 'dolt.host' into a file that already carries a top-level 'dolt.host: \"10.0.0.1\"' removes that entry and re-emits the value under 'dolt:'; only the key being written is touched. .beads/config.yaml is not exclusively bd's, so an external tool that both writes AND reads flat dotted keys there stops seeing any value bd migrates this way. Realistic collisions are 'dolt.*', 'export.auto', and 'backup.enabled'. If that tool re-adds its flat key the file carries both spellings and bd's own readers disagree: Viper-backed reads ('bd config get', and the dolt.auto-start lookup on store open) return the FLAT value while GetStringFromDir returns the NESTED one, so a 'bd config set' can be shadowed by a stale flat entry. Tracked as #6594; until it lands, let the other tool own its keys, or check .beads/config.yaml for a duplicated key after running 'bd config set'.",
+			"CHANGE: two config writes that used to exit 0 now exit 1, because both produced a value no reader could see — setting a dotted key under a parent that already holds a scalar ('sync: enabled', then 'bd config set sync.remote'), and setting one in a file whose top level is not a mapping.",
+		},
+	},
+	{
 		Version: "1.3.0",
 		Date:    "2026-09-15",
 		Changes: []string{

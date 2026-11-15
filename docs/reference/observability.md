@@ -65,6 +65,14 @@ Every metric and span carries the OTel resource describing the bd process:
 |-----------|-------|-------|
 | `service.name` | `bd` | Override with `OTEL_SERVICE_NAME`. |
 | `service.version` | bd version | |
+| `host.name` | hostname | Often the user's name on a laptop; override with `OTEL_RESOURCE_ATTRIBUTES=host.name=<name>`. |
+| `process.pid`, `process.executable.name` | pid, `bd` | |
+| `process.runtime.name`, `process.runtime.version`, `process.runtime.description` | Go runtime | |
+
+The resource never carries the command line (`process.command_args`), the
+executable path or the OS user name (`process.owner`): the command line can
+hold secrets and search text, and the other two identify the user. The
+command's scrubbed arguments are on the command span only (`bd.args`).
 
 Add anything else via `OTEL_RESOURCE_ATTRIBUTES`.
 
@@ -105,7 +113,7 @@ sum(rate(bd_storage_operations_total[5m]))               # operation rate
 ### Confirm storage instrumentation locally
 
 To verify the storage decorator chain is wired up without standing up a
-collector, run `bd` with stdout exporters and look for `bd.storage.*`
+collector, run `bd` with the console exporters and look for `bd.storage.*`
 records on stderr:
 
 ```bash
@@ -137,6 +145,8 @@ present, the storage decorator is not in the chain — check
 |--------|------|------------|-------------|
 | `bd_db_retry_count_total` | Counter | — | SQL retries in server mode |
 | `bd_db_lock_wait_ms` | Histogram | `dolt_lock_exclusive` | Wait time to acquire database locks |
+
+The connection-pool gauges (`bd_db_pool_open`, `bd_db_pool_in_use`, `bd_db_pool_idle`, `bd_db_pool_max_open`) sum the pools of the stores open in the process. With no store open they report the last-known values of the stores that closed since the last open, not live ones; a short command closes its store before its final export.
 
 ### Issues (`bd_issue_*`)
 
@@ -200,8 +210,8 @@ The `hook.stdout` / `hook.stderr` events carry two attributes: `output` (the tex
 ```
 cmd/bd/main.go
   └─ telemetry.Init()
-      ├─ OTEL_TRACES_EXPORTER=console        → TracerProvider stdout
-      ├─ OTEL_METRICS_EXPORTER=console       → MeterProvider stdout
+      ├─ OTEL_TRACES_EXPORTER=console        → TracerProvider stderr
+      ├─ OTEL_METRICS_EXPORTER=console       → MeterProvider stderr
       └─ OTEL_EXPORTER_OTLP_METRICS_ENDPOINT → MeterProvider HTTP → VictoriaMetrics
 
 internal/storage/dolt/        → bd_db_* metrics + dolt.* spans

@@ -1,0 +1,6 @@
+{
+  "shape": "gc-show-json-wisp",
+  "requests": [
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-wisp-1","status":200}
+  ]
+}

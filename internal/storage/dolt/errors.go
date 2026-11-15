@@ -10,8 +10,10 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // Sentinel errors for the dolt storage layer.
@@ -55,15 +57,6 @@ var (
 // (timeouts, connection failures, corrupt data).
 func isTableNotExistError(err error) bool {
 	return dberrors.IsTableNotExist(err)
-}
-
-// isBranchTrackingError returns true if the error indicates that DOLT_PULL
-// failed because upstream branch tracking is not configured. This happens
-// when a remote was added via DOLT_REMOTE('add') or bd dolt remote add
-// rather than via dolt clone / bd bootstrap, leaving repo_state.json with
-// an empty "branches" map (GH#3144).
-func isBranchTrackingError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "did not specify a branch")
 }
 
 // isSerializationError returns true if the error is a Dolt/MySQL serialization
@@ -164,7 +157,7 @@ func wrapExecError(op string, err error) error {
 // for testability.
 func databaseNotFoundError(cfg *Config) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "database %q not found on Dolt server at %s:%d\n\n", cfg.Database, cfg.ServerHost, cfg.ServerPort)
+	fmt.Fprintf(&b, "database %q not found on Dolt server at %s\n\n", cfg.Database, remedy.PrintedValue(doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)))
 
 	// Check if backup files exist — strong signal this is a branch-switch or
 	// fresh-clone scenario rather than a server misconfiguration (GH#2327).
@@ -187,7 +180,7 @@ func databaseNotFoundError(cfg *Config) error {
 	b.WriteString("  bd dolt status             # Show which data directory the server is using")
 
 	if cfg.SyncRemote != "" {
-		fmt.Fprintf(&b, "\n\nTip: sync.remote is configured (%s).\nRun bd bootstrap to recover from the remote or confirm what bootstrap will do with --dry-run.", cfg.SyncRemote)
+		fmt.Fprintf(&b, "\n\nTip: sync.remote is configured (%s).\nRun bd bootstrap to recover from the remote or confirm what bootstrap will do with --dry-run.", remedy.PrintedValue(cfg.SyncRemote))
 	} else {
 		// be-5up5: no longer claims bootstrap is a safe first step "if this is an
 		// existing project" — bootstrap can silently create an empty database in

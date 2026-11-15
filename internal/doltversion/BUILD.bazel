@@ -25,6 +25,7 @@ go_test(
         "version_test.go",
     ],
     embed = [":doltversion"],
+    deps = ["@com_github_data_dog_go_sqlmock//:go-sqlmock"],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

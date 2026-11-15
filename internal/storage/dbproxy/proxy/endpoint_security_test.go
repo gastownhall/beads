@@ -812,6 +812,8 @@ func TestControlFilePathsIncludesSecretAndQuarantines(t *testing.T) {
 	backendStale := pidfile.Path(root, server.PIDFileName) + ".stale-200"
 	require.NoError(t, os.WriteFile(proxyStale, []byte("proxy"), 0o600))
 	require.NoError(t, os.WriteFile(backendStale, []byte("backend"), 0o600))
+	rotatedLog := filepath.Join(root, LogFileName+".1")
+	require.NoError(t, os.WriteFile(rotatedLog, []byte("rotated"), 0o600))
 	_, err := identity.WriteSecret(root)
 	require.NoError(t, err)
 
@@ -819,11 +821,63 @@ func TestControlFilePathsIncludesSecretAndQuarantines(t *testing.T) {
 	assert.Contains(t, paths, filepath.Join(root, identity.SecretFileName))
 	assert.Contains(t, paths, proxyStale)
 	assert.Contains(t, paths, backendStale)
+	assert.Contains(t, paths, rotatedLog)
 
 	assert.Empty(t, PurgeControlFiles(root))
 	assert.NoFileExists(t, filepath.Join(root, identity.SecretFileName))
 	assert.NoFileExists(t, proxyStale)
 	assert.NoFileExists(t, backendStale)
+	assert.NoFileExists(t, rotatedLog)
+}
+
+func TestStopVerifiedPreMACProxyStopsVerifiedProcess(t *testing.T) {
+	root := t.TempDir()
+	helper := startHelperProcess(t)
+	pf := v2Record(t, root, pidfile.KindProxy, helper)
+	require.NoError(t, pidfile.Write(root, PIDFileName, pf))
+
+	require.NoError(t, stopVerifiedPreMACProxy(root, &pf))
+	assertHelperExited(t, helper)
+}
+
+func TestIsPreMACIdentRefusal(t *testing.T) {
+	unmarked := &pidfile.PidFile{Schema: pidfile.SchemaV2, Kind: pidfile.KindProxy, Pid: 1, Port: 3307}
+	marked := &pidfile.PidFile{Schema: pidfile.SchemaV2, Kind: pidfile.KindProxy, Pid: 1, Port: 3307, ControlProto: pidfile.ControlProtoIdentMAC}
+	for _, tc := range []struct {
+		name      string
+		discovery adoptionResult
+		want      bool
+	}{
+		{
+			name:      "unmarked record refusing IDENT is pre-upgrade",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, pidfile: unmarked, err: identity.ErrIdentRefused},
+			want:      true,
+		},
+		{
+			name:      "marked record refusing IDENT is a transient refusal",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, pidfile: marked, err: identity.ErrIdentRefused},
+			want:      false,
+		},
+		{
+			name:      "refusal without a record has nothing to stop",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, err: identity.ErrIdentRefused},
+			want:      false,
+		},
+		{
+			name:      "non-refusal mismatch on an unmarked record is not a stop signal",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, pidfile: unmarked, err: errors.New("reply authentication failed")},
+			want:      false,
+		},
+		{
+			name:      "non-mismatch status with refusal error is not a stop signal",
+			discovery: adoptionResult{status: adoptionUnverifiable, pidfile: unmarked, err: identity.ErrIdentRefused},
+			want:      false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isPreMACIdentRefusal(tc.discovery))
+		})
+	}
 }
 
 // N-process cold-start convergence remains intentionally deferred to the

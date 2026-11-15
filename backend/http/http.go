@@ -90,9 +90,15 @@ type Options struct {
 	UserAgent string
 	// HTTPClient replaces the transport — a tuned timeout, a proxy, a custom
 	// TLS config, an httptest server in a test. Nil builds one. The client is
-	// used as given except for redirect handling, which the underlying wire
-	// client always forces off: a followed 30x would replay the Authorization
-	// header at whatever host the Location named.
+	// used as given except for two things the underlying wire client always
+	// does. It forces redirect handling off: a followed 30x would replay the
+	// Authorization header at whatever host the Location named. And for a
+	// batch apply of more than 100 items it raises a Timeout shorter than 6
+	// minutes to 6 minutes, for that request alone: bd serve gives such a
+	// request an extended budget and commits it even after the client has
+	// given up, so a shorter Timeout reports a failure for a write that
+	// lands. A client with no Timeout stays unbounded; a call's context still
+	// bounds it.
 	HTTPClient *http.Client
 	// RequireCredential makes the registered backend's OpenWith seam refuse a
 	// registered open with no OpenOptions.Credential, rather than silently

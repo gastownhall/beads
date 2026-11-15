@@ -192,7 +192,20 @@ const infraTypesKey = "types.infra"
 
 // settingOrEmpty reads one setting, treating an unset key as the empty string —
 // which is what the role already promises — and reporting only a real failure.
+//
+// Under a read memo (a one-shot CLI command's transport, WithReadMemo) it
+// reads the whole settings page instead, once: `bd list` asks for three
+// vocabulary keys back to back, and one memoized listSettings answers all three
+// where three getSettings cost three sequential round trips (bts-xpw.3.14.6).
+// The two reads agree on every key this serves: an unset key and a redacted one
+// both read as "" either way. A failed page read (a server without config.list)
+// falls back to the per-key read.
 func (s *Store) settingOrEmpty(ctx context.Context, key string) (string, error) {
+	if s.readsMemoized() {
+		if all, err := s.GetAllConfig(ctx); err == nil {
+			return all[key], nil
+		}
+	}
 	value, err := s.GetConfig(ctx, key)
 	if errors.Is(err, ErrSettingRedacted) {
 		// A vocabulary key an operator marked credential-bearing is a
@@ -287,3 +300,11 @@ type vocabularyCache struct {
 // isNotFound reports the wire's not_found, which several roles turn back into a
 // result rather than an error.
 func isNotFound(err error) bool { return errors.Is(err, issueops.ErrNotFound) }
+
+// readsMemoized reports whether this store's transport memoizes repeated reads
+// (wire.Client.EnableReadMemo), which only a one-shot command's open turns on
+// (WithReadMemo).
+func (s *Store) readsMemoized() bool {
+	m, ok := s.wire.(interface{ ReadMemoEnabled() bool })
+	return ok && m.ReadMemoEnabled()
+}

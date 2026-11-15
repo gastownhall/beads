@@ -114,12 +114,68 @@ git branch release/1.3.0 <the-green-sha>
 git push origin release/1.3.0
 ```
 
-**Everything targeted at the release lands on the release branch as a PR.**
-Base the PR on `release/x.y.z`, not `main`, and label it
-`status/needs-review-auto` so it goes through the automated review workflow
-like any other change. That includes the release-prep PR itself (version
-bump, CHANGELOG, `cmd/bd/info.go`) and any fix the release validation turns
-up. Nothing is pushed straight to the release branch.
+**Everything reaches the release branch as a PR.** Ruleset 24482365 protects
+`release/**` and `hotfix/**`: no deletion, no force-push, changes only by pull
+request, and `CI Gate / Required` must pass. Fixes land on `main` first and
+reach the branch as cherry-pick PRs (see [Backports](#backports)). The
+release-prep PRs (version bump, CHANGELOG, `cmd/bd/info.go`) and any fix that
+exists only on the branch are based on `release/x.y.z` and labelled
+`status/needs-review-auto`. Nothing is pushed straight to the release branch.
+
+### Backports
+
+A fix chosen for a release line lands on `main` first, then reaches the
+release branch as a cherry-pick PR.
+
+1. Label the `main` PR `backport/<major>.<minor>` (for example `backport/1.4`)
+   when it is chosen for the line. If a pipeline PR replaces it, move the label.
+2. After it merges on `main`, pick it onto a branch off the release branch:
+
+   ```bash
+   git fetch origin
+   git switch -c backport/1.4/<N> origin/release/1.4.0
+   git cherry-pick -x <merge-commit-sha>
+   ```
+
+   Keep the release branch's `CHANGELOG.md` (drop the pick's entry), so
+   concurrent backport PRs don't conflict there. The
+   `(cherry picked from commit ...)` trailers are the ledger the release-prep
+   PR rebuilds the release's CHANGELOG section from.
+3. Title the PR `[release/1.4.0] backport #<N>: <original title>`. The body
+   links #<N> and says whether the pick was clean or lists each conflict
+   resolution.
+4. A clean pick of a reviewed `main` commit merges once `CI Gate / Required` is
+   green, with no further review. A pick still counts as clean when it differs
+   from the `main` commit only in `CHANGELOG.md` (the branch's version is kept)
+   or in generated files (`BUILD.bazel` srcs, shard manifests, `tree.golden`)
+   resolved by their generator. Check it: outside those files
+   the pick's patch-id must equal the `main` commit's
+   (`git show <sha> -- . ':!CHANGELOG.md' | git patch-id --stable`). Any other
+   resolution gets `status/needs-review-auto`. Release branches have no merge
+   queue: merge the PR yourself once its checks pass.
+
+**Migrations on a release line.** The migration runner reads its cursor as
+`MAX(version)` (`internal/storage/schema/schema.go`), so a migration numbered
+below one a database has already applied never runs. In each series (main and
+ignored), a release branch's migrations must stay a byte-identical prefix of
+`main`'s. Backport a migration only at the branch's next free number, only as
+`main`'s identical file, and never renumber it. Once `main` has merged a
+higher-numbered migration, a release-line schema fix can't be a new migration
+file. A Go pre-migration repair reaches only stores whose version is still
+pending. For stores already at the branch's latest version, the fix must be
+an open-time repair gated by its own `migrationWorkNeeded` term (which
+`alreadyConverged` inherits), as `ensureBackfilledCustomStatusesCustomTypes`
+does. `main`'s migration for the same fix must then tolerate the repaired
+shape. See `internal/storage/schema/migrations/README.md`.
+
+**Docs freshness on a release line.** `doc_freshness_test` compares each
+"Last reviewed" marker with today's date, so a long-lived release branch goes
+red when a marker turns 90 days old. Right after the cut, give the branch's
+`//scripts/repochecks:doc_freshness_test` an
+`env = {"DOC_FRESHNESS_MAX_AGE_DAYS": "3650"}` so markers stop expiring there.
+Don't pin `DOC_FRESHNESS_TODAY` instead: a backport that refreshes a marker
+after the pinned date would then fail the future-date check. The pin is for
+the release line only; never forward-port it.
 
 **Tag from the release branch**, following [1. Prepare Release](#1-prepare-release)
 onward with the branch checked out in place of `main`.
@@ -145,7 +201,8 @@ Before starting a release:
 - [ ] All tests passing (`make test`, the Bazel test lane)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
 - [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](engdocs/RELEASE-STABILITY-GATE.md)
-- [ ] **Regression tests pass** (`make test-regression`)
+- [ ] **Regression tests pass**
+      (`bazel test //tests/regression:regression_test --config=doltserver-cmd`)
 - [ ] **Every release target cross-compiles** — see
       [Cross-compile before tagging](#cross-compile-before-tagging). PR CI
       builds them only with cgo off, and a target that fails at tag time
@@ -173,9 +230,9 @@ tag burned on a freebsd compilation failure no pre-tag gate caught
 [#5662](https://github.com/gastownhall/beads/issues/5662)). PR CI now builds
 the whole tree for every target in `scripts/ci/release-targets.txt` with Bazel
 (`scripts/ci/bazel-release-cross-compile.sh`, in bazel.yml's pure-Go lane),
-but with cgo off, while linux/amd64, linux/arm64, windows/amd64 and the darwin
-pair ship with `CGO_ENABLED=1`. Build the real release configuration by hand
-before tagging:
+but with cgo off, while linux/amd64, linux/arm64, windows/amd64,
+android/arm64 and the darwin pair ship with `CGO_ENABLED=1`. Build the real
+release configuration by hand before tagging:
 
 ```bash
 goreleaser build --snapshot --clean
@@ -183,6 +240,25 @@ goreleaser build --snapshot --clean
 
 A failure here costs a rebase. The same failure after the tag is pushed costs
 the tag.
+
+The android/arm64 CGO snapshot is Linux x86_64 only. `bd-android-arm64`
+compiles with the Android NDK r30 clang through `scripts/ci/android-arm64-cc`
+and `-cxx`, which install the pinned NDK (`scripts/ci/install-android-ndk.sh`)
+on first use, so on Linux x86_64 the command above, or
+`goreleaser build --snapshot --clean --id bd-android-arm64` alone, needs no
+setup. To install the NDK once up front instead:
+
+```bash
+export "$(scripts/ci/install-android-ndk.sh "$HOME/.cache/beads-ndk")"
+```
+
+On macOS the full snapshot stops at the android id with the wrappers'
+"Linux x86_64 only" error: omit `--id bd-android-arm64` (pass `--id` for each
+of the other builds) and build the android id on a Linux machine, or rely on
+release.yml's Ubuntu `goreleaser` job. Its post hooks check the binary with
+`scripts/verify-cgo.sh` and `scripts/verify-android-elf.sh` (Bionic
+`/system/bin/linker64` interpreter, 16 KB `PT_LOAD` alignment; needs
+`readelf`).
 
 ## 1. Prepare Release
 
@@ -940,6 +1016,10 @@ goreleaser check
 # Test build locally
 goreleaser build --snapshot --clean
 ```
+
+The `bd-android-arm64` build only runs on Linux x86_64 (see
+[Cross-compile before tagging](#cross-compile-before-tagging)). On macOS,
+omit `--id bd-android-arm64` and build that id on Linux.
 
 ## Version Numbering
 

@@ -1,6 +1,7 @@
 package bdhttp
 
 import (
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 )
@@ -14,6 +15,13 @@ import (
 // the server's or the wiring's, and any surface that renders it, since these
 // types carry the server URL, its release and its advertised capabilities
 // precisely so a renderer parses nothing.
+
+// LegacyWorkspaceError is Attach's, Connect's and SaveTarget's refusal of a
+// workspace a pre-Dolt bd left behind (a historical SQLite workspace), with
+// the text bd prints when run inside it: such a workspace must be migrated
+// explicitly before this build may touch it. Nothing was written, and Connect
+// dialed nothing. It is the type beads.LegacyWorkspaceError names too.
+type LegacyWorkspaceError = configfile.LegacyWorkspaceError
 
 // ErrNoTransport reports a process that registered this backend without
 // installing a transport. It is a build-wiring fault, not a user's: the

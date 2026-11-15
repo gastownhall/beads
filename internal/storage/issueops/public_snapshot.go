@@ -24,6 +24,7 @@ func CloneCreateRequest(request publicops.CreateRequest) publicops.CreateRequest
 func CloneUpdateRequest(request publicops.UpdateRequest) publicops.UpdateRequest {
 	clone := request
 	clone.Patch.Labels.Add = append([]string(nil), request.Patch.Labels.Add...)
+	clone.Patch.Waiters.Value = append([]string(nil), request.Patch.Waiters.Value...)
 	clone.Patch.Labels.Remove = append([]string(nil), request.Patch.Labels.Remove...)
 	clone.Patch.Labels.Replace.Value = append([]string(nil), request.Patch.Labels.Replace.Value...)
 	clone.Patch.Metadata.Replace.Value = cloneRawMessage(request.Patch.Metadata.Replace.Value)

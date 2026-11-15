@@ -138,27 +138,33 @@ Distinguish **logical consistency issues** (ID collisions, wrong prefixes)
 from **physical database corruption** (disk failures, power loss, filesystem
 errors).
 
-For logical consistency issues — this is not corruption:
+Logical consistency issues are not corruption. In server mode, repair them
+with:
 
 ```bash
 bd doctor --fix
 ```
 
-For physical corruption, rebuild from a Dolt remote or a backup:
+Embedded mode runs only `bd doctor --check=artifacts`, `--check=conventions`
+and `--check=pollution`.
 
-```bash
-# Move the damaged data directory aside:
-mv .beads/embeddeddolt .beads/embeddeddolt.backup   # embedded mode (default)
-mv .beads/dolt .beads/dolt.backup                   # server mode
+Physical corruption needs recovery, not repair: `bd doctor --fix` does not
+rebuild a damaged store. Follow
+[Engine won't open](/recovery/database-corruption#engine-wont-open): preserve
+the damaged store and its configuration first, then recover into a fresh store
+from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
-bd init
-bd dolt pull    # Pull from Dolt remote if configured
-
-# Or restore from a backup:
-# bd backup restore [path] --force
-```
-
-See [Database Corruption](/recovery/database-corruption) for the full runbook.
+In releases after v1.3.2, the `bd doctor --fix` repairs that replace a
+database (automatic integrity recovery and the repo fingerprint fix's
+"Reinitialize database" choice) accept only a database path from
+`metadata.json` that lies under the workspace's `.beads` directory as written,
+or the location `BEADS_DOLT_DATA_DIR` selects. A `dolt_data_dir` or `database`
+outside `.beads`, at `.beads` itself, a symlinked database, or a path that
+escapes through a symlinked directory is refused before anything is backed up
+or deleted. To repair such a workspace, point the metadata back under `.beads`
+or select the real store explicitly with `BEADS_DOLT_DATA_DIR`, or recover by
+hand as above. A `.beads` that is itself a symlink to external storage stays
+supported and needs no workaround.
 
 ### Dolt journal corruption after restart
 
@@ -170,11 +176,21 @@ contains:
 possible data loss detected in journal file at offset ...: corrupted journal
 ```
 
-**Cause:** Dolt detected damaged journal blocks after an unclean shutdown.
-This is not the same as a stale PID, stale port, or stale lock file. `bd`
-will not run Dolt's data-loss repair mode automatically.
+**Symptom (embedded mode):** There is no server or server log. Every `bd`
+command fails while opening the database with the same `corrupted journal`
+error, even with no other `bd` process running. Bare `bd doctor` is not
+supported in embedded mode, so do not wait for it to diagnose this.
 
-**Safe recovery when your remote is current:**
+**Cause:** Dolt detected damaged journal blocks after an unclean shutdown or an
+interrupted write. This is not the same as a stale PID, stale port, or stale
+lock file. `bd` will not run Dolt's data-loss repair mode automatically, and
+`bd doctor --fix` does not rebuild the journal.
+
+**Safe recovery:** follow
+[Engine won't open](/recovery/database-corruption#engine-wont-open). Preserve
+the damaged store and its configuration first, then recover into a fresh store
+from a current remote (`bd bootstrap --dry-run`), a Dolt-native backup, or a
+JSONL export. For example, when your server-mode remote is current:
 
 ```bash
 # Server mode data lives at .beads/dolt; embedded mode at .beads/embeddeddolt
@@ -256,25 +272,37 @@ before removing the stale directory.
 
 ### Configured server unreachable (auto-start disabled)
 
-**Symptom (server mode):** `bd` returns "database not found on Dolt server"
-when the configured server is down.
+**Symptom (server mode):** commands fail with "Dolt server unreachable at
+127.0.0.1:3307", and bd says that `dolt_server_port` (or
+`BEADS_DOLT_SERVER_PORT`, or the legacy `BEADS_DOLT_PORT`) declares that
+server externally managed, so it did not start one.
 
-**Cause:** When `metadata.json` has an explicit `dolt_server_port`, bd treats
-the server as externally managed and intentionally disables auto-start —
-spawning a different server would create a shadow database.
+**Cause:** When `metadata.json` has an explicit `dolt_server_port`, or the
+environment sets `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT`, bd treats the
+server as externally managed and intentionally disables auto-start — spawning a different server
+would create a shadow database. A `dolt_server_port` does so even when
+`config.yaml`'s `dolt.port` chose the port; bd then says the setting declares
+this workspace's server externally managed without claiming it names the
+endpoint. After a command reaches the server, bd records its port in
+`.beads/dolt-server.port`, which outranks `dolt_server_port`. `bd dolt set
+port` leaves that file alone, so when the file chose the port bd names it:
+remove it and bd falls back to the next configured port: `dolt_server_port`,
+unless `config.yaml`'s `dolt.port` or the data directory's `listener.port`
+names another. When one of those names the file's own port, removing the
+file changes nothing, so bd does not name it.
 
-**Fix:**
+**Fix:** start the server that should be listening there, with its own data
+directory. Unless that server is bd's own over `.beads/dolt` (for example one
+you started with `bd dolt start` after `bd dolt set port`), `bd dolt start` is
+not it: it would start one of bd's own over `.beads/dolt` on the same port.
 
 ```bash
-# Start your configured Dolt server
-bd dolt start
-
-# Or start manually with the correct data directory
 dolt sql-server --host 127.0.0.1 --port 3307 --data-dir /path/to/your/dolt/data
 ```
 
 If you want auto-start behavior, remove `dolt_server_port` from
-`.beads/metadata.json`.
+`.beads/metadata.json`, and unset `BEADS_DOLT_SERVER_MODE` or a port variable
+if one also declares the server externally managed.
 
 ### Port conflicts with multiple projects
 
@@ -387,41 +415,77 @@ bd dolt stop
 bd dolt start
 ```
 
-### Proxied-server mode: "dolt is older than the recommended minimum" warning
+### "bd requires dolt 2.6.0 or newer" error
 
-Managed proxied-server mode spawns an external `dolt` CLI it finds via
-`BEADS_DOLT_BIN` or PATH (in that order — see
-[Environment Variables](/reference/configuration#environment-variables); a
-clone-local sidecar setting will slot between the two when the sidecar
-reader lands in contract part 2). On
-startup it probes that binary with `dolt version` and recommends
-**dolt >= 2.0.0**: the 2026-07-25 cross-version compatibility matrix found
-that cross-reading storage written by the beads Dolt Go module (as opposed
-to writing it, which older dolt CLIs can also do) requires dolt >= 2.0.0 —
-dolt 1.85 can *serve* proxied mode but cannot *read* storage the module
-wrote, and dolt 1.52.1 fails at both serving and reading.
+`bd` refuses to run against Dolt older than **2.6.0** outside embedded mode.
+The error names what it checked and the version it found, for example:
 
-This is a warning, not a hard failure — there is deliberately no hard
-version floor, so an older dolt can still be used at your own risk. To
-resolve it, install the pinned dolt version — see
+```
+dolt sql-server at 127.0.0.1:3307 is version 2.5.1, but bd requires dolt 2.6.0 or newer outside embedded mode. Upgrade dolt to 2.6.0 or newer, then restart the server on it: ...
+```
+
+- **`dolt binary "<path>"`**: `bd dolt start`, server-mode auto-start,
+  managed proxied-server mode, a CLI clone (`bd bootstrap`, `bd init
+  --remote`), a push, pull or fetch through the `dolt` CLI (prefixed
+  `dolt push:` and so on) or the remote-repo cache (`bd create --repo
+  <url>`, `bd repo sync`) found an old `dolt` CLI. Managed
+  proxied-server mode finds it via `BEADS_DOLT_BIN` or PATH (in that order —
+  see [Environment Variables](/reference/configuration#environment-variables));
+  the others use PATH. Install the pinned version and update PATH, or point
+  `BEADS_DOLT_BIN` at the new binary.
+- **`dolt sql-server at <address>`** (or **behind the bd proxy**): the
+  server `bd` connected to is old, whether `bd` started it or not. Upgrade
+  the `dolt` binary that server runs and restart it: `bd dolt stop` then
+  `bd dolt start` for a server `bd` manages, or `bd dolt stop` alone in a
+  managed proxied-server workspace, whose proxy starts its server again on
+  the next command (`bd dolt start` is refused there). For an external or
+  shared server, whoever runs it has to upgrade it; back it up first, and
+  treat the upgrade as one-way.
+
+Install the pinned version — see
 [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
-— and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
-Install that specific version rather than `latest`: 2.3.x is a newer release
-that satisfies this warning but carries a
-[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install).
+— rather than `latest`: the pin is the release measured clean for a
+[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install),
+and `releases/latest` can move to an unmeasured release. There is no
+override. `bd doctor --server` reports the server's version against the
+same minimum. `bd doctor`, `bd doctor --fix` included, is exempt from it:
+its checks and repairs that use their own connection still run against an
+older server. Its checks that open the workspace's store fail: the
+✖ Database and Permissions errors only point at `bd dolt status` (which
+shows a healthy server), and this error itself appears in the ⚠ checks
+further down (Peer Connectivity, Sync Staleness, Federation Conflicts,
+Dolt Mode).
+Releases before 2.6.0 also have known defects, which that page measures:
 
-The advisory repeats at most once per day, not on every command: the probe
-result and the warning timestamp are cached (keyed by the binary's path,
-size, and mtime, in the user cache directory), so day-to-day `bd` use stays
-quiet while the reminder still resurfaces until the binary is upgraded.
-Upgrading or replacing the dolt binary re-probes immediately.
+- Dolt 2.4.0 through 2.4.2 return no row for an ungrouped `MAX` or `MIN` over
+  an unmatched primary-key prefix (dolthub/dolt#12093).
+- Dolt before 2.4.0 has a join bug that returns wrong results
+  (dolthub/dolt#11886).
+- Dolt before 2.3.3 cannot write to a database holding a descending index
+  column (dolthub/dolt#11746). Every database `bd` creates in embedded mode
+  holds one, and so does any database whose schema a `dolt sql-server` 2.3.3
+  or newer created. On such a database an `UPDATE` or `DELETE` on `issues`,
+  which `bd create` and `bd update` both run, fails with
+  `cannot add or update a child row: a foreign key constraint fails` on
+  `fk_comp_snap_issue`. Other writes and `information_schema` queries fail
+  with `table has unknown fields`.
 
-If the probe can't parse `dolt version`'s output at all (most commonly a
-dev/custom build with non-standard version output), that also only warns —
-proxied-server mode still starts, since an unparseable version means "we
-don't know", not "this is definitely broken". A genuinely missing or
-broken `dolt` binary (not found, not executable, or the probe itself
-fails/times out) is a hard error, not a warning.
+Managed proxied-server mode caches a passing probe (keyed by the binary's
+path, size, and mtime, in the user cache directory), so day-to-day `bd` use
+does not fork `dolt version` on every command. A refusal is never cached:
+while the binary is refused, every command runs `dolt version` again, so the
+first command after an upgrade runs. That includes an upgrade behind a
+version manager's shim or a `BEADS_DOLT_BIN` wrapper script, whose own file
+does not change.
+
+A version `bd` cannot determine is not refused. If the probe can't parse
+`dolt version`'s output at all (most commonly a dev/custom build with
+non-standard version output), proxied-server mode warns
+(`could not verify dolt version`, at most once a day) and still starts, and
+`bd dolt start` launches it; a server whose `dolt_version()` does not answer
+with a version is used without the check (logged under `BD_DEBUG`). In
+proxied-server mode a genuinely missing or broken `dolt` binary (not found,
+not executable, or the probe itself fails/times out) is a hard error.
 
 ### Prefix routing: "proxy server store needs to be uow provider"
 
@@ -519,15 +583,19 @@ native Windows `timeout.exe` is not compatible. If neither a coreutils timeout
 nor Perl is available, the hook warns that it is running directly without a
 deadline.
 
-The coreutils helper sends `TERM`; on POSIX hosts, Perl's alarm applies to the
-direct `bd` process. Git for Windows Perl does not guarantee that alarm across
-`exec`, so a coreutils `timeout` (GNU or uutils) is preferred there.
-TERM-resistant work and descendant processes are not guaranteed to stop.
+Both helpers send `TERM` to `bd` and its process group, so the deadline also
+stops your chained hook. The Perl fallback runs `bd` in a process group of its
+own and sends the group `KILL` if `bd` is still running two seconds after the
+`TERM`. On Git for Windows a coreutils `timeout` (GNU or uutils) is preferred.
+A process that ignores `TERM` can outlive the hook. Both helpers run `bd`
+outside the terminal's foreground process group, so a chained hook that reads
+from the terminal is stopped until the deadline ends it.
 
 Already-installed hook sections are not refreshed automatically. After upgrading
-to a version that changed the timeout probe — the name-only check, or the uutils
-coreutils banner — run `bd hooks install` once to refresh existing canonical
-sections.
+to a version that changed the timeout probe — the name-only check, the uutils
+coreutils banner, or the Perl fallback that could not stop `bd`
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
+`bd hooks install` once to refresh existing canonical sections.
 
 ### Permission denied on git hooks
 
@@ -667,10 +735,11 @@ below.
 
 ### Storage reclaim fails with "context canceled"
 
-`bd flatten` and the Dolt-history compaction in `bd admin compact` finish by
-hard-resetting `main` onto a temporary branch; the merge-settle path behind
-`bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
-merge. On Dolt 2.3.x a few percent of freshly created databases come up with
+In older releases `bd flatten` finishes by hard-resetting `main` onto a
+temporary branch, as does the Dolt-history compaction, `bd compact`, in v1.3.2
+and earlier (builds with the fixes listed in the CHANGELOG use a soft reset,
+which this does not affect); the merge-settle path behind `bd dolt pull` / `bd sync` falls back
+to a hard reset when it abandons a merge. On Dolt 2.3.x a few percent of freshly created databases come up with
 `CALL DOLT_RESET('--hard')` broken for the life of the server process, so on
 an affected database those commands stop with:
 

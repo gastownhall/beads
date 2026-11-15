@@ -198,12 +198,25 @@ func enrichDatabase(dc DoctorCheck) agentEnrichment {
 		observed:    dc.Message,
 		sourceFiles: []string{"cmd/bd/doctor/database.go:CheckDatabaseVersion", "internal/storage/dolt/migrations.go"},
 	}
-	if dc.Status == StatusError {
+	switch {
+	case dc.Status == StatusError && dc.Message == "Unable to open database":
+		// 'bd doctor --fix' only reopens an existing store, so a store that
+		// did not open gets the check's own Fix instead: it tells server
+		// configuration from damage and links the preservation-first runbook
+		// (GH#4521).
+		e.severity = "blocking"
+		e.explanation = fmt.Sprintf("The Dolt database did not open: %s. A failed open is often server configuration, not damage, and 'bd doctor --fix' does not rebuild a store the engine refuses to open.", dc.Message)
+		if dc.Fix != "" {
+			e.explanation += " " + dc.Fix
+		}
+		e.expected = "Dolt database opens successfully and contains bd_version metadata matching CLI version"
+		e.commands = []string{"bd dolt status"}
+	case dc.Status == StatusError:
 		e.severity = "blocking"
 		e.explanation = fmt.Sprintf("The Dolt database is broken or missing: %s. Without a working database, no beads commands will function.", dc.Message)
 		e.expected = "Dolt database opens successfully and contains bd_version metadata matching CLI version"
 		e.commands = []string{"bd doctor --fix", "bd dolt status"}
-	} else {
+	default:
 		e.severity = "degraded"
 		e.explanation = fmt.Sprintf("Database version mismatch: %s. The database was last written by a different bd version. Auto-migration should resolve this.", dc.Message)
 		e.expected = "Database bd_version metadata matches CLI version"
@@ -490,7 +503,7 @@ func enrichOrphanedDeps(dc DoctorCheck) agentEnrichment {
 func enrichCloneLocalFKs(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
-		explanation: fmt.Sprintf("Severed clone-local FK(s): %s. A hard reset (flatten/compact squash, merge abort, migration error recovery) silently drops foreign keys from dolt_ignored tables onto the tracked plane; enforcement stays off across server restarts and orphaned rows accumulate until the constraint is re-added.", dc.Message),
+		explanation: fmt.Sprintf("Severed clone-local FK(s): %s. A hard reset, such as merge-abort or migration error recovery (or bd flatten and bd compact in older bd releases), can silently drop foreign keys from dolt_ignored tables onto the tracked plane; enforcement stays off across server restarts and orphaned rows accumulate until the constraint is re-added. Repair it explicitly with 'bd doctor --fix', which deletes the orphaned rows and then re-adds each constraint.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Every FK on clone-local tables (events, wisp_dependencies, wisp_labels, wisp_comments, wisp_events, wisp_child_counters) present and enforcing",
 		commands:    []string{"bd doctor --fix"},
@@ -512,9 +525,9 @@ func enrichChildParentDeps(dc DoctorCheck) agentEnrichment {
 func enrichClassicArtifacts(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
-		explanation: fmt.Sprintf("Classic (pre-Dolt) artifacts found: %s. These are leftover files from the SQLite/JSONL era that are no longer needed after Dolt migration.", dc.Message),
+		explanation: fmt.Sprintf("Classic (pre-Dolt) artifacts found: %s. 'bd doctor --check=artifacts --clean' removes only those marked safe to delete; the rest are databases, files a redirect-only .beads holds beyond bd's runtime leftovers (such as what the repository tracks there), or sit in a .beads whose backend doctor cannot establish, and need a human decision before anything is deleted.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "No classic artifacts present (JSONL files, SQLite database, cruft directories)",
+		expected:    "No classic artifacts present (leftover SQLite files, cruft directories)",
 		commands:    []string{"bd doctor --check=artifacts", "bd doctor --check=artifacts --clean"},
 		sourceFiles: []string{"cmd/bd/doctor/artifacts.go:CheckClassicArtifacts"},
 	}

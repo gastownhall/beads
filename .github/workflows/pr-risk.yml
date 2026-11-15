@@ -9,12 +9,22 @@ on:
   # checks_requested is the queue asking for those checks; pinned
   # explicitly (scripts/ci_merge_queue_test.go). The concurrency group
   # below keys a merge group on its own gh-readonly-queue/* ref, so queue
-  # runs never cancel each other or a PR's own runs.
+  # runs never cancel each other or a PR's own runs. A merge group skips
+  # the Nix job (the scope job below); the push to main that lands it (with
+  # its batch) runs it.
   merge_group:
     types: [ checks_requested ]
+  # The post-merge complement: the Nix job a merge group skipped runs on
+  # every push to main, whose head is the last entry of a merge-queue batch
+  # (its tested merge-group tree, containing every entry of the batch). A
+  # red run opens the ci/main-red issue (main-ci-alert.yml).
+  push:
+    branches: [ main ]
 
+# A push to main keys on its commit: no push's complement run cancels
+# another's or waits behind it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,15 +34,45 @@ env:
 # The legacy Go test tiers this workflow used to run (embedded Dolt storage,
 # conformance and cmd shards; proxied-server cmd shards; server-Dolt storage
 # and full suite) are pr.yml's Bazel lanes on rbe-west now: `embedded Dolt
-# tier`, `proxied-server tier` and `server-Dolt storage tier` (bazel.yml),
-# which pr.yml's `CI Gate / Required` requires to have run remotely and
-# passed on every pull_request and merge group, fork and Dependabot PRs
-# included (ga-96smfk.22). What remains is the Nix packaging check, which no
-# Bazel target can stand in for: it builds the package Nix users install.
+# tier`, `proxied-server tier` (`dolt-race`, with the dolt-server lane, in
+# mode remote) and `server-Dolt storage tier` (bazel.yml), which pr.yml's
+# `CI Gate / Required` requires to have run remotely and passed on every
+# pull_request, fork and Dependabot PRs included (ga-96smfk.22); a merge
+# group skips these Dolt tiers and main's push run of bazel.yml runs them.
+# What remains is the Nix packaging check, which no Bazel target can stand
+# in for: it builds the package Nix users install.
 
 jobs:
+  # What this event runs: the same job as pr.yml's
+  # (.github/scripts/ci-scope.sh; engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md,
+  # "Merge Queue"). Here only its platforms switch matters: test-nix runs on
+  # pull requests and on pushes to main, not in a merge group.
+  scope:
+    name: Scope
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      platforms: ${{ steps.decide.outputs.platforms }}
+      dolt-tiers: ${{ steps.decide.outputs.dolt-tiers }}
+      linux: ${{ steps.decide.outputs.linux }}
+      advisory: ${{ steps.decide.outputs.advisory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts/ci-scope.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Decide what this event runs
+        id: decide
+        run: bash .github/scripts/ci-scope.sh decide
+
   test-nix:
     name: Test Nix Flake
+    needs: scope
+    if: ${{ needs.scope.outputs.platforms == 'true' }}
     # F7a: cache-free (no GitHub-saved cache restored/saved here) same-repo
     # job moved onto Blacksmith at 4 vCPU; forks, Dependabot and any other
     # event stay GitHub-hosted. Must match TestSameRepoBlacksmithRunners.
@@ -79,6 +119,7 @@ jobs:
     # minutes too.
     timeout-minutes: 10
     needs:
+      - scope
       - test-nix
     if: ${{ always() }}
     steps:
@@ -88,6 +129,23 @@ jobs:
         env:
           CI_GATE_NAME: PR risk gate
           CI_GATE_REQUIRED: >-
+            SCOPE
             TEST_NIX
+          # The scope job (.github/scripts/ci-scope.sh), read exactly as
+          # pr.yml's gate reads it: SCOPE (set by the run script) is its
+          # result, red when its outputs are missing or not one event's row;
+          # TEST_NIX may skip only where it turned the platforms off (a merge
+          # group).
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          SCOPE_PLATFORMS: ${{ needs.scope.outputs.platforms }}
+          SCOPE_DOLT_TIERS: ${{ needs.scope.outputs.dolt-tiers }}
+          SCOPE_LINUX: ${{ needs.scope.outputs.linux }}
+          SCOPE_ADVISORY: ${{ needs.scope.outputs.advisory }}
+          CI_SCOPE_PLATFORMS_IDS: TEST_NIX
           TEST_NIX: ${{ needs.test-nix.result }}
-        run: bash .github/scripts/ci-gate.sh
+        run: |
+          SCOPE="$(bash .github/scripts/ci-scope.sh result)"
+          export SCOPE
+          CI_GATE_SKIPPED_OK="$(bash .github/scripts/ci-scope.sh skips)"
+          export CI_GATE_SKIPPED_OK
+          bash .github/scripts/ci-gate.sh

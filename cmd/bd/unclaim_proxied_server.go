@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -54,7 +55,7 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 				continue
 			}
 			if rerr != nil {
-				r.errs = append(r.errs, fmt.Sprintf("Error resolving %s: %v", id, rerr))
+				r.errs = append(r.errs, fmt.Sprintf("Error resolving %s: %s", id, remedy.PrintedMessage(rerr)))
 				continue
 			}
 			fullID := issue.ID
@@ -66,7 +67,7 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 				uerr = uw.IssueUseCase().Unclaim(ctx, fullID, currentActor(), force)
 			}
 			if uerr != nil {
-				r.errs = append(r.errs, fmt.Sprintf("Error unclaiming %s: %v", fullID, uerr))
+				r.errs = append(r.errs, fmt.Sprintf("Error unclaiming %s: %s", fullID, remedy.PrintedMessage(uerr)))
 				continue
 			}
 

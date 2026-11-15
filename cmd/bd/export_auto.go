@@ -716,7 +716,8 @@ func buildAutoExportFilter(ctx context.Context) (types.IssueFilter, map[string]b
 
 // exportToFile atomically exports issues + memories to the given file path.
 // Writes to a temp file first, then renames into place so readers never see
-// a partial or truncated export. Used by both `bd export -o` and auto-export.
+// a partial or truncated export. This is the full auto-export writer;
+// `bd export -o` goes through runExport and its exportSource instead.
 func exportToFile(ctx context.Context, path string, includeMemories bool) (issueCount, memoryCount int, err error) {
 	w, err := atomicfile.Create(path, 0o644)
 	if err != nil {
@@ -765,33 +766,35 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		for i, issue := range issues {
 			issueIDs[i] = issue.ID
 		}
-		labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
-		allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
-		commentsMap, _ := store.GetCommentsForIssues(ctx, issueIDs)
-		commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
-		depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+		// Returned explicitly so the named err is set and the deferred
+		// Abort drops the temp file, keeping the previous export (GH#6870).
+		relations, err := loadClassicExportRelations(ctx, issueIDs)
+		if err != nil {
+			return 0, 0, err
+		}
 
 		for _, issue := range issues {
-			issue.Labels = labelsMap[issue.ID]
-			issue.Dependencies = allDeps[issue.ID]
-			issue.Comments = commentsMap[issue.ID]
+			issue.Labels = relations.labels[issue.ID]
+			issue.Dependencies = relations.deps[issue.ID]
+			issue.Comments = relations.comments[issue.ID]
 		}
 
 		// Write issues
 		enc := json.NewEncoder(w)
 		for _, issue := range issues {
-			counts := depCounts[issue.ID]
+			counts := relations.depCounts[issue.ID]
 			if counts == nil {
 				counts = &types.DependencyCounts{}
 			}
 			sanitizeZeroTime(issue)
+			stripCloneLocalFields(issue)
 			record := &exportIssueRecord{
 				RecordType: "issue",
 				IssueWithCounts: &types.IssueWithCounts{
 					Issue:           issue,
 					DependencyCount: counts.DependencyCount,
 					DependentCount:  counts.DependentCount,
-					CommentCount:    commentCounts[issue.ID],
+					CommentCount:    relations.commentCounts[issue.ID],
 				},
 			}
 			if err := enc.Encode(record); err != nil {
@@ -1002,6 +1005,12 @@ func saveExportAutoState(beadsDir string, state *exportAutoState) {
 // worktree root) and skips staging when the target is outside the hook's
 // worktree (the .beads/redirect case, where staging would pollute the
 // main repo's index). See GH#3311, scrubGitHookEnv, hookWorkTreeRoot.
+//
+// It stages into the index the running commit uses: during
+// `git commit -- <paths>` or `git commit -a` that is the GIT_INDEX_FILE git
+// hands the hook, not <gitdir>/index, whose lock the parent commit holds
+// (GH#4080). See gitIndexEnv. A `git commit -- <paths>` also gets the export
+// in the index git installs once it has committed; see partialCommitRealIndex.
 func gitAddFile(path string) error {
 	if wt := hookWorkTreeRoot(); wt != "" && !pathInsideDir(path, wt) {
 		// Running inside a hook AND target is outside the hook's worktree.
@@ -1009,17 +1018,80 @@ func gitAddFile(path string) error {
 		return nil
 	}
 
-	env := scrubGitHookEnv(os.Environ())
-	if lockPath, err := gitIndexLockPath(path, env); err == nil && lockPath != "" {
+	env, indexFile, err := gitIndexEnv(filepath.Dir(path))
+	if err != nil {
+		debug.Logf("auto-export: git add lock preflight skipped: %v\n", err)
+		return runGitAdd(path, env)
+	}
+	indexes := stagingIndexes(indexFile)
+	if err := checkIndexLocks(indexes); err != nil {
+		return err
+	}
+	for _, index := range indexes {
+		if err := runGitAdd(path, envForIndex(env, indexFile, index)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stagingIndexes returns the indexes gitAddFile stages into: indexFile, the
+// index gitIndexEnv resolved, preceded for `git commit -- <paths>` by
+// partialCommitRealIndex. The real index goes first: if staging stops between
+// the two, the export is left staged for the next commit, never reverted by
+// it. isExportFileStagedForDeletion asks the same indexes.
+func stagingIndexes(indexFile string) []string {
+	if realIndex := partialCommitRealIndex(indexFile); realIndex != "" {
+		return []string{realIndex, indexFile}
+	}
+	return []string{indexFile}
+}
+
+// envForIndex returns env, which gitIndexEnv built for indexFile, routed to
+// index instead.
+func envForIndex(env []string, indexFile, index string) []string {
+	if index == indexFile {
+		return env
+	}
+	return append(execenv.WithoutForOS(env, hookEnvGOOS, "GIT_INDEX_FILE"), "GIT_INDEX_FILE="+index)
+}
+
+// checkIndexLocks preflights the lock git add itself will take on each index
+// it writes: <index>.lock, which is <gitdir>/index.lock only when no commit
+// index was inherited. It checks them all before anything is staged.
+func checkIndexLocks(indexes []string) error {
+	for _, index := range indexes {
+		lockPath := index + ".lock"
 		if _, statErr := os.Stat(lockPath); statErr == nil {
 			return fmt.Errorf("git index is locked at %s; skipping auto-stage", lockPath)
 		} else if !os.IsNotExist(statErr) {
 			return fmt.Errorf("failed to check git index lock %s: %w", lockPath, statErr)
 		}
-	} else if err != nil {
-		debug.Logf("auto-export: git add lock preflight skipped: %v\n", err)
 	}
+	return nil
+}
 
+// partialCommitRealIndex returns <gitdir>/index.lock when indexFile is the
+// next-index-<pid>.lock of a `git commit -- <paths>` and that lock is a regular
+// file beside it, else "". git commits from next-index (HEAD plus the paths)
+// but then installs index.lock (the real index plus the paths) as the new
+// index, and rolls both back if the commit fails. An export staged only into
+// next-index therefore stays staged at its old content (a deletion when it
+// is new), and the next commit that does not export again reverts it.
+func partialCommitRealIndex(indexFile string) string {
+	if ok, _ := filepath.Match("next-index-*.lock", filepath.Base(indexFile)); !ok {
+		return ""
+	}
+	dir := filepath.Dir(indexFile)
+	realIndex := filepath.Join(dir, "index.lock")
+	if !isFileDirectlyIn(realIndex, dir) {
+		return ""
+	}
+	return realIndex
+}
+
+// runGitAdd stages path, by its base name from its own directory, with env.
+func runGitAdd(path string, env []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), gitAddTimeout)
 	defer cancel()
 	// Pass the basename only, defensively: cmd.Dir is the parent of path, so
@@ -1030,6 +1102,11 @@ func gitAddFile(path string) error {
 	// failure. See GH#4351.
 	// Keep cmd.Dir = parent so GH#3311 hook worktree staging still resolves
 	// the index path under the repo root (not bare "issues.jsonl" at root).
+	// #nosec G702 -- no shell is involved: the binary is the literal "git"
+	// and the basename is its own argv element behind "--", so it cannot
+	// inject a command. gosec only reaches this line because the
+	// doctorEnsureGitignoreForBeadsDir seam's opaque indirect call widens
+	// taint propagation to package function parameters (#6225).
 	cmd := exec.CommandContext(ctx, "git", "add", "--", filepath.Base(path))
 	cmd.Dir = filepath.Dir(path)
 	cmd.Env = env
@@ -1049,30 +1126,72 @@ func gitAddFile(path string) error {
 	return nil
 }
 
-func gitIndexLockPath(path string, env []string) (string, error) {
+// gitIndexEnv returns the environment for a git child, run in dir, that reads
+// or writes the index, plus the absolute path of the index that child will use.
+// It is scrubGitHookEnv(os.Environ()) with an inherited GIT_INDEX_FILE put back
+// only when that value names an existing regular file directly inside the git
+// dir that dir resolves to (index, index.lock for commit -a, next-index-*.lock
+// for commit -- <paths>). Anything else (another repository's index, a
+// submodule's, a worktree file, a symlink, a missing path) is ignored, so
+// the child uses <gitdir>/index exactly as it did before GH#4080.
+//
+// A relative value is resolved against the process cwd: git runs hooks from
+// the worktree top, which is the base git itself uses for it, never dir.
+func gitIndexEnv(dir string) (env []string, indexFile string, err error) {
+	env = scrubGitHookEnv(os.Environ())
 	ctx, cancel := context.WithTimeout(context.Background(), gitAddTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
-	cmd.Dir = filepath.Dir(path)
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--absolute-git-dir")
+	cmd.Dir = dir
 	cmd.Env = env
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("git rev-parse timed out after %s", gitAddTimeout)
+		return env, "", fmt.Errorf("git rev-parse timed out after %s", gitAddTimeout)
 	}
 	if err != nil {
-		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
-			return "", fmt.Errorf("%w: %s", err, trimmed)
+		if trimmed := strings.TrimSpace(stderr.String()); trimmed != "" {
+			return env, "", fmt.Errorf("%w: %s", err, trimmed)
 		}
-		return "", err
+		return env, "", err
 	}
 	gitDir := strings.TrimSpace(string(out))
 	if gitDir == "" {
-		return "", nil
+		return env, "", fmt.Errorf("git rev-parse --absolute-git-dir printed nothing in %s", dir)
 	}
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(filepath.Dir(path), gitDir)
+	indexFile = filepath.Join(gitDir, "index")
+
+	inherited, ok := execenv.LookupForOS(os.Environ(), "GIT_INDEX_FILE", hookEnvGOOS)
+	if !ok || inherited == "" {
+		return env, indexFile, nil
 	}
-	return filepath.Join(gitDir, "index.lock"), nil
+	if abs, absErr := filepath.Abs(inherited); absErr == nil && isFileDirectlyIn(abs, gitDir) {
+		// The scrub removed every key variant, so this is the only entry.
+		return append(env, "GIT_INDEX_FILE="+abs), abs, nil
+	}
+	debug.Logf("git: ignoring inherited GIT_INDEX_FILE %q: not an index in %s\n", inherited, gitDir)
+	return env, indexFile, nil
+}
+
+// isFileDirectlyIn reports whether path is an existing regular file (not a
+// symlink) whose parent directory is dir itself, not a descendant of it.
+// os.SameFile, unlike a string prefix, sees through /tmp → /private/tmp,
+// Windows case and 8.3 names.
+func isFileDirectlyIn(path, dir string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	parent, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	want, err := os.Stat(dir)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(parent, want)
 }
 
 // hookEnvGOOS lets both hook filters exercise either key policy on every test host.
@@ -1085,7 +1204,9 @@ var hookEnvGOOS = runtime.GOOS
 // unconditional: if a user has intentionally exported any of these vars
 // for scripting purposes, they will be stripped from the git-add child
 // process. That is the correct trade-off here; we never want beads'
-// auto-stage to honor a GIT_DIR pointing at an unrelated repo.
+// auto-stage to honor a GIT_DIR pointing at an unrelated repo. Children
+// that read or write the index get GIT_INDEX_FILE back only through
+// gitIndexEnv, which checks that it names an index of their own repo.
 //
 // Covered vars:
 //   - Repo/worktree discovery: GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
@@ -1513,8 +1634,9 @@ func loadExistingIssueLines(path string) (*orderedIssueLines, error) {
 }
 
 // encodeIssueRecords produces the JSON wire form for a batch of issues
-// using the same bulk-loader pattern the full export uses. Returns a map
-// from issue ID → line bytes (no trailing newline).
+// using the same bulk loader the full export uses. Returns a map from
+// issue ID → line bytes (no trailing newline), or an error and no records
+// when any relation fails to load (GH#6870).
 func encodeIssueRecords(ctx context.Context, issues []*types.Issue) (map[string][]byte, error) {
 	if len(issues) == 0 {
 		return nil, nil
@@ -1523,29 +1645,29 @@ func encodeIssueRecords(ctx context.Context, issues []*types.Issue) (map[string]
 	for i, iss := range issues {
 		ids[i] = iss.ID
 	}
-	labelsMap, _ := store.GetLabelsForIssues(ctx, ids)
-	allDeps, _ := store.GetDependencyRecordsForIssues(ctx, ids)
-	commentsMap, _ := store.GetCommentsForIssues(ctx, ids)
-	commentCounts, _ := store.GetCommentCounts(ctx, ids)
-	depCounts, _ := store.GetDependencyCounts(ctx, ids)
+	relations, err := loadClassicExportRelations(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 
 	out := make(map[string][]byte, len(issues))
 	for _, iss := range issues {
-		iss.Labels = labelsMap[iss.ID]
-		iss.Dependencies = allDeps[iss.ID]
-		iss.Comments = commentsMap[iss.ID]
-		counts := depCounts[iss.ID]
+		iss.Labels = relations.labels[iss.ID]
+		iss.Dependencies = relations.deps[iss.ID]
+		iss.Comments = relations.comments[iss.ID]
+		counts := relations.depCounts[iss.ID]
 		if counts == nil {
 			counts = &types.DependencyCounts{}
 		}
 		sanitizeZeroTime(iss)
+		stripCloneLocalFields(iss)
 		rec := &exportIssueRecord{
 			RecordType: "issue",
 			IssueWithCounts: &types.IssueWithCounts{
 				Issue:           iss,
 				DependencyCount: counts.DependencyCount,
 				DependentCount:  counts.DependentCount,
-				CommentCount:    commentCounts[iss.ID],
+				CommentCount:    relations.commentCounts[iss.ID],
 			},
 		}
 		data, err := json.Marshal(rec)

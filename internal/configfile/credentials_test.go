@@ -1,8 +1,11 @@
 package configfile
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -255,4 +258,118 @@ func TestDefaultCredentialsPath(t *testing.T) {
 	if !filepath.IsAbs(path) {
 		t.Errorf("DefaultCredentialsPath() = %q, want absolute path", path)
 	}
+}
+
+// An IPv6 Dolt host may be configured bare ("::1") or bracketed ("[::1]"), and
+// both name the same server. The password lookup has to agree, whichever of the
+// two section spellings the credentials file uses: [[::1]:3307], the
+// net.JoinHostPort form, or [::1:3307], the form a bare host was looked up under
+// before. On main each host spelling found only its own section spelling. A
+// host with surrounding whitespace finds them too, as it is classified and
+// dialed trimmed.
+func TestLookupCredentialsPassword_IPv6HostEitherSpelling(t *testing.T) {
+	for _, tc := range []struct{ addr, section string }{
+		{"::1", "[[::1]:3307]"},
+		{"::1", "[::1:3307]"},
+		{"2001:db8::1", "[[2001:db8::1]:3307]"},
+		{"2001:db8::1", "[2001:db8::1:3307]"},
+	} {
+		t.Run(tc.section, func(t *testing.T) {
+			credFile := filepath.Join(t.TempDir(), "credentials")
+			if err := os.WriteFile(credFile, []byte(tc.section+"\npassword=ipv6Pass\n"), 0600); err != nil {
+				t.Fatalf("failed to write credentials file: %v", err)
+			}
+			t.Setenv("BEADS_CREDENTIALS_FILE", credFile)
+
+			for _, host := range []string{tc.addr, "[" + tc.addr + "]", " [" + tc.addr + "] "} {
+				if got := LookupCredentialsPassword(host, 3307); got != "ipv6Pass" {
+					t.Errorf("LookupCredentialsPassword(%q, 3307) = %q, want %q", host, got, "ipv6Pass")
+				}
+			}
+			if got := LookupCredentialsPassword(tc.addr, 3308); got != "" {
+				t.Errorf("LookupCredentialsPassword(%q, 3308) = %q, want no password for another port", tc.addr, got)
+			}
+		})
+	}
+}
+
+// An IPv6 host's [[::1]:3307] section is read before [::1:3307], and a
+// password key there decides, even with an empty value: `password=` clears the
+// password, as it does for a host with one section, rather than falling
+// through to the other section's old one. Only a first section with no
+// password key falls through.
+func TestLookupCredentialsPassword_IPv6HostPreferredSectionDecides(t *testing.T) {
+	for _, tc := range []struct{ name, preferred, want string }{
+		{"empty password", "password=\n", ""},
+		{"no password key", "user=admin\n", "legacyPass"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			credFile := filepath.Join(t.TempDir(), "credentials")
+			content := "[[::1]:3307]\n" + tc.preferred + "\n[::1:3307]\npassword=legacyPass\n"
+			if err := os.WriteFile(credFile, []byte(content), 0600); err != nil {
+				t.Fatalf("failed to write credentials file: %v", err)
+			}
+			t.Setenv("BEADS_CREDENTIALS_FILE", credFile)
+
+			for _, host := range []string{"::1", "[::1]"} {
+				if got := LookupCredentialsPassword(host, 3307); got != tc.want {
+					t.Errorf("LookupCredentialsPassword(%q, 3307) = %q, want %q", host, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// An IPv6 host has two candidate sections, but the lookup reads the credentials
+// file once, so an overly permissive file is warned about once per lookup, as
+// it is for any other host, not once per candidate section.
+func TestLookupCredentialsPassword_IPv6HostWarnsOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("credentials file permissions are not checked on Windows")
+	}
+	credFile := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(credFile, []byte("[::1:3307]\npassword=legacyPass\n"), 0600); err != nil {
+		t.Fatalf("failed to write credentials file: %v", err)
+	}
+	if err := os.Chmod(credFile, 0644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credFile)
+
+	for _, tc := range []struct{ host, want string }{
+		{"::1", "legacyPass"},   // found under the second, legacy section
+		{"[::1]", "legacyPass"}, // likewise
+		{"2001:db8::1", ""},     // no section: both candidates are tried
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			var got string
+			stderr := captureStderr(t, func() { got = LookupCredentialsPassword(tc.host, 3307) })
+			if got != tc.want {
+				t.Errorf("LookupCredentialsPassword(%q, 3307) = %q, want %q", tc.host, got, tc.want)
+			}
+			if n := strings.Count(stderr, "overly permissive permissions"); n != 1 {
+				t.Errorf("permissions warning printed %d times, want once; stderr:\n%s", n, stderr)
+			}
+		})
+	}
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	return string(out)
 }

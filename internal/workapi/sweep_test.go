@@ -3,6 +3,7 @@ package workapi
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -491,5 +492,135 @@ func TestLimitSweepCandidatesTakesTheOldestClosedFirst(t *testing.T) {
 		if kept, remaining := LimitSweepCandidates(candidates, limit); len(kept) != 4 || remaining != 0 {
 			t.Errorf("LimitSweepCandidates(%d) kept %d, remaining %d; want all 4 and 0", limit, len(kept), remaining)
 		}
+	}
+}
+
+// TestRetainedTypesFromSettingParsesBothForms pins the two spellings the
+// types.retained setting takes — the JSON array `bd config set` writes for
+// list keys and the legacy comma-separated form — and that an unset value
+// retains nothing.
+func TestRetainedTypesFromSettingParsesBothForms(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{"unset", "", nil},
+		{"blank", "   ", nil},
+		{"csv", "op, fact ,,op", []string{"op", "fact"}},
+		{"json", `["op"," fact ",""]`, []string{"op", "fact"}},
+		{"unknown names are kept", "not-a-registered-type", []string{"not-a-registered-type"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := RetainedTypesFromSetting(test.value)
+			if len(got) != len(test.want) {
+				t.Fatalf("RetainedTypesFromSetting(%q) = %v, want %v", test.value, got, test.want)
+			}
+			for _, name := range test.want {
+				if !got[name] {
+					t.Errorf("RetainedTypesFromSetting(%q) = %v, missing %q", test.value, got, name)
+				}
+			}
+		})
+	}
+}
+
+// TestRetainedTypesFromSettingCanonicalizes pins the one canonicalizing read
+// of types.retained: each stored name protects itself, its canonical form under
+// both alias tables, and its lower-case form when that is a built-in type. So
+// a value an older server, an older client or `bd sql` stored with an alias or
+// a case variant still protects the type rows actually carry, and a custom
+// type is matched verbatim. A name the write check would refuse (`[op]`,
+// `"op"`, `op fact`) also protects each fragment of it, read the same way, so
+// a value stored past that check still protects what it names. The want sets
+// are exact: the read may over-protect by these forms and by nothing else.
+func TestRetainedTypesFromSettingCanonicalizes(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{"a built-in matches itself", "chore", []string{"chore"}},
+		{"the Normalize alias table", "feat", []string{"feat", "feature"}},
+		{"an alias in another case", "Feat", []string{"Feat", "feature"}},
+		{"an alias only Normalize knows", "investigation", []string{"investigation", "spike"}},
+		{"an alias only NormalizeIssueType knows", "mol", []string{"mol", "molecule"}},
+		{"the other one", "MR", []string{"MR", "merge-request"}},
+		{"the tables agree", "adr", []string{"adr", "decision"}},
+		{"a built-in in another case", "Chore", []string{"Chore", "chore"}},
+		{"upper case", "TASK", []string{"TASK", "task"}},
+		{"the event built-in", "Event", []string{"Event", "event"}},
+		{"a custom type is verbatim", "op", []string{"op"}},
+		{"a mixed-case custom type is verbatim", "OpRecord", []string{"OpRecord"}},
+		{"the union of every name", `["op","feat","Bug"]`, []string{"op", "feat", "feature", "Bug", "bug"}},
+		{"the comma form unions too", "fact, mol", []string{"fact", "mol", "molecule"}},
+		{"a bracketed name protects the name inside", "[op]", []string{"[op]", "op"}},
+		{"a quoted name protects the name inside", `"op"`, []string{`"op"`, "op"}},
+		{"a spaced name protects each word", "op fact", []string{"op fact", "op", "fact"}},
+		{"a truncated JSON array protects its names", `["op","fact"`, []string{`["op"`, "op", `"fact"`, "fact"}},
+		{"a fragment is read canonically too", "[Feat]", []string{"[Feat]", "Feat", "feature"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := RetainedTypesFromSetting(test.value)
+			want := make(map[string]bool, len(test.want))
+			for _, name := range test.want {
+				want[name] = true
+			}
+			if !maps.Equal(got, want) {
+				t.Errorf("RetainedTypesFromSetting(%q) = %v, want %v", test.value, got, want)
+			}
+		})
+	}
+}
+
+// TestPartitionSweepRetainedTypesMatchesTheCanonicalRead pins that the
+// partition matches rows against the canonical read rather than the stored
+// spelling: a stored `feat` or `Chore` holds back the `feature` and `chore`
+// rows bd actually writes.
+func TestPartitionSweepRetainedTypesMatchesTheCanonicalRead(t *testing.T) {
+	feature := &types.Issue{ID: "bd-f", IssueType: types.TypeFeature}
+	chore := &types.Issue{ID: "bd-c", IssueType: types.TypeChore}
+	task := &types.Issue{ID: "bd-t", IssueType: types.TypeTask}
+	kept, held := PartitionSweepRetainedTypes([]*types.Issue{feature, chore, task}, RetainedTypesFromSetting("feat,Chore"))
+	if held != 2 || len(kept) != 1 || kept[0] != task {
+		t.Errorf("PartitionSweepRetainedTypes(feat,Chore) kept %v, held %d; want only %s kept and 2 held", kept, held, task.ID)
+	}
+}
+
+// TestPartitionSweepRetainedTypes is the option C partition: a candidate of a
+// retained type is held back and counted. A retaining sweep never calls it —
+// the bodies skip the read under RetainIDs — so it has no RetainIDs input.
+func TestPartitionSweepRetainedTypes(t *testing.T) {
+	op := &types.Issue{ID: "be-op", IssueType: types.IssueType("op")}
+	task := &types.Issue{ID: "be-task", IssueType: types.TypeTask}
+	fact := &types.Issue{ID: "be-fact", IssueType: types.IssueType("fact")}
+	candidates := []*types.Issue{op, task, fact}
+
+	for _, test := range []struct {
+		name     string
+		retained map[string]bool
+		wantKept []string
+		wantHeld int
+	}{
+		{"nothing retained", nil, []string{"be-op", "be-task", "be-fact"}, 0},
+		{"retained types are held back", map[string]bool{"op": true, "fact": true}, []string{"be-task"}, 2},
+		{"an unknown name matches nothing", map[string]bool{"never-registered": true}, []string{"be-op", "be-task", "be-fact"}, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			kept, held := PartitionSweepRetainedTypes(candidates, test.retained)
+			if held != test.wantHeld {
+				t.Errorf("held = %d, want %d", held, test.wantHeld)
+			}
+			var got []string
+			for _, issue := range kept {
+				got = append(got, issue.ID)
+			}
+			if strings.Join(got, ",") != strings.Join(test.wantKept, ",") {
+				t.Errorf("kept = %v, want %v (candidate order preserved)", got, test.wantKept)
+			}
+		})
+	}
+	if len(candidates) != 3 || candidates[0] != op {
+		t.Errorf("PartitionSweepRetainedTypes reordered or truncated its input: %v", candidates)
 	}
 }

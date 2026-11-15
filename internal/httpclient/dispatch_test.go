@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // busyThenOK answers with a 503 for the first busyCount Do calls and succeeds
@@ -76,6 +77,53 @@ func TestDispatchCapsIdempotentRetries(t *testing.T) {
 	}
 	if server.calls != 1+maxIdempotentRetries {
 		t.Errorf("Do called %d times, want %d (one dial plus the capped retries)", server.calls, 1+maxIdempotentRetries)
+	}
+}
+
+// TestDispatchRetriesAReadOnPostOnBusy: a read carried on POST that marks
+// itself Idempotent comes back after a 503 the way a GET does. That the batch
+// get marks itself is TestGetManyRetriesTheBatchGetOnBusy's.
+func TestDispatchRetriesAReadOnPostOnBusy(t *testing.T) {
+	server := &busyThenOK{busyCount: 1, retryAfter: time.Millisecond}
+	s := retryTestStore(t, server.do)
+
+	read := wire.Request{Op: wire.OpBatchGetIssues, Method: http.MethodPost, Path: wire.PathIssuesBatchGet, Idempotent: true}
+	if err := s.dispatch(context.Background(), read, nil); err != nil {
+		t.Fatalf("dispatch: %v, want the retry to succeed", err)
+	}
+	if server.calls != 2 {
+		t.Errorf("Do called %d times, want 2 (one dial plus one retry)", server.calls)
+	}
+}
+
+// TestGetManyRetriesTheBatchGetOnBusy: the batch get is a read dialed as a
+// POST, so it is replayable only because it says so (Idempotent). Through
+// GetMany it comes back after a 503, and what it sends is replayable for the
+// wire's stall retry too.
+func TestGetManyRetriesTheBatchGetOnBusy(t *testing.T) {
+	token, _ := wire.CapabilityFor(wire.OpBatchGetIssues)
+	server := &busyThenOK{busyCount: 1, retryAfter: time.Millisecond}
+	var sent []wire.Request
+	w := &fakeWire{
+		res:       &apigen.ContextResponse{Capabilities: []string{token}},
+		preflight: func(context.Context, string) error { return nil },
+		do: func(ctx context.Context, req wire.Request, out any) error {
+			sent = append(sent, req)
+			return server.do(ctx, req, out)
+		},
+	}
+	g := &httpBatchGetter{store: New(testTarget(t), w, nil)}
+
+	if _, err := g.GetMany(context.Background(), issueops.GetManyRequest{IDs: []string{"bd-1"}}); err != nil {
+		t.Fatalf("GetMany: %v, want the busy batch get retried", err)
+	}
+	if server.calls != 2 {
+		t.Errorf("Do called %d times, want 2 (one dial plus one retry)", server.calls)
+	}
+	for _, req := range sent {
+		if req.Op != wire.OpBatchGetIssues || req.Method != http.MethodPost || !req.Replayable() {
+			t.Errorf("sent %s %s (replayable %v), want the batch get as a replayable POST", req.Method, req.Op, req.Replayable())
+		}
 	}
 }
 

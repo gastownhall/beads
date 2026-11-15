@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -148,6 +149,29 @@ func TestReleaseFormulaHomebrewCoreProcedureCoversTemplateAndBottles(t *testing.
 	}
 	if strings.Contains(localInstallStep, "brew upgrade bd") {
 		t.Fatalf("local-install step still references old Homebrew formula name:\n%s", localInstallStep)
+	}
+}
+
+// TestReleaseFormulaPreflightPullDerivesReleaseBranch pins that preflight-pull
+// names the release branch from {{version}}'s base instead of hard-coding one:
+// a hard-coded release/1.3.0 sent 1.4.0 runs to the 1.3.0 branch.
+func TestReleaseFormulaPreflightPullDerivesReleaseBranch(t *testing.T) {
+	step := releaseFormulaStep(t, releaseFormulaPath(t), `id = "preflight-pull"`)
+	for _, want := range []string{
+		`BASE="$(printf '%s' "{{version}}" | sed 's/-.*//')"`,
+		`REL_BRANCH="release/$BASE"`,
+	} {
+		if !strings.Contains(step, want) {
+			t.Errorf("preflight-pull does not contain %q", want)
+		}
+	}
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`REL_BRANCH="release/[0-9]`),
+		regexp.MustCompile(`release/[0-9.]+\.\.\.origin/`),
+	} {
+		if loc := re.FindStringIndex(step); loc != nil {
+			t.Errorf("preflight-pull hard-codes a release branch: %q", step[loc[0]:loc[1]])
+		}
 	}
 }
 

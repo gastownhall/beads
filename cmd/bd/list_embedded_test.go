@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,12 @@ func bdList(t *testing.T, bd, dir string, args ...string) string {
 		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.String()
+}
+
+// outputHasIssueID reports whether id appears in out as a whole ID, so a
+// hierarchical ID such as tl-x.1 is not found inside tl-x.1.2 or tl-x.10.
+func outputHasIssueID(out, id string) bool {
+	return regexp.MustCompile(`(^|[^\w.-])` + regexp.QuoteMeta(id) + `($|[^\w.-])`).MatchString(out)
 }
 
 // bdListJSON runs "bd list --json" and parses the result as an array of IssueWithCounts.
@@ -623,6 +630,46 @@ func TestEmbeddedListFilteringStatusAndHierarchy(t *testing.T) {
 		}
 	})
 
+	// --pretty --parent renders the tree storage.SearchDescendants walks
+	// (GH#3415). Without --all the walk is filtered at every level, so the
+	// closed mid-level child is left out and nothing below it is reached
+	// through it; everything outside its subtree still shows.
+	t.Run("pretty_parent_tree_with_closed_mid_level_child", func(t *testing.T) {
+		epic := bdCreate(t, bd, dir, "Pretty tree epic", "--type", "epic").ID
+		child := func(title, parent string) string {
+			return bdCreate(t, bd, dir, title, "--type", "task", "--parent", parent).ID
+		}
+		a := child("Pretty tree A", epic)
+		b := child("Pretty tree B", epic)
+		closedMid := child("Pretty tree closed mid", a)
+		underClosed := child("Pretty tree under closed", closedMid)
+		a2 := child("Pretty tree A2", a)
+		a2x := child("Pretty tree A2x", a2)
+		b1 := child("Pretty tree B1", b)
+		b1x := child("Pretty tree B1x", b1)
+		bdClose(t, bd, dir, closedMid, "--force")
+
+		all := bdList(t, bd, dir, "--parent", epic, "--pretty", "--all")
+		for _, id := range []string{epic, a, b, closedMid, underClosed, a2, a2x, b1, b1x} {
+			if !outputHasIssueID(all, id) {
+				t.Errorf("--pretty --all tree is missing %s:\n%s", id, all)
+			}
+		}
+
+		open := bdList(t, bd, dir, "--parent", epic, "--pretty")
+		for _, id := range []string{epic, a, b, a2, a2x, b1, b1x} {
+			if !outputHasIssueID(open, id) {
+				t.Errorf("--pretty tree is missing open descendant %s:\n%s", id, open)
+			}
+		}
+		if outputHasIssueID(open, closedMid) {
+			t.Errorf("--pretty tree without --all shows closed %s:\n%s", closedMid, open)
+		}
+		if outputHasIssueID(open, underClosed) {
+			t.Errorf("--pretty tree without --all shows %s, reachable only through closed %s:\n%s", underClosed, closedMid, open)
+		}
+	})
+
 	t.Run("flat", func(t *testing.T) {
 		// --flat disables tree format, uses legacy flat list
 		out := bdList(t, bd, dir, "--flat")
@@ -811,6 +858,7 @@ func TestEmbeddedListSearchAndOutputFormats(t *testing.T) {
 		if !strings.Contains(out, "digraph") {
 			t.Errorf("dot output should contain 'digraph' header, got: %s", out)
 		}
+		assertDotCanonicalOrder(t, out)
 	})
 
 	t.Run("format_dot_output_error", func(t *testing.T) {
@@ -1066,4 +1114,12 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 			t.Fatalf("authoritative list omitted concurrent snapshot ID %q", id)
 		}
 	}
+
+	t.Run("watch_leaves_list_and_show_free", func(t *testing.T) {
+		testListWatchLeavesListAndShowFree(t, bd)
+	})
+
+	t.Run("watch_parent_tree_leaves_commands_free", func(t *testing.T) {
+		testListWatchParentTreeLeavesCommandsFree(t, bd)
+	})
 }

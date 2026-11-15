@@ -103,52 +103,23 @@ func readyRequestRows() []Row {
 // longest population in the ledger, and deliberately so: `bd list` publishes
 // far more filters than the v0 listing does, and every one of them is a set
 // this client would widen if it dropped it.
+//
+// [Retired: the twenty-nine filter rows that stood here — the spec prefix, the
+// label pattern/regex, the four text and two external-ref matches, the eight
+// updated/closed/defer/due bounds, the priority triple, EmptyDesc, NoLabels,
+// NoParent, ExcludeTypes, the pinned pair, the mol/wisp types and the
+// deferred/overdue predicates. listIssues publishes every one of them behind
+// the issues.list.filters behavior token, the encoder sends them (listTable
+// maps each to its parameter), and httpReader.List refuses a request carrying
+// one against a server that does not advertise the token, before dialing and
+// naming the token, so none of them can be dropped. What is left below is the
+// part of the vocabulary that is a different question (ReadyFlag), a different
+// projection (IncludeComments) or a page shape (Offset).]
 func listRequestRows() []Row {
 	listRefusal := func(field, what, why string) Row {
 		return refusal("E-ListRequest."+field, tyListRequest, field, what, why, fieldSpec)
 	}
 	rows := []Row{
-		listRefusal("TitleSearch", "a title search refuses", noWireList),
-		listRefusal("SpecPrefix", "a spec-id prefix restriction refuses", noWireList),
-		listRefusal("IDFilter", "an explicit id set on the LISTING refuses",
-			noWireList+"; the exact-ids question is getIssue's, reached through the SearchIssues bridge's exact-ids shape (D11), not through a listing filter"),
-		listRefusal("LabelPattern", "a glob label filter refuses",
-			noWireList+" — listReadyWork does publish label_pattern, which is exactly why the absence here has to refuse rather than fall through"),
-		listRefusal("LabelRegex", "a regex label filter refuses",
-			noWireList+" — as for LabelPattern, listReadyWork publishes label_regex and the listing does not"),
-		listRefusal("TitleContains", "a title substring filter refuses", noWireList),
-		listRefusal("DescContains", "a description substring filter refuses", noWireList),
-		listRefusal("NotesContains", "a notes substring filter refuses", noWireList),
-		listRefusal("ExternalContains", "an external-ref substring filter refuses", noWireList),
-		listRefusal("ExternalRef", "an exact external-ref filter refuses", noWireList),
-		listRefusal("UpdatedAfter", "an updated-after bound refuses", noWireList+" — only the created bounds are published"),
-		listRefusal("UpdatedBefore", "an updated-before bound refuses", noWireList+" — only the created bounds are published"),
-		listRefusal("ClosedAfter", "a closed-after bound refuses", noWireList),
-		listRefusal("ClosedBefore", "a closed-before bound refuses", noWireList),
-		listRefusal("DeferAfter", "a defer-after bound refuses", noWireList),
-		listRefusal("DeferBefore", "a defer-before bound refuses", noWireList),
-		listRefusal("DueAfter", "a due-after bound refuses", noWireList),
-		listRefusal("DueBefore", "a due-before bound refuses", noWireList),
-		listRefusal("EmptyDesc", "the empty-description predicate refuses", noWireList),
-		listRefusal("NoAssignee", "the unassigned predicate refuses",
-			noWireList+" — listReadyWork publishes `unassigned`; the listing does not"),
-		listRefusal("NoLabels", "the no-labels predicate refuses", noWireList),
-		listRefusal("Priority", "an exact priority filter refuses",
-			noWireList+" — listReadyWork publishes `priority`; the listing does not"),
-		listRefusal("PriorityMin", "a minimum-priority bound refuses", noWireList),
-		listRefusal("PriorityMax", "a maximum-priority bound refuses", noWireList),
-		listRefusal("PinnedFlag", "selecting the pinned-FLAG rows refuses",
-			noWireList+". The pinned STATUS is reachable through `status`; the flag is a separate predicate at any status and has no parameter"),
-		listRefusal("NoPinnedFlag", "holding the unflagged predicate in place refuses",
-			noWireList+". It changes nothing on a default listing and NARROWS under `all` or a pinned/hooked status — which is precisely when dropping it would widen the answer"),
-		listRefusal("ExcludeTypes", "a type exclusion refuses",
-			noWireList+" — listReadyWork publishes exclude_type; the listing publishes only the four include_* toggles"),
-		listRefusal("NoParent", "the top-level-only predicate refuses", noWireList),
-		listRefusal("MolType", "a molecule-type restriction refuses", noWireList),
-		listRefusal("WispType", "a wisp-type restriction refuses",
-			noWireList+". The listing now ADMITS the wisp plane — include_ephemeral landed upstream and the encoder sends it (L1 retired) — so this refusal is no longer redundant with an invisible plane: it is the only thing standing between a caller and a listing that returns every wisp type when they named one"),
-		listRefusal("DeferredFlag", "the deferred predicate refuses", noWireList),
-		listRefusal("OverdueFlag", "the overdue predicate refuses", noWireList),
 		listRefusal("ReadyFlag", "switching a listing onto the ready set refuses",
 			"ReadyFlag is not a filter but a change of QUESTION: it selects the blocker-aware ready query, which reads a narrower filter vocabulary than a ListRequest can describe. Over the wire that question is listReadyWork, a different operation with a different parameter table. "+
 				"Routing it there would have to decide, silently, which of this request's fields survive the crossing — so v1 refuses and the retirement path is an explicit route in the store, not a re-encode here"),
@@ -302,8 +273,8 @@ func parentWalkRows() []Row {
 			ID: "P-IssueFilter." + field, Kind: KindRefuse,
 			Type: tyIssueFilter, Field: field,
 			What: "a populated IssueFilter." + field + " refuses on the descendant walk",
-			Why: "listIssues publishes no parameter for it, and the walk's inversion accounts only for the members BuildListFilter DERIVES plus the explicit filters the operation does publish. " +
-				"Anything left over is a restriction the bridge would have to drop to answer at all, and a dropped filter widens the set invisibly",
+			Why: "the walk does not send it: its inversion accounts only for the members BuildListFilter DERIVES plus the explicit filters the walk encodes, and anything left over is a restriction the bridge would have to drop to answer at all — a dropped filter widens the set invisibly. " +
+				"Most such members do have a listIssues parameter now, behind `issues.list.filters`; the walk has not taken them on yet, and `--flat` or `--json` asks listIssues for the parent's children directly",
 			SpecRow: parentWalkSpec, PinnedBy: pin,
 		}
 	}
@@ -317,15 +288,15 @@ func parentWalkRows() []Row {
 
 	rows := []Row{
 		derived("ExcludeStatus", "a status exclusion that is not the derived default refuses",
-			"listIssues publishes no exclude_status: the wire publishes the INTENT (`all`) and the server re-derives the exclusions from the same builder against its own authoritative vocabulary, which additionally heals L7's degraded client-side set for the walk. "+
-				"An exclusion list no intent reproduces is therefore unstatable, and dropping it would widen the listing to closed work"),
+			"the walk sends the INTENT (`all`) and the server re-derives the exclusions from the same builder against its own authoritative vocabulary, which additionally heals L7's degraded client-side set for the walk. "+
+				"listIssues' exclude_status (behind `issues.list.filters`) narrows on top of those defaults, but the walk does not send it, so an exclusion list no intent reproduces is unstatable here, and dropping it would widen the listing to closed work"),
 		derived("Pinned", "a pinned predicate that is not the derived default refuses",
-			"the pinned default is the FOURTH derived member and has no parameter of its own: `--pinned` selects the flagged rows and `--no-pinned` holds the unflagged predicate in place under `--all`, and the wire can express neither. "+
+			"the pinned default is the FOURTH derived member and has no parameter of its own. `--pinned` selects the flagged rows and `--no-pinned` holds the unflagged predicate in place under `--all`; listIssues publishes both behind `issues.list.filters`, but the walk does not send them. "+
 				"Its derived value is a function of the `all` intent alone — upstream #5333 stopped an every-status selector from forcing it, so `--status all` and `--all` are now one filter and one wire question — and a value that intent does not reproduce is a user's own predicate, which NARROWS, and that is precisely when dropping it would answer a different question"),
 		derived("IsTemplate", "a template predicate that is not the derived default refuses",
 			"listIssues publishes include_templates, an intent, not an is_template predicate. `&false` is what the absent flag derives and sends nothing; nil is what `--include-templates` derives and sends the flag; `&true` selects templates ONLY, which no intent on this operation can say"),
 		derived("ExcludeTypes", "a type exclusion beyond the derived gate and infra members refuses",
-			"listIssues publishes include_gates and include_infra — intents — and no exclude_type. The gate member and the whole infra vocabulary are what their absent flags derive; a leftover member is a user's `--exclude-type`, and dropping it would return the type they asked to hide"),
+			"listIssues publishes include_gates and include_infra — intents — and, behind `issues.list.filters`, an exclude_type the walk does not send. The gate member and the whole infra vocabulary are what their absent flags derive; a leftover member is a user's `--exclude-type`, and dropping it would return the type they asked to hide"),
 		derived("Ephemeral", "an ephemeral predicate that is not the derived default refuses",
 			"BuildListFilter sets it only for an infra `--type`, from the same flag the walk already encodes; the wire publishes no ephemeral PREDICATE on the listing — include_ephemeral is an intent that ADMITS the plane, not a selector that restricts to it — so any other value is unstatable"),
 		derived("SkipWisps", "a wisp-merge opt-out that is not the derived default refuses",
@@ -360,7 +331,13 @@ func parentWalkRows() []Row {
 
 // parentWalkRefusals enumerates the IssueFilter members that refuse on the
 // descendant walk: everything BuildListFilter can carry that is neither a
-// derived default nor a filter listIssues publishes.
+// derived default nor a filter the walk encodes.
+//
+// Most of them have had a listIssues parameter since `issues.list.filters`.
+// Moving one off this list is a change to the walk, and the walk must then
+// check that token itself: it dials through the SearchIssues bridge, so the
+// listing's pre-dial gate (role_reader.go refuseUnservedListFilters) never
+// sees it.
 //
 // Written out rather than derived, for the reason issueFilterBridgeRefusals is:
 // a list computed from the struct would absorb a field added upstream, and the

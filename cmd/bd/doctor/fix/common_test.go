@@ -1,6 +1,7 @@
 package fix
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,4 +174,31 @@ var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=
 // gitCommand builds a git command for a fixture with noAutoMaintenance applied.
 func gitCommand(args ...string) *exec.Cmd {
 	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
+}
+
+// captureFixStdout runs fn with os.Stdout redirected and returns what it
+// printed there, which is where a fix handler reports.
+func captureFixStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	printed := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		printed <- string(b)
+	}()
+	orig := os.Stdout
+	os.Stdout = w
+	func() {
+		defer func() {
+			os.Stdout = orig
+			_ = w.Close()
+		}()
+		fn()
+	}()
+	out := <-printed
+	_ = r.Close()
+	return out
 }

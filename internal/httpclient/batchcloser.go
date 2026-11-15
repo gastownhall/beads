@@ -123,6 +123,11 @@ func (b *httpBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBatc
 	if err != nil {
 		return issueops.CloseBatchResult{}, err
 	}
+	// AutoCloseMolecule rides the member only where the server advertises it;
+	// elsewhere the batch is refused before it is dialed (molecule.go).
+	if err := b.store.requireAutoCloseMolecule(ctx, "BatchCloser.CloseBatch", req.AutoCloseMolecule); err != nil {
+		return issueops.CloseBatchResult{}, err
+	}
 	if served {
 		return b.serveBatch(ctx, req)
 	}
@@ -175,7 +180,12 @@ func (b *httpBatchCloser) serveComposedSingle(ctx context.Context, req issueops.
 		return issueops.CloseBatchResult{}, err
 	}
 	item := req.Items[0]
-	res, err := b.wire.CloseIssue(ctx, item.IssueID, closeBody(req.Actor, item.Reason, req.Session, req.Force))
+	body := closeBody(req.Actor, item.Reason, req.Session, req.Force)
+	if req.AutoCloseMolecule {
+		autoClose := true
+		body.AutoCloseMolecule = &autoClose
+	}
+	res, err := b.wire.CloseIssue(ctx, item.IssueID, body)
 	if err != nil {
 		if outcome, ok := perItemCloseRefusal(item.IssueID, err); ok {
 			// A per-item refusal is a RESULT and never the method's error. The
@@ -188,10 +198,12 @@ func (b *httpBatchCloser) serveComposedSingle(ctx context.Context, req issueops.
 
 	issue := res.Issue
 	return issueops.CloseBatchResult{Outcomes: []issueops.CloseOutcome{{
-		IssueID:      item.IssueID,
-		Issue:        &issue,
-		Changed:      !res.AlreadyClosed,
-		OpenChildren: res.OpenChildren,
+		IssueID:                  item.IssueID,
+		Issue:                    &issue,
+		Changed:                  !res.AlreadyClosed,
+		OpenChildren:             res.OpenChildren,
+		AutoClosedMolecule:       res.AutoClosedMolecule,
+		MoleculeAutoCloseRefusal: derefStringPtr(res.MoleculeAutoCloseRefusal),
 	}}}, nil
 }
 
@@ -217,6 +229,10 @@ func batchCloseBody(req issueops.CloseBatchRequest) apigen.BatchCloseRequest {
 	if req.Force {
 		force := true
 		body.Force = &force
+	}
+	if req.AutoCloseMolecule {
+		autoClose := true
+		body.AutoCloseMolecule = &autoClose
 	}
 	return body
 }
@@ -265,6 +281,10 @@ func decodeBatchCloseOutcome(actor string, item apigen.CloseOutcome) issueops.Cl
 		out.OpenChildren = *item.OpenChildren
 	}
 	out.Changed = item.AlreadyClosed == nil || !*item.AlreadyClosed
+	out.AutoClosedMolecule = item.AutoClosedMolecule
+	if item.MoleculeAutoCloseRefusal != nil {
+		out.MoleculeAutoCloseRefusal = *item.MoleculeAutoCloseRefusal
+	}
 	return out
 }
 

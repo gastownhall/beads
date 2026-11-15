@@ -49,11 +49,11 @@ func updateAgentFile(filename string, verbose bool, templatePath string, profile
 			}
 			newContent = string(data)
 		} else {
-			newContent = agents.EmbeddedDefault()
+			newContent = agents.EmbeddedDefaultWithOpts(opts)
 		}
 
 		// Replace the beads section with the requested profile.
-		// EmbeddedDefault() ships with profile:full; swap to the requested profile
+		// The embedded template ships with profile:full; swap to the requested profile
 		// (which defaults to minimal). Also handles legacy markers without profile metadata.
 		if strings.Contains(newContent, "BEGIN BEADS INTEGRATION") {
 			if replaced, changed, err := agents.ReplaceSectionWithOpts(newContent, profile, opts); err == nil && changed {

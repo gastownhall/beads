@@ -20,6 +20,21 @@ import (
 	"github.com/steveyegge/beads/memoryops"
 )
 
+func setupEndpointTrustWorkspace(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+}
+
 func TestRegistered(t *testing.T) {
 	factory := tracker.Get("jira")
 	if factory == nil {
@@ -963,6 +978,52 @@ func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	}
 }
 
+// TestFetchIssuesMatchesSinceToSinceGranularity pins SinceGranularity to the
+// JQL: a fetch from Since asks for exactly what a fetch from Since truncated
+// to SinceGranularity asks for, and a fetch from just before that asks for
+// more.
+func TestFetchIssuesMatchesSinceToSinceGranularity(t *testing.T) {
+	var capturedJQL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/search/jql" {
+			capturedJQL = r.URL.Query().Get("jql")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"issues":     []Issue{},
+				"total":      0,
+				"maxResults": 50,
+				"startAt":    0,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	tr := &Tracker{
+		client:      newTestClient(srv.URL, "3"),
+		store:       &configStore{data: map[string]string{}},
+		projectKeys: []string{"TEST"},
+		apiVersion:  "3",
+	}
+	jqlFrom := func(since time.Time) string {
+		t.Helper()
+		if _, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{Since: &since}); err != nil {
+			t.Fatalf("FetchIssues: %v", err)
+		}
+		return capturedJQL
+	}
+
+	since := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	floor := since.Truncate(tr.SinceGranularity())
+	if got, want := jqlFrom(since), jqlFrom(floor); got != want {
+		t.Fatalf("JQL from %s = %q, want the JQL from %s: %q", since, got, floor, want)
+	}
+	if before := jqlFrom(floor.Add(-time.Nanosecond)); before == jqlFrom(floor) {
+		t.Fatalf("JQL from just before %s = %q, the same as from it: SinceGranularity is finer than the JQL", floor, before)
+	}
+}
+
 func TestFetchIssuesWithoutPullJQLOmitsExtraFilter(t *testing.T) {
 	var capturedJQL string
 
@@ -1004,8 +1065,11 @@ func TestFetchIssuesWithoutPullJQLOmitsExtraFilter(t *testing.T) {
 }
 
 func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":                    "https://example.atlassian.net",
@@ -1042,8 +1106,11 @@ func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
 }
 
 func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":              "https://example.atlassian.net",
@@ -1092,8 +1159,11 @@ func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
 }
 
 func TestInitLoadsCustomPriorityMapFromAllConfig(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":            "https://example.atlassian.net",
@@ -1120,8 +1190,11 @@ func TestInitLoadsCustomPriorityMapFromAllConfig(t *testing.T) {
 }
 
 func TestInitLoadsCustomFieldsFromAllConfig(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":                                  "https://example.atlassian.net",
@@ -1201,8 +1274,11 @@ func TestInitLoadsCustomFieldsFromAllConfig(t *testing.T) {
 }
 
 func TestInitRejectsInvalidCustomFieldJSON(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":                             "https://example.atlassian.net",

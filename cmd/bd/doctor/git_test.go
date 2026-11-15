@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // setupGitRepo creates a temporary git repository for testing
@@ -51,6 +53,15 @@ func TestCheckGitHooks(t *testing.T) {
 // setupGitRepoInDir initializes a git repo in the given directory with .beads
 func setupGitRepoInDir(t *testing.T, dir string) {
 	t.Helper()
+	if dir == "" {
+		// cmd.Dir = "" inherits the test process cwd — this checkout's own
+		// package dir — so the config write below would hit the host .git
+		// (the r880 clobber class, wy-qlvlmf).
+		t.Fatal("setupGitRepoInDir: empty dir would run git against the host checkout")
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("setupGitRepoInDir: %q is not an existing directory (err=%v)", dir, err)
+	}
 
 	// Create .beads directory
 	beadsDir := filepath.Join(dir, ".beads")
@@ -68,11 +79,14 @@ func setupGitRepoInDir(t *testing.T, dir string) {
 	}
 
 	// Force repo-local hooks path for test isolation. This prevents global
-	// core.hooksPath from affecting hook detection behavior in tests.
+	// core.hooksPath from affecting hook detection behavior in tests. The env
+	// scrub keeps a leaked GIT_DIR/GIT_WORK_TREE from routing the write at
+	// some other repository.
 	cmd := gitCommand("config", "core.hooksPath", ".git/hooks")
 	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to set core.hooksPath for test repo: %v", err)
+	cmd.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to set core.hooksPath for test repo: %v\n%s", err, out)
 	}
 }
 

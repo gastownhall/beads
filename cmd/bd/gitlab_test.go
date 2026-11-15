@@ -4,13 +4,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
@@ -190,6 +195,69 @@ func TestGitLabPushHooksPreserveTimestampSkipForIssues(t *testing.T) {
 	}
 }
 
+// TestGitLabPushFieldsEqualComparesContentNotTimestamps pins the hook a pull
+// uses to tell an echo of its own push from a remote edit (#6806): it
+// compares what a GitLab push sends, where ContentEqual keeps the push's
+// timestamp skip and calls any newer remote issue equal.
+func TestGitLabPushFieldsEqualComparesContentNotTimestamps(t *testing.T) {
+	now := time.Now().UTC()
+	local := &types.Issue{
+		ID:          "bd-task",
+		Title:       "Task",
+		Description: "body",
+		Status:      types.StatusInProgress,
+		Priority:    1,
+		IssueType:   types.TypeBug,
+		Assignee:    "alice",
+		Labels:      []string{"backend"},
+		UpdatedAt:   now,
+	}
+	// echo is what GitLab holds after a push of local: the push sends no
+	// assignee, so the remote has none.
+	echo := func() *tracker.TrackerIssue {
+		return &tracker.TrackerIssue{
+			Identifier:  "42",
+			Title:       "Task",
+			Description: "body",
+			State:       "opened",
+			Labels:      []string{"backend", "status::in_progress", "priority::high", "type::bug"},
+			UpdatedAt:   now.Add(time.Minute),
+		}
+	}
+	hooks := buildGitLabPushHooks()
+	if !hooks.PushFieldsEqual(local, echo()) {
+		t.Fatal("PushFieldsEqual = false for a remote holding the pushed title, description, state and labels, want true")
+	}
+	for _, edit := range []struct {
+		name  string
+		apply func(*tracker.TrackerIssue)
+	}{
+		{"title", func(r *tracker.TrackerIssue) { r.Title = "Renamed remotely" }},
+		{"description", func(r *tracker.TrackerIssue) { r.Description = "edited remotely" }},
+		{"state", func(r *tracker.TrackerIssue) { r.State = "closed" }},
+		{"labels", func(r *tracker.TrackerIssue) { r.Labels = append(r.Labels, "frontend") }},
+	} {
+		remote := echo()
+		edit.apply(remote)
+		if !hooks.ContentEqual(local, remote) {
+			t.Fatalf("%s: ContentEqual = false for a newer remote issue, want the push's timestamp skip kept", edit.name)
+		}
+		if hooks.PushFieldsEqual(local, remote) {
+			t.Errorf("%s: PushFieldsEqual = true for a newer remote edit, want false", edit.name)
+		}
+	}
+
+	epic := &types.Issue{ID: "bd-epic", Title: "Milestone", Status: types.StatusOpen, IssueType: types.TypeEpic, UpdatedAt: now}
+	milestone := &tracker.TrackerIssue{Identifier: "35", Title: "Milestone", State: "active", UpdatedAt: now.Add(time.Minute)}
+	if !hooks.PushFieldsEqual(epic, milestone) {
+		t.Fatal("PushFieldsEqual = false for a milestone holding the epic's pushed fields, want true")
+	}
+	milestone.State = "closed"
+	if hooks.PushFieldsEqual(epic, milestone) {
+		t.Fatal("PushFieldsEqual = true for a milestone closed remotely, want false")
+	}
+}
+
 // TestGitLabConfigValidation verifies validation catches missing required fields.
 func TestGitLabConfigValidation(t *testing.T) {
 	tests := []struct {
@@ -326,6 +394,7 @@ func TestGitLabConfigEnvVar(t *testing.T) {
 
 // TestGitLabClientCreation verifies client is created with correct config.
 func TestGitLabClientCreation(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
 	// Clear global state to avoid stale connections from prior tests
 	oldDBPath, oldStore := dbPath, store
 	dbPath, store = "", nil
@@ -336,7 +405,10 @@ func TestGitLabClientCreation(t *testing.T) {
 	t.Setenv("GITLAB_PROJECT_ID", "99")
 
 	config := getGitLabConfig()
-	client := getGitLabClient(config)
+	client, err := getGitLabClient(config)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if client.BaseURL != "https://gitlab.test.com" {
 		t.Errorf("client.BaseURL = %q, want %q", client.BaseURL, "https://gitlab.test.com")
@@ -372,6 +444,7 @@ func TestGitLabConfigFromEnv_GroupID(t *testing.T) {
 
 // TestGitLabClientCreation_WithGroupID verifies client is created with GroupID when configured.
 func TestGitLabClientCreation_WithGroupID(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
 	oldDBPath, oldStore := dbPath, store
 	dbPath, store = "", nil
 	t.Cleanup(func() { dbPath, store = oldDBPath, oldStore })
@@ -382,7 +455,10 @@ func TestGitLabClientCreation_WithGroupID(t *testing.T) {
 	t.Setenv("GITLAB_GROUP_ID", "mygroup")
 
 	config := getGitLabConfig()
-	client := getGitLabClient(config)
+	client, err := getGitLabClient(config)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if client.GroupID != "mygroup" {
 		t.Errorf("client.GroupID = %q, want %q", client.GroupID, "mygroup")
@@ -591,11 +667,12 @@ func TestCollectGitLabLinkSyncDataScopesEndpoints(t *testing.T) {
 			parent.ID: {gitLabSyncDep(child, types.DepParentChild)},
 		},
 	}
+	inProject := func(*types.Issue) bool { return true }
 
 	t.Run("issues requires both endpoints", func(t *testing.T) {
 		data, warnings := collectGitLabLinkSyncData(context.Background(), st, tracker.SyncOptions{
 			IssueIDs: []string{child.ID, blocker.ID},
-		})
+		}, inProject)
 		if len(warnings) != 0 {
 			t.Fatalf("warnings = %v", warnings)
 		}
@@ -611,7 +688,7 @@ func TestCollectGitLabLinkSyncDataScopesEndpoints(t *testing.T) {
 	t.Run("issues excludes out of scope targets", func(t *testing.T) {
 		data, warnings := collectGitLabLinkSyncData(context.Background(), st, tracker.SyncOptions{
 			IssueIDs: []string{child.ID},
-		})
+		}, inProject)
 		if len(warnings) != 0 {
 			t.Fatalf("warnings = %v", warnings)
 		}
@@ -623,7 +700,7 @@ func TestCollectGitLabLinkSyncDataScopesEndpoints(t *testing.T) {
 	t.Run("parent excludes targets outside subtree", func(t *testing.T) {
 		data, warnings := collectGitLabLinkSyncData(context.Background(), st, tracker.SyncOptions{
 			ParentID: parent.ID,
-		})
+		}, inProject)
 		if len(warnings) != 0 {
 			t.Fatalf("warnings = %v", warnings)
 		}
@@ -636,7 +713,7 @@ func TestCollectGitLabLinkSyncDataScopesEndpoints(t *testing.T) {
 		data, warnings := collectGitLabLinkSyncData(context.Background(), st, tracker.SyncOptions{
 			IssueIDs:     []string{child.ID, molecule.ID},
 			ExcludeTypes: []types.IssueType{types.TypeMolecule},
-		})
+		}, inProject)
 		if len(warnings) != 0 {
 			t.Fatalf("warnings = %v", warnings)
 		}
@@ -644,6 +721,87 @@ func TestCollectGitLabLinkSyncDataScopesEndpoints(t *testing.T) {
 			t.Fatalf("DesiredLinks len = %d, want 0", len(data.DesiredLinks))
 		}
 	})
+
+	t.Run("endpoint outside the configured project is counted, not linked", func(t *testing.T) {
+		data, warnings := collectGitLabLinkSyncData(context.Background(), st, tracker.SyncOptions{
+			IssueIDs: []string{child.ID, blocker.ID},
+		}, func(issue *types.Issue) bool { return issue.ID != blocker.ID })
+		if len(warnings) != 0 {
+			t.Fatalf("warnings = %v", warnings)
+		}
+		if len(data.DesiredLinks) != 0 || data.OutsideProject != 1 {
+			t.Fatalf("DesiredLinks = %+v, OutsideProject = %d, want no link and 1 outside", data.DesiredLinks, data.OutsideProject)
+		}
+	})
+}
+
+// TestPushGitLabDependencyLinksStaysInConfiguredProject pins the link push to
+// the configured project in group mode (group 30, default project 100), where
+// projects 100 and 200 both have issues 7 and 8. A group pull stores project
+// 200's "7 blocks 8" on project 200's beads, which record that project in
+// their source_system: pushed by IID, it would link project 100's unrelated
+// issues 7 and 8, so it is left out and reported. Project 100's own edge
+// between two beads created locally and pushed, which record no
+// source_system, is pushed: their refs are in the path GitLab reports for
+// project 100.
+func TestPushGitLabDependencyLinksStaysInConfiguredProject(t *testing.T) {
+	var posts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/v4")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && path == "/projects/100":
+			_, _ = w.Write([]byte(`{"id":100,"path_with_namespace":"group-a/project-a","web_url":"http://` + r.Host + `/group-a/project-a"}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/links"):
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/links"):
+			body, _ := io.ReadAll(r.Body)
+			posts = append(posts, path+" "+string(body))
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_URL", srv.URL)
+	t.Setenv("GITLAB_PROJECT_ID", "")
+	t.Setenv("GITLAB_PROJECT_PATH", "")
+	t.Setenv("GITLAB_GROUP_ID", "30")
+	t.Setenv("GITLAB_DEFAULT_PROJECT_ID", "100")
+
+	bead := func(id, project string, iid int, sourceSystem string) *types.Issue {
+		issue := gitLabSyncIssue(id, srv.URL+"/"+project+"/-/issues/"+strconv.Itoa(iid), types.TypeTask)
+		issue.SourceSystem = sourceSystem
+		return issue
+	}
+	b7 := bead("bd-b7", "group-b/project-b", 7, "gitlab:200:7")
+	b8 := bead("bd-b8", "group-b/project-b", 8, "gitlab:200:8")
+	a11 := bead("bd-a11", "group-a/project-a", 11, "")
+	a12 := bead("bd-a12", "group-a/project-a", 12, "")
+	st := &gitLabSyncFakeStore{
+		issues: []*types.Issue{b7, b8, a11, a12},
+		deps: map[string][]*types.IssueWithDependencyMetadata{
+			b8.ID:  {gitLabSyncDep(b7, types.DepBlocks)},
+			a12.ID: {gitLabSyncDep(a11, types.DepBlocks)},
+		},
+	}
+	gt := &gitlab.Tracker{}
+	if err := gt.Init(context.Background(), st); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	var warnings []string
+	pushed, _, _ := pushGitLabDependencyLinks(context.Background(), gt, st, tracker.SyncOptions{Push: true}, false, io.Discard,
+		func(msg string) { warnings = append(warnings, msg) })
+
+	wantPosts := []string{`/projects/100/issues/11/links {"link_type":"blocks","target_issue_iid":12,"target_project_id":"100"}`}
+	if strings.Join(posts, "\n") != strings.Join(wantPosts, "\n") || pushed != 1 {
+		t.Errorf("pushed %d links, POSTs %q, want only %q", pushed, posts, wantPosts)
+	}
+	if want := []string{gitLabOutsideProjectLinkMessage(1)}; strings.Join(warnings, "\n") != strings.Join(want, "\n") {
+		t.Errorf("warnings = %q, want %q", warnings, want)
+	}
 }
 
 func TestGitLabSyncResultJSONIncludesLinksPushed(t *testing.T) {
@@ -694,6 +852,12 @@ type gitLabSyncFakeStore struct {
 	issues     []*types.Issue
 	deps       map[string][]*types.IssueWithDependencyMetadata
 	dependents map[string][]*types.IssueWithDependencyMetadata
+}
+
+// GetConfig answers every key unset, so gitlab.Tracker.Init reads the
+// environment.
+func (s *gitLabSyncFakeStore) GetConfig(context.Context, string) (string, error) {
+	return "", nil
 }
 
 func (s *gitLabSyncFakeStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {

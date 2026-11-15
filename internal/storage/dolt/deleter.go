@@ -97,7 +97,7 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 		// the commit that describes them — the exact loss withVersionedHistoryTables
 		// exists to prevent, and for store_epoch the unrecoverable kind (see the
 		// append-only note in doltAddAndCommitInTx's HAZARD block).
-		for _, table := range s.store.withVersionedHistoryTables(sweptTables) {
+		for _, table := range s.store.withVersionedHistoryTables(ctx, tx, sweptTables) {
 			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		msg := fmt.Sprintf("bd: delete %d issue(s)", result.Deleted)

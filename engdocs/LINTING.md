@@ -16,7 +16,8 @@ or `bazel test`, locally or on rbe-west, fails on a finding. The analyzers are:
 
 - **go test's vet checks**: the passes cmd/go's `defaultVetFlags` give
   `go test` (`atomic`, `bools`, `buildtag`, `directive`, `errorsas`,
-  `ifaceassert`, `nilfunc`, `printf`, `slog`, `stringintconv`, `tests`). They
+  `ifaceassert`, `nilfunc`, `printf`, `slog`, `stdversion`, `stringintconv`,
+  `tests`). They
   see every file, tests included, as the former `go vet ./...` did.
 - **The golangci-lint linters `.golangci.yml` enables** (depguard, errcheck,
   forbidigo, gosec, misspell, sloglint, unconvert, unparam), each a thin

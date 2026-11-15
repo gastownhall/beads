@@ -3,6 +3,7 @@ package doltserver
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -210,5 +211,21 @@ func TestRecoverCorruptManifest_NoLogSignatureNoop(t *testing.T) {
 	}
 	if len(backups) != 0 {
 		t.Errorf("expected no backups without log signature, got %v", backups)
+	}
+}
+
+// TestCorruptJournalRecoveryHintQuotesPaths pins the remedy-printing
+// invariant at the journal recovery hint: its mv command takes the Dolt
+// directory and the backup beside it as one shell word each (quoted when the
+// workspace path holds a space).
+func TestCorruptJournalRecoveryHintQuotesPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the want spells the POSIX quoting")
+	}
+	beadsDir := filepath.Join(t.TempDir(), "my project", ".beads")
+	got := corruptJournalRecoveryHint(beadsDir)
+	want := "  mv '" + filepath.Join(beadsDir, "dolt") + "' '" + filepath.Join(beadsDir, "dolt.corrupt.")
+	if !strings.Contains(got, want) {
+		t.Errorf("hint = %q, want its mv command to hold %q", got, want)
 	}
 }

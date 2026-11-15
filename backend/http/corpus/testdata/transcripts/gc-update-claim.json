@@ -1,0 +1,9 @@
+{
+  "shape": "gc-update-claim",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-claim","status":200},
+    {"method":"POST","operation_id":"claimIssue","path":"/v0/beads/issues/e2e-t-claim:claim","body":["actor"],"status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-claim","status":200}
+  ]
+}

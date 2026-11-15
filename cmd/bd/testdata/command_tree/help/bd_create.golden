@@ -1,0 +1,72 @@
+Create a new issue (or batch from markdown/graph JSON)
+
+Usage:
+  bd create [title] [flags]
+
+Aliases:
+  create, new
+
+Flags:
+      --acceptance string         Acceptance criteria
+      --allow-empty-description   Allow empty description input from stdin or file
+      --append-notes string       Append to existing notes (with newline separator)
+  -a, --assignee string           Assignee
+      --body-file string          Read description from file (use - for stdin)
+      --context string            Additional context for the issue
+      --defer string              Defer until date (issue hidden from bd ready until then). Same formats as --due
+      --deps strings              Dependencies as 'type:id' or bare 'id'. Bare 'id', 'depends-on:id', and 'blocked-by:id' all make THIS issue depend on id; 'blocks:id' reverses direction (id depends on this issue). E.g. 'blocked-by:bd-20,discovered-from:bd-15'
+  -d, --description string        Issue description
+      --design string             Design notes
+      --design-file string        Read design from file (use - for stdin)
+      --dry-run                   Preview what would be created without actually creating
+      --due string                Due date/time. Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15
+      --ephemeral                 Create as ephemeral (short-lived, subject to TTL compaction)
+  -e, --estimate int              Time estimate in minutes (e.g., 60 for 1 hour)
+      --event-actor string        Entity URI who caused this event (requires --type=event)
+      --event-category string     Event category (e.g., patrol.muted, agent.started) (requires --type=event)
+      --event-payload string      Event-specific JSON data (requires --type=event)
+      --event-target string       Entity URI or bead ID affected (requires --type=event)
+      --external-ref string       External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)
+  -f, --file string               Create one issue per ## heading (### fields attach to that issue); for title plus description-from-file, use --body-file
+      --force                     Force creation even if prefix doesn't match database prefix
+      --graph string              Create a graph of issues with dependencies from JSON plan file
+  -h, --help                      help for create
+      --id string                 Explicit issue ID (e.g., 'bd-42' for partitioning)
+  -l, --labels strings            Labels (comma-separated)
+      --metadata string           Set custom metadata (JSON object, or @file.json to read from file)
+      --mol-type string           Molecule type: swarm (multi-agent), patrol (recurring ops), work (default)
+      --no-history                Skip Dolt commit history without making GC-eligible (for permanent agent beads)
+      --no-inherit-labels         Don't inherit labels from parent issue
+      --notes string              Notes
+      --parent string             Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')
+  -p, --priority string           Priority (0-4 or P0-P4, 0=highest) (default "2")
+      --repo string               Target repository for issue (overrides auto-routing)
+      --silent                    Output only the issue ID (for scripting)
+      --skills string             Required skills for this issue
+      --spec-id string            Link to specification document
+  -s, --status string             Initial status
+      --stdin                     Read description from stdin (alias for --body-file -)
+      --storage-class string      Storage class: versioned, unversioned, or ephemeral (default: storage-class.<type> config, else versioned)
+      --title string              Issue title (alternative to positional argument)
+  -t, --type string               Issue type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision (default "task")
+      --validate                  Validate description contains required sections for issue type
+      --waits-for string          Spawner issue ID to wait for (creates waits-for dependency for fanout gate)
+      --waits-for-gate string     Gate type: all-children (wait for all) or any-children (wait for first) (default "all-children")
+      --wisp-type string          Wisp type for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --cpu-profile               Generate CPU profile for performance analysis
+      --database string           Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only)
+      --db string                 Database path (default: auto-discover .beads/*.db). In proxied-server mode, a value that isn't an existing path is treated as a database name override (see --database)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then (a live batch-mode bd process also flushes on SIGTERM/SIGHUP, except in proxied-server mode, where bd dolt commit is the only flush point). In proxied-server mode the deferral covers the writes the CLI makes on that route, including config and version metadata; explicit commit points (bd batch, bd mol bond/pour/squash, bd mol wisp create, and the wisp half of bd mol burn) still commit, and a bd serve process on the same database is unaffected. Default: on. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --mem-profile string        Write heap profile to FILE on exit (also respects BEADS_MEM_PROFILE)
+      --no-color                  Disable color output (also: NO_COLOR=1 or CLICOLOR=0)
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output

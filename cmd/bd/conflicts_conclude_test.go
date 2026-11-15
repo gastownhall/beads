@@ -239,6 +239,61 @@ func TestWriteMergeBlockersRemedies(t *testing.T) {
 		if strings.Contains(out, "bd conflicts resolve --conclude") {
 			t.Errorf("must not recommend --conclude while a schema conflict makes it refuse:\n%s", out)
 		}
+		if strings.Contains(out, "migration 0062") {
+			t.Errorf("migration-0062 recovery shown with no events schema conflict:\n%s", out)
+		}
+	})
+
+	// gastownhall/beads#6727: migration 0062 deleted versioned events, so a
+	// peer that still changed them leaves a deletion-vs-modification
+	// conflict no ALTER TABLE reconciles. The remedy must name the likely
+	// cause without asserting it, abort explicitly, and warn off the
+	// checkout that destroys the ignored working table.
+	events0062 := []string{
+		"schema conflict: events",
+		"may be migration 0062",
+		"dolt merge --abort",
+		"CALL DOLT_MERGE('--abort')",
+		"DOLT_CHECKOUT('--','events')",
+		"docs/recovery/sync-failures.md#merge-blocked-on-the-events-table-migration-0062",
+	}
+
+	t.Run("events schema conflict", func(t *testing.T) {
+		var sb strings.Builder
+		writeMergeBlockers(&sb, schemaBlockers("events"))
+		out := sb.String()
+		for _, want := range events0062 {
+			if !strings.Contains(out, want) {
+				t.Errorf("events schema-conflict remedy missing %q:\n%s", want, out)
+			}
+		}
+		for _, bad := range []string{"ALTER TABLE", "dolt conflicts resolve", "Constraint violations:"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("events schema-conflict remedy must not offer %q:\n%s", bad, out)
+			}
+		}
+	})
+
+	t.Run("events and other blockers", func(t *testing.T) {
+		var sb strings.Builder
+		b := schemaBlockers("events", "issues")
+		b.ConstraintViolations = violationBlockers("labels", 1).ConstraintViolations
+		writeMergeBlockers(&sb, b)
+		out := sb.String()
+		for _, want := range append(events0062,
+			"schema conflict: issues",
+			"Schema conflicts:",
+			"ALTER TABLE",
+			"Constraint violations:",
+			"dolt_constraint_violations_",
+		) {
+			if !strings.Contains(out, want) {
+				t.Errorf("mixed-blocker remedy missing %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "bd conflicts resolve --conclude") {
+			t.Errorf("must not recommend --conclude while a schema conflict makes it refuse:\n%s", out)
+		}
 	})
 }
 

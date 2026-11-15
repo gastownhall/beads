@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -543,4 +544,257 @@ func TestEmbeddedReadyClaimConcurrent(t *testing.T) {
 	if got.Assignee == "" {
 		t.Fatal("expected final assignee to be set")
 	}
+}
+
+// plantStaleBlockedFlag sets is_blocked = 1 on an issue with raw SQL and
+// commits it: the stale-flag state an outside merge or a failed post-pull
+// recompute leaves behind, which no single-store bd command produces.
+func plantStaleBlockedFlag(t *testing.T, beadsDir, database, issueID string) {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	res, err := db.ExecContext(t.Context(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", issueID)
+	if err != nil {
+		t.Fatalf("plant is_blocked on %s: %v", issueID, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("plant is_blocked on %s: %d rows affected (err %v), want 1", issueID, n, err)
+	}
+	if _, err := db.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', 'test: plant a stale is_blocked flag')"); err != nil {
+		t.Fatalf("commit the stale flag: %v", err)
+	}
+}
+
+// readyJSONIDs runs `bd ready --json` with args and returns the listed ids.
+func readyJSONIDs(t *testing.T, bd, dir string, args ...string) map[string]bool {
+	t.Helper()
+	cmd := exec.Command(bd, append([]string{"ready", "--json"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd ready --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var ready []types.IssueWithCounts
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &ready); err != nil {
+		t.Fatalf("parse ready JSON: %v\n%s", err, stdout.String())
+	}
+	ids := make(map[string]bool, len(ready))
+	for _, r := range ready {
+		ids[r.ID] = true
+	}
+	return ids
+}
+
+// storedBlockedFlag reads issueID's stored is_blocked column through
+// `bd blocked --flags --raw --json`.
+func storedBlockedFlag(t *testing.T, bd, dir, issueID string) bool {
+	t.Helper()
+	cmd := exec.Command(bd, "blocked", "--flags", "--raw", "--json")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	cmd.Stdin = strings.NewReader(issueID + "\n")
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd blocked --flags --raw --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var rows []struct {
+		ID        string `json:"id"`
+		IsBlocked bool   `json:"is_blocked"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &rows); err != nil {
+		t.Fatalf("parse blocked --flags JSON: %v\n%s", err, stdout.String())
+	}
+	if len(rows) != 1 || rows[0].ID != issueID {
+		t.Fatalf("bd blocked --flags = %+v, want one row for %s", rows, issueID)
+	}
+	return rows[0].IsBlocked
+}
+
+// TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue is GH#3268 end to end: an
+// open issue with no dependency rows but a stale is_blocked = 1 was hidden from
+// `bd ready` (which trusted the flag) and dropped by `bd blocked` (which could
+// name no blocker), and the empty state then claimed every issue was blocked.
+func TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "rs")
+	edgeless := bdCreate(t, bd, dir, "GH3268 edgeless stale flag", "--type", "task")
+	plantStaleBlockedFlag(t, beadsDir, "rs", edgeless.ID)
+
+	t.Run("ready_json_lists_the_edgeless_issue", func(t *testing.T) {
+		if ids := readyJSONIDs(t, bd, dir); !ids[edgeless.ID] {
+			t.Fatalf("bd ready --json = %v, want it to list %s (no dependency rows, so is_blocked = 1 is stale)", ids, edgeless.ID)
+		}
+	})
+
+	t.Run("plain_ready_lists_it_without_the_blocking_claim", func(t *testing.T) {
+		out := bdRunOK(t, bd, dir, "ready")
+		if !strings.Contains(out, edgeless.ID) {
+			t.Errorf("plain bd ready does not list %s:\n%s", edgeless.ID, out)
+		}
+		if strings.Contains(out, "all issues have blocking dependencies") {
+			t.Errorf("plain bd ready claims blocking dependencies for an edgeless issue:\n%s", out)
+		}
+	})
+
+	t.Run("blocked_and_dep_list_are_unchanged", func(t *testing.T) {
+		for _, entry := range bdBlockedJSON(t, bd, dir) {
+			if entry["id"] == edgeless.ID {
+				t.Errorf("bd blocked lists edgeless %s: %v", edgeless.ID, entry)
+			}
+		}
+		if out := bdRunOK(t, bd, dir, "dep", "list", edgeless.ID); !strings.Contains(out, "has no dependencies") {
+			t.Errorf("bd dep list %s should report no dependencies:\n%s", edgeless.ID, out)
+		}
+	})
+
+	t.Run("related_only_edge_does_not_make_the_flag_believable", func(t *testing.T) {
+		related := bdCreate(t, bd, dir, "GH3268 related-only stale flag", "--type", "task")
+		bdRunOK(t, bd, dir, "dep", "add", related.ID, edgeless.ID, "--type", "related")
+		plantStaleBlockedFlag(t, beadsDir, "rs", related.ID)
+		if ids := readyJSONIDs(t, bd, dir); !ids[related.ID] {
+			t.Fatalf("bd ready --json = %v, want it to list %s (its only edge is related, which never blocks)", ids, related.ID)
+		}
+	})
+
+	// The read guard lists the issue; bd recompute-blocked repairs the stored
+	// flag itself.
+	t.Run("recompute_blocked_clears_the_stale_flag", func(t *testing.T) {
+		if !storedBlockedFlag(t, bd, dir, edgeless.ID) {
+			t.Fatalf("stored is_blocked for %s is already 0 before bd recompute-blocked", edgeless.ID)
+		}
+		var res struct {
+			RowsCorrected int `json:"rows_corrected"`
+		}
+		out := bdRunOK(t, bd, dir, "recompute-blocked", "--json")
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &res); err != nil {
+			t.Fatalf("parse recompute-blocked JSON: %v\n%s", err, out)
+		}
+		if res.RowsCorrected < 1 {
+			t.Errorf("rows_corrected = %d, want >= 1", res.RowsCorrected)
+		}
+		if storedBlockedFlag(t, bd, dir, edgeless.ID) {
+			t.Errorf("stored is_blocked for %s is still 1 after bd recompute-blocked", edgeless.ID)
+		}
+	})
+}
+
+// TestEmbeddedReadyEmptyStateMessage pins plain `bd ready`'s empty state: the
+// "all issues have blocking dependencies" claim used to print whenever any
+// issue was open or in progress, though nothing was blocked (GH#3268). It is
+// now made only when bd blocked lists an issue the listing would show;
+// otherwise the message points at bd list and at the stale-flag repair.
+func TestEmbeddedReadyEmptyStateMessage(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	const claim = "all issues have blocking dependencies"
+
+	assertNeutral := func(t *testing.T, out string) {
+		t.Helper()
+		if !strings.Contains(out, "No ready work found") {
+			t.Errorf("expected 'No ready work found':\n%s", out)
+		}
+		if strings.Contains(out, claim) {
+			t.Errorf("nothing is blocked, yet bd ready claims %q:\n%s", claim, out)
+		}
+		if !strings.Contains(out, "bd recompute-blocked") {
+			t.Errorf("expected the stale-flag repair hint naming bd recompute-blocked:\n%s", out)
+		}
+	}
+
+	dir, _, _ := bdInit(t, bd, "--prefix", "re")
+	wip := bdCreate(t, bd, dir, "Only in-progress issue", "--type", "task")
+	bdRunOK(t, bd, dir, "update", wip.ID, "--status", "in_progress")
+
+	t.Run("only_an_in_progress_issue", func(t *testing.T) {
+		assertNeutral(t, bdRunOK(t, bd, dir, "ready"))
+	})
+
+	t.Run("label_matches_no_open_issue", func(t *testing.T) {
+		bdCreate(t, bd, dir, "Open but unlabelled", "--type", "task")
+		assertNeutral(t, bdRunOK(t, bd, dir, "ready", "--label", "nomatch"))
+	})
+}
+
+// TestEmbeddedReadyEmptyStateRealBlocker pins that a workspace whose only
+// open issue is blocked by an in-progress one keeps the exact blocking-claim
+// line (GH#3268): bd blocked lists the issue, so the claim is true. It also
+// pins that the claim follows the listing: a row cap does not hide the blocked
+// issues from it, and a blocked issue the listing would not show anyway
+// (another assignee's, a deferred one) does not support it.
+func TestEmbeddedReadyEmptyStateRealBlocker(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rb")
+	blocker := bdCreate(t, bd, dir, "In-progress blocker", "--type", "task")
+	blocked := bdCreate(t, bd, dir, "Open issue blocked by it", "--type", "task")
+	bdRunOK(t, bd, dir, "dep", "add", blocked.ID, blocker.ID)
+	bdRunOK(t, bd, dir, "update", blocker.ID, "--status", "in_progress")
+
+	const (
+		claimLine   = "No ready work found (all issues have blocking dependencies)"
+		noneBlocked = "Nothing bd ready would list is blocked by an open dependency"
+	)
+	out := bdRunOK(t, bd, dir, "ready")
+	if !strings.Contains(out, claimLine) {
+		t.Errorf("expected the exact blocking-claim line:\n%s", out)
+	}
+	if strings.Contains(out, "bd recompute-blocked") {
+		t.Errorf("a real blocker must not get the stale-flag hint:\n%s", out)
+	}
+
+	// The blocked read used to take the listing's row cap: with more blocked
+	// issues than the cap it was refused, and the empty state then said that
+	// nothing was blocked.
+	t.Run("row_cap_below_the_blocked_count", func(t *testing.T) {
+		for _, title := range []string{"Second blocked issue", "Third blocked issue"} {
+			more := bdCreate(t, bd, dir, title, "--type", "task")
+			bdRunOK(t, bd, dir, "dep", "add", more.ID, blocker.ID)
+		}
+		if out := bdRunOK(t, bd, dir, "ready", "--max-rows", "2"); !strings.Contains(out, claimLine) {
+			t.Errorf("bd ready --max-rows 2 over three blocked issues lost the blocking claim:\n%s", out)
+		}
+	})
+
+	// Only an issue the listing would show supports the claim. Every blocked
+	// issue here is unassigned, and alice's one issue is in progress.
+	t.Run("another_assignees_blocked_issues", func(t *testing.T) {
+		bdRunOK(t, bd, dir, "update", blocker.ID, "--assignee", "alice")
+		out := bdRunOK(t, bd, dir, "ready", "--assignee", "alice")
+		if strings.Contains(out, claimLine) {
+			t.Errorf("alice has no blocked issue, yet the listing claims blocking dependencies:\n%s", out)
+		}
+		if !strings.Contains(out, noneBlocked) {
+			t.Errorf("expected %q:\n%s", noneBlocked, out)
+		}
+	})
+
+	// A deferred issue is out of the listing whatever its blockers.
+	t.Run("deferred_blocked_issue", func(t *testing.T) {
+		later := bdCreate(t, bd, dir, "Deferred and blocked", "--type", "task", "--label", "rb-later", "--defer", "+24h")
+		bdRunOK(t, bd, dir, "dep", "add", later.ID, blocker.ID)
+		out := bdRunOK(t, bd, dir, "ready", "--label", "rb-later")
+		if strings.Contains(out, claimLine) {
+			t.Errorf("the only blocked issue in scope is deferred, yet the listing claims blocking dependencies:\n%s", out)
+		}
+		if !strings.Contains(out, noneBlocked) {
+			t.Errorf("expected %q:\n%s", noneBlocked, out)
+		}
+	})
 }

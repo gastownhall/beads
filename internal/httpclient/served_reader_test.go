@@ -22,24 +22,24 @@ import (
 // survives the JSON round trip. The seed handles are the reference store's, so
 // a filter this client dropped answers with rows no case seeded.
 //
-// WHAT IS PARKED, and it is one cause with many names: `ListRequest.IDFilter`
-// is the scoping tool almost every List case reaches for, and listIssues
-// publishes no id parameter (E-ListRequest.IDFilter). Refusing it is correct —
-// dropping it would answer about the whole workspace — but a case that scopes
-// itself with it cannot run over this wire at all. Each parked case names the
-// field that refused, and the refusal ITSELF is asserted below in
-// TestServedReaderRefusesTheFiltersTheWireCannotCarry, so the parking never
-// stands in for an unpinned behaviour.
+// WHAT IS PARKED: `ListRequest.IDFilter` is the scoping tool almost every List
+// case reaches for, and until S15b listIssues published no id parameter, so
+// those cases parked on E-ListRequest.IDFilter. It now rides `id` behind
+// issues.list.ids, which this in-process server serves, and they run as
+// written. What still parks is a case whose SUBJECT (or one arm) is a member
+// the wire refuses — Offset, ReadyFlag, SkipCounts — and each names that
+// member's row. PinnedFlag, ExcludeTypes and WispType retired from this list
+// with issues.list.filters, which this in-process server also serves. The refusals THEMSELVES are
+// asserted in TestServedReaderRefusesTheFiltersTheWireCannotCarry, so the
+// parking never stands in for an unpinned behaviour.
 
 // readParkBead is the bead every READ-side park cites, and it is a different
 // constant from the write side's parkBead because it is a different decision
 // with a different retirement.
 //
 // The write parks retire when the wire grows the members it deliberately
-// withholds, or never. These retire when the wire grows a way to SCOPE a
-// listing by id — the upstream ask D8 row 1 records alongside the `sort`
-// parameter — at which point almost all of them go at once. Folding the two
-// into one constant would have said they move together, which they do not.
+// withholds, or never. These retire one member at a time as the wire grows a
+// parameter for it; the id scope that held most of them retired with S15b.
 const readParkBead = "ga-pcwtq"
 
 func servedReaderFixture(t *testing.T, name string) conformance.ReaderFixture {
@@ -54,6 +54,7 @@ func servedReaderFixture(t *testing.T, name string) conformance.ReaderFixture {
 		CreateWisp:    c.seedIssue,
 		AddDependency: c.seedDependency,
 		AddComment:    c.seedComment,
+		PromoteWisp:   c.seedPromotion,
 	}
 }
 
@@ -126,37 +127,28 @@ func TestServedReaderReadySetOwnsItsStatusPinnedAndTemplateDecisions(t *testing.
 }
 
 func TestServedReaderOffsetSkipsTheRowsBeforeThePage(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the List arm scopes itself with IDFilter, which listIssues publishes no parameter for; the Offset "+
-			"refusal this wire answers with instead is pinned by TestServedReaderRefusesTheFiltersTheWireCannotCarry")
+	skipKnownDivergence(t, "E-ListRequest.Offset", readParkBead,
+		"the case's subject is Offset, which neither listIssues nor listReadyWork publishes (its id scope now "+
+			"rides `id`); the Offset refusal this wire answers with instead is pinned by "+
+			"TestServedReaderRefusesTheFiltersTheWireCannotCarry")
 	conformance.RunReaderOffsetSkipsTheRowsBeforeThePage(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// The two pinned-flag arms ride `pinned` / `no_pinned` behind
+// issues.list.filters, so the case runs as written.
 func TestServedReaderListDefaultExclusionsAndTheirOverrides(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"every arm scopes itself with IDFilter, and two of them additionally set PinnedFlag/NoPinnedFlag, "+
-			"which listIssues publishes no parameters for")
 	conformance.RunReaderListDefaultExclusionsAndTheirOverrides(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
 func TestServedReaderListRejectsATypeOutsideTheWorkspaceVocabulary(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the built-in-type arm scopes itself with IDFilter; the vocabulary refusal itself is served (the "+
-			"server validates against its own authoritative vocabulary, which is what heals L7 for this query)")
 	conformance.RunReaderListRejectsATypeOutsideTheWorkspaceVocabulary(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
 func TestServedReaderListNaturalNumericIDSortTrimsAfterTheFetch(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with IDFilter; the natural-numeric order it pins is exercised over this wire "+
-			"by TestServedReaderListAppliesTheClientSideDisplayOrder")
 	conformance.RunReaderListNaturalNumericIDSortTrimsAfterTheFetch(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
 func TestServedReaderListKeysetPositionResumesTheCreatedDescIDAscOrder(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with IDFilter; the skip-forward walk it pins is exercised over this wire by "+
-			"TestServedReaderListKeysetPositionSkipsForward, which is the same assertion under a label scope")
 	conformance.RunReaderListKeysetPositionResumesTheCreatedDescIDAscOrder(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
@@ -175,15 +167,20 @@ func TestServedReaderListReadyFlagRefusesAFilterItCannotCarry(t *testing.T) {
 }
 
 func TestServedReaderListEmptyPageIsWellFormed(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the List arm scopes itself with IDFilter; the empty-page shape is pinned over this wire by "+
-			"TestServedReaderListEmptyPageIsWellFormedUnderALabelScope")
 	conformance.RunReaderListEmptyPageIsWellFormed(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// TestServedReaderListQueryMatchesTheTitleOrTheID runs the search-text case as
+// written: it scopes itself with a label, and Query rides listIssues' `q`
+// parameter behind issues.list.search, which this in-process server serves.
+func TestServedReaderListQueryMatchesTheTitleOrTheID(t *testing.T) {
+	conformance.RunReaderListQueryMatchesTheTitleOrTheID(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
 func TestServedReaderListMaxRowsIsHonored(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with IDFilter; the cap it pins is honored over this wire and exercised by "+
+	skipKnownDivergence(t, "E-ListRequest.Offset", readParkBead,
+		"one arm drives the cap behind an Offset, which listIssues publishes no parameter for (its id scope "+
+			"now rides `id`); the cap is honored over this wire and exercised by "+
 			"TestServedReaderListMaxRowsBoundsWireRowsFetched")
 	conformance.RunReaderListMaxRowsIsHonored(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
@@ -192,14 +189,11 @@ func TestServedReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t *testin
 	skipKnownDivergence(t, "E-ListRequest.SkipCounts", readParkBead,
 		"the knob is DROPPED rather than refused (the wire hydrates the three cardinalities either way, and "+
 			"every text rendering of `bd list` sets it, so refusing would kill the default listing over http); "+
-			"the case additionally scopes itself with IDFilter")
+			"its id scope rides `id` (issues.list.ids)")
 	conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
 func TestServedReaderListLimitBoundaryUnderASortTheDatabaseCanExpress(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with IDFilter; the limit boundary under created order is pinned over this "+
-			"wire by TestServedReaderListLimitBoundaryUnderALabelScope")
 	conformance.RunReaderListLimitBoundaryUnderASortTheDatabaseCanExpress(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
@@ -210,105 +204,75 @@ func TestServedReaderListReadyFlagCarriesTheAssigneeAndPriorityFilters(t *testin
 }
 
 // TestServedReaderListIncludeEphemeralMergesThePlanesIntoOneOrder is the plane
-// contract client wave ga-mijra brought into range, and it parks for the same
-// reason every List case here parks: it scopes itself with IDFilter, which
-// listIssues publishes no parameter for.
-//
-// The behavior it asserts is pinned by
-// TestServedReaderListIncludeEphemeralMergesThePlanesUnderALabelScope, which is
-// the same fixture — alternating planes, every Limit cut, the keyset walk —
-// with the id scope swapped for a label one, plus the plane-identity assertion
+// contract client wave ga-mijra brought into range. It scopes itself with
+// IDFilter, which rides listIssues' `id` behind issues.list.ids (S15b), so it
+// runs as written; TestServedReaderListIncludeEphemeralMergesThePlanesUnderALabelScope
+// is the same fixture under a label scope, plus the plane-identity assertion
 // the contract does not make.
 func TestServedReaderListIncludeEphemeralMergesThePlanesIntoOneOrder(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with ListRequest.IDFilter and listIssues publishes no id parameter; "+
-			"the merged-plane order, the Limit cuts and the keyset walk are asserted under a label scope by "+
-			"TestServedReaderListIncludeEphemeralMergesThePlanesUnderALabelScope")
 	conformance.RunReaderListIncludeEphemeralMergesThePlanesIntoOneOrder(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
-// The FIVE remaining List parks, each named so the wiring lock counts the
-// contract as accounted for rather than merely absent, and each deleted in one
-// line the day its row retires.
-//
-// Three of them park on the id scope alone, which is this family's one cause.
-// The other two would park even under a label scope, because their SUBJECT is a
-// member the wire refuses — so each names that member instead.
+// The id-scoped List cases that parked on E-ListRequest.IDFilter until S15b
+// put `id` on listIssues (issues.list.ids). They run as written now; the one
+// below them that still parks does so because its SUBJECT is Offset, a member
+// the wire refuses.
 
 func TestServedReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with IDFilter; the blocks-only rule it pins is exercised over this wire by "+
-			"the cardinality assertions in TestServedReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded, "+
-			"whose `family` row carries a parent-child and a relates-to edge and still reports zero dependencies")
 	conformance.RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
 func TestServedReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with IDFilter — its shadow rows share every timestamp with the scoped ones "+
-			"and are excluded by the id set ALONE, which is the whole mechanism by which a widened position "+
-			"is caught, so a label scope would not stand in for it")
 	conformance.RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
 func TestServedReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with IDFilter; the keyset walk it pins is exercised over this wire by "+
-			"TestServedReaderListKeysetPositionSkipsForward and by TestServedReaderListWalksMultiplePages, "+
-			"both under a label scope")
 	conformance.RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
-// The priority-order walk parks on the same row as the created-order one
-// above, with a narrower stand-in beside it: the sort=priority pushdown is
-// pinned under a label scope by TestServedReaderListFallsBackToTheWalkWithoutTheCapability,
-// and resuming a priority keyset position — the pager's keysetFilter
-// (list_walk.go) deciding priority first and the (created_at, id) pair only at
-// the position's own priority — by TestServedReaderListPriorityKeysetPositionResumesThePriorityOrder.
-// What neither covers is the WALK this case drives page after page over an
-// oversized equal-key run, which stays unexercised over this wire until
-// IDFilter (or a label-scoped rewrite) lets it run.
+// The priority-order walk over an oversized equal-key run, page after page:
+// the sort=priority pushdown (TestServedReaderListFallsBackToTheWalkWithoutTheCapability)
+// and one resumed priority keyset position
+// (TestServedReaderListPriorityKeysetPositionResumesThePriorityOrder) do not
+// cover the WALK, which this id-scoped case drives now that `id` is served.
 func TestServedReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with IDFilter, which listIssues publishes no parameter for, so its one-shot "+
-			"read is refused before the walk begins; the sort=priority pushdown is pinned under a label scope by "+
-			"TestServedReaderListFallsBackToTheWalkWithoutTheCapability, and one resumed priority keyset position by "+
-			"TestServedReaderListPriorityKeysetPositionResumesThePriorityOrder")
 	conformance.RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
-// TestServedReaderListMaxRowsBoundaryIsLimitPlusOffset names OFFSET rather than
-// the id scope it also carries, because Offset is the one this case could not
-// be rewritten around: the whole point is to drive the cap along the OFFSET
+// TestServedReaderListMaxRowsBoundaryIsLimitPlusOffset parks on OFFSET: the
+// whole point is to drive the cap along the OFFSET
 // axis with the limit held still, and listIssues publishes no offset parameter.
 // The LIMIT axis of the same boundary runs over this wire in
 // TestServedReaderListMaxRowsBoundsWireRowsFetched.
 func TestServedReaderListMaxRowsBoundaryIsLimitPlusOffset(t *testing.T) {
 	skipKnownDivergence(t, "E-ListRequest.Offset", readParkBead,
-		"the case moves the cap along the Offset axis, and listIssues publishes no offset parameter (it "+
-			"scopes itself with IDFilter besides); the cap's Limit axis is driven over this wire by "+
+		"the case moves the cap along the Offset axis, and listIssues publishes no offset parameter; "+
+			"the cap's Limit axis is driven over this wire by "+
 			"TestServedReaderListMaxRowsBoundsWireRowsFetched")
 	conformance.RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
-// TestServedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt
-// names WISPTYPE for the same reason: the classification predicate IS the
-// subject, and listIssues publishes no parameter for it, so no rescoping saves
-// the case. The plane knob it composes against — IncludeEphemeral — is served,
-// and its own half is asserted by
-// TestServedReaderListIncludeEphemeralMergesThePlanesUnderALabelScope.
+// TestServedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt runs
+// as written: the classification predicate rides `wisp_type` behind
+// issues.list.filters beside the served IncludeEphemeral plane knob.
 func TestServedReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.WispType", readParkBead,
-		"the wisp classification predicate is the case's subject and listIssues publishes no parameter for "+
-			"it; the client refuses it rather than answering the whole admitted plane, which is the reading "+
-			"the case exists to rule out")
 	conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// The list filter families behind issues.list.filters, run through the
+// client's encoder and the server's decode: the eight time bounds at their
+// exact boundaries (whole-second, strict, NULL never matching, an offset bound
+// equal to its UTC twin) and one included and one excluded row per remaining
+// family.
+func TestServedReaderListTimeBoundsAreStrictAndWholeSecond(t *testing.T) {
+	conformance.RunReaderListTimeBoundsAreStrictAndWholeSecond(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
+func TestServedReaderListFilterFamiliesNarrowToTheirRows(t *testing.T) {
+	conformance.RunReaderListFilterFamiliesNarrowToTheirRows(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
 func TestServedReaderListStatusAcceptsACommaSeparatedORSet(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with IDFilter; the OR set it pins is exercised over this wire by "+
-			"TestServedReaderListStatusORSetUnderALabelScope, which drives the same three status shapes")
 	conformance.RunReaderListStatusAcceptsACommaSeparatedORSet(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
@@ -329,18 +293,10 @@ func TestServedReaderListStatusAcceptsACommaSeparatedORSet(t *testing.T) {
 // their rows through one function. TestBriefListingsStampTheProjectionMarker
 // asserts that door-by-door; these assert what a projected row must contain.
 
-// TestServedReaderListBriefDropsTheFreeFormTextAndNothingElse parks for the
-// reason every List case here parks — it scopes itself with IDFilter, and
-// listIssues publishes no id parameter — NOT for anything about the projection.
-//
-// The projection half is asserted over this wire by the ready sibling below,
-// which drives the identical assertReaderBriefRow through the same encoder and
-// the same row lift, under a label scope instead of an id one.
+// TestServedReaderListBriefDropsTheFreeFormTextAndNothingElse scopes itself
+// with IDFilter, which rides `id` (issues.list.ids), and the ready sibling below
+// drives the identical assertReaderBriefRow under a label scope.
 func TestServedReaderListBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the case scopes itself with IDFilter; the projection it pins — the six heavy columns empty, the "+
-			"identity fields and the three cardinalities intact, and IsLitePartial set — is asserted over this "+
-			"wire by TestServedReaderReadyBriefDropsTheFreeFormTextAndNothingElse under a label scope")
 	conformance.RunReaderListBriefDropsTheFreeFormTextAndNothingElse(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
@@ -433,9 +389,58 @@ func TestServedReaderGetPopulatesRowVersionForAGuardedWrite(t *testing.T) {
 	}
 }
 
+// The List leg sets ExcludeTypes, which rides `exclude_type` behind
+// issues.list.filters, so the case runs as written.
 func TestServedReaderDoesNotMutateTheCallerRequest(t *testing.T) {
-	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
-		"the List leg of the tripwire scopes itself with IDFilter; the promise is exercised over this wire "+
-			"by TestServedReaderDoesNotMutateTheCallerRequestOverTheWire")
 	conformance.RunReaderDoesNotMutateTheCallerRequest(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
+// TestServedReaderListExcludeStatusAcceptsAWorkspaceCustomStatus is the
+// served twin of the count's custom-status pin: ListRequest.ExcludeStatus is
+// validated against the SERVER workspace's own statuses (status.custom), so a
+// custom status is accepted and applied over the wire, and a name in no
+// vocabulary is still refused. A leg test rather than a conformance case
+// because ReaderFixture has no way to configure a workspace custom status.
+func TestServedReaderListExcludeStatusAcceptsAWorkspaceCustomStatus(t *testing.T) {
+	e := newServedEnv(t, "lcs")
+	ctx := t.Context()
+	if err := e.setConfig(ctx, "status.custom", "review,qa"); err != nil {
+		t.Fatalf("SetConfig(status.custom): %v", err)
+	}
+	const openID, reviewID = "lcs-open", "lcs-review"
+	for _, id := range []string{openID, reviewID} {
+		if err := e.createIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	if err := e.reference.UpdateIssue(ctx, reviewID, map[string]interface{}{"status": types.Status("review")}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(%s) to review: %v", reviewID, err)
+	}
+	reader, err := e.subject.IssueReader()
+	if err != nil {
+		t.Fatalf("IssueReader(): %v", err)
+	}
+
+	scope := issueops.ListRequest{IDFilter: openID + "," + reviewID}
+	page, err := reader.List(ctx, scope)
+	if err != nil {
+		t.Fatalf("List(unfiltered): %v", err)
+	}
+	if got := pageIDs(page); len(got) != 2 {
+		t.Fatalf("List(unfiltered) = %v, want both rows (a custom status with no category is not a default exclusion)", got)
+	}
+
+	scope.ExcludeStatus = []string{"review"}
+	page, err = reader.List(ctx, scope)
+	if err != nil {
+		t.Fatalf("List(ExcludeStatus=review): %v, want the custom status accepted", err)
+	}
+	if got := pageIDs(page); len(got) != 1 || got[0] != openID {
+		t.Fatalf("List(ExcludeStatus=review) = %v, want [%s]", got, openID)
+	}
+
+	scope.ExcludeStatus = []string{"reveiw"}
+	if _, err := reader.List(ctx, scope); err == nil {
+		t.Fatal("List(ExcludeStatus=reveiw) answered instead of refusing a status in no vocabulary")
+	}
 }

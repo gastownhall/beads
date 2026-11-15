@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
@@ -28,6 +29,7 @@ var (
 	dbProxyChildExternalSocketPath string
 	dbProxyChildExternalKeepAlive  time.Duration
 	dbProxyChildStopEpoch          string
+	dbProxyChildRotateLogPath      bool
 )
 
 var dbProxyChildCmd = &cobra.Command{
@@ -60,13 +62,7 @@ not intended to be invoked directly by users.`,
 		}
 		defer func() { _ = srv.Stop(context.Background()) }()
 
-		p := proxy.NewProxyServer(proxy.ProxyOpts{
-			RootDir:     dbProxyChildRoot,
-			Port:        dbProxyChildPort,
-			IdleTimeout: dbProxyChildIdleTimeout,
-			Server:      srv,
-			StopEpoch:   dbProxyChildStopEpoch,
-		})
+		p := proxy.NewProxyServer(dbProxyChildProxyOpts(srv))
 		if err := p.ListenAndServe(cmd.Context()); err != nil {
 			if errors.Is(err, proxy.ErrLockHeld) {
 				return &exitError{Code: proxy.LockHeldExitCode}
@@ -77,6 +73,31 @@ not intended to be invoked directly by users.`,
 	},
 }
 
+// dbProxyChildProxyOpts builds the child's proxy options from its flags.
+func dbProxyChildProxyOpts(srv server.DatabaseServer) proxy.ProxyOpts {
+	return proxy.ProxyOpts{
+		RootDir:     dbProxyChildRoot,
+		Port:        dbProxyChildPort,
+		IdleTimeout: dbProxyChildIdleTimeout,
+		Server:      srv,
+		StopEpoch:   dbProxyChildStopEpoch,
+		// The child inherits BD_DEBUG from the spawning bd; its
+		// PersistentPreRun is a no-op, so --verbose never reaches it.
+		TraceConnections: debug.Enabled(),
+		ServerLogPath:    dbProxyChildServerLogPath(),
+	}
+}
+
+// dbProxyChildServerLogPath is the server log the running proxy bounds: the
+// --logpath the spawning bd marked as its own with --rotate-logpath, never
+// an operator's log.
+func dbProxyChildServerLogPath() string {
+	if !dbProxyChildRotateLogPath {
+		return ""
+	}
+	return dbProxyChildLogPath
+}
+
 func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, doltBin, database string, external configfile.ExternalDoltConfig) (server.DatabaseServer, error) {
 	switch backend {
 	case proxy.BackendLocalServer:
@@ -84,6 +105,7 @@ func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, dolt
 		if err != nil {
 			return nil, err
 		}
+		s.SetConfigValidator(validateManagedServerConfigPolicy)
 		// A Beads-generated config's port was picked before dolt binds it;
 		// if another process got there first, run on a free port instead.
 		s.SetPortConflictPolicy(managedPortConflictPolicy)
@@ -104,6 +126,7 @@ func init() {
 		"backend kind: "+strings.Join(proxy.KnownBackendNames(), " | "))
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildConfig, "config", "", "path to backend server config (e.g. dolt sql-server YAML)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildLogPath, "logpath", "", "path the backend server should write its stdout/stderr to")
+	dbProxyChildCmd.Flags().BoolVar(&dbProxyChildRotateLogPath, "rotate-logpath", false, "bound --logpath's size while running (set only for a log bd owns)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildDoltBin, "dolt-bin", "", "path to the dolt executable")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildDatabase, "database", "", "database to select when running shutdown maintenance (local-server backend)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalHost, "external-host", "", "external backend: hostname or IP of the dolt sql-server")

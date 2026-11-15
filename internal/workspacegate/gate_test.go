@@ -322,6 +322,184 @@ func TestExclusiveHolderDoesNotDisturbSharedAcquirers(t *testing.T) {
 	<-done
 }
 
+// A ReadOnly shared acquisition on a workspace that has never been gated must
+// succeed and create nothing: an absent gate file means nothing has ever been
+// gated here (the reading ExclusiveHolder already uses), so there is no holder
+// to observe and nothing to hold. This is what lets a strict --readonly
+// command stay mutation-free.
+func TestReadOnlySharedAcquireCreatesNothing(t *testing.T) {
+	g, dir := testGate(t)
+
+	h, err := g.Acquire(context.Background(), Shared, Options{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("ReadOnly shared Acquire on a never-gated workspace: %v, want success (nothing to hold)", err)
+	}
+	for i := 1; i <= 2; i++ {
+		if err := h.Release(); err != nil {
+			t.Fatalf("Release #%d of the ReadOnly handle: %v", i, err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created []string
+	for _, e := range entries {
+		created = append(created, e.Name())
+	}
+	if len(created) != 0 {
+		t.Fatalf("ReadOnly Acquire created %v in %s, want nothing", created, dir)
+	}
+}
+
+// Against a gate file that already exists, a ReadOnly shared acquisition is a
+// real shared hold — it coexists with other shared holders, is refused by a
+// live exclusive holder, and keeps an exclusive acquirer out until released.
+// Dropping the create must not make strict readonly commands invisible to
+// maintenance.
+func TestReadOnlySharedAcquireHoldsExistingGate(t *testing.T) {
+	g, _ := testGate(t)
+	// Materialize the gate file once, as any workspace that has run bd has.
+	h0 := mustAcquire(t, g, Shared, Options{})
+	_ = h0.Release()
+
+	h := mustAcquire(t, g, Shared, Options{ReadOnly: true})
+	other := mustAcquire(t, g, Shared, Options{})
+	_ = other.Release()
+	if _, err := g.Acquire(context.Background(), Exclusive, Options{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("exclusive under a ReadOnly shared holder: err = %v, want ErrBusy", err)
+	}
+	if err := h.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+
+	hEx := mustAcquire(t, g, Exclusive, Options{Reason: "after the ReadOnly holder left"})
+	defer hEx.Release()
+	if _, err := g.Acquire(context.Background(), Shared, Options{ReadOnly: true}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("ReadOnly shared under an exclusive holder: err = %v, want ErrBusy", err)
+	}
+}
+
+// The gate file is opened O_RDONLY, not merely without O_CREATE: a strict
+// readonly command in a sandbox whose gate file it cannot write must still be
+// able to hold it (flock does not need a writable descriptor).
+func TestReadOnlySharedAcquireNeedsNoWriteAccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits do not gate opens on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permission bits")
+	}
+	g, _ := testGate(t)
+	h0 := mustAcquire(t, g, Shared, Options{})
+	_ = h0.Release()
+	if err := os.Chmod(g.Path(), 0o400); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := g.Acquire(context.Background(), Shared, Options{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("ReadOnly shared Acquire on a read-only gate file: %v, want success", err)
+	}
+	_ = h.Release()
+}
+
+// ReadOnly applies to shared acquisition only: an exclusive acquirer has to be
+// able to create the gate file it locks, so the option cannot suppress that.
+func TestReadOnlyOptionIgnoredForExclusive(t *testing.T) {
+	g, _ := testGate(t)
+
+	h, err := g.Acquire(context.Background(), Exclusive, Options{ReadOnly: true, Reason: "readonly is ignored"})
+	if err != nil {
+		t.Fatalf("exclusive Acquire with ReadOnly set: %v", err)
+	}
+	defer h.Release()
+	if _, err := os.Stat(g.Path()); err != nil {
+		t.Fatalf("exclusive Acquire must create the gate file it locks: %v", err)
+	}
+	if _, err := g.Acquire(context.Background(), Shared, Options{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("shared under that exclusive holder: err = %v, want ErrBusy", err)
+	}
+}
+
+// AcquireAll passes the option to every gate: gates whose file exists are held
+// shared, gates whose file does not are skipped and stay absent — for the
+// workspace gate beside .beads and the physical-root gate inside it alike.
+func TestAcquireAllReadOnlySkipsAbsentGates(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := ForWorkspace(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := ForPhysicalRoot(filepath.Join(beadsDir, "embeddeddolt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the workspace gate has ever been used.
+	h0 := mustAcquire(t, ws, Shared, Options{})
+	_ = h0.Release()
+
+	m, err := AcquireAll(context.Background(), Shared, Options{ReadOnly: true}, ws, root)
+	if err != nil {
+		t.Fatalf("AcquireAll with ReadOnly over an existing and an absent gate: %v", err)
+	}
+	if _, err := ws.Acquire(context.Background(), Exclusive, Options{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("exclusive on the existing workspace gate under AcquireAll: err = %v, want ErrBusy", err)
+	}
+	if err := m.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, err := os.Lstat(root.Path()); !os.IsNotExist(err) {
+		t.Fatalf("AcquireAll with ReadOnly created the absent physical-root gate %s (stat err: %v)", root.Path(), err)
+	}
+}
+
+// Empty separates a ReadOnly acquisition that locked nothing from a real
+// hold: callers use it to decide whether there is a hold to tell anyone about.
+// One gate file that exists makes the whole set a real hold.
+func TestEmptyReportsWhetherAnythingIsLocked(t *testing.T) {
+	never, _ := testGate(t) // never gated: its file stays absent
+	used, _ := testGate(t)  // gated once, below
+	readOnly := Options{ReadOnly: true}
+
+	if !(*Handle)(nil).Empty() || !(*MultiHandle)(nil).Empty() {
+		t.Fatal("a nil handle must report Empty")
+	}
+	absent, err := AcquireAll(context.Background(), Shared, readOnly, never, used)
+	if err != nil {
+		t.Fatalf("ReadOnly AcquireAll over two absent gates: %v", err)
+	}
+	if !absent.Empty() {
+		t.Fatal("ReadOnly AcquireAll over two absent gates reported a hold, want Empty")
+	}
+	_ = absent.Release()
+
+	h0 := mustAcquire(t, used, Shared, Options{})
+	if h0.Empty() {
+		t.Fatal("a plain shared acquisition reported Empty")
+	}
+	_ = h0.Release()
+	if h0.Empty() {
+		t.Fatal("Release changed Empty; it reports the acquisition, not the current state")
+	}
+
+	partial, err := AcquireAll(context.Background(), Shared, readOnly, never, used)
+	if err != nil {
+		t.Fatalf("ReadOnly AcquireAll over an absent and an existing gate: %v", err)
+	}
+	defer partial.Release()
+	if partial.Empty() {
+		t.Fatal("ReadOnly AcquireAll holding the existing gate reported Empty")
+	}
+	if _, err := os.Lstat(never.Path()); !os.IsNotExist(err) {
+		t.Fatalf("the absent gate %s must stay absent (stat err: %v)", never.Path(), err)
+	}
+}
+
 // A cancelled context must surface as the context error even in
 // fail-fast mode (Wait == 0), so callers can tell shutdown from
 // contention.

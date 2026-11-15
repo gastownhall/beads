@@ -29,6 +29,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
@@ -92,6 +93,24 @@ func isolateBeadsDirForTest(t *testing.T) {
 	t.Setenv("BEADS_DIR", "")
 }
 
+func setupEndpointTrustWorkspaceForTest(t *testing.T) {
+	t.Helper()
+	isolateBeadsDirForTest(t)
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+	// An earlier in-process command may have recorded another workspace.
+	config.RecordWorkspaceBeadsDir(beadsDir)
+}
+
 // initConfigForTest initializes viper config for a test and ensures cleanup.
 // main.go's init() calls config.Initialize() which picks up the real .beads/config.yaml.
 // TestMain resets viper, but any test calling config.Initialize() re-loads the real config.
@@ -116,6 +135,32 @@ func initConfigForTest(t *testing.T) {
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
 	}
+	t.Cleanup(config.ResetForTesting)
+}
+
+// clonePortTestEnv clears every variable that names a Dolt server endpoint,
+// its credentials or the mode, isolates HOME (the shared-server directory,
+// user config and credentials file live there) and resets the config package,
+// so only what a test writes chooses the endpoint.
+func clonePortTestEnv(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, "shared-server"))
+	for _, name := range []string{
+		"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_SOCKET",
+		"BEADS_DOLT_DATA_DIR", "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_SERVER_TLS", "BEADS_DOLT_PASSWORD", "BEADS_CREDENTIALS_FILE",
+		// Config reports these as dolt.port, dolt.shared-server, dolt.host and
+		// dolt.mode.
+		"BD_DOLT_PORT", "BD_DOLT_SHARED_SERVER", "BD_DOLT_HOST", "BD_DOLT_MODE",
+	} {
+		t.Setenv(name, "")
+	}
+	config.ResetForTesting()
 	t.Cleanup(config.ResetForTesting)
 }
 
@@ -214,6 +259,26 @@ func runCommandInDirWithOutput(dir string, name string, args ...string) (string,
 		return "", err
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// runCommandBuffers runs cmd and returns its stdout and stderr apart.
+func runCommandBuffers(t *testing.T, cmd *exec.Cmd) (stdout, stderr bytes.Buffer, err error) {
+	t.Helper()
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	return stdout, stderr, err
+}
+
+// firstLineWithPrefix returns the first line of s that starts with prefix
+// once trimmed, itself trimmed, or "" when no line does.
+func firstLineWithPrefix(s, prefix string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
 }
 
 // testEnvNoPrompt returns the current environment with git auth prompts
@@ -440,12 +505,21 @@ func buildBDForInitTests(t *testing.T) string {
 
 // runGitForBootstrapTest runs a git subcommand in the given directory and
 // fails the test on error. Used by bootstrap and init-safety subprocess tests.
+//
+// An empty dir never inherits the test process cwd: that cwd is this package's
+// directory inside this checkout, so a cwd-resolved git write (config, init)
+// lands in the checkout's own .git — the r880 host .git/config clobber
+// (wy-qlvlmf). Callers that pass "" operate on absolute paths in args and get
+// a neutral scratch cwd instead. The env scrub keeps a leaked GIT_DIR /
+// GIT_WORK_TREE from routing the command at some other repository.
 func runGitForBootstrapTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := gitCommand(args...)
-	if dir != "" {
-		cmd.Dir = dir
+	if dir == "" {
+		dir = t.TempDir()
 	}
+	cmd.Dir = dir
+	cmd.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
@@ -459,9 +533,15 @@ func runGitForBootstrapTest(t *testing.T, dir string, args ...string) {
 // This lives in the pure-Go helper file, not alongside the embedded-Dolt
 // helpers: cmd/bd/where_test.go carries no build tag, so it compiles under
 // CGO_ENABLED=0 where every `//go:build cgo` file is excluded. Keep this
-// helper stdlib-only and keep it here.
+// helper free of cgo-only dependencies and keep it here.
 func initGitRepoAt(t *testing.T, dir string) {
 	t.Helper()
+	if dir == "" {
+		// cmd.Dir = "" inherits the test process cwd — this checkout's own
+		// package dir — so the init and configs would hit the host .git
+		// (the r880 clobber class, wy-qlvlmf).
+		t.Fatal("initGitRepoAt: empty dir would run git against the host checkout")
+	}
 	for _, args := range [][]string{
 		{"init"},
 		{"config", "user.email", "test@test.com"},
@@ -471,8 +551,84 @@ func initGitRepoAt(t *testing.T, dir string) {
 	} {
 		cmd := gitCommand(args...)
 		cmd.Dir = dir
+		cmd.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
 		}
 	}
+}
+
+// snapshotBootstrapEnv saves all BD_/BEADS_-prefixed env vars, clears them,
+// and registers a t.Cleanup to restore them. It restores via t.Cleanup
+// (rather than returning a function for the caller to defer) because
+// t.Cleanup callbacks only start running after the test function's own
+// regular defers have all completed. Tests using this helper commonly call
+// t.Setenv("BEADS_DIR", ...) / t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", ...)
+// afterward; t.Setenv captures its "restore to" value at call time, which
+// would be the already-wiped (absent) state. If this helper's own
+// restoration ran via a caller-deferred function, it would run before those
+// t.Setenv cleanups fire and its correct restoration would be clobbered by
+// them, permanently leaking the wipe forward into later tests in the same
+// binary. Registering via t.Cleanup here instead makes this the
+// first-registered (and thus, by t.Cleanup's LIFO order, last-run) cleanup,
+// so it always has the final word.
+func snapshotBootstrapEnv(t *testing.T) {
+	t.Helper()
+	saved := make(map[string]string)
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
+			parts := strings.SplitN(env, "=", 2)
+			key := parts[0]
+			saved[key] = os.Getenv(key)
+			_ = os.Unsetenv(key)
+		}
+	}
+	t.Cleanup(func() {
+		for _, env := range os.Environ() {
+			if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
+				parts := strings.SplitN(env, "=", 2)
+				_ = os.Unsetenv(parts[0])
+			}
+		}
+		for key, val := range saved {
+			_ = os.Setenv(key, val)
+		}
+	})
+}
+
+// setupSyncRemoteConfig writes sync.remote to .beads/config.yaml and
+// initializes the config subsystem so resolveSyncRemote() can read it.
+// Returns a cleanup function that resets config state.
+func setupSyncRemoteConfig(t *testing.T, beadsDir, remote string) func() {
+	t.Helper()
+	seedSyncRemote(t, beadsDir, remote)
+	config.ResetForTesting()
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	return func() { config.ResetForTesting() }
+}
+
+// newForgeSyncRemoteWorkspace builds a workspace whose config.yaml carries
+// remote as sync.remote and chdirs into it, returning the .beads path.
+func newForgeSyncRemoteWorkspace(t *testing.T, remote string) string {
+	t.Helper()
+	snapshotBootstrapEnv(t)
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cleanup := setupSyncRemoteConfig(t, beadsDir, remote)
+	t.Cleanup(cleanup)
+
+	oldWd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	return beadsDir
 }

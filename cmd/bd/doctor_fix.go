@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/ui"
 	"golang.org/x/term"
@@ -55,6 +56,7 @@ func previewFixes(result doctorResult, gate doctor.FixGate) {
 
 	n := 0
 	printIssue := func(issue doctorCheck, blocked bool) {
+		issue = issue.printed()
 		n++
 		fmt.Printf("  %d. %s\n", n, issue.Name)
 		if issue.Status == statusError {
@@ -135,7 +137,7 @@ func applyFixes(result doctorResult, gate doctor.FixGate) {
 		fmt.Printf("\n%s Skipping %d gated fix(es) — %s\n",
 			ui.RenderFail("✗"), len(withheld), reason)
 		for _, issue := range withheld {
-			fmt.Printf("    · %s\n", issue.Name)
+			fmt.Printf("    · %s\n", issue.printed().Name)
 		}
 	}
 
@@ -147,7 +149,8 @@ func applyFixes(result doctorResult, gate doctor.FixGate) {
 	// Show what will be fixed
 	fmt.Println("\nFixable issues:")
 	for i, issue := range fixableIssues {
-		fmt.Printf("  %d. %s: %s\n", i+1, issue.Name, issue.Message)
+		shown := issue.printed()
+		fmt.Printf("  %d. %s: %s\n", i+1, shown.Name, shown.Message)
 	}
 
 	// Interactive mode - confirm each fix individually
@@ -210,17 +213,18 @@ func applyFixesInteractive(path string, issues []doctorCheck) {
 
 	for i, issue := range issues {
 		// Show issue details
-		fmt.Printf("(%d/%d) %s\n", i+1, len(issues), issue.Name)
+		shown := issue.printed()
+		fmt.Printf("(%d/%d) %s\n", i+1, len(issues), shown.Name)
 		if issue.Status == statusError {
 			fmt.Printf("  Status: %s\n", ui.RenderFail("ERROR"))
 		} else {
 			fmt.Printf("  Status: %s\n", ui.RenderWarn("WARNING"))
 		}
-		fmt.Printf("  Issue:  %s\n", issue.Message)
-		if issue.Detail != "" {
-			fmt.Printf("  Detail: %s\n", issue.Detail)
+		fmt.Printf("  Issue:  %s\n", shown.Message)
+		if shown.Detail != "" {
+			fmt.Printf("  Detail: %s\n", shown.Detail)
 		}
-		fmt.Printf("  Fix:    %s\n", issue.Fix)
+		fmt.Printf("  Fix:    %s\n", shown.Fix)
 
 		// Check if we should apply all remaining
 		if applyAll {
@@ -337,10 +341,14 @@ func applyFixList(path string, fixes []doctorCheck) {
 	orderDoctorFixes(fixes)
 
 	fixedCount := 0
+	skippedCount := 0
 	errorCount := 0
 
 	for _, check := range fixes {
-		fmt.Printf("\nFixing %s...\n", check.Name)
+		// shown is the check as the text printers show it; the switch below
+		// still dispatches on the check's own name.
+		shown := check.printed()
+		fmt.Printf("\nFixing %s...\n", shown.Name)
 
 		var err error
 		switch check.Name {
@@ -470,13 +478,13 @@ func applyFixList(path string, fixes []doctorCheck) {
 			dolt.CleanStaleCircuitBreakerFiles()
 			fmt.Printf("  %s Cleared stale circuit breaker files\n", ui.RenderPass("✓"))
 		case "Fresh Clone":
-			err = fix.FreshCloneImport(path, Version)
+			err = freshCloneImport(path, check)
 		case "Pending Migrations":
 			err = fixPendingMigrations(path)
 		case "Config Values":
 			err = fix.ConfigValues(path)
 		case "Classic Artifacts":
-			err = fix.ClassicArtifacts(path)
+			err = fix.ClassicArtifacts(path, os.Stdout)
 		case "Btrfs NoCOW (dolt)":
 			// Applies FS_NOCOW_FL to .beads/ and any existing dolt data
 			// subdirs. Prints the returned message (which includes the
@@ -504,29 +512,53 @@ func applyFixList(path string, fixes []doctorCheck) {
 			var backups []string
 			backups, err = doltserver.RecoverCorruptManifest(doctor.ResolveBeadsDirForRepo(path))
 			for _, b := range backups {
-				fmt.Printf("  Backed up corrupt dolt database to %s and reinitialized\n", b)
+				fmt.Printf("  Backed up corrupt dolt database to %s and reinitialized\n", remedy.PrintedValue(b))
 			}
 		default:
-			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
-			fmt.Printf("  Manual fix: %s\n", check.Fix)
+			fmt.Printf("  ⚠ No automatic fix available for %s\n", shown.Name)
+			fmt.Printf("  Manual fix: %s\n", shown.Fix)
 			continue
 		}
 
-		if err != nil {
+		// A fix that did not run (fix.ErrSkipped: its server could not be
+		// opened, only a unix socket names it, or its project identity
+		// could not be verified) is reported as skipped, neither fixed nor
+		// an error.
+		var skip *fix.SkipError
+		switch {
+		case errors.As(err, &skip):
+			skippedCount++
+			fmt.Printf("  %s Skipped: %s\n", ui.RenderWarn("⚠"), remedy.PrintedMessage(skip.Reason))
+			fmt.Printf("  Manual fix: %s\n", shown.Fix)
+		case err != nil:
 			errorCount++
-			fmt.Printf("  %s Error: %v\n", ui.RenderFail("✗"), err)
-			fmt.Printf("  Manual fix: %s\n", check.Fix)
-		} else {
+			fmt.Printf("  %s Error: %s\n", ui.RenderFail("✗"), remedy.PrintedMessage(err))
+			fmt.Printf("  Manual fix: %s\n", shown.Fix)
+		default:
 			fixedCount++
 			fmt.Printf("  %s Fixed\n", ui.RenderPass("✓"))
 		}
 	}
 
 	// Summary
-	fmt.Printf("\nFix summary: %d fixed, %d errors\n", fixedCount, errorCount)
+	fmt.Printf("\nFix summary: %d fixed, %d skipped, %d errors\n", fixedCount, skippedCount, errorCount)
 	if errorCount > 0 {
 		fmt.Println("\nSome fixes failed. Please review the errors above and apply manual fixes as needed.")
 	}
+}
+
+// freshCloneImport is bd doctor --fix's Fresh Clone repair: it imports
+// issues.jsonl (fix.FreshCloneImport) only for a check that found the
+// database missing (doctor.FreshCloneDetected), and otherwise reports the
+// repair skipped. The check also warns when it could not log in to the
+// server, and says that is not a fresh clone; the import ran there all the
+// same, so any server or identity the repair could reach and the check could
+// not had its live rows overwritten with the tracked copy (#7874 review).
+func freshCloneImport(path string, check doctorCheck) error {
+	if !doctor.FreshCloneDetected(check.Message) {
+		return &fix.SkipError{Reason: errors.New("the Fresh Clone check did not find the database missing, so issues.jsonl is not imported over it")}
+	}
+	return fix.FreshCloneImport(path, Version)
 }
 
 func fixPendingMigrations(path string) error {

@@ -353,3 +353,35 @@ func TestRecoverNoGit_RedirectProvenance(t *testing.T) {
 		}
 	})
 }
+
+// TestGetRepoContext_NonGitBeadsDirFromNonGitCWD guards the GH#4772 contract
+// against the GH#5700 fix: that fix decides externality positionally only when
+// the CWD is in a repository. A CWD in none must still surface as
+// *NoRepoRootError from GetRepoContext, and GetRepoContextAllowingNoGit must
+// still recover a context rooted at the named .beads parent.
+func TestGetRepoContext_NonGitBeadsDirFromNonGitCWD(t *testing.T) {
+	workspace := resolveSymlinks(t.TempDir())
+	beadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	chdirForRepoContextTest(t, resolveSymlinks(t.TempDir()))
+
+	_, err := GetRepoContext()
+	var noRoot *NoRepoRootError
+	if !errors.As(err, &noRoot) {
+		t.Fatalf("GetRepoContext error = %v, want a *NoRepoRootError", err)
+	}
+
+	rc, err := GetRepoContextAllowingNoGit()
+	if err != nil {
+		t.Fatalf("GetRepoContextAllowingNoGit failed: %v", err)
+	}
+	if rc.RepoRoot != workspace {
+		t.Errorf("RepoRoot = %q, want the .beads parent %q", rc.RepoRoot, workspace)
+	}
+}

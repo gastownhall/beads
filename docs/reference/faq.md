@@ -342,16 +342,9 @@ See the [sync failures runbook](/recovery/sync-failures).
 
 These are two distinct integrity issues:
 
-**Logical consistency** — same ID assigned to different issues, wrong-prefix bugs, branch divergence. Hash-based IDs eliminate collisions by design, and `bd doctor --fix` repairs logical inconsistencies.
+**Logical consistency** — same ID assigned to different issues, wrong-prefix bugs, branch divergence. Hash-based IDs eliminate collisions by design. In server mode, `bd doctor --fix` repairs logical inconsistencies; embedded mode runs only `bd doctor --check=artifacts`, `--check=conventions` and `--check=pollution`.
 
-**Physical corruption** — disk failures, power loss, or multiple processes writing to an embedded database simultaneously. Start with the [database corruption runbook](/recovery/database-corruption) (`bd doctor --fix` after backing up `.beads/`). If the database is unrecoverable and you have a Dolt remote, back up `.beads/`, delete the data directory for your mode — `.beads/embeddeddolt/` in embedded mode, `.beads/dolt/` in server mode — then re-init and pull:
-
-```bash
-cp -r .beads .beads.backup
-rm -rf .beads/embeddeddolt   # or .beads/dolt in server mode
-bd init
-bd dolt pull
-```
+**Physical corruption** — disk failures, power loss, or multiple processes writing to an embedded database simultaneously. `bd doctor --fix` does not rebuild a damaged store, and deleting the data directory destroys any work your remote or backups lack. Follow [Engine won't open](/recovery/database-corruption#engine-wont-open): preserve the damaged store and its configuration first, then recover into a fresh store from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
 For multi-writer scenarios, use server mode so concurrent access goes through the server instead of racing on files.
 

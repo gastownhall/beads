@@ -40,11 +40,7 @@ type RememberResult struct {
 	// observation and the act it describes.
 	//
 	// A previous value that was the EMPTY STRING reports Replaced true. The ROW
-	// existed, even though a Recall of that key would have answered Found
-	// false. That divergence is the storage seam's conflation showing through
-	// (see RecallResult.Found); it is stated here rather than smoothed over,
-	// because smoothing it would mean this field reporting "nothing was there"
-	// about a write that overwrote something.
+	// existed, regardless of what it held.
 	Replaced bool
 }
 
@@ -60,15 +56,9 @@ type RecallResult struct {
 	Key string
 	// Value is the stored content, or "" — and Found says how to read the "".
 	Value string
-	// Found is Value != "". A MEMORY STORED AS THE EMPTY STRING AND AN ABSENT
-	// MEMORY ARE THE SAME ANSWER: Found false, nil error.
-	//
-	// No front door can create the first of those — Remember refuses empty
-	// content — but an out-of-band config write can, and this role does not
-	// invent a distinction the seam beneath it cannot see. List DOES enumerate
-	// such a row, because its KEY exists, and that is the one way a caller can
-	// tell the two apart: the same same-answer-different-row asymmetry the
-	// settings contract pins for `bd config get`.
+	// Found reports whether the row exists, independently of Value. A memory
+	// stored as the empty string therefore reports Found true; an absent memory
+	// reports Found false with the same empty Value.
 	Found bool
 }
 
@@ -84,9 +74,8 @@ type ForgetResult struct {
 	// read in the SAME TRANSACTION as the delete, so it is what was actually
 	// removed rather than what a previous read happened to see.
 	Value string
-	// Found false means nothing was stored under Key (or an empty string was:
-	// the same conflation RecallResult.Found describes) and NOTHING WAS
-	// DELETED.
+	// Found false means no row was stored under Key and NOTHING WAS DELETED. A
+	// row holding the empty string is found and deleted.
 	//
 	// It is a result, not an error. The front doors own the not-found
 	// presentation — the CLI has an exit-code contract for it — and a role that
@@ -160,7 +149,7 @@ type Memories interface {
 	// THE REFUSALS, in the order they are applied:
 	//
 	//   - Content empty after trimming is ErrValidation. There is nothing to
-	//     remember, and a row stored empty is a row Recall would then deny;
+	//     remember;
 	//   - Content from which no key can be derived, when Key is empty, is
 	//     ErrValidation. The caller's recourse is an explicit key, which the
 	//     message says.

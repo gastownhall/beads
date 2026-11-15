@@ -172,6 +172,9 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("AppliesTheDefaultPriority", func(t *testing.T) {
 		conformance.RunBatchApplyAppliesTheDefaultPriority(t, ctx, fixture)
 	})
+	t.Run("CarriesTheGateMembers", func(t *testing.T) {
+		conformance.RunBatchApplyCarriesTheGateMembers(t, ctx, fixture)
+	})
 }
 
 func newUOWBatchApplyFixture(t *testing.T, ctx context.Context, prefix string) conformance.BatchApplyFixture {

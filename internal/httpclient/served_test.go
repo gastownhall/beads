@@ -67,15 +67,26 @@ var (
 )
 
 // TestMain owns the composition's lifetime: one embedded database and one bound
-// listener for the package, torn down after the last case.
+// listener for the package, torn down after the last case, along with the
+// provider source's shared proxy and dolt sql-server when a run used them. It
+// also judges the composition's wire witness (served_protocol_seam_test.go)
+// once, after the last case: a composition that sent what the tier's protocol
+// forbids fails the package even though every case passed.
 func TestMain(m *testing.M) {
 	code := m.Run()
+	if report := compositionWitness.report(); report != "" {
+		fmt.Fprintln(os.Stderr, "FAIL: "+report)
+		if code == 0 {
+			code = 1
+		}
+	}
 	if compositionStop != nil {
 		compositionStop()
 	}
 	if servedTemplateDir != "" {
 		_ = os.RemoveAll(servedTemplateDir)
 	}
+	stopServedProviderSource()
 	os.Exit(code)
 }
 
@@ -126,6 +137,7 @@ func startServedComposition() (*servedComposition, func(), error) {
 	cfg.Addr = "127.0.0.1:0"
 	cfg.Stdout = io.Discard
 	cfg.Stderr = io.Discard
+	servedServerConfig(&cfg)
 	srv, err := httpapi.Listen(cfg)
 	if err != nil {
 		return fail(fmt.Errorf("bind the in-process bd serve: %w", err))
@@ -139,7 +151,7 @@ func startServedComposition() (*servedComposition, func(), error) {
 	if err != nil {
 		return fail(err)
 	}
-	transport, err := wire.New(base, nil, wire.Options{})
+	transport, err := wire.New(base, nil, servedWireOptions(compositionWitness, wire.Options{}))
 	if err != nil {
 		return fail(fmt.Errorf("build the wire client: %w", err))
 	}
@@ -243,6 +255,12 @@ func serveRoles(store storage.DoltStorage) (httpapi.Config, error) {
 	if cfg.LeaseReclaimer, err = store.LeaseReclaimer(); err != nil {
 		return cfg, err
 	}
+	if cfg.Heartbeater, err = store.Heartbeater(); err != nil {
+		return cfg, err
+	}
+	if cfg.BlockedLister, err = store.BlockedLister(); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -279,7 +297,7 @@ func (c *servedComposition) tamperedClient(t *testing.T, tamper func(*wire.Reque
 	if err != nil {
 		t.Fatalf("parse the composition base URL: %v", err)
 	}
-	transport, err := wire.New(base, nil, wire.Options{})
+	transport, err := wire.New(base, nil, servedWireOptions(newServedWitness(t, "tamperedClient"), wire.Options{}))
 	if err != nil {
 		t.Fatalf("build a second wire client: %v", err)
 	}
@@ -310,6 +328,10 @@ func (c *servedComposition) seedDependency(ctx context.Context, dep *types.Depen
 func (c *servedComposition) seedComment(ctx context.Context, issueID, author, text string) error {
 	_, err := c.reference.AddIssueComment(ctx, issueID, author, text)
 	return err
+}
+
+func (c *servedComposition) seedPromotion(ctx context.Context, id, actor string) error {
+	return c.reference.PromoteFromEphemeral(ctx, id, actor)
 }
 
 // queryScalar is the composition's raw-row hook: a single-row query against the

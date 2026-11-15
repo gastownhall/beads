@@ -3,7 +3,10 @@ package conformance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +52,9 @@ type BatchCreatorFixture struct {
 	// QueryScalar runs a single-row query and scans it, RETURNING the error
 	// rather than failing the test.
 	QueryScalar func(context.Context, string, []any, ...any) error
+	// SetConfig writes one workspace config key, which is how a case switches
+	// the id mode. A nil hook means the cases that need it SKIP.
+	SetConfig func(context.Context, string, string) error
 	// CountHistory reports how many history entries the fixture's branch has. A
 	// nil hook means "this backend cannot observe history", and the cases that
 	// need it SKIP rather than passing quietly.
@@ -109,6 +115,111 @@ func RunBatchCreatorCreatesEveryItemAsOneAct(t *testing.T, ctx context.Context, 
 	if labels := result.Issues[0].Labels; len(labels) != 1 || labels[0] != "alpha" {
 		t.Errorf("result issue 0 labels = %v, want [alpha]: the snapshot is promised hydrated with labels", labels)
 	}
+}
+
+// RunBatchCreatorMintsADistinctIDForEachIdenticalItem pins that a GENERATED id
+// is never refused: ErrAlreadyExists is the refusal of an occupied EXPLICIT id
+// (issueops/batchcreator.go:21-25, 156-162), and an item that named no id
+// occupied nothing. Two items alike in every input an id is derived from —
+// title, description, created_at, and the batch's one actor — both land,
+// under two ids.
+//
+// IT IS THE STORE BODY'S CASE. ExecuteCreateBatch assigns every id before it
+// writes any row, so no table holds the first item's id yet when the second
+// item's is chosen; the unit-of-work body writes each item before it mints the
+// next. A body that refuses this pair also refuses, at random, two items that
+// differ and happen to draw the same short id, which is how it was found.
+func RunBatchCreatorMintsADistinctIDForEachIdenticalItem(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	at := time.Date(2021, 5, 6, 7, 8, 9, 123456789, time.UTC)
+	twin := func() publicops.BatchCreateItem {
+		return batchCreatorItem(&types.Issue{Title: fixture.IssuePrefix + " twin", Priority: 2, IssueType: types.TypeTask, CreatedAt: at})
+	}
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{twin(), twin()},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch(two identical items): %v; neither item named an id, so neither can be refused as occupied", err)
+	}
+	if len(result.Issues) != 2 || result.Issues[0] == nil || result.Issues[1] == nil {
+		t.Fatalf("CreateBatch returned %v for two items", result.Issues)
+	}
+	first, second := result.Issues[0].ID, result.Issues[1].ID
+	if first == "" || first == second {
+		t.Fatalf("CreateBatch handed the two items ids %q and %q, want two distinct generated ids", first, second)
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", first, 1)
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", second, 1)
+}
+
+// RunBatchCreatorMintsPastAnIDALaterItemNames is the other half of "a
+// generated id is never refused" (issueops/batchcreator.go:21-25, 156-162): an
+// item that names no id is never handed the id a LATER item of the same
+// request names for itself. Handing it that id refuses the later item as
+// occupied by its own batch, a refusal of an id the caller chose freshly.
+//
+// COUNTER MODE MAKES THE COLLISION CERTAIN. The case mints one item to learn
+// where the counter stands, then sends [minted, explicit <prefix>-<next>]: the
+// counter's next value is exactly the id the second item names. Both bodies
+// meet it before that row exists, ExecuteCreateBatch because it assigns every
+// id before writing any row, the unit-of-work body because it creates in
+// order.
+func RunBatchCreatorMintsPastAnIDALaterItemNames(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	if fixture.SetConfig == nil {
+		t.Skip("this backend cannot switch the workspace's id mode")
+	}
+	if err := fixture.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("SetConfig(issue_id_mode=counter): %v", err)
+	}
+	t.Cleanup(func() {
+		if err := fixture.SetConfig(context.WithoutCancel(ctx), "issue_id_mode", ""); err != nil {
+			t.Errorf("restore the hash id mode: %v", err)
+		}
+	})
+	minted := func(title string) publicops.BatchCreateItem {
+		return batchCreatorItem(&types.Issue{Title: fixture.IssuePrefix + " " + title, Priority: 2, IssueType: types.TypeTask})
+	}
+
+	probe, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{minted("counter probe")},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch(one minted item, counter mode): %v", err)
+	}
+	if len(probe.Issues) != 1 || probe.Issues[0] == nil {
+		t.Fatalf("CreateBatch returned %v for one item", probe.Issues)
+	}
+	probeID := probe.Issues[0].ID
+	cut := strings.LastIndex(probeID, "-")
+	n, err := strconv.Atoi(probeID[cut+1:])
+	if cut < 0 || err != nil {
+		t.Skipf("this backend did not switch to counter ids (minted %q)", probeID)
+	}
+	named := fmt.Sprintf("%s-%d", probeID[:cut], n+1)
+
+	explicit := minted("named later")
+	explicit.Issue.ID = named
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{minted("minted first"), explicit},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch([minted, explicit %s]): %v; the minted item must pass over the id the later item names", named, err)
+	}
+	if len(result.Issues) != 2 || result.Issues[0] == nil || result.Issues[1] == nil {
+		t.Fatalf("CreateBatch returned %v for two items", result.Issues)
+	}
+	if got := result.Issues[0].ID; got == named || got == "" {
+		t.Errorf("minted item = %q, want a generated id other than the %s the later item names", got, named)
+	}
+	if got := result.Issues[1].ID; got != named {
+		t.Errorf("explicit item = %q, want %s", got, named)
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", named, 1)
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", result.Issues[0].ID, 1)
 }
 
 // RunBatchCreatorRefusesEverythingWhenOneItemRefuses is the case this role

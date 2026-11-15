@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -33,29 +34,57 @@ func openStoreDB(beadsDir string) (*sql.DB, storage.DoltStorage, error) {
 	return db, store, nil
 }
 
-// CheckOrphanedDependencies detects dependencies pointing to non-existent issues.
-func CheckOrphanedDependencies(path string) DoctorCheck {
-	beadsDir := ResolveBeadsDirForRepo(path)
-
-	db, store, err := openStoreDB(beadsDir)
+// CheckOrphanedDependencies detects dependencies pointing to non-existent issues
+// on the server its bd doctor --fix repair (fix.OrphanedDependencies) deletes
+// them from (fix.OpenScanDB). It read the store's server, so beside a live
+// BEADS_DOLT_SERVER_SOCKET and a resolved port it diagnosed the socket's
+// server while the repair deleted rows on the server at the port and
+// reported them fixed (#7874 review). It reports a database whose repair
+// server it cannot read as CheckBlockedConsistencyWithStore does: "N/A (no
+// database)" only when the shared store found no database either, else a
+// warning, so bd doctor --check=validate does not pass a database it never
+// read.
+func CheckOrphanedDependencies(path string, ss *SharedStore) DoctorCheck {
+	db, err := fix.OpenScanDB(path)
 	if err != nil {
+		if ss.Store() == nil {
+			return DoctorCheck{
+				Name:    "Orphaned Dependencies",
+				Status:  "ok",
+				Message: "N/A (no database)",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Orphaned Dependencies",
-			Status:  "ok",
-			Message: "N/A (no database)",
+			Status:  StatusWarning,
+			Message: "Unable to check orphaned dependencies",
+			Detail:  err.Error(),
 		}
 	}
-	defer func() { _ = store.Close() }()
+	defer func() { _ = db.Close() }()
 
 	return checkOrphanedDependenciesDB(db)
 }
 
 // checkOrphanedDependenciesDB is the core logic for CheckOrphanedDependencies.
 func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
+	// Read the held prefixes before the candidate query opens its rows: the
+	// pool can be a single connection.
+	issuePrefix, allowedPrefixes, err := fix.LoadDepTargetPrefixes(context.Background(), db)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Orphaned Dependencies",
+			Status:  StatusWarning,
+			Message: "N/A (query failed)",
+		}
+	}
+
 	// Query for orphaned dependencies.
 	// Exclude external: refs — these are synthetic cross-rig tracking deps
 	// injected by the JSONL exporter and intentionally reference issues not
-	// present in the local database (#1593).
+	// present in the local database (#1593). The scan loop also skips bare
+	// targets bd dep add stored unverified under another repository's prefix
+	// (fix.IsUnverifiableDepTarget) and counts them in the message.
 	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.issue_id, d.depends_on_id, d.type
@@ -75,9 +104,14 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	defer rows.Close()
 
 	var orphans []string
+	unverifiable := 0
 	for rows.Next() {
 		var issueID, dependsOnID, depType string
 		if err := rows.Scan(&issueID, &dependsOnID, &depType); err == nil {
+			if fix.IsUnverifiableDepTarget(issueID, dependsOnID, issuePrefix, allowedPrefixes) {
+				unverifiable++
+				continue
+			}
 			orphans = append(orphans, fmt.Sprintf("%s→%s", issueID, dependsOnID))
 		}
 	}
@@ -90,11 +124,18 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 		}
 	}
 
+	// external: refs stay silent as before; only the bare cross-repository
+	// edges get the note, so a database without them reads as it always did.
+	note := ""
+	if unverifiable > 0 {
+		note = fmt.Sprintf(" (%d cross-repository edge(s) not verifiable here)", unverifiable)
+	}
+
 	if len(orphans) == 0 {
 		return DoctorCheck{
 			Name:    "Orphaned Dependencies",
 			Status:  "ok",
-			Message: "No orphaned dependencies",
+			Message: "No orphaned dependencies" + note,
 		}
 	}
 
@@ -106,7 +147,7 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	return DoctorCheck{
 		Name:    "Orphaned Dependencies",
 		Status:  "warning",
-		Message: fmt.Sprintf("%d orphaned dependency reference(s)", len(orphans)),
+		Message: fmt.Sprintf("%d orphaned dependency reference(s)", len(orphans)) + note,
 		Detail:  detail,
 		Fix:     "Run 'bd doctor --fix' to remove orphaned dependencies",
 	}
@@ -322,18 +363,27 @@ func CheckGitConflicts(path string) DoctorCheck {
 // CheckChildParentDependencies detects child→parent blocking dependencies.
 // These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
 // However, they may be intentional in some workflows, so removal requires explicit opt-in.
-func CheckChildParentDependencies(path string) DoctorCheck {
-	beadsDir := ResolveBeadsDirForRepo(path)
-
-	db, store, err := openStoreDB(beadsDir)
+// It reads the server that removal (fix.ChildParentDependencies) writes
+// (fix.OpenScanDB), and reports a database whose repair server it cannot
+// read, as CheckOrphanedDependencies does.
+func CheckChildParentDependencies(path string, ss *SharedStore) DoctorCheck {
+	db, err := fix.OpenScanDB(path)
 	if err != nil {
+		if ss.Store() == nil {
+			return DoctorCheck{
+				Name:    "Child-Parent Dependencies",
+				Status:  "ok",
+				Message: "N/A (no database)",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Child-Parent Dependencies",
-			Status:  "ok",
-			Message: "N/A (no database)",
+			Status:  StatusWarning,
+			Message: "Unable to check child→parent dependencies",
+			Detail:  err.Error(),
 		}
 	}
-	defer func() { _ = store.Close() }()
+	defer func() { _ = db.Close() }()
 
 	return checkChildParentDependenciesDB(db)
 }
@@ -566,6 +616,18 @@ func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
 	// Query for child→parent BLOCKING dependencies where issue_id starts with target id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
 	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	//
+	// The reverse shape, a parent that blocks on or waits for its own child
+	// (GH#4814), is deliberately not matched. Since gastownhall/beads#6506 the
+	// parent-child cascade propagates only exogenous blockedness, so that edge
+	// holds back the parent, not the child: it is a close gate, not a
+	// deadlock. That holds while every parent-child chain up from the child
+	// reaches the parent within the cascade's walk (issueops subtreeWalkDepth,
+	// four levels). A child that also has a parent outside the gating parent's
+	// subtree is still locked out of bd ready (bd-eoxqs0): a cascade defect,
+	// not a reason to delete the gate. The write path refuses the blocks form
+	// in favor of a waits-for gate, and checkParentBlocksOwnChildDB lists any
+	// blocks-form rows.
 	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.issue_id, d.depends_on_id

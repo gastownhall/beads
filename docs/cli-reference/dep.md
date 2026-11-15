@@ -1,6 +1,6 @@
 ---
 title: "bd dep"
-description: "Manage dependencies between issues."
+description: "Manage dependencies"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -21,6 +21,7 @@ Examples:
 
 ```
 bd dep [issue-id] [flags]
+bd dep [command]
 ```
 
 **Flags:**
@@ -54,6 +55,11 @@ External references are stored as-is and resolved at query time using
 the external_projects config. They block the issue until the capability
 is "shipped" in the target project.
 
+With no -t/--type the edge is created as type=blocks, which excludes the
+dependent from bd ready. When stderr is an interactive terminal, an advisory
+note says so once per command; it is silent for scripted and agent callers
+(non-TTY stderr) and can be turned off with --quiet or BD_NO_DEP_TYPE_WARNING=1.
+
 Examples:
   bd dep add bd-42 bd-41                              # Positional args
   bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
@@ -73,7 +79,7 @@ bd dep add [issue-id] [depends-on-id] [flags]
       --depends-on string   Issue ID that the first issue depends on (alias for --blocked-by)
       --file string         Read dependency edges from JSONL file, or '-' for stdin
       --no-cycle-check      Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit
-  -t, --type string         Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes) (default "blocks")
+  -t, --type string         Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes); 'blocked-by' and 'depends-on' are accepted as aliases for 'blocks' (default "blocks")
 ```
 
 ## bd dep cycles
@@ -154,6 +160,15 @@ Examples:
   bd dep tree gt-0iqq --status=open      # Only show open issues
   bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep
 
+A node reached by two paths is shown ONCE, under the first path that got
+there, and a cycle simply ends the descent. --show-all-paths is a deprecated
+no-op; use 'bd dep cycles' to find circular dependencies.
+
+--max-rows / BEADS_MAX_ROWS caveat: the tree walk has no query filter to
+thread the cap through, so the full tree is always built first and the
+node count is checked afterward (post-hoc), not during the walk. The cap is
+honored on the --proxied-server route too, which it was not before.
+
 ```
 bd dep tree [issue-id] [flags]
 ```
@@ -164,8 +179,9 @@ bd dep tree [issue-id] [flags]
       --direction string   Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'
       --format string      Output format: 'mermaid' for Mermaid.js flowchart
   -d, --max-depth int      Maximum tree depth to display (safety limit) (default 50)
+      --max-rows int       Hard upper bound on rows returned. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Honored on both the direct and the --proxied-server route.
       --reverse            Show dependent tree (deprecated: use --direction=up)
-      --show-all-paths     Show all paths to nodes (no deduplication for diamond dependencies)
+      --show-all-paths     Deprecated no-op: accepted and ignored. A node reached by two paths is shown once, under the first.
       --status string      Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)
 ```
 

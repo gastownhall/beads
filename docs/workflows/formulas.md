@@ -107,9 +107,23 @@ title = "Deploy {{version}} to {{environment}}"
 ## Step Types
 
 A step's `type` sets the issue type of the bead it creates: `task`
-(default), `bug`, `feature`, `epic`, or `chore`. Any other value falls back
-to `task`. Human sign-offs and async waits are expressed with a
-`[steps.gate]` block, not a step type — see [Gates](/workflows/gates).
+(default), `bug`, `feature`, `epic`, `chore`, `gate`, or a custom type
+registered in `types.custom`. At `bd mol pour` and `bd cook --persist`, a
+type that is neither built in nor registered falls back to `task` with a
+warning.
+
+`type = "gate"` has two forms:
+
+- **With a `[steps.gate]` block** (an exit-gate): the step becomes a `task`
+  bead holding the preparation work, plus a companion `gate` bead that the
+  task blocks. Other steps that reference the step id wait for both, so they
+  run only after the work is done and the gate is resolved.
+- **Without a `[steps.gate]` block**: the step becomes a single `gate` bead
+  with no await condition. It is hidden from `bd ready` and is resolved by
+  hand.
+
+Async waits and sign-offs are expressed with a `[steps.gate]` block — see
+[Gates](#gates) and [Gates in formulas](/workflows/gates#gates-in-formulas).
 
 ## Dependencies
 
@@ -143,24 +157,66 @@ title = "Deploy"
 needs = ["test-unit", "test-integration"]  # Waits for both
 ```
 
-## Gates
+### Conditional steps
 
-Add gates for async coordination:
+A step with a `condition` is left out of a pour when the condition evaluates
+false against the pour's variables, and its children go with it:
 
 ```toml
-[[steps]]
-id = "approval"
-title = "Manager approval"
-type = "human"
+[vars.deploy]
+default = "false"
 
-[steps.gate]
-type = "human"
-approvers = ["manager"]
+[[steps]]
+id = "test"
+title = "Run tests"
 
 [[steps]]
 id = "deploy"
 title = "Deploy to production"
-needs = ["approval"]
+needs = ["test"]
+condition = "{{deploy}} == true"
+```
+
+Nothing names `deploy`, so leaving it out changes nothing else. A step that
+stays in the pour should not name a step the pour leaves out in its `needs`,
+`depends_on`, or `waits_for` spawner: in releases after v1.3.2 the pour fails
+with a formula validation error naming both steps and the condition (v1.3.2
+and earlier pour the step with that dependency silently dropped). Give the
+dependent step the same condition, or depend only on steps that are always
+poured.
+
+## Gates
+
+Add gates for async coordination. A `[steps.gate]` on an ordinary step is an
+entry-gate: the step waits for the gate before it can start.
+
+```toml
+[[steps]]
+id = "deploy"
+title = "Deploy to production"
+
+[steps.gate]
+type = "timer"
+timeout = "1h"    # deploy waits until bd gate check closes the timer, 1h after pour
+```
+
+On a step declared `type = "gate"` it is an exit-gate: the step is the
+preparation work for the gate's decision, and its task blocks the gate.
+Steps that reference it wait for both that work and the gate.
+
+```toml
+[[steps]]
+id = "approval"
+title = "Prepare the release for manager approval"
+type = "gate"
+
+[steps.gate]
+type = "human"
+
+[[steps]]
+id = "deploy"
+title = "Deploy to production"
+needs = ["approval"]   # waits for the prep task and for bd gate resolve
 ```
 
 ## Aspects (Cross-cutting)

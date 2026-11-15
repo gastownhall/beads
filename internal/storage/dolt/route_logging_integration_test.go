@@ -61,6 +61,9 @@ func TestPushPullLogCLIRouteForGitProtocolRemote(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer store.Close()
+	// This store's own server serves CLIDir; the port TestMain exports names
+	// the suite's server instead (clearServerPortEnv).
+	clearServerPortEnv(t)
 
 	if store.CLIDir() == "" || !store.hasCLIDatabase() {
 		t.Fatalf("local-server store should have its own CLI-accessible database; CLIDir=%q hasCLIDatabase=%v", store.CLIDir(), store.hasCLIDatabase())

@@ -6,15 +6,20 @@ package bdhttp_test
 // that previous backend WAS, onto the sidecar, at connect time.
 
 import (
+	"context"
+	"errors"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	bdhttp "github.com/steveyegge/beads/backend/http"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpclient"
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
 func mustAttachTestURL(t *testing.T, raw string) *url.URL {
@@ -175,6 +180,92 @@ func TestAttachGitignoresBothPerUserFiles(t *testing.T) {
 		}
 		if count != 1 {
 			t.Errorf(".gitignore names %s %d time(s) after two Attaches, want exactly 1:\n%s", name, count, content)
+		}
+	}
+}
+
+// workspaceTreeDigest maps every path under root to "dir" or its file's
+// content, so a refusal can be checked to have left the workspace, and
+// anything beside it, byte-identical.
+func workspaceTreeDigest(t *testing.T, root string) map[string]string {
+	t.Helper()
+	digest := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			digest[rel] = "dir"
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		digest[rel] = "file:" + string(content)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("digest %s: %v", root, err)
+	}
+	return digest
+}
+
+// activationDoors are the two public calls that activate a workspace for this
+// backend. Connect handshakes with server; Attach never dials.
+var activationDoors = map[string]func(t *testing.T, beadsDir string, server *recordingServer) error{
+	"Attach": func(t *testing.T, beadsDir string, server *recordingServer) error {
+		return bdhttp.Attach(beadsDir, server.target(t))
+	},
+	"Connect": func(t *testing.T, beadsDir string, server *recordingServer) error {
+		_, err := bdhttp.Connect(context.Background(), beadsDir, server.target(t), bdhttp.Options{HTTPClient: server.Client()})
+		return err
+	},
+}
+
+// workspaceWriters are the public calls that write this backend's files into
+// a workspace: the activationDoors, and SaveTarget, which writes the sidecar
+// alone and so cannot select the backend, but still writes the workspace.
+func workspaceWriters() map[string]func(t *testing.T, beadsDir string, server *recordingServer) error {
+	writers := maps.Clone(activationDoors)
+	writers["SaveTarget"] = func(t *testing.T, beadsDir string, server *recordingServer) error {
+		return bdhttp.SaveTarget(beadsDir, server.target(t))
+	}
+	return writers
+}
+
+// TestAttachConnectAndSaveTargetRefuseAHistoricalSQLiteWorkspace pins that
+// this backend's activation refuses a historical SQLite workspace with the
+// refusal bd's command admission prints there, before it writes anything:
+// without it Attach migrated a pre-Dolt config.json, saved metadata.json
+// selecting backend http over the SQLite database, and wrote the sidecar and
+// .gitignore, after which bd itself no longer recognized the workspace as one
+// to migrate. Connect refuses before it dials.
+func TestAttachConnectAndSaveTargetRefuseAHistoricalSQLiteWorkspace(t *testing.T) {
+	hermeticEnv(t)
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		for name, activate := range workspaceWriters() {
+			t.Run(layout.Name+"/"+name, func(t *testing.T) {
+				root := t.TempDir()
+				beadsDir := filepath.Join(root, ".beads")
+				layout.Write(t, beadsDir)
+				before := workspaceTreeDigest(t, root)
+				server := newRecordingServer(t)
+
+				err := activate(t, beadsDir, server)
+				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+					t.Fatalf("%s changed the workspace: before %v, after %v", name, slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+				}
+				var legacyErr *bdhttp.LegacyWorkspaceError
+				if !errors.As(err, &legacyErr) || err.Error() != legacyworkspace.HistoricalSQLiteRefusal {
+					t.Fatalf("%s = %v, want *bdhttp.LegacyWorkspaceError with admission's refusal %q", name, err, legacyworkspace.HistoricalSQLiteRefusal)
+				}
+				server.wantNoRequests(t)
+			})
 		}
 	}
 }

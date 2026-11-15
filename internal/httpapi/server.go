@@ -170,6 +170,16 @@ type Config struct {
 	// service DNS name, which the rebinding defense would otherwise refuse;
 	// see newHostPolicy. Empty leaves today's policy exactly as it was.
 	AllowedHosts []string
+	// RequestContext, when non-nil, is called for every routed request, after
+	// the bearer check on a route that requires one (an auth-exempt route, and
+	// every route on a server without bearer authentication, reaches it with no
+	// credential checked) and before it is dispatched to its handler. It
+	// returns the context the handler runs with. A non-nil error refuses the request:
+	// the server answers with the status and code of a *RequestRefusal found
+	// via errors.As, or 403 "request_refused" otherwise, and the handler never
+	// runs. See request_context.go for the full contract. Nil leaves every
+	// request exactly as it was.
+	RequestContext func(r *http.Request) (context.Context, error)
 	// LargeApplyCeiling bounds how long POST /v0/beads/issues:batchApply may
 	// hold a write transaction for a request over largeApplyItemThreshold
 	// items (batch_apply.go). Zero takes DefaultLargeApplyCeiling (5
@@ -293,6 +303,19 @@ type Config struct {
 	// claim on its holder's say-so, and this reverts MANY on a clock's.
 	// Required on the same terms as every field here.
 	LeaseReclaimer issueops.LeaseReclaimer
+	// Heartbeater is the lease refresh behind
+	// POST /v0/beads/issues/{id}:heartbeat. It is a SEPARATE field from
+	// Claimer for the reason issueops.Heartbeater's own doc gives: a claim
+	// takes ownership and never extends the lease, a heartbeat proves the
+	// holder is alive and writes only the lease row. Required on the same
+	// terms as every field here.
+	Heartbeater issueops.Heartbeater
+	// BlockedLister is the blocked listing behind GET /v0/beads/blocked:
+	// what `bd blocked` prints. It is a SEPARATE field from Reader because it
+	// is a separate role: Reader.Ready lists the unblocked front, this lists
+	// the blocked rows with the blockers bd names for each. Required on the
+	// same terms as every field here.
+	BlockedLister issueops.BlockedLister
 	// Relations is the single-anchor neighbor read behind
 	// GET /v0/beads/issues/{id}/related. It is a SEPARATE field from EdgeReader
 	// for the reason issueops.EdgeReader's own doc gives at length: that role
@@ -442,6 +465,8 @@ type Server struct {
 	issueEdgeCounter  issueops.GraphCounter
 	issueBatchGetter  issueops.BatchGetter
 	issueReclaimer    issueops.LeaseReclaimer
+	issueHeartbeater  issueops.Heartbeater
+	issueBlocked      issueops.BlockedLister
 	issueRelations    issueops.Relations
 	issueCommenter    issueops.Commenter
 	issueBlocking     issueops.BlockingAnnotator
@@ -655,6 +680,8 @@ func Listen(cfg Config) (*Server, error) {
 		issueEdgeCounter:  cfg.GraphCounter,
 		issueBatchGetter:  cfg.BatchGetter,
 		issueReclaimer:    cfg.LeaseReclaimer,
+		issueHeartbeater:  cfg.Heartbeater,
+		issueBlocked:      cfg.BlockedLister,
 		issueRelations:    cfg.Relations,
 		issueCommenter:    cfg.Commenter,
 		issueBlocking:     cfg.BlockingAnnotator,
@@ -777,12 +804,12 @@ func Listen(cfg Config) (*Server, error) {
 // "all or nothing" would turn an honest condition into a special case inside
 // three functions. It is checked once, on its own, below.
 func sourceRoles(cfg Config) []any {
-	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.BatchGetter, cfg.LeaseReclaimer, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
+	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.BatchGetter, cfg.LeaseReclaimer, cfg.Heartbeater, cfg.BlockedLister, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
 }
 
 // roleSourceNames spells sourceRoles for the refusal message, in the same
 // order, so a caller reading the error learns the whole set it must pass.
-const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, BatchGetter, LeaseReclaimer, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
+const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, BatchGetter, LeaseReclaimer, Heartbeater, BlockedLister, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
 
 func anyRoleSet(cfg Config) bool {
 	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
@@ -1182,6 +1209,30 @@ func (s *Server) leaseReclaimer(r *http.Request) (issueops.LeaseReclaimer, error
 	}
 	var src uow.LeaseReclaimerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
 	return src.LeaseReclaimer()
+}
+
+// heartbeater returns the lease-refresh surface for one request, on the same
+// terms as every role above and held by INTERFACE so uow.HeartbeaterSource is
+// load-bearing rather than decorative. HeartbeatResult is a plain value, so it
+// goes out unwrapped.
+func (s *Server) heartbeater(r *http.Request) (issueops.Heartbeater, error) {
+	if s.provider == nil {
+		return s.issueHeartbeater, nil
+	}
+	var src uow.HeartbeaterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.Heartbeater()
+}
+
+// blockedLister returns the blocked-listing surface for one request, on the
+// same terms as every role above and held by INTERFACE so
+// uow.BlockedListerSource is load-bearing rather than decorative. It goes out
+// unwrapped: wireBlocked drops a nil element rather than dereferencing it.
+func (s *Server) blockedLister(r *http.Request) (issueops.BlockedLister, error) {
+	if s.provider == nil {
+		return s.issueBlocked, nil
+	}
+	var src uow.BlockedListerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.BlockedLister()
 }
 
 // relations returns the single-anchor neighbor surface for one request, built
@@ -1658,29 +1709,68 @@ func (s *Server) admitLargeApply(ctx context.Context) (runCtx context.Context, r
 	return runCtx, release, nil
 }
 
-// handler builds the whole request path: the route table's registrations, the
-// catch-all that keeps unrouted paths on the same error shape, and the
-// middleware in front of both.
+// handler builds the whole request path: every registration s.mounts() lists,
+// and the middleware in front of all of them.
+//
+// This loop is the only registration on the router
+// (TestNothingIsMountedOutsideTheMountTable): a handler mounted anywhere else
+// would be invisible to every census that ranges over s.mounts().
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
+	for _, m := range s.mounts() {
+		mux.Handle(m.pattern, m.handler)
+	}
+	return s.withRequestContext(s.checkHost(mux))
+}
+
+// mount is one registration on the router: a ServeMux pattern, the handler
+// behind it, and the operations that handler answers.
+//
+// The posture each answer owes the request pipeline is declared by its route
+// row: whether it asks for the bearer credential (authExempt), compares the
+// Bd-Project-Id stamp (projectExempt) and the Bd-Wire-Revision floor
+// (wireRevisionExempt), takes a database slot (bypassSemaphore), and which op
+// its request line books. A request a mount holds but no row claims (the
+// catch-all, or a custom-method suffix no row registers) gets the unrouted
+// answer: 404 not_found, with no credential asked, no RequestContext hook run,
+// no stamp or floor compared, no slot taken and no op booked. The Host policy,
+// the request id, the response-wide headers, panic recovery and the request
+// line are not part of any posture: handler() wraps them around the whole
+// router, so no mount can opt out of them.
+type mount struct {
+	// pattern is exactly what the router registers.
+	pattern string
+	handler http.Handler
+	// rows are the operations answered here, in dispatch order: the one row
+	// for a pattern the router can spell, every row sharing a custom-method
+	// key, and none for the catch-all.
+	rows []route
+}
+
+// mounts lists every registration the router holds: one per route row the
+// router can spell, one per custom-method key the rows share, and the
+// catch-all. It builds handlers and nothing else, so a test can range over it
+// to ask what the server answers.
+func (s *Server) mounts() []mount {
+	var out []mount
 	// Rows carrying a customMethod SHARE a pattern, so they get one
 	// registration between them and a dispatcher in front. Collected in table
 	// order, which is the order customMethodTarget tries the suffixes in.
 	shared := map[string][]route{}
 	var sharedOrder []string
 	for _, rt := range routeTable {
+		key := rt.method + " " + rt.pattern
 		if rt.customMethod == "" {
-			mux.Handle(rt.method+" "+rt.pattern, s.route(rt))
+			out = append(out, mount{pattern: key, handler: s.route(rt), rows: []route{rt}})
 			continue
 		}
-		key := rt.method + " " + rt.pattern
 		if _, seen := shared[key]; !seen {
 			sharedOrder = append(sharedOrder, key)
 		}
 		shared[key] = append(shared[key], rt)
 	}
 	for _, key := range sharedOrder {
-		mux.Handle(key, s.dispatchCustomMethod(shared[key]))
+		out = append(out, mount{pattern: key, handler: s.dispatchCustomMethod(shared[key]), rows: shared[key]})
 	}
 
 	// Not an operation and deliberately not in the route table: it exists so
@@ -1688,11 +1778,10 @@ func (s *Server) handler() http.Handler {
 	// net/http's text/plain default, which the document promises for EVERY
 	// non-2xx byte. A method mismatch on a known path lands here too and
 	// answers 404 rather than 405, because 405 is not in the v0 vocabulary.
-	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	out = append(out, mount{pattern: "/", handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, newResult(CodeNotFound, "no such route on this server"))
-	}))
-
-	return s.withRequestContext(s.checkHost(mux))
+	})})
+	return out
 }
 
 // reqInfo is the per-request record the log line is assembled from. Layers fill
@@ -1907,6 +1996,11 @@ func (s *Server) closeStreams() {
 // id (server_project_id), so it must sit behind the authentication gate — an
 // unauthenticated caller is turned away by the 401 before the stamp is ever
 // compared, and so learns nothing about the workspace's identity.
+//
+// Config.RequestContext, when set, runs between the credential check and the
+// stamp check for every routed request — the auth-exempt ones too, which reach
+// it with no credential checked — and the context it returns is the one every
+// later check and the handler receive.
 func (s *Server) route(rt route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := requestInfo(r.Context())
@@ -1925,6 +2019,13 @@ func (s *Server) route(rt route) http.Handler {
 
 		if !rt.authExempt && s.auth != nil && !s.authorize(w, r, rec) {
 			return
+		}
+
+		if s.cfg.RequestContext != nil {
+			var ok bool
+			if r, ok = s.applyRequestContext(w, r, rec); !ok {
+				return
+			}
 		}
 
 		// Identity before resources: a stamp for the wrong workspace is turned
@@ -2407,4 +2508,24 @@ func logValue(v any) string {
 
 func millis(d time.Duration) string {
 	return strconv.FormatFloat(float64(d)/float64(time.Millisecond), 'f', 3, 64)
+}
+
+// moleculeStepper returns the advance-a-molecule surface for one request.
+//
+// On the store-shaped source there is no configured field for it: the role is
+// issueops.NewMoleculeStepper composed over roles the source already carries
+// (batch getter, relations, edge reader, claimer, lifecycle), so building it
+// here from those is the same composition a store's own accessor makes. On the
+// provider it is built over the timed wrapper, the same two-step every role
+// above performs.
+func (s *Server) moleculeStepper(r *http.Request) (issueops.MoleculeStepper, error) {
+	if s.provider == nil {
+		return issueops.NewMoleculeStepper(issueops.MoleculeStepperRoles{
+			Reader:    issueops.MoleculeReader{BatchGetter: s.issueBatchGetter, Relations: s.issueRelations, EdgeReader: s.issueEdges},
+			Claimer:   checkedClaimer{inner: s.issueClaimer},
+			Lifecycle: checkedLifecycle{inner: s.issueLifecycle},
+		}), nil
+	}
+	var src uow.MoleculeStepperSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.MoleculeStepper()
 }

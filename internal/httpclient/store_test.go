@@ -79,7 +79,8 @@ func pinnedProjectTarget(t *testing.T) Target {
 // TestCommitFamilyIsNoOp is the D3 posture. Without it `bd ready --claim` exits
 // 1 after a durable claim: auto-commit defaults on for a registered workspace,
 // the claim path calls Commit, and PostRun turns any Commit error into a failed
-// exit.
+// exit. The scoped config commits fail the same way: `bd config set` and `bd
+// remember` call them after a write that already landed (GH#4078).
 func TestCommitFamilyIsNoOp(t *testing.T) {
 	s := New(pinnedProjectTarget(t), nil, nil)
 	ctx := context.Background()
@@ -92,6 +93,12 @@ func TestCommitFamilyIsNoOp(t *testing.T) {
 	}
 	if err := s.CommitMergeResolution(ctx, "msg"); err != nil {
 		t.Errorf("CommitMergeResolution: %v, want nil", err)
+	}
+	if err := s.CommitConfigOnly(ctx, "msg"); err != nil {
+		t.Errorf("CommitConfigOnly: %v, want nil", err)
+	}
+	if err := s.CommitConfigUserKVOnly(ctx, "msg"); err != nil {
+		t.Errorf("CommitConfigUserKVOnly: %v, want nil", err)
 	}
 	pending, err := s.CommitPending(ctx, "actor")
 	if err != nil {
@@ -116,7 +123,10 @@ func TestCommitFamilyIsNoOp(t *testing.T) {
 // commit family ever drifts onto the allowlist, the no-ops above are dead code
 // and the claim path breaks.
 func TestCommitFamilyIsNotOnTheUnsupportedMap(t *testing.T) {
-	for _, name := range []string{"Commit", "CommitWithConfig", "CommitMergeResolution", "CommitAll", "CommitPending", "Close"} {
+	for _, name := range []string{
+		"Commit", "CommitWithConfig", "CommitMergeResolution", "CommitAll", "CommitPending",
+		"CommitConfigOnly", "CommitConfigUserKVOnly", "Close",
+	} {
 		if reason, ok := legitimatelyUnsupported[name]; ok {
 			t.Errorf("%q is on the unsupported allowlist (%q) but D3/D4 require a no-op", name, reason)
 		}

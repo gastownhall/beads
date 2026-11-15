@@ -27,6 +27,7 @@ import (
 type capturedProxiedOpen struct {
 	databaseOverride string
 	posture          identityPosture
+	stores           freshStorePosture
 	opts             []uow.ProviderOption
 }
 
@@ -39,10 +40,11 @@ func interceptProxiedOpens(t *testing.T) *[]capturedProxiedOpen {
 	t.Helper()
 	var captured []capturedProxiedOpen
 	orig := openProxiedServerUOWProviderFn
-	openProxiedServerUOWProviderFn = func(ctx context.Context, beadsDir, databaseOverride string, posture identityPosture, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
+	openProxiedServerUOWProviderFn = func(ctx context.Context, beadsDir, databaseOverride string, posture identityPosture, stores freshStorePosture, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
 		captured = append(captured, capturedProxiedOpen{
 			databaseOverride: databaseOverride,
 			posture:          posture,
+			stores:           stores,
 			opts:             opts,
 		})
 		return nil, errProxiedPolicySentinel
@@ -103,6 +105,8 @@ func TestProxiedCreatePolicy_InitOpensWithCreateEnabled(t *testing.T) {
 		"init must bind and migrate the database it creates")
 	assert.Equal(t, adoptWorkspaceIdentity, got.posture,
 		"init adopts the identity the shared database carries")
+	assert.Equal(t, allowFreshStore, got.stores,
+		"init is the one open that may mint a managed-local store, so both create policies travel together (#8043 and #2189)")
 }
 
 func TestProxiedCreatePolicy_OrdinaryCommandOpensWithCreateDisabled(t *testing.T) {
@@ -131,6 +135,8 @@ func TestProxiedCreatePolicy_OrdinaryCommandOpensWithCreateDisabled(t *testing.T
 		"ordinary commands bind to the configured database")
 	assert.Equal(t, assertWorkspaceIdentity, got.posture,
 		"ordinary commands assert the workspace's project identity")
+	assert.Equal(t, refuseFreshStore, got.stores,
+		"ordinary commands keep the empty-root refusal (#8043)")
 	assert.Empty(t, got.databaseOverride,
 		"no --db/--database flag was passed, so no override reaches the open")
 }
@@ -150,6 +156,8 @@ func TestProxiedCreatePolicy_CleanDatabasesOpensServerWideWithoutCreate(t *testi
 		"clean-databases must never (re)create the configured database")
 	assert.Equal(t, adoptWorkspaceIdentity, got.posture,
 		"server-wide maintenance has no single project identity to assert")
+	assert.Equal(t, refuseFreshStore, got.stores,
+		"maintenance keeps the empty-root refusal (#8043)")
 	assert.Empty(t, got.databaseOverride,
 		"maintenance is server-scoped; it never targets an override database")
 }
@@ -169,4 +177,6 @@ func TestProxiedCreatePolicy_PrimeMemoryReadOpensWithCreateDisabled(t *testing.T
 		"prime reads the configured database")
 	assert.Equal(t, assertWorkspaceIdentity, got.posture,
 		"prime reads this workspace's project")
+	assert.Equal(t, refuseFreshStore, got.stores,
+		"prime keeps the empty-root refusal (#8043)")
 }

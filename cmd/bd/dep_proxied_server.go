@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -159,6 +160,92 @@ func proxiedLookupTitle(ctx context.Context, uw uow.UnitOfWork, id string) strin
 	return ""
 }
 
+// proxiedDepTargetMiss asks, once a proxied write has stored an edge, the
+// question the direct route asks before its write: does the target exist?
+// The proxied writers resolve no IDs, and the server files a target whose
+// prefix differs from its source's under depends_on_external without looking
+// it up (IsExternalDepTarget in internal/storage/issueops, the rule the
+// domain repository classifies by), so a typo is stored there with a success
+// line (GH#6556).
+//
+// It returns the lookup error that left the target unverified, the miss
+// warnUnresolvedDepTarget reads, and nil when the target was found or was not
+// stored unchecked: an "external:" ref belongs to the external-deps resolver,
+// and a same-prefix target is held by the store's foreign key, so the write
+// itself found it. The lookups are the ones proxied mode has, in
+// proxiedFreshReadGetter's order: the server's database, as an issue or a
+// wisp, then a prefix route; proxied mode has no contributor auto-routing.
+// No route for the target leaves the server's not-found as the answer; a
+// route that fails is returned as itself, so the warning names it rather
+// than calling the target missing. A route into a rig in proxied-server mode
+// leaves no miss (depTargetLookupMiss): that is not a failed lookup but none
+// at all, because bd will not open such a rig as a direct store (#5861). The
+// refusal says nothing about the target, and in an all-proxied town it would
+// call every valid cross-rig edge a typo.
+//
+// Both lookups are exact because the stored row holds the target as typed.
+// The route's default resolver would count a unique leading prefix of a rig
+// ID, or a hash the rig holds under another prefix, as found, and print its
+// "resolved to" note, while the stored row names no issue. Resolved exactly,
+// an abbreviation comes back as the rig's refusal (utils.AbbreviatedIDError,
+// which names the IDs it abbreviates), and a hit on another ID is named as
+// that ID; neither counts as found.
+func proxiedDepTargetMiss(ctx context.Context, sourceID, targetID string) error {
+	if IsExternalRef(targetID) || types.ExtractPrefix(sourceID) == types.ExtractPrefix(targetID) {
+		return nil
+	}
+	if uowProvider == nil {
+		return errors.New("proxied-server UOW provider not initialized")
+	}
+	uw, err := uowProvider.NewUOW(ctx)
+	if err != nil {
+		return fmt.Errorf("open unit of work: %w", err)
+	}
+	_, _, localErr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), targetID)
+	uw.Close(ctx)
+	if localErr == nil || !isNotFoundErr(localErr) {
+		return localErr
+	}
+	routed, routeErr := resolveViaPrefixRoutingWithAccess(ctx, targetID, false, true)
+	if routeErr == nil {
+		resolvedID := routed.ResolvedID
+		routed.Close()
+		if resolvedID != targetID {
+			return fmt.Errorf("the routed rig resolves it to %s, an ID the edge does not store", resolvedID)
+		}
+		return nil
+	}
+	if errors.Is(routeErr, errRoutingUnavailable) {
+		return localErr
+	}
+	return depTargetLookupMiss(routeErr)
+}
+
+// warnProxiedUnresolvedDepTarget is the single-edge proxied writers' notice
+// for a target proxiedDepTargetMiss did not find, printed once the edge is
+// stored. Under --quiet it asks nothing: the notice is all the lookup is for.
+func warnProxiedUnresolvedDepTarget(ctx context.Context, sourceID, targetID string) {
+	if quietFlag {
+		return
+	}
+	if miss := proxiedDepTargetMiss(ctx, sourceID, targetID); miss != nil {
+		warnUnresolvedDepTarget("", sourceID, targetID, miss)
+	}
+}
+
+// warnProxiedUnresolvedBulkDepTargets is runDepAddBulkProxied's notice: it
+// looks each stored edge's target up and warns per line, as the direct --file
+// route does from the misses it recorded before its write.
+func warnProxiedUnresolvedBulkDepTargets(ctx context.Context, edges []bulkDepEdge) {
+	if quietFlag {
+		return
+	}
+	for i := range edges {
+		edges[i].TargetMiss = proxiedDepTargetMiss(ctx, edges[i].IssueID, edges[i].DependsOnID)
+	}
+	warnUnverifiedBulkDepEdges(edges)
+}
+
 func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerID, blockedID string) error {
 	// `bd dep <blocker> --blocks <blocked>` is the fifth dep add surface: this
 	// command's own help calls it "equivalent to: bd dep add <blocked-id>
@@ -187,6 +274,7 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)
+	warnProxiedUnresolvedDepTarget(ctx, blockedID, blockerID)
 
 	if jsonOutput {
 		_ = outputJSON(map[string]interface{}{
@@ -261,6 +349,7 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 
 	explicit := cmd.Flags().Changed("type") || cmd.Flags().Changed("blocked-by") || cmd.Flags().Changed("depends-on")
 	warnImplicitBlocksDefault(dt, explicit)
+	warnProxiedUnresolvedDepTarget(ctx, fromID, toID)
 
 	if jsonOutput {
 		_ = outputJSON(map[string]interface{}{
@@ -327,6 +416,7 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 			}
 		}
 	}
+	warnProxiedUnresolvedBulkDepTargets(ctx, edges)
 
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(depEdges))

@@ -2,12 +2,20 @@ package schema
 
 import "strings"
 
-// DirtyTablesError is returned by MigrateUp when pending schema migrations
-// would alter tables that already have uncommitted changes in the working
-// set. The guard protects dirty user data from being entangled with a
-// migration: committing a migration's DDL/DML together with unrelated
-// uncommitted rows in the same table makes the two impossible to separate
-// later.
+// DirtyTablesError is returned by MigrateUp when pending schema migrations,
+// from either the main or the ignored series, would alter committable tables
+// that already have uncommitted changes in the working set. Both series are
+// checked before any numbered migration or rekey runs, so that refusal
+// applies none of them (MigrateUp's seed and cursor-heal preparations may
+// already have run). The dependency re-key returns this type too, when it
+// would rewrite such a table, but its plan-time refusal comes after the main
+// series (each step committed) and the custom status and type backfill have
+// run. Dolt-ignored tables (wisps, wisp_comments, ...) are exempt: their rows
+// are clone-local and never staged into the migration commit, so migrations
+// alter them in place (gastownhall/beads#5816). The guard protects dirty user
+// data from being entangled with a migration: committing a migration's
+// DDL/DML together with unrelated uncommitted rows in the same table makes
+// the two impossible to separate later.
 //
 // The documented recovery is "bd dolt commit" (or "bd vc commit"), which
 // commits the working set at the current schema so the migration can then

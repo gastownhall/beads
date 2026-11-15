@@ -7,17 +7,20 @@ import (
 	"testing"
 )
 
-// An unset must not also rewrite the end of the file. commentOutYamlKey used to
-// drop the document's trailing newline, so `bd config unset` produced a
-// no-newline-at-end-of-file change on top of the line it meant to comment out —
-// and did so even for a key the document does not contain, i.e. when nothing
-// was edited at all. A config.yaml is git-tracked, so that is a spurious line
-// in someone's review.
+// Neither an unset nor a set may also rewrite the end of the file.
+// commentOutYamlKey and updateYamlKey's flat-key path both used to drop the
+// document's trailing newline, so `bd config unset` and `bd config set` each
+// produced a no-newline-at-end-of-file change on top of the line they meant to
+// edit — and unset did so even for a key the document does not contain, i.e.
+// when nothing was edited at all. A config.yaml is git-tracked, so that is a
+// spurious line in someone's review. The unset tests come first; the set tests
+// follow them, starting at TestUpdateYamlKeyPreservesTheTrailingNewline.
 //
 // The guarantee is scoped to LF documents. A CRLF file is still normalized to
-// LF by an unset that actually comments a key out — that predates this fix and
-// is pinned below as known-and-accepted rather than quietly claimed away. An
-// unset that changes nothing no longer rewrites the file at all; see
+// LF by an unset that actually comments a key out, and by any set of a
+// single-segment key — that predates both fixes and is pinned below as
+// known-and-accepted rather than quietly claimed away. An unset that changes
+// nothing no longer rewrites the file at all; see
 // TestUnsetOfAnAbsentKeyLeavesACRLFFileUntouched.
 func TestCommentOutYamlKeyPreservesTheTrailingNewline(t *testing.T) {
 	for _, tc := range []struct {
@@ -60,13 +63,13 @@ func TestCommentOutYamlKeyPreservesTheTrailingNewline(t *testing.T) {
 		}
 	})
 
-	// bufio.ScanLines strips the "\r" from every line, so an unset rewrites a
-	// CRLF document to LF throughout. That is pre-existing and unchanged by the
-	// trailing-run logic, but the tail is where it is least visible: TrimRight
-	// on "\n" leaves the final "\r" behind, so the run that gets re-attached is
-	// a bare "\n" and the end of the file reads clean while every line ending
-	// above it changed. Pinned so the normalization is documented, and so a
-	// future change to it has to be deliberate.
+	// commentOutYamlKey normalizes CRLF to LF before anything else, so an unset
+	// rewrites a CRLF document to LF throughout. That is pre-existing and
+	// unchanged by the trailing-run logic, which measures the run after the
+	// normalization: each trailing "\r\n" comes back as one "\n", so the end of
+	// the file reads clean while every line ending above it changed. Pinned so
+	// the normalization is documented, and so a future change to it has to be
+	// deliberate.
 	t.Run("CRLF is normalized to LF, trailing run included", func(t *testing.T) {
 		out, err := commentOutYamlKey("issue_prefix: vp\r\ndolt.mode: server\r\n", "dolt.mode")
 		if err != nil {
@@ -250,4 +253,218 @@ func TestUnsetOfAPresentKeyInACRLFFileReportsTheWrite(t *testing.T) {
 		}
 		assertWritten(t, path)
 	})
+}
+
+// The set twin of TestCommentOutYamlKeyPreservesTheTrailingNewline.
+// updateYamlKey's flat-key path read the document with bufio.Scanner and joined
+// the lines back with "\n" — the shape commentOutYamlKey used to have — so it
+// came back exactly one newline short of any terminated document. Every key
+// here is a single segment, because only those reach that path: updateYamlKey
+// hands every dotted key to updateNestedYamlKey, a different writer, so a
+// dotted-key row would pass without running the code under test at all.
+func TestUpdateYamlKeyPreservesTheTrailingNewline(t *testing.T) {
+	for _, tc := range []struct {
+		name, content, key string
+	}{
+		{"key present", "issue_prefix: vp\ndolt.mode: server\n", "issue_prefix"},
+		{"commented key present", "# actor: \"\"\nother: x\n", "actor"},
+		{"key on the last line", "other: x\nactor: a\n", "actor"},
+		{"key absent, appended", "issue_prefix: vp\n", "actor"},
+
+		// As on the unset side, a run of blank lines lost exactly one newline,
+		// so the output still ended in "\n" and only an exact comparison of the
+		// run can see the loss. An absent key appended to a file that ends like
+		// this is not a row here: its blank lines end up ahead of the new key,
+		// so the run after the key is not the file's run. The appended-key
+		// subtest below pins those outputs exactly.
+		{"ends in a blank line", "actor: a\nother: x\n\n", "actor"},
+		{"ends in two blank lines", "actor: a\nother: x\n\n\n", "actor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := updateYamlKey(tc.content, tc.key, "b")
+			if err != nil {
+				t.Fatalf("updateYamlKey: %v", err)
+			}
+			want := tc.content[len(strings.TrimRight(tc.content, "\n")):]
+			if got := out[len(strings.TrimRight(out, "\n")):]; got != want {
+				t.Errorf("trailing newline run = %q, want %q:\nin:  %q\nout: %q", got, want, tc.content, out)
+			}
+		})
+	}
+
+	// The in-place branch replaces the one value and leaves every other byte,
+	// the terminator included, as it was.
+	t.Run("key present: only the value changes", func(t *testing.T) {
+		out, err := updateYamlKey("issue_prefix: vp\ndolt.mode: server\n", "issue_prefix", "zz")
+		if err != nil {
+			t.Fatalf("updateYamlKey: %v", err)
+		}
+		if want := "issue_prefix: \"zz\"\ndolt.mode: server\n"; out != want {
+			t.Errorf("updateYamlKey:\ngot:  %q\nwant: %q", out, want)
+		}
+	})
+
+	// The appended branch makes an absent key the new last line, which is where
+	// the old join left it unterminated: "x\n" came back "x\n\nnewkey: \"v\"".
+	// The set adds that one line and nothing else: a blank line before it only
+	// when the file does not already end in one, and a terminator after it when
+	// the file had one.
+	t.Run("appended key: separator kept, terminator restored", func(t *testing.T) {
+		for _, tc := range []struct{ content, want string }{
+			{"x\n", "x\n\nnewkey: \"v\"\n"},
+			// A trailing blank line already separates, so no second one is added,
+			// and the file's blank lines stay ahead of the new key instead of
+			// being repeated after it: the file comes back whole, followed by one
+			// terminated line. Re-attaching the file's own run here would end it
+			// "x\n\nnewkey: \"v\"\n\n", a blank line nobody asked for.
+			{"x\n\n", "x\n\nnewkey: \"v\"\n"},
+			{"x\n\n\n", "x\n\n\nnewkey: \"v\"\n"},
+			// The same append on a CRLF file, which comes back LF throughout.
+			{"x\r\n\r\n", "x\n\nnewkey: \"v\"\n"},
+		} {
+			out, err := updateYamlKey(tc.content, "newkey", "v")
+			if err != nil {
+				t.Fatalf("updateYamlKey(%q): %v", tc.content, err)
+			}
+			if out != tc.want {
+				t.Errorf("updateYamlKey(%q):\ngot:  %q\nwant: %q", tc.content, out, tc.want)
+			}
+		}
+	})
+
+	// A document that genuinely has no trailing newline keeps not having one:
+	// the rule is "preserve", not "always append". One input per branch.
+	t.Run("absent trailing newline is not invented", func(t *testing.T) {
+		for _, content := range []string{"actor: a\nother: x", "other: x"} {
+			out, err := updateYamlKey(content, "actor", "b")
+			if err != nil {
+				t.Fatalf("updateYamlKey(%q): %v", content, err)
+			}
+			if strings.HasSuffix(out, "\n") {
+				t.Errorf("a trailing newline was invented for a document that had none: %q -> %q", content, out)
+			}
+		}
+	})
+
+	// A set of a single-segment key rewrites a CRLF document to LF throughout,
+	// as an unset does. That predates the fix and is pinned here, like unset's
+	// subtest of the same name, so that changing it has to be deliberate. What
+	// the fix changes is the end: the old join dropped the terminator, so
+	// "…x\r\n" came back "…x". A set now ends the file the way an unset of the
+	// same document does, blank lines included: both measure the trailing run
+	// after normalizing, so each trailing "\r\n" comes back as one "\n".
+	t.Run("CRLF is normalized to LF, trailing run included", func(t *testing.T) {
+		for _, tc := range []struct{ content, want string }{
+			{"actor: a\r\nother: x\r\n", "actor: \"b\"\nother: x\n"},
+			// Measured on the raw bytes, the run stops at the last "\r", so
+			// re-attaching it ends both of these in a single "\n". For the
+			// second that loses more than the base did, which ended it "…x\n\n".
+			{"actor: a\r\nother: x\r\n\r\n", "actor: \"b\"\nother: x\n\n"},
+			{"actor: a\r\nother: x\r\n\r\n\r\n", "actor: \"b\"\nother: x\n\n\n"},
+		} {
+			out, err := updateYamlKey(tc.content, "actor", "b")
+			if err != nil {
+				t.Fatalf("updateYamlKey(%q): %v", tc.content, err)
+			}
+			if out != tc.want {
+				t.Errorf("updateYamlKey(%q):\ngot:  %q\nwant: %q", tc.content, out, tc.want)
+			}
+			unset, err := commentOutYamlKey(tc.content, "actor")
+			if err != nil {
+				t.Fatalf("commentOutYamlKey(%q): %v", tc.content, err)
+			}
+			if got, want := out[len(strings.TrimRight(out, "\n")):], unset[len(strings.TrimRight(unset, "\n")):]; got != want {
+				t.Errorf("set and unset end %q differently: set %q, unset %q", tc.content, got, want)
+			}
+		}
+	})
+}
+
+// The same property through the public writer, which is what `bd config set`
+// actually calls: the twin of TestUnsetThroughTheFileKeepsTheTrailingNewline.
+func TestSetThroughTheFileKeepsTheTrailingNewline(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "config.yaml")
+	// The file ends in a blank line, the shape a single appended "\n" does not
+	// restore. actor is a single-segment key, so the set takes the flat path.
+	const body = "issue_prefix: vp\nactor: alice\ndolt:\n  mode: server\n\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	if err := SetYamlConfig("actor", "bob"); err != nil {
+		t.Fatalf("SetYamlConfig: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The value must have landed, or an untouched file would pass below.
+	if !strings.Contains(string(after), "actor: \"bob\"\n") {
+		t.Fatalf("set did not write the value:\n%q", string(after))
+	}
+	want := body[len(strings.TrimRight(body, "\n")):]
+	if got := string(after)[len(strings.TrimRight(string(after), "\n")):]; got != want {
+		t.Errorf("set rewrote the end of the file: trailing run %q, want %q\n%q", got, want, string(after))
+	}
+}
+
+// The appended branch through the same writer. The file already ends in a
+// blank line, which separates the new key, so the set adds exactly one line:
+// the change a hand edit would make, and all someone reviewing it should see.
+func TestSetOfAnAbsentKeyThroughTheFileAddsOneLine(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "config.yaml")
+	const body = "issue_prefix: vp\nactor: alice\n\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	if err := SetYamlConfig("no-push", "true"); err != nil {
+		t.Fatalf("SetYamlConfig: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := body + "no-push: true\n"; string(after) != want {
+		t.Errorf("set of an absent key:\ngot:  %q\nwant: %q", string(after), want)
+	}
+}
+
+// updateYamlKey hands every dotted key to updateNestedYamlKey before it
+// normalizes CRLF, and has to keep doing so: replaceFlatKeyLine and
+// appendNestedYamlKey carry "\r" through on the lines they leave alone (the
+// literal dotted key and the comment-only document below), and normalizing
+// above the dispatch would silently change what they write. The other two rows
+// are re-marshalled to LF either way. This pins the boundary, not those
+// outputs: whatever the nested writer makes of a CRLF document, a set of a
+// dotted key returns exactly that.
+func TestUpdateYamlKeyLeavesTheNestedPathAlone(t *testing.T) {
+	for _, tc := range []struct{ name, content string }{
+		{"literal dotted key", "issue_prefix: vp\r\ndolt.mode: server\r\n"},
+		{"nested block", "issue_prefix: vp\r\ndolt:\r\n  mode: server\r\n"},
+		{"key absent", "issue_prefix: vp\r\n"},
+		{"comment-only document", "# dolt.mode: server\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want, ok, err := updateNestedYamlKey(tc.content, "dolt.mode", "embedded")
+			if err != nil || !ok {
+				t.Fatalf("updateNestedYamlKey: ok=%v err=%v; nothing to compare against", ok, err)
+			}
+			got, err := updateYamlKey(tc.content, "dolt.mode", "embedded")
+			if err != nil {
+				t.Fatalf("updateYamlKey: %v", err)
+			}
+			if got != want {
+				t.Errorf("updateYamlKey and updateNestedYamlKey differ on %q:\nset:    %q\nnested: %q", tc.content, got, want)
+			}
+		})
+	}
 }

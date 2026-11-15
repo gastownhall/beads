@@ -8,11 +8,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/atomicfile"
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -24,6 +27,26 @@ import (
 // not.
 var ErrNoProjectConfigYaml = errors.New("no project config.yaml in this workspace")
 
+// CommandSettingKeys names configuration keys whose values bd executes. They
+// must be supplied from user-global YAML or shell environment variables, never
+// from project .beads/config.yaml or replicated database settings.
+var CommandSettingKeys = []string{
+	"mail.delegate",
+}
+
+// IsCommandSettingKey reports whether key names an executable command setting
+// (matched case-insensitively and normalizing underscores/hyphens to dots).
+func IsCommandSettingKey(key string) bool {
+	replacer := strings.NewReplacer("_", ".", "-", ".")
+	norm := replacer.Replace(strings.ToLower(strings.TrimSpace(key)))
+	for _, k := range CommandSettingKeys {
+		if norm == replacer.Replace(strings.ToLower(k)) {
+			return true
+		}
+	}
+	return false
+}
+
 // YamlOnlyKeys are configuration keys that must be stored in config.yaml
 // rather than the database. These are "startup" settings that are
 // read before the database is opened.
@@ -32,6 +55,7 @@ var ErrNoProjectConfigYaml = errors.New("no project config.yaml in this workspac
 // appeared to succeed but had no effect (because no-db is read from yaml
 // at startup, not from the database).
 var YamlOnlyKeys = map[string]bool{
+	"mail.delegate": true,
 	// Bootstrap flags (affect how bd starts)
 	"no-db": true,
 	"json":  true,
@@ -78,6 +102,9 @@ var YamlOnlyKeys = map[string]bool{
 	// the database is reachable, so they must live in yaml)
 	"prime.max-memories":     true,
 	"prime.max-memory-chars": true,
+	// Turns bd prime off for sessions whose host briefs the agent itself;
+	// read at session start like the caps, usually as BD_PRIME_DISABLED.
+	"prime.disabled": true,
 
 	// Memory-corpus budget enforced by `bd remember` (0 = off). Yaml for the
 	// same reason the prime caps are: it is read through viper (config.GetInt),
@@ -297,19 +324,24 @@ func checkSecretGitTracked(configPath, key string) error {
 		return nil
 	}
 	envVar := secretKeyEnvVarHint(key)
+	// The config path goes into the git rm and echo commands as one shell
+	// word each: bare, a workspace path with a space in it would untrack the
+	// wrong file and append to another.
+	configArg, configNote := remedy.CommandArg(runtime.GOOS, configPath, "<config>")
+	ignoreArg, ignoreNote := remedy.CommandArg(runtime.GOOS, filepath.Join(filepath.Dir(configPath), ".gitignore"), "<gitignore>")
 	return fmt.Errorf(
 		"refusing to write secret key %q to git-tracked config file %s\n\n"+
 			"This would expose your secret in git history. Instead:\n"+
 			"  export %s=\"your-key-here\"    # add to ~/.secrets or ~/.zshrc\n\n"+
 			"Or move config.yaml out of git tracking:\n"+
-			"  git rm --cached %s\n"+
-			"  echo \"config.yaml\" >> %s/.gitignore\n\n"+
+			"  git rm --cached %s%s\n"+
+			"  echo \"config.yaml\" >> %s%s\n\n"+
 			"To override this check (e.g., for testing):\n"+
 			"  bd config set --force-git-tracked %s \"value\"",
-		key, configPath,
+		key, remedy.PrintedValue(configPath),
 		envVar,
-		configPath,
-		filepath.Dir(configPath),
+		configArg, configNote,
+		ignoreArg, ignoreNote,
 		key,
 	)
 }
@@ -369,6 +401,7 @@ var userGlobalKeyPrefixes = []string{"metrics."}
 // to ~/.config/bd/config.yaml keeps it per-machine; viper still merges that
 // file, so config.NodeID() reads it back.
 var userGlobalExactKeys = map[string]bool{
+	"mail.delegate":        true,
 	"dolt.remotesapi-port": true,
 	"node_id":              true,
 }
@@ -462,6 +495,23 @@ func WorkspaceYamlValueStrict(beadsDir, key string) (value string, present bool,
 // rather than silently treated as absent. Initialize is equally strict — it
 // fails outright on a config.local.yaml it cannot merge.
 func WorkspaceYamlValueStrictWithLocal(beadsDir, key string) (value string, present bool, err error) {
+	return workspaceYamlValueWithLocal(beadsDir, key, false)
+}
+
+// WorkspaceYamlSettingWithLocal is WorkspaceYamlValueStrictWithLocal for a
+// caller asking what a workspace's config sets, the way bd's merged reader
+// answers it there: a YAML null at the key or at any parent of it reads as
+// absent in that layer, as it does for config.GetYamlConfig, instead of as an
+// error. That is the shape a user leaves by commenting out every child of a
+// section ("dolt:\n  # mode: server\n"), and bd itself runs in that
+// workspace as if the key were unset. Every other error is kept: an
+// unreadable or unparseable file, a non-null non-map parent, and a non-scalar
+// value.
+func WorkspaceYamlSettingWithLocal(beadsDir, key string) (value string, present bool, err error) {
+	return workspaceYamlValueWithLocal(beadsDir, key, true)
+}
+
+func workspaceYamlValueWithLocal(beadsDir, key string, nullIsUnset bool) (value string, present bool, err error) {
 	if beadsDir == "" {
 		return "", false, nil
 	}
@@ -475,7 +525,7 @@ func WorkspaceYamlValueStrictWithLocal(beadsDir, key string) (value string, pres
 		names = names[1:]
 	}
 	for _, name := range names {
-		value, present, err = strictYamlValueAtPath(filepath.Join(beadsDir, name), key)
+		value, present, err = yamlValueAtPath(filepath.Join(beadsDir, name), key, nullIsUnset)
 		if err != nil || present {
 			return value, present, err
 		}
@@ -484,6 +534,13 @@ func WorkspaceYamlValueStrictWithLocal(beadsDir, key string) (value string, pres
 }
 
 func strictYamlValueAtPath(path, key string) (value string, present bool, err error) {
+	return yamlValueAtPath(path, key, false)
+}
+
+// yamlValueAtPath reads key from the YAML file at path with the strict
+// contract of WorkspaceYamlValueStrict; nullIsUnset reads a null at the key or
+// at a parent of it as absent instead of as an error.
+func yamlValueAtPath(path, key string, nullIsUnset bool) (value string, present bool, err error) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is caller-resolved workspace state
 	if os.IsNotExist(err) {
 		return "", false, nil
@@ -498,7 +555,7 @@ func strictYamlValueAtPath(path, key string) (value string, present bool, err er
 	if root == nil {
 		return "", false, nil
 	}
-	if raw, ok := root[key]; ok {
+	if raw, ok := root[key]; ok && (raw != nil || !nullIsUnset) {
 		value, err := strictYamlScalarString(raw)
 		if err != nil {
 			return "", true, err
@@ -513,7 +570,7 @@ func strictYamlValueAtPath(path, key string) (value string, present bool, err er
 			return "", true, fmt.Errorf("workspace config key %q has a non-map parent", key)
 		}
 		node, ok = m[part]
-		if !ok {
+		if !ok || (node == nil && nullIsUnset) {
 			return "", false, nil
 		}
 		if i == len(parts)-1 {
@@ -666,10 +723,10 @@ func UnsetUserYamlConfig(key string) (bool, error) {
 		return false, nil
 	}
 
-	// Preserve the owner-private 0600 posture every other user-global writer
-	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
-	// rewriting at 0644 would relax this shared user config to world-readable.
-	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
+	// replaceConfigYaml keeps the file's own mode, so the owner-private 0600
+	// posture every user-global writer creates it with (SetUserYamlConfig, the
+	// metrics bootstrap) survives the rewrite.
+	if err := replaceConfigYaml(configPath, []byte(newContent)); err != nil {
 		return false, fmt.Errorf("failed to write user config.yaml: %w", err)
 	}
 
@@ -710,12 +767,49 @@ func setYamlConfigAtPath(configPath, key, value string) error {
 		return err
 	}
 
-	// Write back
-	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
+	if err := replaceConfigYaml(configPath, []byte(newContent)); err != nil {
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
 	return nil
+}
+
+// replaceConfigYaml replaces an existing config.yaml's content in one step:
+// temp file, then rename. Other bd processes read this file while bd writes
+// it: every command loads it at startup and reads events-journal activation
+// from it when it opens its store, and `bd serve` resolves that activation
+// once, at startup, for the life of the server. An in-place rewrite (truncate,
+// then write) hands a reader that lands in between an empty or partial file,
+// which parses as "key absent" and resolves to the key's default.
+//
+// On POSIX a reader sees the whole old file or the whole new one. Windows
+// refuses to rename over a file another handle holds open, so there the
+// replace waits for the reader to close it (internal/atomicfile retries for
+// about two seconds) and otherwise fails with the old file intact.
+//
+// A symlinked config.yaml is written through to its target rather than
+// replaced by a regular file, and the file keeps its own permissions. A
+// rename needs write permission on the directory only, so the file's own is
+// checked first: a config.yaml its owner made read-only is refused, as the
+// in-place write refused it, rather than rewritten.
+func replaceConfigYaml(configPath string, content []byte) error {
+	target, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	// Opened without O_TRUNC, so the probe changes nothing.
+	f, err := os.OpenFile(target, os.O_WRONLY, 0) //nolint:gosec // target is the resolved config.yaml path
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(target, content, info.Mode().Perm())
 }
 
 // GetYamlConfig gets a configuration value from config.yaml.
@@ -772,7 +866,7 @@ func UnsetYamlConfig(key string) (bool, error) {
 		return false, nil
 	}
 
-	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
+	if err := replaceConfigYaml(configPath, []byte(newContent)); err != nil {
 		return false, fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
@@ -859,6 +953,13 @@ func findProjectBeadsDir() string {
 // updateYamlKey updates a key in yaml content, handling commented-out keys.
 // If the key exists (commented or not), it updates it in place.
 // If the key doesn't exist, it appends it at the end.
+//
+// A dotted key is written by updateNestedYamlKey, and its result is returned
+// as is (TestUpdateYamlKeyLeavesTheNestedPathAlone pins that boundary). A
+// single-segment key is edited line by line: a CRLF document comes back LF,
+// and the end of the file is kept. An edit in place leaves the trailing
+// newline run as it was; an appended key is the new last line, terminated
+// only if the file was.
 func updateYamlKey(content, key, value string) (string, error) {
 	if strings.Contains(key, ".") {
 		if updated, ok, err := updateNestedYamlKey(content, key, value); err != nil {
@@ -867,6 +968,14 @@ func updateYamlKey(content, key, value string) (string, error) {
 			return updated, nil
 		}
 	}
+
+	// Normalize CRLF the way commentOutYamlKey does. The scan below already
+	// drops each line's "\r"; this makes the trailing run re-attached at the
+	// return the LF run too, so a CRLF file ending in blank lines keeps them.
+	// It sits below the nested dispatch on purpose: some updateNestedYamlKey
+	// branches carry "\r" through on untouched lines, and this fix leaves them
+	// alone.
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 
 	formattedValue := formatYamlValue(value)
 	newLine := fmt.Sprintf("%s: %s", key, formattedValue)
@@ -895,6 +1004,11 @@ func updateYamlKey(content, key, value string) (string, error) {
 			result = append(result, line)
 		}
 	}
+	// A line of bufio.MaxScanTokenSize bytes or more ends the scan early;
+	// returning the lines read so far would truncate config.yaml on write.
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("cannot set %q: scanning config content: %w", key, err)
+	}
 
 	if !found {
 		// Key not found - append at end
@@ -903,19 +1017,27 @@ func updateYamlKey(content, key, value string) (string, error) {
 			result = append(result, "")
 		}
 		result = append(result, newLine)
+
+		// The file's trailing blank lines were scanned as empty tokens, so they
+		// already sit ahead of the new line and separate it, and the join is one
+		// newline short: the terminator bufio.Scanner dropped. Re-attaching
+		// content's whole run, as the return below does for an edit in place,
+		// would repeat them after the key: "x\n\n" would come back
+		// "x\n\nnewkey: \"v\"\n\n", not "x\n\nnewkey: \"v\"\n". A document
+		// without a trailing newline still does not acquire one.
+		out := strings.Join(result, "\n")
+		if strings.HasSuffix(content, "\n") {
+			out += "\n"
+		}
+		return out, nil
 	}
 
-	// TODO: `bd config set` is knowingly left unfixed here. This flat-key path
-	// has the same bufio.Scanner + strings.Join shape that commentOutYamlKey
-	// had, so it is still exactly one newline short for any terminated
-	// document: updateYamlKey("issue_prefix: vp\ndolt.mode: server\n",
-	// "issue_prefix", "zz") returns a string with no terminator, and the
-	// key-not-found branch above is worse, emitting "x\n\nnewkey: \"v\"" for
-	// "x\n". The same one-line tail applied at commentOutYamlKey's return
-	// belongs here too; it is out of scope for a fix aimed at unset. Only this
-	// flat path is affected -- updateNestedYamlKey re-marshals through
-	// yaml.Node and is already newline-faithful.
-	return strings.Join(result, "\n"), nil
+	// Preserve the document's trailing newlines. bufio.Scanner drops the final
+	// terminator, so the join is one newline short of any terminated input. Same
+	// rule as commentOutYamlKey's return: re-attach content's own run, so a
+	// document without a trailing newline does not acquire one.
+	out := strings.Join(result, "\n")
+	return strings.TrimRight(out, "\n") + content[len(strings.TrimRight(content, "\n")):], nil
 }
 
 func updateNestedYamlKey(content, key, value string) (string, bool, error) {
@@ -1220,7 +1342,10 @@ func commentOutYamlKey(content, key string) (string, error) {
 			continue
 		}
 
-		if name, indent, ok := yamlKeyOnLine(line); ok && walk.step(name, indent) {
+		name, indent, ok := yamlKeyOnLine(line)
+		if !ok {
+			walk.stepOver(line)
+		} else if walk.step(name, indent) {
 			if err := mappingValueUnsetRefusal(lines, i, indent, key); err != nil {
 				return "", err
 			}
@@ -1289,17 +1414,22 @@ func mappingValueUnsetRefusal(lines []string, idx, indent int, key string) error
 	return nil
 }
 
-// valueContinuesBelow reports whether the text after a key's colon leaves the
-// value to the following lines: it is empty once a trailing comment is dropped,
-// or holds only anchors and tags.
-func valueContinuesBelow(rest string) bool {
-	rest = strings.TrimSpace(rest)
-	if i := strings.Index(rest, " #"); i >= 0 {
-		rest = rest[:i]
-	} else if strings.HasPrefix(rest, "#") {
-		rest = ""
-	}
-	for _, tok := range strings.Fields(rest) {
+// valueContinuesBelow reports whether text leaves the value to the following
+// lines: it holds only anchors and tags before an optional comment. The text is
+// what follows a key's colon, or a whole line that declares no key (stepOver).
+//
+// A "#" at the start of a line or after whitespace starts a comment, so the
+// comment begins at the first token that starts with "#". Cutting at the first
+// " #" instead read the comment line `# see #12` as the content `# see`:
+// stepOver skipped the target beneath it as a subtree, and unset reported the
+// key as never set while it stayed live. The cut also missed a comment set off
+// by a tab, and it read `sub:  # note #2` as a key with a value of its own, so
+// unset commented that line out and orphaned the mapping beneath it.
+func valueContinuesBelow(text string) bool {
+	for _, tok := range strings.Fields(text) {
+		if strings.HasPrefix(tok, "#") {
+			return true
+		}
 		if !strings.HasPrefix(tok, "&") && !strings.HasPrefix(tok, "!") {
 			return false
 		}
@@ -1381,6 +1511,44 @@ func (w *nestedKeyWalk) step(name string, indent int) bool {
 	}
 	w.opaque = indent
 	return false
+}
+
+// stepOver advances the walk by one line that has content but declares no key
+// yamlKeyOnLine can read, a list item above all. A dotted key names mappings
+// only, so nothing nested under such a line can continue the match, and the
+// walk skips that subtree as it does one under a key that does not match. These
+// lines used to bypass the walk entirely, so unsetting `dolt.host` on
+//
+//	dolt:
+//	  - port: 3307
+//	    host: 10.0.0.1
+//
+// read the item's `host:` as a direct child of `dolt:` and commented out a key
+// the file never set, reporting success (mc-2nfr1).
+//
+// Blank lines and comments are not content, and neither is a line holding only
+// node properties (`&a`, `!!map`): those decorate the node beneath them, which
+// under a matched parent is the parent's own mapping, so the match continues
+// into it. yaml.v3 accepts that mapping indented past the properties, and
+// skipping it as a subtree left `dolt.host` live on
+//
+//	dolt:
+//	  &a
+//	    host: 10.0.0.1
+//
+// while the unset reported the key as never set. valueContinuesBelow draws the
+// same line for the text after a key's colon (`base: &b`), so it decides here
+// too.
+//
+// The skip is armed only while none is. Narrowing an armed one would end the
+// skip over a section the key does not own partway through it, and widening
+// one would trust a line that need not end anything: yaml.v3 accepts a quoted
+// value continued at column 0, and the target can follow it.
+func (w *nestedKeyWalk) stepOver(line string) {
+	if w.opaque >= 0 || valueContinuesBelow(line) {
+		return
+	}
+	w.opaque = lineIndent(line)
 }
 
 // unsupportedUnsetShape reports the two shapes named in the changelog — a key
@@ -1600,6 +1768,11 @@ func validateYamlConfigValue(key, value string) error {
 		}
 		if n < 0 {
 			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+	case "prime.disabled":
+		// The set viper's GetBool reads, so a stored value means what it says.
+		if _, err := strconv.ParseBool(value); err != nil {
+			return fmt.Errorf("prime.disabled must be true or false, got %q", value)
 		}
 	case "memories.budget-chars":
 		n, err := strconv.Atoi(value)

@@ -39,6 +39,11 @@ var _ publicops.BatchGetter = (*batchGetter)(nil)
 // body (issueops.ExecuteGetMany), so this leg does no pre-check of its own.
 func (c *batchGetter) GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
 	return RunTxRead(ctx, c.provider, func(ctx context.Context, uw UnitOfWork) (publicops.GetManyResult, error) {
-		return uw.IssueUseCase().GetMany(ctx, request)
+		return GetManyInUOW(ctx, uw, request)
 	})
+}
+
+// GetManyInUOW is the BatchGetter body, run inside the caller's unit of work.
+func GetManyInUOW(ctx context.Context, uw UnitOfWork, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	return uw.IssueUseCase().GetMany(ctx, request)
 }

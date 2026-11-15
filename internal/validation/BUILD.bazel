@@ -11,6 +11,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/config",
+        "//internal/remedy",
         "//internal/types",
         "//internal/utils",
         "//issueops",
@@ -22,6 +23,7 @@ go_test(
     srcs = [
         "bead_test.go",
         "issue_test.go",
+        "remedy_printing_test.go",
         "template_lint_sections_test.go",
         "template_test.go",
     ],

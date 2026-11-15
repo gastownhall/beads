@@ -112,6 +112,15 @@ type Options struct {
 	// effort, from the advisory sidecar). AcquireAll fires it at most
 	// once across the whole gate set.
 	OnWait func(holder string)
+	// ReadOnly makes a SHARED acquisition free of side effects, for commands
+	// that promise not to mutate the workspace (strict --readonly). The gate
+	// file is opened O_RDONLY and never created: a gate file that does not
+	// exist means nothing has ever been gated here (the reading ExclusiveHolder
+	// uses), so Acquire succeeds holding nothing. An existing file is held
+	// SHARED as usual, so maintenance still sees the holder and a live
+	// exclusive holder still turns it away. Ignored for Exclusive: a
+	// maintenance operation has to be able to create the file it locks.
+	ReadOnly bool
 	// IgnoreQueuedExclusive makes a waiting Shared acquisition skip the
 	// writer-fairness check. Set it only when an ANCESTOR process already
 	// holds this gate shared (see InheritedSharedHold): the queued
@@ -372,6 +381,11 @@ type Handle struct {
 // Mode reports how this handle was acquired.
 func (h *Handle) Mode() Mode { return h.mode }
 
+// Empty reports whether the acquisition locked nothing: a ReadOnly shared
+// acquisition of a gate file that does not exist (see Options.ReadOnly). An
+// empty handle blocks no acquirer. Release does not change the answer.
+func (h *Handle) Empty() bool { return h == nil || h.f == nil }
+
 // Release drops the lock and closes the file handle. For exclusive
 // handles it also best-effort removes the holder-info sidecar. The gate
 // file itself is intentionally never removed: deleting a lock file that
@@ -382,6 +396,11 @@ func (h *Handle) Release() error {
 		return nil
 	}
 	h.once.Do(func() {
+		if h.f == nil {
+			// A ReadOnly acquisition of a gate file that does not exist:
+			// nothing was locked, so there is nothing to drop.
+			return
+		}
 		var errs []error
 		if h.mode == Exclusive {
 			// Remove the sidecar BEFORE unlocking: after the unlock a new
@@ -455,6 +474,9 @@ func (h *Handle) Release() error {
 // Lock order is unchanged in substance: the intent lock of a gate is taken
 // only while acquiring that gate, so it slots directly before the gate in
 // AcquireAll's sorted total order and cannot form a cycle.
+//
+// A Shared acquisition with Options.ReadOnly never creates the gate file:
+// see that option for what it holds instead.
 func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, error) {
 	if g.path == "" {
 		return nil, errors.New("workspacegate: zero Gate; use ForWorkspace/ForPhysicalRoot")
@@ -475,8 +497,20 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 	}
 	deadline := time.Now().Add(opts.Wait)
 
-	f, err := os.OpenFile(g.path, os.O_CREATE|os.O_RDWR, 0o600)
+	// An exclusive acquirer always has to create the file it locks, so
+	// ReadOnly applies to shared acquisition only.
+	readOnly := opts.ReadOnly && mode == Shared
+	flag := os.O_CREATE | os.O_RDWR
+	if readOnly {
+		flag = os.O_RDONLY
+	}
+	f, err := os.OpenFile(g.path, flag, 0o600)
 	if err != nil {
+		if readOnly && os.IsNotExist(err) {
+			// No gate file: nothing has ever gated here, so there is no
+			// holder to see and nothing to hold.
+			return &Handle{gate: g, mode: mode}, nil
+		}
 		return nil, fmt.Errorf("workspacegate: open gate %s: %w", g.path, err)
 	}
 
@@ -703,6 +737,21 @@ func InheritedSharedHold() bool {
 // them in reverse acquisition order.
 type MultiHandle struct {
 	handles []*Handle
+}
+
+// Empty reports whether the acquisition locked no gate at all: every gate in
+// the set was a ReadOnly acquisition of a gate file that does not exist (see
+// Handle.Empty).
+func (m *MultiHandle) Empty() bool {
+	if m == nil {
+		return true
+	}
+	for _, h := range m.handles {
+		if !h.Empty() {
+			return false
+		}
+	}
+	return true
 }
 
 // Release drops every held gate in reverse order. Idempotent.

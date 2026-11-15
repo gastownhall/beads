@@ -745,7 +745,7 @@ func TestDeleteIssuesCascadeDeletesNoHistoryWispDependent(t *testing.T) {
 	if err := store.AddDependency(ctx, &types.Dependency{
 		IssueID:     "mixed-delete-cascade-wisp-child",
 		DependsOnID: "mixed-delete-cascade-parent",
-		Type:        types.DepBlocks,
+		Type:        types.DepParentChild,
 	}, "tester"); err != nil {
 		t.Fatalf("AddDependency wisp child: %v", err)
 	}

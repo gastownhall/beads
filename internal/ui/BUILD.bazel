@@ -20,6 +20,7 @@ go_library(
 go_test(
     name = "ui_test",
     srcs = [
+        "init_cost_test.go",
         "pager_test.go",
         "sanitize_test.go",
         "styles_test.go",
@@ -27,6 +28,7 @@ go_test(
     ],
     embed = [":ui"],
     deps = [
+        "//internal/testutil/bazeltest",
         "//internal/types",
         "@land_charm_lipgloss_v2//:lipgloss",
     ],

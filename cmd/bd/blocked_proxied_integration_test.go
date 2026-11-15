@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -81,6 +83,68 @@ func TestProxiedServerBlocked(t *testing.T) {
 		}
 	})
 
+	t.Run("flags_reads_ids_from_stdin", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "bkf")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Flag blocker")
+		dependent := bdProxiedCreate(t, bd, p.dir, "Flag dependent", "--deps", "depends-on:"+blocker.ID)
+
+		cmd := exec.Command(bd, "blocked", "--flags", "--json")
+		cmd.Dir = p.dir
+		cmd.Env = bdProxiedEnv(p.dir)
+		cmd.Stdin = strings.NewReader(dependent.ID + "\n" + blocker.ID + "\nbk-no-such-row\n")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("bd blocked --flags --json: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		var rows []struct {
+			ID        string `json:"id"`
+			IsBlocked bool   `json:"is_blocked"`
+		}
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &rows); err != nil {
+			t.Fatalf("parse: %v\n%s", err, stdout.String())
+		}
+		if len(rows) != 2 || rows[0].ID != dependent.ID || !rows[0].IsBlocked || rows[1].ID != blocker.ID || rows[1].IsBlocked {
+			t.Errorf("rows = %+v, want [{%s true} {%s false}] (unknown id omitted)", rows, dependent.ID, blocker.ID)
+		}
+	})
+
+	t.Run("flags_raw_is_the_stored_column", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "bkr")
+		ext := bdProxiedCreate(t, bd, p.dir, "Externally blocked only")
+		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "dep", "add", ext.ID, "external:otherproj:cap"); err != nil {
+			t.Fatalf("dep add external: %v\n%s", err, stderr)
+		}
+		flag := func(args ...string) bool {
+			t.Helper()
+			cmd := exec.Command(bd, append([]string{"blocked", "--flags", "--json"}, args...)...)
+			cmd.Dir = p.dir
+			cmd.Env = bdProxiedEnv(p.dir)
+			cmd.Stdin = strings.NewReader(ext.ID + "\n")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("bd blocked --flags %v: %v\n%s\n%s", args, err, stdout.String(), stderr.String())
+			}
+			var rows []struct {
+				ID        string `json:"id"`
+				IsBlocked bool   `json:"is_blocked"`
+			}
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &rows); err != nil || len(rows) != 1 {
+				t.Fatalf("parse %v: %v\n%s", args, err, stdout.String())
+			}
+			return rows[0].IsBlocked
+		}
+		if !flag() {
+			t.Errorf("--flags for an externally blocked row = false, want true (the policy flag)")
+		}
+		if flag("--raw") {
+			t.Errorf("--flags --raw for an externally blocked row = true, want false (the stored column)")
+		}
+	})
+
 	t.Run("empty_case", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "bk2")
@@ -123,6 +187,44 @@ func TestProxiedServerBlocked(t *testing.T) {
 		}
 		if ids[outside.ID] {
 			t.Errorf("non-descendant %s leaked into --parent result", outside.ID)
+		}
+	})
+
+	t.Run("label_filters_apply_to_external_only_rows", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "bkl")
+		// A row blocked only by an unsatisfied external ref is listed by the
+		// unit-of-work decorator after the label query ran, so the filters
+		// must judge it by its own labels, read hydrated.
+		tagged := bdProxiedCreate(t, bd, p.dir, "Externally blocked, labelled", "-l", "lane:a")
+		bare := bdProxiedCreate(t, bd, p.dir, "Externally blocked, unlabelled")
+		for _, id := range []string{tagged.ID, bare.ID} {
+			if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "dep", "add", id, "external:otherproj:cap"); err != nil {
+				t.Fatalf("dep add %s external: %v\n%s", id, err, stderr)
+			}
+		}
+		for _, tc := range []struct {
+			args []string
+			want []string
+		}{
+			{nil, []string{tagged.ID, bare.ID}},
+			{[]string{"--label", "lane:a"}, []string{tagged.ID}},
+			{[]string{"--label-any", "lane:a"}, []string{tagged.ID}},
+			{[]string{"--exclude-label", "lane:a"}, []string{bare.ID}},
+		} {
+			got := bdProxiedBlockedJSON(t, bd, p, tc.args...)
+			ids := make([]string, 0, len(got))
+			for _, bi := range got {
+				ids = append(ids, bi.ID)
+				if bi.ID == tagged.ID && !slices.Equal(bi.Labels, []string{"lane:a"}) {
+					t.Errorf("bd blocked %v: %s prints labels %v, want [lane:a]", tc.args, bi.ID, bi.Labels)
+				}
+			}
+			slices.Sort(ids)
+			slices.Sort(tc.want)
+			if !slices.Equal(ids, tc.want) {
+				t.Errorf("bd blocked %v listed %v, want %v", tc.args, ids, tc.want)
+			}
 		}
 	})
 }

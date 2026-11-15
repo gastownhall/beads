@@ -49,7 +49,15 @@ import (
 // is the store's own), so a caller that used to hand-assemble the pair
 // (`bd connect`'s own connectCmd.RunE, test/embedder's linkage proof) can call
 // this instead and stay correct across a future change to either file's shape.
+//
+// Attach refuses a historical SQLite workspace with *LegacyWorkspaceError,
+// the refusal every open and `bd connect` give it, and writes nothing. It
+// checks before its metadata read, which migrates a legacy config.json.
 func Attach(beadsDir string, target Target) error {
+	// Before Load, which migrates a legacy config.json into metadata.json.
+	if err := configfile.CheckDiscoveredForOpen(beadsDir); err != nil {
+		return err
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", configfile.ConfigFileName, err)
@@ -78,7 +86,8 @@ func Attach(beadsDir string, target Target) error {
 			target.PreviousBackend = cfg.GetBackend()
 		}
 	}
-	if err := SaveTarget(beadsDir, target); err != nil {
+	// The encoder itself: the workspace is checked above.
+	if err := httpclient.SaveTarget(beadsDir, target); err != nil {
 		return fmt.Errorf("writing %s: %w", httpclient.TargetFileName, err)
 	}
 	// Both of this backend's per-user files: the sidecar just written, and
@@ -118,7 +127,14 @@ func Attach(beadsDir string, target Target) error {
 // already-attached workspace, or refusing to switch a workspace from a
 // different backend — those stay the command's own job; Connect's contract
 // is exactly "handshake, then attach".
+//
+// A workspace Attach would refuse as a historical SQLite workspace is refused
+// before the handshake, as `bd connect` refuses it, so Connect dials nothing
+// for it.
 func Connect(ctx context.Context, beadsDir string, target Target, opts Options) (*ServerSnapshot, error) {
+	if err := configfile.CheckDiscoveredForOpen(beadsDir); err != nil {
+		return nil, err
+	}
 	snapshot, err := Handshake(ctx, target, opts)
 	if err != nil {
 		return nil, err

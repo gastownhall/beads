@@ -606,10 +606,7 @@ func runGitHubPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing GitHub tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(gt, store, currentActor())
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
-	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
-	engine.PushHooks = buildGitHubPushHooks(gt)
+	engine := newGitHubEngine(gt, os.Stdout)
 
 	opts := tracker.SyncOptions{
 		Push:     true,
@@ -668,10 +665,8 @@ func runGitHubPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing GitHub tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(gt, store, currentActor())
+	engine := newGitHubEngine(gt, os.Stdout)
 	engine.PullHooks = buildGitHubPullHooks(ctx)
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
-	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
 		Pull:     true,

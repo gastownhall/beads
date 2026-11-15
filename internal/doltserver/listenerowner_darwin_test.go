@@ -27,19 +27,26 @@ func TestListenerOwnership_FakeReads(t *testing.T) {
 		pidsErr    error
 		parents    map[int]int
 		parentsErr error
+		provable   bool
+		ownership  Ownership
 		owned      bool
 		known      bool
 	}{
-		{name: "child holds the listener", pids: []int{self}, parents: tree, owned: true, known: true},
-		{name: "grandchild holds the listener (wrapper)", pids: []int{502}, parents: tree, owned: true, known: true},
-		{name: "foreign process holds it", pids: []int{600}, parents: tree, owned: false, known: true},
-		{name: "foreign and own both listed", pids: []int{600, 501}, parents: tree, owned: true, known: true},
-		{name: "holder missing from the snapshot", pids: []int{999}, parents: tree, owned: false, known: true},
-		{name: "cyclic snapshot does not loop", pids: []int{700}, parents: tree, owned: false, known: true},
-		{name: "no listener listed", pids: nil, parents: tree, owned: false, known: false},
-		{name: "lsof fails", pidsErr: errors.New("lsof: not found"), parents: tree, owned: false, known: false},
-		{name: "ps fails", pids: []int{self}, parentsErr: errors.New("ps: not found"), owned: false, known: false},
-		{name: "empty snapshot", pids: []int{self}, parents: map[int]int{}, owned: false, known: false},
+		{name: "child holds the listener", pids: []int{self}, parents: tree, ownership: OwnershipOwned, owned: true, known: true},
+		{name: "grandchild holds the listener (wrapper)", pids: []int{502}, parents: tree, ownership: OwnershipOwned, owned: true, known: true},
+		{name: "foreign process holds it", pids: []int{600}, parents: tree, ownership: OwnershipForeign, owned: false, known: true},
+		{name: "foreign and own both listed", pids: []int{600, 501}, parents: tree, ownership: OwnershipOwned, owned: true, known: true},
+		{name: "holder missing from the snapshot", pids: []int{999}, parents: tree, ownership: OwnershipForeign, owned: false, known: true},
+		{name: "cyclic snapshot does not loop", pids: []int{700}, parents: tree, ownership: OwnershipForeign, owned: false, known: true},
+		// lsof lists no listener although one answered: another user's
+		// socket, or a forwarded one. Where lsof provably lists this user's
+		// own listeners that is not the child's; where it cannot (no
+		// working lsof) server mode falls back.
+		{name: "no listener listed, ownership provable", pids: nil, parents: tree, provable: true, ownership: OwnershipUnlisted, owned: false, known: true},
+		{name: "no listener listed, ownership not provable", pids: nil, parents: tree, ownership: OwnershipUnlisted, owned: false, known: false},
+		{name: "lsof fails", pidsErr: errors.New("lsof: not found"), parents: tree, ownership: OwnershipUnknown, owned: false, known: false},
+		{name: "ps fails", pids: []int{self}, parentsErr: errors.New("ps: not found"), ownership: OwnershipUnknown, owned: false, known: false},
+		{name: "empty snapshot", pids: []int{self}, parents: map[int]int{}, ownership: OwnershipUnknown, owned: false, known: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -47,6 +54,12 @@ func TestListenerOwnership_FakeReads(t *testing.T) {
 				func(int) ([]int, error) { return tc.pids, tc.pidsErr },
 				func() (map[int]int, error) { return tc.parents, tc.parentsErr },
 			)
+			origProvable := listenerOwnershipProvable
+			listenerOwnershipProvable = func() bool { return tc.provable }
+			t.Cleanup(func() { listenerOwnershipProvable = origProvable })
+			if got := classifyListener(self, 1); got != tc.ownership {
+				t.Errorf("classifyListener = %d, want %d", got, tc.ownership)
+			}
 			owned, known := listenerOwnership(self, 1)
 			if owned != tc.owned || known != tc.known {
 				t.Errorf("listenerOwnership = (%v, %v), want (%v, %v)", owned, known, tc.owned, tc.known)
@@ -137,4 +150,28 @@ func TestListenerOwnership_RealTools(t *testing.T) {
 	if owned, known := listenerOwnership(cmd.Process.Pid, port); owned || !known {
 		t.Errorf("listenerOwnership(sh child, parent's listener) = (%v, %v), want (false, true)", owned, known)
 	}
+}
+
+// TestListenerOwnershipProvable pins the host probe cmd/bd uses to choose
+// the generated proxied config's log level: true where lsof and ps show this
+// process's own listener, and false where they cannot answer, so such a host
+// keeps dolt's ready line as proof.
+func TestListenerOwnershipProvable(t *testing.T) {
+	t.Run("tools cannot answer", func(t *testing.T) {
+		withProcessReads(t,
+			func(int) ([]int, error) { return nil, errors.New("lsof: not found") },
+			func() (map[int]int, error) { return nil, errors.New("ps: not found") },
+		)
+		if ListenerOwnershipProvable() {
+			t.Error("ListenerOwnershipProvable() = true without lsof and ps, want false")
+		}
+	})
+	t.Run("real tools", func(t *testing.T) {
+		if _, err := exec.LookPath("lsof"); err != nil {
+			t.Skip("lsof not on PATH")
+		}
+		if !ListenerOwnershipProvable() {
+			t.Error("ListenerOwnershipProvable() = false with lsof and ps, want true")
+		}
+	})
 }

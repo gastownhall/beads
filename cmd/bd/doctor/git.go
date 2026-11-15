@@ -7,12 +7,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -448,11 +450,13 @@ func CheckGitUpstream(path string) DoctorCheck {
 	cmd.Dir = path
 	upOut, err := cmd.Output()
 	if err != nil {
+		// The branch goes into the git push command as one shell word.
+		branchArg, note := remedy.CommandArg(runtime.GOOS, branch, "<branch>")
 		return DoctorCheck{
 			Name:    "Git Upstream",
 			Status:  StatusWarning,
-			Message: fmt.Sprintf("No upstream configured for %s", branch),
-			Fix:     fmt.Sprintf("Set upstream then push: git push -u origin %s", branch),
+			Message: fmt.Sprintf("No upstream configured for %s", remedy.PrintedValue(branch)),
+			Fix:     "Set upstream then push: git push -u origin " + branchArg + note,
 		}
 	}
 	upstream := strings.TrimSpace(string(upOut))
@@ -586,9 +590,29 @@ func CheckStaleLegacyHooks() DoctorCheck {
 		Name:    "Stale Legacy Hooks",
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d stale .legacy hook(s) calling removed 'bd hook' command", len(staleFiles)),
-		Detail:  fmt.Sprintf("Files: %s", strings.Join(staleFiles, ", ")),
-		Fix:     "Remove or update these files: rm " + strings.Join(staleFilePaths(hooksDir, staleFiles), " "),
+		Detail:  fmt.Sprintf("Files: %s", remedy.PrintedList(staleFiles, ", ")),
+		Fix:     "Remove or update these files: " + staleFilesRemoveCommand(runtime.GOOS, staleFilePaths(hooksDir, staleFiles)),
 	}
+}
+
+// staleFilesRemoveCommand is the rm command for paths, each path one shell
+// word or a numbered placeholder named after the command. The hooks
+// directory can be one the repository commits (core.hooksPath), so both the
+// checkout path and the file names reach the command: bare, a space in
+// either would make rm act on other paths.
+func staleFilesRemoveCommand(goos string, paths []string) string {
+	args := make([]string, len(paths))
+	var notes strings.Builder
+	for i, path := range paths {
+		placeholder := "<file>"
+		if len(paths) > 1 {
+			placeholder = fmt.Sprintf("<file%d>", i+1)
+		}
+		arg, note := remedy.CommandArg(goos, path, placeholder)
+		args[i] = arg
+		notes.WriteString(note)
+	}
+	return "rm " + strings.Join(args, " ") + notes.String()
 }
 
 func staleFilePaths(hooksDir string, names []string) []string {

@@ -39,6 +39,8 @@ type batchCloser struct {
 
 var _ storage.PolicyBatchCloserSource = (*DoltStore)(nil)
 
+var _ storage.BlockersBatchStore = (*DoltStore)(nil)
+
 // CloseBatch runs every close, and the optional claim, in ONE transaction with
 // one commit. The message is composed inside the body because it names what
 // LANDED, which is not knowable until the last item has been tried.

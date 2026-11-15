@@ -1,0 +1,6 @@
+{
+  "shape": "gc-show-id-flag",
+  "requests": [
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-r1","status":200}
+  ]
+}

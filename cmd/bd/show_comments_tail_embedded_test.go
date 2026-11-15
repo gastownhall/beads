@@ -34,8 +34,8 @@ func TestEmbeddedShowCommentsTail(t *testing.T) {
 
 	t.Run("direct_off_state_matches_absence", func(t *testing.T) {
 		without := bdShowRaw(t, bd, dir, issue.ID)
-		assertCommentsTailOff(t, "direct --comments-tail 0", bdShowRaw(t, bd, dir, issue.ID, "--comments-tail", "0"), without)
-		assertCommentsTailOff(t, "direct --comments-tail 5", bdShowRaw(t, bd, dir, issue.ID, "--comments-tail", "5"), without)
+		assertCommentsTailOff(t, "direct --comments-tail 0", true, bdShowRaw(t, bd, dir, issue.ID, "--comments-tail", "0"), without)
+		assertCommentsTailOff(t, "direct --comments-tail 5", true, bdShowRaw(t, bd, dir, issue.ID, "--comments-tail", "5"), without)
 	})
 
 	t.Run("direct_negative_is_usage_error", func(t *testing.T) {
@@ -46,18 +46,12 @@ func TestEmbeddedShowCommentsTail(t *testing.T) {
 	})
 
 	t.Run("direct_json_untouched", func(t *testing.T) {
-		withFlag, err := bdRunWithFlockRetry(t, bd, dir, "show", issue.ID, "--json", "--include-comments", "--comments-tail", "1")
-		if err != nil {
-			t.Fatalf("bd show --json --comments-tail 1 failed: %v\n%s", err, withFlag)
-		}
-		without, err := bdRunWithFlockRetry(t, bd, dir, "show", issue.ID, "--json", "--include-comments")
-		if err != nil {
-			t.Fatalf("bd show --json failed: %v\n%s", err, without)
-		}
-		if string(withFlag) != string(without) {
+		withFlag := bdShowRaw(t, bd, dir, issue.ID, "--json", "--include-comments", "--comments-tail", "1")
+		without := bdShowRaw(t, bd, dir, issue.ID, "--json", "--include-comments")
+		if withFlag != without {
 			t.Errorf("--json output changed under --comments-tail 1\n--- with flag\n%s\n--- without\n%s", withFlag, without)
 		}
-		if !strings.Contains(string(withFlag), commentsTailOldest) {
+		if !strings.Contains(withFlag, commentsTailOldest) {
 			t.Errorf("--json --include-comments dropped the oldest comment under --comments-tail 1:\n%s", withFlag)
 		}
 	})

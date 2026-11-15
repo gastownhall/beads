@@ -5,10 +5,12 @@ go_library(
     srcs = [
         "backend.go",
         "control.go",
+        "data_auth.go",
         "endpoint.go",
         "endpoint_unix.go",
         "endpoint_windows.go",
         "force_stop.go",
+        "logsize.go",
         "process_executable_darwin.go",
         "process_executable_linux.go",
         "process_executable_windows.go",
@@ -29,6 +31,7 @@ go_library(
         "//internal/atomicfile",
         "//internal/configfile",
         "//internal/debug",
+        "//internal/doltserver",
         "//internal/fdhygiene",
         "//internal/lockfile",
         "//internal/procid",
@@ -77,6 +80,7 @@ go_test(
     embed = [":proxy"],
     deps = [
         "//internal/configfile",
+        "//internal/doltserver",
         "//internal/procid",
         "//internal/storage/dbproxy/identity",
         "//internal/storage/dbproxy/pidfile",

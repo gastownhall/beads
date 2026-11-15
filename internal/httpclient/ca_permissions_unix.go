@@ -94,9 +94,15 @@ var (
 // carries on every platform this build tag covers.
 var groupHasNoSupplementaryMembersFn = groupHasNoSupplementaryMembers
 
+var (
+	passwdPath                      = "/etc/passwd"
+	groupHasNoOtherPrimaryMembersFn = groupHasNoOtherPrimaryMembers
+)
+
 // isUserPrivateGroup reports the Debian/OpenSSH "user private group"
 // convention: uid's own primary group is gid, that group's name is exactly
-// uid's username, AND the group lists no OTHER member in /etc/group. Under
+// uid's username, the group lists no OTHER member in /etc/group, AND no
+// other account has gid as its primary group in /etc/passwd. Under
 // Ubuntu's default user-private-groups scheme this is true for every
 // ordinary account, which is what makes a umask-002 ~/.config/bd (0775
 // directories, 0664 files) exactly as private as a umask-022 layout would
@@ -129,7 +135,7 @@ func isUserPrivateGroup(uid, gid uint32) bool {
 	if g.Name != u.Username {
 		return false
 	}
-	return groupHasNoSupplementaryMembersFn(gid)
+	return groupHasNoSupplementaryMembersFn(gid) && groupHasNoOtherPrimaryMembersFn(uid, gid)
 }
 
 // groupHasNoSupplementaryMembers reports whether gid's own /etc/group entry
@@ -167,6 +173,46 @@ func groupHasNoSupplementaryMembers(gid uint32) bool {
 		return false
 	}
 	return false // gid not found in /etc/group: cannot confirm -> refuse
+}
+
+func groupHasNoOtherPrimaryMembers(uid, gid uint32) bool {
+	f, err := os.Open(passwdPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close() //nolint:errcheck // read-only fd
+
+	ownerFound := false
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) < 4 {
+			continue
+		}
+		entryUID, err := strconv.ParseUint(fields[2], 10, 32)
+		if err != nil {
+			continue
+		}
+		entryGID, err := strconv.ParseUint(fields[3], 10, 32)
+		if err != nil {
+			continue
+		}
+		if uint32(entryGID) != gid {
+			continue
+		}
+		if uint32(entryUID) != uid {
+			return false
+		}
+		ownerFound = true
+	}
+	if err := scanner.Err(); err != nil {
+		return false
+	}
+	return ownerFound
 }
 
 // maxCASymlinkHops bounds how many symlink hops checkCAFilePermissions will
@@ -396,7 +442,7 @@ func checkOwnerAndMode(p string, fi caFileStat, isDir bool) error {
 	}
 	if mode&0o020 != 0 && !isUserPrivateGroupFn(fi.uid, fi.gid) {
 		return fmt.Errorf(
-			"%s %s has mode %04o, group-writable by a group that is not its owner's own user-private group; chmod g-w it, or move it under a group whose only member is the owner",
+			"%s %s has mode %04o, group-writable by a group that is not its owner's own user-private group with no other primary or supplementary members; chmod g-w it, or move it under a group whose only member is the owner",
 			noun, p, mode)
 	}
 	return nil

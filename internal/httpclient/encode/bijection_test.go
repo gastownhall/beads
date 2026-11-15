@@ -197,7 +197,10 @@ func TestLedgerRowsAreWellFormed(t *testing.T) {
 		t.Fatal("divergence ledger v1 is empty")
 	}
 
-	tests := testFunctionsInThisPackage(t)
+	local := localTestFunctions(t)
+	// The registry's own gate (TestCrossPackageLedgerPinsResolveToCitedTests)
+	// reports registry problems; here an unresolved entry simply does not count.
+	external, _ := resolveCrossPackagePins(repoRootFromThisPackage, crossPackagePins, crossPackagePinDirs, local, citedPins(rows))
 	ids := map[string]bool{}
 	for _, row := range rows {
 		if row.ID == "" {
@@ -224,8 +227,8 @@ func TestLedgerRowsAreWellFormed(t *testing.T) {
 		// A pin is a TEST or a bead, never a hopeful sentence. A row naming a
 		// test that does not exist is exactly the shape of a ledger that has
 		// drifted from the suite it claims to be held to.
-		if !strings.HasPrefix(row.PinnedBy, "TODO(") && !tests[row.PinnedBy] {
-			t.Errorf("%s: PinnedBy %q is neither a test in this package nor a TODO(<bead>)", row.ID, row.PinnedBy)
+		if problem := pinProblem(row, local, external); problem != "" {
+			t.Error(problem)
 		}
 		if (row.Type == nil) != (row.Field == "") {
 			t.Errorf("%s: Type and Field must be set together (Type=%v Field=%q)", row.ID, row.Type, row.Field)
@@ -648,32 +651,17 @@ func findRow(t *testing.T, id string) Row {
 	return Row{}
 }
 
-// testFunctionsInThisPackage collects the test names a ledger row may cite as
-// its pin.
+// localTestFunctions collects the test names in THIS package that a ledger
+// row may cite as its pin.
 //
 // Parsed out of the sources rather than kept as a list, for the reason
 // everything else here is derived rather than restated: a second copy is a
-// second thing that can be wrong.
-//
-// It reads THIS package, the store package above it, and cmd/bd, because the
-// ledger is one artifact and its pins are not. The read-shape rows are pinned by
-// the encoder sweep in this directory; the write-shape rows D8's refuse-not-drop
-// enumeration owns are pinned where the refusal is raised, which is the store's
-// role bodies; and the F- rows — whole commands and the flag modes of served
-// commands — can only be pinned where a cobra tree exists. Scanning only this
-// directory would have forced those rows to carry a TODO forever and made a real
-// pin indistinguishable from a missing one.
-//
-// cmd/bd's files are enterprise-tagged and this test is not. That is fine and
-// deliberate: parsing is text, and the same reasoning the skew sweep records
-// applies — the build-constrained files are precisely the ones that carry these
-// pins.
-func testFunctionsInThisPackage(t *testing.T) map[string]bool {
+// second thing that can be wrong. Pins outside this package are resolved
+// through the crossPackagePins registry; see ledger_pins_test.go.
+func localTestFunctions(t *testing.T) map[string]bool {
 	t.Helper()
 	names := map[string]bool{}
-	for _, dir := range []string{".", "..", filepath.Join("..", "..", "..", "cmd", "bd")} {
-		collectTestFunctions(t, dir, names)
-	}
+	collectTestFunctions(t, ".", names)
 	if len(names) == 0 {
 		t.Fatal("found no test functions to check ledger pins against")
 	}
@@ -698,7 +686,7 @@ func collectTestFunctions(t *testing.T, dir string, into map[string]bool) {
 		}
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "Test") {
+			if ok && isTopLevelTest(fn) {
 				into[fn.Name.Name] = true
 			}
 		}

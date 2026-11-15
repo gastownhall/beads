@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -42,7 +44,8 @@ DEPENDENCY HANDLING (the same on a local database and against a team server):
 Default: Fails if any issue has dependents not in deletion set
   bd delete bd-1 bd-2
 
-Cascade: Recursively delete all dependents
+Cascade: Also delete parent-child descendants; other dependents survive
+(orphaned, as with --force). Preview first: --dry-run lists every id it deletes.
   bd delete bd-1 --cascade --force
 
 Force: Delete and orphan dependents
@@ -123,7 +126,12 @@ Force: Delete and orphan dependents
 		// stays in the front door: issueops.DeleteRequest.IDs are exact, because
 		// resolving an ambiguous prefix and then deleting the row it hit is the
 		// one place a convenience is not.
-		routedResult, err := resolveAndGetIssueForMutation(ctx, store, issueID)
+		//
+		// Exact here too, never a leading-prefix abbreviation: an id that is
+		// gone (already deleted, a re-run script) would otherwise resolve to
+		// whichever surviving issue's id it begins, and the preview would
+		// print `bd delete <that issue> --force` as the next step.
+		routedResult, err := resolveAndGetIssueForMutationExact(ctx, store, issueID)
 		if err != nil {
 			// mc-zndi7.81: this pre-flight existence check runs before
 			// deleter.Delete() and the per-id lock fence #7244 added, so a
@@ -135,6 +143,9 @@ Force: Delete and orphan dependents
 			}
 			if isNotFoundErr(err) {
 				return HandleError("issue %s not found", issueID)
+			}
+			if refusal := deleteAbbreviationRefusal(err); refusal != nil {
+				return HandleError("%v", refusal)
 			}
 			return HandleError("%v", err)
 		}
@@ -303,6 +314,34 @@ func renderSingleDeletePreview(
 	return nil
 }
 
+// deleteAbbreviationRefusal is the refusal of an id that names no issue
+// exactly but is the start of one or more: delete needs the full id, so say
+// that and name the ids it begins. It is nil for any other error.
+func deleteAbbreviationRefusal(err error) error {
+	var abbrev *utils.AbbreviatedIDError
+	if !errors.As(err, &abbrev) {
+		return nil
+	}
+	return &deleteAbbreviationError{abbrev: abbrev}
+}
+
+// deleteAbbreviationError is that refusal. To a delete, an id that is only the
+// start of other ids names no row, so the text leads with "not found" — the
+// words gascity's isBdNotFound reads as an already-gone bead — and the error
+// unwraps to storage.ErrNotFound, which lets a guarded `bd delete --cascade`
+// report it as the same lost race as any other gone target (see
+// reportIfRevisionTargetGone).
+type deleteAbbreviationError struct {
+	abbrev *utils.AbbreviatedIDError
+}
+
+func (e *deleteAbbreviationError) Error() string {
+	return fmt.Sprintf("issue %q not found: bd delete needs the full issue id, and %q is only the start of %s",
+		e.abbrev.Input, e.abbrev.Input, strings.Join(e.abbrev.Matches, ", "))
+}
+
+func (e *deleteAbbreviationError) Unwrap() []error { return []error{storage.ErrNotFound, e.abbrev} }
+
 // deleteIssue removes an issue from the database.
 func deleteIssue(ctx context.Context, issueID string) error {
 	return store.DeleteIssue(ctx, issueID)
@@ -311,9 +350,11 @@ func deleteIssue(ctx context.Context, issueID string) error {
 // deleteBatch is the multi-id and cascade path, shared by `bd delete`,
 // `bd cleanup`, `bd wisp gc` and `bd mol burn`.
 //
-// It resolves the ids the way this front door always has - prefix matching and
+// It resolves the ids in the front door - exact-id matching and
 // cross-repository routing, which issueops.DeleteRequest deliberately does not
-// do - and hands the RESOLVED ids to the role.
+// do - and hands the RESOLVED ids to the role. Never a leading-prefix
+// abbreviation: a re-run of a finished --from-file list would otherwise
+// delete every surviving issue whose id one of its ids begins.
 //
 // ifRevision is non-nil only via `bd delete`'s own --if-revision (beads#4682);
 // its other three callers always pass nil, and requireSingleIfRevisionID has
@@ -321,6 +362,13 @@ func deleteIssue(ctx context.Context, issueID string) error {
 //
 //nolint:unparam // cmd parameter required for potential future use
 func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, _ bool, ifRevision *int64, _ ...string) error {
+	return deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, ifRevision, nil)
+}
+
+// deleteBatchReporting is deleteBatch for a bulk command that reports on its
+// own selection: report's members (`bd admin cleanup`'s retention_required) are added to the --json preview and result. A nil report
+// adds nothing, which is deleteBatch.
+func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput bool, ifRevision *int64, report map[string]interface{}) error {
 	if store == nil {
 		if err := ensureStoreActive(); err != nil {
 			return err
@@ -332,10 +380,12 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	notFound := []string{}
 	var routedStore storage.DoltStorage
 	for _, id := range issueIDs {
-		result, err := resolveAndGetIssueForMutation(ctx, store, id)
+		result, err := resolveAndGetIssueForMutationExact(ctx, store, id)
 		if err != nil {
 			if isNotFoundErr(err) {
 				notFound = append(notFound, id)
+			} else if refusal := deleteAbbreviationRefusal(err); refusal != nil {
+				return refusal
 			} else {
 				return fmt.Errorf("getting issue %s: %v", id, err)
 			}
@@ -400,7 +450,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 					return err
 				}
 			}
-			if previewErr := outputDeletionPreview(resolvedIDs, issues, cascade, dryRun, nil, err, jsonOutput); previewErr != nil {
+			if previewErr := outputDeletionPreviewReporting(resolvedIDs, issues, cascade, dryRun, nil, err, jsonOutput, report); previewErr != nil {
 				return previewErr
 			}
 			if jsonOutput {
@@ -408,7 +458,14 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			}
 			return err
 		}
-		if previewErr := outputDeletionPreview(resolvedIDs, issues, cascade, dryRun, &result, nil, jsonOutput); previewErr != nil {
+		// The front door hydrated only the REQUESTED rows; the preview below
+		// enumerates every row the role resolved — under --cascade the whole
+		// containment closure, plus the orphans it leaves (GH#6301). JSON
+		// and quiet never print the enumeration, so they skip the read.
+		if !jsonOutput && !isQuiet() {
+			hydrateDeletePreviewTitles(ctx, batchStore, issues, result)
+		}
+		if previewErr := outputDeletionPreviewReporting(resolvedIDs, issues, cascade, dryRun, &result, nil, jsonOutput, report); previewErr != nil {
 			return previewErr
 		}
 		if !dryRun && !jsonOutput && !isQuiet() {
@@ -442,7 +499,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	// deleted from, and defers it in batch and off modes.
 
 	if jsonOutput {
-		if err := outputJSON(map[string]interface{}{
+		answer := map[string]interface{}{
 			"deleted":              resolvedIDs,
 			"deleted_count":        result.Deleted,
 			"dependencies_removed": result.Dependencies,
@@ -450,11 +507,24 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			"events_removed":       result.Events,
 			"references_updated":   result.ReferencesUpdated,
 			"orphaned_issues":      result.Orphaned,
-		}); err != nil {
+			// deleted stays the requested ids; deleted_ids names every row
+			// deleted_count counts, the cascade closure included (GH#6301).
+			"deleted_ids": result.DeletedIDs,
+		}
+		for key, value := range report {
+			answer[key] = value
+		}
+		if err := outputJSON(answer); err != nil {
 			return err
 		}
 	} else {
 		fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), result.Deleted)
+		if cascade && len(result.DeletedIDs) > 0 {
+			// The cascade's reach named, not just counted (GH#6301): the
+			// confirmation is the last place a caller can still see which rows
+			// went with the request.
+			fmt.Printf("  Deleted: %s\n", strings.Join(result.DeletedIDs, ", "))
+		}
 		fmt.Printf("  Removed %d dependency link(s)\n", result.Dependencies)
 		fmt.Printf("  Removed %d label(s)\n", result.Labels)
 		fmt.Printf("  Removed %d event(s)\n", result.Events)
@@ -474,6 +544,12 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 // beside a refusal would read as "nothing would have been deleted" rather than
 // "we did not get that far".
 func outputDeletionPreview(issueIDs []string, issues map[string]*types.Issue, cascade bool, dryRun bool, result *issueops.DeleteResult, depError error, jsonOutput bool) error {
+	return outputDeletionPreviewReporting(issueIDs, issues, cascade, dryRun, result, depError, jsonOutput, nil)
+}
+
+// outputDeletionPreviewReporting is outputDeletionPreview with report's
+// members added to the --json preview (see deleteBatchReporting).
+func outputDeletionPreviewReporting(issueIDs []string, issues map[string]*types.Issue, cascade bool, dryRun bool, result *issueops.DeleteResult, depError error, jsonOutput bool, report map[string]interface{}) error {
 	if jsonOutput {
 		preview := map[string]interface{}{
 			"preview":   true,
@@ -481,12 +557,20 @@ func outputDeletionPreview(issueIDs []string, issues map[string]*types.Issue, ca
 			"issue_ids": issueIDs,
 			"cascade":   cascade,
 		}
+		for key, value := range report {
+			preview[key] = value
+		}
 		if result != nil {
 			preview["would_delete"] = result.Deleted
 			preview["would_remove_dependencies"] = result.Dependencies
 			preview["would_remove_labels"] = result.Labels
 			preview["would_remove_events"] = result.Events
 			preview["would_orphan"] = len(result.Orphaned)
+			// The ids beside the counts, named as the deletion will report
+			// them (deleted_ids, orphaned_issues), so a caller can check it
+			// got what it previewed (GH#6301).
+			preview["would_delete_ids"] = result.DeletedIDs
+			preview["would_orphan_ids"] = result.Orphaned
 		}
 		if depError != nil {
 			preview["error"] = depError.Error()
@@ -498,14 +582,26 @@ func outputDeletionPreview(issueIDs []string, issues map[string]*types.Issue, ca
 	}
 
 	fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
-	fmt.Printf("\nIssues to delete (%d):\n", len(issueIDs))
-	for _, id := range issueIDs {
+	// The role's answer names every row the request would take (GH#6301):
+	// under --cascade that is the whole containment closure, and a preview
+	// listing only the requested ids with a count beside them is what let a
+	// 48-row deletion look like a bounded one. When the role refused
+	// (result == nil) there is no closure to name, so the requested ids stand
+	// in as before. A row whose title did not load is still listed, by id.
+	previewIDs := issueIDs
+	if result != nil && len(result.DeletedIDs) > 0 {
+		previewIDs = result.DeletedIDs
+	}
+	fmt.Printf("\nIssues to delete (%d):\n", len(previewIDs))
+	for _, id := range previewIDs {
+		title := ""
 		if issue := issues[id]; issue != nil {
-			fmt.Printf("  %s: %s\n", id, issue.Title)
+			title = issue.Title
 		}
+		fmt.Printf("  %s: %s\n", id, title)
 	}
 	if cascade {
-		fmt.Printf("\n%s Cascade mode enabled - will also delete all dependent issues\n", ui.RenderWarn("⚠"))
+		fmt.Printf("\n%s Cascade mode enabled - will also delete parent-child descendants; other dependents survive\n", ui.RenderWarn("⚠"))
 	}
 	if depError != nil {
 		fmt.Printf("\n%s\n", ui.RenderFail(depError.Error()))
@@ -516,12 +612,53 @@ func outputDeletionPreview(issueIDs []string, issues map[string]*types.Issue, ca
 			result.Dependencies, result.Labels, result.Events)
 		if len(result.Orphaned) > 0 {
 			fmt.Printf("Would orphan: %d issues\n", len(result.Orphaned))
+			for _, id := range result.Orphaned {
+				title := ""
+				if issue := issues[id]; issue != nil {
+					title = issue.Title
+				}
+				fmt.Printf("  %s: %s\n", id, title)
+			}
 		}
 		if dryRun {
 			fmt.Printf("\n(Dry-run mode - no changes made)\n")
 		}
 	}
 	return nil
+}
+
+// hydrateDeletePreviewTitles batch-loads the rows the preview enumerates but
+// the front door did not hydrate: the role's answer names the whole resolved
+// set — under --cascade the containment closure — and the orphans it leaves,
+// none of which the per-id resolution read (GH#6301).
+//
+// Titles are presentation, so a load that fails lists those rows by id alone
+// — the error is dropped on purpose. It never replaces a row the caller
+// already handed in: issues keeps the front door's rows.
+func hydrateDeletePreviewTitles(ctx context.Context, store storage.DoltStorage, issues map[string]*types.Issue, result issueops.DeleteResult) {
+	extra := make([]string, 0, len(result.DeletedIDs)+len(result.Orphaned))
+	for _, id := range result.DeletedIDs {
+		if issues[id] == nil {
+			extra = append(extra, id)
+		}
+	}
+	for _, id := range result.Orphaned {
+		if issues[id] == nil {
+			extra = append(extra, id)
+		}
+	}
+	if len(extra) == 0 {
+		return
+	}
+	rows, err := store.GetIssuesByIDs(ctx, extra)
+	if err != nil {
+		return
+	}
+	for _, row := range rows {
+		if row != nil {
+			issues[row.ID] = row
+		}
+	}
 }
 
 // readIssueIDsFromFile reads issue IDs from a file (one per line)
@@ -565,7 +702,7 @@ func init() {
 	deleteCmd.Flags().BoolP("force", "f", false, "Actually delete (without this flag, shows preview)")
 	deleteCmd.Flags().String("from-file", "", "Read issue IDs from file (one per line)")
 	deleteCmd.Flags().Bool("dry-run", false, "Preview what would be deleted without making changes")
-	deleteCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
+	deleteCmd.Flags().Bool("cascade", false, "Also delete parent-child descendants; other dependents survive")
 	// A8 (beads#4682)
 	deleteCmd.Flags().String("if-revision", "", ifRevisionFlagHelp)
 	deleteCmd.ValidArgsFunction = issueIDCompletion

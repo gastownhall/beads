@@ -91,7 +91,7 @@ var corpus = []scenario{
 		{"create", "st", "--id", "cf-st1", "-t", "task"},
 		{"stale", "--days", "1", "--json"},
 	}},
-	// Promote a wisp to a durable issue (PromoteFromEphemeral) — CLI-level differential
+	// Promote a wisp to a durable issue (issueops.Promote) — CLI-level differential
 	// for one of the backfilled writes.
 	{name: "promote", steps: [][]string{
 		{"create", "w", "--id", "cf-pw1", "-t", "task", "--ephemeral"},

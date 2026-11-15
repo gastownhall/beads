@@ -748,10 +748,12 @@ func TestFilteredPushUsesDedicatedLongTimeoutConnection(t *testing.T) {
 	if err := held.Close(); err != nil {
 		t.Fatalf("release shared pool: %v", err)
 	}
+	// A name with no federation_peers row is a credential-free remote, so
+	// withPeerCredentials proceeds to Dolt and Dolt reports the unknown remote.
 	if err := <-errCh; err == nil {
-		t.Fatal("expected peer credential error for nonexistent peer")
-	} else if !strings.Contains(err.Error(), "failed to get peer credentials") {
-		t.Fatalf("filtered push failed before peer lookup: %v", err)
+		t.Fatal("expected Dolt unknown-remote error for nonexistent peer")
+	} else if !strings.Contains(err.Error(), "remote 'nonexistent-peer' not found") {
+		t.Fatalf("filtered push failed for an unexpected reason: %v", err)
 	}
 	assertFederationStagingBranchAbsent(t, ctx, observer)
 }
@@ -1629,18 +1631,6 @@ func TestFilteredPushStagingBranchCleanupOnError(t *testing.T) {
 func federationDBName(t *testing.T, town string) string {
 	t.Helper()
 	return uniqueTestDBName(t) + "_" + town
-}
-
-// setupFederationStore is the single-goroutine convenience wrapper around
-// newFederationStore for callers (e.g. pull_branch_tracking_integration_test.go)
-// that don't need concurrent town setup and can use t.Fatalf directly.
-func setupFederationStore(t *testing.T, ctx context.Context, path, prefix string) (*DoltStore, func()) {
-	t.Helper()
-	store, cleanup, err := newFederationStore(ctx, path, federationDBName(t, prefix), prefix)
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	return store, cleanup
 }
 
 // newFederationStore creates a Dolt store for federation testing against the

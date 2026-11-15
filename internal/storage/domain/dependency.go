@@ -151,6 +151,10 @@ type DependencySQLRepository interface {
 	GetBlockingInfo(ctx context.Context, issueIDs []string, opts DepListOpts) (BlockingInfo, error)
 	GetBlockingInfoAcrossIssuesAndWisps(ctx context.Context, issueIDs []string) (BlockingInfo, error)
 	IsBlocked(ctx context.Context, issueID string, opts DepListOpts) (bool, []string, error)
+	// IsBlockedBatch reads the stored transitive is_blocked flag for ids across
+	// both planes (issues win a cross-table collision); an id naming no row is
+	// absent from the map.
+	IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error)
 
 	// DeleteAllForIDs takes actor for the same reason Delete above does: the
 	// edges it drops are journaled as dep_remove rows, and a cascade removal
@@ -203,6 +207,9 @@ type DependencyUseCase interface {
 	CountsByIssueIDs(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error)
 	GetBlockingInfo(ctx context.Context, issueIDs []string) (BlockingInfo, error)
 	IsBlocked(ctx context.Context, issueID string) (bool, []string, error)
+	// IsBlockedBatch is the repository read of the same name: the stored
+	// transitive is_blocked flag per id, both planes, absent = no row.
+	IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error)
 	GetForIssueIDs(ctx context.Context, ids []string) (map[string][]*types.Dependency, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
 	// DetectCycleReport is the shape issueops.CycleDetector publishes; see the
@@ -613,6 +620,17 @@ func (u *dependencyUseCaseImpl) GetBlockingInfo(ctx context.Context, issueIDs []
 	out, err := u.depRepo.GetBlockingInfoAcrossIssuesAndWisps(ctx, issueIDs)
 	if err != nil {
 		return BlockingInfo{}, fmt.Errorf("GetBlockingInfo: %w", err)
+	}
+	return out, nil
+}
+
+func (u *dependencyUseCaseImpl) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
+	if len(ids) == 0 {
+		return map[string]bool{}, nil
+	}
+	out, err := u.depRepo.IsBlockedBatch(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("IsBlockedBatch: %w", err)
 	}
 	return out, nil
 }
