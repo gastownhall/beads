@@ -582,12 +582,10 @@ func cycleDetectorTouching(report publicops.CycleReport, ids ...string) [][]stri
 // expectation itself.
 func assertCycleDetectorPath(t *testing.T, cycle publicops.Cycle, edgeOrder ...string) {
 	t.Helper()
-	lowest := 0
-	for i, id := range edgeOrder {
-		if id < edgeOrder[lowest] {
-			lowest = i
-		}
+	if len(edgeOrder) == 0 {
+		t.Fatal("expected edge order must not be empty")
 	}
+	lowest := slices.Index(edgeOrder, slices.Min(edgeOrder))
 	want := append(append([]string{}, edgeOrder[lowest:]...), edgeOrder[:lowest]...)
 
 	got := make([]string, 0, len(cycle.Members))

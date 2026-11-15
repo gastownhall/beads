@@ -86,6 +86,13 @@ jobs:
           dir="${RUNNER_TEMP}/docs-patch"
           mkdir -p "$dir"
           gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "${RUNNER_TEMP}/docs-patch.zip"
+          # Check the archive entry before extraction: some unzip builds
+          # discard symlinks, which otherwise look like missing files.
+          entries="$(unzip -Z -l "${RUNNER_TEMP}/docs-patch.zip")"
+          if printf '%s\n' "$entries" | awk '$NF ~ /^(cli-docs-freshness\.patch)$/ && $1 ~ /^[ldbcps]/ { bad=1 } END { exit !bad }'; then
+            echo "::error::artifact entry is not a regular file"
+            exit 1
+          fi
           # Extract only the expected name, and only as a regular file.
           unzip -o "${RUNNER_TEMP}/docs-patch.zip" cli-docs-freshness.patch -d "$dir" || true
           ls -la "$dir"

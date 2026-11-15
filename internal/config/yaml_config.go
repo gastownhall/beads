@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/atomicfile"
 	"github.com/steveyegge/beads/internal/ceiling"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/remedy"
 	"gopkg.in/yaml.v3"
@@ -928,6 +929,19 @@ func projectConfigPathFromLoadedState() string {
 	return configPath
 }
 
+// sameDirectory reports whether two directory paths name the same directory,
+// tolerating symlink and case-form differences between the walk's spelling
+// and the git root's. internal/utils cannot be imported here: its test
+// graph imports this package, and the cycle breaks go test.
+func sameDirectory(a, b string) bool {
+	if a == b {
+		return true
+	}
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
+}
+
 func findProjectBeadsDir() string {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -935,10 +949,20 @@ func findProjectBeadsDir() string {
 	}
 
 	bound := ceiling.For(cwd)
+	// The walk stops at the repository root; outside a repository only the
+	// current directory declares a store — an unrelated ancestor (for
+	// example a user-global ~/.beads) may own a different database.
+	root := git.GetRepoRoot()
+	if root == "" {
+		root = cwd
+	}
 	for dir := cwd; dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
+		}
+		if sameDirectory(dir, root) {
+			break
 		}
 	}
 

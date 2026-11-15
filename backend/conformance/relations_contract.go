@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -664,15 +665,8 @@ func relationsPageKeys(items []*publicops.RelatedIssue) []string {
 func assertRelationsPage(t *testing.T, items []*publicops.RelatedIssue, want []string, describe string) {
 	t.Helper()
 	got := relationsPageKeys(items)
-	if len(got) != len(want) {
+	if !slices.Equal(got, want) {
 		t.Errorf("%s = %v, want %v", describe, got, want)
-		return
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("%s = %v, want %v", describe, got, want)
-			return
-		}
 	}
 }
 

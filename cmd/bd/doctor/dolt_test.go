@@ -103,6 +103,61 @@ func TestRunDoltHealthChecks_ExternalModeNoServer(t *testing.T) {
 	}
 }
 
+// TestDoltConnectionFixFollowsStoreOwnership proves the unreachable-server
+// remedy names the lifecycle owner the store's config.yaml declares, and that
+// an invalid gc.endpoint_origin is reported instead of a bd remedy.
+func TestDoltConnectionFixFollowsStoreOwnership(t *testing.T) {
+	tests := []struct {
+		name        string
+		configYAML  string
+		wantStatus  string
+		wantMessage string
+		wantFix     string
+	}{
+		{"unstamped store", "", StatusError, "Failed to connect to Dolt server", "'bd dolt start'"},
+		{"explicit origin", "gc.endpoint_origin: explicit\n", StatusError, "Failed to connect to Dolt server", "'bd dolt start'"},
+		{"city-owned store", "gc.endpoint_origin: managed_city\n", StatusError, "Failed to connect to Dolt server", "'gc start'"},
+		{"unknown origin", "gc.endpoint_origin: somebody_else\n", StatusError, "Cannot resolve Dolt server ownership", "gc.endpoint_origin"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tt.configYAML != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(tt.configYAML), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("BEADS_DOLT_SERVER_PORT", "59998")
+			t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+
+			for _, check := range []DoctorCheck{RunDoltHealthChecks(tmpDir)[0], CheckDoltConnection(tmpDir)} {
+				if check.Name != "Dolt Connection" || check.Status != tt.wantStatus || check.Message != tt.wantMessage {
+					t.Fatalf("check = %+v, want Dolt Connection %s %q", check, tt.wantStatus, tt.wantMessage)
+				}
+				if !strings.Contains(check.Fix, tt.wantFix) {
+					t.Fatalf("Fix = %q, want it to contain %q", check.Fix, tt.wantFix)
+				}
+				agent := EnrichForAgent(check, safeGate())
+				if len(agent.Commands) != 2 || agent.Commands[1] != check.Fix {
+					t.Fatalf("agent commands = %q, want bd doctor --fix then the check's Fix", agent.Commands)
+				}
+				for _, cmd := range agent.Commands {
+					if strings.HasPrefix(cmd, "gt ") {
+						t.Fatalf("agent command %q names the retired gt CLI", cmd)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestRunDoltHealthChecks_ServerBdDoesNotRun pins the Dolt checks of a
 // default bd doctor run for a server-mode workspace whose server bd does not
 // run: at the IPv6 loopback in either spelling, where bd's own server, which

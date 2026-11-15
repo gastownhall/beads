@@ -1012,39 +1012,72 @@ func GetString(key string) string {
 // numbers are coerced to their string representations ("true", "false", etc.).
 // Returns "" if the file is absent, the key is not found, or any error occurs.
 func GetStringFromDir(beadsDir, key string) string {
+	value, _, _ := lookupStringFromDir(beadsDir, key)
+	return value
+}
+
+// lookupStringFromDir resolves key in beadsDir/config.yaml with the same
+// precedence rules as GetStringFromDir, reporting absence and parse errors
+// distinctly: "" false nil when the file or key is absent, a wrapped error
+// when the file is unreadable, malformed, or a dotted segment is not a
+// mapping. Ownership decisions (Gas City endpoint origin) must never read an
+// error as "not present", so they consume this variant instead of the quiet
+// one. At every level an exact dotted spelling wins over further descent, and
+// an explicit YAML null reads as the empty string, not "<nil>".
+func lookupStringFromDir(beadsDir, key string) (string, bool, error) {
 	configPath := filepath.Join(beadsDir, "config.yaml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return ""
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("reading %s: %w", configPath, err)
 	}
 	var root map[string]interface{}
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return ""
+		return "", false, fmt.Errorf("parsing %s: %w", configPath, err)
+	}
+	valueString := func(val interface{}) string {
+		if val == nil {
+			return ""
+		}
+		return configValueString(val)
 	}
 	// Match Viper's precedence: an exact top-level key wins over dotted-path
 	// descent when a file contains both spellings.
 	if val, ok := root[key]; ok {
-		return configValueString(val)
+		return valueString(val), true, nil
 	}
 	parts := strings.SplitN(key, ".", 2)
 	node := root
 	for len(parts) == 2 {
+		// A flat dotted leaf at this level ("b.c: v" inside mapping a) wins
+		// over descending one segment further.
+		if val, ok := node[parts[0]+"."+parts[1]]; ok {
+			return valueString(val), true, nil
+		}
 		val, ok := node[parts[0]]
 		if !ok {
-			return ""
+			return "", false, nil
 		}
 		m, ok := val.(map[string]interface{})
 		if !ok {
-			return ""
+			return "", false, fmt.Errorf("%s in %s: %q is not a mapping", key, configPath, parts[0])
 		}
 		node = m
 		parts = strings.SplitN(parts[1], ".", 2)
 	}
 	val, ok := node[parts[0]]
 	if !ok {
-		return ""
+		return "", false, nil
 	}
-	return configValueString(val)
+	if _, isMapping := val.(map[string]interface{}); isMapping {
+		return "", false, fmt.Errorf("%s in %s: %q is not a scalar", key, configPath, parts[0])
+	}
+	if _, isList := val.([]interface{}); isList {
+		return "", false, fmt.Errorf("%s in %s: %q is not a scalar", key, configPath, parts[0])
+	}
+	return valueString(val), true, nil
 }
 
 func configValueString(val interface{}) string {

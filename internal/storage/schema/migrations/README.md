@@ -176,4 +176,3 @@ stores already at the branch's latest version, use an open-time repair gated
 by its own `migrationWorkNeeded` term, as `ensureBackfilledCustomStatusesCustomTypes`
 does, and make `main`'s migration tolerate the repaired shape. RELEASING.md
 ("Backports") has the full recipe.
-

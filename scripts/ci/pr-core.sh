@@ -20,6 +20,26 @@ beads_test_env_enter
 GO_TEST_PKG_PARALLEL="${GO_TEST_PKG_PARALLEL:-4}"
 GO_TEST_PARALLEL="${GO_TEST_PARALLEL:-4}"
 
+# The tracker package requires a real Dolt container. The required storage
+# domain + uow job runs that package with Dolt enabled; the fast core job runs
+# the remaining packages in its hermetic no-Dolt environment.
+core_packages=()
+tracker_found=0
+if ! all_packages="$(go list ./...)"; then
+    printf 'FATAL: cannot list PR core packages\n' >&2
+    exit 1
+fi
+while IFS= read -r package; do
+    case "$package" in
+        */internal/tracker) tracker_found=1 ;;
+        *) core_packages+=("$package") ;;
+    esac
+done <<< "$all_packages"
+if [[ "$tracker_found" != 1 || ${#core_packages[@]} -eq 0 ]]; then
+    printf 'FATAL: PR core package partition cannot locate tracker or core packages\n' >&2
+    exit 1
+fi
+
 # Without an explicit -timeout every package gets Go's 10m default, and ./cmd/bd
 # has outgrown it: measured through this wrapper it takes 572s, which leaves 28s
 # — under 5% — of margin. Runner variance eats that, and the package then dies on
@@ -40,4 +60,4 @@ go_test() {
 }
 
 ci_time "pr-core go test" -- \
-    go_test -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL" -race -short -timeout=30m -skip '^TestEmbedded' ./...
+    go_test -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL" -race -short -timeout=30m -skip '^TestEmbedded' "${core_packages[@]}"

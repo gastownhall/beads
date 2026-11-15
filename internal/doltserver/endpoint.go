@@ -80,6 +80,7 @@ type Endpoint struct {
 	// config.WithBeadsDir classifies it by that workspace's settings.
 	SharedServer      bool
 	AutoStartDisabled bool
+	ownershipErr      error
 }
 
 // ResolveEndpoint resolves the endpoint beadsDir's store dials, with fileCfg
@@ -100,6 +101,7 @@ func ResolveEndpoint(beadsDir string, fileCfg *configfile.Config) Endpoint {
 
 // endpointFor is the endpoint fileCfg names with dial's port and mode.
 func endpointFor(beadsDir string, fileCfg *configfile.Config, dial *Config) Endpoint {
+	disabled, ownershipErr := IsAutoStartDisabled(beadsDir)
 	ep := Endpoint{
 		BeadsDir:          beadsDir,
 		Host:              fileCfg.GetDoltServerHost(),
@@ -113,7 +115,8 @@ func endpointFor(beadsDir string, fileCfg *configfile.Config, dial *Config) Endp
 		Database:          fileCfg.GetDoltDatabase(),
 		CredentialCommand: fileCfg.GetDoltCredentialCommand(),
 		SharedServer:      IsSharedServerMode(),
-		AutoStartDisabled: IsAutoStartDisabled(),
+		AutoStartDisabled: disabled || ownershipErr != nil,
+		ownershipErr:      ownershipErr,
 	}
 	return ep
 }
@@ -317,6 +320,9 @@ func (e Endpoint) EnsureTrustedForCredential(fileCfg *configfile.Config) error {
 // with no address (UnresolvedError) rather than dial host:0. Callers set a
 // Timeout on it as they need.
 func (e Endpoint) DialDSN(ctx context.Context, database string) (doltutil.ServerDSN, error) {
+	if e.ownershipErr != nil {
+		return doltutil.ServerDSN{}, e.ownershipErr
+	}
 	if err := e.UnresolvedError(); err != nil {
 		return doltutil.ServerDSN{}, err
 	}

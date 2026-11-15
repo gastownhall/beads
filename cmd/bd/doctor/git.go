@@ -919,8 +919,19 @@ func FindOrphanedIssues(gitPath string, provider types.IssueProvider) ([]OrphanI
 		return nil, fmt.Errorf("getting open issues: %w", err)
 	}
 
+	// A parented issue is governed by its parent, not orphaned: parent-child
+	// edges are the governance structure (epics, slices), so only unparented
+	// open issues are orphan candidates.
+	parented, err := provider.GetParentedOpenIssueIDs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting parented issues: %w", err)
+	}
+
 	openIssues := make(map[string]*OrphanIssue)
 	for _, issue := range issues {
+		if parented[issue.ID] {
+			continue
+		}
 		openIssues[issue.ID] = &OrphanIssue{
 			IssueID: issue.ID,
 			Title:   issue.Title,

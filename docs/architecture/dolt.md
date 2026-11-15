@@ -1144,18 +1144,9 @@ After successful migration from SQLite, you may have backup files:
 .beads/sqlite.backup-pre-dolt-20260123-192812.db
 ```
 
-These are safe to delete once you've verified Dolt is working:
-
-```bash
-# Verify Dolt works
-bd list
-bd doctor
-
-# Then clean up (after appropriate waiting period)
-rm .beads/*.backup-*.db
-```
-
-**Recommendation:** Keep backups for at least a week before deleting.
+Retain the legacy SQLite backups until the migration is verified and the
+workspace's backup retention policy permits their removal. Verify the new
+store with `bd list` and `bd doctor` before changing any backup retention.
 
 ## See Also
 

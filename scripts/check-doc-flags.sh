@@ -130,6 +130,8 @@ fi
 echo ""
 
 # --- Check 3: SQLite/legacy database paths ---
+# docs/CLI_REFERENCE.md is generated for the pinned historical release. Its
+# versioned contents are checked against that pinned binary in Check 4.
 echo "=== Check 3: Legacy storage references ==="
 
 SQLITE_REFS=$(grep -rn 'beads\.db\|default\.db\|sqlite3.*\.beads\|\.beads/.*\.db' \
@@ -139,6 +141,7 @@ SQLITE_REFS=$(grep -rn 'beads\.db\|default\.db\|sqlite3.*\.beads\|\.beads/.*\.db
     "$PROJECT_ROOT"/AGENTS.md \
     "$PROJECT_ROOT"/README.md \
     2>/dev/null \
+    | grep -Fv "$PROJECT_ROOT/docs/CLI_REFERENCE.md:" \
     | grep -v 'CHANGELOG\|removed\|legacy\|migration\|migrate\|was removed\|pre-\|old\|deprecated' \
     || true)
 

@@ -17,9 +17,11 @@ import (
 const (
 	migrationLockPrefix        = "bd_schema_init:"
 	migrationLockNameMaxLength = 64
-	// Keep this below the server-mode callers' retry budgets so a contended
-	// lock wait can time out and still leave room for a real retry.
-	migrationLockAcquireTimeoutSeconds = 5
+	// A cold bootstrap migrates the entire schema while holding this lock.
+	// Measured concurrent cold opens under a loaded host took 94 seconds;
+	// repeated 5-second waits exhausted the outer open budget before peers
+	// could observe the completed schema. Wait once for the holder.
+	migrationLockAcquireTimeoutSeconds = 120
 	migrationLockCleanupTimeout        = 5 * time.Second
 	// freshBootstrapResetAttempts bounds the heal path's DOLT_RESET retries.
 	// Small on purpose: this is a last-chance recovery, not a general retry

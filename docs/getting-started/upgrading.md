@@ -678,7 +678,7 @@ server selection is not overridden by a stale `.beads/embeddeddolt/` repository.
 | Explicit server metadata plus `.beads/dolt/` and a witness that is present but unreadable | Normal current server-mode upgrade, with a warning |
 | Explicit server metadata without `.beads/dolt/`, and a missing, malformed, or non-historical witness | Normal current server-mode compatibility path |
 | `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded` | Explicit legacy Dolt export/import, except for the configured shared-server compatibility path described below |
-| One `.beads/*.db` file, such as `beads.db` or `vc.db` | Sealed SQLite bridge |
+| One legacy `.beads/*.db` file, such as `beads.db` or `vc.db` | Sealed SQLite bridge |
 
 The witness is whatever `bd` held in its own version string when it last touched
 the workspace, so it may be a plain release, a release candidate, a build
@@ -754,7 +754,7 @@ v0.62.0, use this explicit bridge even when its witness was lost or damaged.
 Otherwise, follow the normal `bd migrate --dry-run` and `bd migrate schema`
 flow for an admitted server workspace.
 
-### One `.beads/*.db` file: sealed SQLite bridge
+### One legacy `.beads/*.db` file: sealed SQLite bridge
 
 The old binary stored data in SQLite. The new binary uses Dolt.
 

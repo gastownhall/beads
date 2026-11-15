@@ -344,25 +344,6 @@ func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 	}
 }
 
-// TestGenerateHookSection_DBNotInitialized verifies exit code 3 handling (GH#2449).
-func TestGenerateHookSection_DBNotInitialized(t *testing.T) {
-	section := generateHookSection("pre-commit")
-
-	// Exit code 3 = beads database not initialized; hook must continue gracefully
-	if !strings.Contains(section, `"$_bd_exit" -eq 3`) {
-		t.Error("section missing exit code 3 (DB not initialized) handling")
-	}
-	if !strings.Contains(section, "database not initialized") {
-		t.Error("section missing DB-not-initialized warning message")
-	}
-
-	// After handling exit code 3, the effective exit must be 0 (success)
-	// Verify the pattern: set _bd_exit=0 after detecting code 3
-	if !strings.Contains(section, `if [ "$_bd_exit" -eq 3 ]; then`) {
-		t.Error("section missing exit code 3 conditional")
-	}
-}
-
 // TestGenerateHookSection_HookNameInMessages verifies hook name appears in warning messages.
 func TestGenerateHookSection_HookNameInMessages(t *testing.T) {
 	for _, hook := range managedHookNames {

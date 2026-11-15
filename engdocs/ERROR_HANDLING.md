@@ -1,6 +1,6 @@
 # Error Handling Guidelines
 
-Last reviewed: 2026-10-05
+Last reviewed: 2026-11-14
 
 Freshness source: `cmd/bd/*.go`, especially command error exits and JSON error
 helpers in `cmd/bd/errors.go`.
@@ -34,7 +34,8 @@ stack without running deferred functions — the per-command metrics event
 invocation records no usage event and any `defer`red cleanup (unit-of-work close,
 temp-file removal) is skipped. Instead return a `HandleError*` value: it prints
 the message and returns a sentinel `*exitError`; cobra unwinds the stack (running
-every `defer`), and `main()` maps the sentinel to exit code 1.
+every `defer`), and `main()` maps the sentinel's code to the process exit
+status (1 for every `HandleError*` helper).
 
 **Characteristics:**
 - Prints `Error:` (plus `Hint:` for the `WithHint` variants) to stderr; the
@@ -68,7 +69,7 @@ return a `HandleError*` value instead of adding more.
 
 **Example:**
 ```go
-if err := createConfigYaml(beadsDir, false, ""); err != nil {
+if err := createConfigYaml(beadsDir, false, prefix); err != nil {
     fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
     // Non-fatal - continue anyway
 }
@@ -164,7 +165,7 @@ if err != nil {
 ### Creating Auxiliary Config Files → Pattern B (Warn)
 
 ```go
-if err := createConfigYaml(localBeadsDir, false, ""); err != nil {
+if err := createConfigYaml(localBeadsDir, false, prefix); err != nil {
     fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
     // Non-fatal - continue anyway
 }
@@ -203,7 +204,7 @@ if err := store.CreateIssue(ctx, issue, actor); err != nil {
 
 ```go
 // BAD: Same type of operation handled differently
-if err := createConfigYaml(dir, false, ""); err != nil {
+if err := createConfigYaml(dir, false, prefix); err != nil {
     fmt.Fprintf(os.Stderr, "Warning: %v\n", err) // Warns
 }
 if err := createReadme(dir); err != nil {
@@ -214,7 +215,7 @@ if err := createReadme(dir); err != nil {
 
 ```go
 // GOOD: Consistent pattern for similar operations
-if err := createConfigYaml(dir, false, ""); err != nil {
+if err := createConfigYaml(dir, false, prefix); err != nil {
     fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
 }
 if err := createReadme(dir); err != nil {

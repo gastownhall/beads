@@ -44,7 +44,7 @@ func expectBehindDatabaseThroughPreparation(mock sqlmock.Sqlmock, database strin
 
 	lockName := schema.MigrationLockName(database)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
-		WithArgs(lockName, 5).
+		WithArgs(lockName, sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	// Locked preparation on a pre-existing database: the bare CREATE loses, so
 	// this init captures no fresh-bootstrap heal authority, and the USE is all
@@ -172,7 +172,7 @@ func TestInitSchemaSharedStoreGate(t *testing.T) {
 		expectNoSessionDatabase(mock)
 		expectDatabaseExistsProbe(mock, "beads", false)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
-			WithArgs(lockName, 5).
+			WithArgs(lockName, sqlmock.AnyArg()).
 			WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
 			WillReturnResult(sqlmock.NewResult(0, 0))

@@ -570,7 +570,11 @@ func refreshServerAfterReset(st storage.DoltStorage, remote string) *resetDataSe
 // declaration either: bd starts the shared server itself (bd init, bd dolt
 // start), so only auto-start off leaves it to the operator.
 func externalServerDeclaration(serverDir string) string {
-	if doltserver.IsAutoStartDisabled() {
+	disabled, err := doltserver.IsAutoStartDisabled(serverDir)
+	if err != nil {
+		return err.Error()
+	}
+	if disabled {
 		return "auto-start is off (dolt.auto-start or BEADS_DOLT_AUTO_START)"
 	}
 	if !doltserver.IsSharedServerMode() && doltserver.ResolveServerModeIgnoringPortEnv(serverDir) != doltserver.ServerModeOwned {

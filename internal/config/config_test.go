@@ -1954,6 +1954,81 @@ func TestGetStringFromDir(t *testing.T) {
 	})
 }
 
+// TestlookupStringFromDir verifies the error-returning variant: absence is
+// (found=false, nil), while unreadable or malformed input is an error rather
+// than an empty value.
+func TestStringLookupFromDir(t *testing.T) {
+	writeConfig := func(t *testing.T, content string) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(content), 0o600); err != nil {
+			t.Fatalf("writeConfig: %v", err)
+		}
+		return dir
+	}
+
+	found := []struct {
+		name, body, key, want string
+	}{
+		{"flat dotted key", "gc.endpoint_origin: inherited_city\n", "gc.endpoint_origin", "inherited_city"},
+		{"nested mapping", "gc:\n  endpoint_origin: explicit\n", "gc.endpoint_origin", "explicit"},
+		{"flat key inside a mapping", "a:\n  b.c: value\n", "a.b.c", "value"},
+		{"YAML boolean", "dolt:\n  auto-start: false\n", "dolt.auto-start", "false"},
+		{"explicit null", "gc.endpoint_origin:\n", "gc.endpoint_origin", ""},
+	}
+	for _, tt := range found {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, err := lookupStringFromDir(writeConfig(t, tt.body), tt.key)
+			if err != nil || !ok || got != tt.want {
+				t.Fatalf("lookupStringFromDir(%q) = (%q, %v, %v), want (%q, true, nil)", tt.key, got, ok, err, tt.want)
+			}
+		})
+	}
+
+	absent := []struct {
+		name string
+		dir  func(t *testing.T) string
+	}{
+		{"missing file", func(t *testing.T) string { return t.TempDir() }},
+		{"missing key", func(t *testing.T) string { return writeConfig(t, "dolt:\n  shared-server: true\n") }},
+		{"empty file", func(t *testing.T) string { return writeConfig(t, "") }},
+	}
+	for _, tt := range absent {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, err := lookupStringFromDir(tt.dir(t), "dolt.auto-start")
+			if err != nil || ok || got != "" {
+				t.Fatalf("lookupStringFromDir = (%q, %v, %v), want (\"\", false, nil)", got, ok, err)
+			}
+		})
+	}
+
+	broken := []struct {
+		name, body, key, wantErr string
+	}{
+		{"malformed YAML", "dolt: [\nbad yaml\n", "dolt.auto-start", "parsing"},
+		{"key is a mapping", "dolt:\n  auto-start:\n    x: 1\n", "dolt.auto-start", "not a scalar"},
+		{"path through a scalar", "dolt: true\n", "dolt.auto-start", "not a mapping"},
+	}
+	for _, tt := range broken {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := lookupStringFromDir(writeConfig(t, tt.body), tt.key)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("lookupStringFromDir error = %v, want one containing %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	t.Run("unreadable config path", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "config.yaml"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := lookupStringFromDir(dir, "dolt.auto-start"); err == nil || !strings.Contains(err.Error(), "reading") {
+			t.Fatalf("lookupStringFromDir on a directory named config.yaml: err = %v, want a read error", err)
+		}
+	})
+}
+
 // TestXDGConfigPath_Loaded verifies that ~/.config/bd/config.yaml is loaded
 // when it exists, even if os.UserConfigDir() returns a different path (macOS).
 func TestXDGConfigPath_Loaded(t *testing.T) {

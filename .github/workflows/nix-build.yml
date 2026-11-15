@@ -8,7 +8,7 @@ on:
   # `nix build` path itself stays covered without duplicating a PR-blocking
   # job that never adds coverage pr-risk.yml doesn't already have.
   push:
-    branches: [main]
+    branches: [main, dc-use]
     paths:
       - 'go.mod'
       - 'go.sum'

@@ -1,9 +1,9 @@
 # Linting Policy
 
-Last reviewed: 2026-10-07
+Last reviewed: 2026-11-14
 
 Freshness source: `.golangci.yml`, `tools/nogo/`, `scripts/ci/pr-lint.sh`,
-`scripts/pr-lint/`, `Makefile`, `.github/workflows/pr.yml`, and
+`scripts/pr-lint/`, `scripts/ci/fmt-check.sh`, `Makefile`, `.github/workflows/pr.yml`, and
 `.github/workflows/main.yml`.
 
 This document explains the required Go lint and vet gate for this codebase.

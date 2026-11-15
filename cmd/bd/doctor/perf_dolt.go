@@ -100,10 +100,14 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 	// Connect and run diagnostics via server
 	if !serverRunning {
 		addr := doltutil.PrintedServerAddr(host, dsCfg.Port)
-		if advice := doltserver.UnreachableEndpointAdvice(beadsDir, host, dsCfg.Port, dsCfg.PortSource); advice != "" {
+		startHint, err := doltserver.StartHint(beadsDir)
+		if err != nil {
+			return metrics, fmt.Errorf("dolt sql-server is not running on %s: %w", addr, err)
+		}
+		if advice := doltserver.UnreachableEndpointAdvice(beadsDir, host, dsCfg.Port, dsCfg.PortSource); advice != "" && startHint == "bd dolt start" {
 			return metrics, fmt.Errorf("dolt sql-server is not running on %s.\n%s", addr, advice)
 		}
-		return metrics, fmt.Errorf("dolt sql-server is not running on %s; start it with 'bd dolt start'", addr)
+		return metrics, fmt.Errorf("dolt sql-server is not running on %s; start it with '%s'", addr, startHint)
 	}
 
 	if err := runDoltServerDiagnostics(metrics, fileCfg, beadsDir, host, dsCfg.Port); err != nil {

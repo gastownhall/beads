@@ -386,9 +386,9 @@ var migrateUpWithLock = schema.MigrateUpWithLock
 func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = 25 * time.Millisecond
-	// This budget must outwait a peer holding the migration lock through a
-	// full cold-start migration pass (every migration + a Dolt commit each),
-	// not just a transient blip — it grows as migrations accumulate.
+	// This bounds serialization retries. A peer's cold-start migration is
+	// awaited by schema.AcquireMigrationLock on its pinned SQL session; that
+	// single wait owns lock contention and may outlast this retry budget.
 	bo.MaxElapsedTime = 60 * time.Second
 	// One preparer per initSchema call carries the sticky fresh-bootstrap state
 	// (created/heal) across every backoff attempt; see bootstrapPreparer.

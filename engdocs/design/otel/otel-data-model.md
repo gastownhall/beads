@@ -1,6 +1,6 @@
 # OpenTelemetry Data Model
 
-Last reviewed: 2026-11-07
+Last reviewed: 2026-11-14
 
 Freshness source: `internal/telemetry/`, `internal/storage/dolt/store.go`,
 `internal/compact/haiku.go`, `cmd/bd/find_duplicates.go`, and hook execution

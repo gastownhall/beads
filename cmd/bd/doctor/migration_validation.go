@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/utils"
@@ -337,12 +339,16 @@ func CheckDoltLocks(path string) DoctorCheck {
 
 	locked, detail, err := checkDoltLocks(beadsDir)
 	if err != nil {
+		statusHint, hintErr := doltserver.StatusHint(beadsDir)
+		if hintErr != nil {
+			return doltOwnershipCheck("Dolt Locks", CategoryMaintenance, errors.Join(err, hintErr))
+		}
 		return DoctorCheck{
 			Name:     "Dolt Locks",
 			Status:   StatusWarning,
 			Message:  "Could not check Dolt locks",
 			Detail:   err.Error(),
-			Fix:      "Ensure the Dolt server is running: gt dolt status",
+			Fix:      "Ensure the Dolt server is running: " + statusHint,
 			Category: CategoryMaintenance,
 		}
 	}
