@@ -219,8 +219,8 @@ func TestIssueIDCompletion_NoStore(t *testing.T) {
 		t.Errorf("Expected 0 completions when store is nil and dbPath is invalid, got %d", len(completions))
 	}
 
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Errorf("Expected directive NoFileComp (4), got %d", directive)
+	if directive != issueIDCompletionDirective {
+		t.Errorf("directive = %d, want %d", directive, issueIDCompletionDirective)
 	}
 }
 
@@ -363,10 +363,8 @@ func TestCompleteCommandWorksWithoutDatabase(t *testing.T) {
 		completions = []string{}
 	}
 
-	// Should return NoFileComp directive
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Errorf("Expected directive NoFileComp (%d), got %d",
-			cobra.ShellCompDirectiveNoFileComp, directive)
+	if directive != issueIDCompletionDirective {
+		t.Errorf("directive = %d, want %d", directive, issueIDCompletionDirective)
 	}
 
 	// Completions should be empty (no database to query)

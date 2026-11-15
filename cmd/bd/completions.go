@@ -28,7 +28,7 @@ func issueIDCompletion(cmd *cobra.Command, args []string, toComplete string) ([]
 	if currentDBPath == "" {
 		currentDBPath = beads.FindDatabasePath()
 		if currentDBPath == "" {
-			return nil, cobra.ShellCompDirectiveNoFileComp
+			return nil, issueIDCompletionDirective
 		}
 	}
 
@@ -39,7 +39,7 @@ func issueIDCompletion(cmd *cobra.Command, args []string, toComplete string) ([]
 		currentStore, err = openReadOnlyStoreForDBPath(ctx, currentDBPath)
 		if err != nil {
 			// If we can't open database, return empty completion
-			return nil, cobra.ShellCompDirectiveNoFileComp
+			return nil, issueIDCompletionDirective
 		}
 		defer func() { _ = currentStore.Close() }()
 	}
@@ -51,7 +51,7 @@ func issueIDCompletion(cmd *cobra.Command, args []string, toComplete string) ([]
 	issues, err := currentStore.SearchIssues(ctx, "", filter)
 	if err != nil {
 		// If we can't list issues, return empty completion
-		return nil, cobra.ShellCompDirectiveNoFileComp
+		return nil, issueIDCompletionDirective
 	}
 
 	slices.SortFunc(issues, func(a, b *types.Issue) int { return compareIssueIDs(a.ID, b.ID) })
