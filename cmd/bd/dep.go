@@ -1525,6 +1525,10 @@ type treeRenderer struct {
 	rootBlocked bool
 }
 
+// defaultTreeMaxDepth is the one depth ceiling for tree rendering: the default of
+// `bd dep tree --max-depth` and the fixed safety limit of the `bd list` tree.
+const defaultTreeMaxDepth = 50
+
 // renderTree renders the tree with proper box-drawing connectors
 func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 	if len(tree) == 0 {
@@ -1750,7 +1754,7 @@ func init() {
 	// (issueops/treewalker.go, TreeResult.Nodes) and this flag stays accepted so
 	// no script breaks. Same story as TreeNode.Truncated.
 	depTreeCmd.Flags().Bool("show-all-paths", false, "Deprecated no-op: accepted and ignored. A node reached by two paths is expanded once, under the first; later paths list it as (shown above).")
-	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")
+	depTreeCmd.Flags().IntP("max-depth", "d", defaultTreeMaxDepth, "Maximum tree depth to display (safety limit)")
 	depTreeCmd.Flags().Bool("reverse", false, "Show dependent tree (deprecated: use --direction=up)")
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")
 	depTreeCmd.Flags().String("status", "", "Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)")

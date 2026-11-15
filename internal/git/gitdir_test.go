@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/gitenv"
 )
 
 // setupTestRepo creates a temporary git repository for testing.
@@ -651,7 +651,7 @@ var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=
 // (gastownhall/beads#7706). A caller that assigns cmd.Env replaces this.
 func gitCommand(args ...string) *exec.Cmd {
 	cmd := exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
-	cmd.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
+	cmd.Env = gitenv.ScrubRepoLocation(os.Environ())
 	return cmd
 }
 

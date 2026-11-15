@@ -1,6 +1,6 @@
 # `bd serve` operator runbook
 
-Last reviewed: 2026-11-09
+Last reviewed: 2026-11-14
 
 Freshness source: `internal/httpapi/server.go`,
 `internal/httpapi/events_watch.go`, `cmd/bd/serve.go` and
@@ -254,8 +254,9 @@ The shape behind those numbers:
 So `max_connections` on a shared server must cover roughly `22 × (number of bd
 serve processes)` plus every other `bd` process pointed at the same server,
 each of which claims its own. Idle connections are reclaimed after 20 seconds
-and recycled after an hour, so a bursty deployment settles below the worst
-case — but size for the worst case.
+(kept below Dolt's 30-second `wait_timeout`, so a request never receives a
+connection the server already reaped) and recycled after an hour, so a bursty
+deployment settles below the worst case — but size for the worst case.
 
 Those pool limits are applied only if the unit-of-work provider exposes the
 knob. If it does not, `bd serve` says so at startup with
@@ -433,6 +434,7 @@ Other events on the same stream:
 | `auth_refused` | A `401`. Carries `request_id`, `op`, `remote_addr` and `reason` (`missing`, `malformed`, `unknown_token`). A burst of `unknown_token` from one peer is a client left on a rotated-out token; `missing` is a client that was never configured with one. |
 | `auth_reload_error` | The token file could not be re-read. **Not** a refusal — the last-good set stays in force — but the file an operator is rotating is unreadable and nothing else says so. |
 | `limits` | The operating envelope this build compiled in. Log it, then compare against this page. |
+| `request_refused` | A write refused by the workspace's own validation (`400 invalid_argument`). Carries `request_id` and the real `error` the response body replaces with the server's own words — the 4xx path does not otherwise log the cause. |
 | `request_error` | Accompanies a ≥500, carrying the real error the body withholds. Join on `request_id`. Not emitted when the client hung up (see above). |
 | `request_refused` | Accompanies a write's 4xx whose body gives the server's own words instead of the underlying reason, such as a 400 `invalid_argument` "refused by this workspace's own validation". Carries `request_id` and the real `error`. Join on `request_id`. |
 | `pool_limits_unavailable` | The unit-of-work provider does not expose the pool knob, so the limits below are *not* applied and the pool is unbounded. Worth alerting on; it changes the connection budget. |
@@ -464,6 +466,7 @@ gives the cause.
 | `--insecure-no-auth applies only to a bind beyond loopback; on loopback there is nothing to waive, so pass --allow-non-loopback or drop the flag` | The waiver without the bind it waives. |
 | `--insecure-no-auth contradicts --auth-token-file; pass one or the other` | Both spellings of the auth decision at once. |
 | `--auth-token-file: token file <path>: open <path>: no such file or directory` | The token file is unreadable. Also `is a directory`, `contains no tokens`, and `is larger than 1048576 bytes; that is a mis-pointed path, not a token file`. All four are refusals at startup, never a server that binds anyway. |
+| A schema-skew or shared-store migration-gate block (multi-line) | The workspace's schema needs a one-time migration that a daemon must not perform unattended. The whole block is printed, naming the command that unblocks it, and serve exits without binding. |
 | `address already in use` | The fixed-port mutual exclusion working as intended: a second server is already on that port. |
 
 The six auth and bind refusals above are raised by `resolveServeConfig` before

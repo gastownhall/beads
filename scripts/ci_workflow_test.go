@@ -558,7 +558,7 @@ func TestPRPreflightPlatformsRunStepsUseRestoredGoBuildCache(t *testing.T) {
 func TestMainMacOSTestJobRestoresBlacksmithMacOSSaverCaches(t *testing.T) {
 	workflow := readCIWorkflow(t, "main.yml")
 	job := workflow.job(t, "test")
-	if want := "${{ '" + blacksmithMacOSLabel + "' }}"; job.RunsOn != want {
+	if want := mainBlacksmithMacOSTestRunsOn; job.RunsOn != want {
 		t.Errorf("main.yml test runs-on = %q, want %q", job.RunsOn, want)
 	}
 	if job.TimeoutMinutes == 0 {
@@ -795,13 +795,7 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 		"pr.yml":   readCIWorkflow(t, "pr.yml"),
 	}
 
-	// pr.yml's own "test-macos" job (a full-suite pre-merge race against
-	// main.yml's macOS leg, run on every PR to catch macOS-only regressions
-	// before merge) was removed under the F4 rollout: main.yml's
-	// push-triggered macOS job below is now the only lane that ever runs
-	// this suite on macOS, so no PR run exercises it pre-merge any more.
-	// Nothing in pr.yml should carry the workspace bd binary override
-	// checked in the loop below.
+	// The fork keeps a pre-merge macOS leg as well as the post-merge gate.
 	mainTest := workflows["main.yml"].job(t, "test")
 	assertStepRunsExactly(t, mainTest, "Build", buildCommand)
 	assertStepRunsExactly(t, mainTest, "Test", mainTestCommand)
@@ -817,7 +811,7 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 		for jobName, job := range workflow.Jobs {
 			for _, step := range job.Steps {
 				if step.Env["BEADS_TEST_BD_BINARY"] == workspaceBDBinary &&
-					!(workflowName == "main.yml" && jobName == "test" && step.Name == "Test") {
+					!((workflowName == "main.yml" && jobName == "test" || workflowName == "pr.yml" && jobName == "test-macos") && step.Name == "Test") {
 					t.Errorf("%s job %q step %q has unexpected workspace bd binary override", workflowName, jobName, step.Name)
 				}
 			}
@@ -1078,6 +1072,9 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	// windows-make-shell and its saver hold toolchain caches, not Go caches;
 	// TestWindowsMakeShellProvisionsWithoutNetworkInstalls and
 	// TestWindowsMakeShellToolchainSaverMatchesPRJob pin every one of them.
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "test-macos"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("non-race"), restoreBuildCache("race"),
+	})
 	assertNoUnmanagedGoCacheSteps(t, workflows, map[string]map[string]bool{
 		"main.yml": {
 			"test": true, "test-windows": true,
@@ -1085,6 +1082,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 			"windows-make-shell-toolchains":   true,
 		},
 		"pr.yml": {
+			"test-macos":                    true,
 			"worktree-remove-windows":       true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "advisory-reports": true,
 			"test-windows-liveness": true,
@@ -2055,11 +2053,11 @@ const wantRBERunsOn = "${{ github.repository_owner_id == '" + gastownhallOwnerID
 // main.yml's push-to-main-only Windows and macOS savers, on the exact labels
 // pr.yml's Windows and macOS legs run on (no GitHub-hosted leg is left to
 // seed, ga-96smfk.22).
-const mainBlacksmithWindows4vcpuRunsOn = "${{ 'blacksmith-4vcpu-windows-2025' }}"
-const mainBlacksmithMacOSGoBuildCacheRunsOn = "${{ '" + blacksmithMacOSLabel + "' }}"
+const mainBlacksmithWindows4vcpuRunsOn = blacksmithWindows4vcpuRunsOn
+const mainBlacksmithMacOSGoBuildCacheRunsOn = "${{ github.repository == 'gastownhall/beads' && '" + blacksmithMacOSLabel + "' || 'macos-26' }}"
 
 // main.yml's push-to-main-only macOS test job, on Blacksmith macOS.
-const mainBlacksmithMacOSTestRunsOn = "${{ '" + blacksmithMacOSLabel + "' }}"
+const mainBlacksmithMacOSTestRunsOn = mainBlacksmithMacOSGoBuildCacheRunsOn
 
 // pr.yml's call of bazel.yml: exactly these inputs (review D1 v2 N3). An rbe
 // override would put every PR in local mode and ungate the embedded tier
@@ -2629,7 +2627,7 @@ func TestPRCIGateFastChecksTokens(t *testing.T) {
 	noBeads := job.step(t, "Check for .beads/issues.jsonl changes")
 	if noBeads.Env["MERGE_GROUP_BASE_SHA"] != "${{ github.event.merge_group.base_sha }}" ||
 		!strings.Contains(noBeads.Run, `base="${MERGE_GROUP_BASE_SHA:-origin/${GITHUB_BASE_REF:-main}}"`) ||
-		!strings.Contains(noBeads.Run, `git diff --name-only "$base"...HEAD`) || strings.Contains(noBeads.Run, "${{") {
+		!strings.Contains(noBeads.Run, `git diff --no-renames --name-only "$base"...HEAD`) || strings.Contains(noBeads.Run, "${{") {
 		t.Errorf("fast-checks .beads guard must diff merge_group.base_sha (merge queue) or origin/$GITHUB_BASE_REF (pull_request) without interpolating expressions: env %v\n%s", noBeads.Env, noBeads.Run)
 	}
 	if strings.Contains(gateStep.Run, "CHECK_NO_BEADS_CHANGES") {

@@ -31,6 +31,7 @@ import (
 	"github.com/steveyegge/beads/internal/creds"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/initprocs"
@@ -1301,13 +1302,110 @@ func applyChangeDirSelection() error {
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	changeDirEnvSnapshot = make(map[string]envSnapshotValue, 3)
-	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+	changeDirEnvSnapshot = make(map[string]envSnapshotValue, 5)
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB", "GIT_DIR", "GIT_WORK_TREE"} {
 		value, ok := os.LookupEnv(key)
 		changeDirEnvSnapshot[key] = envSnapshotValue{value: value, ok: ok}
 	}
-	_ = os.Setenv("BEADS_DIR", beadsDir)
+	if err := os.Setenv("BEADS_DIR", beadsDir); err != nil {
+		return HandleError("cannot select -C beads directory %q: %v", beadsDir, err)
+	}
+	if err := retargetGitContext(changeDir); err != nil {
+		return HandleError("%v", err)
+	}
 	return nil
+}
+
+// gitNotARepoStderrPrefix is the message git prints (under LC_ALL=C) when
+// repository discovery walks past every parent of the start directory
+// without finding one: "fatal: not a git repository (or any of the parent
+// directories): .git" or "... (or any parent up to mount point ...)". A
+// broken gitfile, dubious ownership, or an unsupported repository format
+// produce different messages and must not be mistaken for it.
+const gitNotARepoStderrPrefix = "fatal: not a git repository (or any "
+
+// errNotGitRepo marks a -C target that is not inside any git repository.
+var errNotGitRepo = errors.New("not a git repository")
+
+// retargetGitContext points the process-wide git context at the repository
+// that contains the -C directory, honoring the flag's documented "like
+// git -C" contract: hooks install, doctor and config surfaces must resolve
+// the target repo, not the caller's cwd (bd-6m4). The repository is resolved
+// from the -C directory itself, so a redirected or shared beads directory
+// does not change which repository is selected. A directory outside any git
+// repository, or one that git reports as not inside a work tree (a bare
+// repository or a git dir), is a no-op; every other git failure is returned.
+func retargetGitContext(dir string) error {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("cannot resolve -C directory %q: %w", dir, err)
+	}
+	inside, err := revParseGitContext(absDir, "--is-inside-work-tree")
+	if errors.Is(err, errNotGitRepo) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	switch inside[0] {
+	case "false":
+		return nil
+	case "true":
+	default:
+		return fmt.Errorf("git rev-parse --is-inside-work-tree in -C directory %q: unexpected output %q", absDir, inside[0])
+	}
+	paths, err := revParseGitContext(absDir, "--absolute-git-dir", "--show-toplevel")
+	if err != nil {
+		return err
+	}
+	gitDir, workTree := paths[0], paths[1]
+	if err := os.Setenv("GIT_DIR", gitDir); err != nil {
+		return fmt.Errorf("cannot set GIT_DIR for -C directory %q: %w", absDir, err)
+	}
+	if err := os.Setenv("GIT_WORK_TREE", workTree); err != nil {
+		return fmt.Errorf("cannot set GIT_WORK_TREE for -C directory %q: %w", absDir, err)
+	}
+	git.ResetCaches()
+	return nil
+}
+
+// revParseGitContext runs `git rev-parse <args>` in dir and returns one
+// output line per argument. The probe runs without the caller's
+// GIT_DIR/GIT_WORK_TREE (a stale value would override -C and resolve the
+// wrong repository) and with LC_ALL=C so the not-a-repository condition is
+// recognized reliably; it alone maps to errNotGitRepo.
+func revParseGitContext(dir string, args ...string) ([]string, error) {
+	cmd := exec.Command("git", append([]string{"rev-parse"}, args...)...)
+	cmd.Dir = dir
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "GIT_DIR=") || strings.HasPrefix(kv, "GIT_WORK_TREE=") ||
+			strings.HasPrefix(kv, "LC_ALL=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env, "LC_ALL=C")
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			stderr := strings.TrimSpace(string(exitErr.Stderr))
+			if strings.HasPrefix(stderr, gitNotARepoStderrPrefix) {
+				return nil, errNotGitRepo
+			}
+			return nil, fmt.Errorf("git rev-parse %s in -C directory %q: %w: %s", strings.Join(args, " "), dir, err, stderr)
+		}
+		return nil, fmt.Errorf("git rev-parse %s in -C directory %q: %w", strings.Join(args, " "), dir, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != len(args) {
+		return nil, fmt.Errorf("git rev-parse %s in -C directory %q: expected %d lines, got %d: %q", strings.Join(args, " "), dir, len(args), len(lines), out)
+	}
+	for i := range lines {
+		lines[i] = strings.TrimSpace(lines[i])
+	}
+	return lines, nil
 }
 
 func restoreChangeDirSelection() {
@@ -1322,6 +1420,7 @@ func restoreChangeDirSelection() {
 		}
 	}
 	changeDirEnvSnapshot = nil
+	git.ResetCaches()
 }
 
 func guardLegacyNoStoreCommand(cmd *cobra.Command, beadsDir string) error {

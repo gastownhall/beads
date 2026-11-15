@@ -2,6 +2,8 @@ package uow
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -26,7 +28,7 @@ func openTestUOWProvider(t *testing.T, bin string) (UnitOfWorkProvider, error) {
 	verifiedShutdownCleanup(t, storeRootDir)
 	cfgPath := writeServerConfig(t, port)
 	logPath := filepath.Join(t.TempDir(), "server.log")
-	return NewDoltServerUOWProvider(
+	provider, err := NewDoltServerUOWProvider(
 		context.Background(),
 		storeRootDir,
 		"beads",
@@ -41,6 +43,14 @@ func openTestUOWProvider(t *testing.T, bin string) (UnitOfWorkProvider, error) {
 		false,
 		"",
 	)
+	if err != nil {
+		serverLog, readErr := os.ReadFile(logPath)
+		if readErr != nil {
+			return nil, fmt.Errorf("NewDoltServerUOWProvider: %v; read Dolt server log: %w", err, readErr)
+		}
+		return nil, fmt.Errorf("NewDoltServerUOWProvider: %v; Dolt server log:\n%s", err, serverLog)
+	}
+	return provider, nil
 }
 
 func localDoltNeverListened(err error) bool {
@@ -62,19 +72,9 @@ func newTestUOWProvider(t *testing.T) UnitOfWorkProvider {
 	prev := proxy.ResolveExecutable
 	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
 	t.Cleanup(func() { proxy.ResolveExecutable = prev })
-
 	t.Setenv("HOME", t.TempDir())
 
 	provider, err := openTestUOWProvider(t, bin)
-	// This helper starts a private dolt. When that process exits before it
-	// listens, the open fails with connection refused and the test is the
-	// only red one (Main, 2026-09-26,
-	// TestIssueOperationsCreateRoutesInfraTypesToWisps). A second server on
-	// a new port is the same start the next test would have done anyway.
-	if err != nil && localDoltNeverListened(err) {
-		t.Logf("local dolt did not accept connections (%v); starting another", err)
-		provider, err = openTestUOWProvider(t, bin)
-	}
 	require.NoError(t, err)
 	require.NotNil(t, provider)
 	t.Cleanup(func() { _ = provider.Close(context.Background()) })

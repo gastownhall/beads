@@ -1,6 +1,6 @@
 # CI Cleanup Plan
 
-Last reviewed: 2026-09-03
+Last reviewed: 2026-11-14
 
 Freshness source: `engdocs/CI_TEST_SURFACE_AUDIT.md`, `.github/workflows/*.yml`,
 `.buildflags`, `.golangci.yml`, `scripts/ci/pr-lint.sh`, `scripts/pr-lint/`,
@@ -9,6 +9,14 @@ Freshness source: `engdocs/CI_TEST_SURFACE_AUDIT.md`, `.github/workflows/*.yml`,
 This document records the agreed target shape for CI cleanup. It is the policy
 and roadmap layer; the current inventory remains in
 [`CI_TEST_SURFACE_AUDIT.md`](CI_TEST_SURFACE_AUDIT.md).
+
+Status (2026-11-14 review): the implementation steps below have landed — the
+wrappers, the `Build Artifacts` stage, the measurement workflow, the package
+gates, the `testing.Short()` allowlist, the workflow split and the aggregate
+`CI Gate / Required` jobs all exist on the integration branch. The branch
+`ci/bd-am3.1-wrapper-commands` named throughout is historical. Read this page
+as the record of that plan; where the current workflows diverge from it, the
+divergence is noted inline.
 
 ## Goals
 
@@ -23,7 +31,10 @@ and roadmap layer; the current inventory remains in
 ## Non-Goals
 
 - Do not make `.test-skip` part of CI. It is a local human optimization file.
-- Do not run macOS or Windows checks on PRs by default.
+- Do not run macOS or Windows checks on PRs by default. (No longer how `pr.yml`
+  is built: it runs `Test (macos-latest)` and targeted Windows jobs — cmd/bd
+  liveness, doltversion, dbproxy server, worktree removal, Make shell — on every
+  PR and merge-queue run.)
 - Do not make Codecov/upload success block PRs or `main`.
 - Do not broaden `pull_request_target` usage for package validation.
 
@@ -41,8 +52,8 @@ and roadmap layer; the current inventory remains in
 | `release-*` | Tags/manual release | Yes before publish | Per artifact | Re-run release-critical checks and publish only after package gates pass. |
 
 `merge_group` means GitHub Merge Queue. Treat it like a PR event: run Linux
-`pr-core`, `pr-policy`, `pr-lint`, and the same risk checks; do not add macOS or
-Windows there.
+`pr-core`, `pr-policy`, `pr-lint`, and the same risk checks. (The original rule
+of no macOS or Windows there no longer holds; see Non-Goals.)
 
 ## Required PR Checks
 
@@ -126,21 +137,24 @@ the run-scoped `ci-build-artifacts` artifact. The first consumers are
 `PR Core (wrapper timing)`, `Test (ubuntu-latest)`, and
 `Test (storage domain + uow)`, all of which verify `SHA256SUMS`; the Linux test
 consumers pass the binary through `BEADS_TEST_BD_BINARY` for subprocess tests.
-The legacy cross-platform `Test` matrix and Windows smoke job are gated to
-push-to-main only, so PR and merge queue events do not run macOS, Windows, or
-coverage collection.
+The cross-platform `Test` matrix (with coverage) and the Windows smoke job are
+gated to push-to-`main` only; PR and merge-queue events instead run the separate
+`Test (macos-latest)` job and the targeted Windows jobs, with no coverage
+collection.
 
 ### `pr-core`
 
-Initial wrapper behavior must preserve the current Linux PR command exactly:
+Initial wrapper behavior preserved the Linux PR command exactly:
 
 ```bash
 source ./.buildflags
 go test -race -short -skip '^TestEmbedded' ./...
 ```
 
-CI may wrap that command with `gotestsum` for logs and JUnit, but the underlying
-test contract must remain identical during the first migration.
+The current `scripts/ci/pr-core.sh` runs that command with `-p 4 -parallel 4
+-timeout=30m` (overridable through `GO_TEST_PKG_PARALLEL` / `GO_TEST_PARALLEL`)
+over every package except `internal/tracker`, which runs in the
+`Test (storage domain + uow)` job through `make ci-pr-storage`.
 
 Additional rules:
 
@@ -160,12 +174,16 @@ Additional rules:
 - CLI flag freshness: `make check-docs` or the underlying doc flag script.
 - PR guard for `.beads/issues.jsonl` changes.
 
+The current wrapper also runs `scripts/check-doc-freshness.sh`,
+`scripts/check-testing-short.sh`, the workapi frontend boundary check, and
+`make api-check` (the OpenAPI spec gate).
+
 ### `pr-lint`
 
 `pr-lint` is required. It should stay separate from policy so lint failures are
 easy to identify and rerun. It includes:
 
-- `make fmt-check`.
+- `scripts/ci/fmt-check.sh` (the script behind `make fmt-check`).
 - A zero-finding golangci-lint pass using `.golangci.yml`, readonly module
   downloads, a five-minute timeout, and the `gms_pure_go` build tag.
 - A second non-CGO Windows cross-lint pass when the native target does not
@@ -197,6 +215,10 @@ Use separate, descriptive jobs rather than one broad "extra tests" job:
 - `pr-risk-nix`
 - `pr-risk-packages`
 - `pr-risk-release`
+
+(As built, `.github/workflows/pr-risk.yml` names its jobs by suite instead —
+`test-embedded-*`, `test-server-storage*`, `test-proxied-cmd`, `test-nix` —
+behind a `detect-ci-tier` detector.)
 
 Use the robust path-gated required-check pattern:
 
@@ -294,8 +316,9 @@ Selectable measurement suites:
 - `cross-version-smoke`: one previous-release smoke sample, optionally pinned
   by workflow input.
 - `nix`: full `nix build .#default`.
-- `mcp-package`, `npm-package`, and `website`: package and documentation probes
-  for measurement. These are not promoted gates yet.
+- `mcp-package` and `npm-package`: package probes for measurement. (A
+  `website` suite existed until the Docusaurus site was deleted for the
+  Mintlify docs under `docs/`.)
 
 Measure at least:
 
@@ -621,11 +644,11 @@ Package checks should be reusable from PR risk jobs, measurement jobs, `main`,
 and release workflows.
 
 Initial package gate implementation on branch `ci/bd-am3.1-wrapper-commands`
-adds `scripts/ci/package-mcp.sh`, `scripts/ci/package-npm.sh`, and
-`scripts/ci/website.sh`, with Make aliases `ci-package-mcp`,
-`ci-package-npm`, and `ci-website`. CI uses `scripts/ci/detect-package-gates.sh`
-to run these jobs only when package, website, release, workflow, or wrapper
-paths are relevant; otherwise each package gate reports success as not
+added `scripts/ci/package-mcp.sh` and `scripts/ci/package-npm.sh`, with Make
+aliases `ci-package-mcp` and `ci-package-npm` (a third `website` gate was
+removed with the Docusaurus site). CI uses `scripts/ci/detect-package-gates.sh`
+to run these jobs only when package, release, workflow, or wrapper paths are
+relevant; otherwise each package gate reports success as not
 applicable. MCP and npm gates consume the `Build Artifacts` `bd-linux-gms-pure`
 binary through `BEADS_TEST_BD_BINARY`.
 
@@ -672,23 +695,10 @@ That keeps the gate focused on the candidate binary copied into
 
 ### Website
 
-Classify `scripts/generate-llms-full.sh` as a docs/website check, not generic
-policy.
-
-Wrapper command sequence:
-
-```bash
-cd website
-npm ci
-npm run typecheck
-cd ..
-./scripts/generate-llms-full.sh
-cd website
-npm run build
-```
-
-Keep the internal link check in Actions through the existing Lychee workflow
-step. External link checking remains non-blocking.
+Retired. The Docusaurus `website/` tree, `scripts/ci/website.sh`,
+`scripts/generate-llms-full.sh` and the Lychee link step were deleted when the
+docs moved to Mintlify under `docs/`; docs rendering is checked by
+`.github/workflows/docs-mintlify.yml`.
 
 ## Mandatory `testing.Short()` Cleanup
 
@@ -704,10 +714,15 @@ Plan:
    explicit build tags, environment checks, or named wrappers.
 4. Update `engdocs/TESTING.md` after wrapper commands exist.
 
-Initial cleanup on branch `ci/bd-am3.1-wrapper-commands` leaves
-`testing.Short()` only in approved timeout, stress, and large-fixture tests:
-`internal/hooks/hooks_test.go`, `internal/testutil/fixtures/fixtures_test.go`,
-and `internal/storage/dolt/concurrent_test.go`.
+Initial cleanup on branch `ci/bd-am3.1-wrapper-commands` left
+`testing.Short()` only in approved timeout, stress, and large-fixture tests. The
+allowlist in `scripts/check-testing-short.sh` is per test function and now
+covers `internal/hooks/hooks_test.go`,
+`internal/testutil/fixtures/fixtures_test.go`,
+`internal/storage/dolt/concurrent_test.go`,
+`internal/storage/dolt/lease_test.go`,
+`internal/storage/uow/lostupdate_dolt_test.go`, and
+`internal/workapi/sweep_test.go`.
 
 The same change removes integration/e2e/API/Docker boundary skips from tagged
 or environment-gated suites, promotes ADO/Linear round-trip and Dolt autostart
@@ -729,10 +744,11 @@ checks pass.
 - Keep privileged automation isolated and audited. Do not broaden normal
   validation to `pull_request_target`.
 
-Initial release hardening on branch `ci/bd-am3.1-wrapper-commands` adds
-release-only MCP, npm, and website package gate jobs to `.github/workflows/release.yml`.
-GoReleaser now waits for all three gates before publishing GitHub release
-assets. PyPI publishing downloads the validated `beads-mcp` `dist/*` artifact
+Initial release hardening on branch `ci/bd-am3.1-wrapper-commands` added
+release-only package gate jobs to `.github/workflows/release.yml`; today they
+are `release-package-mcp` and `release-package-npm` (the website gate went with
+the Docusaurus site). GoReleaser waits for both gates before publishing GitHub
+release assets. PyPI publishing downloads the validated `beads-mcp` `dist/*` artifact
 from the MCP gate instead of rebuilding it in the publish job. npm publishing
 waits for the npm package gate and both Linux/Windows and macOS GitHub release
 artifacts, so `postinstall` URLs are populated before the package is published.
@@ -754,8 +770,8 @@ artifacts, so `postinstall` URLs are populated before the package is published.
    Linux coverage install has been pinned from `gotestsum@latest` to
    `gotestsum@v1.13.0`.
 5. Add package wrappers and risk/measurement usage for MCP, npm, and website.
-   Initial wrappers, measurement reuse, website deploy reuse, and path-gated CI
-   package jobs exist on branch `ci/bd-am3.1-wrapper-commands`.
+   Initial wrappers, measurement reuse, and path-gated CI package jobs exist for
+   MCP and npm; the website wrapper was retired with the Docusaurus site.
 6. Perform the mandatory `testing.Short()` audit and cleanup.
    Initial cleanup and policy enforcement exist on branch
    `ci/bd-am3.1-wrapper-commands`.
@@ -773,9 +789,8 @@ artifacts, so `postinstall` URLs are populated before the package is published.
    `.github/workflows/main.yml`. Job display names are intentionally preserved
    where practical so branch-protection migration can be handled separately.
 10. Add stable aggregate required-check candidates after the split.
-    Initial aggregate jobs exist on branch `ci/bd-am3.1-wrapper-commands` as
-    `PR / CI Gate / Required` and `PR Risk / PR Risk Gate / Required`, backed by
-    `.github/scripts/ci-gate.sh`.
+    The aggregate jobs exist as `PR / CI Gate / Required` and
+    `PR Risk / CI Gate / Required`, backed by `.github/scripts/ci-gate.sh`.
 
 ## Deferred Decisions
 

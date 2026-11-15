@@ -61,9 +61,9 @@ diff -ruN a/dolt/services/eventsapi/v1alpha1/BUILD.bazel b/dolt/services/eventsa
 -load("@protobuf//bazel:proto_library.bzl", "proto_library")
 -load("//:defs.bzl", "typescript_proto_library")
 +load("@io_bazel_rules_go//go:def.bzl", "go_library")
- 
+
  package(default_visibility = ["//visibility:public"])
- 
+
 -proto_library(
 -    name = "eventsapi_proto",
 -    srcs = glob(["*.proto"]),
@@ -99,7 +99,7 @@ diff -ruN a/dolt/services/eventsapi/v1alpha1/BUILD.bazel b/dolt/services/eventsa
 +        "@org_golang_google_protobuf//types/known/timestamppb:timestamppb",
 +    ],
  )
- 
+
 -typescript_proto_library(
 -    name = "eventsapi_ts_proto",
 -    proto = ":eventsapi_proto",

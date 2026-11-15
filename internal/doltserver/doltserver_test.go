@@ -1262,7 +1262,11 @@ func TestIsAutoStartDisabled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run("env="+tt.envVal, func(t *testing.T) {
 			t.Setenv("BEADS_DOLT_AUTO_START", tt.envVal)
-			if got := IsAutoStartDisabled(); got != tt.want {
+			got, err := IsAutoStartDisabled(t.TempDir())
+			if err != nil {
+				t.Fatalf("IsAutoStartDisabled: %v", err)
+			}
+			if got != tt.want {
 				t.Errorf("IsAutoStartDisabled() = %v, want %v", got, tt.want)
 			}
 		})
@@ -1303,7 +1307,11 @@ func TestIsAutoStartDisabled_Sources(t *testing.T) {
 			t.Setenv("BEADS_DOLT_AUTO_START", tt.env)
 			config.Set("dolt.auto-start", tt.cfg)
 			defer config.Set("dolt.auto-start", "")
-			if got := IsAutoStartDisabled(); got != tt.want {
+			got, err := IsAutoStartDisabled(t.TempDir())
+			if err != nil {
+				t.Fatalf("IsAutoStartDisabled: %v", err)
+			}
+			if got != tt.want {
 				t.Errorf("IsAutoStartDisabled() = %v, want %v (env=%q, cfg=%q)",
 					got, tt.want, tt.env, tt.cfg)
 			}
@@ -3354,11 +3362,7 @@ func TestExternalNonLocalhostHost_GH3518(t *testing.T) {
 }
 
 func TestDoltStatusQuery(t *testing.T) {
-	tests := []struct {
-		name   string
-		dbName string
-		want   string
-	}{
+	tests := []struct{ name, dbName, want string }{
 		{"plain", "beads_x", "SELECT COUNT(*) > 0 FROM `beads_x`.dolt_status"},
 		{"backtick", "evil`; DROP TABLE x", "SELECT COUNT(*) > 0 FROM `evil``; DROP TABLE x`.dolt_status"},
 	}
@@ -3372,11 +3376,7 @@ func TestDoltStatusQuery(t *testing.T) {
 }
 
 func TestUseDatabaseStatement(t *testing.T) {
-	tests := []struct {
-		name   string
-		dbName string
-		want   string
-	}{
+	tests := []struct{ name, dbName, want string }{
 		{"plain", "beads_x", "USE `beads_x`"},
 		{"backtick", "evil`; DROP TABLE x", "USE `evil``; DROP TABLE x`"},
 	}

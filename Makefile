@@ -47,7 +47,9 @@ endif
 .PHONY: lint lint-changed vet
 .PHONY: check check-go test-go check-docs-go
 .PHONY: ci-pr-core ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm nogo-ownership
+.PHONY: ci-pr-storage check-storage-concurrent-open ci-pr-doctor-fix
 .PHONY: api-gen api-check
+.PHONY: gen-hooks check-hooks check-pr-gates
 .PHONY: bazel-sync bazel-sync-check
 
 # Default target
@@ -236,6 +238,15 @@ ci-pr-core:
 # --config=nogo; nothing is linked).
 ci-pr-lint:
 	@./scripts/ci/pr-lint.sh
+
+ci-pr-storage:
+	@go test -tags "$(BUILD_TAGS)" -p 1 -race -count=1 -timeout 30m -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
+
+check-storage-concurrent-open:
+	@go test -tags "$(BUILD_TAGS)" -race -count=1 -timeout 5m -run '^TestNewExternalDoltServerUOWProvider_ConcurrentInstantiation$$' ./internal/storage/uow
+
+ci-pr-doctor-fix:
+	@go test -tags "$(BUILD_TAGS)" -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/
 
 # nogo-ownership is a dynamic, advisory cross-check (not part of the required
 # //scripts static suite, which cannot shell out to Bazel): it asks real
@@ -450,6 +461,16 @@ endif
 
 install: check-up-to-date
 
+# Regenerate the tracked hooks through the Beads hook installer.
+gen-hooks:
+	@GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=.githooks go run -tags "$(BUILD_TAGS)" ./cmd/bd hooks install
+
+check-hooks:
+	@go test -tags "$(BUILD_TAGS)" -count=1 -run '^(TestGeneratedHookTimeoutProcessBoundary|TestTrackedManagedHookSectionsMatchGenerator)$$' ./cmd/bd
+
+check-pr-gates:
+	@go test -tags "$(BUILD_TAGS)" -count=1 ./scripts ./scripts/prlintmake
+
 # Format all Go files.
 # Through the go.mod-pinned gofmt, never a bare PATH one: a newer local Go
 # formats differently from CI, so a bare gofmt -w here rewrites files into a
@@ -544,6 +565,9 @@ clean-test-tmp:
 help:
 	@echo "Beads Makefile targets:"
 	@echo "  make build        - Build the bd binary"
+	@echo "  make gen-hooks   - Regenerate tracked Git hooks from the current source"
+	@echo "  make check-hooks - Verify generated hook behavior and tracked copies"
+	@echo "  make check-pr-gates - Verify PR workflow wiring and formatting script behavior"
 	@echo "  make doctor-build - Diagnose build env (GOFLAGS/CGO/CC) for the ICU build trap"
 	@echo "  make test         - bazel test //... --config=ci (bazel.yml's test lane; BAZEL_FLAGS adds flags)"
 	@echo "  make test-go      - Plain go test via scripts/test.sh (inner loop; not what CI enforces)"
@@ -552,6 +576,9 @@ help:
 	@echo "  make test-icu-path - Run opt-in ICU regex path tests (maintainer-only)"
 	@echo "  make test-full-cgo - Deprecated alias for make test-icu-path"
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
+	@echo "  make ci-pr-storage - Run storage, unit-of-work, and tracker packages without concurrent Dolt containers"
+	@echo "  make check-storage-concurrent-open - Exercise concurrent UOW bootstrap against a real Dolt container"
+	@echo "  make ci-pr-doctor-fix - Run the Dolt-backed doctor/fix package"
 	@echo "  make ci-pr-lint  - Run the required lint gate: nogo (vet + golangci-lint's linters) under Bazel, native + windows/darwin"
 	@echo "  make lint        - Same as ci-pr-lint (make vet too)"
 	@echo "  make lint-changed - nogo over the Bazel packages of changed Go files (LINT_CHANGED_SCOPE=staged|worktree)"

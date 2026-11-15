@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/gitenv"
 )
 
 // decoySnapshot is the state of a decoy repository that a leaked git location
@@ -24,7 +24,7 @@ func decoyGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
 	cmd.Dir = dir
-	cmd.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
+	cmd.Env = gitenv.ScrubRepoLocation(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)

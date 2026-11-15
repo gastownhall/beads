@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
@@ -230,12 +231,14 @@ func requireDoltCLIVersion(ctx context.Context, doltBin string) error {
 }
 
 // doltCmd builds a dolt CLI invocation for cache transfers with git tracing
-// scrubbed (internal/gittraceenv) and templated hooks disabled (GH#4272).
-// dir "" runs in the process working directory.
+// scrubbed (internal/gittraceenv), templated hooks disabled (GH#4272), and
+// bd's git routing entries removed (internal/gitenv) — the child's git
+// plumbing for git-protocol remotes must not inherit a -C retarget. dir ""
+// runs in the process working directory.
 func doltCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/ref args
 	cmd.Dir = dir
-	cmd.Env = githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
+	cmd.Env = githooksenv.DisabledEnv(gitenv.ScrubRouting(gittraceenv.ScrubEnv(os.Environ())))
 	return cmd
 }
 

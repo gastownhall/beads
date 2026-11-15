@@ -12,12 +12,17 @@ import (
 
 // mockProvider implements types.IssueProvider for testing
 type mockProvider struct {
-	issues []*types.Issue
-	prefix string
+	issues   []*types.Issue
+	prefix   string
+	parented map[string]bool
 }
 
 func (m *mockProvider) GetOpenIssues(ctx context.Context) ([]*types.Issue, error) {
 	return m.issues, nil
+}
+
+func (m *mockProvider) GetParentedOpenIssueIDs(ctx context.Context) (map[string]bool, error) {
+	return m.parented, nil
 }
 
 func (m *mockProvider) GetIssuePrefix() string {

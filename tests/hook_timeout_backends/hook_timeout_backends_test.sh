@@ -169,14 +169,21 @@ run_case() {
     local block=1
     [[ "$backend" == none ]] && block=
     local signal_file="$case_dir/signal" rc=0 case_out signal verdict=ok
-    case_out=$("$gnu_timeout" 10 env PATH="$path" BEADS_HOOK_TIMEOUT=1 \
+    case_out=$("$gnu_timeout" -s KILL 10 env PATH="$path" BEADS_HOOK_TIMEOUT=1 \
         FAKE_BD_BLOCK="$block" FAKE_BD_SIGNAL="$signal_file" FAKE_BD_CAT="$cat_bin" \
         "$case_dir/bin/sh" "$shims/$hook" origin https://example.invalid 2>&1 <&3) || rc=$?
     signal=$(cat "$signal_file" 2>/dev/null || true)
-    if [[ "$rc" -eq 124 ]]; then
+    local expected
+    case "$backend" in
+        coreutils) expected=124 ;;
+        perl) expected=142 ;;
+        none) expected=0 ;;
+        *) printf 'unknown timeout backend: %s\n' "$backend" >&2; return 1 ;;
+    esac
+    if [[ "$rc" -eq 137 ]]; then
         verdict="FAIL: nothing killed the fake bd (harness safety net fired), signal='$signal': $case_out"
-    elif [[ "$rc" -ne 0 ]]; then
-        verdict="FAIL: hook exit $rc (would block the push): $case_out"
+    elif [[ "$rc" -ne "$expected" ]]; then
+        verdict="FAIL: hook exit $rc, expected $expected: $case_out"
     else
         case "$backend" in
             coreutils)

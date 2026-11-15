@@ -563,7 +563,8 @@ cat .git/hooks/pre-commit
 
 **Symptom:** After `bd hooks install`, chained pre-commit hooks (eslint,
 prettier, ruff, etc.) stop running, with:
-`beads: hook 'pre-commit' timed out after 300s -- continuing without beads`.
+`beads: hook 'pre-commit' timed out after 300s`. Git reports the hook failure
+with exit status 124 (GNU timeout) or 142 (Perl alarm).
 
 **Cause:** The beads hook shim wraps `bd hooks run` with an OS-level timeout.
 Since `bd hooks run` chains to your original hook internally, the timeout

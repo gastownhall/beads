@@ -11,6 +11,40 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// SeedConfigIfAbsent writes value under key only when the key has no value,
+// reading and writing in one transaction so a concurrent writer that sets the
+// key first is never overwritten. It returns the value stored after the call
+// and whether this call wrote it.
+func (s *DoltStore) SeedConfigIfAbsent(ctx context.Context, key, value string) (string, bool, error) {
+	var stored string
+	var seeded bool
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		current, err := issueops.GetConfigInTx(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+		if current != "" {
+			stored, seeded = current, false
+			return nil
+		}
+		if err := issueops.SetConfigInTx(ctx, tx, key, value); err != nil {
+			return err
+		}
+		if _, err := issueops.SyncConfigTables(ctx, tx, key, value); err != nil {
+			return err
+		}
+		stored, err = issueops.GetConfigInTx(ctx, tx, key)
+		seeded = true
+		return err
+	}); err != nil {
+		return "", false, err
+	}
+	if seeded {
+		s.invalidateConfigCaches(key)
+	}
+	return stored, seeded, nil
+}
+
 // SetConfig sets a configuration value
 func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {

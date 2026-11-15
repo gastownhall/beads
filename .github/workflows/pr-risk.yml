@@ -2,7 +2,7 @@ name: PR Risk
 
 on:
   pull_request:
-    branches: [ main, 'release/**', 'hotfix/**' ]
+    branches: [ main, 'release/**', 'hotfix/**', dc-use ]
   # Merge queue (engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Merge Queue"):
   # the ruleset's required gate must also report on each queue entry's
   # merge-group commit, or a queued PR waits until the queue times it out.

@@ -1,4 +1,46 @@
-# Beads — Contributor Agent Instructions
+<!-- AIHUB-INVIOLABLE-LAW-PRELUDE v1 -->
+# AIHUB Inviolable Law — Strict Prelude
+
+1. Truth: never claim done/green/resolved without command, exit code, decisive output.
+2. Root cause: exterminate bypass, fallback, shim, suppression, stub, hardcode, catch-based normalization, retry, compatibility, partial execution, keyring, or old+new coexistence.
+3. Tracker boundary: without repository `.beads/`, invoke neither `bd` nor `gc` and create no substitute. Otherwise use only the selected, available canonical tracker. If explicitly suspended, preserve authorized Git/PR/CI evidence and never declare DONE.
+4. Research first: inspect code, docs, canonical sources before acting; never invent APIs, flags, facts, or behavior.
+5. Owner first: use the project's declared facades/primitives; do not reimplement them locally.
+6. Gate persistence: a failure stops only that invocation. Correct its owner,
+   republish, and rerun until green; never switch phase or repository because a
+   check, review, approval, or merge is pending. Escalate only after every
+   authorized technical action is exhausted and the remaining condition is
+   genuinely external or requires new authority.
+7. Landing: native gates, commit, fast-forward push, bead evidence.
+8. Divergence: FF push rejected → integrate by cooperation: `git merge --no-ff` the integration base into your lane, resolve conflicts, revalidate, land. Never rebase or force-push an authorized change or integration branch; adopt all current worktree state and fix it forward.
+9. Escalation: impossible rule → exact error. Rule conflict → present both with numbers. Unclear → one targeted question. Never guess.
+10. Precedence: NEWEST > OLDEST. USER REQUEST > BEADS > ADRs > SKILLs > DOCS > default. Adjust lower/older to higher/newer. Doubt → ASK USER FIRST.
+11. Workspaces: follow `rules/coordination/gascity.md`. Every manual task uses a dedicated Git worktree, branch, and physical `.venv`, never the primary checkout. Gas City suspension keeps orchestration inactive. Worktrees and staging stay on the destination filesystem, never `/tmp`; no borrowed environment, backup, or archive. Retire worktrees after verified integration.
+12. Phase closure: keep the phase active through check repair, review resolution,
+    independent approval, merge into the configured integration branch, and
+    post-merge proof. Only then, with its Bead closed with evidence, is it DONE.
+    When the operator states that no independent reviewer exists and authorizes
+    an administrative merge, that authorization replaces the approval row alone;
+    every other row stays mandatory and closure records the approval as
+    operator-authorized, never as satisfied.
+13. Root Make only: diagnostics, validation, generation, tests, Waza,
+    publication, and deployment run only through selector-free verbs in the
+    repository root Makefile; bare verbs perform their declared operation. Test
+    verbs: `rules/workflow/canonical-commands.md`.
+14. Red means red: a warning, skip, empty output, missing tool, missing report,
+    zero collection, caught exception, retry, or normalized failure is RED. The
+    only acceptable zero-execution test result is a typed `make test` cache hit
+    with an integrity-checked database and complete deselection
+    accounting; it is never reported as tests passed. The first exception and
+    raw traceback escape unchanged.
+<!-- /AIHUB-INVIOLABLE-LAW-PRELUDE -->
+
+# AGENTS.md — beads
+
+> Packaged governance `agents-governance` `0.6.3` owns the capability indexes: 71 agents, 112 rules, 141 skills. Consume them through `GovernanceBundle`; do not copy their bodies here.
+
+<!-- AIHUB-AGENTS-SCOPE-LOCAL-BEGIN -->
+# Agent Instructions
 
 This file is for agents and humans **developing beads** (`bd`). If you are
 using `bd` to track work in your own project, read the user docs instead:
@@ -34,6 +76,17 @@ Maintainers also keep an internal bd ledger. It is optional for contributors
 and not a substitute for the GitHub issue.
 
 ## Agent contribution policy
+
+## Fork lane and language boundary
+
+This fork integrates on `dc-use` (rig `beads` in the Gas City at `~/gc`). Every change
+uses a dedicated worktree and a change branch cut from `origin/dc-use`, published with
+`git push -u origin <branch>` (the fresh branch's upstream starts as `dc-use`, so a
+bare `git push` is refused under `push.default=simple`), a PR against
+`dc-use`, and `merge --no-ff`; never rebase or force-push (`~/agents` ADR-0036 and
+`rules/coordination/flext-gascity-roe.md`). Code here is idiomatic Go
+validated by this repository's root Makefile; no flext/Python facade rule applies.
+
 
 - File an issue when the change warrants one (see above). When you do, use
   the bug or feature form fields, fill each from evidence, and answer

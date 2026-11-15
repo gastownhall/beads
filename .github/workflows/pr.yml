@@ -5,7 +5,7 @@ on:
     # release/** is here because release-prep and release-fix PRs are based on
     # the release branch, not on main. Without it they run almost no CI and the
     # first full signal is the tag build, where a failure burns the tag.
-    branches: [ main, 'release/**', 'hotfix/**' ]
+    branches: [ main, 'release/**', 'hotfix/**', dc-use ]
   # Merge queue (engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Merge Queue"):
   # the ruleset's required gate must also report on each queue entry's
   # merge-group commit, or a queued PR waits until the queue times it out.
@@ -153,15 +153,15 @@ jobs:
             echo "::error::diff base $base is unavailable"
             exit 1
           fi
-          if git diff --name-only "$base"...HEAD | grep -q "^\.beads/issues\.jsonl$"; then
+          if git diff --no-renames --name-only "$base"...HEAD | grep -q "^\.beads/issues\.jsonl$"; then
             echo "This PR includes changes to .beads/issues.jsonl"
             echo ""
             echo "This file is the project's issue database and should not be modified in PRs."
             echo ""
             echo "To fix, run:"
             echo "  git checkout origin/main -- .beads/issues.jsonl"
-            echo "  git commit --amend"
-            echo "  git push --force"
+            echo "  git commit -m 'Restore tracker data'"
+            echo "  git push"
             echo ""
             exit 1
           fi
@@ -856,26 +856,76 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # `test-macos` / "Test (macos-latest)" used to run here and is deliberately
-  # removed (F4, PR CI -> 5 min). It was a non-required, PR-side mirror of
-  # main.yml's `test` job's macOS leg (full `go test -race -short ./...`),
-  # added after the 2026-08-01 incident where three separately-merged PRs each
-  # introduced a $TMPDIR=/var/folders regression that only reproduces on
-  # macOS and that main.yml's leg -- `if: github.event_name == 'push' &&
-  # github.ref == 'refs/heads/main'`, i.e. push-to-main only -- could not have
-  # caught pre-merge.
-  #
-  # Removing it is an accepted tradeoff, not a coverage-neutral cleanup:
-  # required merge-gate coverage is unaffected (this job was never in
-  # ci-gate's needs/CI_GATE_REQUIRED), but PRs lose the one pre-merge signal
-  # for macOS-only `go test -race ./...` regressions of this kind; such a
-  # regression can land on main again and will only be caught by main.yml's
-  # push-triggered leg, after the fact. The other macOS matrix legs left in
-  # this file (check-doc-freshness-platforms, pr-preflight-platforms) run on
-  # every PR but exercise narrow, specific scripts, not the full suite, so
-  # they are not a substitute. If this tradeoff turns out to be wrong,
-  # reinstate a PR-side mirror rather than relying on main.yml alone.
+  # Retain the fork’s pre-merge macOS coverage. The upstream Bazel
+  # Dolt tier owns storage and doctor coverage on Linux.
+  test-macos:
+    name: Test (macos-latest)
+    needs: scope
+    if: ${{ needs.scope.outputs.platforms == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore non-race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
+      - name: Restore race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
+
+      - name: Install Dolt (Linux/macOS)
+        run: ./scripts/ci/install-dolt.sh
+
+      - name: Verify dolt on PATH
+        run: dolt version
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Build
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: go build -v -tags gms_pure_go ./cmd/bd
+
+      - name: Test
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/bd
+          GOCACHE: ${{ runner.temp }}/go-cache/race
+        # -timeout is explicit for the same reason it is in scripts/ci/pr-core.sh
+        # (#6091): ./cmd/bd has outgrown `go test`'s 10m per-package default. On
+        # this runner it lands between 357s and 600s across recent runs — #6091's
+        # own macOS lane passed at 596.7s, 3.3s under the wall — so the package
+        # intermittently dies on the alarm and the panic names whichever test was
+        # in flight, which reads like a hang instead of the clock running out. 30m
+        # matches every other -race lane here for this same code.
+        run: go test -tags gms_pure_go -v -race -short -timeout=30m -skip '^TestEmbedded' ./...
+
+  #
   # F7a: fold of a 3-host matrix (native, msys2, cygwin) into one sequential
   # job. Review SF-1 (2026-10-03): only the Cygwin *setup* steps carry
   # `continue-on-error: true` (a Cygwin setup failure is infrastructure

@@ -181,7 +181,11 @@ func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 	if doltAutoCommit != "batch" {
 		t.Fatalf("doltAutoCommit = %q, want %q", doltAutoCommit, "batch")
 	}
-	if !doltserver.IsAutoStartDisabled() {
+	autoStartDisabled, err := doltserver.IsAutoStartDisabled(targetBeadsDir)
+	if err != nil {
+		t.Fatalf("IsAutoStartDisabled(target): %v", err)
+	}
+	if !autoStartDisabled {
 		t.Fatal("IsAutoStartDisabled should honor target config after rebinding")
 	}
 	if got := doltserver.DefaultConfig(targetBeadsDir).Port; got != 4242 {

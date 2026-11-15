@@ -413,13 +413,20 @@ func enrichStaleLockFiles(dc DoctorCheck) agentEnrichment {
 	}
 }
 
+// enrichDoltConnection carries the check's own Fix after `bd doctor --fix`:
+// the check resolves the store's lifecycle owner (bd, or Gas City when it
+// stamped gc.endpoint_origin) and names that owner's start command there.
 func enrichDoltConnection(dc DoctorCheck) agentEnrichment {
+	commands := []string{"bd doctor --fix"}
+	if dc.Fix != "" {
+		commands = append(commands, dc.Fix)
+	}
 	return agentEnrichment{
 		severity:    "blocking",
 		explanation: fmt.Sprintf("Cannot connect to Dolt database: %s. Either the embedded Dolt engine failed to start, or the Dolt server (if using server mode) is unreachable.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Dolt database opens successfully (embedded) or server is reachable (server mode)",
-		commands:    []string{"bd doctor --fix", "gt dolt status", "gt dolt start"},
+		commands:    commands,
 		sourceFiles: []string{"cmd/bd/doctor/dolt.go:CheckDoltConnection"},
 	}
 }

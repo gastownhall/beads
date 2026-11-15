@@ -46,6 +46,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
@@ -2284,8 +2285,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// address for it (bd-7pkvvd). IsAutoStartDisabled is checked as well as
 	// serverOpenCanAutoStart because it also accepts spellings such as
 	// "false" that resolveAutoStart does not.
+	disabled, ownershipErr := doltserver.IsAutoStartDisabled(resolvedBeadsDir)
+	if ownershipErr != nil {
+		return nil, ownershipErr
+	}
 	if cfg.ServerSocket == "" && cfg.ServerPort <= 0 &&
-		(!serverOpenCanAutoStart(cfg) || doltserver.IsAutoStartDisabled()) {
+		(!serverOpenCanAutoStart(cfg) || disabled) {
 		return nil, unresolvedServerPortError(cfg, resolvedBeadsDir, serverDir)
 	}
 
@@ -2308,6 +2313,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		// dial error repeats it: each message below names both through
 		// the remedy printer, so neither can redraw the advice under it.
 		dialErr = remedy.PrintedError(dialErr)
+		// The manual start advice names the city's command when Gas City owns
+		// this store's server; an unreadable ownership stamp fails the open.
+		startHint, hintErr := doltserver.StartHint(resolvedBeadsDir)
+		if hintErr != nil {
+			return nil, fmt.Errorf("Dolt server unreachable at %s: %w", remedy.PrintedValue(addr), errors.Join(dialErr, hintErr))
+		}
 		// Auto-start: if enabled and connecting locally via TCP, start a server.
 		// Socket mode is excluded — auto-start creates a TCP listener, not a
 		// unix socket, so the DSN would still fail. Socket users are expected
@@ -2352,9 +2363,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 						remedy.PrintedValue(addr), remedy.PrintedTextError(startErr))
 				}
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
-					"To start manually: bd dolt start\n"+
+					"To start manually: %s\n"+
 					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
-					remedy.PrintedValue(addr), remedy.PrintedTextError(startErr))
+					remedy.PrintedValue(addr), remedy.PrintedTextError(startErr), startHint)
 			}
 			// Only tests should stop auto-started servers on Close(). In normal
 			// repo-local server mode, leaving the server up avoids endpoint churn
@@ -2436,6 +2447,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			}
 		} else {
 			recordDialFailure(breaker, dialErr)
+			autoStartDisabled, err := doltserver.IsAutoStartDisabled(resolvedBeadsDir)
+			if err != nil {
+				return nil, fmt.Errorf("Dolt server unreachable at %s: %w", addr, errors.Join(dialErr, err))
+			}
 			var hint string
 			if cfg.ServerSocket != "" {
 				// The socket path is metadata.json's dolt_server_socket,
@@ -2467,11 +2482,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				// there. Checked before the auto-start-disabled hint,
 				// whose remedy is that same command.
 				hint = named
-			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
+			} else if !cfg.AutoStart && autoStartDisabled {
 				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
-					"Start the server manually:\n  bd dolt start"
+					"Start the server manually:\n  " + startHint
 			} else {
-				hint = "The Dolt server may not be running. Try:\n  bd dolt start"
+				hint = "The Dolt server may not be running. Try:\n  " + startHint
 			}
 			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s",
 				remedy.PrintedValue(addr), dialErr, hint)
@@ -2795,8 +2810,12 @@ func unresolvedServerPortError(cfg *Config, beadsDir, serverDir string) error {
 
 	// The remedy paragraph is the one an endpoint with no port gives
 	// (doltserver.Endpoint.UnresolvedAdvice).
+	disabled, err := doltserver.IsAutoStartDisabled(beadsDir)
+	if err != nil {
+		return err
+	}
 	b.WriteString(doltserver.UnresolvedPortRemedy(cfg.ServerHost, portFile,
-		doltserver.IsAutoStartDisabled(), !cfg.AutoStart))
+		disabled, !cfg.AutoStart))
 	return fmt.Errorf("%w for %s\n\n%s", ErrUnresolvedServerPort, beadsDir, b.String())
 }
 
@@ -2999,8 +3018,15 @@ func createDatabaseRefusedError(cfg *Config, err error) error {
 			"Verify the external server is running and reachable from this host:\n  %s",
 			addr, err, doltserver.ReachabilityCheck(cfg.ServerHost, cfg.ServerPort))
 	}
-	return fmt.Errorf("failed to connect to Dolt server at %s: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
-		addr, err)
+	beadsDir := cfg.BeadsDir
+	if beadsDir == "" {
+		beadsDir = filepath.Dir(cfg.Path)
+	}
+	startHint, hintErr := doltserver.StartHint(beadsDir)
+	if hintErr != nil {
+		return fmt.Errorf("failed to connect to Dolt server at %s: %w", addr, errors.Join(err, hintErr))
+	}
+	return fmt.Errorf("failed to connect to Dolt server at %s: %w\n\nThe Dolt server may not be running. Try:\n  %s", addr, err, startHint)
 }
 
 // buildServerDSN constructs a MySQL DSN for connecting to a Dolt server.
@@ -4979,13 +5005,15 @@ func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *re
 	if s3Remote {
 		applyS3ChecksumEnvToCmd(cmd)
 	}
-	// Stderr-directed git tracing corrupts the transfer (see internal/gittraceenv);
-	// mirrors withRemoteEnvGuards on the in-process path.
+	// Stderr-directed git tracing corrupts the transfer (see internal/gittraceenv)
+	// and bd's git routing entries (GIT_DIR/GIT_WORK_TREE from the -C retarget)
+	// would leak into the git plumbing this dolt child spawns for git-protocol
+	// remotes; mirrors withRemoteEnvGuards on the in-process path.
 	base := cmd.Env
 	if base == nil {
 		base = os.Environ()
 	}
-	cmd.Env = gittraceenv.ScrubEnv(base)
+	cmd.Env = gitenv.ScrubRouting(gittraceenv.ScrubEnv(base))
 	return cmd, ctx, cancel, nil
 }
 

@@ -4,9 +4,9 @@ diff -ruN a/serial/BUILD.bazel b/serial/BUILD.bazel
 @@ -1,35 +1,10 @@
  load("@io_bazel_rules_go//go:def.bzl", "go_library")
 -load("@rules_pkg//:pkg.bzl", "pkg_tar")
- 
+
  package(default_visibility = ["//visibility:public"])
- 
+
 -alias(
 -    name = "flatc",
 -    actual = "@com_github_dolthub_flatbuffers//:flatc",

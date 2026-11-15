@@ -233,8 +233,7 @@ var configSetCmd = &cobra.Command{
 			} else {
 				fmt.Printf("Set %s = %s (in %s)\n", key, value, location)
 			}
-			printConfigSideEffects(checkConfigSetSideEffects(key, value))
-			return nil
+			return reportConfigSideEffects(checkConfigSetSideEffects(beads.FindBeadsDir(), key, value))
 		}
 
 		if key == "beads.role" {
@@ -307,8 +306,7 @@ var configSetCmd = &cobra.Command{
 		} else {
 			fmt.Printf("Set %s = %s\n", result.Key, result.Value)
 		}
-		printConfigSideEffects(checkConfigSetSideEffects(result.Key, result.Value))
-		return nil
+		return reportConfigSideEffects(checkConfigSetSideEffects(beads.FindBeadsDir(), result.Key, result.Value))
 	},
 }
 
@@ -906,7 +904,7 @@ func runConfigUnsetYamlOnly(key string) error {
 	// line it had just printed. This covers the jsonOutput arm too: the hint
 	// goes to stderr, so --json never suppressed it.
 	if changed {
-		printConfigSideEffects(checkConfigUnsetSideEffects(key))
+		return reportConfigSideEffects(checkConfigUnsetSideEffects(beads.FindBeadsDir(), key))
 	}
 	return nil
 }
@@ -1007,8 +1005,7 @@ var configUnsetCmd = &cobra.Command{
 		} else {
 			fmt.Printf("Unset %s (in %s)\n", result.Key, location)
 		}
-		printConfigSideEffects(checkConfigUnsetSideEffects(result.Key))
-		return nil
+		return reportConfigSideEffects(checkConfigUnsetSideEffects(beads.FindBeadsDir(), result.Key))
 	},
 }
 

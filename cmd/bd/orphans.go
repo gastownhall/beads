@@ -29,8 +29,11 @@ var closeIssueRunner = func(issueID string) error {
 
 var orphansCmd = &cobra.Command{
 	Use:   "orphans",
-	Short: "Identify orphaned issues (referenced in commits but still open)",
-	Long: `Identify orphaned issues - issues that are referenced in commit messages but remain open or in_progress in the database.
+	Short: "Identify orphaned issues (open, unparented, referenced in commits)",
+	Long: `Identify orphaned issues - issues that are referenced in commit messages but remain open or in_progress in the database and have no parent.
+
+Issues carrying a parent-child dependency are governed by their parent and are
+never reported here, even when referenced in commits.
 
 This helps identify work that has been implemented but not formally closed.
 
@@ -156,6 +159,30 @@ func (p *doltStoreProvider) GetOpenIssues(ctx context.Context) ([]*types.Issue, 
 		return nil, err
 	}
 	return append(openIssues, inProgressIssues...), nil
+}
+
+// GetParentedOpenIssueIDs returns the open/in_progress issue IDs (the same
+// label-filtered candidate set GetOpenIssues considers) that carry a
+// parent-child dependency.
+func (p *doltStoreProvider) GetParentedOpenIssueIDs(ctx context.Context) (map[string]bool, error) {
+	issues, err := p.GetOpenIssues(ctx)
+	if err != nil {
+		return nil, err
+	}
+	parented := make(map[string]bool)
+	for _, issue := range issues {
+		deps, err := store.GetDependenciesWithMetadata(ctx, issue.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, dep := range deps {
+			if dep.DependencyType == types.DepParentChild {
+				parented[issue.ID] = true
+				break
+			}
+		}
+	}
+	return parented, nil
 }
 
 func (p *doltStoreProvider) GetIssuePrefix() string {

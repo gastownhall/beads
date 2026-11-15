@@ -541,9 +541,10 @@ func TestPasteReadyCommandsQuoteValues(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the rows spell the POSIX quoting")
 	}
+	beadsDir := sideEffectStore(t, "")
 	effect := func(key, value string) string {
 		var out []string
-		for _, e := range checkConfigSetSideEffects(key, value) {
+		for _, e := range setEffects(t, beadsDir, key, value) {
 			out = append(out, e.Message, e.Command)
 		}
 		return strings.Join(out, "\n")

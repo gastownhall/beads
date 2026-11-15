@@ -1,0 +1,29 @@
+name: Sync upstream main
+
+on:
+  schedule:
+    - cron: '37 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-main-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: github.repository == 'marlon-costa-dc/beads'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Fast-forward the fork mirror
+        run: |
+          git fetch --no-tags https://github.com/gastownhall/beads.git refs/heads/main
+          git merge --ff-only FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)"
+          git push origin HEAD:refs/heads/main

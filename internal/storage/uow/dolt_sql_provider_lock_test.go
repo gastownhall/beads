@@ -104,7 +104,7 @@ func TestInitSchemaAcquiresMigrationLockBeforeBootstrapDDL(t *testing.T) {
 	expectNoSessionDatabase(mock)
 	expectDatabaseExistsProbe(mock, "beads", false)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
-		WithArgs(lockName, 5).
+		WithArgs(lockName, sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -181,7 +181,7 @@ func TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(1))
 
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
-		WithArgs(lockName, 5).
+		WithArgs(lockName, sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	// The bare CREATE DATABASE loses to the database the probe just proved
 	// exists, so this init captures no fresh-bootstrap heal authority.
@@ -208,7 +208,12 @@ func TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase(t *testing.T) {
 		db:             db,
 		serverEndpoint: "tcp:127.0.0.1:3306",
 	}
-	err = p.initSchema(context.Background(), "beads")
+	stderr := captureStderr(t, func() {
+		err = p.initSchema(context.Background(), "beads")
+	})
+	if !strings.Contains(stderr, "Warning: applying ") || !strings.Contains(stderr, " pending schema migration(s) to a shared server database") {
+		t.Fatalf("shared-store migration warning = %q, want pending-migrations warning", stderr)
+	}
 	if err == nil || !strings.Contains(err.Error(), "first migration statement failed") {
 		t.Fatalf("initSchema() error = %v, want first migration sentinel", err)
 	}

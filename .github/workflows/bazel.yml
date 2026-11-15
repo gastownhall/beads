@@ -217,7 +217,7 @@ name: Bazel
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dc-use ]
   workflow_dispatch:
     inputs:
       rbe:

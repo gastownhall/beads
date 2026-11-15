@@ -242,8 +242,8 @@ func TestRunApplyAllOK(t *testing.T) {
 	runInDir(t, isolatedApplyFixture(t), func() {
 		// In a test environment with no drift, all results should be ok or skipped
 		results := runApply(false)
-		if len(results) != 3 {
-			t.Errorf("expected 3 results, got %d", len(results))
+		if len(results) != 4 {
+			t.Errorf("expected 4 results, got %d", len(results))
 		}
 		for _, r := range results {
 			if r.Status == applyStatusError {
@@ -257,8 +257,8 @@ func TestRunApplyDryRun(t *testing.T) {
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	runInDir(t, isolatedApplyFixture(t), func() {
 		results := runApply(true)
-		if len(results) != 3 {
-			t.Errorf("expected 3 results, got %d", len(results))
+		if len(results) != 4 {
+			t.Errorf("expected 4 results, got %d", len(results))
 		}
 		// In dry-run, no actions should be "applied"
 		for _, r := range results {
@@ -267,6 +267,73 @@ func TestRunApplyDryRun(t *testing.T) {
 			}
 		}
 	})
+}
+
+type fakeIssuePrefixConfigStore struct {
+	value  string
+	getErr error
+	setErr error
+	raced  string
+	sets   int
+}
+
+func (s *fakeIssuePrefixConfigStore) GetConfig(_ context.Context, _ string) (string, error) {
+	return s.value, s.getErr
+}
+
+// SeedConfigIfAbsent mirrors the store contract: raced, when set, is the value a
+// concurrent writer committed between the report read and the seed.
+func (s *fakeIssuePrefixConfigStore) SeedConfigIfAbsent(_ context.Context, _ string, value string) (string, bool, error) {
+	s.sets++
+	if s.setErr != nil {
+		return "", false, s.setErr
+	}
+	if s.raced != "" {
+		s.value = s.raced
+	}
+	if s.value != "" {
+		return s.value, false, nil
+	}
+	s.value = value
+	return s.value, true, nil
+}
+
+func TestApplyIssuePrefixStore(t *testing.T) {
+	tests := []struct {
+		name       string
+		stored     string
+		dryRun     bool
+		getErr     error
+		setErr     error
+		raced      string
+		wantStatus string
+		wantValue  string
+		wantSets   int
+	}{
+		{name: "missing prefix dry run", dryRun: true, wantStatus: applyStatusDryRun, wantSets: 0},
+		{name: "missing prefix seeds durable store", wantStatus: applyStatusApplied, wantValue: "dc_recon", wantSets: 1},
+		{name: "matching prefix is idempotent", stored: "dc_recon", wantStatus: applyStatusOK, wantValue: "dc_recon", wantSets: 0},
+		{name: "different prefix is never overwritten", stored: "other", wantStatus: applyStatusError, wantValue: "other", wantSets: 0},
+		{name: "read failure does not write", getErr: errors.New("unavailable"), wantStatus: applyStatusError, wantSets: 0},
+		{name: "write failure reports error and stores nothing", setErr: errors.New("write refused"), wantStatus: applyStatusError, wantSets: 1},
+		{name: "concurrent writer's namespace survives the seed", raced: "other", wantStatus: applyStatusError, wantValue: "other", wantSets: 1},
+		{name: "concurrent writer with the same prefix converges", raced: "dc_recon", wantStatus: applyStatusOK, wantValue: "dc_recon", wantSets: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeIssuePrefixConfigStore{value: tt.stored, getErr: tt.getErr, setErr: tt.setErr, raced: tt.raced}
+			result := applyIssuePrefixStore(context.Background(), store, "dc_recon", tt.dryRun)
+			if result.Status != tt.wantStatus {
+				t.Fatalf("status = %q, want %q: %+v", result.Status, tt.wantStatus, result)
+			}
+			if store.value != tt.wantValue {
+				t.Fatalf("stored prefix = %q, want %q", store.value, tt.wantValue)
+			}
+			if store.sets != tt.wantSets {
+				t.Fatalf("set calls = %d, want %d", store.sets, tt.wantSets)
+			}
+		})
+	}
 }
 
 func TestDriftDomainsGroupsDottedChecks(t *testing.T) {
@@ -461,4 +528,20 @@ func TestCurrentOriginRemoteURL(t *testing.T) {
 			t.Fatal("a failed listing must surface as an error, not fall through to disk")
 		}
 	})
+}
+
+// Storage strips one trailing hyphen from issue_prefix; the configured value
+// must be compared and seeded in that same form or "gt-" never converges.
+func TestConfiguredIssuePrefixMatchesStoredNormalization(t *testing.T) {
+	config.ResetForTesting()
+	_ = config.Initialize()
+	config.Set("issue-prefix", "gt-")
+	t.Cleanup(config.ResetForTesting)
+
+	if got := configuredIssuePrefix(); got != "gt" {
+		t.Fatalf("configuredIssuePrefix() = %q, want %q", got, "gt")
+	}
+	if item := issuePrefixDriftItem(configuredIssuePrefix(), "gt"); item.Status != driftStatusOK {
+		t.Fatalf("drift after seeding %q = %+v, want ok", "gt", item)
+	}
 }

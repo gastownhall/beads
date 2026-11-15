@@ -78,6 +78,47 @@ func IsRoutingKeyForOS(key, goos string) bool {
 	return routing
 }
 
+// gitRepoLocationKeys are the git environment variables that name a
+// repository, work tree, index, object store, ref namespace or config file
+// outright. Each one overrides what git would find from cmd.Dir or -C, so a
+// value leaked in from the invoking shell or a git hook (git exports GIT_DIR to
+// every hook it runs) points a fixture's `git init`/`git config` at a
+// repository or file the test does not own: the r880 host .git/config clobber
+// (wy-qlvlmf). GIT_CONFIG is the legacy single-file override: `git config`
+// reads and writes the file it names instead of the repository's config.
+//
+// The set is deliberately narrower than internal/gitenv's routing keys. It
+// leaves GIT_CEILING_DIRECTORIES, GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM
+// alone because the Bazel and CI test wrappers set those on purpose: a
+// discovery fence, and a hermetic global config that carries the test
+// identity. Keys match exactly, so dropping GIT_CONFIG keeps all three.
+var gitRepoLocationKeys = []string{
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_COMMON_DIR",
+	"GIT_CONFIG",
+	"GIT_DIR",
+	"GIT_INDEX_FILE",
+	"GIT_NAMESPACE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_WORK_TREE",
+}
+
+// ScrubRepoLocation removes only environment variables that select a Git
+// repository, preserving discovery and configuration controls.
+func ScrubRepoLocation(env []string) []string {
+	return execenv.Without(env, gitRepoLocationKeys...)
+}
+
+// ClearRepoLocation removes the same Git repository selection from this process.
+func ClearRepoLocation() error {
+	for _, key := range gitRepoLocationKeys {
+		if err := os.Unsetenv(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ScrubRouting removes Git routing entries using the current host's
 // environment-key semantics.
 func ScrubRouting(env []string) []string {

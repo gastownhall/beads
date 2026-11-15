@@ -32,6 +32,18 @@ import (
 	"golang.org/x/term"
 )
 
+// refuseWhenCityOwnsDolt fails `bd dolt <verb>` before any Dolt lifecycle
+// effect when Gas City owns the Dolt server of the store at beadsDir
+// (gc.endpoint_origin stamped by the city in its config.yaml). The city is the
+// only lifecycle surface; bd never starts, stops, re-points or kills that
+// server. An unreadable or invalid ownership stamp fails the command too.
+func refuseWhenCityOwnsDolt(beadsDir, verb string) error {
+	if err := doltserver.CityRefusal(beadsDir, verb); err != nil {
+		return HandleError("%v", err)
+	}
+	return nil
+}
+
 var doltCmd = &cobra.Command{
 	Use:     "dolt",
 	GroupID: "setup",
@@ -158,6 +170,9 @@ Examples:
 		}
 		if !usesSQLServer() {
 			return HandleError("'bd dolt set' is not supported in embedded mode (no Dolt server)")
+		}
+		if err := refuseWhenCityOwnsDolt(beadsDir, "set"); err != nil {
+			return err
 		}
 		key := args[0]
 		value := args[1]
@@ -1101,6 +1116,9 @@ over existing data, or adopting a server bd already tracks, is unaffected. Use
 		if !usesSQLServer() {
 			return HandleError("'bd dolt start' is not supported in embedded mode (no Dolt server)")
 		}
+		if err := refuseWhenCityOwnsDolt(beadsDir, "start"); err != nil {
+			return err
+		}
 		// bd owns the server lifecycle only at the host its own server
 		// binds (configfile.BdRunsServerAt; GH#3545/GH#3518). On another
 		// machine, starting a repo-local server would write local PID/port
@@ -1116,7 +1134,11 @@ over existing data, or adopting a server bd already tracks, is unaffected. Use
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 		force, _ := cmd.Flags().GetBool("force")
-		if err := externallyManagedFreshStartRefusal(serverDir, doltserver.IsAutoStartDisabled(), force); err != nil {
+		disabled, err := doltserver.IsAutoStartDisabled(beadsDir)
+		if err != nil {
+			return err
+		}
+		if err := externallyManagedFreshStartRefusal(serverDir, disabled, force); err != nil {
 			return HandleError("%v", err)
 		}
 
@@ -1208,6 +1230,9 @@ scope cannot be established.`,
 		}
 		if !usesSQLServer() {
 			return HandleError("'bd dolt stop' is not supported in embedded mode (no Dolt server)")
+		}
+		if err := refuseWhenCityOwnsDolt(beadsDir, "stop"); err != nil {
+			return err
 		}
 		// Same ownership guard as 'bd dolt start' (configfile.BdRunsServerAt):
 		// at a host bd does not run its server at, the repo-local PID state
@@ -1500,12 +1525,15 @@ is shown as not running, and the next bd command launches it.`,
 		//   - local host with auto-start disabled (an orchestrator or
 		//     systemd manages the server lifecycle, be-0eyj)
 		//
-		// IsAutoStartDisabled reads the active (globally-bound) config and
-		// BEADS_DOLT_AUTO_START env, not the per-beadsDir cfg loaded above.
-		// That coupling is intentional and consistent with every
-		// other call site of IsAutoStartDisabled in this package — both
-		// resolve against the same active workspace at command time.
-		if cfg != nil && shouldUseExternalDoltStatus(cfg, doltserver.IsAutoStartDisabled(), doltserver.IsSharedServerMode()) {
+		// IsAutoStartDisabled reads the Gas City ownership stamp from this
+		// store's config.yaml, then the active (globally-bound) config and
+		// BEADS_DOLT_AUTO_START env, which resolve against the same active
+		// workspace at command time.
+		autoStartDisabled, err := doltserver.IsAutoStartDisabled(beadsDir)
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		if cfg != nil && shouldUseExternalDoltStatus(cfg, autoStartDisabled, doltserver.IsSharedServerMode()) {
 			runExternalDoltStatus(beadsDir, cfg)
 			return nil
 		}
@@ -1843,8 +1871,11 @@ servers are preserved.`,
 		if !usesSQLServer() {
 			return HandleError("'bd dolt killall' is not supported in embedded mode (no Dolt server)")
 		}
+		// Without a resolved store there is no ownership stamp to honor.
 		if beadsDir == "" {
 			beadsDir = "." // best effort
+		} else if err := refuseWhenCityOwnsDolt(beadsDir, "killall"); err != nil {
+			return err
 		}
 
 		killed, err := doltserver.KillStaleServers(beadsDir)
@@ -2798,7 +2829,11 @@ func testDoltConnection() error {
 		fmt.Printf("%s\n", ui.RenderPass("✓ Connection successful"))
 	} else {
 		fmt.Printf("%s\n", ui.RenderWarn("✗ Connection failed"))
-		fmt.Println("\n" + unreachableServerAdvice(beadsDir, host, dc))
+		advice, err := unreachableServerAdvice(beadsDir, host, dc)
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		fmt.Println("\n" + advice)
 		return SilentExit()
 	}
 
@@ -2991,7 +3026,11 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		fmt.Fprintf(os.Stderr, "Error: cannot reach Dolt server at %s: %v\n", doltutil.PrintedServerAddr(host, port), remedy.PrintedError(err))
-		fmt.Fprintln(os.Stderr, unreachableServerAdvice(beadsDir, host, dc))
+		advice, hintErr := unreachableServerAdvice(beadsDir, host, dc)
+		if hintErr != nil {
+			return nil, nil, HandleError("%v", errors.Join(err, hintErr))
+		}
+		fmt.Fprintln(os.Stderr, advice)
 		return nil, nil, SilentExit()
 	}
 
@@ -3013,11 +3052,15 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 // externally managed advice when a setting naming the port declares the
 // server so (bd starts no server there, and `bd dolt start` would start its
 // own on that port), else `bd dolt start`.
-func unreachableServerAdvice(beadsDir, host string, dc *doltserver.Config) string {
+func unreachableServerAdvice(beadsDir, host string, dc *doltserver.Config) (string, error) {
 	if advice := doltserver.UnreachableEndpointAdvice(beadsDir, host, dc.Port, dc.PortSource); advice != "" {
-		return advice
+		return advice, nil
 	}
-	return "Start the server with: bd dolt start"
+	start, err := doltserver.StartHint(beadsDir)
+	if err != nil {
+		return "", err
+	}
+	return "Start the server with: " + start, nil
 }
 
 // unresolvedServerPortAdvice is the advice for a Dolt server at host that bd

@@ -184,7 +184,11 @@ func TestEndpointBDStartsServerIsTheStoresAutoStartRule(t *testing.T) {
 			}
 			ApplyCLIAutoStart(beadsDir, cfg)
 			applyConfigDefaults(cfg)
-			store := serverOpenCanAutoStart(cfg) && !doltserver.IsAutoStartDisabled()
+			disabled, err := doltserver.IsAutoStartDisabled(beadsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := serverOpenCanAutoStart(cfg) && !disabled
 			ep := doltserver.ResolveEndpoint(beadsDir, fileCfg)
 			if got := ep.BDStartsServer(); got != store || got != tc.want {
 				t.Errorf("Endpoint.BDStartsServer() = %v, store auto-starts = %v, want both %v", got, store, tc.want)

@@ -770,7 +770,11 @@ func TestConfigOpenWithMetadataSocketDoesNotAutoStart(t *testing.T) {
 	cfg.DisableAutoStart = false
 	withoutSocket := *cfg
 	withoutSocket.ServerSocket = ""
-	if !serverOpenCanAutoStart(&withoutSocket) || doltserver.IsAutoStartDisabled() {
+	disabled, err := doltserver.IsAutoStartDisabled(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !serverOpenCanAutoStart(&withoutSocket) || disabled {
 		t.Fatal("auto-start is not permitted for this config without its socket; the test would pass vacuously")
 	}
 
@@ -782,7 +786,7 @@ func TestConfigOpenWithMetadataSocketDoesNotAutoStart(t *testing.T) {
 		return 0, false, errors.New("stub: auto-start refused")
 	}
 
-	_, err := newServerMode(context.Background(), cfg)
+	_, err = newServerMode(context.Background(), cfg)
 	if starts != 0 {
 		t.Errorf("auto-start ran %d time(s) for a workspace whose metadata.json names socket %s", starts, socket)
 	}

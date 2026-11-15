@@ -53,6 +53,37 @@ func (p *uowIssueProvider) GetOpenIssues(ctx context.Context) ([]*types.Issue, e
 	return append(openPage.Items, inProgressPage.Items...), nil
 }
 
+// GetParentedOpenIssueIDs returns the open/in_progress issue IDs (the same
+// label-filtered candidate set GetOpenIssues considers) that carry a
+// parent-child dependency.
+func (p *uowIssueProvider) GetParentedOpenIssueIDs(ctx context.Context) (map[string]bool, error) {
+	issues, err := p.GetOpenIssues(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(issues) == 0 {
+		return map[string]bool{}, nil
+	}
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	deps, err := p.uw.DependencyUseCase().GetForIssueIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	parented := make(map[string]bool)
+	for id, issueDeps := range deps {
+		for _, dep := range issueDeps {
+			if dep.Type == types.DepParentChild {
+				parented[id] = true
+				break
+			}
+		}
+	}
+	return parented, nil
+}
+
 func (p *uowIssueProvider) GetIssuePrefix() string {
 	if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
 		return yamlPrefix

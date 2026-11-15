@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/versionedhistory"
 )
@@ -16,8 +17,10 @@ type configSideEffect struct {
 	Command string `json:"command,omitempty"` // suggested command to run
 }
 
-// checkConfigSetSideEffects returns any hints/warnings for a config key being set.
-func checkConfigSetSideEffects(key, value string) []configSideEffect {
+// checkConfigSetSideEffects returns any hints/warnings for a config key being
+// set. beadsDir is the active store; its Gas City ownership stamp selects the
+// restart command, and an unreadable or invalid stamp is returned as an error.
+func checkConfigSetSideEffects(beadsDir, key, value string) ([]configSideEffect, error) {
 	var effects []configSideEffect
 
 	switch {
@@ -40,15 +43,23 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 		})
 
 	case key == "dolt.debug" && strings.EqualFold(value, "true"):
+		restart, err := doltserver.RestartHint(beadsDir)
+		if err != nil {
+			return nil, err
+		}
 		effects = append(effects, configSideEffect{
 			Message: "Debug mode will apply on the next Dolt server start (loglevel=debug, --prof cpu).",
-			Command: "bd dolt stop && bd dolt start",
+			Command: restart,
 		})
 
 	case key == "dolt.debug" && !strings.EqualFold(value, "true"):
+		restart, err := doltserver.RestartHint(beadsDir)
+		if err != nil {
+			return nil, err
+		}
 		effects = append(effects, configSideEffect{
 			Message: "Debug mode disabled. Restart the server to drop --prof and --loglevel=debug.",
-			Command: "bd dolt stop && bd dolt start",
+			Command: restart,
 		})
 
 	case key == "routing.mode":
@@ -76,11 +87,12 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 		})
 	}
 
-	return effects
+	return effects, nil
 }
 
-// checkConfigUnsetSideEffects returns any hints/warnings for a config key being unset.
-func checkConfigUnsetSideEffects(key string) []configSideEffect {
+// checkConfigUnsetSideEffects returns any hints/warnings for a config key being
+// unset. beadsDir selects the restart command as in checkConfigSetSideEffects.
+func checkConfigUnsetSideEffects(beadsDir, key string) ([]configSideEffect, error) {
 	var effects []configSideEffect
 
 	switch key {
@@ -97,9 +109,13 @@ func checkConfigUnsetSideEffects(key string) []configSideEffect {
 		})
 
 	case "dolt.debug":
+		restart, err := doltserver.RestartHint(beadsDir)
+		if err != nil {
+			return nil, err
+		}
 		effects = append(effects, configSideEffect{
 			Message: "Debug config removed. Restart the server to drop --prof and --loglevel=debug.",
-			Command: "bd dolt stop && bd dolt start",
+			Command: restart,
 		})
 
 	case "backup.enabled":
@@ -108,7 +124,18 @@ func checkConfigUnsetSideEffects(key string) []configSideEffect {
 		})
 	}
 
-	return effects
+	return effects, nil
+}
+
+// reportConfigSideEffects prints the effects computed by
+// checkConfigSetSideEffects/checkConfigUnsetSideEffects, or fails the command
+// with their error.
+func reportConfigSideEffects(effects []configSideEffect, err error) error {
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	printConfigSideEffects(effects)
+	return nil
 }
 
 // printConfigSideEffects displays side-effect hints to stderr (so they don't

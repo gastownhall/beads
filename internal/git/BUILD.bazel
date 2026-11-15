@@ -21,7 +21,7 @@ go_test(
         "jujutsu_test.go",
     ],
     embed = [":git"],
-    deps = ["//internal/testutil"],
+    deps = ["//internal/gitenv"],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

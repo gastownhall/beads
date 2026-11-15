@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -160,6 +161,43 @@ func TestPrintPrettyTree_DiamondRendersUnderBothParents(t *testing.T) {
 		t.Fatalf("diamond wrongly reported as a cycle:\n%s", out)
 	}
 	_ = a
+}
+
+func TestPrintPrettyTree_DepthCeilingIsVisible(t *testing.T) {
+	children := make(map[string][]*types.Issue)
+	for i := 0; i < defaultTreeMaxDepth+1; i++ {
+		parent := fmt.Sprintf("bd-%02d", i)
+		child := cycleTestIssue(fmt.Sprintf("bd-%02d", i+1), "node", "task")
+		children[parent] = []*types.Issue{child}
+	}
+	out, terminated := captureBoundedStdout(t, func() {
+		printPrettyTree(children, "bd-00", "", nil, compareIssuesByPriority, nil)
+	})
+	if !terminated {
+		t.Fatalf("depth-limited tree did not return within %v", captureDeadline)
+	}
+	if got := strings.Count(out, "bd-"); got != defaultTreeMaxDepth {
+		t.Fatalf("expected %d rendered descendants at depth ceiling, got %d:\n%s", defaultTreeMaxDepth, got, head(out, 55))
+	}
+	if !strings.Contains(out, "…") {
+		t.Fatalf("expected visible depth-ceiling marker:\n%s", head(out, 55))
+	}
+}
+
+func TestBuildIssueTreeWithDeps_BlocksIsNotHierarchy(t *testing.T) {
+	parent := cycleTestIssue("bd-parent", "parent", "epic")
+	child := cycleTestIssue("bd-child", "child", "task")
+	issues := []*types.Issue{parent, child}
+	deps := map[string][]*types.Dependency{
+		"bd-child": {{IssueID: "bd-child", DependsOnID: "bd-parent", Type: types.DepBlocks}},
+	}
+	roots, children := buildIssueTreeWithDeps(issues, deps)
+	if len(roots) != 2 {
+		t.Fatalf("blocks edge must leave both issues as roots, got %v", idsOf(roots))
+	}
+	if len(children["bd-parent"]) != 0 {
+		t.Fatalf("blocks edge must not create hierarchy: %v", children["bd-parent"])
+	}
 }
 
 // End to end through the public path: a rooted parent-child cycle in real
