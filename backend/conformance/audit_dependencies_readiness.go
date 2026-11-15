@@ -372,10 +372,16 @@ func testAuditReadyTypeAndPinnedExclusions(t *testing.T, f Factory) {
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "rk2", Title: "gate", IssueType: types.TypeGate, Status: types.StatusOpen}), "a"))
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "rk3", Title: "mol", IssueType: types.TypeMolecule, Status: types.StatusOpen}), "a"))
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "rk4", Title: "pinned", IssueType: types.TypeTask, Status: types.StatusOpen, Pinned: true}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "rk5", Title: "decision", IssueType: types.TypeDecision, Status: types.StatusOpen}), "a"))
 
 	ready, _ := s.GetReadyWork(ctx(), types.WorkFilter{})
 	if got := issueIDs(ready); !slices.Equal(got, []string{"rk1"}) {
-		t.Errorf("ready = %v, want [rk1] (gate/molecule/pinned excluded)", got)
+		t.Errorf("ready = %v, want [rk1] (gate/molecule/pinned/decision excluded)", got)
+	}
+
+	decisions, _ := s.GetReadyWork(ctx(), types.WorkFilter{Type: string(types.TypeDecision)})
+	if got := issueIDs(decisions); !slices.Equal(got, []string{"rk5"}) {
+		t.Errorf("ready type=decision = %v, want [rk5] (an explicit type lifts the default exclusions)", got)
 	}
 }
 

@@ -754,6 +754,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd ready` leaves decisions out by default.** A `decision` bead is a
+  standing ruling, not work to claim, so the ready front no longer offers it.
+  The default type exclusions (`merge-request`, `gate`, `molecule`, `rig` and
+  the infrastructure types) now include `decision`, for every reader of the
+  ready front: `bd ready`, `bd ready --claim`, `bd list --ready` and
+  `GET /v0/beads/ready`. `--type=decision` (`type=decision` over HTTP) lists
+  ready decisions, as it lifts every default exclusion.
+  ([#6290](https://github.com/gastownhall/beads/issues/6290))
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull
