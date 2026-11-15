@@ -1281,6 +1281,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Issue ID completion lists a parent before its children, in numeric
+  order.** `bd show bd-a<TAB>` offered issues in store order and bash re-sorted
+  them lexically, putting `bd-a.10` before `bd-a.2` and the parent last; it now
+  offers `bd-a`, `bd-a.1`, `bd-a.2`, ..., `bd-a.10` and tells bash and zsh to
+  keep that order. (#8498)
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

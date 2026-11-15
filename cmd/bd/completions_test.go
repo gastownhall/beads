@@ -470,11 +470,49 @@ func TestIssueIDCompletion_EmptyDatabase(t *testing.T) {
 	}
 }
 
+func TestIssueIDCompletion_HierarchicalOrder(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	originalRootCtx := rootCtx
+	t.Cleanup(func() { rootCtx = originalRootCtx })
+	ctx := context.Background()
+	rootCtx = ctx
+	testDB := filepath.Join(t.TempDir(), "test.db")
+	testStore := newTestStoreWithPrefix(t, testDB, "bd")
+	store = testStore
+	dbPath = testDB
+
+	for _, id := range []string{"bd-a", "bd-a.10", "bd-a.2", "bd-a.1"} {
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+
+	completions, _ := issueIDCompletion(&cobra.Command{}, nil, "bd-a")
+	want := []string{"bd-a\tbd-a", "bd-a.1\tbd-a.1", "bd-a.2\tbd-a.2", "bd-a.10\tbd-a.10"}
+	if !slices.Equal(completions, want) {
+		t.Errorf("completions = %q, want %q", completions, want)
+	}
+}
+
 func TestCompareIssueIDs(t *testing.T) {
-	ids := []string{"bd-a.10", "bd-a.2", "bd-b", "bd-a.1.2", "bd-a", "bd-a.1", "bd-a.1.10"}
-	slices.SortFunc(ids, compareIssueIDs)
-	want := []string{"bd-a", "bd-a.1", "bd-a.1.2", "bd-a.1.10", "bd-a.2", "bd-a.10", "bd-b"}
-	if !slices.Equal(ids, want) {
-		t.Errorf("sorted = %v, want %v", ids, want)
+	tests := []struct {
+		ids  []string
+		want []string
+	}{
+		{
+			ids:  []string{"bd-a.10", "bd-a.2", "bd-b", "bd-a.1.2", "bd-a", "bd-a.1", "bd-a.1.10"},
+			want: []string{"bd-a", "bd-a.1", "bd-a.1.2", "bd-a.1.10", "bd-a.2", "bd-a.10", "bd-b"},
+		},
+		{
+			ids:  []string{"x.1a", "x.10", "x.9"},
+			want: []string{"x.9", "x.10", "x.1a"},
+		},
+	}
+	for _, tt := range tests {
+		slices.SortFunc(tt.ids, compareIssueIDs)
+		if !slices.Equal(tt.ids, tt.want) {
+			t.Errorf("sorted = %v, want %v", tt.ids, tt.want)
+		}
 	}
 }

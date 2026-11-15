@@ -79,8 +79,13 @@ func compareIssueIDs(a, b string) int {
 func compareIDSegments(a, b string) int {
 	an, aErr := strconv.Atoi(a)
 	bn, bErr := strconv.Atoi(b)
-	if aErr == nil && bErr == nil {
+	switch {
+	case aErr == nil && bErr == nil:
 		return an - bn
+	case aErr == nil:
+		return -1
+	case bErr == nil:
+		return 1
 	}
 	return strings.Compare(a, b)
 }
