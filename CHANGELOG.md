@@ -1512,6 +1512,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ahead of the counter leaves, it skips the rest of the run in one read
   instead of failing every create. Its counter tests for the server and
   embedded stores are ported from #6754.
+
+- **The Dolt server bd starts can be given a memory limit** (#7287). A
+  long-running `dolt sql-server` keeps heap it has freed, and without
+  `GOMEMLIMIT` Dolt sizes its per-database caches at fixed defaults, so a
+  shared server holding many beads databases grew until its supervisor killed
+  it. `bd config set dolt.memory-limit 4GiB` now passes `GOMEMLIMIT=4GiB` to
+  every `dolt sql-server` bd starts on this machine, managed and proxied
+  alike, from the next server start. The key is per-machine: it is stored in
+  the user config.yaml, never in the committed project config. It takes the
+  Go runtime's `GOMEMLIMIT` grammar (a byte count with an optional `B`, `KiB`,
+  `MiB`, `GiB` or `TiB` suffix, or `off`); `bd config set` refuses anything
+  else, since the runtime aborts on a value it cannot parse. A `GOMEMLIMIT`
+  already in the environment that starts the server still wins. Leave
+  headroom above the server's working set: a limit it cannot stay under makes
+  it collect garbage almost continuously and slows every write.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

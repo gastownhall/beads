@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -1916,6 +1917,75 @@ func TestCheckSecretKeyGitSafety_RoutedCheckout(t *testing.T) {
 			t.Fatalf("expected a refusal, got: %v", err)
 		}
 	})
+}
+
+func TestDoltMemoryLimitIsUserGlobalYamlKey(t *testing.T) {
+	if !IsYamlOnlyKey("dolt.memory-limit") || !IsUserGlobalKey("dolt.memory-limit") {
+		t.Fatal("dolt.memory-limit must be a machine-global yaml key; a committed value would size every clone's server to one machine's RAM (GH#7287)")
+	}
+}
+
+func TestValidateDoltMemoryLimit(t *testing.T) {
+	for _, value := range []string{"4GiB", "512MiB", "1073741824", "1048576B", "1TiB", "8388607TiB", "off"} {
+		if err := validateYamlConfigValue("dolt.memory-limit", value); err != nil {
+			t.Errorf("dolt.memory-limit %q refused: %v", value, err)
+		}
+	}
+	for _, value := range []string{
+		"", "0", "0GiB", // a zero soft limit collects garbage continuously
+		"4GB", "4gib", "4G", "4 GiB", "1.5GiB", "-1", "+1", "GiB", "B", "OFF",
+		"1PiB", "7EiB", // the runtime has no suffix past TiB
+		"8388608TiB", "99999999999999999999", // overflow int64
+	} {
+		if err := validateYamlConfigValue("dolt.memory-limit", value); err == nil {
+			t.Errorf("dolt.memory-limit %q accepted; the Go runtime would abort the server or it is not a usable limit", value)
+		}
+	}
+}
+
+// gomemlimitProbeEnv makes the test binary print the memory limit the Go
+// runtime parsed from its own GOMEMLIMIT and exit, for
+// TestValidGoMemLimitAgreesWithTheGoRuntime.
+const gomemlimitProbeEnv = "BD_TEST_GOMEMLIMIT_PROBE"
+
+// Every value ValidGoMemLimit lets through must start a Go process: a
+// GOMEMLIMIT the runtime cannot parse aborts the dolt sql-server before it
+// serves a single query. Each value is handed to a fresh copy of this test
+// binary, whose runtime parses it at startup exactly as dolt's would.
+func TestValidGoMemLimitAgreesWithTheGoRuntime(t *testing.T) {
+	if os.Getenv(gomemlimitProbeEnv) == "1" {
+		fmt.Println(debug.SetMemoryLimit(-1))
+		os.Exit(0)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test binary: %v", err)
+	}
+	for value, want := range map[string]int64{
+		"1":          1,
+		"1048576B":   1 << 20,
+		"512MiB":     512 << 20,
+		"4GiB":       4 << 30,
+		"1TiB":       1 << 40,
+		"8388607TiB": 8388607 << 40,
+		"off":        1<<63 - 1,
+	} {
+		if !ValidGoMemLimit(value) {
+			t.Errorf("ValidGoMemLimit(%q) = false, want true", value)
+			continue
+		}
+		cmd := exec.Command(self, "-test.run=^TestValidGoMemLimitAgreesWithTheGoRuntime$")
+		cmd.Env = append(os.Environ(), gomemlimitProbeEnv+"=1", "GOMEMLIMIT="+value)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Errorf("GOMEMLIMIT=%s: Go process failed to start: %v\n%s", value, err, out)
+			continue
+		}
+		var got int64
+		if _, err := fmt.Sscan(string(out), &got); err != nil || got != want {
+			t.Errorf("GOMEMLIMIT=%s: runtime limit = %q, want %d", value, strings.TrimSpace(string(out)), want)
+		}
+	}
 }
 
 func TestDoltRemotesAPIPortIsUserGlobal(t *testing.T) {

@@ -66,6 +66,17 @@ func TestCheckConfigUnsetSideEffects_DoltDebug(t *testing.T) {
 	}
 }
 
+func TestCheckConfigSideEffects_DoltMemoryLimit(t *testing.T) {
+	for name, effects := range map[string][]configSideEffect{
+		"set":   checkConfigSetSideEffects("dolt.memory-limit", "4GiB"),
+		"unset": checkConfigUnsetSideEffects("dolt.memory-limit"),
+	} {
+		if len(effects) != 1 || effects[0].Command != "bd dolt stop && bd dolt start" {
+			t.Errorf("%s dolt.memory-limit: effects = %+v, want one restart hint", name, effects)
+		}
+	}
+}
+
 func TestCheckConfigSetSideEffects_RoutingModeInvalid(t *testing.T) {
 	effects := checkConfigSetSideEffects("routing.mode", "bogus")
 	if len(effects) != 1 {

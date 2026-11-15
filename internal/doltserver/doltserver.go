@@ -1598,9 +1598,47 @@ func startupReadyLineLogged(debug bool) bool {
 // server runs CALL DOLT_PUSH/FETCH itself, so the guards must be in the
 // child's environment: templated git hooks disabled (GH#4272; approach from
 // PR #4281 by pmgledhill102) and stderr-directed git tracing scrubbed (see
-// internal/gittraceenv).
+// internal/gittraceenv). It also carries the server's memory limit; see
+// withServerMemoryLimit.
 func ServerSpawnEnv() []string {
-	return githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
+	return withServerMemoryLimit(githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ())))
+}
+
+// serverMemoryLimitConfigKey names the GOMEMLIMIT bd gives the dolt sql-server
+// it starts. It is a per-machine key (config.IsUserGlobalKey), read from the
+// user config.yaml directly, so the proxied spawn in a db-proxy-child, which
+// never loads bd's merged config, sees the same value as a direct Start.
+const serverMemoryLimitConfigKey = "dolt.memory-limit"
+
+// withServerMemoryLimit adds GOMEMLIMIT=<dolt.memory-limit> to env (GH#7287).
+//
+// A long-lived dolt sql-server keeps heap it has freed and lets GOGC grow the
+// heap to about twice the live set, and Dolt sizes its per-database caches
+// from GOMEMLIMIT (dolthub/dolt#10820), falling back to fixed sizes per
+// database when it is unset. A shared server holding many beads databases
+// therefore grows until a supervisor kills it. The limit has to be in the
+// server's own environment, and bd starts the server from whichever command
+// happens to run first, so a shell export is not a reliable place for it.
+//
+// A non-empty GOMEMLIMIT already in env wins: it is the operator's explicit
+// choice for this process tree. An invalid configured value is dropped with a
+// warning, because the Go runtime aborts at startup on a GOMEMLIMIT it cannot
+// parse.
+func withServerMemoryLimit(env []string) []string {
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "GOMEMLIMIT="); ok && v != "" {
+			return env
+		}
+	}
+	limit := config.GetUserYamlConfig(serverMemoryLimitConfigKey)
+	if limit == "" {
+		return env
+	}
+	if !config.ValidGoMemLimit(limit) {
+		fmt.Fprintf(os.Stderr, "Warning: ignoring %s %q: not a GOMEMLIMIT value (want e.g. 4GiB, or off); the Dolt server starts without a memory limit\n", serverMemoryLimitConfigKey, limit)
+		return env
+	}
+	return append(env, "GOMEMLIMIT="+limit)
 }
 
 // buildDoltServerArgs returns the argv passed to `dolt` (excluding argv[0]/
