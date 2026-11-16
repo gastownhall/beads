@@ -6438,9 +6438,37 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 		return resolveErr
 	}
 	if pullErr != nil && !resolved {
-		// Pull failed for a non-conflict reason, or conflicts are not auto-resolvable;
-		// leave them in the working set for the operator.
+		// #7839: a conflict the resolver declined must not stay open. The SQL
+		// route aborts it ("merge aborted and working set restored"); do the same
+		// here, or every later write and pull fails on the open merge.
+		if abortErr := s.abortOpenMergeAfterCLIPull(ctx); abortErr != nil {
+			return fmt.Errorf("%w; %v", pullErr, abortErr)
+		}
 		return pullErr
+	}
+	return nil
+}
+
+// abortOpenMergeAfterCLIPull aborts a merge the CLI route left open in the
+// working set (dolt_merge_status.is_merging = 1), so the store is not wedged
+// on an unresolved merge after a declined conflict (#7839). It is a no-op when
+// no merge is open. It runs on a pooled connection from s.db, which is on the
+// store's branch (see autoResolveConflictsAfterCLIPull).
+func (s *DoltStore) abortOpenMergeAfterCLIPull(ctx context.Context) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer conn.Close()
+	var merging bool
+	if err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		return fmt.Errorf("failed to read dolt_merge_status: %w", err)
+	}
+	if !merging {
+		return nil
+	}
+	if err := schema.DrainCall(ctx, conn, "CALL DOLT_MERGE('--abort')"); err != nil {
+		return fmt.Errorf("failed to abort declined merge: %w", err)
 	}
 	return nil
 }
