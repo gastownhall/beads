@@ -147,6 +147,17 @@ func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(root, ref)); err == nil {
 				continue
 			}
+			// Governance rules are canonical in the agent home, not the
+			// repository; the projection references them by their agent-home
+			// path. A missing canonical rule still fails.
+			if home, err := os.UserHomeDir(); err == nil {
+				if _, err := os.Stat(filepath.Join(home, "agents", ref)); err == nil {
+					continue
+				}
+				if _, err := os.Stat(filepath.Join(home, ".agents", ref)); err == nil {
+					continue
+				}
+			}
 			broken = append(broken, rel+" -> `"+m[1]+"`")
 		}
 		for _, m := range backtickRepoPathRE.FindAllStringSubmatch(content, -1) {
