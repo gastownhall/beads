@@ -21,7 +21,7 @@ const (
 	// Measured concurrent cold opens under a loaded host took 94 seconds;
 	// repeated 5-second waits exhausted the outer open budget before peers
 	// could observe the completed schema. Wait once for the holder.
-	migrationLockAcquireTimeoutSeconds = 120
+	MigrationLockAcquireTimeoutSeconds = 120
 	migrationLockCleanupTimeout        = 5 * time.Second
 	// freshBootstrapResetAttempts bounds the heal path's DOLT_RESET retries.
 	// Small on purpose: this is a last-chance recovery, not a general retry
@@ -453,7 +453,7 @@ func (c *FreshBootstrapHealCapability) consumeIfCurrentIncarnation(
 // connection's current Dolt/MySQL session.
 func AcquireMigrationLock(ctx context.Context, conn *sql.Conn, lockName string) error {
 	var locked sql.NullInt64
-	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", lockName, migrationLockAcquireTimeoutSeconds).Scan(&locked); err != nil {
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", lockName, MigrationLockAcquireTimeoutSeconds).Scan(&locked); err != nil {
 		return fmt.Errorf("schema: acquire migration lock: %w: %w", ErrMigrationLockUnavailable, err)
 	}
 	if !locked.Valid {

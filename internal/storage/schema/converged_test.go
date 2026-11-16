@@ -268,7 +268,7 @@ func TestMigrateUpWithLockTakesLockWhenBehind(t *testing.T) {
 
 	lockName := MigrationLockName("testdb")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
-		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WithArgs(lockName, MigrationLockAcquireTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	expectOnePendingMigration(t, mock)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
@@ -297,7 +297,7 @@ func TestMigrateUpWithLockKeepsLockWithBootstrapHeal(t *testing.T) {
 
 	lockName := MigrationLockName("testdb")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
-		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WithArgs(lockName, MigrationLockAcquireTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	expectDirtyGuardRefusal(t, mock)
 	expectFreshBootstrapIdentityMatch(mock)
@@ -780,7 +780,7 @@ func TestMigrateUpWithLockLogsAnUnavailableFastPath(t *testing.T) {
 		WillReturnError(errors.New("probe transport broke"))
 	lockName := MigrationLockName("testdb")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
-		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WithArgs(lockName, MigrationLockAcquireTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 		WillReturnError(errors.New("stop here"))

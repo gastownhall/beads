@@ -67,7 +67,7 @@ func expectAheadDatabaseThroughDriftCheck(mock sqlmock.Sqlmock, database string,
 
 	lockName := schema.MigrationLockName(database)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
-		WithArgs(lockName, 5).
+		WithArgs(lockName, schema.MigrationLockAcquireTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `" + database + "`")).
 		WillReturnError(&mysql.MySQLError{Number: 1007, Message: "database exists"})
