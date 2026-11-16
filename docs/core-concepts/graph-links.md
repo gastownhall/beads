@@ -120,6 +120,7 @@ Marks an issue as superseded by a different (replacement) issue. The old issue i
 
 **Created by:**
 - `bd supersede <old-id> --with <new-id>`
+- `bd supersede <old-id> --with <new-id> --ack`, which also creates an acknowledgement task that blocks every open issue depending on `<old-id>` (through an edge of any type) until the task is closed, so work that relied on the old issue cannot proceed or close before someone reads the replacement
 
 **Use cases:**
 - Design document versions
