@@ -156,15 +156,21 @@ func applyIssuePrefix(dryRun bool) ApplyResult {
 		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusSkipped, Message: "No active beads workspace found"}
 	}
 	ctx := context.Background()
-	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: dryRun, DisableAutoStart: true})
+	rawStore, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: dryRun, DisableAutoStart: true})
+	var st storage.DoltStorage = rawStore
 	// Activation configures this same instance (closing it on failure), so the
 	// seed below journals like every other store-backed mutation.
-	_, err = activateEventsJournalStore(beadsDir, !dryRun, st, err)
+	st, err = activateEventsJournalStore(beadsDir, !dryRun, st, err)
+	st, err = activateVersionedHistoryStore(ctx, st, err)
 	if err != nil {
 		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusSkipped, Message: fmt.Sprintf("Cannot open Dolt store: %v", err)}
 	}
 	defer func() { _ = st.Close() }()
-	result := applyIssuePrefixStore(ctx, st, configured, dryRun)
+	istore, ok := st.(issuePrefixConfigStore)
+	if !ok {
+		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusError, Message: "Activated Dolt store does not implement the issue-prefix surface"}
+	}
+	result := applyIssuePrefixStore(ctx, istore, configured, dryRun)
 	if result.Status != applyStatusApplied {
 		return result
 	}

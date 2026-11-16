@@ -132,7 +132,7 @@ Additional Commands:
   metrics           Show or change anonymous usage-metrics settings
   mol               Molecule commands (work templates)
   notion            Notion integration commands
-  orphans           Identify orphaned issues (referenced in commits but still open)
+  orphans           Identify orphaned issues (open, unparented, referenced in commits)
   ready             Show ready work (open, no active blockers)
   rename            Rename an issue ID
   schema            Print the JSON Schema for bd's --json / export output

@@ -525,7 +525,7 @@ func testHookProcessRealPerlStatuses(t *testing.T) {
 		{name: "database-not-initialized is skipped", bdExit: 3, wantDBWarning: true},
 		{name: "other status is preserved", bdExit: 37, wantExit: 37},
 		{name: "124 is preserved", bdExit: 124, wantExit: 124},
-		{name: "142 is reported as a timeout", bdExit: 142, wantWarning: true},
+		{name: "142 is reported as a timeout", bdExit: 142, wantExit: 142, wantWarning: true},
 		{name: "death by SIGKILL is reported as 137", bdBody: hookProcessKilledBDStub, wantExit: 137},
 	}
 	for _, tt := range tests {

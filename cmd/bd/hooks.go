@@ -165,6 +165,10 @@ func generateHookSection(hookName string) string {
 		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
 		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s\"\n" +
 		"  fi\n" +
+		"  if [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 3 ]; then\n" +
+		"    echo >&2 \"beads: database not initialized; skipping hook '" + hookName + "'\"\n" +
+		"    _bd_exit=0\n" +
+		"  fi\n" +
 		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		"fi\n" +
 		hookSectionEndLine() + "\n"

@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -132,8 +133,10 @@ func checkIssuePrefixDrift() []DriftItem {
 		return []DriftItem{{Check: "issue_prefix", Status: driftStatusSkipped, Message: "No active beads workspace found"}}
 	}
 	ctx := context.Background()
-	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true, DisableAutoStart: true})
-	_, err = activateEventsJournalStore(beadsDir, false, st, err)
+	rawStore, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true, DisableAutoStart: true})
+	var st storage.DoltStorage = rawStore
+	st, err = activateEventsJournalStore(beadsDir, false, st, err)
+	st, err = activateVersionedHistoryStore(ctx, st, err)
 	if err != nil {
 		return []DriftItem{{Check: "issue_prefix", Status: driftStatusSkipped, Message: fmt.Sprintf("Cannot open Dolt store: %v", err)}}
 	}

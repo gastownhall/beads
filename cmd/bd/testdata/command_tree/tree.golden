@@ -981,6 +981,7 @@ bd config apply
     | Runs drift detection and then fixes any mismatches it finds:
     |
     |   - hooks     Reinstall git hooks if missing or outdated
+    |   - issue_prefix  Seed a missing database prefix from config.yaml; never overwrite one
     |   - remote    Add/update Dolt origin remote to match federation.remote
     |   - server    Start Dolt server if dolt.shared-server is enabled
     |
@@ -1006,6 +1007,7 @@ bd config drift
     |
     | Checks:
     |   - hooks     Git hooks installed and up-to-date
+    |   - issue_prefix  Database prefix matches config.yaml
     |   - remote    Dolt remote matches federation.remote config
     |   - server    Server state matches dolt.shared-server config
     |
@@ -5577,11 +5579,14 @@ bd onboard
 
 bd orphans
   use: "orphans"
-  short: "Identify orphaned issues (referenced in commits but still open)"
+  short: "Identify orphaned issues (open, unparented, referenced in commits)"
   hidden: false
   runnable: true
   long:
-    | Identify orphaned issues - issues that are referenced in commit messages but remain open or in_progress in the database.
+    | Identify orphaned issues - issues that are referenced in commit messages but remain open or in_progress in the database and have no parent.
+    |
+    | Issues carrying a parent-child dependency are governed by their parent and are
+    | never reported here, even when referenced in commits.
     |
     | This helps identify work that has been implemented but not formally closed.
     |
