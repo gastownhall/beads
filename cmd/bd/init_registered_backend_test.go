@@ -508,13 +508,12 @@ func TestInitRegisteredBackendFailureKeepsAPreexistingBeadsDir(t *testing.T) {
 // non-zero for a registered backend before it could be provisioned, and an
 // init that accepted one and ignored it would report success for a workspace
 // the caller did not ask for. The refusal names the flag and the backend and
-// comes before anything is created.
+// comes before anything is created. Every case has its own backend and
+// directory, so one that leaks reports itself and nothing after it.
 func TestInitRegisteredBackendRefusesFlagsItCannotHonor(t *testing.T) {
-	const name = "registry-init-flags"
-	fixture := registerCreatableFixture(t, name)
-	tmpDir := registeredInitWorkdir(t)
-	beadsDir := filepath.Join(tmpDir, ".beads")
-
+	// A database path no case's directory holds: --db is refused before it
+	// is looked at.
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere.db")
 	cases := [][]string{
 		{"--server"},
 		{"--remote", "https://example.invalid/x"},
@@ -524,12 +523,17 @@ func TestInitRegisteredBackendRefusesFlagsItCannotHonor(t *testing.T) {
 		{"--force"},
 		{"--proxied-server"},
 		{"--database", "elsewhere"},
-		{"--db", filepath.Join(tmpDir, "elsewhere.db")},
+		{"--db", elsewhere},
 		{"--" + removedBackendInitFlags[0].name, "x"},
 		{"--server", "--remote", "https://example.invalid/x", "--stealth"},
 	}
-	for _, extra := range cases {
+	for i, extra := range cases {
 		t.Run(strings.Join(extra, " "), func(t *testing.T) {
+			name := "registry-init-flags-" + string(rune('a'+i))
+			fixture := registerCreatableFixture(t, name)
+			tmpDir := registeredInitWorkdir(t)
+			beadsDir := filepath.Join(tmpDir, ".beads")
+
 			args := append([]string{"--backend", name, "--prefix", "test", "--quiet"}, extra...)
 			err := runRegisteredInit(args...)
 			if err == nil {
