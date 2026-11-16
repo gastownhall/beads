@@ -44,8 +44,16 @@ var registeredInitRefusedGlobals = map[string]bool{
 	"database": true,
 }
 
+// registeredInitRefusedEnv are the environment twins of those root flags.
+// bd init reads BEADS_DB into the variable --db sets, and the root command
+// resolves the workspace from BEADS_DB or BD_DB before init runs, so an
+// exported one would move the init to the directory beside a database path
+// the route never uses. They are refused like the flags.
+var registeredInitRefusedEnv = []string{"BEADS_DB", "BD_DB"}
+
 // refuseFlagsRegisteredInitCannotHonor fails bd init --backend=<registered>
-// when the command line carries a flag the route would silently drop. Before
+// when the command line carries a flag the route would silently drop, or the
+// environment names a database for it (registeredInitRefusedEnv). Before
 // registered backends could be provisioned, every such invocation failed on
 // the backend name alone; accepting --server, --remote or --stealth now and
 // ignoring them would report success for a workspace the caller did not ask
@@ -72,11 +80,22 @@ func refuseFlagsRegisteredInitCannotHonor(cmd *cobra.Command, name string) error
 			refused = append(refused, "--"+f.Name)
 		}
 	})
-	if len(refused) == 0 {
-		return nil
+	if len(refused) > 0 {
+		sort.Strings(refused)
+		return fmt.Errorf("bd init cannot honor %s with backend %q: a registered backend is provisioned through its own create hook, and bd init applies only --prefix, --quiet and --init-if-missing to it", strings.Join(refused, ", "), name)
 	}
-	sort.Strings(refused)
-	return fmt.Errorf("bd init cannot honor %s with backend %q: a registered backend is provisioned through its own create hook, and bd init applies only --prefix, --quiet and --init-if-missing to it", strings.Join(refused, ", "), name)
+	for _, key := range registeredInitRefusedEnv {
+		value := os.Getenv(key)
+		if value == "" {
+			continue
+		}
+		source := "the environment"
+		if config.IsDotenvKey(key) {
+			source = "a .beads/.env file"
+		}
+		return fmt.Errorf("bd init cannot honor %s=%s (from %s) with backend %q: it names a Dolt database, and a registered backend places its own store through its create hook; unset it, and name the workspace directory with BEADS_DIR if it is not the current one", key, value, source, name)
+	}
+	return nil
 }
 
 // registeredInitOptions is what bd init hands the registered-backend route.

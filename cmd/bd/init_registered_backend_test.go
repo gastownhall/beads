@@ -556,3 +556,64 @@ func TestInitRegisteredBackendRefusesFlagsItCannotHonor(t *testing.T) {
 		})
 	}
 }
+
+// TestInitRegisteredBackendRefusesADatabaseNamedInTheEnvironment is the same
+// rule for the environment twins of --db. BEADS_DB is --db by another name to
+// bd init, and the root command resolves the workspace from BEADS_DB or BD_DB
+// before init runs, so an init that accepted one would create its workspace
+// beside a database path the route never uses, not in the directory it was
+// run in. The refusal names the variable, its value and the backend, comes
+// before anything is created in either place, and covers --init-if-missing;
+// with the variable gone the init lands in the working directory.
+func TestInitRegisteredBackendRefusesADatabaseNamedInTheEnvironment(t *testing.T) {
+	for i, key := range []string{"BEADS_DB", "BD_DB"} {
+		t.Run(key, func(t *testing.T) {
+			name := "registry-init-env-" + string(rune('a'+i))
+			fixture := registerCreatableFixture(t, name)
+			tmpDir := registeredInitWorkdir(t)
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			t.Setenv("BEADS_DB", "")
+			t.Setenv("BD_DB", "")
+
+			elsewhere, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatalf("resolve the temp dir: %v", err)
+			}
+			named := filepath.Join(elsewhere, "project", ".beads", "beads.db")
+			t.Setenv(key, named)
+
+			for _, extra := range [][]string{nil, {"--init-if-missing"}} {
+				args := append([]string{"--backend", name, "--prefix", "test", "--quiet"}, extra...)
+				err := runRegisteredInit(args...)
+				if err == nil {
+					t.Fatalf("%s=%s bd init %s succeeded; want a refusal", key, named, strings.Join(args, " "))
+				}
+				for _, want := range []string{key, named, name} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("the refusal does not name %s: %v", want, err)
+					}
+				}
+				if len(fixture.created) != 0 {
+					t.Fatalf("the refused init reached the Create hook: %q", fixture.created)
+				}
+				if initPathExists(t, beadsDir) {
+					t.Fatalf("the refused init created %s", beadsDir)
+				}
+				if initPathExists(t, filepath.Join(elsewhere, "project")) {
+					t.Fatalf("the refused init created %s", filepath.Join(elsewhere, "project"))
+				}
+				// The root command may have bound the directory the variable
+				// names for its own use; the next run starts without it.
+				t.Setenv("BEADS_DIR", "")
+			}
+
+			t.Setenv(key, "")
+			if err := runRegisteredInit("--backend", name, "--prefix", "test", "--quiet"); err != nil {
+				t.Fatalf("bd init without %s: %v", key, err)
+			}
+			if len(fixture.created) != 1 || fixture.created[0] != beadsDir {
+				t.Fatalf("Create hook calls = %q, want exactly [%q]", fixture.created, beadsDir)
+			}
+		})
+	}
+}
