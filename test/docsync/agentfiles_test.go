@@ -168,7 +168,19 @@ func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 			// "file.go:Symbol" cites a symbol inside a file; check the file.
 			ref, _, _ = strings.Cut(ref, ":")
 			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(ref))); err != nil {
-				broken = append(broken, rel+" -> `"+m[1]+"`")
+				home, homeErr := os.UserHomeDir()
+				resolved := false
+				if homeErr == nil {
+					for _, agentHome := range []string{"agents", ".agents"} {
+						if _, err := os.Stat(filepath.Join(home, agentHome, filepath.FromSlash(ref))); err == nil {
+							resolved = true
+							break
+						}
+					}
+				}
+				if !resolved {
+					broken = append(broken, rel+" -> `"+m[1]+"`")
+				}
 			}
 		}
 		for _, m := range backtickTestRE.FindAllStringSubmatch(content, -1) {
