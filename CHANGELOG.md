@@ -40,8 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`BD_OTEL_ENABLED=true`), the OTel resource attached to every exported
   metric and span carried `process.command_args`, the unscrubbed `os.Args`,
   so a `--password=...` flag, search text or an issue title reached the
-  metrics receiver even though the `bd.args` span attribute is scrubbed. The
-  resource also carried `process.executable.path` and `process.owner` (the OS
+  metrics receiver (for the command span's own `bd.args`, see the entry on
+  span content below). The resource also carried `process.executable.path` and `process.owner` (the OS
   user name). bd now builds the resource from explicit detectors and keeps
   only `host.name`, `process.pid`, `process.executable.name` and the Go
   runtime attributes.
@@ -53,6 +53,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`bd.query`), commit messages (`db.commit_msg`), issue ids and config keys
   reached the OTLP metrics receiver. The storage metrics are now labelled by
   `db.operation` only (see Fixed below for the dashboard impact).
+
+- **Telemetry spans no longer carry issue content.** With telemetry on
+  (`BD_OTEL_ENABLED=true`) and the console trace exporter selected
+  (`OTEL_TRACES_EXPORTER=console`, or the legacy `BD_OTEL_STDOUT=true`), the
+  command span's `bd.args` attribute was the command line with only passwords
+  redacted (a `--password` value, the password in a connection string), so
+  issue titles, descriptions, notes, labels, comments, close reasons and
+  search text were exported verbatim. `bd.args` now holds the command path and
+  the long names of the flags that were set, sorted, and never an argument or
+  a flag value: `bd create "title" -d "text" -q` records
+  `create --description --quiet`. It is built from the command bd parsed, not
+  from the raw arguments, so a value that looks like a flag cannot pass for
+  one. The storage spans no longer record search text (`bd.query`), label
+  names (`bd.label`, `bd.label.old`, `bd.label.new`) or commit messages
+  (`db.commit_msg`, which can quote a `bd batch -m` message or a propagated
+  label), and the `hook.stdout` / `hook.stderr` events carry only the number
+  of bytes a hook wrote, not its output. A failed span still records its error
+  message, which can quote the input that failed. **Breaking for dashboards
+  and trace queries:** anything that reads `bd.args` values, for example to
+  extract an issue id or a title, or reads the removed attributes must change;
+  `bd.command` is unchanged. (#8505)
 
 - **A committed `.beads/.env` can no longer copy your environment into bd's
   settings, set a command or bearer token by a name the deny list missed, or
