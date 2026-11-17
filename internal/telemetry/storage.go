@@ -81,12 +81,16 @@ type opStart struct {
 
 // op starts a span and counts the named storage operation.
 //
-// The span carries db.operation plus the request attributes. The three
-// bd.storage.* metrics carry db.operation only: request attributes (issue
-// ids, actors, search text, commit messages, config keys) would make one
+// The span carries db.operation plus the request attributes: identifiers
+// (issue ids, dependency endpoints, config and slot keys), actors, issue
+// types and counts. It never carries issue content: search text, label
+// names, commit messages (which can quote a label or a `bd batch -m`
+// message) and field values stay out of every span, so they never reach a
+// trace export (#8505). The three bd.storage.* metrics carry db.operation
+// only: request attributes (issue ids, actors, config keys) would make one
 // series per value, run into the SDK's per-metric cardinality limit (2000
-// sets, the rest folded into otel.metric.overflow) and send user content to
-// the metrics receiver. See engdocs/design/otel/otel-data-model.md.
+// sets, the rest folded into otel.metric.overflow) and send them to the
+// metrics receiver. See engdocs/design/otel/otel-data-model.md.
 func (s *InstrumentedStorage) op(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span, opStart) {
 	opAttr := attribute.String("db.operation", name)
 	all := append([]attribute.KeyValue{opAttr}, attrs...)
@@ -260,9 +264,10 @@ func (s *InstrumentedStorage) DeleteIssue(ctx context.Context, id string) error 
 	return err
 }
 
+// The Search* spans carry the result count, never the query: it is the text a
+// user searched for (bd search), and it was exported as bd.query until #8505.
 func (s *InstrumentedStorage) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
-	ctx, span, t := s.op(ctx, "SearchIssues", attrs...)
+	ctx, span, t := s.op(ctx, "SearchIssues")
 	issues, err := s.inner.SearchIssues(ctx, query, filter)
 	if err == nil {
 		span.SetAttributes(attribute.Int("bd.result.count", len(issues)))
@@ -272,8 +277,7 @@ func (s *InstrumentedStorage) SearchIssues(ctx context.Context, query string, fi
 }
 
 func (s *InstrumentedStorage) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
-	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
-	ctx, span, t := s.op(ctx, "SearchIssuesWithCounts", attrs...)
+	ctx, span, t := s.op(ctx, "SearchIssuesWithCounts")
 	v, err := s.inner.SearchIssuesWithCounts(ctx, query, filter)
 	if err == nil {
 		span.SetAttributes(attribute.Int("bd.result.count", len(v)))
@@ -283,8 +287,7 @@ func (s *InstrumentedStorage) SearchIssuesWithCounts(ctx context.Context, query 
 }
 
 func (s *InstrumentedStorage) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
-	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
-	ctx, span, t := s.op(ctx, "SearchIssueIDs", attrs...)
+	ctx, span, t := s.op(ctx, "SearchIssueIDs")
 	ids, err := s.inner.SearchIssueIDs(ctx, query, filter)
 	if err == nil {
 		span.SetAttributes(attribute.Int("bd.result.count", len(ids)))
@@ -294,8 +297,7 @@ func (s *InstrumentedStorage) SearchIssueIDs(ctx context.Context, query string, 
 }
 
 func (s *InstrumentedStorage) SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error) {
-	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
-	ctx, span, t := s.op(ctx, "SearchIssueSummaries", attrs...)
+	ctx, span, t := s.op(ctx, "SearchIssueSummaries")
 	summaries, err := s.inner.SearchIssueSummaries(ctx, query, filter)
 	if err == nil {
 		span.SetAttributes(attribute.Int("bd.result.count", len(summaries)))
@@ -418,10 +420,7 @@ func (s *InstrumentedStorage) GetDependencyTree(ctx context.Context, issueID str
 // ── Labels ──────────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	attrs := []attribute.KeyValue{
-		attribute.String("bd.issue.id", issueID),
-		attribute.String("bd.label", label),
-	}
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "AddLabel", attrs...)
 	err := s.inner.AddLabel(ctx, issueID, label, actor)
 	s.done(ctx, span, t, err)
@@ -429,10 +428,7 @@ func (s *InstrumentedStorage) AddLabel(ctx context.Context, issueID, label, acto
 }
 
 func (s *InstrumentedStorage) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	attrs := []attribute.KeyValue{
-		attribute.String("bd.issue.id", issueID),
-		attribute.String("bd.label", label),
-	}
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "RemoveLabel", attrs...)
 	err := s.inner.RemoveLabel(ctx, issueID, label, actor)
 	s.done(ctx, span, t, err)
@@ -440,11 +436,7 @@ func (s *InstrumentedStorage) RemoveLabel(ctx context.Context, issueID, label, a
 }
 
 func (s *InstrumentedStorage) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
-	attrs := []attribute.KeyValue{
-		attribute.String("bd.label.old", oldLabel),
-		attribute.String("bd.label.new", newLabel),
-	}
-	ctx, span, t := s.op(ctx, "RenameLabel", attrs...)
+	ctx, span, t := s.op(ctx, "RenameLabel")
 	renamed, merged, ids, err = s.inner.RenameLabel(ctx, oldLabel, newLabel, actor)
 	if err == nil {
 		span.SetAttributes(
@@ -465,8 +457,7 @@ func (s *InstrumentedStorage) GetLabels(ctx context.Context, issueID string) ([]
 }
 
 func (s *InstrumentedStorage) GetIssuesByLabel(ctx context.Context, label string) ([]*types.Issue, error) {
-	attrs := []attribute.KeyValue{attribute.String("bd.label", label)}
-	ctx, span, t := s.op(ctx, "GetIssuesByLabel", attrs...)
+	ctx, span, t := s.op(ctx, "GetIssuesByLabel")
 	v, err := s.inner.GetIssuesByLabel(ctx, label)
 	s.done(ctx, span, t, err)
 	return v, err
@@ -687,16 +678,20 @@ func (s *InstrumentedStorage) GetLocalMetadata(ctx context.Context, key string) 
 
 // ── Transactions ─────────────────────────────────────────────────────────────
 
+// RunInTransaction traces a write transaction. The commit message is not an
+// attribute: it can quote user content (`bd batch -m <message>`, the label in
+// `bd label propagate`), and was exported as db.commit_msg until #8505.
 func (s *InstrumentedStorage) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
-	ctx, span, t := s.op(ctx, "RunInTransaction", attribute.String("db.commit_msg", commitMsg))
+	ctx, span, t := s.op(ctx, "RunInTransaction")
 	err := s.inner.RunInTransaction(ctx, commitMsg, fn)
 	s.done(ctx, span, t, err)
 	return err
 }
 
-// RunInIssueLifecycleTransaction traces the required internal lifecycle lane.
+// RunInIssueLifecycleTransaction traces the required internal lifecycle lane,
+// without its commit message, as RunInTransaction does.
 func (s *InstrumentedStorage) RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx storage.IssueLifecycleTransaction) error) error {
-	ctx, span, t := s.op(ctx, "RunInIssueLifecycleTransaction", attribute.String("db.commit_msg", commitMsg))
+	ctx, span, t := s.op(ctx, "RunInIssueLifecycleTransaction")
 	err := s.inner.RunInIssueLifecycleTransaction(ctx, commitMsg, fn)
 	s.done(ctx, span, t, err)
 	return err
