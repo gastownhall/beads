@@ -128,6 +128,32 @@ bd dolt stop && bd dolt start
 
 **Why update hooks?** Git hooks are versioned with bd. Outdated hooks may miss export refresh, legacy fallback, or safety fixes.
 
+### Server users that cannot write `dolt_ignore`
+
+bd keeps a set of `dolt_ignore` patterns so that clone-local and temporary
+tables never reach Dolt history. A release can add a pattern, and the first
+`bd` that opens a database afterwards writes it. A server user that may not
+write `dolt_ignore` (a least-privilege user with read access plus write access
+to the data tables only) cannot. When the database needs no migration and has
+no new uncommitted table, `bd` opens it anyway and prints one warning per open:
+
+```text
+Warning: seeding dolt_ignore pattern "__temp__%": Error 1142 (42000): command denied to user 'op'@'%'; continuing without seeding dolt_ignore on the current schema; open this database once with a privileged bd that can write dolt_ignore to heal the missing patterns
+```
+
+Until that privileged open, every open by the restricted user repeats the
+warning and waits for the schema migration lock. To fix it, run `bd migrate schema`
+once as a server user that may write `dolt_ignore`, such as the user that
+created the database. Any other command that writes works too; read-only
+commands such as `bd list` do not. That open writes and commits the missing
+patterns, and the warning stops. Do not give the
+restricted user write access to `dolt_ignore` instead: a user that can add
+patterns can stop its own changes from being committed.
+
+If the database needs a migration, or `dolt_status` lists a new table, the
+restricted user's open still fails with the `command denied` error. Open the
+database as the privileged user first.
+
 ## Database Migrations
 
 After major upgrades, check for database migrations:

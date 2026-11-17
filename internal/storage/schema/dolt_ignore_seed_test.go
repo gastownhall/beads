@@ -1,14 +1,18 @@
 package schema
 
 import (
+	"bytes"
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 // A fenced wire client holds SELECT on dolt_ignore and nothing else, so the
@@ -238,4 +242,435 @@ func upperASCII(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// GH#6169 (bd-obnpv0): every new canonical pattern leaves existing databases
+// under-seeded, and a fenced wire client (SELECT/DML-on-data-only grant) is
+// denied the seed INSERT. The tests below pin when that denial may degrade to
+// a warning and when it must stay fatal.
+
+// seedDenial is the error a fenced wire client gets back from the seed INSERT.
+func seedDenial() *mysql.MySQLError {
+	return &mysql.MySQLError{
+		Number:  1142,
+		Message: "INSERT command denied to user 'bd_lego_pilot_op'@'%' for table 'dolt_ignore'",
+	}
+}
+
+// refusedSeedMissing is the pattern pair the refused-seed tests leave
+// unregistered. The first one is the INSERT that gets refused.
+var refusedSeedMissing = []string{"__temp__%", "bd_events_journal"}
+
+// wantSeedError is the error text seedDoltIgnorePatterns returns for cause on
+// pattern, unchanged by MigrateUp.
+func wantSeedError(pattern string, cause error) string {
+	return fmt.Sprintf("seeding dolt_ignore pattern %q: %v", pattern, cause)
+}
+
+// expectSeedInsertFailure mocks the seed on a database missing
+// refusedSeedMissing: the presence probe, then INSERTs that succeed for the
+// first okInserts missing patterns and fail with cause on the next one.
+// Nothing after the failing INSERT is expected: the seed stops there.
+func expectSeedInsertFailure(mock sqlmock.Sqlmock, mainVersion, okInserts int, cause error) {
+	var present []string
+	for _, pattern := range expectedIgnoreSeedCandidates(mainVersion) {
+		if !slices.Contains(refusedSeedMissing, pattern) {
+			present = append(present, pattern)
+		}
+	}
+	expectIgnoreSeedProbe(mock, mainVersion, present)
+	for _, pattern := range refusedSeedMissing[:okInserts] {
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(pattern).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+		WithArgs(refusedSeedMissing[okInserts]).
+		WillReturnError(cause)
+}
+
+// expectNoMigrationWork mocks migrationWorkNeeded on a fully current
+// database (both cursors at latest, hash columns present, custom tables
+// populated), the same sequence TestMigrateUpSkipsSeedCommitWhenNothingChanged
+// primes.
+func expectNoMigrationWork(mock sqlmock.Sqlmock) {
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectIgnoredSentinelProbes(mock, true)
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+}
+
+const newTablesQuery = "SELECT table_name FROM dolt_status WHERE status = 'new table' ORDER BY table_name"
+
+// expectNewTables mocks the refused seed's new-table guard.
+func expectNewTables(mock sqlmock.Sqlmock, tables ...string) {
+	rows := sqlmock.NewRows([]string{"table_name"})
+	for _, table := range tables {
+		rows.AddRow(table)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(newTablesQuery)).WillReturnRows(rows)
+}
+
+// captureDoltIgnoreSeedNotices redirects the refused-seed warning for one test.
+func captureDoltIgnoreSeedNotices(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var notices bytes.Buffer
+	orig := doltIgnoreSeedNoticeOut
+	doltIgnoreSeedNoticeOut = &notices
+	t.Cleanup(func() { doltIgnoreSeedNoticeOut = orig })
+	return &notices
+}
+
+// newSeedMock is a fresh ordered sqlmock closed when the test ends.
+func newSeedMock(t *testing.T) (DBConn, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db, mock
+}
+
+// AC-1: an otherwise-current database whose only gap is a canonical pattern
+// the opener may not write opens with one warning, and nothing after the
+// refused INSERT writes: no cursor repair, no scoped seed commit, no pass.
+func TestMigrateUpDegradesRefusedSeedWhenConverged(t *testing.T) {
+	denials := map[string]error{
+		"1044 db access denied":       &mysql.MySQLError{Number: 1044, Message: "Access denied for user 'op'@'%' to database 'beads'"},
+		"1045 access denied":          &mysql.MySQLError{Number: 1045, Message: "Access denied for user 'op'@'%'"},
+		"1142 table command denied":   seedDenial(),
+		"1143 column command denied":  &mysql.MySQLError{Number: 1143, Message: "INSERT command denied to user 'op'@'%' for column 'pattern' in table 'dolt_ignore'"},
+		"1227 specific access denied": &mysql.MySQLError{Number: 1227, Message: "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"},
+		"untyped command denied":      errors.New("command denied to user 'bd_lego_pilot_op'@'%'"),
+	}
+	for name, denial := range denials {
+		t.Run(name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			notices := captureDoltIgnoreSeedNotices(t)
+			db, mock := newSeedMock(t)
+
+			// Two patterns are missing; the first refusal stops the seed, so
+			// only one INSERT is attempted and only one warning printed.
+			expectSeedInsertFailure(mock, LatestVersion(), 0, denial)
+			expectNoMigrationWork(mock)
+			expectNewTables(mock)
+
+			applied, err := MigrateUp(context.Background(), db)
+			if err != nil {
+				t.Fatalf("MigrateUp() error = %v, want nil (a refused seed on a current schema must degrade to a warning)", err)
+			}
+			if applied != 0 {
+				t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+			assertOneRefusedSeedWarning(t, notices.String(), wantSeedError(refusedSeedMissing[0], denial))
+		})
+	}
+
+	// An INSERT that succeeded before the refusal leaves changed=true inside
+	// the seed. The degraded open still stops: no scoped seed commit (ordered
+	// sqlmock rejects the DOLT_ADD), no claim the seed converged.
+	t.Run("earlier insert succeeded", func(t *testing.T) {
+		failOnSwallowedAdvisory(t)
+		notices := captureDoltIgnoreSeedNotices(t)
+		db, mock := newSeedMock(t)
+
+		expectSeedInsertFailure(mock, LatestVersion(), 1, seedDenial())
+		expectNoMigrationWork(mock)
+		expectNewTables(mock)
+
+		applied, err := MigrateUp(context.Background(), db)
+		if err != nil {
+			t.Fatalf("MigrateUp() error = %v, want nil", err)
+		}
+		if applied != 0 {
+			t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+		assertOneRefusedSeedWarning(t, notices.String(), wantSeedError(refusedSeedMissing[1], seedDenial()))
+	})
+}
+
+func assertOneRefusedSeedWarning(t *testing.T, notices, seedErr string) {
+	t.Helper()
+	if strings.Count(notices, "\n") != 1 || !strings.HasSuffix(notices, "\n") {
+		t.Fatalf("warning output = %q, want exactly one line", notices)
+	}
+	for _, want := range []string{
+		seedErr,
+		"continuing without seeding dolt_ignore on the current schema",
+		"open this database once with a privileged bd that can write dolt_ignore to heal the missing patterns",
+	} {
+		if !strings.Contains(notices, want) {
+			t.Fatalf("warning = %q, want it to contain %q", notices, want)
+		}
+	}
+}
+
+// AC-2: pending migration work cannot run without the patterns, so the
+// refusal stays the original seed error. Nothing past migrationWorkNeeded
+// runs: no cursor repair, no new-table read, no migration, no warning.
+func TestMigrateUpRefusedSeedFailsWhenWorkPending(t *testing.T) {
+	const latestMinusOne = 1
+	cases := map[string]struct {
+		mainVersion int
+		work        func(sqlmock.Sqlmock)
+	}{
+		"main migrations pending": {
+			mainVersion: LatestVersion() - latestMinusOne,
+			work: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-latestMinusOne)
+			},
+		},
+		"ignored migrations pending": {
+			mainVersion: LatestVersion(),
+			work: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+				expectCursorProbe(mock, "ignored_schema_migrations", false)
+			},
+		},
+		"content_hash column missing": {
+			mainVersion: LatestVersion(),
+			work: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+				expectCursorProbe(mock, "ignored_schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+				expectIgnoredSentinelProbes(mock, true)
+				mock.ExpectQuery(`SHOW COLUMNS FROM \w+ LIKE 'content_hash'`).WillReturnRows(showColumnsRows())
+			},
+		},
+		"custom types backfill pending": {
+			mainVersion: LatestVersion(),
+			work: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+				expectCursorProbe(mock, "ignored_schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+				expectIgnoredSentinelProbes(mock, true)
+				expectContentHashColumnExists(mock)
+				expectContentHashColumnExists(mock)
+				expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 0)
+				expectScalar(mock, "SELECT `value` FROM config WHERE `key` = 'types.custom'", "value", "spike")
+				expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			notices := captureDoltIgnoreSeedNotices(t)
+			db, mock := newSeedMock(t)
+			denial := seedDenial()
+
+			expectSeedInsertFailure(mock, tc.mainVersion, 0, denial)
+			tc.work(mock)
+
+			_, err := MigrateUp(context.Background(), db)
+			if err == nil {
+				t.Fatal("MigrateUp() error = nil, want the refused seed while migration work is pending")
+			}
+			if got, want := err.Error(), wantSeedError(refusedSeedMissing[0], denial); got != want {
+				t.Fatalf("MigrateUp() error = %q, want the original seed error %q", got, want)
+			}
+			var mysqlErr *mysql.MySQLError
+			if !errors.As(err, &mysqlErr) || mysqlErr != denial {
+				t.Fatalf("MigrateUp() error = %v, want it to wrap the seed denial", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations (the work probe must run before refusing): %v", err)
+			}
+			if notices.Len() != 0 {
+				t.Fatalf("refused open printed %q, want no continuation warning", notices.String())
+			}
+		})
+	}
+
+	// A work probe that cannot answer is no licence to continue: the open
+	// fails with both causes preserved.
+	t.Run("work probe fails", func(t *testing.T) {
+		failOnSwallowedAdvisory(t)
+		notices := captureDoltIgnoreSeedNotices(t)
+		db, mock := newSeedMock(t)
+		denial := seedDenial()
+		probeErr := errors.New("connection reset by peer")
+
+		expectSeedInsertFailure(mock, LatestVersion(), 0, denial)
+		expectCursorProbe(mock, "schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+		expectCursorProbe(mock, "ignored_schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+		expectIgnoredSentinelProbes(mock, true)
+		mock.ExpectQuery(`SHOW COLUMNS FROM \w+ LIKE 'content_hash'`).WillReturnError(probeErr)
+
+		_, err := MigrateUp(context.Background(), db)
+		if err == nil {
+			t.Fatal("MigrateUp() error = nil, want a failure when the work probe fails")
+		}
+		var mysqlErr *mysql.MySQLError
+		if !errors.As(err, &mysqlErr) || mysqlErr != denial {
+			t.Fatalf("MigrateUp() error = %v, want it to wrap the seed denial", err)
+		}
+		if !errors.Is(err, probeErr) {
+			t.Fatalf("MigrateUp() error = %v, want it to wrap the work-probe failure", err)
+		}
+		if !strings.Contains(err.Error(), "checking schema migration work") {
+			t.Fatalf("MigrateUp() error = %q, want it to say the migration-work check failed", err.Error())
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+		if notices.Len() != 0 {
+			t.Fatalf("refused open printed %q, want no continuation warning", notices.String())
+		}
+	})
+}
+
+// AC-3: only a privilege refusal earns the fallback. A connection fault or
+// any other SQL error from the seed INSERT fails the open exactly as before,
+// with no work probe, no new-table read and no warning.
+func TestMigrateUpSeedErrorsThatAreNotRefusalsStayFatal(t *testing.T) {
+	causes := map[string]error{
+		"connection reset": errors.New("connection reset by peer"),
+		"mysql 1105":       &mysql.MySQLError{Number: 1105, Message: "unknown error: disk full"},
+		// The code, not the text, classifies a typed MySQL error: a denial
+		// phrase under a non-denial code is still not a refusal.
+		"mysql 1105 with denial wording": &mysql.MySQLError{Number: 1105, Message: "INSERT command denied upstream: access denied"},
+	}
+	for name, cause := range causes {
+		t.Run(name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			notices := captureDoltIgnoreSeedNotices(t)
+			db, mock := newSeedMock(t)
+
+			expectSeedInsertFailure(mock, LatestVersion(), 0, cause)
+
+			_, err := MigrateUp(context.Background(), db)
+			if err == nil {
+				t.Fatal("MigrateUp() error = nil, want the seed failure")
+			}
+			if got, want := err.Error(), wantSeedError(refusedSeedMissing[0], cause); got != want {
+				t.Fatalf("MigrateUp() error = %q, want %q", got, want)
+			}
+			if !errors.Is(err, cause) {
+				t.Fatalf("MigrateUp() error = %v, want errors.Is to find the cause", err)
+			}
+			if mysqlCause, ok := cause.(*mysql.MySQLError); ok {
+				var got *mysql.MySQLError
+				if !errors.As(err, &got) || got != mysqlCause {
+					t.Fatalf("MigrateUp() error = %v, want errors.As to find the MySQL cause", err)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+			if notices.Len() != 0 {
+				t.Fatalf("failed open printed %q, want no warning", notices.String())
+			}
+		})
+	}
+}
+
+// AC-4: with a pattern missing, a new table might be one the pattern exists
+// to keep off the versioned plane (a rebuild intermediate a later blanket
+// commit would capture). Any new table, or a guard read that cannot complete,
+// keeps the open refused with the seed denial preserved.
+func TestMigrateUpRefusedSeedFailsOnUnignoredNewTable(t *testing.T) {
+	tableCases := map[string][]string{
+		"rebuild intermediate": {"__temp__issues"},
+		"unrelated user table": {"my_notes"},
+		"several tables":       {"__temp__x", "my_notes"},
+	}
+	for name, tables := range tableCases {
+		t.Run(name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			notices := captureDoltIgnoreSeedNotices(t)
+			db, mock := newSeedMock(t)
+			denial := seedDenial()
+
+			expectSeedInsertFailure(mock, LatestVersion(), 0, denial)
+			expectNoMigrationWork(mock)
+			expectNewTables(mock, tables...)
+
+			_, err := MigrateUp(context.Background(), db)
+			if err == nil {
+				t.Fatalf("MigrateUp() error = nil, want a refusal naming new table(s) %v", tables)
+			}
+			var mysqlErr *mysql.MySQLError
+			if !errors.As(err, &mysqlErr) || mysqlErr != denial {
+				t.Fatalf("MigrateUp() error = %v, want it to wrap the seed denial", err)
+			}
+			for _, want := range append([]string{wantSeedError(refusedSeedMissing[0], denial), "privileged bd"}, tables...) {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("MigrateUp() error = %q, want it to contain %q", err.Error(), want)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+			if notices.Len() != 0 {
+				t.Fatalf("refused open printed %q, want no continuation warning", notices.String())
+			}
+		})
+	}
+
+	readErr := errors.New("dolt_status read interrupted")
+	readCases := map[string]func(sqlmock.Sqlmock){
+		"query fails": func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(regexp.QuoteMeta(newTablesQuery)).WillReturnError(readErr)
+		},
+		"scan fails": func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(regexp.QuoteMeta(newTablesQuery)).
+				WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow(nil))
+		},
+		"iteration fails": func(mock sqlmock.Sqlmock) {
+			mock.ExpectQuery(regexp.QuoteMeta(newTablesQuery)).
+				WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues_scratch").RowError(0, readErr))
+		},
+	}
+	for name, expectRead := range readCases {
+		t.Run(name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			notices := captureDoltIgnoreSeedNotices(t)
+			db, mock := newSeedMock(t)
+			denial := seedDenial()
+
+			expectSeedInsertFailure(mock, LatestVersion(), 0, denial)
+			expectNoMigrationWork(mock)
+			expectRead(mock)
+
+			_, err := MigrateUp(context.Background(), db)
+			if err == nil {
+				t.Fatal("MigrateUp() error = nil, want a failure when the new-table guard cannot read dolt_status")
+			}
+			var mysqlErr *mysql.MySQLError
+			if !errors.As(err, &mysqlErr) || mysqlErr != denial {
+				t.Fatalf("MigrateUp() error = %v, want it to wrap the seed denial", err)
+			}
+			if !strings.Contains(err.Error(), "dolt_status") {
+				t.Fatalf("MigrateUp() error = %q, want it to name the dolt_status read", err.Error())
+			}
+			if name != "scan fails" && !errors.Is(err, readErr) {
+				t.Fatalf("MigrateUp() error = %v, want it to wrap the read failure", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+			if notices.Len() != 0 {
+				t.Fatalf("refused open printed %q, want no continuation warning", notices.String())
+			}
+		})
+	}
 }
