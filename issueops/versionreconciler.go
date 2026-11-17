@@ -47,8 +47,9 @@ type VersionReconcileRequest struct {
 	// nothing" over a real marker and lose the downgrade guard with it.
 	//
 	// It is compared as dotted decimal, component by component, with a
-	// non-numeric component reading as 0. So "1.2.0" and "1.2.0-rc1" are the
-	// SAME version to this role, "1.2" is lower than "1.2.1", and a version
+	// non-numeric component reading as 0 and everything from the first "-" or
+	// "+" ignored. So "1.2.0", "1.2.0-rc1" and "1.2.0-rc.3" are the SAME
+	// version to this role, "1.2" is lower than "1.2.1", and a version
 	// string with no digits at all is 0.0.0. That is the comparison both front
 	// doors have always used and it is stated here rather than tightened,
 	// because tightening it would start refusing pre-release binaries that

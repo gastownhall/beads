@@ -1338,6 +1338,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity and mutates as another (`AddParentChild` and `SetStatus` stay
   optional), and must stamp the request's actor on its derived `is_blocked`
   updates.
+- **Moving from a release candidate to its release updates the workspace's
+  version marker.** The marker comparison read the dotted candidates the
+  release tags use as one more release component (`1.4.0-rc.3` as
+  `1.4.0.3`), above their own release, so bd 1.4.0 refused to record itself
+  over a workspace a 1.4.0-rc.N had prepared and kept the candidate's
+  marker: server and proxied-server workspaces showed `Database: version
+  1.4.0-rc.N (CLI: 1.4.0)` in `bd doctor` until a bare `bd migrate`. The
+  comparison now ignores everything from the first `-` or `+`, as it
+  already did for an undotted `-rc1`, so a release and its candidates
+  record over each other in either direction, and a candidate of an
+  earlier release is still refused (#6595).
 - **The aux row id re-key again skips tables with dolthub/dolt#11131
   encoding drift instead of aborting the migration on every open** (#8372).
   The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive
