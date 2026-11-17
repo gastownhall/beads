@@ -818,6 +818,36 @@ bd migrate --dry-run
 bd migrate schema
 ```
 
+### "pending schema migrations were not applied"
+
+The first command after an upgrade applies the new release's pending schema
+migrations, when you have consented to them. If the database's working set
+holds changes nobody committed (an edit through `bd sql`, for example) in a
+table those migrations alter, it stops instead, and says so:
+
+```
+bd upgraded to v1.3.0, but its pending schema migrations were not applied: they alter tables with uncommitted changes (issues).
+Run 'bd dolt commit' to commit the working set, then 'bd migrate schema'.
+The next eligible non-preview command retries the migration.
+```
+
+Nothing was migrated and your uncommitted changes are untouched. Commit them,
+then migrate:
+
+```bash
+bd dolt commit
+bd migrate schema
+```
+
+Until the upgrade goes through, every command (other than a preview or a
+`--readonly` one) reports it again and retries: bd only records the new
+version in `.beads/.local_version` once the upgrade has finished, or has been
+deliberately held back by a consent gate such as
+[Shared servers](#shared-servers). Any other failure is reported as
+`finishing the upgrade failed: <error>` and retried the same way; `bd doctor`
+shows more. Under `--json` these notices are not printed
+([#6929](https://github.com/gastownhall/beads/issues/6929)).
+
 ### Recovery after upgrade
 
 If you need to restore from a backup:

@@ -4,11 +4,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // TestMigrateCommand removed: detectDatabases, getDBVersion, formatDBList, dbInfo
@@ -36,6 +39,42 @@ func TestMigrateSchemaFlagBoundaries(t *testing.T) {
 	}
 	if flag := rootCmd.PersistentFlags().Lookup("format"); flag == nil {
 		t.Error("root command must register persistent --format")
+	}
+}
+
+// TestSchemaMigrateFailedDirtyTablesHint pins the hint `bd migrate schema`
+// gives when the dirty-table guard refuses its migration (#6929): commit the
+// working set with a plain `bd dolt commit` on the database this command
+// targeted, then re-run it. That commit opens leniently, so the hint no
+// longer routes around it with raw SQL or the consent env var.
+func TestSchemaMigrateFailedDirtyTablesHint(t *testing.T) {
+	pinJSONOutput(t, false)
+	dirty := fmt.Errorf("failed to initialize schema: %w", &schema.DirtyTablesError{Tables: []string{"issues"}})
+	for _, tt := range []struct {
+		global bool
+		commit string
+	}{
+		{global: false, commit: "bd dolt commit"},
+		{global: true, commit: "bd dolt commit --global"},
+	} {
+		t.Run(fmt.Sprintf("global=%v", tt.global), func(t *testing.T) {
+			orig := globalFlag
+			globalFlag = tt.global
+			t.Cleanup(func() { globalFlag = orig })
+
+			var err error
+			out := captureNoticeStderr(t, func() { err = schemaMigrateFailed(dirty) })
+			if err == nil {
+				t.Fatal("schemaMigrateFailed returned nil for a refused migration")
+			}
+			want := "Hint: commit the working set with `" + tt.commit + "`, then re-run this command"
+			if !strings.Contains(out, want) {
+				t.Errorf("hint is missing %q:\n%s", want, out)
+			}
+			if strings.Contains(out, "DOLT_COMMIT(") || strings.Contains(out, schema.AllowRemoteMigrateEnv) {
+				t.Errorf("hint still routes around `bd dolt commit`:\n%s", out)
+			}
+		})
 	}
 }
 

@@ -237,7 +237,8 @@ func lenientGateWarning(intent openIntent, gateErr *schema.RemoteMigrateGateErro
 // requireReadableSchema bounds a read-only command's read-through. Having
 // tolerated a migration refusal, the open goes on at the current schema, which
 // this binary's issue reads can query only while it has every column the
-// shared projection selects (schema.CheckReadableDrift). One that lacks any is
+// shared projection selects, the lease overlay included
+// (schema.CheckReadableDrift). One that lacks any is
 // refused here, as server mode's read-only open refuses it
 // (dolt.Config.RequireReadableSchema), instead of opening and then failing
 // every read on an unknown column. The other intents read no issues through
@@ -246,7 +247,9 @@ func (s *EmbeddedDoltStore) requireReadableSchema(ctx context.Context, conn *sql
 	if s.intent != openReadOnlyCommand {
 		return nil
 	}
-	return schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))
+	return schema.CheckReadableDrift(ctx, conn,
+		schema.ReadableRequirement{Table: "issues", Columns: sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)},
+		schema.ReadableRequirement{Table: "leases", Columns: sqlbuild.LeaseOverlayColumns()})
 }
 
 // toleratesGateRefusal reports whether this open's intent may warn and

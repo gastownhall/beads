@@ -750,3 +750,23 @@ func TestColumnNames(t *testing.T) {
 		t.Errorf("QualifyColumns = %q, want %q", got, want)
 	}
 }
+
+// TestLeaseOverlayColumns pins the overlay the readable-schema check requires
+// to what the issue reads actually reference: the LeaseJoin key and every
+// LeaseSelectColumns entry, unqualified.
+func TestLeaseOverlayColumns(t *testing.T) {
+	t.Parallel()
+	got := LeaseOverlayColumns()
+	want := []string{"issue_id", "lease_expires_at", "heartbeat_at", "granted_node"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("LeaseOverlayColumns() = %v, want %v", got, want)
+	}
+	if !strings.Contains(LeaseJoin("issues"), "leases."+got[0]+" ") {
+		t.Errorf("LeaseJoin(issues) = %q does not join on leases.%s", LeaseJoin("issues"), got[0])
+	}
+	for _, column := range got[1:] {
+		if !slices.Contains(ColumnNames(LeaseSelectColumns), "leases."+column) {
+			t.Errorf("leases.%s is not in LeaseSelectColumns %q", column, LeaseSelectColumns)
+		}
+	}
+}

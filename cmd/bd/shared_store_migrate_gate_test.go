@@ -178,6 +178,27 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 		t.Errorf("expected the one-shot shared-store notice on stderr, got:\n%s", stderr)
 	}
 
+	// The consent deferral settles the upgrade witness (#6929): an operator
+	// decision is not a failure, so the one-shot signal is consumed —
+	// unlike the dirty-tables failure, which keeps the witness for the retry.
+	if raw, err := os.ReadFile(filepath.Join(beadsDir, localVersionFile)); err != nil {
+		t.Fatalf("read %s after the refused bump: %v", localVersionFile, err)
+	} else if got := strings.TrimSpace(string(raw)); got != Version {
+		t.Errorf("witness = %q after the gate refusal, want %q — a consent deferral must settle", got, Version)
+	}
+	// And the next command does not repeat the gate notice: no stale witness,
+	// no second upgrade attempt. Reads keep working throughout.
+	stdout, stderr, code = run("list")
+	if code != 0 {
+		t.Fatalf("second bd list exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "shr-1") {
+		t.Errorf("second bd list did not render the issue:\n%s", stdout)
+	}
+	if strings.Contains(stderr, "not auto-applying") {
+		t.Errorf("the settled deferral must not repeat the gate notice on the next command; got:\n%s", stderr)
+	}
+
 	// A write is refused outright, with the full guidance block rather than a
 	// bare error.
 	stdout, stderr, code = run("create", "Should be refused", "-p", "2")
@@ -338,6 +359,493 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 	}
 	stdout, stderr, code = run("list")
 	if code != 0 || !strings.Contains(stdout, "rdb-1") {
+		t.Fatalf("bd list after bd migrate schema: exit %d, want the issue listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
+
+// dirtyUpgradeWorkspace is the server-mode workspace of gastownhall/beads#6929:
+// a database whose cursor is one migration-pass behind this binary (0073
+// alters `issues`), an uncommitted user edit to `issues` in the working set,
+// and a .local_version from an older bd, so the next command's version-bump
+// reconciliation runs the pending migrations and the dirty-table guard
+// refuses them. The schema change itself stays applied, so reads keep working
+// and only the reconciliation is at stake.
+type dirtyUpgradeWorkspace struct {
+	repo     string
+	beadsDir string
+	witness  string
+	admin    *sql.DB
+	bd       string
+}
+
+const dirtyUpgradeOldWitness = "1.0.0"
+
+func newDirtyUpgradeWorkspace(t *testing.T) *dirtyUpgradeWorkspace {
+	t.Helper()
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("create test store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "drt"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	now := time.Now()
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "drt-1",
+		Title:     "one",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, "test-user"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close setup store: %v", err)
+	}
+	// autoMigrateOnVersionBump skips a workspace with no local database
+	// directory.
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+		t.Fatalf("create local dolt data dir: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+	}.String())
+	if err != nil {
+		t.Fatalf("connect to test dolt server: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+
+	// Commit the fixture so the only dirt is the user edit below.
+	if _, err := admin.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'fixture')"); err != nil &&
+		!strings.Contains(err.Error(), "nothing to commit") {
+		t.Fatalf("commit fixture: %v", err)
+	}
+	if schema.LatestVersion() != 74 {
+		t.Fatalf("this fixture regresses the cursor to before 0073 (which alters issues); LatestVersion() = %d, retarget it", schema.LatestVersion())
+	}
+	if _, err := admin.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= 73"); err != nil {
+		t.Fatalf("regress schema_migrations: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'regress cursor')"); err != nil {
+		t.Fatalf("commit regressed cursor: %v", err)
+	}
+	// The recorded bd_version must not let the read-only probe report the
+	// database as already current and skip the writable attempt under test.
+	// local_metadata is dolt-ignored, so this leaves the working set clean.
+	if _, err := admin.ExecContext(ctx, "DELETE FROM local_metadata WHERE `key` = 'bd_version'"); err != nil &&
+		!strings.Contains(err.Error(), "not found") {
+		t.Fatalf("clear recorded bd_version: %v", err)
+	}
+	// The user edit that leaves `issues` dirty in the working set.
+	if _, err := admin.ExecContext(ctx, "UPDATE issues SET title = 'edited' WHERE id = 'drt-1'"); err != nil {
+		t.Fatalf("dirty issues: %v", err)
+	}
+
+	witness := filepath.Join(beadsDir, localVersionFile)
+	if err := os.WriteFile(witness, []byte(dirtyUpgradeOldWitness+"\n"), 0o600); err != nil {
+		t.Fatalf("write stale %s: %v", localVersionFile, err)
+	}
+
+	return &dirtyUpgradeWorkspace{
+		repo:     repo,
+		beadsDir: beadsDir,
+		witness:  witness,
+		admin:    admin,
+		bd:       buildBDForInitTests(t),
+	}
+}
+
+// run runs bd from dir (the workspace root when empty) with BEADS_DIR naming
+// beadsDir (the workspace's when empty) and migration consent given, as the
+// #5920 notice tells scripted use to give it.
+func (w *dirtyUpgradeWorkspace) run(t *testing.T, dir, beadsDir string, args ...string) (string, string, int) {
+	t.Helper()
+	if dir == "" {
+		dir = w.repo
+	}
+	if beadsDir == "" {
+		beadsDir = w.beadsDir
+	}
+	cmd := exec.Command(w.bd, args...)
+	cmd.Dir = dir
+	cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+		"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv,
+		schema.AllowMigrateEnv, "BD_IGNORE_SCHEMA_SKEW", "BD_DEBUG"),
+		"HOME="+t.TempDir(),
+		"XDG_CONFIG_HOME="+t.TempDir(),
+		"BEADS_TEST_MODE=1",
+		"BEADS_TEST_SERVER=1",
+		"BEADS_DIR="+beadsDir,
+		schema.AllowRemoteMigrateEnv+"=1",
+	)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running bd %v: %v", args, err)
+		}
+		code = exitErr.ExitCode()
+	}
+	t.Logf("bd %v: exit %d\nstdout:\n%s\nstderr:\n%s", args, code, stdout.String(), stderr.String())
+	return stdout.String(), stderr.String(), code
+}
+
+func (w *dirtyUpgradeWorkspace) cursor(t *testing.T) int {
+	t.Helper()
+	var cursor int
+	if err := w.admin.QueryRowContext(context.Background(),
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&cursor); err != nil {
+		t.Fatalf("read schema cursor: %v", err)
+	}
+	return cursor
+}
+
+// assertRefusedAndRetained checks the state a refused version-bump leaves:
+// nothing migrated, the user's uncommitted edit intact, and the old witness
+// kept so the next command retries.
+func (w *dirtyUpgradeWorkspace) assertRefusedAndRetained(t *testing.T, after string) {
+	t.Helper()
+	if got := w.cursor(t); got != 72 {
+		t.Errorf("after %s: schema cursor = %d, want it unchanged at 72", after, got)
+	}
+	var title string
+	if err := w.admin.QueryRowContext(context.Background(),
+		"SELECT title FROM issues WHERE id = 'drt-1'").Scan(&title); err != nil {
+		t.Fatalf("read drt-1 title: %v", err)
+	}
+	if title != "edited" {
+		t.Errorf("after %s: the uncommitted user edit is gone (title %q)", after, title)
+	}
+	if got := readLocalVersion(w.witness); got != dirtyUpgradeOldWitness {
+		t.Errorf("after %s: %s = %q, want the previous %q kept so the next command retries the upgrade",
+			after, localVersionFile, got, dirtyUpgradeOldWitness)
+	}
+}
+
+// assertDirtyUpgradeNotice checks the dirty-table failure notice: it names the
+// dirty table, gives the commit-then-migrate remedy in that order, and comes
+// after the consent's "applying" line, which it corrects.
+func assertDirtyUpgradeNotice(t *testing.T, cmd, stderr string) {
+	t.Helper()
+	notice := strings.Index(stderr, "pending schema migrations were not applied")
+	if notice < 0 {
+		t.Fatalf("%s: stderr does not report the refused version-bump migration:\n%s", cmd, stderr)
+	}
+	rest := stderr[notice:]
+	if !strings.Contains(rest, "issues") {
+		t.Errorf("%s: the notice does not name the dirty table:\n%s", cmd, rest)
+	}
+	commit, migrate := strings.Index(rest, "'bd dolt commit'"), strings.Index(rest, "'bd migrate schema'")
+	if commit < 0 || migrate < 0 || commit > migrate {
+		t.Errorf("%s: the notice does not give 'bd dolt commit' then 'bd migrate schema':\n%s", cmd, rest)
+	}
+	if !strings.Contains(rest, "next eligible non-preview command retries") {
+		t.Errorf("%s: the notice does not say which command retries the upgrade:\n%s", cmd, rest)
+	}
+	if applying := strings.Index(strings.ToLower(stderr), "applying"); applying < 0 || applying > notice {
+		t.Errorf("%s: want the consent's applying line, then the notice correcting it:\n%s", cmd, stderr)
+	}
+}
+
+// TestServerVersionBumpDirtyTablesRefusalIsReportedAndRetried reproduces
+// gastownhall/beads#6929 end to end. The operator has consented to migrate
+// (BD_ALLOW_REMOTE_MIGRATE=1), so the version-bump reconciliation's writable
+// open runs the pending migrations and is refused with
+// schema.DirtyTablesError. That refusal used to reach only debug logging, and
+// .local_version was already rewritten, so no later command retried it or
+// said why `bd list` later failed.
+func TestServerVersionBumpDirtyTablesRefusalIsReportedAndRetried(t *testing.T) {
+	w := newDirtyUpgradeWorkspace(t)
+
+	_, stderr, _ := w.run(t, "", "", "count")
+	assertDirtyUpgradeNotice(t, "bd count", stderr)
+	w.assertRefusedAndRetained(t, "bd count")
+}
+
+// TestServerVersionBumpFailureNoticeSuppressedUnderJSON pins the failure
+// notice's --json contract on a real server refusal, the one it shares with
+// the gate notice: under --json the refused dirty-tables migration prints no
+// prose on stderr, and the witness is retained exactly as in the human-output
+// case.
+func TestServerVersionBumpFailureNoticeSuppressedUnderJSON(t *testing.T) {
+	w := newDirtyUpgradeWorkspace(t)
+
+	stdout, stderr, code := w.run(t, "", "", "count", "--json")
+	if code != 0 {
+		t.Fatalf("bd count --json: exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	for _, prose := range []string{
+		"were not applied", "finishing the upgrade failed", "bd dolt commit", "retries the migration",
+	} {
+		if strings.Contains(stderr, prose) {
+			t.Errorf("--json run printed the version-bump failure prose %q on stderr:\n%s", prose, stderr)
+		}
+	}
+	w.assertRefusedAndRetained(t, "bd count --json")
+}
+
+// TestServerVersionBumpDirtyTablesRecoveryConverges is the rest of #6929's
+// story: the retained witness makes the next command report the refusal
+// again, the remedy the notice names converges, and once it has, the upgrade
+// is settled and stays quiet.
+func TestServerVersionBumpDirtyTablesRecoveryConverges(t *testing.T) {
+	w := newDirtyUpgradeWorkspace(t)
+
+	for _, args := range [][]string{{"count"}, {"count"}} {
+		_, stderr, _ := w.run(t, "", "", args...)
+		assertDirtyUpgradeNotice(t, "bd "+strings.Join(args, " "), stderr)
+		w.assertRefusedAndRetained(t, "bd "+strings.Join(args, " "))
+	}
+
+	// Migrating first is the natural mistake; its refusal must name the same
+	// plain commit, not a raw-SQL recipe or an env override.
+	_, stderr, code := w.run(t, "", "", "migrate", "schema")
+	if code == 0 {
+		t.Fatalf("bd migrate schema succeeded over a dirty issues table")
+	}
+	if !strings.Contains(stderr, "bd dolt commit") || strings.Contains(stderr, "DOLT_COMMIT(") {
+		t.Errorf("bd migrate schema over dirty tables does not point at a plain 'bd dolt commit':\n%s", stderr)
+	}
+
+	if stdout, stderr, code := w.run(t, "", "", "dolt", "commit", "-m", "pre-migration working set"); code != 0 {
+		t.Fatalf("bd dolt commit: exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if stdout, stderr, code := w.run(t, "", "", "migrate", "schema"); code != 0 {
+		t.Fatalf("bd migrate schema after the commit: exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if got := w.cursor(t); got != schema.LatestVersion() {
+		t.Errorf("schema cursor = %d after recovery, want %d", got, schema.LatestVersion())
+	}
+	if got := readLocalVersion(w.witness); got != Version {
+		t.Errorf("%s = %q after recovery, want %q", localVersionFile, got, Version)
+	}
+
+	stdout, stderr, code := w.run(t, "", "", "list")
+	if code != 0 || !strings.Contains(stdout, "drt-1") {
+		t.Fatalf("bd list after recovery: exit %d, want drt-1 listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, "were not applied") || strings.Contains(stderr, "finishing the upgrade failed") {
+		t.Errorf("bd list after recovery still reports a version-bump failure:\n%s", stderr)
+	}
+}
+
+// TestDoctorVersionBumpDirtyRefusalKeepsTargetWitness runs #6929 through
+// `bd doctor <path>`, which replicates the version-bump pre-run for its
+// target. Launched from another workspace with no readonly or freeze gate, it
+// must report the refusal and keep the TARGET's witness for the retry, and
+// leave the caller workspace's witness alone.
+func TestDoctorVersionBumpDirtyRefusalKeepsTargetWitness(t *testing.T) {
+	w := newDirtyUpgradeWorkspace(t)
+
+	caller := t.TempDir()
+	callerBeads := filepath.Join(caller, ".beads")
+	if err := os.MkdirAll(callerBeads, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// The caller is another server-mode clone of the same shared database:
+	// doctor's embedded-mode gate reads the caller's workspace, not the target.
+	meta, err := os.ReadFile(filepath.Join(w.beadsDir, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(callerBeads, "metadata.json"), meta, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const callerWitness = "0.9.0"
+	callerWitnessPath := filepath.Join(callerBeads, localVersionFile)
+	if err := os.WriteFile(callerWitnessPath, []byte(callerWitness+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, _ := w.run(t, caller, callerBeads, "doctor", w.repo)
+	assertDirtyUpgradeNotice(t, "bd doctor", stderr)
+	w.assertRefusedAndRetained(t, "bd doctor")
+	if got := readLocalVersion(callerWitnessPath); got != callerWitness {
+		t.Errorf("caller %s = %q after bd doctor <target>, want it untouched (%q)", localVersionFile, got, callerWitness)
+	}
+}
+
+// TestServerModeReadRefusesAMissingLeaseOverlay is the lease half of the
+// readable-schema check above. Every full issue read also selects the
+// ephemeral leases overlay (sqlbuild.LeaseSelectColumns through LeaseJoin), so
+// a behind database that has every issue column but no leases table opened
+// fine and then failed each read on the raw missing table (#6929). It must
+// refuse at open with the schema-version gap and its remedy instead, the
+// remedy must restore the table, and a behind database with both projections
+// complete must keep serving reads.
+func TestServerModeReadRefusesAMissingLeaseOverlay(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("create test store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "lsd"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	now := time.Now()
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "lsd-1",
+		Title:     "Readable with its lease overlay",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, "test-user"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close setup store: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+	}.String())
+	if err != nil {
+		t.Fatalf("connect to test dolt server: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+
+	// Behind by one migration (0074, the id tombstone tables, which no issue
+	// read touches), with every issue column in place.
+	if schema.LatestVersion() != 74 {
+		t.Fatalf("this fixture regresses the cursor past 0074 (the id tombstone tables); LatestVersion() = %d, retarget it", schema.LatestVersion())
+	}
+	for _, stmt := range []string{
+		"DROP TABLE id_tombstones",
+		"DROP TABLE wisp_id_tombstones",
+		"DELETE FROM schema_migrations WHERE version >= 74",
+		"CALL DOLT_COMMIT('-Am', 'test: one migration behind')",
+	} {
+		if _, err := admin.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	// A current witness keeps the version-bump pre-run out of it: only the
+	// read path is under test.
+	if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte(Version+"\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", localVersionFile, err)
+	}
+
+	bd := buildBDForInitTests(t)
+	run := func(args ...string) (string, string, int) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = repo
+		cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+			"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv,
+			schema.AllowMigrateEnv, "BD_IGNORE_SCHEMA_SKEW"),
+			"HOME="+t.TempDir(),
+			"XDG_CONFIG_HOME="+t.TempDir(),
+			"BEADS_TEST_MODE=1",
+			"BEADS_TEST_SERVER=1",
+			"BEADS_DIR="+beadsDir,
+			schema.AllowRemoteMigrateEnv+"=0",
+		)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		code := 0
+		if err := cmd.Run(); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("running bd %v: %v", args, err)
+			}
+			code = exitErr.ExitCode()
+		}
+		return stdout.String(), stderr.String(), code
+	}
+
+	// Positive control: both projections complete, so the behind database
+	// keeps serving reads.
+	if stdout, stderr, code := run("list"); code != 0 || !strings.Contains(stdout, "lsd-1") {
+		t.Fatalf("bd list on a behind database with complete projections: exit %d, want lsd-1 listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	// leases is dolt_ignored (clone-local), so dropping it leaves history alone.
+	if _, err := admin.ExecContext(ctx, "DROP TABLE leases"); err != nil {
+		t.Fatalf("drop leases: %v", err)
+	}
+	stdout, stderr, code := run("list")
+	if code == 0 {
+		t.Fatalf("bd list succeeded without the lease overlay\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "schema version mismatch: database is at v73, binary expects v74") ||
+		!strings.Contains(stderr, "bd migrate schema") {
+		t.Errorf("bd list refusal does not name the behind schema and its remedy:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "table not found") || strings.Contains(stderr, "1146") {
+		t.Errorf("bd list reached a query and failed on the missing leases table instead of refusing at open:\n%s", stderr)
+	}
+
+	if stdout, stderr, code := run("migrate", "schema"); code != 0 {
+		t.Fatalf("bd migrate schema exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	stdout, stderr, code = run("list")
+	if code != 0 || !strings.Contains(stdout, "lsd-1") {
 		t.Fatalf("bd list after bd migrate schema: exit %d, want the issue listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 }

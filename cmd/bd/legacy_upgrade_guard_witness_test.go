@@ -281,7 +281,8 @@ func TestLegacyUpgradeGuardWarningIsSelfHealing(t *testing.T) {
 		t.Fatal("guard admitted an unreadable witness without warning")
 	}
 
-	// trackBdVersion rewrites the witness whenever it differs from Version.
+	// trackBdVersion rewrites the witness whenever it differs from Version
+	// (an upgrade once settleBdVersionStamp has an outcome for it).
 	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
 		t.Fatal(err)
 	}
