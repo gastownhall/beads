@@ -1,5 +1,5 @@
 {
-  "recorded_from": "29472cad3 + gascity/bd-enterprise#210",
+  "recorded_from": "4a92834d5 + fix-4750-proxied-child-counter",
   "steps": [
     "create a",
     "create b blocked by a",
@@ -93,8 +93,8 @@
         "parent_id",
         "last_child"
       ],
-      "rows": 0,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "rows": 1,
+      "sha256": "753b8feea7bdc0fc74468faa597a32984edc501e9873e9f4ee1df7b59d56d0a6"
     },
     "comments": {
       "columns": [
