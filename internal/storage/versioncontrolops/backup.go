@@ -221,6 +221,11 @@ const backupManifestName = "manifest"
 // kernel would follow a symlink first. A path Dolt does not read literally
 // (fileURLSyntax) is refused before anything is checked.
 //
+// The checks read this process's filesystem. They speak for the directory
+// Dolt opens only when Dolt runs in this process or on a SQL server that
+// shares this filesystem at that path; a server in a container or on another
+// host opens the path on its own filesystem, about which they say nothing.
+//
 // It checks only that the backup's manifest is present as a regular file, not
 // that the backup is complete or readable. That check is an interim guard for
 // the engine's drop-before-sync order, kept in this storage package so the

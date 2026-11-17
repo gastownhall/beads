@@ -374,6 +374,116 @@ func TestEnsureIssuesRigColumnsAddsOnlyMissing(t *testing.T) {
 	}
 }
 
+// TestEnsureWispsLateColumns pins the #6080 pre-0053 repair: it probes the
+// wisps table, then each late column in order, and adds only the missing ones
+// with the exact 0023/0027 definitions. sqlmock matches calls in order and
+// fails on any unexpected exec, so each case's expectation list is the full
+// statement sequence.
+func TestEnsureWispsLateColumns(t *testing.T) {
+	tableQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
+	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+	exactExec := func(sql string) string { return "^" + regexp.QuoteMeta(sql) + "$" }
+	count := func(n int) *sqlmock.Rows { return sqlmock.NewRows([]string{"c"}).AddRow(n) }
+	driverErr := errors.New("driver: boom")
+
+	cases := []struct {
+		name    string
+		expect  func(sqlmock.Sqlmock)
+		wantErr string
+	}{
+		{
+			// AC-5: no wisps table. 0053 skips every wisps statement then,
+			// so the repair stops after the table probe: no column probe,
+			// CREATE or ALTER.
+			name: "wisps_absent",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(tableQuery).WithArgs("wisps").WillReturnRows(count(0))
+			},
+		},
+		{
+			// AC-4: a fresh store, or a second call right after a repair:
+			// three probes and no ALTER.
+			name: "both_present",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(tableQuery).WithArgs("wisps").WillReturnRows(count(1))
+				mock.ExpectQuery(columnQuery).WithArgs("wisps", "no_history").WillReturnRows(count(1))
+				mock.ExpectQuery(columnQuery).WithArgs("wisps", "started_at").WillReturnRows(count(1))
+			},
+		},
+		{
+			// The 2026-04 WispsTableSchema shape, and the re-entry after a
+			// kill between the two ALTERs: only started_at is added.
+			name: "started_at_missing",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(tableQuery).WithArgs("wisps").WillReturnRows(count(1))
+				mock.ExpectQuery(columnQuery).WithArgs("wisps", "no_history").WillReturnRows(count(1))
+				mock.ExpectQuery(columnQuery).WithArgs("wisps", "started_at").WillReturnRows(count(0))
+				mock.ExpectExec(exactExec("ALTER TABLE wisps ADD COLUMN started_at DATETIME")).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+			},
+		},
+		{
+			name: "both_missing",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(tableQuery).WithArgs("wisps").WillReturnRows(count(1))
+				mock.ExpectQuery(columnQuery).WithArgs("wisps", "no_history").WillReturnRows(count(0))
+				mock.ExpectExec(exactExec("ALTER TABLE wisps ADD COLUMN no_history TINYINT(1) DEFAULT 0")).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectQuery(columnQuery).WithArgs("wisps", "started_at").WillReturnRows(count(0))
+				mock.ExpectExec(exactExec("ALTER TABLE wisps ADD COLUMN started_at DATETIME")).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+			},
+		},
+		{
+			name: "alter_error",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(tableQuery).WithArgs("wisps").WillReturnRows(count(1))
+				mock.ExpectQuery(columnQuery).WithArgs("wisps", "no_history").WillReturnRows(count(1))
+				mock.ExpectQuery(columnQuery).WithArgs("wisps", "started_at").WillReturnRows(count(0))
+				mock.ExpectExec(exactExec("ALTER TABLE wisps ADD COLUMN started_at DATETIME")).
+					WillReturnError(driverErr)
+			},
+			wantErr: "adding wisps.started_at for migration 0053",
+		},
+		{
+			name: "probe_error",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(tableQuery).WithArgs("wisps").WillReturnRows(count(1))
+				mock.ExpectQuery(columnQuery).WithArgs("wisps", "no_history").WillReturnError(driverErr)
+			},
+			wantErr: "checking wisps.no_history",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			tc.expect(mock)
+
+			err = ensureWispsLateColumns(context.Background(), db)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ensureWispsLateColumns: %v", err)
+				}
+			} else {
+				if !errors.Is(err, driverErr) {
+					t.Fatalf("ensureWispsLateColumns error = %v, want it to wrap %v", err, driverErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("ensureWispsLateColumns error = %q, want it to contain %q", err, tc.wantErr)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+		})
+	}
+}
+
 func TestEnsureWispDependenciesSplitTargetsAddsMissingAndBackfills(t *testing.T) {
 	failOnSwallowedAdvisory(t)
 	db, mock, err := sqlmock.New()
@@ -511,12 +621,15 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	guardExpectAbsentTable(mock)
 
 	// 3. preMigrationRepair(53): ensureIssuesRigColumns (all present, no
-	// exec), ensureWispDependenciesSplitTargets (table absent, no-op), then
+	// exec), ensureWispsLateColumns (wisps absent, no-op),
+	// ensureWispDependenciesSplitTargets (table absent, no-op), then
 	// ensureDependenciesIDColumn actually mutating `dependencies`.
 	for _, col := range []string{"hook_bead", "role_bead", "agent_state", "last_activity", "role_type", "rig"} {
 		mock.ExpectQuery(columnQuery).WithArgs("issues", col).
 			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 	}
+	mock.ExpectQuery(tableQuery).WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectQuery(columnQuery).WithArgs("dependencies", "id").

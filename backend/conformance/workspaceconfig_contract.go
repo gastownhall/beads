@@ -630,10 +630,23 @@ func RunWorkspaceConfigARefusedWriteRecordsNoHistory(t *testing.T, ctx context.C
 		{Key: "", Value: "x"},
 		{Key: publicops.SettingKeyIssuePrefix, Value: "hijack"},
 		{Key: publicops.SettingKeyStatusCustom, Value: "open"},
+		// A config.yaml-only key (#7559): this table is replicated by bd dolt
+		// push, so a tracker secret must never become a row in it.
+		{Key: "github.token", Value: "x"},
 	} {
 		if _, err := fixture.WorkspaceConfig.SetSetting(ctx, req); !errors.Is(err, publicops.ErrValidation) {
 			t.Fatalf("SetSetting(%q) error = %v, want ErrValidation", req.Key, err)
 		}
+	}
+	// Asked through the ENUMERATION, which lists a stored key even where its
+	// value is withheld: a point read of a credential-bearing key is refused by
+	// name on the served leg whether or not a row exists, so it cannot tell.
+	listed, err := fixture.WorkspaceConfig.ListSettings(ctx, publicops.ListSettingsRequest{})
+	if err != nil {
+		t.Fatalf("ListSettings after the refusals: %v", err)
+	}
+	if _, stored := listed.Settings["github.token"]; stored {
+		t.Fatalf("the refused github.token write left a row behind: %v", listed.Settings)
 	}
 
 	after, err := fixture.CountHistory(ctx)
@@ -641,7 +654,7 @@ func RunWorkspaceConfigARefusedWriteRecordsNoHistory(t *testing.T, ctx context.C
 		t.Fatalf("CountHistory after: %v", err)
 	}
 	if after != before {
-		t.Fatalf("history entries went %d -> %d across three refused writes, want no change", before, after)
+		t.Fatalf("history entries went %d -> %d across the refused writes, want no change", before, after)
 	}
 }
 

@@ -376,11 +376,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 			if aerr != nil {
 				return fmt.Errorf("db: Update %s: affected by status change: %w", id, aerr)
 			}
-			if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
+			if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps, actor); err != nil {
 				return fmt.Errorf("db: Update %s: recompute is_blocked: %w", id, err)
 			}
 			if !newActive {
-				issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), affectedIssues, affectedWisps)
+				issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), actor, affectedIssues, affectedWisps)
 			}
 		}
 	}
@@ -1224,11 +1224,11 @@ func (r *issueSQLRepositoryImpl) AffectedByDeletion(ctx context.Context, issueID
 	return issueops.AffectedByDeletionInTx(ctx, r.runner, issueIDs, wispIDs)
 }
 
-func (r *issueSQLRepositoryImpl) RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string) error {
-	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, issueIDs, wispIDs); err != nil {
+func (r *issueSQLRepositoryImpl) RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string, actor string) error {
+	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, issueIDs, wispIDs, actor); err != nil {
 		return err
 	}
-	issueops.NoteDeleteBlockedRecheck(r.runner, deletedIDs, "", issueIDs, wispIDs)
+	issueops.NoteDeleteBlockedRecheck(r.runner, deletedIDs, "", actor, issueIDs, wispIDs)
 	return nil
 }
 

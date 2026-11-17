@@ -28,9 +28,11 @@ type DeleteIssueResult struct {
 }
 
 // DeleteIssueInTx removes one row and everything that hangs off it, journaling
-// the delete and its edge removals to actor. Callers with a request behind them
-// pass its actor; the actorless system surfaces (storage.DeleteIssue,
-// Tx.DeleteIssue) pass "" — see the 0066 contract in journal.go.
+// the delete, its edge removals and the derived is_blocked updates of the
+// dependents it unblocks to actor. Callers with a request behind them pass its
+// actor; the actorless storage surfaces (storage.DeleteIssue, Tx.DeleteIssue)
+// pass NoRequestActor — see the 0066 contract in journal.go — and are listed
+// in derivedActorSystemCallers (journal_completeness_test.go).
 func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) error {
 	_, err := DeleteIssueInTxWithResult(ctx, tx, id, actor)
 	return err
@@ -65,11 +67,11 @@ func DeleteIssueInTxWithResult(ctx context.Context, tx *sql.Tx, id string, actor
 		return DeleteIssueResult{}, err
 	}
 
-	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, actor)
 	if err != nil {
 		return DeleteIssueResult{}, fmt.Errorf("recompute is_blocked after delete for %s: %w", id, err)
 	}
-	NoteDeleteBlockedRecheck(tx, []string{id}, "", affectedIssues, affectedWisps)
+	NoteDeleteBlockedRecheck(tx, []string{id}, "", actor, affectedIssues, affectedWisps)
 
 	return DeleteIssueResult{IssueRowsChanged: !isWisp || recompute.IssueRowsChanged}, nil
 }
@@ -438,10 +440,10 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 		}
 	}
 
-	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps, actor); err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after batch delete: %w", err)
 	}
-	NoteDeleteBlockedRecheck(tx, set.All, "", affectedIssues, affectedWisps)
+	NoteDeleteBlockedRecheck(tx, set.All, "", actor, affectedIssues, affectedWisps)
 
 	return result, nil
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -488,5 +489,173 @@ func TestChildParentDependencies_PreservesDottedEdgeWithoutRealParentChildLink(t
 	}
 	if count != 1 {
 		t.Errorf("Expected the healthy dotted-ID edge (no real parent-child link) to survive, got %d", count)
+	}
+}
+
+// insertFixExternalTargetDep writes a raw edge whose target sits in
+// depends_on_external, the shape migrations 0041/0047/0035 leave for every
+// missing target, same-prefix ones included.
+func insertFixExternalTargetDep(t *testing.T, db *sql.DB, table, source, target string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	//nolint:gosec // G202: table is a fixed test-chosen name.
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO "+table+" (id, issue_id, depends_on_external, type, created_at, created_by) VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')",
+		source, target); err != nil {
+		t.Fatalf("insert %s %s→%s: %v", table, source, target, err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func countFixDepRows(t *testing.T, db *sql.DB, table, source, target string) int {
+	t.Helper()
+	var n int
+	//nolint:gosec // G202: table is a fixed test-chosen name.
+	if err := db.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE issue_id = ? AND "+fixDependencyTargetExpr+" = ?", source, target).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func createFixIssue(t *testing.T, store *dolt.DoltStore, id string, ephemeral bool) {
+	t.Helper()
+	issue := &types.Issue{ID: id, Title: "Issue " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: ephemeral, CreatedAt: time.Now()}
+	if err := store.CreateIssue(context.Background(), issue, "test"); err != nil {
+		t.Fatalf("CreateIssue %s: %v", id, err)
+	}
+}
+
+func addFixDep(t *testing.T, store *dolt.DoltStore, source, target string) {
+	t.Helper()
+	dep := &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepBlocks, CreatedAt: time.Now(), CreatedBy: "test"}
+	if err := store.AddDependency(context.Background(), dep, "test"); err != nil {
+		t.Fatalf("AddDependency %s→%s: %v", source, target, err)
+	}
+}
+
+// TestOrphanedDependencies_KeepsCrossPrefixTarget: bd dep add stores a bare
+// target under another repository's prefix unverified, so bd doctor --fix
+// must not delete it as an orphan (bd-zcpo44, AC-2).
+func TestOrphanedDependencies_KeepsCrossPrefixTarget(t *testing.T) {
+	t.Run("dependencies", func(t *testing.T) {
+		dir := t.TempDir()
+		store := newFixTestStore(t, dir, "bd")
+		createFixIssue(t, store, "bd-1", false)
+		addFixDep(t, store, "bd-1", "gt-9")
+
+		var fixErr error
+		out := captureFixStdout(t, func() { fixErr = OrphanedDependencies(dir, false) })
+		if fixErr != nil {
+			t.Fatalf("OrphanedDependencies: %v", fixErr)
+		}
+		if !strings.Contains(out, "No orphaned dependencies to fix") {
+			t.Fatalf("output = %q, want it to say there is nothing to fix", out)
+		}
+		var n int
+		if err := store.UnderlyingDB().QueryRow(
+			"SELECT COUNT(*) FROM dependencies WHERE issue_id = 'bd-1' AND depends_on_external = 'gt-9'").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("bd-1→gt-9 rows = %d, want 1 (cross-repository edge deleted)", n)
+		}
+	})
+
+	t.Run("wisp_dependencies", func(t *testing.T) {
+		dir := t.TempDir()
+		store := newFixTestStore(t, dir, "bd")
+		createFixIssue(t, store, "bd-wisp-src", true)
+		addFixDep(t, store, "bd-wisp-src", "gt-9")
+		db := store.UnderlyingDB()
+		if n := countFixDepRows(t, db, "wisp_dependencies", "bd-wisp-src", "gt-9"); n != 1 {
+			t.Fatalf("fixture: wisp_dependencies bd-wisp-src→gt-9 rows = %d, want 1", n)
+		}
+
+		var fixErr error
+		out := captureFixStdout(t, func() { fixErr = OrphanedDependencies(dir, false) })
+		if fixErr != nil {
+			t.Fatalf("OrphanedDependencies: %v", fixErr)
+		}
+		if !strings.Contains(out, "No orphaned dependencies to fix") {
+			t.Fatalf("output = %q, want it to say there is nothing to fix", out)
+		}
+		if n := countFixDepRows(t, db, "wisp_dependencies", "bd-wisp-src", "gt-9"); n != 1 {
+			t.Fatalf("wisp bd-wisp-src→gt-9 rows = %d, want 1 (cross-repository edge deleted)", n)
+		}
+	})
+}
+
+// TestOrphanedDependencies_RemovesOnlySamePrefixOrphan: of a cross-repository
+// edge, a wisp cross-repository edge and a same-prefix edge whose target is
+// gone (stored in depends_on_external), the repair deletes only the last
+// (bd-zcpo44, AC-3).
+func TestOrphanedDependencies_RemovesOnlySamePrefixOrphan(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	createFixIssue(t, store, "bd-1", false)
+	addFixDep(t, store, "bd-1", "gt-9")
+	createFixIssue(t, store, "bd-wisp-src", true)
+	addFixDep(t, store, "bd-wisp-src", "gt-8")
+	db := store.UnderlyingDB()
+	insertFixExternalTargetDep(t, db, "dependencies", "bd-1", "bd-gone")
+	if n := countFixDepRows(t, db, "wisp_dependencies", "bd-wisp-src", "gt-8"); n != 1 {
+		t.Fatalf("fixture: wisp_dependencies bd-wisp-src→gt-8 rows = %d, want 1", n)
+	}
+
+	var fixErr error
+	out := captureFixStdout(t, func() { fixErr = OrphanedDependencies(dir, false) })
+	if fixErr != nil {
+		t.Fatalf("OrphanedDependencies: %v", fixErr)
+	}
+	if !strings.Contains(out, "Fixed 1 orphaned dependency reference(s)") {
+		t.Fatalf("output = %q, want exactly one removal", out)
+	}
+	if n := countFixDepRows(t, db, "dependencies", "bd-1", "bd-gone"); n != 0 {
+		t.Fatalf("bd-1→bd-gone rows = %d, want 0 (same-prefix orphan kept)", n)
+	}
+	if n := countFixDepRows(t, db, "dependencies", "bd-1", "gt-9"); n != 1 {
+		t.Fatalf("bd-1→gt-9 rows = %d, want 1", n)
+	}
+	if n := countFixDepRows(t, db, "wisp_dependencies", "bd-wisp-src", "gt-8"); n != 1 {
+		t.Fatalf("bd-wisp-src→gt-8 rows = %d, want 1", n)
+	}
+}
+
+// TestOrphanedDependencies_RemovesDeletedHeldPrefixTarget: a missing target
+// under issue_prefix or allowed_prefixes (multi-hyphen ones included) is this
+// database's own and so a genuine orphan; only another repository's prefix is
+// kept (bd-zcpo44, AC-4).
+func TestOrphanedDependencies_RemovesDeletedHeldPrefixTarget(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	createFixIssue(t, store, "bd-1", false)
+	db := store.UnderlyingDB()
+	if err := store.SetConfig(context.Background(), "allowed_prefixes", "gt, hq-cv"); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"bd-gone", "gt-9", "hq-cv-9", "zz-5"} {
+		insertFixExternalTargetDep(t, db, "dependencies", "bd-1", target)
+	}
+
+	var fixErr error
+	out := captureFixStdout(t, func() { fixErr = OrphanedDependencies(dir, false) })
+	if fixErr != nil {
+		t.Fatalf("OrphanedDependencies: %v", fixErr)
+	}
+	if !strings.Contains(out, "Fixed 3 orphaned dependency reference(s)") {
+		t.Fatalf("output = %q, want three removals", out)
+	}
+	for _, target := range []string{"bd-gone", "gt-9", "hq-cv-9"} {
+		if n := countFixDepRows(t, db, "dependencies", "bd-1", target); n != 0 {
+			t.Errorf("bd-1→%s rows = %d, want 0 (held-prefix orphan kept)", target, n)
+		}
+	}
+	if n := countFixDepRows(t, db, "dependencies", "bd-1", "zz-5"); n != 1 {
+		t.Errorf("bd-1→zz-5 rows = %d, want 1 (cross-repository edge deleted)", n)
 	}
 }

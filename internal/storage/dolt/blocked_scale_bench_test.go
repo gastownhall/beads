@@ -113,7 +113,7 @@ func TestBlockedStateScaleTiming(t *testing.T) {
 		}
 		start = time.Now()
 		for k := 0; k < bs.reps; k++ {
-			if err := issueops.RecomputeIsBlockedForIDsInTx(ctx, txb, batchIDs); err != nil {
+			if err := issueops.RecomputeIsBlockedForIDsInTx(ctx, txb, batchIDs, issueops.NoRequestActor); err != nil {
 				_ = txb.Rollback()
 				t.Fatalf("RecomputeIsBlockedForIDsInTx(%d ids): %v", bs.size, err)
 			}

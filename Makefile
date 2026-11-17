@@ -364,9 +364,11 @@ test-migration: build
 	@echo "Running migration test harness..."
 	@CANDIDATE_BIN="$(BD_BUILD_OUTPUT)" ./scripts/migration-test/run.sh
 
-# Regenerate the golden-JSON contract corpus (cmd/bd/protocol/testdata/corpus/).
+# Regenerate the golden-JSON contract corpus (cmd/bd/protocol/testdata/corpus/)
+# and its commit ledger (cmd/bd/protocol/testdata/corpus_commits.golden).
 # Run after any deliberate bd --json wire change; review the diff, then commit.
-# A downstream consumer vendors this corpus to detect cross-version drift. Needs Docker (Dolt).
+# A downstream consumer vendors this corpus to detect cross-version drift. Needs
+# Docker (Dolt), or BEADS_TEST_DOLT_SERVER=local with the pinned dolt on PATH.
 corpus-regen:
 	@echo "Regenerating contract corpus..."
 	go test -tags "$(BUILD_TAGS)" ./cmd/bd/protocol -run TestCorpusGolden -corpus.update -count=1
