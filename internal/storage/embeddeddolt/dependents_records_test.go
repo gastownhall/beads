@@ -3,8 +3,13 @@
 package embeddeddolt_test
 
 import (
+	"fmt"
+	"math/rand"
+	"reflect"
+	"sort"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -89,6 +94,180 @@ func TestGetDependentRecordsEmbedded(t *testing.T) {
 		t.Fatalf("CountDependentRecords(blocks): %v", err)
 	} else if n != 2 {
 		t.Fatalf("CountDependentRecords(blocks) = %d, want 2 (dr-s1 + dr-w)", n)
+	}
+}
+
+// perIssueComponentWalk is the walk storage.ComponentReader replaces: one read
+// per issue and direction.
+func perIssueComponentWalk(t *testing.T, te *testEnv, root *types.Issue) []string {
+	t.Helper()
+	ctx := t.Context()
+	order := []string{root.ID}
+	visited := map[string]bool{root.ID: true}
+	for queue := []string{root.ID}; len(queue) > 0; {
+		id := queue[0]
+		queue = queue[1:]
+		dependents, err := te.store.GetDependents(ctx, id)
+		if err != nil {
+			t.Fatalf("GetDependents(%s): %v", id, err)
+		}
+		dependencies, err := te.store.GetDependencies(ctx, id)
+		if err != nil {
+			t.Fatalf("GetDependencies(%s): %v", id, err)
+		}
+		for _, issue := range append(dependents, dependencies...) {
+			if !visited[issue.ID] {
+				visited[issue.ID] = true
+				order = append(order, issue.ID)
+				queue = append(queue, issue.ID)
+			}
+		}
+	}
+	return order
+}
+
+func componentIDs(component *storage.Component) []string {
+	ids := make([]string, 0, len(component.Issues))
+	for _, issue := range component.Issues {
+		ids = append(ids, issue.ID)
+	}
+	return ids
+}
+
+func dependencyKeys(deps []*types.Dependency) []string {
+	keys := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		keys = append(keys, dep.IssueID+">"+dep.DependsOnID+":"+string(dep.Type))
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// TestReadComponentMatchesAPerIssueWalkEmbedded compares the batched walk with a
+// copy of the per-issue walk over a random graph of durable issues and wisps,
+// with cycles, diamonds, edges of every kind the walk follows and edges that name
+// no issue. Each issue's edges must be what GetDependencyRecords returns.
+func TestReadComponentMatchesAPerIssueWalkEmbedded(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	te := newTestEnv(t, "rc")
+	ctx := t.Context()
+
+	const durable, wisps = 30, 8
+	ids := make([]string, 0, durable+wisps)
+	for i := 0; i < durable+wisps; i++ {
+		id := fmt.Sprintf("rc-%02d", i)
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: i >= durable}
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", id, err)
+		}
+		ids = append(ids, id)
+	}
+	rnd := rand.New(rand.NewSource(8240))
+	depTypes := []types.DependencyType{types.DepRelated, types.DepRelatesTo, types.DepDiscoveredFrom}
+	seen := make(map[[2]string]bool)
+	for added := 0; added < 70; {
+		from, to := ids[rnd.Intn(len(ids))], ids[rnd.Intn(len(ids))]
+		if from == to || seen[[2]string{from, to}] {
+			continue
+		}
+		seen[[2]string{from, to}] = true
+		dep := &types.Dependency{IssueID: from, DependsOnID: to, Type: depTypes[rnd.Intn(len(depTypes))]}
+		if err := te.store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("AddDependency %s->%s: %v", from, to, err)
+		}
+		added++
+	}
+
+	for _, rootID := range []string{"rc-00", "rc-07", "rc-19", "rc-29", "rc-30", "rc-37"} {
+		root, err := te.store.GetIssue(ctx, rootID)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", rootID, err)
+		}
+		component, err := te.store.ReadComponent(ctx, root)
+		if err != nil {
+			t.Fatalf("ReadComponent(%s): %v", rootID, err)
+		}
+		got, want := componentIDs(component), perIssueComponentWalk(t, te, root)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("walk from %s:\n got %v\nwant %v", rootID, got, want)
+		}
+		for _, id := range got {
+			records, err := te.store.GetDependencyRecords(ctx, id)
+			if err != nil {
+				t.Fatalf("GetDependencyRecords(%s): %v", id, err)
+			}
+			if g, w := dependencyKeys(component.Outgoing[id]), dependencyKeys(records); !reflect.DeepEqual(g, w) {
+				t.Errorf("edges of %s:\n got %v\nwant %v", id, g, w)
+			}
+		}
+	}
+}
+
+// An id can exist in both planes after a pull brings another clone's promoted
+// issue next to a local wisp copy. The walk follows the durable row; the edge
+// list stays with the plane GetDependencyRecords reads, the wisp one.
+func TestReadComponentFollowsBothPlanesOfADualIDEmbedded(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	te := newTestEnv(t, "rd")
+	ctx := t.Context()
+	for _, id := range []string{"rd-dual", "rd-target"} {
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", id, err)
+		}
+	}
+	if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: "rd-dual", DependsOnID: "rd-target", Type: types.DepBlocks}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	te.exec(t, ctx, "INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral) "+
+		"VALUES ('rd-dual', 'dual', '', '', '', '', 'open', 2, 'task', 1)")
+
+	root, err := te.store.GetIssue(ctx, "rd-dual")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	component, err := te.store.ReadComponent(ctx, root)
+	if err != nil {
+		t.Fatalf("ReadComponent: %v", err)
+	}
+	if got, want := componentIDs(component), perIssueComponentWalk(t, te, root); !reflect.DeepEqual(got, want) || len(got) != 2 {
+		t.Errorf("walk = %v, want %v, two issues", got, want)
+	}
+	if deps := component.Outgoing["rd-dual"]; len(deps) != 0 {
+		t.Errorf("edges of the dual id = %v, want none from the wisp plane", deps)
+	}
+}
+
+func TestReadComponentToleratesAMissingWispDependencyTableEmbedded(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	te := newTestEnv(t, "rm")
+	ctx := t.Context()
+	for _, id := range []string{"rm-a", "rm-b", "rm-c"} {
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", id, err)
+		}
+	}
+	for _, edge := range [][2]string{{"rm-b", "rm-a"}, {"rm-a", "rm-c"}} {
+		if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: edge[0], DependsOnID: edge[1], Type: types.DepBlocks}, "tester"); err != nil {
+			t.Fatalf("AddDependency: %v", err)
+		}
+	}
+	te.exec(t, ctx, "RENAME TABLE wisp_dependencies TO wisp_dependencies_renamed_away")
+
+	root, err := te.store.GetIssue(ctx, "rm-a")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	component, err := te.store.ReadComponent(ctx, root)
+	if err != nil {
+		t.Fatalf("ReadComponent: %v", err)
+	}
+	if got, want := componentIDs(component), []string{"rm-a", "rm-b", "rm-c"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("walk = %v, want %v", got, want)
 	}
 }
 
