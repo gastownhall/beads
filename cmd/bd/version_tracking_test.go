@@ -414,6 +414,41 @@ func TestTrackBdVersion_HeadStampChangeDetectedAsUpgrade(t *testing.T) {
 	}
 }
 
+// TestTrackBdVersion_ReleaseCandidateOrdering pins the direction of a move
+// between a release candidate and its release (#6595): moving from an rc to
+// its release is an upgrade, so the one-shot post-upgrade reconciliation runs;
+// moving back from the release to one of its candidates is not.
+func TestTrackBdVersion_ReleaseCandidateOrdering(t *testing.T) {
+	tests := []struct {
+		name         string
+		lastVersion  string
+		binVersion   string
+		wantDetected bool
+	}{
+		{name: "rc to its release", lastVersion: "1.4.0-rc.3", binVersion: "1.4.0", wantDetected: true},
+		{name: "release back to its rc", lastVersion: "1.4.0", binVersion: "1.4.0-rc.3", wantDetected: false},
+		{name: "rc to a later rc", lastVersion: "1.4.0-rc.2", binVersion: "1.4.0-rc.3", wantDetected: true},
+		{name: "rc.9 to rc.10", lastVersion: "1.4.0-rc.9", binVersion: "1.4.0-rc.10", wantDetected: true},
+		{name: "rc.10 back to rc.9", lastVersion: "1.4.0-rc.10", binVersion: "1.4.0-rc.9", wantDetected: false},
+		{name: "previous release to an rc", lastVersion: "1.3.4", binVersion: "1.4.0-rc.3", wantDetected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			localVersionPath := newTrackingWorkspace(t, tt.lastVersion, tt.binVersion)
+
+			trackBdVersion()
+
+			if versionUpgradeDetected != tt.wantDetected {
+				t.Errorf("versionUpgradeDetected = %v, want %v", versionUpgradeDetected, tt.wantDetected)
+			}
+			if got := readLocalVersion(localVersionPath); got != tt.binVersion {
+				t.Errorf(".local_version = %q, want %q", got, tt.binVersion)
+			}
+		})
+	}
+}
+
 // TestTrackBdVersion_HeadStampNeverReachesPreV56Recovery walks the whole
 // #5603 shape end to end: a workspace last touched by a Homebrew --HEAD build,
 // a .dolt with no .bd-dolt-ok marker, and a release install on top. Detection
@@ -579,6 +614,9 @@ func TestRecoverPreV56IfNeeded_OnlySemverPredecessorsAreRecovered(t *testing.T) 
 		{name: "pre-0.56 release", previous: "0.55.4", wantRecovery: true},
 		{name: "v-prefixed pre-0.56 release", previous: "v0.55.4", wantRecovery: true},
 		{name: "pre-0.56 pre-release", previous: "0.55.4-rc.1", wantRecovery: true},
+		// Semver puts a 0.56.0 pre-release before 0.56.0 (#6596). No official
+		// build was ever stamped this way; the row pins the choice.
+		{name: "0.56.0 pre-release", previous: "0.56.0-rc.1", wantRecovery: true},
 	}
 
 	for _, tt := range tests {
