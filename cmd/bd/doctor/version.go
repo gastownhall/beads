@@ -285,7 +285,8 @@ func stripVersionPrefix(version string) string {
 // sorts below the identical version without one ("1.3.1-rc.1" < "1.3.1"),
 // and two prerelease suffixes are compared identifier-by-identifier (each
 // identifier numeric if all-digits, else lexical), with the shorter
-// identifier list sorting lower when one is a prefix of the other.
+// identifier list sorting lower when one is a prefix of the other. Build
+// metadata ("+...") takes no part in the comparison.
 //
 // Fixes gastownhall/beads#6595: the prior parser split the whole string on
 // "." without splitting off the prerelease suffix first, so "1.3.1-rc.1"
