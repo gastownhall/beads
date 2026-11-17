@@ -298,13 +298,24 @@ func stripVersionPrefix(version string) string {
 // Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
 // Handles versions like "0.20.1", "1.2.3", "1.3.1-rc.1", etc.
 func CompareVersions(v1, v2 string) int {
-	core1, pre1 := splitPrereleaseSuffix(stripVersionPrefix(v1))
-	core2, pre2 := splitPrereleaseSuffix(stripVersionPrefix(v2))
+	core1, pre1 := splitPrereleaseSuffix(stripBuildMetadata(stripVersionPrefix(v1)))
+	core2, pre2 := splitPrereleaseSuffix(stripBuildMetadata(stripVersionPrefix(v2)))
 
 	if c := compareVersionCore(core1, core2); c != 0 {
 		return c
 	}
 	return comparePrereleaseSuffix(pre1, pre2)
+}
+
+// stripBuildMetadata drops a "+<build>" suffix. Semver 2.0 leaves build
+// metadata out of precedence, so "1.4.0-rc.2+sha.abc" equals "1.4.0-rc.2"; it
+// has to go before the prerelease split, which would otherwise keep it as part
+// of the last prerelease identifier.
+func stripBuildMetadata(v string) string {
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		return v[:i]
+	}
+	return v
 }
 
 // splitPrereleaseSuffix splits a version string on its first "-" into the

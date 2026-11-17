@@ -1302,6 +1302,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd doctor` ranks a release candidate below its release** (#6595). The
+  version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
+  sorted above its own release and `bd doctor` never told an rc user that
+  the release had shipped. Versions now order by semver 2.0: a pre-release
+  sorts below its release, and its identifiers compare one by one, numbers
+  numerically (`rc.2` < `rc.10`) and below words (`beta` < `rc`); build
+  metadata (`+...`) is ignored. Moving from a candidate to its release now
+  counts as an upgrade, so the one-time post-upgrade notice and
+  `bd upgrade review` cover it, and moving back does not. `bd doctor` reports
+  hooks installed by a candidate as outdated under its release (fix:
+  `bd hooks install --force`), and the Claude plugin check warns when the
+  plugin is a candidate and the release is out. (#6596, by rjgeng)
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
