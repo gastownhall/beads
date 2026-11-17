@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1270,10 +1271,18 @@ func TestExpansionVarRefs(t *testing.T) {
 					Labels:      []string{"team:{team}"},
 					DependsOn:   []string{"{target}.prep-{stage}"},
 					Needs:       []string{"{target.id}.gate-{gate}"},
-					// Neither field is carried into the expanded step, so
-					// nothing in them is ever substituted.
-					Notes:     "{notes_only}",
-					Condition: "{{condition_only}}",
+					Notes:       "{notes_only}",
+					WaitsFor:    "children-of({target}.{waits_only})",
+					Gate:        &Gate{Type: "human", AwaitID: "{gate_only}"},
+					Metadata: map[string]interface{}{
+						"nested": map[string]interface{}{"k": "{meta_only}"},
+						"list":   []interface{}{"{meta_list}"},
+					},
+					// Later phases own these fields, so expansion substitutes
+					// nothing in them.
+					Condition:  "{{condition_only}}",
+					Loop:       &LoopSpec{Range: "1..{loop_only}", Body: []*Step{{ID: "b", Title: "{loop_body_only}"}}},
+					OnComplete: &OnCompleteSpec{ForEach: "output.items", Vars: map[string]string{"k": "{on_complete_only}"}},
 					Children: []*Step{
 						{ID: "{target}.child", Title: "Work on {{feature}}"},
 					},
@@ -1287,7 +1296,7 @@ func TestExpansionVarRefs(t *testing.T) {
 		// single-brace pattern also matches inside {{feature}}, so a
 		// --var feature=x is consumed there too.
 		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
-		if want := "component env feature gate owner release stage team"; got != want {
+		if want := "component env feature gate gate_only meta_list meta_only notes_only owner release stage team waits_only"; got != want {
 			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
 		}
 		if f.Steps != nil {
@@ -1327,4 +1336,497 @@ func TestExpansionVarRefs(t *testing.T) {
 			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
+}
+
+// gatedExpansionJSON is an expansion whose approve step sets every field
+// expandStep used to drop (GH#6433), with values that hold no placeholder, so
+// they read the same whether or not they are substituted.
+const gatedExpansionJSON = `{
+	"formula": "gated",
+	"type": "expansion",
+	"version": 1,
+	"template": [
+		{"id": "{target}.survey", "title": "Survey"},
+		{
+			"id": "{target}.approve",
+			"title": "Approve",
+			"needs": ["{target}.survey"],
+			"notes": "Check the release notes",
+			"metadata": {"owner": "team-a", "attempts": 3},
+			"waits_for": "all-children",
+			"condition": "{{run_review}}",
+			"gate": {"type": "human", "id": "gid", "await_id": "approval", "timeout": "1h", "repo": "acme/beads"},
+			"loop": {"count": 2, "body": [{"id": "body", "title": "Body"}]},
+			"on_complete": {"for_each": "output.items", "bond": "mol-item", "vars": {"k": "{item}"}},
+			"expand": "never-loaded",
+			"expand_vars": {"x": "y"},
+			"children": [
+				{
+					"id": "{target}.approve.child",
+					"title": "Child",
+					"needs": ["{target}.survey"],
+					"notes": "Child notes",
+					"condition": "{{child_flag}}",
+					"waits_for": "any-children"
+				}
+			]
+		}
+	]
+}`
+
+// TestExpandStepPreservesTemplateFields checks that every materialization
+// path keeps the template fields expandStep used to drop - Notes, Metadata,
+// WaitsFor, Condition, Gate, Loop and OnComplete, on the step and on its
+// children - and keeps clearing Expand/ExpandVars (GH#6433).
+func TestExpandStepPreservesTemplateFields(t *testing.T) {
+	newParser := func(t *testing.T) *Parser {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "gated.formula.json"), []byte(gatedExpansionJSON), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return NewParser(dir)
+	}
+
+	paths := []struct {
+		name   string
+		expand func(t *testing.T, p *Parser) []*Step
+	}{
+		{"compose.expand", func(t *testing.T, p *Parser) []*Step {
+			steps, err := ApplyExpansions([]*Step{{ID: "impl", Title: "Impl"}},
+				&ComposeRules{Expand: []*ExpandRule{{Target: "impl", With: "gated"}}}, p)
+			if err != nil {
+				t.Fatalf("ApplyExpansions failed: %v", err)
+			}
+			return steps
+		}},
+		{"compose.map", func(t *testing.T, p *Parser) []*Step {
+			steps, err := ApplyExpansions([]*Step{{ID: "impl", Title: "Impl"}},
+				&ComposeRules{Map: []*MapRule{{Select: "impl", With: "gated"}}}, p)
+			if err != nil {
+				t.Fatalf("ApplyExpansions failed: %v", err)
+			}
+			return steps
+		}},
+		{"inline expand", func(t *testing.T, p *Parser) []*Step {
+			steps, err := ApplyInlineExpansions([]*Step{{ID: "impl", Title: "Impl", Expand: "gated"}}, p)
+			if err != nil {
+				t.Fatalf("ApplyInlineExpansions failed: %v", err)
+			}
+			return steps
+		}},
+		{"standalone materialization", func(t *testing.T, p *Parser) []*Step {
+			f, err := p.LoadByName("gated")
+			if err != nil {
+				t.Fatalf("LoadByName failed: %v", err)
+			}
+			if err := MaterializeExpansion(f, "impl", nil); err != nil {
+				t.Fatalf("MaterializeExpansion failed: %v", err)
+			}
+			return f.Steps
+		}},
+	}
+
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			byID := buildStepMap(path.expand(t, newParser(t)))
+			got := byID["impl.approve"]
+			if got == nil {
+				t.Fatalf("impl.approve missing; steps: %v", byID)
+			}
+
+			if got.Notes != "Check the release notes" {
+				t.Errorf("Notes = %q, want the template's notes", got.Notes)
+			}
+			if got.Metadata == nil {
+				t.Errorf("Metadata = nil, want the template's metadata")
+			} else if got.Metadata["owner"] != "team-a" || fmt.Sprint(got.Metadata["attempts"]) != "3" {
+				t.Errorf("Metadata = %v, want owner=team-a attempts=3", got.Metadata)
+			}
+			if got.WaitsFor != "all-children" {
+				t.Errorf("WaitsFor = %q, want all-children", got.WaitsFor)
+			}
+			if got.Condition != "{{run_review}}" {
+				t.Errorf("Condition = %q, want {{run_review}}", got.Condition)
+			}
+			wantGate := Gate{Type: "human", ID: "gid", AwaitID: "approval", Timeout: "1h", Repo: "acme/beads"}
+			if got.Gate == nil || *got.Gate != wantGate {
+				t.Errorf("Gate = %+v, want %+v", got.Gate, wantGate)
+			}
+			if got.Loop == nil || got.Loop.Count != 2 || len(got.Loop.Body) != 1 || got.Loop.Body[0].Title != "Body" {
+				t.Errorf("Loop = %+v, want count 2 over one Body step", got.Loop)
+			}
+			if oc := got.OnComplete; oc == nil || oc.ForEach != "output.items" || oc.Bond != "mol-item" || oc.Vars["k"] != "{item}" {
+				t.Errorf("OnComplete = %+v, want the template's for-each", got.OnComplete)
+			}
+			if got.Expand != "" || got.ExpandVars != nil {
+				t.Errorf("Expand/ExpandVars = %q/%v, want cleared (an expanded step never re-expands)", got.Expand, got.ExpandVars)
+			}
+
+			child := byID["impl.approve.child"]
+			if child == nil {
+				t.Fatalf("impl.approve.child missing")
+			}
+			if child.Notes != "Child notes" || child.Condition != "{{child_flag}}" || child.WaitsFor != "any-children" {
+				t.Errorf("child Notes/Condition/WaitsFor = %q/%q/%q, want the template's", child.Notes, child.Condition, child.WaitsFor)
+			}
+		})
+	}
+}
+
+// TestExpandStepCoversAllStepFields fills every exported Step field and fails
+// when the expanded step comes back with one of them zero, so a Step field
+// added later is either carried through expansion or deliberately listed here.
+// Adapted from PR #6635's guard.
+func TestExpandStepCoversAllStepFields(t *testing.T) {
+	// An expanded step must never re-expand (see expandStepWith).
+	allowZero := map[string]bool{"Expand": true, "ExpandVars": true}
+
+	prio := 2
+	tmpl := &Step{}
+	v := reflect.ValueOf(tmpl).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		field, f := v.Type().Field(i), v.Field(i)
+		if !field.IsExported() {
+			continue // generatedNeeds: TestExpandStepKeepsGeneratedNeeds
+		}
+		switch f.Type() {
+		case reflect.TypeOf(""):
+			f.SetString("x")
+		case reflect.TypeOf(&prio):
+			f.Set(reflect.ValueOf(&prio))
+		case reflect.TypeOf([]string{}):
+			f.Set(reflect.ValueOf([]string{"x"}))
+		case reflect.TypeOf(map[string]string{}):
+			f.Set(reflect.ValueOf(map[string]string{"k": "v"}))
+		case reflect.TypeOf(map[string]interface{}{}):
+			f.Set(reflect.ValueOf(map[string]interface{}{"k": "v"}))
+		case reflect.TypeOf([]*Step{}):
+			f.Set(reflect.ValueOf([]*Step{{ID: "child", Title: "Child"}}))
+		case reflect.TypeOf(&Gate{}):
+			f.Set(reflect.ValueOf(&Gate{Type: "timer"}))
+		case reflect.TypeOf(&LoopSpec{}):
+			f.Set(reflect.ValueOf(&LoopSpec{Count: 1, Body: []*Step{{ID: "b"}}}))
+		case reflect.TypeOf(&OnCompleteSpec{}):
+			f.Set(reflect.ValueOf(&OnCompleteSpec{Bond: "b"}))
+		default:
+			t.Fatalf("Step.%s has unhandled type %s; extend this test", field.Name, f.Type())
+		}
+	}
+
+	result, err := expandStep(&Step{ID: "t"}, []*Step{tmpl}, nil)
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	got := reflect.ValueOf(result[0]).Elem()
+	for i := 0; i < got.NumField(); i++ {
+		field := got.Type().Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		zero := got.Field(i).IsZero()
+		if allowZero[field.Name] && !zero {
+			t.Errorf("expandStep carried Step.%s; want it cleared", field.Name)
+		}
+		if !allowZero[field.Name] && zero {
+			t.Errorf("expandStep dropped Step.%s: zero in the expanded step although set in the template", field.Name)
+		}
+	}
+}
+
+// TestExpandStepKeepsGeneratedNeeds checks that a template need a transform
+// added stays generated after expansion, with the same substitution as Needs.
+func TestExpandStepKeepsGeneratedNeeds(t *testing.T) {
+	tmpl := &Step{ID: "{target}.b", Title: "B", Needs: []string{"{target}.a", "{target}.{stage}"}}
+	tmpl.generatedNeeds = []string{"{target}.{stage}"}
+
+	result, err := expandStep(&Step{ID: "impl"}, []*Step{tmpl}, map[string]string{"stage": "prep"})
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	got := result[0]
+	if want := []string{"impl.a", "impl.prep"}; !slices.Equal(got.Needs, want) {
+		t.Errorf("Needs = %v, want %v", got.Needs, want)
+	}
+	if want := []string{"impl.prep"}; !slices.Equal(got.generatedNeeds, want) {
+		t.Errorf("generatedNeeds = %v, want %v", got.generatedNeeds, want)
+	}
+	if !isGeneratedNeed(got, "impl.prep") || isGeneratedNeed(got, "impl.a") {
+		t.Errorf("generated provenance moved: generatedNeeds = %v", got.generatedNeeds)
+	}
+	if want := []string{"{target}.{stage}"}; !slices.Equal(tmpl.generatedNeeds, want) {
+		t.Errorf("template generatedNeeds = %v, want it untouched", tmpl.generatedNeeds)
+	}
+}
+
+// TestExpandStepSubstitutesTemplateFields checks that Notes, WaitsFor, the
+// Gate strings and metadata string leaves get the same {target}/{var}
+// substitution as Title, while metadata keys and scalars and the Condition,
+// Loop and OnComplete expressions - owned by later phases - are kept as written
+// (GH#6433).
+func TestExpandStepSubstitutesTemplateFields(t *testing.T) {
+	target := &Step{ID: "impl", Title: "Implement", Description: "Do it"}
+	vars := map[string]string{
+		"env": "prod", "owner": "alice", "gate_type": "human", "timeout": "1h", "org": "acme",
+		// Names the later phases own; expansion must not consume them.
+		"deploy": "yes", "n": "3", "item": "X", "i": "7",
+	}
+
+	cyclic := map[string]interface{}{"name": "{env}"}
+	cyclic["self"] = cyclic
+
+	// deep nests 40 maps, each with a {env} leaf; the walk stops at the
+	// metadata depth bound and keeps the rest as written.
+	deep := map[string]interface{}{"v": "{env}"}
+	level := deep
+	for i := 1; i < 40; i++ {
+		next := map[string]interface{}{"v": "{env}"}
+		level["next"] = next
+		level = next
+	}
+
+	tmpl := &Step{
+		ID:       "{target}.approve",
+		Title:    "Approve",
+		Notes:    "Notes for {target} ({target.title}: {target.description}) in {env}, {{keep}}",
+		WaitsFor: "children-of({target.id}.survey-{env})",
+		Gate: &Gate{
+			Type:    "{gate_type}",
+			ID:      "{target}-gate",
+			AwaitID: "await-{target.id}-{env}",
+			Timeout: "{timeout}",
+			Repo:    "{org}/{target}",
+		},
+		Metadata: map[string]interface{}{
+			"owner":      "{owner}",
+			"{env}":      "keys are never rewritten",
+			"count":      3,
+			"ratio":      1.5,
+			"flag":       true,
+			"none":       nil,
+			"nested":     map[string]interface{}{"desc": "{target.description}", "deeper": map[string]interface{}{"env": "{env}"}},
+			"list":       []interface{}{"{env}", 7, map[string]interface{}{"k": "{owner}"}, []interface{}{"{target}"}},
+			"tables":     []map[string]interface{}{{"name": "{env}"}, {"n": 2}},
+			"empty_map":  map[string]interface{}{},
+			"empty_list": []interface{}{},
+			"nil_map":    map[string]interface{}(nil),
+			"nil_list":   []interface{}(nil),
+			"cyclic":     cyclic,
+			"deep":       deep,
+		},
+		Condition:  "{{deploy}}",
+		Loop:       &LoopSpec{Range: "1..{n}", Var: "i", Body: []*Step{{ID: "body-{i}", Title: "Body {i} in {env}"}}},
+		OnComplete: &OnCompleteSpec{ForEach: "output.items", Bond: "mol-{item}", Vars: map[string]string{"k": "{item}"}},
+	}
+	inferred := &Step{ID: "{target}.collect", Title: "Collect", WaitsFor: "all-children", Needs: []string{"{target}.survey-{env}"}}
+
+	result, err := expandStep(target, []*Step{tmpl, inferred}, vars)
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	got, collect := result[0], result[1]
+
+	if want := "Notes for impl (Implement: Do it) in prod, {{keep}}"; got.Notes != want {
+		t.Errorf("Notes = %q, want %q", got.Notes, want)
+	}
+	if want := "children-of(impl.survey-prod)"; got.WaitsFor != want {
+		t.Errorf("WaitsFor = %q, want %q", got.WaitsFor, want)
+	}
+	if collect.WaitsFor != "all-children" || !slices.Equal(collect.Needs, []string{"impl.survey-prod"}) {
+		t.Errorf("inferred waits_for = %q needs %v, want all-children over [impl.survey-prod]", collect.WaitsFor, collect.Needs)
+	}
+	wantGate := Gate{Type: "human", ID: "impl-gate", AwaitID: "await-impl-prod", Timeout: "1h", Repo: "acme/impl"}
+	if got.Gate == nil || *got.Gate != wantGate {
+		t.Errorf("Gate = %+v, want %+v", got.Gate, wantGate)
+	}
+
+	if got.Condition != "{{deploy}}" {
+		t.Errorf("Condition = %q, want {{deploy}} unchanged", got.Condition)
+	}
+	if l := got.Loop; l == nil || l.Range != "1..{n}" || l.Var != "i" || len(l.Body) != 1 ||
+		l.Body[0].ID != "body-{i}" || l.Body[0].Title != "Body {i} in {env}" {
+		t.Errorf("Loop = %+v, want range/var/body unchanged", got.Loop)
+	}
+	if oc := got.OnComplete; oc == nil || oc.Bond != "mol-{item}" || oc.Vars["k"] != "{item}" {
+		t.Errorf("OnComplete = %+v, want bond/vars unchanged", got.OnComplete)
+	}
+
+	md := got.Metadata
+	if md == nil {
+		t.Fatalf("Metadata = nil, want the template's metadata substituted")
+	}
+	wantMD := map[string]interface{}{
+		"owner":      "alice",
+		"{env}":      "keys are never rewritten",
+		"count":      3,
+		"ratio":      1.5,
+		"flag":       true,
+		"none":       nil,
+		"nested":     map[string]interface{}{"desc": "Do it", "deeper": map[string]interface{}{"env": "prod"}},
+		"list":       []interface{}{"prod", 7, map[string]interface{}{"k": "alice"}, []interface{}{"impl"}},
+		"tables":     []map[string]interface{}{{"name": "prod"}, {"n": 2}},
+		"empty_map":  map[string]interface{}{},
+		"empty_list": []interface{}{},
+		"nil_map":    map[string]interface{}(nil),
+		"nil_list":   []interface{}(nil),
+	}
+	for k, want := range wantMD {
+		if v, ok := md[k]; !ok || !reflect.DeepEqual(v, want) {
+			t.Errorf("Metadata[%q] = %#v, want %#v", k, v, want)
+		}
+	}
+
+	// The cyclic map is never printed: fmt does not detect cycles.
+	if c, ok := md["cyclic"].(map[string]interface{}); !ok || c["name"] != "prod" {
+		t.Errorf("Metadata[cyclic][name] = %v, want prod", c["name"])
+	}
+
+	// Leaves above the bound are substituted; the tail past it is kept as
+	// written (it may share storage with the template).
+	first, last := 0, ""
+	for lvl, i := md["deep"], 0; lvl != nil; i++ {
+		m, ok := lvl.(map[string]interface{})
+		if !ok {
+			t.Fatalf("Metadata[deep] level %d = %#v, want a map", i, lvl)
+		}
+		if m["v"] == "prod" {
+			first = i + 1
+		}
+		last = fmt.Sprint(m["v"])
+		lvl = m["next"]
+		if i > 40 {
+			t.Fatalf("Metadata[deep] runs past its 40 levels")
+		}
+	}
+	if first < 30 || last != "{env}" {
+		t.Errorf("Metadata[deep]: %d levels substituted, deepest leaf %q; want the first 30+ substituted and the tail past the bound unchanged", first, last)
+	}
+
+	// The template is left as written.
+	if tmpl.Notes != "Notes for {target} ({target.title}: {target.description}) in {env}, {{keep}}" ||
+		tmpl.Gate.AwaitID != "await-{target.id}-{env}" || tmpl.Metadata["owner"] != "{owner}" ||
+		tmpl.Metadata["tables"].([]map[string]interface{})[0]["name"] != "{env}" {
+		t.Errorf("expanding rewrote the template's notes, gate or metadata")
+	}
+}
+
+// sharedTemplateTOML is an expansion whose work step carries every kind of
+// mutable state an expanded step could share with the template: metadata in
+// each container type (table, array, array of tables), a Gate, a Loop with a
+// body step, and OnComplete vars.
+const sharedTemplateTOML = `
+formula = "shared"
+type = "expansion"
+version = 1
+
+[[template]]
+id = "{target}.work"
+title = "Work on {target.title}"
+
+[template.metadata]
+owner = "{owner}"
+list = ["{env}", { k = "{owner}" }]
+
+[template.metadata.nested]
+env = "{env}"
+
+[[template.metadata.tables]]
+name = "{env}"
+
+[[template.metadata.tables]]
+name = "second"
+
+[template.gate]
+type = "human"
+await_id = "approve-{target}"
+timeout = "1h"
+
+[template.loop]
+count = 2
+
+[[template.loop.body]]
+id = "body"
+title = "Body"
+
+[template.on_complete]
+for_each = "output.items"
+bond = "mol-item"
+
+[template.on_complete.vars]
+k = "{item}"
+`
+
+// TestApplyExpansionsMapDoesNotShareTemplateState changes everything mutable
+// on one compose.map result and checks that the template and the sibling
+// result keep their values.
+func TestApplyExpansionsMapDoesNotShareTemplateState(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "shared.formula.toml"), []byte(sharedTemplateTOML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(dir)
+
+	steps, err := ApplyExpansions(
+		[]*Step{{ID: "impl.a", Title: "A"}, {ID: "impl.b", Title: "B"}},
+		&ComposeRules{Map: []*MapRule{{Select: "impl.*", With: "shared", Vars: map[string]string{"owner": "alice", "env": "prod"}}}},
+		parser,
+	)
+	if err != nil {
+		t.Fatalf("ApplyExpansions failed: %v", err)
+	}
+	byID := buildStepMap(steps)
+	a, b := byID["impl.a.work"], byID["impl.b.work"]
+	if a == nil || b == nil {
+		t.Fatalf("expanded steps missing: %v", byID)
+	}
+	f, err := parser.LoadByName("shared")
+	if err != nil {
+		t.Fatalf("LoadByName failed: %v", err)
+	}
+	tmpl := f.Template[0]
+
+	// snapshot reads every value the test changes on a.
+	snapshot := func(s *Step) (string, bool) {
+		md := s.Metadata
+		nested, _ := md["nested"].(map[string]interface{})
+		list, _ := md["list"].([]interface{})
+		tables, _ := md["tables"].([]map[string]interface{})
+		if md == nil || nested == nil || len(list) != 2 || len(tables) != 2 || s.Gate == nil ||
+			s.Loop == nil || len(s.Loop.Body) != 1 || s.OnComplete == nil {
+			return fmt.Sprintf("metadata %v gate %v loop %v on_complete %v", md, s.Gate, s.Loop, s.OnComplete), false
+		}
+		listMap, _ := list[1].(map[string]interface{})
+		return fmt.Sprint(md["owner"], "|", nested["env"], "|", list[0], "|", listMap["k"], "|", tables[0]["name"], "|",
+			s.Gate.AwaitID, "|", s.Gate.Timeout, "|", s.Loop.Count, "|", s.Loop.Body[0].Title, "|", s.OnComplete.Vars["k"]), true
+	}
+	tmplBefore, ok := snapshot(tmpl)
+	if !ok {
+		t.Fatalf("template lacks the state under test: %s", tmplBefore)
+	}
+	bBefore, ok := snapshot(b)
+	if !ok {
+		t.Fatalf("impl.b.work lacks the template's state: %s", bBefore)
+	}
+	if _, ok := snapshot(a); !ok {
+		t.Fatalf("impl.a.work lacks the template's state")
+	}
+
+	a.Metadata["owner"] = "changed"
+	a.Metadata["nested"].(map[string]interface{})["env"] = "changed"
+	list := a.Metadata["list"].([]interface{})
+	list[0] = "changed"
+	list[1].(map[string]interface{})["k"] = "changed"
+	a.Metadata["tables"].([]map[string]interface{})[0]["name"] = "changed"
+	a.Gate.AwaitID = "changed"
+	a.Gate.Timeout = "changed"
+	a.Loop.Count = 99
+	a.Loop.Body[0].Title = "changed"
+	a.OnComplete.Vars["k"] = "changed"
+
+	if after, _ := snapshot(tmpl); after != tmplBefore {
+		t.Errorf("changing impl.a.work changed the template:\n before %s\n after  %s", tmplBefore, after)
+	}
+	if after, _ := snapshot(b); after != bBefore {
+		t.Errorf("changing impl.a.work changed impl.b.work:\n before %s\n after  %s", bBefore, after)
+	}
 }
