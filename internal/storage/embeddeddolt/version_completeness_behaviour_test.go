@@ -280,18 +280,35 @@ func TestEmbeddedMintLeavesUpdatedAtWhereHistoryOffDoes(t *testing.T) {
 				}
 				return n
 			}
+			// checkBumped asserts a label write moved updated_at past the aged
+			// instant (the clock, not a fixed value) and minted as history says.
+			checkBumped := func(step string, before int) int {
+				t.Helper()
+				var got time.Time
+				te.queryScalar(t, ctx, "SELECT updated_at FROM issues WHERE id = ?", []any{a}, &got)
+				if !got.UTC().After(aged) {
+					t.Errorf("%s: updated_at for %s is %v, want a bump past %v", step, a, got.UTC(), aged)
+				}
+				n := versions()
+				if n != before+mints {
+					t.Fatalf("%s: version rows for %s = %d, want %d", step, a, n, before+mints)
+				}
+				return n
+			}
 
-			// Label and dependency writes never assign updated_at themselves.
+			// Label writes bump updated_at to the clock (#5442), so they are asserted
+			// to move past the aged instant. Dependency writes never assign it.
 			age()
 			n := versions()
 			if err := te.store.AddLabel(ctx, a, "l1", "actor"); err != nil {
 				t.Fatalf("AddLabel: %v", err)
 			}
-			n = check("add label", n, aged)
+			n = checkBumped("add label", n)
 			if err := te.store.RemoveLabel(ctx, a, "l1", "actor"); err != nil {
 				t.Fatalf("RemoveLabel: %v", err)
 			}
-			n = check("remove label", n, aged)
+			n = checkBumped("remove label", n)
+			age()
 			if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: a, DependsOnID: b, Type: types.DepBlocks}, "actor"); err != nil {
 				t.Fatalf("AddDependency: %v", err)
 			}
