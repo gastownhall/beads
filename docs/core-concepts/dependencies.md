@@ -189,6 +189,12 @@ rig in proxied-server mode yet
 ([#5861](https://github.com/gastownhall/beads/issues/5861)), so bd cannot check
 an ID routed to such a rig and stores it without a warning.
 
+`bd doctor` cannot check such an edge either: it counts it as a
+cross-repository edge not verifiable here instead of reporting it as an
+orphaned dependency, and `bd doctor --fix` keeps it. An edge whose target is
+under this database's own `issue_prefix` or `allowed_prefixes` and is gone is
+still reported and removed.
+
 ## Gates
 
 Gates are special issues that block dependent work until an external

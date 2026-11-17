@@ -95,10 +95,9 @@ Examples:
 		}
 		// Admission checked the workspace discovery found, which is not always
 		// this one: in a linked worktree with no .beads of its own, discovery
-		// passes over a main-checkout .beads that only the graph format
-		// marker or a legacy config.json declares, and connect still attaches
-		// it. Refuse here what admission refuses from that workspace's own
-		// contents (a format this build cannot open, a historical SQLite
+		// passes over a main-checkout .beads that only a legacy config.json
+		// declares, and connect still attaches it. Refuse here what admission
+		// refuses from that workspace's own contents (a historical SQLite
 		// workspace, a removed or unrecognized backend, a legacy Dolt
 		// workspace; admitForeignWorkspace), with admission's text and the
 		// .beads it refuses, before the handshake dials and before
@@ -106,9 +105,8 @@ Examples:
 		//
 		// --clear is refused too, even for an attach a bd without this check
 		// made: it rewrites metadata.json, which this build does not do to a
-		// workspace in a format it cannot open. Such an attach is undone by
-		// hand: delete .beads/http_target.json and restore metadata.json's
-		// "backend".
+		// workspace it refuses. Such an attach is undone by hand: delete
+		// .beads/http_target.json and restore metadata.json's "backend".
 		if _, err := admitForeignWorkspace(beadsDir); err != nil {
 			return handleWorkspaceGuardError(fmt.Errorf("%s: %w", beadsDir, err))
 		}
@@ -269,8 +267,8 @@ Examples:
 		if err != nil {
 			return HandleError("connecting to %s: %v", redactedURL, err)
 		}
-		// The check at the top of RunE ran before the dial, and a graph build
-		// can declare the format while the handshake is in flight. Check
+		// The check at the top of RunE ran before the dial, and the workspace
+		// can change while the handshake is in flight. Check
 		// again before anything below writes the workspace: the .gitignore
 		// would otherwise land in it before Attach's own check refused it.
 		if _, err := admitForeignWorkspace(beadsDir); err != nil {
@@ -317,13 +315,8 @@ Examples:
 		// backend this workspace selected before, and which a future
 		// `bd connect --clear` switching back to that backend (dolt) still
 		// needs intact.
-		//
-		// Attach re-checks the format, so a refusal from it here is a
-		// workspace that turned graph after the re-check that follows the
-		// handshake: render it as connect's own checks do, with the hint and
-		// exit 16. Any other error keeps HandleError's rendering.
 		if err := bdhttp.Attach(beadsDir, target); err != nil {
-			return handleWorkspaceGuardError(err)
+			return HandleError("%v", err)
 		}
 
 		if jsonOutput {

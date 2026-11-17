@@ -1,0 +1,7 @@
+{
+  "shape": "gc-config-set-types",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"PUT","operation_id":"setSetting","path":"/v0/beads/config/types.custom","body":["value"],"status":200}
+  ]
+}

@@ -186,7 +186,7 @@ func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string,
 
 		t0 := time.Now()
 		message, err := h.client.Messages.New(ctx, params)
-		ms := float64(time.Since(t0).Milliseconds())
+		ms := telemetry.Milliseconds(time.Since(t0))
 
 		if err == nil {
 			// Record token usage and latency.

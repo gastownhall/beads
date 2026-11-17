@@ -12,22 +12,9 @@ import (
 // the rejection inspects it (read-only) so a workspace that already holds a Dolt
 // database is told to fix the stale "backend" value rather than to export and
 // reinitialize. Pass "" only where there is genuinely no workspace directory.
-//
-// It also refuses metadata that declares a workspace format this build cannot
-// open (checkWorkspaceFormat). Command admission refuses those first, and the
-// store factories check before their migrating configfile.Load
-// (checkDiscoveredBackend), so here it backs up any other caller that
-// validates metadata it loaded itself. It returns early for a nil cfg, so that
-// backstop covers the graph format marker only when metadata was loaded; a
-// caller that may have none must check beadsDir with
-// checkDiscoveredForOpen or command admission first, as every caller
-// does today.
 func validateConfiguredBackend(cfg *configfile.Config, beadsDir string) error {
 	if cfg == nil {
 		return nil
-	}
-	if err := checkWorkspaceFormat(cfg, beadsDir); err != nil {
-		return err
 	}
 	if backends.Registered(cfg.Backend) {
 		return nil
@@ -44,19 +31,18 @@ func validateConfiguredBackend(cfg *configfile.Config, beadsDir string) error {
 
 // checkDiscoveredBackend refuses, before configfile.Load, every workspace the
 // store factories refuse from its own contents: it runs
-// configfile.LoadDiscoveredForOpen (a workspace format this build cannot open,
-// a historical SQLite workspace) and then validateConfiguredBackend (a removed
-// or unrecognized backend) on beadsDir's metadata as LoadForDiscovery reads
-// it, which never rewrites the workspace. Load migrates a legacy config.json
-// into metadata.json, dropping the keys Config does not know and deleting
-// config.json, so each refusal comes before that rewrite rather than after
-// it. Command admission makes the same checks, in the same order and with the
-// same text, but only on the workspace bd runs in; the factories also open
-// others (an auto-routed or routed target, an external project). A registered
-// backend passes, for the factory to dispatch. It returns the metadata it
-// read, for a factory that decides another refusal before Load
-// (selectsEmbeddedStore): nil when there is none, or when it does not load and
-// is left to the caller's Load to report.
+// configfile.LoadDiscoveredForOpen (a historical SQLite workspace) and then
+// validateConfiguredBackend (a removed or unrecognized backend) on beadsDir's
+// metadata as LoadForDiscovery reads it, which never rewrites the workspace.
+// Load migrates a legacy config.json into metadata.json, dropping the keys
+// Config does not know and deleting config.json, so each refusal comes before
+// that rewrite rather than after it. Command admission makes the same checks,
+// in the same order and with the same text, but only on the workspace bd runs
+// in; the factories also open others (an auto-routed or routed target, an
+// external project). A registered backend passes, for the factory to
+// dispatch. It returns the metadata it read, for a factory that decides
+// another refusal before Load (selectsEmbeddedStore): nil when there is none,
+// or when it does not load and is left to the caller's Load to report.
 func checkDiscoveredBackend(beadsDir string) (*configfile.Config, error) {
 	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
 	if err != nil {
@@ -155,9 +141,8 @@ func backendNameForErrorFraming(beadsDir string) string {
 }
 
 func loadDoltBackendConfig(beadsDir string) (*configfile.Config, error) {
-	// Refuse a workspace format this build cannot open before configfile.Load,
-	// which would otherwise migrate a legacy config.json into metadata.json
-	// before requireDoltBackend's own format check could refuse it.
+	// Refuse a historical SQLite workspace before configfile.Load, which would
+	// otherwise migrate its legacy config.json into metadata.json first.
 	if err := checkDiscoveredForOpen(beadsDir); err != nil {
 		return nil, err
 	}

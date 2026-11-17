@@ -1220,6 +1220,140 @@ func RunLifecycleCloseAndReopenRequireActorAndIssueID(t *testing.T, ctx context.
 	}
 }
 
+// RunLifecycleEventActorMatchesTheRequest pins WHO the history of each
+// Lifecycle verb names: every event Create, Update, Close and Reopen records
+// is attributed to that request's Actor, and an empty Actor gets the same
+// answer from all four — ErrValidation, with nothing written.
+//
+// It lives with Close and Reopen, though it drives all four verbs, because
+// this fixture is the one every leg wires with a raw read of the events table
+// (QueryScalar) beside the whole role. ReopenRequest.Reason's doc names the
+// events as "the same place the Actor attribution for the reopen lives", and
+// no case read an actor off them for any of the four verbs.
+//
+// EACH VERB ACTS AS SOMEONE ELSE, so a body that stamped the creator, the
+// assignee or the row's created_by instead of the caller fails on the verb
+// that did it. Every event a verb adds must name its actor, not just one of
+// them: the label edit and the reopen's reason are separate events, and a
+// verb that attributed its main event and dropped the actor on a side event
+// would pass a weaker check.
+//
+// THE EMPTY ACTOR IS ASSERTED FOR ALL FOUR VERBS IN ONE PLACE. Update, Close
+// and Reopen's refusals are also pinned beside their other validation rules
+// (RunLifecycleUpdateRefusesUnknownIDsAndActorlessRequests,
+// RunLifecycleCloseAndReopenRequireActorAndIssueID); Create's is pinned
+// nowhere else. A whitespace-only actor is deliberately NOT asserted: the
+// store legs accept it verbatim and the served client refuses it, and which
+// answer is right has not been ruled.
+func RunLifecycleEventActorMatchesTheRequest(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-lcr-actor"
+	steps := []struct {
+		verb, actor string
+		run         func(actor string) error
+	}{
+		{"create", "lcr-creator", func(actor string) error {
+			_, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+				Actor: actor, ForceIDPrefix: true,
+				Issue: &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			})
+			return err
+		}},
+		{"update", "lcr-updater", func(actor string) error {
+			_, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+				Actor: actor, IssueID: id,
+				Patch: publicops.IssuePatch{
+					Title:  publicops.Field[string]{Set: true, Value: id + " renamed"},
+					Labels: publicops.LabelPatch{Add: []string{"lcr-actor-label"}},
+				},
+			})
+			return err
+		}},
+		{"close", "lcr-closer", func(actor string) error {
+			_, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: actor, IssueID: id, Reason: "done"})
+			return err
+		}},
+		{"reopen", "lcr-reopener", func(actor string) error {
+			_, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: actor, IssueID: id, Reason: "regressed"})
+			return err
+		}},
+	}
+	for _, step := range steps {
+		total := lifecycleCloseReopenEventsBy(t, ctx, fixture, id, nil)
+		mine := lifecycleCloseReopenEventsBy(t, ctx, fixture, id, &step.actor)
+		if err := step.run(step.actor); err != nil {
+			t.Fatalf("%s %s as %q: %v", step.verb, id, step.actor, err)
+		}
+		added := lifecycleCloseReopenEventsBy(t, ctx, fixture, id, nil) - total
+		attributed := lifecycleCloseReopenEventsBy(t, ctx, fixture, id, &step.actor) - mine
+		if added < 1 {
+			t.Errorf("%s of %s recorded no event: the events are where its attribution lives", step.verb, id)
+		}
+		if attributed != added {
+			t.Errorf("%s of %s recorded %d event(s), %d of them attributed to the request's actor %q: "+
+				"every entry a verb records names the caller that asked for it", step.verb, id, added, attributed, step.actor)
+		}
+	}
+
+	// The empty actor: one answer, on every leg and for every verb.
+	before := lifecycleCloseReopenReadRow(t, ctx, fixture, id)
+	events := newLifecycleCloseReopenEventCounter(t, ctx, fixture, id)
+	absent := fixture.IssuePrefix + "-lcr-actor-none"
+	for _, step := range []struct {
+		verb string
+		run  func() error
+	}{
+		{"create", func() error {
+			_, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{ForceIDPrefix: true,
+				Issue: &types.Issue{ID: absent, Title: absent, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}})
+			return err
+		}},
+		{"update", func() error {
+			_, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{IssueID: id,
+				Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "unattributed"}}})
+			return err
+		}},
+		{"close", func() error {
+			_, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{IssueID: id})
+			return err
+		}},
+		{"reopen", func() error {
+			_, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{IssueID: id})
+			return err
+		}},
+	} {
+		if err := step.run(); !errors.Is(err, publicops.ErrValidation) {
+			t.Errorf("%s with an empty Actor: err = %v, want ErrValidation — an unattributed write is refused, "+
+				"the same way on every leg", step.verb, err)
+		}
+		events.assertNoneAdded(t, step.verb+" with an empty Actor")
+	}
+	lifecycleCloseReopenAssertRow(t, ctx, fixture, id, "after the actorless requests", before)
+	var stray int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", []any{absent}, &stray); err != nil {
+		t.Fatalf("count rows at %s: %v", absent, err)
+	}
+	if stray != 0 {
+		t.Errorf("the refused actorless create left %d row(s) at %s, want none", stray, absent)
+	}
+}
+
+// lifecycleCloseReopenEventsBy counts id's events, all of them when actor is
+// nil and only those attributed to *actor otherwise.
+func lifecycleCloseReopenEventsBy(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, id string, actor *string) int {
+	t.Helper()
+	query, args := "SELECT COUNT(*) FROM events WHERE issue_id = ?", []any{id}
+	if actor != nil {
+		query, args = query+" AND actor = ?", append(args, *actor)
+	}
+	var got int
+	if err := fixture.QueryScalar(ctx, query, args, &got); err != nil {
+		t.Fatalf("count events for %s: %v", id, err)
+	}
+	return got
+}
+
 // RunLifecycleReopenProvenanceLabelsHistory pins both halves of
 // ReopenRequest.Provenance (issueops/issueops.go:335-344): a spelled label is
 // what the recorded entry reads, and the field "NEVER changes WHETHER history

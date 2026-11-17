@@ -7,6 +7,14 @@
       "cmd": "bd close --force --json --reason \"corpus close reason exceeding twenty chars\" corpus-closed",
       "sha256": "9bf64690973160e6658017138882a767bc4d2a790d35a2cf6fb02019e53d5825"
     },
+    "envelope/close_claim_next": {
+      "cmd": "bd close corpus-closer --claim-next --json",
+      "sha256": "89b9af2cad3d434e933de92e3a5dc5531ac3f3755db2ddeda6a656467b96d320"
+    },
+    "envelope/close_claim_next_events": {
+      "cmd": "bd history corpus-closer --events --json",
+      "sha256": "cba52eb0d74400ce310697e57c1b232af4445198a559404a33e0a20340242b0d"
+    },
     "envelope/count": {
       "cmd": "bd count --json",
       "sha256": "8f3df407d576e3fd8e9c0365d496283cf4895a0600a547c4635b8fddeb5516ea"
@@ -27,6 +35,14 @@
       "cmd": "bd create \"Corpus root issue\" --id corpus-root --force --priority 1 --type feature --description \"deterministic corpus root\" --json",
       "sha256": "2e902e37ebf0b122f14d0ece9f8ae7c9e2c5726546366d0dbe8e481f876702e7"
     },
+    "envelope/defer": {
+      "cmd": "bd defer corpus-deferred --reason \"corpus defer reason\" --until 2099-01-01 --json",
+      "sha256": "ee9a11f384eaa55fdbbf9d53edfdf6d28b3862e2ee613fa511efac56238ff5af"
+    },
+    "envelope/defer_events": {
+      "cmd": "bd history corpus-deferred --events --json",
+      "sha256": "867f61bfa70c75f5111c1bfd4f5e29aa28fb4e534fecebfa7ac9a105fcc8caa9"
+    },
     "envelope/delete": {
       "cmd": "bd delete --force --json corpus-deleted",
       "sha256": "c4d2d5143d0f07f5888109d416be8d153a491006b4f9da3cc3f3e7b51670d16a"
@@ -39,21 +55,81 @@
       "cmd": "bd dep list corpus-root --json",
       "sha256": "7ca29f4821b5f845601d3c38c4b1832085369eaf968a7b586f860aefbd6c2d39"
     },
+    "envelope/dep_relate": {
+      "cmd": "bd dep relate corpus-relfrom corpus-relto --json",
+      "sha256": "16b77c9424d29664eefda1da2abf9a729745414de2071a1896bbd94392093b54"
+    },
+    "envelope/dep_relate_events": {
+      "cmd": "bd history corpus-relfrom --events --json",
+      "sha256": "180b675abd5d30cc90319c42f2f1fe8ee0f79e18efa87b2bb72ab6b62f7f137e"
+    },
     "envelope/dep_remove": {
       "cmd": "bd dep remove corpus-root corpus-dep --json",
       "sha256": "9e2d0224b4989eb7d05f7247c2fe51ef8e8864d7023bcd8f924ce331c59614cc"
+    },
+    "envelope/dep_unrelate": {
+      "cmd": "bd dep unrelate corpus-relfrom corpus-relto --json",
+      "sha256": "ce4eba4a675110f25c118e6a8e837d8a7f6e1690ce1e607594e0a9125c3d814e"
+    },
+    "envelope/dep_unrelate_events": {
+      "cmd": "bd history corpus-relfrom --events --json",
+      "sha256": "ca4b42f0b1c44677f4f559dc1657b69dcde3648108602cee04b555d63b4c893b"
+    },
+    "envelope/duplicate": {
+      "cmd": "bd duplicate corpus-duplicate --of corpus-canonical --json",
+      "sha256": "d399b16f16cd33785b2282efec51e1620542e71929f36ea7977f8e93ff67de8c"
+    },
+    "envelope/duplicate_events": {
+      "cmd": "bd history corpus-duplicate --events --json",
+      "sha256": "e5fc98f5912c721eeecc5cfac707a7065482acfbe12166fe6359a2c2261e026d"
     },
     "envelope/error": {
       "cmd": "bd show nonexistent-xyz-corpus --json",
       "sha256": "17d5eafb5a0147e81dca583ea572191a705ba793f5619c27d597705c299dcddd"
     },
+    "envelope/info": {
+      "cmd": "bd info --json",
+      "sha256": "8974b893edb80ffd665cc4d9672f3b2c28a548b8d8585511547bd45fec0dbeda"
+    },
     "envelope/list": {
       "cmd": "bd list --all --json",
       "sha256": "7317a1b51728df55aa64075f5099e3bf1cb90c14a0bbd900fdcb47824ef50d91"
     },
+    "envelope/note": {
+      "cmd": "bd note corpus-note \"corpus note text\" --json",
+      "sha256": "60f73108dec7fa92c3f1cafc8d8f9c153fc9b1fb75c3feed63399bcf7581f402"
+    },
+    "envelope/note_events": {
+      "cmd": "bd history corpus-note --events --json",
+      "sha256": "7322f5e6326f3a34aed4650a143e653f1217a60d48522cfad6467eeabae37725"
+    },
+    "envelope/priority": {
+      "cmd": "bd priority corpus-priority 1 --json",
+      "sha256": "9620d40602790100946e896b8c1626cfc120d23b2ae18fbf4b8ef73e52b1ec32"
+    },
+    "envelope/priority_events": {
+      "cmd": "bd history corpus-priority --events --json",
+      "sha256": "6e7052eaa7ecf93c886425a9212bbef9149b35f8d4b9acfccdbc32f1ff7c6f14"
+    },
+    "envelope/q_parent": {
+      "cmd": "bd q \"Corpus quick child\" --parent corpus-parent --json",
+      "sha256": "70cf8be2b5f0f84d571927ab74fe3baa6ffd57464b1289970ee8e2af6be05886"
+    },
+    "envelope/q_parent_events": {
+      "cmd": "bd history corpus-parent.1 --events --json",
+      "sha256": "186b18eee1f2b484d961387d25dbfe8660feb7e54b0dd5ea30c8217782d33687"
+    },
+    "envelope/q_parent_show": {
+      "cmd": "bd show corpus-parent.1 --json",
+      "sha256": "e17524ad8f894603e5e8660e4b5360271597fa9c83980962837cadbf977e3a35"
+    },
     "envelope/ready": {
       "cmd": "bd ready --json",
       "sha256": "7317a1b51728df55aa64075f5099e3bf1cb90c14a0bbd900fdcb47824ef50d91"
+    },
+    "envelope/ready_explain": {
+      "cmd": "bd ready --explain --json",
+      "sha256": "9afe5e71ac615b0b3ce06c1eaa2dd2b09d63387501f257eb14172cc74e4d84dc"
     },
     "envelope/reopen": {
       "cmd": "bd reopen --json corpus-closed",
@@ -62,6 +138,54 @@
     "envelope/show": {
       "cmd": "bd show corpus-root --json",
       "sha256": "52c3ac87e5cb992c15a9705d77bb07ac0ffd3892359bd78579b4214f7bfb9460"
+    },
+    "envelope/show_children": {
+      "cmd": "bd show corpus-parent --children --json",
+      "sha256": "7546a0a701f1c80201961d49893351d14550795ec0859cc3c471b35ed2b5fa25"
+    },
+    "envelope/show_refs": {
+      "cmd": "bd show corpus-canonical --refs --json",
+      "sha256": "1991173107a007e128fbd6a239dbd9ec5be6b1d67a98e2868a9ed01abfef32bd"
+    },
+    "envelope/supersede": {
+      "cmd": "bd supersede corpus-superseded --with corpus-canonical --json",
+      "sha256": "53c765d656d476040a4aff3772000f7fe92db737e08f625c08768345ffb40783"
+    },
+    "envelope/supersede_events": {
+      "cmd": "bd history corpus-superseded --events --json",
+      "sha256": "96eca81af7fdedfde942c363eb9c7e5dcd88b9cda99bd3048994685522dc8a89"
+    },
+    "envelope/tag": {
+      "cmd": "bd tag corpus-tag corpus-tag-label --json",
+      "sha256": "43ca87a4c589779a4922e9e9410d277cbe29a984f1f94e1aabebe28ff1e6f77d"
+    },
+    "envelope/tag_events": {
+      "cmd": "bd history corpus-tag --events --json",
+      "sha256": "345b27649e483fe9c5050a7297b8577cbc9fa8973bfea5d0b545e6cced9e7a86"
+    },
+    "envelope/todo_add": {
+      "cmd": "bd todo add \"Corpus todo item\" --json",
+      "sha256": "2c701f1f71ff7158ac30d6acc03eb256c5b128408d5e7323b08706be5a55380f"
+    },
+    "envelope/todo_add_events": {
+      "cmd": "bd history <MINTED:todo_add> --events --json",
+      "sha256": "00fe26c4c6716c30032719cc3c88b42ff0b3fea4cf9831cc5da9c09e5e3d6052"
+    },
+    "envelope/unclaim": {
+      "cmd": "bd unclaim corpus-root --json",
+      "sha256": "8f7693350a4e122e2bf38c4aa5c0439b50281b2bae4f2b18b437735c67e6db1d"
+    },
+    "envelope/unclaim_events": {
+      "cmd": "bd history corpus-root --events --json",
+      "sha256": "0f1b367cf00dfec723c30e854c3c7719f1d093680029adc3972a07252d265210"
+    },
+    "envelope/undefer": {
+      "cmd": "bd undefer corpus-deferred --json",
+      "sha256": "4275457d6355101b7147281f88fb1e70bdab18e053521ee587b134daab01dc19"
+    },
+    "envelope/undefer_events": {
+      "cmd": "bd history corpus-deferred --events --json",
+      "sha256": "977d03959bba13af93cdea63e974a941d455f10d3f6ee613197eb76504a27af6"
     },
     "envelope/update": {
       "cmd": "bd update corpus-root --json --priority 0 --add-label corpus-label --set-metadata phase=2 --description \"updated corpus root\"",
@@ -74,6 +198,14 @@
     "flat/close": {
       "cmd": "bd close --force --json --reason \"corpus close reason exceeding twenty chars\" corpus-closed",
       "sha256": "2d5f3dd1dcba8ee0190b22c957859cf5b605789248fadc9fd5543f20ef8b9b31"
+    },
+    "flat/close_claim_next": {
+      "cmd": "bd close corpus-closer --claim-next --json",
+      "sha256": "d569bdc95456a3060204f4c477d9e3d67d42463854319ac700cb09dc2b54f0f0"
+    },
+    "flat/close_claim_next_events": {
+      "cmd": "bd history corpus-closer --events --json",
+      "sha256": "142cfabea27d573efd9b1ea0b824fff3a977a4b1a8bdc8c9876c21c0f04f18e0"
     },
     "flat/count": {
       "cmd": "bd count --json",
@@ -95,6 +227,14 @@
       "cmd": "bd create \"Corpus root issue\" --id corpus-root --force --priority 1 --type feature --description \"deterministic corpus root\" --json",
       "sha256": "6a0aa29c62315a6f1f64d4f66c520c35bd209170b709bd2be9dc0cdaa24d46f2"
     },
+    "flat/defer": {
+      "cmd": "bd defer corpus-deferred --reason \"corpus defer reason\" --until 2099-01-01 --json",
+      "sha256": "791db4260c41b4fb63a01035853731bb5a7227534902dbba20ec506a31185726"
+    },
+    "flat/defer_events": {
+      "cmd": "bd history corpus-deferred --events --json",
+      "sha256": "90dcebb2b50723d3df8a349149f6e391e02f6f62cee1e2e9b41d562a30325f8f"
+    },
     "flat/delete": {
       "cmd": "bd delete --force --json corpus-deleted",
       "sha256": "38543df163c746bf55b5aa4b0a08040af4109f0fe81e3131e4f6455d23091a9b"
@@ -107,21 +247,81 @@
       "cmd": "bd dep list corpus-root --json",
       "sha256": "646844cfd6ce88a4f31429245f0dedeeef612e9565ecdf0154d8e278f5a0a970"
     },
+    "flat/dep_relate": {
+      "cmd": "bd dep relate corpus-relfrom corpus-relto --json",
+      "sha256": "16b77c9424d29664eefda1da2abf9a729745414de2071a1896bbd94392093b54"
+    },
+    "flat/dep_relate_events": {
+      "cmd": "bd history corpus-relfrom --events --json",
+      "sha256": "f27606d559c3983d570ec68346703a2a797396362665f8949ece8db45fd42c37"
+    },
     "flat/dep_remove": {
       "cmd": "bd dep remove corpus-root corpus-dep --json",
       "sha256": "2cad2bf44a31d11c50a70f37e935175bd6a35fe87e87211f2a2fe4432b5ae63a"
+    },
+    "flat/dep_unrelate": {
+      "cmd": "bd dep unrelate corpus-relfrom corpus-relto --json",
+      "sha256": "ce4eba4a675110f25c118e6a8e837d8a7f6e1690ce1e607594e0a9125c3d814e"
+    },
+    "flat/dep_unrelate_events": {
+      "cmd": "bd history corpus-relfrom --events --json",
+      "sha256": "da8466dcd40416ce87459c268173840fbe0ac786afb0ee72943a64b378798ab4"
+    },
+    "flat/duplicate": {
+      "cmd": "bd duplicate corpus-duplicate --of corpus-canonical --json",
+      "sha256": "39ad30c18ef716269936c662cd7193744a3ac76432bc40145d4eb747a7c7b510"
+    },
+    "flat/duplicate_events": {
+      "cmd": "bd history corpus-duplicate --events --json",
+      "sha256": "afab750744c115ff5a156fc3234a99a68b24bbfa5842c748613a8a9bfd772b25"
     },
     "flat/error": {
       "cmd": "bd show nonexistent-xyz-corpus --json",
       "sha256": "7d31206f17d193611086a67460f751f323b93ae4d8297861e680a2d4b444e116"
     },
+    "flat/info": {
+      "cmd": "bd info --json",
+      "sha256": "72c321a245171d5e11b1cdce1fb8c5540f62dde2c399468ab92074bee1f9a6ea"
+    },
     "flat/list": {
       "cmd": "bd list --all --json",
       "sha256": "6a10f8d91e925c58515997cb76a4bb94caf3444925102df0247587353742ac0d"
     },
+    "flat/note": {
+      "cmd": "bd note corpus-note \"corpus note text\" --json",
+      "sha256": "60d7091ea2c9b96e8d131013bd93777c6192e3e9482782df0c0513f0acb5720e"
+    },
+    "flat/note_events": {
+      "cmd": "bd history corpus-note --events --json",
+      "sha256": "253dd4491284921cf3f512f0b37583522a7efcf7b509f3fd4ffa9f01d8ecb05d"
+    },
+    "flat/priority": {
+      "cmd": "bd priority corpus-priority 1 --json",
+      "sha256": "a60a95528b05003fcfec5076cf6ef14c68e702adc425f6208c0de83c2fb47da6"
+    },
+    "flat/priority_events": {
+      "cmd": "bd history corpus-priority --events --json",
+      "sha256": "2517bd99d0717a8787c6fa413ecd429d081277b85ba06031f2019d4738ebfdae"
+    },
+    "flat/q_parent": {
+      "cmd": "bd q \"Corpus quick child\" --parent corpus-parent --json",
+      "sha256": "70cf8be2b5f0f84d571927ab74fe3baa6ffd57464b1289970ee8e2af6be05886"
+    },
+    "flat/q_parent_events": {
+      "cmd": "bd history corpus-parent.1 --events --json",
+      "sha256": "a45c5f53e46fb1472612a468d7683f933cc479db8a5866e39851215f9e9b8acf"
+    },
+    "flat/q_parent_show": {
+      "cmd": "bd show corpus-parent.1 --json",
+      "sha256": "6b8f7bc9f163610abe7856f191f83673e2202fb7630c2414c648f876606780ee"
+    },
     "flat/ready": {
       "cmd": "bd ready --json",
       "sha256": "6a10f8d91e925c58515997cb76a4bb94caf3444925102df0247587353742ac0d"
+    },
+    "flat/ready_explain": {
+      "cmd": "bd ready --explain --json",
+      "sha256": "527e1790c80af0e68e4c6f16b9fadcc24ba4ae6a600d9969a0523673bd449c88"
     },
     "flat/reopen": {
       "cmd": "bd reopen --json corpus-closed",
@@ -130,6 +330,54 @@
     "flat/show": {
       "cmd": "bd show corpus-root --json",
       "sha256": "57977d893d55da712c4ab25b718bb48d2764cb40c2a15d1bbf312b7c58e6010b"
+    },
+    "flat/show_children": {
+      "cmd": "bd show corpus-parent --children --json",
+      "sha256": "4204ad975e09d54cf0d7bcb7ca615f171406148a1ede9007cee6c7e0433dbcb4"
+    },
+    "flat/show_refs": {
+      "cmd": "bd show corpus-canonical --refs --json",
+      "sha256": "b93096272ff260b4c096d873fc5efe53b078da528dd2ad0bc62734e3f35b6b6d"
+    },
+    "flat/supersede": {
+      "cmd": "bd supersede corpus-superseded --with corpus-canonical --json",
+      "sha256": "6d911f23a6f0271c63c4cef0a542f1db7be5660719a420ee3d041eb2ee74b94f"
+    },
+    "flat/supersede_events": {
+      "cmd": "bd history corpus-superseded --events --json",
+      "sha256": "0470c27ba0a753fd8ea5ec8c5a03ded1077737e19d427cb7e6b440b4ce1701bb"
+    },
+    "flat/tag": {
+      "cmd": "bd tag corpus-tag corpus-tag-label --json",
+      "sha256": "c53606ff6a3ff06218babb39009fb90a97fc9871dbdf1f536df76947b4632834"
+    },
+    "flat/tag_events": {
+      "cmd": "bd history corpus-tag --events --json",
+      "sha256": "f9ff9e97abfef7ce6821838bce33979d0696b5db8501cb10a3675ea72d44b855"
+    },
+    "flat/todo_add": {
+      "cmd": "bd todo add \"Corpus todo item\" --json",
+      "sha256": "2c701f1f71ff7158ac30d6acc03eb256c5b128408d5e7323b08706be5a55380f"
+    },
+    "flat/todo_add_events": {
+      "cmd": "bd history <MINTED:todo_add> --events --json",
+      "sha256": "0658a9a8dda78f3085c436704bec9e8daa279854b1005a76117eca78ac182c9a"
+    },
+    "flat/unclaim": {
+      "cmd": "bd unclaim corpus-root --json",
+      "sha256": "1d1f8e21df93df7a1885430fd804d2435cd3d7289cfcfcd1f4f511e241a8d805"
+    },
+    "flat/unclaim_events": {
+      "cmd": "bd history corpus-root --events --json",
+      "sha256": "554b00b41071744f72e7f72f9316a6e2061f52ef8c560dd9793ed18248c9c821"
+    },
+    "flat/undefer": {
+      "cmd": "bd undefer corpus-deferred --json",
+      "sha256": "c8df03a062ee4712de662317b562818798e6105bfa4d29be56fe1f6cb70d66bb"
+    },
+    "flat/undefer_events": {
+      "cmd": "bd history corpus-deferred --events --json",
+      "sha256": "5a08109bb360fd3efa2d6225e7fc78278d14aa69641e4df8a20bed88841df606"
     },
     "flat/update": {
       "cmd": "bd update corpus-root --json --priority 0 --add-label corpus-label --set-metadata phase=2 --description \"updated corpus root\"",

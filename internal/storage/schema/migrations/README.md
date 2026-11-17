@@ -8,6 +8,17 @@ pass before any higher version runs. The escape hatch is a **pre-migration
 repair** in Go, keyed to the pending version — see the header of
 `../migration_repairs.go` and the `preMigrationRepairs` registry.
 
+A frozen migration that is correct but too slow to finish gets the second
+escape hatch: an **execution plan** in `../migration_body_plans.go`
+(`migrationBodyPlans`). A plan is registered for one exact source, file name and
+SHA-256, keeps the text before and after a named anchor pair byte for byte, and
+replaces only what lies between with equivalent SQL (optionally after indexing
+tables the frozen body itself creates and drops). The cursor row still records
+the frozen file's hash, `AllMigrationsSQL` still emits the frozen bytes, and a
+plan that no longer matches its file fails the step before it touches anything.
+Main 0059 and its twin ignored/0015 have one (#6520): their correlated
+recompute did not finish in two hours on ~14k wisp dependencies.
+
 ## Measured Dolt behaviours
 
 These were measured against real Dolt (2.1.2 and 2.2.3) and confirmed against
@@ -150,3 +161,19 @@ constraint-named one. Text equality against a fresh store fails on correctly
 healed databases. Compare columns, primary key, unique keys, foreign keys with
 their referenced tables and actions, checks, and index coverage — see
 `migrate_wisp_dep_forward_repair_test.go`.
+
+## Release branches
+
+A release branch takes migrations only as cherry-picks of `main`'s, and the
+runner's cursor is `MAX(version)`: a migration numbered below one a database
+has already applied never runs. So in each series (main and ignored), a release
+branch's migrations stay a byte-identical prefix of `main`'s. Backport a
+migration only at the branch's next free number, only as `main`'s identical
+file, and never renumber it. Once `main` has merged a higher-numbered
+migration, a fix for the release line can't be a new migration file. A Go
+pre-migration repair reaches only stores whose version is still pending; for
+stores already at the branch's latest version, use an open-time repair gated
+by its own `migrationWorkNeeded` term, as `ensureBackfilledCustomStatusesCustomTypes`
+does, and make `main`'s migration tolerate the repaired shape. RELEASING.md
+("Backports") has the full recipe.
+

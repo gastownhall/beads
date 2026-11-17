@@ -37,6 +37,12 @@ const (
 // row's version at all.
 var ErrDeleteFenceUnavailable = errors.New("delete fence lock unavailable")
 
+// errDeleteFenceUnreachable refuses a guarded delete whose provider chain hides
+// the fence, before anything is read or written: a decorator that neither
+// unwraps nor answers FenceProvider. It is a wiring defect, not a transient
+// one, so it is not ErrDeleteFenceUnavailable. See deleter.Delete.
+var errDeleteFenceUnreachable = errors.New("delete fence: no provider on the chain holds the fence; refusing a guarded delete that would run unfenced")
+
 // deleteFenceLockName returns a Dolt/MySQL named-lock key within the 64-byte
 // limit, hashing down to fnv64a when the readable form would not fit —
 // mirrors internal/storage/dolt's deleteFenceLockName (and, one level further
@@ -80,14 +86,28 @@ func deleteFenceLockName(databaseName, id string) string {
 // draws its own (possibly several, across retries) connection from p.db the
 // ordinary way. That is safe for exactly the reason the dolt-package fence's
 // doc calls out as the hazard to avoid there: THIS provider's pool is never
-// constrained to a single connection (no cmd/bd call site ever calls
-// SetPoolLimits on the proxied-server or bd-serve UOW chain — see pool.go),
-// so a dedicated lock connection can never starve the write of its own
-// connection. What matters for correctness is not which physical connection
-// runs the write but WHEN its transaction begins: fn (and therefore every
-// snapshot it establishes, across every retry) starts only after GET_LOCK has
-// already returned success, so a queued loser's first read can only ever
-// observe the winner's commit as already landed and durable.
+// constrained to a single connection, so a dedicated lock connection can
+// never starve the write of its own connection. The proxied CLI chain sets
+// no pool limits at all. bd serve does (httpapi's servePoolLimits), but keeps
+// MaxOpenConns above its in-flight bound, and a request that touches the
+// database holds an in-flight slot. A fenced request holds at most one lock
+// connection, so lock connections alone can never take the whole pool, and
+// some lock holder can always get a connection for its write; holders past
+// that headroom wait on the pool, never on each other (TestStartupLines pins
+// the headroom). What matters for correctness is not which physical
+// connection runs the write but WHEN its transaction begins: fn (and
+// therefore every snapshot it establishes, across every retry) starts only
+// after GET_LOCK has already returned success, so a queued loser's first read
+// observes the winner's commit as already landed and durable.
+//
+// One case escapes that, and it is the cost of the separate lock session. A
+// winner whose context is canceled mid-commit (a client gone, a request
+// deadline) returns from fn before the server finishes that commit, and the
+// lock is released at once on its own healthy session. A queued racer can then
+// begin before the abandoned commit lands, delete the row again, and land a
+// second commit. Its caller is still the only one told the delete succeeded
+// (the abandoned winner's caller got an error, or no answer at all); the
+// history carries one delete too many.
 func withDeleteFence(ctx context.Context, p *doltSQLProvider, id string, fn func() error) error {
 	conn, err := p.db.Conn(ctx)
 	if err != nil {
@@ -111,6 +131,42 @@ func withDeleteFence(ctx context.Context, p *doltSQLProvider, id string, fn func
 	defer releaseDeleteFenceLock(conn, lockName)
 
 	return fn()
+}
+
+// FenceProvider is what a per-request wrapper around a provider answers so that a
+// role built over the wrapper can still reach the provider's fence.
+//
+// It is a separate question from ProviderUnwrapper, on purpose. Unwrap hands a
+// caller the provider beneath a decorator to work through (bd serve peels the
+// hook layer with it), and the point of a per-request wrapper is that nothing
+// works beneath it: bd serve's timing wrapper builds every role over itself so
+// that each unit of work lands in the request's uow_ms, with the
+// external-dependency policy beneath it. FenceProvider answers one narrower
+// question, where to keep looking for the provider that holds the GET_LOCK
+// fence, and the answer is used for the lock alone: the guarded write still
+// opens its units of work through the wrapper the role was built over.
+//
+// Until bd serve's wrapper answered it, the wrapper was neither, so a guarded
+// delete arriving on v0 never found the fence: every same-token racer answered
+// 200 (GH#7243).
+type FenceProvider interface {
+	FenceProvider() UnitOfWorkProvider
+}
+
+// fenceTarget walks a provider chain down to the provider that holds the fence.
+func fenceTarget(p UnitOfWorkProvider) (*doltSQLProvider, bool) {
+	for {
+		switch next := p.(type) {
+		case *doltSQLProvider:
+			return next, true
+		case FenceProvider:
+			p = next.FenceProvider()
+		case ProviderUnwrapper:
+			p = next.Unwrap()
+		default:
+			return nil, false
+		}
+	}
 }
 
 // currentDatabaseName reads the database conn's session is attached to.

@@ -17,6 +17,7 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/config",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/atomicfile",
         "//internal/ceiling",
         "//internal/debug",
         "//internal/gitenv",
@@ -48,6 +49,7 @@ go_test(
         "user_config_path_test.go",
         "user_config_path_windows_test.go",
         "worktree_config_test.go",
+        "yaml_config_replace_test.go",
         "yaml_config_test.go",
         "yaml_nested_roundtrip_test.go",
         "yaml_unset_newline_test.go",

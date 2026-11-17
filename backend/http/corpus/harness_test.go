@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
@@ -66,7 +67,20 @@ func startCorpusServer(t *testing.T) string {
 		t.Fatalf("load the token file: %v", err)
 	}
 
-	cfg := corpusServeConfig(t, store)
+	// The roles come through the external-dependency policy decorator and
+	// the handshake advertises policy.external_dependencies, as bd serve
+	// composes them (cmd/bd/serve.go): the reference profile advertises that
+	// capability, so the masked parts tell bd the server enforces the policy,
+	// and the current-capability transcripts must see what a deployed bd
+	// serve advertises (without it, bd composes the policy client-side, a
+	// listing walk no deployed server makes it pay).
+	policied := externaldeps.New(store,
+		func(externaldeps.ProjectName) (string, bool) { return "", false },
+		func(context.Context, string) (storage.DoltStorage, error) {
+			return nil, errors.New("the corpus server resolves no external projects")
+		})
+	cfg := corpusServeConfig(t, policied)
+	cfg.ExternalDependencyPolicy = externaldeps.Applied(policied)
 	cfg.AllowNonLoopback = true
 	cfg.Auth = auth
 	srv, err := httpapi.Listen(cfg)

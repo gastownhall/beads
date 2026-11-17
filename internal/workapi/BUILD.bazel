@@ -69,6 +69,7 @@ go_test(
     data = glob(["testdata/**"]),
     embed = [":workapi"],
     deps = [
+        "//internal/config",
         "//internal/storage",
         "//internal/storage/domain",
         "//internal/types",

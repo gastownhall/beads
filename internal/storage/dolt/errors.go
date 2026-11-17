@@ -59,15 +59,6 @@ func isTableNotExistError(err error) bool {
 	return dberrors.IsTableNotExist(err)
 }
 
-// isBranchTrackingError returns true if the error indicates that DOLT_PULL
-// failed because upstream branch tracking is not configured. This happens
-// when a remote was added via DOLT_REMOTE('add') or bd dolt remote add
-// rather than via dolt clone / bd bootstrap, leaving repo_state.json with
-// an empty "branches" map (GH#3144).
-func isBranchTrackingError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "did not specify a branch")
-}
-
 // isSerializationError returns true if the error is a Dolt/MySQL serialization
 // failure that guarantees the transaction was rolled back. Safe to retry.
 //   - 1213 (ER_LOCK_DEADLOCK): concurrent transactions conflict at commit time

@@ -101,15 +101,14 @@ func configuredBackendUnavailable(backend, beadsDir string, cfg *configfile.Conf
 
 // checkDiscoveredBackend refuses a workspace that OpenBestAvailableWith cannot
 // open, reading its metadata as configfile.LoadForDiscovery does, which never
-// rewrites the workspace: a format this build does not support or a historical
-// SQLite workspace (configfile.LoadDiscoveredForOpen), or a removed or
-// unrecognized backend (configuredBackendUnavailable). It runs before
-// configfile.Load, which migrates a legacy config.json into metadata.json and
-// drops the keys Config does not know, and before anything that creates a
-// database or gate file, as the CLI's command admission checks the same read
-// before any Load. Metadata that does not load is left to Load to report,
-// unless the graph format marker sits beside it; no metadata at all (and no
-// format marker or SQLite database) selects Dolt.
+// rewrites the workspace: a historical SQLite workspace
+// (configfile.LoadDiscoveredForOpen), or a removed or unrecognized backend
+// (configuredBackendUnavailable). It runs before configfile.Load, which
+// migrates a legacy config.json into metadata.json and drops the keys Config
+// does not know, and before anything that creates a database or gate file, as
+// the CLI's command admission checks the same read before any Load. Metadata
+// that does not load is left to Load to report; no metadata at all (and no
+// SQLite database) selects Dolt.
 func checkDiscoveredBackend(beadsDir string) error {
 	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
 	if err != nil {
@@ -120,18 +119,6 @@ func checkDiscoveredBackend(beadsDir string) error {
 	}
 	return nil
 }
-
-// UnsupportedWorkspaceFormatError is returned by Open, OpenBestAvailable,
-// OpenBestAvailableWith, OpenFromConfig and OpenGated when the workspace
-// declares a data model this build cannot open: a metadata.json graph_mode
-// other than "dependency", such as the "link" workspaces graph-preview builds
-// of bd write, or the .beads/graph-preview-format marker those builds write
-// beside it (FormatMarker), whatever the metadata says. Nothing was opened,
-// created or modified. Match it with errors.As to read BeadsDir, GraphMode and
-// FormatMarker; the bd CLI refuses the same workspaces with exit code 16.
-// Aliased here because internal/configfile is unimportable outside this
-// module.
-type UnsupportedWorkspaceFormatError = configfile.UnsupportedWorkspaceFormatError
 
 // LegacyWorkspaceError is returned by Open, OpenBestAvailable,
 // OpenBestAvailableWith, OpenFromConfig and OpenGated for a workspace a
@@ -406,8 +393,7 @@ func AllowSharedSchemaMigration(allow bool) {
 //
 // The workspace holding dbPath (its parent directory) is refused, before
 // anything is written there, when bd run in it would refuse it from its
-// contents (checkDiscoveredBackend): a format this build cannot open
-// (*UnsupportedWorkspaceFormatError), a historical SQLite workspace
+// contents (checkDiscoveredBackend): a historical SQLite workspace
 // (*LegacyWorkspaceError), or a removed or unknown backend. An existing
 // database whose project ID differs from the one in that workspace's
 // metadata.json is refused as well, with an untyped PROJECT IDENTITY
@@ -429,9 +415,9 @@ func Open(ctx context.Context, dbPath string) (Storage, error) {
 // name configuration.
 // beadsDir is the path to the .beads directory.
 func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
-	// NewFromConfigWithOptions refuses an unsupported format or backend
-	// (dolt.RequireDiscoveredDoltBackend) before its Load can migrate a
-	// legacy config.json.
+	// NewFromConfigWithOptions refuses a historical SQLite workspace or an
+	// unsupported backend (dolt.RequireDiscoveredDoltBackend) before its Load
+	// can migrate a legacy config.json.
 	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
 	if err != nil {
 		// An untyped nil, as the other public opens return: a nil

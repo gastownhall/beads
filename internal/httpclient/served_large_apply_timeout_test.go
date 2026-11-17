@@ -63,6 +63,8 @@ func TestServedLargeApplyOutlivesTheDefaultClientTimeout(t *testing.T) {
 		cfg.BatchApplier = slowBatchApplier{inner: cfg.BatchApplier, delay: delay}
 	})
 	target := Target{BaseURL: env.base}
+	// The product dial, deliberately outside the protocol seam; see
+	// servedDialsOutsideTheSwitch (served_protocol_seam_test.go).
 	conn, err := DialWith(target, nil, DialOptionsForTarget(target, DialOptions{}))
 	if err != nil {
 		t.Fatalf("DialWith(%s): %v", target, err)

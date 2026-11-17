@@ -227,21 +227,15 @@ go_test(
         "wisp_routing_test.go",
     ],
     data = glob(["testdata/**"]) + [
-        ":go_srcs",
-        # TestArrivalSeqIsWrittenOnlyByTheJournalSeam scans every package
-        # under internal/storage that writes SQL.
-        "//internal/storage:go_srcs",
-        "//internal/storage/batchfixtures:go_srcs",
-        "//internal/storage/createbatchequiv:go_srcs",
-        "//internal/storage/dolt:go_srcs",
-        "//internal/storage/domain/db:go_srcs",
-        "//internal/storage/embeddeddolt:go_srcs",
-        "//internal/storage/journalscan:go_srcs",
-        "//internal/storage/schema:go_srcs",
+        # Every Go file under internal/storage, the tree `go test` walks:
+        # TestArrivalSeqIsWrittenOnlyByTheJournalSeam scans all of it, and
+        # other tests here read this package's and sibling packages' source.
+        # tools/bazel/go_srcs.py generates tree_go_srcs and a policy test
+        # holds it to every package, so a new package is scanned with no
+        # edit here. The hand-picked list this replaces missed
+        # historyoffequiv, which hid #8025 from Bazel CI.
+        "//internal/storage:tree_go_srcs",
         "//internal/storage/schema:migrations",
-        "//internal/storage/sqlbuild:go_srcs",
-        "//internal/storage/uow:go_srcs",
-        "//internal/storage/versioncontrolops:go_srcs",
     ],
     embed = [":issueops"],
     deps = [
@@ -259,6 +253,7 @@ go_test(
         "//issueops",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_dolthub_go_mysql_server//sql",
+        "@com_github_dolthub_vitess//go/vt/sqlparser",
         "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )

@@ -9,6 +9,7 @@ exercised indirectly by bazel_dolt_int_test.go's step-content assertions and
 by the manual BEP runs in that PR's review thread.
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -16,7 +17,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from check_testcases import check  # noqa: E402
+from check_testcases import check, main  # noqa: E402
 
 
 def write_testxml(path, testcase_names):
@@ -100,6 +101,62 @@ class CheckTestcasesTest(unittest.TestCase):
             labels={"//a:x", "//a:shtest"},
         )
         self.assertEqual(problems, [])
+
+
+class SkipCensusFlagTest(unittest.TestCase):
+    """--skip-census runs check_skip_census.py's census over the same targets."""
+
+    LABEL = "//a:x"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        d = os.path.join(self.tmp.name, "a", "x")
+        os.makedirs(d)
+        root = ET.Element("testsuites")
+        suite = ET.SubElement(root, "testsuite")
+        ET.SubElement(suite, "testcase", name="TestRuns")
+        skipped = ET.SubElement(suite, "testcase", name="TestSkips")
+        ET.SubElement(skipped, "skipped", message="Skipped").text = (
+            "=== RUN   TestSkips\n    x_test.go:3: KNOWN DIVERGENCE W-X (b): r\n--- SKIP: TestSkips (0.00s)\n")
+        ET.ElementTree(root).write(os.path.join(d, "test.xml"))
+        self.bep = os.path.join(self.tmp.name, "bep.json")
+        with open(self.bep, "w", encoding="utf-8") as f:
+            for ev in (
+                {"id": {"targetConfigured": {"label": self.LABEL}}, "configured": {"targetKind": "go_test rule"}},
+                {"id": {"testResult": {"label": self.LABEL, "shard": 1}}, "testResult": {"status": "PASSED"}},
+            ):
+                f.write(json.dumps(ev) + "\n")
+
+    def census(self, *lines):
+        path = os.path.join(self.tmp.name, "skip_census.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("".join(line + "\n" for line in lines))
+        return path
+
+    def run_main(self, *extra):
+        return main(["--bep", self.bep, "--testlogs", self.tmp.name, *extra])
+
+    def test_a_listed_skip_passes(self):
+        self.assertEqual(self.run_main("--skip-census", self.census(f"{self.LABEL} TestSkips KNOWN DIVERGENCE W-X")), 0)
+
+    def test_an_unlisted_skip_fails(self):
+        self.assertEqual(self.run_main("--skip-census", self.census()), 1)
+
+    def test_a_stale_line_fails(self):
+        census = self.census(f"{self.LABEL} TestRuns other", f"{self.LABEL} TestSkips KNOWN DIVERGENCE W-X")
+        self.assertEqual(self.run_main("--skip-census", census), 1)
+
+    def test_report_only_never_fails_on_the_census(self):
+        self.assertEqual(self.run_main("--skip-census", self.census(), "--skip-census-report-only"), 0)
+
+    def test_report_only_needs_the_census(self):
+        with self.assertRaises(SystemExit):
+            self.run_main("--skip-census-report-only")
+
+    def test_label_narrows_the_census(self):
+        census = self.census()
+        self.assertEqual(self.run_main("--label", self.LABEL, "--skip-census", census), 1)
 
 
 if __name__ == "__main__":

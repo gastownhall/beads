@@ -89,14 +89,18 @@ func (s *DoltStore) SearchIssuesWithCounts(ctx context.Context, query string, fi
 // classified-read open (GH#804: bd ready/bd list are read-only for the
 // CURRENT project) is eligible despite readOnly=true because the store is
 // genuinely writable underneath; strict --readonly, preview, and
-// foreign-project opens are not (be-vbhpf).
+// foreign-project opens are not (be-vbhpf), and neither is an open under an
+// active migration freeze (bd-6zf0q5).
 //
 // Only the strict --readonly and preview cases are decided here, by
-// classifiedRead being false. Foreign-project and other auxiliary opens are
-// excluded one layer up: they build their own dolt.Config literals and never
+// classifiedRead being false. The freeze is decided one layer up: the CLI's
+// classifiedReadOpen withholds ClassifiedRead itself from an open whose
+// invocation resolved a freeze, so this predicate never sees one and needs
+// no marker lookup of its own. Foreign-project and other auxiliary opens are
+// excluded the same way: they build their own dolt.Config literals and never
 // set ClassifiedRead, so they reach this guard already fail-closed. Do not
-// look for a foreign-project term in this predicate — there is none, and
-// setting ClassifiedRead on such an open would defeat the exclusion.
+// look for a foreign-project or freeze term in this predicate — there is
+// none, and setting ClassifiedRead on such an open would defeat the exclusion.
 func deferWakeSweepEligible(readOnly, classifiedRead bool) bool {
 	return !readOnly || classifiedRead
 }
@@ -112,9 +116,10 @@ func deferWakeSweepEligible(readOnly, classifiedRead bool) bool {
 // A classified-read open (GH#804: bd ready/bd list are read-only for the
 // CURRENT project) still runs the sweep — the store is genuinely writable
 // underneath, and only the command's own semantics forbid a mutating result.
-// A strict --readonly, preview, or foreign-project open must never sweep,
-// which is why deferWakeSweepEligible checks classifiedRead rather than the
-// guard dropping the readOnly check entirely (be-vbhpf).
+// A strict --readonly, preview, foreign-project, or frozen (bd-6zf0q5)
+// open must never sweep, which is why deferWakeSweepEligible checks
+// classifiedRead rather than the guard dropping the readOnly check entirely
+// (be-vbhpf).
 func (s *DoltStore) wakeExpiredDefers(ctx context.Context) {
 	if !deferWakeSweepEligible(s.readOnly, s.classifiedRead) {
 		return

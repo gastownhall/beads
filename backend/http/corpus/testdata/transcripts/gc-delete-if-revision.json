@@ -1,0 +1,8 @@
+{
+  "shape": "gc-delete-if-revision",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-d2","status":200},
+    {"method":"POST","operation_id":"deleteIssues","path":"/v0/beads/issues:delete","body":["actor","cascade","dry_run","expected_version","force","ids"],"status":200}
+  ]
+}

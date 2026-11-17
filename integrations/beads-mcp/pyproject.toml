@@ -65,7 +65,7 @@ warn_return_any = false
 check_untyped_defs = false
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 115
 
 [tool.ruff.lint]

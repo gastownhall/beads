@@ -22,6 +22,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi"
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/httpclient"
 )
 
 // referenceProfile is testdata/reference_server.json: the wire surface of the
@@ -128,10 +129,33 @@ type referenceProxy struct {
 	upstream *url.URL
 	rp       *httputil.ReverseProxy
 
+	// unmasked turns every mask off: the server's own handshake, 404s and
+	// 400s pass through untouched, and profile only names the operations.
+	// It is the proxy of the current-capability transcripts
+	// (current_capability_test.go).
+	unmasked bool
+
+	// requests counts the requests the bd under test made (subjectUserAgent);
+	// foreign counts every other request that reached the proxy's port.
 	requests atomic.Int64
+	foreign  atomic.Int64
+
+	// wire records the subject's requests while a shape's served run is in
+	// flight (transcript_test.go).
+	wire transcriptRecorder
 
 	mu      sync.Mutex
 	refused []string // "METHOD path: why", for the per-shape log
+}
+
+// subjectUserAgent reports whether ua is the bd under test's: every request
+// bd's wire client sends is stamped "bd/<version> bd-http-backend/v0"
+// (cmd/bd/connect.go, cmd/bd/http_backend.go). Anything else that reaches the
+// proxy's loopback port is another process on the host (a port prober's
+// "GET /" with Go's default User-Agent, seen in local runs), which must not
+// count toward a shape's requests or enter its transcript.
+func subjectUserAgent(ua string) bool {
+	return strings.HasPrefix(ua, "bd/") && strings.HasSuffix(ua, " "+httpclient.WireUserAgentSuffix)
 }
 
 func newReferenceProxy(t *testing.T, profile *referenceProfile, upstreamAddr string) *referenceProxy {
@@ -158,7 +182,14 @@ func (p *referenceProxy) takeRefusals() []string {
 	return out
 }
 
+// noteRefusal records a refusal of the subject's request. Another process's
+// request is refused like any other but not noted: runShape fails a served
+// run that exits nonzero after a noted refusal, and a port prober's "GET /"
+// landing in an expect_exit shape's run must not fail it.
 func (p *referenceProxy) noteRefusal(r *http.Request, why string) {
+	if !subjectUserAgent(r.UserAgent()) {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.refused = append(p.refused, fmt.Sprintf("%s %s: %s", r.Method, r.URL.Path, why))
@@ -181,12 +212,26 @@ func (p *referenceProxy) match(r *http.Request) *referenceOperation {
 }
 
 func (p *referenceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	p.requests.Add(1)
+	body, err := bufferBody(r)
+	if err != nil {
+		http.Error(w, "reference proxy: read body: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	op := p.match(r)
+	if subjectUserAgent(r.UserAgent()) {
+		p.requests.Add(1)
+		w = p.wire.track(w, r, op, body)
+	} else {
+		p.foreign.Add(1)
+	}
+	if p.unmasked {
+		p.rp.ServeHTTP(w, r)
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v0/beads/context" {
 		p.serveContext(w, r)
 		return
 	}
-	op := p.match(r)
 	if op == nil {
 		p.noteRefusal(r, "operation not published by the reference server")
 		detail := "no such route on this server"
@@ -204,26 +249,32 @@ func (p *referenceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"unknown query parameter "+offender))
 		return
 	}
-	if r.Body != nil && r.Body != http.NoBody {
-		raw, err := io.ReadAll(r.Body)
-		_ = r.Body.Close()
-		if err != nil {
-			http.Error(w, "reference proxy: read body: "+err.Error(), http.StatusBadGateway)
+	var members map[string]json.RawMessage
+	if len(bytes.TrimSpace(body)) > 0 && json.Unmarshal(body, &members) == nil {
+		if offender := firstUnknown(slices.Collect(maps.Keys(members)), op.body); offender != "" {
+			p.noteRefusal(r, "request member "+offender+" unknown to "+op.OperationID)
+			httpapi.Write(w, httpapi.InvalidArgument(offender, httpapi.ReasonUnknownParameter,
+				"json: unknown field \""+offender+"\""))
 			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(raw))
-		r.ContentLength = int64(len(raw))
-		var members map[string]json.RawMessage
-		if len(bytes.TrimSpace(raw)) > 0 && json.Unmarshal(raw, &members) == nil {
-			if offender := firstUnknown(slices.Collect(maps.Keys(members)), op.body); offender != "" {
-				p.noteRefusal(r, "request member "+offender+" unknown to "+op.OperationID)
-				httpapi.Write(w, httpapi.InvalidArgument(offender, httpapi.ReasonUnknownParameter,
-					"json: unknown field \""+offender+"\""))
-				return
-			}
 		}
 	}
 	p.rp.ServeHTTP(w, r)
+}
+
+// bufferBody reads r's body, if it has one, and puts an identical one back,
+// so the proxy can look at the members and still forward every byte.
+func bufferBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil, nil
+	}
+	raw, err := io.ReadAll(r.Body)
+	_ = r.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	r.ContentLength = int64(len(raw))
+	return raw, nil
 }
 
 // firstUnknown names the smallest key not in known, the same deterministic

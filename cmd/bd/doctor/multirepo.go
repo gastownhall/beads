@@ -86,9 +86,9 @@ func CheckMultiRepoTypes(repoPath string) DoctorCheck {
 // discoverChildTypes reads custom types from a child repo's config or database.
 // Returns nil types if no custom types are found (not an error - child may not
 // have any). refused is set when bd's admission refuses the child's workspace
-// from its own contents (a format this build cannot open, a historical SQLite
-// workspace; configfile.LoadDiscoveredForOpen): its database was not read, so
-// the types come from its config.yaml alone.
+// from its own contents (a historical SQLite workspace;
+// configfile.LoadDiscoveredForOpen): its database was not read, so the types
+// come from its config.yaml alone.
 func discoverChildTypes(repoPath string) (childTypes []string, refused error) {
 	// Expand tilde
 	if strings.HasPrefix(repoPath, "~") {
@@ -104,9 +104,8 @@ func discoverChildTypes(repoPath string) (childTypes []string, refused error) {
 	if err == nil && len(types) > 0 {
 		return types, nil
 	}
-	var formatErr *configfile.UnsupportedWorkspaceFormatError
 	var legacyErr *configfile.LegacyWorkspaceError
-	if errors.As(err, &formatErr) || errors.As(err, &legacyErr) {
+	if errors.As(err, &legacyErr) {
 		refused = err
 	}
 
@@ -139,15 +138,14 @@ var AdmitAdditionalRepo func(beadsDir string) error
 // Command admission checked only the workspace doctor runs in, so beadsDir's
 // metadata is read here as discovery reads it, without migrating a legacy
 // config.json, and a workspace admission would refuse from its own contents
-// (a format this build cannot open, a historical SQLite workspace) is refused
-// before anything else touches it, with admission's text
-// (configfile.LoadDiscoveredForOpen). configfile.Load (getDatabasePath included)
-// would migrate that config.json into metadata.json, dropping graph_* keys it
-// does not know, before the store constructor could refuse a graph workspace
-// it marks; an ordinary legacy workspace is migrated only by that
-// constructor, when there is a database to open. Metadata naming a backend
-// this build does not recognize is refused before the open too, with doctor's
-// own message; the constructor would also refuse it before its Load.
+// (a historical SQLite workspace) is refused before anything else touches it,
+// with admission's text (configfile.LoadDiscoveredForOpen). configfile.Load
+// (getDatabasePath included) would migrate that config.json into
+// metadata.json, dropping keys it does not know, before the workspace could
+// be refused; the read-only store open below reads it in place. Metadata
+// naming a backend this build does not recognize is refused before the open
+// too, with doctor's own message; the constructor would also refuse it before
+// its Load.
 func readTypesFromDB(beadsDir string) ([]string, error) {
 	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
 	if err != nil {

@@ -4,9 +4,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -200,6 +203,196 @@ func TestProxiedServerServeDelete(t *testing.T) {
 		if problem := deleteProblem(t, raw); problem["code"] != "not_found" {
 			t.Errorf("code = %v, want not_found", problem["code"])
 		}
+	})
+
+	sp.shutdown(t)
+}
+
+// serveDeleteIfRevisionRacers is how many same-token guarded deletes race one
+// bead through one `bd serve` below. It is the count
+// TestProxiedServerDeleteIfRevisionSingleWinner races on the proxied CLI route,
+// and it is under the server's in-flight bound (16), so every racer is admitted
+// at once and the only thing that can queue them is the delete fence.
+const serveDeleteIfRevisionRacers = 10
+
+// TestProxiedServerServeDeleteIfRevisionSingleWinner is mc-zndi7.73's race
+// (GH#7243) on the route #7244's fence did not reach: a guarded delete served
+// by `bd serve`. The fence serializes same-token deletes so that a loser's
+// existence probe runs after the winner's commit. bd serve builds the deleter
+// over its per-request timing wrapper, which the fence lookup could not see
+// through, so every racer deleted the same row and answered 200, with one
+// "bd: delete" commit each.
+//
+// Both clients are raced through one bd serve: raw POSTs to issues:delete, and
+// `bd delete --if-revision` from a `bd connect` workspace, which must report
+// the same outcome the proxied and shared-server routes report (exit 13,
+// "precondition failed") for each loser. The deleted row is gone either way;
+// what this pins is that exactly one caller is told it deleted it and exactly
+// one deletion lands in the history.
+func TestProxiedServerServeDeleteIfRevisionSingleWinner(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "srvdelrace")
+	sp := startServe(t, bd, p.dir, bdProxiedEnv(p.dir))
+	db := openProxiedDB(t, p)
+
+	deleteCommits := func(t *testing.T) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow("SELECT COUNT(*) FROM dolt_log WHERE message LIKE 'bd: delete%'").Scan(&n); err != nil {
+			t.Fatalf("count delete commits: %v", err)
+		}
+		return n
+	}
+
+	t.Run("http", func(t *testing.T) {
+		issue := bdProxiedCreate(t, bd, p.dir, "serve delete race (http)", "-p", "2")
+		status, raw := sp.getIssueRaw(t, issue.ID)
+		if status != http.StatusOK {
+			t.Fatalf("GET %s: status = %d, want 200: %s", issue.ID, status, raw)
+		}
+		body := `{"ids":["` + issue.ID + `"],"actor":"http-agent","force":true,"expected_version":` +
+			revisionGuard(revisionOf(t, raw)) + `}`
+		before := deleteCommits(t)
+
+		statuses := make([]int, serveDeleteIfRevisionRacers)
+		bodies := make([][]byte, serveDeleteIfRevisionRacers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range serveDeleteIfRevisionRacers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				req, err := http.NewRequest(http.MethodPost, sp.url("/v0/beads/issues:delete"), strings.NewReader(body))
+				if err != nil {
+					t.Errorf("racer %d: new delete request: %v", i, err)
+					return
+				}
+				req.Header.Set("Content-Type", "application/json")
+				<-start
+				resp, err := sp.client.Do(req)
+				if err != nil {
+					t.Errorf("racer %d: POST issues:delete: %v", i, err)
+					return
+				}
+				defer func() { _ = resp.Body.Close() }()
+				raw, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Errorf("racer %d: read delete body: %v", i, err)
+					return
+				}
+				statuses[i], bodies[i] = resp.StatusCode, raw
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if t.Failed() {
+			t.FailNow()
+		}
+
+		landed := deleteCommits(t) - before
+
+		// One 200 that deleted the bead; every loser a 404, because by the
+		// time the fence lets it in the bead is gone, and an id naming no bead
+		// outranks the guard. A second 200 is the bug: a loser that read the
+		// row before the winner's commit deleted it again and was told so.
+		winner, losers := -1, 0
+		for i, status := range statuses {
+			switch status {
+			case http.StatusOK:
+				winner = i
+			case http.StatusNotFound:
+				losers++
+				if problem := deleteProblem(t, bodies[i]); problem["code"] != "not_found" {
+					t.Errorf("racer %d: code = %v, want not_found: %s", i, problem["code"], bodies[i])
+				}
+			}
+		}
+		if winner < 0 || losers != serveDeleteIfRevisionRacers-1 {
+			t.Fatalf("same-token guarded deletes through bd serve: statuses %v and %d \"bd: delete\" commits, want one 200, %d 404s and one commit\nbodies: %q",
+				statuses, landed, serveDeleteIfRevisionRacers-1, bodies)
+		}
+		var result struct {
+			Deleted int `json:"deleted"`
+		}
+		if err := json.Unmarshal(bodies[winner], &result); err != nil {
+			t.Fatalf("decode the winner's result %q: %v", bodies[winner], err)
+		}
+		if result.Deleted != 1 {
+			t.Errorf("the winner deleted %d beads, want 1: %s", result.Deleted, bodies[winner])
+		}
+		if landed != 1 {
+			t.Errorf("%d \"bd: delete\" commits landed, want 1", landed)
+		}
+		assertRowAbsent(t, db, "issues", issue.ID)
+	})
+
+	t.Run("bd_connect", func(t *testing.T) {
+		issue := bdProxiedCreate(t, bd, p.dir, "serve delete race (bd connect)", "-p", "2")
+		rev0 := proxiedRevStr(bdProxiedShowRevision(t, bd, p.dir, issue.ID))
+
+		client := t.TempDir()
+		connect := exec.Command(bd, "connect", "http://"+sp.addr, "--json")
+		connect.Dir = client
+		connect.Env = bdEnv(client)
+		if out, err := connect.CombinedOutput(); err != nil {
+			t.Fatalf("bd connect: %v\n%s", err, out)
+		}
+		before := deleteCommits(t)
+
+		codes := make([]int, serveDeleteIfRevisionRacers)
+		outputs := make([]string, serveDeleteIfRevisionRacers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range serveDeleteIfRevisionRacers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				cmd := exec.Command(bd, "delete", issue.ID, "--if-revision", rev0, "--force")
+				cmd.Dir = client
+				cmd.Env = bdEnv(client)
+				<-start
+				out, err := cmd.CombinedOutput()
+				outputs[i] = string(out)
+				var exitErr *exec.ExitError
+				switch {
+				case err == nil:
+				case errors.As(err, &exitErr):
+					codes[i] = exitErr.ExitCode()
+				default:
+					t.Errorf("racer %d: bd delete did not run: %v\n%s", i, err, out)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if t.Failed() {
+			t.FailNow()
+		}
+
+		landed := deleteCommits(t) - before
+
+		wins, guarded := 0, 0
+		for i, code := range codes {
+			switch code {
+			case 0:
+				wins++
+			case ExitGuardMismatch:
+				guarded++
+				if !strings.Contains(outputs[i], "precondition failed") {
+					t.Errorf("racer %d: the loser does not say \"precondition failed\":\n%s", i, outputs[i])
+				}
+			}
+		}
+		if wins != 1 || guarded != serveDeleteIfRevisionRacers-1 {
+			t.Fatalf("same-token `bd delete --if-revision` through bd connect: exit codes %v and %d \"bd: delete\" commits, want one 0, %d exit-%d refusals and one commit\noutputs: %q",
+				codes, landed, serveDeleteIfRevisionRacers-1, ExitGuardMismatch, outputs)
+		}
+		if landed != 1 {
+			t.Errorf("%d \"bd: delete\" commits landed, want 1", landed)
+		}
+		assertRowAbsent(t, db, "issues", issue.ID)
 	})
 
 	sp.shutdown(t)

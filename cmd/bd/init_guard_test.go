@@ -4,12 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -526,23 +524,7 @@ func TestInitGuard_ExistingProjectMissingServerDB_Refuses(t *testing.T) {
 	defer func() { serverMode = oldServerMode }()
 
 	dataDir := t.TempDir()
-	port, err := testutil.FindFreePort()
-	if err != nil {
-		t.Fatalf("FindFreePort: %v", err)
-	}
-
-	// #nosec G204 -- fixed args, no user input
-	serverCmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir)
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start dolt sql-server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = serverCmd.Process.Kill()
-		_ = serverCmd.Wait()
-	})
-	if !testutil.WaitForServer(port, 15*time.Second) {
-		t.Fatal("dolt sql-server did not become ready within timeout")
-	}
+	port := testutil.StartDoltSQLServer(t, dataDir)
 	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
 
 	tmpDir := t.TempDir()
@@ -565,7 +547,7 @@ func TestInitGuard_ExistingProjectMissingServerDB_Refuses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = checkExistingBeadsDataAt(beadsDir, "myproject")
+	err := checkExistingBeadsDataAt(beadsDir, "myproject")
 	if err == nil {
 		t.Fatal("existing project (non-empty project_id) with missing server-side database must refuse init, got nil error")
 	}
@@ -626,23 +608,7 @@ func TestInitGuard_ExistingProjectMissingServerDB_RecreateMissingAllows(t *testi
 		defer func() { serverMode = oldServerMode }()
 
 		dataDir := t.TempDir()
-		port, err := testutil.FindFreePort()
-		if err != nil {
-			t.Fatalf("FindFreePort: %v", err)
-		}
-
-		// #nosec G204 -- fixed args, no user input
-		serverCmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir)
-		if err := serverCmd.Start(); err != nil {
-			t.Fatalf("failed to start dolt sql-server: %v", err)
-		}
-		t.Cleanup(func() {
-			_ = serverCmd.Process.Kill()
-			_ = serverCmd.Wait()
-		})
-		if !testutil.WaitForServer(port, 15*time.Second) {
-			t.Fatal("dolt sql-server did not become ready within timeout")
-		}
+		port := testutil.StartDoltSQLServer(t, dataDir)
 		t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
 
 		tmpDir := t.TempDir()
@@ -881,22 +847,7 @@ func TestInitGuard_SharedServerMode_MissingServerDB_Refuses(t *testing.T) {
 	}
 
 	dataDir := t.TempDir()
-	port, err := testutil.FindFreePort()
-	if err != nil {
-		t.Fatalf("FindFreePort: %v", err)
-	}
-	// #nosec G204 -- fixed args, no user input
-	serverCmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir)
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start dolt sql-server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = serverCmd.Process.Kill()
-		_ = serverCmd.Wait()
-	})
-	if !testutil.WaitForServer(port, 15*time.Second) {
-		t.Fatal("dolt sql-server did not become ready within timeout")
-	}
+	port := testutil.StartDoltSQLServer(t, dataDir)
 	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
 
 	tmpDir := t.TempDir()
@@ -956,22 +907,7 @@ func TestInitGuard_SharedServerMode_PresentServerDB_Allows(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 
 	dataDir := t.TempDir()
-	port, err := testutil.FindFreePort()
-	if err != nil {
-		t.Fatalf("FindFreePort: %v", err)
-	}
-	// #nosec G204 -- fixed args, no user input
-	serverCmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir)
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start dolt sql-server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = serverCmd.Process.Kill()
-		_ = serverCmd.Wait()
-	})
-	if !testutil.WaitForServer(port, 15*time.Second) {
-		t.Fatal("dolt sql-server did not become ready within timeout")
-	}
+	port := testutil.StartDoltSQLServer(t, dataDir)
 	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
 
 	sharedDB, err := testutil.SetupSharedTestDB(port, "myproject")
@@ -1052,22 +988,7 @@ func startProjectServerModeGuardFixture(t *testing.T, dbName string) string {
 	}
 
 	dataDir := t.TempDir()
-	port, err := testutil.FindFreePort()
-	if err != nil {
-		t.Fatalf("FindFreePort: %v", err)
-	}
-	// #nosec G204 -- fixed args, no user input
-	serverCmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir)
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start dolt sql-server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = serverCmd.Process.Kill()
-		_ = serverCmd.Wait()
-	})
-	if !testutil.WaitForServer(port, 15*time.Second) {
-		t.Fatal("dolt sql-server did not become ready within timeout")
-	}
+	port := testutil.StartDoltSQLServer(t, dataDir)
 	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
 
 	tmpDir := t.TempDir()

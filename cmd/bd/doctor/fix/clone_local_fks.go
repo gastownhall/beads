@@ -12,9 +12,10 @@ import (
 // dolt_ignored table — including FKs whose referenced table is itself
 // clone-local and was never touched by the reset (verified on dolt-sql-server
 // 2.2.0 and 2.2.2). Enforcement stops, the loss survives server restarts, and
-// nothing re-links it. Every production hard-reset site inherits this:
-// flatten/compact squash, merge abort recovery, and the migration-lock error
-// path. Orphan rows then accumulate until the constraint is re-added.
+// nothing re-links it. The hard-reset sites inherit this: merge abort
+// recovery and the migration-lock error path, and, in older releases,
+// flatten and compact (both soft-reset main now). Orphan rows then
+// accumulate until the constraint is re-added.
 type CloneLocalFK struct {
 	Table      string
 	Constraint string

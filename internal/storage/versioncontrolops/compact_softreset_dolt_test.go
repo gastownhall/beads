@@ -29,6 +29,9 @@ type compactHookConn struct {
 
 	// beforeExec runs before each ExecContext statement is forwarded.
 	beforeExec func(query string)
+	// failExec, when set, can fail an ExecContext statement without
+	// forwarding it: a non-nil error is returned for that statement.
+	failExec func(query string, args []any) error
 	// beforeFollowUp runs after the staged check, just before the follow-up
 	// commit is forwarded.
 	beforeFollowUp func()
@@ -46,11 +49,19 @@ type compactHookConn struct {
 // reset leaves anything staged on main.
 const compactFollowupMsg = "compact: commit changes that reached main during compaction"
 
+// isFinalReset reports whether query moves main onto Compact's or Flatten's
+// temp branch.
 func isFinalReset(query string) bool {
-	return strings.Contains(query, "DOLT_RESET(") && strings.Contains(query, "compact-tmp")
+	return strings.Contains(query, "DOLT_RESET(") &&
+		(strings.Contains(query, "compact-tmp") || strings.Contains(query, "flatten-tmp"))
 }
 
 func (c *compactHookConn) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if c.failExec != nil {
+		if err := c.failExec(query, args); err != nil {
+			return nil, err
+		}
+	}
 	if c.beforeExec != nil {
 		c.beforeExec(query)
 	}

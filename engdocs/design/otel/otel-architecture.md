@@ -19,7 +19,7 @@ Beads uses OpenTelemetry (OTel) for structured observability of all database ope
 | Core OTel initialization | ✅ Implemented | `telemetry.Init()`, providers setup |
 | Metrics export (counters) | ✅ Implemented | Storage operations, Dolt operations |
 | Metrics export (histograms) | ✅ Implemented | Operation durations, query latency |
-| Traces (stdout only) | ✅ Implemented | OTLP traces via stdout (dev mode) |
+| Traces (console only) | ✅ Implemented | Spans to stderr via the console exporter (dev mode) |
 | Storage layer instrumentation | ✅ Implemented | `InstrumentedStorage` wrapper for all storage ops |
 | Command lifecycle tracing | ✅ Implemented | Per-command spans with arguments |
 | Dolt version control tracing | ✅ Implemented | Commit, push, pull, merge operations |
@@ -147,11 +147,11 @@ defer telemetry.Shutdown(ctx)
 
 **Providers:**
 - **Metrics**: Any OTLP-compatible metrics backend via `otlpmetrichttp` exporter
-- **Traces**: Stdout only (local debug). No remote trace backend in default stack.
+- **Traces**: Console (stderr) only (local debug). No remote trace backend in default stack.
 
 **Default endpoints** (when `BD_OTEL_METRICS_URL` is not set):
 - Metrics: `http://localhost:8428/opentelemetry/api/v1/push`
-- Traces: stdout (via `BD_OTEL_STDOUT=true`)
+- Traces: stderr (via `OTEL_TRACES_EXPORTER=console`, or the legacy `BD_OTEL_STDOUT=true`)
 
 > **Note**: These defaults target VictoriaMetrics for local development convenience. Beads uses standard OTLP — you can override endpoints to use any OTLP v1.x+ compatible backend (Prometheus, Grafana Mimir, Datadog, New Relic, Grafana Cloud, Loki, OpenTelemetry Collector, etc.).
 
@@ -163,13 +163,18 @@ defer telemetry.Shutdown(ctx)
 **Resource attributes** (set at init time):
 - `service.name`: "bd"
 - `service.version`: bd binary version
-- `host`: system hostname
-- `os`: system OS info
+- `host.name`: system hostname
+- `process.pid`, `process.executable.name`, `process.runtime.*`
+- never `process.command_args`, `process.executable.path` or `process.owner`
+  (the raw argv can hold secrets; see `buildResource`)
 
-**Custom resource attributes** (via `OTEL_RESOURCE_ATTRIBUTES` env var or `BEADS_ACTOR`):
-- `bd.actor`: Actor identity (from git config or env) — set after actor resolution
+`OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` can add or override
+resource attributes (the `FromEnv` detector runs last).
+
+**Command span attributes** (on each `bd.command.<name>` span, not the resource):
 - `bd.command`: Current command name
-- `bd.args`: Full arguments passed to command
+- `bd.args`: Command path and the names of the flags set, never an argument or flag value (#8505)
+- `bd.actor`: Actor identity (`--actor`, else `BEADS_ACTOR` or config, else git `user.name` or `$USER`) — set after actor resolution
 
 ---
 
@@ -246,7 +251,7 @@ Version control operations emit spans directly in `store.go` via `doltTracer.Sta
 Implemented spans (see Appendix for exact source locations):
 - `dolt.commit` — `CALL DOLT_COMMIT`
 - `dolt.push` — `CALL DOLT_PUSH`
-- `dolt.pull` — `CALL DOLT_PULL`
+- `dolt.pull` — a fetch of the remote branch, then `CALL DOLT_MERGE` of its tracking ref (never `DOLT_PULL`, bd-e2q8zs)
 - `dolt.merge` — `CALL DOLT_MERGE`
 - `dolt.branch` — `CALL DOLT_BRANCH`
 - `dolt.checkout` — `CALL DOLT_CHECKOUT`
@@ -329,10 +334,10 @@ OTel SDK uses dot-notation internally. Prometheus-compatible backends (VictoriaM
 | `storage.CreateIssue` | Issue creation | `bd.issue.id`, `bd.issue.type`, `bd.actor` |
 | `storage.UpdateIssue` | Issue update | `bd.issue.id`, `bd.update.count`, `bd.actor` |
 | `storage.GetIssue` | Issue lookup | `bd.issue.id` |
-| `storage.SearchIssues` | Issue search | `bd.query`, `bd.result.count` |
+| `storage.SearchIssues` | Issue search | `bd.result.count` (never the search text) |
 | `storage.GetReadyWork` | Ready work query | `bd.result.count` |
 | `storage.GetBlockedIssues` | Blocked issues query | `bd.result.count` |
-| `storage.RunInTransaction` | Transaction execution | `db.commit_msg` |
+| `storage.RunInTransaction` | Transaction execution | `db.operation` (never the commit message) |
 
 ### Dolt Events
 
@@ -341,9 +346,9 @@ OTel SDK uses dot-notation internally. Prometheus-compatible backends (VictoriaM
 | `dolt.query` | Each SQL query (`queryContext`) | `db.operation`, `db.statement` |
 | `dolt.exec` | Each SQL write (`execContext`) | `db.operation`, `db.statement` |
 | `dolt.query_row` | Single-row queries (`queryRowContext`) | `db.operation`, `db.statement` |
-| `dolt.commit` | DOLT_COMMIT operation | `commit_msg` |
+| `dolt.commit` | DOLT_COMMIT operation | `doltSpanAttrs()` only (never the commit message) |
 | `dolt.push` | DOLT_PUSH operation | `dolt.branch` |
-| `dolt.pull` | DOLT_PULL operation | `dolt.branch` |
+| `dolt.pull` | Pull: fetch, then DOLT_MERGE of the tracking ref | `dolt.branch` |
 | `dolt.merge` | DOLT_MERGE operation | `dolt.merge_branch` |
 | `dolt.branch` | DOLT_BRANCH operation | `dolt.branch` |
 | `dolt.checkout` | DOLT_CHECKOUT operation | `dolt.branch` |
@@ -515,10 +520,10 @@ Every factual claim in this document is backed by a specific source location. Th
 |-------|--------|
 | `Init` signature — returns only `error` | `telemetry.go:64` |
 | `Enabled()` — true when `BD_OTEL_METRICS_URL` set or `BD_OTEL_STDOUT=true` | `telemetry.go:53-55` |
-| Traces: stdout only when `BD_OTEL_STDOUT=true` | `telemetry.go:84-93` |
+| Traces: console (stderr) only when `OTEL_TRACES_EXPORTER=console` | `telemetry.go:84-93` |
 | Metrics: HTTP OTLP when `BD_OTEL_METRICS_URL` set | `telemetry.go:131-139` |
 | Resource: `service.name`, `service.version` | `telemetry.go:73-75` |
-| Resource: `WithHost()`, `WithProcess()` | `telemetry.go:76-77` |
+| Resource: `WithHost()` plus explicit process detectors (no command args, path or owner) | `telemetry.go` `buildResource` |
 | `Shutdown(ctx)` signature | `telemetry.go:162` |
 | `Init` called in `PersistentPreRun` | `main.go:256` |
 | Command span started with `bd.command`, `bd.version`, `bd.args` | `main.go:262-266` |
@@ -537,10 +542,10 @@ Every factual claim in this document is backed by a specific source location. Th
 | `CreateIssue` — attrs: `bd.actor`, `bd.issue.type` | `storage.go:86` |
 | `UpdateIssue` — attrs: `bd.issue.id`, `bd.update.count`, `bd.actor` | `storage.go:131` |
 | `GetIssue` — attr: `bd.issue.id` | `storage.go:108` |
-| `SearchIssues` — attrs: `bd.query`, `bd.result.count` | `storage.go:162` |
+| `SearchIssues` — attr: `bd.result.count` (no search text since #8505) | `storage.go` |
 | `GetReadyWork` — attr: `bd.result.count` | `storage.go:283` |
 | `GetBlockedIssues` — attr: `bd.result.count` | `storage.go:293` |
-| `RunInTransaction` — attr: `db.commit_msg` | `storage.go:393` |
+| `RunInTransaction` — `db.operation` only (no commit message since #8505) | `storage.go` |
 | `GetStatistics` emits gauge broken down by status | `storage.go:349` |
 | `AddDependency`, `RemoveDependency`, `GetDependencies` instrumented | `storage.go:175, 187, 198` |
 | `AddLabel`, `RemoveLabel`, `GetLabels` instrumented | `storage.go:243, 254, 265` |
@@ -587,8 +592,8 @@ Every factual claim in this document is backed by a specific source location. Th
 |-------|--------|
 | Span `hook.exec` created in `runHook` | `hooks_unix.go:31` |
 | Span attrs: `hook.event`, `hook.path`, `bd.issue_id` | `hooks_unix.go:33-35` |
-| Stdout/stderr added as span events via `addHookOutputEvents` | `hooks_otel.go:14, 20` |
-| `hook.stdout` / `hook.stderr` events carry `output`, `bytes` attrs | `hooks_otel.go:15-16, 21-22` |
+| Stdout/stderr added as span events via `addHookOutputEvents` | `hooks_otel.go:17, 20` |
+| `hook.stdout` / `hook.stderr` events carry `bytes` only (no output text since #8505) | `hooks_otel.go` |
 | No metric counters or histograms for hooks | grep `internal/hooks/` for `Counter\|Histogram` → zero matches |
 
 ### AI (`internal/compact/haiku.go`, `cmd/bd/find_duplicates.go`)
