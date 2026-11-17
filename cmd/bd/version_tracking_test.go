@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
@@ -636,6 +637,56 @@ func TestAutoMigrateOnVersionBump_NoDatabase(t *testing.T) {
 	autoMigrateOnVersionBump(tmpDir)
 
 	// Test passes if no panic occurs
+}
+
+// TestUpgradeReview_SurvivesInterveningCommand pins #6670: .local_version is
+// consumed by whichever command runs first after an upgrade, so `bd upgrade
+// review` must still see the previous version when it is not that command —
+// until `bd upgrade ack` clears it.
+func TestUpgradeReview_SurvivesInterveningCommand(t *testing.T) {
+	ensureCleanGlobalState(t)
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Chdir(tmpDir)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"beads.db"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), "0.22.0"); err != nil {
+		t.Fatal(err)
+	}
+
+	origUpgradeDetected, origPreviousVersion, origAck, origJSON := versionUpgradeDetected, previousVersion, upgradeAcknowledged, jsonOutput
+	defer func() {
+		versionUpgradeDetected, previousVersion, upgradeAcknowledged, jsonOutput = origUpgradeDetected, origPreviousVersion, origAck, origJSON
+	}()
+	jsonOutput = false
+
+	// newProcess simulates the startup tracking of a fresh bd invocation.
+	newProcess := func() {
+		versionUpgradeDetected, previousVersion, upgradeAcknowledged = false, "", false
+		trackBdVersion()
+	}
+	review := func() string {
+		return captureStdout(t, func() error { return upgradeReviewCmd.RunE(upgradeReviewCmd, nil) })
+	}
+
+	newProcess() // e.g. `bd list` runs first and consumes .local_version
+	newProcess() // then `bd upgrade review`
+	if out := review(); !strings.Contains(out, "Upgraded from v0.22.0") {
+		t.Fatalf("review after an intervening command lost the previous version:\n%s", out)
+	}
+
+	newProcess()
+	captureStdout(t, func() error { return upgradeAckCmd.RunE(upgradeAckCmd, nil) })
+	newProcess()
+	if out := review(); strings.Contains(out, "Upgraded from") {
+		t.Fatalf("review still reports an upgrade after ack:\n%s", out)
+	}
 }
 
 // NOTE: TestAutoMigrateOnVersionBump_MigratesVersion, TestAutoMigrateOnVersionBump_AlreadyMigrated,

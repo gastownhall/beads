@@ -25,6 +25,14 @@ import (
 // reset the tracked metadata.json file.
 const localVersionFile = ".local_version"
 
+// upgradeReviewFile is the gitignored file holding the version `bd upgrade
+// review` diffs from. .local_version cannot serve: it is a one-shot signal the
+// first command after an upgrade overwrites, so review would only work if it
+// happened to run first (#6670). This file is written on that same upgrade —
+// only when absent, so unacknowledged upgrades accumulate from the oldest —
+// and removed by `bd upgrade ack`.
+const upgradeReviewFile = ".upgrade_review_from"
+
 // trackBdVersion checks if bd version has changed since last run and updates the local version file.
 // This function is best-effort - failures are silent to avoid disrupting commands.
 // Sets global variables versionUpgradeDetected and previousVersion if upgrade detected.
@@ -62,24 +70,14 @@ func trackBdVersionFile(persist bool) {
 	localVersionPath := filepath.Join(beadsDir, localVersionFile)
 	lastVersion := readLocalVersion(localVersionPath)
 
-	// Check if version changed (only flag actual upgrades, not downgrades).
-	//
-	// Homebrew --HEAD stamps (HEAD-<sha>) carry no ordering, so CompareVersions
-	// reads them as 0.0.0: a reinstall onto a newer HEAD registers as no change
-	// at all, and moving a release workspace onto HEAD registers as a
-	// downgrade. Treat a changed stamp with a HEAD build on either side as an
-	// upgrade, so the one-shot post-upgrade reconciliation actually runs; brew
-	// reinstalls only move forward. If that assumption is ever wrong the
-	// misfire is bounded — recoverPreV56IfNeeded refuses a non-semver
-	// predecessor, and the workspace's own version markers still refuse a
-	// genuine downgrade. (Those markers cannot arbitrate direction here: they
-	// compare with the same dotted scan and read HEAD stamps as 0.0.0 too.)
-	if lastVersion != "" && lastVersion != Version {
-		if doctor.CompareVersions(Version, lastVersion) > 0 ||
-			doctor.IsBrewHeadVersion(Version) || doctor.IsBrewHeadVersion(lastVersion) {
-			// Version upgrade detected!
-			versionUpgradeDetected = true
-			previousVersion = lastVersion
+	if isUpgradeFrom(lastVersion) {
+		// Version upgrade detected!
+		versionUpgradeDetected = true
+		previousVersion = lastVersion
+
+		reviewPath := filepath.Join(beadsDir, upgradeReviewFile)
+		if persist && readLocalVersion(reviewPath) == "" {
+			_ = writeLocalVersion(reviewPath, lastVersion) // Best effort, like .local_version
 		}
 	}
 
@@ -89,6 +87,43 @@ func trackBdVersionFile(persist bool) {
 		_ = writeLocalVersion(localVersionPath, Version) // Best effort: version tracking is advisory
 	}
 
+}
+
+// isUpgradeFrom reports whether running this binary after lastVersion is an
+// upgrade (only actual upgrades, not downgrades).
+//
+// Homebrew --HEAD stamps (HEAD-<sha>) carry no ordering, so CompareVersions
+// reads them as 0.0.0: a reinstall onto a newer HEAD registers as no change
+// at all, and moving a release workspace onto HEAD registers as a
+// downgrade. Treat a changed stamp with a HEAD build on either side as an
+// upgrade, so the one-shot post-upgrade reconciliation actually runs; brew
+// reinstalls only move forward. If that assumption is ever wrong the
+// misfire is bounded — recoverPreV56IfNeeded refuses a non-semver
+// predecessor, and the workspace's own version markers still refuse a
+// genuine downgrade. (Those markers cannot arbitrate direction here: they
+// compare with the same dotted scan and read HEAD stamps as 0.0.0 too.)
+func isUpgradeFrom(lastVersion string) bool {
+	if lastVersion == "" || lastVersion == Version {
+		return false
+	}
+	return doctor.CompareVersions(Version, lastVersion) > 0 ||
+		doctor.IsBrewHeadVersion(Version) || doctor.IsBrewHeadVersion(lastVersion)
+}
+
+// upgradeReviewBaseline returns the version `bd upgrade review` diffs from:
+// the one recorded at the first upgrade since the last `bd upgrade ack`, else
+// this process's own detection (a preview run records nothing). Empty means
+// there is no unreviewed upgrade.
+func upgradeReviewBaseline() string {
+	if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
+		if v := readLocalVersion(filepath.Join(beadsDir, upgradeReviewFile)); isUpgradeFrom(v) {
+			return v
+		}
+	}
+	if versionUpgradeDetected {
+		return previousVersion
+	}
+	return ""
 }
 
 // readLocalVersion reads the last bd version from the local version file.
