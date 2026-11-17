@@ -90,9 +90,9 @@ func TestSeedDoltIgnorePatternsSeedsWhenTheTableDoesNotExistYet(t *testing.T) {
 	}
 	defer db.Close()
 
-	// No schema_migrations either: the cursor probe reports it absent, so
+	// No schema_migrations either: the cursor read reports version 0, so
 	// version-gated patterns are skipped and only the canonical set is asserted.
-	expectCursorProbe(mock, "schema_migrations", false)
+	expectCursorTableMissing(mock, "schema_migrations")
 	args := make([]driver.Value, 0, len(doltIgnorePatterns))
 	for _, pattern := range doltIgnorePatterns {
 		args = append(args, pattern)
@@ -174,7 +174,6 @@ func TestSeedDoltIgnorePatternsDegradesToBlindWriteOnPartialRead(t *testing.T) {
 	// The probe reports the cursor, the main version, then returns rows for the
 	// candidates but errors mid-stream: rows 0..failAt-1 scan cleanly, then the
 	// stream fails, leaving present partially populated.
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", mainVersion)
 	args := make([]driver.Value, 0, len(candidates))
 	rows := sqlmock.NewRows([]string{"pattern"})

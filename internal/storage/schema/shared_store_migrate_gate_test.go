@@ -10,11 +10,10 @@ import (
 )
 
 // expectSharedGateProbe mocks the probe sequence every gate invocation issues
-// before it can decide anything: CurrentVersion, PendingVersions, and the
-// dolt_remotes count.
+// before it can decide anything: one migration-cursor read (the pending
+// versions are derived from it) and the dolt_remotes count.
 func expectSharedGateProbe(mock sqlmock.Sqlmock, current int, remotes int) {
-	expectGateCurrentVersion(mock, current) // CurrentVersion
-	expectGateCurrentVersion(mock, current) // PendingVersions -> pending exists
+	expectGateCurrentVersion(mock, current) // behind: pending migrations exist
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dolt_remotes`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(remotes))
 }
@@ -116,8 +115,7 @@ func TestSharedStoreGateNoRemote(t *testing.T) {
 		t.Setenv(AllowRemoteMigrateEnv, "0")
 		db, mock, _ := sqlmock.New()
 		defer db.Close()
-		expectGateCurrentVersion(mock, latest) // CurrentVersion
-		expectGateCurrentVersion(mock, latest) // PendingVersions -> none
+		expectGateCurrentVersion(mock, latest) // no pending migrations
 
 		if err := sharedGate(t, mock, db); err != nil {
 			t.Fatalf("converged shared database must be allowed, got %v", err)

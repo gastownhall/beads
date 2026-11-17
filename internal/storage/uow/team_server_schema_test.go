@@ -11,15 +11,21 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
-// expectCursorProbe mocks the information_schema existence probe that
-// migrationSource.currentVersion issues before it ever reads the cursor
-// table. The probe was added by be-bv7x so a not-yet-created cursor table
-// never poisons the pooled Dolt session with a failing statement.
-func expectCursorProbe(mock sqlmock.Sqlmock, table string, exists bool) {
+// expectCursorTableMissing mocks the schema cursor read on a database with no
+// cursor table yet: the read fails with 1146, which means version 0.
+func expectCursorTableMissing(mock sqlmock.Sqlmock, table string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM " + table)).
+		WillReturnError(&mysql.MySQLError{Number: 1146, Message: "table not found: " + table})
+}
+
+// expectTableProbe mocks the check ahead of a table listing for a session that
+// may have no usable database: the schemata read, then SHOW TABLES.
+func expectTableProbe(mock sqlmock.Sqlmock, table string, exists bool) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	rows := sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("issues")
@@ -30,7 +36,6 @@ func expectCursorProbe(mock sqlmock.Sqlmock, table string, exists bool) {
 }
 
 func expectVersionQuery(mock sqlmock.Sqlmock, version int) {
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(version))
 }
@@ -83,9 +88,9 @@ func TestCheckTeamServerSchema_FreshDB_RefusesWithBtsInit(t *testing.T) {
 func TestCheckTeamServerSchema_MissingTable_RefusesWithBtsInit(t *testing.T) {
 	mock, db, closeDB := newVersionMockDB(t)
 	defer closeDB()
-	// With the be-bv7x probe in front, an absent cursor table is reported by
-	// the probe returning 0 rather than by the cursor read erroring out.
-	expectCursorProbe(mock, "schema_migrations", false)
+	// An absent cursor table fails the cursor read with 1146, which means
+	// version 0.
+	expectCursorTableMissing(mock, "schema_migrations")
 
 	err := checkTeamServerSchema(context.Background(), db, "beads_team")
 	if err == nil {

@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -228,20 +227,14 @@ func TestPrintGlobalDatabaseConsentHint(t *testing.T) {
 }
 
 // expectRemoteBackedSharedProbe mocks the probe sequence a shared,
-// remote-backed store makes before the gate decides: CurrentVersion, then
-// PendingVersions (both a cursor probe plus a max-version read), then the
-// remote count. With the smart router pinned off, no further query follows
-// either outcome, so an unmet expectation means the gate took a path this test
-// does not describe.
+// remote-backed store makes before the gate decides: one migration-cursor read
+// (the pending versions are derived from it), then the remote count. With the
+// smart router pinned off, no
+// further query follows either outcome, so an unmet expectation means the gate
+// took a path this test does not describe.
 func expectRemoteBackedSharedProbe(mock sqlmock.Sqlmock) {
-	for range 2 {
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
-			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-		mock.ExpectQuery("^SHOW TABLES$").
-			WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("schema_migrations"))
-		mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
-			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(1))
-	}
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(1))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dolt_remotes`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 }

@@ -54,10 +54,21 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 	if !onTarget {
 		return false, nil
 	}
+	return convergedOnTarget(ctx, db, databaseName, qualifier)
+}
+
+// convergedOnTarget is the rest of alreadyConverged, for a session already known
+// to be on databaseName. qualifier is what selectTargetDatabase returned, empty
+// when nothing had to be selected.
+func convergedOnTarget(ctx context.Context, db DBConn, databaseName, qualifier string) (bool, error) {
+	// This probe writes nothing, so its table lookups share one listing instead
+	// of sending a dozen. tableListingUnchanged below re-reads it before the lock
+	// term, so the listing is no older than the lookups' last answer used to be.
+	ctx = withTableListing(ctx)
 
 	// Exactly MigrateUp's own gate, and it runs first: on a fresh or
-	// mid-upgrade database it reports work needed from the cursor probe alone,
-	// before any statement that could fail against a missing table.
+	// mid-upgrade database it reports work needed from the cursor read alone,
+	// before any later statement that could fail against a missing table.
 	needed, err := migrationWorkNeeded(ctx, db)
 	if err != nil {
 		return false, fmt.Errorf("checking schema migration work: %w", err)
@@ -99,14 +110,27 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 	// deliberately non-ignored table that the next pull's auto-commit puts
 	// into HEAD and push replicates fleet-wide.
 	//
-	// Two SHOW TABLES listings on the hot path, safe to issue because
-	// selectTargetDatabase has put the session on the target (see
+	// A SHOW TABLES listing at HEAD plus the working-set listing already held,
+	// safe because selectTargetDatabase has put the session on the target (see
 	// readIgnoredCursorState).
 	state, err := readIgnoredCursorState(ctx, db, qualifier)
 	if err != nil {
 		return false, err
 	}
 	if state.reconcileNeeded() {
+		return false, nil
+	}
+
+	// Every table lookup above answered from the first listing, and the cursor
+	// and sentinel column reads noted the tables they found. A peer that dropped
+	// one of those tables or left a scratch table since then and has already
+	// released the lock would pass the lock term below, so see the tables again
+	// first. A different answer for any of them declines onto the locked path.
+	unchanged, err := tableListingUnchanged(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	if !unchanged {
 		return false, nil
 	}
 
@@ -150,10 +174,9 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 // exists" and captured no heal authority), and the selector issues the same
 // USE preparation would.
 //
-// The existence probe is not decoration. A Dolt session that issues a FAILING
-// statement stays pinned to its pre-statement catalog snapshot, so a USE of a
-// not-yet-created database would poison this pooled connection for the rest of
-// its life (be-bv7x). Probe with a query that always succeeds, then act.
+// The existence probe is not decoration: a USE of a not-yet-created database
+// fails, and that is an expected state here rather than an error. Probe with a
+// query that always succeeds, then act.
 func selectTargetDatabase(ctx context.Context, db DBConn, databaseName string, selector DatabaseSelector) (bool, string, error) {
 	var current sql.NullString
 	if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&current); err != nil {
@@ -222,9 +245,9 @@ func migrationLockFree(ctx context.Context, db DBConn, lockName string) (bool, e
 // returned, or empty when the session was already on the target database and
 // nothing needed selecting. dolt_ignore is a Dolt system table: it is NOT
 // listed in information_schema.tables (verified against a live dolt sql-server
-// — the cursor-table existence probe pattern from migrationSource.currentVersion
-// would report it absent and disable the fast path permanently), so this read
-// cannot get the full be-bv7x probe-before-act treatment at table granularity.
+// — an existence probe of that table would report it absent and disable the
+// fast path permanently), so this read cannot be probed first at table
+// granularity.
 // What it has instead: selectTargetDatabase has already proved this session is
 // on the target database (by reading DATABASE(), or by probing
 // information_schema.schemata and selecting it), Dolt materializes dolt_ignore

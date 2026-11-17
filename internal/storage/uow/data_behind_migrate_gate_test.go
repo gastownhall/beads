@@ -22,7 +22,7 @@ const dataBehindCurrent = 65
 // issues before its HEAD read when the cursor is fully present: the be-bv7x
 // cursor-existence probe, then the content_hash column.
 func expectHeadContentHashProbes(mock sqlmock.Sqlmock) {
-	expectCursorProbe(mock, "schema_migrations", true)
+	expectTableProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'")).
 		WillReturnRows(sqlmock.NewRows([]string{"Field"}).AddRow("content_hash"))
 }

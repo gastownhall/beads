@@ -11,13 +11,12 @@ import (
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
-// TestFreshDB_PoolReadsSchemaMigrations reproduces a pooled-connection
-// poisoning bug: on a brand-new database, the migration cursor's probe query
-// runs against schema_migrations before the table exists, and Dolt pins that
-// pooled session's catalog to its pre-statement snapshot on the resulting
-// failure. Migrations then create the table on a different connection, but a
-// caller who later reuses the poisoned connection still sees "table not
-// found: schema_migrations" even though the table is really there.
+// TestFreshDB_PoolReadsSchemaMigrations pins the pooled-connection poisoning
+// bug be-bv7x (fixed in Dolt between 2.2.0 and 2.4.1; the required minimum is
+// 2.6.0) at the store level: on a brand-new database, the migration cursor's
+// read runs against schema_migrations before the table exists and fails.
+// Migrations then create the table on a different connection, and a caller who
+// later reuses that pooled connection must see it.
 //
 // A single query can pass by luck if it happens to land on a connection that
 // never saw the pre-table failure, so this loops enough times to cycle
@@ -65,16 +64,15 @@ func TestFreshDB_PoolReadsSchemaMigrations(t *testing.T) {
 	}
 }
 
-// TestSentinelColumnProbe_PoolSeesLaterTables is the be-bv7x shape for the
-// ignored cursor's column sentinel, leases.granted_node. Every write-capable
-// open reads that cursor through the sentinel probes, and the column's carrier
-// table is exactly what a release-lineage store lacks (no leases before
-// ignored/0012) or what an out-of-band copy can drop. A probe that sends
-// SHOW COLUMNS to the missing table fails, and on the Dolt releases bd runs
-// against (2.1.8 and the 2.2.0 CI pins; 2.4.1 no longer does it) a failing
-// statement on the store's multiStatements session pins that pooled session
-// to its pre-statement catalog: the leases table the ignored replay then
-// creates on another connection stays "table not found" there.
+// TestSentinelColumnProbe_PoolSeesLaterTables proves the column sentinel is safe
+// to send to a missing table at the required Dolt version. The probe for
+// leases.granted_node sends SHOW COLUMNS to a table a release-lineage store
+// lacks (no leases before ignored/0012). That statement fails, and on the
+// multiStatements DSN a failing statement used to pin the pooled session to its
+// pre-statement catalog (be-bv7x); the failure mode was fixed in Dolt between
+// 2.2.0 and 2.4.1, and the required minimum is 2.6.0. This test runs that
+// failure against the Bazel-pinned server and requires the session to see the
+// leases table created afterwards on another connection.
 //
 // The pool under test holds one connection, so the session the probe ran on
 // is the session the follow-up read lands on.
@@ -138,13 +136,80 @@ func TestSentinelColumnProbe_PoolSeesLaterTables(t *testing.T) {
 	}
 }
 
-// TestCursorProbe_NoDatabaseSessionStaysUsable pins the cursor-existence probe
-// to the be-bv7x rule on a real sql-server: it must succeed on any session. On
-// a session with no database selected, SHOW TABLES fails ("no database
-// selected"), and a failing statement pins the pooled session to its
-// pre-statement catalog. The probe has to read the cursor as absent there,
-// exactly as the INFORMATION_SCHEMA.TABLES count it replaced did, and leave the
-// session able to see a database and table created afterwards elsewhere.
+// TestCursorRead_MissingTableSessionSeesLaterTables is the fresh-database case
+// of reading the cursor directly: the read fails because the cursor table does
+// not exist yet. It proves that failure is safe at the required Dolt version
+// (be-bv7x, a failing statement pinning a pooled session to its old catalog, was
+// fixed in Dolt between 2.2.0 and 2.4.1; the required minimum is 2.6.0). The
+// session the read ran on must see the table created afterwards on another
+// connection, and the rows in it.
+//
+// The pool under test holds one connection, so the session the read ran on is
+// the session the follow-up reads land on.
+func TestCursorRead_MissingTableSessionSeesLaterTables(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root"}.String())
+	if err != nil {
+		t.Fatalf("open admin connection: %v", err)
+	}
+	defer admin.Close()
+	dbName := uniqueTestDBName(t)
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE `"+dbName+"`"); err != nil {
+		t.Fatalf("create database: %v", err)
+	}
+	defer func() {
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*testTimeout)
+		defer dropCancel()
+		_, _ = admin.ExecContext(dropCtx, "DROP DATABASE IF EXISTS `"+dbName+"`")
+	}()
+
+	pool, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName,
+	}.String())
+	if err != nil {
+		t.Fatalf("open single-connection pool: %v", err)
+	}
+	defer pool.Close()
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
+
+	version, err := schema.CurrentVersion(ctx, pool)
+	if err != nil {
+		t.Fatalf("CurrentVersion with no cursor table: %v", err)
+	}
+	if version != 0 {
+		t.Fatalf("CurrentVersion with no cursor table = %d, want 0", version)
+	}
+
+	if _, err := admin.ExecContext(ctx, "CREATE TABLE `"+dbName+"`.schema_migrations (version INT PRIMARY KEY, applied_at DATETIME, content_hash CHAR(64))"); err != nil {
+		t.Fatalf("create cursor table: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "INSERT INTO `"+dbName+"`.schema_migrations (version) VALUES (7)"); err != nil {
+		t.Fatalf("insert cursor row: %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
+		t.Fatalf("the session the failing cursor read ran on cannot see a table created after it (be-bv7x pin): %v", err)
+	}
+	version, err = schema.CurrentVersion(ctx, pool)
+	if err != nil {
+		t.Fatalf("CurrentVersion after the cursor table was created: %v", err)
+	}
+	if version != 7 {
+		t.Fatalf("CurrentVersion after the cursor table was created = %d, want 7", version)
+	}
+}
+
+// TestCursorProbe_NoDatabaseSessionStaysUsable pins the direct cursor read on a
+// real sql-server on a session with no database selected: the read fails with
+// "no database selected", must read as no cursor, and must leave the session
+// able to see a database and table created afterwards elsewhere, as the
+// INFORMATION_SCHEMA.TABLES count that once answered this did.
 func TestCursorProbe_NoDatabaseSessionStaysUsable(t *testing.T) {
 	skipIfNoDolt(t)
 
@@ -202,10 +267,9 @@ func TestCursorProbe_NoDatabaseSessionStaysUsable(t *testing.T) {
 
 // TestCursorProbe_DroppedDatabaseSessionStaysUsable is the 1049 half of
 // TestCursorProbe_NoDatabaseSessionStaysUsable: on a session whose database
-// was dropped under it, SHOW TABLES fails with "database not found" rather
-// than "no database selected". The probe must read the cursor as absent there
-// too, and leave the session able to see a database and table created
-// afterwards.
+// was dropped under it, the cursor read fails with "database not found" rather
+// than "no database selected". It must read as no cursor there too, and leave
+// the session able to see a database and table created afterwards.
 func TestCursorProbe_DroppedDatabaseSessionStaysUsable(t *testing.T) {
 	skipIfNoDolt(t)
 

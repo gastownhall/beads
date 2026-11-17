@@ -12,12 +12,12 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-// expectSmartFiringGate mocks the blunt-gate probe sequence (CurrentVersion,
-// PendingVersions, dolt_remotes) for a behind, remote-backed database at the
-// given current version — the state in which the smart router runs.
+// expectSmartFiringGate mocks the blunt-gate probe sequence (one
+// migration-cursor read, from which the pending versions are derived, then
+// dolt_remotes) for a behind, remote-backed database at the given current
+// version — the state in which the smart router runs.
 func expectSmartFiringGate(mock sqlmock.Sqlmock, current int) {
-	expectGateCurrentVersion(mock, current) // CurrentVersion
-	expectGateCurrentVersion(mock, current) // PendingVersions -> pending exists
+	expectGateCurrentVersion(mock, current) // behind: pending migrations exist
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dolt_remotes`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 }

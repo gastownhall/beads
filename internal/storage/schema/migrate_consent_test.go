@@ -1,10 +1,13 @@
 package schema
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // TestMain grants migration consent for the whole package: the MigrateUp
@@ -29,6 +32,35 @@ func resetConsentState(t *testing.T) {
 	})
 	t.Setenv(AllowMigrateEnv, "")
 	t.Setenv(AllowRemoteMigrateEnv, "")
+}
+
+// TestCheckMigrateConsentActsOnOneCursorRead pins the interleaving that reading
+// the cursor once decides: a peer finishing the migration right after the read.
+// Both answers are queued before the first check, so a check that read the
+// cursor a second time would see the peer's migration, find nothing pending and
+// allow. This one refuses on what it read, sending nothing else (sqlmock refuses
+// any other statement, a write included), and the next check reads the cursor
+// again and allows.
+func TestCheckMigrateConsentActsOnOneCursorRead(t *testing.T) {
+	resetConsentState(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	expectMigrateConsentReads(mock, LatestVersion()-1)
+	expectMigrateConsentReads(mock, LatestVersion()) // the peer has migrated by now
+	if err := checkMigrateConsent(ctx, db); !IsMigrateConsentError(err) {
+		t.Fatalf("check on a cursor one behind = %v, want a consent refusal", err)
+	}
+	if err := checkMigrateConsent(ctx, db); err != nil {
+		t.Fatalf("check after the peer migrated = %v, want nil", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
 }
 
 func TestMigrateConsentDecision_FreshDB_Allows(t *testing.T) {

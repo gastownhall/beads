@@ -846,10 +846,20 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 		return nil // fresh database — nothing to fork
 	}
 
-	pending, err := PendingVersions(ctx, db)
-	if err != nil {
-		return fmt.Errorf("remote-migrate gate: read pending versions: %w", err)
-	}
+	// The pending versions come from the cursor just read, with the same
+	// filter PendingVersions applies, instead of a second cursor read. The two
+	// reads were separate autocommit statements, so another client's migration
+	// could land between them and the gate would decide on a pending list that
+	// did not match the CurrentVersion it reports. With one read, the decision
+	// and the reported versions describe the same moment. A migration that
+	// lands after the read can make the decision stale. Where the second read
+	// used to be, that changes one outcome: a remote-backed database a peer
+	// has just brought current is refused instead of allowed. The refusal
+	// writes nothing and the next open allows; the second read had the same
+	// stale refusal for a migration landing just after it. An allowed open is
+	// safe because MigrateUp reads the cursor again before applying anything
+	// (TestRemoteMigrateGateCursorAdvancedAfterRead).
+	pending := mainSource.pendingAbove(current)
 	if len(pending) == 0 {
 		return nil // already current — nothing to migrate
 	}

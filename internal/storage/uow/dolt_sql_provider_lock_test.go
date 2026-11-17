@@ -120,7 +120,7 @@ func TestInitSchemaAcquiresMigrationLockBeforeBootstrapDDL(t *testing.T) {
 	// init just created the database, so the cursor table does not exist yet,
 	// the gate reads version 0, and it allows: creating a database is consent
 	// for its schema.
-	expectCursorProbe(mock, "schema_migrations", false)
+	expectCursorTableMissing(mock, "schema_migrations")
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 		WithArgs(sqlmock.AnyArg()).
 		WillReturnError(errors.New("first migration statement failed"))
@@ -173,10 +173,6 @@ func TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase(t *testing.T) {
 	// migrationWorkNeeded's first question, reached only because the probe put
 	// the session on the database itself. The cursor is far behind this
 	// binary, so there is real work and the fast path declines.
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	mock.ExpectQuery("^SHOW TABLES$").
-		WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("schema_migrations"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(1))
 
