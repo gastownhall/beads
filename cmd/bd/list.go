@@ -419,6 +419,10 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// updatedAtFilterScope ends the --updated-after/--updated-before help of
+// list, search and count: which edits move updated_at (GH#5442).
+const updatedAtFilterScope = "; field and label edits count, comments, dependencies and derived blocked state do not"
+
 func init() {
 	listCmd.Flags().VarP(&listStatusFlag, "status", "s", "Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated or repeated for multiple: --status open,in_progress")
 	listCmd.Flags().Var(&listStateFlag, "state", "Alias for --status")
@@ -452,8 +456,8 @@ func init() {
 	// Date ranges
 	listCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")
 	listCmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD or RFC3339)")
-	listCmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD or RFC3339)")
-	listCmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD or RFC3339)")
+	listCmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD or RFC3339)"+updatedAtFilterScope)
+	listCmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD or RFC3339)"+updatedAtFilterScope)
 	listCmd.Flags().String("closed-after", "", "Filter issues closed after date (YYYY-MM-DD or RFC3339)")
 	listCmd.Flags().String("closed-before", "", "Filter issues closed before date (YYYY-MM-DD or RFC3339)")
 

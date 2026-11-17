@@ -474,6 +474,7 @@ var versionExemptions = map[string]string{
 	"InsertIssueIfNew":                       "raw issue insert; the calling create entry point mints",
 	"InsertIssueStrictInTx":                  "raw issue insert; the calling create/persistence-move entry point mints",
 	"PersistLabels":                          "constituent label write of a create; the create entry point mints",
+	"TouchLabelOwnerInTx":                    "stamps updated_at for a label add/remove; the calling label write (domain/db LabelSQLRepository Insert/Delete) mints",
 	"PersistDependencies":                    "creation-time edges; CreateIssuesInTxWithContext mints once per issue after they land",
 	"PersistDependenciesWithResult":          "creation-time edges; CreateIssuesInTxWithContext mints once per issue after they land",
 	"PersistDependenciesWithOptionsResult":   "creation-time edges; CreateIssuesInTxWithContext mints once per issue after they land",

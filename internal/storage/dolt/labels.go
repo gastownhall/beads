@@ -21,7 +21,8 @@ func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) 
 		if isWisp {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label add %s", issueID))
+		// issues too: a real label change advanced the issue's updated_at.
+		return s.doltAddAndCommit(ctx, []string{"events", "issues", "labels"}, fmt.Sprintf("bd: label add %s", issueID))
 	})
 }
 
@@ -38,7 +39,8 @@ func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor strin
 		if isWisp {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label remove %s", issueID))
+		// issues too: a real label change advanced the issue's updated_at.
+		return s.doltAddAndCommit(ctx, []string{"events", "issues", "labels"}, fmt.Sprintf("bd: label remove %s", issueID))
 	})
 }
 
@@ -81,10 +83,11 @@ func (s *DoltStore) GetIssuesByLabel(ctx context.Context, label string) ([]*type
 
 // RenameLabel renames a label across every issue and wisp that carries it,
 // delegating the sweep to issueops.RenameLabelInTx and owning only the
-// dolt-specific commit step. The commit targets the fixed "events"/"labels"
-// pair, mirroring AddLabel/RemoveLabel; doltAddAndCommit's own
-// HasStagedChanges guard skips it when a wisp-only rename left those tables
-// untouched.
+// dolt-specific commit step. The commit targets the fixed
+// "events"/"issues"/"labels" set, mirroring AddLabel/RemoveLabel (issues
+// because each renamed carrier advanced its updated_at); doltAddAndCommit's
+// own HasStagedChanges guard skips it when a wisp-only rename left those
+// tables untouched.
 func (s *DoltStore) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
 	err = s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		if txErr := s.withRetryTx(ctx, func(tx *sql.Tx) error {
@@ -97,7 +100,7 @@ func (s *DoltStore) RenameLabel(ctx context.Context, oldLabel, newLabel, actor s
 		if renamed == 0 {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"events", "labels"},
+		return s.doltAddAndCommit(ctx, []string{"events", "issues", "labels"},
 			fmt.Sprintf("bd: label rename '%s' -> '%s' (%d issues)", oldLabel, newLabel, renamed))
 	})
 	return renamed, merged, ids, err

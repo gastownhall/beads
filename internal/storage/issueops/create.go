@@ -920,8 +920,9 @@ func checkCrossTableIDCollisionCached(ctx context.Context, tx DBTX, id, issueTab
 // them: updated_at has second granularity, so a tie may be two distinct
 // same-second updates — the local row must win the tie (an incoming row with
 // an empty notes field must not wipe local notes), but its aux data
-// (labels/comments/deps, which never bump updated_at) still merges
-// additively (bd-hj85c).
+// (labels/comments/deps) still merges additively (bd-hj85c). A local label
+// edit advances updated_at (GH#5442), so only a same-second one ties here;
+// comments and deps never move it.
 //
 //nolint:gosec // G201: table is a hardcoded constant
 func InsertIssueIfNew(ctx context.Context, tx DBTX, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions) (isNew bool, staleRejected bool, err error) {
