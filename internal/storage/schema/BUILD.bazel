@@ -150,6 +150,7 @@ go_test(
     srcs = [
         "aux_row_id_backfill_test.go",
         "aux_row_id_drift_test.go",
+        "backfill_probe_test.go",
         "call_returning_row_test.go",
         "cli_prepared_ddl_test.go",
         "content_hash_test.go",

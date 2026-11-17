@@ -474,8 +474,9 @@ the environment override), and with a remote it suppresses the two auto-execute
 arms, because on a shared server neither can observe the other clients.
 
 Its decision facts are read from the **main lane only**. The shared arm delegates
-to `checkRemoteMigrateGate`, which calls `schema.CurrentVersion` and
-`schema.PendingVersions` — both of which resolve to `mainSource`. The
+to `checkRemoteMigrateGate`, which reads the cursor once with
+`schema.CurrentVersion` and derives the pending versions from that value the
+way `schema.PendingVersions` does — both against `mainSource`. The
 `dolt_ignore`d lane has its own cursor and its own accessors
 (`CurrentIgnoredVersion`, `PendingIgnoredVersions`), and the gate consults
 neither.

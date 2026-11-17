@@ -254,8 +254,7 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectCustomTablesPopulated(mock)
 	// The seed inserted rows and no migration pass follows to commit them, so
 	// MigrateUp must commit the heal itself, scoped and labeled.
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
@@ -300,8 +299,7 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectCustomTablesPopulated(mock)
 
 	applied, err := MigrateUp(context.Background(), db)
 	if err != nil {

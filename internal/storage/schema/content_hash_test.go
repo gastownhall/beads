@@ -151,8 +151,7 @@ func TestMigrationWorkNotNeededWhenContentHashColumnsPresent(t *testing.T) {
 	mock.ExpectQuery(`SHOW COLUMNS FROM ignored_schema_migrations LIKE 'content_hash'`).
 		WillReturnRows(showColumnsRows("content_hash"))
 	// No backfill pending (custom tables already populated).
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectCustomTablesPopulated(mock)
 
 	needed, err := migrationWorkNeeded(context.Background(), db)
 	if err != nil {
