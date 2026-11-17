@@ -92,8 +92,8 @@ func TestIssueIDCompletion_UsesMetadataWhenStoreNil(t *testing.T) {
 	dbPath = testDBPath
 
 	completions, directive := issueIDCompletion(&cobra.Command{}, nil, "cfg-a")
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Fatalf("directive = %d, want %d", directive, cobra.ShellCompDirectiveNoFileComp)
+	if directive != issueIDCompletionDirective {
+		t.Fatalf("directive = %d, want %d", directive, issueIDCompletionDirective)
 	}
 	if len(completions) != 1 {
 		t.Fatalf("len(completions) = %d, want 1 (%v)", len(completions), completions)
