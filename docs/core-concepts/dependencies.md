@@ -62,6 +62,13 @@ Dependencies have a type that determines whether they block work.
 | `conditional-blocks` | B runs only if A fails | Error handling paths |
 | `waits-for` | B waits for all of A's children | Fanout aggregation |
 
+A parent passes down only its blocked or deferred state: an open or
+in-progress parent does not hold its children, so they appear in `bd ready`.
+A child cannot depend on its own parent or another ancestor, because the
+parent cannot close until its children do and the dependency would never
+clear. To make a child wait, see
+[Child Waits for Work in Its Parent](#child-waits-for-work-in-its-parent).
+
 **Non-blocking types** (graph annotations only):
 
 | Type | Meaning |
@@ -356,6 +363,25 @@ bd dep add <test> <implement>
 bd dep tree <epic>
 bd ready                         # Only "Design" is ready
 ```
+
+### Child Waits for Work in Its Parent
+
+A child sometimes needs work its parent is doing, such as a file the parent's
+change adds. Track that work as a sibling and block the child on it:
+
+```bash
+bd create "Add the config loader" --parent <parent>   # sibling S
+bd dep add <child> <sibling>
+
+bd ready                         # child not shown while S is open
+bd close <sibling>
+bd ready                         # child appears
+```
+
+The child leaves `bd ready` until the sibling closes and returns on its own,
+so you never set it to `blocked` and back by hand. To wait for a pull request
+to merge instead, block the child on a gate (see
+[PR Merge Gate](#pr-merge-gate-common)).
 
 ## See Also
 

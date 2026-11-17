@@ -5764,7 +5764,7 @@
  },
  {
   "name": "dep_add_parent_child_then_explicit_dep_deadlock_guard",
-  "purpose": "After parent-child A.child of P, adding an explicit dep from the child onto the parent is rejected with the child-of deadlock guard.",
+  "purpose": "After parent-child A.child of P, adding an explicit dep from the child onto the parent is rejected with the child-of guard.",
   "prefix": "dep",
   "steps": [
    [
@@ -5806,7 +5806,7 @@
     "--json"
    ]
   ],
-  "pins": "Second add rejected: 'cannot add dependency: dep-1.1 is already a child of dep-1 ... would create a deadlock'; exit 1.",
+  "pins": "Second add rejected: 'cannot add dependency: dep-1.1 is already a child of dep-1. A child does not wait for its parent to close ... this gate would never clear ...'; exit 1.",
   "deterministic": true
  },
  {

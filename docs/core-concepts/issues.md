@@ -87,7 +87,13 @@ bd ready
 
 ### Structural Relationships
 
-These don't affect the ready queue:
+These organize work without blocking it. Parent-child reaches the ready queue
+only indirectly: a blocked or deferred parent holds its children out of
+`bd ready`, but an open or in-progress parent does not, so its children can be
+started at once. A child cannot depend on its own parent or another ancestor,
+because the parent cannot close until its children do. To make a child wait
+for work, see
+[child waits for work in its parent](/core-concepts/dependencies#child-waits-for-work-in-its-parent).
 
 ```bash
 # Parent-child (epic subtasks)
@@ -106,7 +112,7 @@ bd dep relate bd-1 bd-2
 | Type | Description | Ready Queue Impact |
 |------|-------------|-------------------|
 | `blocks` | Hard dependency | Yes - blocked items not ready |
-| `parent-child` | Epic/subtask hierarchy | No |
+| `parent-child` | Epic/subtask hierarchy | Indirectly - a blocked or deferred parent holds its children; an open or in-progress parent does not |
 | `discovered-from` | Tracks origin of discovery | No |
 | `related` | Soft relationship | No |
 
