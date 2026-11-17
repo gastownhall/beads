@@ -2,8 +2,10 @@ package configfile
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -873,6 +875,70 @@ func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
 	})
 }
 
+func TestSaveProxiedServerClientInfo_WriteFailures(t *testing.T) {
+	t.Run("missing parent", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "missing")
+		if err := SaveProxiedServerClientInfo(dir, &ProxiedServerClientInfo{}); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Save: got %v, want missing-directory error", err)
+		}
+	})
+	t.Run("directory destination", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(ProxiedServerClientInfoPath(dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := SaveProxiedServerClientInfo(dir, &ProxiedServerClientInfo{}); err == nil {
+			t.Fatal("Save with directory destination succeeded")
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != ProxiedServerClientInfoFileName || !entries[0].IsDir() {
+			t.Fatalf("failed save changed destination or leaked temp files: %v", entries)
+		}
+	})
+}
+
+// TestSyncSidecarDir pins the post-rename directory flush per platform
+// (bd-pw5t5e, GH#6858). The missing-directory rows are portable: no row
+// opens a real directory except the host-native writable sync.
+func TestSyncSidecarDir(t *testing.T) {
+	const syncPrefix = "syncing " + ProxiedServerClientInfoFileName + " directory:"
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	t.Run("windows skips the directory flush", func(t *testing.T) {
+		// A missing path proves no directory is opened: any open fails.
+		if err := syncSidecarDir("windows", missing); err != nil {
+			t.Fatalf("syncSidecarDir(windows, missing) = %v, want nil", err)
+		}
+	})
+
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos+" missing directory reports the open error", func(t *testing.T) {
+			err := syncSidecarDir(goos, missing)
+			if err == nil {
+				t.Fatal("syncSidecarDir on a missing directory returned nil")
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("err = %v, want it to wrap os.ErrNotExist", err)
+			}
+			if !strings.HasPrefix(err.Error(), syncPrefix) {
+				t.Errorf("err = %q, want prefix %q", err, syncPrefix)
+			}
+		})
+	}
+
+	t.Run("non-windows host syncs a writable directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a real non-Windows directory flush needs a non-Windows host")
+		}
+		if err := syncSidecarDir(runtime.GOOS, t.TempDir()); err != nil {
+			t.Fatalf("syncSidecarDir(%q, tempdir) = %v, want nil", runtime.GOOS, err)
+		}
+	})
+}
+
 func TestSaveProxiedServerClientInfo_WritesEffectiveIdleTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1422,5 +1488,24 @@ func TestPortImpliesServerMode(t *testing.T) {
 					got, tt.want, tt.cfg.DoltMode, tt.serverPort, tt.legacyPort)
 			}
 		})
+	}
+}
+
+// TestSaveProxiedServerClientInfo_SuccessfulSaveReturnsNil pins bd-pw5t5e
+// (GH#6858): a save that wrote, flushed and renamed the sidecar must report
+// success. On Windows, syncing the read-only directory handle fails with
+// "Access is denied", so a completed save surfaced as an error.
+func TestSaveProxiedServerClientInfo_SuccessfulSaveReturnsNil(t *testing.T) {
+	dir := t.TempDir()
+	info := &ProxiedServerClientInfo{RootPath: "/var/lib/beads/proxieddb", Port: 3307}
+	if err := SaveProxiedServerClientInfo(dir, info); err != nil {
+		t.Fatalf("Save returned an error for a completed save: %v", err)
+	}
+	got, err := LoadProxiedServerClientInfo(dir)
+	if err != nil || got == nil {
+		t.Fatalf("Load = %+v, %v; want the saved sidecar", got, err)
+	}
+	if got.RootPath != info.RootPath || got.Port != info.Port {
+		t.Fatalf("Load = %+v, want %+v", got, info)
 	}
 }
