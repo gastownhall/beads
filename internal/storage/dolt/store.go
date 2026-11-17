@@ -329,6 +329,14 @@ type DoltStore struct {
 	beadsDir string      // Path to .beads directory (parent of dbPath)
 	database string      // Database name (subdirectory under dbPath)
 	closed   atomic.Bool // Tracks whether Close() has been called
+	// openApplied holds the migrations this instance's writable open applied
+	// (the count initSchema returned) that no successful ApplySchemaMigrations
+	// call has reported yet. With migrate consent, the open that `bd migrate
+	// schema` performs applies the pending migrations itself; without this,
+	// the verb's explicit pass finds nothing left and reports 0 (bd-pgsagt,
+	// gastownhall/beads#7380). The atomic Swap only makes the report
+	// once-only; the database migration lock still serializes the schema work.
+	openApplied atomic.Int64
 	// untrackPool removes db from the process pool gauges (processPools);
 	// set by registerPoolGauges, called by Close.
 	untrackPool func()
@@ -2615,6 +2623,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			// refuses before migrating), so the rebuild below stays correct
 			// either way.
 		}
+		// Keep the count for this instance's next successful
+		// ApplySchemaMigrations, which reports it once.
+		store.openApplied.Store(int64(applied))
 		// initSchema runs migrations over a separate pool (openMigrationDB).
 		// The Ping above already pinned a connection in store.db to the
 		// pre-migration session root; without a rebuild, the first read
@@ -3804,13 +3815,24 @@ func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshB
 // ApplySchemaMigrations runs idempotent schema migrations under the
 // per-database advisory lock, with retry for transient lock contention.
 // Implements storage.SchemaMigrator.
+//
+// The count also includes the migrations this store's own writable open
+// applied, reported once: the first successful call returns them and later
+// calls on the same store do not. A failed call returns its error and keeps
+// them for the next successful call, since callers ignore the count on error.
+// Migrations applied by another store instance (for example a separate
+// version-bump open) are not counted.
 func (s *DoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
 	migDB, err := s.openMigrationDB()
 	if err != nil {
 		return 0, err
 	}
 	defer migDB.Close()
-	return initSchemaOnDBWithRetry(ctx, migDB)
+	applied, err := initSchemaOnDBWithRetry(ctx, migDB)
+	if err != nil {
+		return applied, err
+	}
+	return applied + int(s.openApplied.Swap(0)), nil
 }
 
 // openMigrationDB opens a one-off connection pool for schema migrations with no
