@@ -5,6 +5,9 @@ package configfile
 import (
 	"fmt"
 	"os"
+	"runtime"
+
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // warnIfInsecurePermissions checks if the credentials file is readable by
@@ -16,7 +19,8 @@ func warnIfInsecurePermissions(path string) {
 	}
 	perm := info.Mode().Perm()
 	if perm&0077 != 0 {
-		fmt.Fprintf(os.Stderr, "WARNING: credentials file %s has overly permissive permissions (%04o).\n", path, perm)
-		fmt.Fprintf(os.Stderr, "Consider running: chmod 600 %s\n", path)
+		arg, note := remedy.CommandArg(runtime.GOOS, path, "<path>")
+		fmt.Fprintf(os.Stderr, "WARNING: credentials file %s has overly permissive permissions (%04o).\n", remedy.PrintedValue(path), perm)
+		fmt.Fprintf(os.Stderr, "Consider running: chmod 600 %s%s\n", arg, note)
 	}
 }

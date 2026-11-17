@@ -11,6 +11,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
@@ -372,6 +373,27 @@ func getFormulaSearchPaths() []string {
 	return formula.DefaultSearchPaths()
 }
 
+// readOnlyFormulaDir returns the formula search path bd may read from but must
+// not write or delete files in: $GT_ROOT/.beads/formulas when GT_ROOT came from
+// a project .beads/.env rather than the caller's environment. A committed .env
+// can point GT_ROOT anywhere, so writes that pick a directory by search-path
+// discovery (formula convert, mol distill) must not follow it there. Returns ""
+// when every search path is writable as far as this rule is concerned: GT_ROOT
+// unset or exported by the caller, or its formula directory is also the
+// project, checkout or user directory.
+func readOnlyFormulaDir() string {
+	if !config.GTRootFromProjectEnv() {
+		return ""
+	}
+	return formula.OrchestratorOnlySearchPath()
+}
+
+// readOnlyFormulaDirReason explains why dir (from readOnlyFormulaDir) is not
+// a write target.
+func readOnlyFormulaDirReason(dir string) string {
+	return fmt.Sprintf("%s is under GT_ROOT from .beads/.env; run with GT_ROOT exported to write there", dir)
+}
+
 // scanFormulaDir scans a directory for formula files (both TOML and JSON).
 func scanFormulaDir(dir string) ([]*formula.Formula, error) {
 	entries, err := os.ReadDir(dir)
@@ -531,13 +553,15 @@ func runFormulaConvert(cmd *cobra.Command, args []string) error {
 
 	name := args[0]
 
-	var jsonPath string
+	// foundIn is the search path a name resolved under; it stays "" for a
+	// formula given as a path.
+	var jsonPath, foundIn string
 	if strings.HasSuffix(name, formula.FormulaExtJSON) {
 		jsonPath = name
 	} else if strings.HasSuffix(name, formula.FormulaExtTOML) {
 		return HandleError("%s is already a TOML file", name)
 	} else {
-		jsonPath = findFormulaJSON(name)
+		jsonPath, foundIn = findFormulaJSON(name)
 		if jsonPath == "" {
 			fmt.Fprintf(os.Stderr, "Error: JSON formula %q not found\n", name)
 			fmt.Fprintf(os.Stderr, "\nSearch paths:\n")
@@ -566,6 +590,18 @@ func runFormulaConvert(cmd *cobra.Command, args []string) error {
 
 	tomlPath := strings.TrimSuffix(jsonPath, formula.FormulaExtJSON) + formula.FormulaExtTOML
 
+	// A formula found by name (not given as a path) may live under a search
+	// path bd can read but must not write: refuse rather than write beside it.
+	// Compare the search path the name resolved under, not the file's parent
+	// directory: a name with a subdirectory or ".." in it resolves to a file
+	// below or beside that search path.
+	if foundIn != "" {
+		if dir := readOnlyFormulaDir(); dir != "" && foundIn == dir {
+			return HandleErrorWithHint(fmt.Sprintf("not converting %s: %s", jsonPath, readOnlyFormulaDirReason(dir)),
+				"Use --stdout to print the TOML instead, or export GT_ROOT in your shell to convert it in place")
+		}
+	}
+
 	if err := os.WriteFile(tomlPath, tomlData, 0600); err != nil {
 		return HandleError("writing %s: %v", tomlPath, err)
 	}
@@ -585,10 +621,17 @@ func runFormulaConvert(cmd *cobra.Command, args []string) error {
 func convertAllFormulas() {
 	converted := 0
 	errors := 0
+	readOnlyDir := readOnlyFormulaDir()
 
 	for _, dir := range getFormulaSearchPaths() {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			continue
+		}
+		if dir == readOnlyDir {
+			if hasJSONFormula(entries) {
+				fmt.Fprintf(os.Stderr, "⏭ Skipped: %s\n", readOnlyFormulaDirReason(dir))
+			}
 			continue
 		}
 
@@ -649,15 +692,27 @@ func convertAllFormulas() {
 	fmt.Println()
 }
 
-// findFormulaJSON searches for a JSON formula file by name.
-func findFormulaJSON(name string) string {
-	for _, dir := range getFormulaSearchPaths() {
-		path := filepath.Join(dir, name+formula.FormulaExtJSON)
-		if _, err := os.Stat(path); err == nil {
-			return path
+// hasJSONFormula reports whether entries include a .formula.json file.
+func hasJSONFormula(entries []os.DirEntry) bool {
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), formula.FormulaExtJSON) {
+			return true
 		}
 	}
-	return ""
+	return false
+}
+
+// findFormulaJSON searches the formula search paths for a JSON formula file by
+// name. It returns the file and the search path it was found under, or "" for
+// both.
+func findFormulaJSON(name string) (path, searchDir string) {
+	for _, dir := range getFormulaSearchPaths() {
+		candidate := filepath.Join(dir, name+formula.FormulaExtJSON)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, dir
+		}
+	}
+	return "", ""
 }
 
 // formulaToTOML converts a Formula to TOML bytes.

@@ -623,7 +623,29 @@ func writeMergeBlockers(w io.Writer, b storage.MergeBlockers) {
 		fmt.Fprintf(w, "  constraint violations: %s (%d)\n", v.Table, v.Count)
 	}
 	fmt.Fprintln(w, "\nNeither class has an ours/theirs resolution — bd conflicts resolve cannot settle them.")
-	if len(b.SchemaConflictTables) > 0 {
+	eventsConflict, otherSchemaConflicts := false, 0
+	for _, t := range b.SchemaConflictTables {
+		if strings.EqualFold(t, "events") {
+			eventsConflict = true
+		} else {
+			otherSchemaConflicts++
+		}
+	}
+	if eventsConflict {
+		// Migration 0062 deleted versioned events (it lives on the ignore
+		// plane now), so a peer whose history still changed them meets a
+		// deletion, not an ALTER TABLE: neither --ours nor --theirs can act
+		// on a table that does not exist here (GH#6727). Checking events out
+		// to clear the stomp refusal deletes the ignored working table too.
+		fmt.Fprintln(w, "  events:                 this may be migration 0062, which moved events off the versioned")
+		fmt.Fprintln(w, "                          tables while the peer's history still changed them; no schema")
+		fmt.Fprintln(w, "                          change reconciles that. Keep your local work, abort the merge explicitly")
+		fmt.Fprintln(w, "                          (dolt merge --abort, or CALL DOLT_MERGE('--abort') on the server serving")
+		fmt.Fprintln(w, "                          this store), and do not run DOLT_CHECKOUT('--','events'): it deletes this")
+		fmt.Fprintln(w, "                          clone's working events table. Recovery:")
+		fmt.Fprintln(w, "                          https://github.com/gastownhall/beads/blob/main/docs/recovery/sync-failures.md#merge-blocked-on-the-events-table-migration-0062")
+	}
+	if otherSchemaConflicts > 0 {
 		// Not `dolt conflicts resolve`: dolt refuses that outright while a
 		// schema conflict is live (dolthub/dolt#6616), so pointing an
 		// operator at it sends them to a command that always errors

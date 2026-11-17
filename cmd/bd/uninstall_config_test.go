@@ -57,7 +57,7 @@ func TestStandaloneHooksAbsoluteFallbackHasNoConfigAuthority(t *testing.T) {
 func TestUninstallHooksUnsetsBeadsRole(t *testing.T) {
 	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		cmd := exec.Command("git", "config", "beads.role", "primary")
+		cmd := gitCommand("config", "beads.role", "primary")
 		cmd.Dir = tmpDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("failed to set beads.role: %v", err)
@@ -67,7 +67,7 @@ func TestUninstallHooksUnsetsBeadsRole(t *testing.T) {
 			t.Fatalf("uninstallHooks() failed: %v", err)
 		}
 
-		getCmd := exec.Command("git", "config", "--local", "--get", "beads.role")
+		getCmd := gitCommand("config", "--local", "--get", "beads.role")
 		getCmd.Dir = tmpDir
 		out, err := getCmd.Output()
 		if err == nil {
@@ -96,7 +96,7 @@ func TestUninstallHooksReportsAmbiguousBeadsRole(t *testing.T) {
 	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
 		for _, value := range []string{"primary", "secondary"} {
-			cmd := exec.Command("git", "config", "--add", "beads.role", value)
+			cmd := gitCommand("config", "--add", "beads.role", value)
 			cmd.Dir = tmpDir
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("failed to add beads.role=%s: %v", value, err)
@@ -112,7 +112,7 @@ func TestUninstallHooksReportsAmbiguousBeadsRole(t *testing.T) {
 		}
 
 		// And the key really is still set — the error was not spurious.
-		getCmd := exec.Command("git", "config", "--local", "--get-all", "beads.role")
+		getCmd := gitCommand("config", "--local", "--get-all", "beads.role")
 		getCmd.Dir = tmpDir
 		out, getErr := getCmd.Output()
 		if getErr != nil {
@@ -141,7 +141,7 @@ func TestResetHooksPathIfBeadsManagedReportsFailureLoudly(t *testing.T) {
 		// There has to be something to unset, or there is no git invocation to
 		// fail: the reset reads beads.role first and only unsets it when it is
 		// actually present.
-		setCmd := exec.Command("git", "config", "beads.role", "primary")
+		setCmd := gitCommand("config", "beads.role", "primary")
 		setCmd.Dir = tmpDir
 		if err := setCmd.Run(); err != nil {
 			t.Fatalf("failed to set beads.role: %v", err)
@@ -223,7 +223,7 @@ func TestResetRolePreservesSelectedGitContext(t *testing.T) {
 				t.Fatal(err)
 			}
 			query := func(dir string, args ...string) ([]byte, error) {
-				cmd := exec.Command("git", args...)
+				cmd := gitCommand(args...)
 				cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 				return cmd.CombinedOutput()
 			}
@@ -268,7 +268,7 @@ func TestResetRolePreservesSelectedGitContext(t *testing.T) {
 				t.Setenv("GIT_CONFIG_VALUE_0", "forged")
 			case "selected_config":
 				t.Setenv("GIT_CONFIG", filepath.Join(decoy, ".git", "config"))
-				probe := exec.Command("git", "--git-dir", selected, "config", "beads.routing-test", "selected-file")
+				probe := gitCommand("--git-dir", selected, "config", "beads.routing-test", "selected-file")
 				probe.Dir = cwd // This fixture precondition deliberately inherits GIT_CONFIG.
 				if out, err := probe.CombinedOutput(); err != nil {
 					t.Fatalf("selected-file probe: %v\n%s", err, out)

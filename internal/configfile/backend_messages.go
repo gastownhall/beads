@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // This file is the single source of truth for the user-facing removed-backend
@@ -122,7 +124,7 @@ func RemovedBackendDetailAt(backend, beadsDir string, cfg *Config) string {
 // exact edit that fixes it rather than a destructive rebuild.
 func removedBackendHealDetail(backend, beadsDir, doltDir string) string {
 	return fmt.Sprintf("%s; however, this workspace already has a Dolt database at %s, and bd v1.2.x opened workspaces like this as Dolt — the stale \"backend\" value is the only problem; to heal, edit %s and change \"backend\": %q to \"backend\": %q (or delete the \"backend\" field entirely; Dolt is the default), then rerun the command; %s",
-		removedBackendRationale(backend), doltDir, ConfigPath(beadsDir),
+		removedBackendRationale(backend), remedy.PrintedValue(doltDir), remedy.PrintedValue(MetadataFilePath(beadsDir)),
 		backend, BackendDolt, BackendNotOpenedGuarantee)
 }
 
@@ -132,7 +134,7 @@ func removedBackendHealDetail(backend, beadsDir, doltDir string) string {
 func removedBackendRecoveryDetail(backend, beadsDir string) string {
 	absent := ""
 	if beadsDir != "" {
-		absent = fmt.Sprintf(", and no Dolt database was found under %s", beadsDir)
+		absent = fmt.Sprintf(", and no Dolt database was found under %s", remedy.PrintedValue(beadsDir))
 	}
 	return fmt.Sprintf("%s; the configured %s database was not opened or modified%s; to recover the data, export it to JSONL with a bd release that still includes the %s backend, then follow 'bd help init-safety' to reinitialize this workspace with Dolt and import the exported data",
 		removedBackendRationale(backend), backend, absent, backend)
@@ -146,13 +148,14 @@ func RemovedBackendError(backend string) error {
 }
 
 // RemovedBackendErrorAt is RemovedBackendError for a known workspace: when
-// beadsDir already holds a Dolt database the error names metadata.json as the
-// one thing to fix, because that is the truth for every workspace bd v1.2.x
-// opened as Dolt despite the stale "backend" value.
+// beadsDir already holds a Dolt database the error names the metadata file
+// (MetadataFilePath: metadata.json, or a legacy config.json not yet migrated)
+// as the one thing to fix, because that is the truth for every workspace bd
+// v1.2.x opened as Dolt despite the stale "backend" value.
 func RemovedBackendErrorAt(backend, beadsDir string, cfg *Config) error {
 	if doltDir := ExistingDoltDataDir(beadsDir, cfg); doltDir != "" {
 		return fmt.Errorf("storage backend %q in %s is no longer supported: %s",
-			backend, ConfigPath(beadsDir), removedBackendHealDetail(backend, beadsDir, doltDir))
+			backend, remedy.PrintedValue(MetadataFilePath(beadsDir)), removedBackendHealDetail(backend, beadsDir, doltDir))
 	}
 	return fmt.Errorf("storage backend %q is no longer supported: %s", backend, removedBackendRecoveryDetail(backend, beadsDir))
 }
@@ -166,11 +169,15 @@ func UnknownBackendError(backend string) error {
 // UnknownBackendErrorAt is UnknownBackendError enriched with the metadata heal
 // when the workspace already holds a Dolt database — the same truth the
 // removed-backend branch tells, for a value bd never recognized at all.
+// Like the removed-backend messages, it names the file the backend was read
+// from (MetadataFilePath).
 func UnknownBackendErrorAt(backend, beadsDir string, cfg *Config) error {
-	remedy := "fix or restore metadata.json and retry"
+	metadataPath := MetadataFilePath(beadsDir)
+	metadataFile := filepath.Base(metadataPath)
+	fix := fmt.Sprintf("fix or restore %s and retry", remedy.PrintedValue(metadataFile))
 	if doltDir := ExistingDoltDataDir(beadsDir, cfg); doltDir != "" {
-		remedy = fmt.Sprintf("a Dolt database exists at %s — edit %s and set \"backend\": %q (or delete the \"backend\" field), then rerun",
-			doltDir, ConfigPath(beadsDir), BackendDolt)
+		fix = fmt.Sprintf("a Dolt database exists at %s — edit %s and set \"backend\": %q (or delete the \"backend\" field), then rerun",
+			remedy.PrintedValue(doltDir), remedy.PrintedValue(metadataPath), BackendDolt)
 	}
-	return fmt.Errorf("storage backend %q in metadata.json is not recognized or supported; %s; the supported backend is %q; %s", backend, BackendNotOpenedGuarantee, BackendDolt, remedy)
+	return fmt.Errorf("storage backend %q in %s is not recognized or supported; %s; the supported backend is %q; %s", backend, remedy.PrintedValue(metadataFile), BackendNotOpenedGuarantee, BackendDolt, fix)
 }

@@ -1,0 +1,6 @@
+{
+  "shape": "gc-show-json",
+  "requests": [
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-blk","status":200}
+  ]
+}

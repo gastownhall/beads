@@ -31,8 +31,7 @@ func RecomputeBlocked(path string) error {
 
 	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  Blocked-state fix skipped (%v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 

@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
+	"slices"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -437,7 +440,7 @@ func RunLifecycleUpdateAppendsNotesWithoutReplacingThem(t *testing.T, ctx contex
 
 	replaced, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
 		Notes: publicops.Field[string]{Set: true, Value: "replaced"},
-	}})
+	}, ForceNotesOverwrite: true})
 	if err != nil {
 		t.Fatalf("replace notes on %s: %v", id, err)
 	}
@@ -903,6 +906,385 @@ func RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T, ctx cont
 	}
 	assertPriority("priority after a stale guard behind a holding one", 0)
 	maskedEvents.assert(t, "guard masked by the one before it", 0)
+}
+
+// RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency pins A8's
+// (gastownhall/beads#4682) headline claim about Lifecycle.Update's
+// ExpectedVersion guard, for `bd update/close/assign/delete --if-revision`:
+// the compare and the write are ONE atomic operation, not a read-then-write a
+// concurrent writer can slip between (T4.4, BEADS-JOURNAL-PLAN.md Item 4). N
+// goroutines race the SAME token — the row's version as of before any of them
+// run — against the same row; exactly one may apply it, every other goroutine
+// must see ErrVersionMismatch (never a second silent success), and the row
+// that is left behind must be exactly the single winner's content, never a
+// torn write belonging to neither the seed nor any one racer.
+//
+// THIS IS A GENUINE CONCURRENCY TEST, not N sequential attempts dressed up as
+// parallel ones. cmd/bd's embedded-mode backend admits only one `bd` process
+// at a time (an exclusive flock — see acquireEmbeddedLock in
+// cmd/bd/store_factory.go), which would make "exactly one winner" trivially
+// true even of a buggy read-then-write implementation with no atomicity at
+// all, because no second process could ever observe the first one's
+// in-flight state. That is why the CLI-level --if-revision tests
+// (cmd/bd/if_revision_embedded_test.go) assert the match/mismatch CONTRACT
+// sequentially and leave the race to this fixture: goroutines sharing one
+// already-open Lifecycle are the one shape in this suite that can actually
+// interleave at the transaction level, independent of whatever process-level
+// serialization a given CLI backend layers on top.
+func RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	const racers = 16
+
+	id := fixture.IssuePrefix + "-lup-singlewinner"
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(id))
+
+	seed := lifecycleUpdateRow(t, ctx, fixture, id)
+	racedToken := seed.RowVersion
+
+	// Priority is a small enum (0-4, see validation.ValidatePriority); each
+	// racer's own index would overflow it past four racers, so the index rides
+	// in Notes instead (free-text, nothing else writes it in this test) and
+	// priority merely alternates, giving the final-state check two independent
+	// columns that must agree on which one racer actually landed.
+	var wg sync.WaitGroup
+	won := make([]bool, racers)
+	errs := make([]error, racers)
+	wg.Add(racers)
+	for i := 0; i < racers; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			version := racedToken
+			result, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+				Actor:   "racer",
+				IssueID: id,
+				Patch: publicops.IssuePatch{
+					Priority: publicops.Field[int]{Set: true, Value: i % 5},
+					Notes:    publicops.Field[string]{Set: true, Value: fmt.Sprintf("racer-%d", i)},
+				},
+				ExpectedVersion: &version,
+			})
+			errs[i] = err
+			won[i] = err == nil && result.Changed
+		}()
+	}
+	wg.Wait()
+
+	winners := 0
+	winner := -1
+	for i, win := range won {
+		if win {
+			winners++
+			winner = i
+			continue
+		}
+		if !errors.Is(errs[i], storage.ErrVersionMismatch) {
+			t.Errorf("racer %d: err = %v, want nil (won) or ErrVersionMismatch (lost the race)", i, errs[i])
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d racers shared one --if-revision token %d; got %d winners, want exactly 1 (errs=%v)",
+			racers, racedToken, winners, errs)
+	}
+
+	final := lifecycleUpdateRow(t, ctx, fixture, id)
+	wantNotes := fmt.Sprintf("racer-%d", winner)
+	if final.Notes != wantNotes {
+		t.Errorf("final notes = %q, want the single winner's %q — a torn or lost write", final.Notes, wantNotes)
+	}
+	if final.Priority != winner%5 {
+		t.Errorf("final priority = %d, want the single winner's %d — a torn or lost write", final.Priority, winner%5)
+	}
+	if final.RowVersion == racedToken {
+		t.Errorf("final row version = %d, want it to have advanced past the raced token %d", final.RowVersion, racedToken)
+	}
+}
+
+// RunLifecycleUpdateExpectedVersionSingleWinnerWithDisjointColumnsUnderConcurrency
+// is RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency's sibling,
+// and the reason that one is not enough on its own (mc-zndi7.76, gap 1).
+//
+// Every racer there writes the SAME two cells (Priority and Notes), so a
+// backend whose storage layer auto-merges disjoint-cell changes from a common
+// base — Dolt's native behavior — could pass that test on native cell-level
+// conflict detection ALONE, with the ExpectedVersion/row_lock compare-and-swap
+// doing nothing at all: sixteen racers colliding on one cell look identical to
+// sixteen racers colliding on one ROW VERSION. A hand-applied mutant that
+// reminted row_lock to an unconditional fresh random value on every write
+// (rather than deriving it from, and checking it against, ExpectedVersion)
+// still passed the shared-cell test on this suite's in-tree backends 3 of 3
+// runs each, and only showed its true colors — 3 to 7 winners per round — on a
+// real Dolt server CLI race with disjoint-column patches, which is the shape
+// this case restores.
+//
+// Each racer here writes a column NO OTHER RACER TOUCHES, so Dolt's per-cell
+// auto-merge cannot provide false mutual exclusion for any pair of them:
+// whatever excludes all but one racer here has to be the row_lock/
+// ExpectedVersion compare-and-swap itself, not an accident of which cells
+// collide.
+func RunLifecycleUpdateExpectedVersionSingleWinnerWithDisjointColumnsUnderConcurrency(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	type disjointField struct {
+		name  string
+		apply func(*publicops.IssuePatch, string)
+		read  func(*types.Issue) string
+	}
+	fields := []disjointField{
+		{"Description", func(p *publicops.IssuePatch, v string) { p.Description = publicops.Field[string]{Set: true, Value: v} }, func(i *types.Issue) string { return i.Description }},
+		{"Design", func(p *publicops.IssuePatch, v string) { p.Design = publicops.Field[string]{Set: true, Value: v} }, func(i *types.Issue) string { return i.Design }},
+		{"AcceptanceCriteria", func(p *publicops.IssuePatch, v string) {
+			p.AcceptanceCriteria = publicops.Field[string]{Set: true, Value: v}
+		}, func(i *types.Issue) string { return i.AcceptanceCriteria }},
+		{"Notes", func(p *publicops.IssuePatch, v string) { p.Notes = publicops.Field[string]{Set: true, Value: v} }, func(i *types.Issue) string { return i.Notes }},
+		{"SpecID", func(p *publicops.IssuePatch, v string) { p.SpecID = publicops.Field[string]{Set: true, Value: v} }, func(i *types.Issue) string { return i.SpecID }},
+		{"AwaitID", func(p *publicops.IssuePatch, v string) { p.AwaitID = publicops.Field[string]{Set: true, Value: v} }, func(i *types.Issue) string { return i.AwaitID }},
+		{"Owner", func(p *publicops.IssuePatch, v string) { p.Owner = publicops.Field[string]{Set: true, Value: v} }, func(i *types.Issue) string { return i.Owner }},
+		// Assignee rides the same Update/ExpectedVersion machinery `bd assign`
+		// dispatches onto (cmd/bd/mutate_proxied_server.go's proxiedAssign, and
+		// its direct-route twin), so a disjoint racer on this column is this
+		// suite's single-winner coverage for assign (mc-zndi7.76, gap 3): there
+		// is no separate Assign method on Lifecycle to race independently.
+		{"Assignee", func(p *publicops.IssuePatch, v string) { p.Assignee = publicops.Field[string]{Set: true, Value: v} }, func(i *types.Issue) string { return i.Assignee }},
+	}
+	racers := len(fields)
+
+	id := fixture.IssuePrefix + "-lup-singlewinner-disjoint"
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(id))
+
+	seed := lifecycleUpdateRow(t, ctx, fixture, id)
+	racedToken := seed.RowVersion
+
+	var wg sync.WaitGroup
+	won := make([]bool, racers)
+	errs := make([]error, racers)
+	wg.Add(racers)
+	for i := 0; i < racers; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			version := racedToken
+			var patch publicops.IssuePatch
+			fields[i].apply(&patch, fmt.Sprintf("racer-%d-%s", i, fields[i].name))
+			result, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+				Actor:           "racer",
+				IssueID:         id,
+				Patch:           patch,
+				ExpectedVersion: &version,
+			})
+			errs[i] = err
+			won[i] = err == nil && result.Changed
+		}()
+	}
+	wg.Wait()
+
+	winners := 0
+	winner := -1
+	for i, win := range won {
+		if win {
+			winners++
+			winner = i
+			continue
+		}
+		if !errors.Is(errs[i], storage.ErrVersionMismatch) {
+			t.Errorf("racer %d (%s): err = %v, want nil (won) or ErrVersionMismatch (lost the race)", i, fields[i].name, errs[i])
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d racers on disjoint columns shared one --if-revision token %d; got %d winners, want exactly 1 (errs=%v)",
+			racers, racedToken, winners, errs)
+	}
+
+	final := lifecycleUpdateRow(t, ctx, fixture, id)
+	wantValue := fmt.Sprintf("racer-%d-%s", winner, fields[winner].name)
+	for i, f := range fields {
+		got := f.read(final)
+		if i == winner {
+			if got != wantValue {
+				t.Errorf("final %s = %q, want the single winner's %q — a torn or lost write", f.name, got, wantValue)
+			}
+			continue
+		}
+		if got != "" {
+			t.Errorf("final %s = %q, want empty — a disjoint loser's write was not supposed to apply (false mutual exclusion from native cell-merge, not the version guard)", f.name, got)
+		}
+	}
+	if final.RowVersion == racedToken {
+		t.Errorf("final row version = %d, want it to have advanced past the raced token %d", final.RowVersion, racedToken)
+	}
+}
+
+// RunLifecycleCloseExpectedVersionSingleWinnerUnderConcurrency is
+// RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency's Close twin
+// (mc-zndi7.76, gap 3): CloseRequest.ExpectedVersion rides the same row_lock
+// compare-and-swap Update's does (CloseRequest.ExpectedVersion's doc), and
+// until now nothing proved that under real concurrency for Close specifically.
+// N racers close the SAME open issue racing the SAME pre-close token; exactly
+// one may apply its close, every other racer must see ErrVersionMismatch (not
+// the idempotent-reclose no-op — the token is stale by the time it would
+// observe that), and the row left behind must be exactly the single winner's.
+func RunLifecycleCloseExpectedVersionSingleWinnerUnderConcurrency(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	const racers = 16
+
+	id := fixture.IssuePrefix + "-lup-close-singlewinner"
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(id))
+
+	seed := lifecycleUpdateRow(t, ctx, fixture, id)
+	racedToken := seed.RowVersion
+
+	var wg sync.WaitGroup
+	won := make([]bool, racers)
+	errs := make([]error, racers)
+	wg.Add(racers)
+	for i := 0; i < racers; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			version := racedToken
+			result, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+				Actor:           "racer",
+				IssueID:         id,
+				Reason:          fmt.Sprintf("racer-%d", i),
+				ExpectedVersion: &version,
+			})
+			errs[i] = err
+			won[i] = err == nil && result.Changed
+		}()
+	}
+	wg.Wait()
+
+	winners := 0
+	winner := -1
+	for i, win := range won {
+		if win {
+			winners++
+			winner = i
+			continue
+		}
+		if !errors.Is(errs[i], storage.ErrVersionMismatch) {
+			t.Errorf("racer %d: err = %v, want nil (won) or ErrVersionMismatch (lost the race)", i, errs[i])
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d racers shared one close --if-revision token %d; got %d winners, want exactly 1 (errs=%v)",
+			racers, racedToken, winners, errs)
+	}
+
+	final := lifecycleUpdateRow(t, ctx, fixture, id)
+	if final.Status != types.StatusClosed {
+		t.Errorf("final status = %q, want closed", final.Status)
+	}
+	wantReason := fmt.Sprintf("racer-%d", winner)
+	if final.CloseReason != wantReason {
+		t.Errorf("final close reason = %q, want the single winner's %q — a torn or lost write", final.CloseReason, wantReason)
+	}
+	if final.RowVersion == racedToken {
+		t.Errorf("final row version = %d, want it to have advanced past the raced token %d", final.RowVersion, racedToken)
+	}
+}
+
+// RunLifecycleUpdateExpectedVersionSingleWinnerAcrossUpdateAndCloseUnderConcurrency
+// is this suite's mixed-verb single-winner case (mc-zndi7.76, gap 3): Update
+// and Close share one row_lock compare-and-swap, so a token raced across BOTH
+// verbs at once must still admit exactly one winner, whichever verb it turns
+// out to be — an exclusion mechanism keyed to the row rather than to a given
+// verb's own code path. Delete is deliberately NOT a racer here: delete's
+// production code does not remint row_lock on a deletion (nothing is left to
+// remint), so it does not share this exclusion at all today. That is a real,
+// separately tracked bug (the sibling delete bead, mc-zndi7.73) and not a gap
+// in this test — folding Delete in here would either mask the bug behind
+// Update/Close's real exclusion winning the race, or make this case flake
+// red on current main, neither of which belongs in a test pinning what DOES
+// work.
+func RunLifecycleUpdateExpectedVersionSingleWinnerAcrossUpdateAndCloseUnderConcurrency(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	const racers = 8 // four Update racers, four Close racers, interleaved.
+
+	id := fixture.IssuePrefix + "-lup-mixed-singlewinner"
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(id))
+
+	seed := lifecycleUpdateRow(t, ctx, fixture, id)
+	racedToken := seed.RowVersion
+
+	type outcome struct {
+		kind    string
+		changed bool
+		err     error
+	}
+	outcomes := make([]outcome, racers)
+	var wg sync.WaitGroup
+	wg.Add(racers)
+	for i := 0; i < racers; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			version := racedToken
+			if i%2 == 0 {
+				result, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+					Actor:   "racer",
+					IssueID: id,
+					Patch: publicops.IssuePatch{
+						Owner: publicops.Field[string]{Set: true, Value: fmt.Sprintf("update-racer-%d", i)},
+					},
+					ExpectedVersion: &version,
+				})
+				outcomes[i] = outcome{kind: "update", changed: err == nil && result.Changed, err: err}
+				return
+			}
+			result, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+				Actor:           "racer",
+				IssueID:         id,
+				Reason:          fmt.Sprintf("close-racer-%d", i),
+				ExpectedVersion: &version,
+			})
+			outcomes[i] = outcome{kind: "close", changed: err == nil && result.Changed, err: err}
+		}()
+	}
+	wg.Wait()
+
+	winners := 0
+	winner := -1
+	for i, o := range outcomes {
+		if o.changed {
+			winners++
+			winner = i
+			continue
+		}
+		if !errors.Is(o.err, storage.ErrVersionMismatch) {
+			t.Errorf("racer %d (%s): err = %v, want nil (won) or ErrVersionMismatch (lost the race)", i, o.kind, o.err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d update/close racers shared one --if-revision token %d; got %d winners, want exactly 1 (outcomes=%+v)",
+			racers, racedToken, winners, outcomes)
+	}
+
+	final := lifecycleUpdateRow(t, ctx, fixture, id)
+	switch outcomes[winner].kind {
+	case "update":
+		wantOwner := fmt.Sprintf("update-racer-%d", winner)
+		if final.Owner != wantOwner {
+			t.Errorf("final owner = %q, want the single winner's %q — a torn or lost write", final.Owner, wantOwner)
+		}
+		if final.Status == types.StatusClosed {
+			t.Errorf("the winning racer was an update, not a close; final status must not be closed")
+		}
+	case "close":
+		if final.Status != types.StatusClosed {
+			t.Errorf("final status = %q, want closed — the winning racer was a close", final.Status)
+		}
+		wantReason := fmt.Sprintf("close-racer-%d", winner)
+		if final.CloseReason != wantReason {
+			t.Errorf("final close reason = %q, want the single winner's %q — a torn or lost write", final.CloseReason, wantReason)
+		}
+	}
+	if final.RowVersion == racedToken {
+		t.Errorf("final row version = %d, want it to have advanced past the raced token %d", final.RowVersion, racedToken)
+	}
 }
 
 // RunLifecycleUpdateConditionalGuardAcceptsRespelledAssignee pins the
@@ -1538,10 +1920,10 @@ func RunLifecycleUpdateParentIDReplacesEveryParent(t *testing.T, ctx context.Con
 
 // RunLifecycleUpdatePersistentPreservesUnversionedClass pins the half of the
 // Persistence clause nobody else asserts: "Persistent preserves an existing
-// durable unversioned class" (issueops/issueops.go:135-136). The refusal beside
-// it — an unversioned row cannot be demoted to a wisp mode — is pinned
-// elsewhere; this clause says the legal direction is a no-op that does NOT
-// normalize the row into versioned storage.
+// durable unversioned class" (issueops/issueops.go:149). The refusal beside
+// it — an unversioned row cannot be demoted to a wisp mode — is
+// RunLifecycleUpdateWispModesRefuseAnUnversionedRow; this clause says the legal
+// direction is a no-op that does NOT normalize the row into versioned storage.
 //
 // WHAT A PERSISTENCE RESTATEMENT MUST NOT DO is where the two observations come
 // in. A persistence MOVE deletes the row from one plane and re-inserts it into
@@ -1580,6 +1962,90 @@ func RunLifecycleUpdatePersistentPreservesUnversionedClass(t *testing.T, ctx con
 		t.Errorf("%s came back {ephemeral %v, no-history %v} after a persistent restatement, want a durable-plane row", id, after.Ephemeral, after.NoHistory)
 	}
 	assertLifecycleUpdateWispAbsent(t, ctx, fixture, id, "after the persistent restatement")
+}
+
+// RunLifecycleUpdateWispModesRefuseAnUnversionedRow pins the refusal beside
+// that clause: Ephemeral and NoHistory "select wisp retention modes, never
+// durable unversioned storage" (issueops/issueops.go:150-151), so an
+// unversioned row asked for either is refused. The refusal is the request's,
+// a deterministic validation failure, so it matches ErrValidation on every
+// leg — over http that is the 400 naming the patch rather than a 500 that
+// drops the reason and alerts the operator — and it leaves the row where it
+// was: durable, still unversioned, and absent from the wisp plane.
+func RunLifecycleUpdateWispModesRefuseAnUnversionedRow(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-lup-unversioned-wisp"
+	seeded := lifecycleUpdateIssue(id)
+	seeded.StorageClass = types.StorageClassUnversioned
+	seedLifecycleUpdateIssue(t, ctx, fixture, seeded)
+
+	for _, mode := range []publicops.PersistenceMode{publicops.PersistenceModeEphemeral, publicops.PersistenceModeNoHistory} {
+		label := "after the refused " + string(mode) + " move"
+		before := lifecycleUpdateRow(t, ctx, fixture, id)
+		if _, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+			Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: mode},
+		}}); !errors.Is(err, storage.ErrValidation) {
+			t.Fatalf("move unversioned %s to %s: error = %v, want ErrValidation", id, mode, err)
+		}
+		assertLifecycleUpdateRowUnchanged(t, ctx, fixture, id, label, before)
+		after := lifecycleUpdateRow(t, ctx, fixture, id)
+		if after.Ephemeral || after.NoHistory || after.StorageClass != types.StorageClassUnversioned {
+			t.Errorf("%s %s = {ephemeral %v, no-history %v, class %q}, want the durable unversioned row it was",
+				id, label, after.Ephemeral, after.NoHistory, after.StorageClass)
+		}
+		assertLifecycleUpdateWispAbsent(t, ctx, fixture, id, label)
+	}
+}
+
+// RunLifecycleUpdatePersistentPromotesAWisp pins the move `bd promote` makes
+// (issueops.Promote): Persistence = persistent on an ephemeral wisp is a
+// MUTATION that leaves the row on the durable plane under the same id, with
+// its labels carried across and nothing left behind on the wisp plane. A
+// second identical request is the no-op the "same current mode" clause
+// promises, which is how Promote tells a lost race from a promotion.
+func RunLifecycleUpdatePersistentPromotesAWisp(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+	if fixture.CreateWisp == nil {
+		t.Skip("fixture has no CreateWisp: this backend has no wisp plane to promote from")
+	}
+
+	id := fixture.IssuePrefix + "-lup-promote"
+	seedLifecycleUpdateWisp(t, ctx, fixture, lifecycleUpdateIssue(id, "keep-me"))
+	if got := lifecycleUpdateRow(t, ctx, fixture, id); !got.Ephemeral {
+		t.Fatalf("seeded %s is not ephemeral; the case has nothing to promote", id)
+	}
+
+	promote := publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+		Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: publicops.PersistenceModePersistent},
+	}}
+	promoted, err := fixture.Lifecycle.Update(ctx, promote)
+	if err != nil {
+		t.Fatalf("promote %s: %v", id, err)
+	}
+	if !promoted.Changed {
+		t.Errorf("promoting wisp %s reported Changed = false, want a mutation", id)
+	}
+	if promoted.Issue == nil || promoted.Issue.ID != id || promoted.Issue.Ephemeral {
+		t.Errorf("promote result issue = %+v, want %s on the durable plane", promoted.Issue, id)
+	}
+
+	after := lifecycleUpdateRow(t, ctx, fixture, id)
+	if after.Ephemeral || after.NoHistory {
+		t.Errorf("%s came back {ephemeral %v, no-history %v} after the promotion, want a durable-plane row", id, after.Ephemeral, after.NoHistory)
+	}
+	if !slices.Contains(after.Labels, "keep-me") {
+		t.Errorf("%s labels after the promotion = %v, want the wisp's label carried across", id, after.Labels)
+	}
+	assertLifecycleUpdateWispAbsent(t, ctx, fixture, id, "after the promotion")
+
+	again, err := fixture.Lifecycle.Update(ctx, promote)
+	if err != nil {
+		t.Fatalf("re-promote %s: %v", id, err)
+	}
+	if again.Changed {
+		t.Errorf("re-promoting durable %s reported Changed = true, want the same-mode no-op", id)
+	}
 }
 
 // RunLifecycleUpdateProvenanceLabelsHistory pins UpdateRequest.Provenance
@@ -2137,4 +2603,135 @@ func lifecycleUpdateHasEdge(dependencies []*types.Dependency, wantTarget string)
 		}
 	}
 	return false
+}
+
+// RunLifecycleUpdateRefusesATemplate pins Lifecycle.Update's template guard:
+// templates are read-only, so EVERY update naming one refuses with
+// *TemplateReadOnlyError — a field edit, a label edit, a claim, a status
+// crossing — whatever force flags ride along, and nothing is written. It is the
+// guard `bd update` used to apply as a CLI pre-read, which left bd serve and
+// library callers editing templates bd refused.
+//
+// The refusal is asserted at the level a caller acts on — the typed error, its
+// sentinel and the sentence bd prints, read off the typed error because a
+// served refusal wraps it — and the row is read back to prove nothing moved.
+// Two controls: the same patches land on an ordinary sibling, so the guard is
+// not refusing the patch shapes; and a stale ExpectedVersion on the template
+// still reports the mismatch, so the guard runs after the compare-and-set
+// preconditions like every other update fence.
+func RunLifecycleUpdateRefusesATemplate(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-lut-template"
+	sibling := fixture.IssuePrefix + "-lut-sibling"
+	for _, issue := range []*types.Issue{
+		{ID: template, IsTemplate: true},
+		{ID: sibling},
+	} {
+		issue.Title, issue.Status, issue.Priority, issue.IssueType = issue.ID, types.StatusOpen, 2, types.TypeTask
+		if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", issue.ID, err)
+		}
+	}
+	before, err := fixture.GetIssue(ctx, template)
+	if err != nil {
+		t.Fatalf("read seeded template %s: %v", template, err)
+	}
+
+	requests := []struct {
+		name    string
+		request publicops.UpdateRequest
+	}{
+		{name: "field edit", request: publicops.UpdateRequest{
+			Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "edited"}},
+		}},
+		{name: "label edit", request: publicops.UpdateRequest{
+			Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"lut-tag"}}},
+		}},
+		{name: "claim", request: publicops.UpdateRequest{Claim: true}},
+		{name: "forced status crossing", request: publicops.UpdateRequest{
+			Patch:            publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusClosed}},
+			ForceClosePolicy: true,
+		}},
+		{name: "forced assignee transfer", request: publicops.UpdateRequest{
+			Patch:                 publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "someone"}},
+			ForceAssigneeTransfer: true,
+		}},
+	}
+	for _, tc := range requests {
+		request := tc.request
+		request.Actor, request.IssueID = "writer", template
+		_, err := fixture.Lifecycle.Update(ctx, request)
+		var refusal *publicops.TemplateReadOnlyError
+		if !errors.As(err, &refusal) {
+			t.Fatalf("%s on template %s: err = %v, want *TemplateReadOnlyError", tc.name, template, err)
+		}
+		if refusal.IssueID != template || !errors.Is(err, publicops.ErrTemplateReadOnly) {
+			t.Errorf("%s refusal = %#v (%v), want IssueID %q matching ErrTemplateReadOnly", tc.name, refusal, err, template)
+		}
+		if want := "cannot modify template " + template + ": templates are read-only; use 'bd mol pour' to create a work item"; refusal.Error() != want {
+			t.Errorf("%s refusal reads %q, want %q", tc.name, refusal.Error(), want)
+		}
+		after, err := fixture.GetIssue(ctx, template)
+		if err != nil {
+			t.Fatalf("read template %s after the %s refusal: %v", template, tc.name, err)
+		}
+		if after.RowVersion != before.RowVersion || after.Title != before.Title || after.Status != before.Status ||
+			after.Assignee != before.Assignee || len(after.Labels) != len(before.Labels) {
+			t.Errorf("template %s after the %s refusal = %+v, want it unchanged from %+v", template, tc.name, after, before)
+		}
+
+		control := tc.request
+		control.Actor, control.IssueID = "writer", sibling
+		if _, err := fixture.Lifecycle.Update(ctx, control); err != nil {
+			t.Errorf("%s on the ordinary sibling %s: %v, want it to land", tc.name, sibling, err)
+		}
+	}
+
+	stale := before.RowVersion + 1
+	_, err = fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: template, ExpectedVersion: &stale,
+		Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "edited"}},
+	})
+	if !errors.Is(err, publicops.ErrVersionMismatch) {
+		t.Errorf("stale-guarded update of template %s: err = %v, want ErrVersionMismatch ahead of the template guard", template, err)
+	}
+}
+
+// RunLifecycleUpdateAllowTemplateEditsATemplate pins the template guard's one
+// stand-down: an update with AllowTemplate — what bd label and bd set-state
+// send, since they have always edited templates — lands on a template, and
+// only that request is waived (the same patch without it still refuses).
+func RunLifecycleUpdateAllowTemplateEditsATemplate(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-lua-template"
+	issue := &types.Issue{ID: template, Title: template, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, IsTemplate: true}
+	if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", template, err)
+	}
+
+	result, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: template, AllowTemplate: true,
+		Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"lua-tag"}}},
+	})
+	if err != nil {
+		t.Fatalf("AllowTemplate label edit on template %s: %v, want it to land", template, err)
+	}
+	if !result.Changed || result.Issue == nil || !lifecycleUpdateHasLabel(result.Issue.Labels, "lua-tag") {
+		t.Errorf("AllowTemplate label edit on template %s = %+v, want a change carrying lua-tag", template, result)
+	}
+	after, err := fixture.GetIssue(ctx, template)
+	if err != nil {
+		t.Fatalf("read template %s: %v", template, err)
+	}
+	if !after.IsTemplate {
+		t.Errorf("template %s is no longer a template after an AllowTemplate edit", template)
+	}
+
+	_, err = fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: template,
+		Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"lua-other"}}},
+	})
+	if !errors.Is(err, publicops.ErrTemplateReadOnly) {
+		t.Errorf("the same edit without AllowTemplate: err = %v, want ErrTemplateReadOnly", err)
+	}
 }

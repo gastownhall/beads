@@ -1,0 +1,33 @@
+=== request 1 of 3: listIssues
+GET /v0/beads/issues
+  ?all=true
+  ?include_ephemeral=true
+  ?include_gates=true
+  ?include_infra=true
+  ?include_templates=true
+  ?limit=200
+Accept: application/json, application/problem+json
+Accept-Encoding: gzip
+Authorization: Bearer <BEADS_HTTP_TOKEN>
+Bd-Project-Id: proj-v0-wire-golden
+Bd-Wire-Revision: 2
+User-Agent: bd-http-backend/v0
+
+=== request 2 of 3: getContext
+GET /v0/beads/context
+Accept: application/json, application/problem+json
+Accept-Encoding: gzip
+Authorization: Bearer <BEADS_HTTP_TOKEN>
+Bd-Project-Id: proj-v0-wire-golden
+Bd-Wire-Revision: 2
+User-Agent: bd-http-backend/v0
+
+=== request 3 of 3: listDependencies
+GET /v0/beads/dependencies
+  ?issue_id=bd-1
+Accept: application/json, application/problem+json
+Accept-Encoding: gzip
+Authorization: Bearer <BEADS_HTTP_TOKEN>
+Bd-Project-Id: proj-v0-wire-golden
+Bd-Wire-Revision: 2
+User-Agent: bd-http-backend/v0

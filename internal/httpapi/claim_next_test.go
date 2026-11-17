@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -233,6 +235,36 @@ func TestClaimNextMapsTheRolesValidationToA400(t *testing.T) {
 	}
 	if body := decodeBody(t, resp); body["code"] != string(CodeInvalidArgument) {
 		t.Errorf("code = %v, want %s", body["code"], CodeInvalidArgument)
+	}
+}
+
+// TestClaimNextAttributesAnUncompilableLabelRegex: the claim's scan compiles
+// label_regex in the database's own dialect, so a pattern it cannot compile is
+// the caller's typo — the 400 on label_regex the ready listing gives for the
+// same filter — not a 500. The same text on a claim that sent no regex stays a
+// server fault.
+func TestClaimNextAttributesAnUncompilableLabelRegex(t *testing.T) {
+	engineErr := errors.New("claim next: Error 1105 (HY000): the given regular expression is invalid")
+	for _, tc := range []struct {
+		name, path string
+		status     int
+	}{
+		{"with a regex", claimNextPath + "?label_regex=" + url.QueryEscape("tech-("), http.StatusBadRequest},
+		{"without a regex", claimNextPath, http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newClaimNextServer(t, &roleReadyClaimer{err: engineErr})
+			resp := ts.claimNext(t, tc.path, `{"actor":"poller"}`)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d: %s", resp.StatusCode, tc.status, readAll(t, resp))
+			}
+			if tc.status != http.StatusBadRequest {
+				return
+			}
+			if body := decodeBody(t, resp); body["code"] != string(CodeInvalidArgument) || body["param"] != "label_regex" || body["reason"] != string(ReasonInvalidValue) {
+				t.Errorf("body = %v, want invalid_argument on label_regex with reason invalid_value", body)
+			}
+		})
 	}
 }
 

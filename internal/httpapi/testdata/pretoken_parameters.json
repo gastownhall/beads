@@ -1,0 +1,195 @@
+{
+  "addComment": [
+    "id"
+  ],
+  "claimIssue": [
+    "id"
+  ],
+  "claimNextIssue": [
+    "assignee",
+    "exclude_label",
+    "exclude_type",
+    "has_metadata_key",
+    "include_deferred",
+    "include_ephemeral",
+    "label",
+    "label_any",
+    "label_pattern",
+    "label_regex",
+    "metadata_field",
+    "parent",
+    "priority",
+    "sort",
+    "type",
+    "unassigned"
+  ],
+  "closeIssue": [
+    "id"
+  ],
+  "compareAndSetMetadata": [
+    "id"
+  ],
+  "countDependencyEdges": [
+    "direction",
+    "issue_id",
+    "status",
+    "type"
+  ],
+  "countIssues": [
+    "assignee",
+    "closed_after",
+    "closed_before",
+    "created_after",
+    "created_before",
+    "desc_contains",
+    "empty_description",
+    "group_by",
+    "has_metadata_key",
+    "id",
+    "include_ephemeral",
+    "include_infra",
+    "label",
+    "label_any",
+    "metadata_field",
+    "no_assignee",
+    "no_labels",
+    "notes_contains",
+    "priority",
+    "priority_max",
+    "priority_min",
+    "status",
+    "title",
+    "title_contains",
+    "type",
+    "updated_after",
+    "updated_before"
+  ],
+  "countReadyWork": [
+    "assignee",
+    "exclude_label",
+    "exclude_type",
+    "has_metadata_key",
+    "include_deferred",
+    "include_ephemeral",
+    "label",
+    "label_any",
+    "label_pattern",
+    "label_regex",
+    "metadata_field",
+    "parent",
+    "priority",
+    "type",
+    "unassigned"
+  ],
+  "forgetMemory": [
+    "key"
+  ],
+  "getDependencyTree": [
+    "direction",
+    "max_depth",
+    "root_id",
+    "status"
+  ],
+  "getIssue": [
+    "brief_deps",
+    "id",
+    "include_comments",
+    "include_dependents"
+  ],
+  "getMemory": [
+    "key"
+  ],
+  "getSetting": [
+    "key"
+  ],
+  "getStats": [
+    "assignee",
+    "skip_blocked"
+  ],
+  "listBlockingAnnotations": [
+    "issue_id"
+  ],
+  "listDependencies": [
+    "issue_id",
+    "type"
+  ],
+  "listEvents": [
+    "limit",
+    "since"
+  ],
+  "listIssues": [
+    "all",
+    "assignee",
+    "brief",
+    "created_after",
+    "created_before",
+    "cursor",
+    "exclude_label",
+    "has_metadata_key",
+    "include_ephemeral",
+    "include_gates",
+    "include_infra",
+    "include_templates",
+    "label",
+    "label_any",
+    "limit",
+    "metadata_field",
+    "parent",
+    "status",
+    "type"
+  ],
+  "listMemories": [
+    "search"
+  ],
+  "listReadyWork": [
+    "assignee",
+    "brief",
+    "exclude_label",
+    "exclude_type",
+    "has_metadata_key",
+    "include_deferred",
+    "include_ephemeral",
+    "label",
+    "label_any",
+    "label_pattern",
+    "label_regex",
+    "limit",
+    "metadata_field",
+    "parent",
+    "priority",
+    "sort",
+    "type",
+    "unassigned"
+  ],
+  "listRelatedIssues": [
+    "direction",
+    "id",
+    "type"
+  ],
+  "queryIssues": [
+    "all",
+    "limit",
+    "q",
+    "reverse",
+    "sort"
+  ],
+  "releaseIssue": [
+    "id"
+  ],
+  "reopenIssue": [
+    "id"
+  ],
+  "setSetting": [
+    "key"
+  ],
+  "unsetSetting": [
+    "key"
+  ],
+  "updateIssue": [
+    "id"
+  ],
+  "watchEvents": [
+    "Last-Event-ID",
+    "since"
+  ]
+}

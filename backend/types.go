@@ -22,10 +22,12 @@ type (
 	EpicStatus                  = types.EpicStatus
 	Event                       = types.Event
 	EventType                   = types.EventType
+	GateRef                     = types.GateRef
 	Issue                       = types.Issue
 	IssueDetails                = types.IssueDetails
 	IssueFilter                 = types.IssueFilter
 	IssueSnapshot               = types.IssueSnapshot
+	IssueSummary                = types.IssueSummary
 	IssueType                   = types.IssueType
 	IssueWithCounts             = types.IssueWithCounts
 	IssueWithDependencyMetadata = types.IssueWithDependencyMetadata
@@ -116,6 +118,7 @@ const (
 	EventLabelAdded        = types.EventLabelAdded
 	EventLabelRemoved      = types.EventLabelRemoved
 	EventLeaseReclaimed    = types.EventLeaseReclaimed
+	EventLeaseRearmed      = types.EventLeaseRearmed
 	EventCompacted         = types.EventCompacted
 )
 

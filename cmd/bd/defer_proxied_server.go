@@ -27,9 +27,9 @@ type deferProxiedResult struct {
 
 func proxiedUpdateByID(ctx context.Context, uw uow.UnitOfWork, id string, isWisp bool, updates map[string]any) error {
 	if isWisp {
-		return uw.IssueUseCase().UpdateWisp(ctx, id, updates, actor)
+		return uw.IssueUseCase().UpdateWisp(ctx, id, updates, currentActor())
 	}
-	return uw.IssueUseCase().UpdateIssue(ctx, id, updates, actor)
+	return uw.IssueUseCase().UpdateIssue(ctx, id, updates, currentActor())
 }
 
 func proxiedGetByID(ctx context.Context, uw uow.UnitOfWork, id string, isWisp bool) *types.Issue {

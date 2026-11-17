@@ -4,8 +4,11 @@
 #
 # The binary is //cmd/bd:bd_for_tests, the non-race gms_pure_go cgo bd that
 # Bazel's own tests exec (//cmd/bd:bd is race built under --config=ci); run
-# after `bazel test //... --config=ci`, whose test:ci downloads it. Unlike
-# `go build`, it carries no vcs.* or CGO_ENABLED build settings, so
+# after `bazel test //... --config=ci` (whose test:ci downloads it) or after
+# `bazel build //cmd/bd:bd_for_tests` directly (bazel.yml's package gates:
+# only test:ci is defined in .bazelrc, so `bazel build --config=ci` fails).
+# Either way the same bd_for_tests output path is what this script packages.
+# Unlike `go build`, it carries no vcs.* or CGO_ENABLED build settings, so
 # `bd version` shows no commit and scripts/verify-cgo.sh would pass
 # vacuously; no consumer of the artifact reads either.
 #

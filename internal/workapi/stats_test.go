@@ -73,6 +73,8 @@ func TestFoldStatsAssigneeSummary(t *testing.T) {
 		blocked    int
 		deferred   int
 		closed     int
+		gates      int
+		templates  int
 	}{
 		{
 			name: "counts every status and ready work",
@@ -101,6 +103,30 @@ func TestFoldStatsAssigneeSummary(t *testing.T) {
 			issues: []*types.Issue{nil, {Status: types.StatusOpen}},
 			ready:  0, total: 1, open: 1,
 		},
+		{
+			// The rows a default `bd list --assignee` will not show. This
+			// route's filter sets only Assignee, so IsTemplate stays nil and
+			// the actor's gates and protos really are in these rows - leaving
+			// the two counts at zero would give the scoped answer the same
+			// silent disagreement with its own listing the workspace-wide
+			// answer had. They overlap the status buckets rather than forming
+			// their own, exactly as PinnedIssues does workspace-wide.
+			name: "gates and protos are broken out of the total, not removed from it",
+			issues: []*types.Issue{
+				{Status: types.StatusOpen},
+				{Status: types.StatusOpen, IssueType: types.TypeGate},
+				{Status: types.StatusClosed, IssueType: types.TypeGate},
+				{Status: types.StatusOpen, IsTemplate: true},
+			},
+			ready: 1, total: 4, open: 3, closed: 1, gates: 2, templates: 1,
+		},
+		{
+			// A gate that is also a proto is counted in both, since the two
+			// listing suppressions are independent.
+			name:   "a templated gate is counted in both breakdowns",
+			issues: []*types.Issue{{Status: types.StatusOpen, IssueType: types.TypeGate, IsTemplate: true}},
+			ready:  0, total: 1, open: 1, gates: 1, templates: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -114,6 +140,9 @@ func TestFoldStatsAssigneeSummary(t *testing.T) {
 			}
 			if got.ReadyIssues == nil || *got.ReadyIssues != tt.ready {
 				t.Errorf("ready issues = %v, want %d", got.ReadyIssues, tt.ready)
+			}
+			if got.GateIssues != tt.gates || got.TemplateIssues != tt.templates {
+				t.Errorf("gate/template issues = %d/%d, want %d/%d", got.GateIssues, got.TemplateIssues, tt.gates, tt.templates)
 			}
 			// The three fields AssigneeStats says are always zero here. They
 			// are not "not yet implemented" on this path: the fold has no

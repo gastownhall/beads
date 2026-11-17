@@ -57,6 +57,13 @@ func BuildStatsAssigneeWorkFilter(assignee string) types.WorkFilter {
 // does NOT set is part of that definition: PinnedIssues,
 // EpicsEligibleForClosure and AverageLeadTime stay zero.
 //
+// GateIssues and TemplateIssues ARE set. They are not workspace-wide numbers
+// borrowed into a scoped answer: this route's filter sets only Assignee, so
+// IsTemplate stays nil and the actor's gates and protos really are among these
+// rows, while `bd list --assignee` suppresses both. Leaving them zero would
+// give the scoped answer the same silent disagreement with its own listing
+// that the workspace-wide answer had.
+//
 // BlockedIssues and ReadyIssues are always non-nil here, including for an actor
 // with no rows at all. The nil pointers are the workspace-wide answer's
 // skipped-scan signal (issueops.StatsRequest.SkipBlocked) and mean "not
@@ -75,6 +82,16 @@ func FoldStatsAssigneeSummary(issues []*types.Issue, readyCount int) types.Stati
 			continue
 		}
 		stats.TotalIssues++
+		// The rows a default `bd list --assignee` will not show. The same
+		// reconciliation gap the workspace-wide answer has: this filter sets
+		// only Assignee, so IsTemplate stays nil and gates and templates ARE
+		// in these rows, while the listing suppresses both.
+		if issue.IssueType == types.TypeGate {
+			stats.GateIssues++
+		}
+		if issue.IsTemplate {
+			stats.TemplateIssues++
+		}
 		switch issue.Status {
 		case types.StatusOpen:
 			stats.OpenIssues++

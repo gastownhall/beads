@@ -493,6 +493,38 @@ func TestFormatMemoriesForPrimeTimesOutOpeningStore(t *testing.T) {
 	}
 }
 
+// TestFormatMemoriesForPrimeTimesOutOpeningRegisteredBackend is the unstubbed
+// twin of TestFormatMemoriesForPrimeTimesOutOpeningStore, which replaces
+// ensureStoreActiveForPrime and so cannot see how the real open frames its
+// error. Here the real open dials a registered remote backend that outlives
+// BEADS_PRIME_TIMEOUT, and the timeout banner must still win over the generic
+// "storage unavailable" one.
+func TestFormatMemoriesForPrimeTimesOutOpeningRegisteredBackend(t *testing.T) {
+	const backend = "contract-prime-open-timeout"
+	registerContractBlockingBackend(t, backend, true)
+	t.Setenv("BEADS_DIR", writeContractBackendConfig(t, backend))
+	t.Setenv(primeStoreTimeoutEnv, "50ms")
+	oldStore := store
+	oldStoreActive := storeActive
+	oldEnsure := ensureStoreActiveForPrime
+	oldProxied := proxiedServerMode
+	store = nil
+	storeActive = false
+	ensureStoreActiveForPrime = ensureStoreActiveWithContext
+	proxiedServerMode = false
+	t.Cleanup(func() {
+		store = oldStore
+		storeActive = oldStoreActive
+		ensureStoreActiveForPrime = oldEnsure
+		proxiedServerMode = oldProxied
+	})
+
+	out := formatMemoriesForPrime(false)
+	if !strings.Contains(out, "timed out after 50ms") {
+		t.Fatalf("expected the store-open timeout banner in prime memory output, got %q", out)
+	}
+}
+
 // stubPrimeStoreOpen points prime's lazy store open at the given error and
 // clears the ambient store, so a test drives formatMemoriesForPrime through a
 // chosen failure edge. proxiedServerMode is forced off so the classic route is
@@ -848,5 +880,50 @@ func TestPrime_RawMarkdown_NotJSON_WithoutFlag(t *testing.T) {
 	var envelope map[string]interface{}
 	if err := json.Unmarshal([]byte(output), &envelope); err == nil {
 		t.Fatal("prime output without --hook-json should not be valid JSON (regression guard)")
+	}
+}
+
+// GH#6095: bd prime --help must document all three PRIME.md resolution
+// tiers (current-directory, resolved workspace .beads, global config) in
+// their actual lookup order, not just the first tier.
+func TestPrimeHelpMentionsAllFallbackTiers(t *testing.T) {
+	// Each needle carries its (N) label so that swapping only the labels,
+	// not the descriptions, is caught by the presence check below: the swap
+	// drives every strings.Index to -1, which the ordering loop explicitly
+	// skips.
+	needles := []string{
+		"(1) .beads/PRIME.md relative to the current directory",
+		"(2) PRIME.md in the .beads directory bd resolves for this workspace",
+		"(3) the global PRIME.md in bd's user config dir",
+	}
+	positions := make([]int, len(needles))
+	for i, needle := range needles {
+		pos := strings.Index(primeCmd.Long, needle)
+		if pos == -1 {
+			t.Errorf("prime help missing %q", needle)
+		}
+		positions[i] = pos
+	}
+	for i := 1; i < len(positions); i++ {
+		if positions[i-1] == -1 || positions[i] == -1 {
+			continue
+		}
+		if positions[i] <= positions[i-1] {
+			t.Errorf("prime help documents fallback tiers out of order: %q at %d should come before %q at %d", needles[i-1], positions[i-1], needles[i], positions[i])
+		}
+	}
+
+	// Tier (3) resolves via os.UserConfigDir(), whose location differs per
+	// platform. The help text is static, so it must spell out every OS's
+	// path rather than pinning one platform's spelling as if it were
+	// universal.
+	for _, configDirPath := range []string{
+		"~/.config/beads/",
+		"~/Library/Application Support/beads/",
+		`%AppData%\beads\`,
+	} {
+		if !strings.Contains(primeCmd.Long, configDirPath) {
+			t.Errorf("prime help tier (3) missing user config dir path %q", configDirPath)
+		}
 	}
 }

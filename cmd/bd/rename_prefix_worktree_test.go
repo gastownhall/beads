@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,7 +24,7 @@ func setupWorktree(t *testing.T) (mainRepoDir, worktreeDir string) {
 	}
 
 	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = mainRepoDir
 		if err := cmd.Run(); err != nil {
 			t.Skipf("git %v failed: %v", args, err)
@@ -43,13 +42,13 @@ func setupWorktree(t *testing.T) (mainRepoDir, worktreeDir string) {
 	run("commit", "-m", "Initial commit")
 
 	worktreeDir = filepath.Join(tmpDir, "worktree")
-	cmd := exec.Command("git", "worktree", "add", worktreeDir, "HEAD")
+	cmd := gitCommand("worktree", "add", worktreeDir, "HEAD")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git worktree add failed: %v", err)
 	}
 	t.Cleanup(func() {
-		cmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cmd := gitCommand("worktree", "remove", "--force", worktreeDir)
 		cmd.Dir = mainRepoDir
 		_ = cmd.Run()
 	})

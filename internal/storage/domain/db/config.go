@@ -126,6 +126,22 @@ func (r *configSQLRepositoryImpl) GetAllConfig(ctx context.Context) (map[string]
 	return out, nil
 }
 
+// GetConfigByPrefix retrieves only the config rows whose key starts with
+// prefix, pushing the filter into SQL (domain.ConfigPrefixReader — the
+// optional fast path `bd kv list --prefix` discovers by assertion).
+//
+// Like the dolt and embeddeddolt stores it delegates to issueops rather than
+// re-running the query itself (Runner satisfies issueops.DBTX): query and row
+// scan belong together, and they were already sharing ConfigPrefixLikeQuery
+// across two scan loops — the drift the shared helper exists to prevent.
+func (r *configSQLRepositoryImpl) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	out, err := issueops.GetConfigByPrefixInTx(ctx, r.runner, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("db: GetConfigByPrefix %s: %w", prefix, err)
+	}
+	return out, nil
+}
+
 // GetCustomTypes resolves the workspace's custom issue types through
 // issueops.ComposeCustomTypes, the same rule the embedded and server-mode
 // stores use, so proxied `bd types` and proxied create/update validation

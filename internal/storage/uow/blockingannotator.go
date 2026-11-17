@@ -59,6 +59,14 @@ func (a *blockingAnnotator) AnnotateBlocking(ctx context.Context, request public
 		if err != nil {
 			return publicops.BlockingResult{}, err
 		}
-		return storageissueops.FinishBlockingAnnotation(anchors, info.BlockedBy, info.Blocks, info.Parent), nil
+		result := storageissueops.FinishBlockingAnnotation(anchors, info.BlockedBy, info.Blocks, info.Parent)
+		if request.IncludeIsBlocked {
+			flags, err := uw.DependencyUseCase().IsBlockedBatch(ctx, anchors)
+			if err != nil {
+				return publicops.BlockingResult{}, err
+			}
+			storageissueops.ApplyBlockedFlags(&result, flags)
+		}
+		return result, nil
 	})
 }

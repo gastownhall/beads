@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/config"
+
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil/integration"
@@ -28,6 +31,12 @@ func setupLifecycleTestDir(t *testing.T) string {
 	doltBin := integration.RequireDolt(t)
 
 	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, ".config"))
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
 	configureDoltTestIdentity(t, doltBin, tmpDir)
 
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -83,6 +92,24 @@ func connectMySQL(t *testing.T, port int) *sql.DB {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	return db
+}
+
+func reserveDistinctTCPPorts(t *testing.T, count int) []int {
+	t.Helper()
+	listeners := make([]net.Listener, 0, count)
+	ports := make([]int, 0, count)
+	for range count {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, listener)
+		ports = append(ports, listener.Addr().(*net.TCPAddr).Port)
+	}
+	for _, listener := range listeners {
+		_ = listener.Close()
+	}
+	return ports
 }
 
 func waitForPortClosed(t *testing.T, port int, timeout time.Duration) {
@@ -201,7 +228,9 @@ func TestLifecycle_CrashRecovery(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO crash_test VALUES (1, 'survive')"); err != nil {
 		t.Fatalf("INSERT: %v", err)
 	}
-	// Commit the data so it persists.
+	// Record the data in history so this test exercises recovery of the
+	// committed-history state; SQL-committed working-set persistence across
+	// a kill is covered by TestLifecycle_SharedServerSQLCommitSurvivesKill.
 	if _, err := db.Exec("CALL DOLT_COMMIT('-Am', 'crash test data')"); err != nil {
 		t.Logf("DOLT_COMMIT: %v (may be expected if auto-commit is on)", err)
 	}
@@ -260,6 +289,210 @@ func TestLifecycle_CrashRecovery(t *testing.T) {
 		t.Fatalf("Stop (cleanup): %v", err)
 	}
 	reg.Deregister(state2.PID)
+}
+
+// TestLifecycle_SharedServerSQLCommitSurvivesKill verifies that, on the
+// default managed shared-server configuration, a successful SQL COMMIT
+// persists across a SIGKILL without any Dolt history commit: the committed
+// rows (tracked and dolt_ignore'd) survive, an open transaction's row does
+// not, and HEAD, the log and @@dolt_transaction_commit are untouched, so the
+// tracked writes are still pending in dolt_status (GH#4443).
+func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	sharedDir := filepath.Join(t.TempDir(), "shared-server")
+	reg := integration.NewProcessRegistry(t)
+
+	sqlPort := reserveDistinctTCPPorts(t, 1)[0]
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+	// Dolt disables its chunk journal for any non-empty value; keep the
+	// default journal-backed store whatever the operator's environment says.
+	t.Setenv("DOLT_DISABLE_CHUNK_JOURNAL", "")
+
+	serverDir := doltserver.ResolveServerDir(beadsDir)
+	if serverDir != sharedDir {
+		t.Fatalf("ResolveServerDir = %q, want shared dir %q", serverDir, sharedDir)
+	}
+	diag := integration.NewDiagnostics(t, serverDir)
+	diag.CaptureOnFailure()
+
+	const dbName = "crash_probe"
+	open := func(port int) *sql.DB {
+		t.Helper()
+		dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: dbName}.String()
+		db, err := sql.Open("mysql", dsn)
+		if err != nil {
+			t.Fatalf("sql.Open: %v", err)
+		}
+		return db
+	}
+	queryInt := func(db *sql.DB, query string) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(query).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		return n
+	}
+	queryString := func(db *sql.DB, query string) string {
+		t.Helper()
+		var s string
+		if err := db.QueryRow(query).Scan(&s); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		return s
+	}
+	mustExec := func(db *sql.DB, stmt string) {
+		t.Helper()
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	// assertCommittedRows checks the committed writes are readable and the
+	// open transaction's row is not.
+	assertCommittedRows := func(db *sql.DB, when string) {
+		t.Helper()
+		rows, err := db.Query("SELECT id, val FROM tracked_rows ORDER BY id")
+		if err != nil {
+			t.Fatalf("%s: SELECT tracked_rows: %v", when, err)
+		}
+		var got []string
+		for rows.Next() {
+			var id int
+			var val string
+			if err := rows.Scan(&id, &val); err != nil {
+				t.Fatalf("%s: scan tracked_rows: %v", when, err)
+			}
+			got = append(got, fmt.Sprintf("%d=%s", id, val))
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("%s: tracked_rows: %v", when, err)
+		}
+		_ = rows.Close()
+		want := "1=autocommitted,2=txn-a,3=txn-b"
+		if strings.Join(got, ",") != want {
+			t.Fatalf("%s: tracked_rows = %v, want %s (no row 99 from the open transaction)", when, got, want)
+		}
+		if v := queryString(db, "SELECT val FROM wisp_probe WHERE id = 1"); v != "ignored-table" {
+			t.Fatalf("%s: wisp_probe row = %q, want ignored-table", when, v)
+		}
+	}
+
+	first, err := doltserver.Start(serverDir)
+	if err != nil {
+		t.Fatalf("Start (first): %v", err)
+	}
+	if p, err := os.FindProcess(first.PID); err == nil {
+		reg.Register(p)
+	}
+	if first.Port != sqlPort {
+		t.Fatalf("first Start port = %d, want %d", first.Port, sqlPort)
+	}
+
+	admin := connectMySQL(t, sqlPort)
+	mustExec(admin, "CREATE DATABASE "+dbName)
+	_ = admin.Close()
+
+	db := open(sqlPort)
+	t.Logf("dolt version: %s", queryString(db, "SELECT dolt_version()"))
+	if v := queryInt(db, "SELECT @@dolt_transaction_commit"); v != 0 {
+		t.Fatalf("@@dolt_transaction_commit = %d, want 0 on the default managed config", v)
+	}
+	initialHead := queryString(db, "SELECT DOLT_HASHOF('HEAD')")
+	initialLog := queryInt(db, "SELECT COUNT(*) FROM dolt_log")
+
+	// Autocommitted DDL and DML on a tracked table; no DOLT_COMMIT anywhere.
+	mustExec(db, "INSERT INTO dolt_ignore VALUES ('wisp_%', true)")
+	mustExec(db, "CREATE TABLE tracked_rows (id INT PRIMARY KEY, val VARCHAR(100))")
+	mustExec(db, "INSERT INTO tracked_rows VALUES (1, 'autocommitted')")
+	// An explicit two-row transaction.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := tx.Exec("INSERT INTO tracked_rows VALUES (2, 'txn-a'), (3, 'txn-b')"); err != nil {
+		t.Fatalf("INSERT in transaction: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("COMMIT: %v", err)
+	}
+	// A dolt_ignore'd table, as bd's wisp tables are.
+	mustExec(db, "CREATE TABLE wisp_probe (id INT PRIMARY KEY, val VARCHAR(100))")
+	mustExec(db, "INSERT INTO wisp_probe VALUES (1, 'ignored-table')")
+
+	// A transaction left open at the kill.
+	openTx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("Begin (open): %v", err)
+	}
+	if _, err := openTx.Exec("INSERT INTO tracked_rows VALUES (99, 'uncommitted')"); err != nil {
+		t.Fatalf("INSERT in open transaction: %v", err)
+	}
+
+	observer := open(sqlPort)
+	assertCommittedRows(observer, "before kill")
+	if head := queryString(observer, "SELECT DOLT_HASHOF('HEAD')"); head != initialHead {
+		t.Fatalf("before kill: HEAD = %s, want unchanged %s", head, initialHead)
+	}
+	if n := queryInt(observer, "SELECT COUNT(*) FROM dolt_log"); n != initialLog {
+		t.Fatalf("before kill: dolt_log count = %d, want unchanged %d", n, initialLog)
+	}
+	_ = observer.Close()
+
+	// SIGKILL only the registered server: no Stop, Restart or FlushWorkingSet.
+	proc, err := os.FindProcess(first.PID)
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("SIGKILL: %v", err)
+	}
+	// Start's owner goroutine reaps the child; wait for it to be gone.
+	deadline := time.Now().Add(10 * time.Second)
+	for integration.IsProcessAlive(first.PID) {
+		if time.Now().After(deadline) {
+			t.Fatalf("server PID %d still alive 10s after SIGKILL", first.PID)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	reg.Deregister(first.PID)
+	waitForPortClosed(t, sqlPort, 5*time.Second)
+	_ = openTx.Rollback()
+	_ = db.Close()
+
+	second, err := doltserver.Start(serverDir)
+	if err != nil {
+		t.Fatalf("Start (after kill): %v", err)
+	}
+	if p, err := os.FindProcess(second.PID); err == nil {
+		reg.Register(p)
+	}
+	if second.PID == first.PID {
+		t.Fatalf("Start after kill reused PID %d; want a new server", first.PID)
+	}
+
+	db = open(second.Port)
+	assertCommittedRows(db, "after kill")
+	if v := queryInt(db, "SELECT @@dolt_transaction_commit"); v != 0 {
+		t.Fatalf("after kill: @@dolt_transaction_commit = %d, want 0", v)
+	}
+	if head := queryString(db, "SELECT DOLT_HASHOF('HEAD')"); head != initialHead {
+		t.Fatalf("after kill: HEAD = %s, want unchanged %s", head, initialHead)
+	}
+	if n := queryInt(db, "SELECT COUNT(*) FROM dolt_log"); n != initialLog {
+		t.Fatalf("after kill: dolt_log count = %d, want unchanged %d", n, initialLog)
+	}
+	if n := queryInt(db, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'tracked_rows'"); n == 0 {
+		t.Fatal("after kill: tracked_rows not pending in dolt_status; want it uncommitted to history")
+	}
+	_ = db.Close()
+
+	if err := doltserver.Stop(serverDir); err != nil {
+		t.Fatalf("Stop (cleanup): %v", err)
+	}
+	reg.Deregister(second.PID)
 }
 
 // TestLifecycle_RestartDataPersistence verifies data persists across clean
@@ -496,5 +729,300 @@ func TestLifecycle_PIDReuseDetection(t *testing.T) {
 	// Verify stale state files were cleaned up.
 	if integration.FileExists(corruptor.PIDFilePath()) {
 		t.Error("PID file not cleaned up after detecting non-dolt PID")
+	}
+}
+
+func TestLifecycle_RestartWithRemotesAPI(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	ports := reserveDistinctTCPPorts(t, 2)
+	sqlPort, rapiPort := ports[0], ports[1]
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", rapiPort))
+
+	first, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if proc, findErr := os.FindProcess(first.PID); findErr == nil {
+		reg.Register(proc)
+	}
+	if first.Port != sqlPort || first.RemotesAPIPort != rapiPort || !doltserver.ProbeRemotesAPI(rapiPort) {
+		t.Fatalf("first state = %+v, want SQL %d and live remotesapi %d", first, sqlPort, rapiPort)
+	}
+
+	db := connectMySQL(t, sqlPort)
+	if _, err := db.Exec("CREATE TABLE restart_probe (id INT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO restart_probe VALUES (1)"); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	second, err := doltserver.Restart(beadsDir)
+	if err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	reg.Deregister(first.PID)
+	if proc, findErr := os.FindProcess(second.PID); findErr == nil {
+		reg.Register(proc)
+	}
+	if second.PID == first.PID {
+		t.Fatalf("restart retained PID %d; want a replacement process", first.PID)
+	}
+	if second.Port != sqlPort || second.RemotesAPIPort != rapiPort || !doltserver.ProbeRemotesAPI(rapiPort) {
+		t.Fatalf("second state = %+v, want preserved SQL %d and live remotesapi %d", second, sqlPort, rapiPort)
+	}
+
+	db = connectMySQL(t, sqlPort)
+	var count, dirty int
+	if err := db.QueryRow("SELECT COUNT(*) FROM restart_probe").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if count != 1 || dirty != 0 {
+		t.Fatalf("post-restart state: restart_probe count=%d dolt_status rows=%d, want 1/0 (flush committed before stop)", count, dirty)
+	}
+
+	const starters = 4
+	states := make(chan *doltserver.State, starters)
+	errs := make(chan error, starters)
+	var wg sync.WaitGroup
+	for range starters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			state, err := doltserver.Start(beadsDir)
+			states <- state
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(states)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Start: %v", err)
+		}
+	}
+	for state := range states {
+		if state == nil || state.PID != second.PID {
+			t.Fatalf("concurrent Start state = %+v, want PID %d", state, second.PID)
+		}
+	}
+
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	reg.Deregister(second.PID)
+}
+
+func TestLifecycle_StartRequiresRestartForNewRemotesAPIConfig(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	ports := reserveDistinctTCPPorts(t, 2)
+	sqlPort, rapiPort := ports[0], ports[1]
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proc, findErr := os.FindProcess(state.PID); findErr == nil {
+		reg.Register(proc)
+	}
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", rapiPort))
+	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt stop && bd dolt start") {
+		t.Fatalf("Start after remotesapi config = %v, want actionable stop/start-required error", err)
+	}
+	// The auto-start fast path must NOT fail hard on the same gap:
+	// BEADS_DOLT_REMOTESAPI_PORT predates the listener wiring, so a server
+	// started before the setting appeared keeps serving SQL (with a warning)
+	// until an explicit stop/start applies it.
+	if port, startedByUs, err := doltserver.EnsureRunningDetailed(beadsDir); err != nil {
+		t.Fatalf("EnsureRunningDetailed with unapplied remotesapi config = %v, want warn-and-serve", err)
+	} else if startedByUs || port != sqlPort {
+		t.Fatalf("EnsureRunningDetailed = (port %d, startedByUs %v), want adopted server on %d", port, startedByUs, sqlPort)
+	}
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	reg.Deregister(state.PID)
+}
+
+func TestLifecycle_AdoptedServerRequiresConfiguredRemotesAPI(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	physicalBeadsDir, err := filepath.EvalSymlinks(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beadsDir = physicalBeadsDir
+	reg := integration.NewProcessRegistry(t)
+	ports := reserveDistinctTCPPorts(t, 2)
+	sqlPort, rapiPort := ports[0], ports[1]
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+
+	first, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proc, findErr := os.FindProcess(first.PID); findErr == nil {
+		reg.Register(proc)
+	}
+	if err := os.Remove(filepath.Join(beadsDir, doltserver.PIDFileName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(beadsDir, doltserver.PortFileName)); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", rapiPort))
+	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt stop && bd dolt start") {
+		t.Fatalf("adopted Start = %v, want actionable stop/start-required error", err)
+	}
+	state, err := doltserver.IsRunning(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Running || state.PID != first.PID || state.RemotesAPIPort != rapiPort {
+		t.Fatalf("adopted state = %+v, want PID %d and configured remotesapi %d", state, first.PID, rapiPort)
+	}
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	reg.Deregister(first.PID)
+}
+
+func TestLifecycle_RestartRemotesAPIFailureLeavesCleanStoppedState(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	sqlListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlPort := sqlListener.Addr().(*net.TCPAddr).Port
+	var blocker net.Listener
+	for {
+		blocker, err = net.Listen("tcp6", "[::]:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if blocker.Addr().(*net.TCPAddr).Port != sqlPort {
+			break
+		}
+		_ = blocker.Close()
+	}
+	defer blocker.Close()
+	blockedRAPIPort := blocker.Addr().(*net.TCPAddr).Port
+	_ = sqlListener.Close()
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+
+	first, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if proc, findErr := os.FindProcess(first.PID); findErr == nil {
+		reg.Register(proc)
+	}
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", blockedRAPIPort))
+
+	_, restartErr := doltserver.Restart(beadsDir)
+	if restartErr == nil {
+		t.Fatal("Restart succeeded with occupied remotesapi port")
+	}
+	reg.Deregister(first.PID)
+	for _, want := range []string{"server remains stopped", "remotesapi", doltserver.LogPath(beadsDir)} {
+		if !strings.Contains(restartErr.Error(), want) {
+			t.Fatalf("Restart error %q missing %q", restartErr, want)
+		}
+	}
+	state, err := doltserver.IsRunning(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Running {
+		t.Fatalf("server still running after failed restart: %+v", state)
+	}
+	if got := doltserver.ReadPortFile(beadsDir); got != sqlPort {
+		t.Fatalf("SQL port after failed restart = %d, want preserved %d for retry", got, sqlPort)
+	}
+}
+
+// TestLifecycle_ServesDatabaseDirOnPort runs the served-directory proof the
+// CLI routes take against a dolt sql-server bd started. A database the
+// server created holds the server's lock beside the server's info file, so
+// it counts as served on the server's port and on no other. A copy of the
+// data directory taken while the server runs carries the info file but no
+// held lock, so it does not count, and neither does the database once the
+// server has stopped.
+func TestLifecycle_ServesDatabaseDirOnPort(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if p, err := os.FindProcess(state.PID); err == nil {
+		reg.Register(p)
+	}
+	db := connectMySQL(t, state.Port)
+	if _, err := db.Exec("CREATE DATABASE served"); err != nil {
+		t.Fatalf("CREATE DATABASE: %v", err)
+	}
+	_ = db.Close()
+
+	dataDir := doltserver.ResolveDoltDir(beadsDir)
+	served := filepath.Join(dataDir, "served")
+	if !doltserver.ServesDatabaseDirOnPort(served, state.Port) {
+		t.Errorf("ServesDatabaseDirOnPort(%s, %d) = false for the database the running server created", served, state.Port)
+	}
+	if doltserver.ServesDatabaseDirOnPort(served, state.Port+1) {
+		t.Errorf("ServesDatabaseDirOnPort(%s, %d) = true for a port the server does not listen on", served, state.Port+1)
+	}
+
+	copied := filepath.Join(t.TempDir(), "dolt")
+	if err := os.CopyFS(copied, os.DirFS(dataDir)); err != nil {
+		t.Fatalf("copy %s: %v", dataDir, err)
+	}
+	if _, err := os.Stat(filepath.Join(copied, ".dolt", doltserver.ServerInfoFileName)); err != nil {
+		t.Fatalf("the copy lacks the server's info file, so it tests nothing: %v", err)
+	}
+	if doltserver.ServesDatabaseDirOnPort(filepath.Join(copied, "served"), state.Port) {
+		t.Error("a copy of the served data directory counts as served: its info file names the running server, but nothing holds its lock")
+	}
+
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	reg.Deregister(state.PID)
+	waitForPortClosed(t, state.Port, 5*time.Second)
+	if doltserver.ServesDatabaseDirOnPort(served, state.Port) {
+		t.Errorf("ServesDatabaseDirOnPort(%s, %d) = true after the server stopped", served, state.Port)
 	}
 }

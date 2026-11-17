@@ -30,6 +30,21 @@ func bdDep(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
+// bdRunSplit runs bd with the given args, requires success, and returns
+// stdout and stderr separately, so a stderr-only notice can be asserted
+// without it leaking into (or hiding behind) stdout.
+func bdRunSplit(t *testing.T, bd, dir string, args ...string) (stdout, stderr string) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	outBuf, errBuf, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, outBuf.String(), errBuf.String())
+	}
+	return outBuf.String(), errBuf.String()
+}
+
 // bdDepFail runs "bd dep" expecting failure.
 func bdDepFail(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
@@ -97,7 +112,18 @@ func bdDepWithInputFail(t *testing.T, bd, dir, input string, args ...string) str
 	return string(out)
 }
 
-func TestEmbeddedDep(t *testing.T) {
+// The TestEmbeddedDepA* and TestEmbeddedDepB* tests were split from
+// TestEmbeddedDep (originally ~317s, measured under --config=embedded), first
+// into TestEmbeddedDepA and TestEmbeddedDepB and then (~95s each on
+// rbe-west) into these 6 top-level tests over disjoint subtest groups, for
+// CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once. The
+// "list_*" subtests (which assert on dependencies added by
+// "add_positional_args" / "add_type_parent_child") stay with those subtests
+// and the shared pre-created issues in TestEmbeddedDepAAddAndList, and the
+// tree_* subtests with the pre-wired graph in TestEmbeddedDepBTreeAndCycles;
+// the subtests that create every issue they use run in their own workspace.
+func TestEmbeddedDepAAddAndList(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -143,6 +169,54 @@ func TestEmbeddedDep(t *testing.T) {
 		}
 	})
 
+	// ===== dep list =====
+
+	t.Run("list_default_direction_down", func(t *testing.T) {
+		// issueC depends on issueD (added earlier)
+		out := bdDep(t, bd, dir, "list", issueC.ID)
+		if !strings.Contains(out, issueD.ID) {
+			t.Errorf("expected dependency in list output: %s", out)
+		}
+	})
+
+	t.Run("list_direction_up", func(t *testing.T) {
+		out := bdDep(t, bd, dir, "list", issueD.ID, "--direction", "up")
+		if !strings.Contains(out, issueC.ID) {
+			t.Errorf("expected dependent in list --direction up: %s", out)
+		}
+	})
+
+	t.Run("list_type_filter", func(t *testing.T) {
+		out := bdDep(t, bd, dir, "list", epic.ID, "--direction", "up", "--type", "parent-child")
+		if !strings.Contains(out, child1.ID) || !strings.Contains(out, child2.ID) {
+			t.Errorf("expected children in type-filtered list: %s", out)
+		}
+	})
+
+	t.Run("list_json_output", func(t *testing.T) {
+		fullArgs := []string{"dep", "list", issueC.ID, "--json"}
+		cmd := exec.Command(bd, fullArgs...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("dep list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), issueD.ID) {
+			t.Errorf("expected dependency ID in JSON: %s", stdout.String())
+		}
+	})
+}
+
+func TestEmbeddedDepAAddTypesAndFlags(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "dp")
+
 	t.Run("add_type_tracks", func(t *testing.T) {
 		tracker := bdCreate(t, bd, dir, "Tracker", "--type", "task")
 		tracked := bdCreate(t, bd, dir, "Tracked", "--type", "task")
@@ -179,6 +253,16 @@ func TestEmbeddedDep(t *testing.T) {
 			t.Errorf("expected dependency in deps: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "dp")
 
 	t.Run("add_cycle_rejected", func(t *testing.T) {
 		// A->B already exists, add B->A to create cycle — should be rejected
@@ -233,6 +317,119 @@ func TestEmbeddedDep(t *testing.T) {
 		}
 	})
 
+	// GH#6556: a bare cross-prefix target that resolves nowhere is still
+	// stored (the multi-rig "add now, route later" shape), but no longer
+	// silently: stderr names it and the command that removes the edge.
+	t.Run("add_unresolved_cross_prefix_warns", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target source", "--type", "task")
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "add", src.ID, "zz-404")
+		if !strings.Contains(stdout, "Added dependency") || strings.Contains(stdout, "warning:") {
+			t.Errorf("stdout = %q, want the usual Added dependency line and no warning", stdout)
+		}
+		remove := fmt.Sprintf("bd dep remove %s zz-404", src.ID)
+		if !strings.Contains(stderr, "zz-404 was not found") || !strings.Contains(stderr, "stored unverified") || !strings.Contains(stderr, remove) {
+			t.Fatalf("stderr = %q, want the unresolved-target warning naming zz-404 and %q", stderr, remove)
+		}
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(1) {
+			t.Fatalf("dependency_count = %v, want 1: the edge must still be stored", got)
+		}
+		// The printed remedy addresses the stored row.
+		bdDep(t, bd, dir, "remove", src.ID, "zz-404")
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(0) {
+			t.Fatalf("dependency_count after the printed remove = %v, want 0", got)
+		}
+	})
+
+	t.Run("add_unresolved_cross_prefix_json", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target JSON source", "--type", "task")
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "add", src.ID, "zz-404", "--json")
+		var got map[string]interface{}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &got); err != nil {
+			t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+		}
+		// schema_version is outputJSON's envelope on every object; the
+		// warning must not add a key beside it.
+		if len(got) != 5 || got["schema_version"] == nil || got["status"] != "added" || got["issue_id"] != src.ID || got["depends_on_id"] != "zz-404" || got["type"] != "blocks" {
+			t.Errorf("stdout JSON = %v, want exactly status, issue_id, depends_on_id and type (plus schema_version)", got)
+		}
+		if !strings.Contains(stderr, "zz-404 was not found") || !strings.Contains(stderr, "bd dep remove "+src.ID+" zz-404") {
+			t.Fatalf("stderr = %q, want the unresolved-target warning", stderr)
+		}
+	})
+
+	t.Run("add_bulk_file_unresolved_warns", func(t *testing.T) {
+		a := bdCreate(t, bd, dir, "Bulk unresolved A", "--type", "task")
+		b := bdCreate(t, bd, dir, "Bulk unresolved B", "--type", "task")
+		path := filepath.Join(t.TempDir(), "unresolved-deps.jsonl")
+		body := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":\"zz-405\"}\n", a.ID, b.ID, a.ID)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write deps file: %v", err)
+		}
+
+		stdout, stderr := bdRunSplit(t, bd, dir, "dep", "add", "--file", path)
+		if !strings.Contains(stdout, "Added 2 dependencies") {
+			t.Fatalf("stdout = %q, want the bulk add summary", stdout)
+		}
+		if !strings.Contains(stderr, "warning: line 2: ") || !strings.Contains(stderr, "zz-405 was not found") {
+			t.Fatalf("stderr = %q, want the unresolved-target warning for line 2 naming zz-405", stderr)
+		}
+		if strings.Contains(stderr, "line 1:") {
+			t.Errorf("stderr = %q, want no warning for line 1 (a resolved local edge)", stderr)
+		}
+		if got := bdShowDetails(t, bd, dir, a.ID)["dependency_count"]; got != float64(2) {
+			t.Fatalf("dependency_count = %v, want 2: both edges must be written", got)
+		}
+	})
+
+	t.Run("add_resolved_and_external_no_warning", func(t *testing.T) {
+		a := bdCreate(t, bd, dir, "Resolved target A", "--type", "task")
+		c := bdCreate(t, bd, dir, "Resolved target C", "--type", "task")
+		d := bdCreate(t, bd, dir, "Resolved target D", "--type", "task")
+		for _, target := range []string{c.ID, "external:proj:cap"} {
+			_, stderr := bdRunSplit(t, bd, dir, "dep", "add", a.ID, target)
+			if strings.Contains(stderr, "was not found") {
+				t.Errorf("dep add %s %s: stderr = %q, want no unresolved-target warning", a.ID, target, stderr)
+			}
+		}
+		path := filepath.Join(t.TempDir(), "resolved-deps.jsonl")
+		body := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":\"external:proj:cap2\"}\n", d.ID, c.ID, d.ID)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write deps file: %v", err)
+		}
+		_, stderr := bdRunSplit(t, bd, dir, "dep", "add", "--file", path)
+		if strings.Contains(stderr, "was not found") {
+			t.Errorf("dep add --file: stderr = %q, want no unresolved-target warning", stderr)
+		}
+	})
+
+	t.Run("add_unresolved_quiet", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target quiet source", "--type", "task")
+		_, stderr := bdRunSplit(t, bd, dir, "--quiet", "dep", "add", src.ID, "zz-406")
+		if strings.Contains(stderr, "was not found") {
+			t.Errorf("stderr = %q, want no unresolved-target warning under --quiet", stderr)
+		}
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(1) {
+			t.Fatalf("dependency_count = %v, want 1: --quiet silences the warning, not the write", got)
+		}
+	})
+
+	// The notice says the edge was stored, so an edge refused after its
+	// target was accepted unverified gets none: --type is validated only
+	// once the target decision has run.
+	t.Run("add_unresolved_refused_type_no_warning", func(t *testing.T) {
+		src := bdCreate(t, bd, dir, "Unresolved target refused source", "--type", "task")
+		out := bdDepFail(t, bd, dir, "add", src.ID, "zz-407", "--type", "bogus")
+		if !strings.Contains(out, "unknown dependency type") {
+			t.Fatalf("output = %q, want the --type refusal", out)
+		}
+		if strings.Contains(out, "stored unverified") {
+			t.Errorf("output = %q, want no unresolved-target warning for an edge that was refused", out)
+		}
+		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(0) {
+			t.Fatalf("dependency_count = %v, want 0: the refused edge must not be stored", got)
+		}
+	})
+
 	t.Run("add_bulk_file_validation_no_partial_mutation", func(t *testing.T) {
 		v1 := bdCreate(t, bd, dir, "Bulk validation A", "--type", "task")
 		v2 := bdCreate(t, bd, dir, "Bulk validation B", "--type", "task")
@@ -251,92 +448,33 @@ func TestEmbeddedDep(t *testing.T) {
 			t.Fatalf("bulk validation failure should not add valid rows: %s", list)
 		}
 	})
+}
 
-	// ===== dep remove =====
+func TestEmbeddedDepBTreeAndCycles(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
 
-	t.Run("remove_basic", func(t *testing.T) {
-		r1 := bdCreate(t, bd, dir, "Remove A", "--type", "task")
-		r2 := bdCreate(t, bd, dir, "Remove B", "--type", "task")
-		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
-		out := bdDep(t, bd, dir, "remove", r1.ID, r2.ID)
-		if !strings.Contains(out, "Removed") {
-			t.Errorf("expected 'Removed' in output: %s", out)
-		}
-	})
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "dp")
 
-	t.Run("remove_rm_alias", func(t *testing.T) {
-		r1 := bdCreate(t, bd, dir, "Rm A", "--type", "task")
-		r2 := bdCreate(t, bd, dir, "Rm B", "--type", "task")
-		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
-		out := bdDep(t, bd, dir, "rm", r1.ID, r2.ID)
-		if !strings.Contains(out, "Removed") {
-			t.Errorf("expected 'Removed' via rm alias: %s", out)
-		}
-	})
+	// Pre-create issues for dependency testing.
+	_ = bdCreate(t, bd, dir, "Dep issue A", "--type", "task")
+	_ = bdCreate(t, bd, dir, "Dep issue B", "--type", "task")
+	issueC := bdCreate(t, bd, dir, "Dep issue C", "--type", "task")
+	issueD := bdCreate(t, bd, dir, "Dep issue D", "--type", "task")
+	epic := bdCreate(t, bd, dir, "Dep epic", "--type", "epic")
+	child1 := bdCreate(t, bd, dir, "Dep child 1", "--type", "task")
+	child2 := bdCreate(t, bd, dir, "Dep child 2", "--type", "task")
 
-	t.Run("remove_json_output", func(t *testing.T) {
-		r1 := bdCreate(t, bd, dir, "RmJSON A", "--type", "task")
-		r2 := bdCreate(t, bd, dir, "RmJSON B", "--type", "task")
-		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
-		m := bdDepJSON(t, bd, dir, "remove", r1.ID, r2.ID)
-		if m["status"] != "removed" {
-			t.Errorf("expected status=removed, got %v", m["status"])
-		}
-		if m["removed"] != true {
-			t.Errorf("expected removed=true, got %v", m["removed"])
-		}
-	})
-
-	t.Run("remove_missing_edge_reports_noop", func(t *testing.T) {
-		r1 := bdCreate(t, bd, dir, "Missing edge A", "--type", "task")
-		r2 := bdCreate(t, bd, dir, "Missing edge B", "--type", "task")
-		out := bdDep(t, bd, dir, "remove", r1.ID, r2.ID)
-		if !strings.Contains(out, "No dependency found") || strings.Contains(out, "✓") {
-			t.Errorf("missing edge should report a no-op, got: %s", out)
-		}
-		m := bdDepJSON(t, bd, dir, "remove", r1.ID, r2.ID)
-		if m["status"] != "not_found" || m["removed"] != false {
-			t.Errorf("missing edge JSON = %v, want status=not_found removed=false", m)
-		}
-	})
-
-	// ===== dep list =====
-
-	t.Run("list_default_direction_down", func(t *testing.T) {
-		// issueC depends on issueD (added earlier)
-		out := bdDep(t, bd, dir, "list", issueC.ID)
-		if !strings.Contains(out, issueD.ID) {
-			t.Errorf("expected dependency in list output: %s", out)
-		}
-	})
-
-	t.Run("list_direction_up", func(t *testing.T) {
-		out := bdDep(t, bd, dir, "list", issueD.ID, "--direction", "up")
-		if !strings.Contains(out, issueC.ID) {
-			t.Errorf("expected dependent in list --direction up: %s", out)
-		}
-	})
-
-	t.Run("list_type_filter", func(t *testing.T) {
-		out := bdDep(t, bd, dir, "list", epic.ID, "--direction", "up", "--type", "parent-child")
-		if !strings.Contains(out, child1.ID) || !strings.Contains(out, child2.ID) {
-			t.Errorf("expected children in type-filtered list: %s", out)
-		}
-	})
-
-	t.Run("list_json_output", func(t *testing.T) {
-		fullArgs := []string{"dep", "list", issueC.ID, "--json"}
-		cmd := exec.Command(bd, fullArgs...)
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		stdout, stderr, err := runCommandBuffers(t, cmd)
-		if err != nil {
-			t.Fatalf("dep list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-		}
-		if !strings.Contains(stdout.String(), issueD.ID) {
-			t.Errorf("expected dependency ID in JSON: %s", stdout.String())
-		}
-	})
+	// Wire up the same parent-child/blocks edges TestEmbeddedDepA builds, so
+	// the tree_* subtests below exercise real multi-node traversal instead of
+	// rendering isolated single-node trees (see review S2: these subtests
+	// previously passed vacuously against an edgeless graph).
+	bdDep(t, bd, dir, "add", child1.ID, epic.ID, "--type", "parent-child")
+	bdDep(t, bd, dir, "add", child2.ID, epic.ID, "--type", "parent-child")
+	bdDep(t, bd, dir, "add", issueC.ID, issueD.ID)
 
 	// ===== dep tree =====
 
@@ -380,6 +518,14 @@ func TestEmbeddedDep(t *testing.T) {
 		if !strings.Contains(out, "flowchart") && !strings.Contains(out, "graph") {
 			t.Errorf("expected mermaid flowchart/graph syntax: %s", out)
 		}
+		// Mixed-case pins case-folding at the runDepTree dispatch site.
+		// TestDepTreeFormatMermaidCaseInsensitive calls isMermaidTreeFormat
+		// directly and would stay green if the call site went back to
+		// formatStr == "mermaid" (the PR #6646 bug).
+		mixed := bdDep(t, bd, dir, "tree", epic.ID, "--format", "Mermaid")
+		if !strings.Contains(mixed, "flowchart") && !strings.Contains(mixed, "graph") {
+			t.Errorf("expected mermaid flowchart/graph syntax for --format Mermaid: %s", mixed)
+		}
 	})
 
 	t.Run("tree_json_output", func(t *testing.T) {
@@ -393,6 +539,85 @@ func TestEmbeddedDep(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), epic.ID) {
 			t.Errorf("expected epic ID in JSON tree: %s", stdout.String())
+		}
+	})
+
+	// ===== dep cycles =====
+
+	t.Run("cycles_detect", func(t *testing.T) {
+		// We created a cycle earlier (cyA <-> cyB)
+		out := bdDep(t, bd, dir, "cycles")
+		// Should report at least one cycle
+		if !strings.Contains(out, "cycle") && !strings.Contains(out, "Cycle") && !strings.Contains(out, "No cycles") {
+			t.Errorf("expected cycle info in output: %s", out)
+		}
+	})
+}
+
+func TestEmbeddedDepBRemove(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "dp")
+
+	// ===== dep remove =====
+
+	t.Run("remove_basic", func(t *testing.T) {
+		r1 := bdCreate(t, bd, dir, "Remove A", "--type", "task")
+		r2 := bdCreate(t, bd, dir, "Remove B", "--type", "task")
+		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
+		out := bdDep(t, bd, dir, "remove", r1.ID, r2.ID)
+		if !strings.Contains(out, "Removed") {
+			t.Errorf("expected 'Removed' in output: %s", out)
+		}
+	})
+
+	t.Run("remove_rm_alias", func(t *testing.T) {
+		r1 := bdCreate(t, bd, dir, "Rm A", "--type", "task")
+		r2 := bdCreate(t, bd, dir, "Rm B", "--type", "task")
+		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
+		out := bdDep(t, bd, dir, "rm", r1.ID, r2.ID)
+		if !strings.Contains(out, "Removed") {
+			t.Errorf("expected 'Removed' via rm alias: %s", out)
+		}
+	})
+}
+
+func TestEmbeddedDepBRemoveOutputAndRelatesTo(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "dp")
+
+	t.Run("remove_json_output", func(t *testing.T) {
+		r1 := bdCreate(t, bd, dir, "RmJSON A", "--type", "task")
+		r2 := bdCreate(t, bd, dir, "RmJSON B", "--type", "task")
+		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
+		m := bdDepJSON(t, bd, dir, "remove", r1.ID, r2.ID)
+		if m["status"] != "removed" {
+			t.Errorf("expected status=removed, got %v", m["status"])
+		}
+		if m["removed"] != true {
+			t.Errorf("expected removed=true, got %v", m["removed"])
+		}
+	})
+
+	t.Run("remove_missing_edge_reports_noop", func(t *testing.T) {
+		r1 := bdCreate(t, bd, dir, "Missing edge A", "--type", "task")
+		r2 := bdCreate(t, bd, dir, "Missing edge B", "--type", "task")
+		out := bdDep(t, bd, dir, "remove", r1.ID, r2.ID)
+		if !strings.Contains(out, "No dependency found") || strings.Contains(out, "✓") {
+			t.Errorf("missing edge should report a no-op, got: %s", out)
+		}
+		m := bdDepJSON(t, bd, dir, "remove", r1.ID, r2.ID)
+		if m["status"] != "not_found" || m["removed"] != false {
+			t.Errorf("missing edge JSON = %v, want status=not_found removed=false", m)
 		}
 	})
 
@@ -421,17 +646,6 @@ func TestEmbeddedDep(t *testing.T) {
 		upOut := bdDep(t, bd, dir, "tree", related.ID, "--direction", "up")
 		if strings.Contains(upOut, root.ID) {
 			t.Fatalf("reverse relates-to edge should not render as a dependent tree edge: %s", upOut)
-		}
-	})
-
-	// ===== dep cycles =====
-
-	t.Run("cycles_detect", func(t *testing.T) {
-		// We created a cycle earlier (cyA <-> cyB)
-		out := bdDep(t, bd, dir, "cycles")
-		// Should report at least one cycle
-		if !strings.Contains(out, "cycle") && !strings.Contains(out, "Cycle") && !strings.Contains(out, "No cycles") {
-			t.Errorf("expected cycle info in output: %s", out)
 		}
 	})
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // ErrTestBinary is returned when getBdBinary detects it's running as a test binary.
@@ -148,6 +149,126 @@ func isWithinWorkspace(root, candidate string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+// isStrictDescendant reports whether candidate lies strictly below root;
+// both are absolute and clean.
+func isStrictDescendant(root, candidate string) bool {
+	rel, err := filepath.Rel(root, candidate)
+	return err == nil && rel != "." && rel != ".." && !filepath.IsAbs(rel) &&
+		!strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// resolveExistingParent resolves the symlinks in dir, resolving its nearest
+// existing ancestor when dir does not exist yet.
+// Adapted from #7889 by @Wenjix.
+func resolveExistingParent(dir string) (string, error) {
+	info, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", err
+		}
+		resolved, err := resolveExistingParent(parent)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(resolved, filepath.Base(dir)), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return "", fmt.Errorf("%s is not a directory", remedy.PrintedValue(dir))
+	}
+	return filepath.EvalSymlinks(dir)
+}
+
+// envSelectedDatabasePath is the database location BEADS_DOLT_DATA_DIR names
+// for beadsDir, or "" when the variable is unset or empty.
+func envSelectedDatabasePath(beadsDir string) (string, error) {
+	dataDir := os.Getenv("BEADS_DOLT_DATA_DIR")
+	if dataDir == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(dataDir) {
+		dataDir = filepath.Join(beadsDir, dataDir)
+	}
+	return filepath.Abs(dataDir)
+}
+
+// confinedDatabasePath admits dbPath for a doctor fix that backs up or
+// deletes it, returning it as an absolute path. The path must lie lexically
+// strictly inside the workspace .beads directory (which may itself be a
+// symlink) and may not be a symlink, and its existing ancestors must not
+// resolve outside .beads. The one exception is the location BEADS_DOLT_DATA_DIR selects,
+// which the user named explicitly.
+// Adapted from #7889 by @Wenjix.
+func confinedDatabasePath(beadsDir, dbPath string) (string, error) {
+	absBeads, err := filepath.Abs(beadsDir)
+	if err != nil {
+		return "", fmt.Errorf("invalid beads directory: %w", err)
+	}
+	absDB, err := filepath.Abs(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid database path: %w", err)
+	}
+	envPath, err := envSelectedDatabasePath(absBeads)
+	if err != nil {
+		return "", fmt.Errorf("invalid BEADS_DOLT_DATA_DIR: %w", err)
+	}
+	if envPath != "" && envPath == absDB {
+		return absDB, nil
+	}
+
+	refuse := func(why string) error {
+		return &databaseRefusal{path: absDB, why: why}
+	}
+	resolvedBeads, err := resolveExistingParent(absBeads)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve beads directory %s: %w", remedy.PrintedValue(absBeads), err)
+	}
+	// Metadata must name the database below .beads as spelled: a path that
+	// reaches the store only through .beads' resolved target is refused.
+	if !isStrictDescendant(absBeads, absDB) {
+		return "", refuse("it is outside the workspace .beads directory " + remedy.PrintedValue(absBeads))
+	}
+	info, err := os.Lstat(absDB)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", refuse("it is a symlink")
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("failed to stat database path %s: %w", remedy.PrintedValue(absDB), err)
+	}
+	resolvedParent, err := resolveExistingParent(filepath.Dir(absDB))
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve database parent directory: %w", err)
+	}
+	if resolvedParent != resolvedBeads && !isStrictDescendant(resolvedBeads, resolvedParent) {
+		return "", refuse("its parent directory resolves outside .beads, to " + remedy.PrintedValue(resolvedParent))
+	}
+	if info != nil {
+		resolvedDB, err := filepath.EvalSymlinks(absDB)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve database path %s: %w", remedy.PrintedValue(absDB), err)
+		}
+		if !isStrictDescendant(resolvedBeads, resolvedDB) {
+			return "", refuse("it resolves outside .beads, to " + remedy.PrintedValue(resolvedDB))
+		}
+	}
+	return absDB, nil
+}
+
+// databaseRefusal is confinedDatabasePath's refusal of a database location;
+// why says what makes the location unsafe.
+type databaseRefusal struct {
+	path, why string
+}
+
+func (e *databaseRefusal) Error() string {
+	return fmt.Sprintf("refusing to back up or delete the database at %s: %s\n"+
+		"Recover it by hand, or set BEADS_DOLT_DATA_DIR to that location to select it explicitly",
+		remedy.PrintedValue(e.path), e.why)
 }
 
 // resolveBeadsDir follows .beads/redirect files to find the actual beads directory.

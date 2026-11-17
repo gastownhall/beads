@@ -41,7 +41,7 @@ func bdDoltSeparate(t *testing.T, bd, dir string, args ...string) (string, strin
 
 // -- push --
 
-func TestDoltLocalOnly_Push_ExitsZeroWithMessage(t *testing.T) {
+func TestEmbeddedDoltLocalOnly_Push_ExitsZeroWithMessage(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run dolt.local-only embedded tests")
 	}
@@ -62,7 +62,7 @@ func TestDoltLocalOnly_Push_ExitsZeroWithMessage(t *testing.T) {
 	}
 }
 
-func TestDoltLocalOnly_Push_LocalStoreCopy(t *testing.T) {
+func TestEmbeddedDoltLocalOnly_Push_LocalStoreCopy(t *testing.T) {
 	// The push no-op message must include the "Your issues are stored locally" line.
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run dolt.local-only embedded tests")
@@ -77,7 +77,7 @@ func TestDoltLocalOnly_Push_LocalStoreCopy(t *testing.T) {
 	}
 }
 
-func TestDoltLocalOnly_Push_JSON_DisabledStatus(t *testing.T) {
+func TestEmbeddedDoltLocalOnly_Push_JSON_DisabledStatus(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run dolt.local-only embedded tests")
 	}
@@ -101,7 +101,7 @@ func TestDoltLocalOnly_Push_JSON_DisabledStatus(t *testing.T) {
 
 // -- pull --
 
-func TestDoltLocalOnly_Pull_ExitsZeroWithMessage(t *testing.T) {
+func TestEmbeddedDoltLocalOnly_Pull_ExitsZeroWithMessage(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run dolt.local-only embedded tests")
 	}
@@ -122,7 +122,7 @@ func TestDoltLocalOnly_Pull_ExitsZeroWithMessage(t *testing.T) {
 	}
 }
 
-func TestDoltLocalOnly_Pull_JSON_DisabledStatus(t *testing.T) {
+func TestEmbeddedDoltLocalOnly_Pull_JSON_DisabledStatus(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run dolt.local-only embedded tests")
 	}
@@ -146,7 +146,7 @@ func TestDoltLocalOnly_Pull_JSON_DisabledStatus(t *testing.T) {
 
 // -- remote add --
 
-func TestDoltLocalOnly_RemoteAdd_RefusesExitOne(t *testing.T) {
+func TestEmbeddedDoltLocalOnly_RemoteAdd_RefusesExitOne(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run dolt.local-only embedded tests")
 	}
@@ -169,7 +169,7 @@ func TestDoltLocalOnly_RemoteAdd_RefusesExitOne(t *testing.T) {
 	}
 }
 
-func TestDoltLocalOnly_RemoteAdd_ErrorOnStderr(t *testing.T) {
+func TestEmbeddedDoltLocalOnly_RemoteAdd_ErrorOnStderr(t *testing.T) {
 	// The refusal must go to stderr (not stdout) so agents can distinguish errors.
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run dolt.local-only embedded tests")
@@ -189,7 +189,7 @@ func TestDoltLocalOnly_RemoteAdd_ErrorOnStderr(t *testing.T) {
 
 // -- config round-trip --
 
-func TestDoltLocalOnly_ConfigRoundTrip(t *testing.T) {
+func TestEmbeddedDoltLocalOnly_ConfigRoundTrip(t *testing.T) {
 	// bd config set dolt.local-only true / unset must persist via config.yaml.
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run dolt.local-only embedded tests")
@@ -215,7 +215,7 @@ func TestDoltLocalOnly_ConfigRoundTrip(t *testing.T) {
 
 // -- bd dolt status --
 
-func TestDoltLocalOnly_DoltStatus_ShowsDisabled(t *testing.T) {
+func TestEmbeddedDoltLocalOnly_DoltStatus_ShowsDisabled(t *testing.T) {
 	// When dolt.local-only=true, bd dolt status must include the indicator line.
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run dolt.local-only embedded tests")

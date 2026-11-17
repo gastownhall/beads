@@ -66,8 +66,19 @@ var ErrNotInitialized = errors.New("database not initialized")
 type ErrUnsupported struct {
 	Op      string // method name, e.g. "AddLabel" or "Transaction.CreateIssues"
 	Backend string // e.g. "dolt-server"
+	// Capability names the advertised token a server-version skew refusal was
+	// missing, when that is the reason — e.g. the http backend's own
+	// *wire.CapabilityError, which unwraps to one of these so a caller holding
+	// only a role interface can classify a skew refusal the same way as any
+	// other unsupported capability, without importing the wire package.
+	// Empty for every refusal that is not a skew: a backend that simply never
+	// implemented an accessor names no token it could have advertised.
+	Capability string
 }
 
 func (e *ErrUnsupported) Error() string {
+	if e.Capability != "" {
+		return fmt.Sprintf("operation %q not supported by the %s backend (capability %q not advertised)", e.Op, e.Backend, e.Capability)
+	}
 	return fmt.Sprintf("operation %q not supported by the %s backend", e.Op, e.Backend)
 }

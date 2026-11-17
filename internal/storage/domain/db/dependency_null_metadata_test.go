@@ -29,7 +29,9 @@ func newMockDependencyRepo(t *testing.T) (sqlmock.Sqlmock, *dependencySQLReposit
 // which would turn every subsequent re-add of that edge into an error on a
 // path that used to be idempotently happy. NULL is the absent-metadata state,
 // so it reads as `{}` and the change-free re-add of a metadata-free edge stays
-// the no-op it was.
+// the no-op it was. thread_id is nullable the same way and read by the same
+// gate; a re-add naming no thread keeps a NULL one, so the row holds NULL in
+// both columns and the re-add is still change-free.
 //
 // The repair landed on both planes; without this the two planes are pinned
 // asymmetrically and a revert of the serve-mode scan alone has nothing red to
@@ -37,9 +39,9 @@ func newMockDependencyRepo(t *testing.T) (sqlmock.Sqlmock, *dependencySQLReposit
 func TestDependencyInsertReadsNullStoredMetadataAsEmptyObject(t *testing.T) {
 	mock, repo := newMockDependencyRepo(t)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT type, metadata FROM dependencies")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT type, metadata, thread_id FROM dependencies")).
 		WithArgs("dep-a", "dep-b").
-		WillReturnRows(sqlmock.NewRows([]string{"type", "metadata"}).AddRow(string(types.DepRelated), nil))
+		WillReturnRows(sqlmock.NewRows([]string{"type", "metadata", "thread_id"}).AddRow(string(types.DepRelated), nil, nil))
 
 	dep := &types.Dependency{IssueID: "dep-a", DependsOnID: "dep-b", Type: types.DepRelated}
 	// DepRelated is not a scheduling edge and the hierarchy check is declared

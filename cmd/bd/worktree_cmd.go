@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/worktreeremove"
@@ -2140,15 +2141,12 @@ func addToGitignore(ctx context.Context, repoRoot, entry string) error {
 	}
 	defer f.Close()
 
-	// Add newline if file doesn't end with one
-	if len(content) > 0 && content[len(content)-1] != '\n' {
-		if _, err := f.WriteString("\n"); err != nil {
-			return err
-		}
-	}
-
-	// Add comment and entry
-	if _, err := f.WriteString(fmt.Sprintf("# bd worktree\n%s/\n", entry)); err != nil {
+	// AppendLines owns the line-ending and final-line completion policy and
+	// leaves existing bytes unchanged, so everything past len(content) is the
+	// append. Writing only that suffix keeps this an O_APPEND write rather than
+	// a rewrite of the user's file.
+	appended := gitignore.AppendLines(content, []string{"# bd worktree", entry + "/"})
+	if _, err := f.Write(appended[len(content):]); err != nil {
 		return err
 	}
 

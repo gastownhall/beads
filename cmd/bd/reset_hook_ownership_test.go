@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -249,5 +250,95 @@ func TestCollectResetItems_OnlyRemovesHooksBdOwns(t *testing.T) {
 	// the command, and this pins that the hook change did not disturb it.
 	if !inItems[beadsDir] {
 		t.Errorf("beads dir %s missing from removal list", beadsDir)
+	}
+}
+
+// Every hook bd installs must be considered by reset, or a bd-owned hook
+// survives `bd admin reset` (GH#5566: prepare-commit-msg was left behind).
+func TestCollectResetItems_ScansEveryManagedHook(t *testing.T) {
+	gitCommonDir := t.TempDir()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	hooksDir := filepath.Join(gitCommonDir, "hooks")
+
+	want := map[string]string{}
+	for _, name := range managedHookNames {
+		want[name] = writeHook(t, hooksDir, name, "#!/bin/sh\n# bd-hooks-version: 0.40.0\n# bd (beads) "+name+" hook\nbd hooks run "+name+"\n")
+	}
+
+	items, _ := collectResetItems(gitCommonDir, beadsDir)
+	inItems := map[string]bool{}
+	for _, it := range items {
+		if it.Type == "hook" {
+			inItems[it.Path] = true
+		}
+	}
+	for name, path := range want {
+		if classifyResetHook(path) != hookBdOwned {
+			t.Fatalf("fixture %s is not classified bd-owned; the test would prove nothing", name)
+		}
+		if !inItems[path] {
+			t.Errorf("bd-owned managed hook %s missing from reset's removal list", name)
+		}
+	}
+}
+
+// prepare-commit-msg is commonly the user's own script — commitizen, a
+// ticket-prefix step — with bd's section injected below it. Widening reset's
+// scan to the name must not widen its licence to delete: the file is theirs,
+// and reset has no backup to restore, so it is reported and kept.
+func TestCollectResetItems_KeepsSectionedPrepareCommitMsg(t *testing.T) {
+	gitCommonDir := t.TempDir()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	hooksDir := filepath.Join(gitCommonDir, "hooks")
+
+	sectioned := writeHook(t, hooksDir, "prepare-commit-msg",
+		"#!/bin/sh\n./scripts/add-ticket-prefix \"$1\"\n\n"+generateHookSection("prepare-commit-msg"))
+
+	items, preserved := collectResetItems(gitCommonDir, beadsDir)
+
+	inItems := map[string]bool{}
+	for _, it := range items {
+		inItems[it.Path] = true
+	}
+	keptDesc := ""
+	for _, it := range preserved {
+		if it.Path == sectioned {
+			keptDesc = it.Description
+		}
+	}
+
+	if inItems[sectioned] {
+		t.Errorf("hook %s is the user's file with a bd section in it; removing it takes their content too", sectioned)
+	}
+	if keptDesc == "" {
+		t.Fatalf("hook %s should be reported as left in place, not silently ignored", sectioned)
+	}
+	if !strings.Contains(keptDesc, "Keep git hook prepare-commit-msg") {
+		t.Errorf("preserved entry for %s says %q; it should say the hook is kept", sectioned, keptDesc)
+	}
+}
+
+// A prepare-commit-msg that mentions beads and calls bd, but that bd never
+// wrote, is neither ours to remove nor ours to mention.
+func TestCollectResetItems_LeavesForeignPrepareCommitMsgUnmentioned(t *testing.T) {
+	gitCommonDir := t.TempDir()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	hooksDir := filepath.Join(gitCommonDir, "hooks")
+
+	foreign := writeHook(t, hooksDir, "prepare-commit-msg", `#!/usr/bin/env bash
+# prepare-commit-msg — team hook. Adds the ticket prefix, then lets beads
+# add its trailers. bd did not write this file and must not remove it.
+set -euo pipefail
+
+./scripts/add-ticket-prefix "$1"
+bd hooks run prepare-commit-msg "$@"
+`)
+
+	items, preserved := collectResetItems(gitCommonDir, beadsDir)
+
+	for _, it := range append(items, preserved...) {
+		if it.Path == foreign {
+			t.Errorf("hook %s carries no bd marker; it is neither ours to remove nor ours to mention (%q)", foreign, it.Description)
+		}
 	}
 }

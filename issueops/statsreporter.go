@@ -86,19 +86,32 @@ type StatsResult struct {
 // says the same thing from its side, and this is the role it points at.
 //
 // WHAT THE NUMBERS ARE, and they are not all the same kind of number. Reading
-// them as "six counts of one set" is the mistake this doc is written to
+// them as "eight counts of one set" is the mistake this doc is written to
 // prevent:
 //
-//   - TotalIssues, OpenIssues, InProgressIssues, ClosedIssues, DeferredIssues
-//     and PinnedIssues are one scan of the DURABLE issues plane. Every row is
-//     in Total, including closed and pinned ones; the status tallies are exact
-//     equality against the stored status, so a workspace with a custom status
-//     has rows that appear in Total and in none of the four buckets, and the
-//     buckets do not sum to Total. PinnedIssues counts the pinned FLAG and
-//     overlaps every status bucket.
+//   - TotalIssues, OpenIssues, InProgressIssues, ClosedIssues, DeferredIssues,
+//     PinnedIssues, GateIssues and TemplateIssues are one scan of the DURABLE
+//     issues plane. Every row is in Total, including closed and pinned ones;
+//     the status tallies are exact equality against the stored status, so a
+//     workspace with a custom status has rows that appear in Total and in none
+//     of the four buckets, and the buckets do not sum to Total. PinnedIssues
+//     counts the pinned FLAG and overlaps every status bucket.
+//   - GateIssues and TemplateIssues are the last two of that scan and are
+//     NOT a third kind of bucket either. They count what a default `bd list`
+//     suppresses on account of WHAT THE ROW IS - gate-typed rows, and rows
+//     carrying the template flag - so that the two commands can be reconciled
+//     rather than silently disagree about how many issues exist. Like
+//     PinnedIssues they overlap every status bucket, and being a scan of the
+//     database rather than of a listing they span every status: a CLOSED gate
+//     is in GateIssues. They also overlap EACH OTHER - a proto's gate step is
+//     both, and is counted once in each - so summing them double-counts. Both
+//     are populated on BOTH methods, each with that method's own plane
+//     semantics: durable-plane only on Stats, wisp tier merged on
+//     AssigneeStats, exactly as the paragraph below describes for the rest of
+//     the scan.
 //   - BlockedIssues counts rows whose transitive is_blocked flag is set,
 //     excluding those whose STATUS is "closed" or "pinned". The exclusion is
-//     by status, NOT by the pinned flag the bullet above describes, and the
+//     by status, NOT by the pinned flag the first bullet describes, and the
 //     two are different rows: a flag-pinned OPEN row with an unfinished
 //     blocker IS counted here. It is also not the count of rows whose status
 //     is "blocked" — an open row with an unfinished blocker is counted here
@@ -179,7 +192,10 @@ type StatsReporter interface {
 	//     stronger answer, and it is the narrower one.
 	//   - PinnedIssues IS ALWAYS ZERO, along with the two fields that are
 	//     always zero everywhere. The fold that produces this summary tallies
-	//     the five statuses and nothing else.
+	//     the five statuses and the two suppressed-row counts, and nothing
+	//     else. GateIssues and TemplateIssues ARE populated here — over the
+	//     wider merged set the first bullet describes, which is this method's
+	//     own plane semantics rather than a second definition of the counts.
 	//
 	// A FAILED READY-WORK QUERY IS REPORTED AS ZERO READY WORK, not as an
 	// error: the other five numbers are still right and the summary is still

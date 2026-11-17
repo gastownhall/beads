@@ -55,6 +55,12 @@ func TestDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *testing.T)
 	conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t, ctx, fixture)
 }
 
+func TestDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "idemthread")
+	defer cleanup()
+	conformance.RunDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t, ctx, fixture)
+}
+
 func TestDependencyEditorRepeatsWithinOneRequestCollapse(t *testing.T) {
 	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "repeat")
 	defer cleanup()
@@ -251,6 +257,12 @@ func TestDependencyEditorAcceptsBlockingAcrossIssueTypes(t *testing.T) {
 	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "xtype")
 	defer cleanup()
 	conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes(t, ctx, fixture)
+}
+
+func TestDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "dotted")
+	defer cleanup()
+	conformance.RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t, ctx, fixture)
 }
 
 // newDoltDependencyEditorFixture composes the backend's role fixture kit with

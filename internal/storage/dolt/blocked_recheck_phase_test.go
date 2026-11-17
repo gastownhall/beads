@@ -20,8 +20,8 @@ func scopeAndRecordDependent(t *testing.T, tx *doltTransaction) {
 	t.Helper()
 	t.Cleanup(issueops.ScopeBlockedRecheckTransaction(tx.regularTx))
 	t.Cleanup(issueops.ScopeBlockedRecheckTransaction(tx.ignoredTx))
-	issueops.NoteStatusChangeBlockedRecheck(tx.regularTx, "rp-a", string(types.StatusClosed), []string{"rp-c"}, nil)
-	issueops.NoteStatusChangeBlockedRecheck(tx.ignoredTx, "rp-wa", string(types.StatusClosed), nil, []string{"rp-wc"})
+	issueops.NoteStatusChangeBlockedRecheck(tx.regularTx, "rp-a", string(types.StatusClosed), "actor", []string{"rp-c"}, nil)
+	issueops.NoteStatusChangeBlockedRecheck(tx.ignoredTx, "rp-wa", string(types.StatusClosed), "actor", nil, []string{"rp-wc"})
 }
 
 // TestFinishDoltTransactionRecordingKeepsRecheckWhenDoltCommitFails pins the
@@ -36,7 +36,7 @@ func TestFinishDoltTransactionRecordingKeepsRecheckWhenDoltCommitFails(t *testin
 	regularMock.ExpectCommit()
 	regularMock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM dolt_status s").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	regularMock.ExpectExec("CALL DOLT_ADD\\(\\?\\)").WithArgs("issues").
+	regularMock.ExpectQuery("CALL DOLT_ADD\\(\\?\\)").WithArgs("issues").
 		WillReturnError(errors.New("invalid connection"))
 	ignoredMock.ExpectRollback()
 
@@ -44,8 +44,11 @@ func TestFinishDoltTransactionRecordingKeepsRecheckWhenDoltCommitFails(t *testin
 	if !errors.Is(err, ErrCommitIndeterminate) {
 		t.Fatalf("error = %v, want ErrCommitIndeterminate", err)
 	}
-	if !slices.Equal(pending.IssueIDs, []string{"rp-c"}) || !slices.Equal(pending.WispIDs, []string{"rp-wc"}) {
-		t.Fatalf("pending = %+v, want the dependents recorded on both transactions", pending)
+	// Both transactions recorded "actor", so the merged recheck journals its
+	// derived records as that writer's, not as no one's.
+	if !slices.Equal(pending.IssueIDs, []string{"rp-c"}) || !slices.Equal(pending.WispIDs, []string{"rp-wc"}) ||
+		pending.Actor != "actor" {
+		t.Fatalf("pending = %+v, want the dependents and the actor recorded on both transactions", pending)
 	}
 	requireTransactionPhaseMocks(t, regularMock, ignoredMock)
 }

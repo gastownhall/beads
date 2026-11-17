@@ -76,10 +76,90 @@ func IsRemoteURL(s string) bool {
 	return gitSSHPattern.MatchString(s)
 }
 
+// The parts of a remote URL that OptionShapedPart names.
+const (
+	OptionShapedURL  = "URL"
+	OptionShapedUser = "user name"
+	OptionShapedHost = "host"
+)
+
+// OptionShapedPart names the part of remote that a program the URL reaches
+// would read as a command-line option, or returns "" when no part would.
+// Remote URLs come from committed configuration (sync.remote, routing.*,
+// repos.additional, federation.remote), so a cloned repository must not be
+// able to pick an option for git or ssh:
+//
+//   - OptionShapedURL: the URL, ignoring surrounding space, or what follows
+//     a git+ prefix, starts with "-". git reads such an argument as an
+//     option (--upload-pack=<command>, -u<command>).
+//   - OptionShapedUser, OptionShapedHost: the user name or host of an ssh://
+//     or git+ssh:// URL starts with "-". Dolt's ssh:// transport runs
+//     `ssh [-p port] [user@]host <command>` with nothing that ends ssh's
+//     options before the destination, so ssh reads -oProxyCommand=<command>
+//     there as an option, and an ssh without OpenSSH 9.6's host name check
+//     (CVE-2023-51385) runs the command. The user name is checked
+//     percent-decoded, the form Dolt hands to ssh.
+//
+// No usable remote has such a part: a DNS host name never starts with "-",
+// and OpenSSH refuses a user name that does.
+func OptionShapedPart(remote string) string {
+	s := strings.TrimSpace(remote)
+	if strings.HasPrefix(s, "-") {
+		return OptionShapedURL
+	}
+	if len(s) >= len("git+") && strings.EqualFold(s[:len("git+")], "git+") {
+		s = strings.TrimSpace(s[len("git+"):])
+		if strings.HasPrefix(s, "-") {
+			return OptionShapedURL
+		}
+	}
+	scheme, rest, ok := strings.Cut(s, "://")
+	if !ok || !strings.EqualFold(strings.TrimSpace(scheme), "ssh") {
+		return ""
+	}
+	// Split the authority as net/url does: it ends at the first "/", "?" or
+	// "#", and the user information ends at its last "@".
+	authority := rest
+	if end := strings.IndexAny(authority, "/?#"); end >= 0 {
+		authority = authority[:end]
+	}
+	host := authority
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		user, _, _ := strings.Cut(authority[:at], ":")
+		if optionShapedToken(user) {
+			return OptionShapedUser
+		}
+		if decoded, err := url.PathUnescape(user); err == nil && optionShapedToken(decoded) {
+			return OptionShapedUser
+		}
+		host = authority[at+1:]
+	}
+	if optionShapedToken(strings.TrimPrefix(strings.TrimSpace(host), "[")) {
+		return OptionShapedHost
+	}
+	// Dolt parses the URL with net/url; ask it too, so no spelling it
+	// accepts can name a user or host the split above did not see.
+	if u, err := url.Parse(s); err == nil {
+		if u.User != nil && optionShapedToken(u.User.Username()) {
+			return OptionShapedUser
+		}
+		if optionShapedToken(u.Hostname()) {
+			return OptionShapedHost
+		}
+	}
+	return ""
+}
+
+// optionShapedToken reports whether s, ignoring leading space, starts with
+// "-".
+func optionShapedToken(s string) bool {
+	return strings.HasPrefix(strings.TrimSpace(s), "-")
+}
+
 // ValidateRemoteURL performs strict security validation on a remote URL.
 // It rejects URLs containing control characters (including null bytes),
-// validates structural correctness per scheme, and rejects leading dashes
-// that could be interpreted as CLI flags.
+// validates structural correctness per scheme, and rejects URLs with a part
+// a program would read as a CLI flag (OptionShapedPart).
 //
 // This is a security boundary — all remote URLs should pass through this
 // before reaching exec.Command arguments or SQL parameters.
@@ -95,9 +175,14 @@ func ValidateRemoteURL(rawURL string) error {
 		}
 	}
 
-	// Reject leading dash (CLI flag injection via exec.Command arguments)
-	if strings.HasPrefix(rawURL, "-") {
+	// Reject CLI flag injection via exec.Command arguments: a leading dash,
+	// or an ssh:// user name or host that starts with one.
+	switch part := OptionShapedPart(rawURL); part {
+	case "":
+	case OptionShapedURL:
 		return fmt.Errorf("remote URL must not start with a dash")
+	default:
+		return fmt.Errorf("the %s in a remote URL must not start with a dash", part)
 	}
 
 	// SCP-style URLs (user@host:path) are validated separately

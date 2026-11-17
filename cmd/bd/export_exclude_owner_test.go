@@ -47,9 +47,9 @@ func parseExportedIssues(t *testing.T, jsonl string) []*types.Issue {
 	return issues
 }
 
-// TestExportExcludeOwner_flag verifies that bd export --exclude-owner=<name>
+// TestEmbeddedExportExcludeOwner_flag verifies that bd export --exclude-owner=<name>
 // filters out issues created_by that identity from the export.
-func TestExportExcludeOwner_flag(t *testing.T) {
+func TestEmbeddedExportExcludeOwner_flag(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -86,9 +86,9 @@ func TestExportExcludeOwner_flag(t *testing.T) {
 	}
 }
 
-// TestExportExcludeOwner_config verifies that export.exclude_owners config
+// TestEmbeddedExportExcludeOwner_config verifies that export.exclude_owners config
 // filters issues without a command-line flag.
-func TestExportExcludeOwner_config(t *testing.T) {
+func TestEmbeddedExportExcludeOwner_config(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -115,8 +115,8 @@ func TestExportExcludeOwner_config(t *testing.T) {
 	}
 }
 
-// TestExportExcludeOwner_verbose verifies that --verbose emits a filtered count message.
-func TestExportExcludeOwner_verbose(t *testing.T) {
+// TestEmbeddedExportExcludeOwner_verbose verifies that --verbose emits a filtered count message.
+func TestEmbeddedExportExcludeOwner_verbose(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -151,12 +151,12 @@ func TestExportExcludeOwner_verbose(t *testing.T) {
 	}
 }
 
-// TestAutoExportExcludeOwner_config is a regression test for the maphew review
+// TestEmbeddedAutoExportExcludeOwner_config is a regression test for the maphew review
 // of PR #4023 (be-e2nb): the export.exclude_owners safety net must also apply to
 // the git-committed auto-export (.beads/issues.jsonl), not only to manual
 // `bd export`. Before the fix, contributor/personal issues that the manual path
 // excludes could still leak into git history and PRs via auto-export.
-func TestAutoExportExcludeOwner_config(t *testing.T) {
+func TestEmbeddedAutoExportExcludeOwner_config(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

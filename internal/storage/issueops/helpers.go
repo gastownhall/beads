@@ -62,6 +62,13 @@ func TableRouting(issue *types.Issue) (issueTable, eventTable string) {
 // round-trip the JSONL interchange, wy-urlct). row_lock rides along because
 // any write that can change status/assignee must rewrite it to collide with a
 // concurrent reclaim/close on the same row (see freshRowLock in lease.go).
+//
+// arrival_seq must NEVER join this list or issueInsertSQL's column list: it is
+// written by the journal's create seam alone (stampArrivalSeqInTx), and leaving
+// it out of every generic insert/upsert is what keeps a caller-supplied value —
+// from the Go struct, an HTTP import or a JSONL import — from ever being stored,
+// and what clears it on a row moved between planes.
+// TestIssueInsertAndUpsertColumnsExcludeArrivalSeq holds it.
 var issueUpsertColumns = []string{
 	"content_hash", "title", "description", "design", "acceptance_criteria",
 	"notes", "status", "priority", "issue_type", "assignee",
@@ -114,9 +121,17 @@ func insertIssueCreateOnly(ctx context.Context, tx DBTX, table string, issue *ty
 	return executeIssueInsert(ctx, tx, table, issue, "")
 }
 
+// issueInsertSQL renders the issue-row INSERT for rows VALUES tuples followed
+// by suffix (an ON DUPLICATE KEY UPDATE clause, or ""). Single-row and
+// multi-row writes share it, so their column list cannot drift.
+//
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
-func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types.Issue, suffix string) error {
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+func issueInsertSQL(table string, rows int, suffix string) string {
+	tuples := make([]string, rows)
+	for i := range tuples {
+		tuples[i] = issueInsertRow
+	}
+	return fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
@@ -128,7 +143,13 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
 			row_lock, storage_class
-		) VALUES (
+		) VALUES %s
+		%s
+	`, table, strings.Join(tuples, ", "), suffix)
+}
+
+// issueInsertRow is one VALUES tuple for issueInsertSQL's column list.
+const issueInsertRow = `(
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?, ?,
@@ -139,9 +160,12 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 			?, ?, ?, ?,
 			?, ?, ?,
 			?, ?
-		)
-		%s
-	`, table, suffix),
+		)`
+
+// issueInsertArgs binds issue to issueInsertRow. row_lock is minted fresh
+// per row (freshRowLock), as every issues/wisps content write must.
+func issueInsertArgs(issue *types.Issue) []any {
+	return []any{
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
@@ -152,9 +176,88 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
 		freshRowLock(), NullString(string(issue.StorageClass.Normalize())),
-	)
+	}
+}
+
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types.Issue, suffix string) error {
+	_, err := tx.ExecContext(ctx, issueInsertSQL(table, 1, suffix), issueInsertArgs(issue)...)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)
+	}
+	return nil
+}
+
+// issueInsertRowsPerStatement and issueInsertBytesPerStatement bound a
+// multi-row issue INSERT. The row cap keeps a statement far below the
+// 65535-placeholder protocol limit (49 bound columns per row); the byte budget
+// keeps rows with long text (description and notes are LONGTEXT) from
+// building a statement that a lowered max_allowed_packet or a server read
+// timeout would refuse where the single-row inserts would not.
+const (
+	issueInsertRowsPerStatement  = 100
+	issueInsertBytesPerStatement = 16 << 20
+)
+
+// issueInsertRowBytes estimates the bytes issue binds into an INSERT: its
+// free-text and JSON columns plus a fixed allowance for the rest.
+func issueInsertRowBytes(issue *types.Issue) int {
+	n := 1024 + len(issue.Title) + len(issue.Description) + len(issue.Design) +
+		len(issue.AcceptanceCriteria) + len(issue.Notes) + len(issue.Metadata) +
+		len(issue.Payload) + len(issue.CloseReason) + len(issue.Target)
+	for _, w := range issue.Waiters {
+		n += len(w) + 3
+	}
+	return n
+}
+
+// issueInsertChunks splits issues into consecutive statement-sized runs: at
+// most issueInsertRowsPerStatement rows, and no more than
+// issueInsertBytesPerStatement estimated bytes unless a single row alone
+// exceeds it.
+func issueInsertChunks(issues []*types.Issue) [][]*types.Issue {
+	var chunks [][]*types.Issue
+	start, bytes := 0, 0
+	for i, issue := range issues {
+		rowBytes := issueInsertRowBytes(issue)
+		if i > start && (i-start >= issueInsertRowsPerStatement || bytes+rowBytes > issueInsertBytesPerStatement) {
+			chunks = append(chunks, issues[start:i])
+			start, bytes = i, 0
+		}
+		bytes += rowBytes
+	}
+	if start < len(issues) {
+		chunks = append(chunks, issues[start:])
+	}
+	return chunks
+}
+
+// insertIssueRowsIntoTable writes issues into table with multi-row INSERTs
+// carrying the same ON DUPLICATE KEY UPDATE clause insertIssueIntoTable uses,
+// so each row lands exactly as its single-row insert would have.
+//
+// A multi-row statement that fails writes none of its rows (statements are
+// atomic), so its rows are replayed one at a time: the first row that cannot
+// be written fails the batch with the per-row path's own error, and when every
+// row can be written the batch simply continues, as the per-row path would
+// have.
+//
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func insertIssueRowsIntoTable(ctx context.Context, tx DBTX, table string, issues []*types.Issue, rejectStaleUpdate bool) error {
+	suffix := "ON DUPLICATE KEY UPDATE\n\t\t\t" + issueUpsertAssignments(table, rejectStaleUpdate)
+	for _, chunk := range issueInsertChunks(issues) {
+		args := make([]any, 0, len(chunk)*49)
+		for _, issue := range chunk {
+			args = append(args, issueInsertArgs(issue)...)
+		}
+		if _, err := tx.ExecContext(ctx, issueInsertSQL(table, len(chunk), suffix), args...); err == nil {
+			continue
+		}
+		for _, issue := range chunk {
+			if err := insertIssueIntoTable(ctx, tx, table, issue, rejectStaleUpdate); err != nil {
+				return fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
+			}
+		}
 	}
 	return nil
 }
@@ -170,11 +273,30 @@ func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eve
 	})
 }
 
-// GenerateIssueIDInTable generates a unique ID, checking for collisions
-// in the specified table. Supports counter mode for non-ephemeral issues.
+// maxRetiredCounterSkips bounds how many retired counter values one
+// counter-mode create walks past before giving up with an error rather than
+// looping on a counter that a sweep retired a long run of.
+const maxRetiredCounterSkips = 1000
+
+// GenerateIssueIDInTable generates an ID for an issue bound for table that
+// claimed does not name and no tombstone retired. Supports counter mode for
+// non-ephemeral issues. Only hash mode also probes for live rows, in both
+// planes (IDTakenInTx); counter mode takes the counter's next value on trust.
 //
-//nolint:gosec // G201: table is a hardcoded constant
-func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, issue *types.Issue, actor string) (string, error) {
+// A RETIRED ID IS TAKEN: a candidate a retaining sweep retired (either
+// tombstone table) is skipped exactly like one a live row holds, so a fresh
+// create is never refused with *IdempotencyExpiredError for an id it did not
+// choose. Hash mode folds the tombstone check into the one collision read it
+// already made; counter mode walks past retired values, at most
+// maxRetiredCounterSkips of them.
+//
+// CLAIMED IS THE CALLER'S OWN BATCH: the ids it will write but has not yet,
+// explicit and minted. The probe reads rows, so a caller that assigns every
+// id before it writes any (ExecuteCreateBatch) must pass them, or two of its
+// items can be handed one id and the second refused at insert. A claimed
+// candidate is passed over like a taken one, without a probe. A caller that
+// writes each row before it mints the next passes nil.
+func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, issue *types.Issue, actor string, claimed map[string]bool) (string, error) {
 	// Counter mode only applies to the issues table (not wisps).
 	if table == "issues" {
 		counterMode, err := IsCounterModeTx(ctx, tx)
@@ -182,7 +304,7 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 			return "", err
 		}
 		if counterMode {
-			return NextCounterIDTx(ctx, tx, prefix)
+			return nextUnretiredCounterIDTx(ctx, tx, prefix, claimed)
 		}
 	}
 
@@ -200,20 +322,44 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 	for length := baseLength; length <= maxLength; length++ {
 		for nonce := 0; nonce < 10; nonce++ {
 			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
-
-			var count int
-			err = tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, table), candidate).Scan(&count)
+			if claimed[candidate] {
+				continue
+			}
+			taken, err := IDTakenInTx(ctx, tx, candidate)
 			if err != nil {
 				return "", fmt.Errorf("failed to check for ID collision: %w", err)
 			}
-
-			if count == 0 {
+			if !taken {
 				return candidate, nil
 			}
 		}
 	}
 
 	return "", fmt.Errorf("failed to generate unique ID after trying lengths %d-%d with 10 nonces each", baseLength, maxLength)
+}
+
+// nextUnretiredCounterIDTx is NextCounterIDTx skipping counter values a
+// retaining sweep retired or the caller's batch claimed. The counter only ever
+// advances, so a skipped value is never offered again.
+func nextUnretiredCounterIDTx(ctx context.Context, tx DBTX, prefix string, claimed map[string]bool) (string, error) {
+	for skips := 0; ; skips++ {
+		candidate, err := NextCounterIDTx(ctx, tx, prefix)
+		if err != nil {
+			return "", err
+		}
+		if !claimed[candidate] {
+			retired, err := IDRetiredInTx(ctx, tx, candidate)
+			if err != nil {
+				return "", err
+			}
+			if !retired {
+				return candidate, nil
+			}
+		}
+		if skips >= maxRetiredCounterSkips {
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
+		}
+	}
 }
 
 // IsCounterModeTx checks whether issue_id_mode=counter is configured.

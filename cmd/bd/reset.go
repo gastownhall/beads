@@ -114,10 +114,11 @@ type resetItem struct {
 // how a reset looks like it did less than it did — or, before ownership was
 // checked properly, more.
 func collectResetItems(gitCommonDir, beadsDir string) (items, preserved []resetItem) {
-	// Check for git hooks (hooks are in common git dir, shared across worktrees)
-	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout"}
+	// Check for git hooks (hooks are in common git dir, shared across worktrees).
+	// Scan the hooks bd installs. A private list here once missed
+	// prepare-commit-msg (GH#5566); classifyResetHook decides deletion.
 	hooksDir := filepath.Join(gitCommonDir, "hooks")
-	for _, hookName := range hookNames {
+	for _, hookName := range managedHookNames {
 		hookPath := filepath.Join(hooksDir, hookName)
 		if _, err := os.Stat(hookPath); err != nil {
 			continue

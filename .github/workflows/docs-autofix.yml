@@ -15,18 +15,23 @@
 # patch is applied to an index in a bare clone and re-checked once staged
 # (scripts/docs-autofix-push.sh), so a hostile patch can at most rewrite
 # generated doc files on its own PR branch. Pushes are leased to the run's
-# head SHA and skipped for heads that are protected or under a ruleset.
+# head SHA and skipped for heads that are protected or under a ruleset. The
+# App private key is a secret of the `autofix` environment, whose deployment-
+# branch policy allows only `main`, so only a job running on main can read
+# it; the minted token itself is scoped to this one repo with contents:write
+# only, so even a hostile patch gains nothing beyond what the job already
+# had.
 #
 # CONCURRENCY: job-level, shared with bazel-autofix.yml per head branch and
 # without cancel-in-progress, so the two bots queue instead of racing on one
 # branch (see bazel-autofix.yml).
 #
 # TOKEN NOTE: pushes made with the default GITHUB_TOKEN do not retrigger PR
-# checks. Configure a DOCS_AUTOFIX_TOKEN repo secret (fine-grained PAT or
-# GitHub App token with contents:write on this repo) for fully hands-off
-# operation on same-repo PRs; without it the pushed fix still lands but
-# checks need a manual re-run. Fork PRs always get the apply-recipe comment -
-# no token we hold can push to a fork.
+# checks. On same-repo PRs the push step mints a short-lived installation
+# token for the gastownhall-autofix GitHub App (contents:write, scoped to
+# this repo only) and uses that instead. Fork PRs always get the apply-recipe
+# comment - no token we hold can push to a fork, so the mint step is skipped
+# for them.
 
 name: Docs Autofix
 
@@ -49,6 +54,10 @@ jobs:
     runs-on: ubuntu-latest
     # Bounded: a hung run would hold the shared group for the default 6h.
     timeout-minutes: 10
+    # Grants the job read access to this environment's secrets; its
+    # deployment-branch policy restricts that to jobs running on main
+    # (workflow_run always does), not to any PR branch.
+    environment: autofix
     # Shared with bazel-autofix.yml; queue, never cancel.
     concurrency:
       group: autofix-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
@@ -92,6 +101,22 @@ jobs:
           fi
           echo "found=true" >> "$GITHUB_OUTPUT"
 
+      # Same-repo PRs only: no token we hold can push to a fork, and a fork's
+      # head_repository can even be absent (deleted fork), so this mints
+      # nothing for it and the push script falls back to the apply-recipe
+      # comment. app-token outputs are empty (not failed) when the step is
+      # skipped, which is what the fallback below relies on.
+      - name: Mint autofix app token
+        id: app-token
+        if: github.event.workflow_run.head_repository.full_name == github.repository
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.AUTOFIX_APP_ID }}
+          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
       - name: Push regen commit or leave apply recipe
         if: steps.patch.outputs.found == 'true'
         env:
@@ -104,9 +129,9 @@ jobs:
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           # Split tokens: gh api calls (PR lookup, comments) always use the
           # workflow token, which carries this job's pull-requests:write; the
-          # optional PAT is used ONLY for the git push, so it needs no more
+          # App token is used ONLY for the git push, so it needs no more
           # than contents:write.
           GH_TOKEN: ${{ github.token }}
-          PUSH_TOKEN: ${{ secrets.DOCS_AUTOFIX_TOKEN || github.token }}
-          AUTOFIX_TOKEN_KIND: ${{ secrets.DOCS_AUTOFIX_TOKEN && 'pat' || 'default' }}
+          PUSH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          AUTOFIX_TOKEN_KIND: ${{ steps.app-token.outputs.token && 'app' || 'default' }}
         run: ./scripts/docs-autofix-push.sh

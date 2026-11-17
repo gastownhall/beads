@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -57,7 +56,7 @@ func TestCheckBeadsRole_Maintainer(t *testing.T) {
 	tmpDir := newGitRepo(t)
 
 	// Set beads.role to maintainer
-	cmd := exec.Command("git", "config", "beads.role", "maintainer")
+	cmd := gitCommand("config", "beads.role", "maintainer")
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git config failed: %v", err)
@@ -77,7 +76,7 @@ func TestCheckBeadsRole_Contributor(t *testing.T) {
 	tmpDir := newGitRepo(t)
 
 	// Set beads.role to contributor
-	cmd := exec.Command("git", "config", "beads.role", "contributor")
+	cmd := gitCommand("config", "beads.role", "contributor")
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git config failed: %v", err)
@@ -97,7 +96,7 @@ func TestCheckBeadsRole_InvalidValue(t *testing.T) {
 	tmpDir := newGitRepo(t)
 
 	// Set beads.role to an invalid value
-	cmd := exec.Command("git", "config", "beads.role", "admin")
+	cmd := gitCommand("config", "beads.role", "admin")
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git config failed: %v", err)
@@ -142,9 +141,14 @@ func TestCheckBeadsRole_NonexistentPath(t *testing.T) {
 	// Test with a path that doesn't exist — git will report "not a git repository"
 	check := CheckBeadsRole(filepath.Join(os.TempDir(), "nonexistent-beads-test-dir"))
 
-	// Should return OK/N/A since the path is not a git repository
+	// Should return OK/N/A since the path is not a git repository. Status alone
+	// cannot separate that from an ambient role leaking in: "Configured as
+	// maintainer" is StatusOK too, so the message is the discriminating claim.
 	if check.Status != StatusOK {
 		t.Errorf("expected status %s, got %s", StatusOK, check.Status)
+	}
+	if check.Message != "N/A (not a git repository)" {
+		t.Errorf("expected message 'N/A (not a git repository)', got %q", check.Message)
 	}
 }
 
@@ -182,7 +186,7 @@ func TestCheckBeadsRoleIgnoresInheritedRouting(t *testing.T) {
 			target, decoy := newGitRepo(t), newGitRepo(t)
 			runGit := func(repo string, args ...string) {
 				t.Helper()
-				cmd := exec.Command("git", args...)
+				cmd := gitCommand(args...)
 				cmd.Dir, cmd.Env = repo, gitenv.ScrubRouting(os.Environ())
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("fixture git %v: %v: %s", args, err, out)

@@ -2,7 +2,6 @@ package fix
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -46,7 +45,7 @@ func setupSharedWorktreeWorkspace(t *testing.T) (mainRepoDir, worktreeDir string
 
 	run := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
@@ -65,13 +64,13 @@ func setupSharedWorktreeWorkspace(t *testing.T) (mainRepoDir, worktreeDir string
 	run(mainRepoDir, "commit", "-m", "Initial commit")
 
 	worktreeDir = filepath.Join(tmpDir, "worktree")
-	addWorktree := exec.Command("git", "worktree", "add", worktreeDir, "HEAD")
+	addWorktree := gitCommand("worktree", "add", worktreeDir, "HEAD")
 	addWorktree.Dir = mainRepoDir
 	if out, err := addWorktree.CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add failed: %v\n%s", err, out)
 	}
 	t.Cleanup(func() {
-		removeWorktree := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		removeWorktree := gitCommand("worktree", "remove", "--force", worktreeDir)
 		removeWorktree.Dir = mainRepoDir
 		_ = removeWorktree.Run()
 	})
@@ -82,7 +81,7 @@ func setupSharedWorktreeWorkspace(t *testing.T) (mainRepoDir, worktreeDir string
 // runGit runs a git command and returns output
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {

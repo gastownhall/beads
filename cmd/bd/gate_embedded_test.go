@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -72,11 +73,35 @@ func createGate(t *testing.T, bd, dir, title string, extraArgs ...string) *types
 	return bdCreate(t, bd, dir, args...)
 }
 
-func TestEmbeddedGate(t *testing.T) {
-	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
-		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+// createBeadGate creates a bead gate awaiting awaitID on a new task, and
+// returns the gate.
+func createBeadGate(t *testing.T, bd, dir, awaitID string) *types.Issue {
+	t.Helper()
+	task := bdCreate(t, bd, dir, "Task waiting on "+awaitID, "--type", "task")
+	cmd := exec.Command(bd, "gate", "create", "--blocks", task.ID,
+		"--type", "bead", "--await-id", awaitID, "--json")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd gate create --type=bead failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
-	t.Parallel()
+	var gate types.Issue
+	s := strings.TrimSpace(stdout.String())
+	start := strings.Index(s, "{")
+	if start < 0 {
+		t.Fatalf("no JSON in output: %s", s)
+	}
+	if err := json.Unmarshal([]byte(s[start:]), &gate); err != nil {
+		t.Fatalf("parse gate JSON: %v\n%s", err, s)
+	}
+	return &gate
+}
+
+// setupEmbeddedGate is the TestEmbeddedGate* tests' workspace: prefix tg,
+// with "gate" registered as a custom type.
+func setupEmbeddedGate(t *testing.T) (string, string) {
+	t.Helper()
 
 	bd := buildEmbeddedBD(t)
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tg")
@@ -87,6 +112,16 @@ func TestEmbeddedGate(t *testing.T) {
 		t.Fatalf("SetConfig types.custom: %v", err)
 	}
 	store.Close()
+	return bd, dir
+}
+
+func TestEmbeddedGateList(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedGate(t)
 
 	// ===== Gate List =====
 
@@ -148,6 +183,15 @@ func TestEmbeddedGate(t *testing.T) {
 			t.Errorf("expected at most 1 result with --limit 1, got %d", len(results))
 		}
 	})
+}
+
+func TestEmbeddedGateShowResolve(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedGate(t)
 
 	// ===== Gate Show =====
 
@@ -208,6 +252,15 @@ func TestEmbeddedGate(t *testing.T) {
 		task := bdCreate(t, bd, dir, "Not a gate resolve", "--type", "task")
 		bdGateFail(t, bd, dir, "resolve", task.ID)
 	})
+}
+
+func TestEmbeddedGateWaiterCheckLifecycle(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedGate(t)
 
 	// ===== Gate Add-Waiter =====
 
@@ -350,12 +403,11 @@ func TestEmbeddedGate(t *testing.T) {
 	})
 }
 
-// TestEmbeddedGateCreate exercises the "bd gate create" subcommand.
-func TestEmbeddedGateCreate(t *testing.T) {
-	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
-		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
-	}
-	t.Parallel()
+// setupEmbeddedGateCreate is the shared workspace of the
+// TestEmbeddedGateCreate* tests ("bd gate create"): prefix gc, with "gate"
+// registered as a custom type so bd gate create works.
+func setupEmbeddedGateCreate(t *testing.T) (string, string) {
+	t.Helper()
 
 	bd := buildEmbeddedBD(t)
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gc")
@@ -366,6 +418,16 @@ func TestEmbeddedGateCreate(t *testing.T) {
 		t.Fatalf("SetConfig types.custom: %v", err)
 	}
 	store.Close()
+	return bd, dir
+}
+
+func TestEmbeddedGateCreateFlags(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedGateCreate(t)
 
 	t.Run("create_default_human_gate", func(t *testing.T) {
 		task := bdCreate(t, bd, dir, "Task for human gate", "--type", "task")
@@ -467,6 +529,100 @@ func TestEmbeddedGateCreate(t *testing.T) {
 			t.Errorf("expected title 'Gate: gh:pr 42', got %s", gate.Title)
 		}
 	})
+}
+
+func TestEmbeddedGateCreateRepoErrorsList(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedGateCreate(t)
+
+	t.Run("create_gate_with_repo", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for cross-repo PR gate", "--type", "task")
+
+		cmd := exec.Command(bd, "gate", "create", "--blocks", task.ID,
+			"--type", "gh:pr", "--await-id", "7173", "--repo", "gastownhall/beads", "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd gate create --repo failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		var gate types.Issue
+		s := strings.TrimSpace(stdout.String())
+		start := strings.Index(s, "{")
+		if err := json.Unmarshal([]byte(s[start:]), &gate); err != nil {
+			t.Fatalf("parse gate JSON: %v\n%s", err, s)
+		}
+		var m map[string]string
+		if err := json.Unmarshal(gate.Metadata, &m); err != nil {
+			t.Fatalf("gate metadata %s is not a string map: %v", gate.Metadata, err)
+		}
+		if m["repo"] != "gastownhall/beads" {
+			t.Errorf("gate metadata repo = %q, want gastownhall/beads", m["repo"])
+		}
+	})
+
+	t.Run("repo_flag_on_human_gate_is_refused", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for human gate", "--type", "task")
+
+		cmd := exec.Command(bd, "gate", "create", "--blocks", task.ID,
+			"--type", "human", "--repo", "gastownhall/beads")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err == nil {
+			t.Fatalf("--repo on a human gate must be refused; got:\n%s", stdout.String())
+		}
+		if combined := stdout.String() + stderr.String(); !strings.Contains(combined, "--repo applies only to gh:run and gh:pr gates") {
+			t.Errorf("refusal text missing from output:\n%s", combined)
+		}
+	})
+
+	t.Run("create_gate_missing_blocks_flag", func(t *testing.T) {
+		out := bdGateFail(t, bd, dir, "create")
+		if !strings.Contains(out, "blocks") {
+			t.Errorf("expected error about missing --blocks flag: %s", out)
+		}
+	})
+
+	t.Run("create_gate_nonexistent_target", func(t *testing.T) {
+		out := bdGateFail(t, bd, dir, "create", "--blocks", "gc-nonexistent999")
+		if !strings.Contains(out, "not found") {
+			t.Errorf("expected 'not found' error: %s", out)
+		}
+	})
+
+	t.Run("create_gate_appears_in_gate_list", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for list check", "--type", "task")
+		bdGate(t, bd, dir, "create", "--blocks", task.ID)
+
+		results := bdGateListJSON(t, bd, dir)
+		found := false
+		for _, r := range results {
+			if awaitType, ok := r["await_type"]; ok && awaitType == "human" {
+				if desc, ok := r["description"].(string); ok && strings.Contains(desc, task.ID) {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			t.Errorf("expected gate blocking %s in gate list", task.ID)
+		}
+	})
+}
+
+func TestEmbeddedGateCreateReady(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("create_gate_blocks_ready", func(t *testing.T) {
 		// Use a fresh db so ready output isn't polluted by other subtests
@@ -552,37 +708,292 @@ func TestEmbeddedGateCreate(t *testing.T) {
 			t.Errorf("task should reappear in ready after gate resolved: %s", stdout.String())
 		}
 	})
+}
 
-	t.Run("create_gate_missing_blocks_flag", func(t *testing.T) {
-		out := bdGateFail(t, bd, dir, "create")
-		if !strings.Contains(out, "blocks") {
-			t.Errorf("expected error about missing --blocks flag: %s", out)
+func TestEmbeddedGateCreateBeadCheck(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("check_bead_gate_resolves_only_a_missing_target_it_saw", func(t *testing.T) {
+		// Use a fresh db so the check sees only these bead gates
+		freshDir, freshBeads, _ := bdInit(t, bd, "--prefix", "gb")
+		fs := openStore(t, freshBeads, "gb")
+		if err := fs.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+			t.Fatalf("SetConfig: %v", err)
+		}
+		fs.Close()
+
+		target := bdCreate(t, bd, freshDir, "Awaited bead", "--type", "task")
+		seenGate := createBeadGate(t, bd, freshDir, target.ID)
+		neverSeenGate := createBeadGate(t, bd, freshDir, "gb-nosuchbead")
+
+		// The first check finds the target open and records that on its gate.
+		out := bdGate(t, bd, freshDir, "check", "--type", "bead")
+		if !strings.Contains(out, "no earlier gate check saw it") {
+			t.Errorf("expected a diagnostic for the never-seen await_id: %s", out)
+		}
+		if got := bdShow(t, bd, freshDir, seenGate.ID); got.Status != types.StatusOpen || !strings.Contains(string(got.Metadata), beadGateSeenKey) {
+			t.Fatalf("gate on an open target: status=%s metadata=%s, want open with %s", got.Status, got.Metadata, beadGateSeenKey)
+		}
+
+		// A later check resolves the gate whose target it saw and that is now
+		// deleted; the await_id no check ever saw stays pending.
+		bdDelete(t, bd, freshDir, target.ID, "--force")
+		out = bdGate(t, bd, freshDir, "check", "--type", "bead")
+		if !strings.Contains(out, "1 resolved") || !strings.Contains(out, "no longer exists") {
+			t.Errorf("expected the deleted target's gate to resolve: %s", out)
+		}
+		if got := bdShow(t, bd, freshDir, seenGate.ID); got.Status != types.StatusClosed {
+			t.Errorf("gate on a deleted target: status=%s, want closed", got.Status)
+		}
+		if got := bdShow(t, bd, freshDir, neverSeenGate.ID); got.Status != types.StatusOpen {
+			t.Errorf("gate on a never-seen await_id: status=%s, want open", got.Status)
 		}
 	})
+}
 
-	t.Run("create_gate_nonexistent_target", func(t *testing.T) {
-		out := bdGateFail(t, bd, dir, "create", "--blocks", "gc-nonexistent999")
-		if !strings.Contains(out, "not found") {
-			t.Errorf("expected 'not found' error: %s", out)
+// templateGateFormula is a proto with a gh:run, a bead and a timer gate step;
+// await-ci is beads-release's own shape. bd cook --persist writes each step's
+// gate as a template gate, <proto>.gate-<step>, which ListGates lists with the
+// open gates. %[1]s is the formula name and %[2]s the bead gate's target.
+const templateGateFormula = `formula = "%[1]s"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "await-ci"
+title = "Await CI"
+type = "task"
+
+[steps.gate]
+type = "gh:run"
+id = "release.yml"
+
+[[steps]]
+id = "await-bead"
+title = "Await bead"
+type = "task"
+
+[steps.gate]
+type = "bead"
+id = "%[2]s"
+
+[[steps]]
+id = "await-timer"
+title = "Await timer"
+type = "task"
+
+[steps.gate]
+type = "timer"
+timeout = "1ms"
+`
+
+// TestEmbeddedGateCheckSkipsTemplateGates sweeps a workspace holding a
+// persisted proto. Its gates are blueprints that every pour copies: checking
+// one failed the sweep on the template guard (after asking GitHub for the
+// gh:run gate's run), and the expired timer gate was closed in the proto. The
+// sweep must leave all three untouched and still check the ordinary gate.
+func TestEmbeddedGateCheckSkipsTemplateGates(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gk")
+	fs := openStore(t, beadsDir, "gk")
+	if err := fs.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	fs.Close()
+
+	target := bdCreate(t, bd, dir, "Awaited bead", "--type", "task")
+	formulaPath := filepath.Join(dir, "gk-proto.formula.toml")
+	if err := os.WriteFile(formulaPath, []byte(fmt.Sprintf(templateGateFormula, "gk-proto", target.ID)), 0o600); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	bdCommand(t, bd, dir, "cook", formulaPath, "--persist")
+	live := createBeadGate(t, bd, dir, target.ID)
+
+	// The fake gh records every call, so a template gh:run gate that reaches
+	// GitHub shows up in ghLog.
+	binDir := t.TempDir()
+	ghLog := filepath.Join(binDir, "gh.log")
+	gh := fmt.Sprintf("#!/bin/sh\necho \"$*\" >> '%s'\nexit 3\n", ghLog)
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(gh), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+
+	cmd := exec.Command(bd, "gate", "check")
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd gate check over a persisted proto: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if out := stdout.String(); !strings.Contains(out, "Checked 1 gates") {
+		t.Errorf("bd gate check output:\n%s\nwant only %s checked", out, live.ID)
+	}
+	if calls, err := os.ReadFile(ghLog); err == nil {
+		t.Errorf("the template gh:run gate ran gh: %s", calls)
+	}
+
+	for _, tpl := range []struct{ step, awaitID string }{
+		{"await-ci", "release.yml"},
+		{"await-bead", target.ID},
+		{"await-timer", ""},
+	} {
+		id := "gk-proto.gate-" + tpl.step
+		got := bdShow(t, bd, dir, id)
+		if !got.IsTemplate {
+			t.Fatalf("%s is not a template: the cook did not persist the proto's gates", id)
 		}
-	})
+		if got.Status != types.StatusOpen || got.AwaitID != tpl.awaitID || strings.Contains(string(got.Metadata), beadGateSeenKey) {
+			t.Errorf("template gate %s: status=%s await_id=%q metadata=%s, want it untouched (open, await_id %q, no sighting)",
+				id, got.Status, got.AwaitID, got.Metadata, tpl.awaitID)
+		}
+	}
+	if got := bdShow(t, bd, dir, live.ID); !strings.Contains(string(got.Metadata), beadGateSeenKey) {
+		t.Errorf("gate %s on an open target: metadata=%s, want the sighting recorded", live.ID, got.Metadata)
+	}
+}
 
-	t.Run("create_gate_appears_in_gate_list", func(t *testing.T) {
-		task := bdCreate(t, bd, dir, "Task for list check", "--type", "task")
-		bdGate(t, bd, dir, "create", "--blocks", task.ID)
+// TestEmbeddedGateCheckLimitCountsOnlyLiveGates puts a persisted proto's gates
+// ahead of a live one in the listing order and checks with --limit 1. The
+// template skip used to run after the limit cut the page, so the one row was a
+// template, the sweep printed "No open gates found." and exited 0, and the live
+// gate was never checked. The query now leaves templates out before the cut.
+func TestEmbeddedGateCheckLimitCountsOnlyLiveGates(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
 
-		results := bdGateListJSON(t, bd, dir)
-		found := false
-		for _, r := range results {
-			if awaitType, ok := r["await_type"]; ok && awaitType == "human" {
-				if desc, ok := r["description"].(string); ok && strings.Contains(desc, task.ID) {
-					found = true
-					break
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gl")
+	fs := openStore(t, beadsDir, "gl")
+	if err := fs.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	fs.Close()
+
+	task := bdCreate(t, bd, dir, "Task behind an expired timer", "--type", "task")
+	out := bdGate(t, bd, dir, "create", "--blocks", task.ID, "--type", "timer", "--timeout", "1ms", "--json")
+	var live types.Issue
+	if start := strings.Index(out, "{"); start < 0 || json.Unmarshal([]byte(out[start:]), &live) != nil || live.ID == "" {
+		t.Fatalf("bd gate create --type=timer --json: no gate in output:\n%s", out)
+	}
+	// The listing orders by priority first, so at P4 the live gate sorts after
+	// every P2 template gate the cook writes, whatever their created_at.
+	bdCommand(t, bd, dir, "update", live.ID, "--priority", "4")
+
+	target := bdCreate(t, bd, dir, "Awaited bead", "--type", "task")
+	formulaPath := filepath.Join(dir, "gl-proto.formula.toml")
+	if err := os.WriteFile(formulaPath, []byte(fmt.Sprintf(templateGateFormula, "gl-proto", target.ID)), 0o600); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	bdCommand(t, bd, dir, "cook", formulaPath, "--persist")
+
+	// bd gate list still lists templates: its first row is one, so a cut at
+	// one row taken before the template skip leaves the sweep nothing.
+	if first := bdGateListJSON(t, bd, dir, "--limit", "1"); len(first) != 1 || !strings.HasPrefix(fmt.Sprint(first[0]["id"]), "gl-proto.gate-") {
+		t.Fatalf("bd gate list --limit 1 = %v, want one of gl-proto's template gates first", first)
+	}
+
+	out = bdGate(t, bd, dir, "check", "--limit", "1")
+	if !strings.Contains(out, "Checked 1 gates: 1 resolved") {
+		t.Errorf("bd gate check --limit 1 output:\n%s\nwant %s checked and resolved", out, live.ID)
+	}
+	if got := bdShow(t, bd, dir, live.ID); got.Status != types.StatusClosed {
+		t.Errorf("live expired timer gate %s status = %s, want closed", live.ID, got.Status)
+	}
+	for _, step := range []string{"await-ci", "await-bead", "await-timer"} {
+		id := "gl-proto.gate-" + step
+		if got := bdShow(t, bd, dir, id); !got.IsTemplate || got.Status != types.StatusOpen {
+			t.Errorf("template gate %s: is_template=%v status=%s, want an open template", id, got.IsTemplate, got.Status)
+		}
+	}
+}
+
+func TestEmbeddedGateCreateBeadRename(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("rename_keeps_a_bead_gate_on_its_target", func(t *testing.T) {
+		// Renaming the awaited bead points its gate at the new ID and moves
+		// the sighting along, so the next check finds the bead instead of
+		// resolving the gate as though the bead had been deleted.
+		for _, tt := range []struct {
+			name   string
+			prefix string
+			rename func(t *testing.T, dir, targetID string) (newID func(id string) string)
+		}{
+			{
+				name:   "bd rename",
+				prefix: "gn",
+				rename: func(t *testing.T, dir, targetID string) func(string) string {
+					bdCommand(t, bd, dir, "rename", targetID, "gn-renamed")
+					return func(id string) string {
+						if id == targetID {
+							return "gn-renamed"
+						}
+						return id
+					}
+				},
+			},
+			{
+				name:   "bd rename-prefix",
+				prefix: "gp",
+				rename: func(t *testing.T, dir, _ string) func(string) string {
+					bdRenamePrefix(t, bd, dir, "gq")
+					return func(id string) string { return strings.Replace(id, "gp-", "gq-", 1) }
+				},
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				freshDir, freshBeads, _ := bdInit(t, bd, "--prefix", tt.prefix)
+				fs := openStore(t, freshBeads, tt.prefix)
+				if err := fs.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+					t.Fatalf("SetConfig: %v", err)
 				}
-			}
-		}
-		if !found {
-			t.Errorf("expected gate blocking %s in gate list", task.ID)
+				fs.Close()
+
+				target := bdCreate(t, bd, freshDir, "Awaited bead", "--type", "task")
+				gate := createBeadGate(t, bd, freshDir, target.ID)
+				bdGate(t, bd, freshDir, "check", "--type", "bead")
+				if got := bdShow(t, bd, freshDir, gate.ID); !beadGateTargetSeen(got) {
+					t.Fatalf("the first check did not record the open target: metadata=%s", got.Metadata)
+				}
+
+				newID := tt.rename(t, freshDir, target.ID)
+				gateID, targetID := newID(gate.ID), newID(target.ID)
+				got := bdShow(t, bd, freshDir, gateID)
+				if got.AwaitID != targetID || !beadGateTargetSeen(got) {
+					t.Fatalf("gate after the rename: await_id=%q metadata=%s, want %q recorded as seen", got.AwaitID, got.Metadata, targetID)
+				}
+
+				out := bdGate(t, bd, freshDir, "check", "--type", "bead")
+				if got := bdShow(t, bd, freshDir, gateID); got.Status != types.StatusOpen {
+					t.Fatalf("gate on a renamed open bead: status=%s, want open\n%s", got.Status, out)
+				}
+
+				bdClose(t, bd, freshDir, targetID)
+				out = bdGate(t, bd, freshDir, "check", "--type", "bead")
+				if got := bdShow(t, bd, freshDir, gateID); got.Status != types.StatusClosed {
+					t.Errorf("gate on a renamed bead that closed: status=%s, want closed\n%s", got.Status, out)
+				}
+				if !strings.Contains(out, "bead "+targetID+" closed") {
+					t.Errorf("expected the gate to resolve on the closed bead: %s", out)
+				}
+			})
 		}
 	})
 }

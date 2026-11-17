@@ -78,10 +78,10 @@ Examples:
 		updates := map[string]interface{}{
 			"priority": priority,
 		}
-		if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, actor); err != nil {
+		if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, currentActor()); err != nil {
 			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
-		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, issueStore, currentActor(), doltAutoCommitParams{
 			Command:  "priority",
 			IssueIDs: []string{result.ResolvedID},
 		}); err != nil {

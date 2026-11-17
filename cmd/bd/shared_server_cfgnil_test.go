@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -56,7 +57,7 @@ func TestSharedServerCfgNilHonorsSharedServer(t *testing.T) {
 		// Disable auto-start and point at a port nothing listens on so the
 		// shared-server path fails fast instead of spinning up a server.
 		"BEADS_DOLT_AUTO_START=0",
-		"BEADS_DOLT_SERVER_PORT=59999",
+		"BEADS_DOLT_SERVER_PORT=" + strconv.Itoa(closedLoopbackPort(t)),
 		// Disable the metrics flusher: bd otherwise spawns a DETACHED
 		// `bd send-metrics` child that keeps writing $HOME/.beads/eventsData
 		// after the parent exits. HOME here is a t.TempDir(), so that child

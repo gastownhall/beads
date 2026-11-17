@@ -188,6 +188,9 @@ func TestCreateGuard_MissingDB_CreateIfMissing(t *testing.T) {
 	defer store.Close()
 
 	assertDatabaseExists(t, testServerPort, dbName)
+	if !store.CreatedDatabase() {
+		t.Error("CreatedDatabase() = false for the open that created the database")
+	}
 }
 
 // TestCreateGuard_ExistingDB_NoFlag verifies that opening an EXISTING database
@@ -270,7 +273,7 @@ func TestCreateGuard_ExistingDB_WithData(t *testing.T) {
 	t.Cleanup(func() { dropTestDatabase(t, testServerPort, dbName) })
 
 	// First connection: create store and write data
-	store1, err := New(ctx, &Config{
+	store1, err := openStoreWithOwnBudget(t, &Config{
 		Path:            t.TempDir(),
 		ServerHost:      "127.0.0.1",
 		ServerPort:      testServerPort,
@@ -281,6 +284,9 @@ func TestCreateGuard_ExistingDB_WithData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first connection failed: %v", err)
 	}
+	if store1.CreatedDatabase() {
+		t.Error("CreatedDatabase() = true for a CreateIfMissing open of an existing database")
+	}
 
 	if err := store1.SetConfig(ctx, "test_key", "test_value"); err != nil {
 		t.Fatalf("SetConfig failed: %v", err)
@@ -288,7 +294,7 @@ func TestCreateGuard_ExistingDB_WithData(t *testing.T) {
 	store1.Close()
 
 	// Second connection: open WITHOUT CreateIfMissing, verify data persists
-	store2, err := New(ctx, &Config{
+	store2, err := openStoreWithOwnBudget(t, &Config{
 		Path:         t.TempDir(),
 		ServerHost:   "127.0.0.1",
 		ServerPort:   testServerPort,

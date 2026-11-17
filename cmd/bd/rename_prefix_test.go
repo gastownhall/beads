@@ -4,11 +4,9 @@ package main
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -44,11 +42,7 @@ func TestRenamePrefixCommand(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	ctx := context.Background()
 
@@ -172,14 +166,7 @@ func TestRenamePrefixInDB(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	t.Cleanup(func() {
-		testStore.Close()
-		os.Remove(dbPath)
-	})
+	testStore := newTestStore(t, dbPath)
 
 	ctx := context.Background()
 	store = testStore
@@ -203,7 +190,7 @@ func TestRenamePrefixInDB(t *testing.T) {
 	}
 
 	issues := []*types.Issue{issue1}
-	err = renamePrefixInDB(ctx, "old", "new", issues)
+	err := renamePrefixInDB(ctx, "old", "new", issues)
 	if err != nil {
 		t.Fatalf("renamePrefixInDB failed: %v", err)
 	}
@@ -231,14 +218,7 @@ func TestRenamePrefixInDB_HalfMigratedConfigNotDoubled(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	t.Cleanup(func() {
-		testStore.Close()
-		os.Remove(dbPath)
-	})
+	testStore := newTestStore(t, dbPath)
 
 	ctx := context.Background()
 	store = testStore

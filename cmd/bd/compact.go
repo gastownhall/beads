@@ -845,7 +845,14 @@ func runCompactDolt(ctx context.Context) error {
 		return nil
 	}
 
-	// Check if dolt command is available
+	// Check if dolt command is available. Its version is deliberately not
+	// checked against doltversion.RequiredMin: this `dolt gc` is exempt from
+	// the floor. --dolt runs only against an owned or shared server's local
+	// database, which the store open above has already checked (it refuses a
+	// server older than the minimum, and auto-start refuses to launch an old
+	// binary). The `dolt` CLI finds that running server through
+	// .dolt/sql-server.info and hands the GC to it, so the GC runs in the
+	// checked server's engine, not the PATH binary's.
 	if _, err := exec.LookPath("dolt"); err != nil {
 		return HandleErrorWithHint("dolt command not found in PATH", "install Dolt from https://github.com/dolthub/dolt")
 	}
@@ -986,7 +993,6 @@ func init() {
 	compactCmd.Flags().IntVar(&compactBatch, "batch-size", 10, "Issues per batch")
 	compactCmd.Flags().IntVar(&compactWorkers, "workers", 5, "Parallel workers")
 	compactCmd.Flags().BoolVar(&compactStats, "stats", false, "Show compaction statistics")
-	compactCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output JSON format")
 
 	// New mode flags
 	compactCmd.Flags().BoolVar(&compactAnalyze, "analyze", false, "Analyze mode: export candidates for agent review")

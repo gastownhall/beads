@@ -23,6 +23,13 @@ import (
 // storage spans measure pure DB time without hook-firing overhead. The policy
 // sits directly beneath hooks so serve's one hook-layer peel retains it.
 //
+// Versioned-history activation is NOT applied here. It used to be, and this runs
+// on the one store a command opens for its own workspace, so every store a
+// routed write opens for another workspace missed it. It now happens in the
+// factories that construct a store, on the raw store before anything can wrap it
+// (see versioned_history.go) -- which is also why the decorators above, none of
+// which forwards SetVersionedHistoryEnabled, cannot get in its way.
+//
 // Extracted from main.go's PersistentPreRunE so the chain composition is
 // unit-testable — the bug this PR fixes was a missing WrapStorage call,
 // and the regression class deserves test coverage.
@@ -40,6 +47,17 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 
 // wireExternalDependencyPolicy applies only the read/guard policy. Routed
 // stores must use this without inheriting the caller's hooks or telemetry.
+//
+// It ALWAYS wraps, including a registered Remote backend (design 3.6): a
+// remote server that enforces this policy itself answers the decorator's
+// storage.ExternalDependencyPolicyProber probe (implemented by
+// httpclient.Store, keyed on the handshake's wire.CapExternalDependencies
+// token) with true, so the decorator's own loadBlockingState is a cheap no-op
+// for that server — but a server that does NOT advertise the capability must
+// still get client-side enforcement, which requires wrapping it in the first
+// place. Skipping the wrap here for every remote backend (the pre-S6-fix
+// behavior) silently dropped the policy entirely against such a server; the
+// capability-aware skip now lives inside the decorator, not at wrap time.
 func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage {
 	if store == nil {
 		return nil
@@ -51,7 +69,7 @@ func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage
 			return path, path != ""
 		},
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
-			return newReadOnlyStoreFromConfig(ctx, filepath.Join(projectRoot, ".beads"))
+			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 		},
 	)
 }
@@ -75,6 +93,18 @@ func waitForCommandHooks() {
 	hookRunner.Wait(hookRunner.Timeout())
 }
 
+// wireProxiedUOWProvider composes the proxied-server provider chain:
+//
+//	caller → externaldeps policy → notifying provider → raw provider
+//
+// It is the unit-of-work twin of wireStorageDecorators, extracted from main.go
+// for the same reason: the composition is only unit-testable as a function.
+// The notifying layer is present only when sinks carry a hook runner;
+// uow.NewNotifyingProvider returns the provider unwrapped otherwise.
+func wireProxiedUOWProvider(provider uow.UnitOfWorkProvider, sinks uow.Sinks) uow.UnitOfWorkProvider {
+	return wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(provider, sinks))
+}
+
 func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.UnitOfWorkProvider {
 	return externaldeps.WrapUOWProvider(
 		provider,
@@ -83,7 +113,7 @@ func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.Unit
 			return path, path != ""
 		},
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
-			return newReadOnlyStoreFromConfig(ctx, filepath.Join(projectRoot, ".beads"))
+			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 		},
 	)
 }

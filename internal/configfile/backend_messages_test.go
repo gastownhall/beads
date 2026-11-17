@@ -217,3 +217,87 @@ func TestUnknownBackendErrorHealBranch(t *testing.T) {
 		t.Errorf("unknown-backend message lost its original remedy:\n%s", plain)
 	}
 }
+
+// TestBackendErrorsNameLegacyConfigJSON pins that a workspace whose metadata
+// is still a legacy config.json (no metadata.json yet) gets refusals naming
+// config.json, the file the backend was read from: a refusal made before Load
+// migrates that file must not send the user to edit a metadata.json that does
+// not exist, since creating one would make bd ignore config.json's other
+// settings.
+func TestBackendErrorsNameLegacyConfigJSON(t *testing.T) {
+	newLegacyWorkspace := func(t *testing.T, withDolt bool) (beadsDir, legacyPath string) {
+		t.Helper()
+		beadsDir = t.TempDir()
+		if withDolt {
+			plantDoltRepository(t, filepath.Join(beadsDir, "dolt"))
+		}
+		legacyPath = filepath.Join(beadsDir, LegacyConfigFileName)
+		if err := os.WriteFile(legacyPath, []byte(`{"backend":"postgres"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir, legacyPath
+	}
+
+	t.Run("removed/heal", func(t *testing.T) {
+		beadsDir, legacyPath := newLegacyWorkspace(t, true)
+		for _, backend := range []string{BackendSQLite, BackendPostgres, BackendMySQL} {
+			message := RemovedBackendErrorAt(backend, beadsDir, &Config{Backend: backend}).Error()
+			if !strings.Contains(message, "in "+legacyPath+" is no longer supported") || !strings.Contains(message, "to heal, edit "+legacyPath+" ") {
+				t.Errorf("%s heal message does not name %s:\n%s", backend, legacyPath, message)
+			}
+			if strings.Contains(message, ConfigFileName) {
+				t.Errorf("%s heal message names %s, which does not exist:\n%s", backend, ConfigFileName, message)
+			}
+		}
+	})
+	t.Run("unknown/heal", func(t *testing.T) {
+		beadsDir, legacyPath := newLegacyWorkspace(t, true)
+		message := UnknownBackendErrorAt("mystery", beadsDir, &Config{Backend: "mystery"}).Error()
+		if !strings.Contains(message, `"mystery" in config.json is not recognized`) || !strings.Contains(message, "edit "+legacyPath+" ") {
+			t.Errorf("unknown-backend heal message does not name %s:\n%s", legacyPath, message)
+		}
+		if strings.Contains(message, ConfigFileName) {
+			t.Errorf("unknown-backend heal message names %s, which does not exist:\n%s", ConfigFileName, message)
+		}
+	})
+	t.Run("unknown/plain", func(t *testing.T) {
+		beadsDir, _ := newLegacyWorkspace(t, false)
+		message := UnknownBackendErrorAt("mystery", beadsDir, &Config{Backend: "mystery"}).Error()
+		if !strings.Contains(message, `"mystery" in config.json is not recognized`) || !strings.Contains(message, "fix or restore config.json and retry") {
+			t.Errorf("unknown-backend message does not name config.json:\n%s", message)
+		}
+	})
+}
+
+// TestMetadataFilePath pins which file MetadataFilePath names: metadata.json
+// whenever it exists or neither file does, config.json only when it is the
+// one LoadForDiscovery would read.
+func TestMetadataFilePath(t *testing.T) {
+	write := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := MetadataFilePath(""); got != ConfigFileName {
+		t.Errorf("MetadataFilePath(\"\") = %q, want %q", got, ConfigFileName)
+	}
+
+	empty := t.TempDir()
+	if got, want := MetadataFilePath(empty), ConfigPath(empty); got != want {
+		t.Errorf("no metadata: MetadataFilePath = %q, want %q", got, want)
+	}
+
+	legacyOnly := t.TempDir()
+	write(t, filepath.Join(legacyOnly, LegacyConfigFileName))
+	if got, want := MetadataFilePath(legacyOnly), filepath.Join(legacyOnly, LegacyConfigFileName); got != want {
+		t.Errorf("legacy only: MetadataFilePath = %q, want %q", got, want)
+	}
+
+	both := t.TempDir()
+	write(t, filepath.Join(both, LegacyConfigFileName))
+	write(t, ConfigPath(both))
+	if got, want := MetadataFilePath(both), ConfigPath(both); got != want {
+		t.Errorf("both files: MetadataFilePath = %q, want %q", got, want)
+	}
+}

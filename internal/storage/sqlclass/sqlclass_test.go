@@ -12,6 +12,8 @@ func TestClassify(t *testing.T) {
 		{"lowercase select", "  select id from issues", Read},
 		{"union", "SELECT 1 UNION SELECT 2", Read},
 		{"parenthesized union", "(SELECT 1) UNION (SELECT 2)", Read},
+		{"intersect", "SELECT 1 INTERSECT SELECT 2", Read},
+		{"except", "SELECT 1 EXCEPT SELECT 2", Read},
 		{"show", "SHOW TABLES", Read},
 		{"describe", "DESCRIBE issues", Read},
 		{"explain select", "EXPLAIN SELECT * FROM issues", Read},
@@ -47,6 +49,25 @@ func TestClassify(t *testing.T) {
 		{"drop table", "DROP TABLE x", Write},
 		{"set", "SET @x = 1", Write},
 		{"select into variable", "SELECT 1 INTO @x", Write},
+		{"union into outfile", "(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '/tmp/issues.tsv'", Write},
+		{"union into dumpfile", "SELECT id FROM issues UNION SELECT id FROM issues INTO DUMPFILE '/tmp/issues.bin'", Write},
+		{"cte union into outfile", "WITH ids AS (SELECT id FROM issues) SELECT id FROM ids UNION SELECT id FROM issues INTO OUTFILE '/tmp/issues.tsv'", Write},
+
+		// A set operation keeps a trailing INTO on the SetOp node. INTO
+		// OUTFILE/DUMPFILE writes a file and INTO @var a variable, so these
+		// are writes --readonly must refuse (#7033).
+		{"union all into outfile, short path", "(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '/p'", Write},
+		{"unparenthesized union into dumpfile", "SELECT id FROM issues UNION SELECT id FROM issues INTO DUMPFILE '/p'", Write},
+		{"union into variable", "(SELECT 1) UNION (SELECT 2) INTO @x", Write},
+		{"union order limit into", "SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1 INTO OUTFILE '/p'", Write},
+		{"table-less cte union into outfile", "WITH t AS (SELECT 1 AS n) SELECT n FROM t UNION SELECT n FROM t INTO OUTFILE '/p'", Write},
+		{"intersect into outfile", "(SELECT 1) INTERSECT (SELECT 1) INTO OUTFILE '/p'", Write},
+		{"except into variable", "SELECT id FROM issues EXCEPT SELECT id FROM issues INTO @x", Write},
+		// The grammar attaches INTO to a table-less last operand, or to an
+		// operand inside parentheses, and rejects it there: Mixed, which
+		// --readonly already refuses.
+		{"union into on table-less last operand", "SELECT 1 UNION SELECT 2 INTO @x", Mixed},
+		{"into inside union operand", "(SELECT 1 INTO @x) UNION (SELECT 2)", Mixed},
 
 		// Statements that may write AND return rows, or that the parser
 		// cannot classify, must run in a committing transaction that still
@@ -56,6 +77,51 @@ func TestClassify(t *testing.T) {
 		{"unparseable", "PRAGMA table_info(issues)", Mixed},
 		{"garbage", "NOT SQL AT ALL (", Mixed},
 		{"empty", "", Mixed},
+
+		// Reads that call a Dolt function that may write must run in a
+		// committing transaction behind the read-only gate (GH#6230): a Read
+		// skips CheckReadonly and is rolled back.
+		{"select dolt function", "SELECT DOLT_COMMIT('-Am', 'msg')", Mixed},
+		{"lowercase dolt function", "select dolt_reset('--hard')", Mixed},
+		{"backticked dolt function", "SELECT `dolt_checkout`('main')", Mixed},
+		{"qualified dolt function", "SELECT mydb.dolt_merge('feature')", Mixed},
+		{"dolt function in where", "SELECT id FROM issues WHERE DOLT_COMMIT('-Am','x') = 0", Mixed},
+		{"dolt function in subquery", "SELECT (SELECT DOLT_RESET('--hard'))", Mixed},
+		{"dolt function in cte", "WITH t AS (SELECT DOLT_COMMIT('-Am','x') AS h) SELECT h FROM t", Mixed},
+		{"dolt function in union", "SELECT 1 UNION SELECT DOLT_PUSH('origin','main')", Mixed},
+		// sqlparser.Walk skips these clauses; Classify walks them itself.
+		{"dolt function in cte before union", "WITH t AS (SELECT DOLT_COMMIT('-Am','x') AS h) SELECT h FROM t UNION SELECT 1", Mixed},
+		{"dolt function in union order by", "SELECT 1 UNION SELECT 2 ORDER BY DOLT_COMMIT('-Am','x')", Mixed},
+		{"dolt function in derived union order by", "SELECT * FROM (SELECT 1 UNION SELECT 2 ORDER BY DOLT_RESET('--hard')) AS u", Mixed},
+		{"explain analyze dolt function in union order by", "EXPLAIN ANALYZE SELECT 1 UNION SELECT 2 ORDER BY DOLT_COMMIT('-Am','x')", Mixed},
+		{"dolt function in named window order by", "SELECT ROW_NUMBER() OVER w FROM issues WINDOW w AS (ORDER BY DOLT_COMMIT('-Am','x'))", Mixed},
+		{"dolt function in named window partition by", "SELECT ROW_NUMBER() OVER w FROM issues WINDOW w AS (PARTITION BY DOLT_COMMIT('-Am','x'))", Mixed},
+		{"dolt function in substring literal from", "SELECT SUBSTRING('abc' FROM DOLT_COMMIT('-Am','x') FOR 1)", Mixed},
+		{"dolt function in substr literal for", "SELECT id FROM issues WHERE SUBSTR('abc' FROM 1 FOR DOLT_RESET('--hard')) = 'a'", Mixed},
+		{"dolt function in table function arg", "SELECT * FROM dolt_diff(DOLT_COMMIT('-Am','x'), 'WORKING', 'issues')", Mixed},
+		{"dolt function in show filter", "SHOW TABLES WHERE DOLT_COMMIT('-Am','x') = 0", Mixed},
+		{"explain dolt function", "EXPLAIN SELECT DOLT_COMMIT('-Am','x')", Mixed},
+		{"explain analyze dolt function", "EXPLAIN ANALYZE SELECT DOLT_COMMIT('-Am','x')", Mixed},
+		{"unknown dolt function", "SELECT DOLT_FUTURE_PROC()", Mixed},
+
+		// Reads that touch Dolt only through system tables, table functions,
+		// read-only functions, or literals and comments stay reads.
+		{"dolt system table", "SELECT * FROM dolt_log", Read},
+		{"dolt conflicts table", "SELECT * FROM dolt_conflicts", Read},
+		{"dolt table function", "SELECT * FROM dolt_log()", Read},
+		{"dolt diff table function", "SELECT * FROM dolt_diff('HEAD~1', 'HEAD', 'issues')", Read},
+		{"read-only dolt functions", "SELECT DOLT_HASHOF('HEAD'), DOLT_VERSION(), DOLT_MERGE_BASE('main', 'feature')", Read},
+		{"more read-only dolt functions", "SELECT dolt_hashof_table('issues'), dolt_hashof_db(), dolt_storage_format(), dolt_join_cost()", Read},
+		{"read-only dolt functions in union", "SELECT DOLT_HASHOF('HEAD') UNION SELECT DOLT_VERSION() ORDER BY 1", Read},
+		{"read-only dolt function in union order by", "SELECT 1 UNION SELECT 2 ORDER BY DOLT_HASHOF('HEAD')", Read},
+		{"dolt system table in cte before union", "WITH t AS (SELECT * FROM dolt_log) SELECT * FROM t UNION SELECT * FROM dolt_log", Read},
+		{"named window", "SELECT ROW_NUMBER() OVER w FROM issues WINDOW w AS (ORDER BY id)", Read},
+		{"substring literal", "SELECT SUBSTRING('abc' FROM 1 FOR 2)", Read},
+		{"as of read-only dolt function", "SELECT * FROM issues AS OF DOLT_HASHOF('HEAD~1')", Read},
+		{"unprefixed read functions", "SELECT HASHOF('HEAD'), ACTIVE_BRANCH()", Read},
+		{"dolt function in literal", "SELECT 'DOLT_COMMIT(1)'", Read},
+		{"dolt function in comment", "SELECT 1 /* dolt_commit('x') */", Read},
+		{"dolt column name", "SELECT dolt_commit FROM t", Read},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1,0 +1,16 @@
+{
+  "shape": "gc-export-all",
+  "requests": [
+    {"method":"GET","operation_id":"listIssues","path":"/v0/beads/issues","query":["all","include_ephemeral","include_gates","include_infra","include_templates","limit"],"status":200},
+    {"method":"GET","operation_id":"listIssues","path":"/v0/beads/issues","query":["all","cursor","include_ephemeral","include_gates","include_infra","include_templates","limit"],"status":200},
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id"],"status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id"],"status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id"],"status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id"],"status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-r1","query":["include_comments"],"status":200},
+    {"method":"GET","operation_id":"getSetting","path":"/v0/beads/config/export.exclude_owners","status":200},
+    {"method":"GET","operation_id":"getSetting","path":"/v0/beads/config/export.exclude_owner","status":200},
+    {"method":"GET","operation_id":"listMemories","path":"/v0/beads/memories","status":200}
+  ]
+}

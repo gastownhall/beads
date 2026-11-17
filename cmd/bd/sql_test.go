@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -22,11 +21,7 @@ func TestSqlCommand(t *testing.T) {
 		t.Fatalf("Failed to create .beads directory: %v", err)
 	}
 
-	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: testDBPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, testDBPath)
 
 	ctx := context.Background()
 
@@ -60,20 +55,24 @@ func TestSqlCommand(t *testing.T) {
 	oldStore := store
 	oldCtx := rootCtx
 	oldJSON := jsonOutput
+	oldServerMode, oldProxied := serverMode, proxiedServerMode
 	defer func() {
 		store = oldStore
 		rootCtx = oldCtx
 		jsonOutput = oldJSON
+		serverMode, proxiedServerMode = oldServerMode, oldProxied
 	}()
 
 	store = testStore
 	rootCtx = ctx
+	// testStore is a server-mode store; bd sql refuses in the default
+	// embedded mode before it looks at the store.
+	serverMode, proxiedServerMode = true, false
 
 	t.Run("select count", func(t *testing.T) {
 		jsonOutput = true
 		output := captureStdout(t, func() error {
-			_ = sqlCmd.RunE(sqlCmd, []string{"SELECT COUNT(*) as count FROM issues"})
-			return nil
+			return sqlCmd.RunE(sqlCmd, []string{"SELECT COUNT(*) as count FROM issues"})
 		})
 
 		var result []map[string]interface{}
@@ -96,8 +95,7 @@ func TestSqlCommand(t *testing.T) {
 	t.Run("select with filter", func(t *testing.T) {
 		jsonOutput = true
 		output := captureStdout(t, func() error {
-			_ = sqlCmd.RunE(sqlCmd, []string{`SELECT id, title FROM issues WHERE status = 'open'`})
-			return nil
+			return sqlCmd.RunE(sqlCmd, []string{`SELECT id, title FROM issues WHERE status = 'open'`})
 		})
 
 		var result []map[string]interface{}
@@ -117,8 +115,7 @@ func TestSqlCommand(t *testing.T) {
 	t.Run("empty result json", func(t *testing.T) {
 		jsonOutput = true
 		output := captureStdout(t, func() error {
-			_ = sqlCmd.RunE(sqlCmd, []string{`SELECT * FROM issues WHERE title = 'nonexistent'`})
-			return nil
+			return sqlCmd.RunE(sqlCmd, []string{`SELECT * FROM issues WHERE title = 'nonexistent'`})
 		})
 
 		var result []map[string]interface{}
@@ -134,8 +131,7 @@ func TestSqlCommand(t *testing.T) {
 	t.Run("table output", func(t *testing.T) {
 		jsonOutput = false
 		output := captureStdout(t, func() error {
-			_ = sqlCmd.RunE(sqlCmd, []string{"SELECT COUNT(*) as count FROM issues"})
-			return nil
+			return sqlCmd.RunE(sqlCmd, []string{"SELECT COUNT(*) as count FROM issues"})
 		})
 
 		if !strings.Contains(output, "count") {
@@ -149,8 +145,7 @@ func TestSqlCommand(t *testing.T) {
 	t.Run("empty table output", func(t *testing.T) {
 		jsonOutput = false
 		output := captureStdout(t, func() error {
-			_ = sqlCmd.RunE(sqlCmd, []string{`SELECT * FROM issues WHERE title = 'nonexistent'`})
-			return nil
+			return sqlCmd.RunE(sqlCmd, []string{`SELECT * FROM issues WHERE title = 'nonexistent'`})
 		})
 
 		if !strings.Contains(output, "(0 rows)") {
