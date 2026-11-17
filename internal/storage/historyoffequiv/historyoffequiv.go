@@ -208,6 +208,15 @@ var schemaAdditions = []schemaAddition{{
 	Migrations: map[string][]string{
 		"ignored_schema_migrations": {"31"},
 	},
+}, {
+	By: "the wisps.is_blocked restore marker (bd-eggelc)",
+	// Ignored/0032 adds no schema. Its pre-migration repair restores
+	// wisps.is_blocked and its index on a clone that lost them, and the
+	// scenario's stores have both, so the repair only probes and the marker
+	// adds only its bookkeeping row.
+	Migrations: map[string][]string{
+		"ignored_schema_migrations": {"32"},
+	},
 }}
 
 // runWindow widens the span of the run on each side to bound the wall-clock

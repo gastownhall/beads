@@ -1,0 +1,34 @@
+-- Ignored migration 0032: clone-local marker that restores wisps.is_blocked
+-- and idx_wisps_is_blocked on a clone already past ignored 0015 (bd-eggelc,
+-- refs gastownhall/beads#4468 and #5257).
+--
+-- ignored/0006 adds the column and its index, and ensureWispIsBlockedForRecompute
+-- re-adds them before ignored/0007 and ignored/0015. Each of those runs only
+-- while its version is pending (pending = version > MAX(cursor); deleting a
+-- lower cursor row does not lower the high-water mark), so a clone whose
+-- wisps table lost the column after its cursor passed 15 had no heal path:
+-- `bd ready` and `bd create --ephemeral` failed with "table does not have
+-- column is_blocked" on every open.
+--
+-- The work happens in code, not here: restoreWispIsBlocked
+-- (internal/storage/schema/migration_repairs.go) is registered in
+-- preMigrationRepairs for this version, so it runs immediately before this
+-- marker is recorded. On a healthy clone it probes wisps, the column and the
+-- index, and writes nothing. On a drifted one it drops a stray
+-- idx_wisps_is_blocked left over from the lost column, runs
+-- ALTER TABLE wisps ADD COLUMN is_blocked TINYINT(1) NOT NULL DEFAULT 0,
+-- derives every wisp's flag with the live recompute (an UPDATE wisps that
+-- keeps updated_at; durable issues rows are never written), and runs
+-- CREATE INDEX idx_wisps_is_blocked ON wisps(is_blocked, status) last. The
+-- ALTER TABLE wisps, UPDATE wisps and CREATE INDEX ... ON wisps above are
+-- stated in this header on purpose: MigrateUp's pending-migration
+-- dirty-table guard scans the raw text of pending files, and this marker
+-- must be seen as touching wisps.
+--
+-- The cursor table is dolt-ignored, so the marker is clone-local: every
+-- clone checks its own wisps once. A failed repair leaves the marker pending
+-- for the next migration pass, and the index is created only after the flags
+-- are derived, so a retry still sees the restore as unfinished.
+--
+-- The marker itself changes nothing.
+SELECT 1;
