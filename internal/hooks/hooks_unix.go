@@ -54,7 +54,8 @@ func (r *Runner) runHook(hookPath, event string, issue *types.Issue) (retErr err
 	cmd := exec.CommandContext(ctx, hookPath, issue.ID, event)
 	cmd.Stdin = bytes.NewReader(issueJSON)
 
-	// Capture output for debugging (but don't block on it)
+	// Capture output so the span can report how much the hook wrote (but
+	// don't block on it); the text itself is never exported.
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
