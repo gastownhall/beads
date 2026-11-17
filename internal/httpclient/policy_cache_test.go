@@ -23,6 +23,13 @@ func testPolicyCache(t *testing.T, path, projectID string, now time.Time) *polic
 }
 
 func enforcingContext() *apigen.ContextResponse {
+	return &apigen.ContextResponse{Capabilities: []string{wire.CapExternalDependencies, wire.CapCrossRigDependencies}}
+}
+
+// oldTokenContext models a server of the build between the two tokens (GH#5784
+// AC-8): it enforces the capability-reference half only, so the client must
+// learn cross-rig=false even while external-dependencies=true.
+func oldTokenContext() *apigen.ContextResponse {
 	return &apigen.ContextResponse{Capabilities: []string{wire.CapExternalDependencies}}
 }
 
@@ -41,6 +48,9 @@ func TestPolicyProbeIsAnsweredFromTheCacheAcrossStores(t *testing.T) {
 	if enforced, err := s.ServerEnforcesExternalDependencyPolicy(ctx); err != nil || !enforced {
 		t.Fatalf("first probe = %v, %v; want true from the handshake", enforced, err)
 	}
+	if crossRig, err := s.ServerEnforcesCrossRigDependencyPolicy(ctx); err != nil || !crossRig {
+		t.Fatalf("first cross-rig probe = %v, %v; want true from the same handshake", crossRig, err)
+	}
 	if first.hits != 1 {
 		t.Fatalf("first store dialed %d handshakes, want 1", first.hits)
 	}
@@ -51,21 +61,31 @@ func TestPolicyProbeIsAnsweredFromTheCacheAcrossStores(t *testing.T) {
 	if enforced, err := s.ServerEnforcesExternalDependencyPolicy(ctx); err != nil || !enforced {
 		t.Fatalf("cached probe = %v, %v; want true without a handshake", enforced, err)
 	}
+	if crossRig, err := s.ServerEnforcesCrossRigDependencyPolicy(ctx); err != nil || !crossRig {
+		t.Fatalf("cached cross-rig probe = %v, %v; want true without a handshake", crossRig, err)
+	}
 	if second.hits != 0 {
 		t.Fatalf("second store dialed %d handshakes, want 0", second.hits)
 	}
 
-	expired := &fakeWire{res: &apigen.ContextResponse{}}
+	expired := &fakeWire{res: oldTokenContext()}
 	s = New(target, expired, nil)
 	s.policy = testPolicyCache(t, path, "prj_a", now.Add(time.Minute))
-	if enforced, err := s.ServerEnforcesExternalDependencyPolicy(ctx); err != nil || enforced {
-		t.Fatalf("probe past the TTL = %v, %v; want the handshake's false", enforced, err)
+	if enforced, err := s.ServerEnforcesExternalDependencyPolicy(ctx); err != nil || !enforced {
+		t.Fatalf("probe past the TTL = %v, %v; want the handshake's true", enforced, err)
+	}
+	if crossRig, err := s.ServerEnforcesCrossRigDependencyPolicy(ctx); err != nil || crossRig {
+		t.Fatalf("cross-rig probe past the TTL = %v, %v; want the handshake's false", crossRig, err)
 	}
 	if expired.hits != 1 {
 		t.Fatalf("store past the TTL dialed %d handshakes, want 1", expired.hits)
 	}
-	if enforced, ok := testPolicyCache(t, path, "prj_a", now.Add(time.Minute)).load(); !ok || enforced {
-		t.Fatalf("cache after the refresh = %v, %v; want the fresh false", enforced, ok)
+	refreshed := testPolicyCache(t, path, "prj_a", now.Add(time.Minute))
+	if enforced, ok := refreshed.load(); !ok || !enforced {
+		t.Fatalf("cache after the refresh = %v, %v; want the fresh true", enforced, ok)
+	}
+	if crossRig, ok := refreshed.loadCrossRig(); !ok || crossRig {
+		t.Fatalf("cross-rig cache after the refresh = %v, %v; want the fresh false", crossRig, ok)
 	}
 }
 

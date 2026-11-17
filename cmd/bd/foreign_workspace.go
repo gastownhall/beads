@@ -237,3 +237,20 @@ func openForeignStore(ctx context.Context, beadsDir string, access foreignAccess
 		return nil, fmt.Errorf("openForeignStore: unknown access %d", access)
 	}
 }
+
+// openForeignStoreReadOnlyDatabase is the read arm of openForeignStore with
+// the target's database selected per open (GH#5784 §212): a routed read — the
+// cross-rig resolver among them, which may run on another thread's behalf —
+// cannot swap BEADS_DOLT_SERVER_DATABASE around the factories, so the value
+// travels through openNonMutatingStoreFromConfig's configuration boundary
+// instead. An empty database keeps the workspace's own resolution, exactly
+// as the swap did when it was empty too.
+func openForeignStoreReadOnlyDatabase(ctx context.Context, beadsDir, database string) (storage.DoltStorage, error) {
+	if _, err := admitForeignWorkspace(beadsDir); err != nil {
+		return nil, err
+	}
+	if !beads.HasProjectFiles(beadsDir) {
+		return nil, fmt.Errorf("%w at %s", ErrNoBeadsDatabase, remedy.PrintedValue(beadsDir))
+	}
+	return newReadOnlyStoreFromConfigWithDatabase(ctx, beadsDir, database)
+}

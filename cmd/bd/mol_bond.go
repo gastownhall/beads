@@ -212,7 +212,15 @@ func openMolBondHome(ctx context.Context, localStore storage.DoltStorage, plan *
 	}
 	home := rr.Store
 	if !externaldeps.Applied(home) {
-		home = wireExternalDependencyPolicy(home)
+		// A prefix-routed home resolves its bare cross-prefix targets through
+		// the TARGET rig's own routes (rr.BeadsDir, GH#5784); the local home
+		// is the launching workspace's.
+		routesDir := crossRigRoutesDir
+		if rr.BeadsDir != "" {
+			targetBeadsDir := rr.BeadsDir
+			routesDir = func() string { return targetBeadsDir }
+		}
+		home = wireExternalDependencyPolicy(home, routesDir)
 	}
 	return home, rr.Close, nil
 }

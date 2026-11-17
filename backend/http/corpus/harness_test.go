@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 const (
@@ -67,20 +68,28 @@ func startCorpusServer(t *testing.T) string {
 		t.Fatalf("load the token file: %v", err)
 	}
 
-	// The roles come through the external-dependency policy decorator and
-	// the handshake advertises policy.external_dependencies, as bd serve
-	// composes them (cmd/bd/serve.go): the reference profile advertises that
-	// capability, so the masked parts tell bd the server enforces the policy,
-	// and the current-capability transcripts must see what a deployed bd
-	// serve advertises (without it, bd composes the policy client-side, a
-	// listing walk no deployed server makes it pay).
+	// The roles come through the external-dependency policy decorator, with
+	// a cross-rig issue resolver, and the handshake advertises both
+	// policy.external_dependencies and policy.cross_rig_dependencies, as bd
+	// serve composes them (cmd/bd/serve.go, cmd/bd/storage_chain.go): the
+	// current-capability transcripts must see what a deployed bd serve
+	// advertises, so the server enforces the whole policy and bd composes
+	// none of it client-side. The masked parts model older servers.
 	policied := externaldeps.New(store,
 		func(externaldeps.ProjectName) (string, bool) { return "", false },
 		func(context.Context, string) (storage.DoltStorage, error) {
 			return nil, errors.New("the corpus server resolves no external projects")
-		})
+		},
+		externaldeps.WithIssueResolver(func(_ context.Context, ids []string) (map[string]*types.Issue, map[string]string, error) {
+			unavailable := make(map[string]string, len(ids))
+			for _, id := range ids {
+				unavailable[id] = "the corpus server resolves no foreign rigs"
+			}
+			return nil, unavailable, nil
+		}))
 	cfg := corpusServeConfig(t, policied)
 	cfg.ExternalDependencyPolicy = externaldeps.Applied(policied)
+	cfg.CrossRigDependencyPolicy = externaldeps.EnforcesCrossRig(policied)
 	cfg.AllowNonLoopback = true
 	cfg.Auth = auth
 	srv, err := httpapi.Listen(cfg)

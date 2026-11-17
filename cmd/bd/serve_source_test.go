@@ -459,6 +459,13 @@ func (s *serveRolesDoltStore) GetAllDependencyRecords(context.Context) (map[stri
 	return nil, s.dependencyReadErr
 }
 
+// GetDependencyRecordsForIssues is the close guard's read of the named
+// issues' own edges (the policy reads no other issue's), and it fails the
+// same way.
+func (s *serveRolesDoltStore) GetDependencyRecordsForIssues(context.Context, []string) (map[string][]*types.Dependency, error) {
+	return nil, s.dependencyReadErr
+}
+
 // serveStubRest carries the remainder of storage.DoltStorage for a stub that
 // declares its own roles, one embed deeper than those roles. It is the shared
 // half of the shadowing described above; serve_store_identity_test.go's stub

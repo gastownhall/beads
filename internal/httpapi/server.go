@@ -425,6 +425,11 @@ type Config struct {
 	// a server that advertises the token without enforcing the policy makes
 	// every client skip it.
 	ExternalDependencyPolicy bool
+	// CrossRigDependencyPolicy reports that the same policy also enforces
+	// bare cross-rig issue ids (externaldeps.EnforcesCrossRig). It makes the
+	// handshake advertise CapCrossRigDependencies, and only together with
+	// ExternalDependencyPolicy.
+	CrossRigDependencyPolicy bool
 	// Workspace is the startup snapshot GET /v0/beads/context answers from.
 	// Only the allowlisted fields are ever serialized — see contextResponse,
 	// which names the whole set and the reasons for the exclusions.

@@ -27,9 +27,20 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*ty
 	return result, nil
 }
 
-// GetExternalBlockingDependencyRecordsInTx returns explicit external: edges
-// whose dependency type can block ready work. Cross-prefix issue IDs may share
-// depends_on_external storage, so the external: prefix check is intentional.
+// GetExternalBlockingDependencyRecordsInTx returns the edges stored in
+// depends_on_external whose dependency type can block ready work and whose
+// source is live: explicit external:<project>:<capability> refs and bare
+// cross-rig issue IDs (a cross-prefix target, see IsExternalDepTarget). The
+// external-dependency policy classifies each record by its target and decides
+// per kind which types block; this read only bounds the candidates.
+//
+// A closed or pinned source is no candidate. It is never ready, claimable or
+// listed as blocked, so resolving its targets could change no answer, and
+// would cost every evaluation a read of every foreign rig a long-closed source
+// still names, with a "remains blocking" warning for each one the reader
+// cannot reach. A guard about one named issue reads that issue's own edges
+// (GetDependencyRecordsForIssuesInTx) whatever its status, so it never
+// depends on this filter.
 func GetExternalBlockingDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*types.Dependency, error) {
 	result := make(map[string][]*types.Dependency)
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
@@ -43,15 +54,25 @@ func GetExternalBlockingDependencyRecordsInTx(ctx context.Context, tx DBTX) (map
 	return result, nil
 }
 
-//nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
+//nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller), and sourceTable is derived from it.
 func getExternalBlockingDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, result map[string][]*types.Dependency) error {
+	// An edge row lives in its source's family: dependencies hangs off issues,
+	// wisp_dependencies off wisps. The join keeps only live sources (see
+	// GetExternalBlockingDependencyRecordsInTx); DepTargetExpr names only edge
+	// columns, so it needs no alias.
+	sourceTable := "issues"
+	if depTable == "wisp_dependencies" {
+		sourceTable = "wisps"
+	}
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
-		FROM %s
-		WHERE depends_on_external LIKE 'external:%%'
-		  AND type IN ('blocks', 'conditional-blocks', 'waits-for')
-		ORDER BY issue_id
-	`, DepTargetExpr, depTable))
+		SELECT d.issue_id, %s AS depends_on_id, d.type, d.created_at, d.created_by, d.metadata, d.thread_id
+		FROM %s d
+		JOIN %s src ON src.id = d.issue_id
+		WHERE d.depends_on_external IS NOT NULL
+		  AND d.type IN ('blocks', 'conditional-blocks', 'waits-for')
+		  AND src.status NOT IN ('closed', 'pinned')
+		ORDER BY d.issue_id
+	`, DepTargetExpr, depTable, sourceTable))
 	if err != nil {
 		return fmt.Errorf("get external blocking dependency records from %s: %w", depTable, err)
 	}

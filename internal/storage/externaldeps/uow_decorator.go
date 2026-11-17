@@ -18,11 +18,11 @@ import (
 
 // WrapUOWProvider installs the external capability policy on the server UOW
 // path. Proxied commands otherwise bypass storage decorators entirely.
-func WrapUOWProvider(inner uow.UnitOfWorkProvider, locate ProjectLocator, open StoreOpener) uow.UnitOfWorkProvider {
+func WrapUOWProvider(inner uow.UnitOfWorkProvider, locate ProjectLocator, open StoreOpener, opts ...Option) uow.UnitOfWorkProvider {
 	if inner == nil {
 		return nil
 	}
-	return &uowProvider{UnitOfWorkProvider: inner, policy: New(nil, locate, open)}
+	return &uowProvider{UnitOfWorkProvider: inner, policy: New(nil, locate, open, opts...)}
 }
 
 type uowProvider struct {
@@ -55,6 +55,21 @@ func AppliedToProvider(provider uow.UnitOfWorkProvider) bool {
 	return false
 }
 
+// ProviderEnforcesCrossRig is EnforcesCrossRig for the unit-of-work chain.
+func ProviderEnforcesCrossRig(provider uow.UnitOfWorkProvider) bool {
+	for provider != nil {
+		if p, ok := provider.(*uowProvider); ok {
+			return p.policy.resolveIssues != nil
+		}
+		u, ok := provider.(uow.ProviderUnwrapper)
+		if !ok {
+			return false
+		}
+		provider = u.Unwrap()
+	}
+	return false
+}
+
 // RunNonTx preserves the optional maintenance capability exposed by the
 // proxied provider. Wrapping the provider must not make unrelated commands
 // such as compact lose access to their pinned connection.
@@ -71,7 +86,12 @@ func (p *uowProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &unitOfWork{UnitOfWork: inner, policy: p.policy}, nil
+	// A bare cross-rig blocker id may name an issue this workspace holds, so
+	// the policy reads the source store through the same unit of work first.
+	policy := p.policy.bindLocal(func(ctx context.Context, ids []string) ([]*types.Issue, error) {
+		return getManyChunked(ctx, inner.IssueUseCase(), ids)
+	})
+	return &unitOfWork{UnitOfWork: inner, policy: policy}, nil
 }
 
 // Provider capability accessors build roles on this wrapper. Delegating them
@@ -300,7 +320,7 @@ func (u *issueUseCase) blockingState(ctx context.Context) (blockingState, error)
 	if err != nil {
 		return blockingState{}, err
 	}
-	return u.policy.blockingStateFromRecords(ctx, deps)
+	return u.policy.blockingStateFromRecords(ctx, deps, allKinds)
 }
 
 func (u *issueUseCase) GetReadyWork(ctx context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
@@ -458,11 +478,19 @@ func isClosedUpdate(fields map[string]any) bool {
 	}
 }
 
+// guardExternalClose reads only id's own edges and resolves only their
+// references: a close or claim of one issue must not resolve every reference
+// in the workspace (opening every foreign rig a long-closed source still
+// names, and warning about each unreachable one).
 func (u *issueUseCase) guardExternalClose(ctx context.Context, id string, force bool) error {
 	if force {
 		return nil
 	}
-	state, err := u.blockingState(ctx)
+	records, err := u.deps.GetIssueDependencyRecords(ctx, []string{id})
+	if err != nil {
+		return fmt.Errorf("external dependencies: %w", err)
+	}
+	state, err := u.policy.blockingStateFromRecords(ctx, records, allKinds)
 	if err != nil {
 		return fmt.Errorf("external dependencies: %w", err)
 	}
@@ -490,17 +518,17 @@ func (u *dependencyUseCase) IsBlockedBatch(ctx context.Context, ids []string) (m
 	if err != nil || len(blocked) == 0 {
 		return blocked, err
 	}
-	records, err := u.GetExternalBlockingDependencyRecords(ctx)
+	answeredIDs := make([]string, 0, len(blocked))
+	for id := range blocked {
+		answeredIDs = append(answeredIDs, id)
+	}
+	// The answered ids' own edges, whatever their sources' status: the
+	// workspace-wide candidate read keeps live sources only.
+	answered, err := u.GetIssueDependencyRecords(ctx, answeredIDs)
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: %w", err)
 	}
-	answered := make(map[string][]*types.Dependency, len(blocked))
-	for id := range blocked {
-		if deps, ok := records[id]; ok {
-			answered[id] = deps
-		}
-	}
-	state, err := u.policy.blockingStateFromRecords(ctx, answered)
+	state, err := u.policy.blockingStateFromRecords(ctx, answered, allKinds)
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: %w", err)
 	}
@@ -527,5 +555,5 @@ func (u *dependencyUseCase) GetDependencyTree(ctx context.Context, rootID string
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load tree edges: %w", err)
 	}
-	return u.policy.appendTreeExternalReferences(ctx, tree, deps, opts.MaxDepth)
+	return u.policy.appendTreeExternalReferences(ctx, allKinds, tree, deps, opts.MaxDepth)
 }

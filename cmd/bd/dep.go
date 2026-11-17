@@ -22,6 +22,50 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
+// markExternalJSON adds the GH#5784 feedback marker to a dep-add success
+// payload: `external: true` for an edge whose target lives outside this rig —
+// an explicit external: reference, or a bare ID whose prefix belongs to
+// another rig (crossRigDepTarget) — and no marker for a local edge. Every add
+// form asks the same predicate, so they report the same edge the same way.
+func markExternalJSON(out map[string]interface{}, sourceID, targetID string) {
+	if IsExternalRef(targetID) || crossRigDepTarget(sourceID, targetID) {
+		out["external"] = true
+	}
+}
+
+// crossRigDepTarget reports whether targetID is a bare issue ID whose prefix
+// differs from sourceID's: the cross-rig shape the readiness policy resolves
+// through routes when the source's own database does not hold it (GH#5784).
+// The feedback spells the prefix rule here rather than calling storage's
+// write-side classifier: open PRs #8300 and #8338 replace that classifier
+// with one that also asks whether this database holds the target, and the
+// feedback must not depend on which of them lands first.
+func crossRigDepTarget(sourceID, targetID string) bool {
+	return !IsExternalRef(targetID) && types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
+}
+
+// printCrossRigBlockingSemantics is the human counterpart of
+// markExternalJSON for an edge that actually gates readiness: a bare
+// cross-prefix blocks or conditional-blocks edge is stored in this rig's
+// database, and bd ready checks its target live through the routes the
+// dependent workspace configures — holding the source while the target is
+// open or unreadable. Informational types never get the note: their edges
+// cannot gate, and the feedback must not promise otherwise. Honors --quiet
+// like the package's other non-error notices.
+func printCrossRigBlockingSemantics(sourceID, targetID string, dt types.DependencyType) {
+	if quietFlag || IsExternalRef(targetID) {
+		return
+	}
+	if dt != types.DepBlocks && dt != types.DepConditionalBlocks {
+		return
+	}
+	if !crossRigDepTarget(sourceID, targetID) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "note: this rig's database stores the edge; bd ready checks %s live through .beads/routes.jsonl and holds %s while the target is open or unreadable\n", //nolint:gosec // G705: stderr, not a browser context
+		printedIssueID(targetID), printedIssueID(sourceID))
+}
+
 // addDependencyEdgesDirect asserts edges through the DependencyEditor role on
 // st — the store that owns the source issue.
 //
@@ -340,14 +384,17 @@ Examples:
 			}
 
 			if jsonOutput {
-				return outputJSON(map[string]interface{}{
+				out := map[string]interface{}{
 					"status":     "added",
 					"blocker_id": toID,
 					"blocked_id": fromID,
 					"type":       depType,
-				})
+				}
+				markExternalJSON(out, fromID, toID)
+				return outputJSON(out)
 			}
 
+			printCrossRigBlockingSemantics(fromID, toID, types.DepBlocks)
 			fmt.Printf("%s Added dependency: %s blocks %s\n",
 				ui.RenderPass("✓"), formatFeedbackIDParen(toID, lookupTitle(toID)), formatFeedbackIDParen(fromID, lookupTitle(fromID)))
 			return nil
@@ -382,6 +429,12 @@ object with "from" and "to" fields, and may include "type". The aliases
 External references are stored as-is and resolved at query time using
 the external_projects config. They block the issue until the capability
 is "shipped" in the target project.
+
+A target whose ID prefix belongs to another rig (a bare cross-prefix ID)
+is stored in this database and gates readiness like a local edge: bd
+ready checks its target live through the routes in .beads/routes.jsonl,
+holding the source while the target is open or unreadable. Informational
+types (tracks, related, and the rest) never gate readiness.
 
 With no -t/--type the edge is created as type=blocks, which excludes the
 dependent from bd ready. When stderr is an interactive terminal, an advisory
@@ -545,14 +598,17 @@ Examples:
 		}
 
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			out := map[string]interface{}{
 				"status":        "added",
 				"issue_id":      fromID,
 				"depends_on_id": toID,
 				"type":          string(dt),
-			})
+			}
+			markExternalJSON(out, fromID, toID)
+			return outputJSON(out)
 		}
 
+		printCrossRigBlockingSemantics(fromID, toID, dt)
 		fmt.Printf("%s Added dependency: %s %s %s (%s)\n",
 			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, fromTitle), depRelationFor(dt).phrase, formatFeedbackIDParen(toID, toTitle), dt)
 		return nil
@@ -764,11 +820,13 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(resolved))
 		for _, edge := range resolved {
-			out = append(out, map[string]interface{}{
+			row := map[string]interface{}{
 				"issue_id":      edge.IssueID,
 				"depends_on_id": edge.DependsOnID,
 				"type":          string(edge.Type),
-			})
+			}
+			markExternalJSON(row, edge.IssueID, edge.DependsOnID)
+			out = append(out, row)
 		}
 		return outputJSON(map[string]interface{}{
 			"status":       "added",
@@ -778,6 +836,9 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 	}
 
 	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(resolved))
+	for _, edge := range resolved {
+		printCrossRigBlockingSemantics(edge.IssueID, edge.DependsOnID, edge.Type)
+	}
 	return nil
 }
 
@@ -1231,6 +1292,17 @@ Examples:
 		// role exists to detect it from here — tracked separately.
 		if direction == "down" && len(resolved) == 1 {
 			if reader, err := resolved[0].store.EdgeReader(); err == nil {
+				var depTypes []types.DependencyType
+				if typeFilter != "" {
+					depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
+				}
+				// The anchor's own workspace routes its foreign targets: a
+				// prefix-routed anchor's, else the command's (GH#5784).
+				var anchorBeadsDir string
+				if resolved[0].result != nil {
+					anchorBeadsDir = resolved[0].result.BeadsDir
+				}
+				allIssues = append(allIssues, foreignDependencyRows(ctx, reader, resolved[0].fullID, depTypes, allIssues, crossRigPresentationResolver(anchorBeadsDir))...)
 				warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, allIssues)
 			}
 		}
@@ -1269,8 +1341,8 @@ Examples:
 			default:
 				idStr = iss.ID
 			}
-			fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
-				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
+			fmt.Printf("  %s: %s [P%d] (%s) via %s%s\n",
+				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType, externalRowMarker(iss))
 		}
 		fmt.Println()
 		return nil
@@ -1560,6 +1632,17 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 	if root != nil {
 		hasOpenBlockers := false
 		for _, child := range children[root.ID] {
+			if child.External {
+				// A foreign leaf holds the root under the policy's own rule
+				// (GH#5784): blocks and conditional-blocks only, and an
+				// unreadable target holds it too.
+				if (child.EdgeFromParent == types.DepBlocks || child.EdgeFromParent == types.DepConditionalBlocks) &&
+					(child.Unresolved != "" || (child.Status != types.StatusClosed && child.Status != types.StatusPinned)) {
+					hasOpenBlockers = true
+					break
+				}
+				continue
+			}
 			if (child.Status == types.StatusOpen || child.Status == types.StatusInProgress) &&
 				child.EdgeFromParent.IsBlockingEdge() {
 				hasOpenBlockers = true
@@ -1646,6 +1729,10 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 		}
 		return fmt.Sprintf("%s (external)", idStr)
 	}
+	if node.External && node.Unresolved != "" {
+		return fmt.Sprintf("%s: %s%s (external)", ui.RenderWarn(node.ID),
+			ui.RenderMuted("unresolved: "+node.Unresolved), treeEdgeLabel(node))
+	}
 
 	// Color the ID based on status
 	var idStr string
@@ -1667,6 +1754,9 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 		idStr, node.Title, node.Priority, node.Status)
 
 	line += treeEdgeLabel(node)
+	if node.External {
+		line += " (external)"
+	}
 
 	// Add READY/BLOCKED indicator for root node
 	if node.Status == types.StatusOpen && node.Depth == 0 {

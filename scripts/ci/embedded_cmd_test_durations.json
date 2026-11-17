@@ -120,7 +120,7 @@
     "TestEmbeddedDepBTreeAndCycles": 34.46,
     "TestEmbeddedDepBulkNoCycleCheckKeepsWholeGraphGate": 10.71,
     "TestEmbeddedDepConcurrent": 68.24,
-    "TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge": 29.15,
+    "TestEmbeddedDepListSingleIDRendersResolvableForeignEdge": 29.15,
     "TestEmbeddedDepNoCycleCheck": 39.5,
     "TestEmbeddedDiff": 29.84,
     "TestEmbeddedDiffConcurrent": 40.71,

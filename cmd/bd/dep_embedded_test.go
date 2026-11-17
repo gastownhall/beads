@@ -348,9 +348,11 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 			t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
 		}
 		// schema_version is outputJSON's envelope on every object; the
-		// warning must not add a key beside it.
-		if len(got) != 5 || got["schema_version"] == nil || got["status"] != "added" || got["issue_id"] != src.ID || got["depends_on_id"] != "zz-404" || got["type"] != "blocks" {
-			t.Errorf("stdout JSON = %v, want exactly status, issue_id, depends_on_id and type (plus schema_version)", got)
+		// warning must not add a key beside it. The cross-prefix target
+		// selects external storage, so the GH#5784 external marker rides
+		// along (AC-5).
+		if len(got) != 6 || got["schema_version"] == nil || got["status"] != "added" || got["issue_id"] != src.ID || got["depends_on_id"] != "zz-404" || got["type"] != "blocks" || got["external"] != true {
+			t.Errorf("stdout JSON = %v, want exactly status, issue_id, depends_on_id, type and external (plus schema_version)", got)
 		}
 		if !strings.Contains(stderr, "zz-404 was not found") || !strings.Contains(stderr, "bd dep remove "+src.ID+" zz-404") {
 			t.Fatalf("stderr = %q, want the unresolved-target warning", stderr)

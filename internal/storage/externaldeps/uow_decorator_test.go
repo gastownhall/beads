@@ -116,6 +116,9 @@ func (u *fakeIssueUseCase) GetBlockedIssues(_ context.Context, _ types.WorkFilte
 
 type fakeDependencyUseCase struct {
 	domain.DependencyUseCase
+	// external is what the narrow candidate read answers: the live sources'
+	// blocking external edges. Those edges are stored edges too, so the
+	// per-issue reads answer them with records and wispDeps.
 	external map[string][]*types.Dependency
 	records  map[string][]*types.Dependency
 	wispDeps map[string][]*types.Dependency
@@ -142,10 +145,16 @@ func (u *fakeDependencyUseCase) GetExternalBlockingDependencyRecords(context.Con
 	return u.external, nil
 }
 
+// GetIssueDependencyRecords answers every edge stored for each id, issue or
+// wisp alike, as the SQL read does (GetDependencyRecordsForIssuesInTx
+// partitions the ids by table).
 func (u *fakeDependencyUseCase) GetIssueDependencyRecords(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
 	result := make(map[string][]*types.Dependency, len(ids))
 	for _, id := range ids {
-		result[id] = u.records[id]
+		edges := slices.Concat(u.records[id], u.wispDeps[id], u.external[id])
+		if len(edges) > 0 {
+			result[id] = edges
+		}
 	}
 	return result, nil
 }

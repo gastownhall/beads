@@ -391,6 +391,15 @@ const CapCloseAutoCloseMolecule = "issues.close.autoCloseMolecule"
 // because the store is remote.
 const CapExternalDependencies = "policy.external_dependencies"
 
+// CapCrossRigDependencies is the CONDITIONAL behavior capability announcing
+// that the server's policy also enforces bare cross-rig issue ids (a
+// cross-prefix `bd dep add` target stored in depends_on_external), spelled
+// exactly as httpapi's constant of the same name. httpclient.Store answers
+// storage.CrossRigDependencyPolicyProber from it. A server that advertises
+// CapExternalDependencies but not this token predates cross-rig enforcement,
+// so the client's decorator composes that part itself.
+const CapCrossRigDependencies = "policy.cross_rig_dependencies"
+
 // ClientWireRevision is the wire shape this client was built to speak and
 // decode, mirroring internal/httpapi/wire_revision.go's CurrentWireRevision.
 // It is sent as the Bd-Wire-Revision request header on every request

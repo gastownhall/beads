@@ -350,6 +350,7 @@ func runServe() error {
 			// the external-dependency policy (wireStorageDecorators); the
 			// handshake advertises it only if that layer is really there.
 			ExternalDependencyPolicy: externaldeps.Applied(store),
+			CrossRigDependencyPolicy: externaldeps.EnforcesCrossRig(store),
 			Workspace:                info,
 			SchemaVersion:            JSONSchemaVersion,
 			Mode:                     serveResolvedMode(info, db),
@@ -366,7 +367,7 @@ func runServe() error {
 	if provider != nil {
 		// Remove hooks, then restore the external-dependency policy. The policy
 		// is not a hook and must remain on every served ready/claim path.
-		provider = wireExternalDependencyUOWProvider(provider)
+		provider = wireExternalDependencyUOWProvider(provider, func() string { return info.BeadsDir })
 	}
 	if provider == nil {
 		// Server, external-server and shared-server workspaces: PersistentPreRunE
@@ -413,7 +414,7 @@ func runServe() error {
 				fmt.Fprintf(os.Stderr, "bd serve: closing the unit-of-work provider: %v\n", err)
 			}
 		}()
-		provider = wireExternalDependencyUOWProvider(p)
+		provider = wireExternalDependencyUOWProvider(p, func() string { return info.BeadsDir })
 	}
 
 	defer startServeEventsJournalMaintenance(info.BeadsDir, provider)()
@@ -428,6 +429,7 @@ func runServe() error {
 		// one.
 		EventsJournalEnabled:     eventsjournal.EnabledFor(info.BeadsDir),
 		ExternalDependencyPolicy: externaldeps.AppliedToProvider(provider),
+		CrossRigDependencyPolicy: externaldeps.ProviderEnforcesCrossRig(provider),
 		Workspace:                info,
 		SchemaVersion:            JSONSchemaVersion,
 		Mode:                     serveResolvedMode(info, db),

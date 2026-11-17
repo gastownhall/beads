@@ -307,24 +307,24 @@ const maxEdgeCountAnchors = 100
 // same shape issueops.GetAllDependencyRecordsInTx returns for a local
 // backend.
 //
-// It overrides the unsupported_gen.go stub (design 3.6, HIGH-1): the
-// external-deps decorator's loadBlockingState falls back to this method
-// whenever the inner store implements neither
-// storage.ExternalDependencyPolicyProber-reported server enforcement nor the
-// narrower storage.ExternalDependencyQueryStore, which is exactly this
-// backend's shape against a server that does NOT advertise
-// wire.CapExternalDependencies. Refusing here (the old unsupported behavior)
-// would make `bd ready`/`bd close`/claim hard-fail against such a server
-// instead of correctly enforcing the policy client-side — the regression
-// HIGH-1 reports.
+// It overrides the unsupported_gen.go stub (design 3.6, HIGH-1), so a
+// caller of the legacy seam that wants the whole graph gets it over the wire
+// instead of a refusal.
+//
+// The external-dependency policy no longer reaches it. Against a server that
+// leaves a reference kind to its clients (one without
+// wire.CapExternalDependencies, or without the cross-rig policy token),
+// externaldeps composes from bounded reads instead (remote_roles.go): the
+// ready rows' own edges for the ready page (its count is the server's own,
+// or a judged one-row ready read), the live listing for the blocked listing,
+// and an edge read of the named ids for every per-issue question.
 //
 // There is no single wire operation for "every dependency in the workspace":
 // listDependencies is anchored at up to maxEdgeCountAnchors ids per call, so
-// this walks every issue id over the full-exhaustion list (allIssueIDs) and
-// reads its edges back in chunks of that size. It is O(issues/100) requests,
-// which only this fallback path ever pays — a server that advertises the
-// capability, or that implements the narrower query, never reaches this
-// method.
+// this walks every issue id over the full-exhaustion list (allIssueIDs),
+// closed ones included, and reads its edges back in chunks of that size. It
+// is O(issues/100) requests, which is why no per-command policy read may
+// pay it.
 func (s *Store) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
 	ids, err := s.allIssueIDs(ctx)
 	if err != nil {

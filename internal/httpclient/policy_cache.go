@@ -41,9 +41,13 @@ type policyCache struct {
 }
 
 type policyCacheEntry struct {
-	URL                  string    `json:"url"`
-	ProjectID            string    `json:"project_id"`
-	ExternalDependencies bool      `json:"external_dependencies"`
+	URL                  string `json:"url"`
+	ProjectID            string `json:"project_id"`
+	ExternalDependencies bool   `json:"external_dependencies"`
+	// CrossRigDependencies is the handshake's wire.CapCrossRigDependencies
+	// bit. An entry an older bd wrote has none, so loadCrossRig misses on it
+	// and the next probe asks the server.
+	CrossRigDependencies *bool     `json:"cross_rig_dependencies,omitempty"`
 	CheckedAt            time.Time `json:"checked_at"`
 }
 
@@ -93,31 +97,59 @@ func policyCacheTTL() time.Duration {
 // load returns the cached answer while it is fresh. An entry written in the
 // future (a clock that stepped back) is not trusted.
 func (c *policyCache) load() (enforced, ok bool) {
-	if c == nil {
-		return false, false
-	}
-	raw, err := os.ReadFile(c.path)
-	if err != nil {
-		return false, false
-	}
-	var e policyCacheEntry
-	if json.Unmarshal(raw, &e) != nil || e.URL != c.url || e.ProjectID != c.projectID {
-		return false, false
-	}
-	age := c.now().Sub(e.CheckedAt)
-	if age < 0 || age >= c.ttl {
+	e, ok := c.fresh()
+	if !ok {
 		return false, false
 	}
 	return e.ExternalDependencies, true
 }
 
+// loadCrossRig is load for the cross-rig bit. An entry that does not record
+// it is a miss.
+func (c *policyCache) loadCrossRig() (enforced, ok bool) {
+	e, ok := c.fresh()
+	if !ok || e.CrossRigDependencies == nil {
+		return false, false
+	}
+	return *e.CrossRigDependencies, true
+}
+
+func (c *policyCache) fresh() (policyCacheEntry, bool) {
+	if c == nil {
+		return policyCacheEntry{}, false
+	}
+	raw, err := os.ReadFile(c.path)
+	if err != nil {
+		return policyCacheEntry{}, false
+	}
+	var e policyCacheEntry
+	if json.Unmarshal(raw, &e) != nil || e.URL != c.url || e.ProjectID != c.projectID {
+		return policyCacheEntry{}, false
+	}
+	age := c.now().Sub(e.CheckedAt)
+	if age < 0 || age >= c.ttl {
+		return policyCacheEntry{}, false
+	}
+	return e, true
+}
+
 // store records an answer the handshake just gave. It is best effort: a
 // cache that cannot be written only costs the next process a handshake.
 func (c *policyCache) store(enforced bool) {
+	c.write(policyCacheEntry{ExternalDependencies: enforced})
+}
+
+// storeAnswers records both policy bits of one handshake.
+func (c *policyCache) storeAnswers(external, crossRig bool) {
+	c.write(policyCacheEntry{ExternalDependencies: external, CrossRigDependencies: &crossRig})
+}
+
+func (c *policyCache) write(e policyCacheEntry) {
 	if c == nil {
 		return
 	}
-	raw, err := json.Marshal(policyCacheEntry{URL: c.url, ProjectID: c.projectID, ExternalDependencies: enforced, CheckedAt: c.now().UTC()})
+	e.URL, e.ProjectID, e.CheckedAt = c.url, c.projectID, c.now().UTC()
+	raw, err := json.Marshal(e)
 	if err != nil {
 		return
 	}

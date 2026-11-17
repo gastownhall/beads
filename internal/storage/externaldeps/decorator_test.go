@@ -17,8 +17,11 @@ import (
 
 type fakeStore struct {
 	storage.DoltStorage
-	ready       []*types.Issue
-	blocked     []*types.BlockedIssue
+	ready   []*types.Issue
+	blocked []*types.BlockedIssue
+	// others are issues neither ready nor blocked (a closed one, say):
+	// GetIssue finds them, and a served listing returns them.
+	others      []*types.Issue
 	tree        []*types.TreeNode
 	deps        map[string][]*types.Dependency
 	labels      map[string][]*types.Issue
@@ -31,6 +34,10 @@ type fakeStore struct {
 	batch       *fakeBatchCloser
 	enforced    bool
 	enforcedErr error
+	// capabilityOnly models a server that advertises
+	// policy.external_dependencies but predates policy.cross_rig_dependencies:
+	// it enforces capability refs while bare cross-rig ids stay the client's.
+	capabilityOnly bool
 	// liveProbes records storage.LivePolicyProbe for every policy probe, in
 	// order.
 	liveProbes []bool
@@ -58,6 +65,16 @@ func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lif
 // pins loadBlockingState's skip branch.
 func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
 	f.liveProbes = append(f.liveProbes, storage.LivePolicyProbe(ctx))
+	return f.enforced, f.enforcedErr
+}
+
+// ServerEnforcesCrossRigDependencyPolicy makes every fakeStore satisfy
+// storage.CrossRigDependencyPolicyProber with the same answer as the
+// capability probe, unless capabilityOnly models an older server.
+func (f *fakeStore) ServerEnforcesCrossRigDependencyPolicy(ctx context.Context) (bool, error) {
+	if f.capabilityOnly {
+		return false, nil
+	}
 	return f.enforced, f.enforcedErr
 }
 
@@ -203,8 +220,18 @@ func (f *fakeStore) GetAllDependencyRecords(_ context.Context) (map[string][]*ty
 	return f.deps, nil
 }
 
-func (f *fakeStore) GetExternalBlockingDependencyRecords(_ context.Context) (map[string][]*types.Dependency, error) {
-	return f.deps, nil
+// GetExternalBlockingDependencyRecords models the narrow candidate read: the
+// stored edges of every source except a closed or pinned one. An edge whose
+// source the fake does not hold stays a candidate.
+func (f *fakeStore) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	result := make(map[string][]*types.Dependency, len(f.deps))
+	for id, deps := range f.deps {
+		if source, _ := f.GetIssue(ctx, id); source != nil && (source.Status == types.StatusClosed || source.Status == types.StatusPinned) {
+			continue
+		}
+		result[id] = deps
+	}
+	return result, nil
 }
 
 func (f *fakeStore) GetDependencyRecordsForIssues(_ context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
@@ -262,6 +289,11 @@ func (f *fakeStore) GetIssue(_ context.Context, id string) (*types.Issue, error)
 	for _, blocked := range f.blocked {
 		if blocked.ID == id {
 			return &blocked.Issue, nil
+		}
+	}
+	for _, issue := range f.others {
+		if issue.ID == id {
+			return issue, nil
 		}
 	}
 	return nil, nil
@@ -1172,7 +1204,7 @@ func TestUnavailableProjectWarnsOnce(t *testing.T) {
 	}
 	store := testStore(raw, &fakeStore{}, false)
 	var warnings []ProjectName
-	store.warnProject = func(project ProjectName) { warnings = append(warnings, project) }
+	store.warnings.project = func(project ProjectName) { warnings = append(warnings, project) }
 
 	for range 2 {
 		if _, err := store.GetReadyWork(t.Context(), types.WorkFilter{}); err != nil {

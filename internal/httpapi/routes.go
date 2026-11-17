@@ -380,10 +380,19 @@ const CapIssuesUpdateGates = "issues.update.gates"
 // token is never advertised by a server that does not enforce the policy.
 const CapExternalDependencies = "policy.external_dependencies"
 
+// CapCrossRigDependencies is the CONDITIONAL behavior capability announcing
+// that the same policy also enforces bare cross-rig issue ids: an issue whose
+// blocks or conditional-blocks edge names an issue in another rig (stored in
+// depends_on_external by a cross-prefix `bd dep add`) is blocked until that
+// issue, resolved through this server's routes, is closed or pinned. A server
+// that advertises CapExternalDependencies without this token predates it, and
+// a client composes the cross-rig part itself (Config.CrossRigDependencyPolicy).
+const CapCrossRigDependencies = "policy.cross_rig_dependencies"
+
 // conditionalCapabilities are the behavior tokens a server advertises only
 // when its configuration says the behavior is in force. Capabilities() never
 // lists them; advertisedCapabilities adds each one whose condition holds.
-var conditionalCapabilities = []string{CapExternalDependencies}
+var conditionalCapabilities = []string{CapExternalDependencies, CapCrossRigDependencies}
 
 // CapIssuesCloseAutoCloseMolecule is the behavior capability that advertises
 // CloseIssueRequest.auto_close_molecule and BatchCloseRequest.auto_close_molecule
@@ -1218,6 +1227,9 @@ func advertisedCapabilities(cfg Config) []string {
 	out := Capabilities()
 	if cfg.ExternalDependencyPolicy {
 		out = append(out, CapExternalDependencies)
+		if cfg.CrossRigDependencyPolicy {
+			out = append(out, CapCrossRigDependencies)
+		}
 		slices.Sort(out)
 	}
 	return out
