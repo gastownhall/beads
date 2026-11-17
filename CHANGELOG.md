@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-rc.3] - 2026-11-18
+
+Third release candidate for 1.4.0. It adds no schema migration, so upgrading
+from 1.4.0-rc.1 or rc.2 is a binary swap. Coming from 1.3.x, the consented
+migration and the [1.4.0-rc.2] and [1.4.0-rc.1] **Upgrade notes** still
+apply, as amended below. rc.3 makes three changes:
+- telemetry stops exporting issue content, which rc.1 and rc.2 still did
+  despite the rc.1 notes;
+- bd ranks a release candidate below its release;
+- in server and proxied-server workspaces, moving from a candidate to 1.4.0
+  updates the workspace's version marker.
+
+### Upgrade notes
+
+- **Trace queries and dashboards that read `bd.args` must change**
+  ([#8510](https://github.com/gastownhall/beads/pull/8510), backport of
+  [#8508](https://github.com/gastownhall/beads/pull/8508)). The command span's
+  `bd.args` now holds the command path and the long names of the flags that
+  were set, sorted, and never an argument or a flag value:
+  `bd create "title" -d "text" -q` records `create --description --quiet`.
+  The storage spans no longer carry `bd.query`, `bd.label`, `bd.label.old`,
+  `bd.label.new` or `db.commit_msg`, and the `hook.stdout` and `hook.stderr`
+  events carry only `bytes`. `bd.command`, the span names and the metrics are
+  unchanged.
+- **Release candidate testers: from rc.3 on, bd knows 1.4.0 is newer**
+  ([#8512](https://github.com/gastownhall/beads/pull/8512), backport of
+  [#6596](https://github.com/gastownhall/beads/pull/6596) by rjgeng, and
+  [#8513](https://github.com/gastownhall/beads/pull/8513), backport of
+  [#8511](https://github.com/gastownhall/beads/pull/8511)). This replaces the
+  `bd doctor` bullet under the [1.4.0-rc.1] **Release candidate testers**.
+  The changes:
+  - In server mode, rc.3's `bd doctor` reports when 1.4.0 is out, if you run
+    it in a terminal. With `--json`, or when its output is not a terminal (an
+    agent, a script, CI), it skips the update check.
+  - rc.1 and rc.2 never will, and embedded and proxied-server workspaces have
+    no `bd doctor` version check. Reinstall 1.4.0 by hand there, and wherever
+    `bd doctor` runs only under an agent or a script.
+  - Moving from a candidate to its release now counts as an upgrade, as
+    moving to a newer release does. The first bd command after the move sees
+    it: `bd ready` and `bd list` print the one-time notice, and
+    `bd upgrade status` or `bd upgrade review` report it only if run first.
+    Moving back does not count.
+  - In server and proxied-server workspaces, the move also records the
+    release over the candidate in the version marker, from any candidate,
+    rc.1 and rc.2 included. Embedded workspaces keep the version they
+    recorded, as on any upgrade.
+  - Server-mode `bd doctor` reports git hooks installed by a candidate as
+    outdated under its release. After moving to 1.4.0, run
+    `bd hooks install` in any mode: it rewrites only the beads section, and
+    the `--force` that `bd doctor` suggests is a no-op.
+  - The Claude plugin check (server mode, `CLAUDECODE=1`, `bd doctor` in a
+    terminal) warns when the plugin is a candidate and the beads-mcp release
+    is on PyPI.
+
+### Security
+
+- **Telemetry spans no longer carry issue content**
+  ([#8510](https://github.com/gastownhall/beads/pull/8510), backport of
+  [#8508](https://github.com/gastownhall/beads/pull/8508); reported by wespd
+  in [#8505](https://github.com/gastownhall/beads/issues/8505)). This corrects
+  the [1.4.0-rc.1] **Security** entry "Telemetry no longer exports the raw
+  command line", which said the `bd.args` span attribute is scrubbed. The
+  scrub removed only passwords.
+  - With telemetry on and the console trace exporter selected
+    (`BD_OTEL_ENABLED=true` with `OTEL_TRACES_EXPORTER=console`, or the
+    legacy `BD_OTEL_STDOUT=true` on its own, which turns telemetry on too),
+    rc.1 and rc.2 still exported issue titles, descriptions, notes, labels,
+    comments, close reasons and search text in `bd.args`.
+  - The storage spans also carried search text, label names and commit
+    messages, and the hook events carried a hook's output, which often echoes
+    the issue.
+  - bd has no OTLP trace exporter, so this content went to stderr only, and
+    the rc.1 and rc.2 OTLP metrics did not carry it. Logs that kept bd's
+    stderr, such as CI logs or agent transcripts, can hold it.
+
+  Now no span or event carries issue content (see **Upgrade notes**). A failed
+  span still records its error message, which can quote the input that failed
+  ([#8509](https://github.com/gastownhall/beads/issues/8509)).
+
+### Fixed
+
+- **bd ranks a release candidate below its release**
+  ([#8512](https://github.com/gastownhall/beads/pull/8512), backport of
+  [#6596](https://github.com/gastownhall/beads/pull/6596) by rjgeng). The
+  version comparison read `1.4.0-rc.3` as `1.4.0.3`, so a candidate sorted
+  above its own release
+  ([#6595](https://github.com/gastownhall/beads/issues/6595)). Versions now
+  order by semver 2.0:
+  - a pre-release sorts below its release;
+  - its identifiers compare one by one, numbers numerically (`rc.2` <
+    `rc.10`) and below words, and words in ASCII order (`beta` < `rc`);
+  - build metadata (`+...`) is ignored.
+- **Moving from a release candidate to its release updates the version
+  marker of a server or proxied-server workspace**
+  ([#8513](https://github.com/gastownhall/beads/pull/8513), backport of
+  [#8511](https://github.com/gastownhall/beads/pull/8511)). The marker
+  comparison read the dotted candidate as newer, too, so with the fix above
+  alone, 1.4.0 would still have refused to record itself over a workspace a
+  1.4.0-rc.N had prepared.
+  - A server workspace would have kept the candidate's marker, and
+    `bd doctor` would have shown `Database: version 1.4.0-rc.N (CLI: 1.4.0)`
+    until a bare `bd migrate`.
+  - A proxied-server workspace would have kept it silently.
+
+  The marker comparison now ignores everything from the first `-` or `+`, so a
+  release records itself over its own candidates without raising the
+  high-water mark, and a candidate of an earlier release is still refused.
+  Moving back from 1.4.0 to a candidate is not an upgrade, so the marker keeps
+  1.4.0 and the candidate's server-mode `bd doctor` shows
+  `Database: version 1.4.0 (CLI: 1.4.0-rc.N)`.
+
+### Known issues
+
+The [1.4.0-rc.2] and [1.4.0-rc.1] **Known issues** still apply.
+
 ## [1.4.0-rc.2] - 2026-11-13
 
 Second release candidate for 1.4.0. It adds no schema migration, so upgrading

@@ -228,6 +228,18 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.4.0-rc.3",
+		Date:    "2026-11-18",
+		Changes: []string{
+			"RC: third candidate for 1.4.0: rc.2 plus the telemetry content fix and release-candidate version ordering. No new migration: upgrading from 1.4.0-rc.1 or rc.2 is a binary swap; from 1.3.x the consented migration and every 1.4.0-rc.2 and rc.1 entry below still apply, as amended here. Published as a GitHub prerelease only (Homebrew, npm and PyPI stay on 1.3.4). From rc.3, server-mode 'bd doctor' run in a terminal reports when 1.4.0 is out (with --json or output that is not a terminal, as under an agent or a script, it skips the update check); rc.1 and rc.2 never will, and embedded and proxied-server workspaces have no 'bd doctor' version check, so reinstall 1.4.0 by hand there and wherever 'bd doctor' runs only under an agent or a script.",
+			"UPGRADE: telemetry's command span attribute bd.args now holds the command path and the long names of the flags that were set, sorted, never an argument or a flag value ('bd create \"t\" -d \"x\" -q' records 'create --description --quiet'); the storage spans no longer carry bd.query, bd.label, bd.label.old, bd.label.new or db.commit_msg, and the hook.stdout/hook.stderr events carry only bytes; trace queries that read these values must change (#8508).",
+			"UPGRADE: moving from a release candidate to its release counts as an upgrade, as moving to a newer release does (the first bd command after the move sees it: the one-time notice from 'bd ready' or 'bd list', or 'bd upgrade status'/'bd upgrade review' if run first) and, in server and proxied-server workspaces, records the release over the candidate in the version marker; moving back does not count. Server-mode 'bd doctor' reports hooks installed by a candidate as outdated under its release: run 'bd hooks install' after moving to 1.4.0, in any mode (--force is a no-op) (#6596, #8511).",
+			"SECURITY: correction to the 1.4.0-rc.1 note that telemetry no longer exports the command line: with the console trace exporter on (BD_OTEL_ENABLED=true with OTEL_TRACES_EXPORTER=console, or BD_OTEL_STDOUT=true on its own), rc.1 and rc.2 still exported issue titles, descriptions, notes, labels, comments, close reasons and search text in bd.args, plus search text, label names, commit messages and hook output on other spans, to stderr only (no OTLP trace exporter; the rc.1 and rc.2 metrics did not carry it) (#8505, #8508). A failed span still records its error message (#8509).",
+			"FIX: versions order by semver 2.0, so a release candidate sorts below its release (1.4.0-rc.3 used to read as 1.4.0.3) (#6595, #6596 by rjgeng); a server or proxied-server workspace's version marker records 1.4.0 over a 1.4.0-rc.N instead of keeping the candidate's, which 'bd doctor' showed as 'Database: version 1.4.0-rc.N (CLI: 1.4.0)' in server mode until a bare 'bd migrate' (#8511).",
+			"KNOWN: the 1.4.0-rc.2 and rc.1 known issues still apply.",
+		},
+	},
+	{
 		Version: "1.4.0-rc.2",
 		Date:    "2026-11-13",
 		Changes: []string{
