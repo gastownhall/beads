@@ -74,9 +74,12 @@ func (c *reopenPromotionConn) QueryContext(_ context.Context, query string, args
 		// commit path under test still reaches DOLT_COMMIT.
 		return &reopenPromotionRows{columns: []string{"count"}, values: [][]driver.Value{{int64(1)}}}, nil
 	}
-	if strings.Contains(query, "CALL DOLT_ADD") && len(args) == 1 {
-		if table, ok := args[0].Value.(string); ok {
-			c.driver.doltAddTables = append(c.driver.doltAddTables, table)
+	if strings.Contains(query, "CALL DOLT_ADD") {
+		// Every argument names a staged table, however many one call binds.
+		for _, arg := range args {
+			if table, ok := arg.Value.(string); ok {
+				c.driver.doltAddTables = append(c.driver.doltAddTables, table)
+			}
 		}
 	}
 	if strings.Contains(query, "CALL DOLT_COMMIT") {
@@ -150,7 +153,8 @@ func TestReopenIssuePromotionRaceUsesTransactionRouting(t *testing.T) {
 	if !routingDriver.issueUpdated {
 		t.Fatal("promoted permanent issue was not updated")
 	}
-	if got, want := routingDriver.doltAddTables, []string{"issues", "events"}; !reflect.DeepEqual(got, want) {
+	// The table SET is the contract; publication stages it in name order.
+	if got, want := sortedCopy(routingDriver.doltAddTables...), []string{"events", "issues"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("DOLT_ADD tables = %v, want %v for promoted permanent issue", got, want)
 	}
 	if !routingDriver.doltCommitCalled {

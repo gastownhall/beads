@@ -237,53 +237,60 @@ func newClaimCommitBoundaryStore(d *claimCommitBoundaryDriver) *DoltStore {
 	return &DoltStore{db: sql.OpenDB(d)}
 }
 
-func TestClaimIssueDoltCommitResponseLossIsIndeterminateAndNotReplayed(t *testing.T) {
+// TestClaimIssueDoltCommitResponseLossAfterSQLCommitIsAppliedAndNotReplayed
+// pins the post-commit publication contract (GH#5752) on the claim path: the
+// Dolt history commit runs only after the claim's SQL transaction committed,
+// so losing its response cannot roll the claim back. The claim is applied —
+// reporting it as failed or indeterminate would invite a caller retry onto a
+// claim it already holds — and the SQL body is not replayed.
+func TestClaimIssueDoltCommitResponseLossAfterSQLCommitIsAppliedAndNotReplayed(t *testing.T) {
 	driver := &claimCommitBoundaryDriver{commitErr: testConnectionLoss}
 	store := newClaimCommitBoundaryStore(driver)
 	t.Cleanup(func() { _ = store.db.Close() })
 
-	err := store.ClaimIssue(context.Background(), "claim-boundary", "alice")
-	if !errors.Is(err, ErrCommitIndeterminate) {
-		t.Fatalf("ClaimIssue() error = %v, want ErrCommitIndeterminate", err)
-	}
-	if !errors.Is(err, testConnectionLoss) {
-		t.Fatalf("ClaimIssue() error = %v, want cause %v", err, testConnectionLoss)
+	if err := store.ClaimIssue(context.Background(), "claim-boundary", "alice"); err != nil {
+		t.Fatalf("ClaimIssue() error = %v, want nil: the claim's SQL transaction committed before the Dolt commit", err)
 	}
 
 	driver.mu.Lock()
 	defer driver.mu.Unlock()
 	if driver.claimMutations != 1 {
-		t.Fatalf("claim mutations = %d, want 1", driver.claimMutations)
+		t.Fatalf("claim mutations = %d, want 1 (no replay)", driver.claimMutations)
 	}
 	if driver.doltCommits != 1 {
 		t.Fatalf("DOLT_COMMIT calls = %d, want 1", driver.doltCommits)
 	}
-	if driver.txCommits != 0 || driver.txRollbacks != 1 {
-		t.Fatalf("SQL transaction outcomes = commits:%d rollbacks:%d, want commits:0 rollbacks:1", driver.txCommits, driver.txRollbacks)
+	if driver.txCommits != 1 || driver.txRollbacks != 0 {
+		t.Fatalf("SQL transaction outcomes = commits:%d rollbacks:%d, want commits:1 rollbacks:0", driver.txCommits, driver.txRollbacks)
 	}
 }
 
-func TestClaimIssueDoltAddFailureCannotReportSuccess(t *testing.T) {
+// TestClaimIssueDoltAddFailureAfterSQLCommitKeepsTheClaim is the staging twin:
+// a DOLT_ADD failure after the SQL commit stops publication before DOLT_COMMIT
+// but cannot unwind the committed claim, so the claim reports applied.
+func TestClaimIssueDoltAddFailureAfterSQLCommitKeepsTheClaim(t *testing.T) {
 	stageErr := errors.New("stage failed")
 	driver := &claimCommitBoundaryDriver{stageErr: stageErr, nothingToCommit: true}
 	store := newClaimCommitBoundaryStore(driver)
 	t.Cleanup(func() { _ = store.db.Close() })
 
-	err := store.ClaimIssue(context.Background(), "claim-boundary", "alice")
-	if !errors.Is(err, stageErr) {
-		t.Fatalf("ClaimIssue() error = %v, want stage failure %v", err, stageErr)
+	if err := store.ClaimIssue(context.Background(), "claim-boundary", "alice"); err != nil {
+		t.Fatalf("ClaimIssue() error = %v, want nil: the claim's SQL transaction committed before DOLT_ADD", err)
 	}
 
 	driver.mu.Lock()
 	defer driver.mu.Unlock()
+	if driver.claimMutations != 1 {
+		t.Fatalf("claim mutations = %d, want 1 (no replay)", driver.claimMutations)
+	}
 	if driver.stageCalls != 1 {
 		t.Fatalf("DOLT_ADD calls = %d, want 1", driver.stageCalls)
 	}
 	if driver.doltCommits != 0 {
 		t.Fatalf("DOLT_COMMIT calls = %d, want 0 after staging failure", driver.doltCommits)
 	}
-	if driver.txCommits != 0 || driver.txRollbacks != 1 {
-		t.Fatalf("SQL transaction outcomes = commits:%d rollbacks:%d, want commits:0 rollbacks:1", driver.txCommits, driver.txRollbacks)
+	if driver.txCommits != 1 || driver.txRollbacks != 0 {
+		t.Fatalf("SQL transaction outcomes = commits:%d rollbacks:%d, want commits:1 rollbacks:0", driver.txCommits, driver.txRollbacks)
 	}
 }
 
@@ -296,11 +303,11 @@ func TestClaimReadyIssueDoltCommitResponseLossDoesNotDoubleClaim(t *testing.T) {
 	t.Cleanup(func() { _ = store.db.Close() })
 
 	claimed, err := store.ClaimReadyIssue(context.Background(), types.WorkFilter{}, "alice")
-	if !errors.Is(err, ErrCommitIndeterminate) {
-		t.Fatalf("ClaimReadyIssue() error = %v, want ErrCommitIndeterminate", err)
+	if err != nil {
+		t.Fatalf("ClaimReadyIssue() error = %v, want nil: the claim's SQL transaction committed before the Dolt commit", err)
 	}
-	if claimed != nil {
-		t.Fatalf("ClaimReadyIssue() claimed = %+v, want nil while commit outcome is indeterminate", claimed)
+	if claimed == nil || claimed.ID != "ready-first" {
+		t.Fatalf("ClaimReadyIssue() claimed = %+v, want ready-first", claimed)
 	}
 
 	driver.mu.Lock()
@@ -501,8 +508,11 @@ func TestIssueOperationsUpdateGuardedVerifyFailureDoesNotRecordCircuitSuccess(t 
 }
 
 func TestUpdateIssueCheckedMixedCoordinationCommitLossIsNotMasked(t *testing.T) {
+	// The SQL COMMIT response is lost: whether the mixed update landed is
+	// unknown, and the coordination fields re-reading as wanted must not mask
+	// that for the ordinary field that cannot be re-read.
 	driver := &claimCommitBoundaryDriver{
-		commitErr:      testConnectionLoss,
+		sqlCommitErr:   testConnectionLoss,
 		checkedUpdate:  true,
 		verifyAssignee: "alice",
 		verifyStatus:   types.StatusInProgress,
@@ -533,8 +543,8 @@ func TestUpdateIssueCheckedMixedCoordinationCommitLossIsNotMasked(t *testing.T) 
 	if driver.updateMutations != 1 || driver.eventInserts != 1 {
 		t.Fatalf("mixed update attempts = updates:%d events:%d, want updates:1 events:1", driver.updateMutations, driver.eventInserts)
 	}
-	if driver.txAttempts != 1 || driver.doltCommits != 1 || driver.txRollbacks != 1 {
-		t.Fatalf("transaction outcomes = attempts:%d Dolt commits:%d rollbacks:%d, want 1, 1, 1", driver.txAttempts, driver.doltCommits, driver.txRollbacks)
+	if driver.txAttempts != 1 || driver.txCommits != 1 || driver.doltCommits != 0 {
+		t.Fatalf("transaction outcomes = attempts:%d SQL commits:%d Dolt commits:%d, want 1, 1, 0 (no publication after an indeterminate SQL commit)", driver.txAttempts, driver.txCommits, driver.doltCommits)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	storeops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -44,12 +43,16 @@ var _ issueops.Deleter = (*deleter)(nil)
 // like a mutation to everything watching the store.
 //
 // THE VERSION-CONTROL ENTRY IS ONE PER DELETION, recorded here rather than in
-// the shared body because the two backends mint it differently: this one
-// INSIDE the write transaction, where the embedded store can only publish
-// after its SQL commit, on a second connection. That is why the role promises
-// exactly one entry in the STEADY STATE and only this leg makes it atomic with
-// the deletion. A deletion confined to the wisp tables touches only tables
-// this plane ignores, so DOLT_COMMIT finds nothing to commit and records none.
+// the shared body, and published AFTER the SQL transaction committed, on a
+// connection with no transaction open, exactly as the embedded store does
+// (GH#5752: staging inside the open transaction builds the Dolt commit from
+// the BEGIN-time root and can write a concurrent writer's rows back). The
+// deletion and its history entry are therefore NOT atomic: a publication
+// failure after the commit leaves the deletion applied and is counted and
+// logged, and a concurrent writer's commit can absorb the rows under its own
+// message, which is why the role promises exactly one entry only in the
+// STEADY STATE. A deletion confined to the wisp tables touches only tables
+// this plane ignores, so the staged-set guard finds nothing and records none.
 func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issueops.DeleteResult, error) {
 	if err := workapi.ValidateDeleteRequest(req); err != nil {
 		return issueops.DeleteResult{}, err
@@ -74,38 +77,7 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 		// failure: reset so a rolled-back attempt's result never leaks into
 		// the value returned below (the withRetryTx closure contract).
 		result = issueops.DeleteResult{}
-		if err := run(tx); err != nil {
-			return err
-		}
-		if result.Deleted == 0 {
-			return nil
-		}
-		// Batch/off auto-commit (bd-4wamg): defer the version commit to an
-		// explicit commit point, matching doltAddAndCommitInTx.
-		if storeops.VersionCommitDeferred(ctx) {
-			return nil
-		}
-		// The same tables a sweep stages; the neighbor rewrite lands in
-		// `issues`, which is already on the list.
-		//
-		// THE VERSIONED-HISTORY TABLES ARE NOT on that list, and the rewrite
-		// writes them: RewriteDeletedReferencesInTx updates every surviving
-		// neighbor through UpdateIssueInTx, the seam's minting entry point, and
-		// this transaction is scoped for minting because commitWriteTx scopes
-		// the transaction withRetryTx hands to the body above. Staging the
-		// fixed list alone would leave those rows in the working set, outside
-		// the commit that describes them — the exact loss withVersionedHistoryTables
-		// exists to prevent, and for store_epoch the unrecoverable kind (see the
-		// append-only note in doltAddAndCommitInTx's HAZARD block).
-		for _, table := range s.store.withVersionedHistoryTables(ctx, tx, sweptTables) {
-			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
-		}
-		msg := fmt.Sprintf("bd: delete %d issue(s)", result.Deleted)
-		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			msg, s.store.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
+		return run(tx)
 	}
 
 	// A guarded (ExpectedVersion-checked) delete on a real Dolt sql-server
@@ -118,15 +90,26 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 	// scoped to serverMode only. See withDeleteFence's doc for the full
 	// design and why one pinned connection, rather than a pool-sourced one,
 	// is required.
+	runner := s.store.withRetryTx
 	if req.ExpectedVersion != nil && s.store.serverMode {
-		if err := s.store.withDeleteFence(ctx, req.IDs[0], write); err != nil {
-			return issueops.DeleteResult{}, err
+		runner = func(ctx context.Context, fn func(*sql.Tx) error) error {
+			return s.store.withDeleteFence(ctx, req.IDs[0], fn)
 		}
-		return result, nil
+	}
+	if err := runner(ctx, write); err != nil {
+		return issueops.DeleteResult{}, err
 	}
 
-	if err := s.store.withRetryTx(ctx, write); err != nil {
-		return issueops.DeleteResult{}, err
+	// Published only once the runner returned: after the SQL COMMIT and, on
+	// the fenced path, after RELEASE_LOCK closed the pinned connection, so a
+	// pool of one connection is free for the publisher. The same tables a
+	// sweep stages (the neighbor rewrite lands in `issues`, already on the
+	// list); stageAndCommit appends the versioned-history tables the rewrite
+	// mints into (RewriteDeletedReferencesInTx updates every surviving
+	// neighbor through UpdateIssueInTx), and honors a deferred version commit
+	// (bd-4wamg).
+	if result.Deleted > 0 {
+		s.store.publishCommittedOperation(ctx, sweptTables, fmt.Sprintf("bd: delete %d issue(s)", result.Deleted))
 	}
 	return result, nil
 }

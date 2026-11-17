@@ -27,9 +27,9 @@ func (s *EmbeddedDoltStore) Deleter() (issueops.Deleter, error) {
 // package for the reason that one gives: the work needs a TRANSACTION, which
 // storage.DoltStorage does not publish, so the sharing happens below both of
 // them at issueops.DeleteInTx. The two stores differ here only in how they
-// reach a transaction and in WHEN the version-control entry lands: the server
-// writes it inside the write transaction, this one after the SQL commit on a
-// second connection.
+// reach a transaction and in which connection writes the version-control
+// entry: both write it after the SQL commit (GH#5752), the server on a fresh
+// pooled connection, this one on a second connection.
 type deleter struct{ store *EmbeddedDoltStore }
 
 var _ issueops.Deleter = (*deleter)(nil)

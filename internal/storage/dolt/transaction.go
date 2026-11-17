@@ -142,13 +142,21 @@ func (s *DoltStore) RunInIssueLifecycleTransaction(ctx context.Context, commitMs
 // runInIssueLifecycleTransaction retries only failures that occur before the
 // public callback starts. Once fn has run, its caller-owned work must never be
 // replayed, even when Dolt proves that the SQL transaction rolled back.
+//
+// The Dolt history commit is published only after run returned nil — after
+// the SQL COMMIT, on a connection with no transaction open — and outside the
+// setup retry, so a publication failure can neither replay the callback nor
+// enter the setup-retry classification (GH#5752: staging inside the open
+// transaction builds the Dolt commit from the BEGIN-time root).
 func (s *DoltStore) runInIssueLifecycleTransaction(
 	ctx context.Context,
 	commitMsg string,
 	fn func(tx storage.IssueLifecycleTransaction) error,
 	run func(context.Context, func(*sql.Tx) error) error,
 ) error {
-	return s.withTransactionSetupRetry(ctx, func() error {
+	var tables []string
+	if err := s.withTransactionSetupRetry(ctx, func() error {
+		tables = nil
 		invoked := false
 		var callbackErr error
 		err := run(ctx, func(sqlTx *sql.Tx) error {
@@ -157,11 +165,8 @@ func (s *DoltStore) runInIssueLifecycleTransaction(
 			if callbackErr = fn(tx); callbackErr != nil {
 				return callbackErr
 			}
-			tables := tx.dirtyTableNames()
-			if len(tables) == 0 {
-				return nil
-			}
-			return s.doltAddAndCommitInTx(ctx, sqlTx, tables, commitMsg)
+			tables = tx.dirtyTableNames()
+			return nil
 		})
 		if invoked && err != nil {
 			// An ambiguous commit reaches withRetry so connection failures still
@@ -172,7 +177,11 @@ func (s *DoltStore) runInIssueLifecycleTransaction(
 			return backoff.Permanent(err)
 		}
 		return err
-	})
+	}); err != nil {
+		return err
+	}
+	s.publishCommittedOperation(ctx, tables, commitMsg)
+	return nil
 }
 
 func (t *doltTransaction) dirtyTableNames() []string {

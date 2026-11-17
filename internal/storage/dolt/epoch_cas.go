@@ -37,11 +37,11 @@ import (
 //
 // PUBLICATION ORDER. The four writers
 // commit their SQL transaction FIRST and stage and Dolt-commit afterwards,
-// never from inside the open transaction. doltAddAndCommitInTx builds the Dolt
-// commit from the transaction's BEGIN-time snapshot, so under concurrent
+// never from inside the open transaction. A Dolt commit minted there is built
+// from the transaction's BEGIN-time snapshot, so under concurrent
 // writers it writes every row changed in the meantime back to its old value,
 // and store_epoch and epoch_minted_addresses are append-only: a row lost that
-// way is never rewritten (the HAZARD block on that helper).
+// way is never rewritten (GH#5752; TestNoDoltAddOrCommitInsideOpenTransaction).
 //
 // AN ERROR RETURNED AFTER THE SQL COMMIT MUST NOT BE REPLAYED. Every error a
 // writer returns once its SQL commit has landed, or may have, wraps
