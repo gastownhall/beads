@@ -242,12 +242,12 @@ database after a restart, with a healthy database on the same server as the
 control. A restart re-rolls the dice for every database, though, so the
 durable fix is to move to the pinned version.
 
-This matters because `bd flatten` finishes by hard-resetting `main` onto a
-temporary branch, and the merge-settle path behind `bd dolt pull` / `bd sync`
-falls back to a hard reset when it has to abandon a merge. The Dolt-history
-compaction, `bd compact`, also hard-resets `main` in v1.3.2 and earlier;
-builds with the fix listed in the CHANGELOG move `main` with a soft reset,
-which this breakage does not affect. See
+This matters because the merge-settle path behind `bd dolt pull` / `bd sync`
+falls back to a hard reset when it has to abandon a merge. `bd flatten` and
+the Dolt-history compaction, `bd compact`, also hard-reset `main` in older
+releases (`bd compact` in v1.3.2 and earlier); builds with the fixes listed in
+the CHANGELOG move `main` with a soft reset, which this breakage does not
+affect. See
 [Maintenance](#maintenance--bd-prune-and-bd-purge).
 
 ### New Project
@@ -411,14 +411,14 @@ bd prune --older-than 90d --ignore-references --force
 transient. For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
 
-**On Dolt 2.3.x, storage-reclaim operations can fail partway.** `bd flatten`
-builds a temporary branch and then hard-resets `main` onto it, as does the
-Dolt-history compaction, `bd compact`, in v1.3.2 and earlier, and the
-merge-settle path behind `bd dolt pull` / `bd sync` falls back to a hard reset
-when it abandons a merge. On an affected database that hard reset returns
-`Error 1105 (HY000): context canceled`: `bd flatten` and those `bd compact`
-releases stop at that step, and an abandoned merge is left without its
-rollback. See [Which Dolt version to install](#which-dolt-version-to-install)
+**On Dolt 2.3.x, storage-reclaim operations can fail partway.** In older
+releases `bd flatten` builds a temporary branch and then hard-resets `main`
+onto it, as does the Dolt-history compaction, `bd compact`, in v1.3.2 and
+earlier, and the merge-settle path behind `bd dolt pull` / `bd sync` falls
+back to a hard reset when it abandons a merge. On an affected database that
+hard reset returns `Error 1105 (HY000): context canceled`: those `bd flatten`
+and `bd compact` releases stop at that step, and an abandoned merge is left
+without its rollback. See [Which Dolt version to install](#which-dolt-version-to-install)
 for the check and the fix.
 
 **Writes that reach `main` while `bd compact` runs.** In v1.3.2 and earlier,
@@ -436,6 +436,26 @@ staged when `bd compact` started go into that commit too. If that follow-up
 commit fails, `bd compact` stops after `main` has moved and before garbage
 collection, says so, and leaves the changes staged: commit them with
 `bd dolt commit` when you are ready.
+
+**Writes that reach `main` while `bd flatten` runs.** Older releases'
+`bd flatten` hard-resets `main` onto the flattened branch, which discards the
+same two kinds of write and also drops the foreign keys of the clone-local
+(`dolt_ignored`) tables, `events` and the `wisp_*` tables. Builds with the fix
+listed in the CHANGELOG move `main` with a soft reset: the foreign keys stay,
+working-set changes stay pending, and a commit that landed during the flatten,
+with any changes already staged, is kept in one follow-up commit,
+`flatten: commit changes that reached main during flatten`. If checking for or
+making that commit fails, `bd flatten` stops after `main` has moved and before
+pruning and garbage collection, says so, and leaves the changes staged:
+inspect `dolt_status` and commit them with `bd dolt commit` when you are
+ready. If `bd flatten` fails or is interrupted after creating its temporary
+branch, it tries, within 30 seconds, to return to `main` and delete that
+branch so the next `bd flatten` can run; if that cleanup fails, the error
+keeps the original failure and names the branch left behind. A foreign key
+an older release already dropped stays dropped after a flatten. In server
+mode, `bd doctor` reports it, and `bd doctor --fix` deletes the rows it
+orphaned and re-adds it. Embedded mode has no check or repair for it yet:
+`bd doctor` and `bd doctor --fix` do not run there.
 
 ### Why a garbage collection can reclaim nothing
 

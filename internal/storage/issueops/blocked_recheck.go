@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,14 @@ type BlockedRecheck struct {
 	// SourceCount is how many writes recorded ids in this transaction,
 	// including the ones past recheckSourceLimit that Sources does not name.
 	SourceCount int
+	// Actor is the acting identity of the writes that named the ids, which
+	// the recheck's derived is_blocked journal records carry: a dependent the
+	// recheck settles changed because of those writes. It is NoRequestActor
+	// when no request was behind them, or when writes by different actors
+	// named ids in one transaction — also when the later write names only ids
+	// an earlier one already recorded. A recheck cannot split one recompute
+	// between them, and naming one would attribute the other's change to it.
+	Actor string
 }
 
 // recheckSourceLimit is how many names a bounded recheck line prints in full —
@@ -224,6 +233,16 @@ func TakeBlockedRecheck(tx DBTX) BlockedRecheck {
 // recheck.
 func (r BlockedRecheck) Merge(other BlockedRecheck) BlockedRecheck {
 	merged := BlockedRecheck{SourceCount: r.SourceCount + other.SourceCount}
+	switch {
+	case other.Empty():
+		merged.Actor = r.Actor
+	case r.Empty():
+		merged.Actor = other.Actor
+	case r.Actor == other.Actor:
+		merged.Actor = r.Actor
+	default:
+		merged.Actor = NoRequestActor
+	}
 	merged.IssueIDs, _ = appendRecheckIDs(append([]string(nil), r.IssueIDs...), other.IssueIDs, nil)
 	merged.WispIDs, _ = appendRecheckIDs(append([]string(nil), r.WispIDs...), other.WispIDs, nil)
 	merged.Sources, _ = appendRecheckIDs(append([]string(nil), r.Sources...), other.Sources, nil)
@@ -234,25 +253,25 @@ func (r BlockedRecheck) Merge(other BlockedRecheck) BlockedRecheck {
 }
 
 // NoteStatusChangeBlockedRecheck records, for the post-commit recheck, the
-// dependents a move of id to the inactive newStatus (a close included)
+// dependents a move of id to the inactive newStatus (a close included) by actor
 // recomputed in tx. The issue itself is excluded: a concurrent writer
 // conflicts on its row rather than racing past it.
-func NoteStatusChangeBlockedRecheck(tx DBTX, id, newStatus string, affectedIssues, affectedWisps []string) {
-	noteBlockedRecheck(tx, statusChangeRecheckLabel(id, newStatus), []string{id}, affectedIssues, affectedWisps)
+func NoteStatusChangeBlockedRecheck(tx DBTX, id, newStatus, actor string, affectedIssues, affectedWisps []string) {
+	noteBlockedRecheck(tx, statusChangeRecheckLabel(id, newStatus), actor, []string{id}, affectedIssues, affectedWisps)
 }
 
 // NoteDependencyRemovalBlockedRecheck records the dependents a removal of the
-// issueID -> dependsOnID edge recomputed in tx. Nothing is excluded: the
-// dependent is exactly the row a racing unblocking write can leave stale.
-func NoteDependencyRemovalBlockedRecheck(tx DBTX, issueID, dependsOnID string, affectedIssues, affectedWisps []string) {
-	noteBlockedRecheck(tx, fmt.Sprintf("dependency removal %s -> %s", issueID, dependsOnID), nil, affectedIssues, affectedWisps)
+// issueID -> dependsOnID edge by actor recomputed in tx. Nothing is excluded:
+// the dependent is exactly the row a racing unblocking write can leave stale.
+func NoteDependencyRemovalBlockedRecheck(tx DBTX, issueID, dependsOnID, actor string, affectedIssues, affectedWisps []string) {
+	noteBlockedRecheck(tx, fmt.Sprintf("dependency removal %s -> %s", issueID, dependsOnID), actor, nil, affectedIssues, affectedWisps)
 }
 
-// NoteDeleteBlockedRecheck records the dependents a delete of deletedIDs
-// recomputed in tx, leaving out the deleted rows themselves. scope, when set,
-// says where the ids came from ("from <sourceRepo>").
-func NoteDeleteBlockedRecheck(tx DBTX, deletedIDs []string, scope string, affectedIssues, affectedWisps []string) {
-	noteBlockedRecheck(tx, deleteRecheckLabel(deletedIDs, scope), deletedIDs, affectedIssues, affectedWisps)
+// NoteDeleteBlockedRecheck records the dependents a delete of deletedIDs by
+// actor recomputed in tx, leaving out the deleted rows themselves. scope, when
+// set, says where the ids came from ("from <sourceRepo>").
+func NoteDeleteBlockedRecheck(tx DBTX, deletedIDs []string, scope, actor string, affectedIssues, affectedWisps []string) {
+	noteBlockedRecheck(tx, deleteRecheckLabel(deletedIDs, scope), actor, deletedIDs, affectedIssues, affectedWisps)
 }
 
 // noteBlockedRecheck records the dependents a write recomputed in tx. source
@@ -268,12 +287,26 @@ func NoteDeleteBlockedRecheck(tx DBTX, deletedIDs []string, scope string, affect
 // A call that contributes no new id contributes no source either: the recheck
 // it would name has nothing of its own to recheck, and naming it would put
 // writes in the commit message that the recheck never touched.
-func noteBlockedRecheck(tx DBTX, source string, exclude []string, issueIDs, wispIDs []string) {
+//
+// actor is the write's acting identity. Every write that names an id it does
+// not exclude votes on BlockedRecheck.Actor, whether or not that id is new:
+// the recheck recomputes the id for that write too, so a dependent two writes
+// both recomputed changed because of both of them. The first such write sets
+// the actor, and a later one by a different actor clears it to
+// NoRequestActor (see BlockedRecheck.Actor).
+func noteBlockedRecheck(tx DBTX, source, actor string, exclude []string, issueIDs, wispIDs []string) {
 	scope, ok := blockedRecheckTransactions.Load(tx)
 	if !ok {
 		return
 	}
 	pending := scope.(*BlockedRecheck)
+	if namesRecheckID(issueIDs, exclude) || namesRecheckID(wispIDs, exclude) {
+		if pending.Empty() {
+			pending.Actor = actor
+		} else if pending.Actor != actor {
+			pending.Actor = NoRequestActor
+		}
+	}
 	issues, addedIssues := appendRecheckIDs(pending.IssueIDs, issueIDs, exclude)
 	wisps, addedWisps := appendRecheckIDs(pending.WispIDs, wispIDs, exclude)
 	pending.IssueIDs, pending.WispIDs = issues, wisps
@@ -284,6 +317,16 @@ func noteBlockedRecheck(tx DBTX, source string, exclude []string, issueIDs, wisp
 	if len(pending.Sources) < recheckSourceLimit {
 		pending.Sources, _ = appendRecheckIDs(pending.Sources, []string{source}, nil)
 	}
+}
+
+// namesRecheckID reports whether ids holds any id exclude does not name.
+func namesRecheckID(ids, exclude []string) bool {
+	for _, id := range ids {
+		if !slices.Contains(exclude, id) {
+			return true
+		}
+	}
+	return false
 }
 
 // appendRecheckIDs adds the ids of one write that are neither excluded nor

@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"slices"
+	"strings"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
@@ -10,20 +14,46 @@ import (
 	"github.com/steveyegge/beads/internal/telemetry"
 )
 
+// commandTelemetryArgs renders the bd.args attribute of the bd.command.<name>
+// span: the command path below the root ("create", "comments add"), then the
+// long name of every flag set on the command line, sorted ("--description
+// --quiet"). Positional arguments and flag values are never included: they are
+// where issue titles, descriptions, notes, labels, comments, search text and
+// credentials arrive (#8505).
+//
+// It reads the command cobra parsed rather than os.Args, so nothing is
+// re-parsed: a value that looks like a flag (`--title --password=x`), a
+// shorthand cluster (`-qd text`), or an argument after `--` is never mistaken
+// for a flag name, and a command that disables flag parsing (bd mail) reports
+// its path alone.
+func commandTelemetryArgs(cmd *cobra.Command) string {
+	if cmd == nil {
+		return ""
+	}
+	var parts []string
+	for c := cmd; c.HasParent(); c = c.Parent() {
+		parts = append(parts, c.Name())
+	}
+	slices.Reverse(parts)
+	var flags []string
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		flags = append(flags, "--"+f.Name)
+	})
+	// Visit is lexicographic unless a flag set turns SortFlags off; sort
+	// anyway so the attribute never depends on that.
+	slices.Sort(flags)
+	return strings.Join(append(parts, flags...), " ")
+}
+
 // commandSpanAttrs builds the initial attribute set for the bd.command.<name>
 // span. Pulled out so tests can assert the attribute set without touching
 // global OTel state. The bd.actor attribute is stamped later via SetAttributes
 // in main.go once getActorWithGit() resolves.
-//
-// secretFlags names the flag tokens whose values must never reach the
-// bd.args attribute (see secretFlagTokens); scrubArgsForTelemetry also
-// applies its DSN/userinfo scrub to every arg, so a nil map still redacts
-// positional connection strings.
-func commandSpanAttrs(cmdName, version string, args []string, secretFlags map[string]bool) []attribute.KeyValue {
+func commandSpanAttrs(cmd *cobra.Command, version string) []attribute.KeyValue {
 	return []attribute.KeyValue{
-		attribute.String("bd.command", cmdName),
+		attribute.String("bd.command", cmd.Name()),
 		attribute.String("bd.version", version),
-		attribute.String("bd.args", scrubArgsForTelemetry(args, secretFlags)),
+		attribute.String("bd.args", commandTelemetryArgs(cmd)),
 	}
 }
 
@@ -44,16 +74,17 @@ func initTelemetry(ctx context.Context, version string) {
 	}
 }
 
-// startCommandSpan starts the root bd.command.<name> span. Returns the new
-// context (carrying the span) and the span itself for End().
+// startCommandSpan starts the root bd.command.<name> span for the command
+// cobra is about to run. Returns the new context (carrying the span) and the
+// span itself for End().
 //
 // Assumes initTelemetry has already run for this invocation; does not call
 // telemetry.Init itself so callers can gate the usage-metrics bootstrap
 // block (e.g. skipping span creation for the internal send-metrics
 // subcommand) between the two.
-func startCommandSpan(ctx context.Context, cmdName, version string, args []string, secretFlags map[string]bool) (context.Context, oteltrace.Span) {
-	return telemetry.Tracer("bd").Start(ctx, "bd.command."+cmdName,
-		oteltrace.WithAttributes(commandSpanAttrs(cmdName, version, args, secretFlags)...),
+func startCommandSpan(ctx context.Context, cmd *cobra.Command, version string) (context.Context, oteltrace.Span) {
+	return telemetry.Tracer("bd").Start(ctx, "bd.command."+cmd.Name(),
+		oteltrace.WithAttributes(commandSpanAttrs(cmd, version)...),
 	)
 }
 
@@ -65,7 +96,7 @@ func startCommandSpan(ctx context.Context, cmdName, version string, args []strin
 // called) taught us that wiring inside cobra PreRunE is exactly the kind of
 // code that decays silently — this and its two constituent halves exist so
 // that wiring is a single testable line wherever it's used.
-func startCommandTelemetry(ctx context.Context, cmdName, version string, args []string, secretFlags map[string]bool) (context.Context, oteltrace.Span) {
+func startCommandTelemetry(ctx context.Context, cmd *cobra.Command, version string) (context.Context, oteltrace.Span) {
 	initTelemetry(ctx, version)
-	return startCommandSpan(ctx, cmdName, version, args, secretFlags)
+	return startCommandSpan(ctx, cmd, version)
 }

@@ -1,0 +1,60 @@
+{
+  "data": [
+    {
+      "actor": "protocol-test",
+      "comment": "Added label: corpus-label",
+      "created_at": "<TS>",
+      "event_type": "label_added",
+      "issue_id": "corpus-root"
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "claimed",
+      "issue_id": "corpus-root",
+      "new_value": "{\"assignee\":\"protocol-test\",\"status\":\"in_progress\"}",
+      "old_value": "{\"assignee\":null,\"status\":\"open\"}"
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "created",
+      "issue_id": "corpus-root",
+      "new_value": "",
+      "old_value": ""
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "dependency_added",
+      "issue_id": "corpus-root",
+      "new_value": "Added dependency: corpus-root blocks corpus-dep",
+      "old_value": ""
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "dependency_removed",
+      "issue_id": "corpus-root",
+      "new_value": "Removed dependency on corpus-dep",
+      "old_value": ""
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "unclaimed",
+      "issue_id": "corpus-root",
+      "new_value": "{\"assignee\":\"\",\"status\":\"open\"}",
+      "old_value": "{\"assignee\":\"protocol-test\",\"status\":\"in_progress\"}"
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "updated",
+      "issue_id": "corpus-root",
+      "new_value": "{\"description\":\"updated corpus root\",\"metadata\":{\"phase\":2},\"priority\":0}",
+      "old_value": "{\"description\":\"deterministic corpus root\",\"metadata\":null,\"priority\":1}"
+    }
+  ],
+  "schema_version": 1
+}

@@ -204,6 +204,13 @@ func TestScrubURLCredentials(t *testing.T) {
 			want: "fatal: unable to access 'https://github.com/org/repo.git/': The requested URL returned error: 403",
 		},
 		{
+			// A raw "'" in the password used to end the match, so the whole
+			// tokenized URL was echoed.
+			name: "apostrophe in a quoted URL's password is scrubbed",
+			in:   "fatal: unable to access 'https://user:canary'secret@github.com/org/repo.git/': The requested URL returned error: 403",
+			want: "fatal: unable to access 'https://github.com/org/repo.git/': The requested URL returned error: 403",
+		},
+		{
 			name: "ssh password embedded in text is dropped, user kept",
 			in:   "note: not cloning ssh://alice:hunter2@dolt.example.com/org/db right now",
 			want: "note: not cloning ssh://alice@dolt.example.com/org/db right now",

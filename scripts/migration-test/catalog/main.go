@@ -23,22 +23,22 @@ import (
 const (
 	modulePath          = "github.com/steveyegge/beads"
 	minimumVersion      = "v0.9.1"
-	maximumVersion      = "v1.3.1"
+	maximumVersion      = "v1.3.4"
 	proxyURL            = "https://proxy.golang.org"
 	githubRepository    = "gastownhall/beads"
-	expectedVersions    = 127
+	expectedVersions    = 130
 	expectedRepoOnly    = 49
 	expectedRepoPre     = 3
-	expectedProxyPre    = 7
-	expectedReleases    = 95
-	expectedLinuxAssets = 92
+	expectedProxyPre    = 12
+	expectedReleases    = 98
+	expectedLinuxAssets = 95
 	expectedTagDrift    = 13
 	expectedDriftAssets = 11
 
 	// This pins the complete reviewed catalog identity. A generator run may
 	// expose upstream drift, but offline validation rejects even well-formed
 	// substitutions until this digest is deliberately updated.
-	expectedCatalogSHA256 = "edd01ba3352ec38260a87637d8ec4abb6689df7b2b57f100b18b06842024f858"
+	expectedCatalogSHA256 = "08a6746150485d62ea44a397760ffa9afd99c4ceeb512b04f6102874440510b6"
 )
 
 var (

@@ -195,6 +195,7 @@ go_library(
 go_test(
     name = "hooks_test",
     srcs = [
+        "hooks_otel_test.go",
         "hooks_test.go",
         "hooks_wasm_test.go",
         "wait_test.go",
@@ -202,13 +203,13 @@ go_test(
     embed = [":hooks"],
     deps = [
         "//internal/types",
+        "@io_opentelemetry_go_otel_sdk//trace",
+        "@io_opentelemetry_go_otel_sdk//trace/tracetest",
     ] + select({
         "@rules_go//go/platform:js_wasm": [
             "@io_opentelemetry_go_otel//:otel",
             "@io_opentelemetry_go_otel//attribute",
             "@io_opentelemetry_go_otel//codes",
-            "@io_opentelemetry_go_otel_sdk//trace",
-            "@io_opentelemetry_go_otel_sdk//trace/tracetest",
         ],
         "//conditions:default": [],
     }),

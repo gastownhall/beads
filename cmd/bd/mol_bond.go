@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var molBondCmd = &cobra.Command{
@@ -143,17 +142,7 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 	}
 	defer closeActiveStore()
 
-	opA, opB, err := materializeMolBondOperands(ctx, activeStore, plan, in.vars)
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
-	}
-
-	result, err := bondMolBondOperands(ctx, activeStore, opA, opB, in)
-	if err != nil {
-		return HandleErrorRespectJSON("bonding: %v", err)
-	}
-
-	return renderMolBondResult(result, opA.subgraph.Root.ID, opB.subgraph.Root.ID, in.ephemeral, in.pour)
+	return executeMolBond(ctx, activeStore, plan, in)
 }
 
 // molBondPlan is a bond that passed read-only validation: both operands'
@@ -174,17 +163,25 @@ func (p *molBondPlan) Close() {
 // through read-only handles, so a rejected bond never opens a foreign rig
 // writable.
 func planMolBond(ctx context.Context, localStore storage.DoltStorage, in molBondInput) (*molBondPlan, error) {
-	discA, err := discoverMolBondOperand(ctx, localStore, in.argA, in.vars)
+	return planMolBondWith(in, dependencyStoreKey(localStore), func(operand string) (*molBondDiscovery, error) {
+		return discoverMolBondOperand(ctx, localStore, operand, in.vars)
+	})
+}
+
+// planMolBondWith is the planner both routes share: discover discovers one
+// operand read-only, and defaultKey is the home of a formula-only bond.
+func planMolBondWith(in molBondInput, defaultKey string, discover func(operand string) (*molBondDiscovery, error)) (*molBondPlan, error) {
+	discA, err := discover(in.argA)
 	if err != nil {
 		return nil, err
 	}
-	discB, err := discoverMolBondOperand(ctx, localStore, in.argB, in.vars)
+	discB, err := discover(in.argB)
 	if err != nil {
 		discA.Close()
 		return nil, err
 	}
 	plan := &molBondPlan{a: discA, b: discB}
-	plan.targetID, plan.targetStoreKey, err = validateMolBondHomes(localStore, discA, discB)
+	plan.targetID, plan.targetStoreKey, err = validateMolBondHomesFrom(defaultKey, discA, discB)
 	if err != nil {
 		plan.Close()
 		return nil, err
@@ -202,7 +199,15 @@ func openMolBondHome(ctx context.Context, localStore storage.DoltStorage, plan *
 	if plan.targetID == "" || plan.targetStoreKey == dependencyStoreKey(localStore) {
 		return localStore, func() {}, nil
 	}
-	rr, err := resolveAndGetIssueForMutation(ctx, localStore, plan.targetID)
+	return reopenMolBondHome(plan, func() (*RoutedResult, error) {
+		return resolveAndGetIssueForMutation(ctx, localStore, plan.targetID)
+	})
+}
+
+// reopenMolBondHome opens the plan's routed home writable through reopen and
+// refuses a handle onto any other logical store before the bond writes.
+func reopenMolBondHome(plan *molBondPlan, reopen func() (*RoutedResult, error)) (storage.DoltStorage, func(), error) {
+	rr, err := reopen()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -215,6 +220,22 @@ func openMolBondHome(ctx context.Context, localStore storage.DoltStorage, plan *
 		home = wireExternalDependencyPolicy(home)
 	}
 	return home, rr.Close, nil
+}
+
+// executeMolBond materializes the planned operands in the bond's opened home,
+// bonds them there, and renders the result.
+func executeMolBond(ctx context.Context, home storage.DoltStorage, plan *molBondPlan, in molBondInput) error {
+	opA, opB, err := materializeMolBondOperands(ctx, home, plan, in.vars)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
+	result, err := bondMolBondOperands(ctx, home, opA, opB, in)
+	if err != nil {
+		return HandleErrorRespectJSON("bonding: %v", err)
+	}
+
+	return renderMolBondResult(result, opA.subgraph.Root.ID, opB.subgraph.Root.ID, in.ephemeral, in.pour)
 }
 
 // materializeMolBondOperands re-reads both operands in the bond's home and
@@ -814,6 +835,15 @@ func discoverMolBondOperand(ctx context.Context, localStore storage.DoltStorage,
 			closeFn:  rr.Close,
 		}, nil
 	}
+	return discoverMolBondFormula(operand, vars, err)
+}
+
+// discoverMolBondFormula is discovery's formula fallback, shared by the direct
+// and proxied-server planners: issueErr is why the operand did not resolve as
+// an issue. A formula of that name wins; otherwise an actionable issue error
+// (a route that failed, an ambiguous ID) survives, and plain absence reads as
+// "not found as issue or formula".
+func discoverMolBondFormula(operand string, vars map[string]string, issueErr error) (*molBondDiscovery, error) {
 	parser := formula.NewParser()
 	f, loadErr := parser.LoadByName(operand)
 	if loadErr == nil {
@@ -835,8 +865,8 @@ func discoverMolBondOperand(ctx context.Context, localStore storage.DoltStorage,
 		}
 		return &molBondDiscovery{operand: operand, formula: resolved.Formula}, nil
 	}
-	if !isNotFoundErr(err) {
-		return nil, err
+	if !isNotFoundErr(issueErr) {
+		return nil, issueErr
 	}
 	return nil, fmt.Errorf("'%s' not found as issue or formula: %w", operand, loadErr)
 }
@@ -844,24 +874,40 @@ func discoverMolBondOperand(ctx context.Context, localStore storage.DoltStorage,
 // validateMolBondHomes returns the issue and logical store that pin the
 // mutation. Formula-only bonds stay local. All checks use read-only handles.
 func validateMolBondHomes(localStore storage.DoltStorage, discoveries ...*molBondDiscovery) (string, string, error) {
-	var targetID, targetKey string
-	var targetStore storage.DoltStorage
+	return validateMolBondHomesFrom(dependencyStoreKey(localStore), discoveries...)
+}
+
+// validateMolBondHomesFrom is validateMolBondHomes with the formula-only home
+// given as a key. The first discovered issue pins the home; a discovery need
+// not carry a store handle (a proxied-server served issue has none), so two
+// handles compare as stores and anything else by logical key.
+func validateMolBondHomesFrom(defaultKey string, discoveries ...*molBondDiscovery) (string, string, error) {
+	var target *molBondDiscovery
 	for _, d := range discoveries {
 		if d == nil || d.issue == nil {
 			continue
 		}
-		if targetStore == nil {
-			targetID, targetKey, targetStore = d.issue.ID, d.storeKey, d.store
+		if target == nil {
+			target = d
 			continue
 		}
-		if !sameBondStore(targetStore, d.store) {
-			return "", "", fmt.Errorf("cannot bond %s and %s: they live in different stores/rigs; run the bond from the rig that owns them", targetID, d.issue.ID)
+		if !sameMolBondHome(target, d) {
+			return "", "", fmt.Errorf("cannot bond %s and %s: they live in different stores/rigs; run the bond from the rig that owns them", target.issue.ID, d.issue.ID)
 		}
 	}
-	if targetStore == nil {
-		return "", dependencyStoreKey(localStore), nil
+	if target == nil {
+		return "", defaultKey, nil
 	}
-	return targetID, targetKey, nil
+	return target.issue.ID, target.storeKey, nil
+}
+
+// sameMolBondHome reports whether two discovered issues live in one logical
+// store.
+func sameMolBondHome(a, b *molBondDiscovery) bool {
+	if a.store != nil && b.store != nil {
+		return sameBondStore(a.store, b.store)
+	}
+	return a.storeKey == b.storeKey
 }
 
 // verifyMolBondWritableHome closes the TOCTOU gap between read-only discovery
@@ -896,17 +942,7 @@ func materializeMolBondOperand(ctx context.Context, activeStore storage.DoltStor
 		return nil, fmt.Errorf("missing mol bond operand")
 	}
 	if d.issue == nil {
-		subgraph, err := resolveAndCookFormulaWithVars(d.operand, nil, vars)
-		if err != nil {
-			if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
-				// Don't double-wrap: operand IS a formula that either does not
-				// validate or was given --var values failing its enum/pattern/
-				// required-empty constraints, both distinct from "not found".
-				return nil, err
-			}
-			return nil, fmt.Errorf("'%s' not found as issue or formula: %w", d.operand, err)
-		}
-		return &molBondOperand{subgraph: subgraph, cooked: true}, nil
+		return cookMolBondFormulaOperand(d.operand, vars)
 	}
 
 	rr, err := resolveAndGetFromStore(ctx, activeStore, d.issue.ID, false)
@@ -930,91 +966,19 @@ func materializeMolBondOperand(ctx context.Context, activeStore storage.DoltStor
 	}, nil
 }
 
-// resolveOrDescribe checks if an operand is an issue or formula without cooking.
-// Used by proxied-server dry-run mode. Returns (issue, formulaName, error).
-func resolveOrDescribe(ctx context.Context, s molReader, operand string, vars map[string]string) (*types.Issue, string, error) {
-	id, err := utils.ResolvePartialID(ctx, s, operand)
-	if err == nil {
-		issue, err := s.GetIssue(ctx, id)
-		if err == nil {
-			return issue, "", nil
-		}
-	}
-
-	parser := formula.NewParser()
-	f, err := parser.LoadByName(operand)
-	if err != nil {
-		return nil, "", fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
-	}
-
-	// A dry-run must fail the same way the real bond would, and the real bond
-	// (resolveAndCookFormulaWithVars) resolves inheritance BEFORE it validates
-	// anything. parser.Resolve is what calls Formula.Validate - LoadByName ->
-	// loadFormula -> ParseFile never does - so skipping it here previewed a
-	// successful bond for a formula the real bond rejects, including the
-	// unspawnable waits_for gate this PR adds. Resolving first also means the
-	// --var check runs against the merged formula rather than the unmerged
-	// one, so a var declared only in a parent is checked too.
-	resolved, err := parser.Resolve(f)
-	if err != nil {
-		return nil, "", fmt.Errorf("resolving formula %q: %w", operand, err)
-	}
-
-	// An enum/pattern/provided-empty violation in --var values fails
-	// resolveOrCookToSubgraph, so reporting "will be cooked" here would be a
-	// false preview. Wrapped the same way the real path wraps it, so the two
-	// produce the same message rather than merely the same exit code.
-	if err := formula.ValidateProvidedVars(resolved, vars); err != nil {
-		return nil, "", fmt.Errorf("formula %q: %w", operand, err)
-	}
-
-	return nil, resolved.Formula, nil
-}
-
-// resolveOrCookToSubgraph tries to resolve an operand as an issue ID or formula.
-// If it's an issue, loads the subgraph from DB. If it's a formula, cooks inline to subgraph.
-// Returns the subgraph, whether it was cooked from formula, and any error.
-//
-// The vars parameter is used for step condition filtering (bd-7zka.1).
-// This implements gt-4v1eo: formulas are cooked to in-memory subgraphs (no DB storage).
-func resolveOrCookToSubgraph(ctx context.Context, s molReader, operand string, vars map[string]string) (*TemplateSubgraph, bool, error) {
-	// First, try to resolve as an existing issue
-	id, err := utils.ResolvePartialID(ctx, s, operand)
-	if err == nil {
-		issue, err := s.GetIssue(ctx, id)
-		if err == nil {
-			// Check if it's a proto (template)
-			if isProto(issue) {
-				subgraph, err := loadTemplateSubgraph(ctx, s, id)
-				if err != nil {
-					return nil, false, fmt.Errorf("loading proto subgraph '%s': %w", id, err)
-				}
-				return subgraph, false, nil
-			}
-			// It's a molecule, not a proto - wrap it as a single-issue subgraph
-			return &TemplateSubgraph{
-				Root:     issue,
-				Issues:   []*types.Issue{issue},
-				IssueMap: map[string]*types.Issue{issue.ID: issue},
-			}, false, nil
-		}
-	}
-
-	// Not found as issue — fall through to the formula registry. Same rationale
-	// as resolveOrDescribe above: let the parser decide. Pass vars for step
-	// condition filtering (bd-7zka.1).
+// cookMolBondFormulaOperand cooks a planned formula operand in memory.
+func cookMolBondFormulaOperand(operand string, vars map[string]string) (*molBondOperand, error) {
 	subgraph, err := resolveAndCookFormulaWithVars(operand, nil, vars)
 	if err != nil {
 		if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
 			// Don't double-wrap: operand IS a formula that either does not
 			// validate or was given --var values failing its enum/pattern/
 			// required-empty constraints, both distinct from "not found".
-			return nil, false, err
+			return nil, err
 		}
-		return nil, false, fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
+		return nil, fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
 	}
-
-	return subgraph, true, nil
+	return &molBondOperand{subgraph: subgraph, cooked: true}, nil
 }
 
 // registerMolBondFlags declares bond's flags on cmd. It exists so a test can

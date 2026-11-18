@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // clearTelemetryEnv unsets every BD_OTEL_* / OTEL_* variable telemetry.Enabled
@@ -34,12 +36,22 @@ func clearTelemetryEnv(t *testing.T) {
 }
 
 func TestCommandSpanAttrs(t *testing.T) {
-	got := commandSpanAttrs("ready", "1.0.4-dev", []string{"--json", "--include-deferred"}, nil)
+	fx := newTelemetryArgsFixture()
+	var ready *cobra.Command
+	fx.root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		ready = cmd
+		return nil
+	}
+	fx.root.SetArgs([]string{"ready", "--json", "-p", "1"})
+	if err := fx.root.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	got := commandSpanAttrs(ready, "1.0.4-dev")
 
 	want := map[string]string{
 		"bd.command": "ready",
 		"bd.version": "1.0.4-dev",
-		"bd.args":    "--json --include-deferred",
+		"bd.args":    "ready --json --priority",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("commandSpanAttrs returned %d attrs; want %d", len(got), len(want))
@@ -56,12 +68,20 @@ func TestCommandSpanAttrs(t *testing.T) {
 	}
 }
 
-func TestCommandSpanAttrs_EmptyArgs(t *testing.T) {
-	got := commandSpanAttrs("status", "v1", nil, nil)
-	for _, kv := range got {
-		if string(kv.Key) == "bd.args" && kv.Value.AsString() != "" {
-			t.Errorf("bd.args with nil args = %q; want empty string", kv.Value.AsString())
+// A command run with no subcommand path and no flags has nothing to report.
+func TestCommandSpanAttrs_RootWithoutFlags(t *testing.T) {
+	found := false
+	for _, kv := range commandSpanAttrs(&cobra.Command{Use: "bd"}, "v1") {
+		if string(kv.Key) != "bd.args" {
+			continue
 		}
+		found = true
+		if kv.Value.AsString() != "" {
+			t.Errorf("bd.args for a bare root command = %q; want empty string", kv.Value.AsString())
+		}
+	}
+	if !found {
+		t.Error("commandSpanAttrs dropped bd.args; want it present and empty")
 	}
 }
 
@@ -73,7 +93,7 @@ func TestCommandSpanAttrs_EmptyArgs(t *testing.T) {
 // contract: the function must always return a non-nil context and span.
 func TestStartCommandTelemetry_DisabledStillReturnsSpan(t *testing.T) {
 	clearTelemetryEnv(t)
-	ctx, span := startCommandTelemetry(context.Background(), "ready", "1.0.0", []string{"--json"}, nil)
+	ctx, span := startCommandTelemetry(context.Background(), &cobra.Command{Use: "ready"}, "1.0.0")
 	if ctx == nil {
 		t.Fatal("startCommandTelemetry returned nil context")
 	}

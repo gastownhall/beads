@@ -23,3 +23,10 @@
 # branch and merge queue. git merge reads this rule from the checked-out
 # branch, so a branch cut before it merges as text until it has it.
 CHANGELOG.md merge=changelog
+
+# third_party/bdp/spec/ is a byte copy of a tagged gastownhall/bdp checkpoint,
+# written by scripts/bdp-vendor.sh and locked by third_party/bdp/bdp.pin, which
+# stays visible in diffs. Never edit it by hand (engdocs/design/bdp.md). -text
+# keeps the global text=auto from normalising a vendored CRLF file into a blob
+# that differs from the pinned one.
+third_party/bdp/spec/** -text linguist-vendored=true linguist-generated=true

@@ -2,10 +2,13 @@ package uow
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -383,9 +386,378 @@ func TestImporterUOW(t *testing.T) {
 		}
 	})
 
+	// bd-8qq0ho AC-5: the per-attempt reset must not run after the committed
+	// attempt. The proxied `bd import` builds ImportedIDs from the request
+	// structs (cmd/bd/import_shared.go assembleImportResult), so an ID-less
+	// row's minted id — and its edge's and comment's — stays on them.
+	t.Run("SingleAttemptLeavesMintedIDsOnTheCallerStructs", func(t *testing.T) {
+		before := countHistory(t)
+		when := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+		issue := &types.Issue{
+			Title: "Imported without an id", Status: types.StatusOpen,
+			IssueType: types.TypeTask, Priority: 2,
+			Dependencies: []*types.Dependency{{DependsOnID: "imp-one", Type: types.DepBlocks}},
+			Comments:     []*types.Comment{{Author: "importer-test", Text: "fresh comment", CreatedAt: when}},
+			CreatedAt:    when, UpdatedAt: when,
+		}
+		result, err := imp.ImportBatch(ctx, publicops.ImportBatchRequest{
+			Actor:  "importer-test",
+			Issues: []*types.Issue{issue},
+			Source: "minted.jsonl",
+		})
+		if err != nil {
+			t.Fatalf("ImportBatch: %v", err)
+		}
+		if result.Created != 1 || len(result.StaleRejectedIDs) != 0 || len(result.RetiredIDs) != 0 {
+			t.Errorf("result = %+v, want Created=1 and nothing rejected or retired", result)
+		}
+		if issue.ID == "" {
+			t.Fatal("issue.ID is empty after a committed import; want the minted id left on the caller's struct")
+		}
+		if got := queryString(t, "SELECT title FROM issues WHERE id = ?", issue.ID); got != issue.Title {
+			t.Errorf("row %q title = %q, want %q", issue.ID, got, issue.Title)
+		}
+		if dep := issue.Dependencies[0]; dep.IssueID != issue.ID {
+			t.Errorf("dep.IssueID = %q, want the minted id %q", dep.IssueID, issue.ID)
+		}
+		if c := issue.Comments[0]; c.ID == "" {
+			t.Error("comment.ID is empty after a committed import; want the stored id")
+		} else if got := queryString(t, "SELECT issue_id FROM comments WHERE id = ?", c.ID); got != issue.ID {
+			t.Errorf("comment %q issue_id = %q, want %q", c.ID, got, issue.ID)
+		}
+		// The success path stays a single attempt with a single commit.
+		if after := countHistory(t); after != before+1 {
+			t.Errorf("history entries = %d, want %d", after, before+1)
+		}
+	})
+
 	t.Run("EmptyActorIsRefused", func(t *testing.T) {
 		if _, err := imp.ImportBatch(ctx, publicops.ImportBatchRequest{Source: "noactor.jsonl"}); err == nil {
 			t.Fatal("ImportBatch with empty actor should be refused")
 		}
+	})
+}
+
+// importReplayFaultProvider forces exactly one replay of an import attempt:
+// the FIRST Commit of the units of work it opens rolls the attempt back for
+// real (so attempt 1's writes and its issue_counter row lock are gone), runs
+// between — the window a concurrent writer lands in — and then fails with a
+// retryable serialization error, so RunTxResult replays the closure. Every
+// later Commit passes through.
+type importReplayFaultProvider struct {
+	UnitOfWorkProvider
+	between func(context.Context)
+	faults  int
+}
+
+func (p *importReplayFaultProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
+	uw, err := p.UnitOfWorkProvider.NewUOW(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &importReplayFaultUOW{UnitOfWork: uw, provider: p}, nil
+}
+
+type importReplayFaultUOW struct {
+	UnitOfWork
+	provider *importReplayFaultProvider
+}
+
+// Unwrap keeps importStatementRunner reaching the real transaction.
+func (u *importReplayFaultUOW) Unwrap() UnitOfWork { return u.UnitOfWork }
+
+func (u *importReplayFaultUOW) Commit(ctx context.Context, message string) error {
+	if u.provider.faults > 0 {
+		return u.UnitOfWork.Commit(ctx, message)
+	}
+	u.provider.faults++
+	// A real rollback; RunTxResult's deferred close then has nothing to do.
+	u.UnitOfWork.Close(ctx)
+	if u.provider.between != nil {
+		u.provider.between(ctx)
+	}
+	return newMySQLError(1213)
+}
+
+// TestImporterUOWReplayReMintsUnsetIDs (bd-8qq0ho, GH#8455): ImportBatch hands
+// the caller's structs to the create engine, which mints Issue.ID,
+// Dependency.IssueID and Comment.ID onto them in place. When RunTxResult
+// replays the attempt after a serialization failure, the replay must see the
+// structs as attempt 1 did — the ID-less row re-minted, not upserted under the
+// rolled-back attempt's id — while caller-supplied ids stay exactly as given.
+//
+// Row A carries no ids at all and is pinned to 2024 timestamps, so a row a
+// competitor writes today is strictly newer and an upsert onto it
+// deterministically takes the stale-guard branch. Row B carries all three ids.
+//
+// ONE PROVIDER, NO t.Parallel (the subtests share the counter and dolt_log).
+func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
+	ctx := context.Background()
+	const prefix = "imr"
+	const anchor = "imr-anchor"
+	inner := newUOWRoleFixtureProvider(t, ctx, prefix)
+	kit := newUOWRoleFixtureKit(inner, prefix)
+	if err := kit.CreateIssue(ctx, &types.Issue{
+		ID: anchor, Title: "anchor", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+	}, "importer-test"); err != nil {
+		t.Fatalf("seed anchor: %v", err)
+	}
+	if err := kit.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("set counter mode: %v", err)
+	}
+
+	queryInt := func(t *testing.T, query string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := kit.QueryScalar(ctx, query, args, &n); err != nil {
+			t.Fatalf("QueryScalar %q: %v", query, err)
+		}
+		return n
+	}
+	queryString := func(t *testing.T, query string, args ...any) string {
+		t.Helper()
+		var s string
+		if err := kit.QueryScalar(ctx, query, args, &s); err != nil {
+			t.Fatalf("QueryScalar %q: %v", query, err)
+		}
+		return s
+	}
+	// autoMint creates one issue with no explicit id on the unfaulted
+	// provider and returns the id the workspace minted for it.
+	autoMint := func(t *testing.T, title string) string {
+		t.Helper()
+		var id string
+		if err := RunTx(ctx, inner, func(ctx context.Context, uw UnitOfWork) (string, error) {
+			created, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{
+				Issue: &types.Issue{
+					Title: title, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+				},
+				CreateOnly: true,
+			}, "other-writer")
+			if err != nil {
+				return "", err
+			}
+			id = created.Issue.ID
+			return "auto-mint " + id, nil
+		}); err != nil {
+			t.Fatalf("auto-mint %q: %v", title, err)
+		}
+		return id
+	}
+
+	stamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	type replayRun struct {
+		rowA, rowB    *types.Issue
+		attempt1ID    string // the id attempt 1 minted onto row A (X)
+		result        publicops.ImportBatchResult
+		competitorRow string // title the competitor wrote under X, if any
+	}
+	// importWithReplay imports rows A and B through a provider that fails the
+	// first commit; competitor, when set, runs after attempt 1's rollback and
+	// before the replay, and returns the title it wrote under X.
+	importWithReplay := func(t *testing.T, name string, allowStale bool, competitor func(t *testing.T, x string) string) replayRun {
+		t.Helper()
+		run := replayRun{
+			rowA: &types.Issue{
+				Title: "replayed row " + name, Status: types.StatusOpen,
+				IssueType: types.TypeTask, Priority: 2,
+				Dependencies: []*types.Dependency{{DependsOnID: anchor, Type: types.DepBlocks}},
+				Comments:     []*types.Comment{{Author: "importer-test", Text: "fresh comment " + name, CreatedAt: stamp}},
+				CreatedAt:    stamp, UpdatedAt: stamp,
+			},
+			rowB: &types.Issue{
+				ID: "imr-b-" + name, Title: "explicit row " + name, Status: types.StatusOpen,
+				IssueType: types.TypeTask, Priority: 2,
+				Dependencies: []*types.Dependency{{IssueID: "imr-b-" + name, DependsOnID: anchor, Type: types.DepBlocks}},
+				Comments:     []*types.Comment{{ID: "imr-b-" + name + "-c1", Author: "importer-test", Text: "carried comment " + name, CreatedAt: stamp}},
+				CreatedAt:    stamp, UpdatedAt: stamp,
+			},
+		}
+		provider := &importReplayFaultProvider{UnitOfWorkProvider: inner}
+		provider.between = func(context.Context) {
+			run.attempt1ID = run.rowA.ID
+			if run.attempt1ID == "" {
+				t.Fatal("attempt 1 committed no mint onto row A; the fault fired before the engine ran")
+			}
+			if competitor != nil {
+				run.competitorRow = competitor(t, run.attempt1ID)
+			}
+		}
+		imp, err := NewImporter(provider)
+		if err != nil {
+			t.Fatalf("NewImporter: %v", err)
+		}
+		run.result, err = imp.ImportBatch(ctx, publicops.ImportBatchRequest{
+			Actor:      "importer-test",
+			Source:     "replay-" + name + ".jsonl",
+			AllowStale: allowStale,
+			Issues:     []*types.Issue{run.rowA, run.rowB},
+		})
+		if err != nil {
+			t.Fatalf("ImportBatch: %v", err)
+		}
+		if provider.faults != 1 {
+			t.Fatalf("fault fired %d time(s), want exactly 1 replay", provider.faults)
+		}
+		return run
+	}
+	// counterCompetitor auto-mints through the counter and proves it drew the
+	// very id attempt 1 had minted: the race the bug needs.
+	counterCompetitor := func(name string) func(t *testing.T, x string) string {
+		return func(t *testing.T, x string) string {
+			title := "competitor " + name
+			if got := autoMint(t, title); got != x {
+				t.Fatalf("competitor minted %q, want attempt 1's %q (race not reproduced)", got, x)
+			}
+			return title
+		}
+	}
+
+	// AC-1/AC-3/AC-2's "stored under issue.ID" half: row A landed exactly
+	// once, under the id on the caller's struct, with its edge and comment.
+	assertRowALanded := func(t *testing.T, run replayRun) {
+		t.Helper()
+		a := run.rowA
+		if a.ID == "" {
+			t.Fatal("row A has no id on the caller's struct after the import")
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE title = ?", a.Title); got != 1 {
+			t.Errorf("rows titled %q = %d, want 1", a.Title, got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ? AND title = ?", a.ID, a.Title); got != 1 {
+			t.Errorf("row A not stored under the caller's struct id %q", a.ID)
+		}
+	}
+	// AC-3: the edge and comment follow the replay's id on the rows and on
+	// the caller's structs, and nothing of row A sits under attempt 1's id.
+	assertRowAAuxFollowsReMint := func(t *testing.T, run replayRun) {
+		t.Helper()
+		a, x := run.rowA, run.attempt1ID
+		if dep := a.Dependencies[0]; dep.IssueID != a.ID {
+			t.Errorf("dep.IssueID = %q, want the re-minted %q", dep.IssueID, a.ID)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?", a.ID, anchor); got != 1 {
+			t.Errorf("row A edges under %q = %d, want 1", a.ID, got)
+		}
+		// Only when the replay drew a different id: with no competitor the
+		// re-mint IS attempt 1's id.
+		if a.ID != x {
+			if got := queryInt(t, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", x); got != 0 {
+				t.Errorf("edges under attempt 1's %q = %d, want 0", x, got)
+			}
+			if got := queryInt(t, "SELECT COUNT(*) FROM comments WHERE issue_id = ?", x); got != 0 {
+				t.Errorf("comments under attempt 1's %q = %d, want 0", x, got)
+			}
+		}
+		c := a.Comments[0]
+		if got := queryString(t, "SELECT id FROM comments WHERE issue_id = ? AND text = ?", a.ID, c.Text); got != c.ID {
+			t.Errorf("stored comment id = %q, caller's comment.ID = %q; want equal", got, c.ID)
+		}
+	}
+	// AC-4: row B's caller-supplied ids survive the replay untouched and the
+	// row, edge and comment are stored under them.
+	assertRowBKept := func(t *testing.T, run replayRun) {
+		t.Helper()
+		b := run.rowB
+		want := "imr-b-" + strings.TrimPrefix(b.Title, "explicit row ")
+		if b.ID != want || b.Dependencies[0].IssueID != want || b.Comments[0].ID != want+"-c1" {
+			t.Errorf("caller ids changed: id=%q dep=%q comment=%q, want %q/%q/%q",
+				b.ID, b.Dependencies[0].IssueID, b.Comments[0].ID, want, want, want+"-c1")
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ? AND title = ?", want, b.Title); got != 1 {
+			t.Errorf("row B under %q = %d, want 1", want, got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?", want, anchor); got != 1 {
+			t.Errorf("row B edges = %d, want 1", got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM comments WHERE id = ? AND issue_id = ?", want+"-c1", want); got != 1 {
+			t.Errorf("row B comment under %q = %d, want 1", want+"-c1", got)
+		}
+	}
+	assertCleanResult := func(t *testing.T, run replayRun) {
+		t.Helper()
+		if run.result.Created != 2 || len(run.result.StaleRejectedIDs) != 0 || len(run.result.RetiredIDs) != 0 {
+			t.Errorf("result = %+v, want Created=2 with nothing stale-rejected or retired", run.result)
+		}
+	}
+	// The competitor's row is untouched by the import.
+	assertCompetitorKept := func(t *testing.T, run replayRun) {
+		t.Helper()
+		x := run.attempt1ID
+		if got := queryString(t, "SELECT title FROM issues WHERE id = ?", x); got != run.competitorRow {
+			t.Errorf("row %q title = %q, want the competitor's %q", x, got, run.competitorRow)
+		}
+		if run.rowA.ID == x {
+			t.Errorf("row A kept attempt 1's id %q; want a fresh mint", x)
+		}
+	}
+
+	// AC-1: no other writer. The replay re-draws the same counter value, the
+	// counter ends at it, and the next auto-mint draws the one after.
+	t.Run("no_competitor", func(t *testing.T) {
+		run := importWithReplay(t, "no_competitor", false, nil)
+		assertCleanResult(t, run)
+		assertRowALanded(t, run)
+		assertRowAAuxFollowsReMint(t, run)
+		assertRowBKept(t, run)
+		x := run.attempt1ID
+		if run.rowA.ID != x {
+			t.Errorf("row A id = %q, want the replay to re-mint attempt 1's counter value %q", run.rowA.ID, x)
+		}
+		n, err := strconv.Atoi(strings.TrimPrefix(x, prefix+"-"))
+		if err != nil {
+			t.Fatalf("attempt 1 minted %q, not a counter id", x)
+		}
+		if got := queryInt(t, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix); got != n {
+			t.Errorf("issue_counter.last_id = %d, want %d", got, n)
+		}
+		if next := autoMint(t, "after no_competitor"); next != fmt.Sprintf("%s-%d", prefix, n+1) {
+			t.Errorf("next auto-mint = %q, want %s-%d", next, prefix, n+1)
+		}
+	})
+
+	// AC-2/AC-3: another writer took attempt 1's id between the rollback and
+	// the replay. With the stale guard on, row A must land under a fresh id
+	// rather than be stale-rejected against the competitor's row.
+	t.Run("competitor_stale_guard", func(t *testing.T) {
+		run := importWithReplay(t, "competitor_stale_guard", false, counterCompetitor("competitor_stale_guard"))
+		assertCleanResult(t, run)
+		assertCompetitorKept(t, run)
+		assertRowALanded(t, run)
+		assertRowAAuxFollowsReMint(t, run)
+		assertRowBKept(t, run)
+	})
+
+	// Edge: with --allow-stale the pre-fix replay overwrote the competitor's
+	// row with row A; after the fix the competitor keeps its columns.
+	t.Run("competitor_allow_stale", func(t *testing.T) {
+		run := importWithReplay(t, "competitor_allow_stale", true, counterCompetitor("competitor_allow_stale"))
+		assertCleanResult(t, run)
+		assertCompetitorKept(t, run)
+		assertRowALanded(t, run)
+		assertRowAAuxFollowsReMint(t, run)
+		assertRowBKept(t, run)
+	})
+
+	// Edge: hash mode. A row lands under attempt 1's hash id in between; the
+	// replay's mint must step past it (IDTakenInTx) instead of upserting.
+	t.Run("hash_mode_competitor", func(t *testing.T) {
+		if err := kit.SetConfig(ctx, "issue_id_mode", "hash"); err != nil {
+			t.Fatalf("set hash mode: %v", err)
+		}
+		const title = "competitor hash_mode_competitor"
+		run := importWithReplay(t, "hash_mode_competitor", false, func(t *testing.T, x string) string {
+			if err := kit.CreateIssue(ctx, &types.Issue{
+				ID: x, Title: title, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+			}, "other-writer"); err != nil {
+				t.Fatalf("seed competitor under %q: %v", x, err)
+			}
+			return title
+		})
+		assertCleanResult(t, run)
+		assertCompetitorKept(t, run)
+		assertRowALanded(t, run)
+		assertRowAAuxFollowsReMint(t, run)
+		assertRowBKept(t, run)
 	})
 }
