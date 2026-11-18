@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -126,7 +127,9 @@ func issue6092Setup(t *testing.T) (string, *sql.Conn, context.Context) {
 // table), ignored still at 4, and the legacy generated-column
 // wisp_dependencies carrying main 0022's three type indexes. The upgrade
 // pass must succeed, both cursors must reach latest, and the table must end
-// in the final shape — without the duplicate-index abort at ignored/0005.
+// in the final shape — without the duplicate-index abort at ignored/0005 —
+// with every seeded dependency row preserved under its own surrogate id and
+// the referenced wisp/issue rows untouched.
 func TestIssue6092IgnoredWispDepDropOverPreexistingTypeIndexes(t *testing.T) {
 	dbName, conn, ctx := issue6092Setup(t)
 
@@ -159,6 +162,7 @@ func TestIssue6092IgnoredWispDepDropOverPreexistingTypeIndexes(t *testing.T) {
 
 	issue6092SeedReferencedRows(t, ctx, conn)
 	issue6092SeedValidWispDeps(t, ctx, conn)
+	updatedBefore := issue6092SnapshotUpdatedAt(t, ctx, conn)
 	issue6092CommitFixture(t, ctx, conn, "test: #6092 legacy wisp_dependencies with 0022's type indexes")
 
 	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"); got != 4 {
@@ -185,6 +189,120 @@ func TestIssue6092IgnoredWispDepDropOverPreexistingTypeIndexes(t *testing.T) {
 		t.Fatalf("ignored cursor = %d after the upgrade, want latest %d", got, schema.LatestIgnoredVersion())
 	}
 	issue6092RequireFinalWispDepShape(t, ctx, conn)
+	issue6092RequireSeededRowsPreserved(t, ctx, conn, updatedBefore)
+}
+
+// issue6092SnapshotUpdatedAt captures the updated_at of every referenced wisp
+// and issue row (both columns are ON UPDATE CURRENT_TIMESTAMP, so any rewrite
+// of a referenced row moves its value) for the post-upgrade comparison.
+func issue6092SnapshotUpdatedAt(t *testing.T, ctx context.Context, db issue6092Conn) map[string]string {
+	t.Helper()
+	snapshot := map[string]string{}
+	for _, ref := range []struct{ table, id string }{
+		{"wisps", "w1"}, {"wisps", "w2"}, {"wisps", "w3"}, {"issues", "i1"},
+	} {
+		var ts string
+		if err := db.QueryRowContext(ctx,
+			fmt.Sprintf("SELECT updated_at FROM %s WHERE id = ?", ref.table), ref.id).Scan(&ts); err != nil {
+			t.Fatalf("snapshot %s.%s updated_at: %v", ref.table, ref.id, err)
+		}
+		snapshot[ref.table+"/"+ref.id] = ts
+	}
+	return snapshot
+}
+
+// issue6092RequireSeededRowsPreserved asserts every seeded dependency row
+// survived the upgrade with its targets, type and created_by intact under a
+// distinct nonempty id, and that the referenced wisp and issue rows still
+// carry the updated_at captured before it.
+func issue6092RequireSeededRowsPreserved(t *testing.T, ctx context.Context, db issue6092Conn, before map[string]string) {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `
+SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_by
+FROM wisp_dependencies`)
+	if err != nil {
+		t.Fatalf("read wisp_dependencies: %v", err)
+	}
+	var got []issue6092DepRow
+	for rows.Next() {
+		var r issue6092DepRow
+		if err := rows.Scan(&r.id, &r.issue, &r.issueTarget, &r.wispTarget, &r.ext, &r.depType, &r.createdBy); err != nil {
+			rows.Close()
+			t.Fatalf("scan wisp dep: %v", err)
+		}
+		got = append(got, r)
+	}
+	_ = rows.Close()
+
+	want := []struct{ issue, target, depType, createdBy string }{
+		{"w1", "w2", "blocks", "alice"},
+		{"w3", "i1", "relates", "bob"},
+		{"w1", "external:e1", "mentions", "carol"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("wisp_dependencies has %d rows after the upgrade, want %d", len(got), len(want))
+	}
+
+	ids := map[string]bool{}
+	for _, r := range got {
+		if r.id == "" || len(r.id) != 36 {
+			t.Errorf("row %s->%s has id %q, want a distinct nonempty 36-char id", r.issue, r.target(), r.id)
+		}
+		if ids[r.id] {
+			t.Errorf("duplicate id %s across preserved rows", r.id)
+		}
+		ids[r.id] = true
+
+		matched := false
+		for _, w := range want {
+			if r.issue == w.issue && r.target() == w.target {
+				matched = true
+				if r.depType != w.depType {
+					t.Errorf("row %s->%s type = %q, want %q", r.issue, w.target, r.depType, w.depType)
+				}
+				if r.createdBy != w.createdBy {
+					t.Errorf("row %s->%s created_by = %q, want %q", r.issue, w.target, r.createdBy, w.createdBy)
+				}
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("unexpected dep row %s->%s (%s/%s) survived", r.issue, r.target(), r.depType, r.createdBy)
+		}
+	}
+
+	for _, ref := range []struct{ table, id string }{
+		{"wisps", "w1"}, {"wisps", "w2"}, {"wisps", "w3"}, {"issues", "i1"},
+	} {
+		var ts string
+		if err := db.QueryRowContext(ctx,
+			fmt.Sprintf("SELECT updated_at FROM %s WHERE id = ?", ref.table), ref.id).Scan(&ts); err != nil {
+			t.Fatalf("re-read %s.%s updated_at: %v", ref.table, ref.id, err)
+		}
+		if ts != before[ref.table+"/"+ref.id] {
+			t.Errorf("%s.%s updated_at changed across the upgrade: %q -> %q", ref.table, ref.id, before[ref.table+"/"+ref.id], ts)
+		}
+	}
+}
+
+// issue6092DepRow is one wisp_dependencies row as the preservation check
+// reads it.
+type issue6092DepRow struct {
+	id, issue, createdBy, depType string
+	issueTarget, wispTarget, ext  sql.NullString
+}
+
+// target renders whichever single target column a preserved row carries.
+func (r issue6092DepRow) target() string {
+	switch {
+	case r.issueTarget.Valid:
+		return r.issueTarget.String
+	case r.wispTarget.Valid:
+		return r.wispTarget.String
+	case r.ext.Valid:
+		return r.ext.String
+	}
+	return "<no target>"
 }
 
 // issue6092RunMigrationFile executes one frozen migration file's whole body
