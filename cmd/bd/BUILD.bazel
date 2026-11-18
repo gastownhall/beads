@@ -1114,6 +1114,7 @@ go_test(
         "promote_proxied_integration_test.go",
         "prompt_test.go",
         "provenance_test.go",
+        "proxied_create_policy_test.go",
         "proxied_direct_only_refusal_frontdoor_test.go",
         "proxied_fresh_store_recovery_test.go",
         "proxied_integration_helpers_test.go",

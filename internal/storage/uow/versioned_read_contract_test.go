@@ -137,6 +137,7 @@ func (h *asOfReadHarness) provider(ctx context.Context, storeID string) (UnitOfW
 		0,
 		false,
 		"",
+		WithCreateIfMissing(true),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("as-of read fixture: new provider for store %q (database %q): %w", storeID, database, err)

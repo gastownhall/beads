@@ -212,7 +212,7 @@ func newServedProviderSource(t *testing.T, prefix string) *servedProviderSource 
 	t.Cleanup(func() { dropServedProviderDatabase(t, port, database) })
 
 	raw, err := uow.NewExternalDoltServerUOWProvider(ctx, root, database, filepath.Join(root, "server.log"),
-		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: port}, "root", "", 0, servedProviderProxyIdle, false, "")
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: port}, "root", "", 0, servedProviderProxyIdle, false, "", uow.WithCreateIfMissing(true))
 	if err != nil {
 		t.Fatalf("open the unit-of-work provider on %s: %v", database, err)
 	}

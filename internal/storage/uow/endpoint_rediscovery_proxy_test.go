@@ -91,7 +91,7 @@ func newExternalRediscoveryFixture(t *testing.T) *rediscoveryFixture {
 func (f *rediscoveryFixture) open(ctx context.Context, t *testing.T, ep proxy.Endpoint, database string) *doltSQLProvider {
 	t.Helper()
 	provider, err := openAndInitSchema(ctx, proxy.DataNetwork, ep, f.backend, database, "root", "", "", false, "",
-		providerOptions{}, newProxyEndpointResolver(f.discover))
+		providerOptions{createIfMissing: true}, newProxyEndpointResolver(f.discover))
 	require.NoError(t, err)
 	p, ok := provider.(*doltSQLProvider)
 	require.True(t, ok, "openAndInitSchema returned %T, want *doltSQLProvider", provider)

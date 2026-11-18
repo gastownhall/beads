@@ -194,8 +194,10 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	// Initializing, not Adopting: init is the one open allowed to create the
-	// managed-local store (every other open refuses an empty root).
-	initUOWProvider, err := newProxiedServerUOWProviderInitializing(ctx, beadsDir, "")
+	// managed-local store (every other open refuses an empty root), and it is
+	// the one open whose uow layer may create the database (#2189): every
+	// other proxied call site opens with create disabled.
+	initUOWProvider, err := newProxiedServerUOWProviderInitializing(ctx, beadsDir, "", uow.WithCreateIfMissing(true))
 	if err != nil {
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}

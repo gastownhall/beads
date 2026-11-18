@@ -69,8 +69,10 @@ func expectAheadDatabaseThroughDriftCheck(mock sqlmock.Sqlmock, database string,
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, 5).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
-	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `" + database + "`")).
-		WillReturnError(&mysql.MySQLError{Number: 1007, Message: "database exists"})
+	// The locked preparation probes before any DDL: the database exists, so no
+	// CREATE is attempted.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectExec(regexp.QuoteMeta("USE `" + database + "`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	// Shared-store gate: CurrentVersion and PendingVersions; nothing pending.

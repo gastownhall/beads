@@ -114,6 +114,7 @@ func TestNewDoltServerUOWProvider_HappyPath(t *testing.T) {
 		0,
 		false,
 		"",
+		WithCreateIfMissing(true),
 	)
 
 	require.NoError(t, err)
@@ -171,7 +172,7 @@ func TestNewDoltServerUOWProvider_CarriesProxiedServerMode(t *testing.T) {
 				0,
 				false,
 				"",
-				tt.opts...,
+				append([]ProviderOption{WithCreateIfMissing(true)}, tt.opts...)...,
 			)
 			require.NoError(t, err)
 			require.NotNil(t, provider)
@@ -231,6 +232,7 @@ func TestNewDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) {
 				0,
 				false,
 				"",
+				WithCreateIfMissing(true),
 			)
 			results[i] = result{provider: p, err: err}
 		}()
@@ -410,7 +412,7 @@ func TestManagedProviderRediscoversAfterProxyRetirement(t *testing.T) {
 	const database = "managed_rediscovery"
 	provider, err := NewDoltServerUOWProvider(ctx, storeRootDir, database,
 		filepath.Join(t.TempDir(), "server.log"), writeServerConfig(t, port),
-		proxy.BackendLocalServer, "root", "", bin, 0, retirementIdleTimeout, false, "")
+		proxy.BackendLocalServer, "root", "", bin, 0, retirementIdleTimeout, false, "", WithCreateIfMissing(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = provider.Close(context.Background()) })
 	p, ok := provider.(*doltSQLProvider)
