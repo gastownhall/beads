@@ -142,6 +142,7 @@
 34 14 TestProxiedServerInitIfMissing
 34 14 TestProxiedServerMolReadyGated
 
+34 15 TestProxiedServerAutoExportRefusalGuards
 34 15 TestProxiedServerDepConcurrent
 34 15 TestProxiedServerImport
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
@@ -178,6 +179,7 @@
 34 19 TestProxiedServerShow3
 34 19 TestServerModeTypesAgreeWithCreate
 
+34 20 TestProxiedServerAutoExportByteIdentical
 34 20 TestProxiedServerDelete
 34 20 TestProxiedServerLint
 34 20 TestProxiedServerPriority
@@ -274,6 +276,7 @@
 34 31 TestProxiedServerMolBond
 
 34 32 TestProxiedServerAssigneeHiddenEmptyClears
+34 32 TestProxiedServerAutoExport
 34 32 TestProxiedServerClaimPathsJournalSidecar
 34 32 TestProxiedServerCleanDatabasesPurgeDropped
 34 32 TestProxiedServerConfigConcurrent
