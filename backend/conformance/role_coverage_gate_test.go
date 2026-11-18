@@ -19,7 +19,12 @@ import (
 // the gate takes away is doing it quietly: an addition must name a real method,
 // carry a reason, and land in a diff a reviewer reads. It converts silence into
 // an argument someone has to make.
-var uncoveredRoleMethods = map[string]string{}
+var uncoveredRoleMethods = map[string]string{
+	"issueops.Imager.Image": "the role landed with bd image tested per backend " +
+		"(internal/storage/dolt/image_test.go, cmd/bd image tests across the embedded, direct and " +
+		"proxied routes) but with no contract case: one needs an ImagerFixture, a RoleContractBundle " +
+		"field and wiring on all three backends. A follow-up adds it and deletes this entry.",
+}
 
 // TestEveryRoleMethodHasAContractCase is the exhaustiveness gate on the role
 // tier: every method of every interface the public facade declares must be

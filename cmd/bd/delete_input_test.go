@@ -6,8 +6,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestReadIssueIDsFromFile(t *testing.T) {
@@ -90,6 +93,7 @@ func TestGatherDeleteInput(t *testing.T) {
 		cmd.Flags().Bool("force", false, "")
 		cmd.Flags().Bool("dry-run", false, "")
 		cmd.Flags().Bool("cascade", false, "")
+		cmd.Flags().String("if-threads", "", "")
 		return cmd
 	}
 
@@ -138,4 +142,83 @@ func TestGatherDeleteInput(t *testing.T) {
 			t.Errorf("gatherDeleteInput(): got %#v, want %#v", got, want)
 		}
 	})
+
+	t.Run("loads the --if-threads guard file", func(t *testing.T) {
+		guardPath := filepath.Join(t.TempDir(), "guard.json")
+		if err := os.WriteFile(guardPath, []byte(`{"cutoff": "2026-10-24T12:00:00Z", "member_label": "mail",
+			"exclude_label": "keep", "edge": "replies-to",
+			"threads": [{"root": "bd-r", "members": [{"id": "bd-r", "revision": "abc"}]}]}`), 0o600); err != nil {
+			t.Fatalf("write guard file: %v", err)
+		}
+		cmd := newCommand(t)
+		for name, value := range map[string]string{"if-threads": guardPath, "force": "true"} {
+			if err := cmd.Flags().Set(name, value); err != nil {
+				t.Fatalf("set %s: %v", name, err)
+			}
+		}
+		jsonOutput, quietFlag = false, false
+
+		got, err := gatherDeleteInput(cmd, []string{"bd-r"})
+		if err != nil {
+			t.Fatalf("gatherDeleteInput() with --if-threads: %v", err)
+		}
+		want := &deleteInput{ids: []string{"bd-r"}, force: true, threadGuard: &issueops.ThreadGuard{
+			Cutoff:       time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC),
+			MemberLabel:  "mail",
+			ExcludeLabel: "keep",
+			Edge:         "replies-to",
+			Threads: []issueops.GuardedThread{{Root: "bd-r", Members: []issueops.GuardedMember{
+				{ID: "bd-r", Revision: "abc"},
+			}}},
+		}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("gatherDeleteInput(): got %#v, want %#v", got, want)
+		}
+	})
+}
+
+// TestLoadDeleteThreadGuardRules pins the --if-threads flag rules every route
+// shares: no guard without the flag, --force required, --cascade refused, and
+// a guard file that is not exactly the JSON form of issueops.ThreadGuard
+// refused rather than read with a check missing.
+func TestLoadDeleteThreadGuardRules(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return path
+	}
+	good := write("good.json", `{"cutoff": "2026-10-24T12:00:00Z", "member_label": "mail", "edge": "replies-to", "threads": []}`)
+
+	if guard, err := loadDeleteThreadGuard("", false, false, true); guard != nil || err != nil {
+		t.Errorf("no --if-threads: got guard=%v err=%v, want no guard and no error", guard, err)
+	}
+	for _, tc := range []struct {
+		name           string
+		path           string
+		force, cascade bool
+		want           string
+	}{
+		{"empty path", "", true, false, "--if-threads needs a guard file path"},
+		{"blank path", "  ", true, false, "--if-threads needs a guard file path"},
+		{"empty path without --force", "", false, false, "--if-threads needs a guard file path"},
+		{"empty path with --cascade", "", true, true, "--if-threads needs a guard file path"},
+		{"without --force", good, false, false, "--if-threads requires --force"},
+		{"with --cascade", good, true, true, "cannot be combined with --cascade"},
+		{"missing file", filepath.Join(dir, "absent.json"), true, false, "reading --if-threads file"},
+		{"not JSON", write("bad.json", "cutoff: soon"), true, false, "parsing --if-threads file"},
+		{"unknown key", write("typo.json", `{"member_lable": "mail"}`), true, false, "unknown field"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			guard, err := loadDeleteThreadGuard(tc.path, true, tc.force, tc.cascade)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("loadDeleteThreadGuard() = %v, %v; want an error containing %q", guard, err, tc.want)
+			}
+		})
+	}
+	if guard, err := loadDeleteThreadGuard(good, true, true, false); err != nil || guard == nil || guard.MemberLabel != "mail" {
+		t.Errorf("good guard file: got guard=%+v err=%v", guard, err)
+	}
 }

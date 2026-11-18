@@ -149,6 +149,15 @@ type DeleteRequest struct {
 	// half-explained. It is computed against the same snapshot the real
 	// deletion would have used.
 	DryRun bool
+	// ThreadGuard, when non-nil, refuses the deletion with a
+	// *ThreadGuardMismatchError unless every archived thread it lists is still
+	// exactly what the caller archived. See ThreadGuard for the four checks.
+	//
+	// It ranks BELOW ExpectedVersion and ABOVE the dependents guard, and it
+	// runs before any row is deleted or rewritten: a failure changes no row,
+	// rewrites no neighbor and records no event. With Cascade it is
+	// ErrValidation, refused before anything is read. nil disables it.
+	ThreadGuard *ThreadGuard
 }
 
 // DeleteResult reports one deletion.
