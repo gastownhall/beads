@@ -93,6 +93,8 @@ func TestTrackerSyncRefusesCreateOnlyOnPull(t *testing.T) {
 		{name: "linear pull", cmd: linearSyncCmd, tracker: "Linear", flags: []string{"pull", "create-only"}, refused: true},
 		{name: "linear pull-if-stale", cmd: linearSyncCmd, tracker: "Linear", flags: []string{"pull-if-stale", "create-only"}, refused: true},
 		{name: "linear pull dry-run", cmd: linearSyncCmd, tracker: "Linear", flags: []string{"pull", "create-only", "dry-run"}, refused: true},
+		{name: "jira pull", cmd: jiraSyncCmd, tracker: "Jira", flags: []string{"pull", "create-only"}, refused: true},
+		{name: "notion pull", cmd: notionSyncCmd, tracker: "Notion", flags: []string{"pull", "create-only"}, refused: true},
 	}
 
 	for _, tc := range cases {

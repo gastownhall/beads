@@ -111,6 +111,10 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 	createOnly, _ := cmd.Flags().GetBool("create-only")
 	state, _ := cmd.Flags().GetString("state")
 
+	if err := createOnlyDirectionError("Jira", createOnly, pull && !push); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
 	if !dryRun {
 		CheckReadonly("jira sync")
 	}
