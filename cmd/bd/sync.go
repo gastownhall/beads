@@ -680,9 +680,13 @@ Conflicts sync cannot resolve safely are NEVER auto-resolved: it halts before
 recomputing or pushing and exits 2, and repeated runs keep halting the same way
 until an operator resolves the divergence. (The pull underneath does auto-settle
 the conflict classes it can settle convergently — machine-local metadata,
-audit-only dependency rows, and last-write-wins on issue cells. Anything beyond
-those halts here.) Whether the halted merge was aborted or left live in the
-working set depends on the pull route, so the halt message reports which.
+audit-only dependency rows, and last-write-wins on issue cells — EXCEPT a close
+race, where one side closed an issue the other side's edit left non-closed:
+that one is never settled by timestamp, because either winner silently undoes
+the other side's lifecycle intent. It halts here too, naming the issue and
+both statuses. Anything beyond those halts here.) Whether the halted merge was
+aborted or left live in the working set depends on the pull route, so the halt
+message reports which.
 
 Exit codes (a sync timer can branch on these without parsing output):
 
