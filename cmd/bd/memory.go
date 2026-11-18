@@ -216,14 +216,49 @@ func rememberBudgetVerdict(existing map[string]string, key, content string, budg
 	return memoryBudgetLine(projectedMemoryCorpusChars(existing, key, content), budget, force)
 }
 
+// isBareMemoryKey reports whether a `bd remember` argument is shaped like a
+// key rather than like content: one or more runs of lowercase ASCII letters
+// and digits, joined by single dots or hyphens. It has no length or segment
+// cap, so it accepts every non-empty key memoryapi.DeriveKey mints and also
+// the longer and dotted keys an explicit --key stores.
+//
+// It is a CLI intent decision, not a key rule: --key accepts any string, and
+// a key outside this shape (uppercase, an underscore, a space, a doubled or
+// trailing separator) is still read with bd recall. Such arguments keep the
+// content path, as do the empty and separator-only ones the role refuses.
+func isBareMemoryKey(s string) bool {
+	if s == "" {
+		return false
+	}
+	atStart := true // at the start of the string or just after a separator
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case 'a' <= c && c <= 'z', '0' <= c && c <= '9':
+			atStart = false
+		case c == '.' || c == '-':
+			if atStart {
+				return false
+			}
+			atStart = true
+		default:
+			return false
+		}
+	}
+	return !atStart
+}
+
 // rememberBareKeyPath implements the desire-path / footgun guard for
 // `bd remember <bare-slug>` (no --key): a bare slug naming an EXISTING memory
 // is recalled instead of stored; a bare slug naming nothing is refused. The
-// caller only invokes it when memoryKeyFlag == "" and the insight round-trips
-// through memoryapi.DeriveKey unchanged, having already read the key. As in
+// caller only invokes it when memoryKeyFlag == "" and the insight is a bare
+// key (isBareMemoryKey), having already read that exact key. As in
 // printRecallResult, presence is found (row existence), never existing != "":
 // a bare slug naming a memory stored as the empty string recalls it.
-func rememberBareKeyPath(key, insight, existing string, found bool) error {
+//
+// suggestion, when not empty, is a key holding a memory that the refusal
+// should point at (the bare key's derived key); it is named in a separate
+// hint, never recalled in the key's place.
+func rememberBareKeyPath(key, insight, existing string, found bool, suggestion string) error {
 	if found {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -241,11 +276,18 @@ func rememberBareKeyPath(key, insight, existing string, found bool) error {
 		return nil
 	}
 	keyArg, keyNote := remedy.CommandArg(runtime.GOOS, key, "<key>")
-	return HandleErrorRespectJSON(
+	message := fmt.Sprintf(
 		"no memory named %q to recall -- and refusing to store a bare key-like token as its own content. "+
 			"bd remember WRITES (its positional arg is CONTENT, not a key). "+
 			"To browse keys: bd memories. To store it anyway, run: bd remember %q --key %s%s",
 		key, insight, keyArg, keyNote)
+	if suggestion == "" {
+		return HandleErrorRespectJSON("%s", message)
+	}
+	suggestionArg, suggestionNote := remedy.CommandArg(runtime.GOOS, suggestion, "<key>")
+	return HandleErrorWithHintRespectJSON(message, fmt.Sprintf(
+		"did you mean %s? A memory exists under that derived key; to read it, run: bd recall %s%s",
+		remedy.PrintedWord(suggestion), suggestionArg, suggestionNote))
 }
 
 // printRememberResult renders the `bd remember` success output. commitErr is
@@ -452,9 +494,8 @@ Examples:
 		// Desire path + footgun guard: `bd remember <x>` is a WRITE whose positional arg is
 		// the CONTENT, not a key -- but "remember X" reads as a getter in English, so agents
 		// routinely type `bd remember some-key` meaning "do you remember X?". The tell-tale of
-		// a mistyped read is content that round-trips through the key derivation unchanged (a
-		// bare slug); real prose insights never do. When that happens and no explicit --key was
-		// given:
+		// a mistyped read is content shaped like a key (isBareMemoryKey: a lowercase slug);
+		// real prose insights never are. When that happens and no explicit --key was given:
 		//   - the key EXISTS  -> pave the desire path: recall it instead of writing
 		//   - no such key     -> refuse; storing a key-like token as its own content would
 		//                        create a junk memory that hides the mistake
@@ -465,18 +506,30 @@ Examples:
 		// and must not inherit it. The read below is a plain Recall, so this whole
 		// branch touches nothing.
 		//
-		// `derived != ""` is load-bearing and is not decoration: DeriveKey("")
-		// is "", so without it every empty or unslugifiable insight would satisfy
-		// derived == insight and be routed into a "recall" of the empty key. The
-		// shipped code was saved from that by an empty-content check that ran
-		// first; that check is the role's now, so the condition has to say it.
-		derived := memoryapi.DeriveKey(insight)
-		if memoryKeyFlag == "" && derived != "" && derived == insight {
-			recalled, err := memories.Recall(rootCtx, memoryops.RecallRequest{Key: derived})
+		// The read is of the argument ITSELF, never of its derivation (GH#7275).
+		// The old test, DeriveKey(insight) == insight, missed every key the
+		// derivation changes -- more than eight segments, over 60 bytes, a dot --
+		// and sent those reads on to Remember, which stored the key as content
+		// under the derived key and overwrote whatever memory was there.
+		if memoryKeyFlag == "" && isBareMemoryKey(insight) {
+			recalled, err := memories.Recall(rootCtx, memoryops.RecallRequest{Key: insight})
 			if err != nil {
 				return HandleErrorRespectJSON("recalling memory: %v", err)
 			}
-			return rememberBareKeyPath(derived, insight, recalled.Value, recalled.Found)
+			// On a miss the derived key is read for a SUGGESTION only: its
+			// memory answers a different question, so the refusal names the
+			// key and never its content.
+			var suggestion string
+			if derived := memoryapi.DeriveKey(insight); !recalled.Found && derived != "" && derived != insight {
+				alt, err := memories.Recall(rootCtx, memoryops.RecallRequest{Key: derived})
+				if err != nil {
+					return HandleErrorRespectJSON("recalling memory: %v", err)
+				}
+				if alt.Found {
+					suggestion = derived
+				}
+			}
+			return rememberBareKeyPath(insight, insight, recalled.Value, recalled.Found, suggestion)
 		}
 
 		// Corpus budget (memories.budget-chars, OPT-IN, 0 = off). The
