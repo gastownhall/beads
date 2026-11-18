@@ -1750,8 +1750,9 @@ bd doctor
     | Storage Availability:
     |   Full diagnostics, --perf, --deep, --server, --migration, and
     |   --check=validate currently require Dolt server mode. Embedded Dolt
-    |   supports --check=artifacts, --check=conventions, and
-    |   --check=pollution. --check-health has a limited hook-health fallback.
+    |   supports --check=artifacts, --check=conventions,
+    |   --check=export, and --check=pollution. --check-health has a limited
+    |   hook-health fallback.
     |   Unsupported combinations return a notice without changing storage.
     |
     | Performance Mode (--perf):
@@ -1768,9 +1769,14 @@ bd doctor
     | Specific Check Mode (--check):
     |   Run a specific check in detail. Available checks:
     |   - artifacts: Detect and optionally clean beads classic artifacts
-    |     (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
+    |     (SQLite files, cruft .beads dirs). Use with --clean. Does not
+    |     check export coverage - see the export check.
     |   - conventions: Check for convention drift (lint warnings, stale
     |     issues, orphaned issues). Advisory only - warns, never blocks.
+    |   - export: Compare in-scope store issue IDs against the passive export
+    |     file's IDs (coverage only, not content equality). Reports missing
+    |     IDs as a warning; read-only even with --fix/--clean. Refresh
+    |     manually with: bd export -o <resolved-path>
     |   - pollution: Detect and optionally clean test issues from database
     |   - validate: Run focused data-integrity checks (duplicates, orphaned
     |     deps, test pollution, git conflicts). Use with --fix to auto-repair.
@@ -1838,6 +1844,7 @@ bd doctor
     |   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
     |   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
     |   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+    |   bd doctor --check=export             # Warn when the export file is missing store IDs
     |   bd doctor --check=pollution          # Show potential test issues
     |   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
     |   bd doctor --check=validate         # Data-integrity checks only
@@ -3634,6 +3641,11 @@ bd import
     | --allow-stale is the single deliberate-overwrite opt-in, and
     | updated_issues is where to look for what an import rewrote.
     |
+    | Comments merge additively. A comment whose id is already stored on the
+    | same issue keeps its stored text, author and time, also under
+    | --allow-stale; a comment id stored on a different issue fails the
+    | import with an error naming the comment and both issues.
+    |
     | Large imports are written in bounded transactions (a few hundred issues
     | each, with a short pause between commits) with progress on stderr, so
     | concurrent bd commands keep working while the import runs instead of
@@ -4387,7 +4399,7 @@ bd list
   group: "issues"
   hidden: false
   runnable: true
-  flag --all type=bool default="false" usage="Show all issues including closed (overrides default filter)"
+  flag --all type=bool default="false" usage="Lift default status and pinned exclusions and the default limit (type and plane suppressions still apply; see --include-all-types)"
   flag --assignee -a type=string default="" usage="Filter by assignee"
   flag --brief type=bool default="false" usage="Omit the free-form text (description, design, acceptance criteria, notes, payload, waiters) from each row. Filters that read those fields, such as --desc-contains, still select on them. An omitted field is indistinguishable from an empty one in --json; fetch a whole issue with bd show."
   flag --closed-after type=string default="" usage="Filter issues closed after date (YYYY-MM-DD or RFC3339)"
@@ -4411,6 +4423,7 @@ bd list
   flag --format type=string default="" usage="Export the dependency graph of the listed issues: 'digraph' (edge list for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or a Go template rendered once per edge over .IssueID, .DependsOnID, .Type, .Issue, .Dependency. 'json' is the exception and does not export the graph: it is equivalent to --json, which also wins when both flags are given. 'digraph' and templates print nothing when no listed issue depends on another; 'dot' still prints the nodes"
   flag --has-metadata-key type=string default="" usage="Filter issues that have this metadata key set"
   flag --id type=string default="" usage="Filter by specific issue IDs (comma-separated or repeated, e.g., bd-1,bd-5,bd-10)"
+  flag --include-all-types type=bool default="false" usage="Include all issue types and the ephemeral wisp plane (default status and pinned exclusions still apply; see --all)"
   flag --include-comments type=bool default="false" usage="Populate each row's comments field with full comment bodies in JSON output (--json only; costs one query per row that has comments). Without it, a row with comments carries comments_omitted=true, so an absent comments field is never mistaken for having none. Text output is unaffected either way."
   flag --include-ephemeral type=bool default="false" usage="Include ephemeral wisp-plane rows in output (normally hidden)"
   flag --include-gates type=bool default="false" usage="Include gate issues in output (normally hidden)"

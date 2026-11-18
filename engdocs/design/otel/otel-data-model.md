@@ -1,6 +1,6 @@
 # OpenTelemetry Data Model
 
-Last reviewed: 2026-11-07
+Last reviewed: 2026-11-17
 
 Freshness source: `internal/telemetry/`, `internal/storage/dolt/store.go`,
 `internal/compact/haiku.go`, `cmd/bd/find_duplicates.go`, and hook execution
@@ -16,6 +16,8 @@ Complete schema of all telemetry events emitted by Beads. Each event consists of
 Telemetry is hard opt-in: nothing is emitted unless `BD_OTEL_ENABLED=true` is set (a legacy `BD_OTEL_*` variable also activates it); standard `OTEL_*` variables on their own do not.
 
 All command spans automatically carry `bd.command`, `bd.version`, `bd.args` from startup context; `bd.actor` is added after actor resolution.
+
+**No issue content in any span (#8505).** Span attributes and events carry identifiers (issue ids, actors, issue types, config and slot keys, provenance refs, branch and remote names, the hook path), SQL text with its `?` placeholders, counts and durations, never issue content: no title, description, notes, label, comment, reason, search text, commit message or hook output. Some identifiers repeat what the user typed (an issue id, an `--actor` value, a `bd kv set` key, a provenance ref, a branch name); `bd.args` never carries an argument or a flag value. `TestEmbeddedTelemetryExportCarriesNoIssueContent` (`cmd/bd/telemetry_export_e2e_test.go`) runs a representative set of content-bearing verbs with the console exporters and fails on any marker in the export. Error messages are the exception: a failed span records the error text (`exception.message`, status description), which can quote the input that failed.
 
 ---
 
@@ -70,7 +72,7 @@ The outermost grouping: the OTel **resource** attached to every span and metric,
 
 No `os.*` detector is installed.
 
-**No command line on the resource (fixed in #8222).** The resource is attached to every metric export and span, so it never carries `process.command_args` (the raw, unscrubbed `os.Args`, which can hold the secret-flag values and DSN userinfo that `scrubArgsForTelemetry` removes from `bd.args`, §2), `process.executable.path` or `process.owner`. `resource.WithProcess()` would add all three, so `buildResource` names its process detectors instead; `TestBuildResource_NeverCarriesCommandLine` pins this.
+**No command line on the resource (fixed in #8222).** The resource is attached to every metric export and span, so it never carries `process.command_args` (the raw `os.Args`, which can hold credentials, issue titles and search text; `bd.args` carries only the command path and flag names, §2), `process.executable.path` or `process.owner`. `resource.WithProcess()` would add all three, so `buildResource` names its process detectors instead; `TestBuildResource_NeverCarriesCommandLine` pins this.
 
 ### 1.2 Command
 
@@ -80,7 +82,7 @@ Each `bd` command execution generates a span with full context.
 |---|---|---|
 | `bd.command` | string | Subcommand name (`create`, `list`, `show`, etc.) |
 | `bd.version` | string | Current bd version string |
-| `bd.args` | string | Full argument list |
+| `bd.args` | string | Command path and the names of the flags set (no values, §2) |
 | `bd.actor` | string | Actor identity — set after actor resolution (may lag span start) |
 
 ---
@@ -95,7 +97,7 @@ Emitted once per `bd` subcommand execution. Anchors all subsequent events for th
 |---|---|---|
 | `bd.command` | string | Subcommand name |
 | `bd.version` | string | bd version |
-| `bd.args` | string | Full arguments passed to command, scrubbed via `scrubArgsForTelemetry` (secret-flag values and DSN userinfo redacted). The resource carries no command line (§1.1) |
+| `bd.args` | string | The command path below the root, then the long name of every flag set on the command line, sorted: `bd create "title" -d "text" -q` records `create --description --quiet`. Built by `commandTelemetryArgs` from the command cobra parsed, not from `os.Args`, so no positional argument or flag value (title, description, notes, label, comment, search text, credential) appears, and a value shaped like a flag is not read as one (#8505). The resource carries no command line (§1.1) |
 | `bd.actor` | string | Actor identity (set after actor resolution) |
 
 ---
@@ -104,7 +106,7 @@ Emitted once per `bd` subcommand execution. Anchors all subsequent events for th
 
 `telemetry.WrapStorage` (`InstrumentedStorage`) instruments the methods of the core storage interface and every issueops role accessor: it emits `storage.<Method>` spans and, through the role decorators in `internal/telemetry/`, `storage.<Role>.<Method>` spans (e.g. `storage.IssueReader.Ready`, `storage.ReadyClaimer.ClaimNext`, `storage.Sweeper.Sweep`). The `DoltStorage` capability sub-interfaces (version control, history, sync, and so on) pass through unwrapped; they are covered by the `dolt.*` spans in §4 instead. The tables below are representative examples; the complete list is the inventory at the end of this section.
 
-**Metric labels.** The span carries `db.operation` plus the method's request attributes (`bd.issue.id`, `bd.actor`, `bd.query`, `db.commit_msg`, ...). The three `bd.storage.*` metrics (`operations`, `operation.duration`, `errors`) carry `db.operation` and nothing else (`InstrumentedStorage.op` / `done`). Request attributes are per-request values: as metric labels they would make one series per value, run into the SDK's per-metric cardinality limit (2000 attribute sets, the rest folded into `otel.metric.overflow`) and send search text, commit messages and actor names to the metrics receiver. Result attributes set later on the span (`bd.result.count`, etc.) are not metric labels either. The attribute tables below describe the spans.
+**Metric labels.** The span carries `db.operation` plus the method's request attributes (`bd.issue.id`, `bd.actor`, `bd.issue.type`, `bd.config.key`, ...). Content is never a request attribute: the search text (`bd.query`), label names (`bd.label`, `bd.label.old`, `bd.label.new`) and commit messages (`db.commit_msg`, which can quote a `bd batch -m` message or a propagated label) were dropped from the spans in #8505, and `TestStorageSpansCarryNoIssueContent` pins it. The three `bd.storage.*` metrics (`operations`, `operation.duration`, `errors`) carry `db.operation` and nothing else (`InstrumentedStorage.op` / `done`). Request attributes are per-request values: as metric labels they would make one series per value, run into the SDK's per-metric cardinality limit (2000 attribute sets, the rest folded into `otel.metric.overflow`) and send issue ids, actor names and config keys to the metrics receiver. Result attributes set later on the span (`bd.result.count`, etc.) are not metric labels either. The attribute tables below describe the spans.
 
 ### `storage.CreateIssue`
 
@@ -143,8 +145,9 @@ Emitted when searching for issues.
 | Attribute | Type | Description |
 |---|---|---|
 | `db.operation` | string | `"SearchIssues"` |
-| `bd.query` | string | Search query string |
 | `bd.result.count` | int | Number of results returned |
+
+The search text is not recorded (it was `bd.query` before #8505). `SearchIssuesWithCounts`, `SearchIssueIDs` and `SearchIssueSummaries` carry the same two, each with its own `db.operation`.
 
 ### `storage.GetReadyWork`
 
@@ -171,9 +174,8 @@ Emitted when executing a transaction.
 | Attribute | Type | Description |
 |---|---|---|
 | `db.operation` | string | `"RunInTransaction"` |
-| `db.commit_msg` | string | Commit message |
 
-`storage.RunInIssueLifecycleTransaction` carries the same two attributes.
+`storage.RunInIssueLifecycleTransaction` carries the same attribute. Neither records the commit message, which can quote user content (`bd batch -m <message>`, the label in `bd label propagate`); it was `db.commit_msg` before #8505.
 
 ### `storage.GetStatistics`
 
@@ -287,7 +289,7 @@ Emitted for single-row queries via `queryRowContext()`.
 
 ### `dolt.commit`
 
-Emitted for DOLT_COMMIT operations. Carries only the shared `doltSpanAttrs()` (see the note at the top of this section) — the commit message no longer appears on this span. It survives only as `db.commit_msg` on the `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` spans (`internal/telemetry/storage.go:691,699`).
+Emitted for DOLT_COMMIT operations. Carries only the shared `doltSpanAttrs()` (see the note at the top of this section). No span carries the commit message (§3, #8505).
 
 ### `dolt.push`
 
@@ -378,8 +380,10 @@ Emitted for hook execution, as a root span (hooks run asynchronously, so the spa
 | `bd.issue_id` | string | ID of triggering issue |
 
 Stdout/stderr are added as span **events** (not attributes), each only when non-empty:
-- `hook.stdout` event: `output` (string, truncated to 1024 bytes), `bytes` (int, original size)
-- `hook.stderr` event: `output` (string, truncated to 1024 bytes), `bytes` (int, original size)
+- `hook.stdout` event: `bytes` (int, how much the script wrote to stdout)
+- `hook.stderr` event: `bytes` (int, how much the script wrote to stderr)
+
+The output text is not recorded: a hook receives the issue as JSON on stdin and often echoes or logs it (#8505; it was the `output` attribute, truncated to 1024 bytes, before).
 
 ---
 
@@ -511,11 +515,10 @@ Every metric name, span name, and attribute listed in this document is backed by
 
 | Span name | Attributes | Source |
 |-----------|-----------|--------|
-| `bd.command.<name>` | `bd.command`, `bd.version`, `bd.args` (scrubbed) | built in `cmd/bd/command_telemetry.go` (`startCommandSpan`/`commandSpanAttrs`), called from `cmd/bd/main.go:1425` |
+| `bd.command.<name>` | `bd.command`, `bd.version`, `bd.args` (command path and flag names) | built in `cmd/bd/command_telemetry.go` (`startCommandSpan`/`commandSpanAttrs`/`commandTelemetryArgs`), called from `cmd/bd/main.go:1425` |
 | `bd.command.<name>` | `bd.actor` (added later) | `cmd/bd/main.go:1988` |
 | *(resource)* | `service.name`, `service.version`, `host.name`, `process.pid` / `.executable.name` / `.runtime.*`, `OTEL_RESOURCE_ATTRIBUTES` | `internal/telemetry/telemetry.go:147-161` (`buildResource`) |
 | `storage.<op>` / `storage.<Role>.<Method>` (all methods) | `db.operation` + method-specific attrs | `internal/telemetry/storage.go:76-84` (role decorators throughout `internal/telemetry/`) |
-| `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` | `db.commit_msg` | `internal/telemetry/storage.go:674,682` |
 | `dolt.query` | `db.operation="query"`, `db.statement` + `doltSpanAttrs()` | `store.go:1725` |
 | `dolt.exec` | `db.operation="exec"`, `db.statement` + `doltSpanAttrs()` | `store.go:1616` |
 | `dolt.query_row` | `db.operation="query_row"`, `db.statement` + `doltSpanAttrs()` | `store.go:1754` |
@@ -528,7 +531,7 @@ Every metric name, span name, and attribute listed in this document is backed by
 | `dolt.branch` | `dolt.branch` | `store.go:6287-6290` |
 | `dolt.checkout` | `dolt.branch` | `store.go:6304-6307` |
 | `hook.exec` | `hook.event`, `hook.path`, `bd.issue_id` | `internal/hooks/hooks_unix.go:31`, `hooks_windows.go:30`, `hooks_wasm.go:20` |
-| `hook.exec` events | `hook.stdout` / `hook.stderr` with `output`, `bytes` | `internal/hooks/hooks_otel.go:14, 20`; truncation `hooks.go:172` |
+| `hook.exec` events | `hook.stdout` / `hook.stderr` with `bytes` only | `internal/hooks/hooks_otel.go` (`addHookOutputEvents`) |
 | `anthropic.messages.new` | `bd.ai.model`, `bd.ai.operation` | `haiku.go:161-166` |
 | `anthropic.messages.new` | `bd.ai.input_tokens`, `bd.ai.output_tokens`, `bd.ai.attempts` | `haiku.go:199-203` |
 | `anthropic.messages.new` | `bd.ai.batch_size`; `bd.ai.input_tokens`, `bd.ai.output_tokens`, `bd.ai.duration_ms` (find_duplicates) | `cmd/bd/find_duplicates.go:498-502`; `find_duplicates.go:520-524` |

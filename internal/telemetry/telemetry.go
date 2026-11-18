@@ -138,12 +138,12 @@ func translateLegacyEnv() []string {
 //
 // The process detectors are listed one by one instead of resource.WithProcess:
 // the resource rides on every exported metric and span, and WithProcess would
-// add process.command_args (the raw os.Args, bypassing the scrubbed bd.args
-// span attribute, so a --password=... or a search string would reach the
-// receiver), process.executable.path (often under the user's home directory)
-// and process.owner (the OS user name). Only the non-identifying process
-// attributes are kept: pid, executable name and Go runtime name/version/
-// description.
+// add process.command_args (the raw os.Args, so a --password=..., an issue
+// title or a search string would reach the receiver; the command span's
+// bd.args names only the command and its flags), process.executable.path
+// (often under the user's home directory) and process.owner (the OS user
+// name). Only the non-identifying process attributes are kept: pid,
+// executable name and Go runtime name/version/description.
 func buildResource(ctx context.Context, serviceName, version string) (*resource.Resource, error) {
 	return resource.New(ctx,
 		resource.WithAttributes(

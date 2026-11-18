@@ -40,8 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`BD_OTEL_ENABLED=true`), the OTel resource attached to every exported
   metric and span carried `process.command_args`, the unscrubbed `os.Args`,
   so a `--password=...` flag, search text or an issue title reached the
-  metrics receiver even though the `bd.args` span attribute is scrubbed. The
-  resource also carried `process.executable.path` and `process.owner` (the OS
+  metrics receiver (for the command span's own `bd.args`, see the entry on
+  span content below). The resource also carried `process.executable.path` and `process.owner` (the OS
   user name). bd now builds the resource from explicit detectors and keeps
   only `host.name`, `process.pid`, `process.executable.name` and the Go
   runtime attributes.
@@ -53,6 +53,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`bd.query`), commit messages (`db.commit_msg`), issue ids and config keys
   reached the OTLP metrics receiver. The storage metrics are now labelled by
   `db.operation` only (see Fixed below for the dashboard impact).
+
+- **Telemetry spans no longer carry issue content.** With telemetry on
+  (`BD_OTEL_ENABLED=true`) and the console trace exporter selected
+  (`OTEL_TRACES_EXPORTER=console`, or the legacy `BD_OTEL_STDOUT=true`), the
+  command span's `bd.args` attribute was the command line with only passwords
+  redacted (a `--password` value, the password in a connection string), so
+  issue titles, descriptions, notes, labels, comments, close reasons and
+  search text were exported verbatim. `bd.args` now holds the command path and
+  the long names of the flags that were set, sorted, and never an argument or
+  a flag value: `bd create "title" -d "text" -q` records
+  `create --description --quiet`. It is built from the command bd parsed, not
+  from the raw arguments, so a value that looks like a flag cannot pass for
+  one. The storage spans no longer record search text (`bd.query`), label
+  names (`bd.label`, `bd.label.old`, `bd.label.new`) or commit messages
+  (`db.commit_msg`, which can quote a `bd batch -m` message or a propagated
+  label), and the `hook.stdout` / `hook.stderr` events carry only the number
+  of bytes a hook wrote, not its output. A failed span still records its error
+  message, which can quote the input that failed. **Breaking for dashboards
+  and trace queries:** anything that reads `bd.args` values, for example to
+  extract an issue id or a title, or reads the removed attributes must change;
+  `bd.command` is unchanged. (#8505)
 
 - **A committed `.beads/.env` can no longer copy your environment into bd's
   settings, set a command or bearer token by a name the deny list missed, or
@@ -169,6 +190,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its port to another root's proxy. Such an open never auto-starts a server
   and refuses a Unix socket beside the proxy root. Like the other settings that
   choose which credential bd presents, `.beads/.env` cannot set it.
+
+- **`bd list --include-all-types`: one flag for every hidden kind of row.**
+  `ListRequest.IncludeAllTypes` — the union that lifts every default type or
+  plane suppression (templates, gates, infra types, the ephemeral wisp plane,
+  and any suppression added later) — is now reachable from `bd list`, which
+  previously exposed only the four narrow `--include-*` flags. It says nothing
+  about status: the default done/frozen and pinned exclusions still apply, as
+  does the default page limit. `--all` is unchanged and its help now says what
+  it actually does — lift the default status and pinned exclusions and the
+  default limit — while pointing at the new flag for the type/plane axis;
+  passing both lifts both sets of default exclusions, which is not the same as
+  an unfiltered listing (explicit filters, `--exclude-type` and an explicit
+  `--limit` still apply). `--wisp-type` accepts the new flag as a plane
+  selector. The current `bd serve` HTTP transport refuses the flag with its
+  existing typed error, as it already does for every other caller of that
+  field (GH#5694, first fixed by @kyoto-bonsai in #8191).
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
@@ -785,6 +823,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (it keeps only `**Do:**` and `**Don't:**` lines), and a rule with no such
   lines is skipped by `--auto` and refused by `--group`.
   ([#5719](https://github.com/gastownhall/beads/issues/5719))
+
+- **An update-shaped event's `old_value` is the pre-image of the fields the
+  update changed, not the whole issue.** `claimed`, `unclaimed`, `status_changed`,
+  `closed`, `reopened` and `updated` rows in `events` (and `wisp_events`) used to record
+  `json.Marshal(oldIssue)` in `old_value` beside a `new_value` holding only the
+  update map: 5-6 KB per row on a workspace with sizeable descriptions, so the
+  events table outgrew every comment and every issue body together. `old_value`
+  now carries the old issue projected onto the keys the update touched, in the
+  Issue's own JSON encoding with sorted keys (a claim records
+  `{"assignee":null,"status":"open"}`; a field the old row did not carry is
+  `null`), so `bd history` shows a symmetric per-field diff and the row costs
+  tens of bytes. Nothing in bd parsed `old_value` back into an issue; the events
+  journal (`bd_events_journal.issue_json`) remains the replayable full
+  snapshot. Existing rows are untouched. The `historyoffequiv` and
+  `createbatchequiv` goldens are re-recorded for the new `old_value` (only the
+  `events`/`wisp_events` digests move).
 - **`bd` requires Dolt 2.6.0 or newer outside embedded mode, and refuses
   anything older.** `doltversion.RecommendedMin` (2.5.0, a warning) is now
   `doltversion.RequiredMin` (2.6.0, an error). `bd dolt start` and
@@ -1299,6 +1353,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd doctor` ranks a release candidate below its release** (#6595). The
+  version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
+  sorted above its own release and `bd doctor` never told an rc user that
+  the release had shipped. Versions now order by semver 2.0: a pre-release
+  sorts below its release, and its identifiers compare one by one: numbers
+  numerically (`rc.2` < `rc.10`) and below words (`1.0.0-1` <
+  `1.0.0-alpha`), words in ASCII order (`beta` < `rc`); build metadata
+  (`+...`) is ignored. Moving from a candidate to its release now
+  counts as an upgrade, so the one-time post-upgrade notice and
+  `bd upgrade review` cover it, and moving back does not. `bd doctor` reports
+  hooks installed by a candidate as outdated under its release (fix:
+  `bd hooks install --force`), and the Claude plugin check warns when the
+  plugin is a candidate and the release is out. (#6596, by rjgeng)
+- **`bd mol bond` on a proxied-server launcher follows prefix routes.** The
+  proxied route resolved both operands in the served database only, so
+  bonding a formula to a molecule that a `routes.jsonl` rig holds failed with
+  `'<id>' not found as issue or formula`. It now plans the bond the way the
+  direct route does: each operand is looked up in the served database, then
+  through its prefix route (opened read-only), then as a formula. A bond whose
+  operands share a routed rig spawns and attaches in that rig's own
+  transaction and leaves the served database untouched; a bond between the
+  served database and a rig, or between two rigs, is refused before anything
+  is written. A route that fails to open or refuses (for example a rig that is
+  itself a proxied-server workspace) keeps its own error unless a formula has
+  the operand's name, and a dry run previews without a writable open. A bond
+  that stays in the served database still commits once.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
@@ -1335,6 +1415,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity and mutates as another (`AddParentChild` and `SetStatus` stay
   optional), and must stamp the request's actor on its derived `is_blocked`
   updates.
+- **Moving from a release candidate to its release updates the workspace's
+  version marker** (#6595). Both version comparisons bd runs at startup read
+  the dotted candidates the release tags use as one more release component
+  (`1.4.0-rc.3` as `1.4.0.3`), above their own release: upgrade detection
+  did not count the move to the release as an upgrade (fixed with #6596), and
+  the marker comparison would then have refused to record the release over
+  its candidate. A server workspace moved from 1.4.0-rc.N to 1.4.0 kept the
+  candidate's marker, and `bd doctor` showed `Database: version 1.4.0-rc.N
+  (CLI: 1.4.0)` until a bare `bd migrate`; a proxied-server workspace kept it
+  silently (`bd info --schema`). The marker comparison now ignores
+  everything from the first `-` or `+`, as it already did for an undotted
+  `-rc1`, so a release and its candidates record over each other in either
+  direction, and a candidate of an earlier release is still refused.
 - **The aux row id re-key again skips tables with dolthub/dolt#11131
   encoding drift instead of aborting the migration on every open** (#8372).
   The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive
@@ -3640,6 +3733,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dolt, where the transaction survives a failed statement, the import
   committed without the edge and exited 0. Such an error now fails the
   import. Refused edges are still skipped as before.
+- `bd import` no longer fails with "Error 1062: duplicate primary key" when a
+  comment's id is already stored with different text, author or time; the
+  failure rolled back the chunk and a re-run did not converge. Comments merge
+  additively: the stored comment is kept (also under `--allow-stale`), and a
+  default re-import of such an otherwise unchanged issue writes nothing. A
+  comment id stored on a different issue now fails with an error naming the
+  comment and both issues (#7114).
 
 - **A bare hash that two prefixes share is reported as ambiguous instead of
   resolving to one of them.** With `hacker-news-abc123` and `ops-abc123` in
@@ -4419,6 +4519,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the proxied backend. An empty-valued memory is found, recalls as an empty
   string, and is deleted on the first forget. Only a key with no row is a
   miss.
+
+- **`bd remember <key>` recalls a long or dotted key instead of overwriting
+  another memory** ([#7275](https://github.com/gastownhall/beads/issues/7275)).
+  A bare argument was read as a key only when the key derived from it was the
+  argument itself, so a key with more than eight segments, over 60 bytes, or a
+  dot (`bd remember api.v2`) was stored as content under its derived key
+  (`api-v2`), replacing any memory already there. A bare argument made of
+  lowercase letters and digits joined by single dots or hyphens is now always
+  read as that exact key: `bd remember` prints its memory, or exits 1 without
+  writing anything. When only the derived key holds a memory, the refusal adds
+  a hint naming that key and its `bd recall` command. Text of that shape that
+  used to be stored now needs `--key` (`bd remember api.v2 --key <key>`).
 
 - **`bd doctor` no longer flags a `.local_version` that starts with `v`.** The
   canonical spelling of a Go module version — and the string a build stamped
