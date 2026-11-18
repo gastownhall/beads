@@ -343,6 +343,19 @@ func darwinUserConfigDirForTest(t *testing.T) func() (string, error) {
 	}
 }
 
+// darwinUserConfigDirWithEnvForTest is darwinUserConfigDirForTest reading its
+// environment from env instead of the process, so a test can point the real
+// XDG_CONFIG_HOME (what os.UserConfigDir reads on Linux) somewhere else.
+func darwinUserConfigDirWithEnvForTest(t *testing.T, env map[string]string) func() (string, error) {
+	t.Helper()
+	return func() (string, error) {
+		return userConfigDirFor("darwin", func(key string) string { return env[key] }, func() (string, error) {
+			t.Errorf("darwin resolver consulted os.UserConfigDir")
+			return "", errors.New("os.UserConfigDir must not be consulted on darwin")
+		})
+	}
+}
+
 // recordUserConfigStats routes every user-config candidate stat through a
 // recorder and returns the recorded paths.
 func recordUserConfigStats(t *testing.T) *[]string {
@@ -517,8 +530,11 @@ func TestUserConfigYamlSearchPaths(t *testing.T) {
 // TestUserConfigNeverReadsMacOSApplicationSupport plants bd config under
 // <home>/Library/Application Support and proves no user-config read or write
 // probes it (GH#8113). The native subtests use the host resolver, so on macOS
-// they exercise the real binary path; the darwin subtests install the darwin
-// resolver and are discriminating on every host.
+// they exercise the real binary path. The darwin subtests install the darwin
+// resolver with its own environment and point the real XDG_CONFIG_HOME and
+// APPDATA at Application Support, so os.UserConfigDir answers Application
+// Support on every host: a call site reverted to os.UserConfigDir fails here
+// on Linux and Windows too, not only on the macOS legs.
 func TestUserConfigNeverReadsMacOSApplicationSupport(t *testing.T) {
 	const sentinelActor = "appsupport-sentinel"
 	const sentinelNode = "appsupport-node"
@@ -550,13 +566,26 @@ func TestUserConfigNeverReadsMacOSApplicationSupport(t *testing.T) {
 					if tc.xdg {
 						xdg = filepath.Join(home, "xdg-config")
 					}
+					appSupport := filepath.Join(home, "Library", "Application Support")
 					t.Setenv("XDG_CONFIG_HOME", xdg)
 					if tc.darwin {
-						t.Cleanup(SetUserConfigDirForTest(darwinUserConfigDirForTest(t)))
+						t.Cleanup(SetUserConfigDirForTest(darwinUserConfigDirWithEnvForTest(t,
+							map[string]string{"HOME": home, "XDG_CONFIG_HOME": xdg})))
+						t.Setenv("XDG_CONFIG_HOME", appSupport)
+						t.Setenv("APPDATA", appSupport)
+						if dir, err := os.UserConfigDir(); err != nil || dir != appSupport {
+							t.Fatalf("precondition: os.UserConfigDir() = %q, %v; want %q", dir, err, appSupport)
+						}
+						wantNative := filepath.Join(home, ".config")
+						if tc.xdg {
+							wantNative = xdg
+						}
+						if dir, err := UserConfigDir(); err != nil || dir != wantNative {
+							t.Fatalf("UserConfigDir() = %q, %v; want %q", dir, err, wantNative)
+						}
 					}
 					t.Chdir(home)
 
-					appSupport := filepath.Join(home, "Library", "Application Support")
 					legacyAppSupport := filepath.Join(appSupport, "bd", "config.yaml")
 					if plant == "directory" {
 						if err := os.MkdirAll(legacyAppSupport, 0o755); err != nil {
@@ -741,5 +770,66 @@ func TestConfigYamlReplaceable(t *testing.T) {
 	}
 	if err := ConfigYamlReplaceable(path); err == nil {
 		t.Fatal("read-only config: want error")
+	}
+}
+
+// TestDarwinXDGUserConfigReadsAndWritesXDGFile: on macOS with XDG_CONFIG_HOME
+// set, an existing $XDG_CONFIG_HOME/bd/config.yaml and no
+// ~/.config/bd/config.yaml, bd reads that file and writes back to it, as on
+// Linux (GH#8113 risk 4).
+func TestDarwinXDGUserConfigReadsAndWritesXDGFile(t *testing.T) {
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	t.Cleanup(envSnapshot(t))
+
+	home := t.TempDir()
+	xdg := filepath.Join(home, "xdg-config")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	// The real environment points elsewhere, so only the darwin resolver's
+	// own XDG_CONFIG_HOME can find the file.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "Library", "Application Support"))
+	t.Setenv("APPDATA", filepath.Join(home, "Library", "Application Support"))
+	t.Cleanup(SetUserConfigDirForTest(darwinUserConfigDirWithEnvForTest(t,
+		map[string]string{"HOME": home, "XDG_CONFIG_HOME": xdg})))
+	t.Chdir(home)
+
+	xdgFile := filepath.Join(xdg, "bd", "config.yaml")
+	writeUserConfigPath(t, xdgFile)
+	if err := os.WriteFile(xdgFile, []byte("actor: xdg-actor\nnode_id: xdg-node\nmetrics:\n  disabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	documented := filepath.Join(home, ".config", "bd", "config.yaml")
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if got := GetString("actor"); got != "xdg-actor" {
+		t.Errorf("GetString(actor) = %q, want the XDG file's value", got)
+	}
+	if got := NodeID(); got != "xdg-node" {
+		t.Errorf("NodeID() = %q, want the XDG file's value", got)
+	}
+	if !MetricsDisabledByUserConfig() {
+		t.Error("MetricsDisabledByUserConfig() = false, want the XDG file's opt-out")
+	}
+	if got := GetUserYamlConfig("actor"); got != "xdg-actor" {
+		t.Errorf("GetUserYamlConfig(actor) = %q, want the XDG file's value", got)
+	}
+	if path, err := UserConfigYamlPath(); err != nil || path != xdgFile {
+		t.Fatalf("UserConfigYamlPath() = %q, %v; want %q", path, err, xdgFile)
+	}
+
+	if err := SetUserYamlConfig("node_id", "written-node"); err != nil {
+		t.Fatalf("SetUserYamlConfig: %v", err)
+	}
+	if data, err := os.ReadFile(xdgFile); err != nil || !strings.Contains(string(data), "written-node") {
+		t.Fatalf("write did not land on %s: %v %q", xdgFile, err, data)
+	}
+	if _, err := os.Stat(documented); !os.IsNotExist(err) {
+		t.Fatalf("write created %s: %v", documented, err)
+	}
+	if got := GetUserYamlConfig("node_id"); got != "written-node" {
+		t.Errorf("GetUserYamlConfig(node_id) after write = %q", got)
 	}
 }

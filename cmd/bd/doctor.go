@@ -568,6 +568,12 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Legacy macOS user config (GH#8113): host-level and store-free, so it runs
+	// before the no-.beads early return. Warning-class; never flips OverallOK.
+	if macCheck, ok := macOSLegacyUserConfigCheck(); ok {
+		result.Checks = append(result.Checks, macCheck)
+	}
+
 	// If no .beads/, skip remaining checks
 	if installCheck.Status != statusOK {
 		return result

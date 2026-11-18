@@ -1,0 +1,46 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+
+	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/config"
+)
+
+// macOSLegacyUserConfigGOOS is the platform the macOS legacy user config
+// check believes it runs on; tests drive the darwin branch on any host.
+var macOSLegacyUserConfigGOOS = runtime.GOOS
+
+// macOSLegacyUserConfigCheck runs the "macOS Legacy User Config" doctor check
+// (GH#8113). Off darwin and ios it returns false before reading anything, so
+// Linux and Windows doctor output is unchanged. It is host-level and
+// store-free: it never opens a workspace.
+func macOSLegacyUserConfigCheck() (doctorCheck, bool) {
+	goos := macOSLegacyUserConfigGOOS
+	if goos != "darwin" && goos != "ios" {
+		return doctorCheck{}, false
+	}
+	home, homeErr := os.UserHomeDir()
+	in := doctor.MacOSLegacyUserConfigInputs{
+		GOOS:              goos,
+		Home:              home,
+		HomeErr:           homeErr,
+		ActiveConfigPaths: config.UserConfigYamlSearchPaths(),
+		MetricsEnabled:    resolveMetricsEnabled(),
+		NodeID:            config.NodeID(),
+		Stat:              os.Stat,
+	}
+	if target, err := config.UserConfigYamlPath(); err == nil {
+		in.ConfigTarget = target
+	}
+	if dir, err := config.UserConfigDir(); err == nil {
+		in.PrimeTarget = filepath.Join(dir, "beads", "PRIME.md")
+	}
+	dc, ok := doctor.CheckMacOSLegacyUserConfig(in)
+	if !ok {
+		return doctorCheck{}, false
+	}
+	return convertWithCategory(dc, doctor.CategoryData), true
+}
