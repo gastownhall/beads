@@ -41,7 +41,7 @@
     },
     "envelope/defer_events": {
       "cmd": "bd history corpus-deferred --events --json",
-      "sha256": "867f61bfa70c75f5111c1bfd4f5e29aa28fb4e534fecebfa7ac9a105fcc8caa9"
+      "sha256": "0941507f1a7cbf87bf2b546f680cb7c9983fa12091c61c21019f663cc640caf5"
     },
     "envelope/delete": {
       "cmd": "bd delete --force --json corpus-deleted",
@@ -101,7 +101,7 @@
     },
     "envelope/note_events": {
       "cmd": "bd history corpus-note --events --json",
-      "sha256": "7322f5e6326f3a34aed4650a143e653f1217a60d48522cfad6467eeabae37725"
+      "sha256": "468211ee5e7c2e6667614d6c500e2cfbc621d1194a46956660304a2816809770"
     },
     "envelope/priority": {
       "cmd": "bd priority corpus-priority 1 --json",
@@ -109,7 +109,7 @@
     },
     "envelope/priority_events": {
       "cmd": "bd history corpus-priority --events --json",
-      "sha256": "6e7052eaa7ecf93c886425a9212bbef9149b35f8d4b9acfccdbc32f1ff7c6f14"
+      "sha256": "bad043811eb90feb094494239f5fb3a1f7ed3f4613fc828cd48a92beada8522c"
     },
     "envelope/q_parent": {
       "cmd": "bd q \"Corpus quick child\" --parent corpus-parent --json",
@@ -177,7 +177,7 @@
     },
     "envelope/unclaim_events": {
       "cmd": "bd history corpus-root --events --json",
-      "sha256": "0f1b367cf00dfec723c30e854c3c7719f1d093680029adc3972a07252d265210"
+      "sha256": "56c777dfc911baadb5e1385927adc2efbc3df63950ecaa9319ba2929513afe64"
     },
     "envelope/undefer": {
       "cmd": "bd undefer corpus-deferred --json",
@@ -185,7 +185,7 @@
     },
     "envelope/undefer_events": {
       "cmd": "bd history corpus-deferred --events --json",
-      "sha256": "977d03959bba13af93cdea63e974a941d455f10d3f6ee613197eb76504a27af6"
+      "sha256": "8e042b9bd56ae870d45d03b5ff91d3cd5fe1ce5b878ee581b3dc8298928cf4ea"
     },
     "envelope/update": {
       "cmd": "bd update corpus-root --json --priority 0 --add-label corpus-label --set-metadata phase=2 --description \"updated corpus root\"",
@@ -233,7 +233,7 @@
     },
     "flat/defer_events": {
       "cmd": "bd history corpus-deferred --events --json",
-      "sha256": "90dcebb2b50723d3df8a349149f6e391e02f6f62cee1e2e9b41d562a30325f8f"
+      "sha256": "c1c26be06c45bb06254173908109afcce0b0f99780c2b256368250919eac2ba2"
     },
     "flat/delete": {
       "cmd": "bd delete --force --json corpus-deleted",
@@ -293,7 +293,7 @@
     },
     "flat/note_events": {
       "cmd": "bd history corpus-note --events --json",
-      "sha256": "253dd4491284921cf3f512f0b37583522a7efcf7b509f3fd4ffa9f01d8ecb05d"
+      "sha256": "e43bc605c76a97100f416e0b88d20ef18391af01311930342f88771c4e00c2a1"
     },
     "flat/priority": {
       "cmd": "bd priority corpus-priority 1 --json",
@@ -301,7 +301,7 @@
     },
     "flat/priority_events": {
       "cmd": "bd history corpus-priority --events --json",
-      "sha256": "2517bd99d0717a8787c6fa413ecd429d081277b85ba06031f2019d4738ebfdae"
+      "sha256": "52e5ccf9899a239c3eb3a1938a3f7cabf15d3ac680a3fbaca9e63e8fa31bbd8e"
     },
     "flat/q_parent": {
       "cmd": "bd q \"Corpus quick child\" --parent corpus-parent --json",
@@ -369,7 +369,7 @@
     },
     "flat/unclaim_events": {
       "cmd": "bd history corpus-root --events --json",
-      "sha256": "554b00b41071744f72e7f72f9316a6e2061f52ef8c560dd9793ed18248c9c821"
+      "sha256": "dc0e1c8eaca556e05dd5908fa2ab7a7bf19f47398ac67b322899f3d7f5b9cc36"
     },
     "flat/undefer": {
       "cmd": "bd undefer corpus-deferred --json",
@@ -377,7 +377,7 @@
     },
     "flat/undefer_events": {
       "cmd": "bd history corpus-deferred --events --json",
-      "sha256": "5a08109bb360fd3efa2d6225e7fc78278d14aa69641e4df8a20bed88841df606"
+      "sha256": "9c02c43703ec06c0cfd11ffa9d741b633d373661cb3c5346b7432b04cc7ba960"
     },
     "flat/update": {
       "cmd": "bd update corpus-root --json --priority 0 --add-label corpus-label --set-metadata phase=2 --description \"updated corpus root\"",

@@ -103,8 +103,9 @@ This command checks:
 Storage Availability:
   Full diagnostics, --perf, --deep, --server, --migration, and
   --check=validate currently require Dolt server mode. Embedded Dolt
-  supports --check=artifacts, --check=conventions, and
-  --check=pollution. --check-health has a limited hook-health fallback.
+  supports --check=artifacts, --check=conventions,
+  --check=export, and --check=pollution. --check-health has a limited
+  hook-health fallback.
   Unsupported combinations return a notice without changing storage.
 
 Performance Mode (--perf):
@@ -121,9 +122,14 @@ Export Mode (--output):
 Specific Check Mode (--check):
   Run a specific check in detail. Available checks:
   - artifacts: Detect and optionally clean beads classic artifacts
-    (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
+    (SQLite files, cruft .beads dirs). Use with --clean. Does not
+    check export coverage - see the export check.
   - conventions: Check for convention drift (lint warnings, stale
     issues, orphaned issues). Advisory only - warns, never blocks.
+  - export: Compare in-scope store issue IDs against the passive export
+    file's IDs (coverage only, not content equality). Reports missing
+    IDs as a warning; read-only even with --fix/--clean. Refresh
+    manually with: bd export -o <resolved-path>
   - pollution: Detect and optionally clean test issues from database
   - validate: Run focused data-integrity checks (duplicates, orphaned
     deps, test pollution, git conflicts). Use with --fix to auto-repair.
@@ -191,6 +197,7 @@ Examples:
   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+  bd doctor --check=export             # Warn when the export file is missing store IDs
   bd doctor --check=pollution          # Show potential test issues
   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
   bd doctor --check=validate         # Data-integrity checks only
@@ -278,6 +285,11 @@ Examples:
 				return runConventionsCheck(absPath)
 			case "pollution":
 				return runPollutionCheck(absPath, doctorClean, doctorYes)
+			case "export":
+				// Read-only coverage diagnostic (GH#6955): no --clean/--fix
+				// mutation is associated with it, and it works in embedded
+				// mode alongside the other individually gated checks.
+				return runExportCoverageCheck(absPath, len(args) > 0)
 			case "validate":
 				if isEmbeddedMode() {
 					printEmbeddedUnsupported("doctor --check=validate")
@@ -285,7 +297,7 @@ Examples:
 				}
 				return runValidateCheck(absPath)
 			default:
-				return HandleErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, pollution, validate")
+				return HandleErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, export, pollution, validate")
 			}
 		}
 
@@ -479,7 +491,7 @@ func printEmbeddedUnsupported(commandLabel string) {
 		"If it will not open:     preserve it first, then recover: " + doctor.EngineWontOpenRecoveryURL,
 		"Switch to server mode:   bd init --server",
 	}
-	supported := []string{"artifacts", "conventions", "pollution"}
+	supported := []string{"artifacts", "conventions", "export", "pollution"}
 	unsupported := []string{"validate"}
 
 	if jsonOutput || doctorAgent {
@@ -508,6 +520,7 @@ func printEmbeddedUnsupported(commandLabel string) {
 	fmt.Fprintln(os.Stderr, "Checks available in embedded mode:")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=artifacts")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=conventions")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=export")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=pollution")
 }
 

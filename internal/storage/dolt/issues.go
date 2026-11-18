@@ -694,7 +694,7 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		// storage.DeleteIssue carries no actor, so the journal rows record none.
-		if err := issueops.DeleteIssueInTx(ctx, tx, id, ""); err != nil {
+		if err := issueops.DeleteIssueInTx(ctx, tx, id, issueops.NoRequestActor); err != nil {
 			return err
 		}
 
@@ -774,7 +774,7 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 		// storage.DeleteIssues carries no actor, so the journal rows record none.
 		// The wisps peeled off above stay part of the request for the
 		// dependents guard, in a dry run too, where they are not deleted first.
-		r, err := issueops.DeleteIssuesBesideWispsInTx(ctx, tx, ids, activeWispIDs, cascade, force, dryRun, "")
+		r, err := issueops.DeleteIssuesBesideWispsInTx(ctx, tx, ids, activeWispIDs, cascade, force, dryRun, issueops.NoRequestActor)
 		if err != nil {
 			result = r
 			return err

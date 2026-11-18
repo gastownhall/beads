@@ -1,0 +1,497 @@
+//go:build cgo
+
+package embeddeddolt_test
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// bd-413ovu: import matches an incoming comment by its id before inserting it.
+// Import is additive for comments: an id already stored on the same issue
+// keeps its stored author, text and time whatever the issue row's stale-guard
+// mode, instead of colliding on the comments primary key (Error 1062).
+func TestCreateIssuesCommentIDMatch(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	// The comment-write journal is default-off; turn it on so the journal
+	// assertions below can see what a write emits.
+	newEnv := func(t *testing.T, prefix string) *testEnv {
+		t.Helper()
+		te := newTestEnv(t, prefix)
+		te.store.SetEventsJournalEnabled(true)
+		return te
+	}
+
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	const commentID = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+
+	issueWith := func(id string, wisp bool, updatedAt time.Time, comments ...*types.Comment) *types.Issue {
+		return &types.Issue{
+			ID: id, Title: "title", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask, Ephemeral: wisp,
+			CreatedAt: base, UpdatedAt: updatedAt,
+			Comments: comments,
+		}
+	}
+	original := func(issueID string) *types.Comment {
+		return &types.Comment{ID: commentID, IssueID: issueID, Author: "alice", Text: "original text", CreatedAt: base}
+	}
+	plain := storage.BatchCreateOptions{SkipPrefixValidation: true}
+	create := func(t *testing.T, te *testEnv, ctx context.Context, opts storage.BatchCreateOptions, issues ...*types.Issue) error {
+		t.Helper()
+		return te.store.CreateIssuesWithFullOptions(ctx, issues, "tester", opts)
+	}
+	commentTable := func(wisp bool) string {
+		if wisp {
+			return "wisp_comments"
+		}
+		return "comments"
+	}
+	commentCount := func(t *testing.T, te *testEnv, ctx context.Context, table, issueID string) int {
+		t.Helper()
+		var n int
+		te.queryScalar(t, ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE issue_id = ?", table), []any{issueID}, &n)
+		return n
+	}
+	commentJournal := func(t *testing.T, te *testEnv, ctx context.Context, issueID string) int {
+		t.Helper()
+		var n int
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM bd_events_journal WHERE op = 'comment' AND issue_id = ?", []any{issueID}, &n)
+		return n
+	}
+	assertStoredComment := func(t *testing.T, te *testEnv, ctx context.Context, table, id string, want *types.Comment) {
+		t.Helper()
+		var issueID, author, text string
+		var createdAt time.Time
+		te.queryScalar(t, ctx, fmt.Sprintf("SELECT issue_id, author, text, created_at FROM %s WHERE id = ?", table),
+			[]any{id}, &issueID, &author, &text, &createdAt)
+		if issueID != want.IssueID || author != want.Author || text != want.Text || !createdAt.UTC().Equal(want.CreatedAt) {
+			t.Fatalf("stored comment %s = (%s, %s, %q, %v), want (%s, %s, %q, %v)", id,
+				issueID, author, text, createdAt.UTC(), want.IssueID, want.Author, want.Text, want.CreatedAt)
+		}
+	}
+
+	// AC-1: a same-issue id match keeps the stored comment in every mode.
+	edits := []struct {
+		name string
+		edit func(c *types.Comment)
+	}{
+		{"text", func(c *types.Comment) { c.Text = "edited text" }},
+		{"author", func(c *types.Comment) { c.Author = "bob" }},
+		{"time", func(c *types.Comment) { c.CreatedAt = base.Add(time.Minute) }},
+		{"missing_time", func(c *types.Comment) { c.CreatedAt = time.Time{} }},
+	}
+	modes := []struct {
+		name      string
+		opts      storage.BatchCreateOptions
+		updatedAt time.Time
+	}{
+		{"plain_upsert_equal_row", plain, base},
+		{"plain_upsert_newer_row", plain, base.Add(time.Hour)},
+		{"reject_stale_equal_row", storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}, base},
+		{"reject_stale_newer_row", storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}, base.Add(time.Hour)},
+		{"conflict_skip", storage.BatchCreateOptions{SkipPrefixValidation: true, ConflictSkip: true}, base.Add(time.Hour)},
+	}
+	for _, plane := range []struct {
+		name string
+		wisp bool
+	}{{"issues", false}, {"wisps", true}} {
+		for _, mode := range modes {
+			for _, e := range edits {
+				if plane.wisp && e.name != "text" {
+					continue // the wisp plane shares the code path; one edit proves its routing
+				}
+				t.Run(fmt.Sprintf("same_issue_id_keeps_stored/%s/%s/%s", plane.name, mode.name, e.name), func(t *testing.T) {
+					te := newEnv(t, "cim")
+					ctx := t.Context()
+					table := commentTable(plane.wisp)
+					if err := create(t, te, ctx, plain, issueWith("cim-1", plane.wisp, base, original("cim-1"))); err != nil {
+						t.Fatalf("seed: %v", err)
+					}
+					journalBefore := commentJournal(t, te, ctx, "cim-1")
+
+					incoming := original("cim-1")
+					e.edit(incoming)
+					if err := create(t, te, ctx, mode.opts, issueWith("cim-1", plane.wisp, mode.updatedAt, incoming)); err != nil {
+						t.Fatalf("import with changed comment %s: %v", e.name, err)
+					}
+
+					assertStoredComment(t, te, ctx, table, commentID, original("cim-1"))
+					if n := commentCount(t, te, ctx, table, "cim-1"); n != 1 {
+						t.Fatalf("comment rows = %d, want 1", n)
+					}
+					if d := commentJournal(t, te, ctx, "cim-1") - journalBefore; d != 0 {
+						t.Fatalf("comment journal events = %d, want 0", d)
+					}
+				})
+			}
+		}
+	}
+
+	// PR #7114's scenarios (Ezra Quemuel), with the newer-row and allow-stale
+	// expectations turned to keep the stored comment: a re-import whose
+	// comment is identical is a no-op in both guard modes, and a repeated
+	// --allow-stale import of an edited comment never rewrites it.
+	t.Run("same_issue_id_keeps_stored/identical_comment_is_noop", func(t *testing.T) {
+		te := newEnv(t, "cim")
+		ctx := t.Context()
+		if err := create(t, te, ctx, plain, issueWith("cim-1", false, base, original("cim-1"))); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		journalBefore := commentJournal(t, te, ctx, "cim-1")
+		for _, opts := range []storage.BatchCreateOptions{
+			{SkipPrefixValidation: true, RejectStaleUpserts: true},
+			plain,
+		} {
+			if err := create(t, te, ctx, opts, issueWith("cim-1", false, base.Add(time.Hour), original("cim-1"))); err != nil {
+				t.Fatalf("identical re-import: %v", err)
+			}
+		}
+		assertStoredComment(t, te, ctx, "comments", commentID, original("cim-1"))
+		if n := commentCount(t, te, ctx, "comments", "cim-1"); n != 1 {
+			t.Fatalf("comment rows = %d, want 1", n)
+		}
+		if d := commentJournal(t, te, ctx, "cim-1") - journalBefore; d != 0 {
+			t.Fatalf("comment journal events = %d, want 0", d)
+		}
+	})
+	t.Run("same_issue_id_keeps_stored/allow_stale_repeated", func(t *testing.T) {
+		te := newEnv(t, "cim")
+		ctx := t.Context()
+		if err := create(t, te, ctx, plain, issueWith("cim-1", false, base, original("cim-1"))); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		journalBefore := commentJournal(t, te, ctx, "cim-1")
+		incoming := original("cim-1")
+		incoming.Text = "edited text"
+		for i := range 2 {
+			if err := create(t, te, ctx, plain, issueWith("cim-1", false, base, incoming)); err != nil {
+				t.Fatalf("--allow-stale import %d: %v", i+1, err)
+			}
+			assertStoredComment(t, te, ctx, "comments", commentID, original("cim-1"))
+		}
+		if d := commentJournal(t, te, ctx, "cim-1") - journalBefore; d != 0 {
+			t.Fatalf("comment journal events = %d, want 0", d)
+		}
+	})
+	t.Run("stale_issue_row_skips_comment_merge", func(t *testing.T) {
+		te := newEnv(t, "cim")
+		ctx := t.Context()
+		if err := create(t, te, ctx, plain, issueWith("cim-1", false, base.Add(2*time.Hour), original("cim-1"))); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		journalBefore := commentJournal(t, te, ctx, "cim-1")
+		// A strictly older snapshot is rejected before aux persistence, so
+		// neither its edited comment nor its new one merges.
+		edited := original("cim-1")
+		edited.Text = "edited text"
+		added := &types.Comment{ID: "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5d", IssueID: "cim-1", Author: "dave", Text: "second", CreatedAt: base}
+		opts := storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}
+		if err := create(t, te, ctx, opts, issueWith("cim-1", false, base, edited, added)); err != nil {
+			t.Fatalf("stale re-import: %v", err)
+		}
+		assertStoredComment(t, te, ctx, "comments", commentID, original("cim-1"))
+		if n := commentCount(t, te, ctx, "comments", "cim-1"); n != 1 {
+			t.Fatalf("comment rows = %d, want 1", n)
+		}
+		if d := commentJournal(t, te, ctx, "cim-1") - journalBefore; d != 0 {
+			t.Fatalf("comment journal events = %d, want 0", d)
+		}
+	})
+
+	// AC-3: an id stored on another issue is an ownership error naming the
+	// comment and both issues; the failing transaction writes nothing.
+	assertOwnershipError := func(t *testing.T, err error, commentID, owner, incoming string) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("import of comment %s on %s succeeded, want ownership error", commentID, incoming)
+		}
+		msg := err.Error()
+		for _, want := range []string{commentID, owner, incoming} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("error %q does not name %q", msg, want)
+			}
+		}
+		if strings.Contains(msg, "1062") || strings.Contains(msg, "duplicate primary key") {
+			t.Fatalf("error %q is the opaque primary-key collision", msg)
+		}
+	}
+	issueRows := func(t *testing.T, te *testEnv, ctx context.Context, id string) int {
+		t.Helper()
+		var n int
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", []any{id}, &n)
+		return n
+	}
+	for _, tc := range []struct {
+		name        string
+		commentID   string
+		opts        storage.BatchCreateOptions
+		sameContent bool
+	}{
+		{"uuid_id_new_issue", commentID, plain, false},
+		{"uuid_id_new_issue_conflict_skip", commentID, storage.BatchCreateOptions{SkipPrefixValidation: true, ConflictSkip: true}, false},
+		{"uuid_id_new_issue_reject_stale", commentID, storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}, false},
+		{"legacy_numeric_id_new_issue", "42", plain, false},
+		// PR #7114 (Ezra Quemuel): the owner's exact comment presented on
+		// another issue; content dedup is per issue, so it is still a conflict.
+		{"identical_content_new_issue", commentID, plain, true},
+	} {
+		t.Run("other_issue_id_errors/"+tc.name, func(t *testing.T) {
+			te := newEnv(t, "cio")
+			ctx := t.Context()
+			owned := original("cio-j")
+			owned.ID = tc.commentID
+			if err := create(t, te, ctx, plain, issueWith("cio-j", false, base, owned)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			journalBefore := commentJournal(t, te, ctx, "cio-i")
+
+			incoming := original("cio-i")
+			incoming.ID = tc.commentID
+			if !tc.sameContent {
+				incoming.Text = "text on the other issue"
+			}
+			err := create(t, te, ctx, tc.opts, issueWith("cio-i", false, base, incoming))
+			assertOwnershipError(t, err, tc.commentID, "cio-j", "cio-i")
+
+			assertStoredComment(t, te, ctx, "comments", tc.commentID, owned)
+			if n := issueRows(t, te, ctx, "cio-i"); n != 0 {
+				t.Fatalf("issue cio-i rows = %d, want the failing create rolled back", n)
+			}
+			if d := commentJournal(t, te, ctx, "cio-i") - journalBefore; d != 0 {
+				t.Fatalf("comment journal events on cio-i = %d, want 0", d)
+			}
+		})
+	}
+	for _, opts := range []struct {
+		name string
+		opts storage.BatchCreateOptions
+	}{
+		{"plain_upsert", plain},
+		{"conflict_skip", storage.BatchCreateOptions{SkipPrefixValidation: true, ConflictSkip: true}},
+	} {
+		t.Run("other_issue_id_errors/existing_issue_rolls_back_aux/"+opts.name, func(t *testing.T) {
+			te := newEnv(t, "cio")
+			ctx := t.Context()
+			if err := create(t, te, ctx, plain,
+				issueWith("cio-j", false, base, original("cio-j")),
+				issueWith("cio-i", false, base)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+
+			incoming := issueWith("cio-i", false, base, original("cio-i"))
+			incoming.Labels = []string{"from-import"}
+			err := create(t, te, ctx, opts.opts, incoming)
+			assertOwnershipError(t, err, commentID, "cio-j", "cio-i")
+
+			assertStoredComment(t, te, ctx, "comments", commentID, original("cio-j"))
+			var labels int
+			te.queryScalar(t, ctx, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", []any{"cio-i"}, &labels)
+			if labels != 0 {
+				t.Fatalf("labels on cio-i = %d, want the failing transaction's label rolled back", labels)
+			}
+			if n := commentCount(t, te, ctx, "comments", "cio-i"); n != 0 {
+				t.Fatalf("comment rows on cio-i = %d, want 0", n)
+			}
+		})
+	}
+	t.Run("other_issue_id_errors/after_rename", func(t *testing.T) {
+		// A rename moves the comment to the new id; importing the old id
+		// with that comment is reported, not remapped or silently accepted.
+		te := newEnv(t, "cio")
+		ctx := t.Context()
+		if err := create(t, te, ctx, plain, issueWith("cio-a", false, base, original("cio-a"))); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		renamed, err := te.store.GetIssue(ctx, "cio-a")
+		if err != nil {
+			t.Fatalf("get cio-a: %v", err)
+		}
+		renamed.ID = "cio-b"
+		if err := te.store.UpdateIssueID(ctx, "cio-a", "cio-b", renamed, "tester"); err != nil {
+			t.Fatalf("rename cio-a -> cio-b: %v", err)
+		}
+
+		// Another actor: the same actor would collide first on cio-a's
+		// derived created-event id, a separate rename gap.
+		err = te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{issueWith("cio-a", false, base, original("cio-a"))}, "importer", plain)
+		assertOwnershipError(t, err, commentID, "cio-b", "cio-a")
+		assertStoredComment(t, te, ctx, "comments", commentID, original("cio-b"))
+	})
+	t.Run("other_issue_id_errors/whole_chunk_rolls_back", func(t *testing.T) {
+		// A clean issue in the same transaction rolls back with the
+		// conflicting one instead of surviving the chunk's failure.
+		te := newEnv(t, "cio")
+		ctx := t.Context()
+		if err := create(t, te, ctx, plain, issueWith("cio-j", false, base, original("cio-j"))); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		err := create(t, te, ctx, plain,
+			issueWith("cio-i", false, base, original("cio-i")),
+			issueWith("cio-k", false, base))
+		assertOwnershipError(t, err, commentID, "cio-j", "cio-i")
+		for _, id := range []string{"cio-i", "cio-k"} {
+			if n := issueRows(t, te, ctx, id); n != 0 {
+				t.Fatalf("issue %s rows = %d, want the whole failing transaction rolled back", id, n)
+			}
+		}
+	})
+	t.Run("other_issue_id_errors/wisp_plane", func(t *testing.T) {
+		te := newEnv(t, "cio")
+		ctx := t.Context()
+		if err := create(t, te, ctx, plain, issueWith("cio-j", true, base, original("cio-j"))); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		incoming := original("cio-i")
+		incoming.Text = "text on the other issue"
+		err := create(t, te, ctx, storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true},
+			issueWith("cio-i", true, base, incoming))
+		assertOwnershipError(t, err, commentID, "cio-j", "cio-i")
+		assertStoredComment(t, te, ctx, "wisp_comments", commentID, original("cio-j"))
+	})
+
+	// AC-4: content already stored on the issue under another id deduplicates,
+	// whatever id (or none) the incoming record carries.
+	const otherUUID = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c"
+	for _, tc := range []struct {
+		name       string
+		storedID   string
+		incomingID string
+		opts       storage.BatchCreateOptions
+	}{
+		{"uuid_over_legacy_numeric", "42", commentID, plain},
+		{"numeric_over_legacy_numeric", "42", "43", plain},
+		{"derived_over_legacy_numeric", "42", "", plain},
+		{"uuid_over_legacy_numeric_conflict_skip", "42", commentID, storage.BatchCreateOptions{SkipPrefixValidation: true, ConflictSkip: true}},
+		{"uuid_over_uuid", commentID, otherUUID, storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}},
+		{"derived_shaped_over_uuid", commentID, "cic-derived-9f2a", storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}},
+	} {
+		t.Run("same_content_other_id_dedups/"+tc.name, func(t *testing.T) {
+			te := newEnv(t, "cic")
+			ctx := t.Context()
+			stored := original("cic-1")
+			stored.ID = tc.storedID
+			if err := create(t, te, ctx, plain, issueWith("cic-1", false, base, stored)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			journalBefore := commentJournal(t, te, ctx, "cic-1")
+
+			incoming := original("cic-1")
+			incoming.ID = tc.incomingID
+			if err := create(t, te, ctx, tc.opts, issueWith("cic-1", false, base, incoming)); err != nil {
+				t.Fatalf("import same content under id %q: %v", tc.incomingID, err)
+			}
+
+			if n := commentCount(t, te, ctx, "comments", "cic-1"); n != 1 {
+				t.Fatalf("comment rows = %d, want 1 (content dedup)", n)
+			}
+			assertStoredComment(t, te, ctx, "comments", tc.storedID, stored)
+			if d := commentJournal(t, te, ctx, "cic-1") - journalBefore; d != 0 {
+				t.Fatalf("comment journal events = %d, want 0", d)
+			}
+		})
+	}
+	t.Run("same_content_other_id_dedups/despite_foreign_owner", func(t *testing.T) {
+		// The incoming id belongs to another issue, but its content is
+		// already stored on the destination: content dedup wins, so the
+		// import neither errors nor duplicates and the owner keeps its row.
+		te := newEnv(t, "cic")
+		ctx := t.Context()
+		local := original("cic-1")
+		local.ID = otherUUID
+		if err := create(t, te, ctx, plain,
+			issueWith("cic-j", false, base, original("cic-j")),
+			issueWith("cic-1", false, base, local)); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		journalBefore := commentJournal(t, te, ctx, "cic-1")
+
+		opts := storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}
+		if err := create(t, te, ctx, opts, issueWith("cic-1", false, base, original("cic-1"))); err != nil {
+			t.Fatalf("import content already on cic-1 under a foreign-owned id: %v", err)
+		}
+
+		if n := commentCount(t, te, ctx, "comments", "cic-1"); n != 1 {
+			t.Fatalf("comment rows on cic-1 = %d, want 1 (content dedup)", n)
+		}
+		assertStoredComment(t, te, ctx, "comments", otherUUID, local)
+		assertStoredComment(t, te, ctx, "comments", commentID, original("cic-j"))
+		if d := commentJournal(t, te, ctx, "cic-1") - journalBefore; d != 0 {
+			t.Fatalf("comment journal events = %d, want 0", d)
+		}
+	})
+
+	// AC-5: a comment absent by id and content is inserted and journaled once;
+	// re-importing it with its stored timestamp changes nothing.
+	for _, tc := range []struct {
+		name       string
+		incomingID string
+		wisp       bool
+	}{
+		{"supplied_id", commentID, false},
+		{"supplied_id_wisp", commentID, true},
+		{"derived_id", "", false},
+	} {
+		t.Run("new_comment_inserts_once/"+tc.name, func(t *testing.T) {
+			te := newEnv(t, "cin")
+			ctx := t.Context()
+			table := commentTable(tc.wisp)
+			if err := create(t, te, ctx, plain, issueWith("cin-1", tc.wisp, base)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			journalBefore := commentJournal(t, te, ctx, "cin-1")
+
+			incoming := func() *types.Comment {
+				c := original("cin-1")
+				c.ID = tc.incomingID
+				return c
+			}
+			if err := create(t, te, ctx, plain, issueWith("cin-1", tc.wisp, base, incoming())); err != nil {
+				t.Fatalf("first import: %v", err)
+			}
+			if n := commentCount(t, te, ctx, table, "cin-1"); n != 1 {
+				t.Fatalf("comment rows after first import = %d, want 1", n)
+			}
+			var storedID string
+			te.queryScalar(t, ctx, fmt.Sprintf("SELECT id FROM %s WHERE issue_id = ?", table), []any{"cin-1"}, &storedID)
+			if tc.incomingID != "" && storedID != tc.incomingID {
+				t.Fatalf("stored comment id = %q, want the supplied %q", storedID, tc.incomingID)
+			}
+			if tc.incomingID == "" && storedID == "" {
+				t.Fatalf("id-less comment stored without a derived id")
+			}
+			if d := commentJournal(t, te, ctx, "cin-1") - journalBefore; d != 1 {
+				t.Fatalf("comment journal events after first import = %d, want 1", d)
+			}
+
+			// Re-import as sent, then (id-less case) under the id it was stored with.
+			again := []*types.Comment{incoming()}
+			if tc.incomingID == "" {
+				withID := incoming()
+				withID.ID = storedID
+				again = append(again, withID)
+			}
+			for _, c := range again {
+				if err := create(t, te, ctx, plain, issueWith("cin-1", tc.wisp, base, c)); err != nil {
+					t.Fatalf("re-import with id %q: %v", c.ID, err)
+				}
+			}
+			if n := commentCount(t, te, ctx, table, "cin-1"); n != 1 {
+				t.Fatalf("comment rows after re-import = %d, want 1", n)
+			}
+			want := original("cin-1")
+			want.ID = storedID
+			assertStoredComment(t, te, ctx, table, storedID, want)
+			if d := commentJournal(t, te, ctx, "cin-1") - journalBefore; d != 1 {
+				t.Fatalf("comment journal events after re-import = %d, want still 1", d)
+			}
+		})
+	}
+}

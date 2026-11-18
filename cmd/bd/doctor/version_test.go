@@ -28,6 +28,30 @@ func TestCompareVersions(t *testing.T) {
 		{"v1 shorter but less", "1.0", "1.0.5", -1},
 		{"real version comparison", "0.29.0", "0.30.0", -1},
 		{"real version comparison 2", "0.30.1", "0.30.0", 1},
+		// gastownhall/beads#6595: a prerelease must sort below its own
+		// stable release, not above it.
+		{"stable greater than its own rc", "1.3.1", "1.3.1-rc.1", 1},
+		{"rc less than its own stable", "1.3.1-rc.1", "1.3.1", -1},
+		{"rc equal to itself", "1.3.1-rc.1", "1.3.1-rc.1", 0},
+		{"stable equal to itself", "1.3.1", "1.3.1", 0},
+		{"rc1 less than rc2", "1.3.1-rc.1", "1.3.1-rc.2", -1},
+		{"rc2 greater than rc1", "1.3.1-rc.2", "1.3.1-rc.1", 1},
+		{"rc numeric identifier trap: rc.2 less than rc.10", "1.3.1-rc.2", "1.3.1-rc.10", -1},
+		{"rc numeric identifier trap: rc.10 greater than rc.2", "1.3.1-rc.10", "1.3.1-rc.2", 1},
+		{"rc of a later patch outranks an older stable", "1.3.1-rc.1", "1.3.0", 1},
+		{"an older stable is less than a later patch's rc", "1.3.0", "1.3.1-rc.1", -1},
+		{"fewer prerelease identifiers sorts lower", "1.0.0-alpha", "1.0.0-alpha.1", -1},
+		{"more prerelease identifiers sorts higher", "1.0.0-alpha.1", "1.0.0-alpha", 1},
+		{"hyphenated garbage remains unorderable", "also-not-one", "not-a-version", 0},
+		{"beta sorts below rc", "1.3.1-beta.2", "1.3.1-rc.1", -1},
+		{"undotted rc sorts below its release", "1.3.1-rc1", "1.3.1", -1},
+		{"numeric identifier sorts below alphanumeric", "1.0.0-1", "1.0.0-alpha", -1},
+		{"v-prefixed rc sorts below its release", "v1.3.1-rc.1", "1.3.1", -1},
+		{"pseudo-version sorts below the release it precedes", "v1.3.2-0.20260101000000-abcdefabcdef", "1.3.2", -1},
+		{"snapshot sorts below its release", "1.3.2-next", "1.3.2", -1},
+		{"build metadata is ignored on a prerelease", "1.4.0-rc.2+sha.abc", "1.4.0-rc.2", 0},
+		{"build metadata is ignored on a release", "1.4.0+dirty", "1.4.0", 0},
+		{"build metadata does not lift an rc to its release", "1.4.0-rc.2+sha.abc", "1.4.0", -1},
 	}
 
 	for _, tt := range tests {
@@ -35,6 +59,9 @@ func TestCompareVersions(t *testing.T) {
 			result := CompareVersions(tt.v1, tt.v2)
 			if result != tt.expected {
 				t.Errorf("CompareVersions(%q, %q) = %d, want %d", tt.v1, tt.v2, result, tt.expected)
+			}
+			if reversed := CompareVersions(tt.v2, tt.v1); reversed != -tt.expected {
+				t.Errorf("CompareVersions(%q, %q) = %d, want %d", tt.v2, tt.v1, reversed, -tt.expected)
 			}
 		})
 	}
@@ -153,6 +180,36 @@ func TestCheckCLIVersionUsesFetcher(t *testing.T) {
 	}
 	if !strings.Contains(check.Message, "unable to check for updates") {
 		t.Fatalf("Message = %q, want network fallback notice", check.Message)
+	}
+}
+
+// TestCheckCLIVersionReleaseCandidate is #6595 at the caller: a release
+// candidate is told when its release ships, and a release is never told to
+// move to a candidate.
+func TestCheckCLIVersionReleaseCandidate(t *testing.T) {
+	tests := []struct {
+		cli, latest string
+		wantStatus  string
+	}{
+		{cli: "1.4.0-rc.3", latest: "1.4.0", wantStatus: StatusWarning},
+		{cli: "1.4.0-rc.10", latest: "1.4.0", wantStatus: StatusWarning},
+		{cli: "1.4.0", latest: "1.4.0-rc.3", wantStatus: StatusOK},
+		{cli: "1.4.0-rc.3", latest: "1.3.4", wantStatus: StatusOK},
+	}
+	orig := latestGitHubReleaseFetcher
+	t.Cleanup(func() { latestGitHubReleaseFetcher = orig })
+
+	for _, tt := range tests {
+		t.Run(tt.cli+" vs "+tt.latest, func(t *testing.T) {
+			latestGitHubReleaseFetcher = func() (string, error) { return tt.latest, nil }
+			check := CheckCLIVersion(tt.cli)
+			if check.Status != tt.wantStatus {
+				t.Fatalf("Status = %q, want %q (message: %q)", check.Status, tt.wantStatus, check.Message)
+			}
+			if tt.wantStatus == StatusWarning && !strings.Contains(check.Message, "latest: "+tt.latest) {
+				t.Fatalf("Message = %q, want it to name the release %s", check.Message, tt.latest)
+			}
+		})
 	}
 }
 

@@ -310,6 +310,119 @@ concurrent status updates (e.g., one agent closes a bead while another
 also updates it). Mitigation: use optimistic concurrency checks where needed
 (check expected status before update).
 
+### Guarded delete racing a comment
+
+A guarded delete (`ExpectedVersion` set, run under the per-id delete fence)
+and an `AddComment` on the same issue can overlap: each transaction reads
+the issue as present, and nothing orders the two. A comment never bumps
+`row_lock`, so it does not invalidate the delete's `ExpectedVersion`, and
+the delete fence orders only guarded deletes of that id against each other,
+not comments. This section records what that race does today and what a fix
+needs. **The defect is unresolved:** the tests below only characterize it.
+Raymond W. Ko reported the race, with a fix that took #7645's journal writer
+lock on every server-mode bead write (#8026 as first opened). That fix was
+not adopted; the routes below say why.
+
+**Reproduction.** Two tests hold one side (the loser) at its first commit
+point, after it has read and written everything, then run the other side
+(the winner) to completion and release the loser. They run both orders,
+both commit styles (an in-body `DOLT_COMMIT` by default; a plain SQL
+`COMMIT` with the version commit deferred), and both server paths: the
+direct store and the unit-of-work path that proxied mode and `bd serve` use.
+The journal is off, `foreign_key_checks=1` and
+`dolt_force_transaction_commit=0`, read from the session that commits. Each
+case logs one `delete-comment race evidence:` JSON line, and each test ends
+with a coverage line naming what it did not run.
+
+```bash
+bazel-test //internal/storage/dolt:dolt_test --test_filter='^TestGuardedDeleteCommentRaceCharacterization$' --test_env=BEADS_TEST_SKIP= --test_env=BEADS_TEST_DOLT_SERVER=local --test_env=BEADS_TEST_REQUIRE_DOLT_CONTAINER=1
+bazel-test //internal/storage/uow:uow_test --test_filter='^TestUOWDeleteCommentRaceCharacterization$' --test_env=BEADS_TEST_SKIP= --test_env=BEADS_TEST_DOLT_SERVER=local --test_env=BEADS_TEST_REQUIRE_DOLT_CONTAINER=1
+```
+
+By default the tests pass by asserting the current behavior below. To see
+the defect, append `--test_env=BEADS_TEST_EXPECT_SERIAL_DELETE_COMMENT=1`
+to either command. The journal-off cases then assert the outcome a serial
+execution gives, and they fail with the error below. This mode is a
+reproduction, not a quality gate: it is expected to fail until the
+preferred fix below exists.
+
+**Measured on dolt 2.6.0** (local `dolt sql-server`), the same in all four
+journal-off cases on both paths:
+
+- The released loser fails with `Error 1105 (HY000): Committing this
+  transaction resulted in a working set with constraint violations,
+  transaction rolled back. …`, and the error names the violated key:
+  `Type: Foreign Key Constraint Violation, ForeignKey: fk_comments_issue`.
+  On the direct store the error is wrapped as `dolt commit: …` for an
+  in-body delete and `commit write tx: …` otherwise. It does not match
+  `ErrNotFound`.
+- The loser gets exactly one attempt. Beads retries serialization failures
+  (1213, 1205) and the exact autocommit 1105, not this one.
+- The loser's write is rolled back and the winner's stands. A losing delete
+  leaves the issue with the winner's comment; a losing comment leaves the
+  issue deleted with no comments.
+- No comment is orphaned and `dolt_constraint_violations` is empty. The
+  orphan-row outcome reported against this race did not reproduce.
+- On the direct store the Commenter always commits with a plain SQL `COMMIT`
+  and mints its version commit afterwards, so "comment loses under an
+  in-body `DOLT_COMMIT`" cannot run there. On the unit-of-work path every
+  combination runs.
+
+Two controls in each test pass in either mode. With the events journal on,
+both sides bump the single `bd_events_seq` row, so the loser's first attempt
+fails with an error beads already retries, and the retry gives the serial
+outcome. That control describes beads without a journal-writer admission
+lock: a lock taken before `BEGIN` and held to the commit would make the
+winner queue behind the held loser, so a change that adds one must rework
+the control. With no overlap (winner, then loser), the outcome is serial by
+construction. In both controls the winner commits, a losing delete succeeds
+and removes the issue and its comment, and a losing comment is refused with
+`ErrNotFound`.
+
+**Preferred fix.** The server reports this commit-time sequencing loss as a
+rollback-guaranteed serialization error, preferably MySQL 1213, on the
+server transport, on both server commit paths:
+
+1. an ordinary SQL `COMMIT`, and
+2. an in-body `DOLT_COMMIT` (`CALL DOLT_COMMIT(...)` inside the transaction).
+
+It must also keep that error distinct from a persisted or transaction-local
+constraint violation, which stays permanent. Beads would then replay the
+whole transaction through its existing retry path, and the serial-outcome
+assertions would become the default ones. This route adds no contention:
+only a transaction that loses the race replays. No Dolt release that meets
+this contract has been identified. The follow-up fix is gated on identifying
+one and proving it on both server commit paths; until then, the hard
+failure stays.
+
+Beads could also close the gap on its own side. Each such route is declined
+for now:
+
+- **Retrying this 1105.** The diagnostic covers both a sequencing loss and a
+  real persisted violation, so its text does not prove the error is
+  transient, and classifying it would extend the engine-specific
+  autocommit-1105 exception into a new retry policy on the beads side of the
+  storage boundary ([PROJECT_CHARTER.md](../PROJECT_CHARTER.md)). That needs
+  a maintainer decision, which has not been made.
+- **An admission lock that orders the writers**, as the writer-lock fix
+  proposed. One lock per database queues every server-mode bead write
+  behind the write that holds it, whether or not the two race, and a writer
+  that waits out the lock's budget fails with a busy error.
+- **Making a comment write the issue row**, so that the two transactions
+  conflict on one row and beads replays the loser, as the journaled writes
+  in the journal-on control do on `bd_events_seq`. Two comments on one issue
+  would then conflict with each other as well. If the comment also rewrote `row_lock`
+  (`RowLockClause`), a replayed guarded delete would fail its
+  `ExpectedVersion` check instead of deleting, and `row_lock` would no
+  longer track only lifecycle and ownership writes.
+
+**Scope.** The characterization is test-only support
+(`internal/testutil/sqlgate`) and the two tests above. Beads has no runtime
+retry classifier, advisory-lock admission or `row_lock` mutation for this
+race, and no production fix for it. Label and dependency races are not
+characterized, nor are the wisp plane, cancellation of a held loser, and
+persisted constraint violations.
+
 ## Migration Strategy
 
 ### Phase 1: Add Transaction Discipline (Non-Breaking)

@@ -73,7 +73,7 @@ func trackBdVersionFile(persist bool) {
 	// misfire is bounded — recoverPreV56IfNeeded refuses a non-semver
 	// predecessor, and the workspace's own version markers still refuse a
 	// genuine downgrade. (Those markers cannot arbitrate direction here: they
-	// compare with the same dotted scan and read HEAD stamps as 0.0.0 too.)
+	// use their own dotted comparison, which reads HEAD stamps as 0.0.0 too.)
 	if lastVersion != "" && lastVersion != Version {
 		if doctor.CompareVersions(Version, lastVersion) > 0 ||
 			doctor.IsBrewHeadVersion(Version) || doctor.IsBrewHeadVersion(lastVersion) {

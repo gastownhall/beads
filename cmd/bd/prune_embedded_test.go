@@ -99,6 +99,11 @@ func TestEmbeddedPruneSafetyAndScope(t *testing.T) {
 
 	t.Run("prune_last_issue_removes_gitignored_auto_export", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pjx")
+		// Create and close the issue before export.auto and export.git-add
+		// are on: with .beads/ ignored, an auto-export that writes issues
+		// fails its command at git add (GH#3970). Prune's empty export
+		// removes the file without staging anything.
+		target := createAndClose(t, bd, dir, "Closed exported task")
 		if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".beads/\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +119,6 @@ func TestEmbeddedPruneSafetyAndScope(t *testing.T) {
 			}
 		}
 
-		target := createAndClose(t, bd, dir, "Closed exported task")
 		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 		cmd := exec.Command(bd, "export", "-o", jsonlPath)
 		cmd.Dir = dir

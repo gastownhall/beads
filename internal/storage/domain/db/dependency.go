@@ -240,7 +240,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		affectedIssues, affectedWisps = issueops.RemoveSourceFromAffected(dep.IssueID, srcIsWisp, affectedIssues, affectedWisps)
 	}
 	if dep.Type == types.DepParentChild {
-		if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
+		if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps, actor); err != nil {
 			return fmt.Errorf("db: DependencySQLRepository.Insert: recompute is_blocked: %w", err)
 		}
 		// Snapshot only after all derived blocked-state maintenance has completed.
@@ -252,7 +252,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		// refresh returned above without minting.
 		return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 	}
-	if err := issueops.MarkIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
+	if err := issueops.MarkIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps, actor); err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: mark is_blocked (affected): %w", err)
 	}
 	// Snapshot only after all derived blocked-state maintenance has completed.
@@ -418,10 +418,10 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 	if aerr != nil {
 		return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: affected set: %w", aerr)
 	}
-	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
+	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps, actor); err != nil {
 		return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: recompute is_blocked: %w", err)
 	}
-	issueops.NoteDependencyRemovalBlockedRecheck(r.runner, issueID, dependsOnID, affectedIssues, affectedWisps)
+	issueops.NoteDependencyRemovalBlockedRecheck(r.runner, issueID, dependsOnID, actor, affectedIssues, affectedWisps)
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on opts.EmitEvent — a structural removal is as real to a
