@@ -69,6 +69,16 @@ func (p *unverifiedProcess) commandLineContains(string) (matched bool, gone bool
 	return false, false, errors.New("reading another process's command line is not supported on windows")
 }
 
+// commandLineArgs cannot read another process's argv on Windows, for the
+// reason commandLineContains gives.
+func (p *unverifiedProcess) commandLineArgs() (args []string, gone bool, err error) {
+	_, gone, err = p.commandLineContains("")
+	return nil, gone, err
+}
+
+// pinned is true: the open process handle keeps Windows from reusing the PID.
+func (p *unverifiedProcess) pinned() bool { return true }
+
 // kill terminates the process through the held handle. gone reports a target
 // that had already exited.
 func (p *unverifiedProcess) kill() (gone bool, err error) {

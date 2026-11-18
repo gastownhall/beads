@@ -46,6 +46,19 @@ func (p *unverifiedProcess) commandLineContains(needle string) (matched bool, go
 	return strings.Contains(strings.TrimSpace(string(output)), needle), false, nil
 }
 
+// commandLineArgs refuses on darwin: ps prints the argv joined with spaces,
+// so one argument that contains a space cannot be told from two, and the
+// orphan reap acts on no guessed split.
+func (p *unverifiedProcess) commandLineArgs() (args []string, gone bool, err error) {
+	if killErr := syscall.Kill(p.pid, 0); errors.Is(killErr, unix.ESRCH) {
+		return nil, true, nil
+	}
+	return nil, false, errors.New("reading another process's exact argv is not supported on darwin")
+}
+
+// pinned is false: darwin has no pidfd, so the signal goes to the bare PID.
+func (p *unverifiedProcess) pinned() bool { return false }
+
 // kill sends SIGKILL. gone reports a target that had already exited.
 func (p *unverifiedProcess) kill() (gone bool, err error) {
 	if killErr := syscall.Kill(p.pid, syscall.SIGKILL); killErr != nil {

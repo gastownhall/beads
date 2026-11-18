@@ -73,6 +73,21 @@ test-only `testutil.HoldDoltDatabaseLock` is outside it). The same proof also
 reads Dolt's `.dolt/sql-server.info` for the port and PID it names, as the
 dolt CLI does, the way bd already reads `repo_state.json`.
 
+A second exception is as narrow. The proxied-server supervisor in
+`internal/storage/dbproxy/proxy` may stop a `dolt sql-server` that its own
+managed-local proxy (`BackendLocalServer`) launched and then died before
+recording in `proxy-child.pid` (#8489): that dolt keeps the database lock,
+and every later backend start fails on it. Holding `proxy.lock` with
+`proxy-child.lock` free, the next spawn reads the root's
+`.dolt/sql-server.info` through `doltserver.ReadServerInfo`, only as a
+pointer. It kills the process the file names only when that process's
+executable is `dolt`, its exact argv passes `--config` with one of the
+root's bd-owned configs, and the checks and the signal go through one handle
+that pins the process (a Linux pidfd). On any doubt, and for every other
+platform and backend, it sends no signal and logs the manual remedy. It
+never writes, removes or locks the file. The exception lasts until Dolt or
+its driver can stop a server whose launcher died.
+
 This boundary is mechanically enforced for non-test code by a `depguard`
 rule in `.golangci.yml` that denies `github.com/dolthub/` imports outside
 `internal/storage/` and `internal/doltserver/` (the linter config does not

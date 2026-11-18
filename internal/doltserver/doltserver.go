@@ -745,7 +745,10 @@ const ServerInfoFileName = "sql-server.info"
 // for a socket-only server, reported as -1). Read-only: it never removes,
 // writes or locks the file. The file is only a pointer to a process: a stale
 // one names whatever now holds the PID, so callers must verify the process
-// before acting on it.
+// before acting on it. It is bd's one reader of the file, used by
+// ServesDatabaseDirOnPort and by the proxied-server reap of an unrecorded
+// managed backend (the two uses the storage-boundary exception in
+// engdocs/PROJECT_CHARTER.md names).
 func ReadServerInfo(dir string) (pid, port int, err error) {
 	path := filepath.Join(dir, ".dolt", ServerInfoFileName)
 	data, err := os.ReadFile(path) //nolint:gosec // G304: fixed file name under the caller's database directory
@@ -802,23 +805,11 @@ func ServesDatabaseDirOnPort(dir string, port int) bool {
 		return false
 	}
 	for _, d := range []string{dir, filepath.Dir(dir)} {
-		data, err := os.ReadFile(filepath.Join(d, ".dolt", ServerInfoFileName)) //nolint:gosec // G304: fixed file name in the store's CLIDir or its parent
+		pid, infoPort, err := ReadServerInfo(d)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return false
-		}
-		parts := strings.Split(strings.TrimSpace(string(data)), ":")
-		if len(parts) != 3 {
-			return false
-		}
-		pid, perr := strconv.Atoi(parts[0])
-		infoPort, portErr := -1, error(nil) // "-": a socket-only server
-		if parts[1] != "-" {
-			infoPort, portErr = strconv.Atoi(parts[1])
-		}
-		if perr != nil || portErr != nil || pid <= 0 {
 			return false
 		}
 		return infoPort == port && serverInfoProcessExists(pid) && databaseLocked(dir)

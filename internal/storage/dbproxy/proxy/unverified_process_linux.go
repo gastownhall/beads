@@ -63,6 +63,31 @@ func (p *unverifiedProcess) commandLineContains(needle string) (matched bool, go
 	return strings.Contains(cmdline, needle), false, nil
 }
 
+// commandLineArgs returns the process argv from /proc/<pid>/cmdline, split
+// on the NUL byte that ends each argument, so an argument that contains a
+// space stays one argument.
+func (p *unverifiedProcess) commandLineArgs() (args []string, gone bool, err error) {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(p.pid) + "/cmdline")
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH) {
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("read cmdline for pid %d: %w", p.pid, err)
+	}
+	if len(data) == 0 {
+		// Zombies expose an empty cmdline; the process has effectively exited.
+		return nil, true, nil
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00"), false, nil
+}
+
+// pinned reports whether the handle is a pidfd. Without one (a kernel before
+// 5.3) a signal goes to the bare PID, which the process may have left by
+// then.
+func (p *unverifiedProcess) pinned() bool {
+	return p.pidfd >= 0
+}
+
 // kill sends SIGKILL through the held handle. gone reports a target that had
 // already exited.
 func (p *unverifiedProcess) kill() (gone bool, err error) {

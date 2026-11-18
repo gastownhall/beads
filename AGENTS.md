@@ -106,7 +106,14 @@ directory is served, and covers no other lock (the test-only
 `testutil.HoldDoltDatabaseLock` is outside it). The same proof also reads
 Dolt's `.dolt/sql-server.info` for the port and PID it names, as the dolt CLI
 does, the way bd already reads the remotes in Dolt's repo state file
-(`PersistedRemoteInfos`). `bd doctor` support for
+(`PersistedRemoteInfos`). A second exception, as narrow: the proxied-server
+supervisor (`internal/storage/dbproxy/proxy`) may SIGKILL a
+`dolt sql-server` that its own managed-local proxy launched and then died
+before recording. It finds that dolt through the root's `.dolt/sql-server.info`,
+read only through `doltserver.ReadServerInfo` and never written. It kills
+only when the process is `dolt`, its exact argv passes `--config` with one
+of the root's bd-owned configs, and a Linux pidfd pins it; anywhere else it
+only logs the manual remedy. `bd doctor` support for
 embedded mode is enabled one subcommand at a time, each human-vetted
 (GH#3794): do not lift the embedded-mode gate in
 `cmd/bd/doctor.go` wholesale, and keep database-layer checks and fixes

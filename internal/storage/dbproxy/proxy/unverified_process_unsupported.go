@@ -27,6 +27,12 @@ func (p *unverifiedProcess) commandLineContains(needle string) (matched bool, go
 	return false, false, errUnverifiedUnsupported
 }
 
+func (p *unverifiedProcess) commandLineArgs() (args []string, gone bool, err error) {
+	return nil, false, errUnverifiedUnsupported
+}
+
+func (p *unverifiedProcess) pinned() bool { return false }
+
 func (p *unverifiedProcess) kill() (gone bool, err error) {
 	return false, errUnverifiedUnsupported
 }

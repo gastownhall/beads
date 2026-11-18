@@ -82,11 +82,14 @@ The control files in that root, as enumerated by `proxy.ControlFilePaths`:
 | `proxy-child.lock` | the proxy | held while the backend runs |
 | `<name>.stale-<unix>` | either | quarantined records, swept after 30 days |
 
-A backend missing from `proxy-child.pid` (its proxy was killed before
-recording it) is stopped only through a full identity match on
+A managed-local backend missing from `proxy-child.pid` (its proxy was killed
+before recording it) is stopped only through a full identity match on
 `<root>/.dolt/sql-server.info`: with `proxy.lock` held and `proxy-child.lock`
-free, bd kills the pid that file names only when its executable is `dolt` and
-its command line passes `--config` with one of this root's bd-owned configs.
+free, bd kills the pid that file names only when its executable is `dolt`, its
+exact argv passes `--config` with one of this root's bd-owned configs, and a
+Linux pidfd pins it between the checks and the kill. On macOS, on Windows and
+on Linux kernels without pidfd, bd only logs the pid and the manual remedy. An
+external backend's spawn never reads the file.
 
 Two topologies share this machinery: **managed-local**, where bd spawns the
 `dolt sql-server` itself, and **external**, where the proxy fronts a

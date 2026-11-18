@@ -388,7 +388,7 @@ func spawnAndHandoff(
 	if err := quarantineForSpawn(rootDir, discovery); err != nil {
 		return Endpoint{}, err
 	}
-	if err := cleanupOrphanBackend(rootDir); err != nil {
+	if err := cleanupOrphanBackend(rootDir, opts.Backend); err != nil {
 		return Endpoint{}, err
 	}
 
@@ -811,7 +811,14 @@ func sweepOldQuarantines(rootDir string, now time.Time) error {
 	return errors.Join(errs...)
 }
 
-func cleanupOrphanBackend(rootDir string) error {
+// cleanupOrphanBackend stops the backend a dead proxy left running, before a
+// new proxy child is spawned for rootDir. A live recorded backend is killed
+// through its verified record. When there is no live record (none at all,
+// or a dead one, quarantined here), reapUnrecordedBackend looks for one the
+// dead proxy started but never recorded, which it does only for backend
+// BackendLocalServer. A held child lock, a malformed or unverifiable record
+// and a root-identity mismatch are refused, and never reach that fallback.
+func cleanupOrphanBackend(rootDir string, backend Backend) error {
 	recordPath := pidfile.Path(rootDir, server.PIDFileName)
 	pf, readErr := pidfile.Read(rootDir, server.PIDFileName)
 
@@ -846,7 +853,7 @@ func cleanupOrphanBackend(rootDir string) error {
 		return fmt.Errorf("read backend record %s: %w", recordPath, readErr)
 	}
 	if pf == nil {
-		return reapUnrecordedBackend(rootDir)
+		return reapUnrecordedBackend(rootDir, backend)
 	}
 	if err := pf.ValidateV2(pidfile.KindDoltBackend); err != nil {
 		dead, live, probeErr := probeUnverifiablePID(pf.Pid)
@@ -855,7 +862,7 @@ func cleanupOrphanBackend(rootDir string) error {
 				return fmt.Errorf("quarantine dead unverifiable backend record: %w", quarantineErr)
 			}
 			// A dead record can sit in front of an older unrecorded orphan.
-			return reapUnrecordedBackend(rootDir)
+			return reapUnrecordedBackend(rootDir, backend)
 		}
 		if probeErr != nil {
 			err = errors.Join(err, fmt.Errorf("probe recorded pid: %w", probeErr))
@@ -898,7 +905,7 @@ func cleanupOrphanBackend(rootDir string) error {
 		if _, err := quarantineRecord(rootDir, server.PIDFileName, time.Now()); err != nil {
 			return fmt.Errorf("quarantine dead backend record: %w", err)
 		}
-		return reapUnrecordedBackend(rootDir)
+		return reapUnrecordedBackend(rootDir, backend)
 	}
 	if err := handle.Kill(); err != nil {
 		_ = handle.Close()
