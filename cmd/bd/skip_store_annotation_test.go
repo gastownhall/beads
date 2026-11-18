@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -174,5 +177,114 @@ func TestPersistentPreRunHonorsSkipStoreAnnotation(t *testing.T) {
 	t.Cleanup(func() { rootCmd.RemoveCommand(control) })
 	if err := rootCmd.PersistentPreRunE(control, nil); err == nil {
 		t.Fatal("control (non-annotated) command should attempt store init and fail to open the absent database; test-environment precondition broken")
+	}
+}
+
+// upgradeInspectionFixture is an isolated server-mode workspace whose database
+// is absent and whose server may not be auto-started: any command that
+// reaches store init fails to open it. It returns the .beads directory.
+func upgradeInspectionFixture(t *testing.T) string {
+	t.Helper()
+	repoDir := t.TempDir()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	writeTestConfigYAML(t, beadsDir, "")
+	writeMetadataConfig(t, beadsDir, configfile.DoltModeServer, "upgrade_inspection_test")
+
+	t.Chdir(repoDir)
+	t.Setenv("HOME", repoDir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BD_DISABLE_METRICS", "1")
+	t.Setenv("BD_ALLOW_MIGRATE", "")
+	t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "")
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	savePersistentPreRunState(t)
+
+	oldStore := store
+	oldUpgradeDetected := versionUpgradeDetected
+	oldPreviousVersion := previousVersion
+	oldUpgradeAcknowledged := upgradeAcknowledged
+	t.Cleanup(func() {
+		store = oldStore
+		versionUpgradeDetected = oldUpgradeDetected
+		previousVersion = oldPreviousVersion
+		upgradeAcknowledged = oldUpgradeAcknowledged
+	})
+	return beadsDir
+}
+
+// resetUpgradeInspectionGlobals returns the globals one bd invocation would
+// start with, so successive drives in one test behave like separate processes.
+func resetUpgradeInspectionGlobals() {
+	serverMode = false
+	cmdCtx = nil
+	dbPath = ""
+	readonlyMode = false
+	doltAutoCommit = ""
+	jsonOutput = false
+	store = nil
+	versionUpgradeDetected = false
+	previousVersion = ""
+	upgradeAcknowledged = false
+}
+
+// driveUpgradeInspection runs the root hook and then the leaf's RunE, the way
+// cobra does for `bd upgrade <leaf>`, and returns the leaf's stdout. The hook
+// must succeed without assigning the global store.
+func driveUpgradeInspection(t *testing.T, leaf *cobra.Command, asJSON bool) string {
+	t.Helper()
+	resetUpgradeInspectionGlobals()
+	if err := rootCmd.PersistentPreRunE(leaf, nil); err != nil {
+		t.Fatalf("bd upgrade %s: root hook must skip store init, got: %v", leaf.Name(), err)
+	}
+	if store != nil {
+		t.Fatalf("bd upgrade %s opened the store", leaf.Name())
+	}
+	// The hook rebinds jsonOutput from config when --json was not passed;
+	// set it afterwards, as the flag would have.
+	jsonOutput = asJSON
+	return captureStdout(t, func() error { return leaf.RunE(leaf, nil) })
+}
+
+// TestUpgradeReadOnlySubcommandsSkipStoreInit pins GH#6669 at the hook: `bd
+// upgrade status` and `bd upgrade review` must succeed on a workspace whose
+// database cannot be opened, because they never need it. `bd upgrade ack` is
+// the control: it keeps the store-backed path, so in the same environment it
+// must still reach store init and fail — which also proves the fixture really
+// does refuse a store open.
+func TestUpgradeReadOnlySubcommandsSkipStoreInit(t *testing.T) {
+	beadsDir := upgradeInspectionFixture(t)
+	localVersionPath := filepath.Join(beadsDir, localVersionFile)
+
+	for _, leaf := range []*cobra.Command{upgradeStatusCmd, upgradeReviewCmd} {
+		for _, asJSON := range []bool{false, true} {
+			out := driveUpgradeInspection(t, leaf, asJSON)
+			if strings.TrimSpace(out) == "" {
+				t.Errorf("bd upgrade %s (json=%v) printed nothing", leaf.Name(), asJSON)
+			}
+			if asJSON && leaf == upgradeStatusCmd {
+				var got map[string]any
+				if err := json.Unmarshal([]byte(out), &got); err != nil {
+					t.Errorf("bd upgrade status --json is not JSON: %v\n%s", err, out)
+				} else if got["upgraded"] != false || got["current_version"] != Version {
+					t.Errorf("bd upgrade status --json = %v, want no upgrade at %s", got, Version)
+				}
+			}
+		}
+	}
+	// An absent marker is reported as such, never created by an inspection.
+	if _, err := os.Stat(localVersionPath); !os.IsNotExist(err) {
+		t.Errorf("upgrade inspection created %s (stat err=%v)", localVersionFile, err)
+	}
+
+	// Control: ack still goes through store init.
+	resetUpgradeInspectionGlobals()
+	if err := rootCmd.PersistentPreRunE(upgradeAckCmd, nil); err == nil {
+		t.Fatal("bd upgrade ack should still reach store init and fail to open the absent database; fixture precondition broken")
 	}
 }
