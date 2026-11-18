@@ -98,6 +98,7 @@ type CloneOptions struct {
 	Assignee  string            // Assign the root epic to this agent/user
 	Actor     string            // Actor performing the operation
 	Ephemeral bool              // If true, spawned issues are marked for bulk deletion
+	WispType  types.WispType    // Wisp type stamped on every created issue (wisp creation only); empty = untyped
 	Prefix    string            // Override prefix for ID generation (bd-hobo: distinct prefixes)
 
 	// Dynamic bonding fields (for Christmas Ornament pattern)
@@ -919,6 +920,7 @@ func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgr
 			Assignee:           issueAssignee,
 			EstimatedMinutes:   oldIssue.EstimatedMinutes,
 			Ephemeral:          opts.Ephemeral, // mark for cleanup when closed
+			WispType:           opts.WispType,  // classify for TTL-based compaction
 			IDPrefix:           opts.Prefix,    // distinct prefixes for mols/wisps
 			// Gate fields (for async coordination)
 			AwaitType: oldIssue.AwaitType,

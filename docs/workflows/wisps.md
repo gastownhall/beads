@@ -56,6 +56,24 @@ bd mol wisp gc        # garbage collect old/abandoned wisps
 bd purge --force      # delete all closed ephemeral beads
 ```
 
+### Typing wisps with `--wisp-type`
+
+Both creation spellings — `bd mol wisp <proto>` and
+`bd mol wisp create <proto>` — accept `--wisp-type`, which stamps one of the
+compaction categories on the wisp: `heartbeat`, `ping`, `patrol`,
+`gc_report`, `recovery`, `error` or `escalation`, the same enum
+`bd create --ephemeral` validates. The type is applied to the root issue and
+every child step the creation makes, so compaction TTLs and wisp-type
+filters treat the whole wisp uniformly. Omitting the flag (or passing an
+empty value) keeps the wisp untyped, which falls back to the default
+compaction TTL — exactly the behavior of wisps created before the flag
+existed. Available from the release after v1.3.4.
+
+```bash
+bd mol wisp mol-patrol --wisp-type patrol
+bd mol wisp create mol-patrol --wisp-type patrol --root-only
+```
+
 ### Retiring ids with `--retain-ids`
 
 By default a purged or pruned id is free again: a later `bd create --id`

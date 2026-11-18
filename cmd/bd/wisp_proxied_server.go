@@ -94,6 +94,7 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 			Vars:      vars,
 			Actor:     currentActor(),
 			Ephemeral: true,
+			WispType:  in.wispType,
 			Prefix:    types.IDPrefixWisp,
 			RootOnly:  in.rootOnly,
 		})
