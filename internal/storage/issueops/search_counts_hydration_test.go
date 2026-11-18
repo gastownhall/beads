@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"database/sql/driver"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -40,6 +41,15 @@ func hydratedRowsReversed(ids []string) *sqlmock.Rows {
 		rows.AddRow(vals...)
 	}
 	return rows
+}
+
+func seqIDs(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		// Zero-padded so byte order, natural order and selection order agree.
+		ids[i] = fmt.Sprintf("bd-%04d", i)
+	}
+	return ids
 }
 
 // expectByIDsHydration registers the exact by-IDs statement and argument list
@@ -121,6 +131,90 @@ func TestSearchIssuesWithCountsHydratesOnlyThePageIDs(t *testing.T) {
 		}
 		if len(got) != 0 {
 			t.Fatalf("got %d rows from an empty selection, want none", len(got))
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+}
+
+// TestSearchIssuesWithCountsUnboundedHydratesInBatches (AC-2): an unlimited
+// counts search selects every matching ID with no LIMIT, then hydrates them
+// in batches of 200 and 5, returning all 205 in selection order.
+func TestSearchIssuesWithCountsUnboundedHydratesInBatches(t *testing.T) {
+	t.Parallel()
+
+	ids := seqIDs(205)
+	hyd := sqlbuild.CountsHydration{Lite: true}
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery(`(?s)^SELECT issues\.id FROM issues .*ORDER BY priority ASC, created_at DESC, id ASC\s*$`).
+		WillReturnRows(idRows(ids...))
+	expectByIDsHydration(mock, IssuesFilterTables, ids[:sqlbuild.QueryBatchSize], true, hyd)
+	expectByIDsHydration(mock, IssuesFilterTables, ids[sqlbuild.QueryBatchSize:], true, hyd)
+
+	got, err := SearchIssuesWithCountsInTx(context.Background(), tx, "", types.IssueFilter{SkipWisps: true, Lite: true})
+	if err != nil {
+		t.Fatalf("SearchIssuesWithCountsInTx: %v", err)
+	}
+	assertIDs(t, got, ids)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestReadyWorkWithCountsUnboundedHydratesByIDs (AC-2): an unlimited ready
+// family read runs its indexed ID query without a LIMIT and hydrates the IDs
+// in batches of 200 and 5 — it no longer falls back to the predicate-form
+// mega-query — and its total is the number of selected IDs. An empty
+// selection hydrates nothing.
+func TestReadyWorkWithCountsUnboundedHydratesByIDs(t *testing.T) {
+	t.Parallel()
+
+	hyd := sqlbuild.CountsHydration{Lite: true}
+	preds := &readyWorkPredicates{
+		whereSQL:   "WHERE status = ?",
+		orderBySQL: "ORDER BY priority ASC, created_at ASC, id ASC",
+		args:       []interface{}{"open"},
+	}
+	idQuery := `^SELECT id FROM issues WHERE status = \? ORDER BY priority ASC, created_at ASC, id ASC\s*$`
+
+	t.Run("batched", func(t *testing.T) {
+		t.Parallel()
+		ids := seqIDs(205)
+
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectQuery(idQuery).WithArgs("open").WillReturnRows(idRows(ids...))
+		expectByIDsHydration(mock, IssuesFilterTables, ids[:sqlbuild.QueryBatchSize], true, hyd)
+		expectByIDsHydration(mock, IssuesFilterTables, ids[sqlbuild.QueryBatchSize:], true, hyd)
+
+		got, total, err := runReadyCountsInTx(context.Background(), tx, IssuesFilterTables, 0, preds, true, hyd, false)
+		if err != nil {
+			t.Fatalf("runReadyCountsInTx: %v", err)
+		}
+		assertIDs(t, got, ids)
+		if total != len(ids) {
+			t.Fatalf("total = %d, want %d", total, len(ids))
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectQuery(idQuery).WithArgs("open").WillReturnRows(idRows())
+
+		got, total, err := runReadyCountsInTx(context.Background(), tx, IssuesFilterTables, 0, preds, true, hyd, false)
+		if err != nil {
+			t.Fatalf("runReadyCountsInTx: %v", err)
+		}
+		if len(got) != 0 || total != 0 {
+			t.Fatalf("empty selection returned %d rows, total %d; want none", len(got), total)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet SQL expectations: %v", err)

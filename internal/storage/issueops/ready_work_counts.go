@@ -170,28 +170,24 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 	return items, nil
 }
 
-// runReadyCountsInTx renders the ready-work counts mega-query for one table
-// family, pushing the page down when the caller bounded it.
+// runReadyCountsInTx resolves one table family's ready IDs with the cheap
+// indexed ID query (the same SELECT id … the non-counts GetReadyWork path
+// uses), then hydrates the counts constrained to exactly those IDs
+// (hydrateCountsByIDsInTx). This is what de-quadratics the query: the
+// reverse-blocker subquery rc keys on COALESCE(depends_on_issue_id, …), an
+// expression the pure-Go GMS analyzer cannot auto-index, and every other
+// aggregate subquery would otherwise read its whole side table. Constraining
+// them to the selected IDs turns O(candidates × blockers) into
+// O(selected × blockers). Each per-issue count is a function of the full
+// dependency graph, not of the candidate set, so constraining the driver
+// leaves every emitted count unchanged; the order is the ready order the ID
+// query computed, which ends in a unique `id` tiebreak.
 //
-// For a bounded page (limit > 0) it first resolves the ≤limit ready IDs with the
-// cheap indexed ID query (the same SELECT id … the non-counts GetReadyWork path
-// uses), then hydrates the counts constrained to exactly those IDs. This is what
-// de-quadratics the query: the reverse-blocker subquery rc joins on
-// COALESCE(depends_on_issue_id, …), an expression the pure-Go GMS analyzer
-// cannot auto-index, so the planner re-scans rc's whole materialization once per
-// driver row. Bounding the driver to the page turns that O(candidates × blockers)
-// scan into O(page × blockers). Each per-issue count is a function of the full
-// dependency graph, not of the candidate set, so constraining the driver leaves
-// every emitted count byte-identical to the unbounded mega-query; the page is
-// the same top-N the ORDER BY … LIMIT selected because the ready order ends in a
-// unique `id` tiebreak.
-//
-// The page IDs are chunked into sqlbuild.QueryBatchSize batches so a large page
-// stays within every backend's per-statement placeholder limit (the by-IDs form
-// binds the page up to eight times) without falling back to the quadratic query.
-//
-// For limit <= 0 (unbounded) there is no page to push down, so it runs the
-// predicate-form mega-query unchanged.
+// It does this for an unbounded request (limit <= 0) too. There the ID query
+// carries no LIMIT (or only the MaxRows probe bound preds.limitSQL holds), and
+// the hydration batches through every selected ID. Rendering the predicate-form
+// mega-query instead — what an unbounded request used to do — aggregated every
+// side table in full, the cost GH#4370's unlimited listings paid.
 //
 // withTotal (bounded pages only) also returns the number of rows the family's
 // ready predicate admits, as a window count over the same ID query:
@@ -199,7 +195,7 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 // BY … LIMIT cut the page, so it is exactly `SELECT COUNT(*) … WHERE` — the
 // count CountReadyWorkInTx takes — at no extra statement. The ID query has no
 // DISTINCT, so the window counts rows and IDs alike. Otherwise the returned
-// total is len(result).
+// total is the number of selected IDs.
 //
 // Both callers pass readyHydrationFor(filter), which carries Lite and nothing
 // else: ready work always hydrates labels and cardinalities, because
@@ -209,15 +205,10 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 //
 //nolint:gosec // G201: whereSQL/orderBySQL/limitSQL are hardcoded fragments; user input rides ? placeholders.
 func runReadyCountsInTx(ctx context.Context, tx DBTX, tables FilterTables, limit int, preds *readyWorkPredicates, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration, withTotal bool) ([]*types.IssueWithCounts, int, error) {
-	if limit <= 0 {
-		out, err := runSearchQueryInTx(ctx, tx, tables, preds.whereSQL, preds.orderBySQL, preds.limitSQL, preds.args, includeWispReverseDeps, hyd)
-		return out, len(out), err
-	}
-
 	var pageIDs []string
 	var total int
 	var err error
-	if withTotal {
+	if withTotal && limit > 0 {
 		idQuery := fmt.Sprintf("SELECT id, COUNT(*) OVER () FROM %s %s %s %s", tables.Main, preds.whereSQL, preds.orderBySQL, preds.limitSQL)
 		pageIDs, total, err = queryReadyIDPageWithTotal(ctx, tx, idQuery, preds.args)
 	} else {
@@ -232,35 +223,11 @@ func runReadyCountsInTx(ctx context.Context, tx DBTX, tables FilterTables, limit
 		return nil, 0, nil
 	}
 
-	// Hydrate the counts for the resolved page, chunking the IN-list. The page
-	// IDs are already distinct, so a per-chunk scan needs no cross-chunk dedup.
-	byID := make(map[string]*types.IssueWithCounts, len(pageIDs))
-	for start := 0; start < len(pageIDs); start += sqlbuild.QueryBatchSize {
-		end := start + sqlbuild.QueryBatchSize
-		if end > len(pageIDs) {
-			end = len(pageIDs)
-		}
-		countsSQL, idArgs := sqlbuild.SearchCountsSQL(tables, pageIDs[start:end], "", "", "", includeWispReverseDeps, hyd)
-		rows, scanErr := scanCountsRowsInTx(ctx, tx, tables.Main, countsSQL, idArgs, hyd)
-		if scanErr != nil {
-			return nil, 0, scanErr
-		}
-		for _, r := range rows {
-			if r != nil && r.Issue != nil {
-				byID[r.Issue.ID] = r
-			}
-		}
+	out, err := hydrateCountsByIDsInTx(ctx, tx, tables, pageIDs, includeWispReverseDeps, hyd)
+	if err != nil {
+		return nil, 0, err
 	}
-
-	// Restore the ready order the ID query already computed so the result stays
-	// identical to the unbounded mega-query's ORDER BY … LIMIT.
-	ordered := make([]*types.IssueWithCounts, 0, len(pageIDs))
-	for _, id := range pageIDs {
-		if r, ok := byID[id]; ok {
-			ordered = append(ordered, r)
-		}
-	}
-	return ordered, total, nil
+	return out, total, nil
 }
 
 // queryReadyIDPageWithTotal runs a `SELECT id, COUNT(*) OVER () …` page query
