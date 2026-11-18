@@ -44,7 +44,7 @@ type GraphApplyNode struct {
 	Assignee           string                     `json:"assignee,omitempty"`
 	AssignAfterCreate  bool                       `json:"assign_after_create,omitempty"`
 	Owner              string                     `json:"owner,omitempty"`
-	Priority           *int                       `json:"priority,omitempty"`          // nil defaults to P2
+	Priority           *GraphPlanPriority         `json:"priority,omitempty"`          // 0-4, "0"-"4" or "P0"-"P4"; nil defaults to P2
 	Estimate           *int                       `json:"estimate,omitempty"`          // minutes (alias for estimated_minutes)
 	EstimatedMinutes   *int                       `json:"estimated_minutes,omitempty"` // minutes
 	DueAt              *time.Time                 `json:"due_at,omitempty"`            // RFC3339
@@ -66,6 +66,42 @@ type GraphApplyNode struct {
 	Actor              string                     `json:"actor,omitempty"`      // type=event only
 	Target             string                     `json:"target,omitempty"`     // type=event only
 	Payload            string                     `json:"payload,omitempty"`    // type=event only
+}
+
+// GraphPlanPriority is a plan node's priority. It decodes the forms
+// `bd create --priority` accepts: a JSON integer, or a string "0"-"4" or
+// "P0"-"P4" (any case), checked by validation.ValidatePriority (GH#3879). It
+// encodes as a plain JSON number, so producers that send integers see no
+// change. The 0-4 range of an integer is checked by node validation.
+type GraphPlanPriority int
+
+// UnmarshalJSON implements json.Unmarshaler. A JSON null never reaches it:
+// encoding/json leaves the *GraphPlanPriority field nil, which asks the role
+// for its default priority.
+func (p *GraphPlanPriority) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	switch {
+	case strings.HasPrefix(raw, `"`):
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return fmt.Errorf("invalid priority %s: %w", raw, err)
+		}
+		v, err := validation.ValidatePriority(s)
+		if err != nil {
+			return err
+		}
+		*p = GraphPlanPriority(v)
+		return nil
+	case raw != "" && (raw[0] == '-' || (raw[0] >= '0' && raw[0] <= '9')):
+		v, err := json.Number(raw).Int64()
+		if err != nil {
+			return fmt.Errorf("invalid priority %s (expected an integer 0-4, or a string like \"P1\" or \"1\")", raw)
+		}
+		*p = GraphPlanPriority(v)
+		return nil
+	default:
+		return fmt.Errorf("invalid priority %s (expected an integer 0-4, or a string like \"P1\" or \"1\")", raw)
+	}
 }
 
 // effectiveParentKey resolves the parent alias: parent_key wins, then parent.
@@ -186,7 +222,20 @@ var graphFieldHints = map[string]string{
 	"event_actor":    "use 'actor' (matching the issue model's JSON field)",
 	"event_target":   "use 'target' (matching the issue model's JSON field)",
 	"event_payload":  "use 'payload' (matching the issue model's JSON field)",
+	// Dependency-shaped node fields (GH#3879): the natural shape for a plan
+	// written from memory, so each one says where a node's dependencies go.
+	"blockedby":    graphDependencyFieldHint,
+	"blocked_by":   graphDependencyFieldHint,
+	"blocked-by":   graphDependencyFieldHint,
+	"dependson":    graphDependencyFieldHint,
+	"depends_on":   graphDependencyFieldHint,
+	"depends-on":   graphDependencyFieldHint,
+	"dependencies": graphDependencyFieldHint,
+	"needs":        graphDependencyFieldHint,
 }
+
+// graphDependencyFieldHint is the hint for a dependency-shaped node field.
+const graphDependencyFieldHint = `this node's dependencies go in its own "deps" ({"deps": [{"target": "a"}]} means this node waits on a), or in a top-level edge whose "from_key" is this node`
 
 // detectUnknownGraphFields scans the raw plan JSON and returns unknown field
 // names grouped by their location in the plan. The returned map keys describe
@@ -283,7 +332,7 @@ func warnUnknownGraphFields(w io.Writer, unknown map[string][]string) []string {
 	for _, loc := range locations {
 		fields := append([]string(nil), unknown[loc]...)
 		sort.Strings(fields)
-		fmt.Fprintf(w, "warning: graph plan %s has unknown field(s): %v (silently dropped — see 'bd create --graph' schema)\n", loc, fields)
+		fmt.Fprintf(w, "warning: graph plan %s has unknown field(s): %v (silently dropped — see 'bd help --doc create')\n", loc, fields)
 		for _, f := range fields {
 			distinct[f] = struct{}{}
 		}
@@ -583,6 +632,10 @@ func validateGraphApplyPlan(plan *GraphApplyPlan, customTypes, customStatuses []
 				if !dt.IsValid() {
 					return fmt.Errorf("node %q: dep %d: invalid dependency type %q", node.Key, j, dep.Type)
 				}
+				if canonical, ok := graphPlanTypeRespelling(dep.Type); ok {
+					return fmt.Errorf("node %q: dep %d: dependency type %q is not recognized; did you mean %q%s?",
+						node.Key, j, dep.Type, canonical, graphPlanAliasNote(canonical, "this node depends on the target"))
+				}
 			}
 		}
 	}
@@ -604,6 +657,10 @@ func validateGraphApplyPlan(plan *GraphApplyPlan, customTypes, customStatuses []
 			dt := types.DependencyType(edge.Type)
 			if !dt.IsValid() {
 				return fmt.Errorf("edge %d: invalid dependency type %q", i, edge.Type)
+			}
+			if canonical, ok := graphPlanTypeRespelling(edge.Type); ok {
+				return fmt.Errorf("edge %d: dependency type %q is not recognized; did you mean %q%s?",
+					i, edge.Type, canonical, graphPlanAliasNote(canonical, "from_key depends on to_key, like bd dep add <from> <to>"))
 			}
 		}
 		if edge.Gate != "" || edge.SpawnerKey != "" || edge.SpawnerID != "" {
@@ -804,7 +861,7 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 	// (CreateItem.DefaultPriority); the number is not spelled here.
 	priority := 0
 	if node.Priority != nil {
-		priority = *node.Priority
+		priority = int(*node.Priority)
 	}
 
 	ephemeral, noHistory, storageClass, err := graphApplyNodeStorageClass(node, opts)
@@ -964,6 +1021,9 @@ func (e *GraphApplyTooLargeError) Error() string {
 // order the plan itself declares nodes and edges in (Ref.Key "reaches
 // backward only" — issueops/batchapplier.go).
 //
+// The request always sets SkipPerEdgeCycleCheck (see the return below): the
+// end gate, not a per-edge probe, is the authoritative store-wide cycle check.
+//
 // What this function does NOT do, deliberately: re-check for dependency
 // cycles, parent-child blocking paths, or duplicate/reverse parent-child
 // pairs. BatchApplier's own end gate re-validates the whole scheduling graph
@@ -1093,10 +1153,7 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 	// types.NewGraphNodeDependency applied on the old embedded path.
 	for _, node := range plan.Nodes {
 		for _, dep := range node.Deps {
-			depType := types.DependencyType(dep.Type)
-			if depType == "" {
-				depType = types.DepBlocks
-			}
+			depType := graphApplyDependencyType(dep.Type)
 			target := issueops.Ref{ID: dep.Target}
 			if planKeys[dep.Target] {
 				target = issueops.Ref{Key: dep.Target}
@@ -1152,11 +1209,27 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 		commitMsg = fmt.Sprintf("bd: graph-apply %d nodes", len(plan.Nodes))
 	}
 
+	// SkipPerEdgeCycleCheck drops only the per-edge recursive SQL cycle probe,
+	// which ran one reachability query per dep_add item and made a medium
+	// plan's edge phase cost O(edges x graph) (GH#3879). Cycles are still
+	// refused by:
+	//   - validateGraphApplyLocalCycles, before any write (also under --dry-run),
+	//     over parent links and edges (not node deps);
+	//   - the role's end gate, which re-checks stored plus added edges once per
+	//     batch with one table load and an in-memory walk, and names the path;
+	//   - the per-item self-dependency refusal;
+	//   - the per-edge hierarchy check, which this flag does not gate.
+	// `bd dep add --file --no-cycle-check` makes the same trade. The saving is
+	// the store applier's (embedded and server mode): the uow applier behind a
+	// proxied-server workspace still runs AddDependencies' own final
+	// CycleThroughEdges, which loads both dependency tables for every dep_add
+	// item.
 	return issueops.ApplyBatchRequest{
-		Actor:         actor,
-		Items:         items,
-		Provenance:    commitMsg,
-		ForceIDPrefix: opts.Force,
+		Actor:                 actor,
+		Items:                 items,
+		Provenance:            commitMsg,
+		ForceIDPrefix:         opts.Force,
+		SkipPerEdgeCycleCheck: true,
 	}, nil
 }
 
@@ -1208,11 +1281,67 @@ func graphApplyEdgeIsLocalCycleRelevant(edge GraphApplyEdge, depType types.Depen
 	return graphApplyCycleRelevantDependencyType(depType)
 }
 
+// graphPlanTypeRespelling reports whether raw respells a dependency type bd
+// recognizes — a well-known type or one of the canonicalDependencyType
+// aliases — without matching it exactly: the same word once case, '-', '_'
+// and spaces are ignored ("blocked_by", "Blocks", "waits_for"). Such a type
+// would otherwise be stored verbatim as a custom type that never gates
+// `bd ready` (GH#3879), so plan validation refuses it and names canonical.
+// Custom types that respell nothing ("related-to", "implements") are not
+// matched and stay accepted verbatim.
+func graphPlanTypeRespelling(raw string) (canonical string, ok bool) {
+	squashed := squashDependencyTypeSpelling(raw)
+	known := make([]string, 0, len(types.WellKnownDependencyTypes())+len(graphPlanDependencyTypeAliases))
+	for _, t := range types.WellKnownDependencyTypes() {
+		known = append(known, string(t))
+	}
+	known = append(known, graphPlanDependencyTypeAliases...)
+	for _, k := range known {
+		if raw == k {
+			return "", false
+		}
+		if squashed == squashDependencyTypeSpelling(k) {
+			canonical, ok = k, true
+		}
+	}
+	return canonical, ok
+}
+
+// graphPlanDependencyTypeAliases are the alias spellings canonicalDependencyType
+// maps to "blocks".
+var graphPlanDependencyTypeAliases = []string{"blocked-by", "depends-on"}
+
+func squashDependencyTypeSpelling(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '-', '_', ' ':
+			return -1
+		}
+		return r
+	}, strings.ToLower(s))
+}
+
+// graphPlanAliasNote explains, for a suggested alias, what it is stored as
+// and which way it points; it is empty for a non-alias suggestion.
+func graphPlanAliasNote(canonical, direction string) string {
+	if stored := canonicalDependencyType(types.DependencyType(canonical)); string(stored) != canonical {
+		return fmt.Sprintf(" (stored as %q: %s)", stored, direction)
+	}
+	return ""
+}
+
+// graphApplyDependencyType is the storage type of a plan edge or inline dep:
+// empty defaults to "blocks", and the documented aliases "blocked-by" and
+// "depends-on" become "blocks" with the direction unchanged (from depends on
+// to), the same canonicalDependencyType mapping `bd dep add --type` and
+// `bd create --deps` apply (GH#5069). Every reader — the batch request, the
+// plan-local cycle check and the waits-for gate rule — goes through here, so
+// they all see one canonical type. Other values pass through verbatim.
 func graphApplyDependencyType(depType string) types.DependencyType {
 	if depType == "" {
 		return types.DepBlocks
 	}
-	return types.DependencyType(depType)
+	return canonicalDependencyType(types.DependencyType(depType))
 }
 
 func graphApplyCycleRelevantDependencyType(depType types.DependencyType) bool {
