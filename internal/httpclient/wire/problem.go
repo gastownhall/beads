@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -159,6 +160,14 @@ type ProblemError struct {
 	IssueID           *string
 	BlockerID         *string
 	BlockerIsAncestor *bool
+
+	// Blockers carries the problem's `blockers` member, already projected onto
+	// the typed list a reconstructed *issueops.BlockedError holds. PRESENCE is
+	// the discriminator inside `not_claimable` — the local-blocker claim
+	// refusal carries it, the status's own not_claimable does not — the
+	// open_children precedent, so it is a pointer (an empty but present list
+	// still reads as present) and never a bare slice a zero value could fake.
+	Blockers *[]issueops.Blocker
 
 	// The compare-and-set guard's two sides, with `precondition_failed`. `param`
 	// says WHICH guard missed and these say what the request asked for and what
@@ -413,6 +422,7 @@ func mapProblem(t target, status int, header http.Header, body []byte, maxRetryA
 		IssueID:           stripControlRunesPtr(p.IssueId),
 		BlockerID:         stripControlRunesPtr(p.BlockerId),
 		BlockerIsAncestor: p.BlockerIsAncestor,
+		Blockers:          decodeBlockers(p.Blockers),
 		Since:             p.Since,
 		Floor:             p.Floor,
 		Head:              p.Head,
@@ -621,7 +631,20 @@ var codeSentinel = map[string]func(*ProblemError, target) error{
 	"already_claimed": func(e *ProblemError, t target) error {
 		return claimConflict(e, t, issueops.ErrAlreadyClaimed)
 	},
+	// Member PRESENCE is the discriminator here as on not_closable: the
+	// local-blocker refusal carries `blockers` and is rebuilt as the typed
+	// BlockedError wrapping ErrClaimBlocked — the same typed error the
+	// embedded store's claim returns, force hint and all — where the
+	// status's own not_claimable carries `issue_status` and stays the
+	// ClaimConflictError below.
 	"not_claimable": func(e *ProblemError, t target) error {
+		if e.Blockers != nil {
+			return &issueops.BlockedError{
+				IssueID:  refusedIssueID(e, t),
+				Blockers: *e.Blockers,
+				Err:      issueops.ErrClaimBlocked,
+			}
+		}
 		return claimConflict(e, t, issueops.ErrNotClaimable)
 	},
 
@@ -776,6 +799,30 @@ func sentinelFor(e *ProblemError, t target) error {
 		// unreachable arm — it fails as a server fault rather than as success.
 		return ErrServerFault
 	}
+}
+
+// decodeBlockers projects the problem's `blockers` member onto the typed list
+// a reconstructed *issueops.BlockedError carries, so a caller reads the same
+// typed error off a served refusal that the embedded store returns locally.
+// The ids and types are server-controlled strings like every other member
+// here, so both are stripped at the decode boundary; the TYPE member is
+// optional on the wire (an external blocker reports none) and absence stays an
+// empty DependencyType, which is the typed form's own "not reported". Nil
+// stays nil: the member's PRESENCE is what tells the two not_claimable
+// refusals apart, so an absent one must not become an empty list.
+func decodeBlockers(wire *[]apigen.Blocker) *[]issueops.Blocker {
+	if wire == nil {
+		return nil
+	}
+	out := make([]issueops.Blocker, 0, len(*wire))
+	for _, blocker := range *wire {
+		typed := issueops.Blocker{ID: stripControlRunes(blocker.Id)}
+		if blocker.Type != nil {
+			typed.Type = types.DependencyType(stripControlRunes(*blocker.Type))
+		}
+		out = append(out, typed)
+	}
+	return &out
 }
 
 // claimConflict rebuilds *issueops.ClaimConflictError from the two extension

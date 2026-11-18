@@ -199,6 +199,7 @@ go_test(
         "store_test.go",
         "target_test.go",
         "unlimited_read_test.go",
+        "update_force_claim_blocked_test.go",
         "update_persistence_test.go",
         "v0_wire_golden_rows_test.go",
         "v0_wire_golden_test.go",
