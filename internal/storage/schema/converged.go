@@ -95,11 +95,12 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 	// This asks for the WHOLE gate, not just the legacy-shape half of it. A
 	// term that MigrateUp acts on but this function does not evaluate is
 	// silently unreachable in server mode — the fast path returns before
-	// MigrateUp ever runs — and the leftover it would have cleaned up is a
-	// deliberately non-ignored table that the next pull's auto-commit puts
-	// into HEAD and push replicates fleet-wide.
+	// MigrateUp ever runs. That includes an untrack scratch committed at HEAD
+	// but gone from the working set: "__temp__%" hides its pending deletion
+	// from every ignore-filtered dirty guard, yet `bd dolt pull` refuses it
+	// until the locked sweep commits it.
 	//
-	// Two SHOW TABLES listings on the hot path, safe to issue because
+	// Three SHOW TABLES listings on the hot path, safe to issue because
 	// selectTargetDatabase has put the session on the target (see
 	// readIgnoredCursorState).
 	state, err := readIgnoredCursorState(ctx, db, qualifier)
