@@ -551,3 +551,51 @@ func writeProxiedMetadata(t *testing.T, beadsDir string, fields map[string]strin
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(configfile.ConfigPath(beadsDir), data, 0o644))
 }
+
+// TestManagedProxiedServerOldDoltRefusedBeforeArchiveLevelConfig pins
+// gastownhall/beads#5627 (bd-n627z0): a dolt older than
+// doltserver.MinDoltVersionForArchiveLevelConfig strict-parses the managed
+// config and refuses to start on auto_gc_behavior.archive_level (#4986).
+// The managed proxied-server open must instead fail fast with the actionable
+// RequiredMin error from resolveAndProbeDolt, before ensureProxiedServerConfig
+// writes that config for such a binary.
+func TestManagedProxiedServerOldDoltRefusedBeforeArchiveLevelConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script dolt stub")
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	// Inherited overrides would point the config path at another workspace
+	// (or at a custom file), and the absence check below would prove nothing.
+	for _, env := range []string{
+		"BEADS_PROXIED_SERVER_CONFIG",
+		"BEADS_PROXIED_SERVER_ROOT_PATH",
+		"BEADS_DOLT_DATA_DIR",
+		"BEADS_DOLT_SHARED_SERVER",
+	} {
+		t.Setenv(env, "")
+	}
+	old := filepath.Join(dir, "dolt-old")
+	require.NoError(t, os.WriteFile(old, []byte("#!/bin/sh\necho 'dolt version 1.50.0'\n"), 0o755))
+	t.Setenv(doltversion.DoltBinEnvVar, old)
+
+	beadsDir := filepath.Join(dir, ".beads")
+	require.NoError(t, os.MkdirAll(beadsDir, 0o755))
+	configPath, isCustom, err := resolveProxiedServerConfigPath(beadsDir)
+	require.NoError(t, err)
+	require.False(t, isCustom, "managed config path must be the default, not a custom override")
+	require.Equal(t, filepath.Join(beadsDir, "dolt", proxiedServerConfigName), configPath,
+		"managed config path must resolve inside the isolated workspace")
+
+	_, err = newManagedProxiedServerUOWProvider(context.Background(), beadsDir, sqlServerUOWTopology{})
+	require.ErrorIs(t, err, doltversion.ErrBelowRequiredMin)
+	// The refusal quotes the path with %q, which escapes a backslash (in
+	// TMPDIR, say), so match it quoted.
+	for _, want := range []string{fmt.Sprintf("%q", old), "1.50.0", "requires dolt " + doltversion.RequiredMin.String(), "Upgrade dolt"} {
+		assert.Contains(t, err.Error(), want)
+	}
+	_, statErr := os.Stat(configPath)
+	assert.Truef(t, os.IsNotExist(statErr),
+		"no archive_level config may be written for a dolt that cannot parse it; stat %s: %v", configPath, statErr)
+}

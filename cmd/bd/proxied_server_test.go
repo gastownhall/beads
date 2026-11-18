@@ -15,6 +15,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/stretchr/testify/assert"
@@ -90,6 +91,23 @@ func TestRenderProxiedServerConfig_ArchiveLevel(t *testing.T) {
 	require.NotNil(t, gc, "AutoGCBehavior must always be set")
 	assert.Equal(t, 0, gc.ArchiveLevel())
 	assert.True(t, gc.Enable(), "auto-GC must remain enabled")
+}
+
+// TestRequiredMinCoversProxiedArchiveLevelConfig pins the premise that lets
+// renderProxiedServerConfigAtLevel write auto_gc_behavior.archive_level
+// unconditionally: managed opens refuse a detected dolt below
+// doltversion.RequiredMin before the config is written, and every dolt at or
+// above the floor parses the key. A dolt older than
+// doltserver.MinDoltVersionForArchiveLevelConfig rejects it under strict YAML
+// parsing and refuses to start (#4986, #5627).
+func TestRequiredMinCoversProxiedArchiveLevelConfig(t *testing.T) {
+	cutoff := doltversion.MustParse(doltserver.MinDoltVersionForArchiveLevelConfig)
+	assert.Truef(t, doltversion.RequiredMin.AtLeast(cutoff),
+		"doltversion.RequiredMin %s is below the auto_gc_behavior.archive_level cutoff %s: "+
+			"renderProxiedServerConfigAtLevel writes archive_level unconditionally, so an admitted older dolt "+
+			"would refuse the managed config (#4986, #5627); restore a version gate on archive_level emission "+
+			"before lowering the floor below the cutoff",
+		doltversion.RequiredMin, cutoff)
 }
 
 func TestEnsureProxiedServerConfig_CreatesAndIsIdempotent(t *testing.T) {
