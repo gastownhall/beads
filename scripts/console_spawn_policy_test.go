@@ -941,3 +941,47 @@ func TestConsoleSpawnPolicyCannotBeDisarmed(t *testing.T) {
 		})
 	}
 }
+
+// consoleSpawnRepoPolicy is the repository's statement of scope. These
+// packages spawn from a context that may have no console: the shared dolt
+// sql-server and its dolt/git helpers (internal/doltserver), the dolt version
+// probe (internal/doltversion), and the db-proxy child with the dolt
+// sql-server and helpers it runs (internal/storage/dbproxy). Spawns elsewhere
+// (internal/git, cmd/bd helpers, the pager, $EDITOR) are out of scope; several
+// must share the user's console. Extending scope is the follow-up mechanism.
+var consoleSpawnRepoPolicy = consoleSpawnPolicy{
+	scope: []string{
+		"internal/doltserver",
+		"internal/doltversion",
+		"internal/storage/dbproxy/...",
+	},
+	required: []string{
+		"internal/doltserver",
+		"internal/doltversion",
+		"internal/storage/dbproxy/proxy",
+		"internal/storage/dbproxy/server",
+	},
+	allowlist: map[string][]consoleSpawnAllowEntry{
+		"internal/storage/dbproxy/proxy/endpoint.go": {{
+			fn:      "forkExecChild",
+			snippet: "cmd := exec.Command(self, args...)",
+			why: "the db-proxy child is started with DETACHED_PROCESS (endpoint_windows.go procAttrDetached), so no " +
+				"console is allocated for it, and CREATE_NO_WINDOW would be ignored next to that flag; every console " +
+				"child it starts is in internal/storage/dbproxy/server and hidden there",
+		}},
+	},
+}
+
+// TestConsoleSpawnPolicy runs the guard over the repository: every
+// Windows-buildable spawn in scope is hidden, the single allowlisted proxy
+// child spawn is still live, and each required package is still seen.
+func TestConsoleSpawnPolicy(t *testing.T) {
+	root := sourceRepoRoot(t)
+	problems, err := consoleSpawnRepoPolicy.check(root, repoFiles(t, root, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range problems {
+		t.Error(p)
+	}
+}

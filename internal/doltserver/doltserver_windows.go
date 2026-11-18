@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/steveyegge/beads/internal/execwin"
 )
 
 // portConflictHint is the platform-specific command to diagnose port conflicts.
@@ -24,6 +26,10 @@ const processListHint = `tasklist /FI "IMAGENAME eq dolt.exe"`
 
 // procAttrDetached returns SysProcAttr to detach a child process so it survives
 // parent exit. On Windows, CREATE_NEW_PROCESS_GROUP is the analog of Unix Setpgid.
+//
+// The console policy is not set here: the spawn site calls execwin.Hide after
+// assigning these attributes, which adds CREATE_NO_WINDOW. Never add
+// DETACHED_PROCESS here; CREATE_NO_WINDOW is ignored next to it.
 func procAttrDetached() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 }
@@ -32,7 +38,7 @@ func procAttrDetached() *syscall.SysProcAttr {
 // Parses netstat -aon output matching LISTENING lines. Returns 0 if no process
 // found or on error.
 func findPIDOnPort(port int) int {
-	out, err := exec.Command("netstat", "-aon").Output()
+	out, err := execwin.Hide(exec.Command("netstat", "-aon")).Output()
 	if err != nil {
 		return 0
 	}
@@ -70,7 +76,7 @@ func readDoltProcessPIDs() ([]int, error) {
 	script := `Get-CimInstance Win32_Process -Filter "Name='dolt.exe'" | ` +
 		`Where-Object { $_.CommandLine -match 'sql-server' } | ` +
 		`Select-Object -ExpandProperty ProcessId`
-	out, err := exec.Command("powershell.exe", "-NoProfile", "-Command", script).Output()
+	out, err := execwin.Hide(exec.Command("powershell.exe", "-NoProfile", "-Command", script)).Output()
 	if err != nil {
 		return nil, fmt.Errorf("listing processes: %w", err)
 	}
