@@ -45,6 +45,9 @@ func (s *testSuite) TestConfigSQLRepository() {
 		s.Run("ReturnsOnlyPrefixedRows", s.configGetConfigByPrefixOnlyPrefixed)
 		s.Run("EscapesLikeMetacharacters", s.configGetConfigByPrefixEscapesLike)
 	})
+	s.Run("GetConfigKeys", func() {
+		s.Run("ReturnsOnlyTheNamedRows", s.configGetConfigKeysOnlyNamed)
+	})
 	s.Run("LocalMetadata", func() {
 		s.Run("SetThenGetRoundTrips", s.configLocalMetadataRoundTrip)
 		s.Run("SetOverwrites", s.configLocalMetadataOverwrite)
@@ -59,6 +62,7 @@ func (s *testSuite) TestConfigSQLRepository() {
 		s.Run("GetAllConfigEmpty", s.configUseCaseGetAllConfigEmpty)
 		s.Run("GetAllConfigReturnsAllRows", s.configUseCaseGetAllConfigAllRows)
 		s.Run("GetConfigByPrefixReturnsOnlyPrefixedRows", s.configUseCaseGetConfigByPrefixOnlyPrefixed)
+		s.Run("GetConfigKeysReturnsOnlyTheNamedRows", s.configUseCaseGetConfigKeysOnlyNamed)
 	})
 	s.Run("GetCustomTypes", func() {
 		s.Run("MissingKeyReturnsNil", s.configGetCustomTypesMissing)
@@ -633,6 +637,39 @@ func (s *testSuite) configGetConfigByPrefixEscapesLike() {
 	got, err = pr.GetConfigByPrefix(s.Ctx(), "kv.a%.")
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"kv.a%.one": "percent"}, got)
+}
+
+func (s *testSuite) configGetConfigKeysOnlyNamed() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM config")
+	s.Require().NoError(err)
+	r := s.configRepo()
+	s.Require().NoError(r.SetConfig(s.Ctx(), "routing.mode", "auto"))
+	s.Require().NoError(r.SetConfig(s.Ctx(), "routing.default", "."))
+	s.Require().NoError(r.SetConfig(s.Ctx(), "kv.memory.notes", "large"))
+
+	kr, ok := interface{}(r).(domain.ConfigKeysReader)
+	s.Require().True(ok, "configSQLRepositoryImpl must implement domain.ConfigKeysReader")
+	got, err := kr.GetConfigKeys(s.Ctx(), "routing.mode", "routing.default", "routing.absent")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"routing.mode": "auto", "routing.default": "."}, got)
+
+	got, err = kr.GetConfigKeys(s.Ctx())
+	s.Require().NoError(err)
+	s.Empty(got)
+}
+
+func (s *testSuite) configUseCaseGetConfigKeysOnlyNamed() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM config")
+	s.Require().NoError(err)
+	uc := s.configUC()
+	s.Require().NoError(uc.SetConfig(s.Ctx(), "routing.mode", "auto"))
+	s.Require().NoError(uc.SetConfig(s.Ctx(), "kv.memory.notes", "large"))
+
+	kr, ok := interface{}(uc).(domain.ConfigKeysReader)
+	s.Require().True(ok, "configUseCaseImpl must implement domain.ConfigKeysReader")
+	got, err := kr.GetConfigKeys(s.Ctx(), "routing.mode", "routing.absent")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"routing.mode": "auto"}, got)
 }
 
 func (s *testSuite) configUseCaseGetAllConfigEmpty() {
