@@ -398,6 +398,132 @@ func TestMergeIssuesConflictRow_CloseGroupIsAtomic(t *testing.T) {
 	})
 }
 
+// TestMergeIssuesConflictRow_NonClosedStatusContestKeepsLWW pins the other
+// half of the close-race carve-out: two non-closed statuses (built-in or
+// custom) contested with distinct timestamps still settle last-write-wins with
+// the close group moving atomically, in either timestamp order.
+func TestMergeIssuesConflictRow_NonClosedStatusContestKeepsLWW(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		ours, theirs     string
+		ourTS, theirTS   string
+		wantTheirsStatus bool
+	}{
+		{"builtin theirs newer", "in_progress", "blocked", tsOurs, tsTheirs, true},
+		{"builtin ours newer", "in_progress", "blocked", tsTheirs, tsOurs, false},
+		{"custom theirs newer", "in_progress", "review", tsOurs, tsTheirs, true},
+		{"custom ours newer", "review", "deferred", tsTheirs, tsOurs, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := conflictRowFor(t, map[string][3]any{
+				"id":           {"bd-30", "bd-30", "bd-30"},
+				"status":       {"open", tc.ours, tc.theirs},
+				"closed_at":    {nil, nil, nil},
+				"close_reason": {"", "", ""},
+				"updated_at":   {tsBase, tc.ourTS, tc.theirTS},
+			})
+			m, ok := mergeIssuesConflictRow(row)
+			if !ok {
+				t.Fatal("a non-closed status contest with distinct timestamps must merge by LWW")
+			}
+			v, written := m.merged("status")
+			if tc.wantTheirsStatus && (!written || v != tc.theirs) {
+				t.Errorf("their newer status must win, got %v (written=%v)", v, written)
+			}
+			if !tc.wantTheirsStatus && written {
+				t.Errorf("our newer status must stand, got %v written", v)
+			}
+			if m.closeRace != nil {
+				t.Errorf("a non-closed contest is not a close race, got %+v", *m.closeRace)
+			}
+		})
+	}
+
+	t.Run("both closed keeps atomic LWW", func(t *testing.T) {
+		for _, tc := range []struct {
+			name           string
+			ourTS, theirTS string
+			wantTheirs     bool
+		}{
+			{"theirs newer", tsOurs, tsTheirs, true},
+			{"ours newer", tsTheirs, tsOurs, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				row := conflictRowFor(t, map[string][3]any{
+					"id":                {"bd-31", "bd-31", "bd-31"},
+					"status":            {"in_progress", "closed", "closed"},
+					"closed_at":         {nil, "2026-07-10 11:00:00", "2026-07-10 12:00:00"},
+					"close_reason":      {"", "fixed", "duplicate"},
+					"closed_by_session": {"", "", "sess-theirs"},
+					"updated_at":        {tsBase, tc.ourTS, tc.theirTS},
+				})
+				m, ok := mergeIssuesConflictRow(row)
+				if !ok {
+					t.Fatal("two closes with distinct valid timestamps must merge by LWW")
+				}
+				if m.closeRace != nil {
+					t.Errorf("two closes are not a close race, got %+v", *m.closeRace)
+				}
+				for col, theirVal := range map[string]any{
+					"closed_at":         "2026-07-10 12:00:00",
+					"close_reason":      "duplicate",
+					"closed_by_session": "sess-theirs",
+				} {
+					v, written := m.merged(col)
+					if tc.wantTheirs && (!written || v != theirVal) {
+						t.Errorf("%s must come from the newer close, got %v (written=%v)", col, v, written)
+					}
+					if !tc.wantTheirs && written {
+						t.Errorf("our newer close must stand whole; %s was overwritten with %v", col, v)
+					}
+				}
+			})
+		}
+	})
+
+	// A reopen race: base closed (closed_at, close_reason, closed_by_session
+	// set), both sides reopened to different non-closed statuses and cleared
+	// the close columns, so the whole close group is contested on both sides.
+	// Neither side ends closed, so this is still an ordinary LWW contest.
+	t.Run("reopen race from a close keeps LWW", func(t *testing.T) {
+		for _, tc := range []struct {
+			name             string
+			ours, theirs     string
+			ourTS, theirTS   string
+			wantTheirsStatus bool
+		}{
+			{"theirs newer", "in_progress", "review", tsOurs, tsTheirs, true},
+			{"ours newer", "in_progress", "review", tsTheirs, tsOurs, false},
+			{"both custom, theirs newer", "blocked", "in-review", tsOurs, tsTheirs, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				row := conflictRowFor(t, map[string][3]any{
+					"id":                {"bd-32", "bd-32", "bd-32"},
+					"status":            {"closed", tc.ours, tc.theirs},
+					"closed_at":         {"2026-07-10 10:00:00", nil, nil},
+					"close_reason":      {"first", "", ""},
+					"closed_by_session": {"sess-0", "", ""},
+					"updated_at":        {tsBase, tc.ourTS, tc.theirTS},
+				})
+				m, ok := mergeIssuesConflictRow(row)
+				if !ok {
+					t.Fatal("a reopen race to two non-closed statuses must merge by LWW, not decline")
+				}
+				if m.closeRace != nil {
+					t.Errorf("a reopen race is not a close race, got %+v", *m.closeRace)
+				}
+				v, written := m.merged("status")
+				if tc.wantTheirsStatus && (!written || v != tc.theirs) {
+					t.Errorf("their newer status must win, got %v (written=%v)", v, written)
+				}
+				if !tc.wantTheirsStatus && written {
+					t.Errorf("our newer status must stand, got %v written", v)
+				}
+			})
+		}
+	})
+}
+
 // TestMergeIssuesConflictRow_NonScalarColumnsDecline pins that the columns bd
 // merges structurally are never settled by per-cell LWW: `notes` is
 // append-only (bd note = --append-notes) and `metadata` is a JSON object
