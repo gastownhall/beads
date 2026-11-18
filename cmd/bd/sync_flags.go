@@ -79,3 +79,15 @@ func buildSyncDescendantSet(ctx context.Context, st storage.Storage, parentID st
 	}
 	return result, nil
 }
+
+// createOnlyDirectionError refuses --create-only on a sync that never
+// pushes. The flag limits only the push (doPull never reads it), so a
+// pull-only run would accept it and still update every linked issue
+// (gastownhall/beads#8507). A bidirectional sync keeps the flag: it
+// limits the push half there.
+func createOnlyDirectionError(trackerName string, createOnly, pullOnly bool) error {
+	if createOnly && pullOnly {
+		return fmt.Errorf("--create-only only applies when pushing to %s (a pull still updates linked issues)", trackerName)
+	}
+	return nil
+}

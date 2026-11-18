@@ -240,6 +240,12 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 	threshold, _ := cmd.Flags().GetDuration("threshold")
 	noWait, _ := cmd.Flags().GetBool("no-wait")
 
+	// Refuse before the staleness fast path, so a pull-only --create-only
+	// fails whether or not the data is fresh.
+	if err := createOnlyDirectionError("Linear", createOnly, (pull || pullIfStale) && !push); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
 	if pullIfStale {
 		beadsDir := resolveBeadsDirForStaleness()
 		if beadsDir != "" {
