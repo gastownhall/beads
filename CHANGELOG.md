@@ -1379,6 +1379,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On Windows, bd's Dolt/Git helper spawns no longer open console windows or
+  fail with `0x800700E8` when bd has no console** (#6076). With stdout
+  redirected (an agent harness, a daemon, a CI step), or inside the
+  detached db-proxy child, bd has no console, so Windows allocated a fresh
+  one for every `dolt`/`git`/`netstat`/`powershell` child; with Windows
+  Terminal as the default terminal each became a window that took focus,
+  and a short-lived `dolt init` could fail with `0x800700E8` before the
+  handoff completed. These children, including the shared and the proxied
+  `dolt sql-server`, now start with `CREATE_NO_WINDOW`, and a repository
+  guard fails the build when a spawn in those packages is not hidden.
+  Thanks to @davidcforbes (#6077) and @Zireael (#7572).
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
