@@ -278,6 +278,7 @@ go_test(
         "issue_operations_staging_test.go",
         "issue_operations_test.go",
         "issues_conflict_test.go",
+        "issues_create_retry_test.go",
         "joiniter_spike_test.go",
         "journal_accessor_test.go",
         "journal_contract_test.go",
