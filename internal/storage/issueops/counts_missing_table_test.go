@@ -178,12 +178,17 @@ var countsEntryPoints = []countsEntryPoint{
 		wantTolerated: "rows=0",
 	},
 	{
-		name:    "GetReadyWorkWithCountsInTx",
+		name: "GetReadyWorkWithCountsInTx",
+		// Unbounded ready resolves the ready ID set first and hydrates by-IDs,
+		// so its wisp leg reaches the ID query's tables (wisp_labels via the
+		// ready predicate subqueries) plus whatever the hydration touches on
+		// a non-empty page; the issues leg here returns no rows, so no counts
+		// query runs at all.
 		missing: countsMegaQueryTables,
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
 			mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false, false))
-			mock.ExpectQuery(`(?s)FROM issues i`).WillReturnRows(emptyCountsRows())
-			mock.ExpectQuery(`(?s)FROM wisps i`).WillReturnError(wispErr)
+			mock.ExpectQuery(`(?s)^SELECT id FROM issues `).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+			mock.ExpectQuery(`(?s)^SELECT id FROM wisps `).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
 			out, err := GetReadyWorkWithCountsInTx(ctx, tx, readyFilter())

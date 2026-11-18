@@ -118,8 +118,8 @@ func hydrationFor(filter types.IssueFilter) sqlbuild.CountsHydration {
 // empty page means no counts query at all.
 //
 // The predicate form remains in sqlbuild.SearchCountsSQL as the parity oracle
-// for tests (runSearchQueryInTx below renders it; only the ready seam's
-// unbounded branch still calls that wrapper).
+// for tests; with the ready seam's unbounded branch rewritten to the same
+// select-then-hydrate shape, no production caller renders it anymore.
 //
 // WHY THE ID SELECTION MAY BORROW the label-driven JOIN plan the plain search
 // seam uses: the JOIN-and-DISTINCT rewrite answers the same row set the
@@ -182,12 +182,6 @@ func hydrateCountsByIDsInTx(ctx context.Context, tx DBTX, tables FilterTables, i
 		}
 	}
 	return ordered, nil
-}
-
-//nolint:gosec // G201: SQL fragments are caller-built from hardcoded shapes
-func runSearchQueryInTx(ctx context.Context, tx DBTX, tables FilterTables, whereSQL, orderBySQL, limitSQL string, args []interface{}, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
-	searchSQL, _ := sqlbuild.SearchCountsSQL(tables, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, hyd)
-	return scanCountsRowsInTx(ctx, tx, tables.Main, searchSQL, args, hyd)
 }
 
 // scanCountsRowsInTx runs a prebuilt counts mega-query and hydrates each row

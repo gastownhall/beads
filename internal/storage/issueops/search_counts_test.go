@@ -266,6 +266,70 @@ func TestSearchIssuesWithCountsEmptyPageSkipsTheCountsQuery(t *testing.T) {
 	}
 }
 
+// TestSearchIssuesWithCountsUnboundedHydratesInBatches is the GH#4370 AC-2 pin
+// on the search seam: an unbounded (Limit 0) counts search on one plane with
+// 205 matching rows must resolve the whole ordered ID set first and then
+// hydrate it in sqlbuild.QueryBatchSize batches — 200 and 5 — through the
+// by-IDs form, never the predicate-form counts query whose aggregates read
+// the side tables unconstrained.
+func TestSearchIssuesWithCountsUnboundedHydratesInBatches(t *testing.T) {
+	t.Parallel()
+
+	ids := make([]string, 205)
+	idsRows := sqlmock.NewRows([]string{"id"})
+	for i := range ids {
+		ids[i] = fmt.Sprintf("bd-%03d", i)
+		idsRows.AddRow(ids[i])
+	}
+
+	var captured []string
+	mock, tx := beginCapturingCountsMockTx(t, &captured)
+	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery(`(?s)SELECT issues\.id FROM issues.*ORDER BY priority ASC, created_at DESC, id ASC`).
+		WillReturnRows(idsRows) // deliberately unbounded: no LIMIT expectation
+	mock.ExpectQuery(`WHERE i\.id IN \(\?(?:,\?){199}\)`).
+		WillReturnRows(countsMockRows(ids[:200]))
+	mock.ExpectQuery(`WHERE i\.id IN \(\?(?:,\?){4}\)`).
+		WillReturnRows(countsMockRows(ids[200:]))
+
+	got, err := SearchIssuesWithCountsInTx(context.Background(), txSQLOf(t, tx), "", types.IssueFilter{Limit: 0, SkipWisps: true})
+	if err != nil {
+		t.Fatalf("SearchIssuesWithCountsInTx: %v", err)
+	}
+	if len(got) != 205 {
+		t.Fatalf("row count = %d, want 205", len(got))
+	}
+	for i, g := range got {
+		if g.Issue.ID != ids[i] {
+			t.Fatalf("row %d = %s, want %s (the ID query's order)", i, g.Issue.ID, ids[i])
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+
+	if len(captured) != 4 {
+		t.Fatalf("query count = %d, want 4 (probe, unbounded ID select, two hydration batches)", len(captured))
+	}
+	for _, q := range captured {
+		if strings.Contains(q, "SELECT i.*") {
+			t.Fatalf("a predicate-form counts query ran (derived driver SELECT i.*): %s", q)
+		}
+	}
+}
+
+// txSQLOf narrows the capturing mock's DBTX to the *sql.Tx the counts seam
+// takes.
+func txSQLOf(t *testing.T, tx DBTX) *sql.Tx {
+	t.Helper()
+	txSQL, ok := tx.(*sql.Tx)
+	if !ok {
+		t.Fatal("capturing mock tx must hand back a *sql.Tx for the counts seam")
+	}
+	return txSQL
+}
+
 // Regression for bd-6dnrw.43 (merge half): when issues and wisps results are
 // merged before the limit cut, the in-memory sort must follow the requested
 // SortBy, or the surviving row set reverts to priority order.

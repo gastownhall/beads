@@ -188,10 +188,15 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 //
 // The page IDs are chunked into sqlbuild.QueryBatchSize batches so a large page
 // stays within every backend's per-statement placeholder limit (the by-IDs form
-// binds the page up to eight times) without falling back to the quadratic query.
+// binds the page up to twelve times) without falling back to the quadratic query.
 //
-// For limit <= 0 (unbounded) there is no page to push down, so it runs the
-// predicate-form mega-query unchanged.
+// For limit <= 0 (unbounded) the SAME two steps run with no page bound: the ID
+// query (whose limitSQL carries only a MaxRows probe bound, when one is set)
+// returns the whole ready set, and hydrateCountsByIDsInTx re-chunks it
+// (GH#4370). The old shortcut hydrated the full matching set through the
+// predicate-form mega-query, whose aggregates read every side table — a
+// `bd ready` with no limit over the ~100k-issue corpus paid that price; a
+// bounded one never did. Both arms now share one shape.
 //
 // withTotal (bounded pages only) also returns the number of rows the family's
 // ready predicate admits, as a window count over the same ID query:
@@ -210,8 +215,18 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 //nolint:gosec // G201: whereSQL/orderBySQL/limitSQL are hardcoded fragments; user input rides ? placeholders.
 func runReadyCountsInTx(ctx context.Context, tx DBTX, tables FilterTables, limit int, preds *readyWorkPredicates, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration, withTotal bool) ([]*types.IssueWithCounts, int, error) {
 	if limit <= 0 {
-		out, err := runSearchQueryInTx(ctx, tx, tables, preds.whereSQL, preds.orderBySQL, preds.limitSQL, preds.args, includeWispReverseDeps, hyd)
-		return out, len(out), err
+		idQuery := fmt.Sprintf("SELECT id FROM %s %s %s %s", tables.Main, preds.whereSQL, preds.orderBySQL, preds.limitSQL)
+		pageIDs, err := queryReadyIssueIDPage(ctx, tx, idQuery, preds.args)
+		if err != nil {
+			return nil, 0, err
+		}
+		out, err := hydrateCountsByIDsInTx(ctx, tx, tables, pageIDs, includeWispReverseDeps, hyd)
+		if err != nil {
+			return nil, 0, err
+		}
+		// No windowed total existed to carry, so the page IS the set; the
+		// caller's finish hook only reads this on the bounded arms.
+		return out, len(pageIDs), nil
 	}
 
 	var pageIDs []string
