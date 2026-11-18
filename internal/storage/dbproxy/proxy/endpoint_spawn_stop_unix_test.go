@@ -3,7 +3,10 @@
 package proxy
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -594,6 +597,9 @@ func TestSpawnTimeoutKillsChildThatIgnoresSIGTERMAfterGrace(t *testing.T) {
 	root := t.TempDir()
 	termed := filepath.Join(root, "termed")
 	ready, pidPath := scriptProxyChild(t, root, `trap 'touch "`+termed+`"' TERM`)
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	elapsed, err := spawnUntilTimeout(t, root, ready)
 	require.Error(t, err)
@@ -603,6 +609,11 @@ func TestSpawnTimeoutKillsChildThatIgnoresSIGTERMAfterGrace(t *testing.T) {
 	assert.GreaterOrEqual(t, elapsed, spawnOpenWait+grace, "the child was killed before its SIGTERM grace ended")
 	assert.Less(t, elapsed, spawnOpenWait+grace+shutdownConfirmDeadline)
 	assertScriptChildGone(t, pidPath)
+	pidData, err := os.ReadFile(pidPath)
+	require.NoError(t, err)
+	// An escalated kill can leave the unrecorded backend of #8489, so it must say so.
+	assert.Contains(t, logs.String(),
+		fmt.Sprintf("dbproxy: proxy child pid %s did not exit within %s of SIGTERM; killing it", strings.TrimSpace(string(pidData)), grace))
 }
 
 // AC-2: where a stop cannot be requested (Windows), the timed-out child is
