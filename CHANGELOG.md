@@ -1722,6 +1722,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Building that release target (`goreleaser --id bd-android-arm64`) now needs
   a Linux x86_64 host; see RELEASING.md.
 
+- With `export.auto` on, a failed auto-export now makes a command that
+  changed the database exit 1, even though its change already succeeded:
+  a pre-export check that cannot run, or the export itself failing. A state
+  hash that cannot be read fails any command. These warned and exited 0
+  while `.beads/issues.jsonl` fell behind the store. A command that changed
+  nothing still only warns, as do deliberate refusals and a backend with no
+  state hash. Previews (`--dry-run`, `--inspect`) and
+  `bd config set export.auto false` no longer run the export.
+  ([#6163](https://github.com/gastownhall/beads/issues/6163),
+  [#6016](https://github.com/gastownhall/beads/pull/6016); thanks
+  @sergeiwallace.)
 - With `export.git-add` on, the pre-commit export now lands in commits made
   with `git commit -- <paths>`, `-a`, `-i` or `-p`. It used to stage into
   `.git/index`, whose lock the commit holds, so it was skipped with

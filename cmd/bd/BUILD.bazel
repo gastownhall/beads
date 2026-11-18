@@ -826,6 +826,7 @@ go_test(
         "explicit_db_nodb_test.go",
         "export_auto_embedded_test.go",
         "export_auto_empty_throttle_test.go",
+        "export_auto_error_surfacing_test.go",
         "export_auto_max_rows_gate_test.go",
         "export_auto_missing_store_test.go",
         "export_auto_test.go",

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
@@ -267,9 +269,11 @@ func (s *failingDiffExportRelationStore) GetIssuesByIDs(ctx context.Context, _ [
 }
 
 // TestMaybeAutoExportKeepsJSONLWhenRelationLoaderFails pins GH#6870 on
-// auto-export: a failing relation loader leaves the triggering command
-// successful, warns, keeps the previous JSONL byte for byte, and does not
-// advance export-state.json, so the next write command retries.
+// auto-export: a failing relation loader fails the auto-export with the
+// wrapped loader error and the destination named (GH#6163), prints no
+// warning of its own (the caller reports the error once), keeps the previous
+// JSONL byte for byte, and does not touch export-state.json, so the next
+// eligible write command retries.
 func TestMaybeAutoExportKeepsJSONLWhenRelationLoaderFails(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -310,19 +314,29 @@ func TestMaybeAutoExportKeepsJSONLWhenRelationLoaderFails(t *testing.T) {
 			if err := os.WriteFile(jsonl, []byte(exportRelationSeed), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			saveExportAutoState(beadsDir, &exportAutoState{LastDoltCommit: "hash-before-write", LastDiffAnchor: tc.diffAnchor})
-
-			var err error
-			stderr := captureStderr(t, func() { err = maybeAutoExport(t.Context(), false) })
+			// An old timestamp keeps the throttle open while still pinning
+			// that a failed export leaves it unchanged.
+			saveExportAutoState(beadsDir, &exportAutoState{LastDoltCommit: "hash-before-write", LastDiffAnchor: tc.diffAnchor, Timestamp: time.Now().Add(-time.Hour)})
+			statePath := filepath.Join(beadsDir, exportAutoStateFile)
+			stateBefore, err := os.ReadFile(statePath)
 			if err != nil {
-				t.Fatalf("maybeAutoExport err = %v, want nil (the triggering command must still succeed)", err)
+				t.Fatal(err)
 			}
-			if n := strings.Count(stderr, "Warning: auto-export failed: load labels: "); n != 1 {
-				t.Fatalf("stderr = %q, want exactly one auto-export failure warning naming load labels", stderr)
+
+			stderr := captureStderr(t, func() { err = maybeAutoExport(t.Context(), false) })
+			loader := exportRelationLoaders[0]
+			if !errors.Is(err, loader.sentinel) {
+				t.Fatalf("maybeAutoExport err = %v, want errors.Is %v", err, loader.sentinel)
+			}
+			if msg := err.Error(); !strings.Contains(msg, loader.wantPrefix+": ") || !strings.Contains(msg, jsonl) {
+				t.Fatalf("maybeAutoExport err = %q, want %q naming the destination %q", msg, loader.wantPrefix+": ", jsonl)
+			}
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want no warning: the caller reports the failure once", stderr)
 			}
 			assertFileUnchanged(t, jsonl, exportRelationSeed)
-			if got := loadExportAutoState(beadsDir); got.LastDoltCommit != "hash-before-write" || got.LastDiffAnchor != tc.diffAnchor {
-				t.Fatalf("export state advanced to commit %q anchor %q, want %q / %q", got.LastDoltCommit, got.LastDiffAnchor, "hash-before-write", tc.diffAnchor)
+			if got, readErr := os.ReadFile(statePath); readErr != nil || !bytes.Equal(got, stateBefore) {
+				t.Fatalf("export state changed: got %s (err %v), want %s", got, readErr, stateBefore)
 			}
 		})
 	}
