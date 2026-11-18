@@ -1302,6 +1302,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A proxied-server spawn timeout no longer leaves an unrecorded `dolt
+  sql-server` holding the database.** When a `bd db-proxy-child` missed its
+  start deadline, bd killed it outright, so its shutdown never stopped the
+  dolt it had started; a kill before the backend was recorded in
+  `proxy-child.pid` left that dolt holding the database lock, and every later
+  proxy start then failed with `database "dolt" is locked by another dolt
+  process` until it was stopped by hand. bd now sends the timed-out child
+  SIGTERM and kills it only if it is still running 5 seconds later. On Linux
+  and macOS, when no live backend is recorded, bd also stops the process
+  `<root>/.dolt/sql-server.info` names, but only a `dolt` whose command line
+  names this workspace's own proxied-server config (including the
+  `config.yaml` bd 1.3.x launched with), so an orphan an older bd left behind
+  heals on upgrade; a dolt it cannot verify (always on Windows) is left
+  running and logged with the manual remedy. (#8489, reported by piontec)
+
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that
