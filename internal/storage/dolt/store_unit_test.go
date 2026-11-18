@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -55,6 +56,23 @@ func TestIsRetryableErrorSchemaMigrationLock(t *testing.T) {
 	err := fmt.Errorf("schema migration: %w", schema.ErrMigrationLockUnavailable)
 	if !isRetryableError(err) {
 		t.Fatal("schema migration lock errors should be retryable")
+	}
+}
+
+// GH#5269: a post-condition repair whose commit failed already dropped the
+// defaults in the working set. A retry would find nothing left to repair and
+// report success with nothing committed, so the error is never retried, even
+// when its cause reads like a dropped connection.
+func TestIsRetryableErrorUncommittedPostConditionRepair_5269(t *testing.T) {
+	cause := fmt.Errorf("committing repair: %w", errors.New("driver: bad connection"))
+	if !isRetryableError(cause) {
+		t.Fatal("control: a bare connection error should be retryable")
+	}
+	err := fmt.Errorf("schema migration: %w", &schema.PostConditionRepairUncommittedError{
+		Columns: []string{"dependencies.id"}, Tables: []string{"dependencies"}, Err: cause,
+	})
+	if isRetryableError(err) {
+		t.Fatal("an uncommitted post-condition repair must not be retried: the retry would report a false success")
 	}
 }
 

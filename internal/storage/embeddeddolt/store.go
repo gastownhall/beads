@@ -33,6 +33,7 @@ var _ storage.FullGarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
+var _ storage.SchemaPostConditionRepairer = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalShapeChecker = (*EmbeddedDoltStore)(nil)
 var _ storage.VersionedHistoryConfigurer = (*EmbeddedDoltStore)(nil)
@@ -663,6 +664,34 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	defer conn.Close()
 
 	return schema.MigrateUp(ctx, conn)
+}
+
+// ApplySchemaMigrationsAndRepair is ApplySchemaMigrations for an explicit
+// `bd migrate schema`: MigrateUp, then a repair of recorded migration
+// post-conditions on the same pinned session (GH#5269). The embedded driver's
+// own concurrency controls serialize it; no lock is taken here.
+// Implements storage.SchemaPostConditionRepairer.
+func (s *EmbeddedDoltStore) ApplySchemaMigrationsAndRepair(ctx context.Context) (storage.SchemaRepairResult, error) {
+	if s.closed.Load() {
+		return storage.SchemaRepairResult{}, errClosed
+	}
+	if s.readOnly {
+		return storage.SchemaRepairResult{}, ErrReadOnly
+	}
+	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	if err != nil {
+		return storage.SchemaRepairResult{}, fmt.Errorf("embeddeddolt: open db: %w", err)
+	}
+	defer func() { _ = cleanup() }()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return storage.SchemaRepairResult{}, fmt.Errorf("embeddeddolt: pin connection: %w", err)
+	}
+	defer conn.Close()
+
+	applied, report, err := schema.MigrateUpAndRepairPostConditions(ctx, conn)
+	return storage.SchemaRepairResult{Applied: applied, Repaired: report.Names(), Uncommitted: report.UncommittedNames()}, err
 }
 
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
