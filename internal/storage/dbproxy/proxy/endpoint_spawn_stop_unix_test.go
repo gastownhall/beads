@@ -5,6 +5,7 @@ package proxy
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -443,6 +444,51 @@ func TestForkExecChild_PassesRotateLogPathOnlyForOwnedLog(t *testing.T) {
 			} else {
 				assert.NotContains(t, string(argv), "--rotate-logpath")
 			}
+		})
+	}
+}
+
+// TestKillSpawnedChildLetsChildRunItsSIGTERMHandler pins bd-ig2lqc (#8489):
+// on a spawn timeout the proxy child must get SIGTERM first, so its handler
+// can stop the dolt backend it already started; a bare SIGKILL skips the
+// handler and leaves an unrecorded dolt sql-server behind.
+func TestKillSpawnedChildLetsChildRunItsSIGTERMHandler(t *testing.T) {
+	for _, withHandle := range []bool{true, false} {
+		name := "no handle"
+		if withHandle {
+			name = "verified handle"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			ready := filepath.Join(dir, "ready")
+			cleaned := filepath.Join(dir, "cleaned-up")
+			script := `trap 'touch "$2"; exit 0' TERM; touch "$1"; while :; do sleep 0.05; done`
+			cmd := exec.Command("/bin/sh", "-c", script, "sh", ready, cleaned)
+			require.NoError(t, cmd.Start())
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			t.Cleanup(func() {
+				_ = cmd.Process.Kill()
+			})
+
+			require.Eventually(t, func() bool {
+				_, err := os.Stat(ready)
+				return err == nil
+			}, spawnStopFailAfter, 10*time.Millisecond, "child never installed its SIGTERM trap")
+
+			child := &spawnedProxyChild{cmd: cmd, done: done}
+			if withHandle {
+				tok, err := procid.Capture(cmd.Process.Pid)
+				require.NoError(t, err)
+				handle, err := procid.Open(cmd.Process.Pid, tok)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = handle.Close() })
+				child.handle = handle
+			}
+
+			require.NoError(t, killSpawnedChild(child))
+			_, err := os.Stat(cleaned)
+			assert.NoError(t, err, "killSpawnedChild sent SIGKILL without SIGTERM first: the child's shutdown handler never ran (an already-started dolt backend would be orphaned)")
 		})
 	}
 }

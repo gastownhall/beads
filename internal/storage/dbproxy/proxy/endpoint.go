@@ -1006,11 +1006,43 @@ func waitForRecordedProcessExit(pf *pidfile.PidFile, timeout time.Duration) erro
 	}
 }
 
+// spawnStopGrace is how long a proxy child spawnAndHandoff gave up on has to
+// honor a stop request before killSpawnedChild escalates to SIGKILL. A var so
+// tests can shorten it, like the server package's startReadyTimeout.
+var spawnStopGrace = 5 * time.Second
+
+// errGracefulStopUnsupported marks platforms where a timed-out proxy child
+// cannot be asked to stop itself, so killSpawnedChild escalates at once.
+var errGracefulStopUnsupported = errors.New("graceful stop of the proxy child is unsupported on this platform")
+
+// killSpawnedChild stops a proxy child spawnAndHandoff gave up on. The child
+// is first asked to stop itself (SIGTERM on unix), so its shutdown handler
+// can stop the dolt backend it may already have started: a SIGKILL inside
+// startAttempt's cmd.Start→pidfile.Write window leaves that backend running
+// with no record naming it (#8489). A child that exits within spawnStopGrace
+// is never killed; one that ignores the request, and every child on a
+// platform without a graceful stop, goes through today's handle or Process
+// kill and must still be confirmed dead within shutdownConfirmDeadline.
 func killSpawnedChild(child *spawnedProxyChild) error {
 	select {
 	case <-child.done:
 		return nil
 	default:
+	}
+	requestErr := requestSpawnedChildStop(child.cmd)
+	if requestErr == nil || errors.Is(requestErr, os.ErrProcessDone) {
+		// os.ErrProcessDone means the child has already exited; its done
+		// channel fires as soon as the reaper observes the exit.
+		timer := time.NewTimer(spawnStopGrace)
+		select {
+		case <-child.done:
+			timer.Stop()
+			return nil
+		case <-timer.C:
+			log.Printf("dbproxy: proxy child pid %d did not exit within %s of SIGTERM; killing it", child.cmd.Process.Pid, spawnStopGrace)
+		}
+	} else if !errors.Is(requestErr, errGracefulStopUnsupported) {
+		log.Printf("dbproxy: could not request graceful stop of proxy child pid %d; killing it: %v", child.cmd.Process.Pid, requestErr)
 	}
 	if child.handle == nil {
 		// No verified handle could be opened at spawn time. The child is our
