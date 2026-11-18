@@ -89,23 +89,26 @@ var deferredParentEdges = []deferredParentEdge{
 }
 
 func (r *issueSQLRepositoryImpl) getChildrenOfDeferredParents(ctx context.Context) ([]string, error) {
-	has, err := r.anyFutureDeferredParent(ctx)
+	has, err := r.anyDeferredParent(ctx)
 	if err != nil || !has {
 		return nil, err
 	}
-	return r.descendantsOfFutureDeferredParents(ctx)
+	return r.childrenOfDeferredParents(ctx)
 }
 
-func (r *issueSQLRepositoryImpl) anyFutureDeferredParent(ctx context.Context) (bool, error) {
+// anyDeferredParent reports whether issues or wisps holds a deferred parent
+// (sqlbuild.AnyDeferredParentSQL); a false answer for one table moves on to
+// the next.
+func (r *issueSQLRepositoryImpl) anyDeferredParent(ctx context.Context) (bool, error) {
 	for _, table := range []string{"issues", "wisps"} {
-		var probe int
-		//nolint:gosec // G201: table is a hardcoded constant.
-		err := r.runner.QueryRowContext(ctx, fmt.Sprintf(
-			`SELECT 1 FROM %s WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP() LIMIT 1`,
-			table)).Scan(&probe)
+		var found bool
+		// table is a hardcoded constant.
+		err := r.runner.QueryRowContext(ctx, "SELECT "+sqlbuild.AnyDeferredParentSQL(table)).Scan(&found)
 		switch {
 		case err == nil:
-			return true, nil
+			if found {
+				return true, nil
+			}
 		case errors.Is(err, sql.ErrNoRows), dberrors.IsTableNotExist(err):
 			continue
 		default:
@@ -115,7 +118,9 @@ func (r *issueSQLRepositoryImpl) anyFutureDeferredParent(ctx context.Context) (b
 	return false, nil
 }
 
-func (r *issueSQLRepositoryImpl) descendantsOfFutureDeferredParents(ctx context.Context) ([]string, error) {
+// childrenOfDeferredParents returns the direct children of deferred parents
+// (sqlbuild.DeferredParentPredicate) across every dependency/issue table pair.
+func (r *issueSQLRepositoryImpl) childrenOfDeferredParents(ctx context.Context) ([]string, error) {
 	var childIDs []string
 	for _, e := range deferredParentEdges {
 		//nolint:gosec // G201: depTable/issueTable/targetCol are hardcoded.
@@ -124,9 +129,8 @@ func (r *issueSQLRepositoryImpl) descendantsOfFutureDeferredParents(ctx context.
 			FROM %s dep
 			JOIN %s parent ON parent.id = dep.%s
 			WHERE dep.type = 'parent-child'
-			  AND parent.defer_until IS NOT NULL
-			  AND parent.defer_until > UTC_TIMESTAMP()
-		`, e.depTable, e.issueTable, e.targetCol)
+			  AND %s
+		`, e.depTable, e.issueTable, e.targetCol, sqlbuild.DeferredParentPredicate("parent"))
 		rows, err := r.runner.QueryContext(ctx, q)
 		if err != nil {
 			// Each edge joins a dependency table to an issue table. Only one of
