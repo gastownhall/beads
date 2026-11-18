@@ -60,6 +60,20 @@ func (s *EmbeddedDoltStore) GetConfigByPrefix(ctx context.Context, prefix string
 	return result, err
 }
 
+var _ domain.ConfigKeysReader = (*EmbeddedDoltStore)(nil)
+
+// GetConfigKeys retrieves the named configuration values in one statement (the
+// domain.ConfigKeysReader optional fast path).
+func (s *EmbeddedDoltStore) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
+	var result map[string]string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetConfigKeysInTx(ctx, tx, keys...)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) GetMetadata(ctx context.Context, key string) (string, error) {
 	var value string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {

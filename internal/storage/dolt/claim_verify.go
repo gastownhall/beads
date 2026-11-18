@@ -136,9 +136,10 @@ func guardedUpdatePostcondition(opts storage.UpdateIssueOptions, updates map[str
 	}, true
 }
 
-// readClaimState re-reads an issue's assignee and status on a fresh
-// transaction. withReadTx retries transient connection errors itself, so a
-// failure here means the server is genuinely unreachable, not a blip.
+// readClaimState re-reads an issue's assignee and status from the database,
+// never from anything the write returned. withSingleRead retries transient
+// connection errors itself, so a failure here means the server is genuinely
+// unreachable, not a blip.
 func (s *DoltStore) readClaimState(ctx context.Context, id string) (string, types.Status, error) {
 	return s.readClaimStateIn(ctx, "issues", id)
 }
@@ -164,12 +165,17 @@ func (s *DoltStore) readReadyClaimState(ctx context.Context, id string) (string,
 // the same two coordination columns, so the postcondition is the same either
 // way; only the table differs.
 //
+// It is one SELECT, sent after the write's commit returned, so with autocommit
+// on it runs without a transaction: a single statement reads the latest
+// committed state, which is what the verification has to see. With autocommit
+// off withSingleRead keeps the transaction, which starts after the commit too.
+//
 //nolint:gosec // G201: table is one of the two plane names this file passes.
 func (s *DoltStore) readClaimStateIn(ctx context.Context, table, id string) (string, types.Status, error) {
 	var assignee sql.NullString
 	var status types.Status
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx,
+	err := s.withSingleRead(ctx, func(q storageissueops.DBTX) error {
+		return q.QueryRowContext(ctx,
 			`SELECT assignee, status FROM `+table+` WHERE id = ?`, id,
 		).Scan(&assignee, &status)
 	})

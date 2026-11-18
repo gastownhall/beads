@@ -74,13 +74,24 @@ func (s *DoltStore) SearchIssueSummaries(ctx context.Context, query string, filt
 	return result, err
 }
 
+// SearchIssuesWithCounts reads a page of issues with their counts. The bd list
+// page (no dependency counts, no wisp merge) is one statement, which reads one
+// snapshot by itself, so it runs without a transaction where the server
+// autocommits. Every other filter probes optional tables first and keeps one read
+// transaction, so the probe and the reads it gates see the same tables.
 func (s *DoltStore) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
 	var result []*types.IssueWithCounts
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+	search := func(q issueops.DBTX) error {
 		var err error
-		result, err = issueops.SearchIssuesWithCountsInTx(ctx, tx, query, filter)
+		result, err = issueops.SearchIssuesWithCountsInTx(ctx, q, query, filter)
 		return err
-	})
+	}
+	var err error
+	if issueops.SearchIssuesWithCountsIsOneStatement(filter) {
+		err = s.withSingleRead(ctx, search)
+	} else {
+		err = s.withReadTx(ctx, func(tx *sql.Tx) error { return search(tx) })
+	}
 	return result, err
 }
 
@@ -245,34 +256,19 @@ func (s *DoltStore) GetStaleIssues(ctx context.Context, filter types.StaleFilter
 	return result, err
 }
 
-// GetStatistics returns summary statistics
+// GetStatistics returns summary statistics. Its two SELECTs, the status counts
+// and the blocked count, run in one read transaction: ReadyIssues is the open
+// count minus the blocked count, so both must come from one snapshot.
 func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
-	stats := &types.Statistics{}
-
+	var stats *types.Statistics
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		return issueops.ScanIssueCountsInTx(ctx, tx, stats)
+		var err error
+		stats, err = issueops.GetStatisticsInTx(ctx, tx)
+		return err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get statistics: %w", err)
 	}
-
-	var blockedCount int
-	if err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM issues
-			WHERE is_blocked = 1 AND status <> 'closed' AND status <> 'pinned'
-		`).Scan(&blockedCount)
-	}); err != nil {
-		return nil, fmt.Errorf("failed to count blocked issues: %w", err)
-	}
-	stats.BlockedIssues = &blockedCount
-
-	ready := stats.OpenIssues - blockedCount
-	if ready < 0 {
-		ready = 0
-	}
-	stats.ReadyIssues = &ready
-
 	return stats, nil
 }
 

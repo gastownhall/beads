@@ -6,6 +6,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/memoryapi"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	storagememoryops "github.com/steveyegge/beads/internal/storage/memoryops"
 	"github.com/steveyegge/beads/memoryops"
 )
@@ -18,8 +19,9 @@ func (s *DoltStore) Memories() (memoryops.Memories, error) {
 // newMemories returns guarded memory operations backed by store.
 //
 // It is unexported, like newEdgeReader beside it: the shared body is a set of
-// InTx functions that need a transaction this store owns, so no front door can
-// reach it at all and there is nothing for a depguard entry to deny.
+// InTx functions that need a transaction or database handle this store owns, so
+// no front door can reach it at all and there is nothing for a depguard entry to
+// deny.
 func newMemories(store *DoltStore) (memoryops.Memories, error) {
 	if store == nil {
 		return nil, &storage.ErrUnsupported{Op: "newMemories", Backend: "nil"}
@@ -50,6 +52,8 @@ func (m *memories) Remember(ctx context.Context, req memoryops.RememberRequest) 
 	return memoryops.RememberResult{Key: key, Value: req.Content, Replaced: replaced}, nil
 }
 
+// Recall is one SELECT, which reads one snapshot by itself, so it runs without a
+// transaction where the server autocommits.
 func (m *memories) Recall(ctx context.Context, req memoryops.RecallRequest) (memoryops.RecallResult, error) {
 	key, err := memoryapi.ValidateKey(req.Key)
 	if err != nil {
@@ -59,9 +63,9 @@ func (m *memories) Recall(ctx context.Context, req memoryops.RecallRequest) (mem
 		value string
 		found bool
 	)
-	if err := m.store.withReadTx(ctx, func(tx *sql.Tx) error {
+	if err := m.store.withSingleRead(ctx, func(q issueops.DBTX) error {
 		var err error
-		value, found, err = storagememoryops.RecallInTx(ctx, tx, key)
+		value, found, err = storagememoryops.RecallInTx(ctx, q, key)
 		return err
 	}); err != nil {
 		return memoryops.RecallResult{}, err
@@ -90,11 +94,12 @@ func (m *memories) Forget(ctx context.Context, req memoryops.ForgetRequest) (mem
 	return memoryops.ForgetResult{Key: key, Value: previous, Found: found}, nil
 }
 
+// List is one SELECT of the config table, like Recall.
 func (m *memories) List(ctx context.Context, req memoryops.ListRequest) (memoryops.ListResult, error) {
 	var all map[string]string
-	if err := m.store.withReadTx(ctx, func(tx *sql.Tx) error {
+	if err := m.store.withSingleRead(ctx, func(q issueops.DBTX) error {
 		var err error
-		all, err = storagememoryops.ListInTx(ctx, tx)
+		all, err = storagememoryops.ListInTx(ctx, q)
 		return err
 	}); err != nil {
 		return memoryops.ListResult{}, err
