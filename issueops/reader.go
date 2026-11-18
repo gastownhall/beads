@@ -72,6 +72,17 @@ type ReadyRequest struct {
 	IncludeDeferred  bool
 	IncludeEphemeral bool
 
+	// ExcludeParentsWithOpenChildren drops every row with at least one
+	// recorded parent-child child whose status is not closed - the checked
+	// close gate's open-children relationship, pinned children included - so
+	// a container whose children are all unready is not offered as work
+	// (GH#6817). Opt-in: false leaves the ready set unchanged. A child counts
+	// whether or not it is itself ready or visible to this request; a parent
+	// with work of its own beside open children is hidden too, and returns
+	// once its last child closes. The http transport has no parameter for it
+	// and refuses a request that sets it (httpclient.ErrUnsupported).
+	ExcludeParentsWithOpenChildren bool
+
 	// ExcludeTypes names types to exclude. Entries may be comma-separated;
 	// splitting and alias expansion happen inside. Ignored when IssueType is
 	// set.

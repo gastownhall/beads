@@ -140,6 +140,16 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 		}
 		p.inputs.ParentDescendantIDs = descendantIDs
 	}
+	// GH#6817: each family read gets its open-child parent set once here,
+	// shared by the page, the in-band total and the overlap count. A
+	// zero-valued filter issues no statement.
+	families := []FilterTables{IssuesFilterTables}
+	if p.readsWisps() {
+		families = append(families, WispsFilterTables)
+	}
+	if err := setOpenChildParentIDsInTx(ctx, tx, filter.ExcludeParentsWithOpenChildren, &p.inputs, families...); err != nil {
+		return nil, err
+	}
 	return p, nil
 }
 

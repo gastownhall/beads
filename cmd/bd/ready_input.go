@@ -89,6 +89,7 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.ParentID, _ = cmd.Flags().GetString("parent")
 	in.IncludeDeferred, _ = cmd.Flags().GetBool("include-deferred")
 	in.IncludeEphemeral, _ = cmd.Flags().GetBool("include-ephemeral")
+	in.ExcludeParentsWithOpenChildren, _ = cmd.Flags().GetBool("exclude-parents")
 	in.ExcludeTypes, _ = cmd.Flags().GetStringSlice("exclude-type")
 
 	if molTypeStr, _ := cmd.Flags().GetString("mol-type"); molTypeStr != "" {
