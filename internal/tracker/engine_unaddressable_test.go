@@ -17,7 +17,8 @@ import (
 // linked to several repositories is not flooded, while a push that names
 // beads by ID warns for each of them. A bulk pull takes a listed issue into
 // the bead that links it under the ref the tracker builds in its configured
-// target and imports the rest; a pull by ID skips the issue, listing it.
+// target, which keeps that ref, and imports the rest; a pull by ID skips the
+// issue, listing it.
 func TestEngineWarnsOnceForUnaddressableRefs(t *testing.T) {
 	ctx := context.Background()
 	bead := func(id, ref string) *types.Issue {
@@ -85,6 +86,13 @@ func TestEngineWarnsOnceForUnaddressableRefs(t *testing.T) {
 		for id, title := range map[string]string{"bd-h3": "Moved 3", "bd-h5": "Moved 5"} {
 			if got := state.issues[id]; got.Title != title {
 				t.Errorf("%s title = %q, want %q", id, got.Title, title)
+			}
+		}
+		// They keep the refs the tracker can address: relinked to the URLs
+		// they came back under, they would leave push and conflict detection.
+		for id, ref := range map[string]string{"bd-h3": "https://test.test/EXT-3", "bd-h5": "https://test.test/EXT-5"} {
+			if got := derefStr(state.issues[id].ExternalRef); got != ref {
+				t.Errorf("%s external_ref = %q, want %q", id, got, ref)
 			}
 		}
 		want := []string{"3 test issues came back under URLs outside the configured test repository or project, " +

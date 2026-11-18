@@ -492,11 +492,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		// The tracker fetched this issue but cannot address its ref (GitHub:
 		// an issue transferred to another repository, or one of a repository
 		// renamed under a name Init did not read): unaddressablePull decides
-		// which local issue it may update, if any.
+		// which local issue it may update, if any, and under which ref.
 		if e.unaddressable(ref) && (existing == nil || i >= bulkRows) {
 			outsideRefs = append(outsideRefs, ref)
 			var skip bool
-			if existing, skip = e.unaddressablePull(fallback, &extIssue, i, bulkRows); skip {
+			if existing, ref, skip = e.unaddressablePull(fallback, &extIssue, ref, i, bulkRows); skip {
 				skippedOutsideRefs = append(skippedOutsideRefs, ref)
 				stats.Skipped++
 				continue

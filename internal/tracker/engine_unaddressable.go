@@ -41,10 +41,10 @@ func (e *Engine) leftTarget(ref string) bool {
 }
 
 // unaddressablePull decides what a pull does with extIssue, the i-th issue it
-// fetched, whose own ref the tracker cannot address, when no local issue
+// fetched, whose own ref (ref) the tracker cannot address, when no local issue
 // holds that ref or the pull fetched the issue on its own. It returns the
-// local issue to take extIssue into (nil: import it), or reports that the
-// pull skips it.
+// local issue to take extIssue into (nil: import it) and the ref to link it
+// under, or reports that the pull skips it.
 //
 // An issue fetched on its own, for a pull by ID or a pre-linked hydration,
 // left the configured target (GitHub: an issue transferred to another
@@ -56,13 +56,20 @@ func (e *Engine) leftTarget(ref string) bool {
 // whose names Init could not read). The pull takes it into the local issue
 // that links it under the ref the tracker builds in its configured target
 // (GitHub: github:{number}), where the conflict guard applies as for any
-// match, and imports it when there is none, so the next pull's cursor never
-// passes a remote edit by.
-func (e *Engine) unaddressablePull(fallback pullFallbackIndex, extIssue *TrackerIssue, i, bulkRows int) (*types.Issue, bool) {
+// match, and that local issue keeps its own ref: relinked to ref, which the
+// tracker cannot address, it would drop out of push and conflict detection,
+// and the next remote edit would overwrite its unpushed local edits. With no
+// such local issue the pull imports extIssue under ref, so the next pull's
+// cursor never passes a remote edit by.
+func (e *Engine) unaddressablePull(fallback pullFallbackIndex, extIssue *TrackerIssue, ref string, i, bulkRows int) (*types.Issue, string, bool) {
 	if i >= bulkRows {
-		return nil, true
+		return nil, ref, true
 	}
-	return fallback.match(extIssue, e.Tracker.BuildExternalRef(&TrackerIssue{Identifier: extIssue.Identifier})), false
+	existing := fallback.match(extIssue, e.Tracker.BuildExternalRef(&TrackerIssue{Identifier: extIssue.Identifier}))
+	if own, ok := e.trackerRef(existing); ok && !e.unaddressable(own) {
+		return existing, own, false
+	}
+	return existing, ref, false
 }
 
 // warnUnaddressablePulls warns once about the fetched issues whose own refs
