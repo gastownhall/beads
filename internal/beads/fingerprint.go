@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/execwin"
 )
 
 // RepoIDSource identifies how a repo fingerprint was derived.
@@ -166,7 +168,7 @@ func GetCloneIDForPath(repoPath string) (string, error) {
 }
 
 func runGitInRepo(repoPath string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", args...)
+	cmd := execwin.Hide(exec.Command("git", args...))
 	if repoPath != "" {
 		cmd.Dir = repoPath
 	}
@@ -182,7 +184,7 @@ func runGitInRepo(repoPath string, args ...string) ([]byte, error) {
 // the same across all worktrees sharing a database.
 func mainRepoRootForPath(repoPath string) (string, error) {
 	// Get both toplevel and common-dir in one pass to detect worktrees.
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel", "--git-common-dir")
+	cmd := execwin.Hide(exec.Command("git", "rev-parse", "--show-toplevel", "--git-common-dir"))
 	if repoPath != "" {
 		cmd.Dir = repoPath
 	}

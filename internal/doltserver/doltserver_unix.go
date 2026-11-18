@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"github.com/steveyegge/beads/internal/execwin"
 )
 
 // portConflictHint is the platform-specific command to diagnose port conflicts.
@@ -30,7 +32,7 @@ const processListHint = "pgrep -fl 'dolt sql-server'"
 // findPIDOnPort returns the PID of the process listening on a TCP port.
 // Uses lsof to look up the listener. Returns 0 if no process found or on error.
 func findPIDOnPort(port int) int {
-	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port), "-sTCP:LISTEN").Output() //nolint:gosec // G702: port is internal int, not user input
+	out, err := execwin.Hide(exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port), "-sTCP:LISTEN")).Output() //nolint:gosec // G702: port is internal int, not user input
 	if err != nil {
 		return 0
 	}
@@ -48,7 +50,7 @@ func findPIDOnPort(port int) int {
 // could not be read (ps can be refused, e.g. inside a macOS sandbox), which
 // is not the same as there being no dolt processes.
 func readDoltProcessPIDs() ([]int, error) {
-	out, err := exec.Command("ps", "-axo", "pid=,state=,command=").Output()
+	out, err := execwin.Hide(exec.Command("ps", "-axo", "pid=,state=,command=")).Output()
 	if err != nil {
 		return nil, fmt.Errorf("listing processes: %w", err)
 	}
@@ -108,7 +110,7 @@ func splitPSField(line string) (field, rest string, ok bool) {
 func isProcessInDir(pid int, dir string) bool {
 	// On macOS, lsof requires -a to AND selectors together; without it,
 	// "-p <pid>" and "-d cwd" can yield cwd entries from unrelated processes.
-	out, err := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
+	out, err := execwin.Hide(exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn")).Output()
 	if err != nil {
 		return false
 	}
