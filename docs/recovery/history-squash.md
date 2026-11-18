@@ -146,7 +146,7 @@ both.
 
 The restart matters: a running sql-server keeps its view of every git
 remote it has used, the force-push above included. Releases up to and
-including v1.3.3 delete the remote's Dolt data refs and then force-push.
+including v1.3.4 delete the remote's Dolt data refs and then force-push.
 Once the refs are deleted under that view, the push through the server
 hangs until a read timeout or reports success having written nothing, and
 the remote is left without its Dolt data; running reset-data again right

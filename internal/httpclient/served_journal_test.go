@@ -97,6 +97,28 @@ func TestServedJournalContract(t *testing.T) {
 	t.Run("ArrivalRenameKeepsTheStamp", func(t *testing.T) {
 		conformance.RunJournalArrivalRenameKeepsTheStamp(t, ctx, fixture)
 	})
+	t.Run("EveryMutationKindRecordsItsActor", func(t *testing.T) {
+		// Not a ledger divergence: the operation publishes each record's
+		// actor (eventsjournal.Record.Actor) and the server fills it; this
+		// client's journalRow drops it, so every Row.Actor reads empty.
+		t.Skip("WAITING ON donnabox fixes-b B14 (HTTP client journal keeps the actor): " +
+			"internal/httpclient/journal.go journalRow does not copy record.Actor onto journalops.Row; " +
+			"delete this line with that fix")
+		conformance.RunJournalEveryMutationKindRecordsItsActor(t, ctx, fixture)
+	})
+	t.Run("DerivedRecordsCarryTheCausingActor", func(t *testing.T) {
+		// Parked on B14 for EveryMutationKindRecordsItsActor's reason: read
+		// through this client every Row.Actor is empty, so the case would fail
+		// on every record, the request's own included, and say nothing about
+		// the derived ones. The served half of this property is held without
+		// the client's decode by TestServedLifecycleJournalRecordsCarryTheRequestActor,
+		// which reads GET /v0/beads/events as raw JSON, the way an external
+		// journal consumer does.
+		t.Skip("WAITING ON donnabox fixes-b B14 (HTTP client journal keeps the actor): " +
+			"internal/httpclient/journal.go journalRow does not copy record.Actor onto journalops.Row; " +
+			"delete this line with that fix")
+		conformance.RunJournalDerivedRecordsCarryTheCausingActor(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})

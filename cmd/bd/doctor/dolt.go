@@ -137,7 +137,7 @@ func openDoltConn(beadsDir string) (*doltConn, error) {
 // config.json into metadata.json, so pass only the workspace doctor runs in,
 // which command admission has checked. Read a .beads that admission never saw,
 // such as a nested one the Classic Artifacts walk reaches, with
-// configfile.LoadAndCheckWorkspaceFormat instead.
+// configfile.LoadForDiscovery instead.
 func GetBackend(beadsDir string) string {
 	return dolt.GetBackendFromConfig(beadsDir)
 }

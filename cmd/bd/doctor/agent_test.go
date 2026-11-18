@@ -63,3 +63,36 @@ func TestPruneEnrichmentsRecommendRealCommand(t *testing.T) {
 		}
 	}
 }
+
+// TestCloneLocalFKGuidanceDirectsExplicitRepair: bd flatten and bd compact
+// no longer hard-reset main (they soft-reset since bd-c5s3mv), so the
+// severed clone-local FK guidance must not name them as a current cause. It
+// directs the explicit repair and says the repair deletes orphaned rows.
+func TestCloneLocalFKGuidanceDirectsExplicitRepair(t *testing.T) {
+	dc := DoctorCheck{
+		Name:    "Clone-Local FKs",
+		Message: "1 severed FK(s) on clone-local tables: wisp_labels.fk_wisp_labels_issue (2 orphan(s))",
+		Detail:  severedCloneLocalFKDetail(2),
+	}
+	enrichment := enrichCloneLocalFKs(dc)
+
+	if len(enrichment.commands) != 1 || enrichment.commands[0] != "bd doctor --fix" {
+		t.Fatalf("commands = %#v, want the explicit repair 'bd doctor --fix'", enrichment.commands)
+	}
+	if !strings.Contains(enrichment.explanation, "bd doctor --fix") {
+		t.Errorf("explanation does not direct 'bd doctor --fix': %s", enrichment.explanation)
+	}
+	if !strings.Contains(enrichment.explanation, "deletes") || !strings.Contains(enrichment.explanation, "orphan") {
+		t.Errorf("explanation does not say the repair deletes orphaned rows: %s", enrichment.explanation)
+	}
+	// Any sentence naming flatten or compact must be about older releases.
+	for name, text := range map[string]string{"explanation": enrichment.explanation, "observed": enrichment.observed} {
+		for _, sentence := range strings.Split(text, ". ") {
+			lower := strings.ToLower(sentence)
+			if (strings.Contains(lower, "flatten") || strings.Contains(lower, "compact") || strings.Contains(lower, "squash")) &&
+				!strings.Contains(lower, "older") {
+				t.Errorf("%s attributes a current flatten/compact to a hard reset: %q", name, sentence)
+			}
+		}
+	}
+}

@@ -157,6 +157,34 @@ title = "Deploy"
 needs = ["test-unit", "test-integration"]  # Waits for both
 ```
 
+### Conditional steps
+
+A step with a `condition` is left out of a pour when the condition evaluates
+false against the pour's variables, and its children go with it:
+
+```toml
+[vars.deploy]
+default = "false"
+
+[[steps]]
+id = "test"
+title = "Run tests"
+
+[[steps]]
+id = "deploy"
+title = "Deploy to production"
+needs = ["test"]
+condition = "{{deploy}} == true"
+```
+
+Nothing names `deploy`, so leaving it out changes nothing else. A step that
+stays in the pour should not name a step the pour leaves out in its `needs`,
+`depends_on`, or `waits_for` spawner: in releases after v1.3.2 the pour fails
+with a formula validation error naming both steps and the condition (v1.3.2
+and earlier pour the step with that dependency silently dropped). Give the
+dependent step the same condition, or depend only on steps that are always
+poured.
+
 ## Gates
 
 Add gates for async coordination. A `[steps.gate]` on an ordinary step is an

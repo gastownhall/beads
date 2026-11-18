@@ -438,7 +438,7 @@ func designRows() []Row {
 			What: "issueops.Deleter.Delete over http refuses an absent id as issueops.ErrNotFound, not as *NotFoundError naming WHICH ids did not resolve",
 			Why: "the role's error is a typo report and names every missing id; the wire deliberately does not repeat them (internal/httpapi's NotFound() carries a FIXED detail, so a 404 body cannot echo caller input back). " +
 				"The refusal still FAILS the request and still deletes NOTHING — not even the ids beside the typo — so the all-or-nothing promise is intact and only the classification is coarser. " +
-				"It is stated at the ROLE rather than at a command because `bd delete` is not reachable against an http workspace at all (see httpUnconsumedCapabilities); the embedder holding the role is the audience. Upstream ask: an ids extension member on the not_found problem, which retires this row",
+				"It is stated at the ROLE rather than at a command because `bd delete` resolves every id in its front door before it calls the role, and names the missing ones itself (cmd/bd/delete.go); the embedder holding the role is the audience. Upstream ask: an ids extension member on the not_found problem, which retires this row",
 			SpecRow:  "D8 row 13",
 			PinnedBy: pinnedByS3Conformance,
 		},
@@ -453,7 +453,7 @@ func designRows() []Row {
 		{
 			ID: "L-delete-bound", Kind: KindRefuse,
 			What:    "issueops.Deleter.Delete refuses a request naming more than 1000 ids, citing the wire bound; it is never split across requests",
-			Why:     "maxDeleteIDs = 1000 (internal/httpapi/delete.go). Splitting is the one path that silently breaks the request's one-transaction, one-history-entry contract — and it would ask the dependents guard about half a request at a time, so a pair the caller deliberately listed together would be refused as an outside dependent. Naive forwarding at least fails loudly. Stated at the ROLE: `bd delete` cannot reach an http workspace, so the embedder is the audience",
+			Why:     "maxDeleteIDs = 1000 (internal/httpapi/delete.go). Splitting is the one path that silently breaks the request's one-transaction, one-history-entry contract — and it would ask the dependents guard about half a request at a time, so a pair the caller deliberately listed together would be refused as an outside dependent. Naive forwarding at least fails loudly. Stated at the ROLE, which `bd delete` reaches over an http workspace too: a CLI delete of more than 1000 ids refuses the same way",
 			SpecRow: "D8 row 13, D9 L16 (the same argument, on the other bulk write)",
 			// The boundary itself, both sides: exactly maxDeleteIDs serves, one
 			// more refuses, and the refusal never dials.
@@ -680,6 +680,15 @@ func writeSideRows() []Row {
 				"The multi-id refusal the wire attaches to it is deliberately NOT anticipated client-side: distinctness is measured after trimming and collapsing duplicates, which is the normalization this role sends its ids verbatim to avoid re-implementing",
 			SpecRow:  updateSpec,
 			PinnedBy: pinnedByS3Conformance,
+		},
+		{
+			ID: "W-DeleteRequest.Cascade", Kind: KindRefuse, Capability: "issues.delete.containmentCascade",
+			What: "a cascade delete, its dry-run preview included, refuses against a server that does not advertise issues.delete.containmentCascade",
+			Why: "deleteIssues publishes `cascade` on every server, but what it deletes changed (GH#6301): a server that advertises issues.delete.containmentCascade deletes the named rows' parent-child descendants and orphans every other dependent, while an older one deletes every transitive dependent, whatever the edge type, and previews that same wider set. " +
+				"The member is the same on both, so a request cannot say which cascade it means. The client reads the handshake and refuses a cascade BEFORE the dial with the typed capability error naming the token, rather than send one that would delete, or preview, rows the caller was told survive. A delete without cascade means the same thing on both servers and is sent unchanged. " +
+				"It is a LATE refusal, not a wire gap: the member is carried (W-CreateRequest.Gates is the precedent), so the row is not field-shaped",
+			SpecRow:  "D8 row 13 refuse-not-drop",
+			PinnedBy: "TestDeleteCascadeRefusesAServerWithoutContainmentCascade",
 		},
 		{
 			ID: "W-ReopenRequest.Provenance", Kind: KindRefuse,

@@ -12,7 +12,7 @@ Note: Tests focus on the compaction logic itself, which is independent of the
 FastMCP decorator. The actual tool behavior is tested via _apply_compaction().
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -25,7 +25,7 @@ def sample_issues(count=25):
 
     Default creates 25 issues to exceed the COMPACTION_THRESHOLD (20).
     """
-    now = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
     issues = []
     for i in range(count):
         issue = Issue(
@@ -153,8 +153,8 @@ class TestCompactionLogic:
                 status="open",
                 priority=1,
                 issue_type="task",
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
             )
             for i in range(10)
         ]
@@ -198,8 +198,8 @@ class TestCompactionLogic:
                 status="open",
                 priority=i % 5,
                 issue_type="task",
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
             )
             for i in range(20)
         ]
@@ -221,8 +221,8 @@ class TestCompactionLogic:
                 status="open",
                 priority=i % 5,
                 issue_type="task",
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
             )
             for i in range(21)
         ]
@@ -341,8 +341,8 @@ class TestConversionToMinimal:
             labels=["urgent", "backend"],
             dependency_count=2,
             dependent_count=1,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
         )
 
         minimal = _to_minimal_test(issue)
@@ -364,7 +364,7 @@ class TestConversionToMinimal:
 
     def test_minimal_is_much_smaller(self):
         """Verify IssueMinimal is significantly smaller than Issue (roughly 80% reduction)."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         issue = Issue(
             id="bd-123",
             title="Test Issue",
@@ -408,7 +408,7 @@ class TestCompactionWithFilters:
     def test_mixed_filters_and_compaction(self):
         """Test that filters are applied before compaction decision."""
         # Create 50 issues
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         issues = [
             Issue(
                 id=f"bd-{i:04d}",

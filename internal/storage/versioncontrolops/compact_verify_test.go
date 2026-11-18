@@ -14,16 +14,14 @@ import (
 // argument), not with main's current HEAD.
 const compactVerifySQL = "SELECT COUNT(*) FROM dolt_diff_summary(?, 'compact-tmp')"
 
-// expectCompactReplay queues Compact's steps up to and including the checkout
-// of main that precedes the replay check.
-func expectCompactReplay(mock sqlmock.Sqlmock) {
-	ok := sqlmock.NewResult(0, 0)
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BRANCH('compact-tmp', ?)")).WithArgs("boundary").WillReturnResult(ok)
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHECKOUT('compact-tmp')")).WillReturnResult(ok)
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_RESET('--soft', ?)")).WithArgs("initial").WillReturnResult(ok)
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-Am', ?)")).WillReturnResult(ok)
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHERRY_PICK('--allow-empty', ?)")).WithArgs("recent").WillReturnResult(ok)
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHECKOUT('main')")).WillReturnResult(ok)
+// expectCompactBeforeVerify queues Compact's steps up to and including the
+// checkout of main that precedes the replay check: the replay of kept and
+// the read-back of the rebuilt chain (compact_test.go).
+func expectCompactBeforeVerify(mock sqlmock.Sqlmock, initial, boundary compactCommit, kept []compactCommit) {
+	msg := expectCompactReplay(mock, initial, boundary, kept)
+	mock.ExpectQuery(regexp.QuoteMeta(compactLogQuery)).
+		WillReturnRows(compactLogRows(compactRebuiltLog(initial, boundary, kept, msg)))
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHECKOUT('main')")).WillReturnResult(sqlmock.NewResult(0, 0))
 }
 
 // expectCompactCleanup queues the deferred cleanup of a failed Compact.
@@ -36,9 +34,10 @@ func expectCompactCleanup(mock sqlmock.Sqlmock) {
 func runCompactForVerify(t *testing.T, setup func(sqlmock.Sqlmock)) error {
 	t.Helper()
 	db, mock := newMockDB(t)
-	expectCompactReplay(mock)
+	initial, boundary, kept := compactTestCommits()
+	expectCompactBeforeVerify(mock, initial, boundary, kept)
 	setup(mock)
-	err := Compact(context.Background(), db, "initial", "boundary", "headhash", 3, []string{"recent"})
+	err := Compact(context.Background(), db, initial.Hash, boundary.Hash, "headhash", 2, keptHashes(kept))
 	if merr := mock.ExpectationsWereMet(); merr != nil {
 		t.Errorf("unmet expectations (Compact returned %v): %v", err, merr)
 	}

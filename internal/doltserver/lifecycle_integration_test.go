@@ -228,7 +228,9 @@ func TestLifecycle_CrashRecovery(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO crash_test VALUES (1, 'survive')"); err != nil {
 		t.Fatalf("INSERT: %v", err)
 	}
-	// Commit the data so it persists.
+	// Record the data in history so this test exercises recovery of the
+	// committed-history state; SQL-committed working-set persistence across
+	// a kill is covered by TestLifecycle_SharedServerSQLCommitSurvivesKill.
 	if _, err := db.Exec("CALL DOLT_COMMIT('-Am', 'crash test data')"); err != nil {
 		t.Logf("DOLT_COMMIT: %v (may be expected if auto-commit is on)", err)
 	}
@@ -287,6 +289,210 @@ func TestLifecycle_CrashRecovery(t *testing.T) {
 		t.Fatalf("Stop (cleanup): %v", err)
 	}
 	reg.Deregister(state2.PID)
+}
+
+// TestLifecycle_SharedServerSQLCommitSurvivesKill verifies that, on the
+// default managed shared-server configuration, a successful SQL COMMIT
+// persists across a SIGKILL without any Dolt history commit: the committed
+// rows (tracked and dolt_ignore'd) survive, an open transaction's row does
+// not, and HEAD, the log and @@dolt_transaction_commit are untouched, so the
+// tracked writes are still pending in dolt_status (GH#4443).
+func TestLifecycle_SharedServerSQLCommitSurvivesKill(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	sharedDir := filepath.Join(t.TempDir(), "shared-server")
+	reg := integration.NewProcessRegistry(t)
+
+	sqlPort := reserveDistinctTCPPorts(t, 1)[0]
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+	// Dolt disables its chunk journal for any non-empty value; keep the
+	// default journal-backed store whatever the operator's environment says.
+	t.Setenv("DOLT_DISABLE_CHUNK_JOURNAL", "")
+
+	serverDir := doltserver.ResolveServerDir(beadsDir)
+	if serverDir != sharedDir {
+		t.Fatalf("ResolveServerDir = %q, want shared dir %q", serverDir, sharedDir)
+	}
+	diag := integration.NewDiagnostics(t, serverDir)
+	diag.CaptureOnFailure()
+
+	const dbName = "crash_probe"
+	open := func(port int) *sql.DB {
+		t.Helper()
+		dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: dbName}.String()
+		db, err := sql.Open("mysql", dsn)
+		if err != nil {
+			t.Fatalf("sql.Open: %v", err)
+		}
+		return db
+	}
+	queryInt := func(db *sql.DB, query string) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(query).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		return n
+	}
+	queryString := func(db *sql.DB, query string) string {
+		t.Helper()
+		var s string
+		if err := db.QueryRow(query).Scan(&s); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		return s
+	}
+	mustExec := func(db *sql.DB, stmt string) {
+		t.Helper()
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	// assertCommittedRows checks the committed writes are readable and the
+	// open transaction's row is not.
+	assertCommittedRows := func(db *sql.DB, when string) {
+		t.Helper()
+		rows, err := db.Query("SELECT id, val FROM tracked_rows ORDER BY id")
+		if err != nil {
+			t.Fatalf("%s: SELECT tracked_rows: %v", when, err)
+		}
+		var got []string
+		for rows.Next() {
+			var id int
+			var val string
+			if err := rows.Scan(&id, &val); err != nil {
+				t.Fatalf("%s: scan tracked_rows: %v", when, err)
+			}
+			got = append(got, fmt.Sprintf("%d=%s", id, val))
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("%s: tracked_rows: %v", when, err)
+		}
+		_ = rows.Close()
+		want := "1=autocommitted,2=txn-a,3=txn-b"
+		if strings.Join(got, ",") != want {
+			t.Fatalf("%s: tracked_rows = %v, want %s (no row 99 from the open transaction)", when, got, want)
+		}
+		if v := queryString(db, "SELECT val FROM wisp_probe WHERE id = 1"); v != "ignored-table" {
+			t.Fatalf("%s: wisp_probe row = %q, want ignored-table", when, v)
+		}
+	}
+
+	first, err := doltserver.Start(serverDir)
+	if err != nil {
+		t.Fatalf("Start (first): %v", err)
+	}
+	if p, err := os.FindProcess(first.PID); err == nil {
+		reg.Register(p)
+	}
+	if first.Port != sqlPort {
+		t.Fatalf("first Start port = %d, want %d", first.Port, sqlPort)
+	}
+
+	admin := connectMySQL(t, sqlPort)
+	mustExec(admin, "CREATE DATABASE "+dbName)
+	_ = admin.Close()
+
+	db := open(sqlPort)
+	t.Logf("dolt version: %s", queryString(db, "SELECT dolt_version()"))
+	if v := queryInt(db, "SELECT @@dolt_transaction_commit"); v != 0 {
+		t.Fatalf("@@dolt_transaction_commit = %d, want 0 on the default managed config", v)
+	}
+	initialHead := queryString(db, "SELECT DOLT_HASHOF('HEAD')")
+	initialLog := queryInt(db, "SELECT COUNT(*) FROM dolt_log")
+
+	// Autocommitted DDL and DML on a tracked table; no DOLT_COMMIT anywhere.
+	mustExec(db, "INSERT INTO dolt_ignore VALUES ('wisp_%', true)")
+	mustExec(db, "CREATE TABLE tracked_rows (id INT PRIMARY KEY, val VARCHAR(100))")
+	mustExec(db, "INSERT INTO tracked_rows VALUES (1, 'autocommitted')")
+	// An explicit two-row transaction.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := tx.Exec("INSERT INTO tracked_rows VALUES (2, 'txn-a'), (3, 'txn-b')"); err != nil {
+		t.Fatalf("INSERT in transaction: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("COMMIT: %v", err)
+	}
+	// A dolt_ignore'd table, as bd's wisp tables are.
+	mustExec(db, "CREATE TABLE wisp_probe (id INT PRIMARY KEY, val VARCHAR(100))")
+	mustExec(db, "INSERT INTO wisp_probe VALUES (1, 'ignored-table')")
+
+	// A transaction left open at the kill.
+	openTx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("Begin (open): %v", err)
+	}
+	if _, err := openTx.Exec("INSERT INTO tracked_rows VALUES (99, 'uncommitted')"); err != nil {
+		t.Fatalf("INSERT in open transaction: %v", err)
+	}
+
+	observer := open(sqlPort)
+	assertCommittedRows(observer, "before kill")
+	if head := queryString(observer, "SELECT DOLT_HASHOF('HEAD')"); head != initialHead {
+		t.Fatalf("before kill: HEAD = %s, want unchanged %s", head, initialHead)
+	}
+	if n := queryInt(observer, "SELECT COUNT(*) FROM dolt_log"); n != initialLog {
+		t.Fatalf("before kill: dolt_log count = %d, want unchanged %d", n, initialLog)
+	}
+	_ = observer.Close()
+
+	// SIGKILL only the registered server: no Stop, Restart or FlushWorkingSet.
+	proc, err := os.FindProcess(first.PID)
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("SIGKILL: %v", err)
+	}
+	// Start's owner goroutine reaps the child; wait for it to be gone.
+	deadline := time.Now().Add(10 * time.Second)
+	for integration.IsProcessAlive(first.PID) {
+		if time.Now().After(deadline) {
+			t.Fatalf("server PID %d still alive 10s after SIGKILL", first.PID)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	reg.Deregister(first.PID)
+	waitForPortClosed(t, sqlPort, 5*time.Second)
+	_ = openTx.Rollback()
+	_ = db.Close()
+
+	second, err := doltserver.Start(serverDir)
+	if err != nil {
+		t.Fatalf("Start (after kill): %v", err)
+	}
+	if p, err := os.FindProcess(second.PID); err == nil {
+		reg.Register(p)
+	}
+	if second.PID == first.PID {
+		t.Fatalf("Start after kill reused PID %d; want a new server", first.PID)
+	}
+
+	db = open(second.Port)
+	assertCommittedRows(db, "after kill")
+	if v := queryInt(db, "SELECT @@dolt_transaction_commit"); v != 0 {
+		t.Fatalf("after kill: @@dolt_transaction_commit = %d, want 0", v)
+	}
+	if head := queryString(db, "SELECT DOLT_HASHOF('HEAD')"); head != initialHead {
+		t.Fatalf("after kill: HEAD = %s, want unchanged %s", head, initialHead)
+	}
+	if n := queryInt(db, "SELECT COUNT(*) FROM dolt_log"); n != initialLog {
+		t.Fatalf("after kill: dolt_log count = %d, want unchanged %d", n, initialLog)
+	}
+	if n := queryInt(db, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'tracked_rows'"); n == 0 {
+		t.Fatal("after kill: tracked_rows not pending in dolt_status; want it uncommitted to history")
+	}
+	_ = db.Close()
+
+	if err := doltserver.Stop(serverDir); err != nil {
+		t.Fatalf("Stop (cleanup): %v", err)
+	}
+	reg.Deregister(second.PID)
 }
 
 // TestLifecycle_RestartDataPersistence verifies data persists across clean

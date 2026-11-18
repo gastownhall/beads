@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -559,6 +560,51 @@ func applyNoColorFlag() {
 	}
 }
 
+// expandedBeadsEnvValueReason is the notice reason for a .beads/.env value that
+// $VAR or ${VAR} expansion would have changed.
+const expandedBeadsEnvValueReason = "$VAR references are not expanded in .beads/.env; write the value literally or set it in your shell environment"
+
+// readBeadsEnvFile parses a project .beads/.env file with gotenv's syntax, but
+// takes every value exactly as the file writes it. gotenv expands $VAR and
+// ${VAR} references from the process environment (or an earlier line), which
+// would let a committed file copy anything in the caller's environment,
+// secrets included, into a setting the workspace sends elsewhere: an actor
+// name written into issues, or DOLT_REMOTE_PASSWORD sent to the workspace's
+// own sync.remote.
+//
+// The file is therefore parsed a second time with every '$' escaped. gotenv
+// reads "\$" as a literal dollar sign and never consults the environment for
+// it, so that parse depends on the file alone and yields each value as
+// written, except that an escape gotenv does not consume (inside single
+// quotes, or before an already-escaped dollar in an unquoted value) survives as
+// "\$" and is undone before comparing. A key whose value differs between the
+// two parses was changed by expansion: it is left out of values and listed,
+// sorted, in expanded. Because a value is imported only when it equals what the
+// file alone determines, a quirk of the second parse can refuse a key but never
+// let the environment into one. A file gotenv cannot parse is an error, as it
+// was for gotenv.Read.
+func readBeadsEnvFile(envFile string) (values map[string]string, expanded []string, err error) {
+	raw, err := os.ReadFile(envFile) // #nosec G304 -- the .env of the beads dir bd selected
+	if err != nil {
+		return nil, nil, err
+	}
+	parsed, err := gotenv.StrictParse(bytes.NewReader(raw))
+	if err != nil {
+		return nil, nil, err
+	}
+	asWritten, _ := gotenv.StrictParse(bytes.NewReader(bytes.ReplaceAll(raw, []byte("$"), []byte(`\$`))))
+	values = make(map[string]string, len(parsed))
+	for key, value := range parsed {
+		if literal, ok := asWritten[key]; ok && strings.ReplaceAll(literal, `\$`, "$") == value {
+			values[key] = value
+			continue
+		}
+		expanded = append(expanded, key)
+	}
+	slices.Sort(expanded)
+	return values, expanded, nil
+}
+
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
 // Dolt credentials (GH#2520). Imports are non-overriding —
 // existing shell env vars always take precedence.
@@ -574,11 +620,13 @@ func loadBeadsEnvFile(beadsDir string) {
 	if _, err := os.Stat(envFile); err != nil {
 		return
 	}
-	if pairs, err := gotenv.Read(envFile); err == nil {
-		for key, val := range pairs {
-			if os.Getenv(key) == "" && val != "" {
-				config.MarkDotenvValue(key, val)
-			}
+	env, expanded, err := readBeadsEnvFile(envFile)
+	if err != nil {
+		return
+	}
+	for key, val := range env {
+		if os.Getenv(key) == "" && val != "" {
+			config.MarkDotenvValue(key, val)
 		}
 	}
 	// A .env-provided BEADS_DIR is user-authored selection wherever it is
@@ -589,25 +637,29 @@ func loadBeadsEnvFile(beadsDir string) {
 	// thing, instead of target-role or CWD-role depending on the caller's
 	// unrelated BEADS_DB export.
 	beadsDirWasSet := os.Getenv("BEADS_DIR") != ""
-	env, err := gotenv.Read(envFile)
-	if err != nil {
-		return
-	}
-	keys := make([]string, 0, len(env))
+	keys := make([]string, 0, len(env)+len(expanded))
 	for key := range env {
 		keys = append(keys, key)
 	}
+	keys = append(keys, expanded...)
 	slices.Sort(keys)
 	for _, key := range keys {
-		value := env[key]
+		value, literal := env[key]
 		if ok, reason := creds.AllowedProjectEnvKey(key); !ok {
 			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (%s)\n", key, reason)
+			continue
+		}
+		if !literal {
+			fmt.Fprintf(os.Stderr, "beads: ignoring %s from .beads/.env (%s)\n", key, expandedBeadsEnvValueReason)
 			continue
 		}
 		upper := strings.ToUpper(strings.TrimSpace(key))
 		if _, exists := os.LookupEnv(key); !exists {
 			if _, upperExists := os.LookupEnv(upper); !upperExists {
 				_ = os.Setenv(upper, value)
+				if upper == "GT_ROOT" {
+					config.MarkGTRootFromProjectEnv(value)
+				}
 			}
 		}
 	}
@@ -639,7 +691,9 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 	}
 	config.RecordWorkspaceBeadsDir(beadsDir)
 	envFile := filepath.Join(beadsDir, ".env")
-	pairs, err := gotenv.Read(envFile)
+	// A selector whose value expansion filled in is left out here without a
+	// notice: loadBeadsEnvFile reports it when it reads the same file.
+	pairs, _, err := readBeadsEnvFile(envFile)
 	if err != nil {
 		return
 	}
@@ -1368,7 +1422,7 @@ var rootCmd = &cobra.Command{
 
 		// Start root span for this command. rootCtx now carries the span, so
 		// all downstream DB and AI calls become child spans automatically.
-		rootCtx, commandSpan = startCommandSpan(rootCtx, cmd.Name(), Version, os.Args[1:], secretFlagTokens(cmd))
+		rootCtx, commandSpan = startCommandSpan(rootCtx, cmd, Version)
 
 		// Apply verbosity flags early (before any output)
 		debug.SetVerbose(verboseFlag)
@@ -1583,6 +1637,18 @@ var rootCmd = &cobra.Command{
 			skipsStoreInit = true
 		}
 
+		// A `config get` whose key lives in config.yaml, git config or the
+		// user-global config never reads the store, so it must not open one
+		// just because a database exists. In server mode FindDatabasePath
+		// answers from metadata.json alone, and the store path below writes
+		// .local_version, can auto-migrate and auto-start, and refuses outright
+		// when the server is down (GH#5108). configCommandCanRunWithoutStore is
+		// otherwise consulted only on the no-database branch. Match the command
+		// path, not the leaf name.
+		if commandRegistryPath(cmd) == "config get" && configCommandCanRunWithoutStore(cmd, args) {
+			skipsStoreInit = true
+		}
+
 		// One-time friendly heads-up about anonymous usage metrics. Placed after
 		// the config-derived json/quiet rebind and command classification above so
 		// it can read the real output mode and command identity — that is how it
@@ -1661,9 +1727,6 @@ var rootCmd = &cobra.Command{
 				}
 			}
 			if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
-				if isUnsupportedWorkspaceFormat(err) {
-					return handleWorkspaceGuardError(err)
-				}
 				isMigrationCommand := false
 				for current := cmd; current != nil; current = current.Parent() {
 					if current.Name() == "migrate" {
@@ -2057,10 +2120,11 @@ var rootCmd = &cobra.Command{
 			// Bulk loads outlive the pool's 10s fast-fail on every server
 			// pause (wy-sbgucn); explicit env/config settings still win.
 			PoolReadTimeoutFallback: bulkLoadPoolReadTimeout(cmd),
-			// Classification-only read (GH#804), never strict --readonly or a
-			// preview: the store is genuinely writable underneath, so the
-			// lazy defer-wake sweep may still run (be-vbhpf).
-			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// Classification-only read (GH#804), never strict --readonly, a
+			// preview, or under a migration freeze: the store is genuinely
+			// writable underneath, so the lazy defer-wake sweep may still run
+			// (be-vbhpf), but a freeze forbids that write (bd-6zf0q5).
+			ClassifiedRead: classifiedReadOpen(policy.readOnly, readonlyMode, previewMode, commandFreeze.Frozen()),
 			// A read-only or gateway open does not migrate, so a schema too
 			// old for this binary's issue reads is refused at open instead of
 			// failing each read on an unknown column. Not for a preview,
@@ -2201,7 +2265,7 @@ var rootCmd = &cobra.Command{
 		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
 			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride,
-				rootProviderOptions(previewMode, useReadOnly)...)
+				rootProviderOptions(previewMode, useReadOnly, isWorkingSetReconcileCommand(cmd))...)
 			if err != nil {
 				// Same typed rendering the store path gets below: a schema
 				// skew or a migration-gate refusal here carries a whole
@@ -2333,7 +2397,7 @@ var rootCmd = &cobra.Command{
 		// Dolt manages these files itself; external interference is never safe.
 
 		if _, ok := backends.Lookup(cfg.GetBackend()); ok {
-			store, err = newRegisteredBackendStore(openCtx, cfg.GetBackend(), beadsDir, useReadOnly)
+			store, err = newRegisteredBackendStore(openCtx, cfg.GetBackend(), beadsDir, useReadOnly, opensForBeadWrites(doltCfg))
 		} else {
 			store, err = newDoltStore(rootCtx, doltCfg)
 		}
@@ -3083,163 +3147,4 @@ func envTruthyValue(v string) bool {
 		return false
 	}
 	return true
-}
-
-// secretFlagNames are long flag names whose entire value is an opaque credential
-// that must never reach the bd.args telemetry span. The flag's value is redacted
-// wholesale. Only federation add-peer's --password currently qualifies. Its shorthand (-p) is
-// resolved per command via secretFlagTokens so the same letter bound to
-// --priority/--prefix/--parallel on other commands is never redacted.
-var secretFlagNames = map[string]bool{"password": true}
-
-// secretFlagTokens returns the concrete --long and -short flag tokens that carry a
-// secret value for cmd. Resolving against the running command is what makes the
-// redaction "by flag identity": -p is treated as secret only on the command that
-// actually binds it to a secret flag (federation add-peer), not on the many
-// commands that bind -p to a non-secret option.
-func secretFlagTokens(cmd *cobra.Command) map[string]bool {
-	tokens := make(map[string]bool)
-	if cmd == nil {
-		return tokens
-	}
-	for name := range secretFlagNames {
-		f := cmd.Flags().Lookup(name)
-		if f == nil {
-			continue
-		}
-		tokens["--"+f.Name] = true
-		if f.Shorthand != "" {
-			tokens["-"+f.Shorthand] = true
-		}
-	}
-	return tokens
-}
-
-// scrubArgsForTelemetry joins argv for the bd.args span attribute with any
-// credential-bearing values redacted. A secretFlags token's value is redacted
-// wholesale across the `--password <v>`,
-// `--password=<v>`, `-p <v>`, `-p=<v>`, and `-p<v>` spellings pflag accepts. Every
-// other arg gets a conservative DSN/userinfo scrub as defense in depth so a
-// positional connection string cannot leak a password.
-func scrubArgsForTelemetry(argv []string, secretFlags map[string]bool) string {
-	parts := make([]string, len(argv))
-	redactNext := false
-	for i, a := range argv {
-		if redactNext {
-			parts[i] = "xxxxx"
-			redactNext = false
-			continue
-		}
-		if name, value, ok := strings.Cut(a, "="); ok {
-			if secretFlags[name] {
-				// --password=<secret> / -p=<secret> — redact the whole value.
-				parts[i] = name + "=xxxxx"
-				continue
-			}
-			if strings.HasPrefix(name, "-") {
-				scrubbed := scrubUserinfoPassword(scrubPotentialDSNPasswords(value))
-				if scrubbed != value {
-					// Preserve an arbitrary flag name while parsing its equals-value as
-					// a possible DSN. Passing the whole token to url.Parse would treat
-					// the flag prefix as the URL scheme and miss query credentials.
-					parts[i] = name + "=" + scrubbed
-					continue
-				}
-			}
-		}
-		if i > 0 {
-			if secretFlags[argv[i-1]] {
-				// <secret> following a bare --password / -p token.
-				parts[i] = "xxxxx"
-				continue
-			}
-		}
-		if short, ok := secretShorthandPrefix(a, secretFlags); ok {
-			// -p<secret> — pflag's concatenated shorthand spelling.
-			parts[i] = short + "xxxxx"
-			continue
-		}
-		if secretShorthandTakesSeparateValue(a, secretFlags) {
-			// -qp <secret> — a boolean shorthand cluster ending in the
-			// value-taking secret shorthand, with its value in the next token.
-			parts[i] = a
-			redactNext = true
-			continue
-		}
-		parts[i] = scrubUserinfoPassword(scrubPotentialDSNPasswords(a))
-	}
-	return strings.Join(parts, " ")
-}
-
-// secretShorthandPrefix reports whether a is pflag's concatenated secret-shorthand
-// spelling, returning the "-x...-p" prefix to preserve. Long flags cannot concatenate
-// a value, so only -X<value> shorthands are matched.
-//
-// pflag also accepts a CLUSTER of boolean shorthands ending in a value-taking
-// shorthand: given boolean flags -q/-v and value flag -p, "-qpSECRET" parses as -q
-// followed by -p SECRET, and "-vpSECRET" parses as -v followed by -p SECRET — but the
-// raw token still reaches telemetry as one string. Walk the leading run of letters in
-// a; the first letter whose "-x" token is a registered secret shorthand ends the
-// cluster, and everything after it is that flag's value, regardless of how many
-// boolean shorthands preceded it. This mirrors pflag's own grammar (a cluster is zero
-// or more boolean shorthands followed by one value-taking shorthand) without needing
-// the running command's flag set here: it is conservative in the safe direction,
-// since treating a longer prefix as consumed by the secret shorthand only ever
-// over-redacts, never under-redacts.
-func secretShorthandPrefix(a string, secretFlags map[string]bool) (string, bool) {
-	if len(a) < 3 || a[0] != '-' || a[1] == '-' {
-		return "", false
-	}
-	for i := 1; i < len(a); i++ {
-		c := a[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-			return "", false
-		}
-		if secretFlags["-"+string(c)] {
-			if i+1 >= len(a) {
-				return "", false // no value follows; not the concatenated spelling
-			}
-			return a[:i+1], true
-		}
-	}
-	return "", false
-}
-
-// secretShorthandTakesSeparateValue recognizes a boolean-shorthand cluster that
-// ends in a registered secret shorthand with no attached value. For example,
-// pflag parses "-qp secret" as -q followed by -p=secret.
-func secretShorthandTakesSeparateValue(a string, secretFlags map[string]bool) bool {
-	if len(a) < 3 || a[0] != '-' || a[1] == '-' {
-		return false
-	}
-	for i := 1; i < len(a); i++ {
-		c := a[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-			return false
-		}
-		if secretFlags["-"+string(c)] {
-			return i == len(a)-1
-		}
-	}
-	return false
-}
-
-// scrubUserinfoPassword redacts the password in a URL/DSN userinfo section
-// (postgres://user:PASS@host or user:PASS@tcp(...)); args without a user:pass@
-// userinfo pass through unchanged, so ordinary text is never mangled.
-func scrubUserinfoPassword(a string) string {
-	at := strings.LastIndexByte(a, '@')
-	if at < 0 {
-		return a
-	}
-	head := a[:at]
-	start := 0
-	if s := strings.LastIndex(head, "//"); s >= 0 {
-		start = s + 2 // userinfo begins after the scheme's "//"
-	}
-	colon := strings.IndexByte(head[start:], ':')
-	if colon < 0 {
-		return a // no "user:pass" userinfo, nothing to redact
-	}
-	return head[:start+colon+1] + "xxxxx" + a[at:]
 }

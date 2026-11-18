@@ -5,17 +5,20 @@
 # the field Bazel checks before it accepts --remote_cache_compression (it
 # refuses a remote that does not list it). Anything else exits nonzero: not
 # listed, an HTTP or gRPC error, a refused connection, a timeout, an answer
-# that does not parse, no curl or python3. The caller then leaves the flag
-# off, and never fails on it.
+# that does not parse, no curl or python3.
 #
-# So the server decides, at run time: when rbe-west turns zstd on, fork-cache
-# runs use it; when it turns it off (rollback), they stop. No repository
-# variable (fork pull_request runs see none) and no revert.
+# A diagnostic, not a gate: .bazelrc's fork-cache asks for zstd itself
+# (--remote_cache_compression, committed 2026-11), so while this exits
+# nonzero against the live endpoint every fork-cache build, contributor or
+# CI, runs locally until rbe-cache advertises zstd again or .bazelrc's line
+# is reverted. Fork-cache CI jobs run it first (beads' write-bazelrc.sh,
+# gascity's bazel.yml): on failure they warn and skip the remote repo
+# contents cache lines, and never fail. Operators can run it by hand.
 #
 # One unary gRPC call over curl's HTTP/2, decoded by python3's standard
-# library: no grpcurl, no new action. Nothing goes to stdout (callers write
-# their rc from it); one verdict line goes to stderr. A byte copy lives in
-# gascity (tools/rbe/) and beads (.github/actions/setup-bazel/); keep in sync.
+# library: no grpcurl, no new action. Nothing goes to stdout; one verdict
+# line goes to stderr. A byte copy lives in gascity (tools/rbe/) and beads
+# (.github/actions/setup-bazel/); keep in sync.
 #
 # Tests only: RBE_CACHE_PROBE_URL (a stand-in server) and
 # RBE_CACHE_PROBE_MAX_TIME (seconds).
@@ -24,7 +27,7 @@ url=${RBE_CACHE_PROBE_URL:-https://rbe-cache.ops.gascity.com:8443}
 max_time=${RBE_CACHE_PROBE_MAX_TIME:-5}
 
 no() {
-	echo "rbe-cache zstd probe: $*; the fork cache stays identity" >&2
+	echo "rbe-cache zstd probe: $*; fork-cache builds run locally" >&2
 	exit 1
 }
 command -v curl >/dev/null 2>&1 || no "no curl"
@@ -116,4 +119,4 @@ print("zstd not advertised (supported_compressors %s)" % compressors)
 sys.exit(1)
 PY
 ) || no "${why:-python3 failed}"
-echo "rbe-cache zstd probe: $why; the fork cache uses zstd" >&2
+echo "rbe-cache zstd probe: $why; fork-cache can use it" >&2

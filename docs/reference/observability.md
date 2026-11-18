@@ -65,6 +65,15 @@ Every metric and span carries the OTel resource describing the bd process:
 |-----------|-------|-------|
 | `service.name` | `bd` | Override with `OTEL_SERVICE_NAME`. |
 | `service.version` | bd version | |
+| `host.name` | hostname | Often the user's name on a laptop; override with `OTEL_RESOURCE_ATTRIBUTES=host.name=<name>`. |
+| `process.pid`, `process.executable.name` | pid, `bd` | |
+| `process.runtime.name`, `process.runtime.version`, `process.runtime.description` | Go runtime | |
+
+The resource never carries the command line (`process.command_args`), the
+executable path or the OS user name (`process.owner`): the command line can
+hold secrets, issue titles and search text, and the other two identify the
+user. The command span's `bd.args` names the command and the flags that were
+set, never their values (see [Traces](#traces-spans)).
 
 Add anything else via `OTEL_RESOURCE_ATTRIBUTES`.
 
@@ -105,7 +114,7 @@ sum(rate(bd_storage_operations_total[5m]))               # operation rate
 ### Confirm storage instrumentation locally
 
 To verify the storage decorator chain is wired up without standing up a
-collector, run `bd` with stdout exporters and look for `bd.storage.*`
+collector, run `bd` with the console exporters and look for `bd.storage.*`
 records on stderr:
 
 ```bash
@@ -137,6 +146,8 @@ present, the storage decorator is not in the chain — check
 |--------|------|------------|-------------|
 | `bd_db_retry_count_total` | Counter | — | SQL retries in server mode |
 | `bd_db_lock_wait_ms` | Histogram | `dolt_lock_exclusive` | Wait time to acquire database locks |
+
+The connection-pool gauges (`bd_db_pool_open`, `bd_db_pool_in_use`, `bd_db_pool_idle`, `bd_db_pool_max_open`) sum the pools of the stores open in the process. With no store open they report the last-known values of the stores that closed since the last open, not live ones; a short command closes its store before its final export.
 
 ### Issues (`bd_issue_*`)
 
@@ -178,8 +189,8 @@ Spans are only exported when `OTEL_TRACES_EXPORTER=console` — there is no trac
 |-----------|-------------|
 | `bd.command` | Subcommand name (`list`, `create`, ...) |
 | `bd.version` | bd version |
-| `bd.args` | Raw arguments passed to the command (e.g. "create 'title' -p 2") |
-| `bd.actor` | Actor (resolved from git config / env) |
+| `bd.args` | Command path and the long names of the flags set on the command line, sorted: `bd create "title" -d "text" -p 2` records `create --description --priority`. Never an argument or a flag value |
+| `bd.actor` | Actor: the `--actor` value, else `BEADS_ACTOR` or config, else git `user.name` or `$USER` |
 
 **`hook.exec`**
 
@@ -188,10 +199,24 @@ Spans are only exported when `OTEL_TRACES_EXPORTER=console` — there is no trac
 | `hook.event` | Event type (`create`, `update`, `close`) |
 | `hook.path` | Absolute path to the script |
 | `bd.issue_id` | ID of the triggering issue |
-| event `hook.stdout` | Script standard output (truncated to 1 024 bytes) |
-| event `hook.stderr` | Script error output (truncated to 1 024 bytes) |
+| event `hook.stdout` | The script wrote to standard output |
+| event `hook.stderr` | The script wrote to standard error |
 
-The `hook.stdout` / `hook.stderr` events carry two attributes: `output` (the text) and `bytes` (original size before truncation).
+The `hook.stdout` / `hook.stderr` events carry one attribute, `bytes` (how much
+the script wrote). The text is not exported: a hook receives the issue as JSON
+on stdin and often echoes or logs it.
+
+### Issue content
+
+Span attributes and events say what ran and count and time it: issue ids,
+actors, issue types, config and `kv` keys, provenance refs, branch and remote
+names, the hook path, and SQL statements with their `?` placeholders. Some of
+these repeat what you typed: an issue id you named, an `--actor` value, a
+`bd kv set` key, a `bd provenance by-ref` ref or a branch name. They never
+carry issue content: no titles, descriptions, notes, labels, comments, close
+reasons, search text, commit messages or hook output, and `bd.args` never
+carries an argument or a flag value. A failed span records its error message,
+which can quote the input that failed.
 
 ---
 
@@ -200,8 +225,8 @@ The `hook.stdout` / `hook.stderr` events carry two attributes: `output` (the tex
 ```
 cmd/bd/main.go
   └─ telemetry.Init()
-      ├─ OTEL_TRACES_EXPORTER=console        → TracerProvider stdout
-      ├─ OTEL_METRICS_EXPORTER=console       → MeterProvider stdout
+      ├─ OTEL_TRACES_EXPORTER=console        → TracerProvider stderr
+      ├─ OTEL_METRICS_EXPORTER=console       → MeterProvider stderr
       └─ OTEL_EXPORTER_OTLP_METRICS_ENDPOINT → MeterProvider HTTP → VictoriaMetrics
 
 internal/storage/dolt/        → bd_db_* metrics + dolt.* spans

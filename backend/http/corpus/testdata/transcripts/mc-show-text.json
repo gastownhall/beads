@@ -1,0 +1,8 @@
+{
+  "shape": "mc-show-text",
+  "requests": [
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-r1","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-r1","query":["include_dependents"],"status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-r1","query":["include_comments"],"status":200}
+  ]
+}

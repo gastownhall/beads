@@ -40,6 +40,7 @@ go_test(
         "engine_match_key_test.go",
         "engine_pull_failure_test.go",
         "engine_pull_overlap_test.go",
+        "engine_pull_push_hash_test.go",
         "engine_ratelimit_test.go",
         "engine_selective_test.go",
         "engine_test.go",

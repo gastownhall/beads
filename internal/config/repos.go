@@ -81,6 +81,7 @@ func SetReposInYAML(configPath string, repos *ReposConfig) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to read config.yaml: %w", err)
 	}
+	exists := err == nil
 
 	// Parse existing config into yaml.Node to preserve structure
 	var root yaml.Node
@@ -147,8 +148,14 @@ func SetReposInYAML(configPath string, repos *ReposConfig) error {
 		return fmt.Errorf("failed to close encoder: %w", err)
 	}
 
-	// Write back to file
-	if err := os.WriteFile(configPath, []byte(buf.String()), 0600); err != nil {
+	// Write back to file: replace an existing one in one step, as the other
+	// config.yaml writers do (replaceConfigYaml), and create a missing one.
+	if exists {
+		err = replaceConfigYaml(configPath, []byte(buf.String()))
+	} else {
+		err = os.WriteFile(configPath, []byte(buf.String()), 0600)
+	}
+	if err != nil {
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 

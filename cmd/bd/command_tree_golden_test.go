@@ -49,6 +49,7 @@ var commandHelpGoldenArgs = [][]string{
 	{"versions"},
 	{"config"},
 	{"serve"},
+	{"connect"},
 }
 
 // TestCommandTreeGolden pins the whole bd command tree: for every command and

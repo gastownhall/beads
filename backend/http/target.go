@@ -37,9 +37,8 @@ func LoadTarget(beadsDir string) (Target, error) { return httpclient.LoadTarget(
 // coverage, identity verification, conversion consent — is the CLI's, so an
 // embedder that writes a workspace this way owns those decisions itself.
 //
-// It refuses a workspace in a format this build cannot open, as Attach does,
-// with *UnsupportedWorkspaceFormatError, and a historical SQLite workspace
-// with *LegacyWorkspaceError, and writes nothing there.
+// It refuses a historical SQLite workspace, as Attach does, with
+// *LegacyWorkspaceError, and writes nothing there.
 func SaveTarget(beadsDir string, t Target) error {
 	if err := configfile.CheckDiscoveredForOpen(beadsDir); err != nil {
 		return err
@@ -49,7 +48,5 @@ func SaveTarget(beadsDir string, t Target) error {
 
 // RemoveTarget deletes the activation sidecar, reporting whether one was
 // there. Detaching is a per-user act, so it never touches the tracked
-// metadata.json that selects the backend. Unlike SaveTarget it does not
-// refuse a workspace in a format this build cannot open: it only deletes
-// this backend's own per-user file.
+// metadata.json that selects the backend.
 func RemoveTarget(beadsDir string) (bool, error) { return httpclient.RemoveTarget(beadsDir) }

@@ -485,7 +485,7 @@ func FixDatabaseConfig(path string) error {
 // config.json into metadata.json, so pass only the workspace doctor runs in,
 // which command admission has checked. Read a .beads that admission never saw,
 // such as a nested one the Classic Artifacts walk reaches, with
-// configfile.LoadAndCheckWorkspaceFormat instead.
+// configfile.LoadForDiscovery instead.
 func getDatabasePath(beadsDir string) string {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {

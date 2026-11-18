@@ -207,7 +207,9 @@ var corpusPartsConst = regexp.MustCompile(`(?m)^const corpusParts = (\d+)$`)
 // TestServedCorpusPart1..N, the corpus parts (backend/http/corpus
 // corpusParts), to shards 1..N, one each, and pins nothing else, so every
 // part runs alone in its own Bazel shard on its own seed. One shard is left
-// for the binary's round-robin over the package's other (engine-free) tests.
+// for the binary's round-robin over the package's other tests (the
+// engine-free ones, TestServedGateCheckOverAwaitTypedGates and
+// TestServedCorpusCurrentCapabilityTranscripts).
 func TestCorpusPartsArePinnedOnePerShard(t *testing.T) {
 	root := sourceRepoRoot(t)
 	const (

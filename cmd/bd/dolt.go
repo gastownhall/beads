@@ -197,12 +197,20 @@ Use this before switching to server mode to ensure the server is running.`,
 // error. This typically happens when the remote was added via `dolt remote add`
 // (filesystem config) but not via `bd dolt remote add` (which also registers it
 // in the SQL server's dolt_remotes table).
+//
+// The fetch+merge pull route (bd-e2q8zs) also surfaces dolt's
+// ErrUnknownRemote — "unknown remote; '<name>' does not appear to be a dolt
+// database. ..." — because DOLT_FETCH/DOLT_MERGE reject an unconfigured remote
+// in that wording, and `dolt fetch <remote> <branch>` likewise fails there.
+// Without accepting it, the "Remote <name> is not configured" hint never
+// fired and the benign no-remote case looked like an opaque sync failure.
 func isRemoteNotFoundErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "remote") && strings.Contains(msg, "not found")
+	return (strings.Contains(msg, "remote") && strings.Contains(msg, "not found")) ||
+		strings.Contains(msg, "unknown remote")
 }
 
 // remoteLister is the narrow store surface needed to confirm the structured
@@ -219,19 +227,26 @@ type persistedRemoteProber interface {
 }
 
 // isConfirmedNoRemote reports whether a push/pull failure is the benign
-// "no remote configured" case that may exit 0. isRemoteNotFoundErr alone is a
-// loose string match that also fires on deleted/renamed remote-side repos,
-// missing remote branches, and typoed remote names — real sync failures that
-// must keep a non-zero exit so agents and CI notice (bd-6dnrw.7). Only an
-// actually-empty dolt_remotes table makes the skip safe; if the remotes can't
-// be listed, treat the failure as real. An empty table alone is still not
-// proof in server mode: a freshly auto-started sql-server can report empty
-// dolt_remotes at cold start even though remotes are persisted on disk
-// (GH#2118) — the same reason the remote-migrate gate reads repo_state.json
-// directly — so the on-disk probe must agree before the skip fires
-// (bd-578h9.10).
+// "no remote configured" case that may exit 0. isNoRemoteConfiguredErr (the
+// sync classifier, itself a superset of isRemoteNotFoundErr) is only a loose
+// string match that also fires on
+// deleted/renamed remote-side repos, missing remote branches, and typoed
+// remote names — real sync failures that must keep a non-zero exit so agents
+// and CI notice (bd-6dnrw.7). Only an actually-empty dolt_remotes table makes
+// the skip safe; if the remotes can't be listed, treat the failure as real.
+// An empty table alone is still not proof in server mode: a freshly
+// auto-started sql-server can report empty dolt_remotes at cold start even
+// though remotes are persisted on disk (GH#2118) — the same reason the
+// remote-migrate gate reads repo_state.json directly — so the on-disk probe
+// must agree before the skip fires (bd-578h9.10). Using the wider classifier
+// (bd-e2q8zs) keeps the `bd dolt pull` exit-0 gate in step with the
+// fetch+merge route's error wordings, including the bare `no remote` error
+// DOLT_FETCH produces for a default remote that was never configured.
+// Embedded mode's pull has always fetched first and failed with that bare
+// error, so an embedded `bd dolt pull` with no remote now exits 0 as well,
+// where it used to exit 1.
 func isConfirmedNoRemote(ctx context.Context, st remoteLister, err error) bool {
-	if !isRemoteNotFoundErr(err) {
+	if !isNoRemoteConfiguredErr(err) {
 		return false
 	}
 	return hasNoRemoteConfigured(ctx, st)
@@ -1436,8 +1451,8 @@ is shown as not running, and the next bd command launches it.`,
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
-		// A workspace in a format this build cannot open is refused before
-		// configfile.Load, which would first migrate a legacy config.json.
+		// A historical SQLite workspace is refused before configfile.Load,
+		// which would first migrate a legacy config.json.
 		if err := checkDiscoveredForOpen(beadsDir); err != nil {
 			return handleWorkspaceGuardError(err)
 		}
@@ -1970,6 +1985,9 @@ func purgeDroppedDatabases(ctx context.Context, conn versioncontrolops.DBConn) e
 type doltRemoteAddStore interface {
 	ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error)
 	AddRemote(ctx context.Context, name, url string) error
+	// AddRemoteWithRef is AddRemote for a git-backed remote whose Dolt data
+	// lives on the git ref ref; an empty ref is AddRemote.
+	AddRemoteWithRef(ctx context.Context, name, url, ref string) error
 	RemoveRemote(ctx context.Context, name string) error
 }
 
@@ -1995,13 +2013,52 @@ func confirmDoltRemoteOverwrite(surface, name, existingURL, newURL string) bool 
 	return response == "y" || response == "yes"
 }
 
-func findDoltRemoteURL(remotes []storage.RemoteInfo, name string) string {
+// findDoltRemote returns the named remote's whole record — URL and git ref —
+// so a caller re-registering it can carry what it recorded; the zero
+// storage.RemoteInfo when absent.
+func findDoltRemote(remotes []storage.RemoteInfo, name string) storage.RemoteInfo {
 	for _, remote := range remotes {
 		if remote.Name == name {
-			return remote.URL
+			return remote
 		}
 	}
-	return ""
+	return storage.RemoteInfo{}
+}
+
+func findDoltRemoteURL(remotes []storage.RemoteInfo, name string) string {
+	return findDoltRemote(remotes, name).URL
+}
+
+// registerPersistedDoltRemote registers on the server a remote that the
+// server does not list but the served database records on disk at a URL
+// matching url. The server resolves push, pull and fetch through that
+// listing and reads repo_state.json only when it loads the database, so
+// the recorded remote is added, its URL (the spelling a restart would load)
+// and git ref, and the server ends where a listed match leaves it.
+func registerPersistedDoltRemote(ctx context.Context, st doltRemoteAddStore, persisted storage.RemoteInfo, url string) error {
+	if len(persisted.CLIOnlyParams) > 0 {
+		// The server rewrites the remote's record from the add, which
+		// carries only the URL and git ref: it would erase these for good,
+		// where a restart loads them.
+		return fmt.Errorf("its recorded parameters %s cannot be set over SQL, and the add would erase them; restart the Dolt server so it loads the remote as recorded", remedy.PrintedList(persisted.CLIOnlyParams, ", "))
+	}
+	addErr := st.AddRemoteWithRef(ctx, persisted.Name, persisted.URL, persisted.Ref)
+	if addErr == nil || !strings.Contains(strings.ToLower(addErr.Error()), "already exists") {
+		return addErr
+	}
+	// The server checks the add against the set it lists, which lacked the
+	// remote, so a concurrent add registered it in between. That is the
+	// state this add wanted, as the push path's re-add takes it
+	// (prepareCLIRouteForGitProtocol), once the server lists the remote at
+	// a matching URL.
+	remotes, err := st.ListRemotes(ctx)
+	if err != nil {
+		return fmt.Errorf("%w (listing remotes again: %v)", addErr, err)
+	}
+	if !doltutil.RemoteURLsMatch(findDoltRemoteURL(remotes, persisted.Name), url) {
+		return addErr
+	}
+	return nil
 }
 
 func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url string, confirm doltRemoteOverwriteConfirmer) (doltRemoteAddResult, error) {
@@ -2011,15 +2068,18 @@ func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url stri
 	}
 
 	existingURL := findDoltRemoteURL(remotes, name)
+	var persisted storage.RemoteInfo
 	existingFromDiskOnly := false
 	if existingURL == "" {
 		// An empty listing is not proof the remote is absent: a freshly
 		// (auto-)started sql-server can report empty dolt_remotes while the
 		// remote is persisted on disk (GH#2118, wy-6k7f7). Recover the
-		// persisted URL so the add gets the same match/confirm treatment it
-		// would after the window, instead of silently writing over an
-		// invisible remote.
-		existingURL = findDoltRemoteURL(persistedRemoteInfosFor(st), name)
+		// persisted record — URL and git ref — so a match below can register
+		// it on the server and a URL disagreement still gets the confirm
+		// treatment it would after the window, instead of silently writing
+		// over an invisible remote.
+		persisted = findDoltRemote(persistedRemoteInfosFor(st), name)
+		existingURL = persisted.URL
 		existingFromDiskOnly = existingURL != ""
 	}
 	if existingURL == "" {
@@ -2030,6 +2090,11 @@ func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url stri
 	}
 
 	if doltutil.RemoteURLsMatch(existingURL, url) {
+		if existingFromDiskOnly {
+			if err := registerPersistedDoltRemote(ctx, st, persisted, url); err != nil {
+				return doltRemoteAddResult{}, fmt.Errorf("add remote %s: %w", name, err)
+			}
+		}
 		return doltRemoteAddResult{}, nil
 	}
 
@@ -2401,8 +2466,8 @@ func showDoltConfig(testConnection bool) error {
 		return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
-	// A workspace in a format this build cannot open is refused before
-	// configfile.Load, which would first migrate a legacy config.json.
+	// A historical SQLite workspace is refused before configfile.Load, which
+	// would first migrate a legacy config.json.
 	if err := checkDiscoveredForOpen(beadsDir); err != nil {
 		return handleWorkspaceGuardError(err)
 	}

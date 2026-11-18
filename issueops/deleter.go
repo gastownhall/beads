@@ -95,15 +95,15 @@ type DeleteRequest struct {
 	// NOW, which an edge added since its read may have grown. A caller that
 	// needs the closure itself pinned wants DryRun's preview and not this.
 	ExpectedVersion *int64
-	// Cascade also deletes the TRANSITIVE CLOSURE of everything that depends
-	// on the named rows, in both planes. It is what `bd delete --cascade`
-	// asks for.
+	// Cascade also deletes the named rows' PARENT-CHILD DESCENDANTS,
+	// transitively, in both planes. It is what `bd delete --cascade` asks for.
+	// It follows containment only (GH#6301): a row that merely blocks, relates
+	// to or was discovered from a deleted row is not part of its tree.
 	//
-	// WITH CASCADE THERE IS NOTHING LEFT TO ORPHAN, by construction: the
-	// closure contains every dependent of every row it deletes. So Cascade
-	// makes Force moot rather than conflicting with it — a request carrying
-	// both is legal and behaves as Cascade, and DeleteResult.Orphaned comes
-	// back empty.
+	// A CASCADE ORPHANS what its tree leaves behind: every surviving row with
+	// an edge of any other type into the tree loses that edge and is named in
+	// DeleteResult.Orphaned. Cascade makes Force moot rather than conflicting
+	// with it — a request carrying both is legal and behaves as Cascade.
 	//
 	// The traversal is BOUNDED. A closure that grows past the backend's
 	// runaway limit aborts the whole request and deletes nothing rather than
@@ -182,15 +182,21 @@ type DeleteResult struct {
 	// Orphaned names the surviving rows that depended on something this
 	// request deleted, in ascending id order.
 	//
-	// It is populated exactly when the request carried Force without Cascade —
-	// the only mode in which orphaning is possible — and is empty otherwise.
-	// It is also carried on the DependentsOutsideRequestError the unforced
+	// It is populated under Cascade (the rows joined to the deleted tree by
+	// any edge other than parent-child, checked against every deleted row) and
+	// under Force without Cascade, and is empty otherwise. A DryRun names the
+	// same rows the deletion would. It is also carried on the DependentsOutsideRequestError the unforced
 	// mode returns, so the same fact reaches a caller whichever answer it got.
 	//
 	// It is DIRECT dependents only. A row two edges away loses no edge and is
 	// not orphaned by this deletion; it is merely blocked by something that is
 	// now blocked by nothing.
 	Orphaned []string
+	// DeletedIDs names the rows Deleted counts, in ascending id order without
+	// duplicates, so len(DeletedIDs) == Deleted. Under Cascade it is the whole
+	// parent-child closure, which is what a preview has to show before the
+	// caller agrees to it; a DryRun names the same rows the deletion would.
+	DeletedIDs []string
 }
 
 // ErrDependentsOutsideRequest classifies the unforced refusal: a named row has
@@ -220,7 +226,7 @@ type DependentsOutsideRequestError struct {
 }
 
 func (e *DependentsOutsideRequestError) Error() string {
-	return fmt.Sprintf("issue %s has dependents not in deletion set; use --cascade to delete them or --force to orphan them", e.IssueID)
+	return fmt.Sprintf("issue %s has dependents not in deletion set; use --force to orphan them, or --cascade to also delete its parent-child descendants (other dependents are orphaned)", e.IssueID)
 }
 
 // Unwrap makes DependentsOutsideRequestError match ErrDependentsOutsideRequest.
@@ -288,8 +294,8 @@ func (e *NotFoundError) Unwrap() error { return ErrNotFound }
 // Deterministic request-validation failures match ErrValidation. Result values
 // are unspecified when error is non-nil.
 type Deleter interface {
-	// Delete erases req.IDs and, under Cascade, everything that depends on
-	// them, and reports what it did.
+	// Delete erases req.IDs and, under Cascade, their parent-child
+	// descendants, and reports what it did.
 	//
 	// IT IS ONE TRANSACTION, and on this role that covers one thing it did not
 	// cover before: THE TEXT-REFERENCE REWRITE. The direct CLI route deleted

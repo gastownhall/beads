@@ -1,0 +1,60 @@
+{
+  "data": [
+    {
+      "actor": "protocol-test",
+      "comment": "Added label: corpus-label",
+      "created_at": "<TS>",
+      "event_type": "label_added",
+      "issue_id": "corpus-root"
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "claimed",
+      "issue_id": "corpus-root",
+      "new_value": "{\"assignee\":\"protocol-test\",\"status\":\"in_progress\"}",
+      "old_value": "{\"id\":\"corpus-root\",\"title\":\"Corpus root issue\",\"description\":\"updated corpus root\",\"status\":\"open\",\"priority\":0,\"issue_type\":\"feature\",\"owner\":\"test@protocol.test\",\"created_at\":\"<TS>\",\"created_by\":\"protocol-test\",\"updated_at\":\"<TS>\",\"metadata\":{\"phase\":2},\"labels\":[\"corpus-label\"]}"
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "created",
+      "issue_id": "corpus-root",
+      "new_value": "",
+      "old_value": ""
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "dependency_added",
+      "issue_id": "corpus-root",
+      "new_value": "Added dependency: corpus-root blocks corpus-dep",
+      "old_value": ""
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "dependency_removed",
+      "issue_id": "corpus-root",
+      "new_value": "Removed dependency on corpus-dep",
+      "old_value": ""
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "unclaimed",
+      "issue_id": "corpus-root",
+      "new_value": "{\"assignee\":\"\",\"status\":\"open\"}",
+      "old_value": "{\"id\":\"corpus-root\",\"title\":\"Corpus root issue\",\"description\":\"updated corpus root\",\"status\":\"in_progress\",\"priority\":0,\"issue_type\":\"feature\",\"assignee\":\"protocol-test\",\"owner\":\"test@protocol.test\",\"created_at\":\"<TS>\",\"created_by\":\"protocol-test\",\"updated_at\":\"<TS>\",\"started_at\":\"<TS>\",\"lease_expires_at\":\"<TS>\",\"heartbeat_at\":\"<TS>\",\"metadata\":{\"phase\":2},\"labels\":[\"corpus-label\"]}"
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "updated",
+      "issue_id": "corpus-root",
+      "new_value": "{\"description\":\"updated corpus root\",\"metadata\":{\"phase\":2},\"priority\":0}",
+      "old_value": "{\"id\":\"corpus-root\",\"title\":\"Corpus root issue\",\"description\":\"deterministic corpus root\",\"status\":\"open\",\"priority\":1,\"issue_type\":\"feature\",\"owner\":\"test@protocol.test\",\"created_at\":\"<TS>\",\"created_by\":\"protocol-test\",\"updated_at\":\"<TS>\"}"
+    }
+  ],
+  "schema_version": 1
+}

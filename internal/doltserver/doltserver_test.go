@@ -2740,7 +2740,11 @@ func TestVerifyRemotesAPIState(t *testing.T) {
 // auto_gc_behavior.archive_level: 0 (the actual Snappy-GC fix,
 // gastownhall/beads#4986) and auto-GC left enabled, plus cfg_dir set to the
 // caller-resolved value (gastownhall/beads#4986 round 2: --config mode
-// skips Dolt's own .doltcfg discovery, so this must be set explicitly).
+// skips Dolt's own .doltcfg discovery, so this must be set explicitly), plus
+// behavior.dolt_transaction_commit left off (gastownhall/beads#4443:
+// docs/architecture/dolt.md tells users bd does not turn it on;
+// TestLifecycle_SharedServerSQLCommitSurvivesKill checks the running server,
+// but only where Dolt-backed integration tests run).
 func TestBuildDoltServerYAMLConfig(t *testing.T) {
 	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 8081, false, "/tmp/some/.doltcfg")
 	if err != nil {
@@ -2766,6 +2770,9 @@ func TestBuildDoltServerYAMLConfig(t *testing.T) {
 	}
 	if got := cfg.CfgDir(); got != "/tmp/some/.doltcfg" {
 		t.Errorf("CfgDir = %q, want %q", got, "/tmp/some/.doltcfg")
+	}
+	if cfg.DoltTransactionCommit() {
+		t.Error("DoltTransactionCommit = true, want false: every SQL transaction would become its own Dolt commit")
 	}
 
 	gc := cfg.AutoGCBehavior()

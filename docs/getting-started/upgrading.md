@@ -472,7 +472,7 @@ The statement also removes the markers of any later clone-local migrations,
 which the next command re-applies. Otherwise, recover the rows from a clone
 or backup that can read that history and copy them in by hand as shown below.
 
-To recover the rows **with v1.3.3 or earlier**, copy them in by hand with the
+To recover the rows **with v1.3.4 or earlier**, copy them in by hand with the
 [Dolt CLI](https://docs.dolthub.com/cli-reference/cli) while no `bd` command
 runs. This is only safe when the live table is still empty and history holds
 exactly one drop commit; otherwise install a newer release, which merges the

@@ -15,7 +15,7 @@ const (
 	// matched, so the two halves of the one path exception cannot drift apart.
 	customMethodPathValue = "idop"
 	// customMethodPattern is that one registration. Every row carrying a
-	// customMethod declares it, and s.handler collapses them into a single
+	// customMethod declares it, and s.mounts collapses them into a single
 	// ServeMux entry.
 	customMethodPattern = "/v0/beads/issues/{" + customMethodPathValue + "}"
 	// customMethodIDValue is where the dispatcher leaves the id it split out,
@@ -210,6 +210,16 @@ const CapDependenciesBlockingIsBlocked = "dependencies.blocking.isBlocked"
 // learns journal activation for any purpose: events.list answers 409
 // events_journal_disabled when the journal is off.
 const CapIssuesArrivalSeq = "issues.arrivalSeq"
+
+// CapIssuesDeleteContainmentCascade is the behavior capability announcing
+// that issues:delete's `cascade` follows PARENT-CHILD edges only (GH#6301):
+// the closure is the named beads' containment tree, and a bead joined to it by
+// any other edge survives and comes back in `orphaned`. It names no new
+// request member — an older server accepts the same `cascade` and deletes
+// every transitive dependent — so the token is how a client learns which
+// meaning it will get. bd's client refuses a cascade (preview included)
+// against a server that does not advertise it (wire.CapDeleteContainmentCascade).
+const CapIssuesDeleteContainmentCascade = "issues.delete.containmentCascade"
 
 // CapIssuesSweepWispsPlane is the behavior capability that advertises the
 // `wisps-plane` value of SweepRequest.tier (sweep.go, spec SweepRequest.tier):
@@ -427,7 +437,7 @@ func customMethodTarget(rows []route, segment string) (route, string, *Result) {
 // route is one row of the surface: an operation, where it lives in the
 // document, where it lives in the router, and what the request lifecycle owes
 // it. TestSpecRouteParity compares this table against the spec's paths, and
-// s.handler builds the router from it, so "the routes" and "the document" are
+// s.mounts builds the router from it, so "the routes" and "the document" are
 // the same statement made twice.
 type route struct {
 	// op is the spec's operationId. It also names the operation in the
@@ -1181,7 +1191,7 @@ var behaviorCapabilities = []string{
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
-	CapIssuesArrivalSeq,
+	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

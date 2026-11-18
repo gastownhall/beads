@@ -1104,6 +1104,10 @@ func TestIsRemoteNotFoundErr(t *testing.T) {
 		{"unrelated error", fmt.Errorf("connection refused"), false},
 		{"remote not found", fmt.Errorf("remote 'origin' not found"), true},
 		{"no common ancestor", fmt.Errorf("no common ancestor"), false},
+		// bd-e2q8zs: the fetch+merge pull route rejects an unconfigured
+		// remote with dolt's ErrUnknownRemote wording, not "not found".
+		{"unknown remote", fmt.Errorf("unknown remote; 'peer1' does not appear to be a dolt database. could not read from the remote database. please make sure you have the correct access rights and the database exists"), true},
+		{"unknown, not a remote error", fmt.Errorf("unknown username"), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1157,6 +1161,16 @@ func TestIsConfirmedNoRemote(t *testing.T) {
 		{"nil error", nil, fakeRemoteLister{}, false},
 		{"empty table but remote persisted on disk", notFound, fakeProbingRemoteLister{persisted: true}, false},
 		{"empty table and no persisted remote", notFound, fakeProbingRemoteLister{}, true},
+		// bd-e2q8zs: the fetch+merge pull route words an unconfigured remote
+		// as dolt's ErrUnknownRemote, and a never-configured default remote
+		// fetch can arrive as the bare "no remote" error — the same classes
+		// isNoRemoteConfiguredErr already knows. Either way the structural
+		// half still decides: empty table (and nothing persisted) exits 0,
+		// anything configured stays a real failure.
+		{"unknown remote, no remotes configured", fmt.Errorf("unknown remote; 'origin' does not appear to be a dolt database. could not read from the remote database"), fakeRemoteLister{}, true},
+		{"unknown remote, remotes exist", fmt.Errorf("unknown remote; 'peer1' does not appear to be a dolt database"), fakeRemoteLister{remotes: []storage.RemoteInfo{{Name: "origin"}}}, false},
+		{"bare no remote, no remotes configured", fmt.Errorf("Error 1105: no remote"), fakeRemoteLister{}, true},
+		{"bare no remote, remotes exist", fmt.Errorf("Error 1105: no remote"), fakeRemoteLister{remotes: []storage.RemoteInfo{{Name: "origin"}}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

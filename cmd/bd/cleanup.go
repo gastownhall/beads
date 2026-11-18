@@ -48,8 +48,9 @@ SAFETY:
 - Skips pinned issues, and issues of a type the workspace's types.retained
   setting names (their ids are idempotency keys; only bd prune/purge
   --retain-ids deletes them); --json reports the latter as retention_required
-- Supports --cascade to delete dependents (refused while types.retained names
-  a type, since a cascade could reach a retained issue)
+- Supports --cascade, which also deletes
+  parent-child descendants; other dependents survive (refused while
+  types.retained names a type, since a cascade could reach a retained issue)
 - Shows preview of what will be deleted
 - Use --json for programmatic output
 
@@ -193,7 +194,7 @@ SEE ALSO:
 func init() {
 	cleanupCmd.Flags().BoolP("force", "f", false, "Actually delete (without this flag, shows error)")
 	cleanupCmd.Flags().Bool("dry-run", false, "Preview what would be deleted without making changes")
-	cleanupCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
+	cleanupCmd.Flags().Bool("cascade", false, "Also delete parent-child descendants; other dependents survive")
 	cleanupCmd.Flags().Int("older-than", 0, "Only delete issues closed more than N days ago (0 = all closed issues)")
 	cleanupCmd.Flags().Bool("ephemeral", false, "Only delete closed wisps (transient molecules)")
 	// Note: cleanupCmd is added to adminCmd in admin.go
@@ -213,8 +214,8 @@ type cleanupSelection struct {
 // tombstone, so a retained issue is never its to take.
 //
 // --cascade is refused while anything is retained: the role expands a cascade
-// to every dependent past this selection, so it could delete a retained issue
-// the selection just held back.
+// to every parent-child descendant past this selection, so it could delete a
+// retained issue the selection just held back.
 func selectCleanupCandidates(closed []*types.Issue, retainedSetting string, cascade bool) (cleanupSelection, error) {
 	var selection cleanupSelection
 	if cascade && len(workapi.RetainedTypesFromSetting(retainedSetting)) > 0 {

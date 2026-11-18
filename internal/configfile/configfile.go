@@ -20,25 +20,6 @@ type Config struct {
 	Database string `json:"database"`
 	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default), a registered extension, or a legacy rejection tombstone. Read via GetBackend().
 
-	// GraphMode identifies the workspace's data model, independently of its
-	// storage backend. An absent marker preserves existing Issue workspaces.
-	// This build opens only GraphModeDependency workspaces (see GetGraphMode);
-	// the marker is carried so a Save never strips it from a workspace this
-	// build must refuse.
-	GraphMode string `json:"graph_mode,omitempty"`
-
-	// Graph workspace binding, written by builds that create graph_mode
-	// workspaces. This build never reads them, and missing or mismatched
-	// values never authorize implicit bootstrap or migration. A Save carries
-	// these known fields only, with the tags graph-preview builds declare: a
-	// zero graph_schema_version and a false graph_ready are omitted, as those
-	// builds omit them, and a graph_* key outside this set is not kept.
-	GraphScopeURL      string `json:"graph_scope_url,omitempty"`
-	GraphAuthorityID   string `json:"graph_authority_id,omitempty"`
-	GraphWorkspace     string `json:"graph_workspace,omitempty"`
-	GraphSchemaVersion int    `json:"graph_schema_version,omitempty"`
-	GraphReady         bool   `json:"graph_ready,omitempty"`
-
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
 

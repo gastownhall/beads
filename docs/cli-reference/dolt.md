@@ -268,7 +268,9 @@ only live chunks:
     deletes the Dolt data refs on the git remote, then force-pushes to
     rebuild a fresh store. Code branches are untouched.
   - Native file remotes (file:// paths): clears the store directory, then
-    force-pushes to rebuild it.
+    force-pushes to rebuild it. Refused for a git repository, bare or a
+    checkout, where Dolt keeps the store among the repository's own files:
+    replace that remote as below.
   - Cloud/hosted remotes (aws://, gs://, dolthub://, ...): bd cannot clear
     the stored data safely — replace the remote with a fresh URL or prefix:
       bd dolt remote remove &lt;name&gt;

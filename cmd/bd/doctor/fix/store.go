@@ -46,7 +46,9 @@ func openBeadMutatingStoreCreating(ctx context.Context, beadsDir string) (*dolt.
 // activated applies the workspace's journal setting and the store's own
 // versioned-history setting, and closes the store if the journal cannot be
 // honored. A failed open passes straight through, so the typed-nil store never
-// reaches the activation.
+// reaches the activation. Every caller writes beads, so a journal table the
+// journal cannot run against refuses the repair rather than letting it mutate
+// unrecorded.
 //
 // Versioned history cannot fail an open (a plumbing that cannot version simply
 // records nothing), so it needs no error handling of its own; it runs after the
@@ -54,7 +56,7 @@ func openBeadMutatingStoreCreating(ctx context.Context, beadsDir string) (*dolt.
 // internal/versionedhistory rule, not a copy: package main cannot be imported
 // from here.
 func activated(ctx context.Context, beadsDir string, store *dolt.DoltStore, err error) (*dolt.DoltStore, error) {
-	if _, err = eventsjournal.ActivateStore(beadsDir, store, err); err != nil {
+	if _, err = eventsjournal.ActivateStore(beadsDir, true, store, err); err != nil {
 		return nil, err
 	}
 	_, _ = versionedhistory.ActivateStore(ctx, store, nil)

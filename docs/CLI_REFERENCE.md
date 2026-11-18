@@ -3222,6 +3222,11 @@ Bootstrap auto-detects the right action:
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
 
+Values starting with - in sync.remote or sync.git-remote are refused as invalid
+remote URLs: bd init returns an error naming the key; bd bootstrap restores a
+local backup or issues.jsonl when available, otherwise reports a blocked plan
+without contacting the remote.
+
 This is the recommended command for:
   • Setting up beads on a fresh clone
   • Recovering after moving to a new machine
@@ -3783,7 +3788,9 @@ only live chunks:
     deletes the Dolt data refs on the git remote, then force-pushes to
     rebuild a fresh store. Code branches are untouched.
   - Native file remotes (file:// paths): clears the store directory, then
-    force-pushes to rebuild it.
+    force-pushes to rebuild it. Refused for a git repository, bare or a
+    checkout, where Dolt keeps the store among the repository's own files:
+    replace that remote as below.
   - Cloud/hosted remotes (aws://, gs://, dolthub://, ...): bd cannot clear
     the stored data safely — replace the remote with a fresh URL or prefix:
       bd dolt remote remove &lt;name&gt;
@@ -4644,6 +4651,17 @@ How it works:
   5. Prunes remote-tracking refs (they would keep the old history alive;
      the next push or fetch re-creates them at the new tip)
   6. Runs a full Dolt GC (all storage generations) to reclaim the old history
+
+Compact refuses, and changes nothing, when commit dates are out of history
+order across the cutoff: a recent commit that comes at or before an old commit
+in history is already part of the squashed base, and replaying it again could
+change data. The error names both commits; --force does not override it, and
+--dry-run reports the refusal. Before swapping main, compact also checks that
+the replayed history holds the same committed data main held when compact read
+its history, and aborts without resetting main if it does not. A write that
+reaches main while compact runs is kept, not counted as a difference:
+uncommitted changes stay pending, and a commit that lands meanwhile is kept in
+one follow-up commit.
 
 The GC pass is a full collection: Dolt storage is generational, and a default
 GC never revisits data an earlier GC moved to the old generation. On any store
@@ -5565,7 +5583,31 @@ bd rules audit [flags]
 
 #### bd rules compact
 
-Merge related rules into composites
+Merge related rules into composites.
+
+A composite keeps only the **Do:** and **Don't:** lines of its sources, plus a
+"Source rules:" line naming them. Any other prose is not carried over: the
+preview lists every dropped line by source. A rule with no **Do:** or **Don't:**
+lines is skipped by --auto and refused by --group.
+
+Without --force, compact only previews: it prints the composite, the dropped
+lines, and the files it would back up and delete, and writes nothing. --force
+is the consent to apply. It writes the composite, copies each source to
+&lt;name&gt;.md.backup, and only then deletes the sources. Backups are not rules,
+so audit ignores them.
+
+Compact refuses a group whose composite or any backup path already exists,
+including one of its own sources; nothing is written for that group. If a
+backup or delete fails, the error names what was written, backed up and
+deleted, and every backup is kept.
+
+To undo a merge, delete the composite, then rename each &lt;name&gt;.md.backup back
+to &lt;name&gt;.md (a source that was not deleted still has its original name).
+
+Examples:
+  bd rules compact --auto                    # Preview the audit's suggested merges
+  bd rules compact --auto --force            # Apply them
+  bd rules compact --group alpha,beta --force
 
 ```
 bd rules compact [flags]
@@ -5574,8 +5616,9 @@ bd rules compact [flags]
 **Flags:**
 
 ```
-      --auto            Apply audit suggestions
-      --dry-run         Preview without applying
+      --auto            Use audit suggestions to select merge groups
+      --dry-run         Preview without applying (the default without --force)
+      --force           Write the composite and delete the source files (without this flag, shows preview)
       --group strings   Rule names to merge
       --path string     Path to rules directory (default ".claude/rules/")
 ```
@@ -7236,10 +7279,11 @@ by delegating to the configured mail provider.
 
 Configuration (checked in order):
   1. BEADS_MAIL_DELEGATE or BD_MAIL_DELEGATE environment variable
-  2. 'mail.delegate' config setting (bd config set mail.delegate "gt mail")
+  2. 'mail.delegate' in user-global config (~/.config/bd/config.yaml;
+     project .beads/config.yaml and workspace database settings are ignored)
 
 Examples:
-  # Configure delegation (one-time setup)
+  # Configure delegation (one-time setup in ~/.config/bd/config.yaml)
   `export BEADS_MAIL_DELEGATE="gt mail"`
   # or
   bd config set mail.delegate "gt mail"

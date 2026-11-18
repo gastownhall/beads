@@ -264,6 +264,28 @@ Two consequences an embedder should plan for:
   last connection closes is longer than the configured timeout — up to roughly
   two ticks longer.
 
+**After idle exit, a provider rediscovers the proxy — releases after 1.3.1.**
+At 1.3.1 a unit-of-work provider's pool pins the proxy address it was
+constructed with, so once its connections drain and the proxy exits, every
+later new connection dials the retired port (or whatever now listens there).
+On main, `internal/storage/uow/endpoint_rediscovery.go` runs
+`proxy.GetCreateDatabaseProxyServerEndpoint` again, with the constructor's
+`OpenOpts`, before each new physical connection of both
+`NewDoltServerUOWProvider` and `NewExternalDoltServerUOWProvider`. That adopts
+a live, authenticated proxy without taking `proxy.lock`, or spawns a
+replacement, whose port may differ. Only the address changes: database,
+credentials, TLS and timeouts stay as constructed. Bootstrap and reused pooled
+connections do not rediscover; overlapping new connections share one lookup,
+and nothing is cached between them. A failed lookup fails that connection
+with `uow: rediscover proxy endpoint: <cause>` and never falls back to the old
+address.
+
+Cancellation is the tradeoff to plan for. A caller whose context ends stops
+waiting at once, but the lookup it started keeps running under the proxy's own
+startup rules and deadlines (it may still spawn a proxy), because other
+connections may be waiting on it. The provider's `Close` waits for a lookup in
+flight before returning, so it is not bounded by the caller's context.
+
 **`bd dolt stop` does not wait for clients.** On a proxied workspace (`cmd/bd/dolt.go`)
 the command calls `proxy.Shutdown(rootDir)`, which:
 

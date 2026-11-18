@@ -2221,6 +2221,13 @@
     },
     {
       "schema": "DeleteIssuesResult",
+      "member": "deleted_ids",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "DeleteIssuesResult",
       "member": "dependencies",
       "type": "integer",
       "required": true
@@ -7205,6 +7212,7 @@
     "DeleteIssuesRequest": "request",
     "DeleteIssuesRequest.ids[]": "request",
     "DeleteIssuesResult": "response",
+    "DeleteIssuesResult.deleted_ids[]": "response",
     "DeleteIssuesResult.orphaned[]": "response",
     "Dependency": "response",
     "DependencyEdge": "both",

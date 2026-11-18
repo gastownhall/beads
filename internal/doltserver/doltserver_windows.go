@@ -135,9 +135,10 @@ func serverInfoProcessExists(pid int) bool {
 }
 
 // gracefulStop terminates a process on Windows. Uses TerminateProcess (hard kill)
-// directly. Data safety comes from FlushWorkingSet which runs in StopWithForce
-// before calling gracefulStop. The Unix SIGTERM is a courtesy; the real protection
-// is the flush.
+// directly. Data safety does not depend on this call either way: with Dolt's
+// default chunk journal, SQL-committed changes are durable once COMMIT succeeds,
+// and StopWithForce runs FlushWorkingSet before gracefulStop to record pending
+// changes in history (best-effort), not to save committed data.
 func gracefulStop(pid int, timeout time.Duration) error {
 	process, err := os.FindProcess(pid)
 	if err != nil {

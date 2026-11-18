@@ -234,10 +234,10 @@ Examples:
 
 		if beadsDir == "" {
 			// Discovery passes over a .beads marked only by a legacy
-			// config.json or holding only a SQLite database. One in a format
-			// this build cannot open, or a historical SQLite workspace, is
-			// refused as that, not reported as no workspace.
-			if err := checkUndiscoveredWorkspaceFormat(); err != nil {
+			// config.json or holding only a SQLite database. A historical
+			// SQLite workspace is refused as that, not reported as no
+			// workspace.
+			if err := checkUndiscoveredForOpen(); err != nil {
 				return handleWorkspaceGuardError(err)
 			}
 			if jsonOutput {
@@ -267,7 +267,7 @@ Examples:
 		}
 		if cfg == nil {
 			cfg, err = findParentConfig(beadsDir)
-			if isUnsupportedWorkspaceFormat(err) || isLegacyUpgradeRefusal(err) {
+			if isLegacyUpgradeRefusal(err) {
 				// Admission's refusal of the ancestor, as bd prints it there:
 				// its metadata loaded, so there is nothing to fix or restore.
 				return handleWorkspaceGuardError(err)
@@ -1630,6 +1630,27 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"      re-run `bd bootstrap`, or keep using a bd version that matches the remote.\n\n")
 }
 
+// doctorEnsureGitignoreForBeadsDir is the seam tests use to make the
+// .beads/.gitignore ensure step fail without a hostile mount (mirrors
+// doctorFindOrphanedIssues in orphans.go).
+var doctorEnsureGitignoreForBeadsDir = doctor.EnsureGitignoreForBeadsDir
+
+// ensureBeadsGitignore runs the .beads/.gitignore ensure step shared by
+// bootstrap and connect. A permission-only failure downgrades to a warning:
+// ErrGitignorePermissions means every required pattern is already in place
+// and only the 0600 tightening failed (chmod-hostile mount, file owned by
+// another user), which is not worth aborting over (#6225) — bd init already
+// treats this step as non-fatal. Any other failure — patterns that could
+// not be written, an unreadable file — is returned unchanged.
+func ensureBeadsGitignore(beadsDir string) error {
+	err := doctorEnsureGitignoreForBeadsDir(beadsDir)
+	if errors.Is(err, doctor.ErrGitignorePermissions) {
+		WarnError("%v", err)
+		return nil
+	}
+	return err
+}
+
 // finalizeSyncedBootstrap writes metadata.json and config.yaml after a
 // successful sync clone, matching the on-disk layout that bd init produces.
 // It is idempotent: re-running over an already-finalized workspace leaves
@@ -1663,7 +1684,7 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 	if err := createConfigYaml(beadsDir, false, ""); err != nil {
 		return fmt.Errorf("create config.yaml: %w", err)
 	}
-	if err := doctor.EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+	if err := ensureBeadsGitignore(beadsDir); err != nil {
 		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
 
@@ -2103,9 +2124,6 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 // parent workspace does. Returns nil if no parent config is found. A malformed
 // or unreadable ancestor metadata file is authoritative and returned as an error;
 // bootstrap must not skip it and select a more distant workspace or defaults.
-// An ancestor holding the graph format marker without metadata it can read is
-// a graph workspace, refused like one whose metadata declares graph_mode,
-// rather than skipped or reported as a metadata load failure.
 //
 // The walk ends at the home directory: $HOME, or the account home
 // (beads.IsAccountHomeDir) when $HOME points elsewhere. The account home's
@@ -2137,9 +2155,6 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 		}
 		candidate := filepath.Join(dir, ".beads")
 		cfg, err := configfile.LoadForDiscovery(candidate)
-		if (err != nil || cfg == nil) && hasGraphFormatMarker(candidate) {
-			return nil, &configfile.UnsupportedWorkspaceFormatError{BeadsDir: candidate, FormatMarker: true}
-		}
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", configfile.ConfigPath(candidate), err)
 		}

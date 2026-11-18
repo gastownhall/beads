@@ -1,0 +1,9 @@
+{
+  "shape": "gc-create-no-history",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getSetting","path":"/v0/beads/config/issue_prefix","status":200},
+    {"method":"GET","operation_id":"getSetting","path":"/v0/beads/config/allowed_prefixes","status":200},
+    {"method":"POST","operation_id":"createIssue","path":"/v0/beads/issues","body":["actor","id","issue_type","no_history","priority","status","title"],"status":200}
+  ]
+}

@@ -520,7 +520,7 @@ func analyzeWithAI(ctx context.Context, client anthropic.Client, model anthropic
 	aiSpan.SetAttributes(
 		attribute.Int64("bd.ai.input_tokens", message.Usage.InputTokens),
 		attribute.Int64("bd.ai.output_tokens", message.Usage.OutputTokens),
-		attribute.Float64("bd.ai.duration_ms", float64(time.Since(t0).Milliseconds())),
+		attribute.Float64("bd.ai.duration_ms", telemetry.Milliseconds(time.Since(t0))),
 	)
 	aiSpan.End()
 

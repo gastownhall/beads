@@ -58,7 +58,11 @@ func NewExternalDoltServerUOWProvider(
 	}
 
 	resolved := applyProviderOptions(opts)
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
+	// The upstream is external, but the proxy in front of it is local and
+	// retires on idle exactly like a managed one, so new connections
+	// rediscover it too. Only its address is refreshed: the upstream, its TLS
+	// config and the credentials stay the ones this provider opened with.
+	discover := workspaceProxyDiscovery(absServerRootDir, proxy.OpenOpts{
 		Backend:       proxy.BackendExternal,
 		LogFilePath:   serverLogFilePath,
 		RotateLogFile: resolved.rotateServerLog,
@@ -66,11 +70,12 @@ func NewExternalDoltServerUOWProvider(
 		IdleTimeout:   idleTimeout,
 		Port:          proxyPort,
 	})
+	ep, err := discover()
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, proxy.DataNetwork, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved)
+	return openAndInitSchema(ctx, proxy.DataNetwork, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved, newProxyEndpointResolver(discover))
 }
 
 // externalBackendAddress names the external server behind the proxy: its

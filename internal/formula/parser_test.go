@@ -2298,3 +2298,39 @@ var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=
 func gitCommand(args ...string) *exec.Cmd {
 	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
 }
+
+func TestOrchestratorOnlySearchPath(t *testing.T) {
+	resetFormulaSearchTestContext(t)
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	checkout := filepath.Join(root, "checkout")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(checkout)
+	resetFormulaSearchCaches()
+
+	if got := OrchestratorOnlySearchPath(); got != "" {
+		t.Errorf("GT_ROOT unset: OrchestratorOnlySearchPath() = %q, want \"\"", got)
+	}
+
+	city := filepath.Join(root, "city")
+	t.Setenv("GT_ROOT", city)
+	want := filepath.Join(city, ".beads", "formulas")
+	if got := OrchestratorOnlySearchPath(); got != want {
+		t.Errorf("OrchestratorOnlySearchPath() = %q, want %q", got, want)
+	}
+	paths := DefaultSearchPaths()
+	if len(paths) == 0 || paths[len(paths)-1] != want {
+		t.Errorf("DefaultSearchPaths() = %v, want %q last", paths, want)
+	}
+
+	// GT_ROOT naming the user or checkout root adds no directory of its own.
+	for _, same := range []string{home, checkout} {
+		t.Setenv("GT_ROOT", same)
+		if got := OrchestratorOnlySearchPath(); got != "" {
+			t.Errorf("GT_ROOT=%s: OrchestratorOnlySearchPath() = %q, want \"\"", same, got)
+		}
+	}
+}

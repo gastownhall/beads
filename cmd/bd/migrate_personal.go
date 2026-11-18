@@ -179,9 +179,9 @@ func uncommittedTables(ctx context.Context, st storage.DoltStorage) ([]string, e
 // wrote config.json, bd run there finds no workspace in, or it holds several
 // databases). Every other metadata-less .beads is left to
 // initializePlanningRepo. It writes nothing. A .beads that has a metadata.json
-// is refused here for what bd's admission refuses from its contents (a format
-// this build cannot open, a historical SQLite workspace, a legacy Dolt
-// workspace) and, as a routed create refuses it (refuseExistingCreateTarget),
+// is refused here for what bd's admission refuses from its contents (a
+// historical SQLite workspace, a legacy Dolt workspace) and, as a routed
+// create refuses it (refuseExistingCreateTarget),
 // when its own config selects Dolt server mode while its metadata names no
 // dolt_mode and this process would open it embedded; it is otherwise left to
 // the open, which refuses what it cannot use. A targetRefusal is
@@ -527,17 +527,16 @@ func refusePlanningRepo(format string, args ...any) error {
 // planningOpenError renders a failed openMigrationPlanningStore. A refusal of
 // the planning repo (planningRepoRefusal) is returned as it is: nothing
 // failed to open, so it carries no "failed to open planning store" prefix. A
-// planning repo bd's own command admission refuses (an unsupported format, a
-// legacy store) is rendered as that refusal is, naming the planning repo: the
-// Error line, plus the Hint line and exit 16 for a format. migratePersonalCmd
-// silences cobra, so neither "Error: exit code N" nor a usage dump follows
-// either.
+// planning repo bd's own command admission refuses (a legacy store) is
+// rendered as that refusal is, naming the planning repo: the Error line.
+// migratePersonalCmd silences cobra, so neither "Error: exit code N" nor a
+// usage dump follows it.
 func planningOpenError(planningPath string, err error) error {
 	var refusal *planningRepoRefusal
 	switch {
 	case errors.As(err, &refusal):
 		return refusal
-	case isUnsupportedWorkspaceFormat(err) || isLegacyUpgradeRefusal(err):
+	case isLegacyUpgradeRefusal(err):
 		return handleWorkspaceGuardError(fmt.Errorf("planning repo %s: %w", remedy.PrintedValue(planningPath), err))
 	}
 	// The open error is bd's own and can span lines (a server-mode open

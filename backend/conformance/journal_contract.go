@@ -3,8 +3,10 @@ package conformance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"testing"
 
 	storeops "github.com/steveyegge/beads/internal/storage/issueops"
@@ -156,6 +158,43 @@ type JournalMutations struct {
 	// one the engine journals and the wire never carries; see
 	// RunJournalEveryMutationKindLandsARow.
 	Comment func(ctx context.Context, id, text string) error
+
+	// AddParentChild makes child a parent-child child of parent, acting as
+	// Actor. OPTIONAL: RunJournalDerivedRecordsCarryTheCausingActor uses it to
+	// give its subject a descendant — the one dependent a blocking edge on its
+	// ANCESTOR re-derives (the subtree cascade), so the only way a dependency
+	// add reaches past its own source. nil runs that case without it.
+	AddParentChild func(ctx context.Context, child, parent string) error
+	// SetStatus moves an existing issue to status through the backend's
+	// ordinary UPDATE verb, acting as Actor — not its close verb, which Close
+	// drives. OPTIONAL: it is the only hook that reaches the status-crossing
+	// recompute an update runs (into closed and back out), and
+	// RunJournalDerivedRecordsCarryTheCausingActor skips those steps when it is
+	// nil.
+	SetStatus func(ctx context.Context, id string, status types.Status) error
+	// As returns this same kit acting as actor: every hook drives the same
+	// verb, passing actor wherever this kit passes Actor, and the returned
+	// kit's Actor is actor. RunJournalDerivedRecordsCarryTheCausingActor seeds
+	// with this kit and mutates with As of a second identity, so a derived
+	// record that took the identity of whoever created or last touched the
+	// bead it updates (the seeder) cannot pass for the request's. That case
+	// fails when As is nil.
+	As func(actor string) JournalMutations
+
+	// Actor is the acting identity every hook above passes to the verb it
+	// drives — the comment's author, for Comment. It is what
+	// RunJournalEveryMutationKindRecordsItsActor holds each record to, because
+	// journalops.Row.Actor is "the acting identity that performed the
+	// mutation". It must not be empty: a kit that acted as nobody proves
+	// nothing about attribution.
+	Actor string
+	// ActorlessDelete says the Delete hook drives a verb with NO actor
+	// parameter — storage.DeleteIssue, which both store kits and the served
+	// kit's reference store call — so its record is held to the empty actor
+	// journalops.Row reserves for "a path that genuinely has no actor" rather
+	// than to Actor. A kit whose delete verb takes the actor (the unit of
+	// work's IssueUseCase().DeleteIssue) leaves it false.
+	ActorlessDelete bool
 }
 
 // RunJournalPagesAreSeqAscendingAndSinceExclusive pins the two properties a
@@ -855,6 +894,254 @@ func RunJournalArrivalRenameKeepsTheStamp(t *testing.T, ctx context.Context, fix
 	}
 }
 
+// RunJournalEveryMutationKindRecordsItsActor pins WHO each record names:
+// every op the kit drives lands a record carrying the identity that performed
+// it (journalops.Row.Actor), read back through the role.
+//
+// It is the attribution sibling of RunJournalEveryMutationKindLandsARow and
+// drives the same kit, so the two cannot disagree about which mutations exist.
+// It is a separate case rather than more assertions inside that one because a
+// leg can carry one and not the other: the served client reads every record
+// and drops its actor (internal/httpclient/journal.go journalRow), and parking
+// the completeness case to park the attribution half would give up the only
+// proof that every op kind crosses that wire. TestEventsJournal_ActorMatrixOnEmbedded
+// pins the stored column on one engine; this pins what a READER of the role
+// gets, on every leg.
+//
+// Two rules, and the second is the one with reach. The mutation's own record
+// — its op, naming its subject — carries the kit's Actor (the empty actor for
+// a delete verb that has none, JournalMutations.ActorlessDelete). And EVERY
+// record in the window the mutation opened names that same actor: derived
+// maintenance the mutation caused (an is_blocked recompute journals as a
+// separate update) carries the mutation's actor too
+// (RunJournalDerivedRecordsCarryTheCausingActor holds that on graphs built to
+// make it fire). A record naming an identity no mutation used is a
+// misattribution a consumer reconciling writers cannot tell from a real
+// conflicting writer, and one naming no one reads as system/unknown.
+//
+// It is declared BEFORE RunJournalEveryMutationKindLandsARow, which stays last
+// for the reason its own doc gives; this one rebaselines like every case here
+// and needs no particular journal state.
+func RunJournalEveryMutationKindRecordsItsActor(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	journalBaseline(t, ctx, fixture)
+	actor := fixture.Mutations.Actor
+	if actor == "" {
+		t.Fatalf("JournalMutations.Actor is empty: name the identity this leg's hooks pass to their verbs, " +
+			"or this case would hold every record to nobody")
+	}
+	subject := fixture.IssuePrefix + "-actor-subject"
+	other := fixture.IssuePrefix + "-actor-other"
+
+	kit := journalMutationKit(fixture, subject, other)
+	journalRequireKitCoversTheVocabulary(t, kit)
+
+	for _, mutation := range kit {
+		want := actor
+		if mutation.op == storeops.EventDelete && fixture.Mutations.ActorlessDelete {
+			want = ""
+		}
+		before := journalHead(t, ctx, fixture)
+		if err := mutation.run(ctx); err != nil {
+			t.Fatalf("%s: %v", mutation.what, err)
+		}
+		page := journalRead(t, ctx, fixture, before, 0)
+		attributed := false
+		for _, row := range page.Rows {
+			if row.Op == string(mutation.op) && row.IssueID == mutation.subject && row.Actor == want {
+				attributed = true
+			}
+			if row.Actor != want {
+				t.Errorf("%s: the record %s(%s) at seq %d names actor %q, want %q: a record naming an identity "+
+					"no mutation used reads as a conflicting writer, and one naming no one as system/unknown",
+					mutation.what, row.Op, row.IssueID, row.Seq, row.Actor, want)
+			}
+		}
+		if !attributed {
+			t.Errorf("%s recorded no %q for %s naming actor %q; the journal above seq %d holds %v. The actor "+
+				"is the one member a consumer reconciling writers reads, and a reader that gets it empty reads "+
+				"system/unknown", mutation.what, mutation.op, mutation.subject, want, before,
+				journalActorsOf(page.Rows))
+		}
+	}
+}
+
+// RunJournalDerivedRecordsCarryTheCausingActor pins WHO the records a request
+// causes, but does not name, are attributed to: the derived is_blocked updates
+// blocked-state maintenance journals for the request's own subject and for its
+// dependents and descendants.
+//
+// Every record in the window a mutation opens carries that mutation's actor —
+// the value its own record carries, from the same parameter, never one the
+// record invents. An absent actor reads as system/unknown
+// (eventsjournal.Record.Actor), and a request is not the system: a consumer
+// holding the journal to "every change names its performer" cannot tell a
+// derived row a user's `bd dep remove` caused from one a background repair
+// wrote, so it has to fail the user's change. Only a mutation with no request behind it — a
+// pull's or the doctor's full recompute, `bd recompute-blocked`, a migration —
+// journals derived rows that name no one, and none of those is driven here.
+//
+// Two small graphs make every maintenance seam a request reaches fire, on the
+// subject AND around it. The first: the subject blocks on a blocker, a
+// dependent waits on the subject (a `blocks` edge), and — when the leg
+// supplies AddParentChild — a child hangs under the subject. The second, only
+// with SetStatus: a status subject with a dependent of its own and no child or
+// blocker, so close policy has nothing to refuse. Each step's window is judged:
+//
+//   - adding the subject's blocking edge (`bd dep add`): the subject is marked
+//     directly, and the child re-derives BLOCKED through the subtree cascade;
+//   - removing it (`bd dep remove`): the subject ITSELF and the child re-derive
+//     unblocked — the subject's row lands before its own dep_remove record;
+//   - closing the status subject through an update and reopening it the same
+//     way (`bd update --status closed|open`): its dependent re-derives
+//     unblocked, then blocked;
+//   - re-adding the blocking edge, then closing the blocked subject (`bd close
+//     --force`): the subject's own flag settles, and the dependent and the
+//     child re-derive unblocked.
+//
+// The graphs are SEEDED by one identity (the kit's Actor) and every judged
+// step is MUTATED by another (the kit's As of a second actor), and each
+// window is held to the mutating identity. With one identity throughout, a
+// derived record that took the actor of the bead's creator or of the last
+// write to its edges would carry the right value by coincidence; with two it
+// carries the seeder's and fails.
+//
+// It also holds that those derived records still EXIST, each as an update of
+// the bead whose readiness flipped: dropping them would satisfy the
+// attribution rule vacuously and take the dependents' readiness away from
+// every journal consumer (a cursor reader, events.watch, an export). It
+// rebaselines like every case here.
+func RunJournalDerivedRecordsCarryTheCausingActor(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	journalBaseline(t, ctx, fixture)
+	seeder := fixture.Mutations
+	seedActor := seeder.Actor
+	if seedActor == "" {
+		t.Fatalf("JournalMutations.Actor is empty: name the identity this leg's hooks pass to their verbs, " +
+			"or this case would hold every record to nobody")
+	}
+	if seeder.As == nil {
+		t.Fatalf("JournalMutations.As is nil: this case seeds as one identity and mutates as another, so " +
+			"supply the kit acting as a given actor; with one identity a derived record that took the " +
+			"seeder's actor would pass")
+	}
+	actor := seedActor + "-mutator"
+	m := seeder.As(actor)
+	if m.Actor != actor {
+		t.Fatalf("JournalMutations.As(%q) returned a kit whose Actor is %q", actor, m.Actor)
+	}
+	id := func(name string) string { return fixture.IssuePrefix + "-drv-" + name }
+	subject, blocker, dependent, child := id("subject"), id("blocker"), id("dependent"), id("child")
+	statusSubject, statusDependent := id("status"), id("status-dependent")
+
+	// Seeding, judged by no window and done as seedActor: what the steps
+	// below, done as actor, re-derive.
+	seed := func(what string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("seeding %s: %v", what, err)
+		}
+	}
+	for _, issue := range []string{subject, blocker, dependent} {
+		seed(issue, seeder.Create(ctx, issue))
+	}
+	seed(dependent+"'s wait on "+subject, seeder.AddDependency(ctx, dependent, subject))
+	// withChild is the child, when the leg can hang one under the subject: the
+	// derived rows a step must leave for it.
+	var withChild []string
+	if seeder.AddParentChild != nil {
+		seed(child, seeder.Create(ctx, child))
+		seed(child+" under "+subject, seeder.AddParentChild(ctx, child, subject))
+		withChild = []string{child}
+	} else {
+		t.Logf("AddParentChild is nil: no descendant, so the dependency adds below reach only their source")
+	}
+	if seeder.SetStatus != nil {
+		seed(statusSubject, seeder.Create(ctx, statusSubject))
+		seed(statusDependent, seeder.Create(ctx, statusDependent))
+		seed(statusDependent+"'s wait on "+statusSubject, seeder.AddDependency(ctx, statusDependent, statusSubject))
+	} else {
+		t.Logf("SetStatus is nil: the status-crossing update steps are skipped")
+	}
+
+	type derivedStep struct {
+		what    string
+		op      storeops.EventOp
+		subject string
+		// derived names the beads whose readiness the step flips: each must
+		// have an update record of its own in the window.
+		derived []string
+		run     func(ctx context.Context) error
+	}
+	steps := []derivedStep{
+		{what: "adding " + subject + "'s blocking edge (bd dep add)", op: storeops.EventDepAdd, subject: subject,
+			derived: withChild,
+			run:     func(ctx context.Context) error { return m.AddDependency(ctx, subject, blocker) }},
+		{what: "removing it (bd dep remove)", op: storeops.EventDepRemove, subject: subject,
+			derived: append([]string{subject}, withChild...),
+			run:     func(ctx context.Context) error { return m.RemoveDependency(ctx, subject, blocker) }},
+	}
+	if m.SetStatus != nil {
+		steps = append(steps,
+			derivedStep{what: "closing " + statusSubject + " through an update (bd update --status closed)",
+				op: storeops.EventUpdate, subject: statusSubject, derived: []string{statusDependent},
+				run: func(ctx context.Context) error { return m.SetStatus(ctx, statusSubject, types.StatusClosed) }},
+			derivedStep{what: "reopening it through an update (bd update --status open)",
+				op: storeops.EventUpdate, subject: statusSubject, derived: []string{statusDependent},
+				run: func(ctx context.Context) error { return m.SetStatus(ctx, statusSubject, types.StatusOpen) }},
+		)
+	}
+	steps = append(steps,
+		derivedStep{what: "re-adding " + subject + "'s blocking edge (bd dep add)", op: storeops.EventDepAdd, subject: subject,
+			derived: withChild,
+			run:     func(ctx context.Context) error { return m.AddDependency(ctx, subject, blocker) }},
+		derivedStep{what: "closing the blocked " + subject + " (bd close --force)", op: storeops.EventClose, subject: subject,
+			derived: append([]string{dependent}, withChild...),
+			run:     func(ctx context.Context) error { return m.Close(ctx, subject) }},
+	)
+
+	for _, step := range steps {
+		before := journalHead(t, ctx, fixture)
+		if err := step.run(ctx); err != nil {
+			t.Fatalf("%s: %v", step.what, err)
+		}
+		page := journalRead(t, ctx, fixture, before, 0)
+		own := false
+		updated := map[string]bool{}
+		var unattributed []string
+		for _, row := range page.Rows {
+			if row.Op == string(step.op) && row.IssueID == step.subject && row.Actor == actor {
+				own = true
+			}
+			if row.Op == string(storeops.EventUpdate) {
+				updated[row.IssueID] = true
+			}
+			if row.Actor != actor {
+				who := ""
+				if row.Actor == seedActor {
+					who = " (the seeding identity)"
+				}
+				unattributed = append(unattributed, fmt.Sprintf("seq %d %s(%s) actor=%q%s", row.Seq, row.Op, row.IssueID, row.Actor, who))
+			}
+		}
+		if !own {
+			t.Errorf("%s recorded no %q for %s naming actor %q; the window above seq %d holds %v",
+				step.what, step.op, step.subject, actor, before, journalActorsOf(page.Rows))
+		}
+		for _, flipped := range step.derived {
+			if !updated[flipped] {
+				t.Errorf("%s flips %s's readiness but journaled no update of it; the window above seq %d holds %v. "+
+					"A derived record carries the request's actor; it is not dropped",
+					step.what, flipped, before, journalActorsOf(page.Rows))
+			}
+		}
+		if len(unattributed) > 0 {
+			t.Errorf("%s: %d record(s) in its window do not name the request's actor %q: %v. A derived record "+
+				"the request caused must carry the request's actor, not the actor that seeded the bead (%q); "+
+				"an absent actor reads as system/unknown. The whole window: %v",
+				step.what, len(unattributed), actor, unattributed, seedActor, journalActorsOf(page.Rows))
+		}
+	}
+}
+
 // RunJournalEveryMutationKindLandsARow pins the journal's completeness: every
 // op the engine journals is one a reader actually receives.
 //
@@ -1097,6 +1384,16 @@ func journalOpsOf(rows []journalops.Row) []string {
 		ops = append(ops, row.Op+"("+row.IssueID+")")
 	}
 	return ops
+}
+
+// journalActorsOf renders a window's ops with the actor each names, for the
+// attribution case's failure message.
+func journalActorsOf(rows []journalops.Row) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.Op+"("+row.IssueID+")="+strconv.Quote(row.Actor))
+	}
+	return out
 }
 
 // journalFirstSeq is the first record's seq, or 0 for an empty page, so a

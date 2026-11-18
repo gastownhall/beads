@@ -13,9 +13,9 @@ import (
 
 func TestCheckedCatalogIsCanonicalAndComplete(t *testing.T) {
 	catalog := readCheckedCatalog(t)
-	if len(catalog.Versions) != 127 || len(catalog.Exclusions.RepositoryOnlyStable) != 49 ||
+	if len(catalog.Versions) != 130 || len(catalog.Exclusions.RepositoryOnlyStable) != 49 ||
 		len(catalog.Exclusions.RepositoryOnlyPrereleases) != 3 {
-		t.Fatalf("catalog counts = %d/%d/%d, want 127/49/3",
+		t.Fatalf("catalog counts = %d/%d/%d, want 130/49/3",
 			len(catalog.Versions), len(catalog.Exclusions.RepositoryOnlyStable),
 			len(catalog.Exclusions.RepositoryOnlyPrereleases))
 	}
@@ -25,6 +25,13 @@ func TestCheckedCatalogIsCanonicalAndComplete(t *testing.T) {
 	}
 	if refs["v0.56.0"] == "" {
 		t.Fatal("missing proxy-preserved v0.56.0")
+	}
+	// The release gate upgrades from N-1 and N-2 (GH#8371), so the catalog
+	// must reach the newest stable releases.
+	for _, version := range []string{"v1.3.2", "v1.3.3", "v1.3.4"} {
+		if refs[version] != "refs/tags/"+version {
+			t.Fatalf("catalog ref for %s = %q, want refs/tags/%s", version, refs[version], version)
+		}
 	}
 	if refs["v0.9.11"] != "refs/heads/main" || refs["v0.17.2"] != "refs/heads/main" {
 		t.Fatalf("preserved non-tag refs = %q, %q", refs["v0.9.11"], refs["v0.17.2"])

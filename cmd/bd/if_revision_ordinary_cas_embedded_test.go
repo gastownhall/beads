@@ -45,13 +45,6 @@ func decodeIfRevisionBodyExact(t *testing.T, line string) map[string]any {
 //     refusal, never 13, and writes nothing;
 //   - the current token applies on update, close, assign and delete, and
 //     each write that leaves the issue in place moves its revision on.
-//
-// A second meaning for the same flag (an opaque token in some other kind of
-// workspace) must leave all of this unchanged in an ordinary one. This is
-// the ordinary-workspace half of the fork's
-// TestGraphPreviewIfRevisionOutsideLinkModeIsUpstreamCAS, ported onto this
-// package's embedded helpers and extended from update/delete to close and
-// assign.
 func TestEmbeddedIfRevisionOrdinaryCAS(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")

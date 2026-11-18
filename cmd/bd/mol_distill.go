@@ -262,7 +262,12 @@ func sanitizeFormulaName(title string) string {
 // findWritableFormulaDir finds the first writable formula directory
 func findWritableFormulaDir(formulaName string) string {
 	searchPaths := getFormulaSearchPaths()
+	readOnlyDir := readOnlyFormulaDir()
 	for _, dir := range searchPaths {
+		// Never probe or write the GT_ROOT directory a project .env named.
+		if dir == readOnlyDir {
+			continue
+		}
 		// Try to create the directory if it doesn't exist
 		if err := os.MkdirAll(dir, 0755); err == nil {
 			// Check if we can write to it

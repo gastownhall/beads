@@ -64,7 +64,8 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 
 // PullFrom pulls changes from a specific peer remote.
 // If credentials are stored for this peer, they are used automatically.
-// For git-protocol remotes, uses CLI `dolt pull` to avoid MySQL connection timeouts.
+// For git-protocol remotes, uses CLI `dolt fetch` to avoid MySQL connection
+// timeouts. Every route fetches and merges <peer>/<branch> (bd-e2q8zs).
 // Returns any merge conflicts if present.
 func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
 	var conflicts []storage.Conflict
@@ -123,7 +124,7 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		}
 		return withEnvCredentials(creds, func() error {
-			pullErr := s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
+			pullErr := s.pullWithAutoResolve(ctx, peer, "")
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
 	})
@@ -135,8 +136,8 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 // as data for the caller, anything else stays an error. The SQL route rolls
 // the conflicted merge back before returning, so its conflicts arrive only via
 // MergeConflictsError, captured pre-rollback (bd-578h9.15); the CLI route's
-// subprocess writes conflicts to the on-disk working set where GetConflicts
-// still sees them.
+// merge (mergeTrackingRefAfterCLIFetch) commits its conflicts to the working
+// set, where GetConflicts still sees them.
 func (s *DoltStore) peerPullOutcome(ctx context.Context, peer string, pullErr error, conflicts *[]storage.Conflict) error {
 	if pullErr == nil {
 		return nil
@@ -239,10 +240,18 @@ func (s *DoltStore) HasPersistedRemote() bool {
 // Callers in the GH#2118 cold-start window use this to RECOVER the invisible
 // remote rather than merely detect it: a freshly (auto-)started sql-server
 // can report an empty dolt_remotes even though the remote is persisted on
-// disk, so an empty listing is a reporting artifact, not an unconfigured rig
-// (wy-6k7f7). Read/parse failures are logged and skipped, matching the old
-// HasPersistedRemote behavior — callers only consult this after a SUCCESSFUL
-// (empty) ListRemotes, so a read failure here never masquerades as evidence.
+// disk (wy-6k7f7). That listing, not the state file, is the set of remotes
+// the server pushes and pulls with: the server reads the file only when it
+// loads the database, so a remote recorded only there stays out of every
+// SQL operation until a restart or a SQL add. `bd dolt remote add` makes
+// that add for a recorded remote whose URL matches, with its recorded URL
+// and git ref, unless the record carries parameters SQL cannot set
+// (RemoteInfo.CLIOnlyParams), and still asks before replacing a differing
+// one. Other callers, `bd config apply` among them, take the recorded
+// remote as configured without registering it. Read/parse failures are
+// logged and skipped, matching the old HasPersistedRemote behavior — callers
+// only consult this after a SUCCESSFUL (empty) ListRemotes, so a read
+// failure here never masquerades as evidence.
 //
 // Those are the server's remotes only where the workspace's Dolt root is
 // proven served by the server bd dials (cliDirServesServer). Elsewhere, as
@@ -714,20 +723,18 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 	return nil
 }
 
-// doltCLIPullFromPeer shells out to `dolt pull` for a specific peer remote.
-// Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
-// Credentials are set on the subprocess environment only via cmd.Env.
+// doltCLIPullFromPeer pulls a specific peer remote on the CLI route:
+// doltCLIFetchBranch runs `dolt fetch <peer> <branch>`, then
+// mergeTrackingRefAfterCLIFetch merges <peer>/<branch> over SQL. Used for
+// git-protocol remotes where a transfer through the SQL connection times out.
+// Credentials are set on the subprocess environment only via cmd.Env. Never
+// `dolt pull`, whose merge message copies the stored peer URL, credentials
+// included (bd-e2q8zs).
 func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
-	if err != nil {
+	if err := s.doltCLIFetchBranch(ctx, "fetch from peer "+peer, peer, creds); err != nil {
 		return err
 	}
-	defer cancel()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return cliTransferError(fmt.Sprintf("pull from peer %s", peer), peer, transferCtx, out, err)
-	}
-	return nil
+	return s.mergeTrackingRefAfterCLIFetch(ctx, peer+"/"+s.branch)
 }
 
 // doltCLIFetchFromPeer shells out to `dolt fetch` for a specific peer remote.

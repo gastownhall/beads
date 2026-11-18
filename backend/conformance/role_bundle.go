@@ -106,6 +106,7 @@ type RoleContractBundle struct {
 	ReadyCounter         func(t *testing.T) *ReadyCounterFixture
 	Relations            func(t *testing.T) *RelationsFixture
 	Releaser             func(t *testing.T) *ReleaserFixture
+	RowVersion           func(t *testing.T) *RowVersionFixture
 	StatsReporter        func(t *testing.T) *StatsReporterFixture
 	Sweeper              func(t *testing.T) *SweeperFixture
 	TreeWalker           func(t *testing.T) *TreeWalkerFixture

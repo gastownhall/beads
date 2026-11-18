@@ -684,7 +684,7 @@ async def _context_set(workspace_root: str) -> str:
             asyncio.to_thread(_resolve_workspace_root, workspace_root),
             timeout=5.0,  # Longer timeout to handle slow git operations
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error(f"Git detection timed out after 5s for: {workspace_root}")
         return (
             f"Error: Git repository detection timed out.\n"

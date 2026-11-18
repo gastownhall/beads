@@ -13,9 +13,9 @@ import (
 )
 
 // TestMergeSettleDrainsCallResultSets pins every CALL DOLT_* the merge-settle
-// machinery issues, including the StageAndCommit pair a conflicted
-// MergeWithStrategy commits through, to schema.DrainCall (QueryContext plus a
-// drain of every result set) instead of plain ExecContext (GH#5556). Callers
+// machinery issues, including concludeMerge's stage and commit (GH#7811) and
+// the StageAndCommit pair, to schema.DrainCall (QueryContext plus a drain of
+// every result set) instead of plain ExecContext (GH#5556). Callers
 // pin the session (a *sql.Tx in server mode, a *sql.Conn returned to the pool
 // afterwards by MergeWithStrategy), so a CALL that fails before
 // go-sql-driver/mysql's own handleOk.discardResults() leaves its result sets
@@ -26,8 +26,8 @@ import (
 // mode a CALL reverted to ExecContext fails with "call to ExecQuery ... was not
 // expected". The recordingConn wrapper also catches reverts on paths that
 // swallow the CALL's error (abortMerge, the "up to date" merge swallow,
-// StageAndCommit's "nothing to commit"): every subtest asserts no CALL reached
-// ExecContext.
+// StageAndCommit's and concludeMerge's "nothing to commit"): every subtest
+// asserts no CALL reached ExecContext.
 func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 	t.Run("merge_and_settle_metadata", func(t *testing.T) {
 		rec, mock := newDrainMock(t)
@@ -38,7 +38,8 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		expectDrainedCall(mock, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")
 		expectDrainedCall(mock, "CALL DOLT_ADD('metadata')")
 		expectNoViolations(mock)
-		expectDrainedCall(mock, autoResolveCommitCall)
+		expectMergeResult(mock, "labels")
+		expectDrainedCall(mock, "CALL DOLT_COMMIT('-m', ?)", autoResolveCommitMsg)
 
 		if err := MergeAndSettleWithStrategy(context.Background(), rec, "origin/main", ""); err != nil {
 			t.Fatalf("MergeAndSettleWithStrategy: %v", err)
@@ -63,9 +64,8 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 	t.Run("merge_with_strategy_conflicted", func(t *testing.T) {
 		rec, mock := newDrainMock(t)
 		expectStrategyResolved(mock)
-		expectPendingChanges(mock)
 		expectDrainedCall(mock, "CALL DOLT_ADD(?)", "issues")
-		expectStagedChanges(mock)
+		expectMergeResult(mock, "labels")
 		expectDrainedCall(mock, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", strategyCommitMsg, testAuthor)
 
 		conflicts, err := MergeWithStrategy(context.Background(), rec, "feature", testAuthor, "theirs")
@@ -144,9 +144,35 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		expectDrainedCall(mock, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'wisps')")
 		expectDrainedCall(mock, "CALL DOLT_ADD(?)", "wisps")
 		expectNoViolations(mock)
+		expectMergeResult(mock)
 		expectDrainedCall(mock, "CALL DOLT_COMMIT('-m', ?)", "Resolve merge conflicts using 'theirs' strategy")
 
 		if err := SettleMerge(context.Background(), rec, nil, true, "theirs"); err != nil {
+			t.Fatalf("SettleMerge: %v", err)
+		}
+		rec.assertDrained(t, mock)
+	})
+
+	// A merge whose only artifact is an FK cascade violation the repair
+	// clears is concluded by CommitSettledMerge (GH#7811).
+	t.Run("settle_merge_fk_repair_only", func(t *testing.T) {
+		rec, mock := newDrainMock(t)
+		expectConflicts(mock) // the auto-resolver finds no conflict
+		expectConflicts(mock) // GetConflicts
+		expectViolations(mock, "labels")
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT violation_type, violation_info FROM dolt_constraint_violations_labels")).
+			WillReturnRows(sqlmock.NewRows([]string{"violation_type", "violation_info"}).
+				AddRow("foreign key", `{"ReferencedTable":"issues"}`))
+		mock.ExpectExec(regexp.QuoteMeta(fkCascadeRepairDeletes["labels"])).
+			WillReturnResult(sqlmock.NewResult(0, 2))
+		mock.ExpectExec(regexp.QuoteMeta("DELETE FROM dolt_constraint_violations_labels")).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		expectDrainedCall(mock, "CALL DOLT_ADD('labels')")
+		expectNoViolations(mock)
+		expectMergeResult(mock, "config")
+		expectDrainedCall(mock, "CALL DOLT_COMMIT('-m', ?)", fkRepairCommitMsg)
+
+		if err := SettleMerge(context.Background(), rec, nil, true, ""); err != nil {
 			t.Fatalf("SettleMerge: %v", err)
 		}
 		rec.assertDrained(t, mock)
@@ -257,10 +283,9 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 				},
 			},
 			{
-				name: "MergeWithStrategy StageAndCommit DOLT_ADD",
+				name: "MergeWithStrategy DOLT_ADD",
 				setup: func(mock sqlmock.Sqlmock, cause error) {
 					expectStrategyResolved(mock)
-					expectPendingChanges(mock)
 					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).WithArgs("issues").WillReturnError(cause)
 					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
 				},
@@ -268,15 +293,14 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 					_, err := MergeWithStrategy(ctx, db, "feature", testAuthor, "theirs")
 					return err
 				},
-				want: "conflicts resolved but commit failed: dolt add issues: injected",
+				want: "conflicts resolved but commit failed: injected",
 			},
 			{
-				name: "MergeWithStrategy StageAndCommit DOLT_COMMIT",
+				name: "MergeWithStrategy DOLT_COMMIT",
 				setup: func(mock sqlmock.Sqlmock, cause error) {
 					expectStrategyResolved(mock)
-					expectPendingChanges(mock)
 					expectDrainedCall(mock, "CALL DOLT_ADD(?)", "issues")
-					expectStagedChanges(mock)
+					expectMergeResult(mock)
 					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 						WithArgs(strategyCommitMsg, testAuthor).WillReturnError(cause)
 					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
@@ -285,7 +309,7 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 					_, err := MergeWithStrategy(ctx, db, "feature", testAuthor, "theirs")
 					return err
 				},
-				want: "conflicts resolved but commit failed: dolt commit: injected",
+				want: "conflicts resolved but commit failed: injected",
 			},
 			{
 				name: "StageAndCommit DOLT_COMMIT nothing to commit",
@@ -320,6 +344,7 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 					expectDrainedCall(mock, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'wisps')")
 					expectDrainedCall(mock, "CALL DOLT_ADD(?)", "wisps")
 					expectNoViolations(mock)
+					expectMergeResult(mock)
 					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
 						WithArgs("Resolve merge conflicts using 'theirs' strategy").WillReturnError(cause)
 					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
@@ -362,10 +387,42 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 			{
 				name: "CommitResolvedConflicts DOLT_COMMIT",
 				setup: func(mock sqlmock.Sqlmock, cause error) {
-					mock.ExpectQuery(regexp.QuoteMeta(autoResolveCommitCall)).WillReturnError(cause)
+					expectMergeResult(mock)
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+						WithArgs(autoResolveCommitMsg).WillReturnError(cause)
 				},
 				run:  func(db DBConn) error { return CommitResolvedConflicts(ctx, db) },
 				want: "failed to commit resolved conflicts: injected",
+			},
+			{
+				name: "concludeMerge stage DOLT_ADD",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectMergeSourceCommit(mock)
+					mock.ExpectQuery(regexp.QuoteMeta(mergedTablesQueryPrefix)).
+						WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("labels"))
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).WithArgs("labels").WillReturnError(cause)
+				},
+				run:  func(db DBConn) error { return CommitResolvedConflicts(ctx, db) },
+				want: "failed to commit resolved conflicts: stage merged labels: injected",
+			},
+			{
+				name: "concludeMerge DOLT_COMMIT nothing to commit",
+				setup: func(mock sqlmock.Sqlmock, _ error) {
+					expectMergeResult(mock)
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+						WithArgs(autoResolveCommitMsg).WillReturnError(nothingToCommit)
+				},
+				run: func(db DBConn) error { return CommitResolvedConflicts(ctx, db) },
+			},
+			{
+				name: "CommitSettledMerge repair DOLT_COMMIT",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectMergeResult(mock)
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+						WithArgs(fkRepairCommitMsg).WillReturnError(cause)
+				},
+				run:  func(db DBConn) error { return CommitSettledMerge(ctx, db, false, true) },
+				want: "failed to commit FK cascade repair: injected",
 			},
 			{
 				name: "schema_migrations DOLT_CONFLICTS_RESOLVE",
@@ -431,8 +488,21 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 
 const testAuthor = "Tester <tester@example.com>"
 
-// autoResolveCommitCall is CommitResolvedConflicts' exact statement.
-const autoResolveCommitCall = "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')"
+// autoResolveCommitMsg is the message CommitResolvedConflicts concludes a
+// merge under, bound to concludeMerge's CALL DOLT_COMMIT('-m', ?).
+const autoResolveCommitMsg = "auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)"
+
+// fkRepairCommitMsg is the message CommitSettledMerge concludes a merge the
+// FK cascade repair alone settled under.
+const fkRepairCommitMsg = "auto-repair merge FK cascade violations: deleted rows referencing issues deleted on the other side"
+
+// mergeSourceCommit is the open merge's source commit the stageMergeResult
+// reads answer with: a valid Dolt commit hash, so the merged-tables query runs.
+const mergeSourceCommit = "0123456789abcdefghijklmnopqrstuv"
+
+// mergedTablesQueryPrefix starts stageMergeResult's merged-but-unstaged
+// tables query.
+const mergedTablesQueryPrefix = "SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name)"
 
 // strategyCommitMsg is the message MergeWithStrategy("feature", "theirs")
 // commits a resolved merge under.
@@ -530,7 +600,7 @@ func expectNoViolations(mock sqlmock.Sqlmock) {
 }
 
 // expectStrategyResolved expects MergeWithStrategy("feature", "theirs") up to
-// its StageAndCommit: the merge leaves one issues conflict, which is resolved
+// its conclusion: the merge leaves one issues conflict, which is resolved
 // --theirs with no constraint violation behind it.
 func expectStrategyResolved(mock sqlmock.Sqlmock) {
 	expectWorkingSetClean(mock)
@@ -553,6 +623,28 @@ func expectPendingChanges(mock sqlmock.Sqlmock) {
 func expectStagedChanges(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+}
+
+// expectMergeSourceCommit answers stageMergeResult's read of the open merge's
+// source commit.
+func expectMergeSourceCommit(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT source_commit FROM dolt_merge_status WHERE is_merging")).
+		WillReturnRows(sqlmock.NewRows([]string{"source_commit"}).AddRow(mergeSourceCommit))
+}
+
+// expectMergeResult answers concludeMerge's stageMergeResult (GH#7811): the
+// open merge's source commit, then the merged-but-unstaged tables, each
+// staged with a drained DOLT_ADD.
+func expectMergeResult(mock sqlmock.Sqlmock, tables ...string) {
+	expectMergeSourceCommit(mock)
+	rows := sqlmock.NewRows([]string{"table_name"})
+	for _, table := range tables {
+		rows.AddRow(table)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(mergedTablesQueryPrefix)).WillReturnRows(rows)
+	for _, table := range tables {
+		expectDrainedCall(mock, "CALL DOLT_ADD(?)", table)
+	}
 }
 
 // expectViolations answers one dolt_constraint_violations read with tables.

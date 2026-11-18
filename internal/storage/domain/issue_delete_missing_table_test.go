@@ -39,7 +39,7 @@ func (r *stubDeleteIssueRepo) GetByIDs(_ context.Context, _ []string, opts Issue
 	return r.durable, nil
 }
 
-func (r *stubDeleteIssueRepo) FindAllDependents(_ context.Context, _ []string) ([]string, error) {
+func (r *stubDeleteIssueRepo) FindCascadeClosure(_ context.Context, _ []string) ([]string, error) {
 	return r.dependents, nil
 }
 

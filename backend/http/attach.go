@@ -50,17 +50,9 @@ import (
 // (`bd connect`'s own connectCmd.RunE, test/embedder's linkage proof) can call
 // this instead and stay correct across a future change to either file's shape.
 //
-// Attach refuses a workspace in a format this build cannot open — a
-// metadata.json graph_mode other than "dependency", or the
-// .beads/graph-preview-format marker — with *UnsupportedWorkspaceFormatError,
-// and a historical SQLite workspace with *LegacyWorkspaceError, the refusals
-// every open and `bd connect` give them, and writes nothing. It
-// checks before its metadata read, which migrates a legacy config.json, and
-// again on what that read returned. Only a concurrent writer can change the
-// format between the two, and the second check cannot undo the read's
-// migration: a legacy config.json given a graph format in that window is
-// refused only after it was migrated into metadata.json. The Dolt store's
-// metadata-driven constructors share this window.
+// Attach refuses a historical SQLite workspace with *LegacyWorkspaceError,
+// the refusal every open and `bd connect` give it, and writes nothing. It
+// checks before its metadata read, which migrates a legacy config.json.
 func Attach(beadsDir string, target Target) error {
 	// Before Load, which migrates a legacy config.json into metadata.json.
 	if err := configfile.CheckDiscoveredForOpen(beadsDir); err != nil {
@@ -69,12 +61,6 @@ func Attach(beadsDir string, target Target) error {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", configfile.ConfigFileName, err)
-	}
-	// Again on what Load returned, which a writer could have changed since
-	// the check above; the Dolt constructors re-check theirs the same way.
-	// This refuses such a workspace but cannot undo Load's migration of it.
-	if err := configfile.CheckWorkspaceFormat(cfg, beadsDir); err != nil {
-		return err
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
@@ -100,8 +86,7 @@ func Attach(beadsDir string, target Target) error {
 			target.PreviousBackend = cfg.GetBackend()
 		}
 	}
-	// The encoder itself: the format is checked above, against the metadata
-	// this saves alongside.
+	// The encoder itself: the workspace is checked above.
 	if err := httpclient.SaveTarget(beadsDir, target); err != nil {
 		return fmt.Errorf("writing %s: %w", httpclient.TargetFileName, err)
 	}
@@ -143,9 +128,9 @@ func Attach(beadsDir string, target Target) error {
 // different backend — those stay the command's own job; Connect's contract
 // is exactly "handshake, then attach".
 //
-// A workspace Attach would refuse for its format or as a historical SQLite
-// workspace is refused before the handshake, as `bd connect` refuses it, so
-// Connect dials nothing for it.
+// A workspace Attach would refuse as a historical SQLite workspace is refused
+// before the handshake, as `bd connect` refuses it, so Connect dials nothing
+// for it.
 func Connect(ctx context.Context, beadsDir string, target Target, opts Options) (*ServerSnapshot, error) {
 	if err := configfile.CheckDiscoveredForOpen(beadsDir); err != nil {
 		return nil, err

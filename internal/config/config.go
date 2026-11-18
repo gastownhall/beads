@@ -606,6 +606,28 @@ func IsDotenvKey(key string) bool {
 	return ok && val == dotenvVal
 }
 
+// GTRootFromProjectEnvMarker names the environment variable bd sets to the
+// imported value when it takes GT_ROOT from a project .beads/.env file. It lives
+// in the environment rather than in process memory so a bd started by this one
+// (a hook, gt, a mail delegate) inherits the provenance instead of seeing an
+// already-exported GT_ROOT and treating it as the caller's own.
+const GTRootFromProjectEnvMarker = "BD_GT_ROOT_FROM_DOTENV"
+
+// MarkGTRootFromProjectEnv records that GT_ROOT was set to value from a project
+// .beads/.env file because the caller's environment did not set it.
+func MarkGTRootFromProjectEnv(value string) {
+	_ = os.Setenv(GTRootFromProjectEnvMarker, value)
+}
+
+// GTRootFromProjectEnv reports whether the current GT_ROOT value was imported
+// from a project .beads/.env file (by this process or a bd that started it)
+// rather than exported by the caller. A GT_ROOT the caller exports themselves,
+// or changes after the import, is not reported.
+func GTRootFromProjectEnv() bool {
+	gtRoot := os.Getenv("GT_ROOT")
+	return gtRoot != "" && os.Getenv(GTRootFromProjectEnvMarker) == gtRoot
+}
+
 // PrivateGetenv returns os.Getenv(key) only when the value came from the caller's
 // process environment rather than a project .beads/.env file.
 func PrivateGetenv(key string) string {

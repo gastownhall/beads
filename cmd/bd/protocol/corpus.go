@@ -33,7 +33,43 @@ import (
 type Capture struct {
 	Name string
 	Args []string
+	// Kind says how the generator records this step. The zero value,
+	// CaptureJSON, is every capture that predates the native-fix section.
+	Kind CaptureKind
+	// Write marks a capture that mutates the store. The generator records how
+	// many Dolt commits it added in testdata/corpus_commits.golden, which is not
+	// part of the shipped corpus.
+	Write bool
+	// Mints marks a capture whose JSON output is an issue whose id bd minted
+	// (a hash id, not pinned with --id). The generator remembers that id under
+	// MintedPlaceholder(Name): a later capture names it in Args with the
+	// placeholder, and every blob reports it as the placeholder.
+	Mints bool
 }
+
+// CaptureKind is how the generator turns one PLAN step's stdout into a blob.
+type CaptureKind int
+
+const (
+	// CaptureJSON: stdout is exactly one JSON document, canonicalized.
+	CaptureJSON CaptureKind = iota
+	// CaptureEvents: stdout is `bd history <id> --events --json`. Each event
+	// row carries a random id, and old_value/new_value embed issue snapshots
+	// whose timestamps are text inside a string; the blob drops the row id
+	// and replaces each embedded timestamp with <TS> (see Projection.Events).
+	CaptureEvents
+	// CaptureText: stdout is not JSON (bd q prints the bare new id even under
+	// --json). The blob is that stdout as a single JSON string.
+	CaptureText
+	// CaptureSetup prepares state for later captures: it must exit 0 and
+	// produces no blob, because its command's shape is pinned elsewhere.
+	CaptureSetup
+)
+
+// MintedPlaceholder is the placeholder a blob reports for the id the Mints
+// capture named name minted, and the token a later capture's Args use to name
+// that issue.
+func MintedPlaceholder(name string) string { return "<MINTED:" + name + ">" }
 
 // Fixed issue IDs used by the PLAN. Pinning IDs removes the largest source
 // of nondeterminism (generated hash IDs) so the only thing left to
@@ -43,6 +79,28 @@ const (
 	CorpusDepID     = "corpus-dep"
 	CorpusClosedID  = "corpus-closed"  // created, then closed + reopened
 	CorpusDeletedID = "corpus-deleted" // created, then deleted
+)
+
+// Pinned ids for the native-fix section (G4a). Each write gets a subject of its
+// own, so its events blob holds the subject's create plus that write and no
+// other capture's history.
+const (
+	CorpusAnchorID     = "corpus-anchor" // the rich subjects' shared non-blocking edge target
+	CorpusPriorityID   = "corpus-priority"
+	CorpusTagID        = "corpus-tag"
+	CorpusNoteID       = "corpus-note"
+	CorpusParentID     = "corpus-parent"
+	CorpusQuickChildID = "corpus-parent.1" // the hierarchical id bd q --parent reserves
+	CorpusCanonicalID  = "corpus-canonical"
+	CorpusDuplicateID  = "corpus-duplicate"
+	CorpusSupersededID = "corpus-superseded"
+	CorpusRelFromID    = "corpus-relfrom"
+	CorpusRelToID      = "corpus-relto"
+	CorpusDeferredID   = "corpus-deferred"
+	CorpusCloserID     = "corpus-closer"
+	CorpusBlockerID    = "corpus-blocker"
+	CorpusBlockedID    = "corpus-blocked"
+	CorpusUnblockedID  = "corpus-unblocked"
 )
 
 // errorCaptureName is the single PLAN capture that deliberately targets a
@@ -61,7 +119,7 @@ const errorCaptureName = "error"
 // --json so the output is the structured contract surface; the "error"
 // capture deliberately targets a missing issue to pin the error envelope.
 func CorpusPlan() []Capture {
-	return []Capture{
+	return append([]Capture{
 		// CREATE: --force lets us pin custom IDs despite bd's per-database random
 		// ID prefix; pinned IDs make every downstream read deterministic. Four
 		// beads: root + dep exercise reads/dependencies; closed + deleted are
@@ -149,6 +207,90 @@ func CorpusPlan() []Capture {
 			Name: errorCaptureName,
 			Args: []string{"show", "nonexistent-xyz-corpus", "--json"},
 		},
+	}, nativeFixCaptures()...)
+}
+
+// nativeSeed is a CaptureSetup step creating one pinned-id subject.
+func nativeSeed(id, title string, extra ...string) Capture {
+	args := append([]string{"create", title, "--id", id, "--force", "--type", "task", "--priority", "3"}, extra...)
+	return Capture{Name: "seed_" + strings.ReplaceAll(strings.TrimPrefix(id, "corpus-"), ".", "_"), Args: append(args, "--json"), Kind: CaptureSetup}
+}
+
+// richSeed is a subject carrying every field a role's result can drop or add
+// relative to a fresh read: a description, notes, a label, metadata and one
+// non-blocking edge. (No assignee: bd close refuses an issue assigned to
+// another actor.) A plain subject hides the difference
+// (verified: fixes-b B8 changes the defer blob only when the subject has an edge).
+func richSeed(id, title string) Capture {
+	return nativeSeed(id, title,
+		"--description", "deterministic "+id,
+		"--notes", id+" notes",
+		"--labels", "corpus-native",
+		"--metadata", `{"corpus":"native"}`,
+		"--deps", "discovered-from:"+CorpusAnchorID,
+	)
+}
+
+// eventsOf is the events capture for one subject.
+func eventsOf(name, id string) Capture {
+	return Capture{Name: name, Args: []string{"history", id, "--events", "--json"}, Kind: CaptureEvents}
+}
+
+// nativeFixCaptures is the native-fix section (G4a): the direct-mode commands
+// the fork's native fixes B1-B8 move onto roles, plus the reads B9/B10 and
+// D3-D6 touch, each pinned as today's behavior. It is appended after the
+// legacy captures so none of its state reaches their blobs. Every write is
+// followed by an events capture of its subject and gets a commit-ledger line.
+func nativeFixCaptures() []Capture {
+	return []Capture{
+		nativeSeed(CorpusAnchorID, "Corpus anchor subject"),
+		richSeed(CorpusPriorityID, "Corpus priority subject"),
+		richSeed(CorpusTagID, "Corpus tag subject"),
+		richSeed(CorpusNoteID, "Corpus note subject"),
+		richSeed(CorpusParentID, "Corpus parent subject"),
+		nativeSeed(CorpusCanonicalID, "Corpus canonical subject"),
+		richSeed(CorpusDuplicateID, "Corpus duplicate subject"),
+		richSeed(CorpusSupersededID, "Corpus superseded subject"),
+		richSeed(CorpusRelFromID, "Corpus relate-from subject"),
+		richSeed(CorpusRelToID, "Corpus relate-to subject"),
+		richSeed(CorpusDeferredID, "Corpus deferred subject"),
+		richSeed(CorpusCloserID, "Corpus closer subject"),
+
+		{Name: "priority", Args: []string{"priority", CorpusPriorityID, "1", "--json"}, Write: true},
+		eventsOf("priority_events", CorpusPriorityID),
+		{Name: "tag", Args: []string{"tag", CorpusTagID, "corpus-tag-label", "--json"}, Write: true},
+		eventsOf("tag_events", CorpusTagID),
+		{Name: "note", Args: []string{"note", CorpusNoteID, "corpus note text", "--json"}, Write: true},
+		eventsOf("note_events", CorpusNoteID),
+		{Name: "q_parent", Args: []string{"q", "Corpus quick child", "--parent", CorpusParentID, "--json"}, Kind: CaptureText, Write: true},
+		{Name: "q_parent_show", Args: []string{"show", CorpusQuickChildID, "--json"}},
+		eventsOf("q_parent_events", CorpusQuickChildID),
+		{Name: "todo_add", Args: []string{"todo", "add", "Corpus todo item", "--json"}, Write: true, Mints: true},
+		eventsOf("todo_add_events", MintedPlaceholder("todo_add")),
+		{Name: "duplicate", Args: []string{"duplicate", CorpusDuplicateID, "--of", CorpusCanonicalID, "--json"}, Write: true},
+		eventsOf("duplicate_events", CorpusDuplicateID),
+		{Name: "supersede", Args: []string{"supersede", CorpusSupersededID, "--with", CorpusCanonicalID, "--json"}, Write: true},
+		eventsOf("supersede_events", CorpusSupersededID),
+		{Name: "dep_relate", Args: []string{"dep", "relate", CorpusRelFromID, CorpusRelToID, "--json"}, Write: true},
+		eventsOf("dep_relate_events", CorpusRelFromID),
+		{Name: "dep_unrelate", Args: []string{"dep", "unrelate", CorpusRelFromID, CorpusRelToID, "--json"}, Write: true},
+		eventsOf("dep_unrelate_events", CorpusRelFromID),
+		{Name: "defer", Args: []string{"defer", CorpusDeferredID, "--reason", "corpus defer reason", "--until", "2099-01-01", "--json"}, Write: true},
+		eventsOf("defer_events", CorpusDeferredID),
+		{Name: "undefer", Args: []string{"undefer", CorpusDeferredID, "--json"}, Write: true},
+		eventsOf("undefer_events", CorpusDeferredID),
+		{Name: "close_claim_next", Args: []string{"close", CorpusCloserID, "--claim-next", "--json"}, Write: true},
+		eventsOf("close_claim_next_events", CorpusCloserID),
+		{Name: "unclaim", Args: []string{"unclaim", CorpusRootID, "--json"}, Write: true},
+		eventsOf("unclaim_events", CorpusRootID),
+
+		nativeSeed(CorpusBlockerID, "Corpus blocker subject"),
+		nativeSeed(CorpusBlockedID, "Corpus blocked subject", "--deps", CorpusBlockerID),
+		nativeSeed(CorpusUnblockedID, "Corpus unblocked subject", "--deps", CorpusCloserID),
+		{Name: "ready_explain", Args: []string{"ready", "--explain", "--json"}},
+		{Name: "info", Args: []string{"info", "--json"}},
+		{Name: "show_refs", Args: []string{"show", CorpusCanonicalID, "--refs", "--json"}},
+		{Name: "show_children", Args: []string{"show", CorpusParentID, "--children", "--json"}},
 	}
 }
 
@@ -218,6 +360,32 @@ var volatileValueKeys = map[string]string{
 //
 // The input need not be a single object; arrays and scalars are handled.
 func CanonicalizeJSON(raw []byte) ([]byte, error) {
+	return CanonicalizeJSONWith(raw, Projection{})
+}
+
+// embeddedTimestampRE matches an RFC3339 timestamp anywhere inside a string.
+// Only CaptureEvents blobs use it: their old_value/new_value carry whole issue
+// snapshots as JSON text, so the timestamps are substrings, not values.
+var embeddedTimestampRE = regexp.MustCompile(
+	`\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})`,
+)
+
+// Projection is the normalization a capture needs beyond CanonicalizeJSON's.
+// The zero Projection is CanonicalizeJSON.
+type Projection struct {
+	// Literals maps a run-specific literal (the workspace's random id prefix
+	// and directory, an id bd minted) to its placeholder. Every occurrence in
+	// any string value or object key is replaced, longest literal first, before
+	// object arrays are sorted, so the sort cannot see the random value.
+	Literals map[string]string
+	// Events drops "id" from every object carrying "event_type" (an audit
+	// event row's random id) and replaces RFC3339 timestamps embedded inside
+	// string values with <TS>.
+	Events bool
+}
+
+// CanonicalizeJSONWith is CanonicalizeJSON plus p.
+func CanonicalizeJSONWith(raw []byte, p Projection) ([]byte, error) {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -237,7 +405,7 @@ func CanonicalizeJSON(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("canonicalize: unexpected trailing data after JSON value: %w", err)
 	}
 
-	canon := canonValue(v)
+	canon := canonValue(v, newProjector(p))
 
 	out, err := marshalCanonical(canon)
 	if err != nil {
@@ -246,10 +414,64 @@ func CanonicalizeJSON(raw []byte) ([]byte, error) {
 	return out, nil
 }
 
+// projector applies a Projection to strings.
+type projector struct {
+	literals []string // longest first
+	repl     map[string]string
+	events   bool
+}
+
+func newProjector(p Projection) projector {
+	lits := make([]string, 0, len(p.Literals))
+	for k := range p.Literals {
+		if k != "" {
+			lits = append(lits, k)
+		}
+	}
+	sort.Slice(lits, func(i, j int) bool {
+		if len(lits[i]) != len(lits[j]) {
+			return len(lits[i]) > len(lits[j])
+		}
+		return lits[i] < lits[j]
+	})
+	return projector{literals: lits, repl: p.Literals, events: p.Events}
+}
+
+func (pr projector) project(s string) string {
+	for _, lit := range pr.literals {
+		s = strings.ReplaceAll(s, lit, pr.repl[lit])
+	}
+	if pr.events {
+		s = embeddedTimestampRE.ReplaceAllString(s, tsPlaceholder)
+	}
+	return s
+}
+
 // canonValue recursively normalizes a decoded JSON value in place.
-func canonValue(v any) any {
+func canonValue(v any, pr projector) any {
 	switch t := v.(type) {
 	case map[string]any:
+		if pr.events {
+			if _, isEvent := t["event_type"]; isEvent {
+				delete(t, "id")
+			}
+		}
+		if len(pr.literals) > 0 {
+			// Collect the renames first: inserting into a map while ranging
+			// over it may or may not visit the new key.
+			type rename struct{ from, to string }
+			var renames []rename
+			for k := range t {
+				if pk := pr.project(k); pk != k {
+					renames = append(renames, rename{k, pk})
+				}
+			}
+			for _, r := range renames {
+				child := t[r.from]
+				delete(t, r.from)
+				t[r.to] = child
+			}
+		}
 		for k, child := range t {
 			// NOTE ON SCOPE: the provenance transforms below match by bare key
 			// name at every nesting depth of every blob, not just the version
@@ -289,16 +511,17 @@ func canonValue(v any) any {
 				t[k] = ph
 				continue
 			}
-			t[k] = canonValue(child)
+			t[k] = canonValue(child, pr)
 		}
 		return t
 	case []any:
 		for i, child := range t {
-			t[i] = canonValue(child)
+			t[i] = canonValue(child, pr)
 		}
 		sortObjectArray(t)
 		return t
 	case string:
+		t = pr.project(t)
 		if timestampRE.MatchString(t) {
 			return tsPlaceholder
 		}

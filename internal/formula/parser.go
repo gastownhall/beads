@@ -71,18 +71,34 @@ func NewParser(searchPaths ...string) *Parser {
 // the command surface. If no beads project is resolved, fall back to cwd/.beads
 // so formula registries can still be used before a project is initialized.
 func DefaultSearchPaths() []string {
-	var paths []string
+	paths, _ := defaultSearchPaths()
+	return paths
+}
 
-	addPath := func(path string) {
+// OrchestratorOnlySearchPath returns $GT_ROOT/.beads/formulas when GT_ROOT is
+// set and that directory is its own entry in DefaultSearchPaths, i.e. it is not
+// also the project, checkout or user formula directory. It returns "" when
+// GT_ROOT is unset or its formula directory coincides with an earlier path.
+// Commands that write formula files use it to recognize the orchestrator-only
+// directory, which may be off limits for writes depending on where GT_ROOT
+// came from.
+func OrchestratorOnlySearchPath() string {
+	_, orchestratorDir := defaultSearchPaths()
+	return orchestratorDir
+}
+
+func defaultSearchPaths() (paths []string, orchestratorDir string) {
+	addPath := func(path string) bool {
 		if path == "" {
-			return
+			return false
 		}
 		for _, existing := range paths {
 			if existing == path {
-				return
+				return false
 			}
 		}
 		paths = append(paths, path)
+		return true
 	}
 
 	// Project-level formulas via resolved beads directory.
@@ -109,10 +125,13 @@ func DefaultSearchPaths() []string {
 
 	// Orchestrator formulas (via GT_ROOT)
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
-		addPath(filepath.Join(gtRoot, ".beads", "formulas"))
+		dir := filepath.Join(gtRoot, ".beads", "formulas")
+		if addPath(dir) {
+			orchestratorDir = dir
+		}
 	}
 
-	return paths
+	return paths, orchestratorDir
 }
 
 // ParseFile parses a formula from a file path.

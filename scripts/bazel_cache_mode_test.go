@@ -114,7 +114,7 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			"GITHUB_OUTPUT=" + filepath.Join(dir, "out"),
 			"BAZEL_CI_CACHE_DIR=" + filepath.Join(dir, "bazel-ci-cache"),
 			"BAZEL_CI_SECRET_DIR=" + secretDir,
-			// Mode cache's zstd probe: a refused port, never rbe-cache.
+			// Mode cache's rrc probe: a refused port, never rbe-cache.
 			"RBE_CACHE_PROBE_URL=" + refusedProbeURL,
 		}
 		for k, v := range env {
@@ -368,10 +368,10 @@ func checkModeRC(t *testing.T, lane, mode, outputs, rc string, files []string, l
 			t.Errorf("%s (mode %s): rc lacks %q:\n%s", lane, mode, strings.TrimSpace(want), rc)
 		}
 	}
-	// zstd: no mode here asks for compression. Mode cache's probe is
-	// refused here (TestSetupBazelRCWriter runs it passing); the trusted
-	// schedulers and rbe-fork advertise none, and Bazel refuses such a
-	// remote.
+	// zstd: no generated rc asks for compression. Mode cache gets it from
+	// .bazelrc's fork-cache (TestBazelRemoteCacheCompressionOnlyForkCache);
+	// the trusted schedulers and rbe-fork advertise none, and Bazel refuses
+	// such a remote.
 	if has("remote_cache_compression") {
 		t.Errorf("%s (mode %s): rc asks for compression:\n%s", lane, mode, rc)
 	}
@@ -678,9 +678,9 @@ func TestCacheZstdProbe(t *testing.T) {
 		if stdout != "" {
 			t.Errorf("probe wrote stdout %q; write-bazelrc.sh would append it to the rc", stdout)
 		}
-		verdict := "; the fork cache stays identity\n"
+		verdict := "; fork-cache builds run locally\n"
 		if want {
-			verdict = "; the fork cache uses zstd\n"
+			verdict = "; fork-cache can use it\n"
 		}
 		if !strings.HasPrefix(stderr, "rbe-cache zstd probe: ") || !strings.HasSuffix(stderr, verdict) {
 			t.Errorf("probe stderr %q; want one verdict line ending %q", stderr, verdict)

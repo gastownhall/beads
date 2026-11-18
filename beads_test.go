@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +190,67 @@ func TestOpenFromConfig_ServerModeFailsWithoutServer(t *testing.T) {
 	// Should contain "unreachable" from the fail-fast TCP check
 	if !strings.Contains(openErr.Error(), "unreachable") {
 		t.Errorf("expected 'unreachable' in error, got: %v", openErr)
+	}
+}
+
+func TestOpenFromConfig_MetadataSocketReportedWhenNoEndpointAnswers(t *testing.T) {
+	// A socket is a preference with TCP fallback, so with neither endpoint
+	// answering the error names the socket; a dropped socket names TCP. Every
+	// other source of an endpoint is pinned, and auto-start is off.
+	for _, name := range []string{
+		"BEADS_DOLT_SERVER_SOCKET",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_PORT",
+		"BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE",
+		"BEADS_CENTRAL_CONFIG",
+		"BEADS_DOLT_CREDENTIAL_COMMAND",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+
+	// The TCP endpoint: a port that was free a moment ago, now closed.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to find free port: %v", err)
+	}
+	freePort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	if conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", freePort), 200*time.Millisecond); err == nil {
+		conn.Close()
+		t.Fatalf("something is listening on 127.0.0.1:%d; the TCP endpoint must be unavailable", freePort)
+	}
+
+	// The socket endpoint: a path that does not exist.
+	sockPath := filepath.Join(tmpDir, "dolt.sock")
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Fatalf("socket path %s must not exist: %v", sockPath, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(strconv.Itoa(freePort)), 0644); err != nil {
+		t.Fatalf("failed to write dolt-server.port: %v", err)
+	}
+	metadata := fmt.Sprintf(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"socketcheck","dolt_server_host":"127.0.0.1","dolt_server_socket":%q}`, sockPath)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatalf("failed to write metadata.json: %v", err)
+	}
+
+	store, openErr := beads.OpenFromConfig(context.Background(), beadsDir)
+	if openErr == nil {
+		store.Close()
+		t.Fatal("OpenFromConfig succeeded with neither the socket nor the TCP port answering")
+	}
+	if !strings.Contains(openErr.Error(), sockPath) {
+		t.Errorf("expected the configured socket %s in the error, got: %v", sockPath, openErr)
 	}
 }
 
