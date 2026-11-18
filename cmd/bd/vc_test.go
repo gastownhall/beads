@@ -1,8 +1,15 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestVcCommitStdinFlag(t *testing.T) {
@@ -108,4 +115,134 @@ func trimTrailingNewlines(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// vcStatusUnreadableStore is a DoltStorage stand-in whose branch and commit
+// reads succeed but whose working-set status read fails. It embeds a nil
+// DoltStorage and overrides only the reads bd vc status makes.
+type vcStatusUnreadableStore struct {
+	storage.DoltStorage
+}
+
+func (vcStatusUnreadableStore) CurrentBranch(context.Context) (string, error) {
+	return "main", nil
+}
+
+func (vcStatusUnreadableStore) GetCurrentCommit(context.Context) (string, error) {
+	return "0123456789abcdef0123456789abcdef", nil
+}
+
+func (vcStatusUnreadableStore) Status(context.Context) (*storage.Status, error) {
+	return nil, errors.New("dolt_status exploded")
+}
+
+// TestVCStatusFailsWhenWorkingSetUnreadable pins that bd vc status fails with
+// a status-read error, in text and JSON, when the working-set status cannot be
+// read, instead of printing the branch and commit as if the store were clean.
+func TestVCStatusFailsWhenWorkingSetUnreadable(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		name := "text"
+		if asJSON {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			saveAndRestoreGlobals(t)
+			origJSON, origCtx := jsonOutput, rootCtx
+			t.Cleanup(func() { jsonOutput, rootCtx = origJSON, origCtx })
+			store = vcStatusUnreadableStore{}
+			jsonOutput = asJSON
+			rootCtx = context.Background()
+
+			var runErr error
+			stdioMutex.Lock()
+			stdout, stderr := captureStdio(t, func() {
+				runErr = vcStatusCmd.RunE(vcStatusCmd, nil)
+			})
+			stdioMutex.Unlock()
+
+			if runErr == nil {
+				t.Fatalf("bd vc status succeeded although the working-set status could not be read\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+			}
+			var report string
+			if asJSON {
+				var payload map[string]interface{}
+				if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+					t.Fatalf("JSON error output does not parse: %v\n%s", err, stdout)
+				}
+				msg, _ := payload["error"].(string)
+				report = msg
+				for _, key := range []string{"branch", "commit", "staged", "unstaged"} {
+					if _, ok := payload[key]; ok {
+						t.Errorf("JSON output carries %q alongside the error: %s", key, stdout)
+					}
+				}
+			} else {
+				report = stderr
+				if strings.Contains(stdout, "Branch") || strings.Contains(stdout, "no uncommitted changes") {
+					t.Errorf("text output reports a status despite the failed read:\n%s", stdout)
+				}
+			}
+			for _, want := range []string{"working-set status", "dolt_status exploded"} {
+				if !strings.Contains(report, want) {
+					t.Errorf("error report must mention %q, got:\n%s", want, report)
+				}
+			}
+		})
+	}
+}
+
+// TestNewVCWorkingSetSortsAndKeepsEmptySides pins bd vc status's working-set
+// view: each side sorted by table then status, lowercase JSON keys, and an
+// empty side marshalled as [] rather than null.
+func TestNewVCWorkingSetSortsAndKeepsEmptySides(t *testing.T) {
+	ws := newVCWorkingSet(&storage.Status{
+		Unstaged: []storage.StatusEntry{
+			{Table: "labels", Status: "modified"},
+			{Table: "comments", Status: "new table"},
+			{Table: "comments", Status: "modified"},
+		},
+	})
+	got, err := json.Marshal(map[string]interface{}{"staged": ws.Staged, "unstaged": ws.Unstaged})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"staged":[],"unstaged":[{"table":"comments","status":"modified"},{"table":"comments","status":"new table"},{"table":"labels","status":"modified"}]}`
+	if string(got) != want {
+		t.Errorf("working set JSON =\n%s\nwant\n%s", got, want)
+	}
+	if ws.clean() {
+		t.Error("a working set with unstaged changes reported clean")
+	}
+	if empty := newVCWorkingSet(nil); !empty.clean() || empty.Staged == nil || empty.Unstaged == nil {
+		t.Errorf("nil status must give a clean view with non-nil sides, got %+v", empty)
+	}
+}
+
+// TestNewVCWorkingSetDropsBookkeepingTables pins that bd vc status leaves out
+// the bookkeeping tables bd doctor ignores, on both sides, so a working set
+// changed only there is clean.
+func TestNewVCWorkingSetDropsBookkeepingTables(t *testing.T) {
+	bookkeeping := []storage.StatusEntry{
+		{Table: "wisps", Status: "modified"},
+		{Table: "wisp_labels", Status: "modified"},
+		{Table: "leases", Status: "modified"},
+		{Table: "local_metadata", Status: "modified"},
+		{Table: "repo_mtimes", Status: "new table"},
+		{Table: "events", Status: "modified"},
+	}
+	if ws := newVCWorkingSet(&storage.Status{Staged: bookkeeping, Unstaged: bookkeeping}); !ws.clean() {
+		t.Errorf("bookkeeping-only working set must be clean, got %+v", ws)
+	}
+
+	ws := newVCWorkingSet(&storage.Status{
+		Staged:   append([]storage.StatusEntry{{Table: "issues", Status: "modified"}}, bookkeeping...),
+		Unstaged: append([]storage.StatusEntry{{Table: "labels", Status: "modified"}}, bookkeeping...),
+	})
+	want := vcWorkingSet{
+		Staged:   []vcStatusEntry{{Table: "issues", Status: "modified"}},
+		Unstaged: []vcStatusEntry{{Table: "labels", Status: "modified"}},
+	}
+	if !reflect.DeepEqual(ws, want) {
+		t.Errorf("working set = %+v, want %+v", ws, want)
+	}
 }

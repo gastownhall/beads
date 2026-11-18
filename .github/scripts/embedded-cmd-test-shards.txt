@@ -76,6 +76,7 @@
 
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
+100 20 TestEmbeddedSyncCloseRaceHalts
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
 100 21 TestEmbeddedConfigGetIsReadOnly
@@ -105,6 +106,7 @@
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy
 100 27 TestEmbeddedNewDoltStoreFromConfig_DottedDBName
 100 27 TestEmbeddedShipConcurrent
+100 27 TestEmbeddedVCStatusReportsStagedAndUnstaged
 
 100 28 TestEmbeddedDoltLocalOnly_RemoteAdd_RefusesExitOne
 100 28 TestEmbeddedForeignPreDoltCloneLeftUnchanged
@@ -167,10 +169,12 @@
 100 39 TestEmbeddedIfRevisionRejectsLabelAndParentEdits
 100 39 TestEmbeddedMaxRowsGraph
 100 39 TestEmbeddedNewDoltStoreFromConfig_NoMetadata
+100 39 TestEmbeddedVCStatusIgnoresBookkeepingTables
 
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
+100 40 TestEmbeddedVCStatusReportsUncommittedWorkingSet
 
 100 41 TestEmbeddedCompactAbortsDivergentReplay
 100 41 TestEmbeddedDuplicateConcurrent
