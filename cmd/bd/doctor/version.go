@@ -427,18 +427,18 @@ func comparePrereleaseSuffix(pre1, pre2 string) int {
 // "rc.2" < "rc.10"; anything else compares lexically. Per semver 2.0,
 // numeric identifiers always sort lower than alphanumeric ones.
 func comparePrereleaseIdentifier(a, b string) int {
-	aNum, aIsNum := prereleaseIdentifierAsInt(a)
-	bNum, bIsNum := prereleaseIdentifierAsInt(b)
+	aNum, aIsNum := prereleaseNumericIdentifier(a)
+	bNum, bIsNum := prereleaseNumericIdentifier(b)
 
 	switch {
 	case aIsNum && bIsNum:
 		switch {
-		case aNum < bNum:
+		case len(aNum) < len(bNum):
 			return -1
-		case aNum > bNum:
+		case len(aNum) > len(bNum):
 			return 1
 		default:
-			return 0
+			return strings.Compare(aNum, bNum)
 		}
 	case aIsNum && !bIsNum:
 		return -1
@@ -449,22 +449,16 @@ func comparePrereleaseIdentifier(a, b string) int {
 	}
 }
 
-// prereleaseIdentifierAsInt reports whether s is a non-empty run of ASCII
-// digits, and its integer value when it is.
-func prereleaseIdentifierAsInt(s string) (int, bool) {
-	if s == "" {
-		return 0, false
+// prereleaseNumericIdentifier recognizes digits without a machine-integer bound.
+// Ignore leading zeroes as the existing permissive numeric comparison did.
+func prereleaseNumericIdentifier(s string) (string, bool) {
+	if s == "" || strings.Trim(s, "0123456789") != "" {
+		return "", false
 	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
+	if trimmed := strings.TrimLeft(s, "0"); trimmed != "" {
+		return trimmed, true
 	}
-	var n int
-	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
-		return 0, false
-	}
-	return n, true
+	return "0", true
 }
 
 // IsBrewHeadVersion recognizes the version Homebrew stamps into --HEAD
