@@ -512,7 +512,7 @@ func proxiedInitConfigYAMLBody(beadsDir string) []byte {
 	if _, err := os.Stat(filepath.Join(beadsDir, "config.yaml")); err == nil {
 		return nil
 	}
-	return renderInitConfigYAML("", false)
+	return renderInitConfigYAML()
 }
 
 // proxiedInitTeamServer is the team-server posture init runs with: the

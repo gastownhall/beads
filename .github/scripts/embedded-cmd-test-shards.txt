@@ -44,6 +44,7 @@
 
 100 10 TestEmbeddedCreateScalarAndRelationships
 100 10 TestEmbeddedDoctorExportCheckLeavesTheWorkspaceUntouched
+100 10 TestEmbeddedMetadatalessWorkspaceRefusesSeveralDatabases
 
 100 11 TestEmbeddedAssigneeHiddenEmptyClears
 100 11 TestEmbeddedAutoExportFirstCreateAfterOptIn
@@ -51,6 +52,7 @@
 100 11 TestEmbeddedInitGitOriginAdoptionRequiresConsent
 100 11 TestEmbeddedKVConcurrent
 100 11 TestEmbeddedMemoryBareKeyRecallsKeysDeriveKeyChanges
+100 11 TestEmbeddedMetadatalessWorkspaceAdoptsSoleDatabase
 100 11 TestEmbeddedTelemetryExportCarriesNoIssueContent
 100 11 TestEmbeddedUpdateClaimRefusesBlockedIssue
 
@@ -84,6 +86,7 @@
 100 20 TestEmbeddedDoctorExportCheckMissingFileWarns
 100 20 TestEmbeddedInitGitOriginAdoptionWithConsent
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
+100 20 TestEmbeddedMetadatalessWorkspaceEnvVarSelectsDatabase
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
 100 20 TestEmbeddedUpdateClaimPassesStaleBlockedFlag
 
@@ -115,6 +118,7 @@
 100 27 TestEmbeddedDoctorExportCheckRefreshedFileIsClean
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy
 100 27 TestEmbeddedNewDoltStoreFromConfig_DottedDBName
+100 27 TestEmbeddedNoDBTrueIgnoredWithWarning
 100 27 TestEmbeddedShipConcurrent
 
 100 28 TestEmbeddedDoltLocalOnly_RemoteAdd_RefusesExitOne
@@ -178,8 +182,10 @@
 100 39 TestEmbeddedDoctorExportCheckStaleFileWarns
 100 39 TestEmbeddedIfRevisionRejectsLabelAndParentEdits
 100 39 TestEmbeddedMaxRowsGraph
+100 39 TestEmbeddedMetadatalessWorkspaceLegacyDatabaseName
 100 39 TestEmbeddedNewDoltStoreFromConfig_NoMetadata
 
+100 40 TestEmbeddedConfigSetNoDBRefused
 100 40 TestEmbeddedDoctorExportCheckScopes
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
