@@ -87,6 +87,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("CountsPromotedWispsInIssues", s.issueCountForPrefixCountsPromotedWisps)
 		s.Run("CountsBaseNamespaceHeldInWisps", s.issueCountForPrefixCountsBaseNamespaceInWisps)
 		s.Run("HyphenatedPrefixCountsExactSiblingNamespace", s.issueCountForPrefixHyphenatedPrefix)
+		s.Run("LiveWispsDoNotCountForBasePrefix", s.issueCountForPrefixLiveWispsDoNotCountForBase)
 	})
 	s.Run("NextCounterID", func() {
 		s.Run("FreshDBInsertsAtOne", s.issueNextCounterIDFresh)
@@ -705,6 +706,16 @@ func (s *testSuite) issueCountForPrefixHyphenatedPrefix() {
 	got, err := s.issueRepo().CountForPrefix(s.Ctx(), "cfp-hy", domain.IssueTableOpts{})
 	s.Require().NoError(err)
 	s.Equal(4, got, "2 issues plus the 2 exact-namespace wisps")
+}
+
+// issueCountForPrefixLiveWispsDoNotCountForBase: the sibling term is exact,
+// so 12 wisps outside cfpLw's namespace (-wisp-, -mol-, a dotted child) do
+// not lengthen base IDs. A plain sum would give 15 and length 4.
+func (s *testSuite) issueCountForPrefixLiveWispsDoNotCountForBase() {
+	s.insertCountRows([]string{"cfpLw-a0", "cfpLw-a1", "cfpLw-a2"}, false)
+	s.insertCountRows(append([]string{"cfpLw-mol-c0", "cfpLw-a0.1"}, mintIDs("cfpLw-wisp-b", 10)...), true)
+
+	s.assertTwoPlaneCount("cfpLw", false, 3, 3)
 }
 
 func (s *testSuite) issueCountForPrefixEmptyPrefix() {
