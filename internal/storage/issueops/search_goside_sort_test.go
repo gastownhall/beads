@@ -112,11 +112,11 @@ func TestSearchIssuesWithCountsInTx_GoSideSortDropsTheLegBound(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM issues i`).
+	mock.ExpectQuery(`(?s)SELECT issues\.id FROM issues`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM wisps i`).
+	mock.ExpectQuery(`(?s)SELECT wisps\.id FROM wisps`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	txSQL, ok := tx.(*sql.Tx)

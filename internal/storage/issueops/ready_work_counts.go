@@ -228,37 +228,14 @@ func runReadyCountsInTx(ctx context.Context, tx DBTX, tables FilterTables, limit
 	if err != nil {
 		return nil, 0, err
 	}
-	if len(pageIDs) == 0 {
-		return nil, 0, nil
-	}
 
-	// Hydrate the counts for the resolved page, chunking the IN-list. The page
-	// IDs are already distinct, so a per-chunk scan needs no cross-chunk dedup.
-	byID := make(map[string]*types.IssueWithCounts, len(pageIDs))
-	for start := 0; start < len(pageIDs); start += sqlbuild.QueryBatchSize {
-		end := start + sqlbuild.QueryBatchSize
-		if end > len(pageIDs) {
-			end = len(pageIDs)
-		}
-		countsSQL, idArgs := sqlbuild.SearchCountsSQL(tables, pageIDs[start:end], "", "", "", includeWispReverseDeps, hyd)
-		rows, scanErr := scanCountsRowsInTx(ctx, tx, tables.Main, countsSQL, idArgs, hyd)
-		if scanErr != nil {
-			return nil, 0, scanErr
-		}
-		for _, r := range rows {
-			if r != nil && r.Issue != nil {
-				byID[r.Issue.ID] = r
-			}
-		}
-	}
-
-	// Restore the ready order the ID query already computed so the result stays
-	// identical to the unbounded mega-query's ORDER BY … LIMIT.
-	ordered := make([]*types.IssueWithCounts, 0, len(pageIDs))
-	for _, id := range pageIDs {
-		if r, ok := byID[id]; ok {
-			ordered = append(ordered, r)
-		}
+	// Hydrate the counts for the resolved page through the shared loop
+	// (search_counts.go), which chunked-restores the ready order the ID query
+	// already computed — so the result stays identical to the unbounded
+	// mega-query's ORDER BY … LIMIT.
+	ordered, err := hydrateCountsByIDsInTx(ctx, tx, tables, pageIDs, includeWispReverseDeps, hyd)
+	if err != nil {
+		return nil, 0, err
 	}
 	return ordered, total, nil
 }

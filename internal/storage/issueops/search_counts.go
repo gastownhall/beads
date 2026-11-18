@@ -103,42 +103,85 @@ func hydrationFor(filter types.IssueFilter) sqlbuild.CountsHydration {
 	return sqlbuild.CountsHydration{SkipLabels: filter.SkipLabels, SkipCounts: filter.SkipCounts, Lite: filter.Lite}
 }
 
-func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
-	whereClauses, args, err := BuildIssueFilterClauses(query, filter, tables)
+// runFilterSearchQueryInTx answers one counts search leg in two steps: it
+// selects the surviving, ordered page IDs with the narrow id projection
+// searchTableInTxT runs for SearchIssueIDsInTx — label-driven JOINs, residual
+// filters, EffectiveSearchLimit and the Go-side sort-before-bound rule all
+// included — and then hydrates ONLY those IDs through the by-IDs counts form
+// (GH#4370). The pre-change shape ran the counts mega-query in predicate form
+// over the whole matching set: its aggregate LEFT JOINs computed
+// whole-side-table counts — and the reverse-blocker's COALESCE self-join
+// re-scanned its full materialization once per driver row — for every row the
+// sort then kept, so a bounded page over a ~100k-issue corpus paid for the
+// whole side-table world and seized under concurrent write churn while point
+// reads stayed fast. hydrateCountsByIDsInTx never issues the predicate form; an
+// empty page means no counts query at all.
+//
+// The predicate form remains in sqlbuild.SearchCountsSQL as the parity oracle
+// for tests (runSearchQueryInTx below renders it; only the ready seam's
+// unbounded branch still calls that wrapper).
+//
+// WHY THE ID SELECTION MAY BORROW the label-driven JOIN plan the plain search
+// seam uses: the JOIN-and-DISTINCT rewrite answers the same row set the
+// IN-subquery clauses selected, and the page bound rides the ID query in full
+// — a wrong leg could only answer a different SET, never a different page of
+// the same set, and the parity matrix tests compare this path against the
+// predicate oracle row for row.
+func runFilterSearchQueryInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
+	ids, err := searchTableInTxT(ctx, tx, query, filter, tables, idProjection)
 	if err != nil {
 		return nil, err
 	}
-	whereSQL := ""
-	if len(whereClauses) > 0 {
-		whereSQL = "WHERE " + joinAnd(whereClauses)
+	return hydrateCountsByIDsInTx(ctx, tx, tables, ids, includeWispReverseDeps, hydrationFor(filter))
+}
+
+// hydrateCountsByIDsInTx hydrates counts rows for the given ordered IDs through
+// the by-IDs form of the counts mega-query and restores the caller's order. It
+// is the one hydration loop the store-backed counts seams share: search here,
+// and ready's page (bounded already, unbounded since the GH#4370 rewrite).
+//
+// THE EMPTY-ID CASE RETURNS WITHOUT QUERYING. The by-IDs form is selected by
+// "ids non-empty"; handing it an empty slice would silently select the
+// predicate form, whose aggregates read the WHOLE side table — the exact shape
+// this helper exists to keep off the hot path.
+//
+// The IDs are chunked at sqlbuild.QueryBatchSize so the by-IDs form's
+// up-to-twelvefold placeholder binding stays within every backend's
+// per-statement limit. The page IDs a caller hands here are already distinct
+// (searchTableInTxT and the ready ID queries dedupe), so no cross-batch dedup
+// is needed; scanCountsRowsInTx's in-batch dedup stays as a defensive no-op.
+//
+// A hydrated row missing from the map is skipped, never an error: it answers
+// the page without the row exactly as the predicate scan would have (both
+// dedupe rather than fail on a partially-visible page).
+func hydrateCountsByIDsInTx(ctx context.Context, tx DBTX, tables FilterTables, ids []string, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
+	if len(ids) == 0 {
+		return nil, nil
 	}
-	// A PAGE BOUND IS ONLY EVER PUSHED UNDER AN ORDER THE QUERY CAN EXPRESS —
-	// the same rule searchTableInTxT applies on the plain seam. sqlbuild.OrderBy
-	// renders no ORDER BY for a Go-side sort key ("id"), and a LIMIT with no
-	// ORDER BY returns n rows, not the first n; this is the seam
-	// bd query '<expr>' --sort id reaches on the store-shaped backends
-	// (storequerier → SearchIssuesWithCounts), where BuildQueryPlan always
-	// pushes a bound. So under a Go-side sort the query scans the complete
-	// matching set and the same eff bound is applied below, after the order
-	// exists — leaving every downstream count (the merge, the terminal
-	// finishSearchIssuesWithCounts trim-then-cap) exactly what the SQL LIMIT
-	// used to hand it.
-	goSideSort := sqlbuild.IsGoSideSort(filter.SortBy)
-	eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows)
-	limitSQL := ""
-	if eff > 0 && !goSideSort {
-		limitSQL = fmt.Sprintf("LIMIT %d", eff)
+	byID := make(map[string]*types.IssueWithCounts, len(ids))
+	for start := 0; start < len(ids); start += sqlbuild.QueryBatchSize {
+		end := start + sqlbuild.QueryBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		countsSQL, idArgs := sqlbuild.SearchCountsSQL(tables, ids[start:end], "", "", "", includeWispReverseDeps, hyd)
+		rows, err := scanCountsRowsInTx(ctx, tx, tables.Main, countsSQL, idArgs, hyd)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			if r != nil && r.Issue != nil {
+				byID[r.Issue.ID] = r
+			}
+		}
 	}
-	orderBy := sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, "i")
-	out, err := runSearchQueryInTx(ctx, tx, tables, whereSQL, orderBy, limitSQL, args, includeWispReverseDeps, hydrationFor(filter))
-	if err != nil {
-		return nil, err
+	ordered := make([]*types.IssueWithCounts, 0, len(ids))
+	for _, id := range ids {
+		if r, ok := byID[id]; ok {
+			ordered = append(ordered, r)
+		}
 	}
-	if goSideSort {
-		// scanCountsRowsInTx drops nil-Issue rows, so the accessor is safe.
-		out = goSideSortAndTrim(out, func(iwc *types.IssueWithCounts) string { return iwc.Issue.ID }, filter.SortDesc, eff)
-	}
-	return out, nil
+	return ordered, nil
 }
 
 //nolint:gosec // G201: SQL fragments are caller-built from hardcoded shapes
@@ -232,26 +275,4 @@ func sortSearchIssuesWithCounts(items []*types.IssueWithCounts, sortBy string, s
 		}
 		return sqlbuild.Less(a.Issue, b.Issue, sortBy, sortDesc)
 	})
-}
-
-func joinAnd(clauses []string) string {
-	switch len(clauses) {
-	case 0:
-		return ""
-	case 1:
-		return clauses[0]
-	}
-	total := 0
-	for _, c := range clauses {
-		total += len(c)
-	}
-	total += 5 * (len(clauses) - 1)
-	buf := make([]byte, 0, total)
-	for i, c := range clauses {
-		if i > 0 {
-			buf = append(buf, " AND "...)
-		}
-		buf = append(buf, c...)
-	}
-	return string(buf)
 }

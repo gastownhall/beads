@@ -140,15 +140,19 @@ var countsEntryPoints = []countsEntryPoint{
 		wantTolerated: "groups=map[open:1]",
 	},
 	{
-		name:    "SearchIssuesWithCountsInTx/ephemeral",
+		name: "SearchIssuesWithCountsInTx/ephemeral",
+		// The counts seam selects IDs with the plain search's narrow
+		// projection (no lease join, no aggregate joins), so its wisp leg
+		// reaches wisp_labels alone; the tolerance tests still drive it with
+		// the full table set below, they only document reach here.
 		missing: countsMegaQueryTables,
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
 			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-			mock.ExpectQuery(`(?s)FROM wisps i`).WillReturnError(wispErr)
-			mock.ExpectQuery(`(?s)FROM issues i`).WillReturnRows(emptyCountsRows())
+			mock.ExpectQuery(`(?s)SELECT wisps\.id FROM wisps`).WillReturnError(wispErr)
+			mock.ExpectQuery(`(?s)SELECT issues\.id FROM issues`).WillReturnRows(emptyCountsRows())
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
 			out, err := SearchIssuesWithCountsInTx(ctx, tx, "", types.IssueFilter{Ephemeral: boolPtr(true)})
@@ -162,10 +166,10 @@ var countsEntryPoints = []countsEntryPoint{
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
 			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-			mock.ExpectQuery(`(?s)FROM issues i`).WillReturnRows(emptyCountsRows())
+			mock.ExpectQuery(`(?s)SELECT issues\.id FROM issues`).WillReturnRows(emptyCountsRows())
 			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-			mock.ExpectQuery(`(?s)FROM wisps i`).WillReturnError(wispErr)
+			mock.ExpectQuery(`(?s)SELECT wisps\.id FROM wisps`).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
 			out, err := SearchIssuesWithCountsInTx(ctx, tx, "", types.IssueFilter{})
