@@ -899,3 +899,40 @@ func TestOpenBestAvailableProxiedRefusalPrecedesServerOverride(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenBestAvailableWithOptionRefusalPrecedesProxiedRefusal pins that on a
+// proxied-server workspace an unsupported per-open option still returns its
+// own documented sentinel (the option contract predates the proxied guard and
+// fails closed already), with no store and the workspace untouched.
+func TestOpenBestAvailableWithOptionRefusalPrecedesProxiedRefusal(t *testing.T) {
+	tests := []struct {
+		name string
+		opts beads.OpenOptions
+		want error
+	}{
+		{name: "Credential", opts: beads.OpenOptions{Credential: fixtureCredential{}}, want: beads.ErrCredentialWithoutOpenWith},
+		{name: "HTTPClient", opts: beads.OpenOptions{HTTPClient: &http.Client{}}, want: beads.ErrHTTPClientWithoutOpenWith},
+		{name: "UserAgent", opts: beads.OpenOptions{UserAgent: "test-agent/1.0"}, want: beads.ErrUserAgentWithoutOpenWith},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, beadsDir := proxiedServerBeadsDir(t, "proxied-server")
+			before := workspaceTreeDigest(t, root)
+
+			store, err := beads.OpenBestAvailableWith(context.Background(), beadsDir, tt.opts)
+			if store != nil {
+				_ = store.Close()
+				t.Errorf("OpenBestAvailableWith returned a store alongside the %s refusal", tt.name)
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("OpenBestAvailableWith error = %v, want %v", err, tt.want)
+			}
+			if errors.Is(err, beads.ErrProxiedServerWorkspace) {
+				t.Fatalf("OpenBestAvailableWith error = %v; the %s option sentinel must keep precedence over the proxied refusal", err, tt.name)
+			}
+			if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+				t.Errorf("%s refusal changed the workspace:\nbefore %v\nafter  %v", tt.name, before, after)
+			}
+		})
+	}
+}
