@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
 var routingConfigKeys = []string{
@@ -67,22 +68,11 @@ func getRoutingConfigValue(ctx context.Context, store storage.DoltStorage, key s
 	return strings.TrimSpace(dbValue)
 }
 
-func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage) (string, routing.RoutingRule) {
-	var dbValues map[string]string
-	// Local-only for a remote backend: see routingSettingsStore.
-	if store = routingSettingsStore(store); store != nil {
-		all, allErr := store.GetAllConfig(ctx)
-		if allErr != nil {
-			debug.Logf("DEBUG: failed to read config from store: %v\n", allErr)
-		} else {
-			dbValues = make(map[string]string, len(routingConfigKeys))
-			for _, key := range routingConfigKeys {
-				if v, ok := all[key]; ok {
-					dbValues[key] = v
-				}
-			}
-		}
-	}
+// resolveRoutingConfig builds the routing config in one read of the store's
+// settings: config.yaml values win, and the legacy contributor.* keys fill what
+// the routing.* keys leave empty.
+func resolveRoutingConfig(ctx context.Context, store storage.DoltStorage) *routing.RoutingConfig {
+	dbValues := readRoutingSettings(ctx, store)
 
 	routingMode := resolveRoutingConfigValue("routing.mode", dbValues)
 	contributorRepo := resolveRoutingConfigValue("routing.contributor", dbValues)
@@ -96,14 +86,47 @@ func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage)
 		contributorRepo = resolveRoutingConfigValue("contributor.planning_repo", dbValues)
 	}
 
-	routingConfig := &routing.RoutingConfig{
-		Mode:             routingMode,
-		DefaultRepo:      resolveRoutingConfigValue("routing.default", dbValues),
-		MaintainerRepo:   resolveRoutingConfigValue("routing.maintainer", dbValues),
-		ContributorRepo:  contributorRepo,
-		ExplicitOverride: "",
+	return &routing.RoutingConfig{
+		Mode:            routingMode,
+		DefaultRepo:     resolveRoutingConfigValue("routing.default", dbValues),
+		MaintainerRepo:  resolveRoutingConfigValue("routing.maintainer", dbValues),
+		ContributorRepo: contributorRepo,
 	}
+}
 
+// readRoutingSettings reads routingConfigKeys from the store's settings, or
+// nothing for a remote backend (routingSettingsStore). A failed read logs under
+// BD_DEBUG and reads as no settings. UnwrapStore is what reaches the capability
+// behind cmd/bd's storage decorators (see configPrefixReaderFor).
+func readRoutingSettings(ctx context.Context, store storage.DoltStorage) map[string]string {
+	store = routingSettingsStore(store)
+	if store == nil {
+		return nil
+	}
+	if reader, ok := storage.UnwrapStore(store).(domain.ConfigKeysReader); ok {
+		values, err := reader.GetConfigKeys(ctx, routingConfigKeys...)
+		if err != nil {
+			debug.Logf("DEBUG: failed to read config from store: %v\n", err)
+			return nil
+		}
+		return values
+	}
+	all, err := store.GetAllConfig(ctx)
+	if err != nil {
+		debug.Logf("DEBUG: failed to read config from store: %v\n", err)
+		return nil
+	}
+	values := make(map[string]string, len(routingConfigKeys))
+	for _, key := range routingConfigKeys {
+		if v, ok := all[key]; ok {
+			values[key] = v
+		}
+	}
+	return values
+}
+
+func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage) (string, routing.RoutingRule) {
+	routingConfig := resolveRoutingConfig(ctx, store)
 	userRole := detectUserRoleForRouting(routingConfig)
 	return routing.DetermineTargetRepoWithRule(routingConfig, userRole, ".")
 }

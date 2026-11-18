@@ -77,37 +77,54 @@ func exactDependencyTarget(ctx context.Context, st storage.DependencyQueryStore,
 // (e.g. dep add/remove/link writing through the source issue's store) must use
 // resolveIDForMutation instead (GH#3231, #4141).
 func resolveIDWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (resolvedID string, targetStore storage.DoltStorage, cleanup func(), err error) {
-	result, err := resolveAndGetIssueWithRouting(ctx, localStore, id)
+	result, err := resolveIssueWithRouting(ctx, localStore, id)
 	if err != nil {
-		return "", nil, func() {}, fmt.Errorf("resolving issue ID %s: %w", id, err)
+		return "", nil, func() {}, err
 	}
-	if result == nil || result.Issue == nil {
-		return "", nil, func() {}, fmt.Errorf("no issue found matching %q", id)
-	}
-	s := result.Store
-	if s == nil {
-		s = localStore
-	}
-	return result.ResolvedID, s, func() { result.Close() }, nil
+	return result.ResolvedID, result.Store, func() { result.Close() }, nil
 }
 
 // resolveIDForMutation mirrors resolveIDWithRouting but opens prefix-routed
 // target stores writable (resolveAndGetIssueForMutation) so mutation commands
-// can commit to the routed repository. Its result validation, local-store
-// fallback, and cleanup tail must stay aligned with resolveIDWithRouting.
+// can commit to the routed repository. Both share their result validation,
+// local-store fallback and cleanup through checkedDepResolution.
 func resolveIDForMutation(ctx context.Context, localStore storage.DoltStorage, id string) (resolvedID string, targetStore storage.DoltStorage, cleanup func(), err error) {
-	result, err := resolveAndGetIssueForMutation(ctx, localStore, id)
+	result, err := resolveIssueForMutation(ctx, localStore, id)
 	if err != nil {
-		return "", nil, func() {}, fmt.Errorf("resolving issue ID %s: %w", id, err)
+		return "", nil, func() {}, err
+	}
+	return result.ResolvedID, result.Store, func() { result.Close() }, nil
+}
+
+// resolveIssueWithRouting is resolveIDWithRouting returning the whole result,
+// so a caller also keeps the issue the resolution read (result.Issue, never
+// nil). result.Store is never nil either. The caller must call result.Close().
+func resolveIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
+	result, err := resolveAndGetIssueWithRouting(ctx, localStore, id)
+	return checkedDepResolution(localStore, id, result, err)
+}
+
+// resolveIssueForMutation is resolveIDForMutation returning the whole result,
+// as resolveIssueWithRouting does.
+func resolveIssueForMutation(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
+	result, err := resolveAndGetIssueForMutation(ctx, localStore, id)
+	return checkedDepResolution(localStore, id, result, err)
+}
+
+// checkedDepResolution is the validation the dep resolvers share: a failed or
+// empty resolution becomes an error naming id, and a result without a store
+// is pointed at localStore.
+func checkedDepResolution(localStore storage.DoltStorage, id string, result *RoutedResult, err error) (*RoutedResult, error) {
+	if err != nil {
+		return nil, fmt.Errorf("resolving issue ID %s: %w", id, err)
 	}
 	if result == nil || result.Issue == nil {
-		return "", nil, func() {}, fmt.Errorf("no issue found matching %q", id)
+		return nil, fmt.Errorf("no issue found matching %q", id)
 	}
-	s := result.Store
-	if s == nil {
-		s = localStore
+	if result.Store == nil {
+		result.Store = localStore
 	}
-	return result.ResolvedID, s, func() { result.Close() }, nil
+	return result, nil
 }
 
 // refuseMalformedDepTarget refuses a dep add target that contains ":" but is
@@ -306,17 +323,19 @@ Examples:
 			// target is only resolved by ID and stays read-only, so a routed read
 			// never opens a foreign project writable or runs open-time migrations
 			// against its history (bd-6dnrw.32, GH#3231).
-			fromID, fromStore, fromCleanup, err := resolveIDForMutation(ctx, store, blocksID)
+			from, err := resolveIssueForMutation(ctx, store, blocksID)
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
-			defer fromCleanup()
+			defer from.Close()
+			fromID, fromStore := from.ResolvedID, from.Store
 
-			toID, _, toCleanup, err := resolveIDWithRouting(ctx, store, blockerID)
+			to, err := resolveIssueWithRouting(ctx, store, blockerID)
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
-			defer toCleanup()
+			defer to.Close()
+			toID := to.ResolvedID
 
 			opsCtx, err := issueOpsContext(ctx)
 			if err != nil {
@@ -348,8 +367,12 @@ Examples:
 				})
 			}
 
+			// The titles are the ones the resolution above read, not read again.
+			// That read was its own transaction, so a rename another writer
+			// commits after it is not shown; the line is informational, and the
+			// edge just written changes neither title.
 			fmt.Printf("%s Added dependency: %s blocks %s\n",
-				ui.RenderPass("✓"), formatFeedbackIDParen(toID, lookupTitle(toID)), formatFeedbackIDParen(fromID, lookupTitle(fromID)))
+				ui.RenderPass("✓"), formatFeedbackIDParen(toID, to.Issue.Title), formatFeedbackIDParen(fromID, from.Issue.Title))
 			return nil
 		}
 
@@ -476,27 +499,31 @@ Examples:
 		// below, so the routed source must open writable (#4141). The depends-on
 		// target is only resolved by ID and stays read-only, so resolving it can
 		// never open a foreign project writable (bd-6dnrw.32, GH#3231).
-		fromID, fromStore, fromCleanup, err := resolveIDForMutation(ctx, store, args[0])
+		from, err := resolveIssueForMutation(ctx, store, args[0])
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		defer fromCleanup()
+		defer from.Close()
+		fromID, fromStore := from.ResolvedID, from.Store
 
+		// toIssue stays nil for a target that is not resolved here: an
+		// external ref, or a cross-prefix id passed through unverified.
+		var toIssue *types.Issue
 		if isExternalRef {
 			toID = dependsOnArg
 			if err := validateExternalRef(toID); err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
 		} else {
-			var toCleanup func()
-			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
-			if err != nil {
-				toID, toMiss, err = resolveUnresolvedDepTarget(fromID, dependsOnArg, err)
+			to, resolveErr := resolveIssueWithRouting(ctx, store, dependsOnArg)
+			if resolveErr != nil {
+				toID, toMiss, err = resolveUnresolvedDepTarget(fromID, dependsOnArg, resolveErr)
 				if err != nil {
 					return HandleErrorRespectJSON("%v", err)
 				}
 			} else {
-				defer toCleanup()
+				defer to.Close()
+				toID, toIssue = to.ResolvedID, to.Issue
 			}
 		}
 
@@ -512,15 +539,15 @@ Examples:
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		// The confirmation line names both issues by title. Adding an edge
-		// changes neither title, so read them now, while the resolution's
-		// reads above are still fresh: over http those two lookups are then
-		// answered without a round trip, where after the write they would be
-		// two more (bts-xpw.3.14.6).
-		var fromTitle, toTitle string
-		if !jsonOutput {
-			fromTitle, toTitle = lookupTitle(fromID), lookupTitle(toID)
-		}
+		// The confirmation line names both issues by the titles the
+		// resolution above read; nothing is read again for it. That read was
+		// its own transaction, so a rename another writer commits after it is
+		// not shown. The line is informational, and adding an edge changes
+		// neither title. A target that was not resolved (an external ref, or
+		// a cross-prefix id passed through) has no title, as before. A target
+		// found through a route now shows its title: the old lookup read the
+		// local store, which does not hold it.
+		fromTitle, toTitle := from.Issue.Title, issueTitleOrEmpty(toIssue)
 		edge := issueops.DependencyEdge{IssueID: fromID, DependsOnID: toID, Type: dt}
 		if err := addDependencyEdgesDirect(opsCtx, fromStore, []issueops.DependencyEdge{edge}, false); err != nil {
 			return HandleErrorRespectJSON("%v", err)

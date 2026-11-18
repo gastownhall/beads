@@ -309,28 +309,8 @@ var createCmd = &cobra.Command{
 			// Explicit --repo flag overrides auto-routing
 			repoPath = repoOverride
 		} else {
-			// Build routing config with backward compatibility for legacy contributor.* keys.
-			// Prefer config.yaml values, but fall back to DB config values set by bd init --contributor.
-			routingMode := getRoutingConfigValue(rootCtx, store, "routing.mode")
-			contributorRepo := getRoutingConfigValue(rootCtx, store, "routing.contributor")
-
-			// NFR-001: Backward compatibility - fall back to legacy contributor.* keys
-			if routingMode == "" {
-				if getRoutingConfigValue(rootCtx, store, "contributor.auto_route") == "true" {
-					routingMode = "auto"
-				}
-			}
-			if contributorRepo == "" {
-				contributorRepo = getRoutingConfigValue(rootCtx, store, "contributor.planning_repo")
-			}
-
-			routingConfig := &routing.RoutingConfig{
-				Mode:             routingMode,
-				DefaultRepo:      getRoutingConfigValue(rootCtx, store, "routing.default"),
-				MaintainerRepo:   getRoutingConfigValue(rootCtx, store, "routing.maintainer"),
-				ContributorRepo:  contributorRepo,
-				ExplicitOverride: repoOverride,
-			}
+			routingConfig := resolveRoutingConfig(rootCtx, store)
+			routingConfig.ExplicitOverride = repoOverride
 
 			// Auto-routing based on user role, detected only once the resolved
 			// config shows routing will read it.
