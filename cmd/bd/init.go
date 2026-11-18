@@ -32,6 +32,8 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	domaingit "github.com/steveyegge/beads/internal/storage/domain/git"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/templates/agents"
 	"github.com/steveyegge/beads/internal/ui"
@@ -4469,7 +4471,9 @@ func resolveInitDoltMode(proxiedFlag, sharedFlag, serverFlag bool) string {
 }
 
 // commitEmbeddedInitArtifacts stages the local init artifacts and preserves the
-// optional-add and nonfatal commit behavior of the embedded bootstrap.
+// optional-add and nonfatal commit behavior of the embedded bootstrap. The
+// commit takes only the paths it staged: anything the caller had already
+// staged stays in the index and out of the init commit (GH#5654).
 func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 	if initArtifactGitCommand(workDir, "rev-parse", "--git-dir").Run() != nil {
 		if !quiet {
@@ -4479,48 +4483,43 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 	}
 	gitAddCmd := initArtifactGitCommand(workDir, "add", ".beads/")
 	if _, addErr := gitAddCmd.CombinedOutput(); addErr == nil {
+		staged := []string{".beads/"}
+		stage := func(path string) {
+			if _, statErr := os.Stat(filepath.Join(workDir, path)); statErr == nil {
+				if initArtifactGitCommand(workDir, "add", "--", path).Run() == nil {
+					staged = append(staged, path)
+				}
+			}
+		}
 		// Also stage the agents file if it exists
-		agentsFileToStage := config.SafeAgentsFile()
-		if _, statErr := os.Stat(filepath.Join(workDir, agentsFileToStage)); statErr == nil {
-			agentsCmd := initArtifactGitCommand(workDir, "add", agentsFileToStage)
-			_ = agentsCmd.Run()
-		}
+		stage(config.SafeAgentsFile())
 		// Also stage Claude settings if created by init
-		claudeSettingsPath := filepath.Join(".claude", "settings.json")
-		if _, statErr := os.Stat(filepath.Join(workDir, claudeSettingsPath)); statErr == nil {
-			claudeCmd := initArtifactGitCommand(workDir, "add", claudeSettingsPath)
-			_ = claudeCmd.Run()
-		}
+		stage(filepath.Join(".claude", "settings.json"))
 		// Also stage CLAUDE.md if created by setup
-		if _, statErr := os.Stat(filepath.Join(workDir, "CLAUDE.md")); statErr == nil {
-			claudeMdCmd := initArtifactGitCommand(workDir, "add", "CLAUDE.md")
-			_ = claudeMdCmd.Run()
-		}
+		stage("CLAUDE.md")
 		// Also stage Codex and Cursor project integration files if created
 		// by setup. Cursor project hooks/rules are meant to be committed
 		// (a no-op git add if .cursor/ is gitignored in this repo).
 		for _, path := range []string{".agents", ".codex", ".cursor"} {
-			if _, statErr := os.Stat(filepath.Join(workDir, path)); statErr == nil {
-				codexCmd := initArtifactGitCommand(workDir, "add", path)
-				_ = codexCmd.Run()
-			}
+			stage(path)
 		}
 		// Also stage .gitignore if modified by EnsureProjectGitignore
-		if _, statErr := os.Stat(filepath.Join(workDir, ".gitignore")); statErr == nil {
-			giCmd := initArtifactGitCommand(workDir, "add", ".gitignore")
-			_ = giCmd.Run()
-		}
+		stage(".gitignore")
 		// Hooks installed by this init can call back into bd. Skip all
 		// of them for the bootstrap commit to avoid self-deadlocking
 		// while init still owns the embedded Dolt lock. --no-verify
 		// alone does not skip prepare-commit-msg.
-		commitArgs := []string{"-c", "core.hooksPath=", "commit", "--no-verify", "-m", "bd init: initialize beads issue tracking"}
-		commitCmd := initArtifactGitCommand(workDir, commitArgs...)
-		if commitOut, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
-			if !quiet && !strings.Contains(string(commitOut), "nothing to commit") {
+		commit, commitErr := domaingit.NewInitGitRepository(workDir).Commit(context.Background(), domain.GitCommitParams{
+			Message:   "bd init: initialize beads issue tracking",
+			NoVerify:  true,
+			SkipHooks: true,
+			Paths:     staged,
+		})
+		if commitErr != nil {
+			if !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", commitErr)
 			}
-		} else if !quiet {
+		} else if commit.DidCommit && !quiet {
 			fmt.Printf("  %s Committed beads files to git\n", ui.RenderPass("✓"))
 		}
 		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
@@ -4530,6 +4529,13 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 	}
 }
 
+// initArtifactGitCommand runs git in workDir with routing variables scrubbed.
+//
+// #nosec G702 -- no shell is involved: the binary is the literal "git" and
+// every argument is its own argv element. Callers pass constant subcommands
+// and flags; the only variable arguments are init-owned artifact paths, which
+// commitEmbeddedInitArtifacts places after a "--" terminator so git reads them
+// as pathspecs and never as options.
 func initArtifactGitCommand(workDir string, args ...string) *exec.Cmd {
 	cmd := exec.Command("git", args...)
 	cmd.Dir, cmd.Env = workDir, gitenv.ScrubRouting(os.Environ())

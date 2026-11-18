@@ -32,6 +32,12 @@ type GitCommitParams struct {
 	Message   string
 	NoVerify  bool
 	SkipHooks bool
+	// Paths, when set, limits the commit to the staged changes under these
+	// pathspecs: the staged content and staged removals, never the working
+	// tree's. Anything else already in the index stays staged and out of the
+	// commit. A path with nothing staged under it is dropped, and no staged
+	// change under any of them is DidCommit false.
+	Paths []string
 }
 
 type GitCommitResult struct {
@@ -213,6 +219,7 @@ func (u *gitUseCaseImpl) CommitInitArtifacts(ctx context.Context, params CommitI
 		Message:   params.Message,
 		NoVerify:  params.NoVerify,
 		SkipHooks: params.SkipHooks,
+		Paths:     paths,
 	})
 	if err != nil {
 		return CommitInitArtifactsResult{}, fmt.Errorf("CommitInitArtifacts: commit: %w", err)
