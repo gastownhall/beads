@@ -50,9 +50,12 @@ type doltSQLProvider struct {
 	// creates the database or migrates, only verifies the schema version.
 	teamServer bool
 	// expectedProjectID is the calling workspace's project identity, asserted
-	// against the team-server database on open. Empty means "no assertion
-	// available" (bd init, which adopts; server-wide maintenance; a workspace
-	// predating project identity) and skips the check.
+	// on open: strictly against a team-server database (checkTeamServerIdentity),
+	// and leniently on a plain open, where the CLI sets it only for a
+	// --database/--db excursion (checkExcursionIdentity). Empty means "no
+	// assertion available" (bd init, which adopts; server-wide maintenance; a
+	// workspace predating project identity; a plain open of the configured
+	// database) and skips the check.
 	expectedProjectID string
 	// preview: the command that opened this provider is an explicitly
 	// non-mutating preview (--dry-run, --inspect). The open creates no
@@ -414,6 +417,15 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 
 	if p.teamServer {
 		return p.verifyTeamServerSchema(ctx, conn, database)
+	}
+	// A plain open asserts identity only for a --database/--db excursion (the
+	// CLI leaves expectedProjectID empty otherwise), and must refuse before
+	// the preview attach or the migration below touches the database.
+	if err := checkExcursionIdentity(ctx, conn, database, p.expectedProjectID); err != nil {
+		if isSerializationError(err) {
+			return fmt.Errorf("uow: identity check: %w", err)
+		}
+		return backoff.Permanent(err)
 	}
 	if p.preview {
 		return p.attachPreviewDatabase(ctx, conn, database)

@@ -1360,6 +1360,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself a proxied-server workspace) keeps its own error unless a formula has
   the operand's name, and a dry run previews without a writable open. A bond
   that stays in the served database still commits once.
+- **A worktree database without metadata no longer hides the shared
+  workspace** (#6552). In a linked Git worktree or a jj secondary workspace, a
+  `.beads` database with no `metadata.json` or `config.json`, usually left
+  behind by a command that fell back to embedded mode there, outranked the
+  main repository's workspace for good, so `bd` read and wrote the wrong
+  store. Discovery (`bd` in the worktree, `bd -C`, and the `FindBeadsDir` and
+  `FindDatabasePath` library calls) now uses the shared `.beads` instead when
+  its metadata is readable, and warns once per process on stderr, naming both
+  directories and the databases found in the skipped one. A worktree database
+  with its own metadata, a `.beads/redirect`, `BEADS_DIR` and `BEADS_DB` keep
+  their precedence. Discovery never opens, changes or deletes the skipped
+  database: back it up before removing it; `docs/reference/worktrees.md`
+  shows how to inspect a copy.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
@@ -3732,6 +3745,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mc-gate-check-timer-resolves`, `mc-gate-add-waiter` and
   `mc-update-await-id` (pending until the reference server advertises the
   gate tokens), pinned passing by `TestE2E_GatesOverHTTP`.
+- **`bd import` on a proxied-server workspace mints IDs again when a write
+  conflict makes it start over** (#8455). The whole import is one unit of
+  work, replayed after a deadlock, lock wait timeout or serialization
+  failure (MySQL 1213/1205, SQLSTATE 40001/40P01). The engine writes the IDs
+  it mints onto the imported records, so the replay read the rolled-back
+  attempt's IDs as IDs the input supplied and upserted under them. A record
+  with no ID could then be stale-rejected against an issue another writer
+  had created under that ID in the meantime, or, with `--allow-stale`,
+  written over it; even with no other writer, counter mode left the issue
+  counter behind the imported rows, so a later create could be handed one of
+  their IDs. Each replay now clears the IDs the input left empty (an issue's
+  ID, a dependency's source, a comment's ID) and assigns them again. IDs the
+  input supplied are kept, and `bd import` still reports the IDs that were
+  committed.
 - **`bd import` no longer reports a failed dependency check as a skipped
   dependency.** Import skips an edge the dependency checks refuse (a
   self-dependency, a cycle, or a blocker that is the issue's own ancestor or
