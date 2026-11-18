@@ -106,7 +106,6 @@
 34 10 TestProxiedServerGateCheckB
 34 10 TestProxiedServerServeDeleteIfRevisionSingleWinner
 34 10 TestProxiedServerServeRefusesAStreamOnADisabledJournal
-34 10 TestProxiedServerServeSurvivesProxyIdleGap
 34 10 TestProxiedServerTypes
 34 10 TestProxiedServerUpdate2C
 
@@ -278,6 +277,7 @@
 34 32 TestProxiedServerConfigConcurrent
 34 32 TestProxiedServerDepB
 34 32 TestProxiedServerServeStreamsTheJournalItIsWriting
+34 32 TestProxiedServerServeSurvivesProxyIdleGap
 34 32 TestProxiedServerServeUpdateClaim
 34 32 TestProxiedServerStorageClass
 

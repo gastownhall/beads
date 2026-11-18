@@ -408,11 +408,13 @@ func TestProxiedServerServeSurvivesProxyIdleGap(t *testing.T) {
 // timeout: the database-backed read before a quiet period answers 200; once
 // serve's pool retires its idle connections (20s) and the proxy is observed to
 // exit, the first read may be answered 200 directly or by an interim 503
-// db_unavailable that carries Retry-After; /healthz stays 200 the whole time;
-// and a read within 60s of the first post-exit one answers 200 again, without
-// restarting serve or changing the workspace's idle policy. On a build without
-// recovery the loop exhausts the window — serve dials the exited proxy's port
-// forever — which is this test's red.
+// db_unavailable that carries Retry-After (a proxy lookup that fails, such as
+// a cold start that overruns the proxy's start deadline, answers that 503);
+// /healthz stays 200 the whole time; and a read answers 200 again within 60s
+// of the first post-exit one, without restarting serve or changing the
+// workspace's idle policy. On a build without recovery the loop exhausts the
+// window — serve dials the exited proxy's port forever — which is this
+// test's red.
 func requireServeRecoversAfterIdleGap(t *testing.T, sp *serveProcess, p proxiedProject) {
 	t.Helper()
 
@@ -427,6 +429,12 @@ func requireServeRecoversAfterIdleGap(t *testing.T, sp *serveProcess, p proxiedP
 	for {
 		status, body, hdr := sp.get(t, "/v0/beads/ready?limit=1")
 		if status == http.StatusOK {
+			// A read sent just inside the window can answer up to the
+			// client's 30s timeout later; the recovery must land inside it.
+			if late := time.Since(deadline); late > 0 {
+				t.Fatalf("serve answered 200 only %s after the 60s window from the first post-idle read\nstderr:\n%s",
+					late.Round(time.Millisecond), sp.stderr.String())
+			}
 			return
 		}
 		if status != http.StatusServiceUnavailable {
