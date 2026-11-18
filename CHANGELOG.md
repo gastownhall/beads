@@ -1334,6 +1334,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd vc merge --strategy ours|theirs` concludes a merge whose only
+  problem is a foreign-key violation** (#4992 follow-up). A merge with no row
+  conflict can still stop on a foreign-key cascade violation, for example
+  when one side deleted an issue the other side labeled. The command left
+  that merge open with the violation in the working set; in server mode it
+  then failed with "merge succeeded but is_blocked recompute failed". It now
+  deletes the rows that reference the deleted issue and commits the merge,
+  or aborts it when bd cannot repair the violation, the way `bd dolt pull`
+  settles such a merge. It also refuses to start while another merge is
+  open, such as one an older bd left that way, instead of aborting that
+  merge or concluding it as this one; `bd conflicts list` shows what the
+  open merge needs. In server mode the merge also stops leaving its
+  conflict-tolerance session settings on a pooled connection, where a later
+  transaction on that connection could keep merge conflicts or constraint
+  violations in the working set instead of rolling back.
+
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that
