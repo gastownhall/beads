@@ -19,7 +19,7 @@ var macOSLegacyUserConfigGOOS = runtime.GOOS
 // store-free: it never opens a workspace.
 func macOSLegacyUserConfigCheck() (doctorCheck, bool) {
 	goos := macOSLegacyUserConfigGOOS
-	if goos != "darwin" && goos != "ios" {
+	if !config.IsMacOSFamily(goos) {
 		return doctorCheck{}, false
 	}
 	home, homeErr := os.UserHomeDir()
@@ -28,7 +28,7 @@ func macOSLegacyUserConfigCheck() (doctorCheck, bool) {
 		Home:              home,
 		HomeErr:           homeErr,
 		ActiveConfigPaths: config.UserConfigYamlSearchPaths(),
-		MetricsEnabled:    resolveMetricsEnabled(),
+		MetricsEnabled:    metricsEnabledAfterBootstrap(),
 		NodeID:            config.NodeID(),
 		Stat:              os.Stat,
 	}
@@ -54,4 +54,15 @@ var hostLevelDoctorIssues = func() []doctorCheck {
 		return nil
 	}
 	return []doctorCheck{check}
+}
+
+// embeddedDoctorHostIssues is what the embedded-mode doctor stub shows above
+// its notice: hostLevelDoctorIssues for bare bd doctor only. --deep,
+// --server, --migration and --fix ask for something else that embedded mode
+// cannot do, so their stub stays as it was (design §2).
+func embeddedDoctorHostIssues() []doctorCheck {
+	if doctorDeep || doctorServer || doctorMigration != "" || doctorFix {
+		return nil
+	}
+	return hostLevelDoctorIssues()
 }

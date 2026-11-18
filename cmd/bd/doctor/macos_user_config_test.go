@@ -177,8 +177,9 @@ func TestCheckMacOSLegacyUserConfigPresentTargetExists(t *testing.T) {
 
 	t.Run("every setting matches", func(t *testing.T) {
 		f := newMacFixture(t)
-		writeFixtureFile(t, f.legacyConfig, "metrics:\n  disabled: false\n")
-		writeFixtureFile(t, f.documented, "metrics:\n  disabled: false\n")
+		// Quoted and unquoted scalars are the same setting to bd.
+		writeFixtureFile(t, f.legacyConfig, "metrics:\n  disabled: \"false\"\nretries: 5\n")
+		writeFixtureFile(t, f.documented, "metrics:\n  disabled: false\nretries: \"5\"\n")
 		if check := runMacCheck(t, f.inputs()); check.Detail != "Every setting there already matches your current user config" {
 			t.Errorf("detail = %q", check.Detail)
 		}
@@ -200,7 +201,7 @@ func TestCheckMacOSLegacyUserConfigKeyCap(t *testing.T) {
 }
 
 func TestCheckMacOSLegacyUserConfigMetricsLine(t *testing.T) {
-	const line = "Restore your metrics opt-out: bd metrics off"
+	const line = "If you had turned metrics off, run: bd metrics off"
 	for _, tc := range []struct {
 		name    string
 		legacy  string
@@ -304,7 +305,7 @@ func TestCheckMacOSLegacyUserConfigPrime(t *testing.T) {
 		writeFixtureFile(t, f.legacyPrime, "# custom\n")
 		check := runMacCheck(t, f.inputs())
 		if check.Message != "bd no longer reads ~/Library/Application Support/beads/PRIME.md" ||
-			check.Detail != "bd prime uses its built-in template until "+f.primeTarget+" exists" {
+			check.Detail != "Where a workspace has no PRIME.md of its own, bd prime uses its built-in template until "+f.primeTarget+" exists" {
 			t.Fatalf("got %+v", check)
 		}
 		want := "Move it to where bd reads it: mkdir -p " + filepath.Dir(f.primeTarget) + " && mv '" + f.legacyPrime + "' " + f.primeTarget
@@ -317,7 +318,7 @@ func TestCheckMacOSLegacyUserConfigPrime(t *testing.T) {
 		writeFixtureFile(t, f.legacyPrime, "# custom\n")
 		writeFixtureFile(t, f.primeTarget, "# current\n")
 		check := runMacCheck(t, f.inputs())
-		if check.Detail != "bd prime uses "+f.primeTarget+" instead" {
+		if check.Detail != "Where a workspace has no PRIME.md of its own, bd prime uses "+f.primeTarget+" instead" {
 			t.Fatalf("detail = %q", check.Detail)
 		}
 		want := "Merge anything you still want into " + f.primeTarget + ", then retire the old file: mv '" +
@@ -345,11 +346,11 @@ func TestCheckMacOSLegacyUserConfigBothFiles(t *testing.T) {
 		t.Fatalf("message = %q", check.Message)
 	}
 	if !strings.HasPrefix(check.Detail, "bd/config.yaml: Settings there that differ") ||
-		!strings.Contains(check.Detail, "; beads/PRIME.md: bd prime uses its built-in template") {
+		!strings.Contains(check.Detail, "; beads/PRIME.md: Where a workspace has no PRIME.md of its own, bd prime uses its built-in template") {
 		t.Errorf("detail = %q", check.Detail)
 	}
 	lines := strings.Split(check.Fix, "\n")
-	if len(lines) != 3 || lines[0] != "Restore your metrics opt-out: bd metrics off" ||
+	if len(lines) != 3 || lines[0] != "If you had turned metrics off, run: bd metrics off" ||
 		!strings.Contains(lines[1], "bd/config.yaml") || !strings.Contains(lines[2], "PRIME.md") {
 		t.Errorf("fix lines = %q", lines)
 	}

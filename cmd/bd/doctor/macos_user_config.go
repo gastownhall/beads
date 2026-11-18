@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 
@@ -65,7 +64,7 @@ type macOSLegacyFinding struct {
 // ios, before touching the filesystem. Warning-class: it never reports an
 // error.
 func CheckMacOSLegacyUserConfig(in MacOSLegacyUserConfigInputs) (DoctorCheck, bool) {
-	if in.GOOS != "darwin" && in.GOOS != "ios" {
+	if !config.IsMacOSFamily(in.GOOS) {
 		return DoctorCheck{}, false
 	}
 	check := DoctorCheck{Name: MacOSLegacyUserConfigCheckName, Status: StatusOK, Category: CategoryData}
@@ -227,7 +226,9 @@ func diffLegacyConfig(in MacOSLegacyUserConfigInputs, stat func(string) (fs.File
 
 	var differing []string
 	for _, k := range legacy.AllKeys() {
-		if !active.IsSet(k) || !reflect.DeepEqual(legacy.Get(k), active.Get(k)) {
+		// Compare formatted values: YAML "true" and true, or "5" and 5, are
+		// the same setting to bd's string-typed readers.
+		if !active.IsSet(k) || fmt.Sprint(legacy.Get(k)) != fmt.Sprint(active.Get(k)) {
 			differing = append(differing, k)
 		}
 	}
@@ -236,7 +237,7 @@ func diffLegacyConfig(in MacOSLegacyUserConfigInputs, stat func(string) (fs.File
 	var lines []string
 	if disabledSet && in.MetricsEnabled {
 		if disabled, ok := config.ParseUserConfigBool(disabledRaw); ok && disabled {
-			lines = append(lines, "Restore your metrics opt-out: bd metrics off")
+			lines = append(lines, "If you had turned metrics off, run: bd metrics off")
 		}
 	}
 	if node := strings.TrimSpace(nodeRaw); node != "" && in.NodeID == "" {
@@ -282,27 +283,27 @@ func checkLegacyPrime(in MacOSLegacyUserConfigInputs, stat func(string) (fs.File
 		f.statErr = true
 		f.statusMsg = "Could not check ~/Library/Application Support/beads/PRIME.md"
 		f.detail = statErrDetail(statErr)
-		f.fixLines = []string{"If you kept settings there, copy them into " + targetWord(in.GOOS, target, "your global PRIME.md")}
+		f.fixLines = []string{"If you customized it, copy what you still want into " + targetWord(in.GOOS, target, "your global PRIME.md")}
 		return f, true
 	}
 	f.statusMsg = "bd no longer reads ~/Library/Application Support/beads/PRIME.md"
 	legacyArg, legacyNote := remedy.CommandArg(in.GOOS, legacy, "<path>")
 	backupArg, backupNote := remedy.CommandArg(in.GOOS, legacy+".bak", "<backup>")
 	if target == "" {
-		f.detail = "bd prime uses its built-in template"
+		f.detail = "Where a workspace has no PRIME.md of its own, bd prime uses its built-in template instead"
 		f.fixLines = []string{"Merge anything you still want into your global PRIME.md, then retire the old file: mv " +
 			legacyArg + " " + backupArg + legacyNote + backupNote}
 		return f, true
 	}
 	if _, err := stat(target); errors.Is(err, fs.ErrNotExist) {
-		f.detail = "bd prime uses its built-in template until " + target + " exists"
+		f.detail = "Where a workspace has no PRIME.md of its own, bd prime uses its built-in template until " + target + " exists"
 		dirArg, dirNote := remedy.CommandArg(in.GOOS, filepath.Dir(target), "<dir>")
 		targetArg, targetNote := remedy.CommandArg(in.GOOS, target, "<target>")
 		f.fixLines = []string{"Move it to where bd reads it: mkdir -p " + dirArg + " && mv " + legacyArg + " " + targetArg +
 			dirNote + legacyNote + targetNote}
 		return f, true
 	}
-	f.detail = "bd prime uses " + target + " instead"
+	f.detail = "Where a workspace has no PRIME.md of its own, bd prime uses " + target + " instead"
 	f.fixLines = []string{"Merge anything you still want into " + targetWord(in.GOOS, target, "your global PRIME.md") +
 		", then retire the old file: mv " + legacyArg + " " + backupArg + legacyNote + backupNote}
 	return f, true

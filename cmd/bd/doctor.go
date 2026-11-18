@@ -309,7 +309,7 @@ Examples:
 		// that reach into the database layer stay server-gated until the
 		// storage driver interface covers them (AGENTS.md "Storage Boundary").
 		if isEmbeddedMode() {
-			printEmbeddedUnsupportedWith("doctor", hostLevelDoctorIssues())
+			printEmbeddedUnsupportedWith("doctor", embeddedDoctorHostIssues())
 			return nil
 		}
 

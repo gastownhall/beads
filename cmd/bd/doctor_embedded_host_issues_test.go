@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,7 +57,7 @@ func TestPrintEmbeddedUnsupportedWithHostIssues(t *testing.T) {
 		Status:   statusWarning,
 		Message:  "bd no longer reads ~/Library/Application Support/bd/config.yaml",
 		Detail:   "Settings there that differ from your current user config: actor",
-		Fix:      "Restore your metrics opt-out: bd metrics off\nMove it to where bd reads it: mkdir -p /h/.config/bd && mv '/h/Library/Application Support/bd/config.yaml' /h/.config/bd/config.yaml",
+		Fix:      "If you had turned metrics off, run: bd metrics off\nMove it to where bd reads it: mkdir -p /h/.config/bd && mv '/h/Library/Application Support/bd/config.yaml' /h/.config/bd/config.yaml",
 		Category: doctor.CategoryData,
 	}
 
@@ -107,7 +108,7 @@ func TestPrintEmbeddedUnsupportedWithHostIssues(t *testing.T) {
 		for _, want := range []string{
 			issue.Name + ": " + issue.Message,
 			issue.Detail,
-			"Restore your metrics opt-out: bd metrics off\n",
+			"If you had turned metrics off, run: bd metrics off\n",
 			"        Move it to where bd reads it: mkdir -p /h/.config/bd && mv '/h/Library/Application Support/bd/config.yaml' /h/.config/bd/config.yaml\n",
 		} {
 			if !strings.Contains(head, want) {
@@ -158,24 +159,30 @@ func TestHostLevelDoctorIssuesOnlyReportsMacProblems(t *testing.T) {
 		{goos: "linux", legacy: true},
 		{goos: "windows", legacy: true},
 	} {
-		home := t.TempDir()
-		t.Setenv("HOME", home)
-		t.Setenv("XDG_CONFIG_HOME", "")
-		if tc.legacy {
-			legacy := filepath.Join(home, "Library", "Application Support", "bd", "config.yaml")
-			if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
-				t.Fatal(err)
+		t.Run(fmt.Sprintf("%s legacy=%v", tc.goos, tc.legacy), func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", "")
+			if tc.legacy {
+				legacy := filepath.Join(home, "Library", "Application Support", "bd", "config.yaml")
+				if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(legacy, []byte("actor: alice\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if err := os.WriteFile(legacy, []byte("actor: alice\n"), 0o600); err != nil {
-				t.Fatal(err)
+			setMacOSLegacyUserConfigGOOSForTest(t, tc.goos)
+			if got := hostLevelDoctorIssues(); len(got) != tc.want {
+				t.Errorf("%d issues %+v, want %d", len(got), got, tc.want)
 			}
-		}
-		old := macOSLegacyUserConfigGOOS
-		macOSLegacyUserConfigGOOS = tc.goos
-		got := hostLevelDoctorIssues()
-		macOSLegacyUserConfigGOOS = old
-		if len(got) != tc.want {
-			t.Errorf("%s legacy=%v: %d issues %+v, want %d", tc.goos, tc.legacy, len(got), got, tc.want)
-		}
+		})
 	}
+}
+
+func setMacOSLegacyUserConfigGOOSForTest(t *testing.T, goos string) {
+	t.Helper()
+	old := macOSLegacyUserConfigGOOS
+	macOSLegacyUserConfigGOOS = goos
+	t.Cleanup(func() { macOSLegacyUserConfigGOOS = old })
 }
