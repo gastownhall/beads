@@ -67,6 +67,30 @@ func TestProxiedServerAutoExport(t *testing.T) {
 		bdProxiedCreateSilent(t, bd, p.dir, "Created with export.auto=false")
 		requireProxiedAutoExportUnchanged(t, p, "bd create with export.auto=false", jsonl, state)
 	})
+
+	// Change detection follows the working set, not HEAD: under
+	// dolt.auto-commit=batch nothing commits, yet an update past the
+	// throttle still reaches the JSONL. Inside the interval it does not.
+	t.Run("batch_working_set", func(t *testing.T) {
+		t.Parallel()
+		p := newProxiedAutoExportProject(t, bd, "pxb", "dolt.auto-commit", "batch")
+		id := bdProxiedCreateSilent(t, bd, p.dir, "Original title")
+		if rec := exportIssueRecordByID(exportLines(t, readProxiedAutoExportJSONL(t, p)), id); rec == nil {
+			t.Fatalf("batch-mode create did not export %s", id)
+		}
+
+		setProxiedAutoExportConfig(t, bd, p, "export.interval", "1h")
+		jsonl, state := readProxiedAutoExportFiles(t, p)
+		bdProxiedUpdateOne(t, bd, p.dir, id, "--title", "Throttled title")
+		requireProxiedAutoExportUnchanged(t, p, "bd update inside export.interval", jsonl, state)
+
+		setProxiedAutoExportConfig(t, bd, p, "export.interval", "1ms")
+		bdProxiedUpdateOne(t, bd, p.dir, id, "--title", "Working-set title")
+		rec := exportIssueRecordByID(exportLines(t, readProxiedAutoExportJSONL(t, p)), id)
+		if rec == nil || rec["title"] != "Working-set title" {
+			t.Fatalf("after an uncommitted (batch) update past the throttle, JSONL record = %v; want title %q", rec, "Working-set title")
+		}
+	})
 }
 
 // newProxiedAutoExportProject is a shared-server proxied project with
