@@ -641,3 +641,105 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_dependencies'
 		t.Fatalf("ck_wisp_dep_one_target count = %d, want 1", checks)
 	}
 }
+
+// DRAFT for AC-4 + AC-5 — to append to internal/storage/dolt/issue6092_ignored_wisp_dep_test.go
+// once no bazel run is in flight.
+
+// issue6092ShowCreateWispDep returns the canonical SHOW CREATE TABLE text for
+// wisp_dependencies: any added, dropped or reordered key, constraint or
+// column changes it, which makes it the strongest structural fingerprint for
+// idempotence assertions.
+func issue6092ShowCreateWispDep(t *testing.T, ctx context.Context, db issue6092Conn) string {
+	t.Helper()
+	var tbl, create string
+	if err := db.QueryRowContext(ctx, "SHOW CREATE TABLE wisp_dependencies").Scan(&tbl, &create); err != nil {
+		t.Fatalf("show create wisp_dependencies: %v", err)
+	}
+	return create
+}
+
+// TestIssue6092IgnoredWispDepReplayLeavesConvergedTableUntouched covers the
+// converged population of #6092: both chains fully applied, the table in its
+// final shape with rows under deterministic ids, and only the ignored cursor
+// rewound to 4 — the state a re-run or a restore lands in. The replay of
+// ignored 5..31 must leave the table exactly as it stands (the repair
+// registered at ignored 5 finds the final shape complete and stands down; the
+// frozen 0005 body no-ops on @needs_drop = 0), and a second pass must apply
+// nothing at all. This is the guard half of the fix: converging the stranded
+// populations must not cost convergence of the healthy one.
+func TestIssue6092IgnoredWispDepReplayLeavesConvergedTableUntouched(t *testing.T) {
+	dbName, conn, ctx := issue6092Setup(t)
+
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
+			t.Fatalf("exec %.80q: %v", query, err)
+		}
+	}
+	scalar := func(query string) int64 {
+		t.Helper()
+		var v int64
+		if err := conn.QueryRowContext(ctx, query).Scan(&v); err != nil {
+			t.Fatalf("query %.80q: %v", query, err)
+		}
+		return v
+	}
+
+	// The converged state: final shape from the setup pass itself, plus rows
+	// under depid.New ids (see issue6092SeedWispDepsWithDeterministicIDs: the
+	// #4259 rekey rewrites any other id while the rewind leaves 26 pending,
+	// and this test asserts the replay, not the rekey, leaves them alone).
+	issue6092SeedReferencedRows(t, ctx, conn)
+	wantIDs := issue6092SeedWispDepsWithDeterministicIDs(t, ctx, conn)
+	updatedBefore := issue6092SnapshotUpdatedAt(t, ctx, conn)
+	shapeBefore := issue6092ShowCreateWispDep(t, ctx, conn)
+
+	exec("DELETE FROM ignored_schema_migrations WHERE version > 4")
+	issue6092CommitFixture(t, ctx, conn, "test: #6092 converged wisp_dependencies before ignored rewind")
+
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"); got != 4 {
+		t.Fatalf("fixture ignored cursor = %d, want 4", got)
+	}
+
+	// Pass 1: replay 5..31 over the converged table.
+	if _, err := schema.MigrateUpWithLock(ctx, conn, dbName); err != nil {
+		t.Fatalf("replay over a converged wisp_dependencies (#6092): %v", err)
+	}
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations"); got != int64(schema.LatestVersion()) {
+		t.Fatalf("main cursor = %d after the replay, want latest %d", got, schema.LatestVersion())
+	}
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"); got != int64(schema.LatestIgnoredVersion()) {
+		t.Fatalf("ignored cursor = %d after the replay, want latest %d", got, schema.LatestIgnoredVersion())
+	}
+	if shape := issue6092ShowCreateWispDep(t, ctx, conn); shape != shapeBefore {
+		t.Fatalf("replay changed the converged shape:\nbefore:\n%s\nafter:\n%s", shapeBefore, shape)
+	}
+	issue6092RequireFinalWispDepShape(t, ctx, conn)
+	issue6092RequireSeededRowsPreserved(t, ctx, conn, updatedBefore)
+	for natural, wantID := range wantIDs {
+		if got := issue6092WispDepID(t, ctx, conn, natural); got != wantID {
+			t.Errorf("row %s id = %q after the replay, want the pre-existing %q", natural, got, wantID)
+		}
+	}
+
+	// Pass 2: applies nothing.
+	logBefore := scalar("SELECT COUNT(*) FROM dolt_log")
+	applied, err := schema.MigrateUpWithLock(ctx, conn, dbName)
+	if err != nil {
+		t.Fatalf("second pass over the converged table (#6092): %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("second pass applied %d migrations, want 0", applied)
+	}
+	if got := scalar("SELECT COUNT(*) FROM dolt_log"); got != logBefore {
+		t.Fatalf("dolt_log grew across the second pass: %d -> %d", logBefore, got)
+	}
+	if shape := issue6092ShowCreateWispDep(t, ctx, conn); shape != shapeBefore {
+		t.Fatalf("second pass changed the converged shape:\nbefore:\n%s\nafter:\n%s", shapeBefore, shape)
+	}
+	for natural, wantID := range wantIDs {
+		if got := issue6092WispDepID(t, ctx, conn, natural); got != wantID {
+			t.Errorf("row %s id = %q after the second pass, want the pre-existing %q", natural, got, wantID)
+		}
+	}
+}
