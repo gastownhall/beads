@@ -241,6 +241,7 @@ func writeReleaseFixture(t *testing.T, version string) string {
 			version + "\"\n",
 		"plugins/beads/.claude-plugin/plugin.json": `{"version":"` + version + `"}`,
 		"plugins/beads/.codex-plugin/plugin.json":  `{"version":"` + version + `"}`,
+		"plugins/beads/package.json":               `{"version":"` + version + `"}`,
 		".claude-plugin/marketplace.json": `{"plugins":[{"version":"` +
 			version + `"}]}`,
 		"npm-package/package.json":                  `{"version":"` + version + `"}`,

@@ -618,6 +618,7 @@ func writeBeadsVersionFixture(t *testing.T, version string) string {
 		"integrations/beads-mcp/uv.lock":                   "[[package]]\nname = \"beads-mcp\"\nversion = \"" + version + "\"\n",
 		"plugins/beads/.claude-plugin/plugin.json":         `{"version":"` + version + `"}`,
 		"plugins/beads/.codex-plugin/plugin.json":          `{"version":"` + version + `"}`,
+		"plugins/beads/package.json":                       `{"version":"` + version + `"}`,
 		".claude-plugin/marketplace.json":                  `{"plugins":[{"version":"` + version + `"}]}`,
 		"npm-package/package.json":                         `{"version":"` + version + `"}`,
 		"plugins/beads/.copilot-plugin/plugin.json":        `{"version":"` + version + `"}`,

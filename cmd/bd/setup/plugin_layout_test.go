@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -60,6 +61,46 @@ func TestPluginLayoutUsesSharedBeadsRoot(t *testing.T) {
 	requireRepoFile(t, root, "plugins", "beads", "skills", "beads", "commands", "ready.md")
 	requireRepoFile(t, root, "plugins", "beads", ".codex-plugin", "hooks", "hooks.json")
 	requireNoRepoPath(t, root, "plugins", "beads", "hooks", "hooks.json")
+}
+
+func TestPiPackageUsesSharedBeadsRoot(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+
+	var piPackage struct {
+		Name     string   `json:"name"`
+		Version  string   `json:"version"`
+		Type     string   `json:"type"`
+		Private  bool     `json:"private"`
+		Keywords []string `json:"keywords"`
+		Pi       struct {
+			Extensions []string `json:"extensions"`
+			Skills     []string `json:"skills"`
+		} `json:"pi"`
+	}
+	readJSONFile(t, filepath.Join(root, "plugins", "beads", "package.json"), &piPackage)
+	if piPackage.Name != "beads" {
+		t.Fatalf("Pi package name = %q, want beads", piPackage.Name)
+	}
+	if piPackage.Version == "" {
+		t.Fatal("Pi package version must be set")
+	}
+	if piPackage.Type != "module" {
+		t.Fatalf("Pi package type = %q, want module", piPackage.Type)
+	}
+	if !piPackage.Private {
+		t.Fatal("Pi package must remain private until it has a supported npm publication path")
+	}
+	if !slices.Contains(piPackage.Keywords, "pi-package") {
+		t.Fatalf("Pi package keywords = %v, want pi-package", piPackage.Keywords)
+	}
+	if got, want := piPackage.Pi.Extensions, []string{"./.pi/extensions/beads.ts"}; !slices.Equal(got, want) {
+		t.Fatalf("Pi extensions = %v, want %v", got, want)
+	}
+	if got, want := piPackage.Pi.Skills, []string{"./skills"}; !slices.Equal(got, want) {
+		t.Fatalf("Pi skills = %v, want %v", got, want)
+	}
+
+	requireRepoFile(t, root, "plugins", "beads", ".pi", "extensions", "beads.ts")
 }
 
 func TestPluginCommandArgumentHintsAreStrings(t *testing.T) {

@@ -364,6 +364,7 @@ shipped inconsistent versions, on every step after the stale path.
 - `plugins/beads/.claude-plugin/plugin.json`
 - `plugins/beads/.codex-plugin/plugin.json`
 - `plugins/beads/.copilot-plugin/plugin.json`
+- `plugins/beads/package.json`
 - `.claude-plugin/marketplace.json`
 - `integrations/beads-mcp/pyproject.toml`
 - `integrations/beads-mcp/src/beads_mcp/__init__.py`

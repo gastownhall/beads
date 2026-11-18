@@ -1,14 +1,44 @@
 # Beads Plugin
 
-This is the shared Claude/Codex plugin package for Beads. Claude and Codex use separate manifest files, but they share the same skill tree.
+This is the shared Claude, Codex, Copilot, and Pi plugin package for Beads. Each agent uses its own metadata, while all of them share the same skill tree.
 
 ## Layout
 
 - `.codex-plugin/plugin.json` describes the Codex plugin.
 - `.claude-plugin/plugin.json` describes the Claude plugin.
+- `.copilot-plugin/plugin.json` describes the Copilot plugin.
+- `package.json` describes the Pi package.
+- `.pi/extensions/beads.ts` refreshes Beads context across Pi session lifecycle events.
 - `skills/beads/` contains the plugin-owned Beads skill.
 - `.codex-plugin/hooks/hooks.json` contains Codex-only lifecycle hooks for startup and compaction-aware context refresh.
 - The Claude marketplace entry lives at `.claude-plugin/marketplace.json`.
+
+## Pi
+
+Install from a persistent Beads checkout. Pi records the local path, so keep the checkout after installation.
+
+```bash
+git clone https://github.com/gastownhall/beads.git
+cd beads
+pi install "$PWD/plugins/beads"
+```
+
+For local development, use an isolated Pi agent directory:
+
+```bash
+export PI_CODING_AGENT_DIR=/tmp/beads-pi
+pi install ./plugins/beads
+pi list
+pi
+```
+
+Inside Pi, run `/skill:beads` to load the skill explicitly. Pi discovers the shared
+skill through `package.json`; package skill filters such as `skills: []` and
+`--no-skills` remain effective.
+
+The extension refreshes hidden `bd prime` context at session start (including
+resume) and after compaction. It stays quiet if `bd` is unavailable or cannot
+produce workflow context in the current directory.
 
 ## Codex Hooks
 

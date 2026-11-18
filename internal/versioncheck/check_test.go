@@ -15,8 +15,8 @@ func TestRepositoryReleaseVersionsMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repository release metadata is inconsistent: %v", err)
 	}
-	if report.CheckedSources != 12 {
-		t.Fatalf("checked sources = %d, want 12", report.CheckedSources)
+	if report.CheckedSources != 13 {
+		t.Fatalf("checked sources = %d, want 13", report.CheckedSources)
 	}
 	hookEntries, err := os.ReadDir(filepath.Join(root, ".githooks"))
 	if err != nil {
@@ -43,11 +43,11 @@ func TestRepositoryReleaseVersionsMatch(t *testing.T) {
 			expectedHookMarkers,
 		)
 	}
-	if len(report.Sources) != 13+expectedHookMarkers {
+	if len(report.Sources) != 14+expectedHookMarkers {
 		t.Fatalf(
-			"reported sources = %d, want %d (twelve release metadata checks, uv.lock, and tracked hook markers)",
+			"reported sources = %d, want %d (thirteen release metadata checks, uv.lock, and tracked hook markers)",
 			len(report.Sources),
-			13+expectedHookMarkers,
+			14+expectedHookMarkers,
 		)
 	}
 }
@@ -60,6 +60,7 @@ func TestCheckCoversEveryReleaseSource(t *testing.T) {
 		"MCP __init__.py":                       "integrations/beads-mcp/src/beads_mcp/__init__.py",
 		"Claude plugin.json":                    "plugins/beads/.claude-plugin/plugin.json",
 		"Codex plugin.json":                     "plugins/beads/.codex-plugin/plugin.json",
+		"Pi package.json":                       "plugins/beads/package.json",
 		"Copilot plugin.json":                   "plugins/beads/.copilot-plugin/plugin.json",
 		"Claude marketplace.json":               ".claude-plugin/marketplace.json",
 		"npm package.json":                      "npm-package/package.json",
@@ -589,6 +590,7 @@ func writeFixtureAt(t *testing.T, root, version string) {
 			version + "\"\n",
 		"plugins/beads/.claude-plugin/plugin.json": `{"version":"` + version + `"}`,
 		"plugins/beads/.codex-plugin/plugin.json":  `{"version":"` + version + `"}`,
+		"plugins/beads/package.json":               `{"version":"` + version + `"}`,
 		".claude-plugin/marketplace.json": `{"plugins":[{"version":"` +
 			version + `"}]}`,
 		"npm-package/package.json":                  `{"version":"` + version + `"}`,

@@ -191,6 +191,7 @@ filegroup(
         "//plugins/beads:.claude-plugin/plugin.json",
         "//plugins/beads:.codex-plugin/plugin.json",
         "//plugins/beads:.copilot-plugin/plugin.json",
+        "//plugins/beads:package.json",
     ] + glob([".githooks/*"]),
     visibility = [
         "//internal/versioncheck:__pkg__",

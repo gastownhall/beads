@@ -28,6 +28,7 @@ exports_files(
         ".claude-plugin/plugin.json",
         ".codex-plugin/plugin.json",
         ".copilot-plugin/plugin.json",
+        "package.json",
     ],
     visibility = ["//:__pkg__"],
 )
