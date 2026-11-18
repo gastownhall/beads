@@ -213,6 +213,70 @@ func TestProxiedServerAutoExport(t *testing.T) {
 			t.Fatalf("after cascade-deleting %s, JSONL ids = %v; want only %s", parent, ids, bystander)
 		}
 	})
+
+	// The overwrite guards run on proxied workspaces too: a JSONL record the
+	// store cannot account for, or a store that would export 0 issues over a
+	// non-empty JSONL, refuses with the direct-mode warning and leaves the
+	// file and the export state alone.
+	t.Run("foreign_record_refused", func(t *testing.T) {
+		t.Parallel()
+		p := newProxiedAutoExportProject(t, bd, "pxf")
+		bdProxiedCreateSilent(t, bd, p.dir, "Local issue")
+		path := proxiedAutoExportJSONLPath(p)
+		foreign := `{"_type":"issue","id":"zz-foreign1","title":"From another clone"}` + "\n"
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(foreign); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		jsonl, state := readProxiedAutoExportFiles(t, p)
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "create", "--silent", "Another local issue")
+		if err != nil {
+			t.Fatalf("bd create: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "Warning: auto-export skipped:") || !strings.Contains(stderr, "refusing to overwrite") || !strings.Contains(stderr, "zz-foreign1") {
+			t.Errorf("stderr lacks the JSONL-only refusal naming zz-foreign1:\n%s", stderr)
+		}
+		requireProxiedAutoExportUnchanged(t, p, "a create over an unprovable JSONL record", jsonl, state)
+	})
+
+	t.Run("empty_overwrite_refused", func(t *testing.T) {
+		t.Parallel()
+		p := newProxiedAutoExportProject(t, bd, "pxz")
+		id := bdProxiedCreateSilent(t, bd, p.dir, "Will look infra", "--type", "task")
+
+		// Flip the only issue to an infra type in place: the JSONL keeps its
+		// record while the filtered export set becomes empty, the
+		// empty-overwrite guard's exact wedge shape. The trigger write is a
+		// comment, not a create: a new issue would re-populate the in-scope
+		// set and defuse the guard.
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec("UPDATE issues SET issue_type = 'message' WHERE id = ?", id); err != nil {
+			t.Fatalf("flip issue_type: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close proxied db: %v", err)
+		}
+		jsonl, state := readProxiedAutoExportFiles(t, p)
+		if !strings.Contains(jsonl, id) {
+			t.Fatalf("seed create did not export %s:\n%s", id, jsonl)
+		}
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comment", id, "Trigger write")
+		if err != nil {
+			t.Fatalf("trigger comment: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "Warning: auto-export skipped: current database would export 0 issues") || !strings.Contains(stderr, "refusing to overwrite") {
+			t.Errorf("stderr lacks the empty-overwrite refusal:\n%s", stderr)
+		}
+		requireProxiedAutoExportUnchanged(t, p, "an empty-store export over a non-empty JSONL", jsonl, state)
+	})
 }
 
 // newProxiedAutoExportProject is a shared-server proxied project with
