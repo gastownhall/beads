@@ -85,6 +85,8 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("RoutedToWisps", s.issueCountForPrefixWispRouting)
 		s.Run("EmptyPrefixReturnsError", s.issueCountForPrefixEmptyPrefix)
 		s.Run("CountsPromotedWispsInIssues", s.issueCountForPrefixCountsPromotedWisps)
+		s.Run("CountsBaseNamespaceHeldInWisps", s.issueCountForPrefixCountsBaseNamespaceInWisps)
+		s.Run("HyphenatedPrefixCountsExactSiblingNamespace", s.issueCountForPrefixHyphenatedPrefix)
 	})
 	s.Run("NextCounterID", func() {
 		s.Run("FreshDBInsertsAtOne", s.issueNextCounterIDFresh)
@@ -679,6 +681,30 @@ func (s *testSuite) issueCountForPrefixCountsPromotedWisps() {
 	s.insertCountRows([]string{"cfpPw-wisp-b0.1", "cfpPw-wisp-mol-c0"}, false)
 
 	s.assertTwoPlaneCount("cfpPw-wisp", true, 10, 4)
+}
+
+// issueCountForPrefixCountsBaseNamespaceInWisps: a durable mint's count
+// includes base-namespace rows held in wisps (a demoted issue keeps its ID).
+// Sibling rows in another namespace (a -wisp- one, a lookalike prefix, a
+// dotted child) do not count.
+func (s *testSuite) issueCountForPrefixCountsBaseNamespaceInWisps() {
+	s.insertCountRows([]string{"cfpBn-a0", "cfpBn-a1", "cfpBn-a2", "cfpBn-a3", "cfpBn-a4"}, false)
+	s.insertCountRows([]string{"cfpBn-b0", "cfpBn-b1", "cfpBn-b2", "cfpBn-b3", "cfpBn-b4"}, true)
+	s.insertCountRows([]string{"cfpBn-b0.1", "cfpBnX-b0"}, true)
+
+	s.assertTwoPlaneCount("cfpBn", false, 10, 4)
+}
+
+// issueCountForPrefixHyphenatedPrefix: the exact-namespace rule reads the
+// suffix after prefix plus its separator, so a prefix that itself holds a
+// hyphen still counts its sibling rows, and only those.
+func (s *testSuite) issueCountForPrefixHyphenatedPrefix() {
+	s.insertCountRows([]string{"cfp-hy-a0", "cfp-hy-a1"}, false)
+	s.insertCountRows([]string{"cfp-hy-b0", "cfp-hy-b1", "cfp-hy-wisp-c0", "cfp-hy-mol-c1"}, true)
+
+	got, err := s.issueRepo().CountForPrefix(s.Ctx(), "cfp-hy", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(4, got, "2 issues plus the 2 exact-namespace wisps")
 }
 
 func (s *testSuite) issueCountForPrefixEmptyPrefix() {
