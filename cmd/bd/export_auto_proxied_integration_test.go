@@ -279,6 +279,86 @@ func TestProxiedServerAutoExport(t *testing.T) {
 	})
 }
 
+// TestProxiedServerAutoExportByteIdentical is the GH#8490 cross-mode oracle:
+// the same corpus auto-exported from a proxied workspace and from a classic
+// (embedded) workspace holding the same data must be byte-identical. It is its
+// own entry point because it also builds a classic workspace.
+func TestProxiedServerAutoExportByteIdentical(t *testing.T) {
+	requireSharedProxiedServer(t)
+	bd := buildEmbeddedBD(t)
+
+	// AC-6: the acceptance oracle — the same corpus auto-exported from a
+	// proxied workspace and from a classic (embedded) workspace holding the
+	// same data must be byte-identical, and neither may carry infra,
+	// template, ephemeral, excluded-owner, wisp_plane or memory records.
+	t.Run("cross_mode_byte_identical", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "paxm")
+		fx := seedProxiedExportFixture(t, bd, p)
+
+		// An excluded owner: config-excluded owners must not reach the
+		// git-committed JSONL from auto-export either.
+		setProxiedAutoExportConfig(t, bd, p, "export.exclude_owners", "pax-owner")
+		_, _, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BEADS_ACTOR=pax-owner"},
+			"create", "--silent", "Owner-excluded issue", "--type", "task")
+		if err != nil {
+			t.Fatalf("create as excluded owner: %v", err)
+		}
+
+		setProxiedAutoExportConfig(t, bd, p, "export.auto", "true")
+		setProxiedAutoExportConfig(t, bd, p, "export.interval", "1ms")
+		bdProxiedCreateSilent(t, bd, p.dir, "Trigger write", "--type", "task")
+
+		proxiedBytes, err := os.ReadFile(proxiedAutoExportJSONLPath(p))
+		if err != nil {
+			t.Fatalf("proxied auto-export missing: %v", err)
+		}
+		proxiedRecords := exportLines(t, string(proxiedBytes))
+		ids := exportIssueIDs(proxiedRecords)
+		if ids[fx.infraMsg] {
+			t.Errorf("auto-export carried the infra bead %s", fx.infraMsg)
+		}
+		if ids[fx.wisp] {
+			t.Errorf("auto-export carried the ephemeral wisp %s", fx.wisp)
+		}
+		if keys := exportMemoryKeys(proxiedRecords); len(keys) != 0 {
+			t.Errorf("auto-export carried memories %v (GH#3650)", keys)
+		}
+		for _, rec := range proxiedRecords {
+			if _, marked := rec["wisp_plane"]; marked {
+				t.Errorf("auto-export record carries a wisp_plane marker: %v", rec)
+			}
+			if tpl, _ := rec["is_template"].(bool); tpl {
+				t.Errorf("auto-export carried a template record: %v", rec)
+			}
+			if rec["_type"] == "issue" && rec["title"] == "Owner-excluded issue" {
+				t.Errorf("auto-export carried the excluded owner's issue")
+			}
+		}
+
+		// Classic side: import the proxied JSONL into a fresh embedded
+		// workspace with auto-export on; the import's own post-run
+		// re-exports it there.
+		classicDir, _, _ := bdInit(t, bd, "--prefix", "cls")
+		runClassic(t, bd, classicDir, "config", "set", "export.auto", "true")
+		runClassic(t, bd, classicDir, "config", "set", "export.interval", "1ms")
+		incoming := filepath.Join(classicDir, "incoming.jsonl")
+		if err := os.WriteFile(incoming, proxiedBytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runClassic(t, bd, classicDir, "import", "-i", incoming)
+
+		classicBytes, err := os.ReadFile(filepath.Join(classicDir, ".beads", "issues.jsonl"))
+		if err != nil {
+			t.Fatalf("classic auto-export missing after import: %v", err)
+		}
+		if string(proxiedBytes) != string(classicBytes) {
+			t.Fatalf("proxied and classic auto-exports differ:\n%s",
+				firstStreamDiff(string(proxiedBytes), string(classicBytes)))
+		}
+	})
+}
+
 // newProxiedAutoExportProject is a shared-server proxied project with
 // export.auto on and a throttle short enough that every write exports.
 func newProxiedAutoExportProject(t *testing.T, bd, prefix string, settings ...string) proxiedProject {
