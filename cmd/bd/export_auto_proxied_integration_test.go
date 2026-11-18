@@ -174,6 +174,56 @@ func TestProxiedServerAutoExport(t *testing.T) {
 		}
 		requireProxiedAutoExportUnchanged(t, p, "an empty-store export over a non-empty JSONL", jsonl, state)
 	})
+
+	// The proxied auto-export writes exactly what a classic workspace holding
+	// the same data writes: imported into a fresh embedded workspace and
+	// re-exported there, the bytes match. Wisps, infra beads, memories and
+	// an export.exclude_owners owner never reach the file.
+	t.Run("cross_mode_byte_identical", func(t *testing.T) {
+		t.Parallel()
+		p := newProxiedAutoExportProject(t, bd, "pxc", "export.exclude_owners", "private@example.com")
+		fx := seedProxiedExportFixture(t, bd, p)
+		private := bdProxiedCreateSilent(t, bd, p.dir, "Personal note", "--type", "task")
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec("UPDATE issues SET created_by = ? WHERE id = ?", "private@example.com", private); err != nil {
+			t.Fatalf("set created_by: %v", err)
+		}
+		// One more write so the export covers the raw SQL edits above.
+		bdProxiedUpdateOne(t, bd, p.dir, fx.blocker, "--notes", "final write")
+
+		auto := readProxiedAutoExportJSONL(t, p)
+		records := exportLines(t, auto)
+		ids := exportIssueIDs(records)
+		for _, id := range []string{fx.critical, fx.epic, fx.child, fx.blocker, fx.done, fx.promoted, fx.promotedFriend} {
+			if !ids[id] {
+				t.Errorf("auto-export missing durable issue %s", id)
+			}
+		}
+		for what, id := range map[string]string{"ephemeral wisp": fx.wisp, "infra bead": fx.infraMsg, "excluded owner's issue": private} {
+			if ids[id] {
+				t.Errorf("auto-export carries the %s %s", what, id)
+			}
+		}
+		if keys := exportMemoryKeys(records); len(keys) != 0 {
+			t.Errorf("auto-export carries memories %v", keys)
+		}
+
+		classicDir, _, _ := bdInit(t, bd, "--prefix", "cls")
+		incoming := filepath.Join(classicDir, "incoming.jsonl")
+		if err := os.WriteFile(incoming, []byte(auto), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runClassic(t, bd, classicDir, "import", "-i", incoming)
+		classicPath := filepath.Join(classicDir, "classic.jsonl")
+		runClassic(t, bd, classicDir, "export", "-o", classicPath)
+		classic, err := os.ReadFile(classicPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if auto != string(classic) {
+			t.Errorf("proxied auto-export and classic export differ:\n%s", firstStreamDiff(auto, string(classic)))
+		}
+	})
 }
 
 // newProxiedAutoExportProject is a shared-server proxied project with
