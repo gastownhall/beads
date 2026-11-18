@@ -4644,3 +4644,62 @@ func TestClaudeLegacySettingsWritesEndWithNewline(t *testing.T) {
 		}
 	})
 }
+
+// The Claude project installer keeps a read-only instructions file as it
+// keeps one with malformed markers: hooks are installed, the result stays
+// nil, and the warning names the file it could not update.
+func TestInstallClaudeProjectWarnsAndKeepsAReadOnlyClaudeFile(t *testing.T) {
+	stubDetectRenderOpts(t)
+	t.Run("CLAUDE.md", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		stubClaudeEnvProvider(t, env, nil)
+		claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+		content := "# Claude Code\n\nUser text.\n"
+		seed := seedReadOnlyFile(t, claudePath, content)
+
+		var stdout, stderr bytes.Buffer
+		if err := InstallClaudeProjectTo(false, ProjectInstallOutput{Stdout: &stdout, Stderr: &stderr}); err != nil {
+			t.Fatalf("InstallClaudeProjectTo: %v", err)
+		}
+
+		requireBeadsPrimeHook(t, env)
+		assertReadOnlyFileUntouched(t, claudePath, content, seed)
+		if !strings.Contains(stderr.String(), "Warning: failed to update "+claudeInstructionsFile) {
+			t.Errorf("expected a warning naming %s, got: %q", claudeInstructionsFile, stderr.String())
+		}
+	})
+	t.Run("AGENTS.md behind an @AGENTS.md stub", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		stubClaudeEnvProvider(t, env, nil)
+		claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+		claudeContent := staleClaudeStubWithBlock()
+		claudeSeed := seedAgentsFileWithOldMtime(t, claudePath, claudeContent)
+		agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+		agentsContent := "# My Project\n\nUser text.\n"
+		agentsSeed := seedReadOnlyFile(t, agentsPath, agentsContent)
+
+		var stdout, stderr bytes.Buffer
+		if err := InstallClaudeProjectTo(false, ProjectInstallOutput{Stdout: &stdout, Stderr: &stderr}); err != nil {
+			t.Fatalf("InstallClaudeProjectTo: %v", err)
+		}
+
+		requireBeadsPrimeHook(t, env)
+		assertReadOnlyFileUntouched(t, agentsPath, agentsContent, agentsSeed)
+		// AGENTS.md was not updated, so the stub's block stays.
+		assertAgentsFileUntouched(t, claudePath, claudeContent, claudeSeed)
+		if !strings.Contains(stderr.String(), "Warning: failed to update AGENTS.md") {
+			t.Errorf("expected a warning naming AGENTS.md, got: %q", stderr.String())
+		}
+	})
+}
+
+func requireBeadsPrimeHook(t *testing.T, env claudeEnv) {
+	t.Helper()
+	data, err := os.ReadFile(projectSettingsPath(env.projectDir))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if !strings.Contains(string(data), `"command": "bd prime --hook-json"`) || !strings.Contains(string(data), `"SessionStart"`) {
+		t.Fatalf("settings lack the bd prime SessionStart hook:\n%s", data)
+	}
+}

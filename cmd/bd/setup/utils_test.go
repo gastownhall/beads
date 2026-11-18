@@ -1,11 +1,14 @@
 package setup
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestAtomicWriteFile(t *testing.T) {
@@ -489,4 +492,220 @@ func TestRemoveEmptyDir(t *testing.T) {
 			tt.check(t, path)
 		})
 	}
+}
+
+// seedReadOnlyFile writes content to path, backdates it and makes it 0444,
+// so a test can tell whether a setup writer replaced it. It skips the test
+// when this process can still open the file for writing (root, say): the
+// writer then may replace it, and the test would prove nothing.
+func seedReadOnlyFile(t *testing.T, path, content string) os.FileInfo {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("seed %s: %v", path, err)
+	}
+	old := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("backdate %s: %v", path, err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatalf("chmod %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+	if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
+		_ = f.Close()
+		t.Skipf("this process can write the 0444 file %s; the test needs one it cannot", path)
+	} else if !os.IsPermission(err) {
+		t.Fatalf("write probe of %s: %v", path, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info
+}
+
+// assertReadOnlyFileUntouched fails if path no longer holds content, or was
+// replaced, rewritten or chmodded since seedReadOnlyFile returned seed, or if
+// a writer left a temporary file beside it.
+func assertReadOnlyFileUntouched(t *testing.T, path, content string, seed os.FileInfo) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if string(data) != content {
+		t.Errorf("%s changed:\n got: %q\nwant: %q", path, data, content)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if !os.SameFile(seed, info) {
+		t.Errorf("%s was replaced by a new file", path)
+	}
+	if !info.ModTime().Equal(seed.ModTime()) {
+		t.Errorf("%s was rewritten: mtime %v, want %v", path, info.ModTime(), seed.ModTime())
+	}
+	if info.Mode().Perm() != seed.Mode().Perm() {
+		t.Errorf("%s mode = %o, want %o", path, info.Mode().Perm(), seed.Mode().Perm())
+	}
+	assertNoTempResidue(t, filepath.Dir(path))
+}
+
+// assertNoTempResidue fails unless no temporary file is left in dir.
+func assertNoTempResidue(t *testing.T, dir string) {
+	t.Helper()
+	residue, err := filepath.Glob(filepath.Join(dir, ".*.tmp"))
+	if err != nil {
+		t.Fatalf("glob %s: %v", dir, err)
+	}
+	if len(residue) != 0 {
+		t.Errorf("temporary files left behind: %v", residue)
+	}
+}
+
+// A writable directory lets the rename in atomicWriteFile replace a file the
+// process may not write. atomicWriteFile used to do so, copying the 0444 mode
+// onto the new file, so a read-only AGENTS.md was silently rewritten (#7975).
+func TestAtomicWriteFileRefusesAReadOnlyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "AGENTS.md")
+	content := "# My Project\nUser text.\n"
+	seed := seedReadOnlyFile(t, path, content)
+
+	err := atomicWriteFile(path, []byte(content+"\nAppended by bd.\n"))
+	if !errors.Is(err, errRefuseReadOnlyWrite) || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("atomicWriteFile error = %v, want a read-only refusal wrapping the permission error", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name %s", err, path)
+	}
+	assertReadOnlyFileUntouched(t, path, content, seed)
+}
+
+// A rerun of setup on a read-only file that already holds what it would
+// write has nothing to replace: it succeeds and leaves the file alone. Only
+// readable bytes that match, under the mode asked for, count as current.
+func TestAtomicWriteFileLeavesACurrentReadOnlyFileAlone(t *testing.T) {
+	content := "# My Project\nUser text.\n"
+	for _, tt := range []struct {
+		name       string
+		perm       []os.FileMode
+		unreadable bool
+		refuse     bool
+	}{
+		{name: "same bytes"},
+		{name: "same bytes and explicit mode", perm: []os.FileMode{0o444}},
+		{name: "same bytes but another explicit mode", perm: []os.FileMode{0o644}, refuse: true},
+		{name: "unreadable", unreadable: true, refuse: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "AGENTS.md")
+			seed := seedReadOnlyFile(t, path, content)
+			if tt.unreadable {
+				if err := os.Chmod(path, 0); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.ReadFile(path); err == nil {
+					t.Skip("this process can read a 0000 file")
+				}
+				seed = statFile(t, path)
+			}
+
+			err := atomicWriteFile(path, []byte(content), tt.perm...)
+			if tt.refuse {
+				if !errors.Is(err, errRefuseReadOnlyWrite) {
+					t.Fatalf("atomicWriteFile error = %v, want a read-only refusal", err)
+				}
+			} else if err != nil {
+				t.Fatalf("atomicWriteFile: %v", err)
+			}
+			if tt.unreadable {
+				if err := os.Chmod(path, 0o444); err != nil {
+					t.Fatal(err)
+				}
+				if info := statFile(t, path); !os.SameFile(seed, info) || !info.ModTime().Equal(seed.ModTime()) {
+					t.Fatalf("%s was replaced or rewritten", path)
+				}
+				return
+			}
+			assertReadOnlyFileUntouched(t, path, content, seed)
+		})
+	}
+}
+
+func statFile(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info
+}
+
+// The read-only refusal keeps the symlink rules: atomicWriteFile still refuses
+// a link as a link, and the write-through helper probes the file the link
+// points to, refusing a read-only one with the link and its target unchanged.
+func TestAtomicWriteFileSymlinkToAReadOnlyTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "AGENTS.md")
+	link := filepath.Join(dir, "CLAUDE.md")
+	content := "# My Project\nUser text.\n"
+	seed := seedReadOnlyFile(t, target, content)
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	if err := atomicWriteFile(link, []byte("new")); !errors.Is(err, errRefuseSymlinkWrite) || errors.Is(err, errRefuseReadOnlyWrite) {
+		t.Errorf("atomicWriteFile(link) error = %v, want the symlink refusal", err)
+	}
+	if err := atomicWriteFileFollowingSymlink(link, []byte("new")); !errors.Is(err, errRefuseReadOnlyWrite) || !strings.Contains(err.Error(), target) {
+		t.Errorf("atomicWriteFileFollowingSymlink(link) error = %v, want a read-only refusal naming %s", err, target)
+	}
+
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is no longer a symlink (lstat err %v)", link, err)
+	}
+	if got, err := os.Readlink(link); err != nil || got != target {
+		t.Errorf("link points to %q (err %v), want %q", got, err, target)
+	}
+	assertReadOnlyFileUntouched(t, target, content, seed)
+}
+
+// The read-only gate applies only to files the process cannot write. Writable
+// and missing targets keep the behavior they always had: rewritten even when
+// the bytes already match, modes chosen as before.
+func TestAtomicWriteFileWritableAndMissingTargetsKeepTheirBehavior(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions are not supported on Windows")
+	}
+	t.Run("a writable current file is still rewritten", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "AGENTS.md")
+		seedFileMode(t, path, "same bytes", 0o600)
+		old := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("backdate %s: %v", path, err)
+		}
+
+		if err := atomicWriteFile(path, []byte("same bytes")); err != nil {
+			t.Fatalf("atomicWriteFile: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("mode = %04o, want 0600", info.Mode().Perm())
+		}
+		if info.ModTime().Equal(old) {
+			t.Error("a writable file with unchanged bytes should still be rewritten")
+		}
+	})
+	t.Run("a missing file gets the explicit mode", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "new.md")
+		if err := atomicWriteFile(path, []byte("data"), 0o600); err != nil {
+			t.Fatalf("atomicWriteFile: %v", err)
+		}
+		assertFileMode(t, path, 0o600)
+	})
 }

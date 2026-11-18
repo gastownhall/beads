@@ -181,11 +181,18 @@ func muxLayerEnv(env agentsEnv, integration agentsIntegration) (agentsEnv, agent
 	return muxGlobalAgentsEnv(env, globalPath), muxGlobalIntegration
 }
 
-func writeMuxHook(path, content string, mode os.FileMode) error {
-	if err := atomicWriteFile(path, []byte(content)); err != nil {
+// writeMuxHook writes a hook with the mode it runs under. The writer sets
+// that mode, not a chmod after it, so a hook this process cannot write is
+// left alone, and is current only if it already has that mode: a chmod
+// would make a current read-only hook writable again, for the next template
+// change to replace. bd setup prints no error of its own, so the write's is
+// printed here, as installAgents prints its own.
+func writeMuxHook(env agentsEnv, path, content string, mode os.FileMode) error {
+	if err := atomicWriteFile(path, []byte(content), mode); err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", path, err)
 		return err
 	}
-	return os.Chmod(path, mode)
+	return nil
 }
 
 func installMuxHook(env agentsEnv, path, content string, mode os.FileMode) error {
@@ -196,13 +203,13 @@ func installMuxHook(env agentsEnv, path, content string, mode os.FileMode) error
 			_, _ = fmt.Fprintf(env.stdout, "ℹ Existing hook kept (not managed by bd setup mux): %s\n", path)
 			return nil
 		}
-		if err := writeMuxHook(path, content, mode); err != nil {
+		if err := writeMuxHook(env, path, content, mode); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(env.stdout, "✓ Updated Mux hook: %s\n", path)
 		return nil
 	case os.IsNotExist(err):
-		if err := writeMuxHook(path, content, mode); err != nil {
+		if err := writeMuxHook(env, path, content, mode); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(env.stdout, "✓ Installed Mux hook: %s\n", path)

@@ -50,6 +50,7 @@ go_test(
         "plugin_layout_test.go",
         "project_output_test.go",
         "utils_test.go",
+        "utils_unix_test.go",
     ],
     data = glob(["testdata/**"]) + [
         "//:.claude-plugin/marketplace.json",
