@@ -1368,6 +1368,7 @@ go_test(
         "utils_unit_test.go",
         "vc_embedded_test.go",
         "vc_recompute_test.go",
+        "vc_status_clean_embedded_test.go",
         "vc_status_dirty_embedded_test.go",
         "vc_test.go",
         "verbosity_quiet_embedded_test.go",
