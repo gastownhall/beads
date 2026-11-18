@@ -238,6 +238,7 @@ opens `$EDITOR`; use `bd update <id> --title/--description/--design/--acceptance
 | Dolt concurrency, server vs embedded mode | [engdocs/design/dolt-concurrency.md](engdocs/design/dolt-concurrency.md) |
 | Errors returned to users | [engdocs/ERROR_HANDLING.md](engdocs/ERROR_HANDLING.md) |
 | The `bd serve` HTTP surface | [engdocs/SERVE_RUNBOOK.md](engdocs/SERVE_RUNBOOK.md) |
+| BDP, the Beads Protocol (bring-up, `third_party/bdp/` and its pin bumps) | [engdocs/design/bdp.md](engdocs/design/bdp.md) |
 | A new example under `examples/` | `examples/README.md` — give the example its own README and link it there |
 | Releases and version bumps | [RELEASING.md](RELEASING.md) |
 | Scope questions | [engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md) |

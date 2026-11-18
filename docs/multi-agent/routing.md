@@ -59,6 +59,15 @@ in yet, opens the one embedded database it holds, or its default database when
 it holds none or several; a prefix route in an orchestrator's `routes.jsonl`
 always needs the target's `dolt_database`, for reads as well as writes.
 
+On a proxied-server launcher, `bd mol bond` looks an operand up in the served
+database first and then through its prefix route, so a formula can be bonded
+to a molecule that a routed rig holds. Both operands must live in the same
+place: the bond is written in the rig's own database when both are there (or
+one is a formula), and in the served database when both are there. A bond
+across the served database and a rig, or across two rigs, is refused; run it
+from the rig that owns both. A rig that is itself a proxied-server workspace
+cannot be opened through a route, so bond in that rig directly.
+
 ## Role detection
 
 The role that drives auto mode comes from git config — `beads.role` is the

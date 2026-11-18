@@ -225,7 +225,8 @@ Golden-file tests compare output with files checked into the repository and
 rewrite them in an update mode:
 
 - `make corpus-regen`: the `--json` contract corpus under
-  `cmd/bd/protocol/testdata/corpus/`.
+  `cmd/bd/protocol/testdata/corpus/` and its commit ledger,
+  `cmd/bd/protocol/testdata/corpus_commits.golden`.
 - `make githooks-regen`: the managed sections of the tracked `.githooks/*`.
 - The `BD_UPDATE_GOLDEN=1 … go test` command in `cmd/bd/AGENTS.md`: the
   command-tree and `--help` goldens.

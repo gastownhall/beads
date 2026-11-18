@@ -105,7 +105,7 @@ func largeScenarios() []scenario {
 // recorded from the code BEFORE the batch-create fast paths existed
 // (ebe3b6bcb), so the check holds the current code — fast and per-row
 // bodies alike, including changes the fast-path switch does not gate — to
-// what that code stored, apart from four deliberate behavior changes since.
+// what that code stored, apart from five deliberate behavior changes since.
 //
 // First, the create role defaults an empty created_by to the request's actor
 // (issueops.PreparePublicCreateRequest), so apply.json's issues, wisps and
@@ -143,6 +143,15 @@ func largeScenarios() []scenario {
 // comes bright, and the I and J lines read eq-zI-b=open/0 eq-zI-c@w=open/0
 // where they read /1. That is what BlockedStateInvariant asks once nothing
 // outside the cycle blocks it. No row count moved.
+//
+// Fifth, the bd_events_journal digests of small, depadd, waitsfor, settled,
+// import458 and import458-reject-stale were re-recorded when a derived
+// is_blocked update started naming the request that caused it
+// (gastownhall/beads#8432); recordBlockedJournalChanges used to write those
+// rows with no actor. Only that actor moved: blanking it on the derived
+// update rows of the new journal gives back each old digest exactly, on the
+// embedded and the server engine alike. The request's own records and every
+// row count are unchanged, and apply and retired did not move.
 //
 // settled.json is younger than the rest: it was recorded from the code before
 // the blocked-state settled-row shortcut (fd54802bc8), on the embedded and the

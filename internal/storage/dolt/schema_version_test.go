@@ -271,6 +271,126 @@ func TestMigration0053RepairsIssuesMissingRigColumns(t *testing.T) {
 	}
 }
 
+// TestWispsLateColumns0053 reproduces #6080: 0023 and 0027 add
+// wisps.no_history and wisps.started_at only when wisps exists at the time,
+// and wisps is clone-local, so a clone that built wisps later from an older
+// shape (the 2026-04 WispsTableSchema constant lacked started_at) reaches v52
+// without those columns. 0053 copies both from wisps into issues, so it
+// failed at PREPARE with Error 1105 and the store stayed at v52. The v53
+// pre-migration repair must add whichever column is missing first.
+func TestWispsLateColumns0053(t *testing.T) {
+	cases := []struct {
+		name    string
+		dropped []string
+	}{
+		// The real 2026-04 shape: no_history present, started_at missing.
+		{name: "started_at_only", dropped: []string{"started_at"}},
+		{name: "both_missing", dropped: []string{"no_history", "started_at"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			// The freshly migrated shape is the reference the repaired
+			// columns must match, so definition drift fails here without
+			// duplicating the DDL in the test.
+			columnShape := func(col string) string {
+				t.Helper()
+				var colType, nullable, def string
+				if err := store.db.QueryRowContext(ctx, `
+					SELECT COLUMN_TYPE, IS_NULLABLE, COALESCE(COLUMN_DEFAULT, '<NULL>')
+					FROM INFORMATION_SCHEMA.COLUMNS
+					WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND COLUMN_NAME = ?
+				`, col).Scan(&colType, &nullable, &def); err != nil {
+					t.Fatalf("read wisps.%s shape: %v", col, err)
+				}
+				return fmt.Sprintf("type=%s nullable=%s default=%s", colType, nullable, def)
+			}
+			freshShape := map[string]string{}
+			for _, col := range tc.dropped {
+				freshShape[col] = columnShape(col)
+			}
+
+			for _, col := range tc.dropped {
+				if _, err := store.db.ExecContext(ctx, "ALTER TABLE wisps DROP COLUMN "+col); err != nil {
+					t.Fatalf("drop wisps.%s: %v", col, err)
+				}
+			}
+
+			const rigID = "schema-rig-late-cols"
+			if _, err := store.db.ExecContext(ctx, `
+				INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral, rig)
+				VALUES (?, 'Rig identity', '', '', '', '', 'open', 1, 'rig', 1, 'test-rig')
+			`, rigID); err != nil {
+				t.Fatalf("seed rig wisp: %v", err)
+			}
+			if _, err := store.db.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
+				t.Fatalf("stage legacy fixture: %v", err)
+			}
+			if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'seed legacy wisps shape')"); err != nil &&
+				!strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+				t.Fatalf("commit legacy fixture: %v", err)
+			}
+
+			if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= ?", rigRepairVersion); err != nil {
+				t.Fatalf("mark 0053 pending: %v", err)
+			}
+			if _, err := schema.MigrateUp(ctx, store.db); err != nil {
+				t.Fatalf("MigrateUp on wisps missing %v: %v", tc.dropped, err)
+			}
+
+			var applied int
+			if err := store.db.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM schema_migrations WHERE version = ?", rigRepairVersion).Scan(&applied); err != nil {
+				t.Fatalf("read main cursor: %v", err)
+			}
+			if applied != 1 {
+				t.Fatalf("schema_migrations rows for v%d = %d, want 1", rigRepairVersion, applied)
+			}
+
+			var promoted int
+			if err := store.db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM issues WHERE id = ? AND issue_type = 'rig' AND ephemeral = 0 AND rig = 'test-rig'`,
+				rigID).Scan(&promoted); err != nil {
+				t.Fatalf("count promoted rig issue: %v", err)
+			}
+			if promoted != 1 {
+				t.Fatalf("promoted rig issue rows = %d, want 1", promoted)
+			}
+			var remaining int
+			if err := store.db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM wisps WHERE id = ?`, rigID).Scan(&remaining); err != nil {
+				t.Fatalf("count remaining rig wisp: %v", err)
+			}
+			if remaining != 0 {
+				t.Fatalf("rig wisp rows left in wisps = %d, want 0", remaining)
+			}
+
+			for _, col := range []string{"no_history", "started_at"} {
+				var present int
+				if err := store.db.QueryRowContext(ctx, `
+					SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+					WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND COLUMN_NAME = ?
+				`, col).Scan(&present); err != nil {
+					t.Fatalf("probe wisps.%s: %v", col, err)
+				}
+				if present != 1 {
+					t.Fatalf("wisps.%s present = %d after MigrateUp, want 1", col, present)
+				}
+			}
+			for _, col := range tc.dropped {
+				if got, want := columnShape(col), freshShape[col]; got != want {
+					t.Errorf("repaired wisps.%s shape = %q, want fresh-store %q", col, got, want)
+				}
+			}
+		})
+	}
+}
+
 // rigRepairVersion is the 0053 rig-columns repair migration under test above.
 const rigRepairVersion = 53
 

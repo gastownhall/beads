@@ -71,8 +71,9 @@ Every metric and span carries the OTel resource describing the bd process:
 
 The resource never carries the command line (`process.command_args`), the
 executable path or the OS user name (`process.owner`): the command line can
-hold secrets and search text, and the other two identify the user. The
-command's scrubbed arguments are on the command span only (`bd.args`).
+hold secrets, issue titles and search text, and the other two identify the
+user. The command span's `bd.args` names the command and the flags that were
+set, never their values (see [Traces](#traces-spans)).
 
 Add anything else via `OTEL_RESOURCE_ATTRIBUTES`.
 
@@ -188,8 +189,8 @@ Spans are only exported when `OTEL_TRACES_EXPORTER=console` — there is no trac
 |-----------|-------------|
 | `bd.command` | Subcommand name (`list`, `create`, ...) |
 | `bd.version` | bd version |
-| `bd.args` | Raw arguments passed to the command (e.g. "create 'title' -p 2") |
-| `bd.actor` | Actor (resolved from git config / env) |
+| `bd.args` | Command path and the long names of the flags set on the command line, sorted: `bd create "title" -d "text" -p 2` records `create --description --priority`. Never an argument or a flag value |
+| `bd.actor` | Actor: the `--actor` value, else `BEADS_ACTOR` or config, else git `user.name` or `$USER` |
 
 **`hook.exec`**
 
@@ -198,10 +199,24 @@ Spans are only exported when `OTEL_TRACES_EXPORTER=console` — there is no trac
 | `hook.event` | Event type (`create`, `update`, `close`) |
 | `hook.path` | Absolute path to the script |
 | `bd.issue_id` | ID of the triggering issue |
-| event `hook.stdout` | Script standard output (truncated to 1 024 bytes) |
-| event `hook.stderr` | Script error output (truncated to 1 024 bytes) |
+| event `hook.stdout` | The script wrote to standard output |
+| event `hook.stderr` | The script wrote to standard error |
 
-The `hook.stdout` / `hook.stderr` events carry two attributes: `output` (the text) and `bytes` (original size before truncation).
+The `hook.stdout` / `hook.stderr` events carry one attribute, `bytes` (how much
+the script wrote). The text is not exported: a hook receives the issue as JSON
+on stdin and often echoes or logs it.
+
+### Issue content
+
+Span attributes and events say what ran and count and time it: issue ids,
+actors, issue types, config and `kv` keys, provenance refs, branch and remote
+names, the hook path, and SQL statements with their `?` placeholders. Some of
+these repeat what you typed: an issue id you named, an `--actor` value, a
+`bd kv set` key, a `bd provenance by-ref` ref or a branch name. They never
+carry issue content: no titles, descriptions, notes, labels, comments, close
+reasons, search text, commit messages or hook output, and `bd.args` never
+carries an argument or a flag value. A failed span records its error message,
+which can quote the input that failed.
 
 ---
 

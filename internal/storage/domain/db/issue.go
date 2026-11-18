@@ -78,6 +78,9 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		if err := issueops.InsertIssueStrictInTx(ctx, r.runner, table, issue); err != nil {
 			return err
 		}
+		if err := reserveCreatedChildSuffix(ctx, r.runner, issue.ID); err != nil {
+			return err
+		}
 		if err := r.events.Record(ctx, domain.Event{
 			IssueID: issue.ID,
 			Type:    types.EventCreated,
@@ -133,6 +136,9 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if err := insertIssueRow(ctx, r.runner, table, issue); err != nil {
 		return err
 	}
+	if err := reserveCreatedChildSuffix(ctx, r.runner, issue.ID); err != nil {
+		return err
+	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID: issue.ID,
 		Type:    types.EventCreated,
@@ -147,6 +153,36 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		return issueops.RecordVersionInTx(ctx, r.runner, issue.ID, actor)
 	}
 	return issueops.RecordVersionForCreateInTx(ctx, r.runner, issue.ID, actor)
+}
+
+// reserveCreatedChildSuffix raises the parent's child counter, in the
+// parent's own plane, to at least the suffix of a hierarchical id this Insert
+// just materialized (GH#4750), as issueops' singular and batch creates do. An
+// explicit child (P.8) that left the counter behind would otherwise be the
+// only record of its suffix, and its removal would let the next generated
+// child of P re-mint it. Both insert branches call it, before any version
+// return, so neither the strict create nor the upsert skips it.
+func reserveCreatedChildSuffix(ctx context.Context, runner Runner, id string) error {
+	if _, err := issueops.ReserveChildSuffixesInTx(ctx, runner, []string{id}, nil); err != nil {
+		return fmt.Errorf("db: Insert %s: reserve child suffix: %w", id, err)
+	}
+	return nil
+}
+
+// reserveRemovedChildSuffixes keeps each removed row's hierarchical suffix
+// used in its surviving parent's counter (GH#4750), so the next generated
+// child never re-mints it. A parent removed in the same call keeps no counter
+// to raise; one removed by a later call (the other plane's DeleteByIDs) takes
+// its counter row with it through the counter table's foreign key.
+func reserveRemovedChildSuffixes(ctx context.Context, runner Runner, ids []string) error {
+	departing := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		departing[id] = true
+	}
+	if _, err := issueops.ReserveChildSuffixesInTx(ctx, runner, ids, departing); err != nil {
+		return fmt.Errorf("reserve child suffixes: %w", err)
+	}
+	return nil
 }
 
 func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts domain.InsertIssueOpts) error {
@@ -376,11 +412,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 			if aerr != nil {
 				return fmt.Errorf("db: Update %s: affected by status change: %w", id, aerr)
 			}
-			if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
+			if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps, actor); err != nil {
 				return fmt.Errorf("db: Update %s: recompute is_blocked: %w", id, err)
 			}
 			if !newActive {
-				issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), affectedIssues, affectedWisps)
+				issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), actor, affectedIssues, affectedWisps)
 			}
 		}
 	}
@@ -584,13 +620,14 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		}
 	}
 
-	oldData, _ := json.Marshal(oldIssue)
-	newData, _ := json.Marshal(map[string]any{"assignee": actor, "status": "in_progress"})
+	claimUpdates := map[string]any{"assignee": actor, "status": "in_progress"}
+	oldData := issueops.ChangedFieldsPreImage(oldIssue, claimUpdates)
+	newData, _ := json.Marshal(claimUpdates)
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  id,
 		Type:     types.EventType("claimed"),
 		Actor:    actor,
-		OldValue: string(oldData),
+		OldValue: oldData,
 		NewValue: string(newData),
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: record event: %w", id, err)
@@ -1112,6 +1149,9 @@ func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts dom
 	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, []string{id}, actor); err != nil {
 		return fmt.Errorf("db: IssueSQLRepository.Delete %s: journal dependency removals: %w", id, err)
 	}
+	if err := reserveRemovedChildSuffixes(ctx, r.runner, []string{id}); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.Delete %s: %w", id, err)
+	}
 	//nolint:gosec // G201: table is a hardcoded constant.
 	res, err := r.runner.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id)
 	if err != nil {
@@ -1152,6 +1192,9 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 	// still be read.
 	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, actualIDs, actor); err != nil {
 		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs journal dependency removals: %w", err)
+	}
+	if err := reserveRemovedChildSuffixes(ctx, r.runner, actualIDs); err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs: %w", err)
 	}
 	total := 0
 	for start := 0; start < len(ids); start += deleteBatchSize {
@@ -1224,11 +1267,11 @@ func (r *issueSQLRepositoryImpl) AffectedByDeletion(ctx context.Context, issueID
 	return issueops.AffectedByDeletionInTx(ctx, r.runner, issueIDs, wispIDs)
 }
 
-func (r *issueSQLRepositoryImpl) RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string) error {
-	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, issueIDs, wispIDs); err != nil {
+func (r *issueSQLRepositoryImpl) RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string, actor string) error {
+	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, issueIDs, wispIDs, actor); err != nil {
 		return err
 	}
-	issueops.NoteDeleteBlockedRecheck(r.runner, deletedIDs, "", issueIDs, wispIDs)
+	issueops.NoteDeleteBlockedRecheck(r.runner, deletedIDs, "", actor, issueIDs, wispIDs)
 	return nil
 }
 

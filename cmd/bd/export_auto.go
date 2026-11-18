@@ -116,15 +116,7 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 
 	// Resolve the export path before throttle/check detection so all decisions
 	// refer to the path that would actually be written.
-	exportPath := config.GetString("export.path")
-	if exportPath == "" {
-		if globalFlag {
-			exportPath = "global-issues.jsonl"
-		} else {
-			exportPath = "issues.jsonl"
-		}
-	}
-	fullPath := filepath.Join(beadsDir, exportPath)
+	fullPath := autoExportJSONLPath(beadsDir)
 
 	// Load state + interval.
 	state := loadExportAutoState(beadsDir)
@@ -248,17 +240,21 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		issueCount, memoryCount, fullPath, mode, time.Since(exportStart).Round(time.Millisecond))
 
 	// Don't prime the throttle on an empty export (e.g. immediately after
-	// `bd init`). Saving state here would block the first real `bd create`
-	// from exporting for up to export.interval seconds even though the data
-	// has changed. Remove the empty file too so users don't see a stale 0-byte
-	// issues.jsonl before any issues exist.
+	// `bd init`). A fresh timestamp here would block the first real
+	// `bd create` from exporting for up to export.interval seconds even
+	// though the data has changed (GH#6955), so keep the previous one: this
+	// branch only runs once the throttle already allows an export, so that
+	// timestamp is eligible (or zero). The state hash is still saved so an
+	// unchanged empty store takes the no-change return. Remove the empty file
+	// too so users don't see a stale 0-byte issues.jsonl before any issues
+	// exist.
 	if issueCount == 0 && memoryCount == 0 {
 		_ = os.Remove(fullPath)
 		saveExportAutoState(beadsDir, &exportAutoState{
 			LastDoltCommit: currentCommit,
 			LastDiffAnchor: anchorCommit,
 			LastDirtyIDs:   dirtyIDs,
-			Timestamp:      time.Now(),
+			Timestamp:      state.Timestamp,
 			Issues:         0,
 			Memories:       0,
 		})
@@ -677,6 +673,23 @@ func sampleStrings(values []string, limit int) []string {
 func autoExportFilter(ctx context.Context) types.IssueFilter {
 	filter, _ := buildAutoExportFilter(ctx)
 	return filter
+}
+
+// autoExportJSONLPath resolves the passive export path inside the given
+// .beads directory: the export.path config (relative to .beads/), else the
+// global default under --global, else issues.jsonl. maybeAutoExport and
+// `bd doctor --check=export` share it so both read and write the same file
+// (GH#6955).
+func autoExportJSONLPath(beadsDir string) string {
+	exportPath := config.GetString("export.path")
+	if exportPath == "" {
+		if globalFlag {
+			exportPath = "global-issues.jsonl"
+		} else {
+			exportPath = "issues.jsonl"
+		}
+	}
+	return filepath.Join(beadsDir, exportPath)
 }
 
 func buildAutoExportFilter(ctx context.Context) (types.IssueFilter, map[string]bool) {

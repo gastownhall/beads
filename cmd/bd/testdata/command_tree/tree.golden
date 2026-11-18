@@ -11,7 +11,7 @@ bd
     | Issues chained together like beads. A lightweight issue tracker with first-class dependency support.
   persistent-flag --actor type=string default="" usage="Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)"
   persistent-flag --cpu-profile type=bool default="false" usage="Generate CPU profile for performance analysis"
-  persistent-flag --database type=string default="" usage="Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only)"
+  persistent-flag --database type=string default="" usage="Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only). Refused when it holds another beads project; a database with no beads project identity is allowed; set BEADS_SKIP_IDENTITY_CHECK=1 to override. Team-server workspaces always check identity"
   persistent-flag --db type=string default="" usage="Database path (default: auto-discover .beads/*.db). In proxied-server mode, a value that isn't an existing path is treated as a database name override (see --database)"
   persistent-flag --directory -C type=string default="" usage="Change to this directory before running the command (like git -C)"
   persistent-flag --dolt-auto-commit type=string default="" usage="Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then (a live batch-mode bd process also flushes on SIGTERM/SIGHUP, except in proxied-server mode, where bd dolt commit is the only flush point). In proxied-server mode the deferral covers the writes the CLI makes on that route, including config and version metadata; explicit commit points (bd batch, bd mol bond/pour/squash, bd mol wisp create, and the wisp half of bd mol burn) still commit, and a bd serve process on the same database is unaffected. Default: on. Override via config key dolt.auto-commit"
@@ -282,7 +282,7 @@ bd assign
     |
     | Examples:
     |   bd assign bd-123 alice
-    |   bd assign bd-123 ""      # unassign
+    |   bd assign bd-123 ""      # unassign ("-" or whitespace-only text also unassigns)
   flag --force type=bool default="false" usage="Allow overwriting another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)"
   flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
 
@@ -494,6 +494,7 @@ bd batch
     |   #comment  (blank lines and '# ...' comments are ignored)
     |
     | Supported 'update' keys: status, priority, title, assignee, force
+    | 'assignee=', 'assignee=-' and a whitespace-only assignee clear the assignee.
     | Supported dependency types: see 'bd dep add --help' (default: blocks)
     |
     | 'force' is not a field. An update whose status moves the issue into closed
@@ -1773,8 +1774,9 @@ bd doctor
     | Storage Availability:
     |   Full diagnostics, --perf, --deep, --server, --migration, and
     |   --check=validate currently require Dolt server mode. Embedded Dolt
-    |   supports --check=artifacts, --check=conventions, and
-    |   --check=pollution. --check-health has a limited hook-health fallback.
+    |   supports --check=artifacts, --check=conventions,
+    |   --check=export, and --check=pollution. --check-health has a limited
+    |   hook-health fallback.
     |   Unsupported combinations return a notice without changing storage.
     |
     | Performance Mode (--perf):
@@ -1791,9 +1793,14 @@ bd doctor
     | Specific Check Mode (--check):
     |   Run a specific check in detail. Available checks:
     |   - artifacts: Detect and optionally clean beads classic artifacts
-    |     (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
+    |     (SQLite files, cruft .beads dirs). Use with --clean. Does not
+    |     check export coverage - see the export check.
     |   - conventions: Check for convention drift (lint warnings, stale
     |     issues, orphaned issues). Advisory only - warns, never blocks.
+    |   - export: Compare in-scope store issue IDs against the passive export
+    |     file's IDs (coverage only, not content equality). Reports missing
+    |     IDs as a warning; read-only even with --fix/--clean. Refresh
+    |     manually with: bd export -o <resolved-path>
     |   - pollution: Detect and optionally clean test issues from database
     |   - validate: Run focused data-integrity checks (duplicates, orphaned
     |     deps, test pollution, git conflicts). Use with --fix to auto-repair.
@@ -1861,6 +1868,7 @@ bd doctor
     |   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
     |   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
     |   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+    |   bd doctor --check=export             # Warn when the export file is missing store IDs
     |   bd doctor --check=pollution          # Show potential test issues
     |   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
     |   bd doctor --check=validate         # Data-integrity checks only
@@ -2505,11 +2513,17 @@ bd events tail
     |   actor     string  the acting identity that performed the mutation, as resolved
     |                     for the audit-events table (on a comment row: the comment's
     |                     author). A delete — and the dep_remove rows a cascading
-    |                     delete produces — carries the identity that REQUESTED it.
-    |                     Empty (omitted) only when the path genuinely has no actor:
-    |                     derived maintenance, system cleanup with no request behind
-    |                     it, and rows older than the column. Never user attribution
-    |                     when empty.
+    |                     delete produces — carries the identity that REQUESTED it;
+    |                     a derived is_blocked update carries the actor of the
+    |                     request that caused it. Empty (omitted) when no actor is
+    |                     behind the row: no request at all (system maintenance:
+    |                     pull, recompute-blocked, doctor --fix; system cleanup), a
+    |                     request that named none (a served delete or sweep sent
+    |                     without one), a delete through a storage call that takes
+    |                     no actor (a local mol burn or mol squash, cook's proto
+    |                     delete) and the rows it causes, a post-commit blocked
+    |                     recheck settling writes by different actors, and rows
+    |                     older than the column. Never user attribution when empty.
     |   issue     object  full issue state AFTER the mutation; null on delete
     |   dep       object  {"kind","target","metadata"} for dep_add / dep_remove; omitted otherwise
     |   comment   object  {"id","author","text","created_at","source"} for comment; omitted otherwise
@@ -2726,8 +2740,20 @@ bd flatten
     | full collection reclaims the squashed history. A full GC can take minutes on
     | multi-gigabyte stores.
     |
-    | This is irreversible — all commit history is lost. The resulting database
-    | has exactly one commit containing all current data.
+    | Changes on main that are only in the working set stay pending. Staged
+    | changes, and the rows of a commit that reaches main mid-flatten, are kept in
+    | one preservation commit on the flattened history; the landed commit's own
+    | hash and message are not.
+    |
+    | If a run fails, bd flatten tries to return to main and delete its temporary
+    | branch within 30 seconds; if that cleanup fails, the error names the branch
+    | left behind. A failure after main has moved is not rolled back: main keeps
+    | the flattened history and bd flatten stops before pruning and GC. Inspect
+    | dolt_status, then commit what is staged with bd dolt commit when ready.
+    |
+    | This is irreversible — all commit history is lost. The resulting history is
+    | the initial commit plus one snapshot commit containing all current data, and
+    | a preservation commit when changes reached main mid-flatten.
     |
     | Use this when:
     |   - Your active database has grown very large
@@ -3639,6 +3665,11 @@ bd import
     | --allow-stale is the single deliberate-overwrite opt-in, and
     | updated_issues is where to look for what an import rewrote.
     |
+    | Comments merge additively. A comment whose id is already stored on the
+    | same issue keeps its stored text, author and time, also under
+    | --allow-stale; a comment id stored on a different issue fails the
+    | import with an error naming the comment and both issues.
+    |
     | Large imports are written in bounded transactions (a few hundred issues
     | each, with a short pause between commits) with progress on stderr, so
     | concurrent bd commands keep working while the import runs instead of
@@ -4392,7 +4423,7 @@ bd list
   group: "issues"
   hidden: false
   runnable: true
-  flag --all type=bool default="false" usage="Show all issues including closed (overrides default filter)"
+  flag --all type=bool default="false" usage="Lift default status and pinned exclusions and the default limit (type and plane suppressions still apply; see --include-all-types)"
   flag --assignee -a type=string default="" usage="Filter by assignee"
   flag --brief type=bool default="false" usage="Omit the free-form text (description, design, acceptance criteria, notes, payload, waiters) from each row. Filters that read those fields, such as --desc-contains, still select on them. An omitted field is indistinguishable from an empty one in --json; fetch a whole issue with bd show."
   flag --closed-after type=string default="" usage="Filter issues closed after date (YYYY-MM-DD or RFC3339)"
@@ -4416,6 +4447,7 @@ bd list
   flag --format type=string default="" usage="Export the dependency graph of the listed issues: 'digraph' (edge list for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or a Go template rendered once per edge over .IssueID, .DependsOnID, .Type, .Issue, .Dependency. 'json' is the exception and does not export the graph: it is equivalent to --json, which also wins when both flags are given. 'digraph' and templates print nothing when no listed issue depends on another; 'dot' still prints the nodes"
   flag --has-metadata-key type=string default="" usage="Filter issues that have this metadata key set"
   flag --id type=string default="" usage="Filter by specific issue IDs (comma-separated or repeated, e.g., bd-1,bd-5,bd-10)"
+  flag --include-all-types type=bool default="false" usage="Include all issue types and the ephemeral wisp plane (default status and pinned exclusions still apply; see --all)"
   flag --include-comments type=bool default="false" usage="Populate each row's comments field with full comment bodies in JSON output (--json only; costs one query per row that has comments). Without it, a row with comments carries comments_omitted=true, so an absent comments field is never mistaken for having none. Text output is unaffected either way."
   flag --include-ephemeral type=bool default="false" usage="Include ephemeral wisp-plane rows in output (normally hidden)"
   flag --include-gates type=bool default="false" usage="Include gate issues in output (normally hidden)"
@@ -4805,13 +4837,26 @@ bd migrate schema
     | designated migrator. Migrating is one-way: bd releases built for an older
     | schema refuse the migrated database.
     |
-    | On an up-to-date database this is a no-op, so it is safe to run in CI,
-    | release gates, and recovery scenarios.
+    | On a proxied-server workspace it is refused unless you pass --force:
+    | there, opening the store applies the migration, which changes the schema
+    | underneath every library client connected to the proxy's backend, and the
+    | proxy does not track those clients. Stop them, run
+    | "bd migrate schema --force", then restart them. BD_ALLOW_REMOTE_MIGRATE=1
+    | does not get past that refusal. If the database has a Dolt remote, that
+    | --force is also the designated-migrator confirmation above, so the gate's
+    | adopt and pull-first stops do not run: run a read command such as "bd list"
+    | first, and if it prints one of those stops, follow it instead of forcing.
+    | On a team-server workspace the team server owns the schema, so even --force
+    | only verifies it.
+    |
+    | Outside proxied-server mode, on an up-to-date database this is a no-op, so
+    | it is safe to run in CI, release gates, and recovery scenarios. In
+    | proxied-server mode the bare command is refused, so it is not a CI check.
     |
     | Example:
     |   bd migrate schema
     |   bd migrate schema --json
-  flag --force type=bool default="false" usage="Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)"
+  flag --force type=bool default="false" usage="Bypass the remote-migrate gate as the single designated migrator, as BD_ALLOW_REMOTE_MIGRATE=1 does; in proxied-server mode, also the opt-in past this command's refusal, which BD_ALLOW_REMOTE_MIGRATE=1 does not give"
 
 bd migrate sync
   use: "sync <branch>"
@@ -6276,15 +6321,33 @@ bd rename-prefix
     | Multiple prefix detection and repair:
     | If issues have multiple prefixes (corrupted database), use --repair to consolidate them.
     | The --repair flag will rename all issues with incorrect prefixes to the new prefix,
-    | preserving issues that already have the correct prefix.
+    | preserving issues that already have the correct prefix. Each renamed issue keeps
+    | its suffix (taxdb-u6ch -> mtg-u6ch, cre-db-c2a.3 -> mtg-c2a.3); source IDs are
+    | split by issue_prefix, allowed_prefixes and the prefixes found on the rows. When
+    | a family's root is already live, claimed by another family or retired, the whole
+    | family moves to one new hash root (mtg-<8 hex>) and the move is reported.
+    | Text references are rewritten only inside the renamed issues. Dependencies
+    | follow the renames. An edge between two prefixes is re-pointed by removing
+    | and re-adding it, so it records the repair's actor and time; one that storage
+    | refuses to re-add is left as it was and reported.
+    |
+    | Changing the prefix for new issues only:
+    | --mint-only makes new issues use the new prefix and leaves every existing ID
+    | and text reference as it is. The old prefix is added to allowed_prefixes, so
+    | explicit --id values and children of existing issues keep working. A
+    | dependency between an old-prefix and a new-prefix issue does not block: it is
+    | stored as a reference to another repository, which bd ready ignores. A later
+    | --repair consolidates the prefixes and re-points those dependencies.
     |
     | EXAMPLES:
     |   bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'
     |   bd rename-prefix mtg- --repair      # Consolidate multiple prefixes into 'mtg-'
     |   bd rename-prefix team- --dry-run    # Preview changes without applying
+    |   bd rename-prefix kb- --mint-only    # New issues get 'kb-'; existing IDs stay
     |
     | NOTE: This is a rare operation. Most users never need this command.
   flag --dry-run type=bool default="false" usage="Preview changes without applying them"
+  flag --mint-only type=bool default="false" usage="Mint new issues under the new prefix; keep existing IDs and accept the old prefix"
   flag --repair type=bool default="false" usage="Repair database with multiple prefixes by consolidating them"
 
 bd reopen
@@ -6780,7 +6843,12 @@ bd sql
     | In proxied-server mode, multiple statements separated by ';' run as a single
     | committed batch and report "OK", and --database runs the query against a
     | different server database (equivalent to a session USE) without changing the
-    | project's configured database.
+    | project's configured database. A --database that holds another beads project
+    | is refused with PROJECT IDENTITY MISMATCH before any statement runs; a database
+    | with no beads project identity (such as a non-beads database) is allowed. Set
+    | BEADS_SKIP_IDENTITY_CHECK=1 to reach another beads project deliberately.
+    | Team-server workspaces always check identity, and the variable does not relax
+    | that check.
     |
     | WARNING: Direct database access bypasses the storage layer. Use with caution.
   flag --csv type=bool default="false" usage="Output results in CSV format"
@@ -7259,7 +7327,7 @@ bd update
   flag --add-label -l type=stringSlice default="[]" usage="Add labels (repeatable); -l matches bd create -l"
   flag --allow-empty-description type=bool default="false" usage="Allow empty description replacement when reading from stdin or file"
   flag --append-notes type=string default="" annotations={cobra_annotation_mutually_exclusive=["clear-notes append-notes"]} usage="Append to existing notes (with newline separator)"
-  flag --assignee -a type=string default="" usage="Assignee"
+  flag --assignee -a type=string default="" usage="Assignee ('', '-' or whitespace-only text unassigns)"
   flag --await-id type=string default="" usage="Set gate await_id (e.g., GitHub run ID for gh:run gates)"
   flag --body type=string default="" hidden annotations={cobra_annotation_mutually_exclusive=["stdin body"]} usage="Alias for --description (GitHub CLI convention)"
   flag --body-file type=string default="" annotations={cobra_annotation_mutually_exclusive=["stdin body-file"]} usage="Read description from file (use - for stdin)"

@@ -189,6 +189,6 @@ Three options:
   3. Reinstall with embedded-mode support:
        brew install beads                              # macOS / Linux
        npm install -g @beads/bd                        # any platform with Node
-       curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+       curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
 See docs/getting-started/installation.md for the full comparison.`

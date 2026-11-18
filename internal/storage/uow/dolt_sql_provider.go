@@ -50,9 +50,12 @@ type doltSQLProvider struct {
 	// creates the database or migrates, only verifies the schema version.
 	teamServer bool
 	// expectedProjectID is the calling workspace's project identity, asserted
-	// against the team-server database on open. Empty means "no assertion
-	// available" (bd init, which adopts; server-wide maintenance; a workspace
-	// predating project identity) and skips the check.
+	// on open: strictly against a team-server database (checkTeamServerIdentity),
+	// and leniently on a plain open, where the CLI sets it only for a
+	// --database/--db excursion (checkExcursionIdentity). Empty means "no
+	// assertion available" (bd init, which adopts; server-wide maintenance; a
+	// workspace predating project identity; a plain open of the configured
+	// database) and skips the check.
 	expectedProjectID string
 	// preview: the command that opened this provider is an explicitly
 	// non-mutating preview (--dry-run, --inspect). The open creates no
@@ -377,6 +380,12 @@ func selectProbeDatabase(ctx context.Context, conn schema.DBConn, database strin
 	return quoted, nil
 }
 
+// migrateUpWithLock is schema.MigrateUpWithLock, declared as a variable so a
+// test can stand in for its converged fast path — which issues no statement a
+// test could script without coupling to schema-private SQL. The same seam
+// pattern as dolt.ensureRunningDetailed / dolt.dialServer.
+var migrateUpWithLock = schema.MigrateUpWithLock
+
 func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = 25 * time.Millisecond
@@ -409,10 +418,24 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 	if p.teamServer {
 		return p.verifyTeamServerSchema(ctx, conn, database)
 	}
+	// A plain open asserts identity only for a --database/--db excursion (the
+	// CLI leaves expectedProjectID empty otherwise), and must refuse before
+	// the preview attach or the migration below touches the database.
+	if err := checkExcursionIdentity(ctx, conn, database, p.expectedProjectID); err != nil {
+		if isSerializationError(err) {
+			return fmt.Errorf("uow: identity check: %w", err)
+		}
+		return backoff.Permanent(err)
+	}
 	if p.preview {
 		return p.attachPreviewDatabase(ctx, conn, database)
 	}
-	if _, err := schema.MigrateUpWithLock(ctx, conn, database,
+	// driftAsked records that the migration gate below already ran
+	// schema.CheckForwardDrift on this attempt, so the check after the call
+	// does not read the version (or print the BD_IGNORE_SCHEMA_SKEW warning)
+	// twice. Per attempt: a retry asks again.
+	driftAsked := false
+	if _, err := migrateUpWithLock(ctx, conn, database,
 		schema.WithDatabaseSelector(selectProbeDatabase),
 		schema.WithLockedPreparation(p.serverEndpoint, preparer.prepare),
 		// This provider serves a shared database by definition — an external
@@ -424,8 +447,20 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		// ever reached. Preparation has already CREATEd and USEd the
 		// database by the time it runs, so a fresh bootstrap reads version 0
 		// and passes.
+		//
+		// Forward drift is asked here too, after the shared-store check passes
+		// (gastownhall/beads#8121). That check finds nothing pending on a
+		// database AHEAD of this binary and lets it through, and MigrateUp
+		// then seeds dolt_ignore and reconciles before deciding it has no
+		// work — writes into the newer schema. Asking inside the gate refuses
+		// before the first of them. A behind database the shared-store check
+		// refuses (or reads through) never reaches this read.
 		schema.WithMigrationGate(func(ctx context.Context, c *sql.Conn) error {
-			return schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly))
+			if err := schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly)); err != nil {
+				return err
+			}
+			driftAsked = true
+			return schema.CheckForwardDrift(ctx, c)
 		})); err != nil {
 		var gateErr *schema.RemoteMigrateGateError
 		if errors.As(err, &gateErr) {
@@ -445,9 +480,50 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 			// would be an attempt to perform the migration it just refused.
 			return backoff.Permanent(gateErr)
 		}
+		// A forward-drift refusal from the gate is permanent even when the
+		// lock release also failed: that failure wraps it in a migration-lock
+		// error, which classifyInitSchemaError would retry. The whole error
+		// is kept, so both stay reachable.
+		if schema.IsSchemaSkewError(err) {
+			return backoff.Permanent(err)
+		}
 		return classifyInitSchemaError(err)
 	}
-	return nil
+	if driftAsked {
+		return nil
+	}
+	// Forward drift (gastownhall/beads#8121) on the paths that did not run the
+	// gate: the converged fast path, which returns before the lock, and a fresh
+	// bootstrap, whose capability skips the gate. The fast path answers
+	// "converged" for a database AHEAD of this binary
+	// (schema.TestAlreadyConvergedOnForwardSkew): whether this binary may use
+	// that schema is the caller's question, and every other open path asks it
+	// with schema.CheckForwardDrift. Ask it on the session MigrateUpWithLock
+	// left on the database, so an older bd refuses a newer schema rather than
+	// reading and writing it unawares. The converged fast path wrote nothing
+	// to get here; a fresh bootstrap has just migrated its own new database to
+	// latest, so the check passes there.
+	return checkProxiedForwardDrift(ctx, conn)
+}
+
+// checkProxiedForwardDrift runs schema.CheckForwardDrift for initSchemaAttempt
+// and classifies the result for backoff: a skew refusal is permanent (a retry
+// would read the same version and refuse again), a serialization failure is
+// retried, anything else is terminal — the same split verifyTeamServerSchema
+// uses. BD_IGNORE_SCHEMA_SKEW=1 is honored inside CheckForwardDrift, with its
+// usual warning.
+func checkProxiedForwardDrift(ctx context.Context, conn *sql.Conn) error {
+	err := schema.CheckForwardDrift(ctx, conn)
+	switch {
+	case err == nil:
+		return nil
+	case schema.IsSchemaSkewError(err):
+		return backoff.Permanent(err)
+	case isSerializationError(err):
+		return fmt.Errorf("uow: forward-drift check: %w", err)
+	default:
+		return backoff.Permanent(fmt.Errorf("uow: forward-drift check: %w", err))
+	}
 }
 
 // dataBehindAdopter injects the one ancestry fact the smart gate's #6575
@@ -497,6 +573,9 @@ func dataBehindAdopter(readOnly bool) *schema.FastForwardAdopter {
 // would newly brick every read on a workspace waiting for its operator to
 // consent — which is the opposite of the contract the gate's own message
 // promises ("read commands keep working against the current schema").
+// A read that cannot carry on, because this binary's reads cannot query the
+// current schema, still reports a stop the smart gate shaped
+// (reportsStopOnDrift) rather than only the drift.
 // It is a free function rather than a provider method on purpose: it needs no
 // provider state, and the parity test that enumerates doltSQLProvider's method
 // set as the capability surface a caller can reach through a
@@ -519,6 +598,18 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	if err := schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)); err != nil {
 		if isSerializationError(err) {
 			return err
+		}
+		// The read cannot run, but a stop the smart gate shaped is still the
+		// actionable half, as when the database cannot be attached at all. On
+		// a proxied workspace a read like this one is where the operator is
+		// sent to see that stop: the front door refuses the bare
+		// `bd migrate schema` whose open used to print it, and the forced verb
+		// skips it (gastownhall/beads#6656). The drift error alone would hide
+		// the stop behind a remedy that names the refused bare verb. So the
+		// open fails with the refusal, which cmd/bd's renderTypedOpenError and
+		// its JSON twin print, and the drift stays in the chain for errors.As.
+		if reportsStopOnDrift(gateErr) && schema.IsSchemaBehindError(err) {
+			return backoff.Permanent(errors.Join(gateErr, err))
 		}
 		return backoff.Permanent(err)
 	}
@@ -543,10 +634,50 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	fmt.Fprintf(os.Stderr,
 		"Warning: %[1]v\n"+
 			"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
-			"  Writes are blocked until the schema is reconciled. Run '%[3]s'\n"+
-			"  once every client of this server is upgraded.\n",
-		gateErr, gateErr.CurrentVersion, schema.SharedConsentCommand)
+			"%[3]s",
+		gateErr, gateErr.CurrentVersion, bluntReadThroughRemedy(gateErr))
 	return nil
+}
+
+// reportsStopOnDrift reports whether a read that the drift check stops must
+// still report gateErr: a stop the smart gate shaped, by the predicate the
+// read-through warning keys on, except shared-no-remote. That body says read
+// commands keep working, which is false once the drift check has stopped
+// this one, and its remedy is the forced verb the proxied front door's
+// refusal names anyway. The blunt fallback is left out too. It is none of
+// the stops (adopt, pull first, forked schema) that the forced verb's caveat
+// sends the operator to look for, and its UserMessage body prescribes the
+// bare `bd migrate --force` and `bd dolt push`, which a proxied front door
+// refuses.
+func reportsStopOnDrift(gateErr *schema.RemoteMigrateGateError) bool {
+	if gateErr.IsDataBehind() {
+		return true
+	}
+	return gateErr.Decision != "" && gateErr.Decision != "shared-no-remote"
+}
+
+// bluntReadThroughRemedy is how the blunt read-through warning says to
+// reconcile the schema the gate would not migrate. The blunt stop is
+// remote-backed by construction (with no remote the shared gate decides
+// shared-no-remote instead), so its choice is adopt or migrate as the single
+// designated migrator. On a proxied workspace the front door refuses the bare
+// `bd migrate schema` and `bd dolt push` (gastownhall/beads#6656), so the
+// migrate route there is the forced verb, with the library clients of the
+// proxy's backend stopped around it, and the push runs from a workspace with
+// direct access to the database.
+func bluntReadThroughRemedy(gateErr *schema.RemoteMigrateGateError) string {
+	if !gateErr.Proxied {
+		return "  Writes are blocked until the schema is reconciled. Run '" + schema.SharedConsentCommand + "'\n" +
+			"  once every client of this server is upgraded.\n"
+	}
+	return "" +
+		"  Writes are blocked until the schema is reconciled. If another clone has\n" +
+		"  already migrated and pushed, adopt its database instead of migrating here.\n" +
+		"  Otherwise, and only as the single designated migrator, once every client\n" +
+		"  of this server is upgraded: stop every library client connected to this\n" +
+		"  proxy's backend, run '" + schema.SharedConsentCommandForced + "', restart them, and push\n" +
+		"  with 'bd dolt push' from a workspace with direct access to the database\n" +
+		"  (this proxied-server workspace refuses it).\n"
 }
 
 // verifyTeamServerSchema is the team-server open path: the schema is owned by

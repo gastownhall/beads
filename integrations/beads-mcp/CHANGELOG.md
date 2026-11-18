@@ -21,11 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `comment`, `comments`, and `note` MCP tools, wrapping the existing
   `bd comment` / `bd comments` / `bd note` CLI commands. Previously the MCP
   server exposed no way to add or read comments, so MCP-only agents could only
-  overwrite the single `notes` field — `show()` reports `comment_count` but not
-  the bodies. `comment` leaves a durable, timestamped work trail, `comments`
-  reads them back, and `note` appends to the notes field.
+  overwrite the single `notes` field. `comment` leaves a durable, timestamped
+  work trail, `comments` reads them back, and `note` appends to the notes field.
+- `show(include_comments=True)` returns the comment bodies in CLI order, and
+  `fields=["comments"]` fetches them for a projection; `show` stays count-only
+  by default, and `brief=True` never returns bodies. Both need bd 1.0.5 or
+  later (`bd show --include-comments`). `fields=` also accepts
+  `comment_count` and `comments_omitted`.
 
 ### Fixed
+- `show`, `list` and `ready` no longer drop the CLI's `comment_count` and
+  `comments_omitted`, so a response whose comment bodies were left out no
+  longer looks complete. `list`/`ready` rows and compacted previews carry both
+  fields, and the MCP derives what the CLI leaves out (`bd ready` sends a
+  count without the marker). `null` means the CLI did not report it (as on
+  `blocked`), not "no comments". (first proposed by mark-miyagi in GH#5982)
 - `update(status="open")` no longer drops the other fields of the call or fails
   with "Invalid response for reopen" on an issue that is not closed. A closed
   issue is still reopened through `bd reopen` (`notes` become the reason), then

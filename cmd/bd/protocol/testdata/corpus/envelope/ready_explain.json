@@ -1,0 +1,345 @@
+{
+  "data": {
+    "blocked": [
+      {
+        "blocked_by": [
+          {
+            "id": "corpus-blocker",
+            "priority": 3,
+            "status": "open",
+            "title": "Corpus blocker subject"
+          }
+        ],
+        "blocked_by_count": 1,
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "id": "corpus-blocked",
+        "issue_type": "task",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "status": "open",
+        "title": "Corpus blocked subject",
+        "updated_at": "<TS>"
+      }
+    ],
+    "ready": [
+      {
+        "assignee": "protocol-test",
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "id": "<MINTED:todo_add>",
+        "issue_type": "task",
+        "owner": "test@protocol.test",
+        "priority": 2,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus todo item",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "id": "corpus-anchor",
+        "issue_type": "task",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus anchor subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 1,
+        "id": "corpus-blocker",
+        "issue_type": "task",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus blocker subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "id": "corpus-canonical",
+        "issue_type": "task",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus canonical subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "description": "deterministic corpus closeable",
+        "id": "corpus-closed",
+        "issue_type": "task",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus closeable issue",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "description": "deterministic corpus-deferred",
+        "id": "corpus-deferred",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native"
+        ],
+        "metadata": {
+          "corpus": "native"
+        },
+        "notes": "corpus-deferred notes\ncorpus defer reason",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus deferred subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "description": "deterministic corpus dependency",
+        "id": "corpus-dep",
+        "issue_type": "task",
+        "owner": "test@protocol.test",
+        "priority": 2,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus dependency issue",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "description": "deterministic corpus-note",
+        "id": "corpus-note",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native"
+        ],
+        "metadata": {
+          "corpus": "native"
+        },
+        "notes": "corpus-note notes\ncorpus note text",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus note subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "description": "deterministic corpus-parent",
+        "id": "corpus-parent",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native"
+        ],
+        "metadata": {
+          "corpus": "native"
+        },
+        "notes": "corpus-parent notes",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus parent subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "id": "corpus-parent.1",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native"
+        ],
+        "parent": "corpus-parent",
+        "priority": 2,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus quick child",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "description": "deterministic corpus-priority",
+        "id": "corpus-priority",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native"
+        ],
+        "metadata": {
+          "corpus": "native"
+        },
+        "notes": "corpus-priority notes",
+        "owner": "test@protocol.test",
+        "priority": 1,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus priority subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "description": "deterministic corpus-relfrom",
+        "id": "corpus-relfrom",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native"
+        ],
+        "metadata": {
+          "corpus": "native"
+        },
+        "notes": "corpus-relfrom notes",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus relate-from subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "description": "deterministic corpus-relto",
+        "id": "corpus-relto",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native"
+        ],
+        "metadata": {
+          "corpus": "native"
+        },
+        "notes": "corpus-relto notes",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus relate-to subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "description": "updated corpus root",
+        "id": "corpus-root",
+        "issue_type": "feature",
+        "labels": [
+          "corpus-label"
+        ],
+        "metadata": {
+          "phase": 2
+        },
+        "owner": "test@protocol.test",
+        "priority": 0,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus root issue",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "description": "deterministic corpus-tag",
+        "id": "corpus-tag",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native",
+          "corpus-tag-label"
+        ],
+        "metadata": {
+          "corpus": "native"
+        },
+        "notes": "corpus-tag notes",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "no blocking dependencies",
+        "resolved_blockers": null,
+        "status": "open",
+        "title": "Corpus tag subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_count": 1,
+        "dependent_count": 0,
+        "id": "corpus-unblocked",
+        "issue_type": "task",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "reason": "1 blocker(s) resolved",
+        "resolved_blockers": [
+          "corpus-closer"
+        ],
+        "status": "open",
+        "title": "Corpus unblocked subject",
+        "updated_at": "<TS>"
+      }
+    ],
+    "summary": {
+      "cycle_count": 0,
+      "total_blocked": 1,
+      "total_ready": 16
+    }
+  },
+  "schema_version": 1
+}

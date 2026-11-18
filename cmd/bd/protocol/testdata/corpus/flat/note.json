@@ -1,0 +1,20 @@
+{
+  "created_at": "<TS>",
+  "created_by": "protocol-test",
+  "description": "deterministic corpus-note",
+  "id": "corpus-note",
+  "issue_type": "task",
+  "labels": [
+    "corpus-native"
+  ],
+  "metadata": {
+    "corpus": "native"
+  },
+  "notes": "corpus-note notes\ncorpus note text",
+  "owner": "test@protocol.test",
+  "priority": 3,
+  "schema_version": 1,
+  "status": "open",
+  "title": "Corpus note subject",
+  "updated_at": "<TS>"
+}
