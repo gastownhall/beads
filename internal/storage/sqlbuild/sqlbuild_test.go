@@ -580,8 +580,9 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 
 	// By-IDs form: driver and every subquery are constrained to the ids, and the
-	// arg count matches the placeholder injection points (labels, dc, rc-deps,
-	// rc-wisp, cc, pc, d, driver = 8 for the wisp family with labels).
+	// arg count matches the placeholder injection points (labels, dc, three
+	// rc-deps target legs, three rc-wisp target legs, cc, pc, d, driver = 12
+	// for the wisp family with labels).
 	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{})
 	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
 		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
@@ -595,15 +596,16 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
 		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
 	}
-	if len(idArgs) != 8*2 {
-		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 8*2)
+	if len(idArgs) != 12*2 {
+		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 12*2)
 	}
 
 	// skipLabels drops the labels point and !includeWispReverseDeps drops the
-	// rc-wisp point, leaving 6 injection points (dc, rc-deps, cc, pc, d, driver).
+	// three rc-wisp legs, leaving 8 injection points (dc, three rc-deps legs,
+	// cc, pc, d, driver).
 	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{SkipLabels: true})
-	if len(idArgsNoLabels) != 6*2 {
-		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
+	if len(idArgsNoLabels) != 8*2 {
+		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 8*2)
 	}
 
 	// SkipCounts drops the three cardinality joins and projects constants in
@@ -625,8 +627,8 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		t.Error("SkipCounts must not drop the labels join")
 	}
 
-	// By-IDs: SkipCounts removes the dc, rc-deps, rc-wisp and cc injection
-	// points, leaving labels, pc, d and the driver.
+	// By-IDs: SkipCounts removes the dc, rc-deps legs, rc-wisp legs and cc
+	// injection points, leaving labels, pc, d and the driver.
 	_, idArgsNoCounts := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{SkipCounts: true})
 	if len(idArgsNoCounts) != 4*2 {
 		t.Errorf("by-IDs args (skipCounts) = %d, want %d", len(idArgsNoCounts), 4*2)
@@ -635,6 +637,92 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	_, idArgsNeither := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{SkipLabels: true, SkipCounts: true})
 	if len(idArgsNeither) != 3*2 {
 		t.Errorf("by-IDs args (skipLabels+skipCounts) = %d, want %d", len(idArgsNeither), 3*2)
+	}
+}
+
+// TestSearchCountsByIDsReverseBlockerLegsAreIndexable pins GH#4370's
+// reverse-blocker shape. In the by-IDs form the rc subquery no longer filters
+// on COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)
+// IN (ids) — an expression no index covers, so every batch scanned the whole
+// dependency table — but on three disjoint legs per dependency table, each an
+// IN list over one bare indexed target column, guarded by IS NULL on the
+// columns COALESCE would have preferred. The predicate form keeps the single
+// COALESCE projection. Arguments are the ids once per placeholder group, in
+// placeholder order: 9 groups without wisp reverse edges, 12 with.
+func TestSearchCountsByIDsReverseBlockerLegsAreIndexable(t *testing.T) {
+	t.Parallel()
+
+	ids := []string{"a", "b"}
+	coalesceIn := DepTargetExpr + " IN ("
+	legs := func(table string) []string {
+		return []string{
+			"FROM " + table + " WHERE type = 'blocks' AND depends_on_issue_id IN (?,?)",
+			"FROM " + table + " WHERE type = 'blocks' AND depends_on_issue_id IS NULL AND depends_on_wisp_id IN (?,?)",
+			"FROM " + table + " WHERE type = 'blocks' AND depends_on_issue_id IS NULL AND depends_on_wisp_id IS NULL AND depends_on_external IN (?,?)",
+		}
+	}
+
+	cases := []struct {
+		name      string
+		tables    FilterTables
+		wispDeps  bool
+		hyd       CountsHydration
+		wantGroup int
+		wantLegs  []string
+		noLegs    []string
+	}{
+		{name: "issues, full hydration", tables: IssuesFilterTables, hyd: CountsHydration{}, wantGroup: 9,
+			wantLegs: legs("dependencies"), noLegs: legs("wisp_dependencies")},
+		{name: "issues, wisp reverse edges", tables: IssuesFilterTables, wispDeps: true, hyd: CountsHydration{}, wantGroup: 12,
+			wantLegs: append(legs("dependencies"), legs("wisp_dependencies")...)},
+		{name: "wisps, wisp reverse edges", tables: WispsFilterTables, wispDeps: true, hyd: CountsHydration{}, wantGroup: 12,
+			wantLegs: append(legs("dependencies"), legs("wisp_dependencies")...)},
+		{name: "skip labels", tables: IssuesFilterTables, wispDeps: true, hyd: CountsHydration{SkipLabels: true}, wantGroup: 11,
+			wantLegs: append(legs("dependencies"), legs("wisp_dependencies")...)},
+		{name: "lite", tables: IssuesFilterTables, wispDeps: true, hyd: CountsHydration{Lite: true}, wantGroup: 12,
+			wantLegs: append(legs("dependencies"), legs("wisp_dependencies")...)},
+		{name: "skip counts", tables: IssuesFilterTables, wispDeps: true, hyd: CountsHydration{SkipCounts: true}, wantGroup: 4,
+			noLegs: append(legs("dependencies"), legs("wisp_dependencies")...)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			q, args := SearchCountsSQL(tc.tables, ids, "", "", "", tc.wispDeps, tc.hyd)
+			if strings.Contains(q, coalesceIn) {
+				t.Errorf("by-IDs SQL filters on the unindexable COALESCE target:\n%s", q)
+			}
+			for _, leg := range tc.wantLegs {
+				if strings.Count(q, leg) != 1 {
+					t.Errorf("by-IDs SQL must carry reverse-blocker leg %q exactly once:\n%s", leg, q)
+				}
+			}
+			for _, leg := range tc.noLegs {
+				if strings.Contains(q, leg) {
+					t.Errorf("by-IDs SQL must not carry reverse-blocker leg %q:\n%s", leg, q)
+				}
+			}
+			if got := strings.Count(q, "?"); got != len(args) {
+				t.Fatalf("placeholders = %d, args = %d", got, len(args))
+			}
+			if len(args) != tc.wantGroup*len(ids) {
+				t.Fatalf("args = %d, want %d groups of %d", len(args), tc.wantGroup, len(ids))
+			}
+			for i, a := range args {
+				if a != ids[i%len(ids)] {
+					t.Fatalf("arg %d = %v, want %q: each placeholder group binds the ids in order", i, a, ids[i%len(ids)])
+				}
+			}
+		})
+	}
+
+	// The predicate form aggregates every blocks edge: it keeps the single
+	// COALESCE projection per table and binds no target predicate.
+	pred, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", true, CountsHydration{})
+	if strings.Count(pred, "SELECT "+DepTargetExpr+" AS dep_id") != 2 {
+		t.Errorf("predicate form must project the COALESCE target once per dependency table:\n%s", pred)
+	}
+	if strings.Contains(pred, "depends_on_issue_id IN") || strings.Contains(pred, "IS NULL AND") {
+		t.Errorf("predicate form must not carry by-IDs target legs:\n%s", pred)
 	}
 }
 

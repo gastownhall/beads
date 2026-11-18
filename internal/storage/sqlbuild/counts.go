@@ -1,6 +1,9 @@
 package sqlbuild
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ReadyWorkIssueColumns is IssueSelectColumns qualified with the "i." alias
 // used by the counts mega-query. The lease overlay columns keep their own
@@ -84,7 +87,10 @@ func (h CountsHydration) IssueColumns() string {
 //     each subquery from scanning its whole side table and, crucially, keeps
 //     the reverse-blocker rc self-join — whose COALESCE(...) key the pure-Go
 //     GMS analyzer cannot auto-index — from re-scanning its full materialization
-//     once per driver row. The returned args are the ids repeated once per
+//     once per driver row. The rc input is itself constrained through three
+//     guarded legs per dependency table, one per indexed target column, rather
+//     than through COALESCE(...) IN (ids), which no index covers
+//     (reverseBlockersSQL). The returned args are the ids repeated once per
 //     injection point, in left-to-right placeholder order.
 //
 // The by-IDs form is result-identical to the predicate form over the same set
@@ -136,28 +142,20 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	// Per-subquery id constraints. Empty strings in the predicate form leave the
 	// projection unchanged; in the by-IDs form they push the page down so no
 	// subquery aggregates more than the page's worth of rows.
-	var labelWhere, depBlocksExtra, rcDepExtra, rcWispExtra, ccWhere, pcExtra, depWhere string
+	var labelWhere, depBlocksExtra, ccWhere, pcExtra, depWhere string
 	if byIDs {
 		labelWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		depBlocksExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
-		rcDepExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
-		rcWispExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
 		ccWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		pcExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
 		depWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 	}
 
-	reverseBlockerSelect := fmt.Sprintf(`
-				SELECT %s AS dep_id
-				FROM dependencies WHERE type = 'blocks'%s
-	`, DepTargetExpr, rcDepExtra)
+	reverseBlockerTables := []string{"dependencies"}
 	if includeWispReverseDeps {
-		reverseBlockerSelect += fmt.Sprintf(`
-				UNION ALL
-				SELECT %s AS dep_id
-				FROM wisp_dependencies WHERE type = 'blocks'%s
-		`, DepTargetExpr, rcWispExtra)
+		reverseBlockerTables = append(reverseBlockerTables, "wisp_dependencies")
 	}
+	reverseBlockerSelect := reverseBlockersSQL(reverseBlockerTables, byIDs, inSQL)
 
 	labelsSelect := "l.labels_json AS labels_json"
 	labelsJoin := fmt.Sprintf(`
@@ -266,17 +264,19 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	}
 
 	// args follow the placeholder order in sqlText: labels join (unless
-	// skipped), dc, rc dependencies branch, rc wisp branch (if any), cc (all
-	// four unless the counts are skipped), pc, d, then the driver.
-	args := make([]any, 0, len(idArgs)*8)
+	// skipped), dc, the three reverse-blocker target legs of dependencies, the
+	// three of wisp_dependencies (if any), cc (all unless the counts are
+	// skipped), pc, d, then the driver.
+	args := make([]any, 0, len(idArgs)*12)
 	if !hyd.SkipLabels {
 		args = append(args, idArgs...)
 	}
 	if !hyd.SkipCounts {
 		args = append(args, idArgs...) // dc
-		args = append(args, idArgs...) // rc dependencies
-		if includeWispReverseDeps {
-			args = append(args, idArgs...) // rc wisp_dependencies
+		for range reverseBlockerTables {
+			for range reverseBlockerTargetColumns {
+				args = append(args, idArgs...) // rc target leg
+			}
 		}
 		args = append(args, idArgs...) // cc
 	}
@@ -284,4 +284,56 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	args = append(args, idArgs...) // d
 	args = append(args, idArgs...) // driver
 	return sqlText, args
+}
+
+// reverseBlockerTargetColumns are the three dependency target columns in
+// DepTargetExpr's COALESCE precedence order. Each has its own index on both
+// dependency tables (migrations 0041 and 0047), which the COALESCE expression
+// itself cannot use.
+var reverseBlockerTargetColumns = []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"}
+
+// reverseBlockersSQL renders the rc subquery's input: one dep_id row per
+// 'blocks' edge whose target (DepTargetExpr) is the counted issue, over each
+// of tables.
+//
+// The predicate form keeps the single COALESCE projection per table: it
+// aggregates every blocks edge, so there is no target predicate to index.
+//
+// The by-IDs form splits each table into three disjoint UNION ALL legs, one
+// per target column, each guarded so a row is counted by exactly the leg
+// whose column COALESCE would have picked:
+//
+//	depends_on_issue_id IN (ids)
+//	depends_on_issue_id IS NULL AND depends_on_wisp_id IN (ids)
+//	depends_on_issue_id IS NULL AND depends_on_wisp_id IS NULL AND depends_on_external IN (ids)
+//
+// and projects that column as dep_id. A row whose COALESCE target is in ids
+// matches exactly one leg (the first non-NULL column is in ids, and every
+// earlier column is NULL); a row whose target is not in ids matches none (the
+// only column a leg tests is the one COALESCE picked, or the leg's IS NULL
+// guards fail). So the legs count what `COALESCE(...) IN (ids)` counted, with
+// no assumption about how many target columns a row sets, while each leg's IN
+// list sits on a bare indexed column the planner can seek instead of scanning
+// the whole dependency table (GH#4370).
+func reverseBlockersSQL(tables []string, byIDs bool, inSQL string) string {
+	var legs []string
+	for _, table := range tables {
+		if !byIDs {
+			legs = append(legs, fmt.Sprintf(`
+				SELECT %s AS dep_id
+				FROM %s WHERE type = 'blocks'`, DepTargetExpr, table))
+			continue
+		}
+		for i, col := range reverseBlockerTargetColumns {
+			guard := ""
+			for _, earlier := range reverseBlockerTargetColumns[:i] {
+				guard += fmt.Sprintf(" AND %s IS NULL", earlier)
+			}
+			legs = append(legs, fmt.Sprintf(`
+				SELECT %s AS dep_id
+				FROM %s WHERE type = 'blocks'%s AND %s IN (%s)`, col, table, guard, col, inSQL))
+		}
+	}
+	return strings.Join(legs, `
+				UNION ALL`) + "\n\t"
 }
