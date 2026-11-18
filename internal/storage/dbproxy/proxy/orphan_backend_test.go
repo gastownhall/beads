@@ -197,3 +197,72 @@ func TestCleanupOrphanBackendReapsAfterDeadRecordQuarantine(t *testing.T) {
 	assert.NoFileExists(t, pidfile.Path(root, server.PIDFileName))
 	assert.Len(t, quarantines(t, root, server.PIDFileName), 1)
 }
+
+// TestReapUnrecordedBackendSendsNoSignalWithoutFullMatch pins #8489 AC-5:
+// a missing, malformed or dead-pid info file, a live non-dolt process, or a
+// dolt whose command line names another root's config (including another
+// root's config.yaml) is never signaled, and the reap returns nil.
+func TestReapUnrecordedBackendSendsNoSignalWithoutFullMatch(t *testing.T) {
+	t.Run("missing info file", func(t *testing.T) {
+		root := t.TempDir()
+		opened := false
+		installOrphanCandidate(t, func(int) (orphanCandidate, bool, error) {
+			opened = true
+			return nil, false, nil
+		})
+		require.NoError(t, reapUnrecordedBackend(root))
+		assert.False(t, opened, "a missing info file must not open any candidate")
+	})
+
+	t.Run("malformed info file", func(t *testing.T) {
+		root := t.TempDir()
+		infoDir := filepath.Join(root, ".dolt")
+		require.NoError(t, os.MkdirAll(infoDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(infoDir, doltserver.ServerInfoFileName), []byte("not-a-server"), 0o600))
+		opened := false
+		installOrphanCandidate(t, func(int) (orphanCandidate, bool, error) {
+			opened = true
+			return nil, false, nil
+		})
+		require.NoError(t, reapUnrecordedBackend(root))
+		assert.False(t, opened, "a malformed info file must not open any candidate")
+	})
+
+	t.Run("dead pid", func(t *testing.T) {
+		root := t.TempDir()
+		writeServerInfo(t, root, 4242)
+		fake := &fakeOrphanCandidate{basename: "dolt"}
+		installOrphanCandidate(t, func(int) (orphanCandidate, bool, error) {
+			return fake, true, nil
+		})
+		require.NoError(t, reapUnrecordedBackend(root))
+		assert.False(t, fake.killed, "a pid that no longer exists must not be signaled")
+	})
+
+	t.Run("live non-dolt process through the real proc path", func(t *testing.T) {
+		root := t.TempDir()
+		helper := startHelperProcess(t)
+		writeServerInfo(t, root, helper.cmd.Process.Pid)
+		require.NoError(t, reapUnrecordedBackend(root))
+		assertHelperAlive(t, helper)
+	})
+
+	t.Run("dolt serving another root's config", func(t *testing.T) {
+		root := t.TempDir()
+		other := t.TempDir()
+		writeServerInfo(t, root, 4242)
+		for _, otherConfig := range []string{
+			filepath.Join(other, server.LaunchConfigFileName),
+			filepath.Join(other, server.RuntimeConfigFileName),
+			filepath.Join(other, "config.yaml"),
+		} {
+			fake := &fakeOrphanCandidate{
+				basename: "dolt",
+				cmdline:  "dolt sql-server --config " + otherConfig,
+			}
+			installOrphanCandidate(t, func(int) (orphanCandidate, bool, error) { return fake, false, nil })
+			require.NoError(t, reapUnrecordedBackend(root))
+			assert.False(t, fake.killed, "a dolt serving another root (%s) must never be signaled", otherConfig)
+		}
+	})
+}
