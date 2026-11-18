@@ -1921,7 +1921,13 @@ func (b proxiedAutoExportBackend) commitExists(ctx context.Context, hash string)
 }
 
 func (b proxiedAutoExportBackend) changedIssueIDs(ctx context.Context, from, to string) (storage.ChangedIssueIDs, bool, error) {
-	return storage.ChangedIssueIDs{}, false, nil
+	var changed storage.ChangedIssueIDs
+	err := b.maintenance.RunNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		var err error
+		changed, err = storeissueops.ChangedIssueIDsInTx(ctx, conn, from, to)
+		return err
+	})
+	return changed, true, err
 }
 
 func (b proxiedAutoExportBackend) historicalIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, bool, error) {
