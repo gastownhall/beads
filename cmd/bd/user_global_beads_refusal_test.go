@@ -329,6 +329,25 @@ func TestUserGlobalBeadsRefusalNamesTheSkippedDir(t *testing.T) {
 			}
 		}
 	})
+
+	// The version inspections skip the store open (bd:skip_store), but they
+	// refuse outside a project like every store-backed command, rather than
+	// report the skipped directory as "no upgrade".
+	for _, args := range [][]string{
+		{"upgrade", "status"},
+		{"upgrade", "status", "--json"},
+		{"upgrade", "review"},
+		{"upgrade", "review", "--json"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			f := newUserGlobalFixture(t)
+			exit, stdout, stderr := runInUserGlobalHome(t, f.home, f.notes, nil, args...)
+			if exit != 1 || stdout != "" || stderr != refusal(f) {
+				t.Errorf("bd %s: exit %d, stdout %q\nstderr: %q\nwant exit 1, no stdout, stderr %q", strings.Join(args, " "), exit, stdout, stderr, refusal(f))
+			}
+			f.assertUntouched(t)
+		})
+	}
 }
 
 // TestResolveCommandBeadsDirStopsAtTheBeadsDirItNames pins the binding half of

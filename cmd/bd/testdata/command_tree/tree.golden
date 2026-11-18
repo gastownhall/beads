@@ -7460,6 +7460,7 @@ bd upgrade review
   short: "Review changes since last bd version"
   hidden: false
   runnable: true
+  annotations: {bd:skip_store="1"}
   long:
     | Show what's new in bd since the last version you used.
     |
@@ -7468,6 +7469,9 @@ bd upgrade review
     |
     | If you're upgrading from an old version, you'll see the complete
     | changelog of everything that changed since then.
+    |
+    | Like 'bd upgrade status', this command does not open the database, apply
+    | schema migrations, or rewrite .beads/.local_version.
     |
     | Examples:
     |   bd upgrade review
@@ -7478,11 +7482,15 @@ bd upgrade status
   short: "Check if bd version has changed"
   hidden: false
   runnable: true
+  annotations: {bd:skip_store="1"}
   long:
     | Check if bd has been upgraded since you last used it.
     |
-    | This command uses the version tracking that happens automatically
-    | at startup to detect if bd was upgraded.
+    | This command compares the running bd binary with the version recorded
+    | in .beads/.local_version. It does not open the database, apply schema
+    | migrations, or rewrite the recorded version, so it is safe to run as a
+    | probe. It reports only the version change, not pending schema
+    | migrations.
     |
     | Examples:
     |   bd upgrade status

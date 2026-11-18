@@ -29,15 +29,27 @@ var upgradeStatusCmd = &cobra.Command{
 	Short: "Check if bd version has changed",
 	Long: `Check if bd has been upgraded since you last used it.
 
-This command uses the version tracking that happens automatically
-at startup to detect if bd was upgraded.
+This command compares the running bd binary with the version recorded
+in .beads/.local_version. It does not open the database, apply schema
+migrations, or rewrite the recorded version, so it is safe to run as a
+probe. It reports only the version change, not pending schema
+migrations.
 
 Examples:
   bd upgrade status
   bd upgrade status --json`,
+	// A status query only reads .beads/.local_version and the built-in
+	// changelog, so it must not enter the root hook's writable store open:
+	// that open can apply pending schema migrations (GH#6669) or refuse the
+	// inspection when the database is unavailable.
+	Annotations:   map[string]string{skipStoreAnnotation: "1"},
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := previewUpgradeInspection(); err != nil {
+			return err
+		}
+
 		evt := metrics.NewCommandEvent("upgrade-status")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -87,12 +99,22 @@ this command shows ALL changes since your specific last version.
 If you're upgrading from an old version, you'll see the complete
 changelog of everything that changed since then.
 
+Like 'bd upgrade status', this command does not open the database, apply
+schema migrations, or rewrite .beads/.local_version.
+
 Examples:
   bd upgrade review
   bd upgrade review --json`,
+	// See upgradeStatusCmd: review reads only the version marker and the
+	// built-in changelog, so it opts out of the root hook's store open.
+	Annotations:   map[string]string{skipStoreAnnotation: "1"},
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := previewUpgradeInspection(); err != nil {
+			return err
+		}
+
 		evt := metrics.NewCommandEvent("upgrade-review")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -219,6 +241,24 @@ Examples:
 		}
 		return nil
 	},
+}
+
+// previewUpgradeInspection runs first in bd upgrade status and bd upgrade
+// review. Their bd:skip_store annotation keeps them out of the root hook's
+// store open, which also skips the hook's version tracking and its refusal
+// when no workspace is selected, so both happen here. Outside a workspace it
+// refuses as the store-backed path did, and as bd upgrade ack still does,
+// rather than report a directory bd never tracked as "no upgrade". Inside one
+// it detects an upgrade without rewriting .beads/.local_version: the marker
+// is the one-shot signal for the version-bump reconciliation the next
+// store-backed command runs (see trackBdVersionPreview).
+func previewUpgradeInspection() error {
+	if beads.FindBeadsDir() == "" {
+		printNoDatabaseRefusal()
+		return SilentExit()
+	}
+	trackBdVersionPreview()
+	return nil
 }
 
 func pluralize(count int) string {
