@@ -291,7 +291,7 @@ in the molecule for you; add --no-auto to only show it.`,
 
 			if jsonOutput {
 				if closedIssue != nil {
-					closedIssues = append(closedIssues, newClosedIssueJSON(closedIssue, res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal))
+					closedIssues = append(closedIssues, newClosedIssueJSON(closedIssue, res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal, !res.Changed))
 				}
 			} else if res.Changed {
 				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), printedFeedbackID(id, issueTitleOrEmpty(issue)), reason)
@@ -832,19 +832,28 @@ func alreadyClosedNotice(id string, post *types.Issue) string {
 // Beside, not around: every entry still decodes as the issue it always was,
 // and both members are absent unless the close completed a molecule. A batch
 // reports each root once, on the first entry under it.
+//
+// AlreadyClosed (already_closed, under the HTTP API's name) is true when the
+// close of this issue was an idempotent no-op because it was already closed
+// (bd-th8229, GH#4816): the store kept its first close, so the entry's
+// close_reason is the stored one, not the reason this command asked for. A
+// real close omits it. It speaks for this issue only: a molecule root may
+// still be auto-closed by the replay of an already-closed step's close.
 type closedIssueJSON struct {
 	*types.Issue
 	AutoClosedMolecule       *types.Issue `json:"auto_closed_molecule,omitempty"`
 	MoleculeAutoCloseRefusal string       `json:"molecule_auto_close_refusal,omitempty"`
+	AlreadyClosed            bool         `json:"already_closed,omitempty"`
 }
 
-// newClosedIssueJSON is closed's entry. The auto-closed root drops its
-// dependency records, as the closed issue does: `bd close` never prints them.
-func newClosedIssueJSON(closed, autoClosedMolecule *types.Issue, refusal string) closedIssueJSON {
+// newClosedIssueJSON is closed's entry; alreadyClosed is the inverse of the
+// close outcome's Changed. The auto-closed root drops its dependency records,
+// as the closed issue does: `bd close` never prints them.
+func newClosedIssueJSON(closed, autoClosedMolecule *types.Issue, refusal string, alreadyClosed bool) closedIssueJSON {
 	if autoClosedMolecule != nil {
 		autoClosedMolecule.Dependencies = nil
 	}
-	return closedIssueJSON{Issue: closed, AutoClosedMolecule: autoClosedMolecule, MoleculeAutoCloseRefusal: refusal}
+	return closedIssueJSON{Issue: closed, AutoClosedMolecule: autoClosedMolecule, MoleculeAutoCloseRefusal: refusal, AlreadyClosed: alreadyClosed}
 }
 
 // noticeUnservedMoleculeAutoClose names, on stderr, the molecule a close left
