@@ -785,3 +785,76 @@ func TestAnyDeferredParentSQL(t *testing.T) {
 		}
 	}
 }
+
+// GH#6817: the open-child parent exclusion is opt-in. With the flag off the
+// WHERE and its args are exactly what they were, even when a caller hands the
+// builder a parent set; with it on, each family excludes only the set keyed by
+// its own main table, batched like every other id set.
+func TestBuildReadyWorkWhereExcludeParentsWithOpenChildren(t *testing.T) {
+	t.Parallel()
+
+	parents := make([]string, QueryBatchSize+1)
+	for i := range parents {
+		parents[i] = fmt.Sprintf("p-%d", i)
+	}
+	in := ReadyWorkWhereInputs{OpenChildParentIDs: map[string][]string{
+		IssuesFilterTables.Main: parents,
+		WispsFilterTables.Main:  {"w-parent"},
+	}}
+
+	for _, tables := range []FilterTables{IssuesFilterTables, WispsFilterTables} {
+		t.Run(tables.Main+"/flag_off_is_unchanged", func(t *testing.T) {
+			bareWhere, bareArgs, err := BuildReadyWorkWhere(types.WorkFilter{Status: types.StatusOpen}, tables, ReadyWorkWhereInputs{})
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			where, args, err := BuildReadyWorkWhere(types.WorkFilter{Status: types.StatusOpen}, tables, in)
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			if where != bareWhere || fmt.Sprint(args) != fmt.Sprint(bareArgs) {
+				t.Fatalf("flag off must ignore the parent set:\n got %s %v\nwant %s %v", where, args, bareWhere, bareArgs)
+			}
+		})
+	}
+
+	t.Run("flag_on_excludes_the_family_set", func(t *testing.T) {
+		filter := types.WorkFilter{Status: types.StatusOpen, ExcludeParentsWithOpenChildren: true}
+		bare, _, err := BuildReadyWorkWhere(types.WorkFilter{Status: types.StatusOpen}, IssuesFilterTables, ReadyWorkWhereInputs{})
+		if err != nil {
+			t.Fatalf("BuildReadyWorkWhere: %v", err)
+		}
+		where, args, err := BuildReadyWorkWhere(filter, IssuesFilterTables, in)
+		if err != nil {
+			t.Fatalf("BuildReadyWorkWhere: %v", err)
+		}
+		if got := strings.Count(where, "id NOT IN (?") - strings.Count(bare, "id NOT IN (?"); got != 2 {
+			t.Errorf("%d parents rendered %d extra NOT IN batches, want 2: %s", len(parents), got, where)
+		}
+		for _, p := range []string{parents[0], parents[len(parents)-1]} {
+			if !slicesContainsAny(args, p) {
+				t.Errorf("issues WHERE does not bind parent %q", p)
+			}
+		}
+		if slicesContainsAny(args, "w-parent") {
+			t.Errorf("issues WHERE binds the wisp family's parent: %v", args)
+		}
+
+		wispWhere, wispArgs, err := BuildReadyWorkWhere(filter, WispsFilterTables, in)
+		if err != nil {
+			t.Fatalf("BuildReadyWorkWhere: %v", err)
+		}
+		if !strings.Contains(wispWhere, "id NOT IN (?)") || !slicesContainsAny(wispArgs, "w-parent") || slicesContainsAny(wispArgs, parents[0]) {
+			t.Errorf("wisps WHERE must exclude only its own family's parent: %s %v", wispWhere, wispArgs)
+		}
+	})
+}
+
+func slicesContainsAny(args []any, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
