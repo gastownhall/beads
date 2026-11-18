@@ -197,7 +197,7 @@ func TestMigrateUpDoesNotSuspendTransactionCommitWhenNoWorkNeeded(t *testing.T) 
 	db, mock := newMockDB(t)
 
 	expectIgnorePatternSeedNoop(mock, LatestVersion())
-	expectIgnoredCursorHealNoop(mock)
+	expectOpenReconcilesNoop(mock)
 	expectNoMigrationWorkNeeded(mock)
 
 	applied, err := MigrateUp(context.Background(), db)
@@ -220,7 +220,7 @@ func TestMigrateUpTransactionCommitSetErrorFailsPass(t *testing.T) {
 
 	cursor := LatestVersion() - 1
 	expectIgnorePatternSeedNoop(mock, cursor)
-	expectIgnoredCursorHealNoop(mock)
+	expectOpenReconcilesNoop(mock)
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 	expectTransactionCommitRead(mock, 1)
