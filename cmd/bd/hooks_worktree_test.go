@@ -62,6 +62,9 @@ func TestConfigureBeadsHooksPath_WorktreeUsesMainRepo(t *testing.T) {
 
 	t.Chdir(worktreeDir)
 	git.ResetCaches()
+	// The git context is process-wide: drop this worktree's answer before
+	// the temp dir goes, or a later test's discovery resolves into it.
+	t.Cleanup(git.ResetCaches)
 
 	if !git.IsWorktree() {
 		t.Fatal("expected git.IsWorktree() to return true")
@@ -132,6 +135,8 @@ func TestConfigureSharedHooksPath_WorktreeUsesMainRepo(t *testing.T) {
 
 	t.Chdir(worktreeDir)
 	git.ResetCaches()
+	// As above: do not leave this worktree's git context to later tests.
+	t.Cleanup(git.ResetCaches)
 
 	if !git.IsWorktree() {
 		t.Fatal("expected git.IsWorktree() to return true")

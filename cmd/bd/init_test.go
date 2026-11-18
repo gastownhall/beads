@@ -239,6 +239,9 @@ func TestInitAlreadyInitialized(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
+	// Discover from this directory: a git context an earlier test cached
+	// (a removed worktree's main repo) would otherwise be init's target.
+	resetRepoCachesForTest(t)
 
 	// Initialize once
 	// A database of its own: the suite shares one test server, where a
