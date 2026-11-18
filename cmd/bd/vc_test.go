@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestVcCommitStdinFlag(t *testing.T) {
@@ -108,4 +113,75 @@ func trimTrailingNewlines(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// failingVCStatusStore is a minimal DoltStorage stand-in for the vc status
+// error path: branch and commit reads succeed, the working-set Status read
+// fails. It embeds the nil interface for identity/type assertion and
+// overrides only the three methods the command touches (the same shape
+// failingBackupStore uses).
+type failingVCStatusStore struct {
+	storage.DoltStorage
+	statusErr error
+}
+
+func (f *failingVCStatusStore) CurrentBranch(context.Context) (string, error) {
+	return "main", nil
+}
+
+func (f *failingVCStatusStore) GetCurrentCommit(context.Context) (string, error) {
+	return "deadbeefdeadbeef", nil
+}
+
+func (f *failingVCStatusStore) Status(context.Context) (*storage.Status, error) {
+	return nil, f.statusErr
+}
+
+// TestVCStatusStatusReadFailureIsAnError pins the GH#7783 error contract at
+// the command level: when reading the working set fails, `bd vc status` must
+// fail with that error in both output modes. Before the fix the command never
+// read the working set at all, so an unreadable dolt_status printed a clean
+// branch/commit report — a misleading success over a failed read.
+func TestVCStatusStatusReadFailureIsAnError(t *testing.T) {
+	origStore, origJSON := store, jsonOutput
+	t.Cleanup(func() { store, jsonOutput = origStore, origJSON })
+	store = &failingVCStatusStore{statusErr: errors.New("dolt_status: read exploded")}
+
+	runStatus := func() (string, string, error) {
+		var err error
+		stdout, stderr := captureStdio(t, func() {
+			err = vcStatusCmd.RunE(vcStatusCmd, nil)
+		})
+		return stdout, stderr, err
+	}
+
+	t.Run("text mode", func(t *testing.T) {
+		jsonOutput = false
+		stdout, stderr, err := runStatus()
+		if err == nil {
+			t.Fatalf("vc status must fail when the working-set read fails; stdout:\n%s", stdout)
+		}
+		for _, want := range []string{"failed to read working-set status", "dolt_status: read exploded"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr missing %q:\n%s", want, stderr)
+			}
+		}
+		if strings.Contains(stdout, "Version Control Status") && !strings.Contains(stderr, "failed to read") {
+			t.Errorf("a failing read must not print a clean report; stdout:\n%s", stdout)
+		}
+	})
+
+	t.Run("json mode", func(t *testing.T) {
+		jsonOutput = true
+		stdout, stderr, err := runStatus()
+		if err == nil {
+			t.Fatalf("vc status --json must fail when the working-set read fails; stdout:\n%s", stdout)
+		}
+		combined := stdout + stderr
+		for _, want := range []string{"failed to read working-set status", "dolt_status: read exploded"} {
+			if !strings.Contains(combined, want) {
+				t.Errorf("output missing %q:\nstdout:\n%s\nstderr:\n%s", want, stdout, stderr)
+			}
+		}
+	})
 }
