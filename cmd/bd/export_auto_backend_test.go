@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +18,8 @@ import (
 // cycle's ordering decisions — change detection and throttle — which happen
 // before any reader is needed, so read never invokes its fn).
 type fakeSeamBackend struct {
-	hash string
+	hash    string
+	readErr error
 
 	hashCalls   int
 	commitCalls int
@@ -34,7 +38,7 @@ func (f *fakeSeamBackend) currentCommit(context.Context) (string, error) {
 
 func (f *fakeSeamBackend) read(ctx context.Context, fn func(context.Context, autoExportReader) error) error {
 	f.readCalls++
-	return nil
+	return f.readErr
 }
 
 // seamTestForTest wires maybeAutoExport to the fake backend for one test.
@@ -114,5 +118,41 @@ func TestMaybeAutoExportBackendReadsWhenHashMovesAndWindowOpen(t *testing.T) {
 	}
 	if fake.readCalls != 1 {
 		t.Fatalf("read calls = %d, want 1 (moved hash with the window open must reach the read cycle)", fake.readCalls)
+	}
+}
+
+// TestMaybeAutoExportBackendReadErrorWarnsAndExitsZero pins the read-failure
+// shape on the seam (GH#8490 AC-7): a backend whose read fails before the
+// cycle can run — a proxied provider that cannot open its snapshot mid-export
+// — warns exactly the way the direct mode's read failures always have and
+// returns nil, so the user's command still exits 0 and no JSONL or state is
+// written from a torn read.
+func TestMaybeAutoExportBackendReadErrorWarnsAndExitsZero(t *testing.T) {
+	fake := &fakeSeamBackend{hash: "hash-moved", readErr: errors.New("snapshot torn")}
+	seamBackendForTest(t, fake)
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "hash-before",
+		Timestamp:      time.Time{}, // window open
+	})
+	stateBefore, _ := os.ReadFile(filepath.Join(dir, ".beads", "export-state.json"))
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = maybeAutoExport(context.Background(), false)
+	})
+	if err != nil {
+		t.Fatalf("maybeAutoExport = %v, want nil (a read failure must not fail the command)", err)
+	}
+	if !strings.Contains(stderr, "Warning: auto-export skipped: snapshot torn") {
+		t.Fatalf("stderr lacks the direct-mode skip warning:\n%s", stderr)
+	}
+	if fake.readCalls != 1 {
+		t.Fatalf("read calls = %d, want 1", fake.readCalls)
+	}
+	stateAfter, _ := os.ReadFile(filepath.Join(dir, ".beads", "export-state.json"))
+	if string(stateAfter) != string(stateBefore) {
+		t.Fatalf("failed read still saved state:\n%s\n%s", stateBefore, stateAfter)
 	}
 }
