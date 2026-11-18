@@ -28,6 +28,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
 	s.Run("CreateAttachesNormalizedComments", s.useCaseCreateAttachesNormalizedComments)
+	s.Run("WispMintSizedAcrossBothPlanes", s.useCaseMintWispSizedByPromotedWisps)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -993,4 +994,60 @@ func (s *testSuite) applyGraphWispRouting() {
 	s.Equal(res.IDs["p"], wispDeps[0].dependsOnID)
 	s.Equal("depends_on_wisp_id", wispDeps[0].targetColumn(),
 		"wisp-target dep must use depends_on_wisp_id, got %+v", wispDeps[0])
+}
+
+// resetAdaptiveMintConfig points the mint at a fresh prefix (subtests share
+// the suite's tables, so each needs its own namespace) and tightens the
+// birthday bound to 0.001, where 5 rows size to a three-character hash and
+// 10 rows cross to four. The adaptive-length subtests below (bd-u9cfx0) need
+// that tighter bound so a handful of rows proves both directions.
+func (s *testSuite) resetAdaptiveMintConfig(prefix string) {
+	s.resetMintConfig(prefix, "")
+	r := NewConfigSQLRepository(s.Runner())
+	s.Require().NoError(r.SetConfig(s.Ctx(), "max_collision_prob", "0.001"))
+}
+
+// hashSuffixLen returns the length of id's hash suffix under prefix, first
+// refusing ids that are not prefixed children of prefix (a child id or a
+// sub-prefix row is not a hash mint).
+func (s *testSuite) hashSuffixLen(id, prefix string) int {
+	suffix, ok := strings.CutPrefix(id, prefix+"-")
+	if !ok {
+		s.Require().FailNowf("minted id %q does not carry prefix %q", id, prefix)
+	}
+	s.NotContains(suffix, ".", "hash id %q must not be a child id", id)
+	return len(suffix)
+}
+
+// useCaseMintWispSizedByPromotedWisps pins bd-u9cfx0 on the proxied mint: a
+// promoted wisp keeps its <prefix>-wisp-* id in issues, and issues and wisps
+// share one id space, so a wisp mint sizes against both planes. At 0.001,
+// five rows in each table size a fresh wisp id to a four-character hash.
+func (s *testSuite) useCaseMintWispSizedByPromotedWisps() {
+	s.resetAdaptiveMintConfig("ucAd1")
+	uc := s.issueUseCase()
+	for i := 1; i <= 5; i++ {
+		_, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: fmt.Sprintf("live wisp %d", i), IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+			ExplicitID: fmt.Sprintf("ucAd1-wisp-w%d", i),
+			CreateOnly: true,
+		}, "seeder")
+		s.Require().NoError(err)
+	}
+	// Promoted wisps: wisp-namespace ids the issues table holds.
+	for i := 1; i <= 5; i++ {
+		_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: fmt.Sprintf("promoted %d", i), IssueType: types.TypeTask, Priority: 2},
+			ExplicitID: fmt.Sprintf("ucAd1-wisp-p%d", i),
+			CreateOnly: true,
+		}, "seeder")
+		s.Require().NoError(err)
+	}
+
+	res, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "fresh wisp", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(4, s.hashSuffixLen(res.Issue.ID, "ucAd1-wisp"),
+		"population 10 across both planes must size the wisp hash to 4 characters, got %q", res.Issue.ID)
 }

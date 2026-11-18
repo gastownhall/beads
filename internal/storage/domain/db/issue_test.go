@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -83,6 +84,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("CountsMatching", s.issueCountForPrefixMatches)
 		s.Run("ExcludesChildIDs", s.issueCountForPrefixExcludesChildren)
 		s.Run("RoutedToWisps", s.issueCountForPrefixWispRouting)
+		s.Run("CountsPromotedWispsInIssues", s.issueCountForPrefixPromotedWisps)
 		s.Run("EmptyPrefixReturnsError", s.issueCountForPrefixEmptyPrefix)
 	})
 	s.Run("NextCounterID", func() {
@@ -638,7 +640,32 @@ func (s *testSuite) issueCountForPrefixWispRouting() {
 	s.Equal(1, got)
 	got, err = r.CountForPrefix(s.Ctx(), "cfpWisp", domain.IssueTableOpts{})
 	s.Require().NoError(err)
-	s.Equal(0, got, "issues table should not see wisp rows")
+	// The wisp row sits in the prefix's exact namespace (cfpWisp-c1, no
+	// further '-' or '.' after the prefix), and issues and wisps share one
+	// id space, so sizing an issue mint counts it (bd-u9cfx0).
+	s.Equal(1, got, "the exact-namespace wisp row counts toward the issue-side population")
+}
+
+// issueCountForPrefixPromotedWisps pins the undercount bd-u9cfx0 fixes on
+// the proxied path: a promoted wisp keeps its <prefix>-wisp-* id in issues,
+// and issues and wisps share one id space, so sizing a new wisp id must
+// count the promoted rows sitting in the sibling table.
+func (s *testSuite) issueCountForPrefixPromotedWisps() {
+	r := s.issueRepo()
+	for i := 1; i <= 5; i++ {
+		w := newTestIssue(fmt.Sprintf("cfpProm-wisp-w%d", i), "live wisp")
+		w.Ephemeral = true
+		s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	}
+	// Promoted wisps: wisp-namespace ids that live in the issues table.
+	for i := 1; i <= 5; i++ {
+		s.Require().NoError(r.Insert(s.Ctx(),
+			newTestIssue(fmt.Sprintf("cfpProm-wisp-p%d", i), "promoted"), "tester", domain.InsertIssueOpts{}))
+	}
+
+	got, err := r.CountForPrefix(s.Ctx(), "cfpProm-wisp", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.Equal(10, got, "the wisp namespace's population spans both planes: 5 live + 5 promoted")
 }
 
 func (s *testSuite) issueCountForPrefixEmptyPrefix() {

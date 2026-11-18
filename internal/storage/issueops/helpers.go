@@ -572,17 +572,61 @@ func SeedCounterFromExistingIssuesTx(ctx context.Context, tx DBTX, prefix string
 	return nil
 }
 
-// GetAdaptiveIDLengthTx returns the appropriate hash length based on database size.
+// AdaptiveIDCountInTx counts the population a new hash id under prefix is
+// sized against when minted into table: every row of table under prefix
+// (dotted children excluded, sub-prefixed rows included — the destination's
+// long-standing rule), plus every row of the other live plane that sits in
+// the prefix's EXACT namespace (shaped <prefix>-<suffix> with no further '-'
+// or '.' in the suffix). Issues and wisps share one id space — a promoted
+// wisp keeps its <prefix>-wisp-* id in issues and a demoted issue keeps its
+// id in wisps — so the sibling's exact-namespace rows can collide with a new
+// hash while its other namespaces cannot: a live <prefix>-wisp-* wisp never
+// equals a <prefix>-<hash> id, and must not lengthen the base prefix. The
+// destination term keeps its loose predicate, so for the same rows and
+// configuration the count — and the length computed from it — never
+// decreases. One statement, so both halves read one snapshot.
 //
-//nolint:gosec // G201: table is a hardcoded constant
-func GetAdaptiveIDLengthTx(ctx context.Context, tx DBTX, table, prefix string) (int, error) {
+//nolint:gosec // G201: table and sibling are the validated constants "issues"/"wisps"
+func AdaptiveIDCountInTx(ctx context.Context, tx DBTX, table, prefix string) (int, error) {
+	sibling, err := adaptiveIDSiblingTable(table)
+	if err != nil {
+		return 0, err
+	}
 	var count int
-	err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT COUNT(*)
-		FROM %s
-		WHERE id LIKE CONCAT(?, '-%%')
-		  AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '.') = 0
-	`, table), prefix, prefix).Scan(&count)
+	err = tx.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT
+			(SELECT COUNT(*)
+			 FROM %s
+			 WHERE id LIKE CONCAT(?, '-%%')
+			   AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '.') = 0)
+			+
+			(SELECT COUNT(*)
+			 FROM %s
+			 WHERE id LIKE CONCAT(?, '-%%')
+			   AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '.') = 0
+			   AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '-') = 0)
+	`, table, sibling), prefix, prefix, prefix, prefix, prefix).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// adaptiveIDSiblingTable maps one live issue plane to the other. Any other
+// name is refused before any SQL is built.
+func adaptiveIDSiblingTable(table string) (string, error) {
+	switch table {
+	case "issues":
+		return "wisps", nil
+	case "wisps":
+		return "issues", nil
+	}
+	return "", fmt.Errorf("adaptive id count: unknown issue table %q", table)
+}
+
+// GetAdaptiveIDLengthTx returns the appropriate hash length based on database size.
+func GetAdaptiveIDLengthTx(ctx context.Context, tx DBTX, table, prefix string) (int, error) {
+	count, err := AdaptiveIDCountInTx(ctx, tx, table, prefix)
 	if err != nil {
 		return 6, err
 	}

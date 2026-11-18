@@ -140,6 +140,7 @@
 
 40 3 TestActiveDatabaseSizeFailsForMissingEmbeddedDatabase
 40 3 TestActiveDatabaseSizeScopesToActiveEmbeddedDatabase
+40 3 TestAdaptiveIDLengthSpansBothPlanes
 40 3 TestArrivalSeq_EmbeddedJournalCollisionMovesTheStamp
 40 3 TestBuildDSN_NoDatabase
 40 3 TestBuildDSN_SpacesInPath
@@ -691,6 +692,7 @@
 40 39 TestReclaimRefusesForeignReplicaLease
 40 39 TestWorkspaceConfigContract
 
+40 40 TestAdaptiveIDLengthCountsPromotedWisps
 40 40 TestArrivalSeq_EmbeddedHealRaisesTheCounterPastTheStamps
 40 40 TestCountsWithMissingWispPlaneTables
 40 40 TestEmbeddedBatchCloserDoesNotMutateTheCallerRequest

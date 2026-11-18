@@ -781,19 +781,18 @@ func (r *issueSQLRepositoryImpl) CoordinateCreates(ctx context.Context, ids []st
 	return issueops.CoordinateIDCreatesInTx(ctx, r.runner, ids)
 }
 
+// CountForPrefix counts the ID population a new hash id under prefix is
+// sized against, through the one shared count both minters use
+// (issueops.AdaptiveIDCountInTx): the named plane's rows under prefix
+// (children excluded) plus the other plane's rows in the prefix's exact
+// namespace. Issues and wisps share one id space — a promoted wisp keeps its
+// <prefix>-wisp-* id in issues, a demoted issue keeps its id in wisps — so
+// those sibling rows count toward the mint this count sizes.
 func (r *issueSQLRepositoryImpl) CountForPrefix(ctx context.Context, prefix string, opts domain.IssueTableOpts) (int, error) {
 	if prefix == "" {
 		return 0, errors.New("db: CountForPrefix: prefix must not be empty")
 	}
-	table := pickIssueTable(opts.UseWispsTable)
-	var count int
-	//nolint:gosec // G201: table is one of two hardcoded constants
-	err := r.runner.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT COUNT(*)
-		FROM %s
-		WHERE id LIKE CONCAT(?, '-%%')
-		  AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '.') = 0
-	`, table), prefix, prefix).Scan(&count)
+	count, err := issueops.AdaptiveIDCountInTx(ctx, r.runner, pickIssueTable(opts.UseWispsTable), prefix)
 	if err != nil {
 		return 0, fmt.Errorf("db: CountForPrefix %s: %w", prefix, err)
 	}
