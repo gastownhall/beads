@@ -28,6 +28,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("WispMintCountsPromotedWisps", s.useCaseMintWispCountsPromotedWisps)
 	s.Run("DurableMintCountsBaseNamespaceInWisps", s.useCaseMintDurableCountsBaseNamespaceInWisps)
 	s.Run("LiveWispsDoNotLengthenBaseIDs", s.useCaseMintLiveWispsDoNotLengthenBaseIDs)
+	s.Run("DestinationSubprefixRowsStillCount", s.useCaseMintDestinationSubprefixRowsStillCount)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -302,6 +303,22 @@ func (s *testSuite) useCaseMintLiveWispsDoNotLengthenBaseIDs() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.assertMintedHashLen(res.Issue.ID, "ucLw", 3)
+}
+
+// useCaseMintDestinationSubprefixRowsStillCount: 10 ucSp-mol-* issues still
+// count for a base ucSp mint (the destination rule is unchanged), so it
+// starts at length 4 at 0.001 (bd-u9cfx0).
+func (s *testSuite) useCaseMintDestinationSubprefixRowsStillCount() {
+	s.resetMintConfig("ucSp", "")
+	s.setMaxCollisionProb("0.001")
+	uc := s.issueUseCase()
+	s.seedMintRows(mintIDs("ucSp-mol-a", 10), false)
+
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "fresh issue", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.assertMintedHashLen(res.Issue.ID, "ucSp", 4)
 }
 
 func (s *testSuite) useCaseMintRespectsPrefixOverride() {

@@ -82,6 +82,19 @@ func TestAdaptiveIDLengthSpansBothPlanes(t *testing.T) {
 		assertHashSuffixLen(t, id, "lw", 3)
 		te.assertRowExists(t, ctx, "issues", id)
 	})
+
+	t.Run("destination sub-prefix rows still count for the base prefix", func(t *testing.T) {
+		// AC-4: the destination table's own rule is unchanged, so 10
+		// sp-mol-* issues still give a base sp mint length 4. An
+		// exact-namespace rule on both sides would drop them to 0 (length 3).
+		te, ctx := newAdaptiveIDEnv(t, "sp")
+		seedRows(t, te, seededIDs("sp-mol-a", 10), false)
+
+		assertAdaptiveSizing(t, te, "issues", "sp", 10, 4)
+		id := mintOne(t, te, "fresh issue", false)
+		assertHashSuffixLen(t, id, "sp", 4)
+		te.assertRowExists(t, ctx, "issues", id)
+	})
 }
 
 // newAdaptiveIDEnv returns an isolated store under prefix with

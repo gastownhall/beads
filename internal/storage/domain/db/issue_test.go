@@ -88,6 +88,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("CountsBaseNamespaceHeldInWisps", s.issueCountForPrefixCountsBaseNamespaceInWisps)
 		s.Run("HyphenatedPrefixCountsExactSiblingNamespace", s.issueCountForPrefixHyphenatedPrefix)
 		s.Run("LiveWispsDoNotCountForBasePrefix", s.issueCountForPrefixLiveWispsDoNotCountForBase)
+		s.Run("DestinationSubprefixRowsStillCount", s.issueCountForPrefixDestinationSubprefixRowsStillCount)
 	})
 	s.Run("NextCounterID", func() {
 		s.Run("FreshDBInsertsAtOne", s.issueNextCounterIDFresh)
@@ -716,6 +717,15 @@ func (s *testSuite) issueCountForPrefixLiveWispsDoNotCountForBase() {
 	s.insertCountRows(append([]string{"cfpLw-mol-c0", "cfpLw-a0.1"}, mintIDs("cfpLw-wisp-b", 10)...), true)
 
 	s.assertTwoPlaneCount("cfpLw", false, 3, 3)
+}
+
+// issueCountForPrefixDestinationSubprefixRowsStillCount: the destination
+// table's own prefix-% rule is unchanged, so its sub-prefixed rows still count
+// and no new base ID gets shorter (bd-u9cfx0).
+func (s *testSuite) issueCountForPrefixDestinationSubprefixRowsStillCount() {
+	s.insertCountRows(mintIDs("cfpSp-mol-a", 10), false)
+
+	s.assertTwoPlaneCount("cfpSp", false, 10, 4)
 }
 
 func (s *testSuite) issueCountForPrefixEmptyPrefix() {
