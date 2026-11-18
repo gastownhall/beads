@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -259,8 +260,18 @@ var vcStatusCmd = &cobra.Command{
 	Short: "Show current branch and uncommitted changes",
 	Long: `Show the current branch, commit hash, and any uncommitted changes.
 
+Uncommitted changes are the tables the Dolt working set has changed since the
+last commit, each with its change (modified, new table, deleted) and whether
+it is staged or unstaged. The command only reads the working set: it never
+stages or commits anything.
+
+With --json the output carries "branch", "commit", and the always-present
+"staged" and "unstaged" arrays of {"table", "status"} objects, sorted by table
+and status; a clean working set gives two empty arrays.
+
 Examples:
-  bd vc status`,
+  bd vc status
+  bd vc status --json`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -289,23 +300,81 @@ Examples:
 		// A status that could not be read is not a clean status: fail rather
 		// than print the branch and commit alone, which reads as "nothing to
 		// commit".
-		if _, err := store.Status(ctx); err != nil {
+		status, err := store.Status(ctx)
+		if err != nil {
 			return HandleErrorRespectJSON("failed to read working-set status: %v", err)
 		}
+		workingSet := newVCWorkingSet(status)
 
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"branch": currentBranch,
-				"commit": currentCommit,
+				"branch":   currentBranch,
+				"commit":   currentCommit,
+				"staged":   workingSet.Staged,
+				"unstaged": workingSet.Unstaged,
 			})
 		}
 
-		fmt.Printf("\n%s Version Control Status\n\n", ui.RenderAccent("📊"))
-		fmt.Printf("  Branch: %s\n", ui.StatusInProgressStyle.Render(currentBranch))
-		fmt.Printf("  Commit: %s\n", ui.RenderMuted(currentCommit[:8]))
-		fmt.Println()
+		fmt.Printf("Branch: %s\n", ui.StatusInProgressStyle.Render(currentBranch))
+		fmt.Printf("Commit: %s\n", ui.RenderMuted(currentCommit[:8]))
+		if workingSet.clean() {
+			fmt.Println("Uncommitted changes: none")
+			return nil
+		}
+		fmt.Println("Uncommitted changes:")
+		for _, e := range workingSet.Staged {
+			fmt.Printf("  %s: %s (staged)\n", e.Table, e.Status)
+		}
+		for _, e := range workingSet.Unstaged {
+			fmt.Printf("  %s: %s (unstaged)\n", e.Table, e.Status)
+		}
 		return nil
 	},
+}
+
+// vcStatusEntry is one changed table in bd vc status output. It is the
+// command's own wire shape (lowercase keys), kept apart from
+// storage.StatusEntry so the storage type can change without changing the
+// --json contract.
+type vcStatusEntry struct {
+	Table  string `json:"table"`
+	Status string `json:"status"`
+}
+
+// vcWorkingSet is bd vc status's view of the Dolt working set: the staged and
+// unstaged table changes, each sorted by table then status. Both slices are
+// always non-nil so --json prints [] rather than null for a clean side.
+type vcWorkingSet struct {
+	Staged   []vcStatusEntry
+	Unstaged []vcStatusEntry
+}
+
+func newVCWorkingSet(status *storage.Status) vcWorkingSet {
+	if status == nil {
+		status = &storage.Status{}
+	}
+	return vcWorkingSet{
+		Staged:   vcStatusEntries(status.Staged),
+		Unstaged: vcStatusEntries(status.Unstaged),
+	}
+}
+
+func (w vcWorkingSet) clean() bool {
+	return len(w.Staged) == 0 && len(w.Unstaged) == 0
+}
+
+func vcStatusEntries(entries []storage.StatusEntry) []vcStatusEntry {
+	out := make([]vcStatusEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, vcStatusEntry{Table: e.Table, Status: e.Status})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Table != out[j].Table {
+			return out[i].Table < out[j].Table
+		}
+		return out[i].Status < out[j].Status
+	})
+	return out
 }
 
 func init() {

@@ -7418,8 +7418,18 @@ bd vc status
   long:
     | Show the current branch, commit hash, and any uncommitted changes.
     |
+    | Uncommitted changes are the tables the Dolt working set has changed since the
+    | last commit, each with its change (modified, new table, deleted) and whether
+    | it is staged or unstaged. The command only reads the working set: it never
+    | stages or commits anything.
+    |
+    | With --json the output carries "branch", "commit", and the always-present
+    | "staged" and "unstaged" arrays of {"table", "status"} objects, sorted by table
+    | and status; a clean working set gives two empty arrays.
+    |
     | Examples:
     |   bd vc status
+    |   bd vc status --json
 
 bd version
   use: "version"
