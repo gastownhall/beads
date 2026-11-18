@@ -324,6 +324,7 @@
 40 15 TestMoleculeContract
 40 15 TestReadyWorkPageTotalFilterMatrix
 
+40 16 TestChildSuffixReservation
 40 16 TestDescendantWalkReachesEveryTargetKindAndStopsOnCycles
 40 16 TestEmbeddedDeferredActivationRecordsFromTheFirstWrite
 40 16 TestEmbeddedDependencyEditorAddedEchoesTheRequestOrder
