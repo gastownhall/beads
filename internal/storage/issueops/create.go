@@ -380,6 +380,23 @@ func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, iss
 	return nil
 }
 
+// ResetCreateIDsIfRolledBack runs reset when err means the create's
+// transaction rolled back, and returns err unchanged. A nil error keeps the
+// filled IDs (the rows exist), and so does an error wrapping
+// storage.ErrCommitIndeterminate (directly or inside errors.Join): the commit
+// may have landed, so the IDs may name real rows.
+//
+// Store create entry points take a SnapshotUnsetCreateIDs snapshot before
+// their transaction and hand its closure here on the transaction's error
+// return, so a create that rolled back leaves the caller's struct as it was
+// passed in and a retry of the same struct mints afresh (GH#8457).
+func ResetCreateIDsIfRolledBack(err error, reset func()) error {
+	if err != nil && !errors.Is(err, storage.ErrCommitIndeterminate) && reset != nil {
+		reset()
+	}
+	return err
+}
+
 // CreateIssuesResult reports side effects that callers need for selective
 // Dolt staging after CreateIssuesInTxWithResult returns.
 type CreateIssuesResult struct {
