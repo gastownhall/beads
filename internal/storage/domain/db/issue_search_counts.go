@@ -28,19 +28,11 @@ func (r *issueSQLRepositoryImpl) searchAcrossIssuesAndWispsWithCounts(ctx contex
 		if empty || !wispDepsExist {
 			return domain.SearchCountsPage{}, nil
 		}
-		wisps, err := r.runFilterSearchQuery(ctx, query, filter, wispsFilterTables, true)
-		if err != nil {
-			return domain.SearchCountsPage{}, err
-		}
-		return finishSearchCountsPage(wisps, filter)
+		return r.searchTableWithCounts(ctx, query, filter, wispsFilterTables, true)
 	}
 
 	if filter.SkipWisps {
-		out, err := r.runFilterSearchQuery(ctx, query, filter, issuesFilterTables, wispDepsExist)
-		if err != nil {
-			return domain.SearchCountsPage{}, err
-		}
-		return finishSearchCountsPage(out, filter)
+		return r.searchTableWithCounts(ctx, query, filter, issuesFilterTables, wispDepsExist)
 	}
 
 	empty, probeErr := r.wispsTableEmptyOrMissing(ctx)
@@ -48,11 +40,7 @@ func (r *issueSQLRepositoryImpl) searchAcrossIssuesAndWispsWithCounts(ctx contex
 		return domain.SearchCountsPage{}, fmt.Errorf("search issues with counts: wisp probe: %w", probeErr)
 	}
 	if empty || !wispDepsExist {
-		out, err := r.runFilterSearchQuery(ctx, query, filter, issuesFilterTables, wispDepsExist)
-		if err != nil {
-			return domain.SearchCountsPage{}, err
-		}
-		return finishSearchCountsPage(out, filter)
+		return r.searchTableWithCounts(ctx, query, filter, issuesFilterTables, wispDepsExist)
 	}
 
 	return r.searchUnionWithCounts(ctx, query, filter, wispDepsExist)
@@ -128,12 +116,12 @@ func readyHydrationFor(filter types.WorkFilter) sqlbuild.CountsHydration {
 
 // fetchCountsByIDs hydrates counts rows for explicit IDs via the by-IDs form
 // of the counts mega-query, which also constrains every aggregate subquery to
-// the page (row order is restored by the caller from the union page). It must
+// the page (row order is restored by the caller from its ID window). It must
 // not hand-build an id predicate for the predicate form: that form renders
 // whereSQL inside a derived subquery, so a caller-written "i."-qualified
 // clause would silently couple to the subquery's internal alias. The IDs are
-// chunked so the by-IDs form's up-to-eightfold placeholder binding stays
-// within per-statement limits (mirrors issueops.runReadyCountsInTx).
+// chunked so the by-IDs form's up-to-twelvefold placeholder binding stays
+// within per-statement limits (mirrors issueops.hydrateCountsByIDsInTx).
 func (r *issueSQLRepositoryImpl) fetchCountsByIDs(ctx context.Context, ids []string, tables filterTables, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) (map[string]*types.IssueWithCounts, error) {
 	out := make(map[string]*types.IssueWithCounts, len(ids))
 	err := forEachIDBatch(ids, func(batch []string) error {
@@ -156,23 +144,55 @@ func (r *issueSQLRepositoryImpl) fetchCountsByIDs(ctx context.Context, ids []str
 	return out, nil
 }
 
-func (r *issueSQLRepositoryImpl) runFilterSearchQuery(ctx context.Context, query string, filter types.IssueFilter, tables filterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
-	whereClauses, args, err := buildIssueFilterClauses(query, filter, tables)
+// searchTableWithCounts answers a counted search that reads ONE plane: the
+// SkipWisps, Ephemeral-only and empty/missing-wisps routes. It selects the
+// plane's ordered ID window first, with the very id scan the plain per-table
+// seam runs (searchTable's scanFilterIDs path: the label-driven JOIN plan, the
+// residual filter clauses, the ORDER BY with its unique id tiebreak, and
+// searchWindowForFilter's bound), and then hydrates exactly those IDs through
+// the by-IDs counts form (fetchCountsByIDs), restoring the window's order.
+//
+// scanFilterIDs closes the window — Go-side sort, the defensive cap, the
+// offset the engine was not given, and the page trim with its has-more
+// verdict — so it is applied once, on IDs, and the hydrated rows are not
+// windowed again.
+//
+// This route used to render the PREDICATE form of the counts mega-query, whose
+// aggregate subqueries (labels, dependency/comment counts, the parent and
+// dependency JSON, and the reverse-blocker join) each read their whole side
+// table before the page bound applied, so a ten-row page paid the
+// whole-corpus aggregation (GH#4370). Each per-issue count is a function of
+// the dependency graph restricted to that issue, so constraining the
+// aggregates to the selected IDs cannot change an emitted value.
+func (r *issueSQLRepositoryImpl) searchTableWithCounts(ctx context.Context, query string, filter types.IssueFilter, tables filterTables, includeWispReverseDeps bool) (domain.SearchCountsPage, error) {
+	plan := buildLabelDrivenSearch(filter, tables)
+	whereClauses, args, err := buildIssueFilterClauses(query, plan.Filter, tables)
 	if err != nil {
-		return nil, err
+		return domain.SearchCountsPage{}, err
 	}
+	whereClauses, args = plan.MergeInto(whereClauses, args)
+
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
-	orderBy := orderBySQL(filter.SortBy, filter.SortDesc, "i")
-	return r.runSearchQuery(ctx, tables, whereSQL, orderBy, searchWindowForFilter(filter).sql, args, includeWispReverseDeps, hydrationFor(filter))
-}
+	selectKw := "SELECT "
+	if plan.Distinct {
+		selectKw = "SELECT DISTINCT "
+	}
 
-//nolint:gosec // G201: SQL fragments are built from hardcoded table names and parameterized filters.
-func (r *issueSQLRepositoryImpl) runSearchQuery(ctx context.Context, tables filterTables, whereSQL, orderBySQL, limitSQL string, args []any, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
-	searchSQL, _ := sqlbuild.SearchCountsSQL(tables, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, hyd)
-	return r.scanCountsQuery(ctx, tables, searchSQL, args, hyd)
+	ids, hasMore, err := r.scanFilterIDs(ctx, selectKw, plan.FromSQL, whereSQL, args, filter, tables)
+	if err != nil {
+		return domain.SearchCountsPage{}, err
+	}
+	if len(ids) == 0 {
+		return domain.SearchCountsPage{}, nil
+	}
+	byID, err := r.fetchCountsByIDs(ctx, ids, tables, includeWispReverseDeps, hydrationFor(filter))
+	if err != nil {
+		return domain.SearchCountsPage{}, fmt.Errorf("search %s with counts (hydrate): %w", tables.Main, err)
+	}
+	return domain.SearchCountsPage{Items: orderByIDs(ids, byID), HasMore: hasMore}, nil
 }
 
 // scanCountsQuery runs a prebuilt counts mega-query and hydrates each row,
@@ -227,19 +247,4 @@ func (r *issueSQLRepositoryImpl) optionalTableExists(ctx context.Context, table 
 // scanIssue -> issueops.ScanIssueFrom).
 func scanReadyWorkRowWithCounts(rows *sql.Rows, hyd sqlbuild.CountsHydration) (*types.IssueWithCounts, error) {
 	return issueops.ScanReadyWorkRowWithCounts(rows, hyd)
-}
-
-// finishSearchCountsPage closes the window runFilterSearchQuery opened. It
-// rebuilds it from the same filter rather than being handed it, so the two
-// halves cannot be given different numbers. Like the plain per-table seam, it
-// establishes a Go-side sort's order before the trim (sortRowsGoSide) — the
-// counts query renders no ORDER BY for such keys, so its rows arrive
-// engine-ordered.
-func finishSearchCountsPage(items []*types.IssueWithCounts, filter types.IssueFilter) (domain.SearchCountsPage, error) {
-	sortRowsGoSide(items, func(iwc *types.IssueWithCounts) string { return iwc.Issue.ID }, filter.SortBy, filter.SortDesc)
-	trimmed, hasMore, err := finishWindow(items, searchWindowForFilter(filter))
-	if err != nil {
-		return domain.SearchCountsPage{}, err
-	}
-	return domain.SearchCountsPage{Items: trimmed, HasMore: hasMore}, nil
 }

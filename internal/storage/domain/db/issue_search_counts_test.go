@@ -345,22 +345,23 @@ func (s *testSuite) searchCountsWispPredicateIDFilterParity() {
 	s.Equal(i.CommentCount, p.CommentCount, "comment_count parity")
 }
 
-// searchCountsByIDsFormMatchesPredicateForm is the cross-form parity test the
-// two subtests above are not. SearchCountsSQL renders two shapes, and which one
-// a read gets is decided by the dispatch in
-// searchAcrossIssuesAndWispsWithCounts — never by the filter's id fields:
+// searchCountsByIDsFormMatchesPredicateForm is the cross-ROUTE parity test the
+// two subtests above are not. Which route a read takes is decided by the
+// dispatch in searchAcrossIssuesAndWispsWithCounts — never by the filter's id
+// fields:
 //
 //   - SkipWisps, Ephemeral-only, or an empty/missing wisps plane each take one
-//     plane through runFilterSearchQuery, which renders the PREDICATE form
-//     (ids nil, whereSQL bounding a derived driver subquery).
+//     plane through searchTableWithCounts: the plane's id window from
+//     scanFilterIDs, hydrated through fetchCountsByIDs.
 //   - anything else unions the two planes and hydrates the resulting page
-//     through fetchCountsByIDs, which renders the BY-IDS form (whereSQL empty,
-//     an id predicate at the outer level).
+//     through fetchCountsByIDs.
 //
-// So reaching the by-IDs form takes a search that spans both planes against a
+// Both routes used to render different SearchCountsSQL shapes (the single-plane
+// route the PREDICATE form, until GH#4370), and the subtest keeps its name from
+// then. Reaching the union takes a search that spans both planes against a
 // populated wisps plane — no id filter selects it. This drives one issue both
-// ways and asserts the two shapes project identical counts and JSON, which is
-// the equivalence a change to either shape has to preserve.
+// ways and asserts the two routes project identical counts and JSON, which is
+// the equivalence a change to either route has to preserve.
 func (s *testSuite) searchCountsByIDsFormMatchesPredicateForm() {
 	r := s.issueRepo()
 	dep := s.depRepo()
@@ -376,8 +377,8 @@ func (s *testSuite) searchCountsByIDsFormMatchesPredicateForm() {
 	s.Require().NoError(r.Insert(s.Ctx(), b, "tester", domain.InsertIssueOpts{}))
 
 	// wispsTableEmptyOrMissing short-circuits an empty wisp plane back to the
-	// single-plane predicate form, which would quietly turn this into a third
-	// predicate-vs-predicate test. Seed a wisp so the union leg is really
+	// single-plane route, which would quietly turn this into a third
+	// single-plane-vs-single-plane test. Seed a wisp so the union leg is really
 	// taken. It must NOT match the search prefix: the point is to compare one
 	// row across two forms, not to merge two rows.
 	w := newTestIssue("bd-srxc-xformwisp-1", "wisp")
@@ -398,13 +399,13 @@ func (s *testSuite) searchCountsByIDsFormMatchesPredicateForm() {
 	s.Require().NoError(err)
 
 	// Neither SkipWisps nor Ephemeral: the read spans both planes, so the page
-	// is hydrated through fetchCountsByIDs — the by-IDs form.
+	// is selected by the union.
 	byIDsForm, err := r.SearchAcrossIssuesAndWispsWithCounts(s.Ctx(), "",
 		types.IssueFilter{IDPrefix: "bd-srxc-xform-mid"})
 	s.Require().NoError(err)
 	s.Require().Len(byIDsForm.Items, 1)
 
-	// SkipWisps on the otherwise-identical filter drops to the predicate form.
+	// SkipWisps on the otherwise-identical filter drops to the single-plane route.
 	byPredicateForm, err := r.SearchAcrossIssuesAndWispsWithCounts(s.Ctx(), "",
 		types.IssueFilter{IDPrefix: "bd-srxc-xform-mid", SkipWisps: true})
 	s.Require().NoError(err)
