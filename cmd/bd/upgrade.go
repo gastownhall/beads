@@ -29,12 +29,19 @@ var upgradeStatusCmd = &cobra.Command{
 	Short: "Check if bd version has changed",
 	Long: `Check if bd has been upgraded since you last used it.
 
-This command uses the version tracking that happens automatically
-at startup to detect if bd was upgraded.
+This command compares the running bd binary with the version recorded
+in .beads/.local_version. It does not open the database, apply schema
+migrations, or rewrite the recorded version, so it is safe to run as a
+probe before deciding whether an upgrade step is needed.
 
 Examples:
   bd upgrade status
   bd upgrade status --json`,
+	// A status query only reads .beads/.local_version and the built-in
+	// changelog, so it must not enter the root hook's writable store open:
+	// that open can apply pending schema migrations (GH#6669) or refuse the
+	// inspection when the database is unavailable.
+	Annotations:   map[string]string{skipStoreAnnotation: "1"},
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -44,6 +51,12 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		// The skip-store opt-out also skips the hook's version tracking.
+		// Detect without rewriting the marker: .local_version is the one-shot
+		// signal for the version-bump reconciliation the next store-backed
+		// command runs (see trackBdVersionPreview).
+		trackBdVersionPreview()
 
 		if jsonOutput {
 			result := map[string]interface{}{
@@ -87,9 +100,15 @@ this command shows ALL changes since your specific last version.
 If you're upgrading from an old version, you'll see the complete
 changelog of everything that changed since then.
 
+Like 'bd upgrade status', this command does not open the database, apply
+schema migrations, or rewrite .beads/.local_version.
+
 Examples:
   bd upgrade review
   bd upgrade review --json`,
+	// See upgradeStatusCmd: review reads only the version marker and the
+	// built-in changelog, so it opts out of the root hook's store open.
+	Annotations:   map[string]string{skipStoreAnnotation: "1"},
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -99,6 +118,9 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		// Detect without consuming the marker; see upgradeStatusCmd.
+		trackBdVersionPreview()
 
 		lastVersion := previousVersion
 

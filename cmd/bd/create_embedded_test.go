@@ -824,6 +824,156 @@ func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
 	}
 }
 
+// embeddedBDVersion reports the version the bd binary under test was built
+// with, read through the store-free `bd version --json`. Tests that seed
+// .beads/.local_version with "the running version" must use this rather than
+// the test package's Version: a prebuilt binary may be stamped differently.
+func embeddedBDVersion(t *testing.T, bd, dir string) string {
+	t.Helper()
+	cmd := exec.Command(bd, "version", "--json")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd version --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var out struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil || out.Version == "" {
+		t.Fatalf("parse bd version --json (err=%v): %s", err, stdout.String())
+	}
+	return out.Version
+}
+
+// upgradeInspectionJSON is the union of the `bd upgrade status --json` and
+// `bd upgrade review --json` fields the upgrade-inspection tests read.
+type upgradeInspectionJSON struct {
+	Upgraded        *bool             `json:"upgraded"`
+	CurrentVersion  string            `json:"current_version"`
+	PreviousVersion string            `json:"previous_version"`
+	NewVersions     []json.RawMessage `json:"new_versions"`
+}
+
+// runEmbeddedUpgradeInspection runs `bd upgrade <sub> --json` with env and
+// fails the test unless it exits 0 with a JSON object on stdout.
+func runEmbeddedUpgradeInspection(t *testing.T, bd, dir, sub string, env []string) upgradeInspectionJSON {
+	t.Helper()
+	cmd := exec.Command(bd, "upgrade", sub, "--json")
+	cmd.Dir = dir
+	cmd.Env = env
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd upgrade %s --json failed: %v\nstdout:\n%s\nstderr:\n%s", sub, err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "Applying migration") || strings.Contains(stderr.String(), "auto-applying") {
+		t.Errorf("bd upgrade %s announced a schema migration (GH#6669); stderr:\n%s", sub, stderr.String())
+	}
+	var got upgradeInspectionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("parse bd upgrade %s --json: %v\nstdout:\n%s", sub, err, stdout.String())
+	}
+	return got
+}
+
+// TestEmbeddedUpgradeStatusDoesNotMigrate is the GH#6669 regression: `bd
+// upgrade status` and `bd upgrade review` only inspect the version marker and
+// the built-in changelog, yet they went through the root hook's writable store
+// open, which applies pending schema migrations (with consent) or refuses the
+// command (without it). Either way the inspection must succeed and leave the
+// schema cursor, Dolt HEAD and issues untouched.
+//
+// The equal-marker rows isolate the main store open from the version-bump
+// helper (autoMigrateOnVersionBump runs only when the marker is older).
+func TestEmbeddedUpgradeStatusDoesNotMigrate(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+
+	cases := []struct {
+		name    string
+		sub     string
+		consent bool
+		// oldMarker seeds .local_version with an older version; otherwise
+		// it holds the binary's own version.
+		oldMarker bool
+	}{
+		{name: "status consent old marker", sub: "status", consent: true, oldMarker: true},
+		{name: "status no consent old marker", sub: "status", consent: false, oldMarker: true},
+		{name: "status consent current marker", sub: "status", consent: true, oldMarker: false},
+		{name: "review consent old marker", sub: "review", consent: true, oldMarker: true},
+		{name: "review no consent old marker", sub: "review", consent: false, oldMarker: true},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prefix := fmt.Sprintf("usm%d", i)
+			dir, beadsDir, _ := bdInit(t, bd, "--prefix", prefix)
+			bdCreate(t, bd, dir, "Existing issue")
+
+			marker := "0.9.0"
+			if !tc.oldMarker {
+				marker = embeddedBDVersion(t, bd, dir)
+			}
+			localVersionPath := filepath.Join(beadsDir, localVersionFile)
+			markerBytes := []byte(marker + "\n")
+			if err := os.WriteFile(localVersionPath, markerBytes, 0o600); err != nil {
+				t.Fatalf("write local version: %v", err)
+			}
+
+			regressEmbeddedSchemaCursor(t, beadsDir, prefix)
+			before := readEmbeddedStoreSnapshot(t, beadsDir, prefix)
+			if before.schemaVersion != schema.LatestVersion()-1 {
+				t.Fatalf("fixture schema version = %d, want %d", before.schemaVersion, schema.LatestVersion()-1)
+			}
+
+			env := bdEnv(dir)
+			if tc.consent {
+				// Explicit migration consent: on the base, the writable open
+				// this command used to make then applies the pending step.
+				env = append(env, "BD_ALLOW_MIGRATE=1")
+			} else {
+				// bdEnv already strips BD_*/BEADS_*; keep both consent
+				// variables explicitly absent so the refusal path is the
+				// one under test.
+				env = envWithout(envWithout(env, "BD_ALLOW_MIGRATE"), "BD_ALLOW_REMOTE_MIGRATE")
+			}
+
+			got := runEmbeddedUpgradeInspection(t, bd, dir, tc.sub, env)
+
+			after := readEmbeddedStoreSnapshot(t, beadsDir, prefix)
+			if after.schemaVersion != before.schemaVersion {
+				t.Errorf("bd upgrade %s changed the schema version: before=%d after=%d (GH#6669)", tc.sub, before.schemaVersion, after.schemaVersion)
+			}
+			if after.head != before.head {
+				t.Errorf("bd upgrade %s changed Dolt HEAD: before=%s after=%s (GH#6669)", tc.sub, before.head, after.head)
+			}
+			if after.issueCount != before.issueCount {
+				t.Errorf("bd upgrade %s changed the issue count: before=%d after=%d", tc.sub, before.issueCount, after.issueCount)
+			}
+			raw, err := os.ReadFile(localVersionPath)
+			if err != nil {
+				t.Fatalf("read local version: %v", err)
+			}
+			if string(raw) != string(markerBytes) {
+				t.Errorf("bd upgrade %s rewrote .local_version: got %q, want %q", tc.sub, raw, markerBytes)
+			}
+
+			switch {
+			case tc.sub == "status" && tc.oldMarker:
+				if got.Upgraded == nil || !*got.Upgraded || got.PreviousVersion != "0.9.0" || got.CurrentVersion == "" {
+					t.Errorf("status JSON = %+v, want upgraded from 0.9.0", got)
+				}
+			case tc.sub == "status":
+				if got.Upgraded == nil || *got.Upgraded || got.CurrentVersion != marker {
+					t.Errorf("status JSON = %+v, want no upgrade at %s", got, marker)
+				}
+			case tc.sub == "review":
+				if got.PreviousVersion != "0.9.0" || got.CurrentVersion == "" || got.NewVersions == nil {
+					t.Errorf("review JSON = %+v, want changes since 0.9.0", got)
+				}
+			}
+		})
+	}
+}
+
 func TestEmbeddedChangeDirOverridesInheritedBeadsDir(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	callerDir, callerBeadsDir, _ := bdInit(t, bd, "--prefix", "caller")

@@ -1318,6 +1318,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd upgrade status` and `bd upgrade review` no longer open the database.**
+  Both commands only compare the running binary with
+  `.beads/.local_version` and read the built-in changelog, but they went
+  through the same writable store open as every other command, so a status
+  probe could apply pending schema migrations (announced by the smart gate)
+  or fail when the database was unavailable. They now skip store
+  initialization and leave `.beads/.local_version` unchanged, so successive
+  probes report the same upgrade and the next ordinary command still runs the
+  post-upgrade reconciliation. `bd upgrade ack` is unchanged. (#6669)
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that
