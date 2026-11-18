@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -120,6 +121,56 @@ func LegacyDarwinUserConfigYamlPath() (string, error) {
 // already-resolved absolute home directory.
 func LegacyDarwinUserConfigYamlPathFor(home string) string {
 	return filepath.Join(home, "Library", "Application Support", "bd", "config.yaml")
+}
+
+// LegacyDarwinUserConfigMaxBytes bounds a read of the legacy macOS user
+// config; a real bd user config is a few hundred bytes.
+const LegacyDarwinUserConfigMaxBytes = 1 << 20
+
+// ReadLegacyDarwinUserConfigYaml reads the legacy macOS user config at path
+// for its two sanctioned readers (the metrics bootstrap carry-over and the
+// macOS doctor check). It stats before opening, so a FIFO or device there is
+// refused without the open that could block, re-checks the opened file, and
+// refuses anything larger than LegacyDarwinUserConfigMaxBytes. A missing file
+// returns an error that matches fs.ErrNotExist.
+func ReadLegacyDarwinUserConfigYaml(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkLegacyDarwinUserConfigInfo(path, info); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(path) //nolint:gosec // path is the fixed legacy darwin user config path
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// Re-check the opened file: the path may have been swapped since the stat.
+	if info, err = f.Stat(); err != nil {
+		return nil, err
+	}
+	if err := checkLegacyDarwinUserConfigInfo(path, info); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, LegacyDarwinUserConfigMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > LegacyDarwinUserConfigMaxBytes {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, LegacyDarwinUserConfigMaxBytes)
+	}
+	return data, nil
+}
+
+func checkLegacyDarwinUserConfigInfo(path string, info os.FileInfo) error {
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	if info.Size() > LegacyDarwinUserConfigMaxBytes {
+		return fmt.Errorf("%s is larger than %d bytes", path, LegacyDarwinUserConfigMaxBytes)
+	}
+	return nil
 }
 
 // nativeUserConfigValidationSource names the source of a relative directory

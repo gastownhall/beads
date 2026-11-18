@@ -601,25 +601,50 @@ func readYamlValueAtPath(path, key string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	value, present, _ := YamlValueFromBytes(data, key)
+	return value, present
+}
+
+// YamlValueFromBytes decodes one dotted key from config.yaml content the way
+// bd's user-global reader (GetUserYamlConfig, MetricsDisabledByUserConfig)
+// does: the flat dotted form ("metrics.disabled: true") wins over the nested
+// form, a null reads as absent, and a non-string scalar is formatted with %v.
+// err is non-nil only when data is not a YAML mapping; the file reader treats
+// that as absent, and a caller that must tell the two apart (the GH#8113
+// macOS carry-over) can.
+func YamlValueFromBytes(data []byte, key string) (value string, present bool, err error) {
 	var root map[string]interface{}
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return "", false
+		return "", false, err
 	}
 	if raw, ok := root[key]; ok { // flat dotted form
-		return yamlScalarString(raw)
+		value, present = yamlScalarString(raw)
+		return value, present, nil
 	}
 	var node interface{} = root // nested form
 	for _, part := range strings.Split(key, ".") {
 		m, ok := node.(map[string]interface{})
 		if !ok {
-			return "", false
+			return "", false, nil
 		}
 		node, ok = m[part]
 		if !ok {
-			return "", false
+			return "", false, nil
 		}
 	}
-	return yamlScalarString(node)
+	value, present = yamlScalarString(node)
+	return value, present, nil
+}
+
+// ParseUserConfigBool parses a raw user-config scalar the way the metrics
+// consent readers do. ok is false for a value that is not a bool, which those
+// readers treat as the default.
+func ParseUserConfigBool(raw string) (value bool, ok bool) {
+	parsed, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, false
+	}
+	return parsed, true
 }
 
 func yamlScalarString(v interface{}) (string, bool) {
@@ -654,10 +679,7 @@ func MetricsDisabledByUserConfig() bool {
 	if !ok {
 		return false
 	}
-	disabled, err := strconv.ParseBool(strings.TrimSpace(raw))
-	if err != nil {
-		return false
-	}
+	disabled, _ := ParseUserConfigBool(raw)
 	return disabled
 }
 
@@ -681,10 +703,7 @@ func MetricsNoticeShownByUserConfig() bool {
 	if !ok {
 		return false
 	}
-	shown, err := strconv.ParseBool(strings.TrimSpace(raw))
-	if err != nil {
-		return false
-	}
+	shown, _ := ParseUserConfigBool(raw)
 	return shown
 }
 
@@ -793,23 +812,51 @@ func setYamlConfigAtPath(configPath, key, value string) error {
 // checked first: a config.yaml its owner made read-only is refused, as the
 // in-place write refused it, rather than rewritten.
 func replaceConfigYaml(configPath string, content []byte) error {
-	target, err := filepath.EvalSymlinks(configPath)
+	target, info, err := writableConfigYamlTarget(configPath)
 	if err != nil {
 		return err
 	}
+	return atomicfile.WriteFile(target, content, info.Mode().Perm())
+}
+
+// writableConfigYamlTarget resolves configPath through symlinks and checks the
+// target can be opened for writing: the checks replaceConfigYaml makes before
+// it writes.
+func writableConfigYamlTarget(configPath string) (string, os.FileInfo, error) {
+	target, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		return "", nil, err
+	}
 	info, err := os.Stat(target)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	// Opened without O_TRUNC, so the probe changes nothing.
 	f, err := os.OpenFile(target, os.O_WRONLY, 0) //nolint:gosec // target is the resolved config.yaml path
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	if err := f.Close(); err != nil {
+		return "", nil, err
+	}
+	return target, info, nil
+}
+
+// ConfigYamlReplaceable reports whether SetUserYamlConfig and friends could
+// rewrite the existing config.yaml at configPath: the symlink-resolved target
+// opens for writing and its directory accepts the temp file the atomic
+// replace renames over it. The temp file is removed again; configPath is
+// never modified.
+func ConfigYamlReplaceable(configPath string) error {
+	target, info, err := writableConfigYamlTarget(configPath)
+	if err != nil {
 		return err
 	}
-	return atomicfile.WriteFile(target, content, info.Mode().Perm())
+	w, err := atomicfile.Create(target, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	return w.Abort()
 }
 
 // GetYamlConfig gets a configuration value from config.yaml.

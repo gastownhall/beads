@@ -3155,9 +3155,16 @@ func bootstrapAndInitMetrics(cmdName string) {
 // bootstrap. This mirrors the resolveMetricsEnabled() gate on the first-run
 // notice. (~/.config/bd/ lives outside the repo, so this write is not a
 // stealth/per-repository trace; stealth init is handled by suppressing the
-// first-run notice, not by skipping this user-global bootstrap.)
+// first-run notice, not by skipping this user-global bootstrap.) Shell
+// completion is exempt too: it runs on every Tab press, must stay fast and
+// quiet, and should never be the command that writes the user config or
+// prints the GH#8113 carry-over notice into a completion menu.
 func bootstrapMetricsUserConfig(cmdName string) {
-	if cmdName != metrics.SendMetricsSubcommand && resolveMetricsEnabled() {
+	switch cmdName {
+	case metrics.SendMetricsSubcommand, cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+		return
+	}
+	if resolveMetricsEnabled() {
 		if err := metrics.EnsureUserConfigDefaults(); err != nil {
 			debug.Logf("warning: ensure user config defaults failed: %v", err)
 		}

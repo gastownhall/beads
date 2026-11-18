@@ -1,10 +1,15 @@
 package metrics
 
 import (
+	"bytes"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 )
@@ -16,10 +21,63 @@ func useLegacyCarryOver(t *testing.T, goos string) *[]string {
 	var probes []string
 	restore := SetLegacyDarwinCarryOverForTest(goos, func(path string) ([]byte, error) {
 		probes = append(probes, path)
-		return readRegularFileCapped(path)
+		return config.ReadLegacyDarwinUserConfigYaml(path)
 	})
 	t.Cleanup(restore)
 	return &probes
+}
+
+// useLegacyCarryOverRead is useLegacyCarryOver with an injected read result.
+func useLegacyCarryOverRead(t *testing.T, read func(path string) ([]byte, error)) *[]string {
+	t.Helper()
+	var probes []string
+	restore := SetLegacyDarwinCarryOverForTest("darwin", func(path string) ([]byte, error) {
+		probes = append(probes, path)
+		return read(path)
+	})
+	t.Cleanup(restore)
+	return &probes
+}
+
+// captureCarryOverNotice collects the fail-closed notice.
+func captureCarryOverNotice(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := legacyCarryOverNotice
+	legacyCarryOverNotice = &buf
+	t.Cleanup(func() { legacyCarryOverNotice = prev })
+	return &buf
+}
+
+// assertFailedClosed checks the user config holds the fail-closed result
+// (metrics.disabled true, the default endpoint, nothing else carried) and that
+// exactly one notice line names the legacy path and the way back.
+func assertFailedClosed(t *testing.T, home string, notice *bytes.Buffer) {
+	t.Helper()
+	parsed := parseUserConfig(t, userConfigPath(home))
+	if got := metricsLeaf(t, parsed, "disabled"); got != true {
+		t.Errorf("metrics.disabled = %v, want true (fail closed)", got)
+	}
+	if got := metricsLeaf(t, parsed, "endpoint"); got != DefaultEndpoint {
+		t.Errorf("metrics.endpoint = %v, want the default (nothing carried)", got)
+	}
+	if m, _ := parsed["metrics"].(map[string]interface{}); m != nil {
+		if _, ok := m["notice_shown"]; ok {
+			t.Errorf("metrics.notice_shown written on a fail-closed carry-over: %#v", m)
+		}
+	}
+	if !config.MetricsDisabledByUserConfig() {
+		t.Error("MetricsDisabledByUserConfig() = false after failing closed")
+	}
+	got := notice.String()
+	if strings.Count(got, "\n") != 1 || !strings.HasSuffix(got, "\n") {
+		t.Fatalf("notice = %q, want exactly one line", got)
+	}
+	for _, want := range []string{"metrics were left off", legacyDarwinConfigPath(home), "bd metrics on"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("notice %q does not mention %q", got, want)
+		}
+	}
 }
 
 func legacyDarwinConfigPath(home string) string {
@@ -144,31 +202,89 @@ func TestLegacyDarwinCarryOver_NoLegacyFileUsesDefaults(t *testing.T) {
 	assertDefaultMetricsConfig(t, home)
 }
 
-func TestLegacyDarwinCarryOver_UnusableLegacyFileUsesDefaults(t *testing.T) {
-	for name, plant := range map[string]func(t *testing.T, home string){
-		"malformed yaml": func(t *testing.T, home string) {
+// Only a missing legacy file means "today's defaults". One that exists but
+// cannot be read or parsed fails closed (maintainer ruling on GH#8113): a
+// metrics opt-out bd can no longer see must not turn into sending.
+func TestLegacyDarwinCarryOver_UnusableLegacyFileFailsClosed(t *testing.T) {
+	cases := map[string]struct {
+		plant func(t *testing.T, home string)
+		read  func(path string) ([]byte, error) // nil: the real reader
+	}{
+		"malformed yaml": {plant: func(t *testing.T, home string) {
 			plantLegacyDarwinConfig(t, home, "metrics:\n  disabled: [unclosed\n")
-		},
-		"not a mapping": func(t *testing.T, home string) {
+		}},
+		"not a mapping": {plant: func(t *testing.T, home string) {
 			plantLegacyDarwinConfig(t, home, "- just\n- a list\n")
-		},
-		"directory": func(t *testing.T, home string) {
+		}},
+		"directory": {plant: func(t *testing.T, home string) {
 			if err := os.MkdirAll(legacyDarwinConfigPath(home), 0o755); err != nil {
 				t.Fatalf("mkdir: %v", err)
 			}
-		},
-	} {
+		}},
+		"over the size cap": {plant: func(t *testing.T, home string) {
+			plantLegacyDarwinConfig(t, home, "metrics:\n  disabled: false\n"+strings.Repeat("#", config.LegacyDarwinUserConfigMaxBytes))
+		}},
+		"EPERM after a privacy-prompt denial": {read: func(path string) ([]byte, error) {
+			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+		}},
+		"I/O error": {read: func(path string) ([]byte, error) {
+			return nil, &fs.PathError{Op: "read", Path: path, Err: fmt.Errorf("input/output error")}
+		}},
+	}
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			home := setupUserConfigHome(t)
-			probes := useLegacyCarryOver(t, "darwin")
-			plant(t, home)
+			notice := captureCarryOverNotice(t)
+			var probes *[]string
+			if tc.read != nil {
+				probes = useLegacyCarryOverRead(t, tc.read)
+			} else {
+				probes = useLegacyCarryOver(t, "darwin")
+				tc.plant(t, home)
+			}
 
 			if err := EnsureUserConfigDefaults(); err != nil {
 				t.Fatalf("EnsureUserConfigDefaults: %v", err)
 			}
 			assertLegacyProbes(t, probes, home, 1)
-			assertDefaultMetricsConfig(t, home)
+			assertFailedClosed(t, home, notice)
+
+			// The opt-out is now on disk: later runs neither probe nor
+			// repeat the notice.
+			notice.Reset()
+			if err := EnsureUserConfigDefaults(); err != nil {
+				t.Fatalf("second EnsureUserConfigDefaults: %v", err)
+			}
+			assertLegacyProbes(t, probes, home, 1)
+			if notice.Len() != 0 {
+				t.Fatalf("second run repeated the notice: %q", notice.String())
+			}
 		})
+	}
+}
+
+// An existing user config that lacks metrics.disabled fails closed the same way.
+func TestLegacyDarwinCarryOver_ExistingConfigFailsClosed(t *testing.T) {
+	home := setupUserConfigHome(t)
+	notice := captureCarryOverNotice(t)
+	probes := useLegacyCarryOverRead(t, func(path string) ([]byte, error) {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+	})
+	path := userConfigPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("actor: from-config-set\n"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := EnsureUserConfigDefaults(); err != nil {
+		t.Fatalf("EnsureUserConfigDefaults: %v", err)
+	}
+	assertLegacyProbes(t, probes, home, 1)
+	assertFailedClosed(t, home, notice)
+	if parsed := parseUserConfig(t, path); parsed["actor"] != "from-config-set" {
+		t.Errorf("existing key clobbered: %#v", parsed)
 	}
 }
 
@@ -252,9 +368,10 @@ func TestLegacyDarwinCarryOver_ExistingConfigWithoutMetricsKeysProbesOnce(t *tes
 	assertLegacyProbes(t, probes, home, 1)
 }
 
-// A partially configured user file only gains the missing key; a key the user
-// already set is never replaced by the legacy value.
-func TestLegacyDarwinCarryOver_KeepsKeysAlreadySet(t *testing.T) {
+// The probe exists to carry a consent choice, so it runs only when
+// metrics.disabled is missing. A user file that already records that choice
+// only gains the default endpoint, and the legacy file is never touched.
+func TestLegacyDarwinCarryOver_DisabledAlreadySetNeverProbes(t *testing.T) {
 	home := setupUserConfigHome(t)
 	probes := useLegacyCarryOver(t, "darwin")
 	plantLegacyDarwinConfig(t, home, "metrics:\n  disabled: true\n  endpoint: https://legacy.example.com\n")
@@ -269,13 +386,120 @@ func TestLegacyDarwinCarryOver_KeepsKeysAlreadySet(t *testing.T) {
 	if err := EnsureUserConfigDefaults(); err != nil {
 		t.Fatalf("EnsureUserConfigDefaults: %v", err)
 	}
-	assertLegacyProbes(t, probes, home, 1)
+	assertLegacyProbes(t, probes, home, 0)
 	parsed := parseUserConfig(t, path)
 	if got := metricsLeaf(t, parsed, "disabled"); got != false {
 		t.Errorf("metrics.disabled = %v, want the user's existing false", got)
 	}
-	if got := metricsLeaf(t, parsed, "endpoint"); got != "https://legacy.example.com" {
-		t.Errorf("metrics.endpoint = %v, want carried legacy endpoint", got)
+	if got := metricsLeaf(t, parsed, "endpoint"); got != DefaultEndpoint {
+		t.Errorf("metrics.endpoint = %v, want the default endpoint", got)
+	}
+}
+
+// A user config bd cannot rewrite never triggers the probe: the carried value
+// could not be kept, so the next run would probe again.
+func TestLegacyDarwinCarryOver_ReadOnlyConfigNeverProbes(t *testing.T) {
+	home := setupUserConfigHome(t)
+	probes := useLegacyCarryOver(t, "darwin")
+	plantLegacyDarwinConfig(t, home, "metrics:\n  disabled: true\n")
+	path := userConfigPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("actor: read-only\n"), 0o400); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	requireUnwritable(t, path)
+
+	for run := 1; run <= 2; run++ {
+		if err := EnsureUserConfigDefaults(); err == nil {
+			t.Fatalf("run %d: EnsureUserConfigDefaults returned nil for a read-only user config", run)
+		}
+	}
+	assertLegacyProbes(t, probes, home, 0)
+	if data, _ := os.ReadFile(path); string(data) != "actor: read-only\n" {
+		t.Fatalf("read-only user config changed: %q", data)
+	}
+}
+
+// requireUnwritable fails the test when path can still be opened for writing
+// (for example when the suite runs as root), since the test would then not
+// exercise what it claims.
+func requireUnwritable(t *testing.T, path string) {
+	t.Helper()
+	if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
+		_ = f.Close()
+		t.Fatalf("precondition: %s is still writable (running as root?)", path)
+	}
+}
+
+// Concurrent first runs serialize on the lock: the legacy file is read at most
+// once, every run succeeds, and no reader ever sees an empty or partial user
+// config (the file is published by hard link of a complete temp file).
+func TestLegacyDarwinCarryOver_ConcurrentFirstRunsProbeOnce(t *testing.T) {
+	home := setupUserConfigHome(t)
+	plantLegacyDarwinConfig(t, home, "metrics:\n  disabled: true\n")
+	var mu sync.Mutex
+	probes := 0
+	t.Cleanup(SetLegacyDarwinCarryOverForTest("darwin", func(path string) ([]byte, error) {
+		mu.Lock()
+		probes++
+		mu.Unlock()
+		// Hold the lock long enough for the other runs to queue on it.
+		time.Sleep(20 * time.Millisecond)
+		return config.ReadLegacyDarwinUserConfigYaml(path)
+	}))
+	path := userConfigPath(home)
+	want := "metrics:\n  disabled: true\n  endpoint: " + DefaultEndpoint + "\n"
+
+	const runs = 8
+	start := make(chan struct{})
+	stop := make(chan struct{})
+	var readerErr error
+	var readerWG, runWG sync.WaitGroup
+	readerWG.Add(1)
+	go func() {
+		defer readerWG.Done()
+		<-start
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if data, err := os.ReadFile(path); err == nil && string(data) != want && readerErr == nil {
+				readerErr = fmt.Errorf("reader saw %q, want only the complete %q", data, want)
+			}
+		}
+	}()
+	errs := make([]error, runs)
+	for i := 0; i < runs; i++ {
+		runWG.Add(1)
+		go func(i int) {
+			defer runWG.Done()
+			<-start
+			errs[i] = EnsureUserConfigDefaults()
+		}(i)
+	}
+	close(start)
+	runWG.Wait()
+	close(stop)
+	readerWG.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("run %d: %v", i, err)
+		}
+	}
+	if probes != 1 {
+		t.Errorf("legacy probes = %d across %d concurrent first runs, want 1", probes, runs)
+	}
+	if readerErr != nil {
+		t.Error(readerErr)
+	}
+	if data, _ := os.ReadFile(path); string(data) != want {
+		t.Errorf("user config = %q, want %q", data, want)
 	}
 }
 

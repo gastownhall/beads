@@ -1,9 +1,13 @@
 package main
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/metrics"
 )
@@ -13,6 +17,15 @@ import (
 // platform with a counting legacy reader. Not parallel: it swaps
 // package-level seams.
 func isolateMetricsBootstrap(t *testing.T, goos string) (home string, probes *[]string) {
+	t.Helper()
+	return isolateMetricsBootstrapWithRead(t, goos, func(path string) ([]byte, error) {
+		return os.ReadFile(path) //nolint:gosec // test-owned temp path
+	})
+}
+
+// isolateMetricsBootstrapWithRead is isolateMetricsBootstrap with the legacy
+// read answered by read.
+func isolateMetricsBootstrapWithRead(t *testing.T, goos string, read func(path string) ([]byte, error)) (home string, probes *[]string) {
 	t.Helper()
 	home = t.TempDir()
 	t.Setenv("HOME", home)
@@ -28,7 +41,7 @@ func isolateMetricsBootstrap(t *testing.T, goos string) (home string, probes *[]
 	var recorded []string
 	t.Cleanup(metrics.SetLegacyDarwinCarryOverForTest(goos, func(path string) ([]byte, error) {
 		recorded = append(recorded, path)
-		return os.ReadFile(path) //nolint:gosec // test-owned temp path
+		return read(path)
 	}))
 	t.Cleanup(func() { _, _ = metrics.Init(Version, false, "") })
 	return home, &recorded
@@ -110,4 +123,78 @@ func TestMetricsBootstrapNeverProbesWhenDisabledOrOffDarwin(t *testing.T) {
 			t.Fatalf("legacy probes = %q, want none off darwin", *probes)
 		}
 	})
+}
+
+// TestMetricsBootstrapUnreadableLegacyConfigFailsClosed: a legacy config that
+// exists but cannot be read (EPERM after a macOS privacy-prompt denial) or
+// parsed leaves metrics off on this very run, with one stderr line naming the
+// file and the way back.
+func TestMetricsBootstrapUnreadableLegacyConfigFailsClosed(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string // planted legacy content; "" plants nothing
+		read func(path string) ([]byte, error)
+	}{
+		"EPERM": {read: func(path string) ([]byte, error) {
+			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+		}},
+		"malformed yaml": {body: "metrics:\n  disabled: [unclosed\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			read := tc.read
+			if read == nil {
+				read = func(path string) ([]byte, error) {
+					return os.ReadFile(path) //nolint:gosec // test-owned temp path
+				}
+			}
+			home, probes := isolateMetricsBootstrapWithRead(t, "darwin", read)
+			legacy := filepath.Join(home, "Library", "Application Support", "bd", "config.yaml")
+			if tc.body != "" {
+				if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(legacy, []byte(tc.body), 0o600); err != nil {
+					t.Fatalf("plant: %v", err)
+				}
+			}
+
+			stderr := captureStderrDuring(t, func() { bootstrapAndInitMetrics("ready") })
+
+			if len(*probes) != 1 {
+				t.Fatalf("legacy probes = %q, want exactly one", *probes)
+			}
+			if metrics.Enabled() {
+				t.Fatal("metrics.Enabled() = true after an unreadable legacy config; want fail closed")
+			}
+			if strings.Count(stderr, "\n") != 1 ||
+				!strings.Contains(stderr, "metrics were left off") ||
+				!strings.Contains(stderr, legacy) ||
+				!strings.Contains(stderr, "bd metrics on") {
+				t.Fatalf("stderr = %q, want one line naming %s and bd metrics on", stderr, legacy)
+			}
+
+			stderr = captureStderrDuring(t, func() { bootstrapAndInitMetrics("ready") })
+			if len(*probes) != 1 || stderr != "" || metrics.Enabled() {
+				t.Fatalf("second run: probes=%q stderr=%q enabled=%v; want no probe, no notice, still off",
+					*probes, stderr, metrics.Enabled())
+			}
+		})
+	}
+}
+
+// TestMetricsBootstrapSkipsShellCompletion: a Tab press never bootstraps the
+// user config, so it neither probes the legacy file nor writes anything.
+func TestMetricsBootstrapSkipsShellCompletion(t *testing.T) {
+	for _, name := range []string{cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd} {
+		t.Run(name, func(t *testing.T) {
+			home, probes := isolateMetricsBootstrap(t, "darwin")
+			plantLegacyDarwinMetricsOptOut(t, home)
+			bootstrapMetricsUserConfig(name)
+			if len(*probes) != 0 {
+				t.Fatalf("legacy probes = %q, want none for %s", *probes, name)
+			}
+			if _, err := os.Stat(filepath.Join(home, ".config", "bd", "config.yaml")); !os.IsNotExist(err) {
+				t.Fatalf("%s created the user config: %v", name, err)
+			}
+		})
+	}
 }

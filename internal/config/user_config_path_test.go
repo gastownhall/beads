@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -659,5 +660,86 @@ func TestLegacyDarwinUserConfigYamlPath(t *testing.T) {
 	t.Setenv("HOMEPATH", "")
 	if got, err := LegacyDarwinUserConfigYamlPath(); err == nil || got != "" {
 		t.Fatalf("LegacyDarwinUserConfigYamlPath with a relative home = %q, %v; want error", got, err)
+	}
+}
+
+func TestReadLegacyDarwinUserConfigYaml(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.yaml")
+	if _, err := ReadLegacyDarwinUserConfigYaml(missing); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing file: err = %v, want fs.ErrNotExist", err)
+	}
+	if _, err := ReadLegacyDarwinUserConfigYaml(dir); err == nil || errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("directory: err = %v, want a not-a-regular-file error", err)
+	}
+	big := filepath.Join(dir, "big.yaml")
+	if err := os.WriteFile(big, make([]byte, LegacyDarwinUserConfigMaxBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadLegacyDarwinUserConfigYaml(big); err == nil || errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("oversized file: err = %v, want a size error", err)
+	}
+	ok := filepath.Join(dir, "ok.yaml")
+	if err := os.WriteFile(ok, []byte("node_id: n1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := ReadLegacyDarwinUserConfigYaml(ok); err != nil || string(data) != "node_id: n1\n" {
+		t.Fatalf("regular file: %q, %v", data, err)
+	}
+}
+
+func TestYamlValueFromBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name, data, key, want string
+		present, wantErr      bool
+	}{
+		{name: "nested", data: "metrics:\n  disabled: true\n", key: "metrics.disabled", want: "true", present: true},
+		{name: "flat wins", data: "metrics.disabled: false\nmetrics:\n  disabled: true\n", key: "metrics.disabled", want: "false", present: true},
+		{name: "absent", data: "actor: a\n", key: "metrics.disabled"},
+		{name: "null", data: "metrics:\n  disabled:\n", key: "metrics.disabled"},
+		{name: "empty", data: "", key: "metrics.disabled"},
+		{name: "malformed", data: "metrics: [unclosed\n", key: "metrics.disabled", wantErr: true},
+		{name: "not a mapping", data: "- a\n- b\n", key: "metrics.disabled", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, present, err := YamlValueFromBytes([]byte(tc.data), tc.key)
+			if (err != nil) != tc.wantErr || got != tc.want || present != tc.present {
+				t.Fatalf("YamlValueFromBytes = %q, %v, %v; want %q, %v, err=%v", got, present, err, tc.want, tc.present, tc.wantErr)
+			}
+		})
+	}
+	for raw, want := range map[string][2]bool{"true": {true, true}, " FALSE ": {false, true}, "1": {true, true}, "yes": {false, false}} {
+		if v, ok := ParseUserConfigBool(raw); v != want[0] || ok != want[1] {
+			t.Errorf("ParseUserConfigBool(%q) = %v, %v; want %v, %v", raw, v, ok, want[0], want[1])
+		}
+	}
+}
+
+func TestConfigYamlReplaceable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("a: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ConfigYamlReplaceable(path); err != nil {
+		t.Fatalf("writable config: %v", err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("ConfigYamlReplaceable left files behind: %v", entries)
+	}
+	if err := ConfigYamlReplaceable(filepath.Join(dir, "missing.yaml")); err == nil {
+		t.Fatal("missing config: want error")
+	}
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
+		_ = f.Close()
+		t.Fatalf("precondition: %s is still writable (running as root?)", path)
+	}
+	if err := ConfigYamlReplaceable(path); err == nil {
+		t.Fatal("read-only config: want error")
 	}
 }

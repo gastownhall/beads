@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -15,98 +16,239 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/lockfile"
 )
 
 var commentedMetricsRe = regexp.MustCompile(`(?m)^\s*#\s*metrics\s*:`)
 
 // EnsureUserConfigDefaults writes metrics.disabled and metrics.endpoint into
-// the user config bd reads when either is absent. On darwin, at that moment
-// only, it carries a metrics choice over from the pre-GH#8113 user config in
-// ~/Library/Application Support (see legacyDarwinMetricsCarryOver). Once both
-// keys exist the function returns before any probe, so the legacy file is
-// consulted at most once per machine.
+// the user config bd reads when either is absent.
+//
+// On darwin, when metrics.disabled is about to be written, it first carries a
+// metrics choice over from the pre-GH#8113 user config in ~/Library/Application
+// Support (see legacyDarwinMetricsCarryOver). That probe runs only under the
+// <config>.lock lock and only once the write is known to be possible, so it
+// happens once per user config: after a successful write metrics.disabled is
+// present and every later run returns before the lock. A user config bd cannot
+// write never triggers the probe.
 func EnsureUserConfigDefaults() error {
 	path, err := config.UserConfigYamlPath()
 	if err != nil {
 		return fmt.Errorf("ensure user config: %w", err)
 	}
 
+	state, err := readMetricsKeyState(path)
+	if err != nil || !state.needsWrite() {
+		return err
+	}
+
+	if state.exists {
+		// Never probe the legacy file for a value bd could not keep. Return
+		// the error instead of attempting the write: a write that succeeded
+		// after this check failed would skip the carry-over.
+		if err := config.ConfigYamlReplaceable(path); err != nil {
+			return fmt.Errorf("ensure user config: %s is not writable: %w", path, err)
+		}
+	} else if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("ensure user config: mkdir %s: %w", filepath.Dir(path), err)
+	}
+
+	// Creating the lock file also proves the directory takes new files,
+	// which is all the new-file path needs. An existing config is locked
+	// beside its symlink-resolved target, the directory the check above
+	// proved writable.
+	lockPath := path
+	if state.exists {
+		if target, err := filepath.EvalSymlinks(path); err == nil {
+			lockPath = target
+		}
+	}
+	unlock, err := lockUserConfig(lockPath)
+	if err != nil {
+		return fmt.Errorf("ensure user config: lock %s: %w", lockPath, err)
+	}
+	defer unlock()
+
+	// Re-read under the lock: another bd may have finished while this one
+	// waited, and then there is nothing left to do (and nothing to probe).
+	state, err = readMetricsKeyState(path)
+	if err != nil || !state.needsWrite() {
+		return err
+	}
+	if !state.exists {
+		if _, lerr := os.Lstat(path); lerr == nil {
+			return fmt.Errorf("ensure user config: %s is a dangling symlink", path)
+		}
+	}
+
+	var carry metricsCarryOver
+	if state.needDisabled {
+		carry = legacyDarwinMetricsCarryOver()
+	}
+
+	if !state.exists {
+		created, err := createUserConfig(path, carry.bootstrapBody())
+		if err != nil {
+			return err
+		}
+		if created {
+			carry.announce()
+			return nil
+		}
+		// A writer that does not take the lock (an older bd, or bd config
+		// set) created the file meanwhile: fill in what it lacks.
+		if state, err = readMetricsKeyState(path); err != nil || !state.needsWrite() {
+			return err
+		}
+	}
+	return writeMissingMetricsKeys(state, carry)
+}
+
+// metricsKeyState is what the user config at a path holds of the keys the
+// bootstrap maintains.
+type metricsKeyState struct {
+	exists         bool
+	needDisabled   bool
+	needEndpoint   bool
+	hasNoticeShown bool
+}
+
+func (s metricsKeyState) needsWrite() bool { return s.needDisabled || s.needEndpoint }
+
+func readMetricsKeyState(path string) (metricsKeyState, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is a validated absolute user config path
 	if errors.Is(err, fs.ErrNotExist) {
-		return writeUserConfigBootstrap(path)
+		return metricsKeyState{needDisabled: true, needEndpoint: true}, nil
 	}
 	if err != nil {
-		return fmt.Errorf("ensure user config: read %s: %w", path, err)
+		return metricsKeyState{}, fmt.Errorf("ensure user config: read %s: %w", path, err)
 	}
-
+	state := metricsKeyState{exists: true}
 	if commentedMetricsRe.Match(data) {
-		return nil
+		return state, nil
 	}
-
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return fmt.Errorf("ensure user config: parse %s: %w", path, err)
+		return metricsKeyState{}, fmt.Errorf("ensure user config: parse %s: %w", path, err)
 	}
+	state.needDisabled = !userConfigHasLeaf(&root, "metrics", "disabled")
+	state.needEndpoint = !userConfigHasLeaf(&root, "metrics", "endpoint")
+	state.hasNoticeShown = userConfigHasLeaf(&root, "metrics", "notice_shown")
+	return state, nil
+}
 
-	needDisabled := !userConfigHasLeaf(&root, "metrics", "disabled")
-	needEndpoint := !userConfigHasLeaf(&root, "metrics", "endpoint")
-
-	if !needDisabled && !needEndpoint {
-		return nil
-	}
-
-	carry := legacyDarwinMetricsCarryOver()
-	if needDisabled {
+// writeMissingMetricsKeys fills the missing keys of an existing user config.
+// carry is only consulted for metrics.disabled's companions when
+// metrics.disabled itself is missing; it is the zero value otherwise.
+func writeMissingMetricsKeys(state metricsKeyState, carry metricsCarryOver) error {
+	if state.needDisabled {
 		if err := config.SetUserYamlConfig("metrics.disabled", carry.disabledValue()); err != nil {
 			return fmt.Errorf("ensure user config: set metrics.disabled: %w", err)
 		}
 	}
-	if needEndpoint {
+	if state.needEndpoint {
 		if err := config.SetUserYamlConfig("metrics.endpoint", carry.endpointValue()); err != nil {
 			return fmt.Errorf("ensure user config: set metrics.endpoint: %w", err)
 		}
 	}
-	if carry.noticeShown && !userConfigHasLeaf(&root, "metrics", "notice_shown") {
+	if carry.noticeShown && !state.hasNoticeShown {
 		if err := config.SetUserYamlConfig("metrics.notice_shown", "true"); err != nil {
 			return fmt.Errorf("ensure user config: set metrics.notice_shown: %w", err)
 		}
 	}
+	if state.needDisabled {
+		carry.announce()
+	}
 	return nil
 }
 
-func writeUserConfigBootstrap(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("ensure user config: mkdir %s: %w", filepath.Dir(path), err)
-	}
-	body, err := legacyDarwinMetricsCarryOver().bootstrapBody()
+// lockUserConfig takes an exclusive lock on <path>.lock, serializing the
+// bootstraps of concurrent bd processes (and goroutines: the lock belongs to
+// the open file). The lock file is left in place:
+// removing it after unlock would let two processes lock different inodes.
+func lockUserConfig(path string) (unlock func(), err error) {
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // path is from config.UserConfigYamlPath
 	if err != nil {
-		return fmt.Errorf("ensure user config: encode %s: %w", path, err)
+		return nil, err
 	}
+	if err := lockfile.FlockExclusiveBlocking(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return func() {
+		_ = lockfile.FlockUnlock(f)
+		_ = f.Close()
+	}, nil
+}
+
+// createUserConfig publishes body as a new user config without ever exposing
+// a partly written file: it writes a temp file in the same directory and
+// hard-links it into place, which fails rather than replaces when the path
+// already exists. created is false, with no error, when another writer got
+// there first. On a filesystem without hard links it falls back to an
+// exclusive create, which other bootstraps still cannot observe half-written
+// because they read it only under the same lock.
+func createUserConfig(path string, body []byte) (created bool, err error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".~"+filepath.Base(path)+".bootstrap.") // mode 0600
+	if err != nil {
+		return false, fmt.Errorf("ensure user config: create temp in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	_, werr := tmp.Write(body)
+	if werr == nil {
+		werr = tmp.Sync()
+	}
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return false, fmt.Errorf("ensure user config: write %s: %w", tmpName, werr)
+	}
+
+	linkErr := os.Link(tmpName, path)
+	if linkErr == nil {
+		return true, nil
+	}
+	if errors.Is(linkErr, fs.ErrExist) {
+		return false, nil
+	}
+	return createUserConfigExclusive(path, body)
+}
+
+func createUserConfigExclusive(path string, body []byte) (bool, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // path is from config.UserConfigYamlPath
+	if errors.Is(err, fs.ErrExist) {
+		return false, nil
+	}
 	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return EnsureUserConfigDefaults()
-		}
-		return fmt.Errorf("ensure user config: create %s: %w", path, err)
+		return false, fmt.Errorf("ensure user config: create %s: %w", path, err)
 	}
-	defer f.Close()
-	if _, err := f.Write(body); err != nil {
-		return fmt.Errorf("ensure user config: write %s: %w", path, err)
+	_, werr := f.Write(body)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
 	}
-	return nil
+	if werr != nil {
+		return false, fmt.Errorf("ensure user config: write %s: %w", path, werr)
+	}
+	return true, nil
 }
 
 // bootstrapGOOS and readLegacyDarwinUserConfig are the seams behind the
-// one-time darwin carry-over; tests inject another GOOS and count reads.
+// darwin carry-over; tests inject another GOOS, count reads, and inject read
+// errors. legacyCarryOverNotice, when non-nil, receives the fail-closed
+// notice instead of the os.Stderr current at the time it is printed.
 var (
 	bootstrapGOOS              = runtime.GOOS
-	readLegacyDarwinUserConfig = readRegularFileCapped
+	readLegacyDarwinUserConfig = config.ReadLegacyDarwinUserConfigYaml
+	legacyCarryOverNotice      io.Writer
 )
 
 // SetLegacyDarwinCarryOverForTest makes the bootstrap behave as if running on
-// goos and, when read is non-nil, routes the one legacy darwin config read
-// through it (tests count probes with it). It returns a restore function. Not
-// safe for parallel tests.
+// goos and, when read is non-nil, routes the legacy darwin config read through
+// it (tests count probes and inject errors with it). It returns a restore
+// function. Not safe for parallel tests.
 func SetLegacyDarwinCarryOverForTest(goos string, read func(path string) ([]byte, error)) (restore func()) {
 	prevGOOS, prevRead := bootstrapGOOS, readLegacyDarwinUserConfig
 	bootstrapGOOS = goos
@@ -116,16 +258,22 @@ func SetLegacyDarwinCarryOverForTest(goos string, read func(path string) ([]byte
 	return func() { bootstrapGOOS, readLegacyDarwinUserConfig = prevGOOS, prevRead }
 }
 
-// legacyDarwinUserConfigMaxBytes bounds the one legacy read; a real bd user
-// config is a few hundred bytes.
-const legacyDarwinUserConfigMaxBytes = 1 << 20
-
 // metricsCarryOver holds the metrics choices found in the legacy darwin user
 // config. The zero value means "nothing to carry": today's defaults.
 type metricsCarryOver struct {
 	disabled    *bool
 	endpoint    string
 	noticeShown bool
+
+	// unreadablePath and unreadableErr are set when the legacy file exists
+	// but could not be read or parsed. The carry-over then fails closed:
+	// disabled is true and nothing else is carried.
+	unreadablePath string
+	unreadableErr  error
+}
+
+func (c metricsCarryOver) isZero() bool {
+	return c.disabled == nil && c.endpoint == "" && !c.noticeShown
 }
 
 func (c metricsCarryOver) disabledValue() string {
@@ -143,29 +291,63 @@ func (c metricsCarryOver) endpointValue() string {
 }
 
 // bootstrapBody returns the new user config.yaml. With nothing to carry it is
-// byte-for-byte the historical bootstrap body.
-func (c metricsCarryOver) bootstrapBody() ([]byte, error) {
-	if c == (metricsCarryOver{}) {
-		return []byte("metrics:\n  disabled: false\n  endpoint: " + DefaultEndpoint + "\n"), nil
+// byte-for-byte the historical bootstrap body; otherwise it is YAML-encoded
+// (so any endpoint is quoted safely) with the same 2-space indentation.
+func (c metricsCarryOver) bootstrapBody() []byte {
+	if c.isZero() {
+		return []byte("metrics:\n  disabled: false\n  endpoint: " + DefaultEndpoint + "\n")
 	}
 	type metricsBlock struct {
 		Disabled    bool   `yaml:"disabled"`
 		Endpoint    string `yaml:"endpoint"`
 		NoticeShown bool   `yaml:"notice_shown,omitempty"`
 	}
-	disabled, _ := strconv.ParseBool(c.disabledValue())
-	return yaml.Marshal(struct {
+	doc := struct {
 		Metrics metricsBlock `yaml:"metrics"`
-	}{metricsBlock{Disabled: disabled, Endpoint: c.endpointValue(), NoticeShown: c.noticeShown}})
+	}{metricsBlock{Disabled: c.disabled != nil && *c.disabled, Endpoint: c.endpointValue(), NoticeShown: c.noticeShown}}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	// Encoding a struct of a bool and strings cannot fail.
+	_ = enc.Encode(doc)
+	_ = enc.Close()
+	return buf.Bytes()
+}
+
+// announce prints the one-line fail-closed notice, once the opt-out it
+// describes has been written.
+func (c metricsCarryOver) announce() {
+	if c.unreadableErr == nil {
+		return
+	}
+	reasonErr := c.unreadableErr
+	var pathErr *fs.PathError
+	if errors.As(reasonErr, &pathErr) {
+		reasonErr = pathErr.Err
+	}
+	// One line, even for a multi-line YAML error.
+	reason := strings.Join(strings.Fields(reasonErr.Error()), " ")
+	var w io.Writer = os.Stderr
+	if legacyCarryOverNotice != nil {
+		w = legacyCarryOverNotice
+	}
+	_, _ = fmt.Fprintf(w,
+		"bd: metrics were left off because the old config at %s could not be read (%s); run \"bd metrics on\" to re-enable them\n",
+		c.unreadablePath, reason)
 }
 
 // legacyDarwinMetricsCarryOver reads the pre-GH#8113 macOS user config
 // (~/Library/Application Support/bd/config.yaml) and returns its
 // metrics.disabled, metrics.endpoint and metrics.notice_shown, and nothing
-// else. It runs only on darwin and only from the bootstrap, at the moment the
-// metrics keys are about to be written, so the folder macOS can guard with a
-// privacy prompt is touched at most once per machine. A missing, unreadable or
-// malformed file yields the zero value: today's defaults, silently.
+// else. It runs only on darwin, only from the bootstrap, and only when
+// metrics.disabled is about to be written, so the folder macOS can guard with
+// a privacy prompt is touched once per user config.
+//
+// Only a missing file (or no resolvable home, under which bd never read that
+// file either) means "use today's defaults". A file that exists but cannot be
+// read (EPERM after a privacy-prompt denial, EACCES, not a regular file, over
+// the size cap, an I/O error) or does not parse as a YAML mapping fails
+// closed: metrics.disabled true, nothing else carried, and a notice.
 func legacyDarwinMetricsCarryOver() metricsCarryOver {
 	if bootstrapGOOS != "darwin" {
 		return metricsCarryOver{}
@@ -175,63 +357,43 @@ func legacyDarwinMetricsCarryOver() metricsCarryOver {
 		return metricsCarryOver{}
 	}
 	data, err := readLegacyDarwinUserConfig(path)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return metricsCarryOver{}
 	}
-	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		return metricsCarryOver{}
+	if err != nil {
+		return failClosedCarryOver(path, err)
+	}
+	disabledRaw, disabledSet, err := config.YamlValueFromBytes(data, "metrics.disabled")
+	if err != nil {
+		return failClosedCarryOver(path, err)
 	}
 	var carry metricsCarryOver
-	if raw, ok := userConfigLeaf(&root, "metrics", "disabled"); ok {
-		if disabled, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+	if disabledSet {
+		if disabled, ok := config.ParseUserConfigBool(disabledRaw); ok {
 			carry.disabled = &disabled
 		}
 	}
-	if raw, ok := userConfigLeaf(&root, "metrics", "endpoint"); ok {
+	if raw, ok, _ := config.YamlValueFromBytes(data, "metrics.endpoint"); ok {
 		carry.endpoint = strings.TrimSpace(raw)
 	}
-	if raw, ok := userConfigLeaf(&root, "metrics", "notice_shown"); ok {
-		carry.noticeShown, _ = strconv.ParseBool(strings.TrimSpace(raw))
+	if raw, ok, _ := config.YamlValueFromBytes(data, "metrics.notice_shown"); ok {
+		carry.noticeShown, _ = config.ParseUserConfigBool(raw)
 	}
 	return carry
 }
 
-// readRegularFileCapped reads path only when it is a regular file (never a
-// FIFO or device, which could block) of at most legacyDarwinUserConfigMaxBytes.
-func readRegularFileCapped(path string) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // path is the fixed legacy darwin user config path
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	if info.Size() > legacyDarwinUserConfigMaxBytes {
-		return nil, fmt.Errorf("%s is larger than %d bytes", path, legacyDarwinUserConfigMaxBytes)
-	}
-	return io.ReadAll(io.LimitReader(f, legacyDarwinUserConfigMaxBytes+1))
+func failClosedCarryOver(path string, err error) metricsCarryOver {
+	disabled := true
+	return metricsCarryOver{disabled: &disabled, unreadablePath: path, unreadableErr: err}
 }
 
 func userConfigHasLeaf(root *yaml.Node, parts ...string) bool {
-	value, ok := userConfigLeaf(root, parts...)
-	return ok && value != ""
-}
-
-// userConfigLeaf returns the scalar at a dotted key, written either flat
-// ("metrics.disabled: true") or nested, and whether a scalar is there.
-func userConfigLeaf(root *yaml.Node, parts ...string) (string, bool) {
 	if root == nil || len(root.Content) == 0 {
-		return "", false
+		return false
 	}
 	mapping := root.Content[0]
 	if mapping.Kind != yaml.MappingNode {
-		return "", false
+		return false
 	}
 
 	flatKey := strings.Join(parts, ".")
@@ -239,14 +401,14 @@ func userConfigLeaf(root *yaml.Node, parts ...string) (string, bool) {
 		k := mapping.Content[i]
 		if k.Kind == yaml.ScalarNode && k.Value == flatKey {
 			v := mapping.Content[i+1]
-			return v.Value, v.Kind == yaml.ScalarNode
+			return v.Kind == yaml.ScalarNode && v.Value != ""
 		}
 	}
 
 	current := mapping
 	for _, part := range parts {
 		if current.Kind != yaml.MappingNode {
-			return "", false
+			return false
 		}
 		idx := -1
 		for i := 0; i < len(current.Content); i += 2 {
@@ -257,9 +419,9 @@ func userConfigLeaf(root *yaml.Node, parts ...string) (string, bool) {
 			}
 		}
 		if idx == -1 {
-			return "", false
+			return false
 		}
 		current = current.Content[idx+1]
 	}
-	return current.Value, current.Kind == yaml.ScalarNode
+	return current.Kind == yaml.ScalarNode && current.Value != ""
 }
