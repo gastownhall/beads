@@ -1234,6 +1234,7 @@ go_test(
         "schema_encoding_drift_test.go",
         "schema_skew_test.go",
         "schema_test.go",
+        "sdk_proxied_open_integration_test.go",
         "search_embedded_test.go",
         "search_proxied_integration_test.go",
         "search_routes_embedded_test.go",

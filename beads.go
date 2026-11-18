@@ -23,11 +23,13 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/proxiedopen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/uowstore"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workspacegate"
 )
@@ -84,6 +86,66 @@ var ErrUserAgentWithoutOpenWith = backends.ErrUserAgentWithoutOpenWith
 // Aliased here for the same reason as ErrCredentialWithoutOpenWith: callers
 // outside this module cannot import internal/storage/backends directly.
 var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
+
+// ErrProxyUnavailable is returned by OpenBestAvailable and
+// OpenBestAvailableWith for a proxied-server workspace (dolt_mode
+// "proxied-server") when no bd proxy is running for its server root and no
+// `bd` executable is on PATH to start one. The refused open creates no
+// embedded store and starts no proxy (it may still create the server root
+// directory and write the proxied sql-server config). Run any bd command in
+// the workspace, or put bd on PATH, and retry. The library never starts the
+// proxy from the host executable. Match it with errors.Is.
+var ErrProxyUnavailable = proxiedopen.ErrProxyUnavailable
+
+// SchemaSkewError reports a database whose schema is newer than this
+// library. Match it with errors.As. Aliased here because internal/storage/schema
+// is unimportable outside this module.
+type SchemaSkewError = schema.SchemaSkewError
+
+// RemoteMigrateGateError reports an open refused because applying this
+// library's pending schema migrations in place would silently migrate a
+// database other clients share. Match it with errors.As.
+type RemoteMigrateGateError = schema.RemoteMigrateGateError
+
+// MigrateConsentError reports schema migrations that need operator consent
+// (see AllowSharedSchemaMigration). Match it with errors.As.
+type MigrateConsentError = schema.MigrateConsentError
+
+// proxiedCloseTimeout bounds the provider close on a failed proxied open,
+// matching the bound uowstore.Store.Close applies to the same call.
+const proxiedCloseTimeout = 10 * time.Second
+
+// openProxiedServer is the proxied-server arm of OpenBestAvailableWith, shared
+// verbatim by the cgo and CGO_ENABLED=0 builds: it opens the workspace through
+// the per-root bd proxy, exactly as the bd CLI does (GH#8323), and never
+// creates an embedded store or dials around the proxy.
+//
+// The posture is a root bd command's: the workspace's project identity is
+// asserted, and a managed-local root holding no Dolt database is refused
+// rather than initialized. A running proxy is adopted; with none, one is
+// started from `bd` on PATH, and with no bd there the open fails with
+// ErrProxyUnavailable. The events journal and versioned history are activated
+// under the same workspace switches as the CLI's. The returned store's Close
+// releases this handle's connections and leaves the shared proxy running.
+func openProxiedServer(ctx context.Context, beadsDir string) (Storage, error) {
+	p, err := proxiedopen.Open(ctx, beadsDir, proxiedopen.Options{
+		Identity:        proxiedopen.AssertWorkspaceIdentity,
+		FreshStore:      proxiedopen.RefuseFreshStore,
+		ProxyExecutable: proxiedopen.BDExecutableOnPath(beadsDir),
+	})
+	if err != nil {
+		return nil, err
+	}
+	st, err := uowstore.New(p)
+	if err != nil {
+		// Bounded like Store.Close: a wedged pool must not hang the open.
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), proxiedCloseTimeout)
+		_ = p.Close(closeCtx)
+		cancel()
+		return nil, err
+	}
+	return st, nil
+}
 
 // configuredBackendUnavailable is the public open path's fail-closed refusal for
 // metadata naming a removed or unrecognized backend. beadsDir and cfg let the

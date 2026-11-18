@@ -88,6 +88,15 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 		return nil, fmt.Errorf("beads: OpenOptions.UserAgent is not supported for backend %q (Dolt has no per-open transport seam): %w", cfg.GetBackend(), backends.ErrUserAgentWithoutOpenWith)
 	}
 
+	if cfg.IsDoltProxiedServerMode() {
+		// Before the server arm, which BEADS_DOLT_SERVER_MODE or
+		// BEADS_DOLT_SHARED_SERVER would otherwise select ahead of dolt_mode,
+		// and before the embedded arm, which would create
+		// .beads/embeddeddolt: a proxied workspace is served only through
+		// its bd proxy, as on the bd CLI (GH#8323).
+		return openProxiedServer(ctx, beadsDir)
+	}
+
 	if cfg.IsDoltServerMode() {
 		store, err := dolt.NewFromConfig(ctx, beadsDir)
 		if err != nil {

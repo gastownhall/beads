@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "activate.go",
         "doltbin.go",
+        "executable.go",
         "open.go",
         "paths.go",
         "topology.go",

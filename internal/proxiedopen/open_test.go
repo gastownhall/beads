@@ -143,3 +143,31 @@ func TestOptionsProxyExecutableReachesTheSpawnPath(t *testing.T) {
 		t.Fatal("Options.ProxyExecutable was not consulted on the spawn path")
 	}
 }
+
+// TestBDExecutableOnPathResolvesBDOrFailsTerminally pins the library spawn
+// rule: bd on PATH is the proxy executable; with none, the error is both the
+// public ErrProxyUnavailable and the proxy's terminal ErrNoProxyExecutable,
+// so the open fails at once and never falls back to the host executable.
+func TestBDExecutableOnPathResolvesBDOrFailsTerminally(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+
+	t.Setenv("PATH", t.TempDir())
+	_, err := BDExecutableOnPath(beadsDir)()
+	if !errors.Is(err, ErrProxyUnavailable) || !errors.Is(err, proxy.ErrNoProxyExecutable) {
+		t.Fatalf("no bd on PATH: err = %v, want ErrProxyUnavailable and proxy.ErrNoProxyExecutable", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Dir(beadsDir)) {
+		t.Errorf("err = %q, want it to name the workspace %s", err, filepath.Dir(beadsDir))
+	}
+
+	bin := t.TempDir()
+	bd := filepath.Join(bin, "bd")
+	if err := os.WriteFile(bd, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	got, err := BDExecutableOnPath(beadsDir)()
+	if err != nil || got != bd {
+		t.Fatalf("bd on PATH: got (%q, %v), want (%q, nil)", got, err, bd)
+	}
+}
