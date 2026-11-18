@@ -9250,7 +9250,12 @@ components:
             parent-child descendants and orphans every other dependent (see
             `DeleteIssuesRequest.cascade`; a server without it deletes every
             transitive dependent, so a client refuses to send `cascade` to
-            one). One behavior token is
+            one), and `issues.update.labelPrefixes`, which announces that
+            `PATCH /v0/beads/issues/{id}`'s `patch` accepts
+            `remove_label_prefixes` and an `issues:batchApply` update item's
+            label patch accepts `remove_prefixes` (see `IssuePatchBody` and
+            `ApplyLabelPatch`), rather than a `400` naming the member unknown.
+            One behavior token is
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -11831,7 +11836,10 @@ components:
             with `add: ["state:b"]` leaves exactly `state:b` in that dimension
             however many values it held. Matching is a literal string prefix:
             `%` and `_` match only themselves. An empty prefix is dropped
-            rather than matching every label.
+            rather than matching every label. Requires the behavior token
+            `issues.update.labelPrefixes`: a server that predates the member
+            answers it with a `400` naming it unknown, so a client that does
+            not see the token refuses the plan before the dial.
 
     ApplyMetadataPatch:
       type: object
@@ -13450,7 +13458,10 @@ components:
             themselves. An empty prefix is dropped rather than matching every
             label, and the whole patch is evaluated against the issue's labels
             in the update's own transaction, so a result equal to the current
-            set changes no labels.
+            set changes no labels. Requires the behavior token
+            `issues.update.labelPrefixes`: a server that predates the member
+            answers it with a `400` naming it unknown, so a client that does
+            not see the token refuses the update before the dial.
         estimated_minutes:
           type: integer
           nullable: true

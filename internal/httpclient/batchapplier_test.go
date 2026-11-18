@@ -1009,6 +1009,104 @@ func TestTheApplyLabelPatchIsTheWholeEdit(t *testing.T) {
 	}
 }
 
+// TestALabelPrefixRemovalNeedsTheToken is both sides of version skew for the
+// prefix removal (issues.update.labelPrefixes, GH#5657), on both patch
+// documents. Against a server that advertises it the member is sent; against
+// an older one, which answers it with its unknown-member 400, the request
+// refuses before the dial with the typed capability error naming the token,
+// never a dropped member (that would leave the old values of the dimension
+// beside the new one). A label edit without a prefix removal is untouched by
+// the token, and ServesLabelPrefixPatch reads the same handshake, which is
+// what `bd set-state` asks before it writes its event.
+func TestALabelPrefixRemovalNeedsTheToken(t *testing.T) {
+	prefixPatch := issueops.IssuePatch{Labels: issueops.LabelPatch{
+		RemovePrefixes: []string{"state:"}, Add: []string{"state:b"},
+	}}
+	plainPatch := issueops.IssuePatch{Labels: issueops.LabelPatch{
+		Remove: []string{"state:a"}, Add: []string{"state:b"},
+	}}
+	oldServer := func(w *stubWire) *Store {
+		return New(testTarget(t), w, &apigen.ContextResponse{
+			BdVersion:    "1.2.3",
+			Capabilities: []string{wire.CapIssuesUpdateAllowTemplate, wire.CapIssuesUpdateClaim},
+		})
+	}
+
+	t.Run("updateIssue/new server", func(t *testing.T) {
+		w := &stubWire{update: &apigen.UpdateIssueResponse{Revision: "7", Changed: true}}
+		lifecycle, err := stubStore(t, w).IssueLifecycle()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lifecycle.Update(t.Context(), issueops.UpdateRequest{Actor: "alice", IssueID: "bd-1", Patch: prefixPatch}); err != nil {
+			t.Fatalf("a prefix removal to a server advertising %s refused: %v", wire.CapIssuesUpdateLabelPrefixes, err)
+		}
+		if got, ok := w.lastPatch["remove_label_prefixes"].([]string); !ok || !slices.Equal(got, []string{"state:"}) {
+			t.Errorf("remove_label_prefixes = %#v, want [state:]", w.lastPatch["remove_label_prefixes"])
+		}
+	})
+	t.Run("updateIssue/old server", func(t *testing.T) {
+		w := &stubWire{update: &apigen.UpdateIssueResponse{Revision: "7", Changed: true}}
+		lifecycle, err := oldServer(w).IssueLifecycle()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = lifecycle.Update(t.Context(), issueops.UpdateRequest{Actor: "alice", IssueID: "bd-1", Patch: prefixPatch})
+		requireCapabilityRefusal(t, err, wire.CapIssuesUpdateLabelPrefixes, w)
+		if !strings.Contains(err.Error(), wire.CapIssuesUpdateLabelPrefixes) {
+			t.Errorf("refusal %q does not name %s", err.Error(), wire.CapIssuesUpdateLabelPrefixes)
+		}
+
+		// The exact-label swap set-state falls back to still dials.
+		if _, err := lifecycle.Update(t.Context(), issueops.UpdateRequest{Actor: "alice", IssueID: "bd-1", Patch: plainPatch}); err != nil {
+			t.Fatalf("an exact add/remove to an older server refused: %v", err)
+		}
+		if _, sent := w.lastPatch["remove_label_prefixes"]; sent {
+			t.Errorf("an exact add/remove carries remove_label_prefixes: %v", w.lastPatch)
+		}
+	})
+	t.Run("batchApply/new server", func(t *testing.T) {
+		w := &stubWire{}
+		if _, err := applyRole(t, w).ApplyBatch(t.Context(), applyOneUpdate(prefixPatch)); err != nil {
+			t.Fatalf("a prefix removal item to a server advertising %s refused: %v", wire.CapIssuesUpdateLabelPrefixes, err)
+		}
+		labels, _ := w.lastApply.Items[0].Update.Patch["labels"].(map[string]any)
+		if got, ok := labels["remove_prefixes"].([]string); !ok || !slices.Equal(got, []string{"state:"}) {
+			t.Errorf("labels.remove_prefixes = %#v, want [state:]", labels["remove_prefixes"])
+		}
+	})
+	t.Run("batchApply/old server", func(t *testing.T) {
+		// A plain item first: no partial plan is ever sent.
+		req := applyOneUpdate(plainPatch)
+		req.Items = append(req.Items, applyOneUpdate(prefixPatch).Items...)
+		w := &stubWire{}
+		applier, err := oldServer(w).BatchApplier()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = applier.ApplyBatch(t.Context(), req)
+		requireCapabilityRefusal(t, err, wire.CapIssuesUpdateLabelPrefixes, w)
+
+		if _, err := applier.ApplyBatch(t.Context(), applyOneUpdate(plainPatch)); err != nil {
+			t.Fatalf("an exact add/remove item to an older server refused: %v", err)
+		}
+	})
+	t.Run("ServesLabelPrefixPatch", func(t *testing.T) {
+		for name, tc := range map[string]struct {
+			store *Store
+			want  bool
+		}{
+			"new server": {stubStore(t, &stubWire{}), true},
+			"old server": {oldServer(&stubWire{}), false},
+		} {
+			got, err := storage.ServesLabelPrefixPatch(t.Context(), tc.store)
+			if err != nil || got != tc.want {
+				t.Errorf("%s: ServesLabelPrefixPatch = (%v, %v), want (%v, nil)", name, got, err, tc.want)
+			}
+		}
+	})
+}
+
 // TestApplyBatchRefusesUnservedDepAddLineageBeforeDialing is the 2026-10
 // Opus-review HIGH-1 finding: refuseUnservedDepAddLineage (batchapplier.go)
 // carried no coverage at all — deleting the function and its call site

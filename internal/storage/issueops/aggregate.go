@@ -458,6 +458,17 @@ func applyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 	if !ok {
 		return false, fmt.Errorf("apply labels: transaction must be *sql.Tx")
 	}
+	// A replacement or a prefix removal chose its deletions from the set read
+	// above, so an overlapping one on this issue must conflict at commit and
+	// replay against the labels it committed (GH#5657). Named adds and removes
+	// read nothing they act on and leave the cell alone, so they never
+	// conflict through it; see TouchLabelCoordinationInTx.
+	if labelPatchReadsTheSet(patch) {
+		_, labelTable, _, _ := WispTableRouting(IsActiveWispInTx(ctx, sqlTx, current.ID))
+		if err := TouchLabelCoordinationInTx(ctx, sqlTx, current.ID, labelTable); err != nil {
+			return false, fmt.Errorf("apply labels: %w", err)
+		}
+	}
 	// The per-label helpers run without minting: the patch is one mutation
 	// and is versioned once below, after the last row, so the version carries
 	// the complete post-patch set rather than one row per label.

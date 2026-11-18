@@ -221,6 +221,18 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 		return HandleErrorRespectJSON("%v", err)
 	}
 
+	// The swap's shape is settled before the event is written: see
+	// setStateLabelPatch. The proxied-server route is a local transaction and
+	// takes the prefix, so only the global store can need asking.
+	var prober storage.DoltStorage
+	if !usesProxiedServer() {
+		prober = store
+	}
+	labelPatch, err := setStateLabelPatch(ctx, prober, dimension, newLabel, details.Labels)
+	if err != nil {
+		return HandleErrorRespectJSON("setting %s: %v; no event was written", dimension, err)
+	}
+
 	// THE EVENT IS CREATED IN THE PLANE ITS SUBJECT LIVES IN, and the role
 	// is what makes that a copied fact instead of a chosen one. The
 	// retired proxied route branched here between IssueUseCase().CreateWisp
@@ -264,10 +276,7 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
 		Actor:   currentActor(),
 		IssueID: fullID,
-		Patch: issueops.IssuePatch{Labels: issueops.LabelPatch{
-			RemovePrefixes: []string{dimension + ":"},
-			Add:            []string{newLabel},
-		}},
+		Patch:   issueops.IssuePatch{Labels: labelPatch},
 		// bd set-state has always edited templates; the role's template guard
 		// stands down for it (issueops.UpdateRequest.AllowTemplate).
 		AllowTemplate: true,
@@ -378,6 +387,41 @@ func findStateLabel(labels []string, dimension string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// setStateLabelPatch is the label half of `bd set-state`: the dimension swap,
+// decided BEFORE the command writes its event, so that a store that cannot
+// take it never leaves an event behind for a change that did not happen.
+//
+// Every local route, and a bd serve advertising issues.update.labelPrefixes,
+// takes the literal "<dimension>:" prefix (LabelPatch.RemovePrefixes). The
+// update evaluates it against the labels its own transaction sees, so every
+// value of the dimension goes, including one a concurrent writer added after
+// this command's read (GH#5657). An older bd serve refuses that member, so
+// against one the swap names the exact labels the read found instead: every
+// value of the dimension except the new one, the shape set-state sent before
+// the prefix existed, with that shape's race. s is the store to ask, or nil
+// for a route that needs no asking. A probe that fails is an error, not a
+// guess: the caller has written nothing yet.
+func setStateLabelPatch(ctx context.Context, s storage.DoltStorage, dimension, newLabel string, labels []string) (issueops.LabelPatch, error) {
+	prefix := dimension + ":"
+	served := true
+	if s != nil {
+		var err error
+		if served, err = storage.ServesLabelPrefixPatch(ctx, s); err != nil {
+			return issueops.LabelPatch{}, fmt.Errorf("reading whether the server takes issues.update.labelPrefixes: %w", err)
+		}
+	}
+	if served {
+		return issueops.LabelPatch{RemovePrefixes: []string{prefix}, Add: []string{newLabel}}, nil
+	}
+	var remove []string
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) && label != newLabel {
+			remove = append(remove, label)
+		}
+	}
+	return issueops.LabelPatch{Add: []string{newLabel}, Remove: remove}, nil
 }
 
 // stateLabelValues lists every value labels holds for dimension, in label

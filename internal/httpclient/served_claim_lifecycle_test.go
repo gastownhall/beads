@@ -490,6 +490,91 @@ func TestServedLifecycleUpdateRemovesLabelsByPrefix(t *testing.T) {
 	conformance.RunLifecycleUpdateRemovesLabelsByPrefix(t, t.Context(), newServedUpdateFixture(t, "hlup"))
 }
 
+// TestServedLabelPrefixRemovalRefusesAgainstAnOlderServer is the served half
+// of issues.update.labelPrefixes' version skew (GH#5657). Against a server
+// whose handshake lacks the token, as every bd serve that predates the
+// member's does (it answers the member with its unknown-member 400), a prefix
+// removal on updateIssue and on an issues:batchApply update item is refused
+// with ErrUnsupported naming the token, and the issue keeps its labels and
+// gains no event. The same handshake tells `bd set-state` to send the exact
+// swap instead (storage.ServesLabelPrefixPatch), and that lands.
+func TestServedLabelPrefixRemovalRefusesAgainstAnOlderServer(t *testing.T) {
+	env := newServedEnv(t, "hlpo")
+	ctx := t.Context()
+	const id = "hlpo-1"
+	if err := env.createIssue(ctx, &types.Issue{
+		ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	}, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", id, err)
+	}
+	for _, label := range []string{"state:a", "keep"} {
+		if err := env.reference.AddLabel(ctx, id, label, "seed"); err != nil {
+			t.Fatalf("seed label %s: %v", label, err)
+		}
+	}
+	seeded, err := env.listEvents(ctx, id)
+	if err != nil {
+		t.Fatalf("read the seeded events: %v", err)
+	}
+	labelsAndEvents := func(t *testing.T) ([]string, int) {
+		t.Helper()
+		row, err := env.getIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("read %s back: %v", id, err)
+		}
+		events, err := env.listEvents(ctx, id)
+		if err != nil {
+			t.Fatalf("read the events of %s: %v", id, err)
+		}
+		labels := slices.Clone(row.Labels)
+		sort.Strings(labels)
+		return labels, len(events)
+	}
+	refused := func(t *testing.T, what string, err error) {
+		t.Helper()
+		var unsupported *storage.ErrUnsupported
+		if !errors.As(err, &unsupported) || unsupported.Capability != wire.CapIssuesUpdateLabelPrefixes {
+			t.Fatalf("%s with a prefix removal against a server without the token returned %v, want ErrUnsupported naming %s",
+				what, err, wire.CapIssuesUpdateLabelPrefixes)
+		}
+		if labels, events := labelsAndEvents(t); !slices.Equal(labels, []string{"keep", "state:a"}) || events != len(seeded) {
+			t.Errorf("the refused %s left labels %v and %d events, want [keep state:a] and the seeded %d",
+				what, labels, events, len(seeded))
+		}
+	}
+
+	older := degradedSubject(t, env, wire.CapIssuesUpdateLabelPrefixes)
+	prefixPatch := issueops.IssuePatch{Labels: issueops.LabelPatch{RemovePrefixes: []string{"state:"}, Add: []string{"state:b"}}}
+	lifecycle, err := older.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+	_, err = lifecycle.Update(ctx, issueops.UpdateRequest{Actor: "setter", IssueID: id, Patch: prefixPatch})
+	refused(t, "updateIssue", err)
+
+	applier, err := older.BatchApplier()
+	if err != nil {
+		t.Fatalf("BatchApplier(): %v", err)
+	}
+	_, err = applier.ApplyBatch(ctx, issueops.ApplyBatchRequest{Actor: "setter", Items: []issueops.ApplyItem{{
+		Kind:   issueops.ItemUpdate,
+		Update: &issueops.UpdateItem{Target: issueops.Ref{ID: id}, Patch: prefixPatch},
+	}}})
+	refused(t, "issues:batchApply", err)
+
+	served, err := storage.ServesLabelPrefixPatch(ctx, older)
+	if err != nil || served {
+		t.Fatalf("ServesLabelPrefixPatch against a server without the token = (%v, %v), want (false, nil)", served, err)
+	}
+	exact := issueops.IssuePatch{Labels: issueops.LabelPatch{Add: []string{"state:b"}, Remove: []string{"state:a"}}}
+	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{Actor: "setter", IssueID: id, Patch: exact}); err != nil {
+		t.Fatalf("the exact swap against a server without the token: %v", err)
+	}
+	if labels, _ := labelsAndEvents(t); !slices.Equal(labels, []string{"keep", "state:b"}) {
+		t.Errorf("the exact swap left labels %v, want [keep state:b]", labels)
+	}
+}
+
 // TestServedLifecycleUpdateResolvesBothPlanesUnlessRestricted is PARKED: half
 // the case sets IssuePlaneOnly, which updateIssue publishes no member for. The
 // client refuses it because dropping it would EDIT the wisp the caller asked to

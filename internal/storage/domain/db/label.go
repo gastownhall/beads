@@ -74,12 +74,6 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 		}
 		return nil
 	}
-	// The row landed: make any overlapping label edit of this issue conflict
-	// at commit (GH#5657), on this same transaction and label tier, as
-	// issueops.AddLabelInTx does on the direct route.
-	if err := issueops.TouchLabelCoordinationInTx(ctx, r.runner, issueID, table); err != nil {
-		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
-	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelAdded,
@@ -109,6 +103,18 @@ func (r *labelSQLRepositoryImpl) RenameLabel(ctx context.Context, oldLabel, newL
 	return issueops.RenameLabelInTx(ctx, r.runner, oldLabel, newLabel, actor)
 }
 
+// TouchCoordination rewrites issueID's label coordination cell in opts' tier
+// on this repository's transaction, the uow twin of the direct route's touch in
+// issueops.ApplyLabelPatch: issueops.TouchLabelCoordinationInTx's own SQL, so
+// the two routes write the same key on the same table and conflict with each
+// other as they do with themselves.
+func (r *labelSQLRepositoryImpl) TouchCoordination(ctx context.Context, issueID string, opts domain.LabelOpts) error {
+	if err := issueops.TouchLabelCoordinationInTx(ctx, r.runner, issueID, pickLabelTable(opts.UseWispsTable)); err != nil {
+		return fmt.Errorf("db: LabelSQLRepository.TouchCoordination %s: %w", issueID, err)
+	}
+	return nil
+}
+
 func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, actor string, opts domain.LabelOpts) error {
 	if issueID == "" {
 		return fmt.Errorf("db: LabelSQLRepository.Delete: issueID must not be empty")
@@ -131,9 +137,6 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	}
 	if rows == 0 {
 		return nil
-	}
-	if err := issueops.TouchLabelCoordinationInTx(ctx, r.runner, issueID, table); err != nil {
-		return fmt.Errorf("db: LabelSQLRepository.Delete %s/%s: %w", issueID, label, err)
 	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,

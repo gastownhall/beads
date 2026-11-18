@@ -96,6 +96,9 @@ func (b *httpBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBat
 	if err := b.requireGateTokens(ctx, req); err != nil {
 		return issueops.ApplyBatchResult{}, err
 	}
+	if err := b.requireLabelPrefixToken(ctx, req); err != nil {
+		return issueops.ApplyBatchResult{}, err
+	}
 	var priorities []**int
 	for i := range body.Items {
 		if create := body.Items[i].Create; create != nil {
@@ -171,6 +174,22 @@ func (b *httpBatchApplier) requireGateTokens(ctx context.Context, req issueops.A
 	if updates {
 		if err := b.store.requireCapabilityBeforeDial(ctx, wire.OpApplyBatch, wire.CapIssuesUpdateGates); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// requireLabelPrefixToken scans the whole plan once, before the dial, for an
+// update item whose label patch names a prefix removal (GH#5657), and refuses
+// the request naming issues.update.labelPrefixes when the cached handshake
+// lacks it. An older server answers `labels.remove_prefixes` with its
+// unknown-member 400, and dropping the member would leave the old values of
+// the dimension beside the new one. The plan is all or nothing, so the check
+// is too, requireGateTokens' rule.
+func (b *httpBatchApplier) requireLabelPrefixToken(ctx context.Context, req issueops.ApplyBatchRequest) error {
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemUpdate && item.Update != nil && patchCarriesLabelPrefixes(item.Update.Patch) {
+			return b.store.requireCapabilityBeforeDial(ctx, wire.OpApplyBatch, wire.CapIssuesUpdateLabelPrefixes)
 		}
 	}
 	return nil
@@ -638,6 +657,8 @@ func encodeApplyLabelPatch(patch issueops.LabelPatch) map[string]any {
 	if len(patch.Remove) > 0 {
 		out["remove"] = append([]string(nil), patch.Remove...)
 	}
+	// The prefix removal (issues.update.labelPrefixes): ApplyBatch has already
+	// refused the plan before the dial against a server without the token.
 	if len(patch.RemovePrefixes) > 0 {
 		out["remove_prefixes"] = append([]string(nil), patch.RemovePrefixes...)
 	}

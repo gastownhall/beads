@@ -19,27 +19,32 @@ import (
 // it with {x} and the other with {y}. Before the label coordination cell the
 // two commits merged into {x, y}; now the later commit must fail with the
 // retryable serialization error and the winner's set must stand alone. The
-// seed label leaves a committed cell behind, so this variant covers racing
-// writers that both rewrite an existing cell.
+// seed is itself a whole-set write, which leaves a committed cell behind, so
+// this variant covers racing writers that both rewrite an existing cell.
 func TestLabelPatchConcurrentReplaceConflictsAtCommit(t *testing.T) {
 	runLabelReplaceRace(t, "label_patch_race", false, true)
 }
 
 // TestWispLabelPatchConcurrentReplaceConflictsAtCommit is the same race on an
 // ephemeral wisp, whose labels live in wisp_labels: the coordination write has
-// to use that tier, on the transaction that wrote the label rows. The seed's
-// cell is removed first, so this variant also covers a cell that does not
-// exist until the racing transactions write it.
+// to use that tier, on the transaction that wrote the label rows. The seed is
+// a named add, which writes no cell, so this variant also covers a cell that
+// does not exist until the racing transactions write it.
 func TestWispLabelPatchConcurrentReplaceConflictsAtCommit(t *testing.T) {
 	runLabelReplaceRace(t, "wisp_label_patch_race", true, false)
 }
 
 // TestLabelOnlyPatchLeavesTheRowAndRepeatsAsANoOp pins what the coordination
-// cell must not cost (GH#5657): a label-only patch is a label-table write plus
-// a clone-local cell rewrite, so the issue row keeps its RowVersion and its
-// updated_at, and a second identical patch nets to the current set, reports
+// cell must not cost (GH#5657): a label-only prefix patch is a label-table
+// write plus a clone-local cell rewrite, so the issue row keeps its
+// RowVersion, and a second identical patch nets to the current set, reports
 // Changed=false, leaves the cell as the first patch wrote it and records no
-// label events.
+// label events. The seed's named adds write no cell at all.
+//
+// updated_at is deliberately not asserted. Whether a label edit advances it
+// is a separate, open decision (GH#5442: open PRs #8285 and #5793 make it
+// advance); the cell is not a row write either way, and RowVersion, the
+// untouched cell and the absent events are what prove that.
 func TestLabelOnlyPatchLeavesTheRowAndRepeatsAsANoOp(t *testing.T) {
 	skipIfNoServer(t)
 	ctx, cancel := testContext(t)
@@ -55,9 +60,6 @@ func TestLabelOnlyPatchLeavesTheRowAndRepeatsAsANoOp(t *testing.T) {
 		if err := store.AddLabel(ctx, id, label, "seeder"); err != nil {
 			t.Fatalf("seed label %s: %v", label, err)
 		}
-	}
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM local_metadata WHERE `key` LIKE ?", "label-coordination/%"); err != nil {
-		t.Fatalf("drop the seed's coordination cells: %v", err)
 	}
 	lifecycle, err := store.IssueLifecycle()
 	if err != nil {
@@ -88,6 +90,9 @@ func TestLabelOnlyPatchLeavesTheRowAndRepeatsAsANoOp(t *testing.T) {
 		}
 		return len(got)
 	}
+	if got := cell(); got != "" {
+		t.Fatalf("the seed's named adds wrote the coordination cell %q, want none", got)
+	}
 	patch := publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
 		Labels: publicops.LabelPatch{RemovePrefixes: []string{"state:"}, Add: []string{"state:b"}},
 	}}
@@ -103,9 +108,9 @@ func TestLabelOnlyPatchLeavesTheRowAndRepeatsAsANoOp(t *testing.T) {
 	if !reflect.DeepEqual(labels, []string{"keep", "state:b"}) {
 		t.Fatalf("labels after the first patch = %v, want [keep state:b]", labels)
 	}
-	if afterFirst.RowVersion != before.RowVersion || !afterFirst.UpdatedAt.Equal(before.UpdatedAt) {
-		t.Fatalf("label-only patch moved the issue row: RowVersion %d -> %d, updated_at %v -> %v; want both unchanged",
-			before.RowVersion, afterFirst.RowVersion, before.UpdatedAt, afterFirst.UpdatedAt)
+	if afterFirst.RowVersion != before.RowVersion {
+		t.Fatalf("label-only patch reminted the issue row: RowVersion %d -> %d, want it unchanged",
+			before.RowVersion, afterFirst.RowVersion)
 	}
 	written := cell()
 	if written == "" {
@@ -126,9 +131,9 @@ func TestLabelOnlyPatchLeavesTheRowAndRepeatsAsANoOp(t *testing.T) {
 	if got := events(); got != eventsAfterFirst {
 		t.Errorf("identical label patch recorded %d new events, want none", got-eventsAfterFirst)
 	}
-	if afterSecond := row(); afterSecond.RowVersion != before.RowVersion || !afterSecond.UpdatedAt.Equal(before.UpdatedAt) {
-		t.Errorf("identical label patch moved the issue row: RowVersion %d -> %d, updated_at %v -> %v",
-			before.RowVersion, afterSecond.RowVersion, before.UpdatedAt, afterSecond.UpdatedAt)
+	if afterSecond := row(); afterSecond.RowVersion != before.RowVersion {
+		t.Errorf("identical label patch reminted the issue row: RowVersion %d -> %d, want it unchanged",
+			before.RowVersion, afterSecond.RowVersion)
 	}
 }
 
@@ -154,14 +159,20 @@ func runLabelReplaceRace(t *testing.T, dbName string, wisp, preseeded bool) {
 	} else {
 		createPerm(t, ctx, store, id)
 	}
-	if err := store.AddLabel(ctx, id, "a", "seeder"); err != nil {
-		t.Fatalf("seed label: %v", err)
-	}
-	cellPattern := "label-coordination/v1/" + tier + "/%"
-	if !preseeded {
-		if _, err := store.db.ExecContext(ctx, "DELETE FROM local_metadata WHERE `key` LIKE ?", cellPattern); err != nil {
-			t.Fatalf("drop the seed's coordination cell: %v", err)
+	if preseeded {
+		// A whole-set write reads the set, so it leaves the cell behind.
+		lifecycle, err := store.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("IssueLifecycle(): %v", err)
 		}
+		if _, err := lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "seeder", IssueID: id, Patch: publicops.IssuePatch{
+			Labels: publicops.LabelPatch{Replace: publicops.Field[[]string]{Set: true, Value: []string{"a"}}},
+		}}); err != nil {
+			t.Fatalf("seed label: %v", err)
+		}
+	} else if err := store.AddLabel(ctx, id, "a", "seeder"); err != nil {
+		// A named add reads nothing it acts on and writes no cell.
+		t.Fatalf("seed label: %v", err)
 	}
 	type querier interface {
 		QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -255,13 +266,17 @@ func runLabelReplaceRace(t *testing.T, dbName string, wisp, preseeded bool) {
 	}
 }
 
-// TestLabelWriteCoordinationCellAbsentAndPreseeded covers the coordination
-// cell's two landing states: the first landed label row CREATES it (initially
-// absent), a later landed row REWRITES it (preseeded), and the idempotent
-// no-ops (an INSERT IGNORE that landed nothing, a DELETE that matched nothing)
-// leave it exactly where it was. That rows-affected gate is what keeps a
-// semantic no-op from serializing against real writers (AC-6).
-func TestLabelWriteCoordinationCellAbsentAndPreseeded(t *testing.T) {
+// TestLabelCoordinationCellOnlyForEditsThatReadTheSet pins which label writes
+// rewrite the coordination cell (GH#5657). Named adds and removes never do:
+// AddLabelInTx and RemoveLabelInTx, which `bd label propagate`, `bd cook
+// --persist` and the tracker's direct-route sync call inside transactions that
+// never replay, and a label patch of only Add and Remove. They read nothing
+// they act on, so they must not be able to fail on a conflict through the
+// cell. A replacement or a prefix removal that changes the set creates the
+// cell when it is absent and rewrites it when it exists, and one that leaves
+// the set as it was does not touch it, so a semantic no-op never serializes
+// against real writers (AC-6).
+func TestLabelCoordinationCellOnlyForEditsThatReadTheSet(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 	ctx, cancel := testContext(t)
@@ -274,24 +289,125 @@ func TestLabelWriteCoordinationCellAbsentAndPreseeded(t *testing.T) {
 	}
 
 	addLabelInCommittedTx(t, ctx, store, id, "area:z")
+	removeLabelInCommittedTx(t, ctx, store, id, "area:z")
+	addLabelInCommittedTx(t, ctx, store, id, "state:a")
+	if !patchLabelsInCommittedTx(t, ctx, store, id, publicops.LabelPatch{Add: []string{"keep"}, Remove: []string{"state:gone"}}) {
+		t.Fatal("named add/remove patch reported no change, want keep added")
+	}
+	if got := labelCoordinationValue(t, ctx, store, "labels"); got != "" {
+		t.Fatalf("named label adds and removes wrote the coordination cell %q, want none", got)
+	}
+
+	replace := publicops.LabelPatch{Replace: publicops.Field[[]string]{Set: true, Value: []string{"state:a", "keep", "area:x"}}}
+	if !patchLabelsInCommittedTx(t, ctx, store, id, replace) {
+		t.Fatal("replacement reported no change, want area:x added")
+	}
 	if got := labelCoordinationValue(t, ctx, store, "labels"); got == "" {
-		t.Fatal("first landed label row did not create the coordination cell")
+		t.Fatal("a replacement that changed the set did not create the coordination cell")
 	}
 
 	seedLabelCoordinationSentinel(t, ctx, store, "labels", "sentinel")
-	addLabelInCommittedTx(t, ctx, store, id, "area:w")
+	setState := publicops.LabelPatch{RemovePrefixes: []string{"state:"}, Add: []string{"state:b"}}
+	if !patchLabelsInCommittedTx(t, ctx, store, id, setState) {
+		t.Fatal("prefix removal reported no change, want state:a swapped for state:b")
+	}
 	if got := labelCoordinationValue(t, ctx, store, "labels"); got == "" || got == "sentinel" {
-		t.Fatalf("landed label row left the preseeded cell at %q, want a rewrite", got)
+		t.Fatalf("a prefix removal that changed the set left the preseeded cell at %q, want a rewrite", got)
 	}
 
 	seedLabelCoordinationSentinel(t, ctx, store, "labels", "sentinel-2")
-	addLabelInCommittedTx(t, ctx, store, id, "area:w") // INSERT IGNORE: lands nothing
-	if got := labelCoordinationValue(t, ctx, store, "labels"); got != "sentinel-2" {
-		t.Fatalf("idempotent re-add rewrote the coordination cell = %q, want sentinel-2", got)
+	if patchLabelsInCommittedTx(t, ctx, store, id, setState) {
+		t.Error("repeated prefix removal reported a change, want a no-op")
 	}
-	removeLabelInCommittedTx(t, ctx, store, id, "nope:absent") // DELETE: matches nothing
+	sameSet := publicops.LabelPatch{Replace: publicops.Field[[]string]{Set: true, Value: []string{"state:b", "keep", "area:x"}}}
+	if patchLabelsInCommittedTx(t, ctx, store, id, sameSet) {
+		t.Error("replacement with the held set reported a change, want a no-op")
+	}
+	addLabelInCommittedTx(t, ctx, store, id, "area:y")
+	removeLabelInCommittedTx(t, ctx, store, id, "keep")
 	if got := labelCoordinationValue(t, ctx, store, "labels"); got != "sentinel-2" {
-		t.Fatalf("no-op remove rewrote the coordination cell = %q, want sentinel-2", got)
+		t.Fatalf("no-op set-reading patches and named writes rewrote the coordination cell = %q, want sentinel-2", got)
+	}
+}
+
+// TestNamedLabelWritesOverlapWithoutConflict is the other half of the rule
+// above. Two named label adds on one issue and a replacement of its set, all
+// three reading the same snapshot before any of them writes, commit together:
+// a named add never writes the cell, so it never meets the replacement's or
+// another add's cell write, and the transactions that add labels without a
+// replay (`bd label propagate`, `bd cook --persist`) cannot fail on it. The
+// rows merge into what running the adds after the replacement leaves.
+func TestNamedLabelWritesOverlapWithoutConflict(t *testing.T) {
+	skipIfNoServer(t)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	store := newMultiConnectionEpochStore(t, ctx, "named_label_overlap")
+	// Versioned history off, as in runLabelReplaceRace: issue_versions rows
+	// minted by every writer would conflict on their own.
+	store.SetVersionedHistoryEnabled(false)
+	if err := store.SetConfig(ctx, "issue_prefix", "lr"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	const id = "lr-named"
+	createPerm(t, ctx, store, id)
+	if err := store.AddLabel(ctx, id, "a", "seeder"); err != nil {
+		t.Fatalf("seed label: %v", err)
+	}
+
+	begin := func() *sql.Tx {
+		t.Helper()
+		tx, err := store.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		t.Cleanup(func() { _ = tx.Rollback() })
+		return tx
+	}
+	txR, txY, txZ := begin(), begin(), begin()
+	// Establish all three snapshots before any transaction writes.
+	currentR, err := issueops.GetIssueInTx(ctx, txR, id)
+	if err != nil {
+		t.Fatalf("read in replacing transaction: %v", err)
+	}
+	for name, tx := range map[string]*sql.Tx{"y": txY, "z": txZ} {
+		labels, err := issueops.GetLabelsInTx(ctx, tx, "labels", id)
+		if err != nil {
+			t.Fatalf("read in %s transaction: %v", name, err)
+		}
+		if !reflect.DeepEqual(labels, []string{"a"}) {
+			t.Fatalf("%s snapshot = %v, want [a]", name, labels)
+		}
+	}
+
+	changed, err := issueops.ApplyLabelPatch(ctx, txR, currentR, publicops.LabelPatch{Replace: publicops.Field[[]string]{Set: true, Value: []string{"x"}}}, "writer-r")
+	if err != nil || !changed {
+		t.Fatalf("apply replacement = (%v, %v), want (true, nil)", changed, err)
+	}
+	if err := issueops.AddLabelInTx(ctx, txY, "", "", id, "y", "writer-y"); err != nil {
+		t.Fatalf("add y: %v", err)
+	}
+	if err := issueops.AddLabelInTx(ctx, txZ, "", "", id, "z", "writer-z"); err != nil {
+		t.Fatalf("add z: %v", err)
+	}
+
+	if err := txR.Commit(); err != nil {
+		t.Fatalf("commit replacement: %v", err)
+	}
+	if err := txY.Commit(); err != nil {
+		t.Fatalf("commit add y after the replacement: %v, want it to merge (a named add must not conflict)", err)
+	}
+	if err := txZ.Commit(); err != nil {
+		t.Fatalf("commit add z after add y: %v, want it to merge (a named add must not conflict)", err)
+	}
+
+	got, err := store.GetLabels(ctx, id)
+	if err != nil {
+		t.Fatalf("GetLabels: %v", err)
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, []string{"x", "y", "z"}) {
+		t.Fatalf("labels after the overlap = %v, want [x y z]: the replacement, then both adds", got)
 	}
 }
 
@@ -326,6 +442,30 @@ func addLabelInCommittedTx(t *testing.T, ctx context.Context, store *DoltStore, 
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit add-label transaction: %v", err)
 	}
+}
+
+// patchLabelsInCommittedTx applies patch to issueID's labels in its own
+// committed transaction, as ExecuteUpdate does inside an update, and reports
+// whether the set changed.
+func patchLabelsInCommittedTx(t *testing.T, ctx context.Context, store *DoltStore, issueID string, patch publicops.LabelPatch) bool {
+	t.Helper()
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin label-patch transaction: %v", err)
+	}
+	defer tx.Rollback()
+	current, err := issueops.GetIssueInTx(ctx, tx, issueID)
+	if err != nil {
+		t.Fatalf("read %s: %v", issueID, err)
+	}
+	changed, err := issueops.ApplyLabelPatch(ctx, tx, current, patch, "tester")
+	if err != nil {
+		t.Fatalf("ApplyLabelPatch(%s, %+v): %v", issueID, patch, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit label-patch transaction: %v", err)
+	}
+	return changed
 }
 
 func removeLabelInCommittedTx(t *testing.T, ctx context.Context, store *DoltStore, issueID, label string) {

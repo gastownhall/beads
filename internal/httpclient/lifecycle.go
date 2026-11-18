@@ -404,6 +404,11 @@ func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) 
 			return issueops.UpdateResult{}, err
 		}
 	}
+	if patchCarriesLabelPrefixes(req.Patch) {
+		if err := l.store.requireCapabilityBeforeDial(ctx, wire.OpUpdateIssue, wire.CapIssuesUpdateLabelPrefixes); err != nil {
+			return issueops.UpdateResult{}, err
+		}
+	}
 	if req.Claim {
 		served, err := l.store.servesCapability(ctx, wire.CapIssuesUpdateClaim)
 		if err != nil {
@@ -557,6 +562,27 @@ func (s *Store) requireCapabilityBeforeDial(ctx context.Context, op, token strin
 func patchCarriesGates(patch issueops.IssuePatch) bool {
 	return patch.AwaitID.Set || patch.Waiters.Set
 }
+
+// patchCarriesLabelPrefixes reports whether a patch names a prefix removal
+// (LabelPatch.RemovePrefixes, GH#5657), which both patch documents carry only
+// to a server advertising issues.update.labelPrefixes. It is the encoders' own
+// condition: they send a non-empty list and omit an empty one. An older server
+// answers the member with its unknown-member 400, and dropping it would leave
+// the old values of the dimension beside the new one, so the client refuses
+// instead.
+func patchCarriesLabelPrefixes(patch issueops.IssuePatch) bool {
+	return len(patch.Labels.RemovePrefixes) > 0
+}
+
+// ServesLabelPrefixPatch implements storage.LabelPrefixPatchProber from the
+// handshake: whether this server takes LabelPatch.RemovePrefixes
+// (issues.update.labelPrefixes). `bd set-state` asks before it writes its
+// event, and against a server that does not sends the exact labels it read.
+func (s *Store) ServesLabelPrefixPatch(ctx context.Context) (bool, error) {
+	return s.servesCapability(ctx, wire.CapIssuesUpdateLabelPrefixes)
+}
+
+var _ storage.LabelPrefixPatchProber = (*Store)(nil)
 
 // gateFieldRefusal rebuilds the role's *issueops.GateFieldError from the 400
 // a gate member past its bound earns. The server answers the role's refusal
@@ -1001,13 +1027,14 @@ func encodeIssuePatch(patch issueops.IssuePatch) (map[string]any, error) {
 	setNullableTime(out, "due_at", patch.DueAt)
 	setNullableTime(out, "defer_until", patch.DeferUntil)
 
-	// THE ORDERED LABEL EDIT, whole. The wire spells it as three FLAT members
-	// where applyBatch nests them under one object, and the difference is
-	// historical rather than meaningful: `labels` shipped as a bare array, and
-	// nesting it now would re-type a published member. What both spell is the
-	// role's own algebra — replace, then add, then remove, so REMOVAL WINS where
-	// a label appears in more than one — and the server assembles all three into
-	// ONE issueops.LabelPatch, so the order is never this client's to arrange.
+	// THE ORDERED LABEL EDIT, whole. The wire spells it as FLAT members where
+	// applyBatch nests them under one object, and the difference is historical
+	// rather than meaningful: `labels` shipped as a bare array, and nesting it
+	// now would re-type a published member. What both spell is the role's own
+	// algebra — replace, then the prefix removal, then add, then remove, so
+	// REMOVAL WINS where a label appears in more than one — and the server
+	// assembles them into ONE issueops.LabelPatch, so the order is never this
+	// client's to arrange.
 	//
 	// AN INCREMENTAL EDIT USED TO REFUSE HERE (W-IssuePatch.Labels), and it is
 	// worth saying what the refusal was protecting: a client that degraded an add
@@ -1036,6 +1063,9 @@ func encodeIssuePatch(patch issueops.IssuePatch) (map[string]any, error) {
 	if len(patch.Labels.Remove) > 0 {
 		out["remove_labels"] = append([]string(nil), patch.Labels.Remove...)
 	}
+	// The prefix removal (issues.update.labelPrefixes). Update has already
+	// refused it, before the dial, against a server that does not advertise
+	// the token; this only spells it.
 	if len(patch.Labels.RemovePrefixes) > 0 {
 		out["remove_label_prefixes"] = append([]string(nil), patch.Labels.RemovePrefixes...)
 	}
