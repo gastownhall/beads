@@ -175,3 +175,65 @@ func TestCleanupOrphanBackendReapsVerifiedUnrecordedDolt(t *testing.T) {
 		assertHelperAlive(t, helper)
 	})
 }
+
+// AC-5: a missing or malformed info file, a dead pid, a live non-dolt, or a
+// dolt for anything but this root's configs gets no signal and nil.
+func TestCleanupOrphanBackendLeavesUnverifiedInfoPidAlone(t *testing.T) {
+	for _, content := range []string{"", "garbage", "abc:3307:x", "0:3307:x", "-5:3307:x", "4242:3307", "4242:port:x"} {
+		t.Run("malformed "+strconv.Quote(content), func(t *testing.T) {
+			root := t.TempDir()
+			holdProxyLock(t, root)
+			writeServerInfo(t, root, content)
+			opens := useFakeOrphan(t, &fakeOrphan{exe: "dolt"})
+			require.NoError(t, cleanupOrphanBackend(root))
+			assert.Zero(t, opens.Load(), "a malformed info file must name no process")
+		})
+	}
+
+	t.Run("missing", func(t *testing.T) {
+		root := t.TempDir()
+		holdProxyLock(t, root)
+		opens := useFakeOrphan(t, &fakeOrphan{exe: "dolt"})
+		require.NoError(t, cleanupOrphanBackend(root))
+		assert.Zero(t, opens.Load())
+	})
+
+	t.Run("dead pid", func(t *testing.T) {
+		root := t.TempDir()
+		holdProxyLock(t, root)
+		writeServerInfo(t, root, "4243:3307:x")
+		opens := useFakeOrphan(t, &fakeOrphan{exe: "dolt"})
+		require.NoError(t, cleanupOrphanBackend(root))
+		assert.Equal(t, int32(1), opens.Load())
+	})
+
+	other := t.TempDir()
+	for name, mk := range map[string]func(root string) *fakeOrphan{
+		"non-dolt with this root's config": func(root string) *fakeOrphan {
+			return &fakeOrphan{exe: "sleep", cmdline: "sleep --config " + filepath.Join(root, "config.yaml")}
+		},
+		"dolt for another root's config.yaml": func(string) *fakeOrphan {
+			return &fakeOrphan{exe: "dolt", cmdline: doltLaunchedWith(filepath.Join(other, "config.yaml"))}
+		},
+		"dolt for another root's launch config": func(string) *fakeOrphan {
+			return &fakeOrphan{exe: "dolt", cmdline: doltLaunchedWith(filepath.Join(other, server.LaunchConfigFileName))}
+		},
+		"dolt for a sibling root sharing the prefix": func(root string) *fakeOrphan {
+			return &fakeOrphan{exe: "dolt", cmdline: doltLaunchedWith(root + "-other/config.yaml")}
+		},
+		"dolt with no config": func(string) *fakeOrphan {
+			return &fakeOrphan{exe: "dolt", cmdline: "/usr/local/bin/dolt sql-server"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			holdProxyLock(t, root)
+			fakeOrphanInfo(t, root)
+			proc := mk(root)
+			useFakeOrphan(t, proc)
+			require.NoError(t, cleanupOrphanBackend(root))
+			assert.False(t, proc.killed, "an unverified process was signaled")
+			assert.True(t, proc.closed)
+		})
+	}
+}
