@@ -169,7 +169,11 @@ func gateFileName(base string) string {
 // itself may not exist yet (bd init gates the workspace it is creating).
 // The parent is canonicalized (symlinks resolved) so that every process
 // that reaches the same physical parent agrees on one gate file, no
-// matter which path spelling it used.
+// matter which path spelling it used. Outside Windows canonicalParent is
+// filepath.EvalSymlinks; on Windows it asks a directory handle for its
+// final path (its DOS spelling, or the volume-GUID spelling for a volume
+// with no DOS name), because EvalSymlinks cannot walk through junctions
+// or directory-mounted volumes (see canon_windows.go).
 func forDir(dir string) (Gate, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -195,7 +199,7 @@ func forDir(dir string) (Gate, error) {
 	case "", ".", "..":
 		return Gate{}, fmt.Errorf("workspacegate: cannot gate %q: the guarded path must be a named directory", dir)
 	}
-	canonParent, err := filepath.EvalSymlinks(filepath.Clean(parent))
+	canonParent, err := canonicalParent(filepath.Clean(parent))
 	if err != nil {
 		return Gate{}, fmt.Errorf("workspacegate: gate parent %s must exist: %w", parent, err)
 	}
