@@ -417,7 +417,7 @@ var proxyCapabilityRegistry = []capabilityRow{
 	// topology makes them wrong.
 	refusedPath("gate discover", "proxy.gate.unsupported", ProxyReasonUnimplemented, trackLongTail),
 	refusedPath("cook", "proxy.formula.unsupported", ProxyReasonUnimplemented, trackLongTail),
-	refusedPath("ship", "proxy.formula.unsupported", ProxyReasonUnimplemented, trackLongTail),
+	{Path: "ship", Rule: proxyCapabilityRule{Outcome: ProxyOutcomeHonored}},
 	refusedPath("swarm create", "proxy.swarm.unsupported", ProxyReasonUnimplemented, trackLongTail),
 	refusedPath("swarm list", "proxy.swarm.unsupported", ProxyReasonUnimplemented, trackLongTail),
 	refusedPath("merge-slot create", "proxy.merge_slot.unsupported", ProxyReasonUnimplemented, trackLongTail),
@@ -435,10 +435,10 @@ var proxyCapabilityRegistry = []capabilityRow{
 	refusedArgs("rename-prefix", "--dry-run", "proxy.transform.unsupported", ProxyReasonUnimplemented, trackLongTail),
 	refusedArgs("rename-prefix", "--repair", "proxy.transform.unsupported", ProxyReasonUnimplemented, trackLongTail),
 	refusedArgs("rename-prefix", "--dry-run --repair", "proxy.transform.unsupported", ProxyReasonUnimplemented, trackLongTail),
-	refusedPath("duplicate", "proxy.transform.unsupported", ProxyReasonUnimplemented, trackLongTail),
-	refusedArgs("duplicate", "--of", "proxy.transform.unsupported", ProxyReasonUnimplemented, trackLongTail),
-	refusedPath("supersede", "proxy.transform.unsupported", ProxyReasonUnimplemented, trackLongTail),
-	refusedArgs("supersede", "--with", "proxy.transform.unsupported", ProxyReasonUnimplemented, trackLongTail),
+	{Path: "duplicate", Rule: proxyCapabilityRule{Outcome: ProxyOutcomeHonored}},
+	{Path: "duplicate", ArgSet: "--of", Rule: proxyCapabilityRule{Outcome: ProxyOutcomeHonored}},
+	{Path: "supersede", Rule: proxyCapabilityRule{Outcome: ProxyOutcomeHonored}},
+	{Path: "supersede", ArgSet: "--with", Rule: proxyCapabilityRule{Outcome: ProxyOutcomeHonored}},
 	refusedArgs("duplicates", "--auto-merge", "proxy.transform.unsupported", ProxyReasonUnimplemented, trackLongTail),
 	// The dry run reports what the merge WOULD do without writing anything, so
 	// it rides the read path plain `duplicates` already uses.
