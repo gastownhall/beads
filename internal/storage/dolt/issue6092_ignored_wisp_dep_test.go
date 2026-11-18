@@ -677,3 +677,34 @@ func TestIssue6092IgnoredChainReplayOverAbsentWispTables(t *testing.T) {
 	issue6092RequireNamedFinalObjects(t, got)
 	issue6092RequireFinalShape(t, got, final)
 }
+
+// TestIssue6092Main46LegacyUpgradeStillConvergesThroughMain58 is AC-6's
+// runtime half: a legacy wisp_dependencies (with main 0022's type indexes) on
+// a store whose main cursor is back at 46 and ignored cursor at 4. Main runs
+// first, so the main-58 entry of the same repair converges the table before
+// the ignored pass, and the ignored-5 entry must then no-op. The frozen-hash
+// and committed-schema parity halves are the existing
+// TestShippedMigrationsAreFrozen / TestShippedIgnoredMigrationsAreFrozen and
+// TestCLIBundleMatchesRuntimeCommittedSchema.
+func TestIssue6092Main46LegacyUpgradeStillConvergesThroughMain58(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*testTimeout)
+	defer cancel()
+	db := store.db
+
+	final := issue6092ReadShape(t, ctx, db)
+	issue6092BuildLegacyWispDeps(t, ctx, db)
+	issue6092Exec(t, ctx, db, "DELETE FROM schema_migrations WHERE version > 46")
+	issue6092CommitAndRewindIgnored(t, ctx, db, issue6092IgnoredCursorBefore0005)
+
+	if _, err := schema.MigrateUp(ctx, db); err != nil {
+		t.Fatalf("MigrateUp from main 46: %v", err)
+	}
+	issue6092RequireCursorsAtLatest(t, ctx, db)
+	got := issue6092ReadShape(t, ctx, db)
+	issue6092RequireNamedFinalObjects(t, got)
+	issue6092RequireFinalShape(t, got, final)
+	issue6092RequireDepsPreserved(t, issue6092ReadDeps(t, ctx, db), issue6092ValidDeps)
+	issue6092RequireReferencedUnchanged(t, ctx, db)
+}
