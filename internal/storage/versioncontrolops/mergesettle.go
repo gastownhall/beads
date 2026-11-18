@@ -548,8 +548,10 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     ANY two same-issue edits between syncs conflict on that cell even when
 //     the semantic fields are disjoint, so the conflict rate is far higher
 //     than the semantic-conflict rate. add/add (no base row), delete/modify
-//     (one side removed it), and a contested cell whose two sides carry equal
-//     or unparseable updated_at values are left for the operator.
+//     (one side removed it), a contested cell whose two sides carry equal
+//     or unparseable updated_at values, a contested notes/metadata cell, and
+//     a contested close group where exactly one side ends closed (a close
+//     racing a claim, GH#7783) are left for the operator.
 //
 //   - labels: set-union. The table is all key columns, so two sides adding
 //     DIFFERENT labels are disjoint rows dolt already unions and a conflict
