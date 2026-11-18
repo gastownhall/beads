@@ -1334,6 +1334,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Legacy upgrade recovery leaves the 0.56 release series intact.**
+  A `0.56.0-rc.1` witness no longer authorizes rebuilding `.dolt` merely
+  because its diagnostic SemVer precedence is below `0.56.0`. Existing
+  pre-0.56 recovery and HEAD/pseudo-version refusals are preserved.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
