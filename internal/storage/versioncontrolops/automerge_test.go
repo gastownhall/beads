@@ -1208,6 +1208,14 @@ func TestIssuesConflictsAreFieldMergeable_CloseRaceNotice(t *testing.T) {
 	if strings.Contains(got, "bd-1") || strings.Contains(got, "bd-3") {
 		t.Errorf("only the close race earns the close-race notice; got %q", got)
 	}
+	// The remedy depends on the pull route and the backend, which this layer
+	// cannot see: server mode refuses a strategy pull, and a live conflict is
+	// resolved row by row. The halt report in cmd/bd names it instead.
+	for _, remedy := range []string{"--strategy", "bd dolt pull", "bd conflicts"} {
+		if strings.Contains(got, remedy) {
+			t.Errorf("the storage-layer notice must name no remedy (%q); got %q", remedy, got)
+		}
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
 	}

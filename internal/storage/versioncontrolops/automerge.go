@@ -627,14 +627,17 @@ func issuesConflictsAreFieldMergeable(ctx context.Context, db DBConn) ([]issuesR
 	return plan, true, nil
 }
 
-// closeRaceNotice explains a close-race decline. It names the issue and both
-// statuses and points at explicit resolution; it does not claim the conflict
-// is still live, since some routes abort the merge after declining.
+// closeRaceNotice explains a close-race decline: it names the issue and both
+// statuses. It names no remedy and does not claim the conflict is still live.
+// Both depend on what this layer cannot see: the pull route (the SQL routes
+// abort the merge after a decline, the git-protocol CLI route leaves the
+// conflict live) and the backend (only embedded storage has a strategy pull),
+// and a strategy pull re-runs this resolver. The command that reports the
+// halt names the step that works there (syncConflictMessage in cmd/bd).
 func closeRaceNotice(r closeRace) string {
 	return fmt.Sprintf(
 		"Notice: not auto-merging issue %s; it was closed on one side and changed to another status on the other "+
-			"(local status %s, incoming status %s), which is not settled last-write-wins. "+
-			"Choose a side explicitly with 'bd dolt pull --strategy ours' or 'bd dolt pull --strategy theirs'\n",
+			"(local status %s, incoming status %s), and a close racing another status change is never settled last-write-wins\n",
 		r.issue, r.ourStatus, r.theirStatus)
 }
 

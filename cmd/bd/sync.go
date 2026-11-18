@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -128,6 +130,15 @@ type syncOutcome struct {
 	// syncStuckTicks. Empty means this run's dirty-stuck status, if any, came
 	// from the tick-count inference instead (wy-mhouc).
 	ConstraintViolations []storage.ConstraintViolation `json:"constraint_violations,omitempty"`
+	// strategyPull is the pull command, without its --strategy flag, that
+	// settles an aborted conflict by re-running this run's pull with one side
+	// chosen ("bd dolt pull", plus the remote when --remote named one), and
+	// strategyPullNote is remedy.CommandArg's note when the remote could not
+	// be pasted as it is. Empty when the store has no strategy pull: only
+	// embedded storage implements storage.StrategicPuller (#4992). Set by the
+	// caller (syncStrategyPull); the halt report reads it, --json does not.
+	strategyPull     string
+	strategyPullNote string
 }
 
 // syncTransient is one attempt's transient failure.
@@ -682,10 +693,14 @@ until an operator resolves the divergence. (The pull underneath does auto-settle
 the conflict classes it can settle convergently — machine-local metadata,
 audit-only dependency rows, and last-write-wins on issue cells. Anything beyond
 those halts here, including a close on one side racing a different status on the
-other, such as a claim made without seeing the close: the halt notice names the
-issue and both statuses, and 'bd dolt pull --strategy ours|theirs' chooses a
-side.) Whether the halted merge was aborted or left live in the working set
-depends on the pull route, so the halt message reports which.
+other, such as a claim made without seeing the close: a notice names the issue
+and both statuses.) Whether the halted merge was aborted or left live in the
+working set depends on the pull route, so the halt message reports which, and
+names the step that settles it there. A live conflict is resolved issue by
+issue with 'bd conflicts resolve <issue-id> --ours|--theirs'. After an aborted
+pull on embedded storage, 'bd dolt pull --strategy ours|theirs' settles it, but
+keeps one side's whole row for every conflicted row of the pull, not only the
+issue you mean to settle. Server-mode storage has no strategy pull.
 
 Exit codes (a sync timer can branch on these without parsing output):
 
@@ -859,6 +874,7 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	}
 
 	out, err := runSyncLoop(rootCtx, ops, attempts)
+	out.strategyPull, out.strategyPullNote = syncStrategyPull(st, remote)
 	if noPush && out.Status == syncStatusOK {
 		out.Pushed = false
 		out.PushSkipped = true
@@ -1035,9 +1051,8 @@ func syncConflictMessage(out *syncOutcome) []string {
 			"lost — and sync will keep halting here, unchanged, until an operator resolves the",
 			"divergence between this replica and the remote. Nothing is lost by waiting.",
 			"'bd conflicts list' will show nothing right now — this pull route restores the working",
-			"set instead of leaving conflicts live for it. The same conflict recurs on every retry",
-			"until the two histories are reconciled by hand (see 'bd vc merge --help' for a route",
-			"that leaves conflicts live and resolvable instead of aborting).")
+			"set instead of leaving conflicts live for it.")
+		lines = append(lines, abortedConflictRemedy(out)...)
 	}
 
 	// Second: did anything at all happen before the halt? Only reported when
@@ -1067,6 +1082,47 @@ func syncConflictMessage(out *syncOutcome) []string {
 			"That failure is reported here only — resolving the conflict will not fix it.")
 	}
 	return lines
+}
+
+// abortedConflictRemedy names the step that settles a conflict whose merge was
+// aborted, which differs by backend. Embedded storage can re-run the pull
+// with one side chosen, but that settles the whole pull, not the one issue a
+// close-race notice named, so the warning goes with it. Server mode has no
+// strategy pull ('bd dolt pull --strategy' refuses there, #4992), so it is
+// never offered one.
+func abortedConflictRemedy(out *syncOutcome) []string {
+	if out.strategyPull == "" {
+		return []string{
+			"The same conflict recurs on every retry until the two histories are reconciled by hand",
+			"(see 'bd vc merge --help' for a route that leaves conflicts live and resolvable instead",
+			"of aborting).",
+		}
+	}
+	return []string{
+		"The same conflict recurs on every retry until you pull once choosing a side: 'ours'",
+		"keeps this replica's version, 'theirs' takes the remote's.",
+		fmt.Sprintf("  %s --strategy ours%s", out.strategyPull, out.strategyPullNote),
+		fmt.Sprintf("  %s --strategy theirs%s", out.strategyPull, out.strategyPullNote),
+		"Either one keeps that side's whole row for EVERY conflicted row of the pull, not only",
+		"the issue you mean to settle: the other side's edits to those rows are dropped, even",
+		"edits to fields only that side changed.",
+	}
+}
+
+// syncStrategyPull returns the pull command, without its --strategy flag, that
+// abortedConflictRemedy names (syncOutcome.strategyPull), or "" when st has no
+// strategy pull. remote is the --remote this run pulled from, "" for the
+// default remote; it is user input, so it is pasted only as remedy.CommandArg
+// spells it, and note names it when CommandArg had to leave it out.
+func syncStrategyPull(st storage.DoltStorage, remote string) (command, note string) {
+	if _, ok := storage.UnwrapStore(st).(storage.StrategicPuller); !ok {
+		return "", ""
+	}
+	if remote == "" {
+		return "bd dolt pull", ""
+	}
+	arg, note := remedy.CommandArg(runtime.GOOS, remote, "<remote>")
+	return "bd dolt pull " + arg, note
 }
 
 // syncRetriesExhaustedMessage renders the operator-facing report for exit 3.

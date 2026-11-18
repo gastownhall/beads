@@ -435,7 +435,7 @@ bd doctor
 
 # 3. Dolt mode, reachability, branch, and current commit
 bd dolt status
-bd vc status  # Branch and HEAD only; skip in proxied-server mode
+bd vc status  # Branch, HEAD and uncommitted tables; skip in proxied-server mode
 
 # 4. Git status
 git status

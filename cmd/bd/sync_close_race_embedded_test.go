@@ -121,6 +121,21 @@ func TestEmbeddedSyncCloseRaceHalts(t *testing.T) {
 			t.Errorf("halt output must name %q\nstdout:\n%s\nstderr:\n%s", want, stdout, stderr)
 		}
 	}
+	// The embedded pull aborted the merge, so nothing is live for
+	// 'bd conflicts resolve'; the remedy is a strategy pull, named with the
+	// warning that it settles every conflicted row of the pull.
+	for _, want := range []string{
+		"  bd dolt pull --strategy ours\n",
+		"  bd dolt pull --strategy theirs\n",
+		"EVERY conflicted row of the pull",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("halt must name the embedded remedy %q\nstderr:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "bd conflicts resolve") {
+		t.Errorf("an aborted pull leaves no live conflict, so the halt must not name bd conflicts resolve\nstderr:\n%s", stderr)
+	}
 
 	// Nothing was pushed: b's pull is a no-op and the close stands.
 	syncCloseRaceMust(t, bd, dirB, "host-b", "dolt", "pull")

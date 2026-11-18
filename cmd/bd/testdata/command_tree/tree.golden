@@ -7060,10 +7060,14 @@ bd sync
     | the conflict classes it can settle convergently — machine-local metadata,
     | audit-only dependency rows, and last-write-wins on issue cells. Anything beyond
     | those halts here, including a close on one side racing a different status on the
-    | other, such as a claim made without seeing the close: the halt notice names the
-    | issue and both statuses, and 'bd dolt pull --strategy ours|theirs' chooses a
-    | side.) Whether the halted merge was aborted or left live in the working set
-    | depends on the pull route, so the halt message reports which.
+    | other, such as a claim made without seeing the close: a notice names the issue
+    | and both statuses.) Whether the halted merge was aborted or left live in the
+    | working set depends on the pull route, so the halt message reports which, and
+    | names the step that settles it there. A live conflict is resolved issue by
+    | issue with 'bd conflicts resolve <issue-id> --ours|--theirs'. After an aborted
+    | pull on embedded storage, 'bd dolt pull --strategy ours|theirs' settles it, but
+    | keeps one side's whole row for every conflicted row of the pull, not only the
+    | issue you mean to settle. Server-mode storage has no strategy pull.
     |
     | Exit codes (a sync timer can branch on these without parsing output):
     |

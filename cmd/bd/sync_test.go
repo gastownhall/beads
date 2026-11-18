@@ -1010,6 +1010,117 @@ func TestSyncConflictMessage(t *testing.T) {
 			t.Errorf("aborted-merge halt must not send the operator to resolve a conflict that is not live:\n%s", got)
 		}
 	})
+
+	// The remedy is per route (GH#7783 review): a live conflict resolves row
+	// by row with bd conflicts resolve, whatever the backend; an aborted pull
+	// on embedded storage re-runs as a strategy pull, which settles every
+	// conflicted row of the pull, so it carries that warning; server mode
+	// refuses a strategy pull, so it is never named there.
+	t.Run("the remedy follows the route and the backend", func(t *testing.T) {
+		const strategyPull = "bd dolt pull"
+		cases := []struct {
+			name    string
+			out     *syncOutcome
+			want    []string
+			wantNot []string
+		}{
+			{
+				name:    "live conflict on embedded storage",
+				out:     &syncOutcome{Conflicts: []string{"issues"}, ConflictsLive: true, strategyPull: strategyPull},
+				want:    []string{"bd conflicts resolve <issue-id> --ours|--theirs"},
+				wantNot: []string{"--strategy"},
+			},
+			{
+				name:    "live conflict on server-mode storage",
+				out:     &syncOutcome{Conflicts: []string{"issues"}, ConflictsLive: true},
+				want:    []string{"bd conflicts resolve <issue-id> --ours|--theirs"},
+				wantNot: []string{"--strategy"},
+			},
+			{
+				name: "pre-existing conflict on embedded storage",
+				out: &syncOutcome{Conflicts: []string{"issues"}, ConflictsPreexisting: true, ConflictsLive: true,
+					strategyPull: strategyPull},
+				want:    []string{"bd conflicts resolve <issue-id> --ours|--theirs"},
+				wantNot: []string{"--strategy"},
+			},
+			{
+				name: "aborted pull on embedded storage",
+				out:  &syncOutcome{Conflicts: []string{"issues"}, strategyPull: strategyPull},
+				want: []string{
+					"  bd dolt pull --strategy ours\n",
+					"  bd dolt pull --strategy theirs\n",
+					"EVERY conflicted row of the pull",
+					"other side's edits to those rows are dropped",
+				},
+				wantNot: []string{"bd conflicts resolve", "bd vc merge"},
+			},
+			{
+				name: "aborted pull from a named remote on embedded storage",
+				out: &syncOutcome{Conflicts: []string{"issues"}, strategyPull: strategyPull + " mini",
+					strategyPullNote: "  (<remote>: note)"},
+				want: []string{
+					"  bd dolt pull mini --strategy ours  (<remote>: note)\n",
+					"  bd dolt pull mini --strategy theirs  (<remote>: note)\n",
+				},
+			},
+			{
+				name:    "aborted pull on server-mode storage",
+				out:     &syncOutcome{Conflicts: []string{"issues"}},
+				want:    []string{"reconciled by hand"},
+				wantNot: []string{"--strategy ours", "--strategy theirs", "bd dolt pull", "bd conflicts resolve"},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := joined(tc.out) + "\n"
+				for _, want := range tc.want {
+					if !strings.Contains(got, want) {
+						t.Errorf("message must contain %q:\n%s", want, got)
+					}
+				}
+				for _, not := range tc.wantNot {
+					if strings.Contains(got, not) {
+						t.Errorf("message must not contain %q:\n%s", not, got)
+					}
+				}
+			})
+		}
+	})
+}
+
+// The halt names a strategy pull only on a store that has one, and for the
+// remote this run pulled from; the remote is user input, so it is pasted only
+// as remedy.CommandArg spells it.
+func TestSyncStrategyPull(t *testing.T) {
+	server := &fakeSyncStore{}
+	embedded := &fakeStrategicSyncStore{fakeSyncStore: server}
+	cases := []struct {
+		name     string
+		st       storage.DoltStorage
+		remote   string
+		wantCmd  string
+		wantNote bool
+	}{
+		{name: "server mode has none", st: server, remote: "", wantCmd: ""},
+		{name: "server mode has none for a named remote", st: server, remote: "mini", wantCmd: ""},
+		{name: "embedded default remote", st: embedded, remote: "", wantCmd: "bd dolt pull"},
+		{name: "embedded named remote", st: embedded, remote: "mini", wantCmd: "bd dolt pull mini"},
+		{name: "embedded remote that cannot be pasted", st: embedded, remote: "mi\x1bni", wantCmd: "bd dolt pull <remote>", wantNote: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, note := syncStrategyPull(tc.st, tc.remote)
+			if cmd != tc.wantCmd {
+				t.Errorf("command = %q, want %q", cmd, tc.wantCmd)
+			}
+			if gotNote := note != ""; gotNote != tc.wantNote {
+				t.Errorf("note = %q, want a note: %v", note, tc.wantNote)
+			}
+			if strings.ContainsRune(note, '\x1b') {
+				t.Errorf("note must name the remote escaped, got %q", note)
+			}
+		})
+	}
 }
 
 func TestSyncCommandRegistered(t *testing.T) {
@@ -1763,6 +1874,75 @@ func TestRunSyncCommandQuietDoesNotSilenceConflict(t *testing.T) {
 	if !strings.Contains(stderr, "merge conflict") {
 		t.Errorf("stderr = %q, want a conflict report even under -q", stderr)
 	}
+}
+
+// fakeStrategicSyncStore is fakeSyncStore on a backend with a strategy pull,
+// as embedded storage is (storage.StrategicPuller). bd sync itself must never
+// pull with a strategy, so it counts any call for the test to reject.
+type fakeStrategicSyncStore struct {
+	*fakeSyncStore
+	strategyPulls int
+}
+
+func (f *fakeStrategicSyncStore) PullWithStrategy(context.Context, string) error {
+	f.strategyPulls++
+	return errors.New("bd sync must not pull with a strategy")
+}
+
+func (f *fakeStrategicSyncStore) PullRemoteWithStrategy(context.Context, string, string) error {
+	f.strategyPulls++
+	return errors.New("bd sync must not pull with a strategy")
+}
+
+// TestRunSyncCommandAbortedConflictRemedyFollowsTheBackend drives an aborted
+// pull's halt through runSyncCommand: the store decides whether the remedy
+// names a strategy pull (server mode refuses one), and --remote is the remote
+// it names.
+func TestRunSyncCommandAbortedConflictRemedyFollowsTheBackend(t *testing.T) {
+	aborted := &versioncontrolops.MergeConflictsError{Conflicts: []storage.Conflict{{Field: "issues", Count: 1}}}
+	halt := func(t *testing.T) string {
+		t.Helper()
+		var err error
+		stderr := captureStderr(t, func() { err = runSyncCommand(syncCmd, nil) })
+		if code, ok := exitCodeFromError(err); !ok || code != ExitSyncConflict {
+			t.Fatalf("runSyncCommand() = %v, want exit %d\nstderr:\n%s", err, ExitSyncConflict, stderr)
+		}
+		return stderr
+	}
+
+	t.Run("server-mode storage names no strategy pull", func(t *testing.T) {
+		setupSyncCommandTest(t, &fakeSyncStore{pullErr: aborted})
+		stderr := halt(t)
+		if !strings.Contains(stderr, "working set restored") {
+			t.Errorf("halt does not report the aborted merge:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "--strategy") {
+			t.Errorf("server mode refuses a strategy pull, so the halt must not name one:\n%s", stderr)
+		}
+	})
+
+	t.Run("embedded storage names the strategy pull for the remote synced", func(t *testing.T) {
+		inner := &fakeSyncStore{pullRemoteErr: aborted}
+		setupSyncCommandTest(t, inner)
+		fake := &fakeStrategicSyncStore{fakeSyncStore: inner}
+		store = fake
+		if err := syncCmd.Flags().Set("remote", "mini"); err != nil {
+			t.Fatal(err)
+		}
+		stderr := halt(t)
+		for _, want := range []string{
+			"  bd dolt pull mini --strategy ours\n",
+			"  bd dolt pull mini --strategy theirs\n",
+			"EVERY conflicted row of the pull",
+		} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("halt must contain %q:\n%s", want, stderr)
+			}
+		}
+		if fake.strategyPulls != 0 {
+			t.Errorf("bd sync pulled with a strategy %d time(s); it must only name one", fake.strategyPulls)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

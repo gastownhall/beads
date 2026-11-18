@@ -1302,6 +1302,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A claim that races a remote close no longer reopens the issue** (#7783).
+  A pull's issue merge settled a close on one side against a different
+  status on the other last-write-wins, so a claim made later on a replica
+  that had not pulled the close won, and its next `bd sync` published the
+  issue reopened. Whichever side is newer, such a conflict is now left for
+  the operator: the pull prints a notice naming the issue and both statuses
+  and stops as it does for any conflict it cannot settle, and `bd sync`
+  exits 2 without pushing, so a sync timer that exited 0 on this race now
+  stops publishing that replica until someone chooses a side. The halt
+  names the step the pull route supports: `bd conflicts resolve <issue-id>
+  --ours|--theirs` when the pull left the conflict live (server mode pulling
+  through the dolt CLI, as it does from a git remote), or, after an aborted
+  pull on embedded storage, `bd dolt pull --strategy ours|theirs`, which
+  keeps one side's whole row for every conflicted row of that pull, not
+  only the raced issue. Server-mode storage has no strategy pull. Two
+  closes, or two different non-closed statuses, still settle
+  last-write-wins.
+- **`bd vc status` shows uncommitted changes** (#7783). Its help promised
+  the current branch, commit and any uncommitted changes, but it printed
+  only the branch and commit, so a working set holding uncommitted changes
+  looked clean. It now lists each table changed since the last commit, with
+  its change (modified, new table, deleted) and whether it is staged,
+  leaving out the bookkeeping tables `bd doctor` also leaves out, and
+  `--json` adds always-present `staged` and `unstaged` arrays of
+  `{"table", "status"}` objects. It exits 1 when it cannot read the working
+  set's status instead of reporting a clean one, and it never stages or
+  commits anything. The text output loses its header line and indentation.
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that
