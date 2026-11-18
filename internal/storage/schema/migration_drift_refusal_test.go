@@ -24,9 +24,26 @@ const (
 	driftRecoveryURL = "https://beads.gascity.com/recovery/schema-encoding-drift"
 )
 
-// migrationBody returns the shipped SQL of one main-source migration, which is
-// exactly the text the runner hands to ExecContext or DrainCall.
+// migrationBody returns exactly the text the runner hands to ExecContext or
+// DrainCall for one main-source migration: the shipped SQL, or, for a
+// migration with a registered execution plan (0059, #6520), the planned body
+// built from it.
 func migrationBody(t *testing.T, name string) string {
+	t.Helper()
+	version, err := parseVersion(name)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", name, err)
+	}
+	body, err := mainSource.plannedMigrationBody(version, name, []byte(shippedMigrationSQL(t, name)))
+	if err != nil {
+		t.Fatalf("planning %s: %v", name, err)
+	}
+	return body
+}
+
+// shippedMigrationSQL returns the shipped SQL of one main-source migration,
+// the text the dirty-table guard scans for the tables a pending step touches.
+func shippedMigrationSQL(t *testing.T, name string) string {
 	t.Helper()
 	data, err := mainSource.files.ReadFile(mainSource.dir + "/" + name)
 	if err != nil {
@@ -132,7 +149,7 @@ func TestRunMigrationsEncodingDriftRefuses(t *testing.T) {
 // and both it and the JSON hint say not to commit; both also say to stop
 // every writer and to find the store with bd context, not to assume .beads.
 func TestSchemaEncodingDriftRefusalWarnsAboutTheDirtyTableGuard(t *testing.T) {
-	body := migrationBody(t, migration0059)
+	body := shippedMigrationSQL(t, migration0059)
 	for _, table := range []string{"__bd_0059_recompute_wisp_deps", "__bd_0059_recompute_wisps", "issues"} {
 		if !migrationSQLTouchesTable(body, table) {
 			t.Errorf("the dirty-table guard does not count 0059's write to %s", table)
@@ -531,7 +548,7 @@ func (*panickingBodyDB) ExecContext(context.Context, string, ...any) (sql.Result
 // changes nothing else. Healthy steps run in order and count as before,
 // unrelated failures keep their exact text and type, a raw engine panic passes
 // through untouched (Beads adds no recover), and the aux re-key keeps its own
-// narrower classifier.
+// classifier.
 func TestMigrationDriftClassificationPreservesOtherFailures(t *testing.T) {
 	ok := sqlmock.NewResult(0, 0)
 
@@ -620,11 +637,18 @@ func TestMigrationDriftClassificationPreservesOtherFailures(t *testing.T) {
 	})
 
 	t.Run("aux re-key classifier unchanged", func(t *testing.T) {
-		if !isSchemaEncodingDriftErr(errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 19")) {
-			t.Error("aux re-key no longer tolerates the hash-length drift it skips")
+		// Since #8372 the aux re-key tolerates both drift phrases on its own;
+		// the migration boundary neither narrows nor widens that.
+		for _, err := range []error{
+			errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 19"),
+			errors.New("malformed out-of-band adaptive value: invalid address length 3"),
+		} {
+			if !isSchemaEncodingDriftErr(err) {
+				t.Errorf("aux re-key no longer tolerates the drift it skips: %v", err)
+			}
 		}
-		if isSchemaEncodingDriftErr(errors.New("malformed out-of-band adaptive value: invalid address length 3")) {
-			t.Error("aux re-key widened to the migration-only adaptive signature")
+		if isSchemaEncodingDriftErr(errors.New("Error 1105 (HY000): no root value found in session")) {
+			t.Error("aux re-key widened past its drift phrases")
 		}
 	})
 }
