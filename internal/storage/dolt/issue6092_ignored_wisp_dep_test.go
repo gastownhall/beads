@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
@@ -303,6 +305,168 @@ func (r issue6092DepRow) target() string {
 		return r.ext.String
 	}
 	return "<no target>"
+}
+
+// issue6092Partial0005WispDepDDL is the state a partially applied ignored/0005
+// strands: the drop half ran (depends_on_id gone, legacy indexes and foreign
+// keys dropped), the id/unique-key/index adds ran, and the failure hit before
+// the foreign-key restore — so the retry reads @needs_drop = 0, no-ops the
+// whole frozen body and advances the cursor past a table with no foreign keys
+// and no one-target check. The legacy plain KEYs survive exactly as they would
+// on a real stranded table; 0005 never drops them.
+const issue6092Partial0005WispDepDDL = `
+CREATE TABLE wisp_dependencies (
+    id CHAR(36) NOT NULL DEFAULT (UUID()),
+    issue_id VARCHAR(255) NOT NULL,
+    depends_on_issue_id VARCHAR(255) NULL,
+    depends_on_wisp_id VARCHAR(255) NULL,
+    depends_on_external VARCHAR(255) NULL,
+    type VARCHAR(32) NOT NULL DEFAULT 'blocks',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_by VARCHAR(255) DEFAULT '',
+    metadata JSON DEFAULT (JSON_OBJECT()),
+    thread_id VARCHAR(255) DEFAULT '',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_wisp_dep_issue_target (issue_id, depends_on_issue_id),
+    UNIQUE KEY uk_wisp_dep_wisp_target (issue_id, depends_on_wisp_id),
+    UNIQUE KEY uk_wisp_dep_external_target (issue_id, depends_on_external),
+    KEY idx_wisp_dep_external_target (depends_on_external),
+    KEY idx_wisp_dep_issue_target (depends_on_issue_id),
+    KEY idx_wisp_dep_type (type),
+    KEY idx_wisp_dep_type_issue (type, depends_on_issue_id),
+    KEY idx_wisp_dep_type_wisp (type, depends_on_wisp_id),
+    KEY idx_wisp_dep_type_external (type, depends_on_external),
+    KEY idx_wisp_dep_wisp_target (depends_on_wisp_id)
+)`
+
+// TestIssue6092IgnoredWispDepRepairRestoresConstraintsAfterFailedRun covers the
+// stranded population of #6092: a partially applied ignored/0005 left the
+// id-keyed table without its target foreign keys and without
+// ck_wisp_dep_one_target, and the ignored cursor still at 4. A plain retry
+// cannot heal it — the frozen body no-ops on @needs_drop = 0 — so the repair
+// registered at ignored 5 must complete the shape in place, keeping the
+// existing surrogate ids.
+func TestIssue6092IgnoredWispDepRepairRestoresConstraintsAfterFailedRun(t *testing.T) {
+	dbName, conn, ctx := issue6092Setup(t)
+
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
+			t.Fatalf("exec %.80q: %v", query, err)
+		}
+	}
+	scalar := func(query string) int64 {
+		t.Helper()
+		var v int64
+		if err := conn.QueryRowContext(ctx, query).Scan(&v); err != nil {
+			t.Fatalf("query %.80q: %v", query, err)
+		}
+		return v
+	}
+
+	// The stranded state: cursor still at 4 (0005 never stamped), table
+	// already id-keyed with its unique keys but none of the four constraints.
+	exec("DELETE FROM ignored_schema_migrations WHERE version > 4")
+	exec("DROP TABLE wisp_dependencies")
+	exec(issue6092Partial0005WispDepDDL)
+
+	issue6092SeedReferencedRows(t, ctx, conn)
+	wantIDs := issue6092SeedWispDepsWithDeterministicIDs(t, ctx, conn)
+	updatedBefore := issue6092SnapshotUpdatedAt(t, ctx, conn)
+	issue6092CommitFixture(t, ctx, conn, "test: #6092 partial 0005 shape without target constraints")
+
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"); got != 4 {
+		t.Fatalf("fixture ignored cursor = %d, want 4", got)
+	}
+
+	// PRE-fix this pass succeeds and advances the cursor while the frozen
+	// body no-ops, leaving every constraint missing — the stranded state the
+	// reporter had to recover from by hand.
+	if _, err := schema.MigrateUpWithLock(ctx, conn, dbName); err != nil {
+		t.Fatalf("upgrade over a partially applied 0005 (#6092): %v", err)
+	}
+
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations"); got != int64(schema.LatestVersion()) {
+		t.Fatalf("main cursor = %d after the upgrade, want latest %d", got, schema.LatestVersion())
+	}
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"); got != int64(schema.LatestIgnoredVersion()) {
+		t.Fatalf("ignored cursor = %d after the upgrade, want latest %d", got, schema.LatestIgnoredVersion())
+	}
+	issue6092RequireFinalWispDepShape(t, ctx, conn)
+	issue6092RequireSeededRowsPreserved(t, ctx, conn, updatedBefore)
+
+	for natural, wantID := range wantIDs {
+		if got := issue6092WispDepID(t, ctx, conn, natural); got != wantID {
+			t.Errorf("row %s id = %q after the repair, want the pre-existing %q", natural, got, wantID)
+		}
+	}
+}
+
+// issue6092SeedWispDepsWithDeterministicIDs seeds one valid row per target
+// kind carrying explicit surrogate ids and returns them keyed by natural
+// identity. The ids are depid.New(issue, target) values rather than arbitrary
+// UUIDs: rekeyDependencyIDs (#4259) rewrites every wisp_dependencies id that
+// does not equal depid.New on any pass with ignored 26 pending — and a
+// cursor-at-4 replay makes 26 pending — so the ids the repair must preserve
+// have to already be the deterministic values for the retention claim to be
+// about the repair, not about the rekey rewriting them underneath it.
+func issue6092SeedWispDepsWithDeterministicIDs(t *testing.T, ctx context.Context, db issue6092Conn) map[string]string {
+	t.Helper()
+	rows := []struct {
+		issue, issueTarget, wispTarget, externalTarget, depType, createdBy string
+	}{
+		{"w1", "", "w2", "", "blocks", "alice"},
+		{"w3", "i1", "", "", "relates", "bob"},
+		{"w1", "", "", "external:e1", "mentions", "carol"},
+	}
+	ids := map[string]string{}
+	for _, r := range rows {
+		target := r.issueTarget
+		if target == "" {
+			target = r.wispTarget
+		}
+		if target == "" {
+			target = r.externalTarget
+		}
+		id := depid.New(r.issue, target)
+		var issueTarget, wispTarget, externalTarget any
+		if r.issueTarget != "" {
+			issueTarget = r.issueTarget
+		}
+		if r.wispTarget != "" {
+			wispTarget = r.wispTarget
+		}
+		if r.externalTarget != "" {
+			externalTarget = r.externalTarget
+		}
+		if _, err := db.ExecContext(ctx, `
+INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata)
+VALUES (?, ?, ?, ?, ?, ?, '2026-11-01 10:00:00', ?, JSON_OBJECT())`,
+			id, r.issue, issueTarget, wispTarget, externalTarget, r.depType, r.createdBy); err != nil {
+			t.Fatalf("seed wisp dep %s: %v", id, err)
+		}
+		ids[r.issue+"->"+target] = id
+	}
+	return ids
+}
+
+// issue6092WispDepID reads one dependency row's surrogate id by its natural
+// identity ("issue->target").
+func issue6092WispDepID(t *testing.T, ctx context.Context, db issue6092Conn, natural string) string {
+	t.Helper()
+	issue, target, ok := strings.Cut(natural, "->")
+	if !ok {
+		t.Fatalf("bad natural key %q", natural)
+	}
+	var id string
+	if err := db.QueryRowContext(ctx, `
+SELECT id FROM wisp_dependencies
+WHERE issue_id = ?
+  AND (depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external = ?)`,
+		issue, target, target, target).Scan(&id); err != nil {
+		t.Fatalf("read id for %s: %v", natural, err)
+	}
+	return id
 }
 
 // issue6092RunMigrationFile executes one frozen migration file's whole body

@@ -865,6 +865,25 @@ func AllMigrationsSQL() string {
 	return b.String()
 }
 
+// MainMigrationFileSQL returns the frozen body of one numbered main migration
+// file, byte-for-byte as the runner applies it. Test support, for fixtures
+// that need to replay a single shipped file (e.g. main 0022's indexes over a
+// #6092-style legacy table) without a source-tree relative path, which does
+// not survive every Bazel test configuration.
+func MainMigrationFileSQL(version int) (string, bool) {
+	for _, f := range mainSource.list() {
+		if f.version != version {
+			continue
+		}
+		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + f.name)
+		if err != nil {
+			return "", false
+		}
+		return string(data), true
+	}
+	return "", false
+}
+
 // MigrationSQL returns the frozen SQL content of a main-source migration
 // file by name (e.g. "0057_events_value_columns_idempotent_longtext.up.sql"),
 // read from the same embedded FS runMigrations applies in production
