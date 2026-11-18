@@ -23,8 +23,6 @@ func TestUserConfigYamlPathNamesNativeEnvironmentSource(t *testing.T) {
 		switch runtime.GOOS {
 		case "windows":
 			wantSource = "APPDATA"
-		case "darwin", "ios":
-			wantSource = "HOME"
 		case "plan9":
 			wantSource = "home"
 		}
@@ -227,6 +225,19 @@ func TestRelativeUserRootsNeverReachImplicitOrExplicitFilesystemPaths(t *testing
 }
 
 func TestInitializeUserConfigPrecedence(t *testing.T) {
+	assertInitializeUserConfigPrecedence(t)
+}
+
+// TestInitializeUserConfigPrecedenceDarwinResolver proves the darwin resolver
+// keeps the GH#3532 merge order (legacy < native < documented, per key) when
+// $XDG_CONFIG_HOME names a native root distinct from ~/.config.
+func TestInitializeUserConfigPrecedenceDarwinResolver(t *testing.T) {
+	t.Cleanup(SetUserConfigDirForTest(darwinUserConfigDirForTest(t)))
+	assertInitializeUserConfigPrecedence(t)
+}
+
+func assertInitializeUserConfigPrecedence(t *testing.T) {
+	t.Helper()
 	ResetForTesting()
 	t.Cleanup(ResetForTesting)
 	restore := envSnapshot(t)
@@ -315,5 +326,309 @@ func assertInitializedActor(t *testing.T, want string) {
 	}
 	if got := GetString("actor"); got != want {
 		t.Fatalf("actor = %q, want %q", got, want)
+	}
+}
+
+// darwinUserConfigDirForTest returns the darwin resolver for installation
+// through SetUserConfigDirForTest. The stdlib fallback must never be reached
+// on darwin; reaching it fails the test.
+func darwinUserConfigDirForTest(t *testing.T) func() (string, error) {
+	t.Helper()
+	return func() (string, error) {
+		return userConfigDirFor("darwin", os.Getenv, func() (string, error) {
+			t.Errorf("darwin resolver consulted os.UserConfigDir")
+			return "", errors.New("os.UserConfigDir must not be consulted on darwin")
+		})
+	}
+}
+
+// recordUserConfigStats routes every user-config candidate stat through a
+// recorder and returns the recorded paths.
+func recordUserConfigStats(t *testing.T) *[]string {
+	t.Helper()
+	var probes []string
+	prev := statUserConfigPath
+	statUserConfigPath = func(path string) (os.FileInfo, error) {
+		probes = append(probes, path)
+		return prev(path)
+	}
+	t.Cleanup(func() { statUserConfigPath = prev })
+	return &probes
+}
+
+func TestUserConfigDirFor(t *testing.T) {
+	abs := t.TempDir()
+	home := t.TempDir()
+	dotConfig := home + "/.config"
+	stdlibErr := errors.New("stdlib resolver failure")
+
+	type env map[string]string
+	apple := []struct {
+		name    string
+		goos    string
+		env     env
+		want    string
+		wantErr string
+	}{
+		{name: "darwin XDG absolute", goos: "darwin", env: env{"XDG_CONFIG_HOME": abs, "HOME": home}, want: abs},
+		{name: "darwin XDG relative", goos: "darwin", env: env{"XDG_CONFIG_HOME": "relative-xdg", "HOME": home}, wantErr: "path in $XDG_CONFIG_HOME is relative"},
+		{name: "darwin XDG unset", goos: "darwin", env: env{"HOME": home}, want: dotConfig},
+		{name: "darwin XDG equals ~/.config", goos: "darwin", env: env{"XDG_CONFIG_HOME": dotConfig, "HOME": home}, want: dotConfig},
+		{name: "darwin HOME empty", goos: "darwin", env: env{}, wantErr: "neither $XDG_CONFIG_HOME nor $HOME are defined"},
+		{name: "darwin HOME tilde", goos: "darwin", env: env{"HOME": "~"}, want: "~/.config"},
+		{name: "ios XDG unset", goos: "ios", env: env{"HOME": home}, want: dotConfig},
+		{name: "ios XDG absolute", goos: "ios", env: env{"XDG_CONFIG_HOME": abs, "HOME": home}, want: abs},
+	}
+	for _, tt := range apple {
+		t.Run(tt.name, func(t *testing.T) {
+			getenv := func(key string) string { return tt.env[key] }
+			stdlib := func() (string, error) {
+				t.Errorf("%s consulted os.UserConfigDir", tt.goos)
+				return "", stdlibErr
+			}
+			got, err := userConfigDirFor(tt.goos, getenv, stdlib)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr || got != "" {
+					t.Fatalf("userConfigDirFor = %q, %v; want error %q", got, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("userConfigDirFor = %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+
+	for _, goos := range []string{"linux", "windows", "freebsd", "plan9", "android"} {
+		t.Run(goos+" passes the stdlib value through", func(t *testing.T) {
+			getenv := func(key string) string {
+				t.Errorf("%s read %s from the environment", goos, key)
+				return ""
+			}
+			got, err := userConfigDirFor(goos, getenv, func() (string, error) { return abs, nil })
+			if err != nil || got != abs {
+				t.Fatalf("userConfigDirFor = %q, %v; want %q", got, err, abs)
+			}
+		})
+		t.Run(goos+" passes the stdlib error through", func(t *testing.T) {
+			getenv := func(key string) string {
+				t.Errorf("%s read %s from the environment", goos, key)
+				return ""
+			}
+			got, err := userConfigDirFor(goos, getenv, func() (string, error) { return "", stdlibErr })
+			if !errors.Is(err, stdlibErr) || err != stdlibErr || got != "" {
+				t.Fatalf("userConfigDirFor = %q, %v; want stdlib error identity", got, err)
+			}
+		})
+	}
+}
+
+// TestUserConfigDirMatchesStdlibOffDarwin runs the production resolver on the
+// host. Off darwin and ios it must equal os.UserConfigDir in value and error
+// text; on darwin and ios it must follow the Unix rule and differ from the
+// stdlib's ~/Library/Application Support answer.
+func TestUserConfigDirMatchesStdlibOffDarwin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	for name, xdg := range map[string]string{
+		"XDG absolute": filepath.Join(home, "xdg-config"),
+		"XDG unset":    "",
+		"XDG relative": "relative-xdg",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", xdg)
+			got, err := UserConfigDir()
+			stdlib, stdlibErr := os.UserConfigDir()
+			switch runtime.GOOS {
+			case "darwin", "ios":
+				switch xdg {
+				case "":
+					if err != nil || got != home+"/.config" {
+						t.Fatalf("UserConfigDir = %q, %v; want %q", got, err, home+"/.config")
+					}
+				case "relative-xdg":
+					if err == nil || err.Error() != "path in $XDG_CONFIG_HOME is relative" {
+						t.Fatalf("UserConfigDir = %q, %v; want relative-XDG error", got, err)
+					}
+					return
+				default:
+					if err != nil || got != xdg {
+						t.Fatalf("UserConfigDir = %q, %v; want %q", got, err, xdg)
+					}
+				}
+				if stdlibErr == nil && got == stdlib {
+					t.Fatalf("UserConfigDir = os.UserConfigDir = %q on %s; want the Unix rule", got, runtime.GOOS)
+				}
+			default:
+				if got != stdlib {
+					t.Fatalf("UserConfigDir = %q, want os.UserConfigDir %q", got, stdlib)
+				}
+				if (err == nil) != (stdlibErr == nil) || (err != nil && err.Error() != stdlibErr.Error()) {
+					t.Fatalf("UserConfigDir error = %v, want os.UserConfigDir error %v", err, stdlibErr)
+				}
+			}
+		})
+	}
+}
+
+func TestUserConfigYamlSearchPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Cleanup(SetUserConfigDirForTest(darwinUserConfigDirForTest(t)))
+	probes := recordUserConfigStats(t)
+
+	legacy := filepath.Join(home, ".beads", "config.yaml")
+	documented := filepath.Join(home, ".config", "bd", "config.yaml")
+
+	t.Run("darwin XDG unset dedups native into documented", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "")
+		got := UserConfigYamlSearchPaths()
+		want := []string{legacy, documented}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("UserConfigYamlSearchPaths = %q, want %q", got, want)
+		}
+	})
+	t.Run("darwin XDG set keeps three layers", func(t *testing.T) {
+		xdg := filepath.Join(home, "xdg-config")
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		got := UserConfigYamlSearchPaths()
+		want := []string{legacy, filepath.Join(xdg, "bd", "config.yaml"), documented}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("UserConfigYamlSearchPaths = %q, want %q", got, want)
+		}
+	})
+	t.Run("darwin XDG relative skips the native layer", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", "relative-xdg")
+		got := UserConfigYamlSearchPaths()
+		want := []string{legacy, documented}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("UserConfigYamlSearchPaths = %q, want %q", got, want)
+		}
+	})
+	if len(*probes) != 0 {
+		t.Fatalf("UserConfigYamlSearchPaths touched the filesystem: %q", *probes)
+	}
+}
+
+// TestUserConfigNeverReadsMacOSApplicationSupport plants bd config under
+// <home>/Library/Application Support and proves no user-config read or write
+// probes it (GH#8113). The native subtests use the host resolver, so on macOS
+// they exercise the real binary path; the darwin subtests install the darwin
+// resolver and are discriminating on every host.
+func TestUserConfigNeverReadsMacOSApplicationSupport(t *testing.T) {
+	const sentinelActor = "appsupport-sentinel"
+	const sentinelNode = "appsupport-node"
+	sentinel := "actor: " + sentinelActor + "\nnode_id: " + sentinelNode + "\nmetrics:\n  disabled: true\n"
+
+	for _, tc := range []struct {
+		name   string
+		darwin bool
+		xdg    bool
+	}{
+		{name: "native XDG set", xdg: true},
+		{name: "native XDG unset"},
+		{name: "darwin XDG set", darwin: true, xdg: true},
+		{name: "darwin XDG unset", darwin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, plant := range []string{"sentinel file", "directory"} {
+				t.Run(plant, func(t *testing.T) {
+					ResetForTesting()
+					t.Cleanup(ResetForTesting)
+					restore := envSnapshot(t)
+					t.Cleanup(restore)
+
+					home := t.TempDir()
+					t.Setenv("HOME", home)
+					t.Setenv("USERPROFILE", home)
+					t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+					xdg := ""
+					if tc.xdg {
+						xdg = filepath.Join(home, "xdg-config")
+					}
+					t.Setenv("XDG_CONFIG_HOME", xdg)
+					if tc.darwin {
+						t.Cleanup(SetUserConfigDirForTest(darwinUserConfigDirForTest(t)))
+					}
+					t.Chdir(home)
+
+					appSupport := filepath.Join(home, "Library", "Application Support")
+					legacyAppSupport := filepath.Join(appSupport, "bd", "config.yaml")
+					if plant == "directory" {
+						if err := os.MkdirAll(legacyAppSupport, 0o755); err != nil {
+							t.Fatalf("mkdir %s: %v", legacyAppSupport, err)
+						}
+					} else {
+						writeUserConfigPath(t, legacyAppSupport)
+						if err := os.WriteFile(legacyAppSupport, []byte(sentinel), 0o600); err != nil {
+							t.Fatalf("write %s: %v", legacyAppSupport, err)
+						}
+					}
+					probes := recordUserConfigStats(t)
+					touchesAppSupport := func(path string) bool {
+						return path == appSupport || strings.HasPrefix(path, appSupport+string(filepath.Separator))
+					}
+
+					for _, path := range UserConfigYamlSearchPaths() {
+						if touchesAppSupport(path) {
+							t.Fatalf("user config candidates include Application Support: %q", path)
+						}
+					}
+					if err := Initialize(); err != nil {
+						t.Fatalf("Initialize: %v", err)
+					}
+					if got := GetString("actor"); got == sentinelActor {
+						t.Errorf("GetString(actor) read the Application Support sentinel")
+					}
+					if got := PrivateConfigValue("actor"); got == sentinelActor {
+						t.Errorf("PrivateConfigValue(actor) read the Application Support sentinel")
+					}
+					if got := NodeID(); got == sentinelNode {
+						t.Errorf("NodeID() read the Application Support sentinel")
+					}
+					if MetricsDisabledByUserConfig() {
+						t.Errorf("MetricsDisabledByUserConfig() read the Application Support opt-out")
+					}
+					if got := GetUserYamlConfig("actor"); got == sentinelActor {
+						t.Errorf("GetUserYamlConfig(actor) read the Application Support sentinel")
+					}
+					if got := UserConfigYamlDisplayPath(); touchesAppSupport(got) {
+						t.Errorf("UserConfigYamlDisplayPath() = %q", got)
+					}
+
+					documented := filepath.Join(home, ".config", "bd", "config.yaml")
+					if err := SetUserYamlConfig("actor", "written-by-test"); err != nil {
+						t.Fatalf("SetUserYamlConfig: %v", err)
+					}
+					path, err := UserConfigYamlPath()
+					if err != nil || path != documented {
+						t.Fatalf("UserConfigYamlPath = %q, %v; want %q", path, err, documented)
+					}
+					data, err := os.ReadFile(documented)
+					if err != nil || !strings.Contains(string(data), "written-by-test") {
+						t.Fatalf("write did not land on %s: %v %q", documented, err, data)
+					}
+
+					if len(*probes) == 0 {
+						t.Fatal("no user config stat was recorded; the probe seam is not wired")
+					}
+					for _, probe := range *probes {
+						if touchesAppSupport(probe) {
+							t.Errorf("user config probed Application Support: %q", probe)
+						}
+					}
+					if plant == "directory" {
+						if fi, err := os.Stat(legacyAppSupport); err != nil || !fi.IsDir() {
+							t.Errorf("Application Support directory changed: %v", err)
+						}
+					} else if data, err := os.ReadFile(legacyAppSupport); err != nil || string(data) != sentinel {
+						t.Errorf("Application Support file changed: %v %q", err, data)
+					}
+				})
+			}
+		})
 	}
 }
