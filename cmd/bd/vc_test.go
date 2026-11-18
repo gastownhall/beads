@@ -189,3 +189,30 @@ func TestVCStatusFailsWhenWorkingSetUnreadable(t *testing.T) {
 		})
 	}
 }
+
+// TestNewVCWorkingSetSortsAndKeepsEmptySides pins bd vc status's working-set
+// view: each side sorted by table then status, lowercase JSON keys, and an
+// empty side marshalled as [] rather than null.
+func TestNewVCWorkingSetSortsAndKeepsEmptySides(t *testing.T) {
+	ws := newVCWorkingSet(&storage.Status{
+		Unstaged: []storage.StatusEntry{
+			{Table: "labels", Status: "modified"},
+			{Table: "comments", Status: "new table"},
+			{Table: "comments", Status: "modified"},
+		},
+	})
+	got, err := json.Marshal(map[string]interface{}{"staged": ws.Staged, "unstaged": ws.Unstaged})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"staged":[],"unstaged":[{"table":"comments","status":"modified"},{"table":"comments","status":"new table"},{"table":"labels","status":"modified"}]}`
+	if string(got) != want {
+		t.Errorf("working set JSON =\n%s\nwant\n%s", got, want)
+	}
+	if ws.clean() {
+		t.Error("a working set with unstaged changes reported clean")
+	}
+	if empty := newVCWorkingSet(nil); !empty.clean() || empty.Staged == nil || empty.Unstaged == nil {
+		t.Errorf("nil status must give a clean view with non-nil sides, got %+v", empty)
+	}
+}
