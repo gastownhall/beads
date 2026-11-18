@@ -3698,6 +3698,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dolt, where the transaction survives a failed statement, the import
   committed without the edge and exited 0. Such an error now fails the
   import. Refused edges are still skipped as before.
+- `bd import` no longer fails with "Error 1062: duplicate primary key" when a
+  comment's id is already stored with different text, author or time; the
+  failure rolled back the chunk and a re-run did not converge. Comments merge
+  additively: the stored comment is kept (also under `--allow-stale`), and a
+  default re-import of such an otherwise unchanged issue writes nothing. A
+  comment id stored on a different issue now fails with an error naming the
+  comment and both issues (#7114).
 
 - **A bare hash that two prefixes share is reported as ambiguous instead of
   resolving to one of them.** With `hacker-news-abc123` and `ops-abc123` in
