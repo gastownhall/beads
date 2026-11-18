@@ -48,6 +48,53 @@ func (s *testSuite) TestFieldLengthGuards() {
 		s.Require().ErrorIs(err, types.ErrFieldTooLong)
 	})
 
+	// bd-wnp679 AC-4: the create-only branch (caller-selected, and forced for
+	// every minted id) is bounded too, before the guard writes the id's
+	// coordination cell or the strict writer reaches the backend.
+	for _, field := range []string{"assignee", "owner"} {
+		s.Run("CreateOnlyOverLength_"+field+"_RejectedBeforeAnyWrite", func() {
+			r := s.issueRepo()
+			id := "bd-fl-co-" + field
+			in := newTestIssue(id, "over-length "+field+" create-only")
+			if field == "assignee" {
+				in.Assignee = over
+			} else {
+				in.Owner = over
+			}
+			cellBefore := s.coordinationCell(id)
+			err := r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{CreateOnly: true})
+			s.Require().ErrorIs(err, types.ErrFieldTooLong)
+
+			exists, err := r.Exists(s.Ctx(), id, domain.IssueTableOpts{})
+			s.Require().NoError(err)
+			s.False(exists, "issue must not be persisted when %s is rejected", field)
+			s.Equal(cellBefore, s.coordinationCell(id), "rejected create must not write its coordination cell")
+		})
+	}
+
+	s.Run("CreateOnlyAtLimitAssigneeAndOwnerRoundTrip", func() {
+		r := s.issueRepo()
+		in := newTestIssue("bd-fl-co-ok", "at limit create-only")
+		in.Assignee = atLimit
+		in.Owner = atLimit
+		s.Require().NoError(r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{CreateOnly: true}))
+		out, err := r.Get(s.Ctx(), "bd-fl-co-ok", domain.IssueTableOpts{})
+		s.Require().NoError(err)
+		s.Equal(atLimit, out.Assignee)
+		s.Equal(atLimit, out.Owner)
+	})
+
+	s.Run("MintedCreateOverLengthAssigneeRejected", func() {
+		s.resetMintConfig("flMint", "counter")
+		_, err := s.issueUseCase().CreateIssue(s.Ctx(), domain.CreateIssueParams{
+			Issue: &types.Issue{Title: "minted over-length", IssueType: types.TypeTask, Priority: 2, Assignee: over},
+		}, "tester")
+		s.Require().ErrorIs(err, types.ErrFieldTooLong)
+		exists, err := s.issueRepo().Exists(s.Ctx(), "flMint-1", domain.IssueTableOpts{})
+		s.Require().NoError(err)
+		s.False(exists)
+	})
+
 	s.Run("UpdateOverLengthAssigneeRejected", func() {
 		r := s.issueRepo()
 		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-fl-upd", "x"), "tester", domain.InsertIssueOpts{}))

@@ -1,8 +1,10 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -25,6 +27,11 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
 	s.Run("CreateAttachesNormalizedComments", s.useCaseCreateAttachesNormalizedComments)
+	s.Run("CounterModeJumpsPastHeldIDs", s.useCaseMintCounterJumpsPastHeldIDs)
+	s.Run("CounterModeFreeNextValueStaysSequential", s.useCaseMintCounterFreeNextValueStaysSequential)
+	s.Run("CounterModeCrossesAHeldRunLongerThanTheSkipBound", s.useCaseMintCounterCrossesLongHeldRun)
+	s.Run("MintedIDTakesTheCreateOnlyGuard", s.useCaseMintedIDTakesTheCreateOnlyGuard)
+	s.Run("ExplicitIDWithoutCreateOnlyStillUpserts", s.useCaseExplicitIDWithoutCreateOnlyStillUpserts)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -887,4 +894,277 @@ func (s *testSuite) applyGraphWispRouting() {
 	s.Equal(res.IDs["p"], wispDeps[0].dependsOnID)
 	s.Equal("depends_on_wisp_id", wispDeps[0].targetColumn(),
 		"wisp-target dep must use depends_on_wisp_id, got %+v", wispDeps[0])
+}
+
+// counterLastID reads issue_counter's last_id for prefix.
+func (s *testSuite) counterLastID(prefix string) int {
+	var last int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&last))
+	return last
+}
+
+// planeTitles returns the title of every row holding id, keyed by table.
+func (s *testSuite) planeTitles(id string) map[string]string {
+	out := map[string]string{}
+	for _, table := range []string{"issues", "wisps"} {
+		var title string
+		//nolint:gosec // G201: table is one of two hardcoded constants
+		err := s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT title FROM "+table+" WHERE id = ?", id).Scan(&title)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		s.Require().NoError(err)
+		out[table] = title
+	}
+	return out
+}
+
+// mintCounterIssue creates a top-level issue with no id and CreateOnly unset,
+// the shape the quick, todo, gate and batch proxied servers send.
+func (s *testSuite) mintCounterIssue(uc domain.IssueUseCase, title string) string {
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	return res.Issue.ID
+}
+
+// holdExplicit creates id as an explicit, non-CreateOnly create (the import
+// shape) in the named plane. Explicit creates never move issue_counter.
+func (s *testSuite) holdExplicit(uc domain.IssueUseCase, id, title string, wisp bool) {
+	params := domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2, Ephemeral: wisp},
+		ExplicitID: id,
+	}
+	var err error
+	if wisp {
+		_, err = uc.CreateWisp(s.Ctx(), params, "seeder")
+	} else {
+		_, err = uc.CreateIssue(s.Ctx(), params, "seeder")
+	}
+	s.Require().NoError(err, "hold %s", id)
+}
+
+// useCaseMintCounterJumpsPastHeldIDs pins bd-wnp679 AC-1: an explicit create
+// that sits ahead of a LAGGING counter (initialized before the explicit rows
+// existed, so seeding never saw them) is neither overwritten by the next
+// counter mint nor twinned in the other plane. The first held candidate makes
+// the mint advance the counter past every held numeric id once, so it lands
+// past the highest holder, not merely on the first gap.
+func (s *testSuite) useCaseMintCounterJumpsPastHeldIDs() {
+	for _, tc := range []struct {
+		name           string
+		prefix         string
+		twoWisp, fourW bool
+	}{
+		{name: "IssuesHoldBoth", prefix: "lagI"},
+		{name: "WispsHoldBoth", prefix: "lagW", twoWisp: true, fourW: true},
+		{name: "AcrossPlanes", prefix: "lagX", fourW: true},
+	} {
+		s.Run(tc.name, func() {
+			s.resetMintConfig(tc.prefix, "counter")
+			uc := s.issueUseCase()
+			p := func(n int) string { return fmt.Sprintf("%s-%d", tc.prefix, n) }
+
+			s.Require().Equal(p(1), s.mintCounterIssue(uc, "minted one"))
+			s.holdExplicit(uc, p(2), "holder two", tc.twoWisp)
+			s.holdExplicit(uc, p(4), "holder four", tc.fourW)
+			s.Require().Equal(1, s.counterLastID(tc.prefix), "explicit creates must leave the counter lagging at 1")
+
+			minted := s.mintCounterIssue(uc, "minted after holders")
+			s.Equal(p(5), minted, "counter mint must land past the highest held id")
+
+			plane := func(wisp bool) string {
+				if wisp {
+					return "wisps"
+				}
+				return "issues"
+			}
+			s.Equal(map[string]string{plane(tc.twoWisp): "holder two"}, s.planeTitles(p(2)),
+				"holder two must keep its one row, untouched")
+			s.Equal(map[string]string{plane(tc.fourW): "holder four"}, s.planeTitles(p(4)),
+				"holder four must keep its one row, untouched")
+			s.Equal(map[string]string{"issues": "minted after holders"}, s.planeTitles(minted),
+				"the minted id must exist in exactly one plane")
+		})
+	}
+}
+
+// useCaseMintCounterFreeNextValueStaysSequential pins the other half of
+// AC-1: a held id further ahead does not move the counter while the next
+// candidate is free, so ordinary minting stays sequential.
+func (s *testSuite) useCaseMintCounterFreeNextValueStaysSequential() {
+	s.resetMintConfig("seqF", "counter")
+	uc := s.issueUseCase()
+	s.Require().Equal("seqF-1", s.mintCounterIssue(uc, "one"))
+	s.holdExplicit(uc, "seqF-9", "held far ahead", false)
+	s.Equal("seqF-2", s.mintCounterIssue(uc, "two"))
+	s.Equal(2, s.counterLastID("seqF"))
+}
+
+// useCaseMintCounterCrossesLongHeldRun pins bd-wnp679 AC-2: an initialized
+// counter behind more consecutive held ids than the mint's skip bound (an
+// import ahead of the counter, split across both planes) still mints past the
+// highest holder in one request, and leaves every holder untouched. A
+// value-by-value walk would exhaust the bound, and its progress would roll
+// back with the failed transaction, so every retry would fail the same way.
+func (s *testSuite) useCaseMintCounterCrossesLongHeldRun() {
+	const prefix = "lagRun"
+	s.resetMintConfig(prefix, "counter")
+	uc := s.issueUseCase()
+	s.Require().Equal(prefix+"-1", s.mintCounterIssue(uc, "minted one"))
+
+	last := 2 + 1100
+	var issueVals, wispVals []string
+	var issueArgs, wispArgs []any
+	for n := 2; n <= last; n++ {
+		id := fmt.Sprintf("%s-%d", prefix, n)
+		if n%2 == 0 {
+			issueVals = append(issueVals, "(?, 'held', '', '', '', '')")
+			issueArgs = append(issueArgs, id)
+		} else {
+			wispVals = append(wispVals, "(?, 'held')")
+			wispArgs = append(wispArgs, id)
+		}
+	}
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES "+strings.Join(issueVals, ", "), issueArgs...)
+	s.Require().NoError(err)
+	_, err = s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO wisps (id, title) VALUES "+strings.Join(wispVals, ", "), wispArgs...)
+	s.Require().NoError(err)
+	s.Require().Equal(1, s.counterLastID(prefix), "bulk holders must leave the counter lagging at 1")
+
+	minted := s.mintCounterIssue(uc, "minted past the run")
+	s.Equal(fmt.Sprintf("%s-%d", prefix, last+1), minted)
+
+	var changed int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(), `
+		SELECT (SELECT COUNT(*) FROM issues WHERE id LIKE 'lagRun-%' AND id <> ? AND id <> 'lagRun-1' AND title <> 'held')
+		     + (SELECT COUNT(*) FROM wisps WHERE id LIKE 'lagRun-%' AND title <> 'held')`, minted).Scan(&changed))
+	s.Zero(changed, "no held row may be rewritten")
+	s.Equal(map[string]string{"issues": "minted past the run"}, s.planeTitles(minted))
+}
+
+// createCoordinationKey mirrors issueops.issueCreateCoordinationKey: the
+// local_metadata cell the create-only guard (EnsureIssueIDAvailableInTx)
+// rewrites for id's shard before it probes the id.
+func createCoordinationKey(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	shard := uint16(sum[0])<<4 | uint16(sum[1])>>4
+	return fmt.Sprintf("issue-create/v1/%03x", shard)
+}
+
+// coordinationCell reads id's create coordination cell ("" when unset).
+func (s *testSuite) coordinationCell(id string) string {
+	var value string
+	err := s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT value FROM local_metadata WHERE `key` = ?", createCoordinationKey(id)).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ""
+	}
+	s.Require().NoError(err)
+	return value
+}
+
+// coordinationCells snapshots every create coordination cell.
+func (s *testSuite) coordinationCells() map[string]string {
+	rows, err := s.Runner().QueryContext(s.Ctx(),
+		"SELECT `key`, value FROM local_metadata WHERE `key` LIKE 'issue-create/v1/%'")
+	s.Require().NoError(err)
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		s.Require().NoError(rows.Scan(&k, &v))
+		out[k] = v
+	}
+	s.Require().NoError(rows.Err())
+	return out
+}
+
+// useCaseMintedIDTakesTheCreateOnlyGuard pins bd-wnp679 AC-3: a top-level
+// create that names no id and leaves CreateOnly unset (the quick, todo, gate
+// and batch proxied servers) still inserts through the strict create-only
+// guard and writer, in every mint mode and plane. The guard's mark is the
+// rewritten coordination cell of the minted id's shard; the upsert writer
+// never touches it for a generated id.
+func (s *testSuite) useCaseMintedIDTakesTheCreateOnlyGuard() {
+	for _, tc := range []struct {
+		name, prefix, mode string
+		wisp               bool
+	}{
+		{name: "CounterIssue", prefix: "guardC", mode: "counter"},
+		{name: "HashIssue", prefix: "guardH"},
+		{name: "HashWisp", prefix: "guardW", wisp: true},
+	} {
+		s.Run(tc.name, func() {
+			s.resetMintConfig(tc.prefix, tc.mode)
+			uc := s.issueUseCase()
+			before := s.coordinationCells()
+			params := domain.CreateIssueParams{
+				Issue: &types.Issue{Title: "minted " + tc.name, IssueType: types.TypeTask, Priority: 2, Ephemeral: tc.wisp},
+			}
+			var res domain.CreateIssueResult
+			var err error
+			if tc.wisp {
+				res, err = uc.CreateWisp(s.Ctx(), params, "tester")
+			} else {
+				res, err = uc.CreateIssue(s.Ctx(), params, "tester")
+			}
+			s.Require().NoError(err)
+			s.Require().True(strings.HasPrefix(res.Issue.ID, tc.prefix+"-"), "minted %q", res.Issue.ID)
+
+			after := s.coordinationCell(res.Issue.ID)
+			s.NotEmpty(after, "minted %s must take the create-only guard's coordination cell", res.Issue.ID)
+			s.NotEqual(before[createCoordinationKey(res.Issue.ID)], after,
+				"minted %s must rewrite its shard's coordination cell (strict create), not upsert unguarded", res.Issue.ID)
+		})
+	}
+}
+
+// useCaseExplicitIDWithoutCreateOnlyStillUpserts pins bd-wnp679 AC-5: forcing
+// create-only applies to MINTED ids alone. A caller-named id (ExplicitID or a
+// prepopulated Issue.ID) with CreateOnly unset keeps the upsert import relies
+// on, and a caller-selected CreateOnly still refuses the occupied id.
+func (s *testSuite) useCaseExplicitIDWithoutCreateOnlyStillUpserts() {
+	s.resetMintConfig("upx", "counter")
+	uc := s.issueUseCase()
+	for _, tc := range []struct {
+		name   string
+		params func(title string) domain.CreateIssueParams
+	}{
+		{name: "ExplicitID", params: func(title string) domain.CreateIssueParams {
+			return domain.CreateIssueParams{
+				ExplicitID: "upx-7",
+				Issue:      &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2},
+			}
+		}},
+		{name: "PrepopulatedIssueID", params: func(title string) domain.CreateIssueParams {
+			return domain.CreateIssueParams{
+				Issue: &types.Issue{ID: "upx-8", Title: title, IssueType: types.TypeTask, Priority: 2},
+			}
+		}},
+	} {
+		s.Run(tc.name, func() {
+			first, err := uc.CreateIssue(s.Ctx(), tc.params("original"), "tester")
+			s.Require().NoError(err)
+			id := first.Issue.ID
+
+			again, err := uc.CreateIssue(s.Ctx(), tc.params("re-imported"), "tester")
+			s.Require().NoError(err, "explicit re-create without CreateOnly must upsert")
+			s.Equal(id, again.Issue.ID)
+			s.Equal(map[string]string{"issues": "re-imported"}, s.planeTitles(id))
+
+			strict := tc.params("refused")
+			strict.CreateOnly = true
+			_, err = uc.CreateIssue(s.Ctx(), strict, "tester")
+			s.Require().ErrorIs(err, storage.ErrAlreadyExists)
+			s.Equal(map[string]string{"issues": "re-imported"}, s.planeTitles(id))
+		})
+	}
+	_, ok := s.counterRow("upx")
+	s.False(ok, "explicit creates must not touch the counter")
 }
