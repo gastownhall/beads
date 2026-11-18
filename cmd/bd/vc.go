@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -259,6 +260,12 @@ var vcStatusCmd = &cobra.Command{
 	Short: "Show current branch and uncommitted changes",
 	Long: `Show the current branch, commit hash, and any uncommitted changes.
 
+Staged and unstaged changes to issue-data tables are listed per table.
+Changes to beads' internal bookkeeping tables (wisps, leases, local_metadata,
+repo_mtimes, events, wisp_*) are not reported — the same set bd doctor's
+uncommitted-changes checks filter. The command only observes: it never
+stages, commits, or resolves anything.
+
 Examples:
   bd vc status`,
 	SilenceUsage:  true,
@@ -274,31 +281,99 @@ Examples:
 			}
 		}()
 
-		ctx := rootCtx
+		return runVCStatus(rootCtx, store, jsonOutput)
+	},
+}
 
-		currentBranch, err := store.CurrentBranch(ctx)
-		if err != nil {
-			return HandleErrorRespectJSON("failed to get current branch: %v", err)
+// vcStatusTableEntry is one non-bookkeeping table change reported by
+// bd vc status, in text and JSON alike.
+type vcStatusTableEntry struct {
+	Table  string `json:"table"`
+	Status string `json:"status"`
+}
+
+// vcStatusJSON is the JSON shape of `bd vc status --json`: the branch and
+// commit the command always reported, plus the always-present staged and
+// unstaged arrays (empty, never null, on a clean working set). A command-local
+// view: the raw storage.Status stays as the storage layer defines it for its
+// federation and migration consumers.
+type vcStatusJSON struct {
+	Branch   string               `json:"branch"`
+	Commit   string               `json:"commit"`
+	Staged   []vcStatusTableEntry `json:"staged"`
+	Unstaged []vcStatusTableEntry `json:"unstaged"`
+}
+
+// visibleWorkingSet filters bookkeeping tables out of one dolt_status list
+// and sorts it by table then status, so both output formats render a stable
+// order and a table carrying staged AND unstaged changes stays in both lists.
+func visibleWorkingSet(entries []storage.StatusEntry) []vcStatusTableEntry {
+	out := make([]vcStatusTableEntry, 0, len(entries))
+	for _, e := range entries {
+		if storage.IsBookkeepingTable(e.Table) {
+			continue
 		}
-
-		currentCommit, err := store.GetCurrentCommit(ctx)
-		if err != nil {
-			currentCommit = "(unknown)"
+		out = append(out, vcStatusTableEntry{Table: e.Table, Status: e.Status})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Table != out[j].Table {
+			return out[i].Table < out[j].Table
 		}
+		return out[i].Status < out[j].Status
+	})
+	return out
+}
 
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"branch": currentBranch,
-				"commit": currentCommit,
-			})
-		}
+// runVCStatus is the body of bd vc status. The working-set read happens after
+// the branch/commit reads and before any output: a store whose dolt_status
+// cannot be read must fail the command, never print a clean-looking report
+// over an unreadable working set (GH#7783).
+func runVCStatus(ctx context.Context, s storage.DoltStorage, asJSON bool) error {
+	currentBranch, err := s.CurrentBranch(ctx)
+	if err != nil {
+		return HandleErrorRespectJSON("failed to get current branch: %v", err)
+	}
 
-		fmt.Printf("\n%s Version Control Status\n\n", ui.RenderAccent("📊"))
-		fmt.Printf("  Branch: %s\n", ui.StatusInProgressStyle.Render(currentBranch))
-		fmt.Printf("  Commit: %s\n", ui.RenderMuted(currentCommit[:8]))
+	currentCommit, err := s.GetCurrentCommit(ctx)
+	if err != nil {
+		currentCommit = "(unknown)"
+	}
+
+	ws, err := s.Status(ctx)
+	if err != nil {
+		return HandleErrorRespectJSON("failed to read working-set status: %v", err)
+	}
+
+	staged := visibleWorkingSet(ws.Staged)
+	unstaged := visibleWorkingSet(ws.Unstaged)
+
+	if asJSON {
+		return outputJSON(vcStatusJSON{
+			Branch:   currentBranch,
+			Commit:   currentCommit,
+			Staged:   staged,
+			Unstaged: unstaged,
+		})
+	}
+
+	fmt.Printf("\n%s\n\n", ui.RenderAccent("Version Control Status"))
+	fmt.Printf("  Branch: %s\n", ui.StatusInProgressStyle.Render(currentBranch))
+	fmt.Printf("  Commit: %s\n", ui.RenderMuted(currentCommit[:8]))
+	fmt.Println()
+	if len(staged) == 0 && len(unstaged) == 0 {
+		fmt.Println("  Uncommitted changes: none")
 		fmt.Println()
 		return nil
-	},
+	}
+	fmt.Println("  Uncommitted changes:")
+	for _, e := range staged {
+		fmt.Printf("    %s: %s (staged)\n", e.Table, e.Status)
+	}
+	for _, e := range unstaged {
+		fmt.Printf("    %s: %s (unstaged)\n", e.Table, e.Status)
+	}
+	fmt.Println()
+	return nil
 }
 
 func init() {

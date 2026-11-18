@@ -7419,6 +7419,12 @@ bd vc status
   long:
     | Show the current branch, commit hash, and any uncommitted changes.
     |
+    | Staged and unstaged changes to issue-data tables are listed per table.
+    | Changes to beads' internal bookkeeping tables (wisps, leases, local_metadata,
+    | repo_mtimes, events, wisp_*) are not reported — the same set bd doctor's
+    | uncommitted-changes checks filter. The command only observes: it never
+    | stages, commits, or resolves anything.
+    |
     | Examples:
     |   bd vc status
 

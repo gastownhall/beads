@@ -171,6 +171,7 @@ go_test(
         "//internal/doltserver",
         "//internal/git",
         "//internal/gitenv",
+        "//internal/storage",
         "//internal/storage/backendnames",
         "//internal/storage/dolt",
         "//internal/storage/doltutil",

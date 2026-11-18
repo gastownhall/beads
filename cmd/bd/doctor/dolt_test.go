@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -256,6 +257,10 @@ func TestServerMode_NoLockAcquired(t *testing.T) {
 }
 
 func TestIsIgnoredTable(t *testing.T) {
+	// The predicate itself moved behind the storage boundary
+	// (storage.IsBookkeepingTable, GH#7783); doctor keeps pinning the exact
+	// set here because every uncommitted-changes check funnels through it.
+
 	tests := []struct {
 		name     string
 		table    string
@@ -280,8 +285,8 @@ func TestIsIgnoredTable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isIgnoredTable(tt.table); got != tt.expected {
-				t.Errorf("isIgnoredTable(%q) = %v, want %v", tt.table, got, tt.expected)
+			if got := storage.IsBookkeepingTable(tt.table); got != tt.expected {
+				t.Errorf("storage.IsBookkeepingTable(%q) = %v, want %v", tt.table, got, tt.expected)
 			}
 		})
 	}
@@ -386,8 +391,8 @@ func TestDoltLocksAndDoltStatusShareOneFilter(t *testing.T) {
 	previouslyDivergent := []string{"leases", "local_metadata", "repo_mtimes", "events"}
 
 	for _, table := range previouslyDivergent {
-		if !isIgnoredTable(table) {
-			t.Errorf("isIgnoredTable(%q) = false; the shared filter must cover every table both checks ignore", table)
+		if !storage.IsBookkeepingTable(table) {
+			t.Errorf("storage.IsBookkeepingTable(%q) = false; the shared filter must cover every table both checks ignore", table)
 		}
 		if got := describeUncommittedTables([]doltStatusRow{{table: table, status: "modified"}}); len(got) != 0 {
 			t.Errorf("describeUncommittedTables(%q) = %v, want empty", table, got)
