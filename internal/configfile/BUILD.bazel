@@ -18,6 +18,7 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/configfile",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/certstore",
         "//internal/config",
         "//internal/remedy",
         "//internal/storage/backendnames",
@@ -40,6 +41,7 @@ go_test(
     ],
     embed = [":configfile"],
     deps = [
+        "//internal/certstore",
         "//internal/config",
         "//internal/testutil/legacyworkspace",
     ],
