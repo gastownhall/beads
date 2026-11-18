@@ -6,8 +6,25 @@ import (
 	"strings"
 )
 
-// Pre-0058 repair: march wisp_dependencies forward to the final (current 0021)
-// shape so migration 0058 can apply.
+// Pre-migration repair for wisp_dependencies: march the table forward to the
+// final (current 0021) shape so the migration that follows can apply. It is
+// registered at two entry points: before main 0058, whose foreign keys cannot
+// sit on the base columns of depends_on_id's stored generated column, and
+// before ignored 0005 (#6092).
+//
+// The ignored-5 entry point. Wisp tables are clone-local, so a clone whose
+// main cursor is already past 58 — main at latest, ignored still at 4 — has no
+// pending main migration to host this repair, and ignored/0005 runs first over
+// whatever the clone carries. 0005 sniffs @needs_drop once, from depends_on_id
+// presence, and keys its whole frozen body on that one flag: over a legacy
+// generated-column table that already carries main 0022's three
+// idx_wisp_dep_type_* indexes it re-adds them and dies with "Duplicate key
+// name"; after a partially applied run (depends_on_id already dropped, id
+// added, constraints not) it reads 0, no-ops the whole body, advances the
+// cursor and strands the table without its target foreign keys and without
+// ck_wisp_dep_one_target, which the file never adds. Completing the final
+// shape here selects 0005's no-op branch, and the id-bearing detection below
+// finishes a partial 0005 shape in place, preserving ids.
 //
 // The failure. 0058 adds fk_wisp_dep_wisp_target and fk_wisp_dep_issue_target
 // over depends_on_wisp_id and depends_on_issue_id. On every database 0058 was
@@ -115,11 +132,11 @@ var wispDepFinalKeys = []struct{ name, definition string }{
 	{"idx_wisp_dep_type_external", "ADD INDEX idx_wisp_dep_type_external (type, depends_on_external)"},
 }
 
-// repairWispDependenciesForwardShape is the pre-0058 repair. It no-ops on every
-// population except the one 0058 cannot serve: no-ops when the table or either
-// referenced table is absent, when the table is already in the final shape, and
-// on a fresh store (which never had the generated column, so 0058 applies to it
-// cleanly).
+// repairWispDependenciesForwardShape runs before main 0058 and ignored 0005.
+// It no-ops on every population except those two migrations cannot serve:
+// no-ops when the table or either referenced table is absent, when the table
+// is already in the final shape, and on a fresh store (which never had the
+// generated column, so both bodies apply to it cleanly).
 func repairWispDependenciesForwardShape(ctx context.Context, db DBConn) error {
 	// Both referenced tables must exist before any foreign key can be added.
 	// 0058 carries the same @has_wisps/@has_issues guards; a database missing
@@ -127,7 +144,7 @@ func repairWispDependenciesForwardShape(ctx context.Context, db DBConn) error {
 	for _, t := range []string{wispDepTable, "wisps", "issues"} {
 		exists, err := schemaTableExists(ctx, db, t)
 		if err != nil {
-			return fmt.Errorf("checking %s for the pre-0058 repair: %w", t, err)
+			return fmt.Errorf("checking %s for the wisp_dependencies forward-shape repair: %w", t, err)
 		}
 		if !exists {
 			return nil
@@ -186,13 +203,15 @@ func wispDepNeedsForwardRepair(ctx context.Context, db DBConn) (bool, error) {
 
 	hasID, err := schemaColumnExists(ctx, db, wispDepTable, "id")
 	if err != nil {
-		return false, fmt.Errorf("checking %s.id for the pre-0058 repair: %w", wispDepTable, err)
+		return false, fmt.Errorf("checking %s.id for the wisp_dependencies forward-shape repair: %w", wispDepTable, err)
 	}
 	if hasID {
-		// Final lineage. Still finish the job if a prior pass was killed
-		// between adding the surrogate key and adding every constraint: the
-		// steps below are individually guarded, so this is a no-op once the
-		// shape is complete.
+		// Final lineage. Still finish the job if a prior pass — this repair
+		// interrupted mid-sequence, or ignored/0005 interrupted inside its
+		// own window after adding id but before restoring the constraints it
+		// restores — left the surrogate key in place without every final
+		// constraint: the steps below are individually guarded, so this is a
+		// no-op once the shape is complete.
 		return wispDepMissingAnyFinalConstraint(ctx, db)
 	}
 

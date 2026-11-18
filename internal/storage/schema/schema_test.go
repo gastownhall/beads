@@ -799,6 +799,49 @@ func TestPreMigrationRepairDispatchesIgnored15ToWispIsBlockedRepair(t *testing.T
 	}
 }
 
+func TestPreMigrationRepairScopedToIgnored5(t *testing.T) {
+	// The repair must not fire for other versions or for the main source
+	// (whose own version 5 is a different, long-applied migration); nil DB
+	// proves no queries are attempted.
+	if err := ignoredSource.preMigrationRepair(context.Background(), nil, 4); err != nil {
+		t.Fatalf("ignored v4 repair = %v, want nil no-op", err)
+	}
+	if err := ignoredSource.preMigrationRepair(context.Background(), nil, 6); err != nil {
+		t.Fatalf("ignored v6 repair = %v, want nil no-op", err)
+	}
+	if err := mainSource.preMigrationRepair(context.Background(), nil, 5); err != nil {
+		t.Fatalf("main v5 repair = %v, want nil no-op", err)
+	}
+}
+
+func TestPreMigrationRepairDispatchesIgnored5ToWispDepForwardRepair(t *testing.T) {
+	failOnSwallowedAdvisory(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	tableQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
+
+	// repairWispDependenciesForwardShape probes wisp_dependencies, then
+	// wisps: wisp_dependencies present but wisps absent takes the repair's
+	// early no-op branch (no foreign keys can be hosted), which is what
+	// proves the dispatch — only that repair probes in this order with these
+	// arguments.
+	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(tableQuery).WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+
+	if err := ignoredSource.preMigrationRepair(context.Background(), db, 5); err != nil {
+		t.Fatalf("ignored v5 repair: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func TestEnsureWispIsBlockedForRecomputeNoopsWhenWispsAbsent(t *testing.T) {
 	failOnSwallowedAdvisory(t)
 	db, mock, err := sqlmock.New()
@@ -2663,13 +2706,15 @@ func (m *mockDB) QueryRowContext(_ context.Context, _ string, _ ...any) *sql.Row
 }
 
 // wispsAbsentDB extends mockDB's blind-success ExecContext / panicking
-// QueryContext with TWO answerable QueryRowContext queries, same pattern:
-// the ignored/7 and ignored/15 pre-migration repairs (both dispatch to
+// QueryContext with answerable QueryRowContext queries, same pattern:
+// the {ignored_schema_migrations, 5} repair (repairWispDependenciesForwardShape)
+// probes whether wisp_dependencies exists before anything else, and the
+// ignored/7 and ignored/15 repairs (both dispatch to
 // ensureWispIsBlockedForRecompute) each probe whether wisps exists before
 // touching it, and *sql.Row has no public constructor outside a real
 // database/sql driver -- mockDB itself cannot fake a scan result. A small
-// embedded sqlmock answers exactly those two queries with "table absent"
-// (0), so the repair takes its early no-op branch on both firings; any
+// embedded sqlmock answers exactly those queries with "table absent"
+// (0), so each repair takes its early no-op branch on its firing; any
 // OTHER QueryRowContext this pass might issue still surfaces loudly, via
 // sqlmock's own unmet/unexpected-call error rather than a silent success.
 // QueryContext answers the {ignored_schema_migrations, 31} repair's lookup of
@@ -2688,6 +2733,11 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	// The {ignored_schema_migrations, 5} repair probes wisp_dependencies
+	// first and stops there when absent (#6092).
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
+		WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	// Registered twice, once per firing of the {ignored_schema_migrations, 7}
 	// and {ignored_schema_migrations, 15} repairs; go-sqlmock v1.5.2 predates
 	// ExpectedQuery.Times, so the same expectation is set up twice instead of
@@ -2792,10 +2842,11 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	// and ignored both number their first 14 files contiguously (1..14, no
 	// gaps in either series), so any bound < 15 gives main==ignored and would
 	// fail this test's own regression check for an unrelated reason.
-	// wispsAbsentDB answers both the {ignored_schema_migrations, 7} and
-	// {..., 15} repairs' probes (ensureWispIsBlockedForRecompute dispatches
-	// at both) and the {..., 31} repair's drop-commit lookup instead of
-	// dodging them.
+	// wispsAbsentDB answers the {ignored_schema_migrations, 5} repair's
+	// wisp_dependencies-absent probe (#6092), both the {ignored_schema_
+	// migrations, 7} and {..., 15} repairs' probes
+	// (ensureWispIsBlockedForRecompute dispatches at both) and the {..., 31}
+	// repair's drop-commit lookup instead of dodging them.
 	ignored, err := runMigrations(context.Background(), newWispsAbsentDB(t), ignoredSource, 0, 39, false)
 	if err != nil {
 		t.Fatalf("runMigrations(ignoredSource): %v", err)
@@ -2840,9 +2891,10 @@ func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
 	stderr = &ignoredBuf
 	// This assertion (no large-rig notice on the ignored-source pass) does
 	// not depend on applying every ignored migration, so bound below the
-	// {ignored_schema_migrations, 7} repair rather than answering it (7, not
-	// 15: ensureWispIsBlockedForRecompute now dispatches at both versions).
-	_, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 6, false)
+	// {ignored_schema_migrations, 5} repair rather than answering it (5, not
+	// 7 or 15: repairWispDependenciesForwardShape dispatches at 5 and
+	// ensureWispIsBlockedForRecompute at both 7 and 15).
+	_, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 4, false)
 	stderr = orig
 	if err != nil {
 		t.Fatalf("runMigrations(ignoredSource): %v", err)
