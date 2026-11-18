@@ -83,6 +83,12 @@ func TestReadyClaimerDoesNotMutateTheCallerRequest(t *testing.T) {
 // two accessors. A store per case is affordable here — setupTestStore hands out
 // a copy-on-write branch of the shared package server — which is why this
 // wiring keeps one test function per case while the unit-of-work one cannot.
+func TestReadyClaimerExcludeParentsSkipsContainersItWouldOtherwiseClaim(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rcxp")
+	defer cleanup()
+	conformance.RunReadyClaimerExcludeParentsSkipsContainersItWouldOtherwiseClaim(t, ctx, fixture)
+}
+
 func newDoltReadyClaimerFixture(t *testing.T, prefix string) (conformance.ReadyClaimerFixture, context.Context, func()) {
 	t.Helper()
 	store, storeCleanup := setupTestStore(t)

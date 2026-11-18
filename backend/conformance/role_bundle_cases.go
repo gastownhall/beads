@@ -684,6 +684,7 @@ var roleContractCases = []roleContract{
 		RunReadyClaimerDoesNotMutateTheCallerRequest,
 		RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven,
 		RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities,
+		RunReadyClaimerExcludeParentsSkipsContainersItWouldOtherwiseClaim,
 	),
 
 	roleCases("ReadyCounter", "ReadyCounter() and IssueReader()", oncePerRole,
