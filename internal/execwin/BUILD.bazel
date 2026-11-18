@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "execwin",
@@ -14,6 +14,12 @@ go_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+go_test(
+    name = "execwin_test",
+    srcs = ["execwin_test.go"],
+    deps = [":execwin"],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
