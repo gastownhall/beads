@@ -101,6 +101,27 @@ func UserConfigYamlSearchPaths() []string {
 	return paths
 }
 
+// LegacyDarwinUserConfigYamlPath returns
+// <home>/Library/Application Support/bd/config.yaml, the pre-GH#8113 macOS
+// user config that bd no longer merges. home comes from os.UserHomeDir and
+// must be absolute. It only computes the path: the one-time metrics bootstrap
+// carry-over and the macOS doctor check are the only callers allowed to touch
+// the file, because macOS 26 can guard that folder with a privacy prompt.
+func LegacyDarwinUserConfigYamlPath() (string, error) {
+	homeDir, homeErr := os.UserHomeDir()
+	home, err := cleanAbsoluteUserDirectory("user home directory (HOME/USERPROFILE)", homeDir, homeErr)
+	if err != nil {
+		return "", err
+	}
+	return LegacyDarwinUserConfigYamlPathFor(home), nil
+}
+
+// LegacyDarwinUserConfigYamlPathFor is LegacyDarwinUserConfigYamlPath for an
+// already-resolved absolute home directory.
+func LegacyDarwinUserConfigYamlPathFor(home string) string {
+	return filepath.Join(home, "Library", "Application Support", "bd", "config.yaml")
+}
+
 // nativeUserConfigValidationSource names the source of a relative directory
 // returned without a resolver error. The resolver itself rejects relative
 // XDG_CONFIG_HOME values (os.UserConfigDir on Unix, UserConfigDir's own rule

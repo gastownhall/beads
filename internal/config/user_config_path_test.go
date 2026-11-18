@@ -632,3 +632,32 @@ func TestUserConfigNeverReadsMacOSApplicationSupport(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyDarwinUserConfigYamlPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	want := filepath.Join(home, "Library", "Application Support", "bd", "config.yaml")
+	probes := recordUserConfigStats(t)
+	got, err := LegacyDarwinUserConfigYamlPath()
+	if err != nil || got != want {
+		t.Fatalf("LegacyDarwinUserConfigYamlPath = %q, %v; want %q", got, err, want)
+	}
+	if got := LegacyDarwinUserConfigYamlPathFor(home); got != want {
+		t.Fatalf("LegacyDarwinUserConfigYamlPathFor = %q, want %q", got, want)
+	}
+	if len(*probes) != 0 {
+		t.Fatalf("computing the legacy path touched the filesystem: %q", *probes)
+	}
+	if _, err := os.Stat(filepath.Dir(want)); !os.IsNotExist(err) {
+		t.Fatalf("computing the legacy path created %s: %v", filepath.Dir(want), err)
+	}
+
+	t.Setenv("HOME", "~")
+	t.Setenv("USERPROFILE", "~")
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+	if got, err := LegacyDarwinUserConfigYamlPath(); err == nil || got != "" {
+		t.Fatalf("LegacyDarwinUserConfigYamlPath with a relative home = %q, %v; want error", got, err)
+	}
+}

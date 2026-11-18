@@ -1421,23 +1421,7 @@ var rootCmd = &cobra.Command{
 		// span.
 		initTelemetry(rootCtx, Version)
 
-		// Materialize the user-level metrics config only when metrics are
-		// actually enabled. When metrics are disabled (BD_DISABLE_METRICS or a
-		// user-global metrics.disabled), there is nothing to bootstrap. The
-		// send-metrics flusher is exempt so it never recurses into bootstrap.
-		// This mirrors the resolveMetricsEnabled() gate on the first-run notice
-		// below. (~/.config/bd/ lives outside the repo, so this write is not a
-		// stealth/per-repository trace; stealth init is handled by suppressing
-		// the first-run notice, not by skipping this user-global bootstrap.)
-		if cmd.Name() != metrics.SendMetricsSubcommand && resolveMetricsEnabled() {
-			if err := metrics.EnsureUserConfigDefaults(); err != nil {
-				debug.Logf("warning: ensure user config defaults failed: %v", err)
-			}
-		}
-
-		if _, err := metrics.Init(Version, resolveMetricsEnabled(), resolveMetricsEndpoint()); err != nil {
-			debug.Logf("warning: metrics init failed: %v", err)
-		}
+		bootstrapAndInitMetrics(cmd.Name())
 
 		if cmd.Name() == metrics.SendMetricsSubcommand {
 			return nil
@@ -3150,6 +3134,33 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(err.Error()))
 		}
 		os.Exit(1)
+	}
+}
+
+// bootstrapAndInitMetrics is the PersistentPreRun metrics step: bootstrap the
+// user-level metrics config, then initialize the collector from a fresh
+// resolution, so a value the bootstrap just wrote (a metrics opt-out carried
+// over from the pre-GH#8113 macOS config) governs this very run.
+func bootstrapAndInitMetrics(cmdName string) {
+	bootstrapMetricsUserConfig(cmdName)
+	if _, err := metrics.Init(Version, resolveMetricsEnabled(), resolveMetricsEndpoint()); err != nil {
+		debug.Logf("warning: metrics init failed: %v", err)
+	}
+}
+
+// bootstrapMetricsUserConfig materializes the user-level metrics config only
+// when metrics are actually enabled. When metrics are disabled
+// (BD_DISABLE_METRICS or a user-global metrics.disabled), there is nothing to
+// bootstrap. The send-metrics flusher is exempt so it never recurses into
+// bootstrap. This mirrors the resolveMetricsEnabled() gate on the first-run
+// notice. (~/.config/bd/ lives outside the repo, so this write is not a
+// stealth/per-repository trace; stealth init is handled by suppressing the
+// first-run notice, not by skipping this user-global bootstrap.)
+func bootstrapMetricsUserConfig(cmdName string) {
+	if cmdName != metrics.SendMetricsSubcommand && resolveMetricsEnabled() {
+		if err := metrics.EnsureUserConfigDefaults(); err != nil {
+			debug.Logf("warning: ensure user config defaults failed: %v", err)
+		}
 	}
 }
 

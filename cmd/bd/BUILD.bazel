@@ -1069,6 +1069,7 @@ go_test(
         "metadataless_database_embedded_test.go",
         "metadataless_database_test.go",
         "metadataless_server_workspace_test.go",
+        "metrics_legacy_carryover_test.go",
         "metrics_test.go",
         "migrate_consent_test.go",
         "migrate_dolt_mode_frontdoor_integration_test.go",
