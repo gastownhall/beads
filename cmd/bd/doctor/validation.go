@@ -239,11 +239,12 @@ func checkDuplicateIssuesDB(db *sql.DB, orchestratorMode bool, orchestratorThres
 	}
 }
 
-// CheckTestPollution detects test issues that may have leaked into the database.
+// CheckTestPollution detects test issues that may have leaked into the
+// database, with the classifier bd doctor --check=pollution uses.
 func CheckTestPollution(path string) DoctorCheck {
 	beadsDir := ResolveBeadsDirForRepo(path)
 
-	db, store, err := openStoreDB(beadsDir)
+	_, store, err := openStoreDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Test Pollution",
@@ -253,24 +254,24 @@ func CheckTestPollution(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	// Look for common test patterns in titles
-	query := `
-		SELECT COUNT(*) FROM issues
-		WHERE (
-			title LIKE 'test-%' OR
-			title LIKE 'Test Issue%' OR
-			title LIKE '%test issue%' OR
-			id LIKE 'test-%'
-		)
-	`
-	var count int
-	if err := db.QueryRow(query).Scan(&count); err != nil {
+	return checkTestPollutionWithStore(context.Background(), store)
+}
+
+// checkTestPollutionWithStore is CheckTestPollution on an open store.
+// PollutionReviewHint is the next step bd doctor gives for pollution
+// matches: review each one before deleting it.
+const PollutionReviewHint = "Run 'bd doctor --check=pollution', review each match with 'bd show <id>', and delete only confirmed leftovers"
+
+func checkTestPollutionWithStore(ctx context.Context, store PollutionStore) DoctorCheck {
+	matches, err := FindTestPollution(ctx, store)
+	if err != nil {
 		return DoctorCheck{
 			Name:    "Test Pollution",
 			Status:  StatusWarning,
 			Message: "N/A (query failed)",
 		}
 	}
+	count := len(matches)
 
 	if count == 0 {
 		return DoctorCheck{
@@ -284,8 +285,8 @@ func CheckTestPollution(path string) DoctorCheck {
 		Name:    "Test Pollution",
 		Status:  "warning",
 		Message: fmt.Sprintf("%d potential test issue(s) detected", count),
-		Detail:  "Test issues may have leaked into production database",
-		Fix:     "Run 'bd doctor --check=pollution' to review and clean test issues",
+		Detail:  "Possible test leftovers matched by a title and content heuristic; real work with a test-style title and no description can match too, and a score is a heuristic strength, not a probability",
+		Fix:     PollutionReviewHint,
 	}
 }
 

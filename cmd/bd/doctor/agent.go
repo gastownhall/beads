@@ -481,10 +481,10 @@ func enrichDuplicateIssues(dc DoctorCheck) agentEnrichment {
 func enrichTestPollution(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
-		explanation: fmt.Sprintf("Test pollution detected: %s. Test-created issues are present in the production database. These are artifacts from test runs that didn't clean up properly.", dc.Message),
+		explanation: fmt.Sprintf("Possible test pollution: %s. A title and content heuristic matched these issues as possible leftovers of test runs; real work with a test-style title and no description can match too, and a score is a heuristic strength, not a probability. Review each match with bd show <id> and delete only confirmed leftovers, one at a time.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "No test issues in production database",
-		commands:    []string{"bd doctor --check=pollution", "bd doctor --check=pollution --clean"},
+		expected:    "No unreviewed test leftovers in the database",
+		commands:    []string{"bd doctor --check=pollution", "bd show <id>", "bd delete <id>"},
 		sourceFiles: []string{"cmd/bd/doctor/validation.go:CheckTestPollution"},
 	}
 }

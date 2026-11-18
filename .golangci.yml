@@ -506,7 +506,7 @@ linters:
         linters:
           - forbidigo
       # doctor's diagnostics and the fixes that follow them.
-      - path: '^cmd/bd/doctor_(conventions|pollution)\.go$|^cmd/bd/doctor/(maintenance|fix/maintenance|fix/migrate)\.go$'
+      - path: '^cmd/bd/doctor_(conventions|pollution)\.go$|^cmd/bd/doctor/(maintenance|pollution|fix/maintenance|fix/migrate)\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo
