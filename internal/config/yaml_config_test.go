@@ -1351,10 +1351,14 @@ func TestCommentOutYamlKey(t *testing.T) {
 			expected: "other: value",
 		},
 		{
+			// The whole mapping is indented. With `other` at column 0 instead,
+			// the first document would end above it, and commenting out its
+			// only key would bring `other` into it, an edit commentOutYamlKey
+			// refuses (TestUnsetRefusesShapesItCannotEdit).
 			name:     "preserve indentation",
-			content:  "  backup.enabled: true\nother: value",
+			content:  "  backup.enabled: true\n  other: value",
 			key:      "backup.enabled",
-			expected: "  # backup.enabled: true\nother: value",
+			expected: "  # backup.enabled: true\n  other: value",
 		},
 		{
 			// A flat key is a top-level key. A single-segment key must not
@@ -1426,6 +1430,15 @@ func TestCommentOutYamlKey(t *testing.T) {
 			content:  "a: 1",
 			key:      "a",
 			expected: "# a: 1",
+		},
+		{
+			// bd's config loader cannot read a file that writes a section
+			// twice, before the edit or after it, so the edit is not refused
+			// for that: it is judged by the leaves alone.
+			name:     "section written twice",
+			content:  "sync:\n  remote: x\nsync:\n  branch: b\n",
+			key:      "sync.remote",
+			expected: "sync:\n  # remote: x\nsync:\n  branch: b\n",
 		},
 	}
 

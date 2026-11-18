@@ -299,42 +299,56 @@ func TestUnsetUserYamlConfigRefusesAValueThatSpansLines(t *testing.T) {
 }
 
 // The user-global unset checks the edit by its effect too, before it writes.
-// node_id is not in the first document, so no refusal before the edit looks
-// at it, but the line matcher still finds it in the second, where commenting
-// out its first line would leave `box"` behind.
 func TestUnsetUserYamlConfigRefusesAnEditThatChangesMoreThanTheKey(t *testing.T) {
-	const body = "metrics:\n  disabled: true\n---\nnode_id: \"mini\n  box\"\n"
+	for _, tc := range []struct{ name, body, key string }{
+		// node_id is not in the first document, so no refusal before the
+		// edit looks at it, but the line matcher still finds it in the
+		// second, where commenting out its first line would leave `box"`
+		// behind.
+		{name: "wrapped value in a later document", body: "metrics:\n  disabled: true\n---\nnode_id: \"mini\n  box\"\n", key: "node_id"},
+		// backup.remote would go with sync.remote.
+		{name: "the key under an anchor an alias reads", body: "sync: &settings\n  remote: file:///a\n  branch: main\nbackup: *settings\n", key: "sync.remote"},
+		// The merge would name a null, and the whole file would stop reading.
+		{name: "the only key of an anchored section a merge reads", body: "dolt:\n  mode: server\nsync: &s\n  remote: x\nbackup:\n  <<: *s\n  branch: y\n", key: "sync.remote"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Every directory UserConfigYamlPath reads, so the real
+			// user-global config.yaml is out of reach on any platform.
+			home, native := t.TempDir(), t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("XDG_CONFIG_HOME", native)
+			t.Setenv("APPDATA", native)
+			path, err := UserConfigYamlPath()
+			if err != nil {
+				t.Fatalf("UserConfigYamlPath: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
 
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	path, err := UserConfigYamlPath()
-	if err != nil {
-		t.Fatalf("UserConfigYamlPath: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	changed, err := UnsetUserYamlConfig("node_id")
-	if err == nil {
-		after, _ := os.ReadFile(path) //nolint:gosec,errcheck // test-owned temp path; diagnostic
-		t.Fatalf("UnsetUserYamlConfig reported success on an edit that breaks the second document:\n%q", string(after))
-	}
-	if !strings.Contains(err.Error(), "node_id") || !strings.Contains(err.Error(), "more of this file than the key") {
-		t.Errorf("the error names neither the key nor the reason: %v", err)
-	}
-	if changed {
-		t.Error("UnsetUserYamlConfig() changed = true for an unset it refused")
-	}
-	after, err := os.ReadFile(path) //nolint:gosec // test-owned temp path
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(after) != body {
-		t.Errorf("a refused unset still changed the file:\ngot:  %q\nwant: %q", string(after), body)
+			changed, err := UnsetUserYamlConfig(tc.key)
+			if err == nil {
+				after, _ := os.ReadFile(path) //nolint:gosec,errcheck // test-owned temp path; diagnostic
+				t.Fatalf("UnsetUserYamlConfig reported success on an edit that changes more than the key:\n%q", string(after))
+			}
+			if !strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), "more of this file than the key") {
+				t.Errorf("the error names neither the key nor the reason: %v", err)
+			}
+			if changed {
+				t.Error("UnsetUserYamlConfig() changed = true for an unset it refused")
+			}
+			after, err := os.ReadFile(path) //nolint:gosec // test-owned temp path
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != tc.body {
+				t.Errorf("a refused unset still changed the file:\ngot:  %q\nwant: %q", string(after), tc.body)
+			}
+		})
 	}
 }
 
@@ -632,5 +646,17 @@ func testYamlLineEndCuts(t *testing.T, content string) {
 		if entry := key.Value + ": " + value.Value; ok && !strings.HasSuffix(content[:end], entry) {
 			t.Errorf("the cut after line %d (key %s) is %q, want it to end with %q", key.Line, key.Value, content[:end], entry)
 		}
+	}
+}
+
+// yaml.v3 panics, rather than failing, on a key it cannot hash in a mapping
+// that merges another: here the anchored mapping is itself a key, so its
+// sequence key is never refused where it is defined, and the merge into other,
+// whose int key makes it a map of any key, hashes it. The effect check counts
+// that as a file it cannot decode rather than letting the panic end the unset.
+func TestYamlReadsAsConfigCountsAPanicAsAFileItCannotRead(t *testing.T) {
+	const content = "? &b {? [x] : 2}\n: v\nother:\n  <<: *b\n  1: x\n"
+	if yamlReadsAsConfig(content) {
+		t.Error("yamlReadsAsConfig read a file yaml.v3 cannot decode")
 	}
 }

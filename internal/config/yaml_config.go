@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -723,9 +724,6 @@ func UnsetUserYamlConfig(key string) (bool, error) {
 	if newContent == normalized {
 		return false, nil
 	}
-	if err := collateralUnsetRefusal(normalized, newContent, key); err != nil {
-		return false, err
-	}
 
 	// Preserve the owner-private 0600 posture every other user-global writer
 	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
@@ -831,9 +829,6 @@ func UnsetYamlConfig(key string) (bool, error) {
 	}
 	if newContent == normalized {
 		return false, nil
-	}
-	if err := collateralUnsetRefusal(normalized, newContent, key); err != nil {
-		return false, err
 	}
 
 	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
@@ -1354,7 +1349,17 @@ func commentOutYamlKey(content, key string) (string, error) {
 	// that genuinely has no trailing newline does not acquire one, so this
 	// cannot rewrite the end of a file that was already written that way.
 	out := strings.Join(result, "\n")
-	return strings.TrimRight(out, "\n") + content[len(strings.TrimRight(content, "\n")):], nil
+	out = strings.TrimRight(out, "\n") + content[len(strings.TrimRight(content, "\n")):]
+
+	// The refusals above judge the file before the edit. Whatever they cannot
+	// see is judged by what the edit did, here rather than in each caller, so
+	// every writer of this result gets that check as it gets them.
+	if out != content {
+		if err := collateralUnsetRefusal(content, out, key); err != nil {
+			return "", err
+		}
+	}
+	return out, nil
 }
 
 // mappingValueUnsetRefusal refuses a matched key line whose value continues on
@@ -1728,20 +1733,30 @@ func yamlLineEnd(content string, line int) (end int, ok bool) {
 }
 
 // collateralUnsetRefusal refuses an unset whose edit changed more of the file
-// than the key. Both unset callers run it on commentOutYamlKey's result before
-// they write. The refusals before the edit name the shapes they know, judged
-// from the first document's parse; this one judges the edit by its effect, so
-// it also catches the shapes they cannot see: a later duplicate of the key
-// whose value wraps, the key in a later document, an anchor on the key's line
-// that an alias further down still uses, or a line inside another value that
-// only looks like the key, beside the key itself. A file that does not hold
-// the key at all never gets here: commentOutYamlKey leaves it as it is.
+// than the key. commentOutYamlKey runs it on its own edit before returning
+// that edit, so every writer of the result is checked. The refusals before the
+// edit name the shapes they know, judged from the first document's parse; this
+// one judges the edit by its effect, so it also catches the shapes they cannot
+// see: a later duplicate of the key whose value wraps, the key in a later
+// document, an anchor on the key's line that an alias further down still uses,
+// the key under an anchor that an alias elsewhere reads, or a line inside
+// another value that only looks like the key, beside the key itself. A file
+// that does not hold the key at all never gets here: commentOutYamlKey leaves
+// it as it is.
 //
 // Read back, after must hold what before held, document by document, less
 // some of the key's own entries in either spelling: nothing added, and nothing
 // else removed or changed. Documents are compared by position because bd reads
 // only the first one: commenting out all of a first document that no `---`
-// opens would move the second one into its place.
+// opens would move the second one into its place. An alias is compared by
+// what its anchor holds as well as by where the anchor is, so removing the key
+// from under an anchor (`sync: &s` above `backup: *s`) changes the alias too.
+//
+// A first document that decoded the way bd's config loader reads it must
+// still decode that way (yamlReadsAsConfig), which no leaf shows: a merge
+// (`<<: *s`) of a section whose only key has no value holds no leaf before the
+// edit or after it, yet with that key commented out the merge names a null,
+// and the whole read fails.
 //
 // A later document that does not parse leaves the ones before it readable, the
 // first of them being what bd reads, so those are compared all the same, and
@@ -1764,16 +1779,34 @@ func collateralUnsetRefusal(before, after, key string) error {
 		return fmt.Errorf("cannot unset %q: this file nests more than %d levels deep, too deep for bd to check what else commenting out the key would change; remove the key by hand", key, maxYamlLeafDepth)
 	}
 	isLeaves, ok := yamlLeaves(is)
-	if ok && isErr == nil && onlyKeyLeavesRemoved(wasLeaves, isLeaves, key) {
+	if ok && isErr == nil && onlyKeyLeavesRemoved(wasLeaves, isLeaves, key) &&
+		(yamlReadsAsConfig(after) || !yamlReadsAsConfig(before)) {
 		return nil
 	}
 	return fmt.Errorf("cannot unset %q: commenting out the lines that match it would change more of this file than the key itself; remove the key by hand", key)
 }
 
+// yamlReadsAsConfig reports whether the first document of content decodes the
+// way bd's config loader reads config.yaml: viper decodes it into a map,
+// resolving every alias and merge. A config.yaml that fails that read costs
+// every setting in it, since bd only warns and runs on its defaults. yaml.v3
+// can panic rather than fail on a key it cannot hash under a merge; that
+// document does not decode either.
+func yamlReadsAsConfig(content string) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	var settings map[string]interface{}
+	return yaml.Unmarshal([]byte(content), &settings) == nil
+}
+
 // yamlLeaf is one scalar of a YAML stream: the document it is in, the keys and
 // list indexes that lead to it, and its value. An alias is a leaf of its own,
-// naming the anchor it resolves to rather than expanding it, so the list never
-// grows past the size of the file, however the aliases nest.
+// naming the anchor it resolves to and a digest of what that anchor holds
+// rather than expanding it, so the list never grows past the size of the file,
+// however the aliases nest.
 type yamlLeaf struct {
 	doc   int
 	path  []string
@@ -1796,11 +1829,12 @@ const maxYamlLeafDepth = 64
 // is gone. ok is false, and no leaves come back, when a document nests more
 // than maxYamlLeafDepth keys and list items deep.
 func yamlLeaves(docs []*yaml.Node) (leaves []yamlLeaf, ok bool) {
+	held := make(map[*yaml.Node]string)
 	for doc, root := range docs {
 		if yamlNestsDeeper(root, maxYamlLeafDepth) {
 			return nil, false
 		}
-		leaves = appendYamlLeaves(leaves, doc, nil, root)
+		leaves = appendYamlLeaves(leaves, held, doc, nil, root)
 	}
 	return leaves, true
 }
@@ -1839,33 +1873,82 @@ func yamlDocuments(content string) ([]*yaml.Node, error) {
 }
 
 // appendYamlLeaves appends the leaves of n, which path leads to, to leaves.
-func appendYamlLeaves(leaves []yamlLeaf, doc int, path []string, n *yaml.Node) []yamlLeaf {
+// held keeps what yamlHeld has read, for the aliases still to come.
+func appendYamlLeaves(leaves []yamlLeaf, held map[*yaml.Node]string, doc int, path []string, n *yaml.Node) []yamlLeaf {
 	switch n.Kind {
 	case yaml.DocumentNode:
 		for _, child := range n.Content {
-			leaves = appendYamlLeaves(leaves, doc, path, child)
+			leaves = appendYamlLeaves(leaves, held, doc, path, child)
 		}
 	case yaml.MappingNode:
 		for i := 0; i+1 < len(n.Content); i += 2 {
-			leaves = appendYamlLeaves(leaves, doc, append(path[:len(path):len(path)], n.Content[i].Value), n.Content[i+1])
+			leaves = appendYamlLeaves(leaves, held, doc, append(path[:len(path):len(path)], n.Content[i].Value), n.Content[i+1])
 		}
 	case yaml.SequenceNode:
 		for i, item := range n.Content {
-			leaves = appendYamlLeaves(leaves, doc, append(path[:len(path):len(path)], strconv.Itoa(i)), item)
+			leaves = appendYamlLeaves(leaves, held, doc, append(path[:len(path):len(path)], strconv.Itoa(i)), item)
 		}
 	case yaml.AliasNode:
-		// By where its anchor is, not by name alone: YAML lets a later anchor
-		// reuse a name, and with the later one's line commented out the alias
-		// would resolve to the earlier one, reading the same while its value
-		// changed. Commenting a line out moves no other node, so an alias
-		// whose anchor is untouched reads the same.
-		leaves = append(leaves, yamlLeaf{doc: doc, path: path, value: fmt.Sprintf("*%s@%d:%d", n.Value, n.Alias.Line, n.Alias.Column)})
+		// An alias reads what its anchor holds, so it is compared by where
+		// that anchor is and by what it holds. By where, not by name alone:
+		// YAML lets a later anchor reuse a name, and with the later one's line
+		// commented out the alias would resolve to the earlier one, reading
+		// the same while its value changed. And by what it holds, because
+		// commenting a line out moves no node: an anchor stays where it was
+		// when the edit removes a key from under it, so with `sync: &s` above
+		// `backup: *s`, unsetting sync.remote would take backup.remote with
+		// it.
+		leaves = append(leaves, yamlLeaf{doc: doc, path: path, value: fmt.Sprintf("*%s@%d:%d %s", n.Value, n.Alias.Line, n.Alias.Column, yamlHeld(held, n.Alias))})
 	case yaml.ScalarNode:
 		if n.ShortTag() != "!!null" {
 			leaves = append(leaves, yamlLeaf{doc: doc, path: path, value: n.Value})
 		}
 	}
 	return leaves
+}
+
+// yamlHeld returns a digest of the leaves under n, each by its path below n,
+// so two nodes get the same digest when they hold the same leaves. It is ""
+// when n holds none: a null scalar or an empty collection holds no leaf here
+// either. An alias under n counts by its anchor alone and is never followed.
+// It is a leaf of its own as well, compared by what its own anchor holds, so a
+// change to what it reads is seen where it is. held keeps the digest of each
+// node read, so anchors nested in one another share the digests of the nodes
+// they share, and each node is read once.
+func yamlHeld(held map[*yaml.Node]string, n *yaml.Node) string {
+	if digest, ok := held[n]; ok {
+		return digest
+	}
+	// Each kind writes a form no other kind can: a mapping's lines start with
+	// a quote and a sequence's with a digit, and both end in a newline, which
+	// a quoted scalar never holds; an alias's form starts with `*`.
+	var b strings.Builder
+	switch n.Kind {
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if digest := yamlHeld(held, n.Content[i+1]); digest != "" {
+				fmt.Fprintf(&b, "%q %s\n", n.Content[i].Value, digest)
+			}
+		}
+	case yaml.SequenceNode:
+		for i, item := range n.Content {
+			if digest := yamlHeld(held, item); digest != "" {
+				fmt.Fprintf(&b, "%d %s\n", i, digest)
+			}
+		}
+	case yaml.AliasNode:
+		fmt.Fprintf(&b, "*%s@%d:%d", n.Value, n.Alias.Line, n.Alias.Column)
+	case yaml.ScalarNode:
+		if n.ShortTag() != "!!null" {
+			fmt.Fprintf(&b, "%q", n.Value)
+		}
+	}
+	digest := ""
+	if b.Len() > 0 {
+		digest = fmt.Sprintf("%x", sha256.Sum256([]byte(b.String())))
+	}
+	held[n] = digest
+	return digest
 }
 
 // onlyKeyLeavesRemoved reports whether is holds exactly was's leaves less some

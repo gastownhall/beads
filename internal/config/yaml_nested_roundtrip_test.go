@@ -537,6 +537,23 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			survivors: map[string]string{"sync.remote": "file:///a"},
 		},
 		{
+			// An alias is compared by what its own anchor holds, and the key
+			// is not under that one, so the alias reads the same after the
+			// edit and the unset goes ahead.
+			name:      "beside an anchor an alias reads",
+			seed:      "sync:\n  remote: x\n  opts: &o\n    depth: 1\nbackup:\n  opts: *o\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"sync.opts.depth": "1", "backup.opts.depth": "1"},
+		},
+		{
+			// The same for a merge, with the key beside it in the section the
+			// merge reads into.
+			name:      "beside a merge",
+			seed:      "sync: &s\n  branch: main\nbackup:\n  <<: *s\n  remote: x\n",
+			key:       "backup.remote",
+			survivors: map[string]string{"sync.branch": "main", "backup.branch": "main"},
+		},
+		{
 			// yaml.v3 ends a line at a Unicode line separator or a lone carriage
 			// return as well as at LF, even inside a quoted string, so either
 			// one above the key numbers its line one past the line a "\n" split
@@ -793,6 +810,19 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// out, the alias below resolves to the anchor above it instead, so the
 		// file still parses, but backup.remote reads keep rather than a.
 		{name: "anchor on the key's line reusing the name of one above", seed: "x: &r keep\nsync:\n  remote: &r a\nbackup:\n  remote: *r\n", key: "sync.remote", want: "more of this file than the key"},
+		// An alias reads what its anchor holds. Commenting the key out leaves
+		// the anchor where it was, holding one key fewer, so backup.remote
+		// would go with sync.remote.
+		{name: "the key under an anchor an alias reads", seed: "sync: &settings\n  remote: file:///a\n  branch: main\nbackup: *settings\n", key: "sync.remote", want: "more of this file than the key"},
+		{name: "the key under an anchor alone on its line that an alias reads", seed: "dolt:\n  &a\n    host: kill-me\n    port: 3307\nother: *a\n", key: "dolt.host", want: "more of this file than the key"},
+		// A merge (`<<: *s`) reads the anchor the same way. With its only key
+		// commented out the section is null, a merge of a null fails, and the
+		// whole file stops reading, dolt.mode with it.
+		{name: "the only key of an anchored section a merge reads", seed: "dolt:\n  mode: server\nsync: &s\n  remote: x\nbackup:\n  <<: *s\n  branch: y\n", key: "sync.remote", want: "more of this file than the key"},
+		// With no value the key holds no leaf, so the anchor holds the same
+		// leaves, none, before and after. What catches it is that the file
+		// must still read the way bd's config loader reads it.
+		{name: "the only key of an anchored section a merge reads, with no value", seed: "dolt:\n  mode: server\nsync: &s\n  remote:\nbackup:\n  <<: *s\n  branch: y\n", key: "sync.remote", want: "more of this file than the key"},
 		// A tag alone on its line decorates the section's mapping, and the key
 		// under it is the target (TestUnsetRemovesADottedKeyInEveryShape). As
 		// that mapping's only key, commenting it out leaves the tag on an empty
@@ -808,6 +838,11 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		// bd reads only the first document. With its only key commented out,
 		// that document is gone, and node_id would be read in its place.
 		{name: "only key of the first document", seed: "remote: x\n---\nnode_id: mini\n", key: "remote", want: "more of this file than the key"},
+		// An indented top level ends at the first line less indented, so
+		// node_id is not in the first document but after it, where it does
+		// not parse and nobody reads it. With the key commented out, node_id
+		// would open the first document instead.
+		{name: "only key of an indented first document", seed: "  remote: x\nnode_id: mini\n", key: "remote", want: "more of this file than the key"},
 		// A later document that does not parse leaves the ones before it
 		// readable, so an edit to them is checked as in any other file. Here
 		// notes would change, and with the first document gone, the one that
@@ -848,6 +883,26 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 	}
 }
 
+// commentOutYamlKey checks its own edit by its effect, so a writer that calls it
+// without going through UnsetYamlConfig or UnsetUserYamlConfig gets the same
+// refusal, and never an edit to write.
+func TestCommentOutYamlKeyRefusesAnEditThatChangesMoreThanTheKey(t *testing.T) {
+	for _, tc := range []struct{ name, content, key string }{
+		{name: "the key under an anchor an alias reads", content: "sync: &s\n  remote: x\n  branch: y\nbackup: *s\n", key: "sync.remote"},
+		{name: "wrapped value in a later document", content: "node_id: mini\n---\nnotes: \"line one\n  line two\"\n", key: "notes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := commentOutYamlKey(tc.content, tc.key)
+			if err == nil {
+				t.Fatalf("commentOutYamlKey returned an edit it should have refused:\n%s", out)
+			}
+			if !strings.Contains(err.Error(), "more of this file than the key") {
+				t.Errorf("the error does not give the reason: %v", err)
+			}
+		})
+	}
+}
+
 // A shape bd cannot edit is only worth refusing when the key is actually there.
 // Unsetting a key that was never set has always been a successful no-op, and a
 // flow-style mapping elsewhere in the file is not the operator's problem. Nor
@@ -864,11 +919,11 @@ func TestUnsetOfAnAbsentKeyStillSucceeds(t *testing.T) {
 		// The matching line is the second line of notes, in either spelling.
 		{name: "line inside another value that looks like the key", seed: "sync:\n  notes: \"x\n  remote: y\"\n", key: "sync.remote"},
 		{name: "line inside another value that looks like the flat key", seed: "notes: \"see\njira.url: https://x\"\n", key: "jira.url"},
-		// sync is a list, so sync.remote is not set, but the nested walk
-		// matches the key of its item. An alias there is a value like any
-		// other, though it is not expanded. The matcher refused the same key
-		// with a mapping beneath it as a value that goes on below, and
-		// commented it out with no value at all, which left nothing to compare.
+		// sync is a list, so sync.remote is not set, though its item has a
+		// key named remote. The presence check finds no sync.remote, and the
+		// line matcher skips a list item's lines (stepOver), so neither edits
+		// these files. An alias there is a value like any other, though it is
+		// not expanded.
 		{name: "key inside a list item", seed: "base: &r file:///a\nsync:\n  -\n    remote: *r\n", key: "sync.remote"},
 		{name: "key with a mapping beneath it inside a list item", seed: "sync:\n  -\n    remote:\n      url: a\n", key: "sync.remote"},
 		{name: "key with no value inside a list item", seed: "sync:\n  -\n    remote:\n", key: "sync.remote"},
