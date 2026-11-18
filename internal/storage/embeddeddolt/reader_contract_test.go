@@ -209,6 +209,12 @@ func TestEmbeddedReaderReadyParentScopesToItsTransitiveDescendants(t *testing.T)
 	conformance.RunReaderReadyParentScopesToItsTransitiveDescendants(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderReadyExcludeParentsWithOpenChildren(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderReadyExcludeParentsWithOpenChildren(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 // The id prefix is a LIKE against a binary-collated column on this engine, so
 // the cased-sibling half of the case has its most plausible failure mode here.
 func TestEmbeddedReaderListParentReachesEveryDescendantAndOnlyItsOwn(t *testing.T) {

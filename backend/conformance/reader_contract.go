@@ -2336,6 +2336,115 @@ func RunReaderReadyParentScopesToItsTransitiveDescendants(t *testing.T, ctx cont
 	assertReaderPageIDSet(t, "Ready --parent", page, []string{child, grandchild, dotted, adopted})
 }
 
+// RunReaderReadyExcludeParentsWithOpenChildren pins
+// ReadyRequest.ExcludeParentsWithOpenChildren (GH#6817): the flagged answer is
+// the ordinary ready answer minus every parent that has a recorded
+// parent-child edge to a non-closed child, in whichever family the edge and
+// the child live.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE. Every parent is ready on its own and
+// every child is out of the answer for a different reason — blocked, in
+// progress, pinned, deferred, or simply unlabelled — so the flag has to read
+// the edge rather than the child's readiness or its visibility in the query.
+// The four family shapes are all here: durable parent and child, wisp parent
+// and child, a durable parent with a wisp child (the edge lives in
+// wisp_dependencies and targets depends_on_issue_id) and a wisp parent with a
+// durable child (the edge lives in dependencies and targets
+// depends_on_wisp_id). A parent whose only child is closed stays, and so does
+// a parent with a dotted pseudo-child but no edge: the rule is the close
+// gate's, a recorded edge to a non-closed child, not an id prefix.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: nothing. The scope label is on the
+// parents and leaves only, so no child is ever a candidate row.
+func RunReaderReadyExcludeParentsWithOpenChildren(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope := readerLabel(fixture, "rdyxp")
+	id := func(name string) string { return readerID(fixture, "rdyxp", name) }
+	closedAt := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+
+	durable := func(name, label string, status types.Status) string {
+		issue := readerIssue(id(name), types.TypeTask, label)
+		issue.Status = status
+		if status == types.StatusClosed {
+			issue.ClosedAt = &closedAt
+		}
+		seedReaderIssue(t, ctx, fixture, issue)
+		return issue.ID
+	}
+	wisp := func(name, label string) string {
+		issue := readerIssue(id(name), types.TypeTask, label)
+		issue.Ephemeral = true
+		seedReaderWisp(t, ctx, fixture, issue)
+		return issue.ID
+	}
+	edge := func(from, to string, depType types.DependencyType) {
+		t.Helper()
+		if err := fixture.AddDependency(ctx, &types.Dependency{IssueID: from, DependsOnID: to, Type: depType}, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s (%s): %v", from, to, depType, err)
+		}
+	}
+
+	leaf := durable("leaf", scope, types.StatusOpen)
+	blocker := durable("blocker", scope, types.StatusOpen)
+
+	pBlocked := durable("p-blocked", scope, types.StatusOpen)
+	cBlocked := durable("c-blocked", "", types.StatusOpen)
+	edge(cBlocked, pBlocked, types.DepParentChild)
+	edge(cBlocked, blocker, types.DepBlocks)
+
+	pProgress := durable("p-progress", scope, types.StatusOpen)
+	edge(durable("c-progress", "", types.StatusInProgress), pProgress, types.DepParentChild)
+
+	pPinned := durable("p-pinned", scope, types.StatusOpen)
+	edge(durable("c-pinned", "", types.StatusPinned), pPinned, types.DepParentChild)
+
+	pDeferred := durable("p-deferred", scope, types.StatusOpen)
+	edge(durable("c-deferred", "", types.StatusDeferred), pDeferred, types.DepParentChild)
+
+	pDone := durable("p-done", scope, types.StatusOpen)
+	edge(durable("c-done", "", types.StatusClosed), pDone, types.DepParentChild)
+
+	pDotted := durable("p-dotted", scope, types.StatusOpen)
+	seedReaderIssue(t, ctx, fixture, readerIssue(pDotted+".1", types.TypeTask, ""))
+
+	wParent := wisp("w-parent", scope)
+	edge(wisp("w-child", ""), wParent, types.DepParentChild)
+
+	dParentWispChild := durable("d-parent-w", scope, types.StatusOpen)
+	edge(wisp("w-child-of-d", ""), dParentWispChild, types.DepParentChild)
+
+	wParentDurableChild := wisp("w-parent-d", scope)
+	edge(durable("d-child-of-w", "", types.StatusOpen), wParentDurableChild, types.DepParentChild)
+
+	excluded := []string{pBlocked, pProgress, pPinned, pDeferred, wParent, dParentWispChild, wParentDurableChild}
+	kept := []string{leaf, blocker, pDone, pDotted}
+
+	request := publicops.ReadyRequest{Labels: []string{scope}, IncludeEphemeral: true, Limit: readerLimit(0)}
+	ordinary, err := fixture.Reader.Ready(ctx, request)
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	// The baseline is what makes the flag's answer meaningful: every parent
+	// the flag drops is offered without it.
+	assertReaderPageIDSet(t, "Ready (flag off)", ordinary, append(slices.Clone(kept), excluded...))
+
+	request.ExcludeParentsWithOpenChildren = true
+	flagged, err := fixture.Reader.Ready(ctx, request)
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents: %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready --exclude-parents", flagged, kept)
+
+	// Durable-only answers apply the same rule: the durable parents with a
+	// wisp child are still dropped without IncludeEphemeral.
+	request.IncludeEphemeral = false
+	durableOnly, err := fixture.Reader.Ready(ctx, request)
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents (durable only): %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready --exclude-parents (durable only)", durableOnly, kept)
+}
+
 // RunReaderListParentReachesEveryDescendantAndOnlyItsOwn is the same field on
 // the listing plane (reader.go:213), where it is rendered differently: one
 // clause with a parent-child subquery ORed against the id prefix

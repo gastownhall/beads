@@ -657,6 +657,7 @@ var roleContractCases = []roleContract{
 		RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix,
 		RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge,
 		RunReaderReadyParentScopesToItsTransitiveDescendants,
+		RunReaderReadyExcludeParentsWithOpenChildren,
 		RunReaderListParentReachesEveryDescendantAndOnlyItsOwn,
 		RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing,
 		RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing,
