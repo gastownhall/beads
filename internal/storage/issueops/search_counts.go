@@ -103,42 +103,75 @@ func hydrationFor(filter types.IssueFilter) sqlbuild.CountsHydration {
 	return sqlbuild.CountsHydration{SkipLabels: filter.SkipLabels, SkipCounts: filter.SkipCounts, Lite: filter.Lite}
 }
 
-func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
-	whereClauses, args, err := BuildIssueFilterClauses(query, filter, tables)
+// runFilterSearchQueryInTx selects one table family's matching IDs with the
+// plain search seam's id-only query, then hydrates exactly those IDs through
+// the by-IDs counts form (hydrateCountsByIDsInTx).
+//
+// It used to render the PREDICATE form of the counts mega-query instead, which
+// left every aggregate subquery (labels, dependency/comment counts, the parent
+// and dependency JSON, and the reverse-blocker rc join, whose COALESCE key the
+// planner cannot index) unconstrained: each one aggregated its WHOLE side table
+// and the ORDER BY … LIMIT was applied only after the joins. A bounded page and
+// an unlimited listing paid the same whole-corpus aggregation (GH#4370).
+//
+// The ID selection is the very query SearchIssueIDsInTx issues for this table
+// (searchTableInTxT under idProjection): the label-driven JOIN plan, the
+// residual filter clauses, the ORDER BY with its unique id tiebreak, and the
+// EffectiveSearchLimit bound — pushed into SQL under an order the query can
+// express, applied in Go after the order exists under a Go-side sort key. So
+// the row set and order are the ones the predicate form selected, and every
+// downstream count (the issues+wisps merge, finishSearchIssuesWithCounts'
+// trim-then-cap) is unchanged. Each per-issue count is a function of the
+// dependency graph restricted to that issue, so constraining the aggregates to
+// the selected IDs cannot change any emitted value.
+func runFilterSearchQueryInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
+	ids, err := searchTableInTxT(ctx, tx, query, filter, tables, idProjection)
 	if err != nil {
 		return nil, err
 	}
-	whereSQL := ""
-	if len(whereClauses) > 0 {
-		whereSQL = "WHERE " + joinAnd(whereClauses)
+	return hydrateCountsByIDsInTx(ctx, tx, tables, ids, includeWispReverseDeps, hydrationFor(filter))
+}
+
+// hydrateCountsByIDsInTx hydrates counts rows for an ordered list of distinct
+// IDs from one table family and returns them in that order.
+//
+// The IDs are chunked into sqlbuild.QueryBatchSize batches so the by-IDs form,
+// which binds each batch once per aggregate it constrains, stays within every
+// backend's per-statement placeholder limit. Rows come back in whatever order
+// the engine emits them, so the caller's order is restored by ID; an ID that
+// hydrated no row (it cannot, inside the transaction that selected it) is
+// skipped rather than turned into a nil entry. The first error from any batch
+// is returned and no partial result is.
+//
+// An empty ID list returns without a statement: SearchCountsSQL renders the
+// PREDICATE form for empty ids, which is exactly the whole-table aggregation
+// this helper exists to avoid.
+func hydrateCountsByIDsInTx(ctx context.Context, tx DBTX, tables FilterTables, ids []string, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
+	if len(ids) == 0 {
+		return nil, nil
 	}
-	// A PAGE BOUND IS ONLY EVER PUSHED UNDER AN ORDER THE QUERY CAN EXPRESS —
-	// the same rule searchTableInTxT applies on the plain seam. sqlbuild.OrderBy
-	// renders no ORDER BY for a Go-side sort key ("id"), and a LIMIT with no
-	// ORDER BY returns n rows, not the first n; this is the seam
-	// bd query '<expr>' --sort id reaches on the store-shaped backends
-	// (storequerier → SearchIssuesWithCounts), where BuildQueryPlan always
-	// pushes a bound. So under a Go-side sort the query scans the complete
-	// matching set and the same eff bound is applied below, after the order
-	// exists — leaving every downstream count (the merge, the terminal
-	// finishSearchIssuesWithCounts trim-then-cap) exactly what the SQL LIMIT
-	// used to hand it.
-	goSideSort := sqlbuild.IsGoSideSort(filter.SortBy)
-	eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows)
-	limitSQL := ""
-	if eff > 0 && !goSideSort {
-		limitSQL = fmt.Sprintf("LIMIT %d", eff)
+	byID := make(map[string]*types.IssueWithCounts, len(ids))
+	for start := 0; start < len(ids); start += sqlbuild.QueryBatchSize {
+		end := start + sqlbuild.QueryBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		countsSQL, idArgs := sqlbuild.SearchCountsSQL(tables, ids[start:end], "", "", "", includeWispReverseDeps, hyd)
+		rows, err := scanCountsRowsInTx(ctx, tx, tables.Main, countsSQL, idArgs, hyd)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			byID[r.Issue.ID] = r
+		}
 	}
-	orderBy := sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, "i")
-	out, err := runSearchQueryInTx(ctx, tx, tables, whereSQL, orderBy, limitSQL, args, includeWispReverseDeps, hydrationFor(filter))
-	if err != nil {
-		return nil, err
+	ordered := make([]*types.IssueWithCounts, 0, len(ids))
+	for _, id := range ids {
+		if r, ok := byID[id]; ok {
+			ordered = append(ordered, r)
+		}
 	}
-	if goSideSort {
-		// scanCountsRowsInTx drops nil-Issue rows, so the accessor is safe.
-		out = goSideSortAndTrim(out, func(iwc *types.IssueWithCounts) string { return iwc.Issue.ID }, filter.SortDesc, eff)
-	}
-	return out, nil
+	return ordered, nil
 }
 
 //nolint:gosec // G201: SQL fragments are caller-built from hardcoded shapes
@@ -148,9 +181,8 @@ func runSearchQueryInTx(ctx context.Context, tx DBTX, tables FilterTables, where
 }
 
 // scanCountsRowsInTx runs a prebuilt counts mega-query and hydrates each row
-// through ScanReadyWorkRowWithCounts, deduping by issue ID. It is the single
-// scan/dedupe loop shared by the predicate-form search path and the by-IDs
-// ready-counts path.
+// through ScanReadyWorkRowWithCounts, deduping by issue ID and dropping rows
+// without an issue. It is the scan/dedupe loop behind hydrateCountsByIDsInTx.
 //
 //nolint:gosec // G201: query is builder-produced; user input rides ? placeholders.
 func scanCountsRowsInTx(ctx context.Context, tx DBTX, mainTable, query string, args []interface{}, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {

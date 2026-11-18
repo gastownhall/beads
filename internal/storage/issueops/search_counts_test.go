@@ -15,11 +15,11 @@ func TestSearchIssuesWithCountsAppliesLimitToEachSourceQuery(t *testing.T) {
 	_, mock, tx := beginMockTx(t)
 	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM issues i.*ORDER BY i\.priority ASC, i\.created_at DESC, i\.id ASC\s+LIMIT 3`).
+	mock.ExpectQuery(`(?s)^SELECT issues\.id FROM issues .*ORDER BY priority ASC, created_at DESC, id ASC\s+LIMIT 3$`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM wisps i.*ORDER BY i\.priority ASC, i\.created_at DESC, i\.id ASC\s+LIMIT 3`).
+	mock.ExpectQuery(`(?s)^SELECT wisps\.id FROM wisps .*ORDER BY priority ASC, created_at DESC, id ASC\s+LIMIT 3$`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	got, err := SearchIssuesWithCountsInTx(context.Background(), tx, "", types.IssueFilter{Limit: 3})
@@ -44,7 +44,7 @@ func TestSearchIssuesWithCountsHonorsSkipWisps(t *testing.T) {
 	_, mock, tx := beginMockTx(t)
 	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM issues i.*ORDER BY i\.priority ASC, i\.created_at DESC, i\.id ASC`).
+	mock.ExpectQuery(`(?s)^SELECT issues\.id FROM issues .*ORDER BY priority ASC, created_at DESC, id ASC$`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	got, err := SearchIssuesWithCountsInTx(context.Background(), tx, "", types.IssueFilter{SkipWisps: true})
@@ -68,11 +68,11 @@ func TestSearchIssuesWithCountsPushesSortIntoSQL(t *testing.T) {
 	_, mock, tx := beginMockTx(t)
 	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM issues i.*ORDER BY i\.created_at DESC, i\.id ASC\s+LIMIT 2`).
+	mock.ExpectQuery(`(?s)^SELECT issues\.id FROM issues .*ORDER BY created_at DESC, id ASC\s+LIMIT 2$`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM wisps i.*ORDER BY i\.created_at DESC, i\.id ASC\s+LIMIT 2`).
+	mock.ExpectQuery(`(?s)^SELECT wisps\.id FROM wisps .*ORDER BY created_at DESC, id ASC\s+LIMIT 2$`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	filter := types.IssueFilter{SortBy: "created", Limit: 2}
