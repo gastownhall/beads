@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
 
 // End-to-end lifecycle for `bd serve`, driven as a subprocess exactly as an
@@ -379,6 +381,104 @@ func TestProxiedServerServeLifecycle(t *testing.T) {
 	// exclusion" true rather than aspirational.
 	if _, err := http.Get(sp.url("/healthz")); err == nil {
 		t.Error("server still answering after shutdown")
+	}
+}
+
+// TestProxiedServerServeSurvivesProxyIdleGap is GH#7295: a proxied-server
+// workspace whose proxy has a finite idle timeout must keep answering
+// database-backed reads after a quiet period. serve's pool retires its last
+// idle connection after 20s (servePoolLimits.ConnMaxIdleTime); the proxy then
+// sees zero clients and exits after its idle timeout, and serve must not be
+// left dialing the dead port. A 2s proxy timeout stands in for the 30s default
+// so the gap is ~25s instead of ~55s; the shape is the same.
+func TestProxiedServerServeSurvivesProxyIdleGap(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "srvidle", "--proxied-server-idle-timeout", "2s")
+
+	sp := startServe(t, bd, p.dir, bdProxiedEnv(p.dir))
+	t.Cleanup(func() { sp.shutdown(t) })
+
+	requireServeRecoversAfterIdleGap(t, sp, p)
+}
+
+// requireServeRecoversAfterIdleGap drives one serve process through
+// GH#7295's whole contract against a workspace whose proxy has a 2s idle
+// timeout: the database-backed read before a quiet period answers 200; once
+// serve's pool retires its idle connections (20s) and the proxy is observed to
+// exit, the first read may be answered 200 directly or by an interim 503
+// db_unavailable that carries Retry-After; /healthz stays 200 the whole time;
+// and a read within 60s of the first post-exit one answers 200 again, without
+// restarting serve or changing the workspace's idle policy. On a build without
+// recovery the loop exhausts the window — serve dials the exited proxy's port
+// forever — which is this test's red.
+func requireServeRecoversAfterIdleGap(t *testing.T, sp *serveProcess, p proxiedProject) {
+	t.Helper()
+
+	if status, body, _ := sp.get(t, "/v0/beads/ready?limit=1"); status != http.StatusOK {
+		t.Fatalf("first read: status = %d, want 200: %v", status, body)
+	}
+
+	waitForProxyIdleExit(t, p, 60*time.Second)
+	requireHealthzStays200(t, sp)
+
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		status, body, hdr := sp.get(t, "/v0/beads/ready?limit=1")
+		if status == http.StatusOK {
+			return
+		}
+		if status != http.StatusServiceUnavailable {
+			t.Fatalf("read after an idle gap: status = %d (%v), want 200 or an interim db_unavailable\nstderr:\n%s",
+				status, body, sp.stderr.String())
+		}
+		if code, _ := body["code"].(string); code != "db_unavailable" {
+			t.Fatalf("interim failure after an idle gap: code = %q, want db_unavailable: %v", code, body)
+		}
+		if hdr.Get("Retry-After") == "" {
+			t.Fatalf("interim db_unavailable must tell the client to retry: no Retry-After header on status %d", status)
+		}
+		requireHealthzStays200(t, sp)
+		if time.Now().After(deadline) {
+			t.Fatalf("serve did not recover within 60s of the first post-idle read; still answering %d for /v0/beads/ready\nstderr:\n%s",
+				status, sp.stderr.String())
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// waitForProxyIdleExit waits until the proxy serve has been reading through
+// is gone: its proxy.pid is removed or names another process. It reads only
+// the pidfile — dialing the proxy to probe it would count as client activity
+// and could hold off the very idle exit it waits for.
+func waitForProxyIdleExit(t *testing.T, p proxiedProject, timeout time.Duration) {
+	t.Helper()
+	before, err := pidfile.Read(p.proxyRoot, proxy.PIDFileName)
+	if err != nil || before == nil {
+		t.Fatalf("read %s in %s after a database-backed read: pidfile=%v err=%v", proxy.PIDFileName, p.proxyRoot, before, err)
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		cur, err := pidfile.Read(p.proxyRoot, proxy.PIDFileName)
+		if err == nil && (cur == nil || cur.Pid != before.Pid) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("proxy (pid %d) did not idle-exit within %s; pidfile=%v err=%v", before.Pid, timeout, cur, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// requireHealthzStays200 pins serve's liveness contract while the database is
+// unreachable (GH#7295): healthz is deliberately liveness-only, so the gap
+// must not change it — a supervisor watching healthz alone keeps trusting the
+// process, and serve's own recovery brings the reads back.
+func requireHealthzStays200(t *testing.T, sp *serveProcess) {
+	t.Helper()
+	if status, _, _ := sp.get(t, "/healthz"); status != http.StatusOK {
+		t.Fatalf("healthz: status = %d, want 200 while the database is unreachable", status)
 	}
 }
 

@@ -106,6 +106,7 @@
 34 10 TestProxiedServerGateCheckB
 34 10 TestProxiedServerServeDeleteIfRevisionSingleWinner
 34 10 TestProxiedServerServeRefusesAStreamOnADisabledJournal
+34 10 TestProxiedServerServeSurvivesProxyIdleGap
 34 10 TestProxiedServerTypes
 34 10 TestProxiedServerUpdate2C
 
