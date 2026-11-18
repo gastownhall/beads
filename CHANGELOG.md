@@ -1504,6 +1504,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.3.4 upgraded past with a warning failed to open. The re-key now treats
   that text as drift too: it warns, records the table, and retries it on later
   passes, as for the older engine's `invalid hash length` (#4380).
+- **`bd kv set` and `bd kv clear` now commit their write** (#7523). Both
+  wrote their `config` row without a Dolt commit, in embedded and direct
+  SQL-server mode alike, so the row sat in the working set until a later
+  command such as `bd dolt commit` staged config, and `bd dolt push` did not
+  publish it. With auto-commit on, each now adds one commit. On a SQL server
+  that commit takes only `kv.*` config rows, as `bd remember` and `bd forget`
+  do: when another write left an internal config key (such as `issue_prefix`)
+  uncommitted, the commit is refused, and the command still succeeds, since
+  its write has landed, with a stderr warning naming the key. Under
+  `dolt.auto-commit` `batch` or `off` the write waits for `bd dolt commit`,
+  as other writes do. (builds on PR #7717 by harry-miller-trimble)
+
 - **Upgrading a clone whose local `wisps` table lacks `started_at` or
   `no_history` no longer stops at schema v52** (#6080, reported by @dmcp718;
   fix from #8099 by @kyoto-bonsai). Migrations 0023 and 0027 add those

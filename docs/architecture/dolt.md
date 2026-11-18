@@ -842,6 +842,15 @@ In **server mode** (orchestrator), auto-commit defaults to OFF because the serve
 manages its own transaction lifecycle. Firing `DOLT_COMMIT` after every write
 under concurrent load causes 'database is read only' errors.
 
+Config-table writes are the exception on a direct SQL server: `bd config set`
+and `unset`, `bd remember`, `bd forget`, `bd kv set` and `bd kv clear` commit
+their own `config` row while auto-commit is on, because nothing else commits a
+config row there. The memory and kv verbs commit only `kv.*` rows. If another
+write left an internal config key uncommitted, that commit is refused and the
+command still succeeds with a stderr warning naming the key; `bd dolt commit`
+publishes everything together. Under `batch` or `off` these writes wait in the
+working set like any other.
+
 Override for batch operations (embedded) or explicit commits (server):
 
 ```bash
