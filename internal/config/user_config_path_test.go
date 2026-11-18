@@ -884,3 +884,54 @@ func TestUserConfigSetsBoolKey(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckYamlConfigUpdates: the in-memory check refuses exactly the
+// documents SetUserYamlConfig's writer refuses, and never touches a file.
+func TestCheckYamlConfigUpdates(t *testing.T) {
+	metricsKeys := []YamlKeyValue{
+		{Key: "metrics.disabled", Value: "false"},
+		{Key: "metrics.endpoint", Value: "https://example.invalid/x"},
+	}
+	for _, tc := range []struct {
+		name    string
+		content string
+		wantErr string
+	}{
+		{name: "empty file", content: ""},
+		{name: "comments only", content: "# just a comment\n"},
+		{name: "unrelated keys", content: "actor: alice\n"},
+		{name: "metrics section without disabled", content: "metrics:\n  notice_shown: true\n"},
+		{name: "empty metrics section", content: "metrics:\n"},
+		{name: "metrics is false", content: "metrics: false\n", wantErr: "already holds a value"},
+		{name: "metrics is off", content: "metrics: off\n", wantErr: "already holds a value"},
+		{name: "metrics is a list", content: "metrics:\n  - x\n", wantErr: "already holds a value"},
+		{name: "top-level list", content: "- a\n- b\n", wantErr: "not a mapping"},
+		{name: "top-level scalar", content: "hello\n", wantErr: "not a mapping"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckYamlConfigUpdates([]byte(tc.content), metricsKeys...)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("CheckYamlConfigUpdates: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("CheckYamlConfigUpdates err = %v, want %q", err, tc.wantErr)
+			}
+			// The check agrees with the real write.
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if werr := os.WriteFile(path, []byte(tc.content), 0o600); werr != nil {
+				t.Fatal(werr)
+			}
+			if werr := setYamlConfigAtPath(path, metricsKeys[0].Key, metricsKeys[0].Value); werr == nil {
+				t.Fatal("setYamlConfigAtPath succeeded where the check failed")
+			}
+		})
+	}
+	t.Run("validation runs", func(t *testing.T) {
+		if err := CheckYamlConfigUpdates(nil, YamlKeyValue{Key: "hierarchy.max-depth", Value: "0"}); err == nil {
+			t.Fatal("want the writer's value validation to reject hierarchy.max-depth=0")
+		}
+	})
+}

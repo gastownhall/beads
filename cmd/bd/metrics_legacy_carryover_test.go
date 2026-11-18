@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -275,6 +276,20 @@ func TestMetricsUnwritableUserConfigKeepsMacOptOut(t *testing.T) {
 		{"commented-out metrics block", func(t *testing.T, home string) {
 			writeTestUserConfig(t, filepath.Join(home, ".config", "bd", "config.yaml"), "# metrics:\n#   disabled: true\nactor: alice\n")
 		}},
+		// Writable configs whose YAML shape refuses metrics.disabled: the
+		// write fails every run, so the probe must never start.
+		{"metrics is false", func(t *testing.T, home string) {
+			writeTestUserConfig(t, filepath.Join(home, ".config", "bd", "config.yaml"), "metrics: false\nactor: alice\n")
+		}},
+		{"metrics is off", func(t *testing.T, home string) {
+			writeTestUserConfig(t, filepath.Join(home, ".config", "bd", "config.yaml"), "metrics: off\n")
+		}},
+		{"metrics is a list", func(t *testing.T, home string) {
+			writeTestUserConfig(t, filepath.Join(home, ".config", "bd", "config.yaml"), "metrics:\n  - x\n")
+		}},
+		{"top-level list", func(t *testing.T, home string) {
+			writeTestUserConfig(t, filepath.Join(home, ".config", "bd", "config.yaml"), "- a\n- b\n")
+		}},
 	}
 	for _, tc := range cases {
 		t.Run("darwin/"+tc.name, func(t *testing.T) {
@@ -285,18 +300,29 @@ func TestMetricsUnwritableUserConfigKeepsMacOptOut(t *testing.T) {
 				t.Fatal("precondition: metrics resolve enabled before the bootstrap")
 			}
 
-			stderr := captureStderrDuring(t, func() { bootstrapAndInitMetrics("ready") })
+			// Twice: a config that refuses the write refuses it every run,
+			// and no run may probe.
+			for run := 1; run <= 2; run++ {
+				stderr := captureStderrDuring(t, func() { bootstrapAndInitMetrics("ready") })
 
-			if len(*probes) != 0 {
-				t.Fatalf("legacy probes = %q, want none for a config bd cannot write", *probes)
-			}
-			if metrics.Enabled() || metricsEnabledAfterBootstrap() {
-				t.Fatal("metrics on after the bootstrap could not keep the legacy opt-out")
-			}
-			if stderr != "" {
-				t.Fatalf("stderr = %q, want silence", stderr)
+				if len(*probes) != 0 {
+					t.Fatalf("run %d: legacy probes = %q, want none for a config bd cannot write", run, *probes)
+				}
+				if metrics.Enabled() || metricsEnabledAfterBootstrap() {
+					t.Fatalf("run %d: metrics on after the bootstrap could not keep the legacy opt-out", run)
+				}
+				if stderr != "" {
+					t.Fatalf("run %d: stderr = %q, want silence", run, stderr)
+				}
 			}
 			assertNoMetricsDataDir(t)
+
+			if out, _ := metricsStatusForTest(t); !strings.Contains(out, "Anonymous usage metrics: OFF") {
+				t.Fatalf("bd metrics status = %q, want OFF", out)
+			}
+			if notice := firstRunNoticeForTest(t); notice != "" {
+				t.Fatalf("first-run notice printed with metrics off: %q", notice)
+			}
 		})
 		t.Run("linux/"+tc.name, func(t *testing.T) {
 			home, probes := isolateMetricsBootstrap(t, "linux")
@@ -323,12 +349,27 @@ func TestMetricsUnwritableUserConfigKeepsMacOptOut(t *testing.T) {
 		if !metricsEnabledAfterBootstrap() {
 			t.Fatalf("%s=0 did not turn metrics on", metrics.EnvDisableMetrics)
 		}
+		// The saved choice is off on macOS (no metrics.disabled), so the
+		// env var is overriding it, and status says so.
+		out, errOut := metricsStatusForTest(t)
+		if !strings.Contains(out, "Anonymous usage metrics: ON") ||
+			!strings.Contains(errOut, `is overriding your saved config (which is "off")`) {
+			t.Fatalf("bd metrics status stdout=%q stderr=%q; want ON and an override note against saved off", out, errOut)
+		}
 	})
 	t.Run("darwin valid metrics.disabled", func(t *testing.T) {
 		_, _ = isolateMetricsBootstrap(t, "darwin")
 		bootstrapMetricsUserConfig("ready") // writes metrics.disabled: false
 		if !metricsEnabledAfterBootstrap() {
 			t.Fatal("metrics off with a written metrics.disabled: false")
+		}
+		out, errOut := metricsStatusForTest(t)
+		if !strings.Contains(out, "Anonymous usage metrics: ON") || errOut != "" {
+			t.Fatalf("bd metrics status stdout=%q stderr=%q; want ON and no note", out, errOut)
+		}
+		first, second := firstRunNoticeForTest(t), firstRunNoticeForTest(t)
+		if strings.Count(first, firstRunNoticeMarker) != 1 || second != "" {
+			t.Fatalf("first-run notice: first=%q second=%q; want it exactly once", first, second)
 		}
 	})
 }
@@ -342,3 +383,24 @@ func writeTestUserConfig(t *testing.T, path, body string) {
 		t.Fatal(err)
 	}
 }
+
+// metricsStatusForTest runs bd metrics status and returns its stdout and
+// stderr.
+func metricsStatusForTest(t *testing.T) (stdout, stderr string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{Use: "status"}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	runMetricsStatus(cmd)
+	return out.String(), errOut.String()
+}
+
+// firstRunNoticeForTest runs the first-run notice for a plain `bd ready` and
+// returns what it printed.
+func firstRunNoticeForTest(t *testing.T) string {
+	t.Helper()
+	return captureStderrDuring(t, func() { maybeShowMetricsFirstRunNotice(&cobra.Command{Use: "ready"}) })
+}
+
+const firstRunNoticeMarker = "Thanks for using bd!"

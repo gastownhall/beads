@@ -26,15 +26,20 @@ var commentedMetricsRe = regexp.MustCompile(`(?m)^\s*#\s*metrics\s*:`)
 //
 // On macOS (darwin and ios), when metrics.disabled is about to be written, it
 // first carries a metrics choice over from the pre-GH#8113 user config in
-// ~/Library/Application Support (see legacyDarwinMetricsCarryOver). That probe
-// runs only under the <config>.lock lock and only once the write is known to
-// be possible, so it happens once per user config: after a successful write
-// metrics.disabled is present and every later run returns before the lock. A
-// user config bd cannot write never triggers the probe; the caller then keeps
+// ~/Library/Application Support (see legacyDarwinMetricsCarryOver). The probe
+// runs only under the <config>.lock lock (created beside the config, or beside
+// its symlink target, and left in place), and only after the write is shown
+// to be possible: the directory or file is writable and, for an existing
+// config, the metrics keys fit its YAML shape (checkMetricsKeysWritable). A
+// successful write leaves metrics.disabled present, so every later run returns
+// before the lock and the probe happens once per user config. A config bd
+// cannot write, cannot parse, whose metrics block is commented out, or whose
+// shape refuses the keys never triggers the probe; the caller then keeps
 // metrics off for the run (see cmd/bd metricsEnabledAfterBootstrap).
 //
-// Elsewhere there is nothing to probe and no lock: the hard-link publish in
-// createUserConfig already makes creating the file atomic.
+// Elsewhere there is nothing to probe, no lock and no shape check: the
+// hard-link publish in createUserConfig already makes creating the file
+// atomic.
 func EnsureUserConfigDefaults() error {
 	path, err := config.UserConfigYamlPath()
 	if err != nil {
@@ -80,6 +85,15 @@ func EnsureUserConfigDefaults() error {
 		state, err = readMetricsKeyState(path)
 		if err != nil || !state.needsWrite() {
 			return err
+		}
+		// Never probe the legacy file for keys the existing config cannot
+		// take: a top level that is not a mapping, or a metrics section that
+		// already holds a scalar or a list, fails the write below every run,
+		// so the probe would repeat every run too.
+		if state.exists {
+			if err := checkMetricsKeysWritable(path, state); err != nil {
+				return err
+			}
 		}
 	}
 	if !state.exists {
@@ -142,6 +156,29 @@ func readMetricsKeyState(path string) (metricsKeyState, error) {
 	state.needEndpoint = !userConfigHasLeaf(&root, "metrics", "endpoint")
 	state.hasNoticeShown = userConfigHasLeaf(&root, "metrics", "notice_shown")
 	return state, nil
+}
+
+// checkMetricsKeysWritable runs writeMissingMetricsKeys' metrics.disabled and
+// metrics.endpoint updates against the config at path in memory, with the
+// writer's own update code (config.CheckYamlConfigUpdates), and returns the
+// error the real write would hit. The values are placeholders: a carried
+// value has the same YAML shape, so only the document decides the outcome.
+func checkMetricsKeysWritable(path string, state metricsKeyState) error {
+	data, err := os.ReadFile(path) //nolint:gosec // path is a validated absolute user config path
+	if err != nil {
+		return fmt.Errorf("ensure user config: read %s: %w", path, err)
+	}
+	var updates []config.YamlKeyValue
+	if state.needDisabled {
+		updates = append(updates, config.YamlKeyValue{Key: "metrics.disabled", Value: "false"})
+	}
+	if state.needEndpoint {
+		updates = append(updates, config.YamlKeyValue{Key: "metrics.endpoint", Value: DefaultEndpoint})
+	}
+	if err := config.CheckYamlConfigUpdates(data, updates...); err != nil {
+		return fmt.Errorf("ensure user config: %s cannot take the metrics keys: %w", path, err)
+	}
+	return nil
 }
 
 // writeMissingMetricsKeys fills the missing keys of an existing user config.

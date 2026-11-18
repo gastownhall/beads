@@ -788,6 +788,33 @@ func SetUserYamlConfig(key, value string) error {
 	return setYamlConfigAtPath(configPath, key, value)
 }
 
+// YamlKeyValue is one key and value for CheckYamlConfigUpdates.
+type YamlKeyValue struct {
+	Key, Value string
+}
+
+// CheckYamlConfigUpdates applies updates, in order, to a copy of a config.yaml
+// held in content, using the same validation and update code SetUserYamlConfig
+// writes with, and returns the first error. Nothing is written. Callers use it
+// to learn whether a later SetUserYamlConfig call can succeed before doing
+// work that only makes sense if it will — a config whose top level is not a
+// mapping, or whose section already holds a scalar or list, fails here as the
+// write would.
+func CheckYamlConfigUpdates(content []byte, updates ...YamlKeyValue) error {
+	updated := string(content)
+	for _, u := range updates {
+		if err := validateYamlConfigValue(u.Key, u.Value); err != nil {
+			return err
+		}
+		next, err := updateYamlKey(updated, u.Key, u.Value)
+		if err != nil {
+			return err
+		}
+		updated = next
+	}
+	return nil
+}
+
 func setYamlConfigAtPath(configPath, key, value string) error {
 	// Read existing config
 	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from findProjectConfigYaml

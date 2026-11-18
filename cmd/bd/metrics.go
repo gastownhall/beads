@@ -194,10 +194,10 @@ func runMetricsStatus(cmd *cobra.Command) {
 
 	// Surface the env override if it disagrees with the saved config.
 	if name, v, ok := metricsEnvOverride(); ok {
-		if envTruthyValue(v) == metricsEnabledByConfig() {
+		if saved := savedMetricsConsent(); envTruthyValue(v) == saved {
 			fmt.Fprintf(cmd.ErrOrStderr(),
 				"\nNote: %s=%s is overriding your saved config (which is %q) for this shell.\n",
-				name, v, map[bool]string{true: "on", false: "off"}[metricsEnabledByConfig()])
+				name, v, map[bool]string{true: "on", false: "off"}[saved])
 		}
 	}
 }

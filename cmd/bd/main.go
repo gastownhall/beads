@@ -3209,13 +3209,22 @@ func metricsEnabledAfterBootstrap() bool {
 	if !resolveMetricsEnabled() {
 		return false
 	}
-	if !metrics.MacOSFamilyPlatform() {
-		return true
-	}
 	if _, ok := os.LookupEnv(metrics.EnvDisableMetrics); ok {
 		return true // a falsey BD_DISABLE_METRICS turned metrics on explicitly
 	}
-	return config.UserConfigSetsBoolKey("metrics.disabled")
+	return savedMetricsConsent()
+}
+
+// savedMetricsConsent is the metrics choice the user config records, before
+// any environment override: metricsEnabledByConfig, except that on macOS
+// (darwin and ios, GH#8113) it is on only when the user config holds a valid
+// bool metrics.disabled (see metricsEnabledAfterBootstrap). Off macOS it is
+// exactly metricsEnabledByConfig.
+func savedMetricsConsent() bool {
+	if !metricsEnabledByConfig() {
+		return false
+	}
+	return !metrics.MacOSFamilyPlatform() || config.UserConfigSetsBoolKey("metrics.disabled")
 }
 
 func resolveMetricsEndpoint() string {
