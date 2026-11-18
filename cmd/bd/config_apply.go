@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -289,6 +290,17 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 			Action:  "configure",
 			Status:  applyStatusError,
 			Message: "federation.remote is not a usable remote URL",
+			Error:   err.Error(),
+		}
+	}
+	// GH#6233: checked before the store is opened, so neither the add nor the
+	// remove-then-add replacement touches the origin remote already there.
+	if err := remotecache.CheckProposedRemote("origin", federationRemote); err != nil {
+		return ApplyResult{
+			Check:   "remote",
+			Action:  "configure",
+			Status:  applyStatusError,
+			Message: "federation.remote is not permitted by " + remotecache.AllowedRemotePatternsKey,
 			Error:   err.Error(),
 		}
 	}

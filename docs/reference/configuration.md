@@ -151,7 +151,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `external_projects` | — | — | `{}` | Map project names → paths for cross-project deps |
 | `federation.remote` | — | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL (`dolthub://`, `gs://`, `s3://`, `az://`, `file://`) |
 | `federation.sovereignty` | — | `BD_FEDERATION_SOVEREIGNTY` | (none) | Sovereignty tier: `T1`, `T2`, `T3`, `T4` (see [below](#sync-and-federation)) |
-| `federation.allowed-remote-patterns` | — | — | `[]` | Glob patterns restricting allowed remote URLs |
+| `federation.allowed-remote-patterns` | — | `BD_FEDERATION_ALLOWED_REMOTE_PATTERNS` | `[]` (no restriction) | Glob patterns for the remote URLs bd pushes to, pulls and fetches from, registers and clones; the environment variable separates them with spaces, not commas (see [below](#sync-and-federation)) |
 | `federation.exclude_types` | — | — | `[wisp]` | Issue types excluded from federation push |
 | `sync.require_confirmation_on_mass_delete` | — | — | `false` | Prompt before pushing when a merge deletes most issues |
 | `output.title-length` | — | — | `255` | Title display in feedback (`0` hides); see routing note below |
@@ -449,7 +449,20 @@ federation:
   - `T3`: Provider sovereignty — data with trusted cloud provider
   - `T4`: No restrictions — data can be anywhere
 
-`bd config validate` checks the remote URL format, the sovereignty tier, `federation.allowed-remote-patterns`, and `routing.mode`.
+`federation.allowed-remote-patterns` is an allowlist for remote destinations. Empty (the default) means no restriction. When the list is non-empty, bd refuses, before any transfer or write, to push to, pull or fetch from, register, adopt, apply, reset, or clone from a remote whose URL matches no pattern; this covers `bd dolt push`/`pull`, `bd sync`, auto-push, federation peers, `bd dolt remote add`, `bd dolt remote reset-data`, git-origin adoption, `bd config apply`, `bd bootstrap`, and the remote cache. It does not cover `bd backup` destinations.
+
+An entry equal to a remote's URL allows it. Any other entry is a Go `path.Match` glob over the whole URL: `*` matches any run of characters except `/`, `?` matches one such character, `[...]` is a character class, and `\` escapes the next character. So a bracketed host, an IPv6 literal such as `http://[::1]:7007/db` or Dolt's `aws://[bucket:table]/db`, is allowed by an entry equal to the URL, or by a glob that escapes the brackets: `aws://\[bucket:table\]/*`. In the part of the URL between `://` and the next `/`, a wildcard also stops at `@`: user info in front of the host is matched only by a pattern that spells its `@` too. `gs://acme-*/*` allows `gs://acme-prod/db` but not `gs://acme-prod@attacker/db`, whose bucket is `attacker`, and `https://*@github.com/org/*` allows `https://token@github.com/org/repo`. A wildcard in a host or bucket name allows every name it matches, including one someone else can register, so prefer literal hosts and buckets. An `http(s)://`, `ssh://` or `git+` URL is matched in both its `git+` spelling and its plain one, and an SCP-style `user@host:path` as `git+ssh://user@host/path` and `ssh://user@host/path`, so write its pattern in one of those forms. For example, `git+https://github.com/org/*` and `https://github.com/org/*` both allow `https://github.com/org/repo`, which bd registers as `git+https://github.com/org/repo`, and a Dolt remotesapi endpoint such as `https://doltremoteapi.dolthub.com/org/repo` or `http://myserver:7007/mydb`, which bd registers unchanged, matches a pattern written the way `bd dolt remote list` shows it. A URL with a query (`?`), a fragment (`#`), or a `..` path segment (percent-encoded or between backslashes too) is allowed only by an entry equal to the whole URL, because a glob does not bound where such a URL sends data: `s3://bucket/*` does not allow `s3://bucket/db?endpoint=...`. Blank or malformed entries match nothing, so a list of only blank entries refuses every remote. A refusal names the remote or config key, never the URL. A refused auto-push keeps the local write and prints its usual warning.
+
+The list is read like any other key: a project's `.beads/config.yaml` (or the one under `BEADS_DIR`) replaces a list set in user config, and `BD_FEDERATION_ALLOWED_REMOTE_PATTERNS` replaces both. So a repository's committed config can widen or clear a user-level list; set the environment variable to impose a list the repository cannot change. The environment variable, like a single string in `config.yaml`, is split at whitespace, not at commas: `BD_FEDERATION_ALLOWED_REMOTE_PATTERNS='dolthub://myorg/* git+https://github.com/myorg/*'`. A comma-separated value is read as a single pattern, so it refuses the remotes it was meant to allow. In `config.yaml`, write a YAML list:
+
+```yaml
+federation:
+  allowed-remote-patterns:
+    - "dolthub://myorg/*"
+    - "git+https://github.com/myorg/*"
+```
+
+`bd config validate` checks the remote URL format, the sovereignty tier, `routing.mode`, and whether `federation.remote` and `sync.remote` pass the effective `federation.allowed-remote-patterns` (user config, environment, and project config) under the same matching rule.
 
 ## Integration Configuration
 

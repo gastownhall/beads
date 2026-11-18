@@ -1113,16 +1113,45 @@ func validateSyncConfig(repoPath string) []string {
 		}
 	}
 
-	// Validate against allowed-remote-patterns if configured
-	if federationRemote != "" {
-		patterns := v.GetStringSlice("federation.allowed-remote-patterns")
-		if len(patterns) > 0 {
-			if err := remotecache.ValidateRemoteURLWithPatterns(federationRemote, patterns); err != nil {
-				issues = append(issues, fmt.Sprintf("federation.remote: %s", err))
-			}
+	issues = append(issues, allowedRemotePatternIssues(doctor.ResolveBeadsDirForRepo(repoPath))...)
+
+	return issues
+}
+
+// allowedRemotePatternIssues judges the remotes this workspace syncs with
+// (federation.remote, and sync.remote or its sync.git-remote fallback) the way
+// the runtime gates do (GH#6233): under the effective
+// federation.allowed-remote-patterns value (user config, BD_ environment and
+// the workspace's config.yaml), against the normalized destination, with
+// issues that name the key and never the URL.
+func allowedRemotePatternIssues(beadsDir string) []string {
+	var patterns []string
+	var keys, values []string
+	err := config.WithBeadsDir(beadsDir, func() {
+		patterns = config.AllowedRemotePatterns()
+		keys = append(keys, "federation.remote")
+		values = append(values, config.GetString("federation.remote"))
+		syncKey := "sync.remote"
+		syncValue := config.GetString(syncKey)
+		if syncValue == "" {
+			syncKey = "sync.git-remote"
+			syncValue = config.GetString(syncKey)
+		}
+		keys = append(keys, syncKey)
+		values = append(values, syncValue)
+	})
+	if err != nil {
+		return []string{remotecache.AllowedRemotePatternsKey + ": the workspace config could not be read to check the configured remotes"}
+	}
+	var issues []string
+	for i, key := range keys {
+		if values[i] == "" {
+			continue
+		}
+		if err := remotecache.CheckRemotePolicy(key, values[i], patterns); err != nil {
+			issues = append(issues, err.Error())
 		}
 	}
-
 	return issues
 }
 

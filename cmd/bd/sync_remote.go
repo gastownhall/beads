@@ -37,6 +37,13 @@ func resolveSyncRemoteChecked() (string, error) {
 	if err := checkRemoteNotOption(key, v); err != nil {
 		return "", err
 	}
+	// GH#6233: a sync remote the allowlist rejects is never cloned from or
+	// wired in; the refusal names the key, not the URL.
+	if v != "" {
+		if err := remotecache.CheckRemotePolicy(key, v, config.AllowedRemotePatterns()); err != nil {
+			return "", err
+		}
+	}
 	return v, nil
 }
 

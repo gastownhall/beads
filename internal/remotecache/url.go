@@ -216,7 +216,7 @@ func validateSchemeURL(rawURL string) error {
 		return fmt.Errorf("remote URL scheme %q is not allowed (expected one of: %s)", scheme, strings.Join(sortedSchemes(), ", "))
 	}
 
-	parsed, err := url.Parse(normalizedURL)
+	parsed, err := parseRemoteURL(normalizedURL)
 	if err != nil {
 		return fmt.Errorf("remote URL is malformed: %w", err)
 	}
@@ -264,6 +264,26 @@ func validateSchemeURL(rawURL string) error {
 	}
 
 	return nil
+}
+
+// parseRemoteURL is url.Parse, except that it reads Dolt's
+// aws://[bucket:table]/path form the way Dolt does
+// (earl.ParseRawWithAWSSupport). Since Go 1.25.2 (golang/go#75678) net/url
+// rejects a bracketed host that is not an IP literal, so, like Dolt, it
+// parses the rest of the URL with a stand-in host and then puts the
+// bracketed one back.
+func parseRemoteURL(rawURL string) (*url.URL, error) {
+	rest, aws := strings.CutPrefix(rawURL, "aws://[")
+	host, tail, closed := strings.Cut(rest, "]")
+	if !aws || !closed {
+		return url.Parse(rawURL)
+	}
+	parsed, err := url.Parse("aws://hostname" + tail)
+	if err != nil {
+		return nil, err
+	}
+	parsed.Host = "[" + host + "]"
+	return parsed, nil
 }
 
 // validateSCPURL validates an SCP-style URL (user@host:path)

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltversion"
@@ -88,6 +89,9 @@ func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
 	if err := ValidateRemoteURL(remoteURL); err != nil {
 		return "", fmt.Errorf("invalid remote URL: %w", err)
 	}
+	if err := c.checkPolicy(remoteURL); err != nil {
+		return "", err
+	}
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
 		return "", fmt.Errorf("dolt CLI not found (required for remote cache): %w", err)
@@ -145,6 +149,9 @@ func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
 
 // Push pushes local commits in the cached clone back to the remote.
 func (c *Cache) Push(ctx context.Context, remoteURL string) error {
+	if err := c.checkPolicy(remoteURL); err != nil {
+		return err
+	}
 	target := c.cloneTarget(remoteURL)
 	if !c.doltExists(target) {
 		return fmt.Errorf("no cached clone for %s", remoteURL)
@@ -331,4 +338,53 @@ func (c *Cache) writeMeta(remoteURL string, meta *CacheMeta) {
 	if err := os.WriteFile(c.metaPath(remoteURL), data, 0o600); err != nil {
 		debug.Logf("remotecache: failed to write meta for %s: %v\n", remoteURL, err)
 	}
+}
+
+// cachedRemoteSubject and cachedOriginSubject name the cache's two policy
+// subjects in a refusal without the URL (RemotePolicyError).
+const (
+	cachedRemoteSubject = "the cached remote"
+	cachedOriginSubject = `remote "origin" of the cached clone`
+)
+
+// checkPolicy is the federation.allowed-remote-patterns gate of the Ensure
+// and Push funnels (GH#6233). It runs before a cache entry is created and
+// before dolt is run. It checks the requested URL and, for a warm entry, the
+// origin the clone has registered, since that, not the requested URL, is what
+// `dolt pull` and `dolt push` dial.
+func (c *Cache) checkPolicy(remoteURL string) error {
+	patterns := config.AllowedRemotePatterns()
+	if len(patterns) == 0 {
+		return nil
+	}
+	if err := CheckRemotePolicy(cachedRemoteSubject, remoteURL, patterns); err != nil {
+		return err
+	}
+	target := c.cloneTarget(remoteURL)
+	if !c.doltExists(target) {
+		return nil
+	}
+	origin, err := clonedOriginURL(target)
+	if err != nil {
+		return &RemotePolicyError{Subject: cachedOriginSubject, Reason: "its URL could not be read to check it against " + AllowedRemotePatternsKey}
+	}
+	return CheckRemotePolicy(cachedOriginSubject, origin, patterns)
+}
+
+// clonedOriginURL reads the URL the cached clone at dbPath has registered for
+// origin from its .dolt/repo_state.json; "" when none is registered.
+func clonedOriginURL(dbPath string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(dbPath, ".dolt", "repo_state.json")) // #nosec G304 -- cache-owned dolt state file
+	if err != nil {
+		return "", err
+	}
+	var state struct {
+		Remotes map[string]struct {
+			URL string `json:"url"`
+		} `json:"remotes"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return "", err
+	}
+	return state.Remotes["origin"].URL, nil
 }

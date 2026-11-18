@@ -2515,3 +2515,55 @@ func TestInitialize_IgnoreRepoConfigMatchesASymlinkedBeadsDir(t *testing.T) {
 		t.Errorf("ConfigFileUsed() = %q, want empty when the repo config is ignored", got)
 	}
 }
+
+// GH#6233: the allowlist is read as effective config, so callers enforcing it
+// see the same value `bd config get` does: empty by default (no policy), the
+// project's list when set, and the BD_ environment override above both.
+func TestAllowedRemotePatternsEffectiveValue(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if got := AllowedRemotePatterns(); len(got) != 0 {
+		t.Fatalf("default AllowedRemotePatterns() = %q, want empty (no policy)", got)
+	}
+	if got := GetFederationConfig().AllowedRemotePatterns; len(got) != 0 {
+		t.Fatalf("default FederationConfig.AllowedRemotePatterns = %q, want empty", got)
+	}
+
+	yaml := "federation:\n  allowed-remote-patterns:\n    - \"dolthub://myorg/*\"\n    - \"\"\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"dolthub://myorg/*", ""}
+	if got := AllowedRemotePatterns(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("AllowedRemotePatterns() = %q, want %q (blank entries kept)", got, want)
+	}
+	if got := GetFederationConfig().AllowedRemotePatterns; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("FederationConfig.AllowedRemotePatterns = %q, want %q", got, want)
+	}
+
+	t.Setenv("BD_FEDERATION_ALLOWED_REMOTE_PATTERNS", "s3://bucket/*")
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if got := AllowedRemotePatterns(); len(got) != 1 || got[0] != "s3://bucket/*" {
+		t.Fatalf("AllowedRemotePatterns() with env override = %q, want [s3://bucket/*]", got)
+	}
+}

@@ -36,10 +36,13 @@ go_test(
         "dsn_test.go",
         "identifier_test.go",
         "persisted_remotes_test.go",
+        "remote_policy_test.go",
         "remotes_test.go",
     ],
     embed = [":doltutil"],
     deps = [
+        "//internal/config",
+        "//internal/remotecache",
         "//internal/storage",
         "@com_github_go_sql_driver_mysql//:mysql",
     ],

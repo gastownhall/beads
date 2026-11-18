@@ -827,6 +827,16 @@ func TestResolveSyncRemoteCheckedRejectsOptionValue(t *testing.T) {
 	})
 }
 
+func TestResolveSyncRemoteCheckedEnforcesAllowedRemotePatterns(t *testing.T) {
+	newForgeSyncRemoteWorkspace(t, "https://evil.example.com/attacker/repo.git")
+	config.Set("federation.allowed-remote-patterns", []string{"https://github.com/myorg/*"})
+	t.Cleanup(func() { config.Set("federation.allowed-remote-patterns", []string{}) })
+	got, err := resolveSyncRemoteChecked()
+	if err == nil {
+		t.Fatalf("resolveSyncRemoteChecked() = %q, nil; want a rejection: the remote matches no federation.allowed-remote-patterns entry", got)
+	}
+}
+
 func TestDetectBootstrapAction_OptionSyncRemoteBlocksWithoutProbe(t *testing.T) {
 	for _, remote := range []string{
 		"--upload-pack=touch /tmp/pwned;false #.git",

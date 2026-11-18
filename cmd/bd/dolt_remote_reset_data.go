@@ -19,9 +19,11 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -311,6 +313,14 @@ Examples:
 			return HandleErrorWithHint(
 				fmt.Sprintf("remote %q is not configured", name),
 				"Use 'bd dolt remote list' to see configured remotes.")
+		}
+
+		// GH#6233: the rebuild below is a push the store refuses for a remote
+		// federation.allowed-remote-patterns rejects, so refuse here, before
+		// the remote's data refs or file store are deleted: refusing only at
+		// the push would leave the remote emptied and not rebuilt.
+		if err := remotecache.CheckRemotePolicy(remotecache.RemoteSubject(name), url, config.AllowedRemotePatterns()); err != nil {
+			return HandleError("%v", err)
 		}
 
 		// The rebuilt remote holds exactly HEAD; refuse while anything

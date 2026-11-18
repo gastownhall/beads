@@ -644,7 +644,7 @@ federation:
 		issues := validateSyncConfig(tmpDir)
 		found := false
 		for _, issue := range issues {
-			if strings.Contains(issue, "does not match") {
+			if strings.Contains(issue, "federation.remote is not permitted") {
 				found = true
 				break
 			}

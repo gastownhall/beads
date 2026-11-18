@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -1731,6 +1732,9 @@ var (
 )
 
 func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config, cloneMode remoteCloneMode) error {
+	if err := checkCloneRemotePolicy(beadsDir, remoteURL); err != nil {
+		return err
+	}
 	mode := resolveRemoteCloneMode(beadsDir, cfg, cloneMode)
 
 	switch mode {
@@ -1782,6 +1786,21 @@ func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName st
 	default:
 		return remoteCloneViaCLI(ctx, beadsDir, remoteURL, dbName)
 	}
+}
+
+// checkCloneRemotePolicy refuses a clone source that the target workspace's
+// federation.allowed-remote-patterns rejects (GH#6233), before any clone
+// route creates a database. The policy is read from beadsDir, the workspace
+// that will hold the clone and later sync with the source, not from whichever
+// workspace the process loaded first. A target config bd cannot read refuses
+// the clone, so an unreadable config cannot lift its policy; the load error
+// is returned (wrapped) so the operator can see what to fix.
+func checkCloneRemotePolicy(beadsDir, remoteURL string) error {
+	var patterns []string
+	if err := config.WithBeadsDir(beadsDir, func() { patterns = config.AllowedRemotePatterns() }); err != nil {
+		return fmt.Errorf("load the target workspace config to enforce %s: %w", remotecache.AllowedRemotePatternsKey, err)
+	}
+	return remotecache.CheckRemotePolicy(remotecache.RemoteSubject("origin"), remoteURL, patterns)
 }
 
 func resolveRemoteCloneMode(beadsDir string, cfg *configfile.Config, cloneMode remoteCloneMode) remoteCloneMode {

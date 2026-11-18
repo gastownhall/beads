@@ -72,6 +72,11 @@ func BootstrapFromRemoteWithDBRef(ctx context.Context, doltDir, remoteURL, datab
 	if err := remotecache.ValidateRemoteURL(remoteURL); err != nil {
 		return false, fmt.Errorf("invalid remote URL: %w", err)
 	}
+	// GH#6233: refuse a clone source the allowlist rejects before the dolt
+	// directory is created.
+	if err := remotecache.CheckProposedRemote("origin", remoteURL); err != nil {
+		return false, err
+	}
 
 	if err := ValidateDatabaseName(database); err != nil {
 		return false, fmt.Errorf("invalid database name %q (use cfg.GetDoltDatabase() to resolve the configured name): %w", database, err)

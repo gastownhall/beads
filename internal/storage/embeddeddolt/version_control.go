@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -219,6 +220,10 @@ func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) err
 // AddRemoteWithRef adds a remote whose Dolt data lives on the git ref ref;
 // see storage.RemoteStore.
 func (s *EmbeddedDoltStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
+	// GH#6233: a URL the allowlist refuses is never registered.
+	if err := remotecache.CheckProposedRemote(name, url); err != nil {
+		return err
+	}
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.AddRemote(ctx, db, name, url, ref)
 	})
@@ -571,8 +576,8 @@ func (s *EmbeddedDoltStore) Push(ctx context.Context) error {
 	// (auto-commit off, or a session that ended right after a write with no
 	// intervening commit) silently pushed nothing new and still reported
 	// success.
-	if _, err := s.CommitPending(ctx, "beads"); err != nil {
-		return fmt.Errorf("commit pending before push: %w", err)
+	if err := s.commitPendingBeforeTransfer(ctx, defaultRemote, "push"); err != nil {
+		return err
 	}
 	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
@@ -585,8 +590,8 @@ func (s *EmbeddedDoltStore) Pull(ctx context.Context) error {
 	// GH#2474 / bd-578h9.2: auto-commit pending changes before pull, matching
 	// server-mode pullFromRemote and PullFrom. Leftovers from a crashed
 	// command would otherwise make the merge refuse to start.
-	if _, err := s.CommitPending(ctx, "beads"); err != nil {
-		return fmt.Errorf("commit pending before pull: %w", err)
+	if err := s.commitPendingBeforeTransfer(ctx, defaultRemote, "pull"); err != nil {
+		return err
 	}
 	preHead := s.preMergeHead(ctx)
 	err := s.withPeerAuth(ctx, defaultRemote, func(user string) error {
@@ -605,8 +610,8 @@ func (s *EmbeddedDoltStore) Pull(ctx context.Context) error {
 // auto-resolver declines are resolved with strategy instead of aborting the
 // merge for the operator; see versioncontrolops.PullWithStrategy.
 func (s *EmbeddedDoltStore) PullWithStrategy(ctx context.Context, strategy string) error {
-	if _, err := s.CommitPending(ctx, "beads"); err != nil {
-		return fmt.Errorf("commit pending before pull: %w", err)
+	if err := s.commitPendingBeforeTransfer(ctx, defaultRemote, "pull"); err != nil {
+		return err
 	}
 	preHead := s.preMergeHead(ctx)
 	err := s.withPeerAuth(ctx, defaultRemote, func(user string) error {
@@ -623,8 +628,8 @@ func (s *EmbeddedDoltStore) PullWithStrategy(ctx context.Context, strategy strin
 // PullRemoteWithStrategy implements storage.StrategicPuller for a named
 // remote; see PullWithStrategy.
 func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, strategy string) error {
-	if _, err := s.CommitPending(ctx, "beads"); err != nil {
-		return fmt.Errorf("commit pending before pull: %w", err)
+	if err := s.commitPendingBeforeTransfer(ctx, remote, "pull"); err != nil {
+		return err
 	}
 	preHead := s.preMergeHead(ctx)
 	err := s.withPeerAuth(ctx, remote, func(user string) error {
@@ -640,8 +645,8 @@ func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, 
 
 func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 	// GH#5433: see Push.
-	if _, err := s.CommitPending(ctx, "beads"); err != nil {
-		return fmt.Errorf("commit pending before push: %w", err)
+	if err := s.commitPendingBeforeTransfer(ctx, defaultRemote, "push"); err != nil {
+		return err
 	}
 	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
@@ -652,8 +657,8 @@ func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 
 func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
 	// GH#5433: see Push.
-	if _, err := s.CommitPending(ctx, "beads"); err != nil {
-		return fmt.Errorf("commit pending before push: %w", err)
+	if err := s.commitPendingBeforeTransfer(ctx, remote, "push"); err != nil {
+		return err
 	}
 	return s.withPeerAuth(ctx, remote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
@@ -667,8 +672,8 @@ func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force
 
 func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error {
 	// GH#2474 / bd-578h9.2: see Pull.
-	if _, err := s.CommitPending(ctx, "beads"); err != nil {
-		return fmt.Errorf("commit pending before pull: %w", err)
+	if err := s.commitPendingBeforeTransfer(ctx, remote, "pull"); err != nil {
+		return err
 	}
 	preHead := s.preMergeHead(ctx)
 	err := s.withPeerAuth(ctx, remote, func(user string) error {
@@ -692,8 +697,8 @@ func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
 	// GH#5433: see Push.
-	if _, err := s.CommitPending(ctx, "beads"); err != nil {
-		return fmt.Errorf("commit pending before push: %w", err)
+	if err := s.commitPendingBeforeTransfer(ctx, peer, "push"); err != nil {
+		return err
 	}
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
@@ -705,8 +710,8 @@ func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
 func (s *EmbeddedDoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
 	// Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors.
-	if _, err := s.CommitPending(ctx, "beads"); err != nil {
-		return nil, fmt.Errorf("commit pending before pull: %w", err)
+	if err := s.commitPendingBeforeTransfer(ctx, peer, "pull"); err != nil {
+		return nil, err
 	}
 
 	preHead := s.preMergeHead(ctx)

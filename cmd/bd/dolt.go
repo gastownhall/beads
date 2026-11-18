@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -640,6 +641,15 @@ func printNoRemoteGuidance() {
 	fmt.Println("  • Azure Blob Storage: az://account.blob.core.windows.net/container/path")
 }
 
+// adoptionOriginURL reads the git origin URL git-origin adoption derives the
+// Dolt remote from. It is a variable only so tests can name an origin without
+// a git repository or the process-wide repository caches.
+var adoptionOriginURL = gitOriginGetURLForActiveRepo
+
+// adoptionPolicySubject names the git origin in a federation.allowed-remote-patterns
+// refusal of adoption: no Dolt remote exists yet to name.
+const adoptionPolicySubject = "git origin"
+
 // adoptGitOriginRemoteForPush gives a rig with no Dolt remote the one its git
 // origin implies, so `bd dolt push` works out of the box.
 //
@@ -664,11 +674,23 @@ func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, po
 	// Workspace resolution is deliberately NOT done yet: selectedDoltBeadsDir
 	// calls prepareSelectedNoDBContext, which mutates process and on-disk
 	// workspace state, and nothing may mutate before consent is established.
-	originURL, err := gitOriginGetURLForActiveRepo(ctx)
+	originURL, err := adoptionOriginURL(ctx)
 	if err != nil || originURL == "" {
 		return false, nil
 	}
 	remoteURL := normalizeRemoteURL(originURL)
+
+	// --no-adopt / BD_NO_REMOTE_ADOPT: nothing will be adopted, so there is
+	// nothing to vet, and the caller's no-remote handling runs as it would
+	// without an allowlist (applyAdoptionConsent's "not an error" refusal).
+	if decision, refusal := decideRemoteAdoption(policy); decision == adoptRefuse && refusal == adoptRefusedDisabled {
+		return false, nil
+	}
+	// GH#6233: an origin federation.allowed-remote-patterns refuses is never
+	// offered for consent, let alone adopted.
+	if err := remotecache.CheckRemotePolicy(adoptionPolicySubject, remoteURL, config.AllowedRemotePatterns()); err != nil {
+		return false, err
+	}
 
 	if proceed, err := applyAdoptionConsent(remoteURL, policy, optIn); err != nil || !proceed {
 		return false, err
@@ -823,6 +845,15 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 		} else if adopted {
 			fmt.Println("Configured Dolt remote origin from git origin.")
 		}
+		// GH#6233: under a non-empty allowlist the store's transfer gate fails
+		// closed on an unresolved default remote (refused, not dialed), so the
+		// benign no-remote case would surface as a policy refusal instead of
+		// Dolt's no-remote error. Confirm the emptiness with the same evidence
+		// isConfirmedNoRemote proves below and keep the exit-0 skip.
+		if len(config.AllowedRemotePatterns()) > 0 && hasNoRemoteConfigured(ctx, st) {
+			printNoRemoteGuidance()
+			return nil
+		}
 		fmt.Println("Pushing to Dolt remote...")
 
 		var pushErr error
@@ -943,6 +974,13 @@ reports conflicts.`,
 		var leftover *remoteOnlyInLeftoverDatabaseError
 		if _, err := hasConfiguredRemote(ctx, st); errors.As(err, &leftover) {
 			return HandleError("%v", err)
+		}
+		// GH#6233: see the push twin: the allowlist gate's fail-closed refusal
+		// on an unresolved default remote must not turn the benign no-remote
+		// skip into a policy error.
+		if len(config.AllowedRemotePatterns()) > 0 && hasNoRemoteConfigured(ctx, st) {
+			printNoRemoteGuidance()
+			return nil
 		}
 		fmt.Println("Pulling from Dolt remote...")
 		if strategy != "" {
@@ -2062,6 +2100,12 @@ func registerPersistedDoltRemote(ctx context.Context, st doltRemoteAddStore, per
 }
 
 func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url string, confirm doltRemoteOverwriteConfirmer) (doltRemoteAddResult, error) {
+	// GH#6233: a URL federation.allowed-remote-patterns refuses is refused
+	// before the overwrite prompt and the remove, so the remote already
+	// registered under name stays as it was.
+	if err := remotecache.CheckProposedRemote(name, url); err != nil {
+		return doltRemoteAddResult{}, err
+	}
 	remotes, err := st.ListRemotes(ctx)
 	if err != nil {
 		return doltRemoteAddResult{}, fmt.Errorf("list existing remotes: %w", err)

@@ -48,6 +48,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -5523,6 +5524,11 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
+	// GH#6233: the allowlist is checked before any route, credential or
+	// pre-push work, so a refused remote receives nothing.
+	if err := s.checkRemotePolicy(ctx, remote); err != nil {
+		return err
+	}
 	creds := s.credentialsForRemote(remote)
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
@@ -5624,6 +5630,12 @@ func (s *DoltStore) PullRemote(ctx context.Context, remote string) error {
 // pullFromRemote is the internal implementation for all pull operations.
 // It routes through CLI or SQL based on the remote's protocol and credentials.
 func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr error) {
+	// GH#6233: refuse a remote outside the allowlist before the write circuit
+	// is entered and before the pre-pull commit, so a policy refusal neither
+	// counts against the circuit nor changes local state.
+	if err := s.checkRemotePolicy(ctx, remote); err != nil {
+		return err
+	}
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.pullFromRemoteUnchecked(ctx, remote)
 	})
@@ -6695,6 +6707,10 @@ func (s *DoltStore) AddRemote(ctx context.Context, name, url string) error {
 // AddRemoteWithRef adds a remote whose Dolt data lives on the git ref ref;
 // see storage.RemoteStore.
 func (s *DoltStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
+	// GH#6233: a URL the allowlist refuses is never registered.
+	if err := remotecache.CheckProposedRemote(name, url); err != nil {
+		return err
+	}
 	if err := versioncontrolops.AddRemote(ctx, s.db, name, url, ref); err != nil {
 		return fmt.Errorf("failed to add remote %s: %w", name, err)
 	}
