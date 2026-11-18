@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -676,4 +677,86 @@ func TestIssue6092IgnoredChainReplayOverAbsentWispTables(t *testing.T) {
 	got := issue6092ReadShape(t, ctx, db)
 	issue6092RequireNamedFinalObjects(t, got)
 	issue6092RequireFinalShape(t, got, final)
+}
+
+// issue6092OpenFreshDatabase creates a new, unmigrated database on the test
+// server and returns a pool limited to one connection, so the session
+// variables the migrations set stay on one session. The caller must already
+// hold a test slot (setupTestStore takes one). No DROP DATABASE on cleanup:
+// rapid CREATE/DROP cycles crash the Dolt server (see setupPreReshapeAncestor).
+func issue6092OpenFreshDatabase(t *testing.T, ctx context.Context) *sql.DB {
+	t.Helper()
+	dbName := uniqueTestDBName(t)
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testServerPort, User: "root", Timeout: 10 * time.Second,
+	}.String())
+	if err != nil {
+		t.Fatalf("open admin connection: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE `"+dbName+"`"); err != nil {
+		t.Fatalf("create database: %v", err)
+	}
+	db, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName, Timeout: 10 * time.Second,
+	}.String())
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// TestIssue6092Main46LegacyUpgradeStillConvergesThroughMain58 is AC-6's
+// runtime half, on the reporter's lineage: a clone last migrated by a binary
+// at main 46 whose ignored chain sat at 4, so wisp_dependencies is still
+// ignored/0003's generated-column table, and main 0022's three type indexes
+// landed on it. Main runs first, so the main-58 entry of the same repair
+// converges the table before the ignored pass, and the ignored-5 entry must
+// then no-op. The frozen-hash and committed-schema parity halves are the
+// existing TestShippedMigrationsAreFrozen / TestShippedIgnoredMigrationsAreFrozen
+// and TestCLIBundleMatchesRuntimeCommittedSchema.
+func TestIssue6092Main46LegacyUpgradeStillConvergesThroughMain58(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*testTimeout)
+	defer cancel()
+
+	// The reference final shape comes from a separate store migrated fresh.
+	final := issue6092ReadShape(t, ctx, store.db)
+
+	db := issue6092OpenFreshDatabase(t, ctx)
+	if _, err := schema.MigrateUpTo(ctx, db, 46); err != nil {
+		t.Fatalf("seed main schema to 46: %v", err)
+	}
+	if _, err := schema.MigrateIgnoredUpTo(ctx, db, issue6092IgnoredCursorBefore0005); err != nil {
+		t.Fatalf("seed ignored schema to %d: %v", issue6092IgnoredCursorBefore0005, err)
+	}
+	// A fresh database at main 46 / ignored 4 already holds the id-keyed
+	// wisp_dependencies (the current binary's chain builds it), so lay in the
+	// generated-column table an older binary's ignored/0003 left, with main
+	// 0022's indexes on it, the way the affected clones carry it.
+	issue6092BuildLegacyWispDeps(t, ctx, db)
+	legacy := issue6092ReadShape(t, ctx, db)
+	if _, ok := legacy.columns["depends_on_id"]; !ok {
+		t.Fatalf("fixture: want ignored/0003's generated depends_on_id column, got columns %v", legacy.columns)
+	}
+	issue6092CommitAndRewindIgnored(t, ctx, db, issue6092IgnoredCursorBefore0005)
+	if v, err := schema.CurrentVersion(ctx, db); err != nil || v != 46 {
+		t.Fatalf("fixture main cursor = %d (err %v), want 46", v, err)
+	}
+	if v, err := schema.CurrentIgnoredVersion(ctx, db); err != nil || v != issue6092IgnoredCursorBefore0005 {
+		t.Fatalf("fixture ignored cursor = %d (err %v), want %d", v, err, issue6092IgnoredCursorBefore0005)
+	}
+
+	if _, err := schema.MigrateUp(ctx, db); err != nil {
+		t.Fatalf("MigrateUp from main 46: %v", err)
+	}
+	issue6092RequireCursorsAtLatest(t, ctx, db)
+	got := issue6092ReadShape(t, ctx, db)
+	issue6092RequireNamedFinalObjects(t, got)
+	issue6092RequireFinalShape(t, got, final)
+	issue6092RequireDepsPreserved(t, issue6092ReadDeps(t, ctx, db), issue6092ValidDeps)
+	issue6092RequireReferencedUnchanged(t, ctx, db)
 }
