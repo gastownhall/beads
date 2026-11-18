@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-11-10
+Last reviewed: 2026-11-18
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -23,11 +23,14 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 `config.yaml` is searched in this order, with later files overriding earlier ones:
 
 1. `~/.beads/config.yaml` (legacy user-level, lowest priority)
-2. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
-3. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
-4. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
+2. `$XDG_CONFIG_HOME/bd/config.yaml` on Linux and macOS when `XDG_CONFIG_HOME` is set, `%AppData%\bd\config.yaml` on Windows (native user-level; with `XDG_CONFIG_HOME` unset on Linux or macOS this is the next entry)
+3. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
+4. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
+5. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
 
 A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
+
+On macOS, bd no longer reads `~/Library/Application Support/bd/config.yaml` or the global `~/Library/Application Support/beads/PRIME.md`: probing that folder can raise a macOS privacy prompt (GH#8113). Move any settings there to `~/.config/bd/config.yaml` (and PRIME.md to `~/.config/beads/`); `bd doctor` lists the settings that differ and prints the commands. On the first run after upgrading, bd carries the metrics settings from the old file into the new one when the new one does not set them.
 
 ### Missing `metadata.json`
 

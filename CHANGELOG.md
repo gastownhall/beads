@@ -819,6 +819,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **On macOS, bd no longer reads `~/Library/Application Support/bd/config.yaml`
+  or `~/Library/Application Support/beads/PRIME.md`.** Probing those paths on
+  every launch could raise a macOS 26 privacy prompt ("would like to access
+  data from other apps"). bd now resolves its macOS user config directory as
+  it does on Linux: `$XDG_CONFIG_HOME` when set, otherwise `~/.config`, so the
+  files are `~/.config/bd/config.yaml` and `~/.config/beads/PRIME.md`, and a
+  set `XDG_CONFIG_HOME` is now honored on macOS. On the first run after
+  upgrading, bd reads the old file once to carry your metrics settings
+  (`metrics.disabled`, `metrics.endpoint`, `metrics.notice_shown`) into the
+  new config when it does not set them; if the old file exists but cannot be
+  read, metrics are left off and bd says so (`bd metrics on` re-enables
+  them). Other settings left in the old file stop applying, including
+  `node_id` and `mail.delegate`. Run `bd doctor` to list the settings that
+  differ and the commands to move them. Linux and Windows are unchanged.
+  ([#8113](https://github.com/gastownhall/beads/issues/8113))
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull
