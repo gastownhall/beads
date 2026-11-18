@@ -34,6 +34,7 @@ go_test(
         "doltserver_exit_unix_test.go",
         "doltserver_internal_test.go",
         "doltserver_test.go",
+        "execwin_windows_test.go",
         "external_dolt_server_test.go",
         "testmain_test.go",
         "testserver_test.go",
@@ -51,7 +52,13 @@ go_test(
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "//internal/execwin",
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

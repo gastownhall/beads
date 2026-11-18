@@ -5,9 +5,16 @@ go_library(
     srcs = [
         "execwin.go",
         "execwin_other.go",
+        "execwin_windows.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/execwin",
     visibility = ["//:__subpackages__"],
+    deps = select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
@@ -15,8 +22,15 @@ go_test(
     srcs = [
         "execwin_other_test.go",
         "execwin_test.go",
+        "execwin_windows_test.go",
     ],
     embed = [":execwin"],
+    deps = select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
