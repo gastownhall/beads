@@ -366,6 +366,7 @@ go_test(
         "schema_skew_test.go",
         "schema_version_test.go",
         "search_counts_byids_plan_test.go",
+        "search_counts_oracle_test.go",
         "search_counts_parity_test.go",
         "search_parity_test.go",
         "server_version_floor_test.go",
