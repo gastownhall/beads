@@ -40,6 +40,12 @@ func runTrackerSyncForTest(t *testing.T, cmd *cobra.Command, flags []string) (ru
 	for _, k := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB", "NOTION_TOKEN", "NOTION_DATA_SOURCE_ID"} {
 		t.Setenv(k, "")
 	}
+	// Pin the proxied-server route off: saveAndRestoreGlobals does not reset
+	// these, and the notion runner's proxied refusal sits before its direction
+	// check, so an inherited value would shadow the case under test.
+	oldProxied, oldCmdCtx := proxiedServerMode, cmdCtx
+	proxiedServerMode, cmdCtx = false, nil
+	t.Cleanup(func() { proxiedServerMode, cmdCtx = oldProxied, oldCmdCtx })
 
 	resetCommandFlags(cmd)
 	t.Cleanup(func() { resetCommandFlags(cmd) })
