@@ -735,10 +735,10 @@ below.
 
 ### Storage reclaim fails with "context canceled"
 
-`bd flatten` finishes by hard-resetting `main` onto a temporary branch, as
-does the Dolt-history compaction, `bd compact`, in v1.3.2 and earlier (builds
-with the fix listed in the CHANGELOG use a soft reset, which this does not
-affect); the merge-settle path behind `bd dolt pull` / `bd sync` falls back
+In older releases `bd flatten` finishes by hard-resetting `main` onto a
+temporary branch, as does the Dolt-history compaction, `bd compact`, in v1.3.2
+and earlier (builds with the fixes listed in the CHANGELOG use a soft reset,
+which this does not affect); the merge-settle path behind `bd dolt pull` / `bd sync` falls back
 to a hard reset when it abandons a merge. On Dolt 2.3.x a few percent of freshly created databases come up with
 `CALL DOLT_RESET('--hard')` broken for the life of the server process, so on
 an affected database those commands stop with:

@@ -1472,7 +1472,8 @@ func rejectProtectedConfigKey(key string) (string, bool) {
 		return "Error: issue_prefix cannot be set via 'bd config set'.\n" +
 			"  - New project:       bd init --prefix <prefix>\n" +
 			"  - Fresh clone:       bd bootstrap\n" +
-			"  - Rename existing:   bd rename-prefix <new-prefix>", true
+			"  - Rename existing:   bd rename-prefix <new-prefix>\n" +
+			"  - New IDs only:      bd rename-prefix <new-prefix> --mint-only", true
 	}
 	return "", false
 }

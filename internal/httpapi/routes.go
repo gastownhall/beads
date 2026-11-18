@@ -15,7 +15,7 @@ const (
 	// matched, so the two halves of the one path exception cannot drift apart.
 	customMethodPathValue = "idop"
 	// customMethodPattern is that one registration. Every row carrying a
-	// customMethod declares it, and s.handler collapses them into a single
+	// customMethod declares it, and s.mounts collapses them into a single
 	// ServeMux entry.
 	customMethodPattern = "/v0/beads/issues/{" + customMethodPathValue + "}"
 	// customMethodIDValue is where the dispatcher leaves the id it split out,
@@ -437,7 +437,7 @@ func customMethodTarget(rows []route, segment string) (route, string, *Result) {
 // route is one row of the surface: an operation, where it lives in the
 // document, where it lives in the router, and what the request lifecycle owes
 // it. TestSpecRouteParity compares this table against the spec's paths, and
-// s.handler builds the router from it, so "the routes" and "the document" are
+// s.mounts builds the router from it, so "the routes" and "the document" are
 // the same statement made twice.
 type route struct {
 	// op is the spec's operationId. It also names the operation in the

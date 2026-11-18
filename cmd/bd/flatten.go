@@ -35,8 +35,20 @@ that has been GC'd before (bd gc, or a previous flatten or compact), only a
 full collection reclaims the squashed history. A full GC can take minutes on
 multi-gigabyte stores.
 
-This is irreversible — all commit history is lost. The resulting database
-has exactly one commit containing all current data.
+Changes on main that are only in the working set stay pending. Staged
+changes, and the rows of a commit that reaches main mid-flatten, are kept in
+one preservation commit on the flattened history; the landed commit's own
+hash and message are not.
+
+If a run fails, bd flatten tries to return to main and delete its temporary
+branch within 30 seconds; if that cleanup fails, the error names the branch
+left behind. A failure after main has moved is not rolled back: main keeps
+the flattened history and bd flatten stops before pruning and GC. Inspect
+dolt_status, then commit what is staged with bd dolt commit when ready.
+
+This is irreversible — all commit history is lost. The resulting history is
+the initial commit plus one snapshot commit containing all current data, and
+a preservation commit when changes reached main mid-flatten.
 
 Use this when:
   - Your active database has grown very large

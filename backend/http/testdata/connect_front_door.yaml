@@ -627,10 +627,10 @@ commands:
     cases:
       - id: dolt-pull
         class: refuses
+        note: 'the embedded oracle has no remote, so its pull skips with the no-remote guidance and exits 0, as server mode does (bd-e2q8zs; it exited 1 before)'
         args: [dolt, pull, '--json']
         exit: 1
         words: 'operation "Pull" not supported by the http backend'
-        embedded_exit: 1
   - command: bd dolt push
     cases:
       - id: dolt-push

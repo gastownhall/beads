@@ -143,7 +143,7 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor str
 	if aerr != nil {
 		return fmt.Errorf("affected by promote for %s: %w", id, aerr)
 	}
-	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps, actor); err != nil {
 		return fmt.Errorf("recompute is_blocked after promote for %s: %w", id, err)
 	}
 

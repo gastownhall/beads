@@ -1,0 +1,49 @@
+{
+  "data": {
+    "corpus-canonical": [
+      {
+        "closed_at": "<TS>",
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_type": "duplicates",
+        "description": "deterministic corpus-duplicate",
+        "id": "corpus-duplicate",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native"
+        ],
+        "metadata": {
+          "corpus": "native"
+        },
+        "notes": "corpus-duplicate notes",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "status": "closed",
+        "title": "Corpus duplicate subject",
+        "updated_at": "<TS>"
+      },
+      {
+        "closed_at": "<TS>",
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_type": "supersedes",
+        "description": "deterministic corpus-superseded",
+        "id": "corpus-superseded",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native"
+        ],
+        "metadata": {
+          "corpus": "native"
+        },
+        "notes": "corpus-superseded notes",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "status": "closed",
+        "title": "Corpus superseded subject",
+        "updated_at": "<TS>"
+      }
+    ]
+  },
+  "schema_version": 1
+}

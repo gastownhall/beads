@@ -219,3 +219,41 @@ func docSubtree(doc, heading string) (string, bool) {
 func headingLevel(line string) int {
 	return len(line) - len(strings.TrimLeft(line, "#"))
 }
+
+// TestNativeBackupRestoreUnknownFieldsGuidance pins the native-backup route's
+// answer to a restore whose post-restore commit Dolt refuses with "table has
+// unknown fields" (GH#7569): which engine must read the backup (the installed
+// Dolt CLI is ruled out only in embedded mode, because a server bd starts runs
+// it and needs a restart after an upgrade), that a newer writer is not
+// guaranteed, that the outcome is unknown, and how to verify recovery from a
+// preserved backup in a separate workspace.
+func TestNativeBackupRestoreUnknownFieldsGuidance(t *testing.T) {
+	runbook := readRepoDoc(t, "docs", "recovery", "database-corruption.md")
+	const heading = "### From a Dolt-native backup"
+	section, ok := docSection(runbook, heading)
+	if !ok {
+		t.Fatalf("docs/recovery/database-corruption.md missing the %q recovery route", heading)
+	}
+	where := "database-corruption.md " + heading
+	requirePhrases(t, where, section,
+		"table has unknown fields",
+		"failed to commit restore",
+		"in embedded mode it is the dolt engine built into `bd`, not the dolt cli you may have installed",
+		"the dolt sql server the workspace connects to",
+		"a server that bd starts runs the `dolt` that was on your path when it started",
+		"restart the server with `bd dolt stop` and then `bd dolt start`",
+		"a backup written by a newer dolt is not guaranteed to restore",
+		"may already hold the backup contents",
+		"whether the commit was recorded or the data can be read is unknown",
+		"leave the backup directory unchanged",
+		"upgrade `bd` to a build whose embedded dolt can read the backup",
+		"a dolt server whose version can read it",
+		"separate, freshly initialized recovery workspace",
+	)
+	forbidPhrases(t, where, section,
+		"every newer backup is rejected",
+		"the one doing the restore, not the dolt cli you may have installed",
+		"nothing was committed",
+		"the restored data is readable",
+	)
+}

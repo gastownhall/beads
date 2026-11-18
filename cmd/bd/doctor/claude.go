@@ -370,6 +370,11 @@ func isClaudePresent() bool {
 	return err == nil && info.IsDir()
 }
 
+// claudePluginInstallFix is the install hint both plugin checks print when the
+// beads plugin is missing. Doctor usually runs outside a beads checkout, so it
+// links the published page rather than a repo-relative docs path.
+const claudePluginInstallFix = "Install plugin: /plugin marketplace add gastownhall/beads && /plugin install beads (see https://beads.gascity.com/integrations/claude-code-plugin)"
+
 // CheckClaudePlugin checks if the beads Claude Code plugin is installed and up to date.
 func CheckClaudePlugin() DoctorCheck {
 	// Check if running in Claude Code.
@@ -399,7 +404,7 @@ func CheckClaudePlugin() DoctorCheck {
 			Name:    "Claude Plugin",
 			Status:  StatusWarning,
 			Message: "beads plugin not installed",
-			Fix:     "Install plugin: /plugin marketplace add steveyegge/beads && /plugin install beads (see docs/integrations/claude-code-plugin.md)",
+			Fix:     claudePluginInstallFix,
 		}
 	}
 
@@ -465,7 +470,7 @@ func CheckClaudePluginLocalOnly() DoctorCheck {
 			Name:    "Claude Plugin",
 			Status:  StatusWarning,
 			Message: "beads plugin not installed",
-			Fix:     "Install plugin: /plugin marketplace add steveyegge/beads && /plugin install beads (see docs/integrations/claude-code-plugin.md)",
+			Fix:     claudePluginInstallFix,
 		}
 	}
 

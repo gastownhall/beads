@@ -1,0 +1,17 @@
+[
+  {
+    "actor": "protocol-test",
+    "comment": "Added label: corpus-native",
+    "created_at": "<TS>",
+    "event_type": "label_added",
+    "issue_id": "corpus-parent.1"
+  },
+  {
+    "actor": "protocol-test",
+    "created_at": "<TS>",
+    "event_type": "created",
+    "issue_id": "corpus-parent.1",
+    "new_value": "",
+    "old_value": ""
+  }
+]

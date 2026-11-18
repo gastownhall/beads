@@ -10,7 +10,9 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -56,13 +58,26 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 			}
 		}
 
-		if err := validateBackupRestoreDir(dir); err != nil {
+		proxied := usesProxiedServer()
+		// A store that cannot restore at all (a bd connect workspace) refuses
+		// before the source is checked, so its user is not sent off to write a
+		// backup that this workspace could never restore. A proxied restore
+		// runs only on the managed-local server bd spawned on this machine
+		// (runBackupRestoreProxied refuses every other topology).
+		reader := restoreSourceReadByBd
+		if !proxied {
+			if _, err := restoreBackupStore(store); err != nil {
+				return err
+			}
+			reader = restoreSourceReaderOf(store)
+		}
+		if err := validateBackupRestoreDir(dir, reader); err != nil {
 			return err
 		}
 
 		force, _ := cmd.Flags().GetBool("force")
 
-		if usesProxiedServer() {
+		if proxied {
 			if err := runBackupRestoreProxied(ctx, dir, force); err != nil {
 				return err
 			}
@@ -89,15 +104,24 @@ func init() {
 	backupCmd.AddCommand(backupRestoreCmd)
 }
 
-// runBackupRestore restores the database from a Dolt-native backup.
-func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, force bool) error {
+// restoreBackupStore returns the restore surface of s, or the refusal for a
+// store that has none.
+func restoreBackupStore(s storage.DoltStorage) (storage.BackupStore, error) {
 	if s == nil {
-		return fmt.Errorf("database is not initialized. Run 'bd init' first")
+		return nil, fmt.Errorf("database is not initialized. Run 'bd init' first")
 	}
-
 	bs, ok := storage.UnwrapStore(s).(storage.BackupStore)
 	if !ok {
-		return fmt.Errorf("storage backend does not support backup operations")
+		return nil, fmt.Errorf("storage backend does not support backup operations")
+	}
+	return bs, nil
+}
+
+// runBackupRestore restores the database from a Dolt-native backup.
+func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, force bool) error {
+	bs, err := restoreBackupStore(s)
+	if err != nil {
+		return err
 	}
 
 	if err := bs.RestoreDatabase(ctx, dir, force); err != nil {
@@ -120,11 +144,41 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, fo
 
 	if err := s.Commit(ctx, "bd backup restore"); err != nil {
 		if !strings.Contains(err.Error(), "nothing to commit") {
-			return fmt.Errorf("failed to commit restore: %w", err)
+			return restoreCommitError(err)
 		}
 	}
 
 	return nil
+}
+
+// restoreUnknownFieldsDiagnostic is the Dolt engine's text for a stored
+// table it cannot decode because it holds fields this engine does not know.
+const restoreUnknownFieldsDiagnostic = "table has unknown fields"
+
+// restoreUnknownFieldsHint follows a post-restore commit failure carrying
+// restoreUnknownFieldsDiagnostic (GH#7569). The restore step already ran, so
+// it says what is known and leaves the commit outcome and the readability of
+// the restored data open: the failure may be indeterminate
+// (storage.ErrCommitIndeterminate), and the engine text alone does not say
+// which field or which writer version is involved.
+const restoreUnknownFieldsHint = "The restore step completed before this commit, so this workspace's database may already have been replaced\n" +
+	"by the backup contents; whether the commit was recorded, and whether the restored data can be read, is unknown.\n" +
+	"Dolt reported table fields the restoring engine does not know, which can mean the backup was written in a newer\n" +
+	"storage format than that engine reads.\n" +
+	"Embedded mode: upgrade bd to a build whose embedded Dolt engine can read this backup.\n" +
+	"Server mode: restore through a Dolt server whose version can read this backup. A server bd starts runs the dolt\n" +
+	"that was on PATH when it started: upgrade dolt, then restart the server ('bd dolt stop', then 'bd dolt start').\n" +
+	"Keep the backup unchanged and verify the recovery by restoring it into a separate, freshly initialized workspace\n" +
+	"(see docs/recovery/database-corruption.md)"
+
+// restoreCommitError wraps a failed post-restore commit, adding restore
+// guidance when the engine reported unknown table fields. The original error,
+// including any storage.ErrCommitIndeterminate, stays in the chain.
+func restoreCommitError(err error) error {
+	if strings.Contains(err.Error(), restoreUnknownFieldsDiagnostic) {
+		return fmt.Errorf("failed to commit restore: %w\n%s", err, restoreUnknownFieldsHint)
+	}
+	return fmt.Errorf("failed to commit restore: %w", err)
 }
 
 // registerBackupRemote registers dir as the default backup remote and saves
@@ -169,9 +223,89 @@ func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
 	return cfg.Save(beadsDir)
 }
 
-func validateBackupRestoreDir(dir string) error {
+// restoreSourceReader is what opens a restore source's directory, which
+// decides what bd's own check of that directory says about it.
+type restoreSourceReader int
+
+const (
+	// restoreSourceReadByBd is embedded Dolt in this process, or the
+	// managed-local server a proxied workspace runs on this machine: the
+	// check reads the directory the restore opens.
+	restoreSourceReadByBd restoreSourceReader = iota
+	// restoreSourceReadByLocalServer is a Dolt SQL server at a loopback host
+	// (clientServerShareFilesystem), taken to share this machine's
+	// filesystem. It opens the path on its own filesystem all the same, so
+	// in a container it opens whatever is at that path inside it.
+	restoreSourceReadByLocalServer
+	// restoreSourceReadByRemoteServer is a Dolt SQL server at another host,
+	// which opens the path on a filesystem bd cannot check.
+	restoreSourceReadByRemoteServer
+)
+
+// restoreSourceReaderOf returns what opens the source of a restore into s, a
+// store that is not proxied: the engine in this process for embedded Dolt,
+// otherwise the Dolt SQL server s is connected to.
+func restoreSourceReaderOf(s storage.DoltStorage) restoreSourceReader {
+	switch {
+	case isEmbeddedStore(s):
+		return restoreSourceReadByBd
+	case clientServerShareFilesystem():
+		return restoreSourceReadByLocalServer
+	default:
+		return restoreSourceReadByRemoteServer
+	}
+}
+
+// backupRestoreRemedy is the hint every restore preflight refusal of the
+// source ends with.
+const backupRestoreRemedy = "Restore was not attempted. Pass a directory written by 'bd backup sync';\n" +
+	"to create one, run 'bd backup init <path>' and then 'bd backup sync'"
+
+// backupRestoreServerNote follows backupRestoreRemedy when a Dolt SQL server
+// at a loopback host opens the source. A server in a container there opens
+// the path inside the container, where its `bd backup sync` wrote too, so a
+// backup it holds is refused here unless this machine sees the same backup at
+// the same path.
+const backupRestoreServerNote = "bd checked the path on this machine, and the Dolt server opens it on its own filesystem:\n" +
+	"a server in a container needs the backup mounted at the same path in both"
+
+// validateBackupRestoreDir refuses a restore source that holds no Dolt backup,
+// or sits at a path Dolt would read as another directory, before either
+// restore path starts. A forced restore opens the source, replaces the live
+// database, and only then syncs the backup into it, so an empty or wrong
+// directory (including the default .beads/backup, which backupDir creates)
+// would otherwise cost the database (GH#7098). The check itself is the
+// storage layer's (versioncontrolops.RestoreSourceURL), the one each restore
+// path builds its source URL with; running it here first refuses before the
+// proxied path quiesces the topology.
+//
+// The check reads this machine's filesystem, and in server mode the Dolt
+// server opens the path on its own (reader). A server at another host reads
+// a filesystem bd cannot check, so a restore from it is refused outright: a
+// forced one from a directory the server sees as empty would drop the
+// database, and one without --force cannot replace the workspace's existing
+// database anyway. A server at a loopback host is taken to share this
+// filesystem, and its refusals say which side was checked; one in a
+// container that is handed a backup only this machine holds still drops the
+// database under --force, until the engine restores through a staging
+// database (dolthub/dolt#11951).
+func validateBackupRestoreDir(dir string, reader restoreSourceReader) error {
+	if reader == restoreSourceReadByRemoteServer {
+		return fmt.Errorf("backup source %s is read by the Dolt server at %s from its own filesystem, which bd cannot check from this machine;\n"+
+			"a --force restore from a directory that holds no Dolt backup there drops the database\n"+
+			"Restore was not attempted. Run 'bd backup restore' on the server's machine, in a workspace\n"+
+			"that reaches the server at localhost, so bd checks the directory the server reads",
+			remedy.PrintedValue(dir), remedy.PrintedValue(backupServerHost()))
+	}
+	hint := backupRestoreRemedy
+	if reader == restoreSourceReadByLocalServer {
+		hint += "\n" + backupRestoreServerNote
+	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
+		return fmt.Errorf("backup directory not found: %s\n%s", dir, hint)
+	}
+	if _, err := versioncontrolops.RestoreSourceURL(dir); err != nil {
+		return fmt.Errorf("%w\n%s", err, hint)
 	}
 	return nil
 }

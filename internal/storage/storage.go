@@ -883,11 +883,13 @@ type BlockedRecomputer interface {
 	RecomputeAllBlocked(ctx context.Context) (int, error)
 }
 
-// StateHasher returns a hash covering committed history plus the working set.
-// Unlike GetCurrentCommit (HEAD only), the hash moves on uncommitted writes.
-// Change detection against a SQL server must use this when available: server
-// mode runs with dolt auto-commit off, so writes sit in the working set and
-// HEAD does not advance.
+// StateHasher returns a hash of the working root (DOLT_HASHOF_DB()). Unlike
+// GetCurrentCommit (HEAD only), the hash moves on uncommitted writes, and it
+// stays put across reads and across a commit that leaves the working data as
+// it was. Change detection must use this when available: server mode runs
+// with dolt auto-commit off, and embedded batch or off auto-commit leaves
+// writes in the working set too, so HEAD does not advance. The server store
+// falls back to HEAD on servers that predate DOLT_HASHOF_DB.
 // Callers should type-assert to this interface and fall back to
 // GetCurrentCommit when the store does not implement it.
 type StateHasher interface {
@@ -1101,6 +1103,12 @@ type BackupStore interface {
 	BackupDatabase(ctx context.Context, dir string) error
 	// RestoreDatabase restores the database from a Dolt backup at dir.
 	// When force is true, the existing database is dropped before restoring.
+	// dir must be a directory on the caller's filesystem holding a Dolt
+	// backup, at a path Dolt reads literally: anything else is refused before
+	// the existing database is touched. A store served by a Dolt SQL server
+	// hands the path to the server, which opens it on its own filesystem, so
+	// that check speaks for the directory restored from only when the server
+	// shares the caller's filesystem at that path.
 	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 
