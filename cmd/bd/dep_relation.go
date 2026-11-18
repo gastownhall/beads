@@ -2,22 +2,14 @@ package main
 
 import (
 	"slices"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// depRelation names one dependency type from both ends of its edge. A stored
-// edge is (issue_id, depends_on_id, type): out* describes the edge as the
-// issue_id side sees it, in* as the depends_on_id side sees it.
-//
-// Each type's direction comes from the command that writes it, NOT from reading
-// the type name left to right — beads has no single convention there.
-// `bd supersede old --with new` stores (old, new, supersedes), so the edge
-// reads "issue_id is superseded by depends_on_id", while
-// `bd duplicate dup --of canonical` stores (dup, canonical, duplicates), which
-// reads the other way round. Getting this backwards prints a lie, so change an
-// entry only alongside the command that creates that edge.
+// depRelation names one dependency type from both ends of its edge, for the
+// text views. The table and its direction notes live in
+// types.DependencyRelationFor, which bd show --json reads too, so the two
+// views cannot disagree about which end is which.
 type depRelation struct {
 	outHeading string // bd show section heading for the edge's source
 	inHeading  string // bd show section heading for the edge's target
@@ -26,43 +18,16 @@ type depRelation struct {
 	phrase     string // reads "<source> <phrase> <target>", for dep add feedback
 }
 
-// depRelations covers the well-known types. Missing entries fall back to the
-// type's own name (see depRelationFor), which is what custom types get.
-var depRelations = map[types.DependencyType]depRelation{
-	types.DepBlocks:            {"DEPENDS ON", "BLOCKS", "→", "←", "depends on"},
-	types.DepParentChild:       {"PARENT", "CHILDREN", "↑", "↳", "is a child of"},
-	types.DepConditionalBlocks: {"CONDITIONALLY DEPENDS ON", "CONDITIONALLY BLOCKS", "→", "←", "conditionally depends on"},
-	types.DepWaitsFor:          {"WAITS FOR", "AWAITED BY", "→", "←", "waits for"},
-	types.DepRelated:           {"RELATED", "RELATED", "↔", "↔", "is related to"},
-	types.DepRelatesTo:         {"RELATED", "RELATED", "↔", "↔", "relates to"},
-	types.DepDiscoveredFrom:    {"DISCOVERED FROM", "DISCOVERED", "◊", "◊", "was discovered from"},
-	types.DepRepliesTo:         {"IN REPLY TO", "REPLIES", "→", "←", "replies to"},
-	types.DepDuplicates:        {"DUPLICATE OF", "DUPLICATED BY", "→", "←", "duplicates"},
-	types.DepSupersedes:        {"SUPERSEDED BY", "SUPERSEDES", "→", "←", "is superseded by"},
-	types.DepAuthoredBy:        {"AUTHORED BY", "AUTHORED", "→", "←", "was authored by"},
-	types.DepAssignedTo:        {"ASSIGNED TO", "ASSIGNED", "→", "←", "is assigned to"},
-	types.DepApprovedBy:        {"APPROVED BY", "APPROVED", "→", "←", "was approved by"},
-	types.DepAttests:           {"ATTESTS", "ATTESTED BY", "→", "←", "attests"},
-	types.DepTracks:            {"TRACKS", "TRACKED BY", "→", "←", "tracks"},
-	types.DepUntil:             {"ACTIVE UNTIL", "KEEPS ACTIVE", "→", "←", "is active until"},
-	types.DepCausedBy:          {"CAUSED BY", "CAUSED", "→", "←", "was caused by"},
-	types.DepValidates:         {"VALIDATES", "VALIDATED BY", "→", "←", "validates"},
-	types.DepDelegatedFrom:     {"DELEGATED FROM", "DELEGATED TO", "→", "←", "was delegated from"},
-}
-
 // depRelationFor returns how to name an edge of this type. A custom type gets
 // its own name rather than being described as a blocker it is not.
 func depRelationFor(t types.DependencyType) depRelation {
-	if rel, ok := depRelations[t]; ok {
-		return rel
-	}
-	name := strings.ToUpper(string(t))
+	rel := types.DependencyRelationFor(t)
 	return depRelation{
-		outHeading: name,
-		inHeading:  name + " (INBOUND)",
-		outGlyph:   "→",
-		inGlyph:    "←",
-		phrase:     string(t),
+		outHeading: rel.OutHeading,
+		inHeading:  rel.InHeading,
+		outGlyph:   rel.OutGlyph,
+		inGlyph:    rel.InGlyph,
+		phrase:     rel.Phrase,
 	}
 }
 
