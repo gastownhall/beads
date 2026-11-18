@@ -18,18 +18,22 @@ const (
 	shutdownConfirmDeadline = 5 * time.Second
 	shutdownConfirmPoll     = 50 * time.Millisecond
 	shutdownPostKillMinimum = 2 * time.Second
-
-	// shutdownSpawnWaitDeadline bounds how long Shutdown waits for a live
-	// starter's spawn marker. The marker is only treated as active while its
-	// owner's verified identity is alive, and a live starter resolves it
-	// within its own budgets: openDeadline to see the child take proxy.lock
-	// (which clears the marker) or give up, then killSpawnedChild and
-	// clearOwnSpawnMarker, each bounded by shutdownConfirmDeadline. Waiting
-	// that long means a stop racing a slow (loaded, -race, cold-cache) start
-	// stops it instead of reporting "proxy left running" for a start that
-	// is still making progress. A dead owner's marker is removed on sight.
-	shutdownSpawnWaitDeadline = openDeadline + 2*shutdownConfirmDeadline
 )
+
+// shutdownSpawnWaitDeadline bounds how long Shutdown waits for a live
+// starter's spawn marker. The marker is only treated as active while its
+// owner's verified identity is alive, and a live starter resolves it within
+// its own budgets: openDeadline to see the child take proxy.lock (which
+// clears the marker) or give up, then killSpawnedChild (up to spawnStopGrace
+// for the child to exit on SIGTERM, then a kill bounded by
+// shutdownConfirmDeadline) and clearOwnSpawnMarker, bounded by
+// shutdownConfirmDeadline. Waiting that long means a stop racing a slow
+// (loaded, -race, cold-cache) start stops it instead of reporting "proxy left
+// running" for a start that is still making progress. A dead owner's marker
+// is removed on sight. A function because spawnStopGrace is a var.
+func shutdownSpawnWaitDeadline() time.Duration {
+	return openDeadline + spawnStopGrace + 2*shutdownConfirmDeadline
+}
 
 // afterSpawnMarkerLockFreeCheck is a deterministic test hook for the window
 // between stopAndAcquire's lock-free spawn-marker check and its TryLock, in
@@ -183,6 +187,7 @@ func stopAndAcquire(
 	deadline := time.Now().Add(shutdownConfirmDeadline)
 	// spawnDeadline starts when an in-progress start is first observed.
 	var spawnDeadline time.Time
+	var spawnWait time.Duration
 	var stopped *pidfile.PidFile
 
 	// waitForStart polls once more for an in-progress start's live spawn
@@ -190,12 +195,13 @@ func stopAndAcquire(
 	waitForStart := func() error {
 		now := time.Now()
 		if spawnDeadline.IsZero() {
-			spawnDeadline = now.Add(shutdownSpawnWaitDeadline)
+			spawnWait = shutdownSpawnWaitDeadline()
+			spawnDeadline = now.Add(spawnWait)
 		}
 		if now.After(spawnDeadline) {
 			return fmt.Errorf(
 				"timeout (%s) waiting for spawn marker %s; wait for the in-progress start to finish, then retry",
-				shutdownSpawnWaitDeadline,
+				spawnWait,
 				filepath.Join(rootDir, spawnMarkerFileName),
 			)
 		}

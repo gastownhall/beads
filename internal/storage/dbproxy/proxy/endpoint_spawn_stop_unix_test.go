@@ -646,3 +646,15 @@ func TestKillSpawnedChildUnconfirmedKillStillErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "timeout (5s) waiting for pid "+strconv.Itoa(cmd.Process.Pid))
 	assert.FileExists(t, termed, "the child was killed without SIGTERM first")
 }
+
+// AC-3 (#8489): Shutdown waits on a live starter's spawn marker for at least
+// the starter's own worst case, which now includes the SIGTERM grace a
+// timed-out child gets before it is killed; otherwise a stop racing that
+// starter reports "proxy left running" while the start is within budget.
+func TestShutdownSpawnWaitCoversSpawnStopGrace(t *testing.T) {
+	assert.GreaterOrEqual(t, shutdownSpawnWaitDeadline(), openDeadline+spawnStopGrace+2*shutdownConfirmDeadline)
+
+	shortenSpawnStopGrace(t, spawnStopGrace+time.Minute)
+	assert.GreaterOrEqual(t, shutdownSpawnWaitDeadline(), openDeadline+spawnStopGrace+2*shutdownConfirmDeadline,
+		"the budget must track spawnStopGrace, not a value frozen at init")
+}
