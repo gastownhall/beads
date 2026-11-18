@@ -2142,6 +2142,38 @@ func TestLinearPullAfterPushIsAFixedPoint(t *testing.T) {
 	f.requireSplit(t)
 }
 
+// TestLinearPullTakesLinearSectionEdits pins the pull direction of the
+// description sections: an edit made in Linear to one folded section
+// reaches the bead's own field, and the sync after it pushes nothing back.
+func TestLinearPullTakesLinearSectionEdits(t *testing.T) {
+	f := newLinearSectionsFixture(t)
+
+	// Edit the Acceptance Criteria section in Linear.
+	f.api.edit(func(issue *linear.Issue) {
+		issue.Description = strings.Replace(issue.Description, "AC-MARK the acceptance criteria.", "AC-EDITED in Linear", 1)
+	})
+
+	if result := f.sync(tracker.SyncOptions{Pull: true}); result.PullStats.Updated != 1 {
+		t.Fatalf("pull of the edited section: PullStats = %+v, want one update", result.PullStats)
+	}
+	if f.store.issue.AcceptanceCriteria != "AC-EDITED in Linear" {
+		t.Fatalf("acceptance_criteria = %q, want the edited section text", f.store.issue.AcceptanceCriteria)
+	}
+	if f.store.issue.Description != "DESC-MARK the description." ||
+		f.store.issue.Design != "DESIGN-MARK the design." ||
+		f.store.issue.Notes != "NOTES-MARK the notes." {
+		t.Fatalf("description/design/notes = %q / %q / %q, want unchanged",
+			f.store.issue.Description, f.store.issue.Design, f.store.issue.Notes)
+	}
+
+	// The next sync pushes nothing back: the folded description the bead now
+	// builds matches the edited remote text.
+	result := f.sync(tracker.SyncOptions{Push: true})
+	if _, updates := f.api.snapshot(); result.PushStats.Updated != 0 || updates != 0 {
+		t.Fatalf("push after the section edit: PushStats = %+v, issueUpdate calls = %d, want none", result.PushStats, updates)
+	}
+}
+
 // fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes
 // for one team holding one issue: workflow states, labels (none), the
 // incremental issues query, which honours its updatedAt.gte filter, the
@@ -2249,6 +2281,15 @@ func (f *fakeLinearIssueAPI) snapshot() (linear.Issue, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.issue, f.updates
+}
+
+// edit mutates the served issue the way a Linear user edit would, stamping
+// updatedAt as Linear does.
+func (f *fakeLinearIssueAPI) edit(fn func(*linear.Issue)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(&f.issue)
+	f.issue.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 }
 
 // linearSyncStore is an in-memory tracker.Store holding one issue, for
