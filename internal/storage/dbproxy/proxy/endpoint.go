@@ -388,7 +388,7 @@ func spawnAndHandoff(
 	if err := quarantineForSpawn(rootDir, discovery); err != nil {
 		return Endpoint{}, err
 	}
-	if err := cleanupOrphanBackend(rootDir); err != nil {
+	if err := cleanupOrphanBackend(rootDir, opts.Backend); err != nil {
 		return Endpoint{}, err
 	}
 
@@ -811,7 +811,14 @@ func sweepOldQuarantines(rootDir string, now time.Time) error {
 	return errors.Join(errs...)
 }
 
-func cleanupOrphanBackend(rootDir string) error {
+// cleanupOrphanBackend stops the backend a dead proxy left running, before a
+// new proxy child is spawned for rootDir. A live recorded backend is killed
+// through its verified record. When there is no live record (none at all,
+// or a dead one, quarantined here), reapUnrecordedBackend looks for one the
+// dead proxy started but never recorded, which it does only for backend
+// BackendLocalServer. A held child lock, a malformed or unverifiable record
+// and a root-identity mismatch are refused, and never reach that fallback.
+func cleanupOrphanBackend(rootDir string, backend Backend) error {
 	recordPath := pidfile.Path(rootDir, server.PIDFileName)
 	pf, readErr := pidfile.Read(rootDir, server.PIDFileName)
 
@@ -846,7 +853,7 @@ func cleanupOrphanBackend(rootDir string) error {
 		return fmt.Errorf("read backend record %s: %w", recordPath, readErr)
 	}
 	if pf == nil {
-		return nil
+		return reapUnrecordedBackend(rootDir, backend)
 	}
 	if err := pf.ValidateV2(pidfile.KindDoltBackend); err != nil {
 		dead, live, probeErr := probeUnverifiablePID(pf.Pid)
@@ -854,7 +861,8 @@ func cleanupOrphanBackend(rootDir string) error {
 			if _, quarantineErr := quarantineRecord(rootDir, server.PIDFileName, time.Now()); quarantineErr != nil {
 				return fmt.Errorf("quarantine dead unverifiable backend record: %w", quarantineErr)
 			}
-			return nil
+			// A dead record can sit in front of an older unrecorded orphan.
+			return reapUnrecordedBackend(rootDir, backend)
 		}
 		if probeErr != nil {
 			err = errors.Join(err, fmt.Errorf("probe recorded pid: %w", probeErr))
@@ -897,7 +905,7 @@ func cleanupOrphanBackend(rootDir string) error {
 		if _, err := quarantineRecord(rootDir, server.PIDFileName, time.Now()); err != nil {
 			return fmt.Errorf("quarantine dead backend record: %w", err)
 		}
-		return nil
+		return reapUnrecordedBackend(rootDir, backend)
 	}
 	if err := handle.Kill(); err != nil {
 		_ = handle.Close()
@@ -1006,7 +1014,52 @@ func waitForRecordedProcessExit(pf *pidfile.PidFile, timeout time.Duration) erro
 	}
 }
 
+// spawnStopGrace bounds how long a timed-out spawn waits for its proxy child
+// to exit after SIGTERM before killing it. A var so tests can shorten it.
+var spawnStopGrace = 5 * time.Second
+
+// errGracefulStopUnsupported reports a platform where a timed-out proxy
+// child cannot be asked to stop (Windows: the detached child has no console
+// and procid's Signal is TerminateProcess), so it is killed at once.
+var errGracefulStopUnsupported = errors.New("graceful proxy child stop is not supported on this platform")
+
+// requestSpawnedChildStopFn is requestSpawnedChildStop behind a test seam.
+var requestSpawnedChildStopFn = requestSpawnedChildStop
+
+// killSpawnedChild stops a proxy child that missed its spawn deadline. It
+// sends SIGTERM first so the child's shutdown handler runs and stops any dolt
+// backend it already started (#8489): a bare SIGKILL can land between the
+// backend's start and its proxy-child.pid record and leave an unrecorded dolt
+// holding the database lock. Only a child still alive spawnStopGrace later
+// (or any child where the request is unsupported) is killed outright.
 func killSpawnedChild(child *spawnedProxyChild) error {
+	select {
+	case <-child.done:
+		return nil
+	default:
+	}
+	stopErr := requestSpawnedChildStopFn(child.cmd)
+	switch {
+	case errors.Is(stopErr, os.ErrProcessDone):
+		return nil
+	case stopErr == nil:
+		grace := time.NewTimer(spawnStopGrace)
+		select {
+		case <-child.done:
+			grace.Stop()
+			return nil
+		case <-grace.C:
+		}
+		log.Printf("dbproxy: proxy child pid %d did not exit within %s of SIGTERM; killing it", child.cmd.Process.Pid, spawnStopGrace)
+	case !errors.Is(stopErr, errGracefulStopUnsupported):
+		debug.Logf("dbproxy: could not ask proxy child pid %d to stop: %v; killing it", child.cmd.Process.Pid, stopErr)
+	}
+	return forceKillSpawnedChild(child)
+}
+
+// forceKillSpawnedChild kills a proxy child through its verified handle (or
+// directly when none could be opened) and confirms its exit.
+func forceKillSpawnedChild(child *spawnedProxyChild) error {
 	select {
 	case <-child.done:
 		return nil
