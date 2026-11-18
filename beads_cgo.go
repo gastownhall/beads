@@ -18,6 +18,10 @@ import (
 //
 //   - Embedded Dolt (default): Opens via the CGo embedded Dolt engine.
 //   - Dolt server: Connects to a dolt sql-server via OpenFromConfig.
+//   - Dolt proxied-server: Refused with ErrProxiedServerWorkspace (match it
+//     with errors.Is) before any storage is opened or created. The proxy's
+//     sql-server owns that workspace's data and this package has no route
+//     to it; use the bd CLI instead.
 //
 // The returned Storage must be closed when no longer needed.
 //
@@ -44,7 +48,9 @@ func OpenBestAvailable(ctx context.Context, beadsDir string) (Storage, error) {
 // every path is a non-nil opts.Credential, non-nil opts.HTTPClient, or
 // non-empty opts.UserAgent with nothing able to honor it — that is always a
 // typed refusal (the matching ErrXWithoutOpenWith sentinel), never a silent
-// open with the field ignored.
+// open with the field ignored. That option refusal is returned ahead of the
+// proxied-server refusal (ErrProxiedServerWorkspace) for a workspace that
+// would earn both.
 func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOptions) (Storage, error) {
 	// Before Load, which can migrate a legacy config.json, and before any
 	// backend is chosen; IsSupportedBackend below re-checks the loaded config.
@@ -86,6 +92,15 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	}
 	if opts.UserAgent != "" {
 		return nil, fmt.Errorf("beads: OpenOptions.UserAgent is not supported for backend %q (Dolt has no per-open transport seam): %w", cfg.GetBackend(), backends.ErrUserAgentWithoutOpenWith)
+	}
+
+	// A proxied-server workspace's data lives behind the proxy's sql-server,
+	// which neither Dolt arm below opens: the embedded arm would create (or
+	// read a stale) separate database at .beads/embeddeddolt, and an
+	// environment override can make IsDoltServerMode true for it too. Refuse
+	// before either constructor (bd-wrm8e6, GH#6655).
+	if cfg.IsDoltProxiedServerMode() {
+		return nil, proxiedServerWorkspaceError(beadsDir)
 	}
 
 	if cfg.IsDoltServerMode() {

@@ -642,15 +642,42 @@ which handles embedded Dolt, dolt-server mode and registered extension
 backends; and `beads_nocgo.go` (`//go:build !cgo`), which handles the latter two
 and returns an error for embedded Dolt.
 
-**First, a routing fact worth knowing before the interface question.** Neither
-copy has a proxied-server arm. Both dispatch on `cfg.IsDoltServerMode()`, and
-`configfile.IsDoltServerMode` and `IsDoltProxiedServerMode` are mutually
-exclusive — proxied workspaces are explicitly exempt from the host-based
-server-mode inference. So on a proxied-server workspace `OpenBestAvailable` falls
-through to `embeddeddolt.Open`, and it does not connect through the proxy.
+**First, a routing fact worth knowing before the interface question.**
+*Changed 2026-11-18 (bd-wrm8e6, GH#6655):* both copies now refuse a
+proxied-server workspace. `OpenBestAvailable` and `OpenBestAvailableWith`
+return a nil `Storage` and an error wrapping the exported
+`beads.ErrProxiedServerWorkspace` before either Dolt constructor runs, so no
+storage directory is created or opened. The message names the workspace's
+`metadata.json`, says no storage database was opened or modified, and points at
+the bd CLI. Classify it with `errors.Is`:
 
-The consequence is not contention over the directory the proxy is serving. It is
-that the two paths look at **different directories entirely**. `embeddeddolt`
+```go
+store, err := beads.OpenBestAvailable(ctx, beadsDir)
+if errors.Is(err, beads.ErrProxiedServerWorkspace) {
+    // The proxy's sql-server owns this workspace's data; this package has
+    // no route to it. Use the bd CLI (or the data port, §3) instead.
+}
+```
+
+Refusals that came first before still come first: an unsupported or removed
+backend, unreadable metadata, a registered extension backend (which still
+dispatches ahead of every Dolt path), and `OpenBestAvailableWith`'s refusals of
+an unsupported `Credential`, `HTTPClient` or `UserAgent` keep their own errors.
+The guard is checked ahead of `cfg.IsDoltServerMode()` on purpose.
+`IsDoltServerMode` and `IsDoltProxiedServerMode` are *not* always mutually
+exclusive. Proxied workspaces are exempt from host-based server-mode
+inference, but the `BEADS_DOLT_SERVER_MODE=1` and
+`BEADS_DOLT_SHARED_SERVER=1|true` environment overrides are checked first and
+make `IsDoltServerMode` true for a proxied workspace too.
+
+Why it refuses, which is also what happened before the change: neither copy had
+a proxied-server arm, and both dispatched on `cfg.IsDoltServerMode()`. Without
+an override, a proxied-server workspace therefore fell through to
+`embeddeddolt.Open` (with CGO) or to the "embedded Dolt requires CGO" error
+(without), and never connected through the proxy.
+
+The consequence was not contention over the directory the proxy is serving. It
+was that the two paths look at **different directories entirely**. `embeddeddolt`
 joins its data directory as `<beadsDir>/embeddeddolt` and does so in four
 non-test places — `newStore`, `openReadOnly`, the open cache's `cacheKey`, and
 `HasRepository` — with no way for a caller to redirect it. The proxy's
@@ -659,16 +686,17 @@ non-test places — `newStore`, `openReadOnly`, the open cache's `cacheKey`, and
 (`internal/doltserver/physical_root.go`; `Config.DatabasePath`'s fallback joins
 the literal `dolt`, with a comment saying always to).
 
-So an embedder that calls `OpenBestAvailable` on a proxied workspace does not
-fight the running server for its files — it silently opens **a separate database**
-beside it. On the read-write path — the one `OpenBestAvailable` takes —
-`newStore` `MkdirAll`s `.beads/embeddeddolt`, and `initSchema` issues
-`CREATE DATABASE IF NOT EXISTS` and migrates, so the open creates and writes a
-second database rather than failing. What it contains depends on the workspace's
-history: empty on one initialised straight into proxied mode, and whatever
-`.beads/embeddeddolt` still holds on one that was ever embedded, since none of
-the mode-migration verbs removes that directory. The second case is the nastier
-one — stale issues that look real.
+So, before the change, an embedder that called `OpenBestAvailable` on a proxied
+workspace did not fight the running server for its files. It opened
+**a separate database** beside it. On the read-write path, the one
+`OpenBestAvailable` takes, `newStore` `MkdirAll`s `.beads/embeddeddolt`, and
+`initSchema` issues `CREATE DATABASE IF NOT EXISTS` and migrates, so the open
+created and wrote a second database rather than failing. What that held depended
+on the workspace's history: nothing on one initialised straight into proxied
+mode, and whatever `.beads/embeddeddolt` still held on one that was ever
+embedded. None of the mode-migration verbs removes that directory, and the
+refusal does not remove it either. The second case was the worse one: stale
+issues that looked real.
 
 The read-only join site behaves the other way, which is worth knowing before
 generalising the paragraph above: `openReadOnly` does **not** create. It
@@ -677,10 +705,10 @@ generalising the paragraph above: `openReadOnly` does **not** create. It
 arriving through the read-only open on a workspace that was never embedded gets
 an error instead of an empty database.
 
-Nothing in the open path refuses on that ground and no error comes back. The
-store is genuine; it is just not the one the workspace's issues are in. An
-embedder that wants the proxied endpoint should connect to the data port (§3)
-rather than expect this function to find it.
+The refusal covers these two best-available APIs only; `Open`,
+`OpenFromConfig`, `OpenGated` and the lower-level embedded APIs are unchanged.
+An embedder that wants the proxied endpoint should connect to the data port
+(§3) rather than expect this function to find it.
 
 `SetEventsJournalEnabled(enabled bool)` is **not a method on the `Storage`
 interface.** `beads.Storage` aliases `internal/beads.Storage`, which aliases
@@ -911,13 +939,14 @@ live proxy to confirm end to end, and are therefore inferred from the code:
   succeeds against the data port on a managed-local workspace (§3). The
   credentials, the loopback bind and the absence of protocol handling in the
   proxy are all read directly from the source; the end-to-end connection is not.
-- That `OpenBestAvailable`'s embedded fall-through (§8) completes and hands back
-  a usable but separate store, rather than failing somewhere in the create and
-  migrate steps. The *routing* (it takes the embedded arm, because proxied mode
-  is exempt from `IsDoltServerMode`) and the *directory* (`embeddeddolt` joins
-  `<beadsDir>/embeddeddolt`, the proxy serves `<beadsDir>/dolt`) are read off the
-  source and are not in doubt; the open itself was not run against a live
-  proxied workspace.
+- That `OpenBestAvailable`'s former embedded fall-through (§8) completed and
+  handed back a usable but separate store, rather than failing somewhere in the
+  create and migrate steps. That was never run against a live proxied workspace,
+  and since 2026-11-18 (bd-wrm8e6) the path refuses before either Dolt
+  constructor, so it can no longer be. The refusal itself is pinned by tests in
+  `open_backend_selection_test.go`, which run without a proxy. The *directory*
+  split (`embeddeddolt` joins `<beadsDir>/embeddeddolt`, the proxy serves
+  `<beadsDir>/dolt`) is read off the source.
 
 Everything else — field names, JSON keys and their types, argv and flag
 spellings, exported Go symbols, default values, and which code path decides
