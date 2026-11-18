@@ -1308,6 +1308,11 @@ func TestAutoExportSkipsEmptyExportOverPopulatedJSONL(t *testing.T) {
 	if !strings.Contains(out, "refusing to overwrite") {
 		t.Fatalf("expected auto-export refusal warning, got:\n%s", out)
 	}
+	// The direct backend's remedy. A proxied-server workspace names `bd
+	// import` instead (TestProxiedServerAutoExport/empty_overwrite_refused).
+	if !strings.Contains(out, "Run `bd init --from-jsonl` to import the JSONL file") {
+		t.Errorf("the direct refusal does not name `bd init --from-jsonl` as its remedy:\n%s", out)
+	}
 
 	got, err := os.ReadFile(jsonlPath)
 	if err != nil {

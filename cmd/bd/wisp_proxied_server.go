@@ -199,6 +199,14 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 	if err != nil {
 		return HandleError("%v", err)
 	}
+	// Hand the removed ids to post-run auto-export as PROVEN deletions, as
+	// the direct route (deleteBatch) does. The sweep also takes --no-history
+	// dependents, which auto-export writes to the JSONL. They live in the
+	// dolt_ignore'd wisps table and never reach committed history, so in
+	// every auto-commit mode only this handoff can prove them gone; without
+	// it the export's orphan guard would refuse this export and every later
+	// one (GH#5896, #8490). Cascade is off, so DeletedIDs is the swept set.
+	commandDeletedIssueIDs.add(res.DeletedIDs...)
 
 	return renderWispGCDeleteResult(ids, res)
 }
@@ -329,6 +337,11 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		if err != nil {
 			return wispPurgeChunk{}, err
 		}
+		// The handoff purgeClosedWispsDirect makes per committed chunk. The
+		// scan above selects only ephemeral rows, which auto-export never
+		// writes, so this changes no export today; it keeps the two routes'
+		// bookkeeping the same.
+		commandDeletedIssueIDs.add(res.DeletedIDs...)
 		return wispPurgeChunk{
 			deletedIDs:        res.DeletedIDs,
 			deleted:           res.DeletedCount,

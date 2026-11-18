@@ -658,6 +658,10 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 	}
 
 	for _, id := range persistentIDs {
+		// deletedIDs is what this burn's deletion actually removed. The
+		// closure can run more than once, and each run overwrites it, so it
+		// is read only after the transaction committed.
+		var deletedIDs []string
 		// No exemption: the persistent half's direct twin is deleteBatch ->
 		// issueOpsContext, so this stays on the inherited policy context and
 		// the message is blanked under batch/off, exactly as the direct route
@@ -679,6 +683,7 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 			if err != nil {
 				return BurnResult{}, "", fmt.Errorf("burning %s: %w", id, err)
 			}
+			deletedIDs = res.DeletedIDs
 			return BurnResult{
 				MoleculeID:   id,
 				DeletedIDs:   issueIDs,
@@ -692,6 +697,12 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 			batchResult.FailedCount++
 			continue
 		}
+		// Hand the removed ids to post-run auto-export as PROVEN deletions,
+		// as the direct route (deleteBatch) and the proxied `bd delete` do.
+		// Under dolt.auto-commit=batch|off the burn never reaches committed
+		// history, so without this the export's orphan guard would refuse
+		// this export and every later one (GH#5896, #8490).
+		commandDeletedIssueIDs.add(deletedIDs...)
 		batchResult.TotalDeleted += result.DeletedCount
 		batchResult.Results = append(batchResult.Results, result)
 	}

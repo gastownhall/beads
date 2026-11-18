@@ -91,12 +91,16 @@ func TestProxiedServerAutoExport(t *testing.T) {
 		// (the TestProxiedServerSQLDatabaseFlag shape; this project connects
 		// as root for the same reason): the create must SUCCEED, so the
 		// post-run arm runs, and still leave this workspace's JSONL untouched.
+		// That database is another beads project, which the --database
+		// identity guard refuses (#5572); BEADS_SKIP_IDENTITY_CHECK=1 is its
+		// deliberate cross-project hatch, as in
+		// TestProxiedServerDatabaseFlagForeignProjectIdentity.
 		other := p.database + "_other"
 		port := requireSharedProxiedServer(t)
 		bdProxiedInit(t, bd, "paxs", "--database", other,
 			"--proxied-server-external-host", "127.0.0.1",
 			"--proxied-server-external-port", strconv.Itoa(port))
-		if _, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, nil, "--database", other, "create", "--silent", "Other database", "--type", "task"); err != nil {
+		if _, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BEADS_SKIP_IDENTITY_CHECK=1"}, "--database", other, "create", "--silent", "Other database", "--type", "task"); err != nil {
 			t.Fatalf("bd --database %s create: %v\n%s", other, err, stderr)
 		}
 		requireNoExport("bd --database <other> create")
@@ -190,10 +194,11 @@ func TestProxiedServerAutoExport(t *testing.T) {
 	}
 
 	// The --cascade closure rides the same handoff: every id the delete
-	// actually removed is proven, not just the requested one.
+	// actually removed is proven, not just the requested one. Under batch
+	// nothing commits, so the handoff is the only proof for the child.
 	t.Run("delete_reconciled_cascade", func(t *testing.T) {
 		t.Parallel()
-		p := newProxiedAutoExportProject(t, bd, "pxx")
+		p := newProxiedAutoExportProject(t, bd, "pxx", "dolt.auto-commit", "batch")
 		parent := bdProxiedCreateSilent(t, bd, p.dir, "Cascade parent", "--type", "task")
 		child := bdProxiedCreateSilent(t, bd, p.dir, "Cascade child", "--type", "task", "--parent", parent)
 		bystander := bdProxiedCreateSilent(t, bd, p.dir, "Cascade bystander", "--type", "task")
@@ -214,14 +219,82 @@ func TestProxiedServerAutoExport(t *testing.T) {
 		}
 	})
 
+	// `bd mol burn` deletes through its own route, not `bd delete`'s, and
+	// must hand off the same proof: under batch the burned molecule never
+	// reaches history, and without the handoff this export and every later
+	// one would refuse.
+	for _, mode := range []string{"on", "batch"} {
+		t.Run("mol_burn_reconciled_autocommit_"+mode, func(t *testing.T) {
+			t.Parallel()
+			p := newProxiedAutoExportProject(t, bd, "pxm", "dolt.auto-commit", mode)
+			keep := bdProxiedCreateSilent(t, bd, p.dir, "Survivor", "--type", "task")
+			mol := bdProxiedCreateSilent(t, bd, p.dir, "Burned molecule", "--type", "epic")
+			step := bdProxiedCreateSilent(t, bd, p.dir, "Burned step", "--type", "task", "--parent", mol)
+			if ids := exportIssueIDs(exportLines(t, readProxiedAutoExportJSONL(t, p))); !ids[keep] || !ids[mol] || !ids[step] {
+				t.Fatalf("seed creates not exported: %v", ids)
+			}
+
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "mol", "burn", mol, "--force")
+			if err != nil {
+				t.Fatalf("bd mol burn: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			if !strings.Contains(stderr, "auto-export: reconciled 2 deleted issue(s)") {
+				t.Errorf("stderr lacks the reconciliation notice:\n%s", stderr)
+			}
+			if strings.Contains(stderr, "refusing to overwrite") {
+				t.Errorf("mol burn hit the JSONL-only refusal:\n%s", stderr)
+			}
+			ids := exportIssueIDs(exportLines(t, readProxiedAutoExportJSONL(t, p)))
+			if ids[mol] || ids[step] || !ids[keep] {
+				t.Fatalf("after burning %s, JSONL ids = %v; want only %s", mol, ids, keep)
+			}
+		})
+	}
+
+	// `bd mol wisp gc` deletes through a route of its own as well. Its sweep
+	// takes an abandoned wisp's --no-history dependents, which auto-export
+	// writes to the JSONL but which live in the dolt_ignore'd wisps table: no
+	// history proves them gone in any auto-commit mode, the default `on`
+	// included, so the route's handoff is the only proof.
+	t.Run("mol_wisp_gc_reconciled", func(t *testing.T) {
+		t.Parallel()
+		p := newProxiedAutoExportProject(t, bd, "pxw")
+		keep := bdProxiedCreateSilent(t, bd, p.dir, "Survivor")
+		wisp := bdProxiedCreateSilent(t, bd, p.dir, "Abandoned wisp", "--ephemeral")
+		child := bdProxiedCreateSilent(t, bd, p.dir, "No-history dependent", "--no-history", "--parent", wisp)
+		if ids := exportIssueIDs(exportLines(t, readProxiedAutoExportJSONL(t, p))); !ids[keep] || !ids[child] || ids[wisp] {
+			t.Fatalf("seed creates: JSONL ids = %v; want %s and %s, and not the ephemeral %s", ids, keep, child, wisp)
+		}
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "mol", "wisp", "gc", "--age", "0s")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Deleted 2 issue(s)") {
+			t.Fatalf("gc did not sweep the wisp and its no-history dependent:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "auto-export: reconciled 1 deleted issue(s)") {
+			t.Errorf("stderr lacks the reconciliation notice:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "refusing to overwrite") {
+			t.Errorf("mol wisp gc hit the JSONL-only refusal:\n%s", stderr)
+		}
+		ids := exportIssueIDs(exportLines(t, readProxiedAutoExportJSONL(t, p)))
+		if ids[child] || !ids[keep] {
+			t.Fatalf("after gc swept %s, JSONL ids = %v; want only %s", child, ids, keep)
+		}
+	})
+
 	// The overwrite guards run on proxied workspaces too: a JSONL record the
 	// store cannot account for, or a store that would export 0 issues over a
 	// non-empty JSONL, refuses with the direct-mode warning and leaves the
-	// file and the export state alone.
+	// file and the export state alone. Only the remedy the warning names
+	// differs: `bd import`, since `bd init --from-jsonl` does not run on a
+	// proxied-server workspace.
 	t.Run("foreign_record_refused", func(t *testing.T) {
 		t.Parallel()
 		p := newProxiedAutoExportProject(t, bd, "pxf")
-		bdProxiedCreateSilent(t, bd, p.dir, "Local issue")
+		local := bdProxiedCreateSilent(t, bd, p.dir, "Local issue")
 		path := proxiedAutoExportJSONLPath(p)
 		foreign := `{"_type":"issue","id":"zz-foreign1","title":"From another clone"}` + "\n"
 		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
@@ -243,7 +316,24 @@ func TestProxiedServerAutoExport(t *testing.T) {
 		if !strings.Contains(stderr, "Warning: auto-export skipped:") || !strings.Contains(stderr, "refusing to overwrite") || !strings.Contains(stderr, "zz-foreign1") {
 			t.Errorf("stderr lacks the JSONL-only refusal naming zz-foreign1:\n%s", stderr)
 		}
+		requireProxiedImportRemedy(t, stderr)
 		requireProxiedAutoExportUnchanged(t, p, "a create over an unprovable JSONL record", jsonl, state)
+		another := strings.TrimSpace(stdout)
+
+		// The named remedy runs here and heals the refusal: the import brings
+		// the foreign record into the store, so its own post-run export
+		// writes every record.
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "import")
+		if err != nil {
+			t.Fatalf("bd import (the named remedy): %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if strings.Contains(stderr, "refusing to overwrite") {
+			t.Errorf("the export after `bd import` still refused:\n%s", stderr)
+		}
+		ids := exportIssueIDs(exportLines(t, readProxiedAutoExportJSONL(t, p)))
+		if !ids["zz-foreign1"] || !ids[local] || !ids[another] {
+			t.Fatalf("after `bd import`, JSONL ids = %v; want zz-foreign1, %s and %s", ids, local, another)
+		}
 	})
 
 	t.Run("empty_overwrite_refused", func(t *testing.T) {
@@ -275,8 +365,19 @@ func TestProxiedServerAutoExport(t *testing.T) {
 		if !strings.Contains(stderr, "Warning: auto-export skipped: current database would export 0 issues") || !strings.Contains(stderr, "refusing to overwrite") {
 			t.Errorf("stderr lacks the empty-overwrite refusal:\n%s", stderr)
 		}
+		requireProxiedImportRemedy(t, stderr)
 		requireProxiedAutoExportUnchanged(t, p, "an empty-store export over a non-empty JSONL", jsonl, state)
 	})
+}
+
+// requireProxiedImportRemedy fails unless a proxied overwrite refusal names
+// `bd import`, the import that runs on a proxied-server workspace, rather
+// than `bd init --from-jsonl`, which bd refuses there.
+func requireProxiedImportRemedy(t *testing.T, stderr string) {
+	t.Helper()
+	if !strings.Contains(stderr, "Run `bd import` to import the JSONL file") || strings.Contains(stderr, "bd init --from-jsonl") {
+		t.Errorf("the proxied refusal does not name `bd import` as its remedy:\n%s", stderr)
+	}
 }
 
 // TestProxiedServerAutoExportByteIdentical is the GH#8490 cross-mode oracle:
@@ -335,6 +436,16 @@ func TestProxiedServerAutoExportByteIdentical(t *testing.T) {
 				t.Errorf("auto-export carried the excluded owner's issue")
 			}
 		}
+		// The positive half. The classic side imports this very file, so a
+		// record or relation the proxied reader dropped would be missing
+		// from both exports and the bytes would still match: pin the
+		// fixture's durable issues and relations here.
+		for _, id := range []string{fx.critical, fx.epic, fx.child, fx.blocker, fx.done, fx.promoted, fx.promotedFriend} {
+			if !ids[id] {
+				t.Errorf("auto-export missing durable issue %s", id)
+			}
+		}
+		requireExportFixtureRelations(t, proxiedRecords, fx)
 
 		// Classic side: import the proxied JSONL into a fresh embedded
 		// workspace with auto-export on; the import's own post-run

@@ -181,12 +181,12 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to check existing JSONL: %v\n", err)
 				return nil
 			} else if skip {
-				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: current database would export 0 issues, but %s already contains %d issue(s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, existingCount)
+				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: current database would export 0 issues, but %s already contains %d issue(s); refusing to overwrite. Run `%s` to import the JSONL file, or move it aside and retry.\n", fullPath, existingCount, backend.jsonlImportCommand())
 				return nil
 			}
 
 			if len(rec.unproven) > 0 {
-				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %s contains %d JSONL-only issue record(s) absent from the local Dolt store (%s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, len(rec.unproven), strings.Join(sampleStrings(rec.unproven, 5), ", "))
+				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %s contains %d JSONL-only issue record(s) absent from the local Dolt store (%s); refusing to overwrite. Run `%s` to import the JSONL file, or move it aside and retry.\n", fullPath, len(rec.unproven), strings.Join(sampleStrings(rec.unproven, 5), ", "), backend.jsonlImportCommand())
 				return nil
 			}
 		}
@@ -1765,6 +1765,9 @@ type autoExportBackend interface {
 	historicalIssueIDs(ctx context.Context, ids []string) (present map[string]struct{}, ok bool, err error)
 	// supportsIncremental reports whether tryIncrementalExport may run.
 	supportsIncremental() bool
+	// jsonlImportCommand is the command the overwrite refusals name for
+	// importing the JSONL into this store.
+	jsonlImportCommand() string
 	// read runs fn over one consistent view of the store: the guards and the
 	// writer share it.
 	read(ctx context.Context, fn func(ctx context.Context, r autoExportReader) error) error
@@ -1864,6 +1867,8 @@ func (directAutoExportBackend) historicalIssueIDs(ctx context.Context, ids []str
 
 func (directAutoExportBackend) supportsIncremental() bool { return true }
 
+func (directAutoExportBackend) jsonlImportCommand() string { return "bd init --from-jsonl" }
+
 func (directAutoExportBackend) read(ctx context.Context, fn func(context.Context, autoExportReader) error) error {
 	return fn(ctx, directAutoExportReader{})
 }
@@ -1938,6 +1943,12 @@ func (b proxiedAutoExportBackend) historicalIssueIDs(ctx context.Context, ids []
 }
 
 func (proxiedAutoExportBackend) supportsIncremental() bool { return false }
+
+// jsonlImportCommand names `bd import`, which reads the same configured
+// import.path: `bd init --from-jsonl` does not run on a proxied-server
+// workspace (init refuses both the mode change and --from-jsonl with
+// --proxied-server).
+func (proxiedAutoExportBackend) jsonlImportCommand() string { return "bd import" }
 
 // read runs fn inside ONE read unit of work — the reader `bd export` uses in
 // proxied mode — so the guards and the writer see a single snapshot. A read

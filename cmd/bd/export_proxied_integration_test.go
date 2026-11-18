@@ -202,6 +202,54 @@ func exportCommentTexts(v any) []string {
 	return out
 }
 
+// requireExportFixtureRelations pins the seeded relations of an exported
+// exportProxiedFixture: the child's labels, comments and both dependency
+// edges, and the counts derived from them. A byte-identity round trip is
+// blind to a relation the exporter dropped (classic re-exports the same
+// impoverished stream), so every oracle over this fixture also asserts its
+// content.
+func requireExportFixtureRelations(t *testing.T, records []map[string]any, fx exportProxiedFixture) {
+	t.Helper()
+	child := exportIssueRecordByID(records, fx.child)
+	if child == nil {
+		t.Fatalf("export missing %s", fx.child)
+	}
+	if labels := exportStrings(child["labels"]); len(labels) != 2 || labels[0] != "alpha" || labels[1] != "zeta" {
+		t.Errorf("child labels = %v, want [alpha zeta]", labels)
+	}
+	if texts := exportCommentTexts(child["comments"]); len(texts) != 2 || texts[0] != "first comment" || texts[1] != "second comment" {
+		t.Errorf("child comments = %v, want [first comment, second comment]", texts)
+	}
+	if cc, _ := child["comment_count"].(float64); int(cc) != 2 {
+		t.Errorf("child comment_count = %v, want 2", child["comment_count"])
+	}
+	deps, _ := child["dependencies"].([]any)
+	dependsOn := map[string]bool{}
+	for _, d := range deps {
+		if m, ok := d.(map[string]any); ok {
+			if id, ok := m["depends_on_id"].(string); ok {
+				dependsOn[id] = true
+			}
+		}
+	}
+	if len(deps) != 2 || !dependsOn[fx.epic] || !dependsOn[fx.blocker] {
+		t.Errorf("child dependencies depend on %v, want both %s and %s", dependsOn, fx.epic, fx.blocker)
+	}
+	// Dependency COUNTS tally only 'blocks' edges (both stacks:
+	// domain/db/dependency.go:396, classic GetDependencyCountsInTx), so
+	// the parent-child edge appears in `dependencies` but not the count.
+	if dc, _ := child["dependency_count"].(float64); int(dc) != 1 {
+		t.Errorf("child dependency_count = %v, want 1 (blocks edge only)", child["dependency_count"])
+	}
+	blocker := exportIssueRecordByID(records, fx.blocker)
+	if blocker == nil {
+		t.Fatalf("export missing %s", fx.blocker)
+	}
+	if dc, _ := blocker["dependent_count"].(float64); int(dc) != 1 {
+		t.Errorf("blocker dependent_count = %v, want 1", blocker["dependent_count"])
+	}
+}
+
 func exportMemoryKeys(records []map[string]any) []string {
 	var keys []string
 	for _, r := range records {
@@ -297,45 +345,7 @@ func TestProxiedServerExport(t *testing.T) {
 		if err != nil {
 			t.Fatalf("bd export: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-		records := exportLines(t, stdout)
-		child := exportIssueRecordByID(records, fx.child)
-		if child == nil {
-			t.Fatalf("export missing %s", fx.child)
-		}
-		if labels := exportStrings(child["labels"]); len(labels) != 2 || labels[0] != "alpha" || labels[1] != "zeta" {
-			t.Errorf("child labels = %v, want [alpha zeta]", labels)
-		}
-		if texts := exportCommentTexts(child["comments"]); len(texts) != 2 || texts[0] != "first comment" || texts[1] != "second comment" {
-			t.Errorf("child comments = %v, want [first comment, second comment]", texts)
-		}
-		if cc, _ := child["comment_count"].(float64); int(cc) != 2 {
-			t.Errorf("child comment_count = %v, want 2", child["comment_count"])
-		}
-		deps, _ := child["dependencies"].([]any)
-		dependsOn := map[string]bool{}
-		for _, d := range deps {
-			if m, ok := d.(map[string]any); ok {
-				if id, ok := m["depends_on_id"].(string); ok {
-					dependsOn[id] = true
-				}
-			}
-		}
-		if len(deps) != 2 || !dependsOn[fx.epic] || !dependsOn[fx.blocker] {
-			t.Errorf("child dependencies depend on %v, want both %s and %s", dependsOn, fx.epic, fx.blocker)
-		}
-		// Dependency COUNTS tally only 'blocks' edges (both stacks:
-		// domain/db/dependency.go:396, classic GetDependencyCountsInTx), so
-		// the parent-child edge appears in `dependencies` but not the count.
-		if dc, _ := child["dependency_count"].(float64); int(dc) != 1 {
-			t.Errorf("child dependency_count = %v, want 1 (blocks edge only)", child["dependency_count"])
-		}
-		blocker := exportIssueRecordByID(records, fx.blocker)
-		if blocker == nil {
-			t.Fatalf("export missing %s", fx.blocker)
-		}
-		if dc, _ := blocker["dependent_count"].(float64); int(dc) != 1 {
-			t.Errorf("blocker dependent_count = %v, want 1", blocker["dependent_count"])
-		}
+		requireExportFixtureRelations(t, exportLines(t, stdout), fx)
 	})
 
 	// The plane-classification trap from review: a promoted no-history wisp
