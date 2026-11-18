@@ -3,7 +3,6 @@ package domain
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"slices"
 	"sort"
 	"time"
@@ -463,23 +462,27 @@ func (u *issueUseCaseImpl) rewriteTextReferences(
 	connected map[string]*types.Issue, isWisp map[string]bool, actor string,
 ) (int, error) {
 	touched := make(map[string]bool)
+	// The citation rule is types.RewriteDeletedReferences, shared with the
+	// store body (issueops.RewriteDeletedReferencesInTx): a route that spelled
+	// it differently would rewrite different citations for the same deletion.
 	for _, id := range deletedIDs {
-		pattern := `(^|[^A-Za-z0-9_-])(` + regexp.QuoteMeta(id) + `)($|[^A-Za-z0-9_-])`
-		re := regexp.MustCompile(pattern)
-		replacement := `$1[deleted:` + id + `]$3`
 		for connID, conn := range connected {
 			updates := map[string]any{}
-			if re.MatchString(conn.Description) {
-				updates["description"] = re.ReplaceAllString(conn.Description, replacement)
-			}
-			if conn.Notes != "" && re.MatchString(conn.Notes) {
-				updates["notes"] = re.ReplaceAllString(conn.Notes, replacement)
-			}
-			if conn.Design != "" && re.MatchString(conn.Design) {
-				updates["design"] = re.ReplaceAllString(conn.Design, replacement)
-			}
-			if conn.AcceptanceCriteria != "" && re.MatchString(conn.AcceptanceCriteria) {
-				updates["acceptance_criteria"] = re.ReplaceAllString(conn.AcceptanceCriteria, replacement)
+			for _, field := range []struct {
+				column string
+				value  string
+			}{
+				{"description", conn.Description},
+				{"notes", conn.Notes},
+				{"design", conn.Design},
+				{"acceptance_criteria", conn.AcceptanceCriteria},
+			} {
+				if field.value == "" {
+					continue
+				}
+				if rewritten, changed := types.RewriteDeletedReferences(field.value, id); changed {
+					updates[field.column] = rewritten
+				}
 			}
 			if len(updates) == 0 {
 				continue
