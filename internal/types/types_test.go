@@ -102,13 +102,13 @@ func TestIssueValidation(t *testing.T) {
 			name: "title too long",
 			issue: Issue{
 				ID:        "test-1",
-				Title:     string(make([]byte, 501)), // 501 characters
+				Title:     string(make([]byte, 501)), // 501 bytes
 				Status:    StatusOpen,
 				Priority:  2,
 				IssueType: TypeFeature,
 			},
 			wantErr: true,
-			errMsg:  "title must be 500 characters or less",
+			errMsg:  "title must be 500 bytes or less",
 		},
 		{
 			name: "invalid priority too low",
@@ -2100,5 +2100,48 @@ func TestArrivalSeqSerializesOnlyWhenStamped(t *testing.T) {
 	b.ArrivalSeq = 7
 	if a.ComputeContentHash() != b.ComputeContentHash() {
 		t.Error("arrival_seq changed the content hash; it is storage-assigned metadata, not content")
+	}
+}
+
+// TestValidateIssueTitleByteLimit pins the title limit's unit (GH#8150): it is
+// 500 UTF-8 bytes, and the refusal says bytes, so a writer counting characters
+// can see why a 499-character title with multibyte punctuation is refused.
+// Create, import and the update paths all reach ValidateIssueTitle, so the
+// Issue-level validators must agree with it.
+func TestValidateIssueTitleByteLimit(t *testing.T) {
+	reporter := strings.Repeat("a", 489) + "—––·····′′"
+	if runes, size := len([]rune(reporter)), len(reporter); runes != 499 || size != 514 {
+		t.Fatalf("reporter fixture is %d runes / %d bytes, want 499 / 514", runes, size)
+	}
+	for _, tc := range []struct {
+		name    string
+		title   string
+		wantErr string // "" means the title is accepted
+	}{
+		{"500 ASCII bytes", strings.Repeat("t", 500), ""},
+		{"250 two-byte runes", strings.Repeat("é", 250), ""},
+		{"501 ASCII bytes", strings.Repeat("t", 501), "title must be 500 bytes or less (got 501)"},
+		{"499 runes in 514 bytes", reporter, "title must be 500 bytes or less (got 514)"},
+		{"empty", "", "title is required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := Issue{ID: "test-1", Title: tc.title, Status: StatusOpen, Priority: 2, IssueType: TypeTask}
+			checks := map[string]error{
+				"ValidateIssueTitle": ValidateIssueTitle(tc.title),
+				"ValidateWithCustom": issue.ValidateWithCustom(nil, nil),
+				"ValidateForImport":  issue.ValidateForImport(nil),
+			}
+			for name, err := range checks {
+				if tc.wantErr == "" {
+					if err != nil {
+						t.Errorf("%s() error = %v, want nil", name, err)
+					}
+					continue
+				}
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("%s() error = %v, want it to contain %q", name, err, tc.wantErr)
+				}
+			}
+		})
 	}
 }

@@ -113,7 +113,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			}
 
 			if err := repairPrefixes(ctx, store, currentActor(), newPrefix, issues, prefixes, dryRun); err != nil {
-				return HandleError("failed to repair prefixes: %v", err)
+				return handleRenameError("failed to repair prefixes", err)
 			}
 			if !dryRun {
 				commandDidWrite.Store(true)
@@ -196,7 +196,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		fmt.Printf("Renaming issues from prefix '%s' to '%s'...\n", detected, newPrefix)
 
 		if err := renamePrefixInDB(ctx, detected, newPrefix, issues); err != nil {
-			return HandleError("failed to rename prefix: %v", err)
+			return handleRenameError("failed to rename prefix", err)
 		}
 
 		commandDidWrite.Store(true)
@@ -328,13 +328,33 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		return nil
 	}
 
+	// Pattern to match any issue ID reference in text (both hash and sequential IDs)
+	oldPrefixPattern := regexp.MustCompile(`\b[a-z][a-z0-9-]*-[a-z0-9]+\b`)
+
+	// Replace all issue IDs in text fields using the rename map
+	replaceFunc := func(match string) string {
+		if newID, ok := renameMap[match]; ok {
+			return newID
+		}
+		return match
+	}
+
+	// UpdateIssueID stores a title as given, so each title the repair rewrites
+	// is held to the rule create and import apply (GH#8150), all before the
+	// first issue is renamed: a refusal leaves nothing half-repaired.
+	titles := make([]titleRewrite, 0, len(incorrectIssues))
+	for _, is := range incorrectIssues {
+		titles = append(titles, titleRewrite{issueID: is.issue.ID, before: is.issue.Title, after: oldPrefixPattern.ReplaceAllStringFunc(is.issue.Title, replaceFunc)})
+	}
+	if err := checkTitleRewrites(titles); err != nil {
+		return err
+	}
+
 	// Perform the repairs
 	fmt.Printf("Repairing database with multiple prefixes...\n")
 	fmt.Printf("  Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), len(correctIssues))
 	fmt.Printf("  Issues to repair: %d\n\n", len(incorrectIssues))
 
-	// Pattern to match any issue ID reference in text (both hash and sequential IDs)
-	oldPrefixPattern := regexp.MustCompile(`\b[a-z][a-z0-9-]*-[a-z0-9]+\b`)
 	gates := beadGatesByTarget(issues)
 
 	// Rename each issue
@@ -344,14 +364,6 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 
 		// Apply text replacements in all issue fields
 		issue := is.issue
-
-		// Replace all issue IDs in text fields using the rename map
-		replaceFunc := func(match string) string {
-			if newID, ok := renameMap[match]; ok {
-				return newID
-			}
-			return match
-		}
 
 		issue.Title = oldPrefixPattern.ReplaceAllStringFunc(issue.Title, replaceFunc)
 		issue.Description = oldPrefixPattern.ReplaceAllStringFunc(issue.Description, replaceFunc)
@@ -431,6 +443,19 @@ func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues [
 
 	replaceFunc := func(match string) string {
 		return strings.Replace(match, oldP+"-", newP+"-", 1)
+	}
+
+	// UpdateIssueID stores a title as given, so each title the rename rewrites
+	// is held to the rule create and import apply (GH#8150), all before the
+	// first issue is renamed: a refusal leaves nothing half-renamed.
+	var titles []titleRewrite
+	for _, issue := range issues {
+		if rewriteIssueID(oldP, newP, issue.ID) != issue.ID {
+			titles = append(titles, titleRewrite{issueID: issue.ID, before: issue.Title, after: oldPrefixPattern.ReplaceAllStringFunc(issue.Title, replaceFunc)})
+		}
+	}
+	if err := checkTitleRewrites(titles); err != nil {
+		return err
 	}
 
 	gates := beadGatesByTarget(issues)

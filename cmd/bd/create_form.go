@@ -284,7 +284,7 @@ func runCreateForm(cmd *cobra.Command) error {
 						return fmt.Errorf("title is required")
 					}
 					if len(s) > 500 {
-						return fmt.Errorf("title must be 500 characters or less")
+						return fmt.Errorf("title must be 500 bytes or less")
 					}
 					return nil
 				}),

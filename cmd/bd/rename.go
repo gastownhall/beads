@@ -91,6 +91,24 @@ func runRename(cmd *cobra.Command, args []string) error {
 		return HandleError("failed to list gates: %v", err)
 	}
 
+	// The references are rewritten only after the rename has committed, one
+	// issue at a time, so a title the store refuses there would stop the
+	// rewrite part way with the old ID already gone. Refuse such a rename
+	// before anything is written.
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return HandleError("failed to list issues: %v", err)
+	}
+	var titles []titleRewrite
+	for _, ref := range referenceUpdates(issues, oldID, newID) {
+		if title, ok := ref.updates["title"].(string); ok {
+			titles = append(titles, titleRewrite{issueID: ref.issue.ID, before: ref.issue.Title, after: title})
+		}
+	}
+	if err := checkTitleRewrites(titles); err != nil {
+		return handleRenameError(fmt.Sprintf("cannot rename %s to %s", oldID, newID), err)
+	}
+
 	actor := getActorWithGit()
 	if err := renameIssueKeepingBeadGates(ctx, store, oldIssue, newID, beadGatesByTarget(gates)[oldID], actor); err != nil {
 		return HandleError("failed to rename issue: %v", err)
@@ -115,47 +133,109 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 		return fmt.Errorf("failed to list issues: %w", err)
 	}
 
+	for _, ref := range referenceUpdates(issues, oldID, newID) {
+		if err := store.UpdateIssue(ctx, ref.issue.ID, ref.updates, actor); err != nil {
+			return fmt.Errorf("failed to update references in %s: %w", ref.issue.ID, err)
+		}
+	}
+
+	return nil
+}
+
+// referenceUpdate is the update that points one issue's text references to a
+// renamed issue at its new ID.
+type referenceUpdate struct {
+	issue   *types.Issue
+	updates map[string]interface{}
+}
+
+// referenceUpdates lists the updates that point the text references to oldID
+// in issues at newID. The renamed issue itself, listed under oldID before the
+// rename and under newID after it, keeps its text.
+func referenceUpdates(issues []*types.Issue, oldID, newID string) []referenceUpdate {
 	// Pattern to match the old ID as a word boundary
 	oldPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldID) + `\b`)
 
+	var refs []referenceUpdate
 	for _, issue := range issues {
-		if issue.ID == newID {
+		if issue.ID == oldID || issue.ID == newID {
 			continue // Skip the renamed issue itself
 		}
 
-		updated := false
 		updates := make(map[string]interface{})
 
 		// Check and update each text field
 		if oldPattern.MatchString(issue.Title) {
 			updates["title"] = oldPattern.ReplaceAllString(issue.Title, newID)
-			updated = true
 		}
 		if oldPattern.MatchString(issue.Description) {
 			updates["description"] = oldPattern.ReplaceAllString(issue.Description, newID)
-			updated = true
 		}
 		if oldPattern.MatchString(issue.Design) {
 			updates["design"] = oldPattern.ReplaceAllString(issue.Design, newID)
-			updated = true
 		}
 		if oldPattern.MatchString(issue.Notes) {
 			updates["notes"] = oldPattern.ReplaceAllString(issue.Notes, newID)
-			updated = true
 		}
 		if oldPattern.MatchString(issue.AcceptanceCriteria) {
 			updates["acceptance_criteria"] = oldPattern.ReplaceAllString(issue.AcceptanceCriteria, newID)
-			updated = true
 		}
 
-		if updated {
-			if err := store.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
-				return fmt.Errorf("failed to update references in %s: %w", issue.ID, err)
-			}
+		if len(updates) > 0 {
+			refs = append(refs, referenceUpdate{issue: issue, updates: updates})
 		}
 	}
+	return refs
+}
 
-	return nil
+// titleRewrite is one issue's title before and after a rename rewrites the
+// issue IDs in it.
+type titleRewrite struct {
+	issueID, before, after string
+}
+
+// titleRewriteError is a rename refused before its first write: rewriting the
+// issue IDs in the titles it names would leave titles that fail
+// types.ValidateIssueTitle, the rule create, import and the update gate apply.
+type titleRewriteError struct {
+	refused []string // "<issue ID>: <why the title is refused>"
+}
+
+func (e *titleRewriteError) Error() string {
+	return "rewriting the issue IDs in these titles would make them invalid: " + strings.Join(e.refused, "; ")
+}
+
+// checkTitleRewrites returns a *titleRewriteError naming each rewrite whose
+// new title fails types.ValidateIssueTitle, or nil when there is none. The
+// renames commit issue by issue, so they run it over every title they would
+// rewrite before their first write rather than stop part way. A title the
+// rewrite leaves as it is passes, as the update gate passes an unchanged one.
+func checkTitleRewrites(rewrites []titleRewrite) error {
+	var refused []string
+	for _, rw := range rewrites {
+		if rw.after == rw.before {
+			continue
+		}
+		if err := types.ValidateIssueTitle(rw.after); err != nil {
+			refused = append(refused, fmt.Sprintf("%s: %v", rw.issueID, err))
+		}
+	}
+	if len(refused) == 0 {
+		return nil
+	}
+	return &titleRewriteError{refused: refused}
+}
+
+// handleRenameError reports err, which stopped a rename, after failed. A
+// *titleRewriteError stopped it before anything was written, so the report
+// says so and how to let the rename through.
+func handleRenameError(failed string, err error) error {
+	var titleErr *titleRewriteError
+	if errors.As(err, &titleErr) {
+		return HandleErrorWithHint(fmt.Sprintf("%s: %v", failed, err),
+			"Nothing was renamed. Shorten the title of each issue named above with bd update <id> --title, then try again.")
+	}
+	return HandleError("%s: %v", failed, err)
 }
 
 // beadGateRenameStore is the part of the store a rename writes through.

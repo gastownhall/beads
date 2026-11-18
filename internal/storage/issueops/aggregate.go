@@ -148,6 +148,19 @@ func ValidateMetadataPatch(patch publicops.MetadataPatch) error {
 
 // ValidateScalarUpdates checks typed scalar values before they reach SQL.
 func ValidateScalarUpdates(ctx context.Context, tx DBTX, updates map[string]interface{}) error {
+	// The title answers to the same canonical rule create and import apply
+	// (GH#8150): a map update that skipped it could store a row the store's
+	// own export then cannot import. A non-string value is refused rather
+	// than left to SQL coercion.
+	if rawTitle, ok := updates["title"]; ok {
+		title, isString := rawTitle.(string)
+		if !isString {
+			return fmt.Errorf("%w: update title: title must be a string (got %T)", storage.ErrValidation, rawTitle)
+		}
+		if err := types.ValidateIssueTitle(title); err != nil {
+			return fmt.Errorf("%w: update title: %w", storage.ErrValidation, err)
+		}
+	}
 	if rawType, ok := updates["issue_type"]; ok {
 		var issueType types.IssueType
 		switch value := rawType.(type) {

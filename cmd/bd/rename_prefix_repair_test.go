@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -295,4 +297,135 @@ func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestRenamesRefuseARewrittenTitleOverTheLimit(t *testing.T) {
+	// A rename rewrites the issue IDs in titles and commits issue by issue,
+	// so a title it would push over 500 bytes refuses the whole rename before
+	// its first write: no ID renamed, no reference rewritten, the prefix
+	// config untouched. 247 é and " old-1" make a valid 500-byte title of 253
+	// characters, which the title column would still take after any of these
+	// renames lengthens old-1 (GH#8150). Shortening it lets the rename through.
+	// An older bd stored old-4's title over the limit. No rename rewrites
+	// that title, so none refuses it, not even the ones that rename old-4.
+	oldWrote := commandDidWrite.Load()
+	t.Cleanup(func() { commandDidWrite.Store(oldWrote) }) // a rename that goes through sets it
+	for _, tt := range []struct {
+		name string
+		got  int // bytes in old-2's title once the rename rewrites old-1 in it
+		run  func(t *testing.T, ctx context.Context, st storage.DoltStorage, issues []*types.Issue) (stderr string, err error)
+	}{
+		{name: "rename", got: 506, run: func(t *testing.T, _ context.Context, st storage.DoltStorage, _ []*types.Issue) (string, error) {
+			var err error
+			stderr := captureStderr(t, func() {
+				err = withRenameStore(st, func() error { return runRename(renameCmd, []string{"old-1", "old-renamed"}) })
+			})
+			return stderr, err
+		}},
+		{name: "repair", got: 508, run: func(t *testing.T, ctx context.Context, st storage.DoltStorage, issues []*types.Issue) (string, error) {
+			return reportRenameError(t, "failed to repair prefixes", repairPrefixes(ctx, st, "test", "test", issues, detectPrefixes(issues), false))
+		}},
+		{name: "rename-prefix", got: 503, run: func(t *testing.T, ctx context.Context, st storage.DoltStorage, issues []*types.Issue) (string, error) {
+			return reportRenameError(t, "failed to rename prefix", withRenameStore(st, func() error { return renamePrefixInDB(ctx, "old", "longer", issues) }))
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			for _, issue := range []*types.Issue{
+				{ID: "test-1", Title: "Kept bead", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+				{ID: "old-1", Title: "Renamed bead", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+				{ID: "old-2", Title: strings.Repeat("é", 247) + " old-1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+				{ID: "old-3", Title: "Holder", Description: "Depends on old-1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+				{ID: "old-4", Title: "Legacy bead", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			} {
+				if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+					t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+				}
+			}
+			legacy := strings.Repeat("é", 255) // 510 bytes in 255 characters
+			if _, err := testStore.DB().ExecContext(ctx, "UPDATE issues SET title = ? WHERE id = ?", legacy, "old-4"); err != nil {
+				t.Fatalf("failed to seed old-4's legacy title: %v", err)
+			}
+			listIssues := func() []*types.Issue {
+				t.Helper()
+				issues, err := testStore.SearchIssues(ctx, "", types.IssueFilter{})
+				if err != nil {
+					t.Fatalf("failed to search issues: %v", err)
+				}
+				return issues
+			}
+			before := issueTexts(listIssues())
+
+			stderr, err := tt.run(t, ctx, testStore, listIssues())
+			if err == nil {
+				t.Fatal("the rename succeeded, want it refused over old-2's title")
+			}
+			for _, want := range []string{
+				fmt.Sprintf("old-2: title must be 500 bytes or less (got %d)", tt.got),
+				"Hint: Nothing was renamed.",
+			} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("the refusal printed %q, want it to contain %q", stderr, want)
+				}
+			}
+			if strings.Contains(stderr, "old-4") {
+				t.Errorf("the refusal printed %q, naming old-4, whose title the rename leaves as it is", stderr)
+			}
+			if got := issueTexts(listIssues()); !slices.Equal(got, before) {
+				t.Errorf("the refused rename wrote issues:\n got %q\nwant %q", got, before)
+			}
+			if prefix, err := testStore.GetConfig(ctx, "issue_prefix"); err != nil || prefix != "test" {
+				t.Errorf("issue_prefix after the refused rename = %q (err %v), want %q", prefix, err, "test")
+			}
+
+			shortened := strings.Repeat("é", 237)
+			if err := testStore.UpdateIssue(ctx, "old-2", map[string]interface{}{"title": shortened + " old-1"}, "test"); err != nil {
+				t.Fatalf("failed to shorten old-2's title: %v", err)
+			}
+			if stderr, err := tt.run(t, ctx, testStore, listIssues()); err != nil {
+				t.Fatalf("the rename after shortening old-2's title: %v\n%s", err, stderr)
+			}
+			after := listIssues()
+			byTitle := make(map[string]*types.Issue, len(after))
+			for _, issue := range after {
+				byTitle[issue.Title] = issue
+			}
+			renamed := byTitle["Renamed bead"]
+			if renamed == nil || renamed.ID == "old-1" {
+				t.Fatalf("issues after the rename: %q, want the renamed bead under a new ID", issueTexts(after))
+			}
+			if byTitle[shortened+" "+renamed.ID] == nil {
+				t.Errorf("issues after the rename: %q, want old-2's title to name %s", issueTexts(after), renamed.ID)
+			}
+			if holder := byTitle["Holder"]; holder == nil || holder.Description != "Depends on "+renamed.ID {
+				t.Errorf("issues after the rename: %q, want the holder's description to name %s", issueTexts(after), renamed.ID)
+			}
+			if byTitle[legacy] == nil {
+				t.Errorf("issues after the rename: %q, want old-4's legacy title kept", issueTexts(after))
+			}
+		})
+	}
+}
+
+// reportRenameError returns what bd rename-prefix prints to stderr for err,
+// the error one of its renames returned, and the error the command returns.
+func reportRenameError(t *testing.T, failed string, err error) (string, error) {
+	t.Helper()
+	if err == nil {
+		return "", nil
+	}
+	var cmdErr error
+	stderr := captureStderr(t, func() { cmdErr = handleRenameError(failed, err) })
+	return stderr, cmdErr
+}
+
+// issueTexts lists each issue's ID, title and description, sorted by ID.
+func issueTexts(issues []*types.Issue) []string {
+	texts := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		texts = append(texts, fmt.Sprintf("%s %q %q", issue.ID, issue.Title, issue.Description))
+	}
+	slices.Sort(texts)
+	return texts
 }

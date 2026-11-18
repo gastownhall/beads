@@ -1,10 +1,12 @@
 package issueops
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/storage"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -83,6 +85,57 @@ func TestApplyMetadataPatchRejectsUnsafeKeysAndNullMerge(t *testing.T) {
 			next, changed, err := ApplyMetadataPatch(json.RawMessage(`{"keep":"yes"}`), tc.patch)
 			if !errors.Is(err, storage.ErrValidation) {
 				t.Fatalf("ApplyMetadataPatch() = %s, %t, %v; want ErrValidation", next, changed, err)
+			}
+		})
+	}
+}
+
+// reporterTitle is the title from GH#8150: 499 runes but 514 bytes (one em
+// dash, two en dashes, five middle dots and two primes). It fits the
+// VARCHAR(500) column, so only the canonical byte rule can refuse it.
+func reporterTitle(t *testing.T) string {
+	t.Helper()
+	title := strings.Repeat("a", 489) + "—––·····′′"
+	if runes, size := utf8.RuneCountInString(title), len(title); runes != 499 || size != 514 {
+		t.Fatalf("reporter fixture is %d runes / %d bytes, want 499 / 514", runes, size)
+	}
+	return title
+}
+
+// TestValidateScalarUpdatesTitle pins the map-update title gate (GH#8150):
+// the map path bd edit, bd batch and bd rename take must refuse exactly the
+// titles create and import refuse, or the store holds a row its own export
+// cannot import.
+func TestValidateScalarUpdatesTitle(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		updates map[string]interface{}
+		wantErr string // "" means the update is accepted
+	}{
+		{"absent title", map[string]interface{}{"description": "d"}, ""},
+		{"short title", map[string]interface{}{"title": "short"}, ""},
+		{"500 ASCII bytes", map[string]interface{}{"title": strings.Repeat("t", 500)}, ""},
+		{"250 two-byte runes", map[string]interface{}{"title": strings.Repeat("é", 250)}, ""},
+		{"empty title", map[string]interface{}{"title": ""}, "title is required"},
+		{"501 ASCII bytes", map[string]interface{}{"title": strings.Repeat("t", 501)}, "(got 501)"},
+		{"reporter title", map[string]interface{}{"title": reporterTitle(t)}, "(got 514)"},
+		{"251 two-byte runes", map[string]interface{}{"title": strings.Repeat("é", 251)}, "(got 502)"},
+		{"integer title", map[string]interface{}{"title": 7}, "int"},
+		{"nil title", map[string]interface{}{"title": nil}, "nil"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateScalarUpdates(context.Background(), nil, tc.updates)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateScalarUpdates() error = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, storage.ErrValidation) {
+				t.Fatalf("ValidateScalarUpdates() error = %v, want ErrValidation", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ValidateScalarUpdates() error = %q, want it to contain %q", err, tc.wantErr)
 			}
 		})
 	}
