@@ -100,6 +100,9 @@ var scannedPackages = map[string]string{
 	"doctor/fix": "doctor/fix/",
 	"../../internal/storage/embeddeddolt/cmd": "embeddeddolt-cmd/",
 	"../..": "sdk/",
+	// The proxied-server provider construction, shared by the bd binary and
+	// the Go SDK's proxied-server open (GH#8323).
+	"../../internal/proxiedopen": "proxiedopen/",
 }
 
 // sdkOpenExemptionReason is the one reason the Go SDK's five opens share. It has
@@ -279,8 +282,8 @@ func TestRootOpensPassTheirPostureToActivation(t *testing.T) {
 		{"store_factory_nocgo.go", "newDoltStore", "activateEventsJournalStore", 1, "opensForBeadWrites(cfg)"},
 		{"store_factory.go", "newRegisteredBackendStore", "activateEventsJournalStore", 1, "writesBeads"},
 		{"store_factory_nocgo.go", "newRegisteredBackendStore", "activateEventsJournalStore", 1, "writesBeads"},
-		{"uow_factory.go", "newExternalProxiedServerUOWProvider", "activateEventsJournalProvider", 2, "uow.OpensForBeadWrites(opts...)"},
-		{"uow_factory.go", "newManagedProxiedServerUOWProvider", "activateEventsJournalProvider", 2, "uow.OpensForBeadWrites(opts...)"},
+		{"../../internal/proxiedopen/open.go", "newExternalProxiedServerUOWProvider", "activateEventsJournalProvider", 2, "uow.OpensForBeadWrites(opts...)"},
+		{"../../internal/proxiedopen/open.go", "newManagedProxiedServerUOWProvider", "activateEventsJournalProvider", 2, "uow.OpensForBeadWrites(opts...)"},
 		// The root pre-run, inside rootCmd's literal: the proxied provider reads
 		// its posture back out of these options, and the registry arm is handed
 		// it directly.
