@@ -858,3 +858,74 @@ func slicesContainsAny(args []any, want string) bool {
 	}
 	return false
 }
+
+// TestOpenChildParentIDsSQLKeepsEachFamilySeparate pins the open-child parent
+// query behind ExcludeParentsWithOpenChildren (GH#6817): one statement per
+// child family, each selecting only the target column of the parent family
+// it is asked about, never a COALESCE across the two, and with the wisp leg
+// skipping edges the durable table also holds. It is the same relationship
+// the close gate counts, so both renderers share their FROM ... WHERE body.
+func TestOpenChildParentIDsSQLKeepsEachFamilySeparate(t *testing.T) {
+	if got := ParentTargetColumn(IssuesFilterTables); got != IssueTargetColumn {
+		t.Errorf("ParentTargetColumn(issues) = %q, want %q", got, IssueTargetColumn)
+	}
+	if got := ParentTargetColumn(WispsFilterTables); got != WispTargetColumn {
+		t.Errorf("ParentTargetColumn(wisps) = %q, want %q", got, WispTargetColumn)
+	}
+	if len(OpenChildFamilies) != 2 ||
+		OpenChildFamilies[0] != (OpenChildFamily{Dependencies: "dependencies", Children: "issues"}) ||
+		OpenChildFamilies[1] != (OpenChildFamily{Dependencies: "wisp_dependencies", Children: "wisps", DedupeDurable: true}) {
+		t.Fatalf("OpenChildFamilies = %+v, want the durable leg then the deduped wisp leg", OpenChildFamilies)
+	}
+
+	for _, family := range OpenChildFamilies {
+		for _, column := range []string{IssueTargetColumn, WispTargetColumn} {
+			other := WispTargetColumn
+			if column == WispTargetColumn {
+				other = IssueTargetColumn
+			}
+			query, err := OpenChildParentIDsSQL(family, column)
+			if err != nil {
+				t.Fatalf("OpenChildParentIDsSQL(%s, %s): %v", family.Dependencies, column, err)
+			}
+			for _, want := range []string{
+				"SELECT DISTINCT dependency." + column,
+				"FROM " + family.Dependencies + " AS dependency",
+				"JOIN " + family.Children + " AS child ON child.id = dependency.issue_id",
+				"dependency.type = 'parent-child'",
+				"child.status != 'closed'",
+				"dependency." + column + " IS NOT NULL",
+			} {
+				if !strings.Contains(query, want) {
+					t.Errorf("%s/%s query lacks %q:\n%s", family.Dependencies, column, want, query)
+				}
+			}
+			if strings.Contains(query, other) || strings.Contains(strings.ToUpper(query), "COALESCE") {
+				t.Errorf("%s/%s query reads the other family's target column:\n%s", family.Dependencies, column, query)
+			}
+			if strings.Contains(query, "?") {
+				t.Errorf("%s/%s query has a placeholder; the set query binds nothing:\n%s", family.Dependencies, column, query)
+			}
+			if got := strings.Contains(query, "NOT EXISTS"); got != family.DedupeDurable {
+				t.Errorf("%s/%s dedupe against durable ids = %v, want %v", family.Dependencies, column, got, family.DedupeDurable)
+			}
+
+			count, err := OpenChildCountSQL(family, column)
+			if err != nil {
+				t.Fatalf("OpenChildCountSQL(%s, %s): %v", family.Dependencies, column, err)
+			}
+			if !strings.Contains(count, OpenChildEdgesSQL(family)) || !strings.HasSuffix(count, "dependency."+column+" = ?") {
+				t.Errorf("close-gate count no longer shares the open-edge body for %s/%s:\n%s", family.Dependencies, column, count)
+			}
+		}
+	}
+
+	for _, bad := range []string{"", "depends_on_external", "depends_on_issue_id; DROP TABLE issues"} {
+		if _, err := OpenChildParentIDsSQL(OpenChildFamilies[0], bad); err == nil {
+			t.Errorf("OpenChildParentIDsSQL accepted target column %q", bad)
+		}
+		if _, err := OpenChildCountSQL(OpenChildFamilies[0], bad); err == nil {
+			t.Errorf("OpenChildCountSQL accepted target column %q", bad)
+		}
+	}
+}
