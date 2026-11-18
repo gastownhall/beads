@@ -208,11 +208,8 @@ var countsEntryPoints = []countsEntryPoint{
 		name:    "GetReadyWorkInTx/unbounded",
 		missing: wispPlaneAndLeases,
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
-			mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+			mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false, false))
 			mock.ExpectQuery(`SELECT id FROM issues`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
-			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
-				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-			mock.ExpectQuery(staleBlockedQueryRegex("wisps")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			mock.ExpectQuery(`(?s)FROM wisps`).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
@@ -225,11 +222,8 @@ var countsEntryPoints = []countsEntryPoint{
 		name:    "GetReadyWorkInTx/paged",
 		missing: []string{"wisp_labels"},
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
-			mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+			mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false, false))
 			mock.ExpectQuery(`SELECT id FROM issues`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
-			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
-				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-			mock.ExpectQuery(staleBlockedQueryRegex("wisps")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			mock.ExpectQuery(`(?s)FROM wisps`).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {

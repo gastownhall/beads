@@ -123,7 +123,7 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 		if err := p.readStaleBlockedInTx(ctx, tx, flags[iIssuesStale], flags[iWispsStale]); err != nil {
 			return nil, err
 		}
-	case isTableNotExistError(err):
+	case isTableNotExistError(err) || missingIsBlockedColumn(err):
 		if err := p.probeTableByTableInTx(ctx, tx, excludeDeferred); err != nil {
 			return nil, err
 		}
@@ -143,6 +143,20 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 		p.inputs.ParentDescendantIDs = descendantIDs
 	}
 	return p, nil
+}
+
+// missingIsBlockedColumn reports whether err is a table lacking is_blocked. A
+// clone past the ignored migration that adds it to wisps can have a wisps table
+// without the column. The probe statement names it unconditionally, while the
+// per-table probes read it only from a wisps table that holds rows, so such a
+// database with no wisps must fall back rather than fail. Dolt answers with
+// error 1105 and the wording matched here, not MySQL's 1054.
+func missingIsBlockedColumn(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "is_blocked") &&
+		(strings.Contains(s, "does not have column") ||
+			strings.Contains(s, "could not be found") ||
+			strings.Contains(s, "unknown column"))
 }
 
 // probeTableByTableInTx is the per-table fallback for a database missing part

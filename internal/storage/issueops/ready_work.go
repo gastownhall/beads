@@ -19,11 +19,10 @@ type readyWorkPredicates struct {
 	// whereArgs binds only the WHERE placeholders (no ORDER BY params); it is
 	// what a bare COUNT(*) over the ready predicate needs. args carries the
 	// WHERE params followed by the ORDER BY params for the full page query.
-	whereArgs        []interface{}
-	orderBySQL       string
-	limitSQL         string
-	args             []interface{}
-	deferredChildIDs []string
+	whereArgs  []interface{}
+	orderBySQL string
+	limitSQL   string
+	args       []interface{}
 }
 
 func readyWorkPageSize(limit int) int {
@@ -39,38 +38,6 @@ func readyWorkPageSize(limit int) int {
 
 func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
 	return sqlbuild.BuildReadyWorkOrder(policy, "created_at", "priority")
-}
-
-// buildReadyWorkPredicates computes the ID sets the ready-work WHERE clause
-// needs (children of deferred parents, parent descendants, the family's
-// stale-flagged rows), then delegates the clause text to sqlbuild so both
-// stacks share ready semantics.
-func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFilter, tables FilterTables) (*readyWorkPredicates, error) {
-	var inputs sqlbuild.ReadyWorkWhereInputs
-	if !filter.IncludeDeferred {
-		deferredChildIDs, dcErr := getChildrenOfDeferredParentsInTx(ctx, tx)
-		if dcErr != nil {
-			return nil, fmt.Errorf("get ready work: compute deferred parent children: %w", dcErr)
-		}
-		inputs.DeferredChildIDs = deferredChildIDs
-	}
-	// Parent filtering: return all transitive descendants of parentID.
-	// GH#3396: previously was a one-hop subquery against dependencies, so
-	// grandchildren were silently dropped despite the help text and
-	// WorkFilter.ParentID godoc both promising "descendants (recursive)".
-	if filter.ParentID != nil {
-		descendantIDs, descErr := GetDescendantIDsInTx(ctx, tx, *filter.ParentID, 0)
-		if descErr != nil {
-			return nil, fmt.Errorf("get parent descendants: %w", descErr)
-		}
-		inputs.ParentDescendantIDs = descendantIDs
-	}
-	staleIDs, err := queryIDs(ctx, tx, sqlbuild.StaleBlockedIDsSQL(tables))
-	if err != nil {
-		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
-	}
-	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
-	return buildReadyWorkPredicatesFrom(filter, tables, inputs)
 }
 
 // buildReadyWorkPredicatesFrom renders the ready-work predicates for one table
@@ -95,12 +62,11 @@ func buildReadyWorkPredicatesFrom(filter types.WorkFilter, tables FilterTables, 
 	}
 
 	return &readyWorkPredicates{
-		whereSQL:         whereSQL,
-		whereArgs:        whereArgs,
-		orderBySQL:       orderBy.SQL,
-		limitSQL:         limitSQL,
-		args:             args,
-		deferredChildIDs: inputs.DeferredChildIDs,
+		whereSQL:   whereSQL,
+		whereArgs:  whereArgs,
+		orderBySQL: orderBy.SQL,
+		limitSQL:   limitSQL,
+		args:       args,
 	}, nil
 }
 
@@ -110,7 +76,11 @@ func GetReadyWorkInTx(
 	tx DBTX,
 	filter types.WorkFilter,
 ) ([]*types.Issue, error) {
-	preds, err := buildReadyWorkPredicates(ctx, tx, filter, IssuesFilterTables)
+	probe, err := probeReadyWorkInTx(ctx, tx, filter, false)
+	if err != nil {
+		return nil, fmt.Errorf("get ready work: %w", err)
+	}
+	preds, err := buildReadyWorkPredicatesFrom(filter, IssuesFilterTables, probe.inputs)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +98,13 @@ func GetReadyWorkInTx(
 		return nil, err
 	}
 
-	issues, err := GetIssuesByIDsInTx(ctx, tx, issueIDs, nil)
+	// With no wisp row there is no wisp to route an id to, so the hydration
+	// need not ask again; nil has it find out for itself.
+	var wispSet map[string]struct{}
+	if !probe.wispsPresent {
+		wispSet = map[string]struct{}{}
+	}
+	issues, err := GetIssuesByIDsInTx(ctx, tx, issueIDs, wispSet)
 	if err != nil {
 		return nil, fmt.Errorf("get ready work: fetch issues: %w", err)
 	}
@@ -143,12 +119,14 @@ func GetReadyWorkInTx(
 		}
 	}
 
-	wisps, wErr := getReadyWispsInTx(ctx, tx, filter, preds.deferredChildIDs)
-	if wErr != nil {
-		return nil, wErr
-	}
-	if len(wisps) > 0 {
-		ordered = mergeReadyWisps(ordered, wisps, filter)
+	if probe.wispsPresent {
+		wisps, wErr := getReadyWispsInTx(ctx, tx, filter, probe)
+		if wErr != nil {
+			return nil, wErr
+		}
+		if len(wisps) > 0 {
+			ordered = mergeReadyWisps(ordered, wisps, filter)
+		}
 	}
 
 	// Apply the defensive cap on the row count returned to the caller.
@@ -180,17 +158,15 @@ func mergeReadyWisps(ordered []*types.Issue, wisps []*types.Issue, filter types.
 	return kept
 }
 
-func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, deferredChildIDs []string) ([]*types.Issue, error) {
-	empty, err := wispsTableEmptyOrMissingInTx(ctx, tx)
-	if err != nil {
-		return nil, fmt.Errorf("search wisps (ready work): probe: %w", err)
-	}
-	if empty {
-		return nil, nil
-	}
-	stale, err := staleBlockedWispSetInTx(ctx, tx)
-	if err != nil {
-		return nil, err
+// getReadyWispsInTx lists the wisp family's ready rows, for a database whose
+// probe saw at least one wisp. The wisp family's stale-flagged rows come from
+// the probe, which reads none where wisp_dependencies is absent: the flag
+// decides there as it always did.
+func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, probe *readyWorkProbe) ([]*types.Issue, error) {
+	deferredChildIDs := probe.inputs.DeferredChildIDs
+	stale := make(map[string]bool, len(probe.inputs.StaleBlockedIDs[WispsFilterTables.Main]))
+	for _, id := range probe.inputs.StaleBlockedIDs[WispsFilterTables.Main] {
+		stale[id] = true
 	}
 
 	wispFilter := readyWorkWispIssueFilter(filter)
@@ -240,21 +216,6 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 		}
 	}
 	return ready, nil
-}
-
-// staleBlockedWispSetInTx reads the wisp family's stale-flagged rows
-// (sqlbuild.StaleBlockedIDsSQL). A database without wisp_dependencies has none
-// to read around, so the flag decides there as it always did.
-func staleBlockedWispSetInTx(ctx context.Context, tx DBTX) (map[string]bool, error) {
-	ids, err := queryIDs(ctx, tx, sqlbuild.StaleBlockedIDsSQL(WispsFilterTables))
-	if err != nil && !missingOptionalWispTable(err) {
-		return nil, fmt.Errorf("search wisps (ready work): stale blocked flags: %w", err)
-	}
-	stale := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		stale[id] = true
-	}
-	return stale, nil
 }
 
 func queryReadyWispIssueIDPage(ctx context.Context, tx DBTX, filter types.IssueFilter, excludeDeferred bool, orderBy sqlbuild.ReadyWorkOrder, limit, offset int) ([]string, error) {
