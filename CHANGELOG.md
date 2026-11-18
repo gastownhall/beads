@@ -1439,6 +1439,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rig wisps. bd now adds the missing columns right before 0053 runs, so
   stores stuck at v52 finish the upgrade on their next run. The migration
   files and their recorded content hashes are unchanged.
+- **A clone that adopts a schema another clone migrated no longer fails at
+  clone-local migration 0005 with `Duplicate key name
+  'idx_wisp_dep_type_issue'`** (#6092). `wisp_dependencies` is local to each
+  clone, and main migration 0022 had already added that index to it. The
+  repair that heals the table before main migration 0058 never runs on a
+  clone whose shared schema is already past 0058, for example one that pulled
+  it from the clone that migrated, so clone-local step 5 failed there after
+  it had already dropped the table's foreign keys, and the next open recorded
+  the step over a table without them. bd now runs the same repair before
+  clone-local step 5, so such a clone reaches the final table shape with
+  every valid dependency row and its foreign keys. A clone that an older
+  release already reopened past step 5 is not reached; in server mode
+  `bd doctor --fix` re-adds its foreign keys. The migration files and their
+  recorded content hashes are unchanged. Migration 0053's
+  `table not found: new`, also reported in #6092, is not fixed.
 - **Proxied-server workspaces and `bd serve` refuse a database whose schema is
   ahead of the binary**, as embedded and server mode already did. An older
   `bd` that a newer `bd` had migrated past now stops with a schema-skew error

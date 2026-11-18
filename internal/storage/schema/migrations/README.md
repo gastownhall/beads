@@ -146,6 +146,28 @@ gave it during the step. The census also fails if a guarded step's UPDATE
 assigns anything but its registered column. That registry is closed: a new
 migration self-assigns instead of joining it.
 
+## Guard each object on its own existence
+
+A guard computed once from one object does not protect the other objects the
+script adds. Ignored/0005 sets `@needs_drop` once, from the generated
+`depends_on_id` column, and then adds the `uk_*` keys and
+`idx_wisp_dep_type_*` indexes on that flag alone. Main 0022 already creates the
+three type indexes on any `wisp_dependencies` that has the split target
+columns, so a store whose main series reached 0022 while its clone-local
+(ignored) cursor was still below 5 failed with `Duplicate key name
+'idx_wisp_dep_type_issue'` (#6092). In a new migration, test each `ADD INDEX`,
+`ADD UNIQUE KEY`, `ADD CONSTRAINT` and `DROP` against that object's own row in
+`INFORMATION_SCHEMA.STATISTICS` or `TABLE_CONSTRAINTS`, as ignored/0005 already
+does for its drops.
+
+The shipped file stays frozen. `preMigrationRepairs` instead registers main
+0058's repair, `repairWispDependenciesForwardShape`, before ignored/0005 too.
+It converges the table to the final shape, so 0005's guard then finds no
+generated column and runs nothing. A repair registered in both series runs at
+whichever entry comes first and must be a no-op at the other. Both entries
+apply one cleanup policy. On a table that already has `id` the repair keeps
+each row's id. Pin both entries in `TestPreMigrationRepairDispatches*`.
+
 ## Testing
 
 `sqlmock` statement-echo tests cannot exercise any of the above; they assert the

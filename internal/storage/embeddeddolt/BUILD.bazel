@@ -214,6 +214,7 @@ go_test(
         "migrate_events_preflip_restore_test.go",
         "migrate_frozen_guard_convergence_test.go",
         "migrate_id_tombstones_test.go",
+        "migrate_ignored5_repair_test.go",
         "migrate_ignored_cursor_untrack_test.go",
         "migrate_ignored_plane_shape_test.go",
         "migrate_journal_shape_repair_test.go",
