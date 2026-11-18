@@ -55,6 +55,7 @@ Grammar (one command per line):
   #comment  (blank lines and '# ...' comments are ignored)
 
 Supported 'update' keys: status, priority, title, assignee, force
+'assignee=', 'assignee=-' and a whitespace-only assignee clear the assignee.
 Supported dependency types: see 'bd dep add --help' (default: blocks)
 
 'force' is not a field. An update whose status moves the issue into closed
@@ -509,7 +510,7 @@ func parseUpdateKVs(kvs []string) (map[string]interface{}, error) {
 			}
 			updates["title"] = value
 		case "assignee":
-			updates["assignee"] = value
+			updates["assignee"] = normalizeAssigneeInput(value)
 		case "force":
 			// Not a field: the override for close policy on a status that
 			// crosses into done, spelled as a token because a batch script has

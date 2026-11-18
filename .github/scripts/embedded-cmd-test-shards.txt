@@ -45,6 +45,7 @@
 100 10 TestEmbeddedCreateScalarAndRelationships
 100 10 TestEmbeddedDoctorExportCheckLeavesTheWorkspaceUntouched
 
+100 11 TestEmbeddedAssigneeHiddenEmptyClears
 100 11 TestEmbeddedAutoExportFirstCreateAfterOptIn
 100 11 TestEmbeddedForkAutoContributorRoutedWrites
 100 11 TestEmbeddedKVConcurrent
