@@ -757,6 +757,7 @@ go_test(
         "doctor_context_test.go",
         "doctor_conventions_test.go",
         "doctor_delete_guard_test.go",
+        "doctor_embedded_host_issues_test.go",
         "doctor_embedded_test.go",
         "doctor_export_embedded_test.go",
         "doctor_export_store_test.go",

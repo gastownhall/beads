@@ -44,3 +44,14 @@ func macOSLegacyUserConfigCheck() (doctorCheck, bool) {
 	}
 	return convertWithCategory(dc, doctor.CategoryData), true
 }
+
+// hostLevelDoctorIssues returns the store-free host-level checks that found
+// something, for the embedded-mode doctor stub (GH#8113, GH#3794 sign-off):
+// today only a non-OK macOS legacy user config result. Tests replace it.
+var hostLevelDoctorIssues = func() []doctorCheck {
+	check, ok := macOSLegacyUserConfigCheck()
+	if !ok || check.Status == statusOK {
+		return nil
+	}
+	return []doctorCheck{check}
+}
