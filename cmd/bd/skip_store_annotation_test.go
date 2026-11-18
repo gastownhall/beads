@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/migration"
 )
 
 // annotate returns a command carrying the skip-store annotation set to v.
@@ -174,5 +176,117 @@ func TestPersistentPreRunHonorsSkipStoreAnnotation(t *testing.T) {
 	t.Cleanup(func() { rootCmd.RemoveCommand(control) })
 	if err := rootCmd.PersistentPreRunE(control, nil); err == nil {
 		t.Fatal("control (non-annotated) command should attempt store init and fail to open the absent database; test-environment precondition broken")
+	}
+}
+
+// TestUpgradeReadOnlySubcommandsSkipStoreInit pins the GH#6669 routing on
+// the real upgrade leaves: `bd upgrade status` and `bd upgrade review` are
+// version-marker inspections, so the root pre-run must take the no-store
+// early return for them. On this fixture — a valid server-mode workspace
+// whose database is unreachable and whose server may not be auto-started —
+// an ordinary command fails at the store open, which is exactly what every
+// pre-fix status/review invocation did: it dialed a server (or started
+// one), and on a reachable store it would initialize schema, auto-applying
+// or refusing pending migrations. The inspections must instead succeed with
+// no store, leave the one-shot .local_version marker byte-for-byte intact
+// (a later reconciliation reads it), and keep working under an active
+// migration freeze, which only a command that opens no store can.
+// `bd upgrade ack` is the negative control on a fresh fixture: it keeps the
+// ordinary pre-run and must still attempt the absent database.
+func TestUpgradeReadOnlySubcommandsSkipStoreInit(t *testing.T) {
+	newFixture := func() (repoDir, beadsDir string) {
+		repoDir = t.TempDir()
+		beadsDir = filepath.Join(repoDir, ".beads")
+		writeTestConfigYAML(t, beadsDir, "")
+		writeMetadataConfig(t, beadsDir, configfile.DoltModeServer, "upgrade_skip_store")
+		return repoDir, beadsDir
+	}
+
+	repoDir, beadsDir := newFixture()
+	// An explicitly selected workspace (BEADS_DIR), so the test does not
+	// depend on ambient discovery.
+	t.Chdir(repoDir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	// If the store IS opened (a broken gate), fail fast: never auto-start a server.
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BD_DISABLE_METRICS", "1")
+	t.Setenv("BD_DISABLE_EVENT_FLUSH", "1")
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	savePersistentPreRunState(t)
+
+	oldStore := store
+	t.Cleanup(func() { store = oldStore })
+
+	// The one-shot upgrade marker must survive every inspection unchanged.
+	localVersionPath := filepath.Join(beadsDir, localVersionFile)
+	markerBytes := []byte("0.9.0\n")
+	if err := os.WriteFile(localVersionPath, markerBytes, 0o600); err != nil {
+		t.Fatalf("write local version marker: %v", err)
+	}
+	assertMarkerIntact := func(when string) {
+		t.Helper()
+		raw, err := os.ReadFile(localVersionPath)
+		if err != nil {
+			t.Fatalf("read local version marker %s: %v", when, err)
+		}
+		if string(raw) != string(markerBytes) {
+			t.Errorf("%s: .local_version = %q, want the untouched %q (an inspection must not consume the one-shot upgrade signal)", when, raw, markerBytes)
+		}
+	}
+
+	// The globals the handlers read carry state between the hook and RunE;
+	// reset them so the two leaves cannot cross-contaminate.
+	resetUpgradeRunState := func() {
+		versionUpgradeDetected = false
+		previousVersion = ""
+		upgradeAcknowledged = false
+		store = nil
+		jsonOutput = false
+	}
+
+	for _, leaf := range []*cobra.Command{upgradeStatusCmd, upgradeReviewCmd} {
+		for _, asJSON := range []bool{false, true} {
+			resetUpgradeRunState()
+			jsonOutput = asJSON
+			if err := rootCmd.PersistentPreRunE(leaf, nil); err != nil {
+				t.Fatalf("bd upgrade %s must skip store init and return nil even with an unreachable database, got: %v", leaf.Name(), err)
+			}
+			if store != nil {
+				t.Fatalf("bd upgrade %s must not open the store", leaf.Name())
+			}
+			_ = captureStdout(t, func() error {
+				return leaf.RunE(leaf, nil)
+			})
+			assertMarkerIntact("after bd upgrade " + leaf.Name())
+		}
+	}
+
+	// An inspection must keep working during a migration freeze: it opens no
+	// store, so there is nothing for the freeze gate to refuse. On the base
+	// the freeze gate rejected `bd upgrade status` outright.
+	freezePath := filepath.Join(repoDir, migration.FileName)
+	if err := os.WriteFile(freezePath, []byte("operator=upgrade-skip-store-test reason=GH#6669\n"), 0o600); err != nil {
+		t.Fatalf("write migration freeze marker: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(freezePath) })
+	resetUpgradeRunState()
+	if err := rootCmd.PersistentPreRunE(upgradeStatusCmd, nil); err != nil {
+		t.Fatalf("bd upgrade status must remain usable during a migration freeze (it opens no store), got: %v", err)
+	}
+	assertMarkerIntact("after bd upgrade status under a migration freeze")
+
+	// Negative control, fresh fixture: ack is not an inspection and keeps
+	// the ordinary pre-run, so it must still attempt the (absent) database.
+	ackRepoDir, ackBeadsDir := newFixture()
+	t.Chdir(ackRepoDir)
+	t.Setenv("BEADS_DIR", ackBeadsDir)
+	resetUpgradeRunState()
+	if err := rootCmd.PersistentPreRunE(upgradeAckCmd, nil); err == nil {
+		t.Fatal("bd upgrade ack must still initialize the store and fail to open the absent database; annotating it would strand .local_version at the old version")
 	}
 }
