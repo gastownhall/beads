@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -832,6 +836,64 @@ func TestOpenBestAvailableProxiedRefusalLeavesWorkspaceUntouched(t *testing.T) {
 				assertProxiedRefusal(t, name, store, err)
 				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
 					t.Fatalf("%s refusal changed the workspace:\nbefore %v\nafter  %v", name, before, after)
+				}
+			})
+		}
+	}
+}
+
+// TestOpenBestAvailableProxiedRefusalPrecedesServerOverride pins that the
+// refusal also wins over the environment overrides that force direct-server
+// mode (BEADS_DOLT_SERVER_MODE=1, BEADS_DOLT_SHARED_SERVER=1|true): those make
+// IsDoltServerMode true for a proxied workspace too, so the guard must sit
+// before both Dolt constructors. A test-owned loopback listener stands in for
+// the server the overrides would dial; it must never see a connection.
+func TestOpenBestAvailableProxiedRefusalPrecedesServerOverride(t *testing.T) {
+	overrides := []struct{ key, value string }{
+		{"BEADS_DOLT_SERVER_MODE", "1"},
+		{"BEADS_DOLT_SHARED_SERVER", "1"},
+		{"BEADS_DOLT_SHARED_SERVER", "true"},
+	}
+	for _, o := range overrides {
+		for name, open := range proxiedOpens {
+			t.Run(o.key+"="+o.value+"/"+name, func(t *testing.T) {
+				root, beadsDir := proxiedServerBeadsDir(t, "proxied-server")
+				t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+				t.Setenv(o.key, o.value)
+
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatalf("listen: %v", err)
+				}
+				var accepted atomic.Int32
+				var wg sync.WaitGroup
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						conn, err := ln.Accept()
+						if err != nil {
+							return
+						}
+						accepted.Add(1)
+						_ = conn.Close()
+					}
+				}()
+				stop := func() { _ = ln.Close(); wg.Wait() }
+				defer stop()
+				t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(ln.Addr().(*net.TCPAddr).Port))
+				before := workspaceTreeDigest(t, root)
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				store, err := open(ctx, beadsDir)
+				stop()
+				assertProxiedRefusal(t, name, store, err)
+				if n := accepted.Load(); n != 0 {
+					t.Errorf("%s dialed the server %d time(s) before refusing", name, n)
+				}
+				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+					t.Errorf("%s refusal changed the workspace:\nbefore %v\nafter  %v", name, before, after)
 				}
 			})
 		}
