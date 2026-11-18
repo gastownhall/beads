@@ -802,6 +802,16 @@ func f() error {
 			src:  "//go:build unix\n\n" + hdr + "func h() error { return exec.Command(\"ps\").Run() }\n",
 		},
 		{
+			// "unix" is not a GOOS, so the filename suffix alone does not
+			// keep a file out of the Windows build: go/build selects an
+			// untagged _unix.go for GOOS=windows and its spawn still gets a
+			// console window. Only the //go:build line above excludes it.
+			name:       "bare _unix.go without a build tag is still reported",
+			file:       "bare_unix.go",
+			src:        hdr + "func u() error { return exec.Command(\"ps\").Run() }\n",
+			wantReason: "not hidden",
+		},
+		{
 			name: "spawn in a _darwin.go file",
 			file: "sweep_darwin.go",
 			src:  hdr + "func k() error { return exec.Command(\"ps\").Run() }\n",
