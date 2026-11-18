@@ -674,9 +674,17 @@ func RunSweeperWispsPlaneRequiresAFilter(t *testing.T, ctx context.Context, fixt
 }
 
 // RunSweeperProtectsLiveDependents pins issueops.SweepRequest.ProtectLiveDependents:
-// a closed row a LIVE row depends on through parent-child, tracks or blocks is
-// held back and counted, while a closed row reached only by a non-structural
-// edge, or only by a dependent that is itself closed, is swept.
+// a closed row a LIVE row depends on through parent-child, tracks, blocks or
+// conditional-blocks is held back and counted, while a closed row reached only
+// by a non-structural edge, or only by a dependent that is itself closed, is
+// swept.
+//
+// The conditional-blocks targets carry both kinds of close reason. One closed
+// with a reason that is not a failure still holds its open fallback back, so
+// sweeping it would release the fallback after a success (GH#5577). One closed
+// with a failure reason released its fallback, which is now running, and it is
+// kept as the gate of that live work, as the closed blocker is. Once a fallback
+// is closed, the way an unused one is disposed of, its target is swept.
 //
 // The live sources carry three different not-done statuses (open,
 // in_progress, hooked), because "live" is the not-done set and not "open".
@@ -697,6 +705,11 @@ func RunSweeperProtectsLiveDependents(t *testing.T, ctx context.Context, fixture
 	closed := func(name string) string {
 		return sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "live", name, true), nil)
 	}
+	closedWith := func(name, reason string) string {
+		return sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "live", name, true), func(issue *types.Issue) {
+			issue.CloseReason = reason
+		})
+	}
 
 	parent := closed("parent")
 	openChild := live("child-open", types.StatusOpen)
@@ -704,10 +717,16 @@ func RunSweeperProtectsLiveDependents(t *testing.T, ctx context.Context, fixture
 	convoy := live("convoy", types.StatusInProgress)
 	blocker := closed("blocker")
 	hooked := live("hooked", types.StatusHooked)
+	held := closedWith("held", "all steps complete")
+	fallback := live("fallback", types.StatusOpen)
+	failedGate := closedWith("failed-gate", "failed: smoke test red")
+	rollback := live("rollback", types.StatusInProgress)
 	related := closed("related")
 	relater := live("relater", types.StatusOpen)
 	doneParent := closed("done-parent")
 	doneChild := closed("done-child")
+	disposedGate := closedWith("disposed-gate", "all steps complete")
+	disposed := closedWith("disposed", "skipped: the gate succeeded")
 
 	if err := fixture.AddDependencies(ctx, publicops.AddDependenciesRequest{
 		Actor: "sweeper-seed",
@@ -715,8 +734,11 @@ func RunSweeperProtectsLiveDependents(t *testing.T, ctx context.Context, fixture
 			{IssueID: openChild, DependsOnID: parent, Type: publicops.DepParentChild},
 			{IssueID: convoy, DependsOnID: tracked, Type: publicops.DepTracks},
 			{IssueID: hooked, DependsOnID: blocker, Type: publicops.DepBlocks},
+			{IssueID: fallback, DependsOnID: held, Type: types.DepConditionalBlocks},
+			{IssueID: rollback, DependsOnID: failedGate, Type: types.DepConditionalBlocks},
 			{IssueID: relater, DependsOnID: related, Type: publicops.DepRelated},
 			{IssueID: doneChild, DependsOnID: doneParent, Type: publicops.DepParentChild},
+			{IssueID: disposed, DependsOnID: disposedGate, Type: types.DepConditionalBlocks},
 		},
 	}); err != nil {
 		t.Fatalf("wiring dependencies: %v", err)
@@ -728,23 +750,24 @@ func RunSweeperProtectsLiveDependents(t *testing.T, ctx context.Context, fixture
 		ClosedBefore: &sweeperCutoff,
 	}
 	unprotected := sweeperSweep(t, ctx, fixture, sweeperAsDryRun(request))
-	if unprotected.Swept != 6 || unprotected.Skipped.LiveDependent != 0 {
-		t.Fatalf("unprotected dry run: Swept = %d, LiveDependent = %d; want 6 and 0 — "+
+	if unprotected.Swept != 10 || unprotected.Skipped.LiveDependent != 0 {
+		t.Fatalf("unprotected dry run: Swept = %d, LiveDependent = %d; want 10 and 0 — "+
 			"the protection must be asked for", unprotected.Swept, unprotected.Skipped.LiveDependent)
 	}
 
 	request.ProtectLiveDependents = true
 	result := sweeperSweep(t, ctx, fixture, request)
-	if result.Skipped.LiveDependent != 3 {
-		t.Errorf("Skipped.LiveDependent = %d, want 3 (the parent, the tracked bead and the blocker)",
-			result.Skipped.LiveDependent)
+	if result.Skipped.LiveDependent != 5 {
+		t.Errorf("Skipped.LiveDependent = %d, want 5 (the parent, the tracked bead, the blocker "+
+			"and both conditional gates of a live fallback)", result.Skipped.LiveDependent)
 	}
-	if result.Swept != 3 {
-		t.Errorf("Swept = %d, want 3 (the related-only bead and the closed parent/child pair)", result.Swept)
+	if result.Swept != 5 {
+		t.Errorf("Swept = %d, want 5 (the related-only bead, the closed parent/child pair "+
+			"and the disposed-of fallback with its gate)", result.Swept)
 	}
-	sweeperAssertWispRows(t, ctx, fixture, 3, parent, tracked, blocker)
-	sweeperAssertWispRows(t, ctx, fixture, 0, related, doneParent, doneChild)
-	sweeperAssertWispRows(t, ctx, fixture, 4, openChild, convoy, hooked, relater)
+	sweeperAssertWispRows(t, ctx, fixture, 5, parent, tracked, blocker, held, failedGate)
+	sweeperAssertWispRows(t, ctx, fixture, 0, related, doneParent, doneChild, disposedGate, disposed)
+	sweeperAssertWispRows(t, ctx, fixture, 6, openChild, convoy, hooked, fallback, rollback, relater)
 }
 
 // RunSweeperProtectsTransitiveLiveDependents pins that protection propagates
@@ -792,8 +815,10 @@ func RunSweeperProtectsTransitiveLiveDependents(t *testing.T, ctx context.Contex
 
 // RunSweeperProtectsLiveDependentsAcrossPlanes pins that the live-dependent
 // protection reads BOTH dependency tables: a closed wisp that a live DURABLE
-// (issues-table) bead depends on through parent-child, tracks or blocks is
-// kept, whatever not-done status the durable source carries.
+// (issues-table) bead depends on through parent-child, tracks, blocks or
+// conditional-blocks is kept, whatever not-done status the durable source
+// carries. The conditional-blocks target closed with bd close's default
+// reason, which is not a failure, so its durable fallback is still held back.
 func RunSweeperProtectsLiveDependentsAcrossPlanes(t *testing.T, ctx context.Context, fixture SweeperFixture) {
 	t.Helper()
 	if fixture.AddDependencies == nil {
@@ -812,10 +837,14 @@ func RunSweeperProtectsLiveDependentsAcrossPlanes(t *testing.T, ctx context.Cont
 	parent := closedWisp("parent")
 	tracked := closedWisp("tracked")
 	blocker := closedWisp("blocker")
+	held := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "xplane", "held", true), func(issue *types.Issue) {
+		issue.CloseReason = "Closed"
+	})
 	loose := closedWisp("loose")
 	child := durableLive("child", types.StatusOpen)
 	convoy := durableLive("convoy", types.StatusInProgress)
 	waiter := durableLive("waiter", types.StatusDeferred)
+	fallback := durableLive("fallback", types.StatusOpen)
 
 	if err := fixture.AddDependencies(ctx, publicops.AddDependenciesRequest{
 		Actor: "sweeper-seed",
@@ -823,6 +852,7 @@ func RunSweeperProtectsLiveDependentsAcrossPlanes(t *testing.T, ctx context.Cont
 			{IssueID: child, DependsOnID: parent, Type: publicops.DepParentChild},
 			{IssueID: convoy, DependsOnID: tracked, Type: publicops.DepTracks},
 			{IssueID: waiter, DependsOnID: blocker, Type: publicops.DepBlocks},
+			{IssueID: fallback, DependsOnID: held, Type: types.DepConditionalBlocks},
 		},
 	}); err != nil {
 		t.Fatalf("wiring cross-plane dependencies: %v", err)
@@ -834,12 +864,12 @@ func RunSweeperProtectsLiveDependentsAcrossPlanes(t *testing.T, ctx context.Cont
 		ClosedBefore:          &sweeperCutoff,
 		ProtectLiveDependents: true,
 	})
-	if result.Skipped.LiveDependent != 3 || result.Swept != 1 {
-		t.Errorf("Swept = %d, LiveDependent = %d; want 1 (the unlinked wisp) and 3", result.Swept, result.Skipped.LiveDependent)
+	if result.Skipped.LiveDependent != 4 || result.Swept != 1 {
+		t.Errorf("Swept = %d, LiveDependent = %d; want 1 (the unlinked wisp) and 4", result.Swept, result.Skipped.LiveDependent)
 	}
-	sweeperAssertWispRows(t, ctx, fixture, 3, parent, tracked, blocker)
+	sweeperAssertWispRows(t, ctx, fixture, 4, parent, tracked, blocker, held)
 	sweeperAssertWispRows(t, ctx, fixture, 0, loose)
-	sweeperAssertIssueRows(t, ctx, fixture, 3, child, convoy, waiter)
+	sweeperAssertIssueRows(t, ctx, fixture, 4, child, convoy, waiter, fallback)
 }
 
 // RunSweeperLimitTakesTheOldestClosedFirst pins issueops.SweepRequest.Limit:

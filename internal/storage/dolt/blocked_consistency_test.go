@@ -106,6 +106,45 @@ func TestRecomputeAllIsBlocked_RepairsStaleClearedFlag(t *testing.T) {
 	}
 }
 
+// TestRecomputeAllIsBlocked_RepairsReleasedConditionalFallback is the upgrade
+// path for conditional-blocks: a fallback whose primary closed successfully
+// under the old rule was released (is_blocked = 0). Detection must count that
+// row, the full recompute must hold it again, and detection must then read 0.
+func TestRecomputeAllIsBlocked_RepairsReleasedConditionalFallback(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "bm-cb-primary")
+	createPerm(t, ctx, store, "bm-cb-fallback")
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "bm-cb-fallback", DependsOnID: "bm-cb-primary", Type: types.DepConditionalBlocks,
+	}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	if err := store.CloseIssue(ctx, "bm-cb-primary", "completed successfully", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
+	}
+	// The row an older bd left behind: released on the success close.
+	if _, err := store.db.ExecContext(ctx, "UPDATE issues SET is_blocked = 0 WHERE id = 'bm-cb-fallback'"); err != nil {
+		t.Fatalf("seed released fallback: %v", err)
+	}
+
+	if n := countInconsistencies(ctx, t, store.db); n != 1 {
+		t.Fatalf("released fallback: want 1 inconsistency, got %d", n)
+	}
+	if changed := recomputeAll(ctx, t, store.db); changed != 1 {
+		t.Fatalf("repair: want 1 row corrected, got %d", changed)
+	}
+	if !isBlocked(ctx, t, store.db, "bm-cb-fallback") {
+		t.Fatal("after repair: the fallback must read blocked again")
+	}
+	if n := countInconsistencies(ctx, t, store.db); n != 0 {
+		t.Fatalf("after repair: want 0 inconsistencies, got %d", n)
+	}
+}
+
 // TestRecomputeAllIsBlocked_ClearsStuckBlockedFlag is the mirror case: a row
 // left is_blocked = 1 after its only blocker was closed remotely (a merge that
 // bypassed the recompute hook). `bd ready` would keep hiding it; the full

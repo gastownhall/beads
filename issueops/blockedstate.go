@@ -15,8 +15,11 @@ package issueops
 // THE PREDICATE. A row that is closed or pinned is never blocked. Any other row
 // is blocked exactly when at least one of these holds:
 //
-//   - it has a blocks or conditional-blocks edge onto a target that is itself
-//     neither closed nor pinned;
+//   - it has a blocks or conditional-blocks edge onto a target that still
+//     holds it (types.BlockingEdgeHolds): a target that is neither closed nor
+//     pinned holds either type, and a target closed with a reason that is not
+//     a failure still holds a conditional-blocks edge, whose source runs only
+//     if the target fails;
 //   - it is the child of a parent-child edge whose parent is blocked, so
 //     blockage is INHERITED down a hierarchy transitively;
 //   - it has a waits-for edge whose gate over the spawner's children is not yet

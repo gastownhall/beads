@@ -634,6 +634,17 @@ Use --closed to purge ALL closed wisps (regardless of age). This is the
 fastest way to reclaim space from accumulated wisp bloat. Safe by default:
 requires --force to actually delete.
 
+Neither mode deletes a closed wisp that a live bead still waits on: a
+conditional-blocks target closed with a reason that is not a failure holds its
+fallback back, and deleting it would put the fallback in 'bd ready' as if the
+wisp had failed. 'bd blocked' names such a wisp as the fallback's blocker;
+close or delete the unused fallback, and the next gc collects the wisp.
+gc learns what a fallback waits on from 'bd blocked', which reads the stored
+blocked state. After upgrading from a bd that released fallbacks on any
+close, run 'bd recompute-blocked' (or 'bd doctor --fix') before the next gc:
+gc would otherwise delete the wisp a released fallback waits on, and the
+repair could no longer block that fallback again.
+
 Note: This uses time-based cleanup, appropriate for ephemeral wisps.
 For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
 
@@ -705,23 +716,54 @@ func protectedWispStatuses(ctx context.Context, r molReader) (map[types.Status]b
 
 // isProtectedWisp reports whether a wisp is live work that age-based GC must
 // never reclaim. A wisp is protected if it is explicitly pinned, if it is
-// blocked on an open dependency (blockedSet, derived from is_blocked), or if
-// its status falls in a protected category. Reclaiming any of these
-// mid-execution destroys active molecules (GH#4394).
+// blocked on an open dependency (blockedSet, derived from is_blocked), if it
+// is closed and still holds a live bead back (holders, see wispGCHolders), or
+// if its status falls in a protected category. Reclaiming any of these
+// mid-execution destroys active molecules (GH#4394) or runs a fallback that
+// must not run (GH#5577).
 //
 // Named isProtectedWisp rather than isActiveWisp to avoid confusion with
 // (*DoltStore).isActiveWisp in internal/storage/dolt, which is in this same
 // delete path but means only "a row for this ID exists in the wisps table".
-func isProtectedWisp(issue *types.Issue, blockedSet map[string]bool, protectedStatuses map[types.Status]bool) bool {
+func isProtectedWisp(issue *types.Issue, blockedSet, holders map[string]bool, protectedStatuses map[types.Status]bool) bool {
 	// The pinned flag is independent of the pinned status; the closed-purge
-	// branch of this same command already honors it (see runWispPurgeClosed).
+	// branch of this same command already honors it (see selectClosedWispsForGC).
 	if issue.Pinned {
 		return true
 	}
 	if blockedSet[issue.ID] {
 		return true
 	}
+	if issue.Status == types.StatusClosed && holders[issue.ID] {
+		return true
+	}
 	return protectedStatuses[issue.Status]
+}
+
+// wispGCHolders returns every id the blocked listing names as a blocker of a
+// live bead. A CLOSED wisp among them still holds that bead back: it is a
+// conditional-blocks target closed with a reason that is not a failure
+// (types.BlockingEdgeHolds), and deleting it drops the edge, which releases
+// its fallback into ready work as if it had failed (GH#5577). Neither gc mode
+// collects such a wisp. An open blocker the listing names is left to the age
+// rules, as before.
+//
+// The listing reads the stored is_blocked flag, so a fallback whose flag an
+// older bd left at 0 is not listed and gc collects the wisp it waits on; the
+// gc help tells an upgrader to run bd recompute-blocked first. bd mol squash
+// reads the edges instead (squashKeptSteps): one read per step is cheap for a
+// molecule's few steps, where gc's candidates can run to thousands.
+func wispGCHolders(blocked []*types.BlockedIssue) map[string]bool {
+	holders := make(map[string]bool)
+	for _, b := range blocked {
+		if b == nil {
+			continue
+		}
+		for _, id := range b.BlockedBy {
+			holders[id] = true
+		}
+	}
+	return holders
 }
 
 func runWispGC(cmd *cobra.Command, args []string) error {
@@ -873,6 +915,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	for _, b := range blocked {
 		blockedSet[b.ID] = true
 	}
+	holders := wispGCHolders(blocked)
 
 	protectedStatuses, err := protectedWispStatuses(ctx, r)
 	if err != nil {
@@ -888,7 +931,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		if issue.Status == types.StatusClosed && !cleanAll {
 			continue
 		}
-		if isProtectedWisp(issue, blockedSet, protectedStatuses) {
+		if isProtectedWisp(issue, blockedSet, holders, protectedStatuses) {
 			continue
 		}
 		if wispIsAbandoned(now, issue.UpdatedAt, ageThreshold) {
@@ -929,7 +972,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 				if r.IsInfraTypeCtx(ctx, child.IssueType) {
 					continue
 				}
-				if isProtectedWisp(child, blockedSet, protectedStatuses) {
+				if isProtectedWisp(child, blockedSet, holders, protectedStatuses) {
 					continue
 				}
 				// Children are held to the same --age contract as parents. One
@@ -945,44 +988,79 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	return abandoned, cascadeErr
 }
 
-func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
+// closedWispGCSkips counts the closed wisps `bd mol wisp gc --closed` keeps:
+// pinned ones, configured infra types, and ones a live bead still waits on
+// (wispGCHolders).
+type closedWispGCSkips struct {
+	pinned, infra, holding int
+}
+
+// selectClosedWispsForGC reads the closed wisps `bd mol wisp gc --closed` may
+// delete, through whichever route r reads. Both routes select through it, so
+// they cannot disagree about which closed wisps the flag deletes. A failure to
+// read the blocked listing aborts the GC, as it aborts the age GC: without it
+// the GC cannot tell which closed wisps still hold a fallback back.
+func selectClosedWispsForGC(ctx context.Context, r molReader, excludeTypes []types.IssueType) ([]*types.Issue, closedWispGCSkips, error) {
 	statusClosed := types.StatusClosed
 	ephemeralTrue := true
-	filter := types.IssueFilter{
+	closedIssues, err := r.SearchIssues(ctx, "", types.IssueFilter{
 		Status:       &statusClosed,
 		Ephemeral:    &ephemeralTrue,
 		ExcludeTypes: excludeTypes,
 		Limit:        5000,
-	}
-
-	closedIssues, err := store.SearchIssues(ctx, "", filter)
+	})
 	if err != nil {
-		return HandleError("listing closed wisps: %v", err)
+		return nil, closedWispGCSkips{}, fmt.Errorf("listing closed wisps: %w", err)
 	}
+	var skips closedWispGCSkips
+	if len(closedIssues) == 0 {
+		return nil, skips, nil
+	}
+	blocked, err := r.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		return nil, closedWispGCSkips{}, fmt.Errorf("determining which closed wisps live work waits on: %w", err)
+	}
+	holders := wispGCHolders(blocked)
 
-	// Filter out pinned and infra issues (protected from cleanup)
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
+	kept := make([]*types.Issue, 0, len(closedIssues))
 	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
+		switch {
+		case issue.Pinned:
+			skips.pinned++
+		case r.IsInfraTypeCtx(ctx, issue.IssueType):
+			skips.infra++
+		case holders[issue.ID]:
+			skips.holding++
+		default:
+			kept = append(kept, issue)
 		}
-		if store.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
 	}
-	closedIssues = filtered
+	return kept, skips, nil
+}
 
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
+// printClosedWispGCSkips tells a text reader which closed wisps
+// `bd mol wisp gc --closed` kept, and why.
+func printClosedWispGCSkips(skips closedWispGCSkips) {
+	if jsonOutput {
+		return
 	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
+	if skips.pinned > 0 {
+		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", skips.pinned)
 	}
+	if skips.infra > 0 {
+		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", skips.infra)
+	}
+	if skips.holding > 0 {
+		fmt.Printf("Skipping %d closed wisp(s) a conditional-blocks fallback still waits on (see 'bd blocked')\n", skips.holding)
+	}
+}
+
+func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
+	closedIssues, skips, err := selectClosedWispsForGC(ctx, store, excludeTypes)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	printClosedWispGCSkips(skips)
 
 	if len(closedIssues) == 0 {
 		if jsonOutput {

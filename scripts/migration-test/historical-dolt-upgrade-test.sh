@@ -1563,17 +1563,29 @@ verify_lease_plane() {
         die "$version: the claimed issue exposes no lease projection"
 }
 
-# Closing the blocker must release the plain-blocks and conditional-blocks
-# wisps; the wisp-blocked wisp stays blocked because its blocker is still open.
+# Closing the blocker must release the plain-blocks wisp; the wisp-blocked
+# wisp stays blocked because its blocker is still open. The conditional-blocks
+# wisp runs only if the blocker fails (GH#5577): the default close reason is
+# not a failure, so it stays blocked until the blocker is reopened and closed
+# again with a failure reason.
 verify_unblock_path() {
     local version="$1" i1 w2 w3 w4 actual expected
     i1=$(wisp_id 1); w2=$(wisp_id 4); w3=$(wisp_id 5); w4=$(wisp_id 6)
     run_in_workspace "$candidate" close "$i1" >/dev/null ||
         die "$version: candidate could not close the blocker while holding its own claim"
     actual=$(oracle_rows "$version" "SELECT id, is_blocked FROM wisps WHERE id IN ('$w2', '$w3', '$w4') ORDER BY id")
+    expected=$(printf '%s,0\n%s,1\n%s,1\n' "$w2" "$w3" "$w4" | LC_ALL=C sort)
+    [ "$(LC_ALL=C sort <<< "$actual")" = "$expected" ] ||
+        die "$version: a default-reason close of the blocker did not release exactly the plain-blocks wisp: $(tr '\n' ' ' <<< "$actual")"
+
+    run_in_workspace "$candidate" reopen "$i1" >/dev/null ||
+        die "$version: candidate could not reopen the blocker"
+    run_in_workspace "$candidate" close "$i1" --reason 'failed: historical upgrade probe' >/dev/null ||
+        die "$version: candidate could not close the blocker with a failure reason"
+    actual=$(oracle_rows "$version" "SELECT id, is_blocked FROM wisps WHERE id IN ('$w2', '$w3', '$w4') ORDER BY id")
     expected=$(printf '%s,0\n%s,1\n%s,0\n' "$w2" "$w3" "$w4" | LC_ALL=C sort)
     [ "$(LC_ALL=C sort <<< "$actual")" = "$expected" ] ||
-        die "$version: closing the blocker did not release the blocked wisps: $(tr '\n' ' ' <<< "$actual")"
+        die "$version: a failure close of the blocker did not release the plain-blocks and conditional-blocks wisps: $(tr '\n' ' ' <<< "$actual")"
 }
 
 # The 0058 contract, and the reason v1.0.1 is in this lane at all.

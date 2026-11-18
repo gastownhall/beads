@@ -47,11 +47,14 @@ type BlockedResult struct {
 // wisps; closed and pinned-status rows excluded; no type exclusions), then
 // narrowed to rows bd can NAME a blocker for: an active blocks, waits-for or
 // conditional-blocks target resident in this workspace that is neither closed
-// nor pinned, else the parent. A row whose flag is set but which has neither
-// is not listed. Where the external-dependency policy applies, an unsatisfied
-// external: blocker is added to the row's blockers, and a row blocked only by
-// such refs is listed too, narrowed by the request's parent and label filters
-// like every other row.
+// nor pinned — except that a conditional-blocks target closed with a
+// NON-failure reason still names itself (GH#5577: "B runs only if A fails"
+// means a success close of A keeps B blocked, so B's blocker is A) — else the
+// parent. A row whose flag is set but which has neither is not listed. Where
+// the external-dependency policy applies, an unsatisfied external: blocker is
+// added to the row's blockers, and a row blocked only by such refs is listed
+// too, narrowed by the request's parent and label filters like every other
+// row.
 //
 // IT IS NOT A PAGE. There is no limit and no cursor, like the local command,
 // and an answer is never truncated.

@@ -3,6 +3,8 @@ package issueops
 import (
 	"context"
 	"time"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // SweepTier names which of the two planes a sweep clears. It is REQUIRED on
@@ -128,13 +130,22 @@ type SweepRequest struct {
 	ProtectReferenced bool
 	// ProtectLiveDependents skips candidates that a LIVE row depends on
 	// through a structural edge — a closed parent whose child is still open,
-	// a closed bead a live convoy tracks, a closed blocker of a live bead —
-	// so a sweep never deletes the root, container or gate of work that is
-	// still in progress.
+	// a closed bead a live convoy tracks, a closed blocker of a live bead, a
+	// closed precondition of a live conditional fallback — so a sweep never
+	// deletes the root, container or gate of work that is still in progress.
 	//
-	// WHICH EDGES are SweepLiveDependentEdgeTypes: parent-child, tracks and
-	// blocks, from either plane's dependency table. Other edge types (related,
-	// discovered-from, ...) are links rather than structure and do not protect.
+	// WHICH EDGES are SweepLiveDependentEdgeTypes: parent-child, tracks,
+	// blocks and conditional-blocks, from either plane's dependency table.
+	// Other edge types (related, discovered-from, ...) are links rather than
+	// structure and do not protect.
+	//
+	// A conditional-blocks target is a closed row whose deletion can change
+	// what is ready. Closed with a reason that is not a failure it still holds
+	// its fallback back (types.BlockingEdgeHolds), and deleting it drops the
+	// edge, which releases the fallback as if the target had failed (GH#5577).
+	// It protects whatever its close reason, as a closed blocker does: a
+	// fallback that a failure close released is live work, and its gate stays
+	// with it.
 	//
 	// WHICH ROWS ARE LIVE is the same not-done set ProtectReferenced asks: the
 	// built-in active statuses (open, in_progress, blocked, deferred, pinned,
@@ -340,7 +351,7 @@ type SweepResult struct {
 // SweepLiveDependentEdgeTypes are the edge types through which a live row
 // protects a closed candidate under SweepRequest.ProtectLiveDependents. It is
 // published so a caller can state the same policy without copying the list.
-var SweepLiveDependentEdgeTypes = []DependencyType{DepParentChild, DepTracks, DepBlocks}
+var SweepLiveDependentEdgeTypes = []DependencyType{DepParentChild, DepTracks, DepBlocks, types.DepConditionalBlocks}
 
 // SweepReferencedSampleLimit bounds SweepResult.ReferencedIDs. It is published
 // so a caller can tell a truncated sample from a complete one by comparing the

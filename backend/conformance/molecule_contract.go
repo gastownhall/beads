@@ -355,6 +355,146 @@ func RunMoleculeGuardedRootKeepsTheStepClose(t *testing.T, ctx context.Context, 
 	}
 }
 
+// RunMoleculeConditionalEdgesFollowTheCloseReason pins what the
+// conditional-blocks close rule (types.BlockingEdgeHolds, GH#5577: the source
+// runs only if the target fails) means for the two molecule shapes that carry
+// a conditional edge, read off the stored flags, and that the hand steps
+// docs/workflows/molecules.md gives for them put no unwanted work into ready
+// work (an open row whose is_blocked is 0):
+//
+//   - an arm bonded with `bd mol bond --type conditional`: a molecule whose
+//     root holds a conditional-blocks edge onto the molecule's root and holds
+//     the arm's steps by inheritance. The auto-close records
+//     MoleculeAutoCloseReason, which is not a failure reason, so the arm stays
+//     blocked when the molecule completes. An unused arm is closed step by
+//     step, in dependency order, then at its root, and no step of it is ready
+//     on the way. A forced close of the arm's root over open steps releases
+//     them, which is why the docs forbid it. To run the arm, the auto-closed
+//     root is reopened and closed with a failure reason: a second close
+//     without the reopen keeps the first reason and releases nothing.
+//   - a fallback step, held by a conditional-blocks edge onto a sibling step.
+//     When that step closes without a failure reason, the fallback stays open
+//     and blocked, so the root does not auto-close. Closing the unused
+//     fallback by hand completes the molecule.
+func RunMoleculeConditionalEdgesFollowTheCloseReason(t *testing.T, ctx context.Context, fixture MoleculeFixture) {
+	t.Helper()
+	c := conditionalArmCase{moleculeSeed{t, ctx, fixture}, newBlockedStateProbe(ctx, fixture.QueryScalar)}
+
+	_, arm := c.completedWithArm("cond-arm")
+	for _, step := range arm[1:] {
+		c.closeStep(step, true)
+		c.requireNotReady("while the unused arm is closed step by step", arm)
+	}
+	c.closeWith(arm[0], "skipped: not needed", false)
+	for _, id := range arm {
+		if status, _ := c.row(id); status != string(types.StatusClosed) {
+			t.Errorf("%s status = %s after the unused arm was closed step by step, want closed", id, status)
+		}
+	}
+
+	_, arm = c.completedWithArm("cond-arm-forced")
+	c.closeWith(arm[0], "skipped: not needed", true)
+	if got := c.probe.rawBlocked(t, blockedIssue(arm[1])); got != 0 {
+		t.Errorf("%s is_blocked = %d after its arm %s was force-closed over it, want 0: the release the docs warn of",
+			arm[1], got, arm[0])
+	}
+
+	root, arm := c.completedWithArm("cond-arm-failed")
+	const failed = "failed: a step's check failed"
+	if res := c.closeWith(root, failed, false); res.Changed {
+		t.Errorf("a second close of the auto-closed %s reported Changed, want the first close's reason to stand", root)
+	}
+	c.requireNotReady("after a second close of "+root+", which keeps its first reason", arm)
+	if _, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: moleculeActor, IssueID: root}); err != nil {
+		t.Fatalf("reopen %s: %v", root, err)
+	}
+	c.closeWith(root, failed, false)
+	for _, id := range arm[:2] {
+		if got := c.probe.rawBlocked(t, blockedIssue(id)); got != 0 {
+			t.Errorf("%s is_blocked = %d after %s was reopened and closed with a failure reason, want 0", id, got, root)
+		}
+	}
+
+	root = fixture.IssuePrefix + "-cond-step"
+	primary, fallback := root+".1", root+".2"
+	c.issue(root, types.TypeMolecule, types.StatusOpen, false)
+	c.issue(primary, types.TypeTask, types.StatusOpen, false)
+	c.issue(fallback, types.TypeTask, types.StatusOpen, false)
+	c.edge(primary, root, types.DepParentChild)
+	c.edge(fallback, root, types.DepParentChild)
+	c.edge(fallback, primary, types.DepConditionalBlocks)
+	if res := c.closeStep(primary, true); res.AutoClosedMolecule != nil {
+		t.Errorf("close %s auto-closed %s with the fallback %s still open", primary, res.AutoClosedMolecule.ID, fallback)
+	}
+	if got := c.probe.rawBlocked(t, blockedIssue(fallback)); got != 1 {
+		t.Errorf("fallback %s is_blocked = %d after %s closed without a failure reason, want 1", fallback, got, primary)
+	}
+	if status, _ := c.row(root); status != string(types.StatusOpen) {
+		t.Errorf("root %s status = %s with the fallback %s open, want open", root, status, fallback)
+	}
+	if res := c.closeStep(fallback, true); res.AutoClosedMolecule == nil || res.AutoClosedMolecule.ID != root {
+		t.Errorf("closing the unused fallback %s: AutoClosedMolecule = %+v, want %s", fallback, res.AutoClosedMolecule, root)
+	}
+}
+
+// conditionalArmCase seeds and closes the molecules
+// RunMoleculeConditionalEdgesFollowTheCloseReason reads.
+type conditionalArmCase struct {
+	moleculeSeed
+	probe *blockedStateProbe
+}
+
+// completedWithArm seeds a molecule and bonds onto its root an arm of two
+// sequential steps, in the order `bd mol bond --type conditional` spawns one:
+// the arm and its steps, then the conditional edge. It then closes the
+// molecule's last step with the auto-close on, as `bd close` does by default,
+// and answers the molecule's root and the arm's root and steps.
+func (c conditionalArmCase) completedWithArm(name string) (string, []string) {
+	c.t.Helper()
+	root, _, last := c.molecule(name, types.TypeMolecule, false)
+	arm := []string{root + "-arm", root + "-arm.1", root + "-arm.2"}
+	c.issue(arm[0], types.TypeMolecule, types.StatusOpen, false)
+	for _, step := range arm[1:] {
+		c.issue(step, types.TypeTask, types.StatusOpen, false)
+		c.edge(step, arm[0], types.DepParentChild)
+	}
+	c.edge(arm[2], arm[1], types.DepBlocks)
+	c.edge(arm[0], root, types.DepConditionalBlocks)
+	c.requireNotReady("while "+root+" is open", arm)
+	if res := c.closeStep(last, true); res.AutoClosedMolecule == nil || res.AutoClosedMolecule.ID != root {
+		c.t.Fatalf("close %s: AutoClosedMolecule = %+v, want %s", last, res.AutoClosedMolecule, root)
+	}
+	c.requireNotReady("after "+root+" auto-closed with "+publicops.MoleculeAutoCloseReason+", which is not a failure reason", arm)
+	return root, arm
+}
+
+// requireNotReady fails for each of ids that is open with is_blocked 0, which
+// is ready work.
+func (c conditionalArmCase) requireNotReady(when string, ids []string) {
+	c.t.Helper()
+	for _, id := range ids {
+		if status, _ := c.row(id); status == string(types.StatusClosed) {
+			continue
+		}
+		if got := c.probe.rawBlocked(c.t, blockedIssue(id)); got != 1 {
+			c.t.Errorf("%s is open with is_blocked = %d %s, want 1: it is ready work", id, got, when)
+		}
+	}
+}
+
+// closeWith closes id with reason and no molecule auto-close, forced when
+// force is set.
+func (c conditionalArmCase) closeWith(id, reason string, force bool) publicops.CloseResult {
+	c.t.Helper()
+	res, err := c.fixture.Lifecycle.Close(c.ctx, publicops.CloseRequest{
+		Actor: moleculeActor, IssueID: id, Reason: reason, Force: force,
+	})
+	if err != nil {
+		c.t.Fatalf("close %s (force %v): %v", id, force, err)
+	}
+	return res
+}
+
 // RunMoleculeStepperClaimsTheNextReadyStepForTheActor pins the advance and its
 // claim: the next ready step becomes in progress AND assigned to Actor; without
 // AutoClaim nothing is written.

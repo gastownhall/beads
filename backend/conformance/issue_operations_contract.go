@@ -1859,10 +1859,10 @@ func RunIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T, ctx co
 // RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender pins
 // the HALF OF THE PREDICATE'S FIRST CLAUSE THAT NAMES A SECOND EDGE TYPE.
 // issueops.BlockedStateInvariant says a row is blocked when "it has a blocks or
-// conditional-blocks edge onto a target that is itself neither closed nor
-// pinned"; every other is_blocked case in this package seeds the first type
-// only, so the second was a word in the doc with no case behind it. The type
-// list is spelled out five times in
+// conditional-blocks edge onto a target that still holds it", as every target
+// that is neither closed nor pinned does; every other is_blocked case in this
+// package seeds the first type only, so the second was a word in the doc with
+// no case behind it. The type list is spelled out five times in
 // internal/storage/issueops/blocked_state.go — the two mark templates, the two
 // unmark templates, and the depender load that builds the affected set — and
 // dropping `conditional-blocks` from any of them left every case green.

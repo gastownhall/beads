@@ -1078,6 +1078,25 @@ func TestCloseIssueCheckedRefusesUnsatisfiedExternalRef(t *testing.T) {
 	}
 }
 
+// TestCloseIssueCheckedAllowsStoredBlockWithNoLiveBlockers: a dependent held
+// only by a success-closed conditional-blocks target reads blocked with no live
+// blockers from the local store (the target is closed and cannot be worked), so
+// the adapter's guard, like the local one, lets a manual close through.
+func TestCloseIssueCheckedAllowsStoredBlockWithNoLiveBlockers(t *testing.T) {
+	b := issue("be-b")
+	raw := &fakeStore{ready: []*types.Issue{b}, isBlocked: true, deps: map[string][]*types.Dependency{
+		b.ID: {{IssueID: b.ID, DependsOnID: "be-a", Type: types.DepConditionalBlocks}},
+	}}
+	store := testStore(raw, &fakeStore{}, true)
+
+	if _, err := store.CloseIssueChecked(t.Context(), b.ID, "tester", storage.CloseIssueOptions{}); err != nil {
+		t.Fatalf("CloseIssueChecked without force: %v", err)
+	}
+	if !slices.Equal(raw.closed, []string{b.ID}) {
+		t.Fatalf("raw close calls = %v, want [%s]", raw.closed, b.ID)
+	}
+}
+
 func TestGetDependencyTreeAddsResolvedExternalLeaf(t *testing.T) {
 	root := issue("be-root")
 	ref := "external:remote:payments"

@@ -362,9 +362,11 @@ type MoleculeAnalysis struct {
 // AnalyzeMolecule computes readiness from the edges inside the molecule
 // rather than from the workspace ready query, which excludes ephemeral rows (a
 // wisp molecule's steps are ephemeral by definition). A node is ready when it
-// is open or in progress and no open node blocks it through a blocks,
-// conditional-blocks or waits-for edge. Nodes at the same blocking depth that
-// do not block each other share a parallel group.
+// is open or in progress and no node holds it back: an open node through a
+// blocks or waits-for edge, or, through a conditional-blocks edge, any node
+// for which types.BlockingEdgeHolds (a closed one only while its close reason
+// is not a failure). Nodes at the same blocking depth that do not block each
+// other share a parallel group.
 func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 	analysis := &MoleculeAnalysis{
 		MoleculeID:     g.Root.ID,
@@ -375,6 +377,7 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 
 	blockedBy := make(map[string]map[string]bool)
 	blocks := make(map[string]map[string]bool)
+	conditional := make(map[string]map[string]bool)
 	parentChildren := make(map[string][]string)
 	for _, issue := range g.Issues {
 		blockedBy[issue.ID] = make(map[string]bool)
@@ -390,6 +393,12 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 		case types.DepBlocks, types.DepConditionalBlocks:
 			if _, ok := blockedBy[dep.IssueID]; ok {
 				blockedBy[dep.IssueID][dep.DependsOnID] = true
+				if dep.Type == types.DepConditionalBlocks {
+					if conditional[dep.IssueID] == nil {
+						conditional[dep.IssueID] = make(map[string]bool)
+					}
+					conditional[dep.IssueID][dep.DependsOnID] = true
+				}
 			}
 			if _, ok := blocks[dep.DependsOnID]; ok {
 				blocks[dep.DependsOnID][dep.IssueID] = true
@@ -419,10 +428,22 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 		}
 	}
 
+	// holding reports whether blockerID still holds id back.
+	holding := func(id, blockerID string) bool {
+		blocker := g.IssueMap[blockerID]
+		if blocker == nil {
+			return false
+		}
+		if conditional[id][blockerID] {
+			return types.BlockingEdgeHolds(types.DepConditionalBlocks, blocker.Status, blocker.CloseReason)
+		}
+		return blocker.Status != types.StatusClosed
+	}
+
 	for _, issue := range g.Issues {
 		info := &MoleculeStepInfo{StepID: issue.ID, Status: string(issue.Status), BlockedBy: []string{}, Blocks: []string{}}
 		for blockerID := range blockedBy[issue.ID] {
-			if blocker := g.IssueMap[blockerID]; blocker != nil && blocker.Status != types.StatusClosed {
+			if holding(issue.ID, blockerID) {
 				info.BlockedBy = append(info.BlockedBy, blockerID)
 			}
 		}
@@ -438,7 +459,7 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 		analysis.Steps[issue.ID] = info
 	}
 
-	depths := blockingDepths(g, blockedBy)
+	depths := blockingDepths(g, blockedBy, holding)
 	depthGroups := make(map[int][]string)
 	for _, issue := range g.Issues {
 		depthGroups[depths[issue.ID]] = append(depthGroups[depths[issue.ID]], issue.ID)
@@ -517,9 +538,10 @@ func groupParallelSteps(analysis *MoleculeAnalysis, steps []string, blocks, bloc
 	return counter
 }
 
-// blockingDepths answers each node's blocking depth: 0 with no open blocker,
-// one more than its deepest open blocker otherwise. A cycle counts as 0.
-func blockingDepths(g *MoleculeGraph, blockedBy map[string]map[string]bool) map[string]int {
+// blockingDepths answers each node's blocking depth: 0 with no blocker still
+// holding it, one more than its deepest holding blocker otherwise. A cycle
+// counts as 0.
+func blockingDepths(g *MoleculeGraph, blockedBy map[string]map[string]bool, holding func(id, blockerID string) bool) map[string]int {
 	depths := make(map[string]int)
 	visiting := make(map[string]bool)
 	var depthOf func(id string) int
@@ -533,7 +555,7 @@ func blockingDepths(g *MoleculeGraph, blockedBy map[string]map[string]bool) map[
 		visiting[id] = true
 		deepest := -1
 		for blockerID := range blockedBy[id] {
-			if blocker := g.IssueMap[blockerID]; blocker != nil && blocker.Status != types.StatusClosed {
+			if holding(id, blockerID) {
 				deepest = max(deepest, depthOf(blockerID))
 			}
 		}

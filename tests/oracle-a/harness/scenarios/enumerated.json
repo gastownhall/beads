@@ -6028,8 +6028,8 @@
   "deterministic": true
  },
  {
-  "name": "dep_conditional_blocks_close_unblocks",
-  "purpose": "conditional-blocks behaves like blocks for readiness: dependent blocked until target closed.",
+  "name": "dep_conditional_blocks_success_close_holds",
+  "purpose": "conditional-blocks gates readiness while its target is open, and a close without a failure reason keeps it blocked (GH#5577): the dependent runs only if the target fails.",
   "prefix": "dep",
   "steps": [
    [
@@ -6079,7 +6079,64 @@
     "--json"
    ]
   ],
-  "pins": "dep-2 blocked by conditional-blocks while dep-1 open (blocked_by=[dep-1]); after closing dep-1, dep-2 ready and blocked empty.",
+  "pins": "dep-2 blocked by conditional-blocks while dep-1 open (blocked_by=[dep-1]); a plain close (default reason \"Closed\") keeps dep-2 out of ready and in blocked with blocked_by=[dep-1].",
+  "deterministic": true
+ },
+ {
+  "name": "dep_conditional_blocks_failure_close_unblocks",
+  "purpose": "conditional-blocks releases its dependent when the target closes with a failure reason (GH#5577).",
+  "prefix": "dep",
+  "steps": [
+   [
+    "create",
+    "Target",
+    "--id",
+    "dep-1",
+    "--force",
+    "-t",
+    "task",
+    "--json"
+   ],
+   [
+    "create",
+    "Cond",
+    "--id",
+    "dep-2",
+    "--force",
+    "-t",
+    "task",
+    "--json"
+   ],
+   [
+    "dep",
+    "add",
+    "dep-2",
+    "dep-1",
+    "-t",
+    "conditional-blocks",
+    "--json"
+   ],
+   [
+    "blocked",
+    "--json"
+   ],
+   [
+    "close",
+    "dep-1",
+    "--reason",
+    "failed: target failed",
+    "--json"
+   ],
+   [
+    "ready",
+    "--json"
+   ],
+   [
+    "blocked",
+    "--json"
+   ]
+  ],
+  "pins": "dep-2 blocked by conditional-blocks while dep-1 open (blocked_by=[dep-1]); after closing dep-1 with a failure reason, dep-2 ready and blocked empty.",
   "deterministic": true
  },
  {

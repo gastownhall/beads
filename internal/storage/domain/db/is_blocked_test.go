@@ -123,3 +123,90 @@ func (s *testSuite) ibClaimDoesNotChange() {
 	s.False(s.isBlocked("bd-ib-cl-free"), "claimed issue (open->in_progress) must not become blocked")
 	s.False(s.isBlocked("bd-ib-cl-blocker"), "untouched issue must stay unblocked")
 }
+
+// TestConditionalBlocksInsertOntoClosedTarget drives the domain/db direct
+// writer (DependencySQLRepository.Insert) with a conditional-blocks edge onto
+// an already-closed target on every issue/wisp route: the source is blocked
+// exactly when the target's close reason is not a failure.
+func (s *testSuite) TestConditionalBlocksInsertOntoClosedTarget() {
+	routes := []struct {
+		name                   string
+		sourceWisp, targetWisp bool
+	}{
+		{"issue-to-issue", false, false},
+		{"issue-to-wisp", false, true},
+		{"wisp-to-issue", true, false},
+		{"wisp-to-wisp", true, true},
+	}
+	reasons := []string{"completed successfully", "Rejected by review"}
+	for ri, r := range routes {
+		for oi, reason := range reasons {
+			suffix := string(rune('0'+ri)) + string(rune('0'+oi))
+			a, b := "bd-cbi-a"+suffix, "bd-cbi-b"+suffix
+			targetTable, sourceTable := "issues", "issues"
+			if r.targetWisp {
+				s.seedWispRow(a)
+				targetTable = "wisps"
+			} else {
+				s.seedIssueRow(a)
+			}
+			if r.sourceWisp {
+				s.seedWispRow(b)
+				sourceTable = "wisps"
+			} else {
+				s.seedIssueRow(b)
+			}
+			//nolint:gosec // G201: targetTable is "issues" or "wisps".
+			_, err := s.Runner().ExecContext(s.Ctx(),
+				"UPDATE "+targetTable+" SET status = 'closed', closed_at = CURRENT_TIMESTAMP, close_reason = ? WHERE id = ?", reason, a)
+			s.Require().NoError(err)
+
+			s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+				newDep(b, a, types.DepConditionalBlocks), "tester", domain.DepInsertOpts{UseWispsTable: r.sourceWisp}))
+
+			var v int
+			//nolint:gosec // G201: sourceTable is "issues" or "wisps".
+			s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+				"SELECT is_blocked FROM "+sourceTable+" WHERE id = ?", b).Scan(&v))
+			s.Equal(!types.IsFailureClose(reason), v != 0,
+				"%s: insert onto target closed %q: stored is_blocked(%s)", r.name, reason, b)
+		}
+	}
+}
+
+// TestConditionalBlocksReasonEditFlipsDependent edits only a closed target's
+// close reason through the repository Update: crossing between a non-failure
+// and a failure reason flips the conditional dependent's stored bit in the
+// same write, without touching the dependent's updated_at.
+func (s *testSuite) TestConditionalBlocksReasonEditFlipsDependent() {
+	s.seedIssueRow("bd-cbr-a")
+	s.seedIssueRow("bd-cbr-b")
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"UPDATE issues SET status = 'closed', closed_at = CURRENT_TIMESTAMP, close_reason = 'completed successfully' WHERE id = 'bd-cbr-a'")
+	s.Require().NoError(err)
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-cbr-b", "bd-cbr-a", types.DepConditionalBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().True(s.isBlocked("bd-cbr-b"), "success-closed conditional target must hold its dependent")
+
+	updatedAt := func() string {
+		var v string
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT CAST(updated_at AS CHAR) FROM issues WHERE id = 'bd-cbr-b'").Scan(&v))
+		return v
+	}
+	before := updatedAt()
+
+	issueRepo := NewIssueSQLRepository(s.Runner())
+	for _, step := range []struct {
+		reason      string
+		wantBlocked bool
+	}{
+		{"failed downstream", false},
+		{"done after all", true},
+	} {
+		s.Require().NoError(issueRepo.Update(s.Ctx(), "bd-cbr-a",
+			map[string]any{"close_reason": step.reason}, "tester", domain.IssueTableOpts{}))
+		s.Equal(step.wantBlocked, s.isBlocked("bd-cbr-b"), "reason edited to %q", step.reason)
+		s.Equal(before, updatedAt(), "reason edit to %q must not touch the dependent's updated_at", step.reason)
+	}
+}

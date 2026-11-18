@@ -38,10 +38,12 @@ type purgeScope struct {
 	// never does, because a wisp's citations are as transient as the wisp.
 	protectReferenced bool
 	// protectLiveDependents asks the role to skip candidates a live bead
-	// depends on through a parent-child, tracks or blocks edge. `bd purge`
-	// always asks: deleting a closed wisp whose child, tracker or blocked bead
-	// is still live cuts that live work loose from its root, and there is no
-	// retention reason to want that — a deliberate removal is `bd delete`.
+	// depends on through a parent-child, tracks, blocks or conditional-blocks
+	// edge. `bd purge` always asks: deleting a closed wisp whose child, tracker
+	// or blocked bead is still live cuts that live work loose from its root,
+	// deleting one a conditional fallback still waits on runs the fallback
+	// after a success, and there is no retention reason to want either — a
+	// deliberate removal is `bd delete`.
 	protectLiveDependents bool
 	// reportsReferences publishes the reference-skip keys under --json. It is
 	// separate from protectReferenced because `bd prune --ignore-references`
@@ -60,8 +62,10 @@ have no value once closed. This command removes them to reclaim storage.
 
 Deletes: issues, dependencies, labels, events, and comments for matching beads.
 Skips: pinned beads, and closed beads a live bead still depends on through a
-parent-child, tracks or blocks edge (a closed molecule root whose step is open,
-a closed bead a live convoy tracks). Live means any status that is not done.
+parent-child, tracks, blocks or conditional-blocks edge (a closed molecule root
+whose step is open, a closed bead a live convoy tracks, a closed molecule whose
+conditional arm still waits on it: deleting that root would run the arm). Live
+means any status that is not done.
 Without --retain-ids it also skips beads whose type the workspace's
 types.retained setting names (their ids are idempotency keys); --json reports
 them as retention_required.

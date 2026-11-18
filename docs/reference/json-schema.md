@@ -247,8 +247,12 @@ items, plus:
   `{id, type, reason}` — the gate bead to resolve, its await condition (`human`,
   `timer`, `gh:run`, `gh:pr`, `bead`, or `gate` when it carries none), and the
   reason recorded at creation. A gate counts when it is reached over a `blocks`
-  or `conditional-blocks` edge, is itself neither closed nor pinned, and the
-  issue is neither closed nor pinned; a `waits-for` edge onto a gate does not
+  or `conditional-blocks` edge and the edge holds — the gate is neither closed
+  nor pinned over a `blocks` edge; over a `conditional-blocks` edge a gate
+  closed with a failure reason (`failed`, `rejected`, `wontfix`, …) releases
+  while a closed gate with any other close reason, and an open one, still
+  count, because the dependent runs only when the gate fails — and the issue
+  is neither closed nor pinned; a `waits-for` edge onto a gate does not
   count, because that leg of the readiness rule is a fanout over the gate's
   children rather than a status test. Absent when nothing gates the issue.
   DERIVED, not stored: `status` is unaffected, and a nonempty list means

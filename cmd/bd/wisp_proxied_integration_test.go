@@ -389,4 +389,55 @@ func TestProxiedServerWispGC(t *testing.T) {
 			t.Errorf("expected closed wisp %s purged", closedWisp.ID)
 		}
 	})
+
+	// GH#5577 on the proxied route's own --closed selection: a wisp closed with
+	// a reason that is not a failure still holds its conditional-blocks
+	// fallback back, so gc keeps it and the fallback stays blocked, while a
+	// wisp whose failure close released its fallback is purged.
+	t.Run("closed_force_keeps_a_wisp_a_conditional_fallback_waits_on", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgch")
+		conditionalPair := func(name, reason string) (target, fallback string) {
+			target = bdProxiedCreate(t, bd, p.dir, name, "--ephemeral").ID
+			fallback = bdProxiedCreate(t, bd, p.dir, name+" fallback", "--ephemeral").ID
+			if out, err := bdProxiedRun(t, bd, p.dir, "dep", "add", fallback, target, "--type", "conditional-blocks"); err != nil {
+				t.Fatalf("bd dep add: %v\n%s", err, out)
+			}
+			if out, err := bdProxiedRun(t, bd, p.dir, "close", target, "--reason", reason); err != nil {
+				t.Fatalf("bd close: %v\n%s", err, out)
+			}
+			return target, fallback
+		}
+		held, fallback := conditionalPair("Main flow wisp", "all steps complete")
+		failed, _ := conditionalPair("Canary wisp", "failed: smoke test red")
+
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --closed --force --json: %v\n%s", err, out)
+		}
+		var got struct {
+			Deleted []string `json:"deleted"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if len(got.Deleted) != 1 || got.Deleted[0] != failed {
+			t.Errorf("deleted = %v, want only %s: %s still holds its fallback %s back", got.Deleted, failed, held, fallback)
+		}
+
+		db := openProxiedDB(t, p)
+		var count, blocked int
+		if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", held).Scan(&count); err != nil {
+			t.Fatalf("query wisps: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("expected %s kept: its conditional-blocks fallback %s still waits on it", held, fallback)
+		}
+		if err := db.QueryRow("SELECT is_blocked FROM wisps WHERE id = ?", fallback).Scan(&blocked); err != nil {
+			t.Fatalf("query fallback: %v", err)
+		}
+		if blocked != 1 {
+			t.Errorf("fallback %s is_blocked = %d, want 1: gc released it after %s succeeded", fallback, blocked, held)
+		}
+	})
 }

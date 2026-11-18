@@ -374,3 +374,52 @@ func TestRunInTransactionCrossTierNonSchedulingEdgeIsNotGated(t *testing.T) {
 	assertDepEdge(ctx, t, store, wisp.ID, regular.ID)
 	assertDepEdge(ctx, t, store, regular.ID, wisp.ID)
 }
+
+// A cross-tier conditional-blocks edge onto an already-closed target routes
+// through the dep target precheck: the gate it applies in Go must carry the
+// target's close reason, so a success-closed precondition still blocks the
+// wisp fallback and a failure-closed one does not (GH#5577).
+func TestRunInTransactionConditionalBlocksCrossTierClosedTarget(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	reasons := []struct {
+		outcome     string
+		reason      string
+		wantBlocked bool
+	}{
+		{"success_close_keeps_wisp_blocked", "completed successfully", true},
+		{"failure_close_leaves_wisp_free", "failed: rejected by reviewer", false},
+	}
+	for _, r := range reasons {
+		t.Run(r.outcome, func(t *testing.T) {
+			wisp := crossTierWispIssue("test-xtier-cb-wisp-"+r.outcome, "wisp conditional on a closed regular target")
+			if err := store.CreateIssue(ctx, wisp, "tester"); err != nil {
+				t.Fatalf("CreateIssue wisp: %v", err)
+			}
+			target := crossTierRegularIssue("test-xtier-cb-target-"+r.outcome, "closed regular conditional target")
+			if err := store.CreateIssue(ctx, target, "tester"); err != nil {
+				t.Fatalf("CreateIssue target: %v", err)
+			}
+			if err := store.CloseIssue(ctx, target.ID, r.reason, "tester", ""); err != nil {
+				t.Fatalf("close target %s: %v", target.ID, err)
+			}
+
+			if err := store.RunInTransaction(ctx, "test: conditional-blocks onto closed cross-tier target", func(tx storage.Transaction) error {
+				return tx.AddDependency(ctx, &types.Dependency{
+					IssueID:     wisp.ID,
+					DependsOnID: target.ID,
+					Type:        types.DepConditionalBlocks,
+				}, "tester")
+			}); err != nil {
+				t.Fatalf("RunInTransaction conditional-blocks edge: %v", err)
+			}
+
+			assertDepEdge(ctx, t, store, wisp.ID, target.ID)
+			assertCrossTierIsBlocked(ctx, t, store.db, "wisps", wisp.ID, r.wantBlocked)
+		})
+	}
+}

@@ -124,3 +124,63 @@ func TestEmbeddedWispGCPurgeClosedStillPurgesFullyClosedMolecules(t *testing.T) 
 		bdShowFail(t, bd, dir, id)
 	}
 }
+
+// TestEmbeddedWispGCKeepsAClosedWispAFallbackWaitsOn is GH#5577 end to end on
+// the closed-wisp cleanup verbs: a wisp closed with a reason that is not a
+// failure still holds its conditional-blocks fallback back, so deleting it
+// would put the fallback in ready work after a success. The age GC under
+// --all, `--closed --force` and `bd purge` all keep it while the fallback
+// waits, the two GC modes still collect a wisp whose failure close released
+// its fallback, and once the unused fallback is closed the next GC collects
+// the wisp and the fallback.
+func TestEmbeddedWispGCKeepsAClosedWispAFallbackWaitsOn(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cgh")
+
+	// conditionalPair seeds a wisp, a wisp fallback that runs only if it
+	// fails, and closes the first with reason.
+	conditionalPair := func(name, reason string) (target, fallback string) {
+		target = bdCreate(t, bd, dir, name, "--ephemeral").ID
+		fallback = bdCreate(t, bd, dir, name+" fallback", "--ephemeral").ID
+		bdDepAdd(t, bd, dir, fallback, target, "--type", "conditional-blocks")
+		bdClose(t, bd, dir, target, "--reason", reason)
+		return target, fallback
+	}
+	held, fallback := conditionalPair("main flow", "all steps complete")
+	assertHeld := func(phase string) {
+		t.Helper()
+		if !bdShowSucceeds(t, bd, dir, held) {
+			t.Fatalf("%s deleted %s, which its conditional-blocks fallback %s still waits on", phase, held, fallback)
+		}
+		if wakeReadyIDs(t, bd, dir, "--include-ephemeral")[fallback] {
+			t.Fatalf("%s put fallback %s in bd ready after %s closed with a success reason (GH#5577)", phase, fallback, held)
+		}
+	}
+	assertHeld("closing the main flow")
+
+	// The age GC reaches closed wisps under --all; --age 0s makes every wisp
+	// old enough.
+	failed, _ := conditionalPair("canary", "failed: smoke test red")
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--all", "--age", "0s")
+	assertHeld("bd mol wisp gc --all")
+	bdShowFail(t, bd, dir, failed)
+
+	failed, _ = conditionalPair("second canary", "failed: smoke test red")
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+	assertHeld("bd mol wisp gc --closed --force")
+	bdShowFail(t, bd, dir, failed)
+
+	bdCommand(t, bd, dir, "purge", "--force")
+	assertHeld("bd purge --force")
+
+	// Disposing of the unused fallback lets the main flow go.
+	bdClose(t, bd, dir, fallback, "--reason", "skipped: main flow succeeded")
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+	bdShowFail(t, bd, dir, held)
+	bdShowFail(t, bd, dir, fallback)
+}

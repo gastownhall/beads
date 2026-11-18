@@ -31,6 +31,14 @@ The squash operation:
   5. Clears Wisp flag on children (promotes to persistent)
      OR keeps them with --keep-children (default: delete)
 
+Squash never deletes a closed child that a live bead still waits on. A
+conditional-blocks target closed with a reason that is not a failure holds its
+fallback back (for example a step that 'bd mol bond <arm> <step> --type
+conditional' bonded an arm onto), and deleting it would put the fallback in
+'bd ready' as if the step had failed. Squash keeps such a child, still
+summarized in the digest, and lists it as kept; close or delete the unused
+fallback, and 'bd mol wisp gc --closed' collects it.
+
 AGENT INTEGRATION:
 Use --summary to provide an AI-generated summary. This keeps bd as a pure
 tool - the calling agent (orchestrator worker, Claude Code, etc.) is responsible
@@ -59,7 +67,11 @@ type SquashResult struct {
 	SquashedCount int      `json:"squashed_count"`
 	DeletedCount  int      `json:"deleted_count"`
 	KeptChildren  bool     `json:"kept_children"`
-	WispSquash    bool     `json:"wisp_squash,omitempty"` // True if this was a wisp→digest squash
+	// KeptIDs are the closed children the squash did not delete because a
+	// live conditional-blocks fallback still waits on them (squashKeptSteps).
+	// The digest still summarizes them and SquashedCount counts them.
+	KeptIDs    []string `json:"kept_ids,omitempty"`
+	WispSquash bool     `json:"wisp_squash,omitempty"` // True if this was a wisp→digest squash
 }
 
 type molSquashInput struct {
@@ -90,7 +102,68 @@ func wispChildrenOf(subgraph *TemplateSubgraph) []*types.Issue {
 	return wispChildren
 }
 
-func renderSquashDryRun(moleculeID string, subgraph *TemplateSubgraph, wispChildren []*types.Issue, keepChildren bool) {
+// squashKeptSteps returns the ids of the closed children a squash keeps
+// instead of deleting. Each is the target of a conditional-blocks edge from a
+// bead that is not closed and that this squash does not delete, and its close
+// reason is not a failure, so it still holds that fallback back
+// (types.BlockingEdgeHolds). Deleting it drops the edge, which puts the
+// fallback in ready work as if the step had failed (GH#5577). The usual shape
+// is an arm bonded onto a step (bd mol bond <arm> <step> --type conditional):
+// the arm is outside the molecule's subgraph, so squash deletes the step and
+// never the arm.
+//
+// It reads each closed child's incoming edges rather than the blocked listing
+// bd mol wisp gc consults, so a fallback whose stored is_blocked flag an older
+// bd left at 0 still keeps its step. A molecule has few steps, so one read per
+// closed child stays cheap. With keepChildren the squash deletes nothing, and
+// nothing is read.
+func squashKeptSteps(ctx context.Context, r molReader, children []*types.Issue, keepChildren bool) (map[string]bool, error) {
+	if keepChildren {
+		return nil, nil
+	}
+	squashed := make(map[string]bool, len(children))
+	for _, c := range children {
+		squashed[c.ID] = true
+	}
+	kept := make(map[string]bool)
+	for _, c := range children {
+		if c.Status != types.StatusClosed || !types.BlockingEdgeHolds(types.DepConditionalBlocks, c.Status, c.CloseReason) {
+			continue
+		}
+		dependents, err := r.GetDependentsWithMetadata(ctx, c.ID)
+		if err != nil {
+			return nil, fmt.Errorf("reading what waits on %s: %w", c.ID, err)
+		}
+		for _, d := range dependents {
+			// A source among the children goes with this squash, an open
+			// one included, and takes its edge with it.
+			if d != nil && d.DependencyType == types.DepConditionalBlocks &&
+				d.Issue.Status != types.StatusClosed && !squashed[d.Issue.ID] {
+				kept[c.ID] = true
+				break
+			}
+		}
+	}
+	return kept, nil
+}
+
+// keptStepIDs lists the children squashKeptSteps kept, in the children's order.
+func keptStepIDs(children []*types.Issue, kept map[string]bool) []string {
+	var ids []string
+	for _, c := range children {
+		if kept[c.ID] {
+			ids = append(ids, c.ID)
+		}
+	}
+	return ids
+}
+
+// keptStepsLine tells a text reader which closed children the squash keeps.
+func keptStepsLine(ids []string) string {
+	return fmt.Sprintf("Kept: %d closed wisp(s) a conditional-blocks fallback still waits on: %s", len(ids), strings.Join(ids, ", "))
+}
+
+func renderSquashDryRun(moleculeID string, subgraph *TemplateSubgraph, wispChildren []*types.Issue, kept map[string]bool, keepChildren bool) {
 	fmt.Printf("\nDry run: would squash %d ephemeral children of %s\n\n", len(wispChildren), moleculeID)
 	fmt.Printf("Root: %s\n", subgraph.Root.Title)
 	fmt.Printf("\nWisp children to squash:\n")
@@ -109,6 +182,9 @@ func renderSquashDryRun(moleculeID string, subgraph *TemplateSubgraph, wispChild
 		fmt.Printf("\n--keep-children: children would NOT be deleted\n")
 	} else {
 		fmt.Printf("\nChildren would be deleted after digest creation.\n")
+		if ids := keptStepIDs(wispChildren, kept); len(ids) > 0 {
+			fmt.Println(keptStepsLine(ids))
+		}
 	}
 }
 
@@ -122,6 +198,9 @@ func renderSquashResult(result *SquashResult) error {
 		fmt.Printf("  Deleted: %d wisps\n", result.DeletedCount)
 	} else if result.KeptChildren {
 		fmt.Printf("  Children preserved (--keep-children)\n")
+	}
+	if len(result.KeptIDs) > 0 {
+		fmt.Printf("  %s\n", keptStepsLine(result.KeptIDs))
 	}
 	if result.WispSquash {
 		fmt.Printf("  Root auto-closed: %s\n", result.MoleculeID)
@@ -174,7 +253,11 @@ func runMolSquash(cmd *cobra.Command, args []string) error {
 	}
 
 	if in.dryRun {
-		renderSquashDryRun(moleculeID, subgraph, wispChildren, in.keepChildren)
+		kept, err := squashKeptSteps(ctx, store, wispChildren, in.keepChildren)
+		if err != nil {
+			return HandleErrorRespectJSON("squashing molecule: %v", err)
+		}
+		renderSquashDryRun(moleculeID, subgraph, wispChildren, kept, in.keepChildren)
 		return nil
 	}
 
@@ -238,14 +321,24 @@ func generateDigest(root *types.Issue, children []*types.Issue) string {
 // If summary is provided (non-empty), it's used as the digest content.
 // Otherwise, generateDigest() creates a basic concatenation.
 // This enables agents to provide AI-generated summaries while keeping bd as a pure tool.
+// It keeps every closed child a live conditional-blocks fallback still waits
+// on (squashKeptSteps) and reports it in SquashResult.KeptIDs.
 func squashMolecule(ctx context.Context, s storage.DoltStorage, root *types.Issue, children []*types.Issue, keepChildren bool, summary string, actorName string) (*SquashResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
 
+	// Read through the store before the transaction opens: during it a store
+	// read needs a second connection, and the embedded store's transaction
+	// holds its only one (see storeMolWriter.GetConfig).
+	kept, err := squashKeptSteps(ctx, s, children, keepChildren)
+	if err != nil {
+		return nil, err
+	}
+
 	var result *SquashResult
-	err := transact(ctx, s, fmt.Sprintf("bd: squash molecule %s", root.ID), func(tx storage.Transaction) error {
-		r, err := squashMoleculeInto(ctx, storeMolWriter{DoltStorage: s, tx: tx}, root, children, keepChildren, summary, actorName)
+	err = transact(ctx, s, fmt.Sprintf("bd: squash molecule %s", root.ID), func(tx storage.Transaction) error {
+		r, err := squashMoleculeInto(ctx, storeMolWriter{DoltStorage: s, tx: tx}, root, children, kept, keepChildren, summary, actorName)
 		if err != nil {
 			return err
 		}
@@ -258,7 +351,10 @@ func squashMolecule(ctx context.Context, s storage.DoltStorage, root *types.Issu
 	return result, nil
 }
 
-func squashMoleculeInto(ctx context.Context, w molWriter, root *types.Issue, children []*types.Issue, keepChildren bool, summary string, actorName string) (*SquashResult, error) {
+// squashMoleculeInto writes the squash through w. kept names the closed
+// children it must not delete (squashKeptSteps): the caller reads it on its
+// own route, the direct one before its transaction opens.
+func squashMoleculeInto(ctx context.Context, w molWriter, root *types.Issue, children []*types.Issue, kept map[string]bool, keepChildren bool, summary string, actorName string) (*SquashResult, error) {
 	// Collect child IDs
 	childIDs := make([]string, len(children))
 	for i, c := range children {
@@ -309,9 +405,15 @@ func squashMoleculeInto(ctx context.Context, w molWriter, root *types.Issue, chi
 		return nil, fmt.Errorf("failed to link digest to root: %w", err)
 	}
 
-	// Delete ephemeral children within the same transaction
+	// Delete ephemeral children within the same transaction, except the closed
+	// ones a live conditional-blocks fallback still waits on: deleting one
+	// drops the edge and puts the fallback in ready work (GH#5577).
 	if !keepChildren {
 		for _, id := range childIDs {
+			if kept[id] {
+				result.KeptIDs = append(result.KeptIDs, id)
+				continue
+			}
 			if err := w.DeleteIssue(ctx, id, actorName); err != nil {
 				return nil, fmt.Errorf("failed to delete child %s: %w", id, err)
 			}

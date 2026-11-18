@@ -708,7 +708,9 @@ paths:
         excluded and NO type exclusions, then NARROWED to rows bd can name a
         blocker for: an active `blocks`, `waits-for` or `conditional-blocks`
         target resident in this workspace that is neither closed nor pinned,
-        else the parent. A row whose flag is set but which has neither is not
+        or a `conditional-blocks` target closed with a close reason that is
+        not a failure (the row runs only if that target fails), else the
+        parent. A row whose flag is set but which has neither is not
         listed. Where the server applies the external-dependency policy
         (`policy.external_dependencies`), an unsatisfied `external:` blocker is
         added to the row's `blocked_by`, and a row blocked only by such refs
@@ -4229,8 +4231,10 @@ paths:
         claim the next ready step for `actor`.
 
 
-        A step is READY when it is open and no open step of the same molecule
-        blocks it (blocks, conditional-blocks or waits-for). The claim is a
+        A step is READY when it is open and no step of the same molecule
+        holds it back: an open step over a blocks, conditional-blocks or
+        waits-for edge, or, over a conditional-blocks edge, a step closed
+        with a close reason that is not a failure. The claim is a
         real claim — the step's assignee becomes `actor` — and a step another
         actor holds is skipped, never taken: a ready step lost that way, or one
         moved out of a claimable status since it was read, falls through to
@@ -8356,8 +8360,11 @@ components:
           description: >-
             The gates actively blocking this issue: gate-typed dependencies
             reached over a `blocks` or `conditional-blocks` edge whose own
-            status is neither closed nor pinned, on an issue that is itself
-            neither closed nor pinned. ADDITIVE and absent when empty. It is
+            status is neither closed nor pinned, and, over a
+            `conditional-blocks` edge, gates closed with a close reason that
+            is not a failure (the issue runs only if the gate fails), on an
+            issue that is itself neither closed nor pinned. ADDITIVE and
+            absent when empty. It is
             DERIVED, not stored — `status` is unaffected, and an open issue an
             open gate blocks still reports `open` — and both clauses are the
             ones the readiness query's is_blocked column applies, so a nonempty
@@ -10026,11 +10033,13 @@ components:
           default: false
           description: >-
             Skip a closed candidate that a LIVE (not-done) bead depends on
-            through a parent/child, tracks, or blocks edge, so closing a
-            dependent's dependency does not erase the row a live bead still
-            points at. Protection is TRANSITIVE and crosses the ephemeral/durable
-            plane boundary. Behind the `issues.sweep.liveDependents` behavior
-            token: an older server answers `unknown_parameter` for this name.
+            through a parent/child, tracks, blocks, or conditional-blocks edge,
+            so closing a dependent's dependency does not erase the row a live
+            bead still points at, and deleting a conditional fallback's
+            precondition does not release the fallback. Protection is
+            TRANSITIVE and crosses the ephemeral/durable plane boundary. Behind
+            the `issues.sweep.liveDependents` behavior token: an older server
+            answers `unknown_parameter` for this name.
         limit:
           type: integer
           format: int64

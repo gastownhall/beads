@@ -27,6 +27,9 @@ func TestBlockedListerContract(t *testing.T) {
 		CreateIssue:   kit.CreateIssue,
 		CreateWisp:    kit.CreateWisp,
 		AddDependency: kit.AddDependency,
+		CloseIssue: func(ctx context.Context, id, reason, actor string) error {
+			return te.store.CloseIssue(ctx, id, reason, actor, "")
+		},
 		MarkBlocked: func(ctx context.Context, id string) error {
 			db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
 			if err != nil {
