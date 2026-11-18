@@ -1431,6 +1431,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The SDK's `OpenBestAvailable` refuses proxied-server workspaces instead
+  of silently opening a separate database.** The public Go open dispatched
+  only on server mode, so on a proxied-server workspace a cgo build fell
+  through to the embedded engine, which creates `.beads/embeddeddolt` and
+  migrates it: an empty second database on a workspace initialized straight
+  into proxied mode, and stale issues that look real on one that was ever
+  embedded and later migrated. `OpenBestAvailable` and
+  `OpenBestAvailableWith` now return `beads.ErrProxiedServerWorkspace`
+  (match with `errors.Is`) before either Dolt constructor — including under
+  `BEADS_DOLT_SERVER_MODE=1` or `BEADS_DOLT_SHARED_SERVER=1` — after the
+  per-open option refusals, and without touching the workspace. The library
+  has no proxied route; use the `bd` CLI, which routes proxied workspaces
+  command by command. (#6655)
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

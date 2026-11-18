@@ -85,6 +85,32 @@ var ErrUserAgentWithoutOpenWith = backends.ErrUserAgentWithoutOpenWith
 // outside this module cannot import internal/storage/backends directly.
 var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
 
+// ErrProxiedServerWorkspace is returned by OpenBestAvailable and
+// OpenBestAvailableWith when the workspace's metadata puts it in Dolt
+// proxied-server mode. That workspace's live data sits behind its proxy's
+// dolt sql-server, which neither direct arm of those functions can serve:
+// in a CGO build the embedded arm would create or read a separate
+// .beads/embeddeddolt database beside the proxied root (.beads/dolt) and
+// hand it back as real — an empty second database on a workspace
+// initialized straight into proxied mode, stale issues that look real on
+// one that was ever embedded (GH#6655) — and the server arm would bypass
+// the proxy. Match it with errors.Is. The refusal happens after the
+// per-open option refusals (ErrCredentialWithoutOpenWith and its siblings
+// keep precedence) and never for a workspace whose registered backend
+// dispatches first.
+var ErrProxiedServerWorkspace = errors.New("beads: proxied-server workspace cannot be opened as a direct store")
+
+// proxiedServerWorkspaceError is the refusal both build-tagged copies of
+// OpenBestAvailableWith return for a proxied-server workspace (GH#6655):
+// the sentinel, the mode and the metadata file naming it, the fail-closed
+// data-safety guarantee, and the CLI alternative, so both builds print one
+// diagnostic. It promises no particular bd verb has a proxied route: the
+// CLI routes proxied workspaces command by command.
+func proxiedServerWorkspaceError(beadsDir string) error {
+	return fmt.Errorf("%w: dolt_mode %q in %q names a workspace served by its proxy's sql-server; %s; use the bd CLI against this workspace instead (not every command has a proxied route)",
+		ErrProxiedServerWorkspace, configfile.DoltModeProxiedServer, configfile.MetadataFilePath(beadsDir), configfile.BackendNotOpenedGuarantee)
+}
+
 // configuredBackendUnavailable is the public open path's fail-closed refusal for
 // metadata naming a removed or unrecognized backend. beadsDir and cfg let the
 // refusal detect an already-present Dolt database and name the exact

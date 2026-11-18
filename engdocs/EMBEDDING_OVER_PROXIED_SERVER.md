@@ -1,11 +1,12 @@
 # Embedding over a proxied-server workspace: observed behaviour at 1.3.1
 
-Last reviewed: 2026-09-23
+Last reviewed: 2026-11-18
 
 Read at: `e1e1158dd` (`v1.3.1-rc.1-2-ge1e1158dd`). Because this document
 describes observed behaviour rather than a contract, a stale marker makes it
 wrong, not merely old. Re-read it against the sources below before trusting it
-against a later build.
+against a later build. §8's change note was re-read against the GH#6655 fix on
+2026-11-18; the rest still describes `e1e1158dd`.
 
 Freshness source: `internal/storage/dbproxy/pidfile/pidfile.go`,
 `internal/storage/dbproxy/proxy/` (`endpoint.go`, `server.go`, `shutdown.go`,
@@ -642,12 +643,24 @@ which handles embedded Dolt, dolt-server mode and registered extension
 backends; and `beads_nocgo.go` (`//go:build !cgo`), which handles the latter two
 and returns an error for embedded Dolt.
 
-**First, a routing fact worth knowing before the interface question.** Neither
-copy has a proxied-server arm. Both dispatch on `cfg.IsDoltServerMode()`, and
-`configfile.IsDoltServerMode` and `IsDoltProxiedServerMode` are mutually
-exclusive — proxied workspaces are explicitly exempt from the host-based
-server-mode inference. So on a proxied-server workspace `OpenBestAvailable` falls
-through to `embeddeddolt.Open`, and it does not connect through the proxy.
+**First, a routing fact worth knowing before the interface question.**
+Changed 2026-11-18 (GH#6655). Before the change, neither copy had a
+proxied-server arm: both dispatched on `cfg.IsDoltServerMode()`, and a
+proxied workspace fell through to `embeddeddolt.Open` without connecting
+through the proxy. `OpenBestAvailable` and `OpenBestAvailableWith` now
+refuse such a workspace before either Dolt constructor, returning
+`beads.ErrProxiedServerWorkspace` (match with `errors.Is`; the diagnostic
+names the mode, the metadata file, the no-storage-touched guarantee and the
+bd CLI alternative). The refusal keys on `IsDoltProxiedServerMode` and sits
+ahead of the `IsDoltServerMode` check because the two predicates are not
+universally mutually exclusive: `HostImpliesServerMode` exempts proxied
+workspaces from the host-based inference, but the `BEADS_DOLT_SERVER_MODE=1`
+and `BEADS_DOLT_SHARED_SERVER=1`/`true` environment overrides make
+`IsDoltServerMode` true even on proxied metadata, and a guard placed after
+that check would miss them. The paragraphs below describe the pre-fix
+behaviour; they are kept as the rationale for the refusal and for why a
+`.beads/embeddeddolt` directory left behind by a mode migration is
+dangerous.
 
 The consequence is not contention over the directory the proxy is serving. It is
 that the two paths look at **different directories entirely**. `embeddeddolt`
@@ -659,8 +672,8 @@ non-test places — `newStore`, `openReadOnly`, the open cache's `cacheKey`, and
 (`internal/doltserver/physical_root.go`; `Config.DatabasePath`'s fallback joins
 the literal `dolt`, with a comment saying always to).
 
-So an embedder that calls `OpenBestAvailable` on a proxied workspace does not
-fight the running server for its files — it silently opens **a separate database**
+So an embedder that called `OpenBestAvailable` on a proxied workspace did not
+fight the running server for its files — it silently opened **a separate database**
 beside it. On the read-write path — the one `OpenBestAvailable` takes —
 `newStore` `MkdirAll`s `.beads/embeddeddolt`, and `initSchema` issues
 `CREATE DATABASE IF NOT EXISTS` and migrates, so the open creates and writes a
@@ -677,10 +690,12 @@ generalising the paragraph above: `openReadOnly` does **not** create. It
 arriving through the read-only open on a workspace that was never embedded gets
 an error instead of an empty database.
 
-Nothing in the open path refuses on that ground and no error comes back. The
-store is genuine; it is just not the one the workspace's issues are in. An
-embedder that wants the proxied endpoint should connect to the data port (§3)
-rather than expect this function to find it.
+Nothing in the pre-fix open path refused on that ground and no error came
+back. The store was genuine; it was just not the one the workspace's issues
+are in. Since the 2026-11-18 change the call refuses instead. An embedder
+that wants the proxied endpoint should still connect to the data port (§3)
+rather than expect this function to find it — an observation about where
+the data lives, not an SDK guarantee of that route.
 
 `SetEventsJournalEnabled(enabled bool)` is **not a method on the `Storage`
 interface.** `beads.Storage` aliases `internal/beads.Storage`, which aliases
@@ -911,13 +926,16 @@ live proxy to confirm end to end, and are therefore inferred from the code:
   succeeds against the data port on a managed-local workspace (§3). The
   credentials, the loopback bind and the absence of protocol handling in the
   proxy are all read directly from the source; the end-to-end connection is not.
-- That `OpenBestAvailable`'s embedded fall-through (§8) completes and hands back
-  a usable but separate store, rather than failing somewhere in the create and
-  migrate steps. The *routing* (it takes the embedded arm, because proxied mode
-  is exempt from `IsDoltServerMode`) and the *directory* (`embeddeddolt` joins
-  `<beadsDir>/embeddeddolt`, the proxy serves `<beadsDir>/dolt`) are read off the
-  source and are not in doubt; the open itself was not run against a live
-  proxied workspace.
+- `OpenBestAvailable`'s embedded fall-through (§8), before the 2026-11-18
+  refusal: it was never run against a live proxied workspace. The *routing*
+  (it took the embedded arm, because proxied mode is exempt from
+  `IsDoltServerMode`'s host-based inference) and the *directory*
+  (`embeddeddolt` joins `<beadsDir>/embeddeddolt`, the proxy serves
+  `<beadsDir>/dolt`) were read off the source and were not in doubt; the open
+  itself was not run, and no live stale read was ever reproduced. The
+  fall-through is now gone: `TestOpenBestAvailableRefusesProxiedServerWorkspace`
+  (`open_backend_selection_test.go`) pins the refusal and pins the pre-fix
+  fall-through only as a failing precondition, not as a store hand-back.
 
 Everything else — field names, JSON keys and their types, argv and flag
 spellings, exported Go symbols, default values, and which code path decides

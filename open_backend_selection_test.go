@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/storage"
@@ -720,4 +722,122 @@ func TestPublicOpensRefuseHistoricalSQLiteWorkspace(t *testing.T) {
 			})
 		}
 	}
+}
+
+// proxiedRefusalEnv clears every ambient signal that could reclassify a
+// workspace's storage mode or redirect a dial, so a subtest's metadata and
+// env pin the whole decision: the server/shared-server mode overrides, the
+// host/port/socket env (including TestMain's ambient BEADS_DOLT_PORT naming
+// the shared test container), the central config and the credential
+// command. HOME moves to an empty directory so no user config.yaml leaks
+// into IsDoltServerMode's config.yaml fallback. BEADS_TEST_MODE stays set
+// (TestMain sets it for the process), which keeps auto-start off.
+func proxiedRefusalEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"BEADS_DOLT_SERVER_SOCKET",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_PORT",
+		"BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE",
+		"BEADS_CENTRAL_CONFIG",
+		"BEADS_DOLT_CREDENTIAL_COMMAND",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+}
+
+// writeProxiedModeMetadata writes metadata.json naming the default "dolt"
+// backend with dolt_mode exactly as given (mixed-case spellings are pinned
+// by the caller) and returns the .beads directory.
+func writeProxiedModeMetadata(t *testing.T, doltMode string) string {
+	t.Helper()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	metadata := `{"backend":"dolt","database":"dolt","dolt_mode":"` + doltMode + `"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	return beadsDir
+}
+
+// assertProxiedRefusal asserts the refusal contract: nil Storage, the typed
+// refusal via errors.Is, a diagnostic naming the mode, the metadata file,
+// the data-safety guarantee and the CLI alternative, and a workspace tree
+// identical to before (digest over all of the .beads parent, so anything
+// created beside .beads is caught too).
+func assertProxiedRefusal(t *testing.T, open func(context.Context, string) (beads.Storage, error), beadsDir string, before map[string]string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	store, err := open(ctx, beadsDir)
+	if store != nil {
+		_ = store.Close()
+		t.Fatalf("open returned a %T on a proxied-server workspace; want the typed refusal", store)
+	}
+	if !errors.Is(err, beads.ErrProxiedServerWorkspace) {
+		t.Fatalf("open error = %v, want beads.ErrProxiedServerWorkspace", err)
+	}
+	for _, fragment := range []string{
+		"proxied-server",
+		filepath.Join(beadsDir, "metadata.json"),
+		"no storage database was opened or modified",
+		"bd CLI",
+	} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Errorf("refusal %q omits %q", err, fragment)
+		}
+	}
+	if after := workspaceTreeDigest(t, filepath.Dir(beadsDir)); !maps.Equal(after, before) {
+		t.Errorf("refusal changed the workspace: before %v, after %v", before, after)
+	}
+}
+
+// TestOpenBestAvailableRefusesProxiedServerWorkspace pins GH#6655: a
+// proxied-server workspace keeps its live data in the proxy's sql-server
+// root (.beads/dolt), so neither best-available API may fall through to the
+// embedded arm, which creates (or reads a stale) separate database at
+// .beads/embeddeddolt and serves it as real. Both build-tagged copies must
+// refuse with ErrProxiedServerWorkspace before either Dolt constructor —
+// including under a server-forcing environment override — after the
+// per-open option refusals, leaving the workspace untouched. The
+// nonproxied/* subtests pin that the guard does not over-fire: server-mode
+// and registered-backend dispatch are unchanged.
+func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
+	opens := []struct {
+		name string
+		open func(context.Context, string) (beads.Storage, error)
+	}{
+		{"OpenBestAvailable", beads.OpenBestAvailable},
+		{"OpenBestAvailableWith", func(ctx context.Context, beadsDir string) (beads.Storage, error) {
+			return beads.OpenBestAvailableWith(ctx, beadsDir, beads.OpenOptions{})
+		}},
+	}
+
+	t.Run("refuses", func(t *testing.T) {
+		for _, o := range opens {
+			t.Run(o.name, func(t *testing.T) {
+				proxiedRefusalEnv(t)
+				beadsDir := writeProxiedModeMetadata(t, "proxied-server")
+				before := workspaceTreeDigest(t, filepath.Dir(beadsDir))
+				assertProxiedRefusal(t, o.open, beadsDir, before)
+			})
+		}
+	})
+
+	t.Run("refuses_mixed_case_dolt_mode", func(t *testing.T) {
+		for _, o := range opens {
+			t.Run(o.name, func(t *testing.T) {
+				proxiedRefusalEnv(t)
+				beadsDir := writeProxiedModeMetadata(t, "Proxied-Server")
+				before := workspaceTreeDigest(t, filepath.Dir(beadsDir))
+				assertProxiedRefusal(t, o.open, beadsDir, before)
+			})
+		}
+	})
 }

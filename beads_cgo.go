@@ -18,6 +18,9 @@ import (
 //
 //   - Embedded Dolt (default): Opens via the CGo embedded Dolt engine.
 //   - Dolt server: Connects to a dolt sql-server via OpenFromConfig.
+//   - Dolt proxied-server: Refused with ErrProxiedServerWorkspace; the
+//     workspace's data is served by its proxy, which no arm here can open,
+//     and the workspace is left untouched.
 //
 // The returned Storage must be closed when no longer needed.
 //
@@ -45,6 +48,12 @@ func OpenBestAvailable(ctx context.Context, beadsDir string) (Storage, error) {
 // non-empty opts.UserAgent with nothing able to honor it — that is always a
 // typed refusal (the matching ErrXWithoutOpenWith sentinel), never a silent
 // open with the field ignored.
+//
+// A Dolt proxied-server workspace is refused with ErrProxiedServerWorkspace
+// before either Dolt constructor — after those option refusals, so a caller
+// passing an unsupported option still sees the option sentinel — and the
+// workspace is left untouched; use the bd CLI, which routes proxied
+// workspaces.
 func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOptions) (Storage, error) {
 	// Before Load, which can migrate a legacy config.json, and before any
 	// backend is chosen; IsSupportedBackend below re-checks the loaded config.
@@ -86,6 +95,17 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	}
 	if opts.UserAgent != "" {
 		return nil, fmt.Errorf("beads: OpenOptions.UserAgent is not supported for backend %q (Dolt has no per-open transport seam): %w", cfg.GetBackend(), backends.ErrUserAgentWithoutOpenWith)
+	}
+
+	// A proxied-server workspace is served by its proxy's sql-server, which
+	// neither arm below can reach: the embedded arm would open — creating,
+	// if absent — a separate .beads/embeddeddolt database and serve it as
+	// real (GH#6655), and the server arm would bypass the proxy. Refuse
+	// before either constructor, including under a server-forcing
+	// environment override, which IsDoltServerMode consults ahead of the
+	// persisted mode.
+	if cfg.IsDoltProxiedServerMode() {
+		return nil, proxiedServerWorkspaceError(beadsDir)
 	}
 
 	if cfg.IsDoltServerMode() {
