@@ -590,3 +590,49 @@ func TestIssue6092IgnoredWispDepRepairRestoresConstraintsAfterFailedRun(t *testi
 	issue6092RequireIDsKept(t, got, deps)
 	issue6092RequireReferencedUnchanged(t, ctx, db)
 }
+
+// TestIssue6092IgnoredWispDepReplayOverFinalShapeIsANoOp is AC-4: a fully
+// migrated table with valid rows and only its ignored cursor rewound to 4.
+// Neither the repair nor the replayed chain may touch the structure or the
+// rows (ids included), and a second MigrateUp applies nothing.
+func TestIssue6092IgnoredWispDepReplayOverFinalShapeIsANoOp(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*testTimeout)
+	defer cancel()
+	db := store.db
+
+	issue6092SeedReferenced(t, ctx, db)
+	deps := issue6092IDDeps()
+	issue6092SeedDeps(t, ctx, db, deps, true)
+	beforeShape := issue6092ReadShape(t, ctx, db)
+	beforeRows := issue6092ReadDeps(t, ctx, db)
+	issue6092CommitAndRewindIgnored(t, ctx, db, issue6092IgnoredCursorBefore0005)
+
+	if _, err := schema.MigrateUp(ctx, db); err != nil {
+		t.Fatalf("first MigrateUp: %v", err)
+	}
+	issue6092RequireCursorsAtLatest(t, ctx, db)
+	n, err := schema.MigrateUp(ctx, db)
+	if err != nil {
+		t.Fatalf("second MigrateUp: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("second MigrateUp applied %d migrations, want 0", n)
+	}
+
+	afterShape := issue6092ReadShape(t, ctx, db)
+	issue6092RequireFinalShape(t, afterShape, beforeShape)
+	issue6092RequireFinalShape(t, beforeShape, afterShape)
+	issue6092RequireNamedFinalObjects(t, afterShape)
+	afterRows := issue6092ReadDeps(t, ctx, db)
+	if len(afterRows) != len(beforeRows) {
+		t.Fatalf("rows = %+v, want unchanged %+v", afterRows, beforeRows)
+	}
+	for i := range beforeRows {
+		if afterRows[i] != beforeRows[i] {
+			t.Errorf("row %d = %+v, want unchanged %+v", i, afterRows[i], beforeRows[i])
+		}
+	}
+	issue6092RequireReferencedUnchanged(t, ctx, db)
+}
