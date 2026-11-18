@@ -295,6 +295,22 @@ func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string)
 	return exists, err
 }
 
+var _ storage.StateHasher = (*EmbeddedDoltStore)(nil)
+
+// GetStateHash returns the hash of the working root. Implements
+// storage.StateHasher: under batch or off auto-commit an embedded write stays
+// in the working set and HEAD does not move, so auto-export's change detection
+// needs this hash to see it (GH#6955).
+func (s *EmbeddedDoltStore) GetStateHash(ctx context.Context) (string, error) {
+	var hash string
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var readErr error
+		hash, readErr = versioncontrolops.StateHash(ctx, db)
+		return readErr
+	})
+	return hash, err
+}
+
 var _ storage.HeadHasher = (*EmbeddedDoltStore)(nil)
 
 // GetHeadHashes returns the HEAD commit hash and the hash of its root value.
@@ -809,18 +825,12 @@ func (s *EmbeddedDoltStore) BackupDatabase(ctx context.Context, dir string) erro
 }
 
 // RestoreDatabase restores the database from a Dolt backup at dir.
-// The dir must exist locally and contain a valid Dolt backup.
-// When force is true, an existing database is overwritten.
+// The dir must exist locally and contain a Dolt backup at a path Dolt reads
+// literally; anything else is refused before the engine opens
+// (versioncontrolops.RestoreSourceURL). When force is true, an existing
+// database is overwritten.
 func (s *EmbeddedDoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("backup source does not exist: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("backup source is not a directory: %s", dir)
-	}
-
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
 		return err
 	}

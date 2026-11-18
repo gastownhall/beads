@@ -126,7 +126,9 @@ type IssueSQLRepository interface {
 	// RecomputeIsBlockedAfterDelete recomputes the blocked state of the
 	// dependents a delete of deletedIDs affected, and records them for the
 	// post-commit recheck the unit of work runs (gastownhall/beads#6716).
-	RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string) error
+	// actor is the delete's acting identity, which the derived is_blocked
+	// records the recompute journals carry.
+	RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string, actor string) error
 	Close(ctx context.Context, id string, params CloseRowParams, actor string, opts IssueTableOpts) (CloseRowResult, error)
 	CloseChecked(ctx context.Context, id string, params CloseRowParams, actor string, force bool) (CloseRowResult, error)
 	Reopen(ctx context.Context, id string, params ReopenRowParams, actor string, opts IssueTableOpts) (ReopenRowResult, error)

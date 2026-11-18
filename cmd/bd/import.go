@@ -83,6 +83,11 @@ wholesale by design — a restore must not fail field-by-field — so
 --allow-stale is the single deliberate-overwrite opt-in, and
 updated_issues is where to look for what an import rewrote.
 
+Comments merge additively. A comment whose id is already stored on the
+same issue keeps its stored text, author and time, also under
+--allow-stale; a comment id stored on a different issue fails the
+import with an error naming the comment and both issues.
+
 Large imports are written in bounded transactions (a few hundred issues
 each, with a short pause between commits) with progress on stderr, so
 concurrent bd commands keep working while the import runs instead of

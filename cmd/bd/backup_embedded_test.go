@@ -8,6 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -257,6 +260,11 @@ func TestEmbeddedBackupRestoreStrictReadonly(t *testing.T) {
 
 	t.Run("control_restore_without_readonly", func(t *testing.T) {
 		dir, backupDir := newWorkspace(t, "rrctl")
+		// The restore preflight (bd-jwaljq) accepts only a source whose top
+		// level holds Dolt's manifest; `bd backup sync` must have written one.
+		if info, err := os.Stat(filepath.Join(backupDir, "manifest")); err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("bd backup sync left no regular manifest in %s: %v", backupDir, err)
+		}
 		stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "backup", "restore", "--force", backupDir)
 		if code != 0 {
 			t.Fatalf("restore without --readonly exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
@@ -264,8 +272,126 @@ func TestEmbeddedBackupRestoreStrictReadonly(t *testing.T) {
 		if !strings.Contains(stdout, "Restore complete") {
 			t.Errorf("stdout is missing %q:\n%s", "Restore complete", stdout)
 		}
-		if got := len(bdListJSON(t, bd, dir)); got != 2 {
-			t.Errorf("issue count after a real restore = %d, want 2: the backup holds two issues and the live store held three", got)
+		var titles []string
+		for _, issue := range bdListJSON(t, bd, dir) {
+			titles = append(titles, issue.Title)
+		}
+		sort.Strings(titles)
+		if want := []string{"issue in the backup A", "issue in the backup B"}; !slices.Equal(titles, want) {
+			t.Errorf("issues after a real restore = %q, want the backup's %q: the live store also held a third", titles, want)
+		}
+	})
+
+	// bd-jwaljq (GH#7098): a source that holds no Dolt backup is refused before
+	// the restore runs, so the live store keeps exactly the issues it had. At
+	// base a forced restore dropped the database first and failed afterwards.
+	// The default-path case matters on its own: backupDir creates .beads/backup
+	// when it is missing, so a bare `bd backup restore --force` used to hand Dolt
+	// an empty directory.
+	issueSet := func(t *testing.T, dir string) []string {
+		t.Helper()
+		var got []string
+		for _, issue := range bdListJSON(t, bd, dir) {
+			got = append(got, fmt.Sprintf("%s|%s|%s", issue.ID, issue.Title, issue.Status))
+		}
+		sort.Strings(got)
+		return got
+	}
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		files  []string // created in an explicit source; nil means the default path
+		force  bool
+	}{
+		{"refuses_empty_dir", "rrempty", []string{}, true},
+		{"refuses_empty_dir_without_force", "rrnoforce", []string{}, false},
+		{"refuses_default_dir", "rrdefault", nil, true},
+		{"refuses_exports_only", "rrexport", []string{"issues.jsonl", "backup_state.json"}, true},
+		{"refuses_restore_debris", "rrdebris", []string{"LOCK", "oldgen/"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _ := newWorkspace(t, tc.prefix)
+			before := issueSet(t, dir)
+			if len(before) != 3 {
+				t.Fatalf("fixture holds %d issues, want 3: %v", len(before), before)
+			}
+
+			args := []string{"backup", "restore"}
+			if tc.force {
+				args = append(args, "--force")
+			}
+			source := filepath.Join(".beads", "backup")
+			if tc.files != nil {
+				source = t.TempDir()
+				for _, f := range tc.files {
+					path := filepath.Join(source, f)
+					var err error
+					if strings.HasSuffix(f, "/") {
+						err = os.MkdirAll(path, 0o750)
+					} else {
+						err = os.WriteFile(path, []byte("x"), 0o600)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				args = append(args, source)
+			}
+			stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, args...)
+
+			if code == 0 {
+				t.Errorf("bd %s exited 0 from a source with no backup\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), stdout, stderr)
+			}
+			for _, want := range []string{"holds no Dolt backup", source, "Restore was not attempted"} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr is missing %q:\n%s", want, stderr)
+				}
+			}
+			if strings.Contains(stdout, "Restore complete") {
+				t.Errorf("stdout reports a restore:\n%s", stdout)
+			}
+			if after := issueSet(t, dir); !slices.Equal(after, before) {
+				t.Errorf("issues after the refused restore = %v, want the live store's %v", after, before)
+			}
+		})
+	}
+
+	// A real backup at a path Dolt reads as another directory is refused too.
+	// Dolt parses the source as a file:// URL, so a backup copied to "proj#2"
+	// was restored from "proj": Dolt created that directory empty, dropped
+	// the live database, and failed, as with an empty source. Windows paths
+	// skip that parse, but '%' is unescaped there.
+	t.Run("refuses_backup_at_a_path_dolt_misreads", func(t *testing.T) {
+		dir, backupDir := newWorkspace(t, "rrmisread")
+		before := issueSet(t, dir)
+		if len(before) != 3 {
+			t.Fatalf("fixture holds %d issues, want 3: %v", len(before), before)
+		}
+		name := "proj#2"
+		if runtime.GOOS == "windows" {
+			name = "proj%232"
+		}
+		parent := t.TempDir()
+		source := filepath.Join(parent, name)
+		if err := copyTree(backupDir, source); err != nil {
+			t.Fatalf("copy the backup to %s: %v", source, err)
+		}
+
+		stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "backup", "restore", "--force", source)
+
+		if code == 0 {
+			t.Errorf("bd backup restore --force %s exited 0\nstdout:\n%s\nstderr:\n%s", source, stdout, stderr)
+		}
+		for _, want := range []string{"cannot be restored where it is", source, "Restore was not attempted"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr is missing %q:\n%s", want, stderr)
+			}
+		}
+		if after := issueSet(t, dir); !slices.Equal(after, before) {
+			t.Errorf("issues after the refused restore = %v, want the live store's %v", after, before)
+		}
+		if _, err := os.Stat(filepath.Join(parent, "proj")); !os.IsNotExist(err) {
+			t.Errorf("the refused restore reached Dolt, which created %s: %v", filepath.Join(parent, "proj"), err)
 		}
 	})
 

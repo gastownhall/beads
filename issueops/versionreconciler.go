@@ -35,6 +35,9 @@ type RecordedVersionResult struct {
 	// by a newer binary and then by an older one keeps the newer number here,
 	// and that is what lets ReconcileVersion refuse a downgrade it could not
 	// otherwise see. It is "" exactly when nothing has ever been recorded.
+	// "Highest" is in the comparison CLIVersion describes, where a release and
+	// its candidates are equal, so the mark keeps the first spelling recorded
+	// within a release: bd_version 1.4.0 under a mark of 1.4.0-rc.3 is normal.
 	HighWaterMark string
 }
 
@@ -47,12 +50,15 @@ type VersionReconcileRequest struct {
 	// nothing" over a real marker and lose the downgrade guard with it.
 	//
 	// It is compared as dotted decimal, component by component, with a
-	// non-numeric component reading as 0. So "1.2.0" and "1.2.0-rc1" are the
-	// SAME version to this role, "1.2" is lower than "1.2.1", and a version
+	// non-numeric component reading as 0 and everything from the first "-" or
+	// "+" ignored. So "1.2.0", "1.2.0-rc1" and "1.2.0-rc.3" are the SAME
+	// version to this role, "1.2" is lower than "1.2.1", and a version
 	// string with no digits at all is 0.0.0. That is the comparison both front
-	// doors have always used and it is stated here rather than tightened,
-	// because tightening it would start refusing pre-release binaries that
-	// reconcile cleanly today.
+	// doors use, and it is stated here rather than tightened, because
+	// tightening it would start refusing pre-release binaries that reconcile
+	// cleanly today. (Ignoring the suffix is what keeps a dotted candidate
+	// such as "1.2.0-rc.3" from reading as a fourth component, above its own
+	// release.)
 	CLIVersion string
 }
 

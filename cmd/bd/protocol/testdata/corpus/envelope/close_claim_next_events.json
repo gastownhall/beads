@@ -1,0 +1,28 @@
+{
+  "data": [
+    {
+      "actor": "protocol-test",
+      "comment": "Added label: corpus-native",
+      "created_at": "<TS>",
+      "event_type": "label_added",
+      "issue_id": "corpus-closer"
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "closed",
+      "issue_id": "corpus-closer",
+      "new_value": "Closed",
+      "old_value": ""
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "created",
+      "issue_id": "corpus-closer",
+      "new_value": "",
+      "old_value": ""
+    }
+  ],
+  "schema_version": 1
+}

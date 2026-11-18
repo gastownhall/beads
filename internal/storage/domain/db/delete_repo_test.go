@@ -249,7 +249,7 @@ func (s *testSuite) issueAffectedByDeletionDependers() {
 }
 
 func (s *testSuite) issueRecomputeIsBlockedEmpty() {
-	s.Require().NoError(s.issueRepo().RecomputeIsBlockedAfterDelete(s.Ctx(), nil, nil, nil))
+	s.Require().NoError(s.issueRepo().RecomputeIsBlockedAfterDelete(s.Ctx(), nil, nil, nil, "tester"))
 }
 
 func (s *testSuite) issueRecomputeIsBlockedFlips() {
@@ -260,7 +260,7 @@ func (s *testSuite) issueRecomputeIsBlockedFlips() {
 		"tester", domain.DepInsertOpts{}))
 
 	s.Require().NoError(s.issueRepo().RecomputeIsBlockedAfterDelete(s.Ctx(), nil,
-		[]string{"bd-del-rib-depender"}, nil))
+		[]string{"bd-del-rib-depender"}, nil, "tester"))
 	var blocked int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT is_blocked FROM issues WHERE id = ?", "bd-del-rib-depender").Scan(&blocked))
@@ -270,7 +270,7 @@ func (s *testSuite) issueRecomputeIsBlockedFlips() {
 		"UPDATE issues SET status = 'closed' WHERE id = ?", "bd-del-rib-blocker")
 	s.Require().NoError(err)
 	s.Require().NoError(s.issueRepo().RecomputeIsBlockedAfterDelete(s.Ctx(), nil,
-		[]string{"bd-del-rib-depender"}, nil))
+		[]string{"bd-del-rib-depender"}, nil, "tester"))
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT is_blocked FROM issues WHERE id = ?", "bd-del-rib-depender").Scan(&blocked))
 	s.Equal(0, blocked, "depender should unblock once blocker is closed")

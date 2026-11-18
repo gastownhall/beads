@@ -1687,6 +1687,7 @@ changes. They gate through `BAZEL_TEST`; pinned by
 | --- | --- |
 | fast-checks: `check-build-tags.sh` | `//scripts/repochecks:build_tags_test` |
 | fast-checks: `check-go-install-guidance.sh` | `//scripts/repochecks:go_install_guidance_test` |
+| (new, GH#3059) `check-legacy-repo-refs.sh` | `//scripts/repochecks:legacy_repo_refs_test` |
 | fast-checks: `check-winget-portable-alias.sh` | `//scripts/repochecks:winget_portable_alias_test` |
 | fast-checks: `check-versions.sh` | `//internal/versioncheck:versioncheck_test` (same `versioncheck.Check` over the release metadata) |
 | fast-checks: migration hygiene checks A and B | `//scripts/repochecks:migration_hygiene_test` (`MIGRATION_HYGIENE_SCOPE=tree`) |

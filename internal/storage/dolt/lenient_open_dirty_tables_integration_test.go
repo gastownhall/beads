@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -184,6 +185,118 @@ func TestServerModeLenientOpenDirtyTableGate(t *testing.T) {
 		defer migrated.Close()
 		if got := lenientOpenSchemaVersion(t, ctx, migrated.db); got != schema.LatestVersion() {
 			t.Fatalf("schema version after consented open = %d, want latest %d", got, schema.LatestVersion())
+		}
+	})
+
+	// gastownhall/beads#5816: a pending ignored migration (0002) that touches
+	// dirty committable data refuses with the same typed error before any
+	// numbered migration runs, so the lenient open recovers it too, while an
+	// unrelated dirty wisp stays local throughout.
+	t.Run("ignored migration over dirty committable data recovers through a lenient open", func(t *testing.T) {
+		const (
+			database = "lenient_ignored_committable"
+			parentID = database + "-parent"
+			wispID   = database + "-wisp"
+		)
+		admin := prepareLenientOpenDatabaseAtV51(t, ctx, state.Port, database)
+		defer admin.Close()
+		seeded, err := New(ctx, lenientOpenConfig(beadsDir, state.Port, database))
+		if err != nil {
+			t.Fatalf("New (seed to latest): %v", err)
+		}
+		seeded.Close()
+
+		for _, q := range []string{
+			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES ('" + parentID + "', 'durable parent', '', '', '', '')",
+			"CALL DOLT_COMMIT('-Am', 'test: durable parent', '--author', 'Beads Test <beads@example.com>')",
+			"INSERT INTO child_counters (parent_id, last_child) VALUES ('" + parentID + "', 7)",
+			"INSERT INTO wisps (id, title) VALUES ('" + wispID + "', 'unrelated wisp')",
+			"DELETE FROM ignored_schema_migrations WHERE version > 1",
+		} {
+			if _, err := admin.ExecContext(ctx, q); err != nil {
+				t.Fatalf("fixture %q: %v", q, err)
+			}
+		}
+
+		gated, gateErr := New(ctx, lenientOpenConfig(beadsDir, state.Port, database))
+		if gateErr == nil {
+			gated.Close()
+			t.Fatal("New (plain writable open) = nil, want *schema.DirtyTablesError")
+		}
+		var dirtyErr *schema.DirtyTablesError
+		if !errors.As(gateErr, &dirtyErr) {
+			t.Fatalf("New error = %T (%v), want error wrapping *schema.DirtyTablesError", gateErr, gateErr)
+		}
+		if len(dirtyErr.Tables) != 1 || dirtyErr.Tables[0] != "child_counters" {
+			t.Fatalf("DirtyTablesError.Tables = %v, want [child_counters]", dirtyErr.Tables)
+		}
+
+		lenientCfg := lenientOpenConfig(beadsDir, state.Port, database)
+		lenientCfg.LenientOpen = true
+		var (
+			store   *DoltStore
+			openErr error
+		)
+		warning := captureOpenStderr(t, func() { store, openErr = New(ctx, lenientCfg) })
+		if openErr != nil {
+			t.Fatalf("New (LenientOpen) = %v, want a usable store", openErr)
+		}
+		if !strings.Contains(warning, "Warning:") || !strings.Contains(warning, "child_counters") {
+			store.Close()
+			t.Fatalf("lenient open stderr = %q, want a warning naming child_counters", warning)
+		}
+		committed, err := store.CommitAll(ctx, "reconcile working set")
+		store.Close()
+		if err != nil {
+			t.Fatalf("CommitAll: %v", err)
+		}
+		if !committed {
+			t.Fatal("CommitAll committed = false, want the dirty child_counters row committed")
+		}
+
+		migrated, err := New(ctx, lenientOpenConfig(beadsDir, state.Port, database))
+		if err != nil {
+			t.Fatalf("New (post-commit plain open) = %v, want migrations to converge", err)
+		}
+		defer migrated.Close()
+		if got := lenientOpenSchemaVersion(t, ctx, migrated.db); got != schema.LatestVersion() {
+			t.Fatalf("schema version = %d, want latest %d", got, schema.LatestVersion())
+		}
+		var ignoredVersion int
+		if err := migrated.db.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
+		).Scan(&ignoredVersion); err != nil {
+			t.Fatalf("read ignored cursor: %v", err)
+		}
+		if ignoredVersion != schema.LatestIgnoredVersion() {
+			t.Fatalf("ignored cursor = %d, want %d", ignoredVersion, schema.LatestIgnoredVersion())
+		}
+		for _, q := range []string{
+			"SELECT last_child FROM child_counters AS OF 'HEAD' WHERE parent_id = '" + parentID + "'",
+			"SELECT last_child FROM child_counters WHERE parent_id = '" + parentID + "'",
+		} {
+			var lastChild int
+			if err := migrated.db.QueryRowContext(ctx, q).Scan(&lastChild); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+			if lastChild != 7 {
+				t.Fatalf("%s = %d, want 7", q, lastChild)
+			}
+		}
+		var working, atHead int
+		if err := migrated.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM wisps WHERE id = '"+wispID+"'").Scan(&working); err != nil {
+			t.Fatalf("count working wisp: %v", err)
+		}
+		// An untracked wisps table is absent from HEAD altogether, which also
+		// keeps the row out of it.
+		if err := migrated.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM wisps AS OF 'HEAD' WHERE id = '"+wispID+"'").Scan(&atHead); err != nil &&
+			!strings.Contains(err.Error(), "table not found") {
+			t.Fatalf("count committed wisp: %v", err)
+		}
+		if working != 1 || atHead != 0 {
+			t.Fatalf("unrelated wisp: working = %d, at HEAD = %d; want 1 and 0 (it must stay local)", working, atHead)
 		}
 	})
 

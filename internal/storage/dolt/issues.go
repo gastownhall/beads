@@ -694,7 +694,7 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		// storage.DeleteIssue carries no actor, so the journal rows record none.
-		if err := issueops.DeleteIssueInTx(ctx, tx, id, ""); err != nil {
+		if err := issueops.DeleteIssueInTx(ctx, tx, id, issueops.NoRequestActor); err != nil {
 			return err
 		}
 
@@ -715,7 +715,7 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 // If both are false, returns an error if any issue has dependents.
 // If dryRun is true, only computes statistics without deleting.
 // deleteBatchSize controls the maximum number of IDs per IN-clause query.
-// Kept small to avoid large IN-clause queries. See steveyegge/beads#1692.
+// Kept small to avoid large IN-clause queries. See GH#1692.
 const deleteBatchSize = 50
 
 // maxRecursiveResults is the safety limit for the total number of issues discovered
@@ -774,7 +774,7 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 		// storage.DeleteIssues carries no actor, so the journal rows record none.
 		// The wisps peeled off above stay part of the request for the
 		// dependents guard, in a dry run too, where they are not deleted first.
-		r, err := issueops.DeleteIssuesBesideWispsInTx(ctx, tx, ids, activeWispIDs, cascade, force, dryRun, "")
+		r, err := issueops.DeleteIssuesBesideWispsInTx(ctx, tx, ids, activeWispIDs, cascade, force, dryRun, issueops.NoRequestActor)
 		if err != nil {
 			result = r
 			return err

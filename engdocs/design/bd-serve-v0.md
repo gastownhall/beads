@@ -288,6 +288,26 @@ compare-and-set is therefore a correctness fence against *concurrent* claims,
 not an authorization boundary: it guarantees that two racing claimants cannot
 both win, and guarantees nothing about who either of them really is.
 
+Whatever a request's `actor` is, it is the one value every events-journal
+record the request causes carries (`GET /v0/beads/events`, `events.watch`): the
+request's own record and the derived `is_blocked` updates its mutation
+journals for its subject, dependents and descendants alike — including those
+the post-commit blocked recheck writes. So a deployment that puts a verifying
+gateway in front of this surface and overwrites the body's `actor` with the
+caller's verified subject gets that subject on every record of the change,
+derived ones included, from the same source, and never a caller-supplied
+value. A record carries no `actor` only when no actor is behind it: no request
+at all (a pull's or merge's recompute, `bd recompute-blocked`,
+`bd doctor --fix`, the Decay-phase deletes of `bd gc` outside proxied-server
+mode, `bd repo remove`); a request that named none (a `delete` or `sweep` sent
+without `actor`, which both accept); a delete made through a storage delete
+call that takes no actor (a local `bd mol burn` or `bd mol squash`, or
+`bd cook`'s proto delete), with the `dep_remove` and derived `update` records
+it causes; or a post-commit recheck that settles writes by different actors in
+one transaction, which names no one rather than one of them. This is not a
+wire-shape change: `actor` was already an optional member of every record, so
+`wire_revision` does not move.
+
 ## No hooks
 
 Hooks do not fire on any write over this surface. A CLI claim runs `on_update`;

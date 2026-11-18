@@ -55,7 +55,10 @@ func TestServedConfigWriteAnswersTheReadThatFollowsIt(t *testing.T) {
 	ctx := t.Context()
 	settings := servedSettings(t, e)
 
-	const secretKey = "notion.token"
+	// A credential-named key OUTSIDE the config.yaml-only set. The tracker
+	// secrets (notion.token, github.token, ...) are yaml-only and never become
+	// rows (#7559); that half is the arm at the end.
+	const secretKey = "custom.hcfgw1-token"
 	const secret = "shhh-real-secret"
 	res, err := settings.SetSetting(ctx, issueops.SetSettingRequest{Key: secretKey, Value: secret})
 	if err != nil {
@@ -101,6 +104,29 @@ func TestServedConfigWriteAnswersTheReadThatFollowsIt(t *testing.T) {
 	got, err := settings.GetSetting(ctx, issueops.GetSettingRequest{Key: plainKey})
 	if err != nil || got.Value != plain {
 		t.Errorf("GetSetting after the write = (%q, %v), want (%q, nil)", got.Value, err, plain)
+	}
+
+	// A config.yaml-only key is REFUSED, not withheld (#7559): this table is
+	// replicated by bd dolt push, so a tracker secret must never become a row.
+	// Read RAW afterwards, past the wire, so a refusal that still wrote fails.
+	const yamlOnlyKey = "notion.token"
+	if _, err := settings.SetSetting(ctx, issueops.SetSettingRequest{Key: yamlOnlyKey, Value: secret}); !errors.Is(err, issueops.ErrValidation) {
+		t.Errorf("SetSetting(%s) = %v, want ErrValidation: a config.yaml-only key is never stored here", yamlOnlyKey, err)
+	}
+	if stored, err := e.reference.GetConfig(ctx, yamlOnlyKey); err != nil || stored != "" {
+		t.Errorf("after the refused write the workspace holds (%q, %v) under %s, want no row", stored, err, yamlOnlyKey)
+	}
+
+	// A row an OLDER bd or server stored stays removable through this door:
+	// the refusal is on the write only, and removing the row is the repair.
+	if err := e.setConfig(ctx, yamlOnlyKey, "legacy-leaked-secret"); err != nil {
+		t.Fatalf("seed a legacy %s row on the reference store: %v", yamlOnlyKey, err)
+	}
+	if _, err := settings.UnsetSetting(ctx, issueops.UnsetSettingRequest{Key: yamlOnlyKey}); err != nil {
+		t.Errorf("UnsetSetting(%s) = %v, want the legacy row removed", yamlOnlyKey, err)
+	}
+	if stored, err := e.reference.GetConfig(ctx, yamlOnlyKey); err != nil || stored != "" {
+		t.Errorf("after UnsetSetting the workspace still holds (%q, %v) under %s, want no row", stored, err, yamlOnlyKey)
 	}
 }
 
