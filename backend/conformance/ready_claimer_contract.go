@@ -904,6 +904,107 @@ func readyClaimerEdgesTo(t *testing.T, ctx context.Context, fixture ReadyClaimer
 	return rows
 }
 
+// RunReadyClaimerExcludeParentsSkipsContainersItWouldOtherwiseClaim pins
+// ReadyRequest.ExcludeParentsWithOpenChildren on the claim and the page it
+// mirrors (GH#6817): a container sorted ahead of the ready leaves is the first
+// row without the flag, and with it the page starts at the first leaf, the
+// unbounded answer is the leaves alone, and the claim takes that same first
+// leaf while the container is left exactly as it was. When only containers
+// match, the claim is the ordinary empty result and writes nothing to them.
+//
+// The children carry no scope label and sit behind an open blocker, so the
+// container's exclusion comes from the edge and not from a ready child.
+func RunReadyClaimerExcludeParentsSkipsContainersItWouldOtherwiseClaim(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture) {
+	t.Helper()
+	label := fixture.IssuePrefix + "-rcxp"
+	container := fixture.IssuePrefix + "-rcxp-container"
+	child := fixture.IssuePrefix + "-rcxp-child"
+	blocker := fixture.IssuePrefix + "-rcxp-blocker"
+	first := fixture.IssuePrefix + "-rcxp-first"
+	second := fixture.IssuePrefix + "-rcxp-second"
+
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(container, 0, label))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(child, 0))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(blocker, 0, label+"-blocker"))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(first, 1, label))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(second, 2, label))
+	if err := fixture.AddDependency(ctx, &types.Dependency{IssueID: child, DependsOnID: container, Type: types.DepParentChild}, "seed"); err != nil {
+		t.Fatalf("seed parent-child edge %s -> %s: %v", child, container, err)
+	}
+	seedReadyClaimerEdge(t, ctx, fixture, child, blocker)
+
+	request := publicops.ReadyRequest{Labels: []string{label}, Sort: readyClaimerSort, Limit: readerLimit(1)}
+	page, err := fixture.Reader.Ready(ctx, request)
+	if err != nil {
+		t.Fatalf("Ready (flag off, limit 1): %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready (flag off, limit 1)", page, []string{container})
+
+	request.ExcludeParentsWithOpenChildren = true
+	page, err = fixture.Reader.Ready(ctx, request)
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents (limit 1): %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready --exclude-parents (limit 1)", page, []string{first})
+	if !page.HasMore {
+		t.Errorf("Ready --exclude-parents (limit 1) HasMore = false, want true: %s is still behind the page", second)
+	}
+
+	request.Limit = readerLimit(0)
+	page, err = fixture.Reader.Ready(ctx, request)
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents (unbounded): %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready --exclude-parents (unbounded)", page, []string{first, second})
+
+	result, err := fixture.Claimer.ClaimNext(ctx, publicops.ClaimNextRequest{
+		Actor: "claimer",
+		Filter: publicops.ReadyRequest{
+			Labels: []string{label}, Sort: readyClaimerSort, ExcludeParentsWithOpenChildren: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ClaimNext --exclude-parents: %v", err)
+	}
+	if result.Claimed == nil || result.Claimed.ID != first {
+		got := "<nil>"
+		if result.Claimed != nil {
+			got = result.Claimed.ID
+		}
+		t.Fatalf("ClaimNext --exclude-parents claimed %s, want %s — the first row of the filtered page", got, first)
+	}
+	assertReadyClaimerRowState(t, ctx, fixture, first, string(types.StatusInProgress), "claimer")
+	assertReadyClaimerRowState(t, ctx, fixture, container, string(types.StatusOpen), "")
+	assertReadyClaimerRowState(t, ctx, fixture, second, string(types.StatusOpen), "")
+
+	// Only containers left in scope: the claim finds nothing and writes nothing.
+	onlyLabel := fixture.IssuePrefix + "-rcxp-only"
+	onlyContainer := fixture.IssuePrefix + "-rcxp-only-container"
+	onlyChild := fixture.IssuePrefix + "-rcxp-only-child"
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(onlyContainer, 0, onlyLabel))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(onlyChild, 0))
+	if err := fixture.AddDependency(ctx, &types.Dependency{IssueID: onlyChild, DependsOnID: onlyContainer, Type: types.DepParentChild}, "seed"); err != nil {
+		t.Fatalf("seed parent-child edge %s -> %s: %v", onlyChild, onlyContainer, err)
+	}
+	seedReadyClaimerEdge(t, ctx, fixture, onlyChild, blocker)
+
+	before := readyClaimerHistoryCount(t, ctx, fixture)
+	result, err = fixture.Claimer.ClaimNext(ctx, publicops.ClaimNextRequest{
+		Actor: "claimer",
+		Filter: publicops.ReadyRequest{
+			Labels: []string{onlyLabel}, Sort: readyClaimerSort, ExcludeParentsWithOpenChildren: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ClaimNext --exclude-parents over containers only: error = %v, want nil", err)
+	}
+	if result.Claimed != nil {
+		t.Fatalf("ClaimNext --exclude-parents over containers only claimed %s, want nil", result.Claimed.ID)
+	}
+	assertReadyClaimerRowState(t, ctx, fixture, onlyContainer, string(types.StatusOpen), "")
+	assertReadyClaimerHistoryDelta(t, ctx, fixture, before, 0, "a flagged claim that found only containers")
+}
+
 // readyClaimerSort is the order every case names. It is the policy whose SQL is
 // a plain "ORDER BY priority, created_at, id", so a seed with distinct
 // priorities has one unambiguous front row — hybrid's recency bucket would make

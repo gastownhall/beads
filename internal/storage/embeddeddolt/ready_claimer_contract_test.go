@@ -68,6 +68,12 @@ func TestEmbeddedReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t *t
 	conformance.RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t, ctx, newEmbeddedReadyClaimerFixture(t, "rccount"))
 }
 
+func TestEmbeddedReadyClaimerExcludeParentsSkipsContainersItWouldOtherwiseClaim(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReadyClaimerExcludeParentsSkipsContainersItWouldOtherwiseClaim(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcxp"))
+}
+
 func TestEmbeddedReadyClaimerRecordsOneHistoryEntryForAWin(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

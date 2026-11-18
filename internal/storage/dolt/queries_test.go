@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -3687,5 +3688,101 @@ func TestGetReadyWork_ParentWithOnlyUnreadyChildrenIsNotReady(t *testing.T) {
 	}
 	if ready = readySet(t, excluding); !ready["rc-parent"] {
 		t.Errorf("rc-parent must be ready again once its last open child closed; ready=%v", ready)
+	}
+}
+
+// TestGetReadyWork_ExcludeParentsPagesCountsAndTotals pins the classic store's
+// limit-bounded page, total and count under ExcludeParentsWithOpenChildren (GH#6817): with
+// two containers sorted ahead of three ready leaves, every page is cut from
+// the filtered set and both totals size that set, so neither a page short of
+// its limit nor a total that still counts the containers can pass. The
+// containers' children are one durable and one wisp, so both families feed
+// the probe the total and the count share.
+func TestGetReadyWork_ExcludeParentsPagesCountsAndTotals(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, iss := range []*types.Issue{
+		{ID: "pg-container-a", Title: "Container A", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeEpic},
+		{ID: "pg-container-b", Title: "Container B", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeEpic},
+		{ID: "pg-child-a", Title: "Child A", Status: types.StatusPinned, Priority: 0, IssueType: types.TypeTask},
+		{ID: "pg-child-b", Title: "Child B", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeTask, Ephemeral: true},
+		{ID: "pg-leaf-1", Title: "Leaf 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "pg-leaf-2", Title: "Leaf 2", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "pg-leaf-3", Title: "Leaf 3", Status: types.StatusOpen, Priority: 3, IssueType: types.TypeTask},
+	} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", iss.ID, err)
+		}
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: "pg-child-a", DependsOnID: "pg-container-a", Type: types.DepParentChild},
+		{IssueID: "pg-child-b", DependsOnID: "pg-container-b", Type: types.DepParentChild},
+	} {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("add dep %s->%s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+
+	ids := func(rows []*types.IssueWithCounts) []string {
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, row.ID)
+		}
+		return out
+	}
+	base := types.WorkFilter{SortPolicy: types.SortPolicyPriority, ExcludeParentsWithOpenChildren: true}
+
+	// Baseline: without the flag the containers are the front of the order and
+	// both are counted.
+	unflagged := base
+	unflagged.ExcludeParentsWithOpenChildren = false
+	unflagged.Limit = 2
+	page, total, err := store.GetReadyWorkWithCountsAndTotal(ctx, unflagged)
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCountsAndTotal (flag off): %v", err)
+	}
+	if got := ids(page); !slices.Equal(got, []string{"pg-container-a", "pg-container-b"}) || total != 5 {
+		t.Fatalf("flag off: page %v total %d, want the two containers and 5", got, total)
+	}
+
+	for _, test := range []struct {
+		limit, offset int
+		want          []string
+	}{
+		{limit: 2, offset: 0, want: []string{"pg-leaf-1", "pg-leaf-2"}},
+		{limit: 1, offset: 0, want: []string{"pg-leaf-1"}},
+		{limit: 0, offset: 0, want: []string{"pg-leaf-1", "pg-leaf-2", "pg-leaf-3"}},
+	} {
+		filter := base
+		filter.Limit, filter.Offset = test.limit, test.offset
+		page, total, err := store.GetReadyWorkWithCountsAndTotal(ctx, filter)
+		if err != nil {
+			t.Fatalf("GetReadyWorkWithCountsAndTotal(limit %d, offset %d): %v", test.limit, test.offset, err)
+		}
+		if got := ids(page); !slices.Equal(got, test.want) {
+			t.Errorf("page (limit %d, offset %d) = %v, want %v", test.limit, test.offset, got, test.want)
+		}
+		if total != 3 {
+			t.Errorf("total (limit %d, offset %d) = %d, want 3 — the filtered set", test.limit, test.offset, total)
+		}
+		withCounts, err := store.GetReadyWorkWithCounts(ctx, filter)
+		if err != nil {
+			t.Fatalf("GetReadyWorkWithCounts(limit %d, offset %d): %v", test.limit, test.offset, err)
+		}
+		if got := ids(withCounts); !slices.Equal(got, test.want) {
+			t.Errorf("GetReadyWorkWithCounts (limit %d, offset %d) = %v, want %v", test.limit, test.offset, got, test.want)
+		}
+	}
+
+	count, err := store.CountReadyWork(ctx, base)
+	if err != nil {
+		t.Fatalf("CountReadyWork: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("CountReadyWork = %d, want 3 — the filtered set", count)
 	}
 }
