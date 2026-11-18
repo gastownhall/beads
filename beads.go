@@ -85,6 +85,27 @@ var ErrUserAgentWithoutOpenWith = backends.ErrUserAgentWithoutOpenWith
 // outside this module cannot import internal/storage/backends directly.
 var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
 
+// ErrProxiedServerWorkspace is returned (wrapped) by OpenBestAvailable and
+// OpenBestAvailableWith when the workspace's metadata.json sets dolt_mode to
+// proxied-server. A proxied workspace's live data is served by the proxy's
+// sql-server from its own root; neither the embedded engine nor a direct
+// server connection opened by this package is that store, and an embedded
+// open would instead create, or read a stale copy of, a separate database
+// at .beads/embeddeddolt. Classify it with errors.Is. The refusal happens
+// before any storage is opened or created. Earlier refusals (unsupported or
+// removed backend, unreadable metadata, and an unsupported per-open
+// Credential, HTTPClient or UserAgent) keep their precedence and are
+// returned instead of this one.
+var ErrProxiedServerWorkspace = errors.New("beads: proxied-server workspace cannot be opened as a direct store")
+
+// proxiedServerWorkspaceError is the shared OpenBestAvailableWith refusal for a
+// proxied-server workspace, used by both the cgo and non-cgo builds so the two
+// copies cannot drift.
+func proxiedServerWorkspaceError(beadsDir string) error {
+	return fmt.Errorf("%w: %q sets dolt_mode %q, whose data only the proxy's sql-server serves; %s; use the bd CLI for this workspace instead",
+		ErrProxiedServerWorkspace, configfile.MetadataFilePath(beadsDir), configfile.DoltModeProxiedServer, configfile.BackendNotOpenedGuarantee)
+}
+
 // configuredBackendUnavailable is the public open path's fail-closed refusal for
 // metadata naming a removed or unrecognized backend. beadsDir and cfg let the
 // refusal detect an already-present Dolt database and name the exact

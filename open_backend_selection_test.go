@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
@@ -716,6 +717,90 @@ func TestPublicOpensRefuseHistoricalSQLiteWorkspace(t *testing.T) {
 				}
 				if store != nil {
 					t.Fatalf("%s returned a non-nil %T with its refusal", name, store)
+				}
+			})
+		}
+	}
+}
+
+// proxiedOpens are the two best-available entry points bd-wrm8e6 (GH#6655)
+// guards, each called with zero per-open options.
+var proxiedOpens = map[string]func(context.Context, string) (beads.Storage, error){
+	"OpenBestAvailable": beads.OpenBestAvailable,
+	"OpenBestAvailableWith": func(ctx context.Context, beadsDir string) (beads.Storage, error) {
+		return beads.OpenBestAvailableWith(ctx, beadsDir, beads.OpenOptions{})
+	},
+}
+
+// proxiedServerBeadsDir writes metadata.json naming the Dolt backend in
+// proxied-server mode, spelled as given, under a fresh temp root it returns
+// alongside the .beads path. It clears the environment overrides that force
+// direct-server mode, pins any dial to a port nobody listens on, and turns
+// auto-start off, so a missing refusal fails fast instead of reaching
+// TestMain's shared test server or launching one.
+func proxiedServerBeadsDir(t *testing.T, mode string) (root, beadsDir string) {
+	t.Helper()
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	root = t.TempDir()
+	beadsDir = filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	metadata := `{"backend":"dolt","database":"dolt","dolt_mode":"` + mode + `"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	return root, beadsDir
+}
+
+// assertProxiedRefusal fails unless an open returned no store and the typed
+// proxied-server refusal. A store returned anyway is closed.
+func assertProxiedRefusal(t *testing.T, name string, store beads.Storage, err error) {
+	t.Helper()
+	if store != nil {
+		_ = store.Close()
+		t.Errorf("%s returned a store for a proxied-server workspace", name)
+	}
+	if !errors.Is(err, beads.ErrProxiedServerWorkspace) {
+		t.Fatalf("%s error = %v, want errors.Is ErrProxiedServerWorkspace", name, err)
+	}
+}
+
+// TestOpenBestAvailableRefusesProxiedServerWorkspace pins bd-wrm8e6 (GH#6655):
+// a proxied-server workspace keeps its live data in the proxy's sql-server
+// root, so neither an embedded nor a direct open can serve it. Both
+// best-available APIs must refuse with a typed error rather than fall through
+// to embeddeddolt.Open, which creates (or reads a stale) separate database at
+// .beads/embeddeddolt and returns it as real, or, without CGO, to a misleading
+// CGO-required error. The mode is matched case-insensitively, as
+// configfile.IsDoltProxiedServerMode does.
+func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
+	for _, mode := range []string{"proxied-server", "Proxied-Server"} {
+		for name, open := range proxiedOpens {
+			t.Run(mode+"/"+name, func(t *testing.T) {
+				_, beadsDir := proxiedServerBeadsDir(t, mode)
+
+				store, err := open(context.Background(), beadsDir)
+				assertProxiedRefusal(t, name, store, err)
+				msg := err.Error()
+				for _, want := range []string{
+					"proxied-server",
+					strconv.Quote(filepath.Join(beadsDir, "metadata.json")),
+					configfile.BackendNotOpenedGuarantee,
+					"bd CLI",
+				} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("%s refusal %q does not mention %q", name, msg, want)
+					}
+				}
+				embedded := filepath.Join(beadsDir, "embeddeddolt")
+				if _, statErr := os.Stat(embedded); !os.IsNotExist(statErr) {
+					t.Errorf("%s on a proxied-server workspace created %s (stat error: %v)", name, embedded, statErr)
 				}
 			})
 		}

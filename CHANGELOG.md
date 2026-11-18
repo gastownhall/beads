@@ -1431,6 +1431,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`beads.OpenBestAvailable` and `OpenBestAvailableWith` refuse a
+  proxied-server workspace** (#6655). Neither had a proxied-server arm, so with
+  CGO an embedder's call on a workspace whose `metadata.json` sets
+  `dolt_mode: proxied-server` silently opened a separate database at
+  `.beads/embeddeddolt`. That database was created empty, or was stale data
+  left from when the workspace was embedded, never the data the proxy serves.
+  Both calls now return a nil store and an error that matches the new
+  `beads.ErrProxiedServerWorkspace` with `errors.Is`, before any storage is
+  opened or created, also when `BEADS_DOLT_SERVER_MODE` or
+  `BEADS_DOLT_SHARED_SERVER` forces server mode. Earlier refusals (unsupported
+  backend, unsupported per-open options) keep their own errors.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
