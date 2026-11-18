@@ -1302,6 +1302,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A proxied-server spawn timeout no longer SIGKILLs the proxy child
+  outright, and the unrecorded `dolt sql-server` it could leave behind is
+  reaped** (#8489, reported by @piontec). Both spawn-timeout paths went
+  straight to `Process.Kill`, so the child's SIGTERM shutdown handler never
+  ran, and a kill landing in the window between starting `dolt` and writing
+  its pid record left a live `dolt sql-server` that no record named: it held
+  the database lock, every later `bd` command spawned a proxy whose backend
+  died with `database "dolt" is locked by another dolt process`, and nothing
+  reaped the orphan (about 1250 proxy restarts an hour in the report). The
+  child now gets SIGTERM first and a 5 s grace before any SIGKILL (on
+  Windows, which has no graceful form for the detached child, the kill is
+  immediate), and when no live backend record exists, backend cleanup reads
+  dolt's own `<root>/.dolt/sql-server.info` and stops the pid it names —
+  only after proving, through one held process handle, that it is a `dolt`
+  whose command line names one of this root's bd-owned configs (the current
+  launch or runtime config, or the `<root>/config.yaml` bd 1.3.x launched
+  with, so an upgraded bd also heals storms older versions left behind). On
+  any doubt no signal is sent; on Linux and macOS a fully verified orphan is
+  killed and its exit confirmed.
+
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that

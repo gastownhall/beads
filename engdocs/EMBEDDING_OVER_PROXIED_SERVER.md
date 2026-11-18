@@ -87,6 +87,13 @@ Two topologies share this machinery: **managed-local**, where bd spawns the
 `dolt sql-server` somebody else runs. They differ in several of the surfaces
 below, and the difference is usually the part an embedder gets wrong.
 
+A managed-local backend the pid records do not name — a `dolt sql-server`
+orphaned by a kill inside the spawn window (#8489) — is reaped on the next
+start only through a full identity match on dolt's own
+`<root>/.dolt/sql-server.info`: the pid it names must prove, through one held
+process handle, to be a `dolt` whose command line names one of this root's
+bd-owned configs; on any doubt no signal is sent.
+
 ---
 
 ## 1. The `proxy.pid` record
