@@ -434,13 +434,16 @@ missing from the server, or the server unreachable:
 | Data dir present, database directory absent | Present | This refusal | This refusal |
 | Data dir present, database directory absent | Absent | Refused as already initialized, not by this guard | This refusal |
 | No Dolt data dir | Present | This refusal | This refusal |
-| No Dolt data dir | Absent | Proceeds, as for a fresh clone | Proceeds, as for a fresh clone |
+| No Dolt data dir | Absent | Proceeds, as for a fresh clone | Not this guard; the destroy confirmation asks (count unknown) unless `--recreate-missing` is set and the reachable server reports the database absent |
 
 Adding `--recreate-missing` lifts every refusal in the last four rows,
 including the third row's "already initialized". It changes nothing in the
-first row, where this project's database is still on local disk. In
-shared-server mode the data dir is machine-global (see below), so the last two
-rows rarely apply there.
+first row, where this project's database is still on local disk. It spares
+`--reinit-local` / `--force` the destroy confirmation only where the reachable
+server reports the database absent: with the server unreachable, the issues
+cannot be counted and that confirmation still asks. In shared-server mode the
+data dir is machine-global (see below), so the last two rows rarely apply
+there.
 
 - `project_id` is also inherited by a **fresh clone**, because
   `.beads/metadata.json` is git-tracked by default. Cloning a beads-managed

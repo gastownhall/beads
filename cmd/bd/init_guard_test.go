@@ -1198,10 +1198,12 @@ func TestInitGuard_ReinitLocal_NoProjectID_DataDirPresent_StillBlocks(t *testing
 }
 
 // TestInitGuard_ReinitLocal_NoProjectID_NoDataDir_Allows is the positive
-// control: with nothing local at all, this really is a fresh clone and
-// --reinit-local must still work. It pins the coarse-directory permit
-// condition, so the fix above cannot be over-applied into refusing every
-// pre-GH#2372 workspace.
+// control: with nothing local at all, this really is a fresh clone and this
+// guard must permit --reinit-local. It pins only the guard's coarse-directory
+// permit condition, so the fix above cannot be over-applied into refusing
+// every pre-GH#2372 workspace. The destroy confirmation that follows is not
+// this guard's: countReinitTargetIssues asks there unless --recreate-missing
+// is set and the reachable server reports the database absent.
 func TestInitGuard_ReinitLocal_NoProjectID_NoDataDir_Allows(t *testing.T) {
 	oldServerMode := serverMode
 	serverMode = true

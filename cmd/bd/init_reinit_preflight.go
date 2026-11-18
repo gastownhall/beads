@@ -50,13 +50,14 @@ func reinitTargetDatabase(beadsDir, prefix, database string) string {
 // which is not evidence that there are none.
 //
 // It counts zero only on positive evidence that there is nothing to destroy:
-// no .beads, one without beads project files (settled without opening a
-// store, so nothing is created before the confirmation), a database that
-// counts no issues, or, under --recreate-missing, a server-mode database the
-// open reports absent (reinitTargetDatabaseAbsent). A store that reports no
-// statistics has counted nothing, so that is an error too, and so is a store
-// that opens another database than dbName (reinitStoreOpensTarget): what it
-// counts, zero included, says nothing about dbName.
+// no .beads, one holding nothing that names a store
+// (reinitTargetHasProjectFiles; settled without opening a store, so nothing
+// is created before the confirmation), a database that counts no issues, or,
+// under --recreate-missing, a server-mode database the open reports absent
+// (reinitTargetDatabaseAbsent). A store that reports no statistics has
+// counted nothing, so that is an error too, and so is a store that opens
+// another database than dbName (reinitStoreOpensTarget): what it counts, zero
+// included, says nothing about dbName.
 //
 // Without --recreate-missing the open's not-found is an error as well. It
 // says only that the server this open dialed by the workspace's
@@ -81,7 +82,7 @@ func countReinitTargetIssues(beadsDir, dbName string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if !info.IsDir() || !beads.HasProjectFiles(beadsDir) {
+	if !info.IsDir() || !reinitTargetHasProjectFiles(beadsDir) {
 		return 0, nil
 	}
 	if err := reinitStoreOpensTarget(beadsDir, dbName); err != nil {
@@ -108,6 +109,21 @@ func countReinitTargetIssues(beadsDir, dbName string) (int, error) {
 		return 0, errors.New("the store reported no issue statistics")
 	}
 	return stats.TotalIssues, nil
+}
+
+// reinitTargetHasProjectFiles reports whether beadsDir holds anything that
+// names a store a re-initialization could destroy: beads project files
+// (beads.HasProjectFiles), or a legacy config.json. HasProjectFiles decides
+// discovery and does not count config.json, but the store the count opens
+// reads it as it reads metadata.json (configfile.Load migrates it,
+// LoadForDiscovery reads it in place), so it can name a populated server
+// database. A config.json that cannot be shown not to exist counts.
+func reinitTargetHasProjectFiles(beadsDir string) bool {
+	if beads.HasProjectFiles(beadsDir) {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(beadsDir, configfile.LegacyConfigFileName))
+	return !os.IsNotExist(err)
 }
 
 // reinitStoreOpensTarget returns an error unless the store the count opens for

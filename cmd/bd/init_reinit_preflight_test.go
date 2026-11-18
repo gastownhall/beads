@@ -459,6 +459,64 @@ func TestCountReinitTargetIssues(t *testing.T) {
 			t.Errorf("want the count to open the store once, got %d", *opened)
 		}
 	})
+
+	// A .beads holding only a legacy config.json has no file discovery's
+	// beads.HasProjectFiles counts, but its store reads config.json as it
+	// reads metadata.json, so that file can name a populated server database.
+	legacyConfigOnly := func(t *testing.T, data []byte) (beadsDir string, opened *int) {
+		t.Helper()
+		beadsDir = filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, configfile.LegacyConfigFileName), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+		opened = new(int)
+		orig := openReinitTarget
+		openReinitTarget = func(context.Context, string) (storage.DoltStorage, error) {
+			*opened++
+			return reinitStatsStore{stats: &types.Statistics{TotalIssues: 3}}, nil
+		}
+		t.Cleanup(func() { openReinitTarget = orig })
+		return beadsDir, opened
+	}
+
+	t.Run("a .beads holding only a legacy config.json counts the database it names through its store", func(t *testing.T) {
+		beadsDir, opened := legacyConfigOnly(t, serverMetadata)
+		count, err := countReinitTargetIssues(beadsDir, "myproject")
+		if err != nil || count != 3 {
+			t.Fatalf("want 3, nil: a legacy config.json names a store, so the target is not empty; got %d, %v", count, err)
+		}
+		if *opened != 1 {
+			t.Errorf("want the count to open the store once, got %d", *opened)
+		}
+	})
+
+	t.Run("a .beads holding only a legacy config.json is an error for another database, before any open", func(t *testing.T) {
+		beadsDir, opened := legacyConfigOnly(t, unnamedServerMetadata)
+		count, err := countReinitTargetIssues(beadsDir, "myproject")
+		if err == nil {
+			t.Fatalf("want an error: the store opens beads, not myproject, the database init replaces; got %d, nil", count)
+		}
+		if !strings.Contains(err.Error(), `opens database "beads", but re-initializing replaces database "myproject"`) {
+			t.Errorf("the error must name the database the store opens and the one init replaces, got: %v", err)
+		}
+		if *opened != 0 {
+			t.Errorf("the count opened the store %d time(s); a name it cannot count must be settled before the open creates anything", *opened)
+		}
+	})
+
+	t.Run("an unparseable legacy config.json is an error", func(t *testing.T) {
+		beadsDir, opened := legacyConfigOnly(t, []byte("{not json"))
+		if count, err := countReinitTargetIssues(beadsDir, "myproject"); err == nil {
+			t.Fatalf("want an error for an unloadable config.json, got %d, nil", count)
+		}
+		if *opened != 0 {
+			t.Errorf("the count opened the store %d time(s) for a config it cannot read", *opened)
+		}
+	})
 }
 
 // reinitStatsStore is a store the count opens: it answers GetStatistics with
@@ -1024,6 +1082,53 @@ func TestRunInitReinitPreflight_UnnamedDatabaseNeedsTheToken(t *testing.T) {
 				t.Fatalf("the destroy token must authorize the re-initialization, got %v\n%s", err, out)
 			}
 		})
+	}
+}
+
+// TestRunInitReinitPreflight_LegacyConfigJSONNeedsTheToken pins that a target
+// holding only a legacy config.json is not taken for one with nothing to
+// destroy. beads.HasProjectFiles, which decides discovery, does not count
+// config.json, but the store the count opens reads it as it reads
+// metadata.json, so it can name a populated server database: without a
+// terminal the preflight refuses without the destroy token, and accepts it.
+func TestRunInitReinitPreflight_LegacyConfigJSONNeedsTheToken(t *testing.T) {
+	for _, name := range []string{"BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_DATA_DIR"} {
+		t.Setenv(name, "")
+	}
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"myproject","project_id":"existing-0000-1111-2222-333344445555"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, configfile.LegacyConfigFileName), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orig := openReinitTarget
+	openReinitTarget = func(context.Context, string) (storage.DoltStorage, error) {
+		return reinitStatsStore{stats: &types.Statistics{TotalIssues: 5}}, nil
+	}
+	t.Cleanup(func() { openReinitTarget = orig })
+
+	dbName := reinitTargetDatabase(beadsDir, "proj", "")
+	if dbName != "myproject" {
+		t.Fatalf("precondition: init replaces %q, want config.json's dolt_database myproject", dbName)
+	}
+	var err error
+	out := captureStderr(t, func() {
+		err = runInitReinitPreflight(true, true, beadsDir, dbName, "proj", "")
+	})
+	requireExitCode(t, err, ExitDestroyTokenMissing)
+	for _, want := range []string{"Target: " + beadsDir, "Existing issues: 5", "Refusing to destroy 5 issues"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q, got:\n%s", want, out)
+		}
+	}
+
+	out = captureStderr(t, func() {
+		err = runInitReinitPreflight(true, true, beadsDir, dbName, "proj", FormatDestroyToken("proj"))
+	})
+	if err != nil {
+		t.Fatalf("the destroy token must authorize the re-initialization, got %v\n%s", err, out)
 	}
 }
 
