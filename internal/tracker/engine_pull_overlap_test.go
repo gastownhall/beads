@@ -247,7 +247,9 @@ func TestEnginePullOverlapHydratesPrelinkedStub(t *testing.T) {
 		CreatedAt:   overlapLastSync.Add(-time.Hour),
 		UpdatedAt:   overlapLastSync.Add(10 * time.Second),
 	}
-	store := newOverlapStore(stub) // created before last_sync, no ref at it: linked after it
+	store := newOverlapStore(stub)
+	// created before last_sync, no ref at it (a NULL historical ref): linked after it
+	store.previousRefs[stub.ID] = ""
 	mock, _ := newOverlapTracker(TrackerIssue{
 		ID:          "EXT-1",
 		Identifier:  "EXT-1",
