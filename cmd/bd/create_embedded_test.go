@@ -840,6 +840,48 @@ func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
 	}
 }
 
+// TestEmbeddedUpgradeAckConsumesVersionMarker pins the bd upgrade ack half of
+// GH#6669's scope: status and review stopped consuming .local_version, but ack
+// keeps the store-backed root hook, so a successful ack still records the
+// running version and a following status reports no upgrade.
+func TestEmbeddedUpgradeAckConsumesVersionMarker(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "uak")
+
+	localVersionPath := filepath.Join(beadsDir, localVersionFile)
+	if err := os.WriteFile(localVersionPath, []byte("0.9.0\n"), 0o600); err != nil {
+		t.Fatalf("write old local version: %v", err)
+	}
+
+	ack := exec.Command(bd, "upgrade", "ack", "--json")
+	ack.Dir = dir
+	ack.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, ack)
+	if err != nil {
+		t.Fatalf("bd upgrade ack failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var acked struct {
+		Acknowledged bool `json:"acknowledged"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &acked); err != nil || !acked.Acknowledged {
+		t.Fatalf("bd upgrade ack --json (err=%v): %s", err, stdout.String())
+	}
+
+	current := embeddedBDVersion(t, bd, dir)
+	raw, err := os.ReadFile(localVersionPath)
+	if err != nil {
+		t.Fatalf("read local version after ack: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != current {
+		t.Errorf("bd upgrade ack left .local_version at %q; want the running version %q", got, current)
+	}
+
+	got := runEmbeddedUpgradeInspection(t, bd, dir, "status", bdEnv(dir))
+	if got.Upgraded == nil || *got.Upgraded {
+		t.Errorf("bd upgrade status after ack still reports an upgrade: %+v", got)
+	}
+}
+
 // embeddedBDVersion reports the version the bd binary under test was built
 // with, read through the store-free `bd version --json`. Tests that seed
 // .beads/.local_version with "the running version" must use this rather than
