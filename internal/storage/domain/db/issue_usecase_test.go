@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("WispUsesWispPrefix", s.useCaseMintWispPrefix)
 	s.Run("HashModePassesOverTheOtherPlanesIDs", s.useCaseMintPassesOverTheOtherPlane)
 	s.Run("MintPassesOverClaimedIDs", s.useCaseMintPassesOverClaimedIDs)
+	s.Run("WispMintCountsPromotedWisps", s.useCaseMintWispCountsPromotedWisps)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -207,6 +209,62 @@ func (s *testSuite) useCaseMintWispIgnoresCounterMode() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.True(strings.HasPrefix(res.Issue.ID, "ucWcnt-wisp-"), "expected ucWcnt-wisp- prefix, got %q", res.Issue.ID)
+}
+
+// setMaxCollisionProb sets max_collision_prob for one subtest and restores
+// the default after it: subtests of one suite method share state.
+func (s *testSuite) setMaxCollisionProb(value string) {
+	r := NewConfigSQLRepository(s.Runner())
+	s.Require().NoError(r.SetConfig(s.Ctx(), "max_collision_prob", value))
+	s.T().Cleanup(func() {
+		_ = r.SetConfig(context.Background(), "max_collision_prob", "")
+	})
+}
+
+// seedMintRows inserts one row per id straight through the repository, into
+// wisps when wisps is set. Seeded IDs carry two-character suffixes, so no
+// mint at length 3 or more collides with one: a longer hash is adaptive
+// growth, never a collision retry.
+func (s *testSuite) seedMintRows(ids []string, wisps bool) {
+	r := NewIssueSQLRepository(s.Runner())
+	for _, id := range ids {
+		row := &types.Issue{ID: id, Title: "seeded " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: wisps}
+		s.Require().NoError(r.Insert(s.Ctx(), row, "seeder", domain.InsertIssueOpts{UseWispsTable: wisps}), "seed %s", id)
+	}
+}
+
+// mintIDs returns base0..base(n-1).
+func mintIDs(base string, n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("%s%d", base, i)
+	}
+	return ids
+}
+
+// assertMintedHashLen checks id is prefix-<hash> with a wantLen-char hash.
+func (s *testSuite) assertMintedHashLen(id, prefix string, wantLen int) {
+	hash, ok := strings.CutPrefix(id, prefix+"-")
+	s.Require().True(ok && !strings.ContainsAny(hash, "-."), "minted %q, want %s-<hash>", id, prefix)
+	s.Len(hash, wantLen, "minted %q", id)
+}
+
+// useCaseMintWispCountsPromotedWisps: the proxied wisp mint sizes its hash
+// from the wisps in its namespace plus the promoted ones that kept their
+// <prefix>-wisp-* IDs in issues (bd-u9cfx0). 5 + 5 = 10 rows give length 4
+// at 0.001; the wisps alone would give 3.
+func (s *testSuite) useCaseMintWispCountsPromotedWisps() {
+	s.resetMintConfig("ucPw", "")
+	s.setMaxCollisionProb("0.001")
+	uc := s.issueUseCase()
+	s.seedMintRows(mintIDs("ucPw-wisp-a", 5), true)
+	s.seedMintRows(mintIDs("ucPw-wisp-b", 5), false)
+
+	res, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "fresh wisp", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+	}, "tester")
+	s.Require().NoError(err)
+	s.assertMintedHashLen(res.Issue.ID, "ucPw-wisp", 4)
 }
 
 func (s *testSuite) useCaseMintRespectsPrefixOverride() {

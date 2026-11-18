@@ -572,17 +572,60 @@ func SeedCounterFromExistingIssuesTx(ctx context.Context, tx DBTX, prefix string
 	return nil
 }
 
-// GetAdaptiveIDLengthTx returns the appropriate hash length based on database size.
+// adaptiveIDSiblingTable maps each live table to the other one: issues and
+// wisps share one ID space.
+var adaptiveIDSiblingTable = map[string]string{"issues": "wisps", "wisps": "issues"}
+
+// AdaptiveIDCountInTx returns the population adaptive hash-ID sizing uses for
+// a new ID under prefix bound for table ("issues" or "wisps"; any other table
+// is refused before any SQL is built).
 //
-//nolint:gosec // G201: table is a hardcoded constant
-func GetAdaptiveIDLengthTx(ctx context.Context, tx DBTX, table, prefix string) (int, error) {
+// Issues and wisps share one ID space: a promoted wisp keeps its
+// <prefix>-wisp-* ID in issues, and a demoted issue keeps its ID in wisps. So
+// the count is the sum of two terms, read in one statement:
+//
+//   - table's own rows under prefix-, excluding dotted children. This is the
+//     long-standing rule and is deliberately unchanged: it still counts
+//     sub-prefixed rows (prefix-wisp-*, prefix-mol-*), so no new ID gets
+//     shorter than it was before the sibling term existed.
+//   - the sibling table's rows in prefix's EXACT namespace: prefix-<suffix>
+//     with no further '-' or '.' in the suffix. Only those can equal a hash
+//     ID minted under prefix, so live prefix-wisp-* wisps do not lengthen
+//     base prefix-<hash> IDs.
+//
+// The asymmetry is intentional (bd-u9cfx0): the sibling term corrects the
+// undercount without letting other namespaces inflate it, and the target
+// term is never narrowed.
+//
+//nolint:gosec // G201: table and sibling are hardcoded constants validated above
+func AdaptiveIDCountInTx(ctx context.Context, tx DBTX, table, prefix string) (int, error) {
+	sibling, ok := adaptiveIDSiblingTable[table]
+	if !ok {
+		return 0, fmt.Errorf("adaptive id count: unknown table %q (want issues or wisps)", table)
+	}
 	var count int
 	err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT COUNT(*)
-		FROM %s
-		WHERE id LIKE CONCAT(?, '-%%')
-		  AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '.') = 0
-	`, table), prefix, prefix).Scan(&count)
+		SELECT
+		  (SELECT COUNT(*) FROM %s
+		   WHERE id LIKE CONCAT(?, '-%%')
+		     AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '.') = 0)
+		  +
+		  (SELECT COUNT(*) FROM %s
+		   WHERE id LIKE CONCAT(?, '-%%')
+		     AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '.') = 0
+		     AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '-') = 0)
+	`, table, sibling), prefix, prefix, prefix, prefix, prefix).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("adaptive id count for prefix %q in %s: %w", prefix, table, err)
+	}
+	return count, nil
+}
+
+// GetAdaptiveIDLengthTx returns the appropriate hash length for a new ID under
+// prefix bound for table, sized from AdaptiveIDCountInTx's population across
+// both live tables.
+func GetAdaptiveIDLengthTx(ctx context.Context, tx DBTX, table, prefix string) (int, error) {
+	count, err := AdaptiveIDCountInTx(ctx, tx, table, prefix)
 	if err != nil {
 		return 6, err
 	}
