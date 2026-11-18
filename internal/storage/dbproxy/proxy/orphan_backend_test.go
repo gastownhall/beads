@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/procid"
@@ -289,4 +290,81 @@ func TestReapUnrecordedBackendLogsRemedyWhenCommandLineUnreadable(t *testing.T) 
 	assert.Contains(t, logs.String(), "stop pid 4242 and retry")
 	assert.Equal(t, 1, strings.Count(logs.String(), "command line cannot be read"),
 		"exactly one remedy line, not a per-needle spill")
+}
+
+// TestReapUnrecordedBackendReportsKillAndExitFailures pins #8489 AC-7: a
+// fully matched orphan whose kill fails, or which has not exited
+// backendExitTimeout after the kill, produces an error naming the pid and
+// the info file.
+func TestReapUnrecordedBackendReportsKillAndExitFailures(t *testing.T) {
+	t.Run("kill fails", func(t *testing.T) {
+		root := t.TempDir()
+		infoPath := writeServerInfo(t, root, 4242)
+		fake := &fakeOrphanCandidate{
+			basename: "dolt",
+			cmdline:  "dolt sql-server --config " + filepath.Join(root, server.LaunchConfigFileName),
+			killErr:  errors.New("permission denied"),
+		}
+		installOrphanCandidate(t, func(int) (orphanCandidate, bool, error) { return fake, false, nil })
+
+		err := reapUnrecordedBackend(root)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "pid 4242")
+		assert.ErrorContains(t, err, infoPath)
+		assert.ErrorContains(t, err, "permission denied")
+	})
+
+	t.Run("exit not confirmed within backendExitTimeout", func(t *testing.T) {
+		root := t.TempDir()
+		infoPath := writeServerInfo(t, root, 4242)
+		fake := &fakeOrphanCandidate{
+			basename: "dolt",
+			cmdline:  "dolt sql-server --config " + filepath.Join(root, server.LaunchConfigFileName),
+			neverExits: true,
+		}
+		installOrphanCandidate(t, func(int) (orphanCandidate, bool, error) { return fake, false, nil })
+		start := time.Now()
+
+		err := reapUnrecordedBackend(root)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "pid 4242")
+		assert.ErrorContains(t, err, infoPath)
+		assert.ErrorContains(t, err, fmt.Sprintf("timeout (%s)", backendExitTimeout))
+		assert.Less(t, time.Since(start), 2*backendExitTimeout, "the exit wait must be bounded by backendExitTimeout")
+	})
+}
+
+// TestSpawnAndHandoffStartsNoChildWhenReapFails pins #8489 AC-7: when the
+// reap of a fully matched orphan fails, spawnAndHandoff propagates the error
+// and never forks a proxy child on top of a live unrecorded backend.
+func TestSpawnAndHandoffStartsNoChildWhenReapFails(t *testing.T) {
+	root := t.TempDir()
+	infoPath := writeServerInfo(t, root, 4242)
+	fake := &fakeOrphanCandidate{
+		basename: "dolt",
+		cmdline:  "dolt sql-server --config " + filepath.Join(root, server.LaunchConfigFileName),
+		killErr:  errors.New("permission denied"),
+	}
+	installOrphanCandidate(t, func(int) (orphanCandidate, bool, error) { return fake, false, nil })
+	previousResolve := ResolveExecutable
+	ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+	t.Cleanup(func() { ResolveExecutable = previousResolve })
+
+	proxyLock, err := util.TryLock(filepath.Join(root, LockFileName))
+	require.NoError(t, err)
+	// spawnAndHandoff takes ownership of the lock and releases it when the
+	// handoff does not happen.
+
+	_, err = spawnAndHandoff(
+		root,
+		externalOpenOpts(root),
+		time.Now().Add(time.Second),
+		"",
+		proxyLock,
+		adoptionResult{status: adoptionNoRecord},
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "pid 4242")
+	assert.ErrorContains(t, err, infoPath)
+	assert.NotContains(t, err.Error(), "spawn reached", "no proxy child may be forked while the orphan cannot be stopped")
 }
