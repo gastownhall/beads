@@ -608,3 +608,18 @@ func TestKillSpawnedChildStillReportsUnconfirmedKill(t *testing.T) {
 		t.Fatal("escalated kill did not stop the TERM-ignoring child")
 	}
 }
+
+// TestShutdownSpawnWaitBudgetCoversEscalatedStop pins #8489 AC-3: Shutdown
+// waiting on a live starter whose timed-out child is inside its SIGTERM grace
+// must not give up on the marker before the starter's own worst case,
+// openDeadline + spawnStopGrace + 2*shutdownConfirmDeadline, and the budget
+// must follow a shortened grace instead of baking in the production one.
+func TestShutdownSpawnWaitBudgetCoversEscalatedStop(t *testing.T) {
+	assert.GreaterOrEqual(t, shutdownSpawnWaitBudget(),
+		openDeadline+spawnStopGrace+2*shutdownConfirmDeadline,
+		"a stop racing a slow start must wait out the starter's escalated stop, not report \"proxy left running\" mid-grace")
+
+	shortenSpawnStopGrace(t, 150*time.Millisecond)
+	assert.Equal(t, openDeadline+150*time.Millisecond+2*shutdownConfirmDeadline, shutdownSpawnWaitBudget(),
+		"the wait budget must be computed from the runtime spawnStopGrace")
+}

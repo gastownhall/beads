@@ -18,18 +18,22 @@ const (
 	shutdownConfirmDeadline = 5 * time.Second
 	shutdownConfirmPoll     = 50 * time.Millisecond
 	shutdownPostKillMinimum = 2 * time.Second
-
-	// shutdownSpawnWaitDeadline bounds how long Shutdown waits for a live
-	// starter's spawn marker. The marker is only treated as active while its
-	// owner's verified identity is alive, and a live starter resolves it
-	// within its own budgets: openDeadline to see the child take proxy.lock
-	// (which clears the marker) or give up, then killSpawnedChild and
-	// clearOwnSpawnMarker, each bounded by shutdownConfirmDeadline. Waiting
-	// that long means a stop racing a slow (loaded, -race, cold-cache) start
-	// stops it instead of reporting "proxy left running" for a start that
-	// is still making progress. A dead owner's marker is removed on sight.
-	shutdownSpawnWaitDeadline = openDeadline + 2*shutdownConfirmDeadline
 )
+
+// shutdownSpawnWaitBudget bounds how long Shutdown waits for a live starter's
+// spawn marker. The marker is only treated as active while its owner's
+// verified identity is alive, and a live starter resolves it within its own
+// budgets: openDeadline to see the child take proxy.lock (which clears the
+// marker) or give up, then killSpawnedChild — a stop request plus
+// spawnStopGrace for a child that ignores it — and clearOwnSpawnMarker, the
+// kill and the clear each bounded by shutdownConfirmDeadline. Waiting that
+// long means a stop racing a slow (loaded, -race, cold-cache) start stops it
+// instead of reporting "proxy left running" for a start that is still making
+// progress. A dead owner's marker is removed on sight. Computed rather than a
+// constant because spawnStopGrace is a var tests shorten (#8489).
+func shutdownSpawnWaitBudget() time.Duration {
+	return openDeadline + spawnStopGrace + 2*shutdownConfirmDeadline
+}
 
 // afterSpawnMarkerLockFreeCheck is a deterministic test hook for the window
 // between stopAndAcquire's lock-free spawn-marker check and its TryLock, in
@@ -97,7 +101,7 @@ func CanForceStopUnverified(err error) bool {
 // Shutdown waits, without holding proxy.lock, for that marked attempt to
 // either acquire proxy.lock or fail and clear its marker, then verifies and
 // stops whatever it published. The marker wait is bounded by the live
-// starter's own budgets (shutdownSpawnWaitDeadline); every other wait is
+// starter's own budgets (shutdownSpawnWaitBudget); every other wait is
 // bounded by shutdownConfirmDeadline.
 func Shutdown(rootDir string) error {
 	if err := advanceStopEpoch(rootDir); err != nil {
@@ -186,16 +190,16 @@ func stopAndAcquire(
 	var stopped *pidfile.PidFile
 
 	// waitForStart polls once more for an in-progress start's live spawn
-	// marker, or reports that the start outlived shutdownSpawnWaitDeadline.
+	// marker, or reports that the start outlived shutdownSpawnWaitBudget().
 	waitForStart := func() error {
 		now := time.Now()
 		if spawnDeadline.IsZero() {
-			spawnDeadline = now.Add(shutdownSpawnWaitDeadline)
+			spawnDeadline = now.Add(shutdownSpawnWaitBudget())
 		}
 		if now.After(spawnDeadline) {
 			return fmt.Errorf(
 				"timeout (%s) waiting for spawn marker %s; wait for the in-progress start to finish, then retry",
-				shutdownSpawnWaitDeadline,
+				shutdownSpawnWaitBudget(),
 				filepath.Join(rootDir, spawnMarkerFileName),
 			)
 		}
