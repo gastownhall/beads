@@ -3,7 +3,7 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-11-05
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
@@ -27,6 +27,7 @@ See also: `bd help init-safety`, and
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
+- [init-repoint — `bd init` moves a workspace to a different database, or refuses to](#init-repoint)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
@@ -440,6 +441,98 @@ rows rarely apply there.
   mode before creating anything, and does not restore over a database the
   server already holds. Elsewhere, including shared-server mode named only
   by `dolt.shared-server` in a config.yaml, it uses the embedded store.
+
+---
+
+## init-repoint
+
+In releases after v1.3.4.
+
+**Symptom**
+
+Proceeding:
+
+```
+Repointing this workspace from database A (127.0.0.1:3307) to B (127.0.0.1:3307).
+```
+
+Refused:
+
+```
+refusing to repoint this workspace from database A (127.0.0.1:3307) to B (127.0.0.1:3307): A exists but could not be read: ...
+```
+
+**What happened**
+
+`bd init --database`, `--server-host` or `--server-port` named a database
+other than the one this workspace's `metadata.json` records. That is a
+repoint: once init records the new database, the old one is no longer
+reachable from this workspace. A flag that only restates the recorded value
+(a case-only `--database` difference, `localhost` for `127.0.0.1`, or the
+workspace's own port while a different `BEADS_DOLT_SERVER_PORT` is exported)
+is not a repoint.
+
+A repoint to another server, away from the Dolt server `bd` runs for this
+workspace (`bd init --server` without `--external`), also stops that server
+once the repoint is confirmed and before init writes anything, as
+`bd dolt stop` does:
+
+```
+Stopped this workspace's own Dolt server for A (127.0.0.1:41317).
+```
+
+Its port file, `.beads/dolt-server.port`, outranks the port init records, so
+while it ran the workspace's commands kept using the old database. As with
+`bd dolt stop`, uncommitted changes in its databases are committed first, and
+the old database stays in `.beads/dolt/`. If the server cannot be stopped,
+the repoint is refused (exit 1) and nothing is written. The shared server is
+never stopped. An exported `BEADS_DOLT_SERVER_HOST` or
+`BEADS_DOLT_SERVER_PORT`, or a `dolt.port` setting, still outranks the
+endpoint init records for the commands that see it.
+
+Every guard reads the database the workspace is configured for, never the
+target the flags name:
+
+- The database is the name `metadata.json` records. An exported
+  `BEADS_DOLT_SERVER_DATABASE` is ignored, as it is by init's own open and
+  its metadata write.
+- The endpoint is the one `bd` commands in the same environment dial, so an
+  exported `BEADS_DOLT_SERVER_HOST` or `BEADS_DOLT_SERVER_PORT` counts.
+  `bd init`'s own `--server-host` and `--server-port` count only when they
+  restate it. While the workspace's own server is stopped its port is
+  unknown, so any `--server-port` names another server, and the count opens
+  the workspace's database as its commands do, auto-start included.
+- The password is the one kept for that endpoint (`BEADS_DOLT_PASSWORD`, or
+  its `[host:port]` entry in the credentials file), never the target's.
+- The user and TLS setting are the ones its commands dial with.
+  `--server-user` and `--server-tls` apply to it only when the flags leave
+  the endpoint where it is.
+
+A plain `bd init` (without `--reinit-local`) naming another database gets
+the refusals it would get about the configured database without the flags:
+already initialized while that database exists, and
+[init-missing-server-db](#init-missing-server-db) while it is missing.
+
+| Configured database | `bd init --reinit-local` / `--force` naming another database |
+|---|---|
+| Has issues | The [init-local-exists](#init-local-exists) confirmation for that count, under a warning that names both databases: exit `11` or `12` without it |
+| Exists with zero issues | Proceeds and prints the notice above |
+| Missing from its server, project_id recorded | The [init-missing-server-db](#init-missing-server-db) refusal for the configured database; `--recreate-missing` lets the repoint proceed |
+| Exists (its `.dolt` directory, or the server lists it) but cannot be read | Refused with an ordinary error (exit 1). Neither `--recreate-missing` nor `--destroy-token` lifts it, because its issue count is unknown |
+
+`--quiet` suppresses the notice.
+
+**Recovery paths**
+
+For the unreadable case, either repair the configured database and re-run, or
+re-initialize it in place (`bd init --reinit-local` without `--database`,
+`--server-host` or `--server-port`). If it is genuinely lost, move its
+directory aside so it is missing, where
+[init-missing-server-db](#init-missing-server-db) applies.
+
+If the workspace's own server could not be stopped, stop it with
+`bd dolt stop` (its error says why it was not stopped), then re-run the same
+`bd init`.
 
 ---
 
