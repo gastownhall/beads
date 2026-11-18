@@ -46,6 +46,11 @@ func TestCompareVersions(t *testing.T) {
 		{"beta sorts below rc", "1.3.1-beta.2", "1.3.1-rc.1", -1},
 		{"undotted rc sorts below its release", "1.3.1-rc1", "1.3.1", -1},
 		{"numeric identifier sorts below alphanumeric", "1.0.0-1", "1.0.0-alpha", -1},
+		{"numeric identifier beyond int still sorts below alphanumeric", "1.0.0-999999999999999999999999999999", "1.0.0-2a", -1},
+		{"large numeric identifiers compare by magnitude", "1.0.0-99999999999999999999999999999", "1.0.0-100000000000000000000000000000", -1},
+		{"large equal-length numeric identifiers compare by digits", "1.0.0-100000000000000000000000000001", "1.0.0-100000000000000000000000000002", -1},
+		{"tolerated leading zeros do not change numeric magnitude", "1.0.0-000000000000000000000000000002", "1.0.0-2", 0},
+		{"large numeric identifiers remain equal through build metadata", "1.0.0-999999999999999999999999999999+left", "1.0.0-999999999999999999999999999999+right", 0},
 		{"v-prefixed rc sorts below its release", "v1.3.1-rc.1", "1.3.1", -1},
 		{"pseudo-version sorts below the release it precedes", "v1.3.2-0.20260101000000-abcdefabcdef", "1.3.2", -1},
 		{"snapshot sorts below its release", "1.3.2-next", "1.3.2", -1},
@@ -208,6 +213,8 @@ func TestCheckCLIVersionReleaseCandidate(t *testing.T) {
 		{cli: "1.4.0-rc.10", latest: "1.4.0", wantStatus: StatusWarning},
 		{cli: "1.4.0", latest: "1.4.0-rc.3", wantStatus: StatusOK},
 		{cli: "1.4.0-rc.3", latest: "1.3.4", wantStatus: StatusOK},
+		{cli: "1.4.0-99999999999999999999999999999", latest: "1.4.0-100000000000000000000000000000", wantStatus: StatusWarning},
+		{cli: "1.4.0-999999999999999999999999999999", latest: "1.4.0-2a", wantStatus: StatusWarning},
 	}
 	orig := latestGitHubReleaseFetcher
 	t.Cleanup(func() { latestGitHubReleaseFetcher = orig })
