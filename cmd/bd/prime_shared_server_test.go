@@ -25,7 +25,7 @@ const sharedServerPrimePort = "19999"
 // TestPrimeHonorsSharedServerConfigYaml is a regression test for GH#6551.
 //
 // bd prime resolves its store through ensureStoreActiveForPrime ->
-// ensureStoreActiveWithContext -> newDoltStoreFromConfig, a different path
+// ensureReadOnlyStoreActiveWithContext -> newReadOnlyStoreFromConfig, a different path
 // from every other command's resolution in cmd/bd/main.go. That path did not
 // compensate for the gap configfile.IsDoltServerMode() leaves on purpose: it
 // does not read dolt.shared-server from config.yaml, to avoid a circular
@@ -41,7 +41,7 @@ const sharedServerPrimePort = "19999"
 // The config.yaml layer is the ONLY thing this test may rely on, which is why
 // BEADS_DOLT_SHARED_SERVER is deliberately absent from the env below.
 // configfile.IsDoltServerMode honors that env var itself (step 2 of its
-// precedence chain), and newDoltStoreFromConfig runs normalizeLoadedConfig
+// precedence chain), and newReadOnlyStoreFromConfig runs normalizeLoadedConfig
 // before the gate, so an absent metadata.json arrives as a non-nil
 // DefaultConfig() rather than nil: exporting the env var made the OLD gate
 // select server mode too, and the A/B went green on unfixed code. This test
@@ -73,8 +73,8 @@ func TestPrimeHonorsSharedServerConfigYaml(t *testing.T) {
 	// returns (nil, nil) because it reads only metadata.json — and what makes
 	// the workspace DISCOVERABLE. With an entirely empty dir,
 	// internal/beads.hasBeadsProjectFiles is false, so FindBeadsDir() ignores
-	// BEADS_DIR and returns "", and ensureStoreActiveWithContext refuses with
-	// ErrNoBeadsDatabase before newDoltStoreFromConfig is ever reached. This
+	// BEADS_DIR and returns "", and ensureReadOnlyStoreActiveWithContext refuses with
+	// ErrNoBeadsDatabase before newReadOnlyStoreFromConfig is ever reached. This
 	// test then passed identically with and without the fix: no phantom store
 	// can be created on either, so the assertion below proved nothing.
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
@@ -125,4 +125,140 @@ func TestPrimeHonorsSharedServerConfigYaml(t *testing.T) {
 		t.Fatalf("bd prime created a phantom embedded database at %s for a workspace with "+
 			"dolt.shared-server: true in its config.yaml (GH#6551 regression)", phantom)
 	}
+}
+
+// TestPrimeConfigOnlyDirectoryDoesNotCreateLedger covers the explicit
+// BEADS_DIR scenario reported in GH#7920 through the real command and open.
+func TestPrimeConfigOnlyDirectoryDoesNotCreateLedger(t *testing.T) {
+	bd := buildSharedServerTestBinary(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	ancestor, _ := primeInitializedWorkspace(t, ctx, bd)
+	for _, cwd := range []struct{ name, path string }{
+		{"outside_repo", t.TempDir()},
+		{"inside_initialized_repo", ancestor},
+	} {
+		for _, fixture := range []struct{ name, content string }{
+			{"config.yaml", "# Beads configuration\n"},
+			{"metadata.json", `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"prime"}`},
+		} {
+			t.Run(cwd.name+"/"+fixture.name, func(t *testing.T) {
+				beadsDir := t.TempDir()
+				configPath := filepath.Join(beadsDir, fixture.name)
+				if err := os.WriteFile(configPath, []byte(fixture.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				env := primeEmbeddedTestEnv(t, beadsDir)
+				for _, mode := range []string{"--memories-only", "--full", "--mcp"} {
+					out, err := ssExec(ctx, bd, cwd.path, env, "prime", mode)
+					if err != nil {
+						t.Fatalf("prime %s: %v\n%s", mode, err, out)
+					}
+					if !strings.Contains(out, "no embedded database") {
+						t.Fatalf("prime %s did not report the missing ledger: %s", mode, out)
+					}
+					if _, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); !os.IsNotExist(err) {
+						t.Fatalf("prime %s created embedded storage (stat error: %v)", mode, err)
+					}
+				}
+				data, err := os.ReadFile(configPath)
+				if err != nil || string(data) != fixture.content {
+					t.Fatalf("prime changed %s: %q, %v", fixture.name, data, err)
+				}
+			})
+		}
+	}
+}
+
+func TestPrimeReadsInitializedWorkspace(t *testing.T) {
+	bd := buildSharedServerTestBinary(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	root, env := primeInitializedWorkspace(t, ctx, bd)
+	const memory = "prime must read this initialized ledger"
+	if out, err := ssExec(ctx, bd, root, env, "remember", memory, "--key", "prime-existing"); err != nil {
+		t.Fatalf("remember: %v\n%s", err, out)
+	}
+	child := filepath.Join(root, "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, selection := range []string{"explicit", "discovery"} {
+		t.Run(selection, func(t *testing.T) {
+			selectedEnv := append([]string(nil), env...)
+			if selection == "discovery" {
+				for i, entry := range selectedEnv {
+					if strings.HasPrefix(entry, "BEADS_DIR=") {
+						selectedEnv[i] = "BEADS_DIR="
+					}
+				}
+			}
+			out, err := ssExec(ctx, bd, child, selectedEnv, "prime", "--memories-only")
+			if err != nil || !strings.Contains(out, memory) || strings.Contains(out, "unavailable") {
+				t.Fatalf("prime did not read the initialized ledger: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestPrimeEmptyOrMissingExplicitDirectoryStaysUninitialized(t *testing.T) {
+	bd := buildSharedServerTestBinary(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	root, _ := primeInitializedWorkspace(t, ctx, bd)
+	for _, kind := range []string{"empty", "missing"} {
+		t.Run(kind, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), "explicit")
+			if kind == "empty" {
+				if err := os.Mkdir(beadsDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := ssExec(ctx, bd, root, primeEmbeddedTestEnv(t, beadsDir), "prime")
+			if err != nil || strings.TrimSpace(out) != "" {
+				t.Fatalf("prime should stay silent without a workspace: %v\n%s", err, out)
+			}
+			if _, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); !os.IsNotExist(err) {
+				t.Fatalf("prime initialized %s explicit directory: %v", kind, err)
+			}
+		})
+	}
+}
+
+func primeEmbeddedTestEnv(t *testing.T, beadsDir string) []string {
+	t.Helper()
+	return []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"BEADS_DIR=" + beadsDir,
+		"BEADS_DOLT_SHARED_SERVER=0",
+		"BEADS_DOLT_AUTO_START=0",
+		"BEADS_TEST_MODE=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
+		"BD_DISABLE_METRICS=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+	}
+}
+
+func primeInitializedWorkspace(t *testing.T, ctx context.Context, bd string) (string, []string) {
+	t.Helper()
+	root := t.TempDir()
+	env := primeEmbeddedTestEnv(t, filepath.Join(root, ".beads"))
+	if out, err := ssExec(ctx, "git", root, env, "-c", "core.hooksPath=.git/hooks", "init", "--quiet"); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if out, err := ssExec(ctx, "git", root, env, "config", "core.hooksPath", ".git/hooks"); err != nil {
+		t.Fatalf("isolate git hooks: %v\n%s", err, out)
+	}
+	for _, entry := range []struct{ key, value string }{{"user.name", "Prime Test"}, {"user.email", "prime@example.test"}} {
+		if out, err := ssExec(ctx, "git", root, env, "config", entry.key, entry.value); err != nil {
+			t.Fatalf("git config %s: %v\n%s", entry.key, err, out)
+		}
+	}
+	if out, err := ssExec(ctx, bd, root, env, "init", "--quiet", "--prefix", "prime", "--skip-hooks", "--skip-agents"); err != nil {
+		t.Fatalf("bd init: %v\n%s", err, out)
+	}
+	return root, env
 }

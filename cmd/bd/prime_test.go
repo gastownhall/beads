@@ -510,7 +510,7 @@ func TestFormatMemoriesForPrimeTimesOutOpeningRegisteredBackend(t *testing.T) {
 	oldProxied := proxiedServerMode
 	store = nil
 	storeActive = false
-	ensureStoreActiveForPrime = ensureStoreActiveWithContext
+	ensureStoreActiveForPrime = ensureReadOnlyStoreActiveWithContext
 	proxiedServerMode = false
 	t.Cleanup(func() {
 		store = oldStore

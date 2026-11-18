@@ -95,6 +95,8 @@ func TestPersistentPostRunProxiedRunsAutoBackup(t *testing.T) {
 		want     int
 	}{
 		{name: "ordinary command", cmd: func() *cobra.Command { return &cobra.Command{Use: "list"} }, want: 1},
+		{name: "write command", cmd: func() *cobra.Command { return &cobra.Command{Use: "create"} }, want: 1},
+		{name: "prime", cmd: func() *cobra.Command { return &cobra.Command{Use: "prime"} }},
 		{name: "strict readonly", cmd: func() *cobra.Command { return &cobra.Command{Use: "list"} }, readonly: true},
 		{name: "bd serve", cmd: func() *cobra.Command { return &cobra.Command{Use: serveCmdName} }},
 		{name: "preview", cmd: func() *cobra.Command {

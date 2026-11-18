@@ -42,7 +42,7 @@ const (
 	primeStoreTimeoutDefault = 10 * time.Second
 )
 
-var ensureStoreActiveForPrime = ensureStoreActiveWithContext
+var ensureStoreActiveForPrime = ensureReadOnlyStoreActiveWithContext
 
 func primeStoreTimeout() time.Duration {
 	raw := strings.TrimSpace(os.Getenv(primeStoreTimeoutEnv))
@@ -580,7 +580,7 @@ func formatMemoriesForPrime(compact bool) string {
 		return formatMemoriesForPrimeProxied(compact)
 	}
 
-	// Try to initialize store if not already active (prime may run before other commands)
+	// Open existing storage without creating a ledger (prime may run before other commands).
 	if store == nil {
 		timeout := primeStoreTimeout()
 		ctx := context.Background()

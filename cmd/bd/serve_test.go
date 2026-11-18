@@ -127,8 +127,7 @@ func TestServeSkipsPostCommandMaintenance(t *testing.T) {
 	if runsPostCommandMaintenance(serveCmdName, false) {
 		t.Error("bd serve runs post-command maintenance; the server would export and push at shutdown")
 	}
-	// The exclusion is serve's alone: a write command in the same workspace
-	// still gets the whole net.
+	// A write command in the same workspace still gets the whole net.
 	if !runsPostCommandMaintenance("update", false) {
 		t.Error("bd update no longer runs post-command maintenance")
 	}
