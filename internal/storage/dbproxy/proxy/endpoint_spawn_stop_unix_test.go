@@ -3,7 +3,10 @@
 package proxy
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -490,5 +493,118 @@ func TestKillSpawnedChildLetsChildRunItsSIGTERMHandler(t *testing.T) {
 			_, err := os.Stat(cleaned)
 			assert.NoError(t, err, "killSpawnedChild sent SIGKILL without SIGTERM first: the child's shutdown handler never ran (an already-started dolt backend would be orphaned)")
 		})
+	}
+}
+
+// shortenSpawnStopGrace shrinks the spawn stop grace for one test, so
+// escalation paths run in milliseconds instead of the production 5s.
+func shortenSpawnStopGrace(t *testing.T, d time.Duration) {
+	t.Helper()
+	previous := spawnStopGrace
+	spawnStopGrace = d
+	t.Cleanup(func() { spawnStopGrace = previous })
+}
+
+// TestKillSpawnedChildEscalatesAfterIgnoredStopRequest pins #8489 AC-2: a
+// timed-out child that is still alive spawnStopGrace after SIGTERM is killed
+// through today's handle or Process kill, killSpawnedChild returns nil once
+// the exit is confirmed, and the escalation is both logged and bounded by
+// spawnStopGrace + shutdownConfirmDeadline.
+func TestKillSpawnedChildEscalatesAfterIgnoredStopRequest(t *testing.T) {
+	for _, withHandle := range []bool{true, false} {
+		name := "no handle"
+		if withHandle {
+			name = "verified handle"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			ready := filepath.Join(dir, "ready")
+			script := `trap "" TERM; touch "$1"; while :; do sleep 0.05; done`
+			cmd := exec.Command("/bin/sh", "-c", script, "sh", ready)
+			require.NoError(t, cmd.Start())
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait(); close(done) }()
+			t.Cleanup(func() { _ = cmd.Process.Kill() })
+			require.Eventually(t, func() bool {
+				_, err := os.Stat(ready)
+				return err == nil
+			}, spawnStopFailAfter, 10*time.Millisecond, "child never became ready")
+
+			child := &spawnedProxyChild{cmd: cmd, done: done}
+			if withHandle {
+				tok, err := procid.Capture(cmd.Process.Pid)
+				require.NoError(t, err)
+				handle, err := procid.Open(cmd.Process.Pid, tok)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = handle.Close() })
+				child.handle = handle
+			}
+
+			shortenSpawnStopGrace(t, 150*time.Millisecond)
+			var logs bytes.Buffer
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+			start := time.Now()
+			require.NoError(t, killSpawnedChild(child))
+			elapsed := time.Since(start)
+			assert.Less(t, elapsed, spawnStopGrace+shutdownConfirmDeadline+5*time.Second,
+				"escalation must stay bounded by spawnStopGrace + shutdownConfirmDeadline")
+
+			select {
+			case <-done:
+			case <-time.After(spawnStopFailAfter):
+				t.Fatal("escalated kill did not stop the TERM-ignoring child")
+			}
+			assert.Contains(t, logs.String(),
+				fmt.Sprintf("dbproxy: proxy child pid %d did not exit within %s of SIGTERM; killing it", cmd.Process.Pid, spawnStopGrace),
+				"an escalated kill can leave the unrecorded backend of #8489, so it must say so")
+		})
+	}
+}
+
+// TestKillSpawnedChildStillReportsUnconfirmedKill pins #8489 AC-2: when the
+// kill cannot be confirmed (a done channel that never delivers), the caller
+// still gets today's confirm-timeout error naming the pid, after a bounded
+// grace + confirm wait. spawnAndHandoff wraps this as "safe child kill
+// failed", unchanged.
+func TestKillSpawnedChildStillReportsUnconfirmedKill(t *testing.T) {
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	script := `trap "" TERM; touch "$1"; while :; do sleep 0.05; done`
+	cmd := exec.Command("/bin/sh", "-c", script, "sh", ready)
+	require.NoError(t, cmd.Start())
+	reaped := make(chan error, 1)
+	go func() { reaped <- cmd.Wait(); close(reaped) }()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(ready)
+		return err == nil
+	}, spawnStopFailAfter, 10*time.Millisecond, "child never installed its SIGTERM trap")
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		select {
+		case <-reaped:
+		case <-time.After(spawnStopFailAfter):
+		}
+	})
+
+	shortenSpawnStopGrace(t, 150*time.Millisecond)
+	// A done channel that never delivers models an unconfirmable kill.
+	silent := make(chan error, 1)
+	child := &spawnedProxyChild{cmd: cmd, done: silent}
+
+	start := time.Now()
+	err := killSpawnedChild(child)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(),
+		fmt.Sprintf("timeout (%s) waiting for pid %d", shutdownConfirmDeadline, cmd.Process.Pid))
+	elapsed := time.Since(start)
+	assert.Less(t, elapsed, spawnStopGrace+shutdownConfirmDeadline+5*time.Second,
+		"the unconfirmed-kill wait must stay bounded by spawnStopGrace + shutdownConfirmDeadline")
+
+	select {
+	case <-reaped:
+	case <-time.After(spawnStopFailAfter):
+		t.Fatal("escalated kill did not stop the TERM-ignoring child")
 	}
 }
