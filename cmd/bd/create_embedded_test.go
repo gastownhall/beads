@@ -795,32 +795,48 @@ func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
 		t.Fatalf("preview consumed the version marker: .local_version = %q, want %q", got, "0.9.0")
 	}
 
-	// Invocation 2: an ordinary command, which must still see the upgrade.
-	status := exec.Command(bd, "upgrade", "status", "--json")
-	status.Dir = dir
-	status.Env = bdEnv(dir)
-	stdout, stderr, err = runCommandBuffers(t, status)
-	if err != nil {
-		t.Fatalf("bd upgrade status failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-	}
-	var upgradeStatus struct {
-		Upgraded        bool   `json:"upgraded"`
-		PreviousVersion string `json:"previous_version"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &upgradeStatus); err != nil {
-		t.Fatalf("parse upgrade status: %v\nstdout:\n%s", err, stdout.String())
-	}
-	if !upgradeStatus.Upgraded || upgradeStatus.PreviousVersion != "0.9.0" {
-		t.Errorf("ordinary command after a preview no longer sees the upgrade: upgraded=%v previous=%q; stdout:\n%s",
-			upgradeStatus.Upgraded, upgradeStatus.PreviousVersion, stdout.String())
+	// Invocations 2 and 3: the upgrade inspections, which must report the
+	// upgrade the preview left in place and must not consume it either
+	// (GH#6669: they no longer go through the hook's tracking at all).
+	for _, sub := range []string{"status", "review"} {
+		got := runEmbeddedUpgradeInspection(t, bd, dir, sub, bdEnv(dir))
+		if got.PreviousVersion != "0.9.0" {
+			t.Errorf("bd upgrade %s after a preview no longer sees the upgrade: %+v", sub, got)
+		}
+		if sub == "status" && (got.Upgraded == nil || !*got.Upgraded) {
+			t.Errorf("bd upgrade status after a preview reports no upgrade: %+v", got)
+		}
+		raw, err = os.ReadFile(localVersionPath)
+		if err != nil {
+			t.Fatalf("read local version after upgrade %s: %v", sub, err)
+		}
+		if got := strings.TrimSpace(string(raw)); got != "0.9.0" {
+			t.Fatalf("bd upgrade %s consumed the version marker: .local_version = %q, want %q", sub, got, "0.9.0")
+		}
 	}
 
+	// Invocation 4: an ordinary store-backed command, which runs the
+	// version-bump reconciliation and records the running version.
+	list := exec.Command(bd, "list", "--json")
+	list.Dir = dir
+	list.Env = bdEnv(dir)
+	stdout, stderr, err = runCommandBuffers(t, list)
+	if err != nil {
+		t.Fatalf("bd list failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	current := embeddedBDVersion(t, bd, dir)
 	raw, err = os.ReadFile(localVersionPath)
 	if err != nil {
 		t.Fatalf("read local version after ordinary command: %v", err)
 	}
-	if got := strings.TrimSpace(string(raw)); got == "0.9.0" {
-		t.Errorf("ordinary command left .local_version at %q; the marker should have been updated", got)
+	if got := strings.TrimSpace(string(raw)); got != current {
+		t.Errorf("ordinary command left .local_version at %q; want the running version %q", got, current)
+	}
+
+	// Invocation 5: the upgrade has been reconciled, so status reports none.
+	got := runEmbeddedUpgradeInspection(t, bd, dir, "status", bdEnv(dir))
+	if got.Upgraded == nil || *got.Upgraded {
+		t.Errorf("bd upgrade status after an ordinary command still reports an upgrade: %+v", got)
 	}
 }
 
