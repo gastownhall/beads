@@ -12,7 +12,34 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 )
+
+// serverReadOnlyStore stands in for the store newReadOnlyStoreFromConfig opens
+// in server mode: not embedded, and writable underneath.
+type serverReadOnlyStore struct{ storage.DoltStorage }
+
+// TestReadOnlyOpenMarksOnlyEmbeddedStoresWriteRefusing pins the embedded-only
+// scope of the write-refusing mark. bd prime opens its store read-only; only
+// the embedded OpenReadOnly store refuses writes, so only it may be recorded in
+// writeRefusingLazyStore, which makes autoBackupBackendForCommand skip the
+// post-command backup. A server-mode store recorded there would lose its
+// backup for no reason.
+func TestReadOnlyOpenMarksOnlyEmbeddedStoresWriteRefusing(t *testing.T) {
+	saved := writeRefusingLazyStore
+	t.Cleanup(func() { writeRefusingLazyStore = saved })
+	writeRefusingLazyStore = nil
+
+	server := &serverReadOnlyStore{}
+	recordWriteRefusingStore(server, nil)
+	if activeStoreRefusesWrites(server) {
+		t.Fatal("a server-mode read-only store was marked write-refusing, so its auto-backup would be skipped")
+	}
+	recordWriteRefusingStore(nil, errors.New("open failed"))
+	if writeRefusingLazyStore != nil {
+		t.Fatalf("a failed open recorded %v as write-refusing", writeRefusingLazyStore)
+	}
+}
 
 // stubPrimeStoreUnavailable temporarily disconnects prime from any ambient
 // workspace store, so tests assert against prime's own text rather than
@@ -510,7 +537,7 @@ func TestFormatMemoriesForPrimeTimesOutOpeningRegisteredBackend(t *testing.T) {
 	oldProxied := proxiedServerMode
 	store = nil
 	storeActive = false
-	ensureStoreActiveForPrime = ensureStoreActiveWithContext
+	ensureStoreActiveForPrime = ensureReadOnlyStoreActiveWithContext
 	proxiedServerMode = false
 	t.Cleanup(func() {
 		store = oldStore

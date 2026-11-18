@@ -42,7 +42,9 @@ const (
 	primeStoreTimeoutDefault = 10 * time.Second
 )
 
-var ensureStoreActiveForPrime = ensureStoreActiveWithContext
+// ensureStoreActiveForPrime opens prime's store read-only: prime only reads
+// the memory plane, so the open neither migrates nor initializes a schema.
+var ensureStoreActiveForPrime = ensureReadOnlyStoreActiveWithContext
 
 func primeStoreTimeout() time.Duration {
 	raw := strings.TrimSpace(os.Getenv(primeStoreTimeoutEnv))

@@ -76,6 +76,7 @@
 
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
+100 20 TestEmbeddedPrimeOpensReadOnlyStore
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
 100 21 TestEmbeddedConfigGetIsReadOnly
@@ -104,6 +105,7 @@
 
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy
 100 27 TestEmbeddedNewDoltStoreFromConfig_DottedDBName
+100 27 TestEmbeddedPrimeLeavesDueAutoBackupToNextWrite
 100 27 TestEmbeddedShipConcurrent
 
 100 28 TestEmbeddedDoltLocalOnly_RemoteAdd_RefusesExitOne
@@ -170,6 +172,7 @@
 
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
+100 40 TestEmbeddedReadCommandLeavesJSONLRecoveryToImport
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
 
 100 41 TestEmbeddedCompactAbortsDivergentReplay

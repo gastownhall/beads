@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // ErrNoBeadsDatabase reports that no beads workspace could be resolved at all,
@@ -26,6 +27,44 @@ func ensureStoreActive() error {
 }
 
 func ensureStoreActiveWithContext(ctx context.Context) error {
+	return ensureStoreActiveWith(ctx, newDoltStoreFromConfig)
+}
+
+// ensureReadOnlyStoreActiveWithContext is ensureStoreActiveWithContext with a
+// store opened by newReadOnlyStoreFromConfig, whose open does not migrate or
+// initialize the schema. On embedded Dolt the store is an OpenReadOnly store,
+// which refuses every write (ErrReadOnly); it is recorded in
+// writeRefusingLazyStore.
+func ensureReadOnlyStoreActiveWithContext(ctx context.Context) error {
+	return ensureStoreActiveWith(ctx, func(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+		st, err := newReadOnlyStoreFromConfig(ctx, beadsDir)
+		recordWriteRefusingStore(st, err)
+		return st, err
+	})
+}
+
+// recordWriteRefusingStore records st in writeRefusingLazyStore when it is an
+// embedded store, the only backend whose read-only open refuses writes. A
+// server-mode store from newReadOnlyStoreFromConfig is writable underneath, so
+// it is not recorded and its post-command steps, auto-backup among them, run.
+func recordWriteRefusingStore(st storage.DoltStorage, err error) {
+	if err == nil && isEmbeddedStore(st) {
+		writeRefusingLazyStore = st
+	}
+}
+
+// writeRefusingLazyStore is the embedded store ensureReadOnlyStoreActiveWithContext
+// last opened (bd prime's store). It refuses writes, so post-command steps that
+// write must skip it rather than fail: see autoBackupBackendForCommand.
+var writeRefusingLazyStore storage.DoltStorage
+
+// activeStoreRefusesWrites reports whether st is the write-refusing store
+// ensureReadOnlyStoreActiveWithContext opened.
+func activeStoreRefusesWrites(st storage.DoltStorage) bool {
+	return st != nil && writeRefusingLazyStore != nil && st == writeRefusingLazyStore
+}
+
+func ensureStoreActiveWith(ctx context.Context, open func(context.Context, string) (storage.DoltStorage, error)) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -46,7 +85,7 @@ func ensureStoreActiveWithContext(ctx context.Context) error {
 
 	// Use the factory to create the appropriate backend
 	// based on metadata.json configuration and build tags
-	store, err := newDoltStoreFromConfig(ctx, beadsDir)
+	store, err := open(ctx, beadsDir)
 	if err != nil {
 		return fmt.Errorf("%w\nHint: %s", openStoreError(backendNameForErrorFraming(beadsDir), err), diagHint())
 	}
