@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/steveyegge/beads/internal/execwin"
 )
 
 // startedServer is a dolt sql-server child Start launched. A goroutine waits
@@ -26,6 +28,23 @@ type startedServer struct {
 // has not returned. The wait reaps the child just before it removes the
 // entry, and until a child is reaped its PID cannot name another process.
 var launchedServers sync.Map // int -> *startedServer
+
+// newDoltServerCmd builds the dolt sql-server child Start launches: detached
+// via procAttrDetached, and — on Windows — marked CREATE_NO_WINDOW by
+// execwin.Hide so a bd run without a console of its own does not get a
+// visible console window allocated for the server (GH#6076). Hide runs after
+// the SysProcAttr assignment because it mutates that attr in place.
+func newDoltServerCmd(doltBin string, args []string, dir string, logFile *os.File) *exec.Cmd {
+	cmd := exec.Command(doltBin, args...) //nolint:gosec // doltBin is resolved from PATH, not user input
+	cmd.Dir = dir
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.SysProcAttr = procAttrDetached()
+	execwin.Hide(cmd)
+	cmd.Env = ServerSpawnEnv()
+	return cmd
+}
 
 func launchServer(cmd *exec.Cmd) (*startedServer, error) {
 	if err := cmd.Start(); err != nil {

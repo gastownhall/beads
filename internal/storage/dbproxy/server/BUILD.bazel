@@ -13,6 +13,7 @@ go_library(
     deps = [
         "//internal/configfile",
         "//internal/doltserver",
+        "//internal/execwin",
         "//internal/procid",
         "//internal/remedy",
         "//internal/storage/dbproxy/identity",
