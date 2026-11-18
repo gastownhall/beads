@@ -141,6 +141,7 @@ go_test(
         "policy_cache_test.go",
         "race_detector_off_test.go",
         "race_detector_on_test.go",
+        "ready_exclude_parents_test.go",
         "required_served_tier_test.go",
         "roles_graph_cycles_test.go",
         "roles_test.go",

@@ -68,6 +68,10 @@ func readyRequestRows() []Row {
 			"a non-zero Offset on ready work refuses",
 			"the wire publishes no offset parameter, and the store-backed role refuses a non-zero Offset itself with a typed *ErrUnsupported. A ready request carries no keyset position, so there is no portable way to page ready work at all — a caller that must page pages a ListRequest instead",
 			fieldSpec+", D12"),
+		refusal("E-ReadyRequest.ExcludeParentsWithOpenChildren", tyReadyRequest, "ExcludeParentsWithOpenChildren",
+			"excluding parents with open children from ready work refuses",
+			"neither listReadyWork, countReadyWork nor claimNext publishes a parameter for it, and the open-child test reads parent-child edges the client cannot see from a ready page — so a dropped exclusion would answer, count and claim the very containers the caller asked to leave out (GH#6817)",
+			fieldSpec),
 		{
 			ID: "E-ReadyRequest.Brief", Kind: KindRetired,
 			What:     "RETIRED — the ready listing SENDS the projection; only the count still drops it",
@@ -427,6 +431,8 @@ func workFilterRows() []Row {
 			"listReadyWork publishes include_ephemeral, which admits the wisp plane wholesale, and nothing that selects a wisp TYPE within it"),
 		bridge("ExcludeIDs", "an id exclusion set on ready work refuses",
 			"listReadyWork publishes no id-exclusion parameter; the set is what the external-dependency policy decorator (upstream #4753) injects to hide sources behind unsatisfied external blockers, and dropping it would widen the answer to exactly the issues the caller's policy excluded (L12). A server that advertises policy.external_dependencies applies the policy itself, so the client never builds the set for it"),
+		bridge("ExcludeParentsWithOpenChildren", "excluding parents with open children from ready work refuses",
+			"no wire parameter — the same absence E-ReadyRequest.ExcludeParentsWithOpenChildren records, reached from the other source shape"),
 		bridge("Offset", "a non-zero Offset on ready work refuses",
 			"no wire parameter, and ready work carries no keyset position to page by; see E-ReadyRequest.Offset"),
 	}
