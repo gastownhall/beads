@@ -1170,6 +1170,97 @@ func TestPushFieldsEqualToBeads(t *testing.T) {
 	}
 }
 
+// TestPushFieldsEqualLinearStoredDescription pins the push comparators against
+// what Linear actually stores (GH#8506): a blank line after each section
+// heading and, for creates, bd's idempotency marker. The byte comparison the
+// skip checks used never matched those, so every sync re-sent an unchanged
+// issue and bumped its updatedAt; the canonical parsed comparison must report
+// them equal, and still report real content differences unequal.
+func TestPushFieldsEqualLinearStoredDescription(t *testing.T) {
+	config := DefaultMappingConfig()
+	local := &types.Issue{
+		Title:              "fields pushed",
+		Description:        "DESC",
+		AcceptanceCriteria: "AC",
+		Design:             "DESIGN",
+		Notes:              "NOTES",
+		Status:             types.StatusOpen,
+		Priority:           2,
+	}
+	pushed := BuildLinearDescription(local)
+	// The way Linear stores it: a blank line after each heading.
+	stored := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(pushed,
+		"## Acceptance Criteria\n", "## Acceptance Criteria\n\n"),
+		"## Design\n", "## Design\n\n"),
+		"## Notes\n", "## Notes\n\n")
+	marked := AppendIdempotencyMarker(stored, GenerateIdempotencyMarker("spk-moq", "", 0))
+	state := &State{ID: "state-todo", Name: "Todo", Type: "unstarted"}
+
+	remoteFor := func(description string) *Issue {
+		return &Issue{
+			ID:          "uuid-1",
+			Identifier:  "TEAM-9",
+			Title:       local.Title,
+			Description: description,
+			Priority:    PriorityToLinear(local.Priority, config),
+			State:       state,
+		}
+	}
+
+	for _, test := range []struct {
+		name        string
+		description string
+		want        bool
+	}{
+		{name: "bd_output", description: pushed, want: true},
+		{name: "linear_stored", description: stored, want: true},
+		{name: "linear_stored_with_marker", description: marked, want: true},
+		{name: "changed_body", description: strings.Replace(stored, "DESC", "OTHER", 1), want: false},
+		{name: "changed_section_text", description: strings.Replace(stored, "AC", "AC EDITED", 1), want: false},
+		{name: "dropped_section", description: strings.Replace(stored, "\n\n## Design\n\nDESIGN", "", 1), want: false},
+		{name: "added_section", description: stored + "\n\n## Extra\nx", want: false},
+	} {
+		if got := PushFieldsEqual(local, remoteFor(test.description), config, nil); got != test.want {
+			t.Errorf("PushFieldsEqual(%s) = %v, want %v", test.name, got, test.want)
+		}
+	}
+
+	// The fallback comparator accepts both the folded remote description and
+	// the split one a pull now produces (IssueToBeads), and rejects the same
+	// content differences.
+	splitRemote := &types.Issue{
+		Title:              local.Title,
+		Description:        "DESC",
+		AcceptanceCriteria: "AC",
+		Design:             "DESIGN",
+		Notes:              "NOTES",
+		Status:             local.Status,
+		Priority:           local.Priority,
+	}
+	foldedRemote := &types.Issue{
+		Title:       local.Title,
+		Description: stored,
+		Status:      local.Status,
+		Priority:    local.Priority,
+	}
+	if !PushFieldsEqualToBeads(local, splitRemote) {
+		t.Error("PushFieldsEqualToBeads(split remote) = false, want true")
+	}
+	if !PushFieldsEqualToBeads(local, foldedRemote) {
+		t.Error("PushFieldsEqualToBeads(folded remote) = false, want true")
+	}
+	editedRemote := *splitRemote
+	editedRemote.AcceptanceCriteria = "AC EDITED"
+	if PushFieldsEqualToBeads(local, &editedRemote) {
+		t.Error("PushFieldsEqualToBeads(edited section) = true, want false")
+	}
+	droppedRemote := *splitRemote
+	droppedRemote.Design = ""
+	if PushFieldsEqualToBeads(local, &droppedRemote) {
+		t.Error("PushFieldsEqualToBeads(dropped section) = true, want false")
+	}
+}
+
 // TestLinearPullInvertsPushDescription reproduces GH#8506: a pull must invert
 // what a push wrote into Linear's description. Pulling the pushed body must not
 // fold the Acceptance Criteria/Design/Notes sections or the idempotency marker
