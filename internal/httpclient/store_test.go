@@ -435,13 +435,14 @@ func TestOpenDialsThroughTheRegisteredWire(t *testing.T) {
 	}
 }
 
-// TestReadOnlyOpenServesTheClaimBdReadyMakes pins the posture
+// TestReadOnlyOpenServesTheClaimBdReadyMakes pins the API contract
 // NewReadOnlyFromConfig documents: the read-only open is writable. cmd/bd opens
-// every classified read command through backends.Backend.OpenReadOnly, `bd
-// ready --claim` included, and that command claims through the store it is
-// handed. Wrapping this open to refuse writes — the obvious way to make a
-// "read-only" open read-only — would break that claim on this backend while
-// every role test, which builds its store with New, went on passing.
+// every classified read command through backends.Backend.OpenReadOnly (`bd
+// ready --claim` itself is a writer since bd-fwx149 and opens read-write), and
+// a claim through a store this hook returned must keep working. Wrapping this
+// open to refuse writes — the obvious way to make a "read-only" open
+// read-only — would break that contract while every role test, which builds
+// its store with New, went on passing.
 func TestReadOnlyOpenServesTheClaimBdReadyMakes(t *testing.T) {
 	dir := t.TempDir()
 	if err := SaveTarget(dir, pinnedProjectTarget(t)); err != nil {
