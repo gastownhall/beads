@@ -277,6 +277,7 @@ release_cross_build(
         "//internal/storage/storagecontract:storagecontract",
         "//internal/storage/unsupportedgen:unsupportedgen",
         "//internal/storage/uow:uow",
+        "//internal/storage/uowstore:uowstore",
         "//internal/storage/versioncontrolops:versioncontrolops",
         "//internal/storage:storage",
         "//internal/telemetry:telemetry",

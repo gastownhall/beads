@@ -1321,6 +1321,17 @@ func (u *recordingDepUC) RemoveDependencyBySource(ctx context.Context, sourceID,
 	return removed, nil
 }
 
+// RemoveDependencyBySourceWithOptions records exactly as RemoveDependencyBySource
+// does; the options only gate the events-table row.
+func (u *recordingDepUC) RemoveDependencyBySourceWithOptions(ctx context.Context, sourceID, dependsOnID, actor string, opts domain.RemoveDepBySourceOpts) (bool, error) {
+	removed, err := u.DependencyUseCase.RemoveDependencyBySourceWithOptions(ctx, sourceID, dependsOnID, actor, opts)
+	if err != nil || !removed {
+		return removed, err
+	}
+	u.rec.record(opDepRemove, u.snap.anyPlaneWithEdges(ctx, sourceID))
+	return removed, nil
+}
+
 func (u *recordingDepUC) Reparent(ctx context.Context, childID, newParentID, actor string) error {
 	if err := u.DependencyUseCase.Reparent(ctx, childID, newParentID, actor); err != nil {
 		return err

@@ -165,6 +165,7 @@ go_test(
         "notifying_parity_test.go",
         "notifying_test.go",
         "preview_provider_test.go",
+        "provider_close_test.go",
         "querier_contract_test.go",
         "reader_contract_test.go",
         "ready_claimer_contract_test.go",
