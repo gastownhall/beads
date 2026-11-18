@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -283,4 +284,104 @@ func TestEmbeddedUpgradeFromSchema27FaultRestoresTransactionCommit_4137(t *testi
 	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
 		t.Fatalf("@@dolt_transaction_commit after the failed upgrade pass = %d, want the original 1", got)
 	}
+}
+
+// openStuckAt0040Conn reproduces GH#4800's stuck store: a database at main
+// schema 39 whose migration pass ran migration 0040 with automatic
+// transaction commits on, the way a binary without GH#4470's suspension runs
+// it. 0040's first bare INSERT committed on its own, so its in-body
+// DOLT_COMMIT failed with "nothing to commit" and the pass aborted before
+// recording version 40, leaving the wisps registration committed. Returns a
+// pinned connection with the session's @@dolt_transaction_commit still 1 and
+// consent to migrate the existing store.
+func openStuckAt0040Conn(t *testing.T, ctx context.Context) *sql.Conn {
+	t.Helper()
+	t.Setenv(schema.AllowMigrateEnv, "1")
+	conn, closeConn := openPinnedConn(t, ctx, seedMainSchemaAt(t, ctx, 39))
+	t.Cleanup(closeConn)
+	if _, err := conn.ExecContext(ctx, "SET @@SESSION.dolt_transaction_commit = 1"); err != nil {
+		t.Fatalf("enable dolt_transaction_commit: %v", err)
+	}
+
+	restoreSeam := schema.SetKeepTransactionCommitForTest(true)
+	t.Cleanup(restoreSeam)
+	_, err := schema.MigrateUp(ctx, conn)
+	restoreSeam()
+	requireStuckAt0040(t, ctx, conn, err)
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_nonlocal_tables WHERE table_name = 'wisps'"); n != 1 {
+		t.Fatalf("wisps nonlocal registrations after the failed pass = %d, want 1 (committed residue)", n)
+	}
+	if contains(dirtyTableNames(t, ctx, conn), "dolt_nonlocal_tables") {
+		t.Fatal("dolt_nonlocal_tables is dirty after the failed pass, want its residue committed")
+	}
+	return conn
+}
+
+// requireStuckAt0040 fails the test unless err is migration 0040's in-body
+// "nothing to commit" failure and the main cursor is still at version 39.
+func requireStuckAt0040(t *testing.T, ctx context.Context, conn *sql.Conn, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("MigrateUp with automatic transaction commits kept on succeeded, want 0040's \"nothing to commit\" failure")
+	}
+	for _, want := range []string{"0040_ignored_tables_also_nonlocal_tables", "nothing to commit"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("MigrateUp error = %v, want it to contain %q", err, want)
+		}
+	}
+	if got := currentMainVersion(t, ctx, conn); got != 39 {
+		t.Fatalf("main schema version after the failed pass = %d, want 39", got)
+	}
+}
+
+// TestEmbeddedStuckAt0040ConvergesUnderTransactionCommit_4800: a store left at
+// version 39 with committed 0040 residue by a pass that ran with automatic
+// transaction commits on converges when a consented migration retries with
+// the setting suspended. #4504's repair clears the residue once, 0040's body
+// then commits its own rows, both cursors reach latest with a clean working
+// set, and the session gets its original setting back.
+func TestEmbeddedStuckAt0040ConvergesUnderTransactionCommit_4800(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openStuckAt0040Conn(t, ctx)
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("retry MigrateUp under dolt_transaction_commit=1: %v", err)
+	}
+	if got, want := currentMainVersion(t, ctx, conn), schema.LatestVersion(); got != want {
+		t.Fatalf("main schema version after retry = %d, want %d", got, want)
+	}
+	if got, want := scalarInt(t, ctx, conn, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"), schema.LatestIgnoredVersion(); got != want {
+		t.Fatalf("ignored schema version after retry = %d, want %d", got, want)
+	}
+	if dirty := dirtyTableNames(t, ctx, conn); len(dirty) != 0 {
+		t.Fatalf("working set after retry is dirty: %v, want clean", dirty)
+	}
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log WHERE message = 'repair: clear partial 0040 nonlocal rows before replay'"); n != 1 {
+		t.Fatalf("partial-0040 repair commit count = %d, want 1", n)
+	}
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log WHERE message = 'create nonlocal table wisps'"); n != 1 {
+		t.Fatalf("0040's 'create nonlocal table wisps' commit count = %d, want 1", n)
+	}
+	if got := sessionTransactionCommit(t, ctx, conn); got != 1 {
+		t.Fatalf("@@dolt_transaction_commit after retry = %d, want the original 1", got)
+	}
+}
+
+// TestEmbeddedStuckAt0040FailsAgainWithoutSuspension_4800 is the negative
+// control for the convergence test above: on an independent stuck store, a
+// retry that keeps automatic transaction commits on (the seam standing in for
+// a binary without GH#4470's suspension) fails at 0040 again with "nothing to
+// commit" and leaves the main cursor at 39, so the suspension, not #4504's
+// repair alone, is what converges the store.
+func TestEmbeddedStuckAt0040FailsAgainWithoutSuspension_4800(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openStuckAt0040Conn(t, ctx)
+
+	restoreSeam := schema.SetKeepTransactionCommitForTest(true)
+	t.Cleanup(restoreSeam)
+	_, err := schema.MigrateUp(ctx, conn)
+	restoreSeam()
+	requireStuckAt0040(t, ctx, conn, err)
 }
