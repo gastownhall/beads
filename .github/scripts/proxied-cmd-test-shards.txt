@@ -142,7 +142,6 @@
 34 14 TestProxiedServerInitIfMissing
 34 14 TestProxiedServerMolReadyGated
 
-34 15 TestProxiedServerAutoExportRefusalGuards
 34 15 TestProxiedServerDepConcurrent
 34 15 TestProxiedServerImport
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
