@@ -715,7 +715,7 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 // If both are false, returns an error if any issue has dependents.
 // If dryRun is true, only computes statistics without deleting.
 // deleteBatchSize controls the maximum number of IDs per IN-clause query.
-// Kept small to avoid large IN-clause queries. See steveyegge/beads#1692.
+// Kept small to avoid large IN-clause queries. See GH#1692.
 const deleteBatchSize = 50
 
 // maxRecursiveResults is the safety limit for the total number of issues discovered
