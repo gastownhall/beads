@@ -131,7 +131,7 @@ func TestUOWDeleteCommentRaceCharacterization(t *testing.T) {
 	defer cancel()
 
 	const database = "delete_comment_race"
-	opened, err := openAndInitSchema(ctx, "tcp", ep, "", database, "root", "", "", false, "", providerOptions{})
+	opened, err := openAndInitSchema(ctx, "tcp", ep, "", database, "root", "", "", false, "", providerOptions{}, nil)
 	if err != nil {
 		t.Fatalf("openAndInitSchema: %v", err)
 	}
