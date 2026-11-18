@@ -840,4 +840,42 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("preserves_fresh_workspace", func(t *testing.T) {
+		proxiedRefusalEnv(t)
+		beadsDir := writeProxiedModeMetadata(t, "proxied-server")
+		before := workspaceTreeDigest(t, filepath.Dir(beadsDir))
+		assertProxiedRefusal(t, beads.OpenBestAvailable, beadsDir, before)
+		// The digest covers the whole tree; name the two storage roots the
+		// embedded fall-through used to create so a failure reads as the
+		// defect it is.
+		for _, artifact := range []string{"embeddeddolt", "dolt"} {
+			if _, statErr := os.Stat(filepath.Join(beadsDir, artifact)); !os.IsNotExist(statErr) {
+				t.Errorf("refusal created %s (stat error: %v)", artifact, statErr)
+			}
+		}
+	})
+
+	t.Run("preserves_leftover_embedded_tree", func(t *testing.T) {
+		proxiedRefusalEnv(t)
+		beadsDir := writeProxiedModeMetadata(t, "proxied-server")
+		// A workspace that was once embedded and later moved to
+		// proxied-server: .beads/embeddeddolt still holds the stale issue
+		// set the embedded fall-through would serve as real. Plant known
+		// bytes and pin that the refusal leaves them byte-identical (a
+		// preservation fixture, not evidence of a live stale read).
+		marker := filepath.Join(beadsDir, "embeddeddolt", "stale", "issues.json")
+		if err := os.MkdirAll(filepath.Dir(marker), 0o750); err != nil {
+			t.Fatalf("plant stale tree: %v", err)
+		}
+		const knownBytes = `{"issues":["stale-issue-from-the-embedded-era"]}`
+		if err := os.WriteFile(marker, []byte(knownBytes), 0o600); err != nil {
+			t.Fatalf("plant stale marker: %v", err)
+		}
+		before := workspaceTreeDigest(t, filepath.Dir(beadsDir))
+		assertProxiedRefusal(t, beads.OpenBestAvailable, beadsDir, before)
+		if got, err := os.ReadFile(marker); err != nil || string(got) != knownBytes {
+			t.Errorf("stale marker = %q, %v; want the planted bytes untouched", got, err)
+		}
+	})
 }
