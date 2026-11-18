@@ -145,6 +145,28 @@ func TestEngineDryRunCreateOnlyForcedLinkedUpdates(t *testing.T) {
 	}
 }
 
+// TestEngineCreateOnlyDoesNotLimitPull pins the pull side of --create-only
+// (gastownhall/beads#8507): the flag limits only the push, so a sync that
+// pulls under CreateOnly still imports remote edits into linked beads. The
+// tracker CLIs refuse the flag on pull-only runs; at the engine itself the
+// contract is that doPull never consults it.
+func TestEngineCreateOnlyDoesNotLimitPull(t *testing.T) {
+	f := newPushHashFixture()
+	f.editRemote("remote edit")
+
+	result := runSync(t, f.engine, SyncOptions{Pull: true, Push: true, CreateOnly: true})
+
+	if f.local.Title != "remote edit" {
+		t.Errorf("linked bead title = %q, want %q: a pull must not honor CreateOnly", f.local.Title, "remote edit")
+	}
+	if result.PullStats.Updated != 1 {
+		t.Errorf("PullStats.Updated = %d, want 1: the linked bead must be pulled", result.PullStats.Updated)
+	}
+	if len(f.mock.updated) != 0 {
+		t.Errorf("tracker.updated = %v, want none: CreateOnly must still stop the push of the linked issue", f.mock.updated)
+	}
+}
+
 // batchPushOnlyTracker is Linear-shaped: it implements BatchPushTracker but not
 // BatchPushDryRunner, so a push dry-run falls through to the sequential loop.
 type batchPushOnlyTracker struct {
