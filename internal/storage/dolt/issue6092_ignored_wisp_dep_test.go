@@ -636,3 +636,44 @@ func TestIssue6092IgnoredWispDepReplayOverFinalShapeIsANoOp(t *testing.T) {
 	}
 	issue6092RequireReferencedUnchanged(t, ctx, db)
 }
+
+// issue6092CloneLocalWispTables are the clone-local wisp tables ignored/0001
+// creates, children before wisps so the drops respect their foreign keys.
+var issue6092CloneLocalWispTables = []string{
+	"wisp_dependencies", "wisp_labels", "wisp_events", "wisp_comments", "wisp_child_counters", "wisps",
+}
+
+// TestIssue6092IgnoredChainReplayOverAbsentWispTables is AC-5: main at latest
+// and the clone-local wisp tables absent, as on a fresh clone of an upgraded
+// lineage. The ignored chain replays from scratch -- ignored/0001 creates the
+// tables and ignored/0003 leaves the generated-column shape the ignored-5
+// repair then converges -- and wisp_dependencies ends with the final keys,
+// indexes and constraints. A second MigrateUp applies nothing.
+func TestIssue6092IgnoredChainReplayOverAbsentWispTables(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*testTimeout)
+	defer cancel()
+	db := store.db
+
+	final := issue6092ReadShape(t, ctx, db)
+	for _, table := range issue6092CloneLocalWispTables {
+		issue6092Exec(t, ctx, db, "DROP TABLE IF EXISTS "+table)
+	}
+	issue6092CommitAndRewindIgnored(t, ctx, db, 0)
+
+	if _, err := schema.MigrateUp(ctx, db); err != nil {
+		t.Fatalf("first MigrateUp over absent wisp tables: %v", err)
+	}
+	issue6092RequireCursorsAtLatest(t, ctx, db)
+	n, err := schema.MigrateUp(ctx, db)
+	if err != nil {
+		t.Fatalf("second MigrateUp: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("second MigrateUp applied %d migrations, want 0", n)
+	}
+	got := issue6092ReadShape(t, ctx, db)
+	issue6092RequireNamedFinalObjects(t, got)
+	issue6092RequireFinalShape(t, got, final)
+}
