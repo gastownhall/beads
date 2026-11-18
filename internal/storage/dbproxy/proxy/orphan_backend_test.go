@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -265,4 +266,27 @@ func TestReapUnrecordedBackendSendsNoSignalWithoutFullMatch(t *testing.T) {
 			assert.False(t, fake.killed, "a dolt serving another root (%s) must never be signaled", otherConfig)
 		}
 	})
+}
+
+// TestReapUnrecordedBackendLogsRemedyWhenCommandLineUnreadable pins #8489
+// AC-6: a live dolt whose command line cannot be read (every Windows case,
+// any read failure elsewhere) gets no signal, and exactly one log line names
+// the pid, the info file and the manual remedy.
+func TestReapUnrecordedBackendLogsRemedyWhenCommandLineUnreadable(t *testing.T) {
+	root := t.TempDir()
+	infoPath := writeServerInfo(t, root, 4242)
+	fake := &fakeOrphanCandidate{
+		basename:   "dolt",
+		cmdlineErr: errors.New("reading another process's command line is not supported on windows"),
+	}
+	installOrphanCandidate(t, func(int) (orphanCandidate, bool, error) { return fake, false, nil })
+	logs := captureLogs(t)
+
+	require.NoError(t, reapUnrecordedBackend(root))
+	assert.False(t, fake.killed, "an unreadable command line must never earn a signal")
+	assert.Contains(t, logs.String(), "pid 4242")
+	assert.Contains(t, logs.String(), infoPath)
+	assert.Contains(t, logs.String(), "stop pid 4242 and retry")
+	assert.Equal(t, 1, strings.Count(logs.String(), "command line cannot be read"),
+		"exactly one remedy line, not a per-needle spill")
 }
