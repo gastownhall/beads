@@ -464,6 +464,22 @@ type consoleSpawnPolicy struct {
 	// scope lists repo-relative package directories; a "/..." suffix
 	// includes every package below it.
 	scope []string
+	// required lists package directories that must each contribute at
+	// least one Windows-buildable file and one recognised spawn, so a
+	// rename, a move or a scanner regression cannot empty the scan
+	// silently.
+	required []string
+	// allowlist is file (repo-relative) -> justified unhidden spawns.
+	allowlist map[string][]consoleSpawnAllowEntry
+}
+
+// consoleSpawnAllowEntry is one justified unhidden spawn, keyed by its
+// enclosing function and the exact trimmed source line rather than a line
+// number (the hostToolExecAllowlist precedent), with a mandatory reason.
+type consoleSpawnAllowEntry struct {
+	fn      string
+	snippet string
+	why     string
 }
 
 // inScope reports whether rel (repo-relative, slash-separated) is a non-test
@@ -540,15 +556,62 @@ func (p consoleSpawnPolicy) check(root string, relFiles []string) ([]string, err
 		return nil, err
 	}
 	var problems []string
+	pkgFiles := map[string]int{}
+	pkgSpawns := map[string]int{}
+	matched := map[string]map[int]bool{}
 	for _, f := range files {
+		dir := path.Dir(f.rel)
+		pkgFiles[dir]++
+		pkgSpawns[dir] += len(f.spawns)
 		for _, sp := range f.spawns {
 			if sp.problem == "" {
+				continue
+			}
+			if idx, ok := matchConsoleSpawnAllow(p.allowlist[f.rel], sp); ok {
+				if matched[f.rel] == nil {
+					matched[f.rel] = map[int]bool{}
+				}
+				matched[f.rel][idx] = true
 				continue
 			}
 			problems = append(problems, f.rel+":"+strconv.Itoa(sp.line)+": "+sp.problem+" (GH#6076: on Windows a console-less bd gives this child a visible console)")
 		}
 	}
+	for _, pkg := range p.required {
+		switch {
+		case pkgFiles[pkg] == 0:
+			problems = append(problems, "required package "+pkg+" contributes no Windows-buildable non-test Go file to the console-spawn scan; if it moved or was renamed, update the policy's scope and required list")
+		case pkgSpawns[pkg] == 0:
+			problems = append(problems, "required package "+pkg+" contributes no recognised spawn to the console-spawn scan; if it no longer spawns, drop it from the required list, else the scanner stopped seeing its spawns")
+		}
+	}
+	rels := make([]string, 0, len(p.allowlist))
+	for rel := range p.allowlist {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	for _, rel := range rels {
+		for idx, e := range p.allowlist[rel] {
+			id := "allowlist entry " + rel + " " + e.fn + " " + strconv.Quote(e.snippet)
+			if strings.TrimSpace(e.why) == "" {
+				problems = append(problems, id+" has no reason")
+			}
+			if !matched[rel][idx] {
+				problems = append(problems, id+" matches no live unhidden spawn; delete it")
+			}
+		}
+	}
 	return problems, nil
+}
+
+// matchConsoleSpawnAllow returns the index of the entry naming sp.
+func matchConsoleSpawnAllow(entries []consoleSpawnAllowEntry, sp consoleSpawn) (int, bool) {
+	for i, e := range entries {
+		if e.fn == sp.fn && e.snippet == sp.snippet {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // writeConsoleSpawnFixtures writes files (repo-relative path -> source) under
@@ -768,6 +831,112 @@ func f() error {
 			}
 			if !strings.Contains(got[0], c.wantReason) {
 				t.Fatalf("report %q does not say %q", got[0], c.wantReason)
+			}
+		})
+	}
+}
+
+// TestConsoleSpawnPolicyCannotBeDisarmed pins the counts that keep the
+// repository-wide scan honest: a required package with no Windows-buildable
+// file or no recognised spawn fails the guard and is named, and so does an
+// allowlist entry that matches no live unhidden spawn or gives no reason.
+func TestConsoleSpawnPolicyCannotBeDisarmed(t *testing.T) {
+	const spawning = "package p\n\nimport \"os/exec\"\n\nfunc child(self string) error {\n\tcmd := exec.Command(self, \"child\")\n\treturn cmd.Start()\n}\n"
+	root, rels := writeConsoleSpawnFixtures(t, map[string]string{
+		"pkg/spawns/child.go":      spawning,
+		"pkg/darwinonly/ps.go":     "//go:build darwin\n\npackage p\n\nimport \"os/exec\"\n\nfunc ps() error { return exec.Command(\"ps\").Run() }\n",
+		"pkg/quiet/quiet.go":       "package p\n\nfunc quiet() {}\n",
+		"pkg/spawns/child_test.go": "package p\n",
+	})
+	childEntry := consoleSpawnAllowEntry{fn: "child", snippet: `cmd := exec.Command(self, "child")`, why: "DETACHED_PROCESS fixture"}
+	base := consoleSpawnPolicy{
+		scope:     []string{"pkg/..."},
+		required:  []string{"pkg/spawns"},
+		allowlist: map[string][]consoleSpawnAllowEntry{"pkg/spawns/child.go": {childEntry}},
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(p *consoleSpawnPolicy)
+		want   []string // substrings, each of which must appear in some problem
+	}{
+		{name: "control: live allowlist entry, populated packages", mutate: func(*consoleSpawnPolicy) {}},
+		{
+			name:   "required package with no Windows-buildable file",
+			mutate: func(p *consoleSpawnPolicy) { p.required = append(p.required, "pkg/darwinonly") },
+			want:   []string{"required package pkg/darwinonly contributes no Windows-buildable"},
+		},
+		{
+			name:   "required package that is missing entirely",
+			mutate: func(p *consoleSpawnPolicy) { p.required = append(p.required, "pkg/renamed") },
+			want:   []string{"required package pkg/renamed contributes no Windows-buildable"},
+		},
+		{
+			name:   "required package with no recognised spawn",
+			mutate: func(p *consoleSpawnPolicy) { p.required = append(p.required, "pkg/quiet") },
+			want:   []string{"required package pkg/quiet contributes no recognised spawn"},
+		},
+		{
+			name: "allowlist entry whose snippet no longer matches",
+			mutate: func(p *consoleSpawnPolicy) {
+				e := childEntry
+				e.snippet = `cmd := exec.Command(self, "old")`
+				p.allowlist = map[string][]consoleSpawnAllowEntry{"pkg/spawns/child.go": {e}}
+			},
+			want: []string{
+				`allowlist entry pkg/spawns/child.go child "cmd := exec.Command(self, \"old\")" matches no live unhidden spawn`,
+				"pkg/spawns/child.go:6: cmd is started, passed on or read before execwin.Hide(cmd)",
+			},
+		},
+		{
+			name: "allowlist entry for a file that is out of scope",
+			mutate: func(p *consoleSpawnPolicy) {
+				p.allowlist["pkg/darwinonly/ps.go"] = []consoleSpawnAllowEntry{{fn: "ps", snippet: `func ps() error { return exec.Command("ps").Run() }`, why: "x"}}
+			},
+			want: []string{"allowlist entry pkg/darwinonly/ps.go ps"},
+		},
+		{
+			name: "allowlist entry without a reason",
+			mutate: func(p *consoleSpawnPolicy) {
+				e := childEntry
+				e.why = " "
+				p.allowlist = map[string][]consoleSpawnAllowEntry{"pkg/spawns/child.go": {e}}
+			},
+			want: []string{"allowlist entry pkg/spawns/child.go child " + strconv.Quote(childEntry.snippet) + " has no reason"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := base
+			p.required = append([]string(nil), base.required...)
+			p.allowlist = map[string][]consoleSpawnAllowEntry{}
+			for k, v := range base.allowlist {
+				p.allowlist[k] = append([]consoleSpawnAllowEntry(nil), v...)
+			}
+			c.mutate(&p)
+			problems, err := p.check(root, rels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(c.want) == 0 {
+				if len(problems) != 0 {
+					t.Fatalf("control reported:\n%s", strings.Join(problems, "\n"))
+				}
+				return
+			}
+			if len(problems) != len(c.want) {
+				t.Errorf("got %d problems, want %d:\n%s", len(problems), len(c.want), strings.Join(problems, "\n"))
+			}
+			for _, w := range c.want {
+				found := false
+				for _, got := range problems {
+					if strings.Contains(got, w) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("no problem says %q; got:\n%s", w, strings.Join(problems, "\n"))
+				}
 			}
 		})
 	}
