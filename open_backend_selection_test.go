@@ -806,3 +806,34 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenBestAvailableProxiedRefusalLeavesWorkspaceUntouched pins that the
+// proxied-server refusal writes nothing, whether the workspace never had an
+// embedded tree or still carries one from before it moved to proxied-server
+// mode. The planted tree is a preservation fixture: no open may create,
+// migrate or read-and-rewrite it, nor create any other storage directory.
+func TestOpenBestAvailableProxiedRefusalLeavesWorkspaceUntouched(t *testing.T) {
+	for _, tree := range []string{"absent", "pre-existing"} {
+		for name, open := range proxiedOpens {
+			t.Run(tree+"/"+name, func(t *testing.T) {
+				root, beadsDir := proxiedServerBeadsDir(t, "proxied-server")
+				if tree == "pre-existing" {
+					marker := filepath.Join(beadsDir, "embeddeddolt", "dolt", "stale-marker")
+					if err := os.MkdirAll(filepath.Dir(marker), 0o750); err != nil {
+						t.Fatalf("create embedded tree: %v", err)
+					}
+					if err := os.WriteFile(marker, []byte("issues as of the last embedded run\n"), 0o600); err != nil {
+						t.Fatalf("write marker: %v", err)
+					}
+				}
+				before := workspaceTreeDigest(t, root)
+
+				store, err := open(context.Background(), beadsDir)
+				assertProxiedRefusal(t, name, store, err)
+				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+					t.Fatalf("%s refusal changed the workspace:\nbefore %v\nafter  %v", name, before, after)
+				}
+			})
+		}
+	}
+}
