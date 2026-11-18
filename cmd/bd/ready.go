@@ -41,6 +41,15 @@ Use --gated to find molecules ready for gate-resume dispatch:
 Use --claim to atomically claim the first ready issue matching the filters:
   bd ready --claim --json
 
+Use --exclude-parents to leave out container issues while their children are
+still open, so a parent whose children are all blocked is not offered as work:
+  bd ready --exclude-parents --json
+
+It hides every parent with a non-closed child (pinned children included), even
+a parent that carries work of its own; once its last child closes, an
+otherwise-ready parent is offered again. It combines with the other filters,
+--parent and --claim, but not with --gated, --mol or --explain.
+
 This is useful for agents executing molecules to see which steps can run next.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -860,6 +869,7 @@ func init() {
 	readyCmd.Flags().Bool("flat", false, "Alias for --plain, spelled the way bd list spells it")
 	readyCmd.Flags().Bool("include-deferred", false, "Include issues with future defer_until timestamps")
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
+	readyCmd.Flags().Bool("exclude-parents", false, "Exclude parents with non-closed child issues (including pinned children)")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")

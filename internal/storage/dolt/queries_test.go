@@ -3603,3 +3603,89 @@ func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
 		}
 	})
 }
+
+// TestGetReadyWork_ParentWithOnlyUnreadyChildrenIsNotReady reproduces GH#6817:
+// a parent whose open children are all blocked is offered by ready even though
+// none of its children are, so the container is dispatched as actionable work.
+// The approved fix is opt-in (WorkFilter.ExcludeParentsWithOpenChildren, `bd
+// ready --exclude-parents`): the default ready set keeps the parent, and the
+// flagged one drops it while its children are open, keeps a childless leaf and
+// an epic whose children are all closed, and offers the parent again once its
+// last open child closes.
+func TestGetReadyWork_ParentWithOnlyUnreadyChildrenIsNotReady(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, iss := range []*types.Issue{
+		{ID: "rc-parent", Title: "Container", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic},
+		{ID: "rc-child1", Title: "Child 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "rc-child2", Title: "Child 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "rc-prereq", Title: "Shared prerequisite", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "rc-leaf", Title: "Childless leaf", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "rc-done-epic", Title: "Epic with closed children", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic},
+		{ID: "rc-done-child", Title: "Closed child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+	} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", iss.ID, err)
+		}
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: "rc-child1", DependsOnID: "rc-parent", Type: types.DepParentChild},
+		{IssueID: "rc-child2", DependsOnID: "rc-parent", Type: types.DepParentChild},
+		{IssueID: "rc-child1", DependsOnID: "rc-prereq", Type: types.DepBlocks},
+		{IssueID: "rc-child2", DependsOnID: "rc-prereq", Type: types.DepBlocks},
+		{IssueID: "rc-done-child", DependsOnID: "rc-done-epic", Type: types.DepParentChild},
+	} {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("add dep %s->%s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+	if err := store.CloseIssue(ctx, "rc-done-child", "done", "tester", ""); err != nil {
+		t.Fatalf("close rc-done-child: %v", err)
+	}
+
+	readySet := func(t *testing.T, filter types.WorkFilter) map[string]bool {
+		t.Helper()
+		work, err := store.GetReadyWork(ctx, filter)
+		if err != nil {
+			t.Fatalf("GetReadyWork(%+v): %v", filter, err)
+		}
+		ready := map[string]bool{}
+		for _, iss := range work {
+			ready[iss.ID] = true
+		}
+		return ready
+	}
+
+	// The default contract is unchanged: the parent is still offered.
+	ready := readySet(t, types.WorkFilter{})
+	if ready["rc-child1"] || ready["rc-child2"] {
+		t.Fatalf("precondition: blocked children must not be ready; ready=%v", ready)
+	}
+	if !ready["rc-prereq"] || !ready["rc-parent"] {
+		t.Fatalf("default ready must keep the prerequisite and the parent; ready=%v", ready)
+	}
+
+	excluding := types.WorkFilter{ExcludeParentsWithOpenChildren: true}
+	ready = readySet(t, excluding)
+	if ready["rc-parent"] {
+		t.Errorf("parent rc-parent is ready although it has open children and none of them is ready; ready=%v", ready)
+	}
+	for _, id := range []string{"rc-prereq", "rc-leaf", "rc-done-epic"} {
+		if !ready[id] {
+			t.Errorf("%s must stay ready under the exclusion; ready=%v", id, ready)
+		}
+	}
+
+	for _, id := range []string{"rc-child1", "rc-child2"} {
+		if err := store.CloseIssue(ctx, id, "done", "tester", ""); err != nil {
+			t.Fatalf("close %s: %v", id, err)
+		}
+	}
+	if ready = readySet(t, excluding); !ready["rc-parent"] {
+		t.Errorf("rc-parent must be ready again once its last open child closed; ready=%v", ready)
+	}
+}

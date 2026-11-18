@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
@@ -50,11 +51,55 @@ func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, f
 		inputs.ParentDescendantIDs = descendantIDs
 	}
 
+	if filter.ExcludeParentsWithOpenChildren {
+		parentIDs, pErr := r.openChildParentIDs(ctx, tables)
+		if pErr != nil {
+			return nil, fmt.Errorf("get ready work: %w", pErr)
+		}
+		inputs.OpenChildParentIDs = map[string][]string{tables.Main: parentIDs}
+	}
+
 	whereSQL, args, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)
 	if err != nil {
 		return nil, err
 	}
 	return &readyWorkPredicates{whereSQL: whereSQL, args: args}, nil
+}
+
+// openChildParentIDs returns, deduplicated and sorted, the rows of one parent
+// family (tables.Main) with at least one open child in either child family:
+// the classic stack's issueops.openChildParentIDsInTx over the same
+// sqlbuild statements, which are also the checked close gate's relationship
+// (GH#6817). A database without the wisp plane has no wisp children.
+func (r *issueSQLRepositoryImpl) openChildParentIDs(ctx context.Context, tables filterTables) ([]string, error) {
+	targetColumn := sqlbuild.ParentTargetColumn(tables)
+	seen := make(map[string]struct{})
+	for _, family := range sqlbuild.OpenChildFamilies {
+		query, err := sqlbuild.OpenChildParentIDsSQL(family, targetColumn)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := r.runner.QueryContext(ctx, query)
+		if err != nil {
+			if family.DedupeDurable && missingOptionalWispTable(err) {
+				continue
+			}
+			return nil, fmt.Errorf("open-child parents of %s from %s: %w", tables.Main, family.Dependencies, err)
+		}
+		var ids []string
+		if err := scanStringsInto(rows, &ids); err != nil {
+			return nil, fmt.Errorf("open-child parents of %s from %s: %w", tables.Main, family.Dependencies, err)
+		}
+		for _, id := range ids {
+			seen[id] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // staleBlockedIDs reads sqlbuild.StaleBlockedIDsSQL for one table family:

@@ -798,3 +798,71 @@ func TestEmbeddedReadyEmptyStateRealBlocker(t *testing.T) {
 		}
 	})
 }
+
+// GH#6817: `bd ready --exclude-parents` leaves out a parent while any child is
+// open (here its only child is blocked, so ready offered the container and
+// nothing under it), keeps a childless leaf and an epic whose children all
+// closed, and offers the parent again once the child closes. Without the flag
+// the parent stays in the ready set.
+func TestEmbeddedReadyExcludeParents(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "xp")
+
+	run := func(t *testing.T, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		return stdout.String()
+	}
+	readySet := func(t *testing.T, args ...string) map[string]bool {
+		t.Helper()
+		out := run(t, append([]string{"ready", "--json", "--limit", "0"}, args...)...)
+		var issues []types.IssueWithCounts
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &issues); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, out)
+		}
+		ids := map[string]bool{}
+		for _, issue := range issues {
+			ids[issue.ID] = true
+		}
+		return ids
+	}
+
+	parent := bdCreate(t, bd, dir, "Container", "--type", "epic")
+	child := bdCreate(t, bd, dir, "Blocked child", "--type", "task", "--parent", parent.ID)
+	blocker := bdCreate(t, bd, dir, "Blocker", "--type", "task")
+	run(t, "dep", "add", child.ID, blocker.ID)
+	leaf := bdCreate(t, bd, dir, "Childless leaf", "--type", "task")
+	doneEpic := bdCreate(t, bd, dir, "Epic with closed children", "--type", "epic")
+	doneChild := bdCreate(t, bd, dir, "Closed child", "--type", "task", "--parent", doneEpic.ID)
+	run(t, "close", doneChild.ID)
+
+	if ready := readySet(t); !ready[parent.ID] || ready[child.ID] {
+		t.Fatalf("default ready must keep the parent and drop its blocked child; ready=%v", ready)
+	}
+
+	ready := readySet(t, "--exclude-parents")
+	if ready[parent.ID] {
+		t.Errorf("--exclude-parents offered parent %s while its child %s is open; ready=%v", parent.ID, child.ID, ready)
+	}
+	for _, id := range []string{leaf.ID, doneEpic.ID, blocker.ID} {
+		if !ready[id] {
+			t.Errorf("--exclude-parents dropped %s, which has no open child; ready=%v", id, ready)
+		}
+	}
+
+	run(t, "close", child.ID, "--force")
+	if ready := readySet(t, "--exclude-parents"); !ready[parent.ID] {
+		t.Errorf("--exclude-parents must offer %s again once its last child closed; ready=%v", parent.ID, ready)
+	}
+}
