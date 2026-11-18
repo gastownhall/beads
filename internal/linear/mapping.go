@@ -37,6 +37,119 @@ func BuildLinearDescription(issue *types.Issue) string {
 	return description
 }
 
+// DescriptionParts is a Linear description split back into the bead fields
+// BuildLinearDescription folds into it. It is comparable with ==.
+type DescriptionParts struct {
+	Description        string
+	AcceptanceCriteria string
+	Design             string
+	Notes              string
+}
+
+// descriptionSectionHeadings lists the headings BuildLinearDescription
+// emits, in the order it emits them; the index is the heading's rank.
+var descriptionSectionHeadings = [...]string{
+	"## Acceptance Criteria",
+	"## Design",
+	"## Notes",
+}
+
+// ParseLinearDescription inverts BuildLinearDescription (and the
+// bd-idempotency marker a create appends) for a Linear description.
+//
+// Every complete bd-idempotency marker is removed, with the newline that
+// AppendIdempotencyMarker put before it, wherever it sits in the text. Then,
+// walking up from the end, only a final run of non-empty "## Acceptance
+// Criteria", "## Design" and "## Notes" sections in that order is lifted
+// into the fields, which is exactly the shape BuildLinearDescription writes.
+// Any other line, including a repeated, out-of-order or empty-body heading,
+// stays in the part above it. Section bodies drop the leading blank lines
+// Linear inserts after a heading and their trailing whitespace.
+//
+// When neither a marker nor a section is found, the text is returned as the
+// description unchanged.
+func ParseLinearDescription(text string) DescriptionParts {
+	stripped, markerRemoved := stripIdempotencyMarkers(text)
+	lines := strings.Split(stripped, "\n")
+
+	var fields [len(descriptionSectionHeadings)]string
+	limit := len(descriptionSectionHeadings)
+	end := len(lines) // the lines from end on belong to split sections
+	split := false
+	for i := len(lines) - 1; i >= 0 && limit > 0; i-- {
+		rank := descriptionHeadingRank(lines[i])
+		if rank < 0 || rank >= limit {
+			continue
+		}
+		body := descriptionSectionBody(lines[i+1 : end])
+		if body == "" {
+			continue
+		}
+		fields[rank] = body
+		limit = rank
+		end = i
+		split = true
+	}
+
+	if !split && !markerRemoved {
+		return DescriptionParts{Description: text}
+	}
+	return DescriptionParts{
+		Description:        strings.TrimRight(strings.Join(lines[:end], "\n"), descriptionTrailingSpace),
+		AcceptanceCriteria: fields[0],
+		Design:             fields[1],
+		Notes:              fields[2],
+	}
+}
+
+const descriptionTrailingSpace = " \t\r\n"
+
+// descriptionHeadingRank returns the rank of a section heading line, or -1.
+func descriptionHeadingRank(line string) int {
+	line = strings.TrimRight(line, " \t\r")
+	for rank, heading := range descriptionSectionHeadings {
+		if line == heading {
+			return rank
+		}
+	}
+	return -1
+}
+
+// descriptionSectionBody joins a section's lines without its leading blank
+// lines and trailing whitespace; indentation is kept.
+func descriptionSectionBody(lines []string) string {
+	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+		lines = lines[1:]
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), descriptionTrailingSpace)
+}
+
+// stripIdempotencyMarkers removes every complete bd-idempotency marker and
+// the newline before it. A prefix with no suffix after it stays, as in
+// extractIdempotencyMarker.
+func stripIdempotencyMarkers(text string) (string, bool) {
+	removed := false
+	from := 0
+	for {
+		idx := strings.Index(text[from:], idempotencyPrefix)
+		if idx < 0 {
+			return text, removed
+		}
+		start := from + idx
+		end := strings.Index(text[start+len(idempotencyPrefix):], idempotencySuffix)
+		if end < 0 {
+			return text, removed
+		}
+		stop := start + len(idempotencyPrefix) + end + len(idempotencySuffix)
+		if start > 0 && text[start-1] == '\n' {
+			start--
+		}
+		text = text[:start] + text[stop:]
+		from = start
+		removed = true
+	}
+}
+
 // NormalizeIssueForLinearHash returns a copy of the issue using Linear's description
 // formatting and clears fields not present in Linear's model to avoid false conflicts.
 func NormalizeIssueForLinearHash(issue *types.Issue) *types.Issue {
@@ -751,13 +864,19 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 		updatedAt = time.Now()
 	}
 
+	// A push folds acceptance criteria, design and notes into the
+	// description (BuildLinearDescription); split them back out.
+	parts := ParseLinearDescription(li.Description)
 	issue := &types.Issue{
-		Title:       li.Title,
-		Description: li.Description,
-		Priority:    PriorityToBeads(li.Priority, config),
-		IssueType:   LabelToIssueType(li.Labels, config),
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
+		Title:              li.Title,
+		Description:        parts.Description,
+		AcceptanceCriteria: parts.AcceptanceCriteria,
+		Design:             parts.Design,
+		Notes:              parts.Notes,
+		Priority:           PriorityToBeads(li.Priority, config),
+		IssueType:          LabelToIssueType(li.Labels, config),
+		CreatedAt:          createdAt,
+		UpdatedAt:          updatedAt,
 	}
 
 	// Map state using configurable mapping
@@ -855,8 +974,13 @@ func BuildLinearToLocalUpdates(li *Issue, config *MappingConfig) map[string]inte
 	// Update title
 	updates["title"] = li.Title
 
-	// Update description
-	updates["description"] = li.Description
+	// Update description, splitting out the sections a push folded into it
+	// (BuildLinearDescription) and dropping bd's idempotency marker.
+	parts := ParseLinearDescription(li.Description)
+	updates["description"] = parts.Description
+	updates["acceptance_criteria"] = parts.AcceptanceCriteria
+	updates["design"] = parts.Design
+	updates["notes"] = parts.Notes
 
 	// Update priority using configured mapping
 	updates["priority"] = PriorityToBeads(li.Priority, config)
