@@ -288,3 +288,76 @@ func TestUpgradeReadOnlySubcommandsSkipStoreInit(t *testing.T) {
 		t.Fatal("bd upgrade ack should still reach store init and fail to open the absent database; fixture precondition broken")
 	}
 }
+
+// TestUpgradeReadOnlySubcommandsPreserveVersionMarker pins the marker half of
+// GH#6669: status and review detect an upgrade without consuming
+// .beads/.local_version, the one-shot signal the next store-backed command's
+// version-bump reconciliation reads. Run in succession, both must report the
+// same prior version and leave the marker's bytes alone; a downgrade marker is
+// reported as no upgrade and is not rewritten either.
+func TestUpgradeReadOnlySubcommandsPreserveVersionMarker(t *testing.T) {
+	t.Run("older marker", func(t *testing.T) {
+		beadsDir := upgradeInspectionFixture(t)
+		localVersionPath := filepath.Join(beadsDir, localVersionFile)
+		marker := []byte("0.9.0\n")
+		if err := os.WriteFile(localVersionPath, marker, 0o600); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+
+		out := driveUpgradeInspection(t, upgradeStatusCmd, true)
+		var status map[string]any
+		if err := json.Unmarshal([]byte(out), &status); err != nil {
+			t.Fatalf("bd upgrade status --json is not JSON: %v\n%s", err, out)
+		}
+		if status["upgraded"] != true || status["previous_version"] != "0.9.0" {
+			t.Errorf("bd upgrade status --json = %v, want upgraded from 0.9.0", status)
+		}
+		assertMarkerBytes(t, localVersionPath, marker, "status")
+
+		out = driveUpgradeInspection(t, upgradeReviewCmd, true)
+		var review map[string]any
+		if err := json.Unmarshal([]byte(out), &review); err != nil {
+			t.Fatalf("bd upgrade review --json after status is not JSON: %v\n%s", err, out)
+		}
+		if review["previous_version"] != "0.9.0" {
+			t.Errorf("bd upgrade review --json after status = %v, want previous_version 0.9.0", review)
+		}
+		assertMarkerBytes(t, localVersionPath, marker, "review")
+
+		out = driveUpgradeInspection(t, upgradeStatusCmd, false)
+		if !strings.Contains(out, "upgraded from v0.9.0") {
+			t.Errorf("text bd upgrade status after review = %q, want the 0.9.0 upgrade", out)
+		}
+		assertMarkerBytes(t, localVersionPath, marker, "status (text)")
+	})
+
+	t.Run("newer marker", func(t *testing.T) {
+		beadsDir := upgradeInspectionFixture(t)
+		localVersionPath := filepath.Join(beadsDir, localVersionFile)
+		marker := []byte("999.0.0\n")
+		if err := os.WriteFile(localVersionPath, marker, 0o600); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+		out := driveUpgradeInspection(t, upgradeStatusCmd, true)
+		var status map[string]any
+		if err := json.Unmarshal([]byte(out), &status); err != nil {
+			t.Fatalf("bd upgrade status --json is not JSON: %v\n%s", err, out)
+		}
+		if status["upgraded"] != false {
+			t.Errorf("bd upgrade status --json on a downgrade = %v, want upgraded=false", status)
+		}
+		driveUpgradeInspection(t, upgradeReviewCmd, false)
+		assertMarkerBytes(t, localVersionPath, marker, "status+review")
+	})
+}
+
+func assertMarkerBytes(t *testing.T, path string, want []byte, after string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s after %s: %v", localVersionFile, after, err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("%s rewrote %s: got %q, want %q", after, localVersionFile, got, want)
+	}
+}
