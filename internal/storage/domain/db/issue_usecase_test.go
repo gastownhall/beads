@@ -27,6 +27,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("MintPassesOverClaimedIDs", s.useCaseMintPassesOverClaimedIDs)
 	s.Run("WispMintCountsPromotedWisps", s.useCaseMintWispCountsPromotedWisps)
 	s.Run("DurableMintCountsBaseNamespaceInWisps", s.useCaseMintDurableCountsBaseNamespaceInWisps)
+	s.Run("LiveWispsDoNotLengthenBaseIDs", s.useCaseMintLiveWispsDoNotLengthenBaseIDs)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -283,6 +284,24 @@ func (s *testSuite) useCaseMintDurableCountsBaseNamespaceInWisps() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.assertMintedHashLen(res.Issue.ID, "ucBn", 4)
+}
+
+// useCaseMintLiveWispsDoNotLengthenBaseIDs: wisps outside the base
+// namespace (ucLw-wisp-*, ucLw-mol-*) do not count for a durable mint, so 3
+// base issues keep length 3 at 0.001 (bd-u9cfx0).
+func (s *testSuite) useCaseMintLiveWispsDoNotLengthenBaseIDs() {
+	s.resetMintConfig("ucLw", "")
+	s.setMaxCollisionProb("0.001")
+	uc := s.issueUseCase()
+	s.seedMintRows(mintIDs("ucLw-a", 3), false)
+	s.seedMintRows(mintIDs("ucLw-wisp-b", 10), true)
+	s.seedMintRows(mintIDs("ucLw-mol-c", 2), true)
+
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "fresh issue", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.assertMintedHashLen(res.Issue.ID, "ucLw", 3)
 }
 
 func (s *testSuite) useCaseMintRespectsPrefixOverride() {

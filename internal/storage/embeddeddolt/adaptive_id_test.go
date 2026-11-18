@@ -68,6 +68,20 @@ func TestAdaptiveIDLengthSpansBothPlanes(t *testing.T) {
 
 		assertAdaptiveSizing(t, te, "issues", "dm", 12, 4)
 	})
+
+	t.Run("live wisps outside the base namespace do not lengthen base IDs", func(t *testing.T) {
+		// AC-3: a plain sum of both tables' lw-% counts would be 15
+		// (length 4); only the 3 lw-<hash> issues share the namespace.
+		te, ctx := newAdaptiveIDEnv(t, "lw")
+		seedRows(t, te, seededIDs("lw-a", 3), false)
+		seedRows(t, te, seededIDs("lw-wisp-b", 10), true)
+		seedRows(t, te, seededIDs("lw-mol-c", 2), true)
+
+		assertAdaptiveSizing(t, te, "issues", "lw", 3, 3)
+		id := mintOne(t, te, "fresh issue", false)
+		assertHashSuffixLen(t, id, "lw", 3)
+		te.assertRowExists(t, ctx, "issues", id)
+	})
 }
 
 // newAdaptiveIDEnv returns an isolated store under prefix with
