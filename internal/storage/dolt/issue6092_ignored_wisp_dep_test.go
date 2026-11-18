@@ -743,3 +743,88 @@ func TestIssue6092IgnoredWispDepReplayLeavesConvergedTableUntouched(t *testing.T
 		}
 	}
 }
+
+// issue6092WispPlaneTables are the clone-local tables the ignored chain owns
+// (0001/0002/0030): the wisp family plus its local-state companions.
+var issue6092WispPlaneTables = []string{
+	"wisps", "wisp_labels", "wisp_dependencies", "wisp_events", "wisp_comments",
+	"repo_mtimes", "local_metadata", "wisp_child_counters", "wisp_id_tombstones",
+}
+
+// TestIssue6092IgnoredReplayRebuildsAbsentWispTables covers the absent-table
+// population of #6092: main is at latest but the clone never got the
+// ignored-plane tables (a fresh clone of a repo whose main branch carried the
+// main-plane schema), so the whole ignored chain has to replay from 1. The
+// replay must rebuild the tables and leave wisp_dependencies in the final
+// shape, and a second pass must apply nothing.
+func TestIssue6092IgnoredReplayRebuildsAbsentWispTables(t *testing.T) {
+	dbName, conn, ctx := issue6092Setup(t)
+
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
+			t.Fatalf("exec %.80q: %v", query, err)
+		}
+	}
+	scalar := func(query string) int64 {
+		t.Helper()
+		var v int64
+		if err := conn.QueryRowContext(ctx, query).Scan(&v); err != nil {
+			t.Fatalf("query %.80q: %v", query, err)
+		}
+		return v
+	}
+
+	// Absent clone-local wisp tables, whole ignored cursor gone.
+	exec("SET FOREIGN_KEY_CHECKS = 0")
+	for _, table := range issue6092WispPlaneTables {
+		exec("DROP TABLE IF EXISTS `" + table + "`")
+	}
+	exec("SET FOREIGN_KEY_CHECKS = 1")
+	exec("DELETE FROM ignored_schema_migrations")
+	issue6092CommitFixture(t, ctx, conn, "test: #6092 absent clone-local wisp tables")
+
+	var present int
+	if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('wisps', 'wisp_dependencies', 'wisp_child_counters', 'wisp_id_tombstones')`).Scan(&present); err != nil {
+		t.Fatalf("probe dropped tables: %v", err)
+	}
+	if present != 0 {
+		t.Fatalf("%d wisp-plane tables survived the drop, want 0", present)
+	}
+
+	// Pass 1: the whole ignored chain replays and rebuilds.
+	if _, err := schema.MigrateUpWithLock(ctx, conn, dbName); err != nil {
+		t.Fatalf("replay with absent clone-local wisp tables (#6092): %v", err)
+	}
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations"); got != int64(schema.LatestVersion()) {
+		t.Fatalf("main cursor = %d after the replay, want latest %d", got, schema.LatestVersion())
+	}
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"); got != int64(schema.LatestIgnoredVersion()) {
+		t.Fatalf("ignored cursor = %d after the replay, want latest %d", got, schema.LatestIgnoredVersion())
+	}
+	if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('wisps', 'wisp_dependencies', 'wisp_child_counters', 'wisp_id_tombstones')`).Scan(&present); err != nil {
+		t.Fatalf("probe rebuilt tables: %v", err)
+	}
+	if present != 4 {
+		t.Fatalf("only %d of the dropped wisp-plane tables came back, want 4", present)
+	}
+	issue6092RequireFinalWispDepShape(t, ctx, conn)
+
+	// Pass 2: applies nothing.
+	logBefore := scalar("SELECT COUNT(*) FROM dolt_log")
+	applied, err := schema.MigrateUpWithLock(ctx, conn, dbName)
+	if err != nil {
+		t.Fatalf("second pass after the rebuild (#6092): %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("second pass applied %d migrations, want 0", applied)
+	}
+	if got := scalar("SELECT COUNT(*) FROM dolt_log"); got != logBefore {
+		t.Fatalf("dolt_log grew across the second pass: %d -> %d", logBefore, got)
+	}
+	issue6092RequireFinalWispDepShape(t, ctx, conn)
+}
