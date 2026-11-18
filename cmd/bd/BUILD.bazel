@@ -842,6 +842,7 @@ go_test(
         "export_auto_missing_store_test.go",
         "export_auto_proxied_backend_test.go",
         "export_auto_proxied_integration_test.go",
+        "export_auto_proxied_maybe_test.go",
         "export_auto_proxied_test.go",
         "export_auto_test.go",
         "export_auto_wedge_heal_test.go",

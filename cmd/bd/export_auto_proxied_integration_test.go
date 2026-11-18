@@ -115,6 +115,48 @@ func TestProxiedServerAutoExport(t *testing.T) {
 			t.Fatalf("canary write did not produce issues.jsonl: %v", err)
 		}
 	})
+
+	// Inside export.interval nothing is rewritten even though the hash moved.
+	t.Run("throttle_window", func(t *testing.T) {
+		t.Parallel()
+		p := newProxiedAutoExportProject(t, bd, "pxt", "export.interval", "1h")
+		bdProxiedCreateSilent(t, bd, p.dir, "Throttled one")
+		jsonl, state := readProxiedAutoExportFiles(t, p)
+		if jsonl == "" || state == "" {
+			t.Fatalf("first proxied write did not export: jsonl=%q state=%q", jsonl, state)
+		}
+		// The second write changes the hash but lands inside the window.
+		bdProxiedCreateSilent(t, bd, p.dir, "Throttled two")
+		requireProxiedAutoExportUnchanged(t, p, "bd create inside export.interval", jsonl, state)
+	})
+
+	// Change detection follows the working set, not HEAD: under
+	// dolt.auto-commit=batch nothing commits, yet an update past the
+	// throttle still reaches the JSONL. Inside the interval it does not.
+	t.Run("batch_working_set", func(t *testing.T) {
+		t.Parallel()
+		p := newProxiedAutoExportProject(t, bd, "pxb", "dolt.auto-commit", "batch")
+		id := bdProxiedCreateSilent(t, bd, p.dir, "Original title")
+		if rec := exportIssueRecordByID(exportLines(t, readProxiedAutoExportJSONL(t, p)), id); rec == nil {
+			t.Fatalf("batch-mode create did not export %s", id)
+		}
+		first := readProxiedAutoExportState(t, p)
+
+		setProxiedAutoExportConfig(t, bd, p, "export.interval", "1h")
+		jsonl, state := readProxiedAutoExportFiles(t, p)
+		bdProxiedUpdateOne(t, bd, p.dir, id, "--title", "Throttled title")
+		requireProxiedAutoExportUnchanged(t, p, "bd update inside export.interval", jsonl, state)
+
+		setProxiedAutoExportConfig(t, bd, p, "export.interval", "1ms")
+		bdProxiedUpdateOne(t, bd, p.dir, id, "--title", "Working-set title")
+		rec := exportIssueRecordByID(exportLines(t, readProxiedAutoExportJSONL(t, p)), id)
+		if rec == nil || rec["title"] != "Working-set title" {
+			t.Fatalf("after an uncommitted (batch) update past the throttle, JSONL record = %v; want title %q", rec, "Working-set title")
+		}
+		if second := readProxiedAutoExportState(t, p); second.LastDoltCommit == first.LastDoltCommit {
+			t.Fatalf("export-state last_dolt_commit did not move under dolt.auto-commit=batch (still %q)", first.LastDoltCommit)
+		}
+	})
 }
 
 // newProxiedAutoExportProject is a shared-server proxied project with
