@@ -878,4 +878,74 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 			t.Errorf("stale marker = %q, %v; want the planted bytes untouched", got, err)
 		}
 	})
+
+	t.Run("override_server_mode_env", func(t *testing.T) {
+		proxiedRefusalEnv(t)
+		// The override forces IsDoltServerMode true ahead of the persisted
+		// mode; the refusal must still fire first. The dial target is pinned
+		// to a port nothing listens on so a missing guard fails fast instead
+		// of reaching a real server.
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+		beadsDir := writeProxiedModeMetadata(t, "proxied-server")
+		before := workspaceTreeDigest(t, filepath.Dir(beadsDir))
+		assertProxiedRefusal(t, beads.OpenBestAvailable, beadsDir, before)
+	})
+
+	t.Run("override_shared_server_env", func(t *testing.T) {
+		for _, v := range []string{"1", "true"} {
+			t.Run("BEADS_DOLT_SHARED_SERVER="+v, func(t *testing.T) {
+				proxiedRefusalEnv(t)
+				t.Setenv("BEADS_DOLT_SHARED_SERVER", v)
+				t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+				t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+				beadsDir := writeProxiedModeMetadata(t, "proxied-server")
+				before := workspaceTreeDigest(t, filepath.Dir(beadsDir))
+				assertProxiedRefusal(t, beads.OpenBestAvailable, beadsDir, before)
+			})
+		}
+	})
+
+	t.Run("override_no_dial_before_server_constructor", func(t *testing.T) {
+		proxiedRefusalEnv(t)
+		// A test-owned loopback listener is the configured server endpoint.
+		// If the refusal did not precede the server constructor, the open
+		// would dial it (fail-fast check or connection) and the listener
+		// would record the connection; the refusal must leave it untouched.
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		accepted := make(chan net.Conn, 8)
+		acceptDone := make(chan struct{})
+		go func() {
+			defer close(acceptDone)
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				accepted <- conn
+				_ = conn.Close()
+			}
+		}()
+		t.Cleanup(func() {
+			_ = ln.Close()
+			<-acceptDone
+		})
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(ln.Addr().(*net.TCPAddr).Port))
+
+		beadsDir := writeProxiedModeMetadata(t, "proxied-server")
+		before := workspaceTreeDigest(t, filepath.Dir(beadsDir))
+		assertProxiedRefusal(t, beads.OpenBestAvailable, beadsDir, before)
+
+		select {
+		case conn := <-accepted:
+			t.Fatalf("the open dialed the configured server endpoint (connection from %s); the refusal must precede the server constructor", conn.RemoteAddr())
+		default:
+		}
+	})
 }
