@@ -166,6 +166,36 @@ bd init
 bd backup restore /path/to/backup --force   # replaces whatever bd init created
 ```
 
+The engine that reads the backup is the one doing the restore. In embedded
+mode it is the Dolt engine built into `bd`, not the Dolt CLI you may have
+installed. In server mode it is the Dolt SQL server the workspace connects to.
+A server that bd starts runs the `dolt` that was on your PATH when it started
+and keeps that version until it restarts, so after upgrading `dolt`, restart
+the server with `bd dolt stop` and then `bd dolt start`.
+Restoring a backup written by the same Dolt version is the baseline; a backup
+from an older Dolt is the expected direction, within the storage formats Dolt
+still reads. A backup written by a newer Dolt is not guaranteed to restore,
+and a `dolt backup restore` that succeeds with a newer CLI does not show that
+the engine restoring for bd can read it.
+
+If the restore fails with `failed to commit restore` and Dolt's
+`table has unknown fields`, the engine met table data it does not know, which
+can mean the backup is in a newer storage format than that engine reads. The
+restore step had already run, so the workspace may already hold the backup
+contents, and whether the commit was recorded or the data can be read is
+unknown. Do not keep working in that workspace, and do not re-run the restore
+over it hoping for a different result:
+
+1. Leave the backup directory unchanged; restore from it, never into it.
+2. In embedded mode, upgrade `bd` to a build whose embedded Dolt can read the
+   backup; in server mode, use a Dolt server whose version can read it. For a
+   server that bd starts, upgrade `dolt` on your PATH, then run `bd dolt stop`
+   and `bd dolt start` so the server runs the upgraded `dolt`.
+3. Verify in a separate, freshly initialized recovery workspace: run
+   `bd init` and `bd backup restore /path/to/backup --force` there, then check
+   the data as described in "4. Verify the recovered data" below before you
+   rely on it.
+
 ### From a JSONL export
 
 A JSONL file from `bd export` is an issue export, not a Dolt backup: it has no

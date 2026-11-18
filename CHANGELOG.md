@@ -1334,6 +1334,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd vc merge --strategy ours|theirs` concludes a merge whose only
+  problem is a foreign-key violation** (#4992 follow-up). A merge with no row
+  conflict can still stop on a foreign-key cascade violation, for example
+  when one side deleted an issue the other side labeled. The command left
+  that merge open with the violation in the working set; in server mode it
+  then failed with "merge succeeded but is_blocked recompute failed". It now
+  deletes the rows that reference the deleted issue and commits the merge,
+  or aborts it when bd cannot repair the violation, the way `bd dolt pull`
+  settles such a merge. It also refuses to start while another merge is
+  open, such as one an older bd left that way, instead of aborting that
+  merge or concluding it as this one; `bd conflicts list` shows what the
+  open merge needs. In server mode the merge also stops leaving its
+  conflict-tolerance session settings on a pooled connection, where a later
+  transaction on that connection could keep merge conflicts or constraint
+  violations in the working set instead of rolling back.
+
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that
@@ -1477,6 +1493,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem, which a server in a container does not unless the backup is
   mounted at the same path in both; there a `--force` restore from a backup
   that only bd's machine holds can still drop the database.
+- `bd backup restore` explains a post-restore commit that Dolt refuses with
+  `table has unknown fields` (GH#7569). The restore step has already run by
+  then, but bd printed only the engine error. It now says the workspace's
+  database may already hold the backup contents, that whether the commit was
+  recorded and whether the data can be read is unknown, and that the backup
+  may be in a newer storage format than the restoring engine reads. It names
+  the engine to upgrade (the Dolt engine built into `bd` in embedded mode;
+  the Dolt server in server mode, which for a server bd starts is the `dolt`
+  on `PATH`, picked up after `bd dolt stop` and `bd dolt start`) and says to
+  verify the recovery in a separate, freshly initialized workspace, as the
+  native-backup route of the database-corruption runbook now describes.
+  `bd bootstrap` prints the same guidance when its restore fails this way.
+  The version pair reported there, an embedded Dolt 2.2.3 reading a backup
+  written by Dolt 2.4.2, no longer applies: embedded mode now runs the Dolt
+  2.6.0 engine.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
@@ -2370,6 +2401,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or `.beads/dolt-server.activity`.** Both were already gitignored, but the
   tracked-runtime-files check did not list them, so a copy committed before
   the ignore rule stayed tracked (#6191).
+- **`.beads/.gitignore` now ignores the machine-local files bd writes
+  after init.** `dolt-backup.json` and `dolt-backup-state.json`
+  (`bd backup init`/`sync`), `dolt-config.log` (`bd dolt set`),
+  `.auto-import-issues.jsonl` (the JSONL auto-import stamp) and
+  `dolt-mode-migration.json` (the resume journal of the
+  `bd migrate from-<mode>-to-<mode>` switches) sat beside `backup/`, which
+  matches only that directory, so a `git add .` committed them; three of
+  them hold absolute local paths. New workspaces ignore all five. In an
+  existing server-mode workspace, `bd doctor` shows an "Outdated
+  .beads/.gitignore" warning until `bd doctor --fix` appends the five
+  names, and the same fix untracks copies already committed, leaving them
+  on disk. `bd doctor` is not yet supported in embedded (the `bd init`
+  default) or proxied-server workspaces, so there, add the five names to
+  `.beads/.gitignore` by hand and run `git rm --cached` on any copy already
+  committed (#8318, builds on PR #8364 by rjgeng).
 
 - `bd admin reset` now removes the `prepare-commit-msg` hook bd installs.
   Reset scanned only four of the five hooks bd manages, so a bd-installed

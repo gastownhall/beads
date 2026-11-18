@@ -48,6 +48,43 @@ func TestCheckGitHooks(t *testing.T) {
 			}
 		})
 	})
+
+	// The Fix links name live pages, not the pre-move repository
+	// or its never-existing examples/git-hooks directory (GH#3059).
+	assertHooksFixLink := func(t *testing.T, check DoctorCheck, want string) {
+		t.Helper()
+		if check.Status != StatusWarning {
+			t.Fatalf("expected status %q, got %q (%s)", StatusWarning, check.Status, check.Message)
+		}
+		if !strings.Contains(check.Fix, want) {
+			t.Errorf("Fix = %q, want it to link %s", check.Fix, want)
+		}
+		for _, stale := range []string{legacyRepoOrg, "examples/git-hooks"} {
+			if strings.Contains(check.Fix, stale) {
+				t.Errorf("Fix = %q contains stale %q", check.Fix, stale)
+			}
+		}
+	}
+
+	t.Run("missing hooks link the hooks reference", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setupGitRepoInDir(t, tmpDir)
+		runInDir(t, tmpDir, func() {
+			assertHooksFixLink(t, CheckGitHooks("0.49.6"), "https://beads.gascity.com/cli-reference/hooks")
+		})
+	})
+
+	t.Run("hooks not calling bd link the upgrade issue", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setupGitRepoInDir(t, tmpDir)
+		lefthook := "pre-commit:\n  commands:\n    lint:\n      run: echo lint\n"
+		if err := os.WriteFile(filepath.Join(tmpDir, "lefthook.yml"), []byte(lefthook), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runInDir(t, tmpDir, func() {
+			assertHooksFixLink(t, CheckGitHooks("0.49.6"), "https://github.com/gastownhall/beads/issues/615")
+		})
+	})
 }
 
 // setupGitRepoInDir initializes a git repo in the given directory with .beads

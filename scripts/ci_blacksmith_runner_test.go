@@ -499,7 +499,7 @@ func mustEvalGHRunsOn(t *testing.T, expr string, ctx map[string]string) string {
 // `||`, a wrong field name) fails this test even if a hand-rolled Go mirror
 // would have been edited to match it.
 func TestSameRepoBlacksmithExpressionSemantics(t *testing.T) {
-	const ownRepo = "steveyegge/beads"
+	const ownRepo = "gastownhall/beads"
 	type tc struct {
 		name       string
 		event      string
@@ -554,7 +554,7 @@ func TestSameRepoBlacksmithExpressionSemantics(t *testing.T) {
 // resolve to Blacksmith on every event shape, forks and Dependabot included;
 // there is no GitHub-hosted fallback left to drift to.
 func TestBlacksmithWindowsMacOSRunsOnEveryEvent(t *testing.T) {
-	const ownRepo = "steveyegge/beads"
+	const ownRepo = "gastownhall/beads"
 	events := []struct{ name, event, headRepo, actor string }{
 		{"same-repo PR", "pull_request", ownRepo, "alice"},
 		{"merge_group", "merge_group", "", ""},
