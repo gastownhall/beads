@@ -78,7 +78,10 @@ type SyncOptions struct {
 	Push bool
 	// DryRun previews sync without making changes.
 	DryRun bool
-	// CreateOnly only creates new issues, doesn't update existing.
+	// CreateOnly limits a push to issues with no external link yet; a linked
+	// issue is still pushed when conflict resolution forces it. A pull ignores
+	// it, which is why the tracker CLIs refuse it on a pull-only sync
+	// (gastownhall/beads#8507).
 	CreateOnly bool
 	// State filters issues: "open", "closed", or "all".
 	State string

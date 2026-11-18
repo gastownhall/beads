@@ -95,6 +95,15 @@ func TestTrackerSyncRefusesCreateOnlyOnPull(t *testing.T) {
 		{name: "linear pull dry-run", cmd: linearSyncCmd, tracker: "Linear", flags: []string{"pull", "create-only", "dry-run"}, refused: true},
 		{name: "jira pull", cmd: jiraSyncCmd, tracker: "Jira", flags: []string{"pull", "create-only"}, refused: true},
 		{name: "notion pull", cmd: notionSyncCmd, tracker: "Notion", flags: []string{"pull", "create-only"}, refused: true},
+		// AC-3: --create-only limits the push, so any run that pushes keeps it.
+		{name: "linear push", cmd: linearSyncCmd, tracker: "Linear", flags: []string{"push", "create-only"}},
+		{name: "linear pull and push", cmd: linearSyncCmd, tracker: "Linear", flags: []string{"pull", "push", "create-only"}},
+		{name: "linear pull-if-stale and push", cmd: linearSyncCmd, tracker: "Linear", flags: []string{"pull-if-stale", "push", "create-only"}},
+		{name: "linear bidirectional", cmd: linearSyncCmd, tracker: "Linear", flags: []string{"create-only"}},
+		{name: "jira push", cmd: jiraSyncCmd, tracker: "Jira", flags: []string{"push", "create-only"}},
+		{name: "jira bidirectional", cmd: jiraSyncCmd, tracker: "Jira", flags: []string{"create-only"}},
+		{name: "notion push", cmd: notionSyncCmd, tracker: "Notion", flags: []string{"push", "create-only"}},
+		{name: "notion bidirectional", cmd: notionSyncCmd, tracker: "Notion", flags: []string{"create-only"}},
 	}
 
 	for _, tc := range cases {
