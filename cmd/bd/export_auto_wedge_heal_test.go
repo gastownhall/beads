@@ -464,7 +464,7 @@ func TestMaybeAutoExport_ScopeSkipsNeverReachAProofSource(t *testing.T) {
 		map[string]any{"_type": "issue", "id": "wh-tpl", "title": "Template", "issue_type": "task", "is_template": true},
 	)
 
-	rec, err := reconcileAutoExportJSONL(context.Background(), exportPath, "")
+	rec, err := reconcileAutoExportJSONL(context.Background(), directAutoExportBackend{}, directAutoExportReader{}, exportPath, "")
 	if err != nil {
 		t.Fatalf("reconcileAutoExportJSONL: %v", err)
 	}
@@ -491,7 +491,7 @@ func TestProveDeletedIssueIDs_HistoryProofIsCapped(t *testing.T) {
 		fake.historical[candidates[i]] = true
 	}
 
-	proven, unproven := proveDeletedIssueIDs(context.Background(), candidates, "")
+	proven, unproven := proveDeletedIssueIDs(context.Background(), directAutoExportBackend{}, candidates, "")
 	if len(proven) != 0 {
 		t.Errorf("proven = %d ids, want 0 past the cap", len(proven))
 	}
@@ -718,7 +718,7 @@ func TestMaybeAutoExport_ProvenDeletionReachesTheIncrementalPatch(t *testing.T) 
 	// the same issue set, field for field, as a fresh full export of the same
 	// state — including in what it OMITS.
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
-	if _, _, err := exportToFile(ctx, controlPath, false); err != nil {
+	if _, _, err := exportToFile(ctx, directAutoExportReader{}, controlPath, false); err != nil {
 		t.Fatalf("control exportToFile: %v", err)
 	}
 	got := jsonlRecordsByID(t, exportPath)

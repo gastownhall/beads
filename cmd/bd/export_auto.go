@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -102,10 +103,8 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	if !config.GetBool("export.auto") {
 		return nil
 	}
-	if store == nil {
-		return nil
-	}
-	if lm, ok := storage.UnwrapStore(store).(storage.LifecycleManager); ok && lm.IsClosed() {
+	backend := autoExportBackendForCommand()
+	if backend == nil {
 		return nil
 	}
 
@@ -125,9 +124,10 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		interval = 60 * time.Second
 	}
 
-	// Change detection via Dolt state hash. This is cheap, so do it before
-	// throttle: when there are no changes, there is nothing to throttle.
-	currentCommit, err := storeStateHash(ctx)
+	// Change detection via the backend's state hash. This is cheap, so do it
+	// before throttle: when there are no changes, there is nothing to
+	// throttle.
+	currentCommit, err := backend.stateHash(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
 		return nil
@@ -143,74 +143,101 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		return nil
 	}
 
-	// Reconcile the existing JSONL against the store ONCE, and let BOTH
-	// fail-safe guards below read the same answer. A deletion this store can
-	// prove is not divergence for either of them: the empty-overwrite guard
-	// fires first, so without a shared verdict `bd delete <last issue>`
-	// wedges there before the orphan guard ever gets to prove anything
-	// (GH#5896).
-	var provenDeleted []string
-	if !allowEmptyOverwrite {
-		rec, err := reconcileAutoExportJSONL(ctx, fullPath, state.LastDiffAnchor)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare existing JSONL against local store: %v\n", err)
-			return nil
-		}
-		provenDeleted = rec.provenDeleted
-
-		if skip, existingCount, err := shouldSkipEmptyAutoExport(ctx, rec); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to check existing JSONL: %v\n", err)
-			return nil
-		} else if skip {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: current database would export 0 issues, but %s already contains %d issue(s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, existingCount)
-			return nil
-		}
-
-		if len(rec.unproven) > 0 {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %s contains %d JSONL-only issue record(s) absent from the local Dolt store (%s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, len(rec.unproven), strings.Join(sampleStrings(rec.unproven, 5), ", "))
-			return nil
-		}
-	}
-
-	// Run the export — memories are excluded from auto-export because they
-	// contain private agent context that must not reach git history (GH#3650).
-	// Try an incremental re-encode first (dolt_diff over the changed-since-last-
-	// export range); fall back to a full export when the store doesn't support
-	// diffing, the commit range isn't diffable (e.g. state-hash values in server
-	// mode where auto-commit is off), or the change set exceeds the threshold.
-	//
-	// The diff anchor is always a real commit (never the working-set/state
-	// hash used for change detection above) — dolt_diff() rejects anything
-	// else — and the diff's "to" endpoint is always the literal "WORKING",
-	// which dolt_diff accepts and which captures uncommitted writes in
-	// server mode (where auto-commit is off and HEAD does not advance).
-	// Resolved after every early-return guard above so tests whose scenario
-	// is fully handled by those guards see no extra GetCurrentCommit call.
-	exportStart := time.Now()
-	anchorCommit, anchorErr := store.GetCurrentCommit(ctx)
-	if anchorErr != nil {
-		debug.Logf("auto-export: failed to resolve diff anchor (%v); preserving previous anchor\n", anchorErr)
-		anchorCommit = state.LastDiffAnchor
-	}
-	// provenDeleted rides along as FORCED removals: an id proved by the
-	// in-process handoff or by store history is invisible to
-	// dolt_diff(anchor, WORKING), so an incremental patch would faithfully
-	// preserve its stale JSONL line forever even though the guard just
-	// cleared the export to run. A full export needs nothing — it rewrites
-	// from the store.
-	issueCount, memoryCount, dirtyIDs, didIncremental, err := tryIncrementalExport(
-		ctx, fullPath, state.LastDiffAnchor, doltWorkingRef, state.LastDirtyIDs, provenDeleted,
+	// Guards and writer run inside ONE backend read (autoExportBackend.read),
+	// so a backend with a snapshot serves both from it. Each refusal below
+	// prints its own warning and stops the cycle by leaving exported false.
+	var (
+		provenDeleted  []string
+		anchorCommit   string
+		issueCount     int
+		memoryCount    int
+		dirtyIDs       []string
+		didIncremental bool
+		exportStart    time.Time
+		exported       bool
 	)
-	if err != nil {
-		debug.Logf("auto-export: incremental failed (%v); falling back to full\n", err)
-	}
-	if !didIncremental {
-		issueCount, memoryCount, err = exportToFile(ctx, fullPath, false)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export failed: %v\n", err)
-			return nil
+	if err := backend.read(ctx, func(ctx context.Context, r autoExportReader) error {
+		// Reconcile the existing JSONL against the store ONCE, and let BOTH
+		// fail-safe guards below read the same answer. A deletion this store can
+		// prove is not divergence for either of them: the empty-overwrite guard
+		// fires first, so without a shared verdict `bd delete <last issue>`
+		// wedges there before the orphan guard ever gets to prove anything
+		// (GH#5896).
+		if !allowEmptyOverwrite {
+			rec, err := reconcileAutoExportJSONL(ctx, backend, r, fullPath, state.LastDiffAnchor)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare existing JSONL against local store: %v\n", err)
+				return nil
+			}
+			provenDeleted = rec.provenDeleted
+
+			if skip, existingCount, err := shouldSkipEmptyAutoExport(ctx, r, rec); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to check existing JSONL: %v\n", err)
+				return nil
+			} else if skip {
+				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: current database would export 0 issues, but %s already contains %d issue(s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, existingCount)
+				return nil
+			}
+
+			if len(rec.unproven) > 0 {
+				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %s contains %d JSONL-only issue record(s) absent from the local Dolt store (%s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, len(rec.unproven), strings.Join(sampleStrings(rec.unproven, 5), ", "))
+				return nil
+			}
 		}
-		dirtyIDs = nil
+
+		// Run the export — memories are excluded from auto-export because they
+		// contain private agent context that must not reach git history (GH#3650).
+		// Try an incremental re-encode first (dolt_diff over the changed-since-last-
+		// export range); fall back to a full export when the store doesn't support
+		// diffing, the commit range isn't diffable (e.g. state-hash values in server
+		// mode where auto-commit is off), or the change set exceeds the threshold.
+		//
+		// The diff anchor is always a real commit (never the working-set/state
+		// hash used for change detection above) — dolt_diff() rejects anything
+		// else — and the diff's "to" endpoint is always the literal "WORKING",
+		// which dolt_diff accepts and which captures uncommitted writes in
+		// server mode (where auto-commit is off and HEAD does not advance).
+		// Resolved after every early-return guard above so tests whose scenario
+		// is fully handled by those guards see no extra GetCurrentCommit call.
+		exportStart = time.Now()
+		var anchorErr error
+		anchorCommit, anchorErr = backend.currentCommit(ctx)
+		if anchorErr != nil {
+			debug.Logf("auto-export: failed to resolve diff anchor (%v); preserving previous anchor\n", anchorErr)
+			anchorCommit = state.LastDiffAnchor
+		}
+		// provenDeleted rides along as FORCED removals: an id proved by the
+		// in-process handoff or by store history is invisible to
+		// dolt_diff(anchor, WORKING), so an incremental patch would faithfully
+		// preserve its stale JSONL line forever even though the guard just
+		// cleared the export to run. A full export needs nothing — it rewrites
+		// from the store.
+		var incErr error
+		issueCount, memoryCount, dirtyIDs, didIncremental, incErr = tryIncrementalExport(
+			ctx, backend, r, fullPath, state.LastDiffAnchor, doltWorkingRef, state.LastDirtyIDs, provenDeleted,
+		)
+		if incErr != nil {
+			debug.Logf("auto-export: incremental failed (%v); falling back to full\n", incErr)
+		}
+		if !didIncremental {
+			var fullErr error
+			issueCount, memoryCount, fullErr = exportToFile(ctx, r, fullPath, false)
+			if fullErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: auto-export failed: %v\n", fullErr)
+				return nil
+			}
+			dirtyIDs = nil
+		}
+		exported = true
+		return nil
+	}); err != nil {
+		// The read itself failed before the cycle could run (a backend that
+		// could not open its snapshot); same skip shape as the cycle's own.
+		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %v\n", err)
+		return nil
+	}
+	if !exported {
+		return nil
 	}
 
 	// Never heal silently. The user asked for a delete and is getting a line
@@ -283,16 +310,150 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	return nil
 }
 
-// storeStateHash returns the hash used for auto-export change detection.
-// It prefers a working-set-aware hash (storage.StateHasher) over the HEAD
-// commit: in server mode dolt auto-commit is off, so writes stay in the
-// working set and HEAD does not advance — HEAD-based detection would go
-// permanently quiet after the first export.
-func storeStateHash(ctx context.Context) (string, error) {
+// autoExportBackend is the storage seam the auto-export pipeline runs
+// against: change detection, guards, and writer all read through it, so the
+// same pipeline serves the classic store global (direct backend) and the
+// proxied-server unit-of-work provider (bd-todbq7) with byte-identical
+// output. Selected once per run by autoExportBackendForCommand, after the
+// export.auto config check, so a disabled auto-export costs no storage
+// round trip.
+type autoExportBackend interface {
+	// stateHash is the change-detection hash: working-set aware where the
+	// backend can offer it, else HEAD-based (the pre-seam storeStateHash
+	// rule — in server mode dolt auto-commit is off, so writes stay in the
+	// working set and HEAD does not advance, and HEAD-based detection would
+	// go permanently quiet after the first export).
+	stateHash(ctx context.Context) (string, error)
+	// currentCommit is HEAD's hash — the incremental diff anchor. Never a
+	// working-set value: dolt_diff() rejects those.
+	currentCommit(ctx context.Context) (string, error)
+	// read runs fn against one consistent view of the issue data the guards
+	// and the writer need, and only returns an error when fn could not run.
+	// Backends with a snapshot run fn inside it; the direct backend calls fn
+	// immediately, exactly as the pre-seam code did.
+	read(ctx context.Context, fn func(ctx context.Context, r autoExportReader) error) error
+}
+
+// autoExportReader is the read surface the auto-export guards and writer run
+// on inside backend.read: the exportSource `bd export` already reads through
+// (so classic and proxied modes read the same rows), plus the issue search
+// the guards and the full writer use.
+type autoExportReader interface {
+	exportSource
+	searchIssues(ctx context.Context, filter types.IssueFilter) ([]*types.Issue, error)
+}
+
+// The optional capabilities below are asserted on the backend, mirroring the
+// pre-seam storage.DiffStore / storage.HistoryPresence assertions: a backend
+// without one makes its caller degrade exactly as before — fall through to
+// the next deletion proof, or fall back to a full export.
+
+// autoExportAnchorChecker is P2's ancestry precondition: is the diff anchor
+// still reachable from HEAD?
+type autoExportAnchorChecker interface {
+	commitExists(ctx context.Context, commitHash string) (bool, error)
+}
+
+// autoExportDiffSource is P2's dolt_diff deletion proof and the incremental
+// path's change set.
+type autoExportDiffSource interface {
+	changedIssueIDs(ctx context.Context, fromCommit, toCommit string) (storage.ChangedIssueIDs, error)
+}
+
+// autoExportHistorySource is P3's committed-history deletion proof.
+type autoExportHistorySource interface {
+	historicalIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error)
+}
+
+// autoExportIssueFetcher is the bulk row fetch only the incremental path
+// needs; a backend without it always takes the full export.
+type autoExportIssueFetcher interface {
+	issuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
+}
+
+// errAutoExportUnsupported is what an optional capability returns when the
+// storage under the backend does not offer it — the direct backend's store
+// may lack storage.DiffStore (embedded mode) or storage.HistoryPresence
+// exactly as before the seam. Callers treat it as the old failed type
+// assertion, not as a failure to report.
+var errAutoExportUnsupported = errors.New("auto-export: backend does not offer this capability")
+
+// autoExportBackendForCommand selects the backend this run's auto-export
+// reads through, or nil when auto-export must not run at all. A var so
+// tests can stub selection.
+var autoExportBackendForCommand = defaultAutoExportBackendForCommand
+
+// defaultAutoExportBackendForCommand routes by storage mode. Proxied-server
+// runs read through the provider the command opened (bd-todbq7); every other
+// mode keeps the direct selection rules exactly where they were: no store,
+// or a closed store, means no auto-export.
+func defaultAutoExportBackendForCommand() autoExportBackend {
+	if usesProxiedServer() {
+		return proxiedAutoExportBackendForCommand()
+	}
+	if store == nil {
+		return nil
+	}
+	if lm, ok := storage.UnwrapStore(store).(storage.LifecycleManager); ok && lm.IsClosed() {
+		return nil
+	}
+	return directAutoExportBackend{}
+}
+
+// directAutoExportBackend reads through the classic store global,
+// preserving the pre-seam call pattern: unwrap-assert the optional
+// capabilities on the store, read everything else straight off it.
+type directAutoExportBackend struct{}
+
+func (directAutoExportBackend) stateHash(ctx context.Context) (string, error) {
 	if sh, ok := storage.UnwrapStore(store).(storage.StateHasher); ok {
 		return sh.GetStateHash(ctx)
 	}
 	return store.GetCurrentCommit(ctx)
+}
+
+func (directAutoExportBackend) currentCommit(ctx context.Context) (string, error) {
+	return store.GetCurrentCommit(ctx)
+}
+
+func (directAutoExportBackend) read(ctx context.Context, fn func(ctx context.Context, r autoExportReader) error) error {
+	return fn(ctx, directAutoExportReader{})
+}
+
+func (directAutoExportBackend) commitExists(ctx context.Context, commitHash string) (bool, error) {
+	ch, ok := storage.UnwrapStore(store).(commitHistoryChecker)
+	if !ok {
+		return false, errAutoExportUnsupported
+	}
+	return ch.CommitExists(ctx, commitHash)
+}
+
+func (directAutoExportBackend) changedIssueIDs(ctx context.Context, fromCommit, toCommit string) (storage.ChangedIssueIDs, error) {
+	ds, ok := storage.UnwrapStore(store).(storage.DiffStore)
+	if !ok {
+		return storage.ChangedIssueIDs{}, errAutoExportUnsupported
+	}
+	return ds.ChangedIssueIDs(ctx, fromCommit, toCommit)
+}
+
+func (directAutoExportBackend) historicalIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	hp, ok := storage.UnwrapStore(store).(storage.HistoryPresence)
+	if !ok {
+		return nil, errAutoExportUnsupported
+	}
+	return hp.HistoricalIssueIDs(ctx, ids)
+}
+
+func (directAutoExportBackend) issuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
+	return store.GetIssuesByIDs(ctx, ids)
+}
+
+// directAutoExportReader is the direct-mode autoExportReader: the classic
+// export source plus the store-global search the guards use.
+type directAutoExportReader struct{ storeExportSource }
+
+func (directAutoExportReader) searchIssues(ctx context.Context, filter types.IssueFilter) ([]*types.Issue, error) {
+	return store.SearchIssues(ctx, "", filter)
 }
 
 // shouldExport reports whether the throttle window has elapsed, or whether
@@ -313,13 +474,13 @@ func shouldExport(state *exportAutoState, interval time.Duration) bool {
 // records worth protecting — deleting the last exported issue is the shape
 // that used to wedge here, one guard earlier than the orphan guard everyone
 // blamed (GH#5896).
-func shouldSkipEmptyAutoExport(ctx context.Context, rec *autoExportReconciliation) (bool, int, error) {
+func shouldSkipEmptyAutoExport(ctx context.Context, r autoExportReader, rec *autoExportReconciliation) (bool, int, error) {
 	existingCount := rec.jsonlIssueCount - len(rec.provenDeleted)
 	if existingCount <= 0 {
 		return false, 0, nil
 	}
 
-	issues, err := store.SearchIssues(ctx, "", autoExportFilter(ctx))
+	issues, err := r.searchIssues(ctx, autoExportFilter(ctx, r))
 	if err != nil {
 		return false, 0, fmt.Errorf("failed to search issues: %w", err)
 	}
@@ -357,7 +518,7 @@ type autoExportReconciliation struct {
 // proof sources; the other two need no anchor, which is what lets a store
 // wedged by an earlier binary (no anchor, or an anchor that no longer
 // resolves) recover on its first run under this code.
-func reconcileAutoExportJSONL(ctx context.Context, path, fromCommit string) (*autoExportReconciliation, error) {
+func reconcileAutoExportJSONL(ctx context.Context, backend autoExportBackend, r autoExportReader, path, fromCommit string) (*autoExportReconciliation, error) {
 	// GH#4988: only refuse when *in-scope* JSONL issue records are absent from
 	// the store. Ephemeral wisps, templates, and infra types are outside
 	// auto-export scope (buildAutoExportFilter / GH#3649). Compaction can
@@ -378,8 +539,8 @@ func reconcileAutoExportJSONL(ctx context.Context, path, fromCommit string) (*au
 	// phantom "missing" ids, never fewer (maphew review, GH#4988 follow-up).
 	// buildAutoExportFilter is still consulted for infraTypeSet, which
 	// classifies the JSONL-side records below.
-	_, infraTypeSet := buildAutoExportFilter(ctx)
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Limit: 0, MaxRows: 0})
+	_, infraTypeSet := buildAutoExportFilter(ctx, r)
+	issues, err := r.searchIssues(ctx, types.IssueFilter{Limit: 0, MaxRows: 0})
 	if err != nil {
 		return nil, fmt.Errorf("failed to search issues: %w", err)
 	}
@@ -401,7 +562,7 @@ func reconcileAutoExportJSONL(ctx context.Context, path, fromCommit string) (*au
 		return rec, nil
 	}
 
-	rec.provenDeleted, rec.unproven = proveDeletedIssueIDs(ctx, candidates, fromCommit)
+	rec.provenDeleted, rec.unproven = proveDeletedIssueIDs(ctx, backend, candidates, fromCommit)
 	return rec, nil
 }
 
@@ -422,7 +583,7 @@ func reconcileAutoExportJSONL(ctx context.Context, path, fromCommit string) (*au
 //
 // Whatever survives all three is unexplained divergence, and the caller keeps
 // refusing to overwrite: that is GH#4988's fail-safe, unchanged.
-func proveDeletedIssueIDs(ctx context.Context, candidates []string, fromCommit string) (proven, unproven []string) {
+func proveDeletedIssueIDs(ctx context.Context, backend autoExportBackend, candidates []string, fromCommit string) (proven, unproven []string) {
 	unproven = candidates
 
 	// P1 — same-process delete handoff.
@@ -447,9 +608,9 @@ func proveDeletedIssueIDs(ctx context.Context, candidates []string, fromCommit s
 	// A missing anchor, an off-history anchor, a diff error, or a store with
 	// no DiffStore at all (embedded mode — the default) all just fall through
 	// to P3 now, instead of ending the search.
-	if fromCommit != "" && diffAnchorOnCurrentHistory(ctx, fromCommit) {
-		if ds, ok := storage.UnwrapStore(store).(storage.DiffStore); ok {
-			if changed, diffErr := ds.ChangedIssueIDs(ctx, fromCommit, doltWorkingRef); diffErr == nil {
+	if fromCommit != "" && diffAnchorOnCurrentHistory(ctx, backend, fromCommit) {
+		if ds, ok := backend.(autoExportDiffSource); ok {
+			if changed, diffErr := ds.changedIssueIDs(ctx, fromCommit, doltWorkingRef); diffErr == nil {
 				removed := make(map[string]struct{}, len(changed.Removed))
 				for _, id := range changed.Removed {
 					removed[id] = struct{}{}
@@ -458,7 +619,7 @@ func proveDeletedIssueIDs(ctx context.Context, candidates []string, fromCommit s
 					_, ok := removed[id]
 					return ok
 				})
-			} else {
+			} else if !errors.Is(diffErr, errAutoExportUnsupported) {
 				debug.Logf("auto-export: anchor diff %s..%s failed (%v); falling through to the history proof\n",
 					fromCommit, doltWorkingRef, diffErr)
 			}
@@ -477,20 +638,24 @@ func proveDeletedIssueIDs(ctx context.Context, candidates []string, fromCommit s
 			len(unproven), historyProofMaxCandidates)
 		return proven, unproven
 	}
-	hp, ok := storage.UnwrapStore(store).(storage.HistoryPresence)
-	if !ok {
+	if hp, ok := backend.(autoExportHistorySource); ok {
+		historical, err := hp.historicalIssueIDs(ctx, unproven)
+		switch {
+		case err == nil:
+			proven, unproven = splitProvenDeletions(proven, unproven, func(id string) bool {
+				_, ok := historical[id]
+				return ok
+			})
+		case errors.Is(err, errAutoExportUnsupported):
+			// The backend answers the capability, the storage under it does
+			// not — the pre-seam failed HistoryPresence assertion.
+			debug.Logf("auto-export: store does not implement HistoryPresence; JSONL-only ids stay unproven\n")
+		default:
+			debug.Logf("auto-export: history proof failed (%v); treating JSONL-only ids as unproven\n", err)
+		}
+	} else {
 		debug.Logf("auto-export: store does not implement HistoryPresence; JSONL-only ids stay unproven\n")
-		return proven, unproven
 	}
-	historical, err := hp.HistoricalIssueIDs(ctx, unproven)
-	if err != nil {
-		debug.Logf("auto-export: history proof failed (%v); treating JSONL-only ids as unproven\n", err)
-		return proven, unproven
-	}
-	proven, unproven = splitProvenDeletions(proven, unproven, func(id string) bool {
-		_, ok := historical[id]
-		return ok
-	})
 	return proven, unproven
 }
 
@@ -558,15 +723,18 @@ type commitHistoryChecker interface {
 // diffAnchorOnCurrentHistory reports whether anchor is still reachable from
 // the current HEAD. It is the ancestry precondition on trusting a dolt_diff
 // "removed" verdict as proof of a real `bd delete` rather than a history
-// rewind — see reconcileAutoExportJSONL. Fails closed: a store that
+// rewind — see reconcileAutoExportJSONL. Fails closed: a backend that
 // cannot answer, or an error while asking, yields false so the caller keeps
 // refusing to overwrite.
-func diffAnchorOnCurrentHistory(ctx context.Context, anchor string) bool {
-	ch, ok := storage.UnwrapStore(store).(commitHistoryChecker)
+func diffAnchorOnCurrentHistory(ctx context.Context, backend autoExportBackend, anchor string) bool {
+	ch, ok := backend.(autoExportAnchorChecker)
 	if !ok {
 		return false
 	}
-	onHistory, err := ch.CommitExists(ctx, anchor)
+	onHistory, err := ch.commitExists(ctx, anchor)
+	if errors.Is(err, errAutoExportUnsupported) {
+		return false
+	}
 	if err != nil {
 		debug.Logf("auto-export: cannot verify diff anchor %s against HEAD history (%v); treating JSONL-only ids as unproven\n", anchor, err)
 		return false
@@ -670,8 +838,8 @@ func sampleStrings(values []string, limit int) []string {
 	return out
 }
 
-func autoExportFilter(ctx context.Context) types.IssueFilter {
-	filter, _ := buildAutoExportFilter(ctx)
+func autoExportFilter(ctx context.Context, src exportSource) types.IssueFilter {
+	filter, _ := buildAutoExportFilter(ctx, src)
 	return filter
 }
 
@@ -692,17 +860,14 @@ func autoExportJSONLPath(beadsDir string) string {
 	return filepath.Join(beadsDir, exportPath)
 }
 
-func buildAutoExportFilter(ctx context.Context) (types.IssueFilter, map[string]bool) {
+func buildAutoExportFilter(ctx context.Context, src exportSource) (types.IssueFilter, map[string]bool) {
 	// MaxRows: 0 opts out of BEADS_MAX_ROWS — auto-export is a data-integrity
 	// sweep and must not be capped (designer §4.1).
 	filter := types.IssueFilter{Limit: 0, MaxRows: 0}
 	var infraTypes []string
-	if store != nil {
-		infraSet := store.GetInfraTypes(ctx)
-		if len(infraSet) > 0 {
-			for t := range infraSet {
-				infraTypes = append(infraTypes, t)
-			}
+	if infraSet := src.GetInfraTypes(ctx); len(infraSet) > 0 {
+		for t := range infraSet {
+			infraTypes = append(infraTypes, t)
 		}
 	}
 	if len(infraTypes) == 0 {
@@ -730,8 +895,10 @@ func buildAutoExportFilter(ctx context.Context) (types.IssueFilter, map[string]b
 // exportToFile atomically exports issues + memories to the given file path.
 // Writes to a temp file first, then renames into place so readers never see
 // a partial or truncated export. This is the full auto-export writer;
-// `bd export -o` goes through runExport and its exportSource instead.
-func exportToFile(ctx context.Context, path string, includeMemories bool) (issueCount, memoryCount int, err error) {
+// `bd export -o` goes through runExport and its exportSource instead. Reads
+// through r, the autoExportReader of the backend that selected it, so the
+// classic and proxied backends write byte-identical files.
+func exportToFile(ctx context.Context, r autoExportReader, path string, includeMemories bool) (issueCount, memoryCount int, err error) {
 	w, err := atomicfile.Create(path, 0o644)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to create export file: %w", err)
@@ -742,8 +909,8 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		}
 	}()
 
-	filter, infraTypeSet := buildAutoExportFilter(ctx)
-	issues, err := store.SearchIssues(ctx, "", filter)
+	filter, infraTypeSet := buildAutoExportFilter(ctx, r)
+	issues, err := r.searchIssues(ctx, filter)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to search issues: %w", err)
 	}
@@ -754,7 +921,7 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 	// issues that the manual `bd export` path excludes can still leak into git
 	// history and PRs via auto-export (maphew review, be-e2nb). Auto-export has
 	// no --exclude-owner flag, so only config-sourced owners apply here.
-	if ownerExcludes := buildOwnerExcludeSet(ctx, storeExportSource{}, nil); len(ownerExcludes) > 0 {
+	if ownerExcludes := buildOwnerExcludeSet(ctx, r, nil); len(ownerExcludes) > 0 {
 		issues = filterOutOwners(issues, ownerExcludes)
 	}
 
@@ -764,7 +931,7 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 	// in-scope `issues` above — because the guard needs to see infra/
 	// template/ephemeral ids too, to tell "still in Dolt" apart from
 	// "compacted away".
-	storeIDs, err := storeKnownIssueIDs(ctx)
+	storeIDs, err := storeKnownIssueIDs(ctx, r)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -775,13 +942,9 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 
 	// Bulk-load relational data
 	if len(issues) > 0 {
-		issueIDs := make([]string, len(issues))
-		for i, issue := range issues {
-			issueIDs[i] = issue.ID
-		}
 		// Returned explicitly so the named err is set and the deferred
 		// Abort drops the temp file, keeping the previous export (GH#6870).
-		relations, err := loadClassicExportRelations(ctx, issueIDs)
+		relations, err := r.LoadExportRelations(ctx, issues)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -817,26 +980,22 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		}
 	}
 
-	// Write memories
+	// Write memories. A memory read that fails writes no memories, exactly
+	// as the pre-seam silent GetAllConfig guard did (auto-export itself
+	// always passes includeMemories=false — GH#3650).
 	if includeMemories {
-		allConfig, err := store.GetAllConfig(ctx)
-		if err == nil {
-			fullPrefix := kvPrefix + memoryPrefix
+		if memories, memErr := r.ExportMemories(ctx); memErr == nil {
 			// Sort keys for deterministic output order (GH#3474).
-			var memKeys []string
-			for k := range allConfig {
-				if strings.HasPrefix(k, fullPrefix) {
-					memKeys = append(memKeys, k)
-				}
+			memKeys := make([]string, 0, len(memories))
+			for k := range memories {
+				memKeys = append(memKeys, k)
 			}
 			sort.Strings(memKeys)
-			for _, k := range memKeys {
-				v := allConfig[k]
-				userKey := strings.TrimPrefix(k, fullPrefix)
+			for _, userKey := range memKeys {
 				record := map[string]string{
 					"_type": "memory",
 					"key":   userKey,
-					"value": v,
+					"value": memories[userKey],
 				}
 				data, err := json.Marshal(record)
 				if err != nil {
@@ -869,8 +1028,8 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 // loss. Deliberately unfiltered + MaxRows: 0, for the same reason as
 // reconcileAutoExportJSONL's store-side query: this guard's failure mode
 // is a permanent wedge, so the query must stay maximally permissive.
-func storeKnownIssueIDs(ctx context.Context) (map[string]struct{}, error) {
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Limit: 0, MaxRows: 0})
+func storeKnownIssueIDs(ctx context.Context, r autoExportReader) (map[string]struct{}, error) {
+	issues, err := r.searchIssues(ctx, types.IssueFilter{Limit: 0, MaxRows: 0})
 	if err != nil {
 		return nil, fmt.Errorf("failed to search issues: %w", err)
 	}
@@ -1344,7 +1503,7 @@ func pathInsideDir(path, dir string) bool {
 // freshly-diffed ids — not the ones merely carried-in — makes a stable
 // no-op cycle self-heal: a carried id that produces no new diff simply
 // drops out instead of accumulating forever.
-func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit string, carryIDs, forcedRemovals []string) (issueCount, memoryCount int, dirtyIDs []string, didIncremental bool, err error) {
+func tryIncrementalExport(ctx context.Context, backend autoExportBackend, r autoExportReader, fullPath, fromCommit, toCommit string, carryIDs, forcedRemovals []string) (issueCount, memoryCount int, dirtyIDs []string, didIncremental bool, err error) {
 	if fromCommit == "" {
 		debug.Logf("auto-export: incremental skipped — no prior commit hash recorded\n")
 		return 0, 0, nil, false, nil
@@ -1355,13 +1514,30 @@ func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit st
 		debug.Logf("auto-export: incremental skipped — existing file not found: %v\n", statErr)
 		return 0, 0, nil, false, nil
 	}
-	ds, ok := storage.UnwrapStore(store).(storage.DiffStore)
+	ds, ok := backend.(autoExportDiffSource)
 	if !ok {
 		debug.Logf("auto-export: incremental skipped — store does not implement DiffStore\n")
 		return 0, 0, nil, false, nil
 	}
-	changed, diffErr := ds.ChangedIssueIDs(ctx, fromCommit, toCommit)
+	// The fetcher is the incremental capability itself: a backend without it
+	// must take NO incremental path — not even the removals-only patch below,
+	// which needs no fetch — because a mode that cannot re-encode a changed
+	// row has no business patching the file either (the proxied backend,
+	// bd-todbq7: full export only). DiffStore stays asserted above for the
+	// deletion proofs, which are a different consumer of the same SQL.
+	fetcher, ok := backend.(autoExportIssueFetcher)
+	if !ok {
+		debug.Logf("auto-export: incremental skipped — backend cannot fetch issues by id\n")
+		return 0, 0, nil, false, nil
+	}
+	changed, diffErr := ds.changedIssueIDs(ctx, fromCommit, toCommit)
 	if diffErr != nil {
+		if errors.Is(diffErr, errAutoExportUnsupported) {
+			// The backend answers the capability, the storage under it does
+			// not (embedded mode) — the pre-seam failed DiffStore assertion.
+			debug.Logf("auto-export: incremental skipped — store does not implement DiffStore\n")
+			return 0, 0, nil, false, nil
+		}
 		// Commits may be unreachable (history rewritten), in which case we
 		// cannot trust the diff. Fall back silently.
 		return 0, 0, nil, false, diffErr
@@ -1409,17 +1585,18 @@ func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit st
 		// TODO(batchgetter): this read is unbounded; issueops.BatchGetter caps a
 		// request at MaxGetManyIDs (1000) and this call site has not been
 		// audited for id volume or given chunking, so it still goes through
-		// GetIssuesByIDs rather than the role. See issueops.BatchGetter's doc.
-		issues, fetchErr := store.GetIssuesByIDs(ctx, upsertIDs)
+		// the bulk id fetch rather than the role. See issueops.BatchGetter's
+		// doc.
+		issues, fetchErr := fetcher.issuesByIDs(ctx, upsertIDs)
 		if fetchErr != nil {
 			return 0, 0, nil, false, fmt.Errorf("GetIssuesByIDs: %w", fetchErr)
 		}
-		infraSet := store.GetInfraTypes(ctx)
+		infraSet := r.GetInfraTypes(ctx)
 		// Owner-exclusion safety net, mirroring exportToFile's: without
 		// this, a config-excluded owner's issue that changes would leak
 		// into the git-committed JSONL via the incremental path even
 		// though the full-export path always excludes it (be-shbed).
-		ownerExcludes := buildOwnerExcludeSet(ctx, storeExportSource{}, nil)
+		ownerExcludes := buildOwnerExcludeSet(ctx, r, nil)
 		filtered := make([]*types.Issue, 0, len(issues))
 		for _, iss := range issues {
 			// Record IDs that GetIssuesByIDs returned but we deliberately
@@ -1440,7 +1617,7 @@ func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit st
 			}
 			filtered = append(filtered, iss)
 		}
-		records, err = encodeIssueRecords(ctx, filtered)
+		records, err = encodeIssueRecords(ctx, r, filtered)
 		if err != nil {
 			return 0, 0, nil, false, err
 		}
@@ -1650,15 +1827,11 @@ func loadExistingIssueLines(path string) (*orderedIssueLines, error) {
 // using the same bulk loader the full export uses. Returns a map from
 // issue ID → line bytes (no trailing newline), or an error and no records
 // when any relation fails to load (GH#6870).
-func encodeIssueRecords(ctx context.Context, issues []*types.Issue) (map[string][]byte, error) {
+func encodeIssueRecords(ctx context.Context, r autoExportReader, issues []*types.Issue) (map[string][]byte, error) {
 	if len(issues) == 0 {
 		return nil, nil
 	}
-	ids := make([]string, len(issues))
-	for i, iss := range issues {
-		ids[i] = iss.ID
-	}
-	relations, err := loadClassicExportRelations(ctx, ids)
+	relations, err := r.LoadExportRelations(ctx, issues)
 	if err != nil {
 		return nil, err
 	}

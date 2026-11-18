@@ -78,7 +78,7 @@ func TestExportAuto_FilterHasZeroMaxRows(t *testing.T) {
 	}
 
 	outPath := filepath.Join(tmpDir, "auto-export.jsonl")
-	if _, _, err := exportToFile(ctx, outPath, false); err != nil {
+	if _, _, err := exportToFile(ctx, directAutoExportReader{}, outPath, false); err != nil {
 		t.Fatalf("exportToFile: %v", err)
 	}
 

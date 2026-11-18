@@ -136,7 +136,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `backup.size-cap-mb` | — | `BD_BACKUP_SIZE_CAP_MB` | `2048` | Pause auto-backup once the destination directory reaches this size; `0` disables the cap (see [below](#auto-backup)) |
 | `backup.size-warn-interval` | — | `BD_BACKUP_SIZE_WARN_INTERVAL` | `24h` | Minimum time between repeated "auto-backup paused" warnings |
 | `audit.enabled` | — | `BD_AUDIT_ENABLED` | `false` | Enable the optional JSONL interaction sidecar at `.beads/interactions.jsonl`, written by `bd audit record` / `bd audit label`. While disabled, `bd init` does not create the file and `bd audit record` / `bd audit label` refuse to write. Issue history is always recorded in the database either way — see `bd history <id> --events` |
-| `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` after eligible mutating commands; not cross-machine sync (see [passive export timing](#passive-export-timing-and-coverage)) |
+| `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` after eligible mutating commands, in every storage mode (including `dolt_mode: proxied-server`); not cross-machine sync (see [passive export timing](#passive-export-timing-and-coverage)) |
 | `export.path` | — | — | `issues.jsonl` | Output filename relative to `.beads/` |
 | `export.interval` | — | — | `60s` | Minimum time between auto-exports — a throttle, not a staleness deadline (see [passive export timing](#passive-export-timing-and-coverage)) |
 | `export.git-add` | — | — | `false` | Run `git add` on the export file |

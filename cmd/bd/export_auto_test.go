@@ -1692,7 +1692,7 @@ func TestTryIncrementalExport_PatchesChangedIssuesAndDropsRemoved(t *testing.T) 
 	c1 := h.mustCommit(t, ctx, "baseline")
 
 	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
-	if _, _, err := exportToFile(ctx, exportPath, true); err != nil {
+	if _, _, err := exportToFile(ctx, directAutoExportReader{}, exportPath, true); err != nil {
 		t.Fatalf("exportToFile: %v", err)
 	}
 	if got := countIssueLines(t, exportPath); got != 5 {
@@ -1708,7 +1708,7 @@ func TestTryIncrementalExport_PatchesChangedIssuesAndDropsRemoved(t *testing.T) 
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	issueCount, memoryCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
+	issueCount, memoryCount, _, didIncremental, err := tryIncrementalExport(ctx, directAutoExportBackend{}, directAutoExportReader{}, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport returned error: %v", err)
 	}
@@ -1743,7 +1743,7 @@ func TestTryIncrementalExport_DropsIssueWhenFlippedToTemplate(t *testing.T) {
 	c1 := h.mustCommit(t, ctx, "baseline")
 
 	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
-	if _, _, err := exportToFile(ctx, exportPath, true); err != nil {
+	if _, _, err := exportToFile(ctx, directAutoExportReader{}, exportPath, true); err != nil {
 		t.Fatalf("exportToFile: %v", err)
 	}
 	if got := countIssueLines(t, exportPath); got != 2 {
@@ -1764,7 +1764,7 @@ func TestTryIncrementalExport_DropsIssueWhenFlippedToTemplate(t *testing.T) {
 	}
 	c2 := h.mustCommit(t, ctx, "promote to template")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, directAutoExportBackend{}, directAutoExportReader{}, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -1792,7 +1792,7 @@ func TestTryIncrementalExport_FallsBackWhenFileMissing(t *testing.T) {
 	// No existing file → must return didIncremental=false and leave the
 	// disk untouched so the caller falls back to the full-export path.
 	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
-	issueCount, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
+	issueCount, _, _, didIncremental, err := tryIncrementalExport(ctx, directAutoExportBackend{}, directAutoExportReader{}, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1823,7 +1823,7 @@ func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
 	c1 := h.mustCommit(t, ctx, "seed")
 
 	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
-	if _, _, err := exportToFile(ctx, exportPath, true); err != nil {
+	if _, _, err := exportToFile(ctx, directAutoExportReader{}, exportPath, true); err != nil {
 		t.Fatalf("exportToFile: %v", err)
 	}
 	sizeBefore, err := os.ReadFile(exportPath)
@@ -1840,7 +1840,7 @@ func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
 	h.mustCreateBatch(t, ctx, incrementalExportThreshold+1, "thr-")
 	c2 := h.mustCommit(t, ctx, "flood")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, directAutoExportBackend{}, directAutoExportReader{}, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1941,7 +1941,7 @@ func TestMaybeAutoExport_SecondRunTakesIncrementalPath_ServerMode(t *testing.T) 
 	// state (field-for-field, not byte-for-byte — line order and formatting
 	// are allowed to differ).
 	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
-	if _, _, err := exportToFile(ctx, controlPath, false); err != nil {
+	if _, _, err := exportToFile(ctx, directAutoExportReader{}, controlPath, false); err != nil {
 		t.Fatalf("control exportToFile: %v", err)
 	}
 	got := jsonlRecordsByID(t, exportPath)
@@ -2072,7 +2072,7 @@ func TestTryIncrementalExport_NeverLeaksMemoriesIntoAutoExport(t *testing.T) {
 
 	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
 	// Baseline matches real auto-export usage: includeMemories=false.
-	if _, memCount, err := exportToFile(ctx, exportPath, false); err != nil {
+	if _, memCount, err := exportToFile(ctx, directAutoExportReader{}, exportPath, false); err != nil {
 		t.Fatalf("exportToFile: %v", err)
 	} else if memCount != 0 {
 		t.Fatalf("baseline memoryCount = %d, want 0", memCount)
@@ -2089,7 +2089,7 @@ func TestTryIncrementalExport_NeverLeaksMemoriesIntoAutoExport(t *testing.T) {
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, memCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
+	_, memCount, _, didIncremental, err := tryIncrementalExport(ctx, directAutoExportBackend{}, directAutoExportReader{}, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -2108,7 +2108,7 @@ func TestTryIncrementalExport_NeverLeaksMemoriesIntoAutoExport(t *testing.T) {
 	// Control: an explicit full export with memories included stays clean —
 	// i.e. this isn't a case where the memory was never written at all.
 	fullPath := filepath.Join(t.TempDir(), "full-control.jsonl")
-	if _, memCount, err := exportToFile(ctx, fullPath, true); err != nil {
+	if _, memCount, err := exportToFile(ctx, directAutoExportReader{}, fullPath, true); err != nil {
 		t.Fatalf("exportToFile control: %v", err)
 	} else if memCount != 1 {
 		t.Fatalf("control export memoryCount = %d, want 1 (sanity: the memory really was written)", memCount)
@@ -2128,7 +2128,7 @@ func TestTryIncrementalExport_PreservesPreExistingMemoryAcrossPatch(t *testing.T
 	// A memory already exists in the file BEFORE any incremental patching —
 	// e.g. from an explicit `bd export --include-memories` the user ran by
 	// hand. Auto-export's incremental path must not destroy it.
-	if _, memCount, err := exportToFile(ctx, exportPath, true); err != nil {
+	if _, memCount, err := exportToFile(ctx, directAutoExportReader{}, exportPath, true); err != nil {
 		t.Fatalf("exportToFile: %v", err)
 	} else if memCount != 1 {
 		t.Fatalf("baseline memoryCount = %d, want 1", memCount)
@@ -2139,7 +2139,7 @@ func TestTryIncrementalExport_PreservesPreExistingMemoryAcrossPatch(t *testing.T
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, directAutoExportBackend{}, directAutoExportReader{}, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -2225,7 +2225,7 @@ func TestTryIncrementalExport_ExcludesConfiguredOwnerFromPatchedIssues(t *testin
 	// own-b is correctly absent from the start — this test is about the
 	// INCREMENTAL patch path, not the baseline.
 	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
-	if _, _, err := exportToFile(ctx, exportPath, true); err != nil {
+	if _, _, err := exportToFile(ctx, directAutoExportReader{}, exportPath, true); err != nil {
 		t.Fatalf("exportToFile: %v", err)
 	}
 	if _, ok := loadIssueTitles(t, exportPath)["own-b"]; ok {
@@ -2240,7 +2240,7 @@ func TestTryIncrementalExport_ExcludesConfiguredOwnerFromPatchedIssues(t *testin
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, directAutoExportBackend{}, directAutoExportReader{}, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -2264,7 +2264,7 @@ func TestTryIncrementalExport_PatchedLinesIncludeTypeField(t *testing.T) {
 	c1 := h.mustCommit(t, ctx, "baseline")
 
 	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
-	if _, _, err := exportToFile(ctx, exportPath, true); err != nil {
+	if _, _, err := exportToFile(ctx, directAutoExportReader{}, exportPath, true); err != nil {
 		t.Fatalf("exportToFile: %v", err)
 	}
 
@@ -2273,7 +2273,7 @@ func TestTryIncrementalExport_PatchedLinesIncludeTypeField(t *testing.T) {
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil, nil)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, directAutoExportBackend{}, directAutoExportReader{}, exportPath, c1, c2, nil, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -292,8 +293,10 @@ func TestCommitPending(t *testing.T) {
 // dolt_diff() accepts the literal "WORKING" as an endpoint alongside real
 // commit hashes, and the fix threads that literal through ChangedIssueIDs as
 // the incremental path's "to" endpoint (in place of a root/working-set hash
-// dolt_diff always rejected) — isSafeCommitRef's character/length check must
-// keep admitting it, since no prior test in this file covered that value.
+// dolt_diff always rejected) — the ref validator's character/length check
+// must keep admitting it, since no prior test in this file covered that
+// value. The validator moved to issueops.IsSafeCommitRef with the dolt_diff
+// query it guards (bd-todbq7); this test pins it where it runs.
 func TestIsSafeCommitRef(t *testing.T) {
 	valid := []string{
 		"WORKING",
@@ -302,7 +305,7 @@ func TestIsSafeCommitRef(t *testing.T) {
 		strings.Repeat("a", 64),
 	}
 	for _, s := range valid {
-		if !isSafeCommitRef(s) {
+		if !issueops.IsSafeCommitRef(s) {
 			t.Errorf("isSafeCommitRef(%q) = false, want true", s)
 		}
 	}
@@ -318,7 +321,7 @@ func TestIsSafeCommitRef(t *testing.T) {
 		"abc\ndef",
 	}
 	for _, s := range invalid {
-		if isSafeCommitRef(s) {
+		if issueops.IsSafeCommitRef(s) {
 			t.Errorf("isSafeCommitRef(%q) = true, want false", s)
 		}
 	}

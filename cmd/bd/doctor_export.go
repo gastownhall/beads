@@ -237,7 +237,7 @@ func collectExportCoverage(ctx context.Context, beadsDir string) (exportCoverage
 	// filter (unlimited, infra/template/ephemeral exclusions) and the same
 	// config-based owner exclusions, so the file is only expected to cover
 	// what the writer would put in it.
-	issues, err := store.SearchIssues(ctx, "", autoExportFilter(ctx))
+	issues, err := store.SearchIssues(ctx, "", autoExportFilter(ctx, storeExportSource{}))
 	if err != nil {
 		return result, fmt.Errorf("fetching issues: %w", err)
 	}

@@ -86,7 +86,7 @@ func TestReconcileAutoExportJSONL_IgnoresCompactedWisp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec, err := reconcileAutoExportJSONL(ctx, jsonlPath, "")
+	rec, err := reconcileAutoExportJSONL(ctx, directAutoExportBackend{}, directAutoExportReader{}, jsonlPath, "")
 	if err != nil {
 		t.Fatalf("reconcileAutoExportJSONL: %v", err)
 	}

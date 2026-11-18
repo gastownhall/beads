@@ -134,7 +134,7 @@ func TestClassicExportPathsRejectRelationLoaderFailures(t *testing.T) {
 
 			// Incremental auto-export encoder: no records, so the patch path
 			// never reaches rewriteExportFile.
-			records, err := encodeIssueRecords(t.Context(), []*types.Issue{{ID: "bd-export1", Title: "export me"}})
+			records, err := encodeIssueRecords(t.Context(), directAutoExportReader{}, []*types.Issue{{ID: "bd-export1", Title: "export me"}})
 			assertRelationLoaderErr(t, "encodeIssueRecords", err, loader.sentinel, loader.wantPrefix)
 			if records != nil {
 				t.Fatalf("encodeIssueRecords records = %v, want nil", records)
@@ -148,7 +148,7 @@ func TestClassicExportPathsRejectRelationLoaderFailures(t *testing.T) {
 			if err := os.WriteFile(out, []byte(exportRelationSeed), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			_, _, err = exportToFile(t.Context(), out, false)
+			_, _, err = exportToFile(t.Context(), directAutoExportReader{}, out, false)
 			assertRelationLoaderErr(t, "exportToFile", err, loader.sentinel, loader.wantPrefix)
 			assertFileUnchanged(t, out, exportRelationSeed)
 			if entries, readErr := os.ReadDir(dir); readErr != nil || len(entries) != 1 {
@@ -157,7 +157,7 @@ func TestClassicExportPathsRejectRelationLoaderFailures(t *testing.T) {
 
 			// ...and with no previous export, none is published.
 			absent := filepath.Join(t.TempDir(), "issues.jsonl")
-			_, _, err = exportToFile(t.Context(), absent, false)
+			_, _, err = exportToFile(t.Context(), directAutoExportReader{}, absent, false)
 			assertRelationLoaderErr(t, "exportToFile (absent)", err, loader.sentinel, loader.wantPrefix)
 			if _, statErr := os.Stat(absent); !os.IsNotExist(statErr) {
 				t.Fatalf("failed export published %q: stat err = %v", absent, statErr)

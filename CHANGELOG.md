@@ -1334,6 +1334,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`export.auto` now refreshes `.beads/issues.jsonl` on proxied-server
+  workspaces** ([#8490](https://github.com/gastownhall/beads/issues/8490)).
+  With `dolt_mode: proxied-server`, the post-command auto-export pipeline
+  depended on a process-global store handle that proxied commands never set,
+  so the export silently never ran and the JSONL fell further behind the
+  database on every write. The pipeline now also runs from the proxied
+  post-run arm, reading through the provider the command itself opened, and
+  writes the same file the classic (embedded/direct/SQL-server) modes write
+  — byte-identical output, the same `export.interval` throttle, the same
+  deletion-reconcile and foreign-record refusal guards. As elsewhere, a
+  command run with `--database` (pointing at another database) does not
+  refresh the workspace's export.
+
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that

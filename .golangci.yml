@@ -498,10 +498,11 @@ linters:
         linters:
           - forbidigo
       # Bulk movement of issues in, out and across prefixes. export_source is
-      # export's storage seam (classic store vs proxied unit of work): it does
-      # not build a filter, it carries the one export.go builds through to
-      # whichever stack is live.
-      - path: '^cmd/bd/(export|export_auto|export_source|import|migrate|migrate_issues|migrate_personal|rename|rename_prefix)\.go$'
+      # export's storage seam (classic store vs proxied unit of work) and
+      # export_auto_proxied is auto-export's proxied backend over that seam:
+      # neither builds a filter, they carry the one export.go / export_auto.go
+      # builds through to whichever stack is live.
+      - path: '^cmd/bd/(export|export_auto|export_auto_proxied|export_source|import|migrate|migrate_issues|migrate_personal|rename|rename_prefix)\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo

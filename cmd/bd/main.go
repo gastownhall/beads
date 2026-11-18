@@ -159,6 +159,12 @@ var (
 	// (GH#5896). See deletedIssueIDSet for why it is not persisted.
 	commandDeletedIssueIDs deletedIssueIDSet
 
+	// commandDatabaseOverride records the --database/--db override this run
+	// opened its proxied provider with, if any. Post-run maintenance that
+	// belongs to the workspace's configured database — auto-export's JSONL
+	// and its export-state — must skip when a different database was served.
+	commandDatabaseOverride string
+
 	// commandDidExplicitDoltCommit is set when a command already created a Dolt commit
 	// explicitly (e.g., bd sync in dolt-native mode, hook flows, bd vc commit).
 	// This prevents a redundant auto-commit attempt in PersistentPostRun.
@@ -1387,6 +1393,7 @@ var rootCmd = &cobra.Command{
 		commandMayEmptyJSONLExport.Store(false)
 		commandSkipsPostRunMaintenance.Store(false)
 		commandDeletedIssueIDs.reset()
+		commandDatabaseOverride = ""
 		commandDidExplicitDoltCommit = false
 		commandDidWriteTipMetadata = false
 		commandTipIDsShown = make(map[string]struct{})
@@ -2266,6 +2273,7 @@ var rootCmd = &cobra.Command{
 				return HandleErrorRespectJSON("%v", err)
 			}
 		}
+		commandDatabaseOverride = databaseOverride
 
 		// In proxied mode the CLI short-circuits to the uowProvider path and
 		// dispatches through the *_proxied_server.go duals.
@@ -2567,6 +2575,20 @@ var rootCmd = &cobra.Command{
 			// topology, so this stays inert off managed-local.
 			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !isPreviewCommand(cmd) && !commandFreeze.Frozen() {
 				runPostRunAutoBackup(rootCtx)
+
+				// Auto-export, through the same provider: proxied writes land
+				// in Dolt, so the JSONL must track them here too — before this
+				// hook the proxied arm only pruned, backed up and closed,
+				// and export.auto was a silent no-op (GH#8490). Read-only
+				// commands additionally skip via shouldRunPostCommandAutoExport,
+				// exactly as in the direct arm's net. A failed export.git-add
+				// returns non-zero and the deferred close still releases the
+				// provider.
+				if shouldRunPostCommandAutoExport(cmd) {
+					if err := runPostRunAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
+						return HandleError("%v", err)
+					}
+				}
 			}
 			if uowProvider != nil {
 				_ = uowProvider.Close(rootCtx)
