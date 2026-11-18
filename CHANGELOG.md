@@ -1344,6 +1344,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself a proxied-server workspace) keeps its own error unless a formula has
   the operand's name, and a dry run previews without a writable open. A bond
   that stays in the served database still commits once.
+- **`bd -C <dir> setup` now installs, checks and removes project integrations
+  in `<dir>`** (#8283). `-C` selected the beads project in `<dir>` but setup
+  still wrote, checked and removed `.claude/settings.json`, `AGENTS.md`,
+  `.agents/skills/`, `.cursor/` and the other project files in the directory
+  bd was started from. Setup's managed project files and
+  workspace recipes (confined to `<dir>`) now follow the selected project;
+  global (`--global`) integrations are unchanged, and a relative path you pass
+  yourself, such as `bd -C <dir> setup -o rules.md`, still resolves against
+  the current directory. `-C` never changes the process directory, so
+  `bd -C <dir> init` is now refused before it does anything, `--force`
+  included, with a hint to run `cd <dir> && bd init`; the `-C` help no longer
+  promises a git-style directory change.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

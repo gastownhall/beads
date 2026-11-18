@@ -60,7 +60,7 @@ func defaultClaudeEnv() (claudeEnv, error) {
 	if err != nil {
 		return claudeEnv{}, fmt.Errorf("home directory: %w", err)
 	}
-	workDir, err := os.Getwd()
+	workDir, err := workingProjectDir()
 	if err != nil {
 		return claudeEnv{}, fmt.Errorf("working directory: %w", err)
 	}
