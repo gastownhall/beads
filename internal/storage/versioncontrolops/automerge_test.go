@@ -593,6 +593,67 @@ func TestMergeIssuesConflictRow_CloseRaceDeclines(t *testing.T) {
 	})
 }
 
+// TestMergeIssuesConflictRow_BothNonClosedGroupKeepsLWW pins the other half of
+// the close-group policy (GH#7783): a contested close group whose BOTH sides
+// are non-closed is an ordinary status contest and keeps the documented
+// last-write-wins settlement — the decline is reserved for exactly one closed
+// side. These rows carry the close columns on both sides (a reopen race clears
+// them), so the group is genuinely contested through them, not just through
+// status alone.
+func TestMergeIssuesConflictRow_BothNonClosedGroupKeepsLWW(t *testing.T) {
+	// reopenedRace is a bead both sides reopened from the same close to
+	// different non-closed statuses: every close-group member moved on both
+	// sides, so the group is contested as a whole.
+	overClosedRace := func(ourStatus, theirStatus string, updated [3]any) rawConflictRow {
+		return conflictRowFor(t, map[string][3]any{
+			"id":                {"bd-40", "bd-40", "bd-40"},
+			"status":            {"closed", ourStatus, theirStatus},
+			"closed_at":         {"2026-07-10 10:00:00", nil, nil},
+			"close_reason":      {"first", "", ""},
+			"closed_by_session": {"sess-0", "", ""},
+			"updated_at":        updated,
+		})
+	}
+	t.Run("reopen race, theirs newer keeps their status", func(t *testing.T) {
+		m, d, ok := mergeIssuesConflictRow(overClosedRace("in_progress", "review", [3]any{tsBase, tsOurs, tsTheirs}))
+		if !ok {
+			t.Fatal("a both-non-closed status contest must merge by LWW, not decline")
+		}
+		if d != nil {
+			t.Error("no close-race diagnostic for a both-non-closed contest")
+		}
+		if v, written := m.merged("status"); !written || v != "review" {
+			t.Errorf("the later reopen's status must win, got %v (written=%v)", v, written)
+		}
+	})
+	t.Run("reopen race, ours newer keeps our status", func(t *testing.T) {
+		m, d, ok := mergeIssuesConflictRow(overClosedRace("in_progress", "review", [3]any{tsBase, tsTheirs, tsOurs}))
+		if !ok {
+			t.Fatal("a both-non-closed status contest must merge by LWW, not decline")
+		}
+		if d != nil {
+			t.Error("no close-race diagnostic for a both-non-closed contest")
+		}
+		if _, written := m.merged("status"); written {
+			t.Error("our later reopen's status must stand, not be overwritten")
+		}
+	})
+	t.Run("custom statuses on both sides keep LWW", func(t *testing.T) {
+		// Custom non-closed statuses contest like built-ins: no category is
+		// interpreted, so two custom values are still two non-closed sides.
+		m, d, ok := mergeIssuesConflictRow(overClosedRace("blocked", "in-review", [3]any{tsBase, tsOurs, tsTheirs}))
+		if !ok {
+			t.Fatal("a both-custom-non-closed status contest must merge by LWW")
+		}
+		if d != nil {
+			t.Error("no close-race diagnostic for a both-non-closed contest")
+		}
+		if v, written := m.merged("status"); !written || v != "in-review" {
+			t.Errorf("the later custom status must win, got %v (written=%v)", v, written)
+		}
+	})
+}
+
 // TestMergeIssuesConflictRow_NonScalarColumnsDecline pins that the columns bd
 // merges structurally are never settled by per-cell LWW: `notes` is
 // append-only (bd note = --append-notes) and `metadata` is a JSON object
