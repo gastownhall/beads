@@ -981,4 +981,57 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("nonproxied_server_mode_still_dials", func(t *testing.T) {
+		proxiedRefusalEnv(t)
+		// Server-mode metadata with the dial target pinned to a port nobody
+		// listens on (the plainDoltServerModeBeadsDir convention): the open
+		// must keep taking the server arm and fail its dial, not the proxied
+		// refusal and not the embedded arm.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+		beadsDir := writeProxiedModeMetadata(t, "server")
+		store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
+		if store != nil {
+			_ = store.Close()
+			t.Fatal("server-mode open on a dead endpoint returned a store")
+		}
+		if err == nil {
+			t.Fatal("server-mode open on a dead endpoint succeeded; want the dial failure")
+		}
+		if errors.Is(err, beads.ErrProxiedServerWorkspace) {
+			t.Fatalf("server-mode workspace refused with the proxied sentinel; the guard must not over-fire: %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); !os.IsNotExist(statErr) {
+			t.Errorf("server-mode open created an embedded store at embeddeddolt (stat error: %v); it must keep taking the server arm", statErr)
+		}
+	})
+
+	t.Run("nonproxied_registered_backend_dispatches", func(t *testing.T) {
+		proxiedRefusalEnv(t)
+		// A registered extension backend whose metadata still carries a
+		// proxied dolt_mode: dispatch to the registry is ahead of every
+		// Dolt-path decision, and this change must not move that.
+		const backend = "registry-proxied-mode-guard"
+		registerWorkspaceBackend(t, backend)
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatalf("create .beads: %v", err)
+		}
+		metadata := `{"backend":"` + backend + `","dolt_mode":"proxied-server"}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+			t.Fatalf("write metadata: %v", err)
+		}
+		store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
+		if store != nil {
+			_ = store.Close()
+			t.Fatal("registered backend dispatch returned a store instead of the backend's own result")
+		}
+		if !errors.Is(err, errRegistryBackendOpen) {
+			t.Fatalf("OpenBestAvailable error = %v, want the registered backend's Open result; dispatch must stay ahead of the proxied guard", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); !os.IsNotExist(statErr) {
+			t.Errorf("registered backend dispatch created %s (stat error: %v)", "embeddeddolt", statErr)
+		}
+	})
 }
