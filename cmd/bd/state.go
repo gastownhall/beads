@@ -203,7 +203,7 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 		eventDesc += types.ReasonMarker + reason
 	}
 
-	lifecycle, err := openIssueLifecycle()
+	applier, err := openIssueBatchApplier()
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -215,56 +215,64 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 		return HandleErrorRespectJSON("%v", err)
 	}
 
-	// THE EVENT IS CREATED IN THE PLANE ITS SUBJECT LIVES IN, and the role
-	// is what makes that a copied fact instead of a chosen one. The
-	// retired proxied route branched here between IssueUseCase().CreateWisp
-	// and CreateIssue; the retired direct route branched not at all and put
-	// every event in the durable table, so a wisp's state history landed
-	// beside issues that outlive it. Carrying the subject's own retention
-	// mode onto the event says the SAME thing to both routes, and it is
-	// checked rather than trusted: a guarded create refuses a parent edge it
-	// could not write, so an event that disagreed with its subject's plane
-	// fails the command instead of silently landing in the wrong table.
-	created, err := lifecycle.Create(ctx, issueops.CreateRequest{
-		Actor: currentActor(),
-		Issue: &types.Issue{
-			Title:       eventTitle,
-			Description: eventDesc,
-			Status:      types.StatusClosed,
-			Priority:    4,
-			IssueType:   types.TypeEvent,
-			Ephemeral:   details.Ephemeral,
-			NoHistory:   details.NoHistory,
+	// ONE REQUEST, ONE TRANSACTION (GH#5637). The event, its parent edge and
+	// the label swap are the three items of a single BatchApplier plan, so a
+	// refusal anywhere rolls all three back and a state change is recorded
+	// exactly when it happened. This used to be two separately committed
+	// lifecycle calls, and a refused label patch left a committed event for a
+	// transition that never took place. There is no fallback to separate
+	// writes: a route that cannot apply the plan fails the command.
+	//
+	// THE EVENT IS CREATED IN THE PLANE ITS SUBJECT LIVED IN AT THE PRE-READ:
+	// it carries the subject's own Ephemeral and NoHistory. The parent edge is
+	// an ITEM rather than a CreateRequest.ParentID, so the event takes an
+	// ordinary minted id instead of one of the subject's child numbers, and the
+	// guarded create's parent-plane check is not part of this shape: a dep_add
+	// routes by its own source plane under the batch's ordinary edge policy,
+	// which accepts an edge to a subject that moved planes after the pre-read
+	// (the label item still resolves the CURRENT row; see the compatibility
+	// note in docs/core-concepts/labels.md). All three writes stay atomic.
+	//
+	// ONE PATCH SWAPS THE DIMENSION: a LabelPatch applies Add and Remove in
+	// one guarded update, so the dimension has one value or the command
+	// failed. bd set-state has always edited templates, and AllowTemplate
+	// stands the template guard down for that item only.
+	result, err := applier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
+		Actor:      currentActor(),
+		Provenance: "bd: set-state " + fullID,
+		Items: []issueops.ApplyItem{
+			{Kind: issueops.ItemCreate, Create: &issueops.CreateItem{
+				Key: stateEventKey,
+				Issue: &types.Issue{
+					Title:       eventTitle,
+					Description: eventDesc,
+					Status:      types.StatusClosed,
+					Priority:    4,
+					IssueType:   types.TypeEvent,
+					Ephemeral:   details.Ephemeral,
+					NoHistory:   details.NoHistory,
+				},
+			}},
+			{Kind: issueops.ItemDepAdd, DepAdd: &issueops.DepAddItem{
+				Source: issueops.Ref{Key: stateEventKey},
+				Target: issueops.Ref{ID: fullID},
+				Type:   types.DepParentChild,
+			}},
+			{Kind: issueops.ItemUpdate, Update: &issueops.UpdateItem{
+				Target: issueops.Ref{ID: fullID},
+				Patch: issueops.IssuePatch{Labels: issueops.LabelPatch{
+					Add:    []string{newLabel},
+					Remove: removeStateLabel(oldLabel),
+				}},
+				AllowTemplate: details.IsTemplate,
+			}},
 		},
-		ParentID: fullID,
 	})
 	if err != nil {
-		return HandleErrorRespectJSON("creating event: %v", err)
+		return HandleErrorRespectJSON("%s", setStateRefusal(dimension, err))
 	}
 	commandDidWrite.Store(true)
-	eventID := created.Issue.ID
-
-	// ONE PATCH SWAPS THE DIMENSION. Both retired routes removed the old
-	// label and added the new one as two writes, and both treated a failed
-	// removal as a warning — which leaves an issue carrying two values for
-	// one dimension, a state findStateLabel resolves by whichever the label
-	// read happens to return first. A LabelPatch applies Add and Remove in
-	// one guarded update, so the dimension has one value or the command
-	// failed. The plane needs no branch: IssuePlaneOnly stays false and the
-	// role resolves it inside its own transaction.
-	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
-		Actor:   currentActor(),
-		IssueID: fullID,
-		Patch: issueops.IssuePatch{Labels: issueops.LabelPatch{
-			Add:    []string{newLabel},
-			Remove: removeStateLabel(oldLabel),
-		}},
-		// bd set-state has always edited templates; the role's template guard
-		// stands down for it (issueops.UpdateRequest.AllowTemplate).
-		AllowTemplate: true,
-	}); err != nil {
-		return HandleErrorRespectJSON("setting %s: %v", dimension, err)
-	}
+	eventID := result.Keys[stateEventKey]
 
 	if jsonOutput {
 		result := map[string]interface{}{
@@ -287,6 +295,26 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 	}
 	fmt.Printf("  Event: %s\n", eventID)
 	return nil
+}
+
+// stateEventKey names set-state's event create inside its one-request plan,
+// so the parent edge can reference the id the create mints.
+const stateEventKey = "event"
+
+// setStateRefusal says which part of a refused state change refused: the
+// event create and its parent edge (items 0 and 1) as `creating event`, and
+// the label swap or anything else as `setting <dimension>`. Nothing landed
+// either way. An item refusal is reported as the item's own error, without the
+// plan position the user did not write.
+func setStateRefusal(dimension string, err error) string {
+	var itemErr *issueops.ItemError
+	if errors.As(err, &itemErr) {
+		if itemErr.Index < 2 {
+			return fmt.Sprintf("creating event: %v", itemErr.Err)
+		}
+		return fmt.Sprintf("setting %s: %v", dimension, itemErr.Err)
+	}
+	return fmt.Sprintf("setting %s: %v", dimension, err)
 }
 
 // stateListCmd lists all state dimensions on an issue

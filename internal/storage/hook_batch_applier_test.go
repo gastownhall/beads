@@ -45,6 +45,12 @@ func (r *recordingBatchApplyHooks) CompleteIssueOperationReclaim(_ context.Conte
 func (r *recordingBatchApplyHooks) CompleteIssueOperationUpdateByID(_ context.Context, issueID string) {
 	r.completions = append(r.completions, "update-by-id:"+issueID)
 }
+func (r *recordingBatchApplyHooks) CompleteIssueOperationCreateByID(_ context.Context, issueID string) {
+	r.completions = append(r.completions, "create-by-id:"+issueID)
+}
+func (r *recordingBatchApplyHooks) CompleteIssueOperationCloseByID(_ context.Context, issueID string) {
+	r.completions = append(r.completions, "close-by-id:"+issueID)
+}
 
 func issueIDOrNil(issue *types.Issue) string {
 	if issue == nil {
@@ -159,16 +165,35 @@ func TestHookBatchApplierFiresPerLandedItem(t *testing.T) {
 			want: []string{"update:bd-9", "dependency:bd-1", "dependency:bd-2"},
 		},
 		{
-			// A script was handed this row as a create, and the edges are part
-			// of the same act. Firing again would have it react to a graph it
-			// has already seen.
-			name: "an issue this request created does not also fire update for its edges",
+			// The create hook was handed the row before its edges existed, so
+			// the update is what shows a script the edges the request gave it,
+			// as the guarded create and the unit-of-work recorder both fire.
+			// bd set-state's event reaches its subject only through this
+			// update (GH#5637).
+			name: "an issue this request created also fires update for its edges",
 			applier: &fakeBatchApplier{result: issueops.ApplyBatchResult{Items: []issueops.ItemResult{
 				batchApplyItemResult(issueops.ItemCreate, "bd-1", true),
 				batchApplyItemResult(issueops.ItemDepAdd, "bd-1", true),
 				batchApplyItemResult(issueops.ItemDepAdd, "bd-2", true),
+				batchApplyItemResult(issueops.ItemDepAdd, "bd-1", true),
 			}}},
-			want: []string{"create:bd-1", "dependency:bd-2"},
+			want: []string{"create:bd-1", "dependency:bd-1", "dependency:bd-2"},
+		},
+		{
+			// The http leg answers without snapshots (ledger row
+			// L-apply-snapshot), and a connected workspace's hooks run
+			// client-side over it. The rows still landed, so each fires from
+			// the row read back by id; without that, bd set-state over bd
+			// connect fired only its edge's update.
+			name: "a row that came back without its snapshot fires by id",
+			applier: &fakeBatchApplier{result: issueops.ApplyBatchResult{Items: []issueops.ItemResult{
+				{Kind: issueops.ItemCreate, IssueID: "bd-1", Changed: true},
+				{Kind: issueops.ItemDepAdd, IssueID: "bd-1", Changed: true},
+				{Kind: issueops.ItemUpdate, IssueID: "bd-2", Changed: true},
+				{Kind: issueops.ItemClose, IssueID: "bd-3", Changed: true},
+				{Kind: issueops.ItemUpdate, IssueID: "bd-4", Changed: false},
+			}}},
+			want: []string{"create-by-id:bd-1", "update-by-id:bd-2", "close-by-id:bd-3", "dependency:bd-1"},
 		},
 		{
 			name: "a refused request fires nothing",
@@ -238,3 +263,5 @@ func (r *recordingBatchApplyIssues) CompleteIssueOperationMetadata(context.Conte
 func (r *recordingBatchApplyIssues) CompleteIssueOperationRelease(context.Context, string)    {}
 func (r *recordingBatchApplyIssues) CompleteIssueOperationReclaim(context.Context, string)    {}
 func (r *recordingBatchApplyIssues) CompleteIssueOperationUpdateByID(context.Context, string) {}
+func (r *recordingBatchApplyIssues) CompleteIssueOperationCreateByID(context.Context, string) {}
+func (r *recordingBatchApplyIssues) CompleteIssueOperationCloseByID(context.Context, string)  {}

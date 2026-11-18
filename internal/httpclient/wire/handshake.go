@@ -307,6 +307,14 @@ const CapSweepRetainedTypes = "issues.sweep.retainedTypes"
 // asked to carry against an older server.
 const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 
+// CapBatchApplyUpdateAllowTemplate is the behavior capability announcing that
+// issues.batchApply's update items accept `allow_template`, spelled exactly as
+// httpapi's constant of the same name. batchapplier.go reads this token before
+// sending the member, refusing locally with a typed capability error: an older
+// server answers it as an unknown member, and dropping it would turn the
+// caller's deliberate template edit into a template_read_only refusal.
+const CapBatchApplyUpdateAllowTemplate = "issues.batchApply.updateAllowTemplate"
+
 // CapIssuesUpdateAllowTemplate is the behavior capability announcing that
 // updateIssue enforces the template read-only guard and accepts
 // `allow_template` to stand it down, spelled exactly as httpapi's constant of
@@ -316,7 +324,8 @@ const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 // pre-read and never sends `allow_template`. BatchApplier does not read it:
 // an applyBatch `update` item gets no client-side check (its target resolves
 // on the server), so through an older server it still edits a template
-// (bd-jkp9v3).
+// (bd-jkp9v3). An update item's own `allow_template` is gated by
+// CapBatchApplyUpdateAllowTemplate, not by this token.
 const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
 
 // CapIssuesUpdatePersistence is the behavior capability announcing that
@@ -507,7 +516,7 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
 	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit, CapSweepRetainIDs, CapSweepRetainedTypes,
-	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
+	CapBatchApplyDepAddLineage, CapBatchApplyUpdateAllowTemplate, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapListFilters,

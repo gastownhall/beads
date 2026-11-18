@@ -2562,6 +2562,412 @@ func RunBatchApplyUpdateItemsRefuseATemplate(t *testing.T, ctx context.Context, 
 	}
 }
 
+// batchApplyStateChangeEvent is the closed priority-4 event `bd set-state`
+// records (GH#5637), with an EXPLICIT id so a case's assertions read the raw
+// row by a name the request spelled rather than an id the role reported.
+// ephemeral is the plane the caller's PRE-READ saved: the set-state shape
+// copies the subject's retention mode onto the event when the request is
+// built, which is exactly the state a plane race freezes mid-flight.
+func batchApplyStateChangeEvent(id string, ephemeral bool) *types.Issue {
+	event := batchApplyIssue(id, "State change: patrol → muted")
+	event.Status = types.StatusClosed
+	event.Priority = 4
+	event.IssueType = types.TypeEvent
+	event.Ephemeral = ephemeral
+	return event
+}
+
+// batchApplyStateChangePlan is `bd set-state`'s three-item shape (GH#5637):
+// create the keyed state-change event, wire its parent-child edge to the
+// subject, swap the subject's dimension label — one transaction, all or
+// nothing.
+func batchApplyStateChangePlan(event *types.Issue, subject, addLabel string) publicops.ApplyBatchRequest {
+	return publicops.ApplyBatchRequest{
+		Actor:         "apply-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.ApplyItem{
+			batchApplyCreate("event", event),
+			batchApplyDepAdd(publicops.Ref{Key: "event"}, publicops.Ref{ID: subject}, types.DepParentChild, ""),
+			batchApplyUpdate(publicops.Ref{ID: subject}, publicops.IssuePatch{Labels: publicops.LabelPatch{
+				Add:    []string{addLabel},
+				Remove: []string{"patrol:active"},
+			}}),
+		},
+	}
+}
+
+// RunBatchApplyARefusedEventCreatePreventsTheStateChange pins the first
+// refusal arm of the set-state shape's atomicity (GH#5637): a state-change
+// batch whose EVENT CREATE is refused — here by an explicit id that already
+// names a row — answers with the create item's *ItemError, and the label
+// mutation the batch would have made LATER never happens: no parent edge, no
+// label swap, no history entry.
+func RunBatchApplyARefusedEventCreatePreventsTheStateChange(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	subject := fixture.IssuePrefix + "-crrefus-subject"
+	seeded := batchApplyIssue(subject, "the state subject")
+	seeded.Labels = []string{"patrol:active"}
+	if err := fixture.CreateIssue(ctx, seeded, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", subject, err)
+	}
+	occupied := fixture.IssuePrefix + "-crrefus-occupied"
+	batchApplySeedIssue(t, ctx, fixture, occupied, types.StatusOpen)
+
+	settled := fixture.CountHistory != nil && fixture.CommitPending != nil
+	batchApplySettle(t, ctx, fixture)
+	before := 0
+	if settled {
+		before = batchApplyHistory(t, ctx, fixture)
+	}
+
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, batchApplyStateChangePlan(
+		batchApplyStateChangeEvent(occupied, false), subject, "patrol:muted"))
+	if !errors.Is(err, publicops.ErrAlreadyExists) {
+		t.Fatalf("an event create over the occupied id %s: error = %v, want ErrAlreadyExists", occupied, err)
+	}
+	var itemErr *publicops.ItemError
+	if !errors.As(err, &itemErr) || itemErr.Index != 0 || itemErr.Kind != publicops.ItemCreate {
+		t.Fatalf("error = %v, want the create item's *ItemError at index 0", err)
+	}
+	// The occupied row is untouched: an upsert would report the same refusal
+	// having rewritten the row it collided with.
+	if got := batchApplyColumn(t, ctx, fixture, "title", occupied); got != occupied {
+		t.Errorf("the occupied row's title = %q, want %q: the refusal must not have written through it", got, occupied)
+	}
+	assertBatchApplyInboundEdgeCount(t, ctx, fixture, subject, 0)
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:active"}); n != 1 {
+		t.Errorf("subject label rows for patrol:active after the refusal = %d, want 1 (the later label mutation never ran)", n)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:muted"}); n != 0 {
+		t.Errorf("subject label rows for patrol:muted after the refusal = %d, want 0", n)
+	}
+	if settled {
+		if got := batchApplyHistory(t, ctx, fixture) - before; got != 0 {
+			t.Errorf("a refused state-change batch recorded %d history entries, want none", got)
+		}
+	}
+
+	// POSITIVE HALF: the same shape over a FREE event id lands whole, because a
+	// refusal case is only a test of a batch that could have applied.
+	free := fixture.IssuePrefix + "-crrefus-event"
+	batchApplyMust(t, ctx, fixture, batchApplyStateChangePlan(
+		batchApplyStateChangeEvent(free, false), subject, "patrol:muted"))
+	if n := batchApplyCount(t, ctx, fixture,
+		"SELECT COUNT(*) FROM issues WHERE id = ? AND status = 'closed' AND priority = 4 AND issue_type = 'event'",
+		[]any{free}); n != 1 {
+		t.Errorf("event row %s after the positive half = %d, want exactly the closed priority-4 event", free, n)
+	}
+	if n := batchApplyCount(t, ctx, fixture,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND type = 'parent-child'",
+		[]any{free, subject}); n != 1 {
+		t.Errorf("parent-child edges %s -> %s after the positive half = %d, want 1", free, subject, n)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:muted"}); n != 1 {
+		t.Errorf("subject label rows for patrol:muted after the positive half = %d, want 1", n)
+	}
+}
+
+// RunBatchApplyAMissingParentTargetRefusesTheStateChangeAfterTheEventCreate
+// pins the second refusal arm (GH#5637): the subject vanished between the
+// caller's pre-read and the batch, so the EVENT CREATE at index 0 is a valid
+// item that REACHES EXECUTION and lands inside the transaction — and the
+// parent-edge item at index 1 refuses with the edge's
+// *DependencyEndpointNotFoundError, and the executed create rolls back with
+// the request: no row on either plane, no edge, no label, no history entry.
+func RunBatchApplyAMissingParentTargetRefusesTheStateChangeAfterTheEventCreate(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	// Never seeded: the subject the pre-read saw and the batch still names.
+	subject := fixture.IssuePrefix + "-mstgt-subject"
+	eventID := fixture.IssuePrefix + "-mstgt-event"
+
+	settled := fixture.CountHistory != nil && fixture.CommitPending != nil
+	batchApplySettle(t, ctx, fixture)
+	before := 0
+	if settled {
+		before = batchApplyHistory(t, ctx, fixture)
+	}
+
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, batchApplyStateChangePlan(
+		batchApplyStateChangeEvent(eventID, false), subject, "patrol:muted"))
+	var itemErr *publicops.ItemError
+	if !errors.As(err, &itemErr) || itemErr.Index != 1 || itemErr.Kind != publicops.ItemDepAdd {
+		t.Fatalf("a state change whose parent target %s is missing: error = %v, want the edge item's *ItemError at index 1", subject, err)
+	}
+	var missing *publicops.DependencyEndpointNotFoundError
+	if !errors.As(err, &missing) || missing.MissingID != subject {
+		t.Errorf("missing-target refusal = %v, want *DependencyEndpointNotFoundError naming %s as the missing endpoint", err, subject)
+	}
+	// THE CREATE RAN AND ROLLED BACK: index 0 is a valid create over a free
+	// explicit id, and after the refusal neither plane holds the row.
+	assertBatchApplyRowCount(t, ctx, fixture, "issues", eventID, 0)
+	assertBatchApplyRowCount(t, ctx, fixture, "wisps", eventID, 0)
+	assertBatchApplyInboundEdgeCount(t, ctx, fixture, subject, 0)
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", []any{subject}); n != 0 {
+		t.Errorf("durable label rows for the missing subject = %d, want 0", n)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ?", []any{subject}); n != 0 {
+		t.Errorf("wisp label rows for the missing subject = %d, want 0", n)
+	}
+	if settled {
+		if got := batchApplyHistory(t, ctx, fixture) - before; got != 0 {
+			t.Errorf("a state change refused at the edge recorded %d history entries, want none: the executed create rolled back", got)
+		}
+	}
+
+	// POSITIVE HALF: seed the subject the plan always named, and the SAME plan
+	// lands whole — the refusal above is only meaningful for a batch that
+	// could have applied.
+	subjectRow := batchApplyIssue(subject, "the subject arrives")
+	subjectRow.Labels = []string{"patrol:active"}
+	if err := fixture.CreateIssue(ctx, subjectRow, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", subject, err)
+	}
+	batchApplyMust(t, ctx, fixture, batchApplyStateChangePlan(
+		batchApplyStateChangeEvent(eventID, false), subject, "patrol:muted"))
+	if n := batchApplyCount(t, ctx, fixture,
+		"SELECT COUNT(*) FROM issues WHERE id = ? AND status = 'closed' AND priority = 4 AND issue_type = 'event'",
+		[]any{eventID}); n != 1 {
+		t.Errorf("event row %s after the positive half = %d, want exactly the closed priority-4 event", eventID, n)
+	}
+	if n := batchApplyCount(t, ctx, fixture,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND type = 'parent-child'",
+		[]any{eventID, subject}); n != 1 {
+		t.Errorf("parent-child edges %s -> %s after the positive half = %d, want 1", eventID, subject, n)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:muted"}); n != 1 {
+		t.Errorf("subject label rows for patrol:muted after the positive half = %d, want 1", n)
+	}
+}
+
+// RunBatchApplyALateLabelRefusalRollsBackTheStateChange pins the third refusal
+// arm (GH#5637): the label patch of the set-state shape refuses at the LAST
+// item — a value over labels.label's bound, the same refusal the CLI test
+// drives — after the event create and the parent edge both EXECUTED and landed
+// inside the transaction. The request is all or nothing, so both earlier writes
+// roll back with it.
+func RunBatchApplyALateLabelRefusalRollsBackTheStateChange(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	subject := fixture.IssuePrefix + "-latelab-subject"
+	seeded := batchApplyIssue(subject, "the state subject")
+	seeded.Labels = []string{"patrol:active"}
+	if err := fixture.CreateIssue(ctx, seeded, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", subject, err)
+	}
+	eventID := fixture.IssuePrefix + "-latelab-event"
+	// patrol: plus 300 characters overflows labels.label's bound while the
+	// event's title stays legal, so the refusal is the label patch's and not
+	// the create's.
+	overlong := "patrol:" + strings.Repeat("v", 300)
+
+	settled := fixture.CountHistory != nil && fixture.CommitPending != nil
+	batchApplySettle(t, ctx, fixture)
+	before := 0
+	if settled {
+		before = batchApplyHistory(t, ctx, fixture)
+	}
+
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, batchApplyStateChangePlan(
+		batchApplyStateChangeEvent(eventID, false), subject, overlong))
+	var itemErr *publicops.ItemError
+	if !errors.As(err, &itemErr) || itemErr.Index != 2 || itemErr.Kind != publicops.ItemUpdate {
+		t.Fatalf("a state change whose label patch overflows the column: error = %v, want the update item's *ItemError at index 2", err)
+	}
+	if !errors.Is(err, types.ErrFieldTooLong) {
+		t.Errorf("the label refusal = %v, want types.ErrFieldTooLong (a typed bound rejection, not a raw backend error)", err)
+	}
+	// THE EARLIER WRITES ROLLED BACK: the create and the edge both executed
+	// before the refusal, and neither row survives it.
+	assertBatchApplyRowCount(t, ctx, fixture, "issues", eventID, 0)
+	assertBatchApplyInboundEdgeCount(t, ctx, fixture, subject, 0)
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:active"}); n != 1 {
+		t.Errorf("subject label rows for patrol:active after the refusal = %d, want 1 (the swap never ran)", n)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{subject, overlong}); n != 0 {
+		t.Errorf("overlong label rows after the refusal = %d, want 0", n)
+	}
+	if settled {
+		if got := batchApplyHistory(t, ctx, fixture) - before; got != 0 {
+			t.Errorf("a state change refused at its last item recorded %d history entries, want none: the executed create and edge rolled back", got)
+		}
+	}
+
+	// POSITIVE HALF: the same plan over a legal label lands whole.
+	batchApplyMust(t, ctx, fixture, batchApplyStateChangePlan(
+		batchApplyStateChangeEvent(eventID, false), subject, "patrol:muted"))
+	if n := batchApplyCount(t, ctx, fixture,
+		"SELECT COUNT(*) FROM issues WHERE id = ? AND status = 'closed' AND priority = 4 AND issue_type = 'event'",
+		[]any{eventID}); n != 1 {
+		t.Errorf("event row %s after the positive half = %d, want exactly the closed priority-4 event", eventID, n)
+	}
+	if n := batchApplyCount(t, ctx, fixture,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND type = 'parent-child'",
+		[]any{eventID, subject}); n != 1 {
+		t.Errorf("parent-child edges %s -> %s after the positive half = %d, want 1", eventID, subject, n)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:active"}); n != 0 {
+		t.Errorf("old label patrol:active survived the positive half's swap (%d rows)", n)
+	}
+}
+
+// assertBatchApplyInboundEdgeCount counts the parent-child edges TARGETING one
+// id across both edge tables, for the refusal cases whose source row never
+// existed and so cannot be named. A refusal must leave no edge pointing at the
+// subject from a row that was not there before the request.
+func assertBatchApplyInboundEdgeCount(t *testing.T, ctx context.Context, fixture BatchApplyFixture, subject string, want int) {
+	t.Helper()
+	const query = `SELECT
+		(SELECT COUNT(*) FROM dependencies WHERE type = 'parent-child'
+			AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?) +
+		(SELECT COUNT(*) FROM wisp_dependencies WHERE type = 'parent-child'
+			AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?)`
+	if got := batchApplyCount(t, ctx, fixture, query, []any{subject, subject}); got != want {
+		t.Errorf("parent-child edges targeting %s = %d, want %d", subject, got, want)
+	}
+}
+
+// RunBatchApplyAStateChangeBatchSurvivesASubjectThatChangedPlanes pins the
+// plane-race outcome GH#5637's design ACCEPTED rather than fixed: the batch's
+// event carries the retention mode the caller's PRE-READ saved, while the label
+// update resolves the subject AS IT IS AT EXECUTION, so a subject that changed
+// planes between the pre-read and the batch commits a CROSS-PLANE parent edge —
+// allowed, because the cross-plane refusal (RefusesACrossPlaneEdgeBetweenRows
+// ItCreated, above) is about endpoints the request itself created — and routes
+// the label to the subject's CURRENT plane. Both directions of the race are
+// asserted against the raw tables, and the outcome stays atomic: one request,
+// one history entry.
+func RunBatchApplyAStateChangeBatchSurvivesASubjectThatChangedPlanes(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	settled := fixture.CountHistory != nil && fixture.CommitPending != nil
+
+	t.Run("durable at the pre-read, wisp at execution", func(t *testing.T) {
+		subject := fixture.IssuePrefix + "-plane-durable"
+		seeded := batchApplyIssue(subject, "raced to the wisp plane")
+		seeded.Labels = []string{"patrol:active"}
+		if err := fixture.CreateIssue(ctx, seeded, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", subject, err)
+		}
+		eventID := fixture.IssuePrefix + "-plane-durable-event"
+
+		// THE RACE: the subject moves to the wisp plane after the pre-read that
+		// captured its durable mode. The move is its own batch, so the case
+		// never depends on timing to stage it.
+		batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+			Actor: "apply-writer",
+			Items: []publicops.ApplyItem{
+				batchApplyUpdate(publicops.Ref{ID: subject}, publicops.IssuePatch{
+					Persistence: publicops.Field[publicops.PersistenceMode]{
+						Set: true, Value: publicops.PersistenceModeEphemeral,
+					},
+				}),
+			},
+		})
+		assertBatchApplyRowCount(t, ctx, fixture, "wisps", subject, 1)
+		assertBatchApplyRowCount(t, ctx, fixture, "issues", subject, 0)
+
+		before := 0
+		if settled {
+			batchApplySettle(t, ctx, fixture)
+			before = batchApplyHistory(t, ctx, fixture)
+		}
+
+		// The saved-mode batch: the event is created the way the pre-read saw
+		// the subject — DURABLE — while the subject is now a wisp.
+		batchApplyMust(t, ctx, fixture, batchApplyStateChangePlan(
+			batchApplyStateChangeEvent(eventID, false), subject, "patrol:muted"))
+
+		// The event retains the PRE-READ mode.
+		if n := batchApplyCount(t, ctx, fixture,
+			"SELECT COUNT(*) FROM issues WHERE id = ? AND status = 'closed' AND priority = 4 AND issue_type = 'event'",
+			[]any{eventID}); n != 1 {
+			t.Errorf("event row %s = %d, want exactly the closed priority-4 event on the plane the pre-read saved", eventID, n)
+		}
+		assertBatchApplyRowCount(t, ctx, fixture, "wisps", eventID, 0)
+		// THE DOCUMENTED CROSS-PLANE EDGE: the durable event's parent edge to
+		// the wisp subject lands in the DURABLE edge table, pointing at the
+		// wisp through its typed target column.
+		assertBatchApplyPlaneEdgeCount(t, ctx, fixture, "dependencies", eventID, subject, 1)
+		assertBatchApplyPlaneEdgeCount(t, ctx, fixture, "wisp_dependencies", eventID, subject, 0)
+		// The label routed to the subject's CURRENT plane.
+		if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:muted"}); n != 1 {
+			t.Errorf("wisp_labels rows for patrol:muted = %d, want 1 (the label follows the subject's current plane)", n)
+		}
+		if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:active"}); n != 0 {
+			t.Errorf("old label patrol:active survived the swap in wisp_labels (%d rows)", n)
+		}
+		if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", []any{subject}); n != 0 {
+			t.Errorf("durable label rows for a wisp subject = %d, want 0 (the label followed the subject's current plane)", n)
+		}
+		if settled {
+			if got := batchApplyHistory(t, ctx, fixture) - before; got != 1 {
+				t.Errorf("the plane-raced state change recorded %d history entries, want exactly 1: durable rows landed, and the request is one transaction", got)
+			}
+		}
+	})
+
+	t.Run("wisp at the pre-read, durable at execution", func(t *testing.T) {
+		subject := fixture.IssuePrefix + "-plane-wisp"
+		seeded := batchApplyIssue(subject, "raced to the durable plane")
+		seeded.Ephemeral = true
+		seeded.Labels = []string{"patrol:active"}
+		if err := fixture.CreateWisp(ctx, seeded, "seed"); err != nil {
+			t.Fatalf("seed wisp %s: %v", subject, err)
+		}
+		eventID := fixture.IssuePrefix + "-plane-wisp-event"
+
+		// THE RACE, other direction: the wisp is promoted to durable storage
+		// after the pre-read that captured its ephemeral mode.
+		batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+			Actor: "apply-writer",
+			Items: []publicops.ApplyItem{
+				batchApplyUpdate(publicops.Ref{ID: subject}, publicops.IssuePatch{
+					Persistence: publicops.Field[publicops.PersistenceMode]{
+						Set: true, Value: publicops.PersistenceModePersistent,
+					},
+				}),
+			},
+		})
+		assertBatchApplyRowCount(t, ctx, fixture, "issues", subject, 1)
+		assertBatchApplyRowCount(t, ctx, fixture, "wisps", subject, 0)
+		if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:active"}); n != 1 {
+			t.Errorf("the promotion did not carry the subject's label to the durable plane: patrol:active rows = %d, want 1", n)
+		}
+
+		before := 0
+		if settled {
+			batchApplySettle(t, ctx, fixture)
+			before = batchApplyHistory(t, ctx, fixture)
+		}
+
+		// The saved-mode batch: the event is created the way the pre-read saw
+		// the subject — EPHEMERAL — while the subject is now durable.
+		batchApplyMust(t, ctx, fixture, batchApplyStateChangePlan(
+			batchApplyStateChangeEvent(eventID, true), subject, "patrol:muted"))
+
+		// The event retains the PRE-READ mode.
+		assertBatchApplyRowCount(t, ctx, fixture, "wisps", eventID, 1)
+		assertBatchApplyRowCount(t, ctx, fixture, "issues", eventID, 0)
+		// THE CROSS-PLANE EDGE from the other side: the wisp event's parent
+		// edge to the durable subject lives in the WISP edge table.
+		assertBatchApplyPlaneEdgeCount(t, ctx, fixture, "wisp_dependencies", eventID, subject, 1)
+		assertBatchApplyPlaneEdgeCount(t, ctx, fixture, "dependencies", eventID, subject, 0)
+		// The label routed to the subject's CURRENT — durable — plane.
+		if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:muted"}); n != 1 {
+			t.Errorf("durable label rows for patrol:muted = %d, want 1 (the label follows the subject's current plane)", n)
+		}
+		if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{subject, "patrol:active"}); n != 0 {
+			t.Errorf("old label patrol:active survived the swap in labels (%d rows)", n)
+		}
+		if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ?", []any{subject}); n != 0 {
+			t.Errorf("wisp label rows for a durable subject = %d, want 0 (the label followed the subject's current plane)", n)
+		}
+		if settled {
+			if got := batchApplyHistory(t, ctx, fixture) - before; got != 1 {
+				t.Errorf("the plane-raced state change recorded %d history entries, want exactly 1: the label landed on the durable plane, and the request is one transaction", got)
+			}
+		}
+	})
+}
+
 // RunBatchApplySplicesTheMetadataOfATemplateItCreates is the template guard's
 // boundary: the one write a template legitimately takes inside a batch is a
 // CREATE item that makes it and asks for a metadata splice. The splice runs as

@@ -88,6 +88,9 @@ func (b *httpBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBat
 	if err := b.refuseUnservedDepAddLineage(ctx, req); err != nil {
 		return issueops.ApplyBatchResult{}, err
 	}
+	if err := b.refuseUnservedUpdateAllowTemplate(ctx, req); err != nil {
+		return issueops.ApplyBatchResult{}, err
+	}
 
 	body, err := applyBatchBody(req)
 	if err != nil {
@@ -145,6 +148,29 @@ func (b *httpBatchApplier) refuseUnservedDepAddLineage(ctx context.Context, req 
 		return nil
 	}
 	return b.store.unsupportedCapability("BatchApplier.ApplyBatch", wire.CapBatchApplyDepAddLineage)
+}
+
+// refuseUnservedUpdateAllowTemplate is refuseUnservedDepAddLineage's rule for
+// an update item's AllowTemplate: the member is served only by a server that
+// advertises wire.CapBatchApplyUpdateAllowTemplate. An older server answers it
+// as an unknown member, and dropping it instead would send the caller's
+// deliberate template edit as one the server refuses with template_read_only,
+// so the whole plan refuses before the dial. A plan whose items all leave it
+// false is unaffected and never reads the handshake.
+func (b *httpBatchApplier) refuseUnservedUpdateAllowTemplate(ctx context.Context, req issueops.ApplyBatchRequest) error {
+	if !slices.ContainsFunc(req.Items, func(item issueops.ApplyItem) bool {
+		return item.Kind == issueops.ItemUpdate && item.Update != nil && item.Update.AllowTemplate
+	}) {
+		return nil
+	}
+	snap, err := b.store.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if snap != nil && slices.Contains(snap.Capabilities, wire.CapBatchApplyUpdateAllowTemplate) {
+		return nil
+	}
+	return b.store.unsupportedCapability("BatchApplier.ApplyBatch", wire.CapBatchApplyUpdateAllowTemplate)
 }
 
 // requireGateTokens scans the whole plan once, before the dial, for a create
@@ -406,6 +432,9 @@ func applyUpdateItemBody(item *issueops.UpdateItem) (*wire.ApplyUpdateItem, erro
 	setItemBool(&out.ForceClosePolicy, item.ForceClosePolicy)
 	setItemBool(&out.ForceAssigneeTransfer, item.ForceAssigneeTransfer)
 	setItemBool(&out.ForceNotesOverwrite, item.ForceNotesOverwrite)
+	// Gated by refuseUnservedUpdateAllowTemplate before the dial, and sent
+	// only when true like the force flags.
+	setItemBool(&out.AllowTemplate, item.AllowTemplate)
 	return out, nil
 }
 

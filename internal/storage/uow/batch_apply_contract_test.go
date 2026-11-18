@@ -175,6 +175,24 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("CarriesTheGateMembers", func(t *testing.T) {
 		conformance.RunBatchApplyCarriesTheGateMembers(t, ctx, fixture)
 	})
+	t.Run("StateChangeOnATemplateHonorsAllowTemplate", func(t *testing.T) {
+		conformance.RunBatchApplyStateChangeOnATemplateHonorsAllowTemplate(t, ctx, fixture)
+	})
+	t.Run("StateChangeRefusedAtTheEventOrItsEdgeWritesNothing", func(t *testing.T) {
+		conformance.RunBatchApplyStateChangeRefusedAtTheEventOrItsEdgeWritesNothing(t, ctx, fixture)
+	})
+	t.Run("ARefusedEventCreatePreventsTheStateChange", func(t *testing.T) {
+		conformance.RunBatchApplyARefusedEventCreatePreventsTheStateChange(t, ctx, fixture)
+	})
+	t.Run("MissingParentTargetRefusesTheStateChangeAfterTheEventCreate", func(t *testing.T) {
+		conformance.RunBatchApplyAMissingParentTargetRefusesTheStateChangeAfterTheEventCreate(t, ctx, fixture)
+	})
+	t.Run("LateLabelRefusalRollsBackTheStateChange", func(t *testing.T) {
+		conformance.RunBatchApplyALateLabelRefusalRollsBackTheStateChange(t, ctx, fixture)
+	})
+	t.Run("AStateChangeBatchSurvivesASubjectThatChangedPlanes", func(t *testing.T) {
+		conformance.RunBatchApplyAStateChangeBatchSurvivesASubjectThatChangedPlanes(t, ctx, fixture)
+	})
 }
 
 func newUOWBatchApplyFixture(t *testing.T, ctx context.Context, prefix string) conformance.BatchApplyFixture {

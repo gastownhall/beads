@@ -494,6 +494,28 @@ func (h *HookFiringStore) CompleteIssueOperationUpdateByID(ctx context.Context, 
 	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
 }
 
+// CompleteIssueOperationCreateByID fires the create hooks for a committed
+// create whose result carried no row (a batch apply over http, ledger row
+// L-apply-snapshot), reading the row back to hand it to the script. An
+// on_update hook alone is reason enough to read it: a created row's labels
+// fire on_update (createHookEvents).
+func (h *HookFiringStore) CompleteIssueOperationCreateByID(ctx context.Context, issueID string) {
+	if !h.hookConfigured(hooks.EventCreate) && !h.hookConfigured(hooks.EventUpdate) {
+		return
+	}
+	issue, err := h.inner.GetIssue(ctx, issueID)
+	if err != nil {
+		return // best-effort: skip hook if re-fetch fails
+	}
+	h.CompleteIssueOperationCreate(ctx, issue, nil)
+}
+
+// CompleteIssueOperationCloseByID fires the close hook for a committed close
+// whose result carried no row, reading the row back to hand it to the script.
+func (h *HookFiringStore) CompleteIssueOperationCloseByID(ctx context.Context, issueID string) {
+	h.fireHookByID(ctx, hooks.EventClose, issueID)
+}
+
 func (h *HookFiringStore) fireHookByID(ctx context.Context, event, id string) {
 	if !h.hookConfigured(event) {
 		return

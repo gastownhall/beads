@@ -1093,3 +1093,66 @@ func TestApplyBatchRefusesUnservedDepAddLineageBeforeDialing(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyBatchGatesAnUpdateItemsAllowTemplateOnItsToken pins
+// UpdateItem.AllowTemplate over the wire (GH#5637: bd set-state's one-request
+// state change sends it on the label patch). Against a server that does not
+// advertise issues.batchApply.updateAllowTemplate, an item setting it refuses
+// before the dial with *storage.ErrUnsupported naming the token: that server
+// answers the member as unknown, and dropping it would turn a deliberate
+// template edit into a template_read_only refusal. Against a server that
+// advertises it the member is sent as true, and an item leaving it false sends
+// no member at all, so a plan that never asks for the waiver still dials an
+// older server.
+func TestApplyBatchGatesAnUpdateItemsAllowTemplateOnItsToken(t *testing.T) {
+	plan := func(allow bool) issueops.ApplyBatchRequest {
+		return issueops.ApplyBatchRequest{
+			Actor: "planner",
+			Items: []issueops.ApplyItem{{Kind: issueops.ItemUpdate, Update: &issueops.UpdateItem{
+				Target:        issueops.Ref{ID: "bd-1"},
+				Patch:         issueops.IssuePatch{Labels: issueops.LabelPatch{Add: []string{"patrol:muted"}}},
+				AllowTemplate: allow,
+			}}},
+		}
+	}
+	masked := &apigen.ContextResponse{BdVersion: "1.2.3"} // no CapBatchApplyUpdateAllowTemplate
+	advertised := &apigen.ContextResponse{BdVersion: "1.2.3", Capabilities: []string{wire.CapBatchApplyUpdateAllowTemplate}}
+
+	t.Run("refused before the dial when the token is absent", func(t *testing.T) {
+		w := &stubWire{}
+		_, err := applyRoleWithSnapshot(t, w, masked).ApplyBatch(t.Context(), plan(true))
+		var unsup *storage.ErrUnsupported
+		if !errors.As(err, &unsup) {
+			t.Fatalf("ApplyBatch = %v, want a pre-dial *storage.ErrUnsupported", err)
+		}
+		if unsup.Capability != wire.CapBatchApplyUpdateAllowTemplate {
+			t.Errorf("Capability = %q, want %q", unsup.Capability, wire.CapBatchApplyUpdateAllowTemplate)
+		}
+		if len(w.calls) != 0 {
+			t.Errorf("dialed %v, want no call: a pre-dial refusal must never reach the wire", w.calls)
+		}
+	})
+
+	t.Run("sent as true when the token is advertised", func(t *testing.T) {
+		w := &stubWire{}
+		if _, err := applyRoleWithSnapshot(t, w, advertised).ApplyBatch(t.Context(), plan(true)); err != nil {
+			t.Fatalf("ApplyBatch: %v", err)
+		}
+		got := w.lastApply.Items[0].Update.AllowTemplate
+		if got == nil || !*got {
+			t.Errorf("allow_template = %v, want true on the wire", got)
+		}
+	})
+
+	for name, snap := range map[string]*apigen.ContextResponse{"masked": masked, "advertised": advertised} {
+		t.Run("omitted when false on a "+name+" server", func(t *testing.T) {
+			w := &stubWire{}
+			if _, err := applyRoleWithSnapshot(t, w, snap).ApplyBatch(t.Context(), plan(false)); err != nil {
+				t.Fatalf("ApplyBatch: %v", err)
+			}
+			if got := w.lastApply.Items[0].Update.AllowTemplate; got != nil {
+				t.Errorf("allow_template = %v, want the member absent", *got)
+			}
+		})
+	}
+}

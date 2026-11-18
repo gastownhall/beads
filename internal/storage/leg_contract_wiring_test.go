@@ -95,6 +95,28 @@ const idRetentionNoRenameDoorWaiverReason = "IDRetentionFixture.Rename is storag
 	"leg serves no identity change: the unit of work has no rename use case and the http client refuses it as " +
 	"unsupported. The guard is the shared rename body's (issueops.UpdateIssueIDInTx) and runs on every store leg"
 
+// These three cover the set-state batch cases (GH#5637) the http leg cannot run
+// as written; its two other set-state cases run there unchanged
+// (internal/httpclient/served_batch_apply_test.go). Each waived case has a
+// bespoke served test that pins what the wire does instead, and each reason is
+// what a run of the shared case over the wire refused on.
+const (
+	stateChangeMissingEndpointWireWaiverReason = "the problem document for a missing edge endpoint " +
+		"carries no endpoint id, so the edge item's *DependencyEndpointNotFoundError (MissingID) does not " +
+		"survive the wire; the client rebuilds the item's *ItemError, and " +
+		"TestServedBatchApplyAMissingParentTargetRollsTheExecutedCreateBack pins the refusal and the " +
+		"rolled-back create"
+	stateChangeLabelAtDecodeWaiverReason = "this server refuses an over-length label while decoding the " +
+		"request (applyLabelPatch -> applyBoundedLabels in internal/httpapi/batch_apply.go), before any item " +
+		"runs, so the wire has no executed create and edge for the late refusal to roll back and no item for " +
+		"its *ItemError; TestServedBatchApplyRefusesAnOverlongStateLabelAtDecode pins the decode-time refusal"
+	stateChangePlaneRaceWireWaiverReason = "the case stages the plane race with a batch update item's " +
+		"IssuePatch.Persistence, which ApplyPatchBody does not carry (the client refuses it before the dial; " +
+		"issues.update.persistence belongs to updateIssue); " +
+		"TestServedBatchApplyAStateChangeBatchCommitsACrossPlaneEdge seeds the subject on the far plane " +
+		"instead and pins the same cross-plane outcome"
+)
+
 // The waivers of the three legs registered here. Each is registered beside its
 // leg rather than written into one literal, so a leg registered elsewhere
 // brings its waivers the same way; see unwiredContractEntrypoints.
@@ -132,6 +154,10 @@ func init() {
 		"RunIDRetentionImportSkipsAndReportsARetiredRow": idRetentionNoImportDoorWaiverReason,
 		"RunIDRetentionARacingImportNeverResurrects":     idRetentionNoImportDoorWaiverReason,
 		"RunIDRetentionRefusesARenameOntoARetiredID":     idRetentionNoRenameDoorWaiverReason,
+
+		"RunBatchApplyAMissingParentTargetRefusesTheStateChangeAfterTheEventCreate": stateChangeMissingEndpointWireWaiverReason,
+		"RunBatchApplyALateLabelRefusalRollsBackTheStateChange":                     stateChangeLabelAtDecodeWaiverReason,
+		"RunBatchApplyAStateChangeBatchSurvivesASubjectThatChangedPlanes":           stateChangePlaneRaceWireWaiverReason,
 
 		"RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape":         cycleTracksWireGapWaiverReason,
 		"RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop":            cycleTracksWireGapWaiverReason,
