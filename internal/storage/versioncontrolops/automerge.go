@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // Domain-aware auto-merge (federation ask #1, the flagship).
@@ -39,6 +40,11 @@ import (
 // write paths cannot produce (see issuesCloseGroup and issuesNonScalarColumns
 // below): the close columns move atomically, and a contested `notes` or
 // `metadata` declines rather than letting LWW delete an append or a JSON key.
+// A third declines the close RACE (GH#7783): a contested close group whose
+// sides disagree about closed-versus-not is never settled by timestamp,
+// because either winner silently undoes the other side's lifecycle intent —
+// a claim that never saw the remote's close would reopen the bead, or a stale
+// close would discard the claim.
 //
 // A row is left for the operator when it is not modify/modify (add/add,
 // delete/modify), when a genuinely conflicting cell cannot be settled because
@@ -273,7 +279,11 @@ func parseConflictTimestamp(v any) (time.Time, bool) {
 // independence is wrong for them: our close and their status change would
 // otherwise merge into `status='in_progress' AND closed_at=<t>`, a row no
 // write path can produce and validation rejects. When any of them is
-// contested the whole group is settled from the LWW winner, atomically.
+// contested the whole group is settled from the LWW winner, atomically —
+// EXCEPT when exactly one side's final status is closed: that close race is
+// declined outright (see closeRaceFromVerdicts), because no timestamp can
+// make "reopen the bead the claimant never saw closed" or "discard the claim
+// behind the closer's back" a merge either side meant.
 var issuesCloseGroup = []string{"status", "closed_at", "close_reason", "closed_by_session"}
 
 // issuesNonScalarColumns are columns whose contents are structurally merged by
@@ -323,19 +333,79 @@ func classifyCell(row rawConflictRow, col string) (cellVerdict, any, bool) {
 	}
 }
 
+// closeRaceDecline is the diagnostic context for the one contested close
+// group bd refuses to settle by timestamp (GH#7783): the issue it belongs to
+// and the two sides' final statuses, one of which is the built-in closed and
+// the other not. mergeIssuesConflictRow returns it so the wrapper can name
+// the race in its notice instead of leaving an unexplained declined table.
+type closeRaceDecline struct {
+	issueKey    any
+	ourStatus   string
+	theirStatus string
+}
+
+// closeRaceFromVerdicts reports the close-race decline for one conflict row,
+// or nil when the shape is not one. The trigger: the atomic close group is
+// contested (any member changed on both sides) AND exactly one side's final
+// status is the built-in closed value — in either direction, whatever the
+// timestamps say, and for any non-closed value on the other side (custom
+// statuses included; no category is interpreted). Two closed sides are a
+// detail race and two non-closed sides an ordinary status contest: both keep
+// their existing LWW settlement. A side with no readable status column keeps
+// the conservative missing-column handling instead of an invented status.
+func closeRaceFromVerdicts(row rawConflictRow, verdicts map[string]cellVerdict) *closeRaceDecline {
+	contested := false
+	for _, col := range issuesCloseGroup {
+		if verdicts[col] == cellContested {
+			contested = true
+			break
+		}
+	}
+	if !contested {
+		return nil
+	}
+	ourRaw, _ := row.value("our", "status")
+	theirRaw, _ := row.value("their", "status")
+	ourStatus, ourOK := conflictCellString(ourRaw)
+	theirStatus, theirOK := conflictCellString(theirRaw)
+	if !ourOK || !theirOK {
+		return nil
+	}
+	ourClosed := ourStatus == string(types.StatusClosed)
+	theirClosed := theirStatus == string(types.StatusClosed)
+	if ourClosed == theirClosed {
+		return nil
+	}
+	key, _ := row.value("our", issuesKeyColumn)
+	return &closeRaceDecline{issueKey: key, ourStatus: ourStatus, theirStatus: theirStatus}
+}
+
+// conflictCellString renders a raw conflict cell as the string the merge
+// rules compare under, so a driver handing back []byte for one side and
+// string for the other reads consistently.
+func conflictCellString(v any) (string, bool) {
+	s := formatConflictValue(v)
+	if s == nil {
+		return "", false
+	}
+	return *s, true
+}
+
 // mergeIssuesConflictRow computes the field-level three-way merge of one
 // conflicted issues row. ok is false when the row must be left for the
 // operator: not modify/modify, a contested cell whose LWW tiebreak is
-// ambiguous (equal or unparseable updated_at), or a contested cell whose
-// contents LWW cannot merge without loss (issuesNonScalarColumns).
+// ambiguous (equal or unparseable updated_at), a contested cell whose
+// contents LWW cannot merge without loss (issuesNonScalarColumns), or a
+// contested close group with exactly one closed side (a close race, whose
+// decline carries the diagnostic naming the issue and both statuses).
 //
 // It is pure, so every merge rule is unit-testable without a database.
-func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
+func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, *closeRaceDecline, bool) {
 	baseOK, ourOK, theirOK := row.sidesPresent([]string{issuesKeyColumn})
 	if !baseOK || !ourOK || !theirOK {
 		// add/add (no base row) or delete/modify (one side removed it):
 		// neither has a field-level answer.
-		return issuesRowMerge{}, false
+		return issuesRowMerge{}, nil, false
 	}
 	ourKey, _ := row.value("our", issuesKeyColumn)
 
@@ -375,16 +445,23 @@ func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
 			// enumeration is our_*-driven, so this catches a their_*/base_*
 			// column going missing, not the reverse; dolt builds the conflict
 			// table from the merged schema, so all three sides are expected.
-			return issuesRowMerge{}, false
+			return issuesRowMerge{}, nil, false
 		}
 		verdicts[col] = v
 		theirVals[col] = theirVal
 	}
 
+	// The close race check runs BEFORE the non-scalar decline: a contested
+	// notes/metadata cell in the same row must not mask the race's own
+	// decline (and its diagnostic) with the generic one.
+	if d := closeRaceFromVerdicts(row, verdicts); d != nil {
+		return issuesRowMerge{}, d, false
+	}
+
 	// A contested column bd merges structurally has no cell-level answer.
 	for col, v := range verdicts {
 		if v == cellContested && issuesNonScalarColumns[col] {
-			return issuesRowMerge{}, false
+			return issuesRowMerge{}, nil, false
 		}
 	}
 
@@ -413,7 +490,7 @@ func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
 		if closeGroupContested && inCloseGroup[col] {
 			// Atomic group: one LWW decision for all of its members.
 			if !lwwUsable {
-				return issuesRowMerge{}, false
+				return issuesRowMerge{}, nil, false
 			}
 			merge.lww = append(merge.lww, col)
 			if theirsWinLWW {
@@ -439,7 +516,7 @@ func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
 			// Both sides changed the same cell to different values — the only
 			// genuine conflict. Settle it last-write-wins by updated_at.
 			if !lwwUsable {
-				return issuesRowMerge{}, false
+				return issuesRowMerge{}, nil, false
 			}
 			merge.lww = append(merge.lww, col)
 			if theirsWinLWW {
@@ -501,7 +578,7 @@ func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
 			merge.setColumn("row_lock", freshRowLockDistinctFrom(ourLock, theirLock))
 		}
 	}
-	return merge, true
+	return merge, nil, true
 }
 
 // freshRowLockDistinctFrom mints a new row_lock token that differs from both
@@ -541,24 +618,35 @@ func mustValue(row rawConflictRow, side, col string) any {
 
 // issuesConflictsAreFieldMergeable reports whether every live issues conflict
 // can be settled by mergeIssuesConflictRow, and returns the merge plan so the
-// resolution pass does not recompute it.
-func issuesConflictsAreFieldMergeable(ctx context.Context, db DBConn) ([]issuesRowMerge, bool, error) {
+// resolution pass does not recompute it. Every row is examined even after one
+// declines, so the close-race diagnostics cover the whole conflicted table —
+// a second racing issue should not hide behind the first's refusal.
+func issuesConflictsAreFieldMergeable(ctx context.Context, db DBConn) ([]issuesRowMerge, []closeRaceDecline, bool, error) {
 	rows, err := loadConflictRows(ctx, db, "issues")
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	if declineDuplicateConflictRows("issues", []string{issuesKeyColumn}, rows) {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	plan := make([]issuesRowMerge, 0, len(rows))
+	var declines []closeRaceDecline
+	mergeable := true
 	for _, row := range rows {
-		merged, ok := mergeIssuesConflictRow(row)
+		merged, decline, ok := mergeIssuesConflictRow(row)
+		if decline != nil {
+			declines = append(declines, *decline)
+		}
 		if !ok {
-			return nil, false, nil
+			mergeable = false
+			continue
 		}
 		plan = append(plan, merged)
 	}
-	return plan, true, nil
+	if !mergeable {
+		return nil, declines, false, nil
+	}
+	return plan, nil, true, nil
 }
 
 // resolveIssuesFieldMerge applies a plan from issuesConflictsAreFieldMergeable.

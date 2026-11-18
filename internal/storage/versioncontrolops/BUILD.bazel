@@ -32,6 +32,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/schema",
+        "//internal/types",
     ],
 )
 

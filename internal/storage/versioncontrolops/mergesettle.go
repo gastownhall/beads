@@ -549,7 +549,10 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     the semantic fields are disjoint, so the conflict rate is far higher
 //     than the semantic-conflict rate. add/add (no base row), delete/modify
 //     (one side removed it), and a contested cell whose two sides carry equal
-//     or unparseable updated_at values are left for the operator.
+//     or unparseable updated_at values are left for the operator. So is the
+//     close race (GH#7783): a contested close group with exactly one closed
+//     side is declined outright, whatever the timestamps say, with a Notice
+//     naming the issue and both statuses.
 //
 //   - labels: set-union. The table is all key columns, so two sides adding
 //     DIFFERENT labels are disjoint rows dolt already unions and a conflict
@@ -635,11 +638,14 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			}
 			resolvable = append(resolvable, "config")
 		case "issues":
-			plan, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
+			plan, declines, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
 			if err != nil {
 				return false, err
 			}
 			if !mergeable {
+				for _, d := range declines {
+					fmt.Fprintf(os.Stderr, "Notice: not auto-merging issue %v: this side left it %q while the other side closed it %q (or the reverse), and last-write-wins must not silently reopen or discard a close. Resolve with: bd conflicts resolve %v --ours|--theirs, or pull with bd dolt pull --strategy ours|theirs\n", d.issueKey, d.ourStatus, d.theirStatus, d.issueKey)
+				}
 				return false, nil
 			}
 			issuesPlan = plan

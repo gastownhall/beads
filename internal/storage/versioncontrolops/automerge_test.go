@@ -70,7 +70,7 @@ func TestMergeIssuesConflictRow_DisjointFieldsBothSurvive(t *testing.T) {
 		"updated_at": {tsBase, tsOurs, tsTheirs},
 	})
 
-	m, ok := mergeIssuesConflictRow(row)
+	m, _, ok := mergeIssuesConflictRow(row)
 	if !ok {
 		t.Fatal("expected disjoint-field conflict to be field-mergeable")
 	}
@@ -93,28 +93,31 @@ func TestMergeIssuesConflictRow_DisjointFieldsBothSurvive(t *testing.T) {
 
 // TestMergeIssuesConflictRow_ContestedCellLWW checks the one genuine conflict
 // class: both sides changed the SAME cell, so the later updated_at wins it.
+// The contest is deliberately between two NON-closed statuses: a
+// closed-vs-non-closed contest is a close race and is declined instead (see
+// TestMergeIssuesConflictRow_CloseRaceDeclines).
 func TestMergeIssuesConflictRow_ContestedCellLWW(t *testing.T) {
 	t.Run("theirs newer", func(t *testing.T) {
 		row := conflictRowFor(t, map[string][3]any{
 			"id":         {"bd-2", "bd-2", "bd-2"},
-			"status":     {"open", "in_progress", "closed"},
+			"status":     {"open", "in_progress", "review"},
 			"updated_at": {tsBase, tsOurs, tsTheirs},
 		})
-		m, ok := mergeIssuesConflictRow(row)
+		m, _, ok := mergeIssuesConflictRow(row)
 		if !ok {
 			t.Fatal("expected contested cell with distinct timestamps to be mergeable")
 		}
-		if v, written := m.merged("status"); !written || v != "closed" {
+		if v, written := m.merged("status"); !written || v != "review" {
 			t.Errorf("later writer must win the contested cell, got %v (written=%v)", v, written)
 		}
 	})
 	t.Run("ours newer", func(t *testing.T) {
 		row := conflictRowFor(t, map[string][3]any{
 			"id":         {"bd-3", "bd-3", "bd-3"},
-			"status":     {"open", "in_progress", "closed"},
+			"status":     {"open", "in_progress", "review"},
 			"updated_at": {tsBase, tsTheirs, tsOurs},
 		})
-		m, ok := mergeIssuesConflictRow(row)
+		m, _, ok := mergeIssuesConflictRow(row)
 		if !ok {
 			t.Fatal("expected contested cell with distinct timestamps to be mergeable")
 		}
@@ -128,25 +131,27 @@ func TestMergeIssuesConflictRow_ContestedCellLWW(t *testing.T) {
 }
 
 // TestMergeIssuesConflictRow_AmbiguousLeftAlone covers the classes LWW has no
-// answer for: equal or unparseable timestamps on a contested cell.
+// answer for: equal or unparseable timestamps on a contested cell. The
+// contested statuses are both non-closed, so the close-race decline cannot
+// explain a failure here (see TestMergeIssuesConflictRow_CloseRaceDeclines).
 func TestMergeIssuesConflictRow_AmbiguousLeftAlone(t *testing.T) {
 	t.Run("equal timestamps", func(t *testing.T) {
 		row := conflictRowFor(t, map[string][3]any{
 			"id":         {"bd-4", "bd-4", "bd-4"},
-			"status":     {"open", "in_progress", "closed"},
+			"status":     {"open", "in_progress", "review"},
 			"updated_at": {tsBase, tsOurs, tsOurs},
 		})
-		if _, ok := mergeIssuesConflictRow(row); ok {
+		if _, _, ok := mergeIssuesConflictRow(row); ok {
 			t.Error("a contested cell with equal updated_at must be left for the operator")
 		}
 	})
 	t.Run("unparseable timestamp", func(t *testing.T) {
 		row := conflictRowFor(t, map[string][3]any{
 			"id":         {"bd-5", "bd-5", "bd-5"},
-			"status":     {"open", "in_progress", "closed"},
+			"status":     {"open", "in_progress", "review"},
 			"updated_at": {tsBase, "not-a-time", tsTheirs},
 		})
-		if _, ok := mergeIssuesConflictRow(row); ok {
+		if _, _, ok := mergeIssuesConflictRow(row); ok {
 			t.Error("a contested cell with an unparseable updated_at must be left for the operator")
 		}
 	})
@@ -159,7 +164,7 @@ func TestMergeIssuesConflictRow_AmbiguousLeftAlone(t *testing.T) {
 			"assignee":   {"", "", "alice"},
 			"updated_at": {tsBase, tsOurs, tsOurs},
 		})
-		if _, ok := mergeIssuesConflictRow(row); !ok {
+		if _, _, ok := mergeIssuesConflictRow(row); !ok {
 			t.Error("disjoint edits must merge regardless of the timestamps")
 		}
 	})
@@ -174,7 +179,7 @@ func TestMergeIssuesConflictRow_StructuralConflictsLeftAlone(t *testing.T) {
 			"status":     {nil, "open", "closed"},
 			"updated_at": {nil, tsOurs, tsTheirs},
 		})
-		if _, ok := mergeIssuesConflictRow(row); ok {
+		if _, _, ok := mergeIssuesConflictRow(row); ok {
 			t.Error("add/add must be left for the operator")
 		}
 	})
@@ -184,7 +189,7 @@ func TestMergeIssuesConflictRow_StructuralConflictsLeftAlone(t *testing.T) {
 			"status":     {"open", nil, "closed"},
 			"updated_at": {tsBase, nil, tsTheirs},
 		})
-		if _, ok := mergeIssuesConflictRow(row); ok {
+		if _, _, ok := mergeIssuesConflictRow(row); ok {
 			t.Error("delete/modify must be left for the operator")
 		}
 	})
@@ -199,7 +204,7 @@ func TestMergeIssuesConflictRow_NullVsEmpty(t *testing.T) {
 		"assignee":   {nil, "", nil},
 		"updated_at": {tsBase, tsOurs, tsTheirs},
 	})
-	m, ok := mergeIssuesConflictRow(row)
+	m, _, ok := mergeIssuesConflictRow(row)
 	if !ok {
 		t.Fatal("expected the row to merge: only one side changed assignee")
 	}
@@ -218,7 +223,7 @@ func TestMergeIssuesConflictRow_ByteValuesCompareEqual(t *testing.T) {
 		"assignee":   {"", "", "alice"},
 		"updated_at": {tsBase, tsOurs, tsTheirs},
 	})
-	m, ok := mergeIssuesConflictRow(row)
+	m, _, ok := mergeIssuesConflictRow(row)
 	if !ok {
 		t.Fatal("expected the row to merge")
 	}
@@ -306,7 +311,7 @@ func TestMergeIssuesConflictRow_UpdatedAtAlwaysWrittenWithTheMerge(t *testing.T)
 		"assignee":   {"", "", "alice"},
 		"updated_at": {tsBase, tsTheirs, tsOurs}, // ours = 12:00, theirs = 11:00
 	})
-	m, ok := mergeIssuesConflictRow(row)
+	m, _, ok := mergeIssuesConflictRow(row)
 	if !ok {
 		t.Fatal("expected disjoint-field conflict to merge")
 	}
@@ -331,7 +336,7 @@ func TestMergeIssuesConflictRow_NoWriteNoUpdatedAt(t *testing.T) {
 		"status":     {"open", "in_progress", "open"}, // only we changed it
 		"updated_at": {tsBase, tsTheirs, tsBase},
 	})
-	m, ok := mergeIssuesConflictRow(row)
+	m, _, ok := mergeIssuesConflictRow(row)
 	if !ok {
 		t.Fatal("expected the row to merge")
 	}
@@ -341,46 +346,53 @@ func TestMergeIssuesConflictRow_NoWriteNoUpdatedAt(t *testing.T) {
 }
 
 // TestMergeIssuesConflictRow_CloseGroupIsAtomic pins that the close columns
-// move together. Per-cell independence would synthesize status='in_progress'
-// alongside our closed_at — a row no write path produces and
+// move together. Both sides CLOSED the issue with different details, so the
+// race is over the close's metadata, not over closed-vs-non-closed — that
+// shape is a close race and is declined instead (see
+// TestMergeIssuesConflictRow_CloseRaceDeclines). Per-cell independence would
+// synthesize a half-open half-closed row no write path produces and
 // types.Issue.Validate rejects.
 func TestMergeIssuesConflictRow_CloseGroupIsAtomic(t *testing.T) {
 	t.Run("theirs wins the group", func(t *testing.T) {
 		row := conflictRowFor(t, map[string][3]any{
-			"id":           {"bd-13", "bd-13", "bd-13"},
-			"status":       {"open", "closed", "in_progress"},
-			"closed_at":    {nil, "2026-07-10 11:00:00", nil},
-			"close_reason": {"", "done", ""},
-			"updated_at":   {tsBase, tsOurs, tsTheirs}, // theirs newer
+			"id":                {"bd-13", "bd-13", "bd-13"},
+			"status":            {"open", "closed", "closed"},
+			"closed_at":         {nil, "2026-07-10 11:00:00", "2026-07-10 12:00:00"},
+			"close_reason":      {"", "done ours", "done theirs"},
+			"closed_by_session": {"", "sess-a", "sess-b"},
+			"updated_at":        {tsBase, tsOurs, tsTheirs}, // theirs newer
 		})
-		m, ok := mergeIssuesConflictRow(row)
+		m, _, ok := mergeIssuesConflictRow(row)
 		if !ok {
-			t.Fatal("expected the close-group conflict to merge by LWW")
+			t.Fatal("expected the two-closes conflict to merge by LWW")
 		}
-		if v, written := m.merged("status"); !written || v != "in_progress" {
-			t.Errorf("status must come from the LWW winner, got %v (written=%v)", v, written)
+		if _, written := m.merged("status"); written {
+			t.Error("status agrees on both sides and must not be written")
 		}
-		v, written := m.merged("closed_at")
-		if !written || v != nil {
-			t.Errorf("closed_at must follow status to the winner (NULL), got %v (written=%v)", v, written)
+		if v, written := m.merged("closed_at"); !written || v != "2026-07-10 12:00:00" {
+			t.Errorf("closed_at must come from the LWW winner, got %v (written=%v)", v, written)
 		}
-		if v, written := m.merged("close_reason"); !written || v != "" {
-			t.Errorf("close_reason must follow status to the winner, got %v (written=%v)", v, written)
+		if v, written := m.merged("close_reason"); !written || v != "done theirs" {
+			t.Errorf("close_reason must come from the LWW winner, got %v (written=%v)", v, written)
+		}
+		if v, written := m.merged("closed_by_session"); !written || v != "sess-b" {
+			t.Errorf("closed_by_session must come from the LWW winner, got %v (written=%v)", v, written)
 		}
 	})
 	t.Run("ours wins the group", func(t *testing.T) {
 		row := conflictRowFor(t, map[string][3]any{
-			"id":           {"bd-14", "bd-14", "bd-14"},
-			"status":       {"open", "closed", "in_progress"},
-			"closed_at":    {nil, "2026-07-10 11:00:00", nil},
-			"close_reason": {"", "done", ""},
-			"updated_at":   {tsBase, tsTheirs, tsOurs}, // ours newer
+			"id":                {"bd-14", "bd-14", "bd-14"},
+			"status":            {"open", "closed", "closed"},
+			"closed_at":         {nil, "2026-07-10 11:00:00", "2026-07-10 12:00:00"},
+			"close_reason":      {"", "done ours", "done theirs"},
+			"closed_by_session": {"", "sess-a", "sess-b"},
+			"updated_at":        {tsBase, tsTheirs, tsOurs}, // ours newer
 		})
-		m, ok := mergeIssuesConflictRow(row)
+		m, _, ok := mergeIssuesConflictRow(row)
 		if !ok {
-			t.Fatal("expected the close-group conflict to merge by LWW")
+			t.Fatal("expected the two-closes conflict to merge by LWW")
 		}
-		for _, col := range []string{"status", "closed_at", "close_reason"} {
+		for _, col := range []string{"status", "closed_at", "close_reason", "closed_by_session"} {
 			if _, written := m.merged(col); written {
 				t.Errorf("our close state must stand whole; %s was overwritten", col)
 			}
@@ -388,13 +400,195 @@ func TestMergeIssuesConflictRow_CloseGroupIsAtomic(t *testing.T) {
 	})
 	t.Run("ambiguous timestamps decline", func(t *testing.T) {
 		row := conflictRowFor(t, map[string][3]any{
-			"id":         {"bd-15", "bd-15", "bd-15"},
-			"status":     {"open", "closed", "in_progress"},
-			"closed_at":  {nil, "2026-07-10 11:00:00", nil},
-			"updated_at": {tsBase, tsOurs, tsOurs},
+			"id":           {"bd-15", "bd-15", "bd-15"},
+			"status":       {"open", "closed", "closed"},
+			"closed_at":    {nil, "2026-07-10 11:00:00", "2026-07-10 12:00:00"},
+			"close_reason": {"", "done ours", "done theirs"},
+			"updated_at":   {tsBase, tsOurs, tsOurs},
 		})
-		if _, ok := mergeIssuesConflictRow(row); ok {
+		if _, d, ok := mergeIssuesConflictRow(row); ok {
 			t.Error("a contested close group with equal timestamps must go to the operator")
+		} else if d != nil {
+			t.Error("two closes are a detail race, not a close race; the decline must not carry the close-race diagnostic")
+		}
+	})
+}
+
+// TestMergeIssuesConflictRow_CloseRaceDeclines is the GH#7783 policy pin: a
+// contested close group where exactly one side's final status is the built-in
+// closed is DECLINED — regardless of timestamp ordering, in either direction,
+// for built-in and custom non-closed values alike — and the decline carries a
+// diagnostic naming the issue and both statuses. Last-write-wins there would
+// let a claim that never saw the remote's close silently reopen the bead (or
+// a stale close silently discard the claim), so neither side may win silently.
+func TestMergeIssuesConflictRow_CloseRaceDeclines(t *testing.T) {
+	// claimAfterClose is the reported shape: the remote closed the issue, then
+	// this clone edited it (claimed it) without pulling. Ours is the LATER
+	// writer, so before the fix LWW let the claim reopen the closed bead.
+	claimAfterClose := func(updated [3]any) rawConflictRow {
+		return conflictRowFor(t, map[string][3]any{
+			"id":           {"bd-30", "bd-30", "bd-30"},
+			"status":       {"open", "in_progress", "closed"},
+			"closed_at":    {nil, nil, "2026-07-10 12:00:00"},
+			"close_reason": {"", "", "done on b"},
+			"updated_at":   updated,
+		})
+	}
+	assertDeclined := func(t *testing.T, row rawConflictRow, wantOur, wantTheir string) {
+		t.Helper()
+		m, d, ok := mergeIssuesConflictRow(row)
+		if ok {
+			t.Fatalf("a contested close group with one closed side must be declined, got a merge plan %v", m.columns)
+		}
+		if d == nil {
+			t.Fatal("the decline must carry the close-race diagnostic")
+		}
+		if d.issueKey != "bd-30" {
+			t.Errorf("diagnostic must name the issue, got %v", d.issueKey)
+		}
+		if d.ourStatus != wantOur || d.theirStatus != wantTheir {
+			t.Errorf("diagnostic statuses = %q vs %q; want %q vs %q", d.ourStatus, d.theirStatus, wantOur, wantTheir)
+		}
+	}
+
+	t.Run("claim after close declines though ours is newer", func(t *testing.T) {
+		// Ours (the claim) is the later writer: exactly the case LWW used to
+		// settle by reopening the close.
+		assertDeclined(t, claimAfterClose([3]any{tsBase, tsTheirs, tsOurs}), "in_progress", "closed")
+	})
+	t.Run("close after claim declines though theirs is newer", func(t *testing.T) {
+		assertDeclined(t, claimAfterClose([3]any{tsBase, tsOurs, tsTheirs}), "in_progress", "closed")
+	})
+	t.Run("equal timestamps still decline", func(t *testing.T) {
+		assertDeclined(t, claimAfterClose([3]any{tsBase, tsOurs, tsOurs}), "in_progress", "closed")
+	})
+	t.Run("unparseable timestamps still decline", func(t *testing.T) {
+		assertDeclined(t, claimAfterClose([3]any{tsBase, "not-a-time", tsTheirs}), "in_progress", "closed")
+	})
+	t.Run("swapped sides decline", func(t *testing.T) {
+		// We closed; they claimed later. The race is symmetric.
+		row := conflictRowFor(t, map[string][3]any{
+			"id":           {"bd-30", "bd-30", "bd-30"},
+			"status":       {"open", "closed", "in_progress"},
+			"closed_at":    {nil, "2026-07-10 11:00:00", nil},
+			"close_reason": {"", "done here", ""},
+			"updated_at":   {tsBase, tsOurs, tsTheirs}, // theirs (the claim) is newer
+		})
+		assertDeclined(t, row, "closed", "in_progress")
+	})
+	t.Run("custom non-closed status declines", func(t *testing.T) {
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-30", "bd-30", "bd-30"},
+			"status":     {"open", "blocked", "closed"},
+			"closed_at":  {nil, nil, "2026-07-10 12:00:00"},
+			"updated_at": {tsBase, tsOurs, tsTheirs},
+		})
+		assertDeclined(t, row, "blocked", "closed")
+	})
+	t.Run("byte and string statuses decline", func(t *testing.T) {
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-30", "bd-30", "bd-30"},
+			"status":     {[]byte("open"), "in_progress", []byte("closed")},
+			"closed_at":  {nil, nil, []byte("2026-07-10 12:00:00")},
+			"updated_at": {tsBase, tsOurs, tsTheirs},
+		})
+		assertDeclined(t, row, "in_progress", "closed")
+	})
+	t.Run("contested reopen declines", func(t *testing.T) {
+		// Base closed; we reopened it; they re-closed it with new details.
+		// One side is closed and the other is not, so the group is declined
+		// even though both sides agree the bead was once closed.
+		row := conflictRowFor(t, map[string][3]any{
+			"id":           {"bd-30", "bd-30", "bd-30"},
+			"status":       {"closed", "open", "closed"},
+			"closed_at":    {"2026-07-10 10:00:00", nil, "2026-07-10 12:00:00"},
+			"close_reason": {"first", "", "done again"},
+			"updated_at":   {tsBase, tsOurs, tsTheirs},
+		})
+		assertDeclined(t, row, "open", "closed")
+	})
+	t.Run("simultaneous notes conflict does not hide the race", func(t *testing.T) {
+		// The contested notes cell declines on its own; the close-race
+		// diagnostic must still be the one returned, or the operator would be
+		// told about the notes and never about the undone close.
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-30", "bd-30", "bd-30"},
+			"status":     {"open", "in_progress", "closed"},
+			"closed_at":  {nil, nil, "2026-07-10 12:00:00"},
+			"notes":      {"base", "base + ours", "base + theirs"},
+			"updated_at": {tsBase, tsOurs, tsTheirs},
+		})
+		assertDeclined(t, row, "in_progress", "closed")
+	})
+	t.Run("missing status column is not a close race", func(t *testing.T) {
+		// No status column at all: there is nothing to compare against
+		// closed, so the conservative missing-column handling keeps charge
+		// and a disjoint edit still merges.
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-31", "bd-31", "bd-31"},
+			"assignee":   {"", "", "alice"},
+			"updated_at": {tsBase, tsOurs, tsTheirs},
+		})
+		m, d, ok := mergeIssuesConflictRow(row)
+		if !ok {
+			t.Fatal("a disjoint edit with no status column must merge")
+		}
+		if d != nil {
+			t.Error("no status column means no close-race diagnostic")
+		}
+		if v, written := m.merged("assignee"); !written || v != "alice" {
+			t.Errorf("their disjoint assignee edit must survive, got %v (written=%v)", v, written)
+		}
+	})
+	t.Run("independent close plus title still merges", func(t *testing.T) {
+		// Only WE touched the close group; only THEY touched the title. The
+		// group is not contested, so our close stands and their title lands —
+		// the decline is reserved for a genuine close RACE.
+		row := conflictRowFor(t, map[string][3]any{
+			"id":           {"bd-32", "bd-32", "bd-32"},
+			"status":       {"open", "closed", "open"},
+			"closed_at":    {nil, "2026-07-10 11:00:00", nil},
+			"close_reason": {"", "done here", ""},
+			"title":        {"seed", "seed", "their title"},
+			"updated_at":   {tsBase, tsOurs, tsTheirs},
+		})
+		m, d, ok := mergeIssuesConflictRow(row)
+		if !ok {
+			t.Fatal("an uncontested close plus a disjoint title edit must merge")
+		}
+		if d != nil {
+			t.Error("an uncontested close group is not a close race")
+		}
+		if _, written := m.merged("status"); written {
+			t.Error("our close must stand; status must not be written")
+		}
+		if v, written := m.merged("title"); !written || v != "their title" {
+			t.Errorf("their title edit must survive, got %v (written=%v)", v, written)
+		}
+	})
+	t.Run("one-sided reopen still merges", func(t *testing.T) {
+		// Base closed; only THEY reopened it; we edited the title. Nothing in
+		// the group is contested, so their reopen lands alongside our title.
+		row := conflictRowFor(t, map[string][3]any{
+			"id":           {"bd-33", "bd-33", "bd-33"},
+			"status":       {"closed", "closed", "open"},
+			"closed_at":    {"2026-07-10 10:00:00", "2026-07-10 10:00:00", nil},
+			"close_reason": {"first", "first", ""},
+			"title":        {"seed", "our title", "seed"},
+			"updated_at":   {tsBase, tsOurs, tsTheirs},
+		})
+		m, d, ok := mergeIssuesConflictRow(row)
+		if !ok {
+			t.Fatal("an intentional one-sided reopen must merge")
+		}
+		if d != nil {
+			t.Error("a one-sided reopen is not a close race")
+		}
+		if v, written := m.merged("status"); !written || v != "open" {
+			t.Errorf("their reopen must land, got %v (written=%v)", v, written)
+		}
+		if _, written := m.merged("title"); written {
+			t.Error("our title edit must stand, not be overwritten")
 		}
 	})
 }
@@ -411,7 +605,7 @@ func TestMergeIssuesConflictRow_NonScalarColumnsDecline(t *testing.T) {
 				col:          {"base", "base + ours", "base + theirs"},
 				"updated_at": {tsBase, tsOurs, tsTheirs},
 			})
-			if _, ok := mergeIssuesConflictRow(row); ok {
+			if _, _, ok := mergeIssuesConflictRow(row); ok {
 				t.Errorf("a contested %s must go to the operator, not be settled by LWW", col)
 			}
 		})
@@ -422,7 +616,7 @@ func TestMergeIssuesConflictRow_NonScalarColumnsDecline(t *testing.T) {
 				"assignee":   {"", "alice", ""},
 				"updated_at": {tsBase, tsOurs, tsTheirs},
 			})
-			m, ok := mergeIssuesConflictRow(row)
+			m, _, ok := mergeIssuesConflictRow(row)
 			if !ok {
 				t.Fatalf("a one-sided %s edit is not contested and must merge", col)
 			}
@@ -443,7 +637,7 @@ func TestMergeIssuesConflictRow_ContestedCellsAreNamed(t *testing.T) {
 		"assignee":   {"", "", "alice"},
 		"updated_at": {tsBase, tsOurs, tsTheirs},
 	})
-	m, ok := mergeIssuesConflictRow(row)
+	m, _, ok := mergeIssuesConflictRow(row)
 	if !ok {
 		t.Fatal("expected the row to merge")
 	}
@@ -703,12 +897,15 @@ func TestDuplicateConflictRowsDeclineRatherThanError(t *testing.T) {
 				AddRow("bd-1", "bd-1", "bd-1").
 				AddRow("bd-1", "bd-1", "bd-1"))
 
-		plan, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
+		plan, declines, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
 		if err != nil {
 			t.Fatalf("duplicate rows must decline, not error: %v", err)
 		}
 		if mergeable || plan != nil {
 			t.Fatalf("mergeable = %v, plan = %v; want a decline", mergeable, plan)
+		}
+		if len(declines) != 0 {
+			t.Fatalf("a duplicate-key decline carries no close-race diagnostic, got %v", declines)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)
@@ -746,13 +943,87 @@ func TestIssuesConflictsAreFieldMergeableLoadsEveryRow(t *testing.T) {
 			AddRow("bd-1", "bd-1", "bd-1", "open", "open", "closed", "2026-07-25 09:00:00", "2026-07-25 09:00:00", "2026-07-25 10:00:00").
 			AddRow("bd-2", "bd-2", "bd-2", "open", "open", "closed", "2026-07-25 09:00:00", "2026-07-25 09:00:00", "2026-07-25 10:00:00"))
 
-	plan, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
+	plan, declines, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
 	if err != nil {
 		t.Fatalf("issuesConflictsAreFieldMergeable: %v", err)
 	}
 	if !mergeable || len(plan) != 2 {
 		t.Fatalf("mergeable = %v, len(plan) = %d; want true, 2", mergeable, len(plan))
 	}
+	if len(declines) != 0 {
+		t.Fatalf("a mergeable table carries no declines, got %v", declines)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// closeRaceCols is the conflict-table column set the close-race fixtures
+// below need; shared so the sqlmock rows stay readable.
+var closeRaceCols = []string{
+	"base_id", "our_id", "their_id",
+	"base_status", "our_status", "their_status",
+	"base_updated_at", "our_updated_at", "their_updated_at",
+}
+
+// TestIssuesConflictsAreFieldMergeable_CloseRaceDiagnosticScansEveryRow pins
+// the scan-all contract (GH#7783): every loaded row is examined even after a
+// decline, so an ordinary decline in an earlier row cannot hide a later close
+// race, all plans are discarded on any decline, and the returned diagnostics
+// name the issue and both statuses for the wrapper's notice.
+func TestIssuesConflictsAreFieldMergeable_CloseRaceDiagnosticScansEveryRow(t *testing.T) {
+	ctx := context.Background()
+	db, mock := newMockDB(t)
+	// Row 1 declines ordinarily (a contested notes cell); row 2 is the close
+	// race. Screening only until the first decline would return no diagnostic.
+	notesCols := append(append([]string{}, closeRaceCols...),
+		"base_notes", "our_notes", "their_notes")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `dolt_conflicts_issues`")).
+		WillReturnRows(sqlmock.NewRows(notesCols).
+			AddRow("bd-1", "bd-1", "bd-1", "open", "open", "open", tsBase, tsOurs, tsTheirs, "base", "ours", "theirs").
+			AddRow("bd-2", "bd-2", "bd-2", "open", "in_progress", "closed", tsBase, tsOurs, tsTheirs, "n", "n", "n"))
+
+	plan, declines, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
+	if err != nil {
+		t.Fatalf("issuesConflictsAreFieldMergeable: %v", err)
+	}
+	if mergeable || plan != nil {
+		t.Fatalf("mergeable = %v, plan = %v; want the decline to discard every plan", mergeable, plan)
+	}
+	if len(declines) != 1 {
+		t.Fatalf("declines = %v; want exactly the close race from the later row", declines)
+	}
+	d := declines[0]
+	if d.issueKey != "bd-2" || d.ourStatus != "in_progress" || d.theirStatus != "closed" {
+		t.Errorf("close-race diagnostic = %+v; want bd-2, in_progress vs closed", d)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// TestTryAutoResolveMergeConflicts_CloseRaceDeclineWritesNothing pins the
+// pre-screen-before-mutation contract for the new decline: when the issues
+// table holds a close race, TryAutoResolveMergeConflicts resolves nothing —
+// no DOLT_CONFLICTS_RESOLVE, no merge write — and returns (false, nil) so the
+// settle pass aborts and reports the tables for the operator.
+func TestTryAutoResolveMergeConflicts_CloseRaceDeclineWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	db, mock := newMockDB(t)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT `table`, num_conflicts FROM dolt_conflicts")).
+		WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("issues", 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `dolt_conflicts_issues`")).
+		WillReturnRows(sqlmock.NewRows(closeRaceCols).
+			AddRow("bd-1", "bd-1", "bd-1", "open", "in_progress", "closed", tsBase, tsOurs, tsTheirs))
+
+	resolved, err := TryAutoResolveMergeConflicts(ctx, db)
+	if err != nil {
+		t.Fatalf("a close-race decline must be a decline, not an error: %v", err)
+	}
+	if resolved {
+		t.Fatal("a close race must not be auto-resolved")
+	}
+	// No Exec was ever expected: sqlmock fails the test if any ran.
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
 	}
@@ -782,7 +1053,7 @@ func TestMergeIssuesConflictRow_SettledRowGetsFreshRowLock(t *testing.T) {
 		"row_lock":   {int64(7), int64(111), int64(222)},
 		"updated_at": {tsBase, tsOurs, tsTheirs},
 	})
-	m, ok := mergeIssuesConflictRow(row)
+	m, _, ok := mergeIssuesConflictRow(row)
 	if !ok {
 		t.Fatal("expected disjoint-field conflict to merge")
 	}
@@ -815,7 +1086,7 @@ func TestMergeIssuesConflictRow_RowLockOnlyDivergenceIsNotAConflict(t *testing.T
 		"row_lock":   {int64(7), int64(111), int64(222)},
 		"updated_at": {tsBase, tsOurs, tsOurs}, // equal: LWW could never settle this
 	})
-	m, ok := mergeIssuesConflictRow(row)
+	m, _, ok := mergeIssuesConflictRow(row)
 	if !ok {
 		t.Fatal("a row whose only divergence is the row_lock token must merge, not decline")
 	}
@@ -838,7 +1109,7 @@ func TestMergeIssuesConflictRow_NoRowLockColumnDegradesGracefully(t *testing.T) 
 		"updated_at": {tsBase, tsOurs, tsTheirs},
 		// deliberately no "row_lock" key: simulates a pre-0054 schema.
 	})
-	m, ok := mergeIssuesConflictRow(row)
+	m, _, ok := mergeIssuesConflictRow(row)
 	if !ok {
 		t.Fatal("expected disjoint-field conflict to merge even without a row_lock column")
 	}
