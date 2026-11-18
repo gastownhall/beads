@@ -2166,6 +2166,138 @@ func TestLinearPullAfterPushIsAFixedPoint(t *testing.T) {
 	}
 }
 
+// TestLinearFirstSyncKeepsSectionsLinearLacks pins a sync with no
+// linear.last_sync, as in every new clone: the bead's notes, which its Linear
+// issue has no section for, are kept, and the same sync's push adds them to
+// Linear. Without a last sync, a missing section cannot tell notes deleted
+// in Linear from notes never pushed. The next sync sends nothing.
+func TestLinearFirstSyncKeepsSectionsLinearLacks(t *testing.T) {
+	api, store, runSync := newGH8506LinearSync(t)
+	delete(store.metadata, "linear.last_sync")
+	withoutNotes := store.issue
+	withoutNotes.Notes = ""
+	api.mu.Lock()
+	api.issue.Description = linearStoresDescription(linear.BuildLinearDescription(&withoutNotes))
+	api.mu.Unlock()
+	const acceptance = "AC-MARK the acceptance criteria."
+
+	result := runSync(tracker.SyncOptions{Pull: true, Push: true})
+	assertGH8506Fields(t, "after the first sync", store.issue, acceptance)
+	remote, updates := api.snapshot()
+	if result.PushStats.Updated != 1 || updates != 1 {
+		t.Fatalf("PushStats = %+v, issueUpdate calls = %d, want the kept notes pushed once", result.PushStats, updates)
+	}
+	if n := strings.Count(remote.Description, "## Notes"); n != 1 || !strings.Contains(remote.Description, "NOTES-MARK the notes.") {
+		t.Fatalf("Linear description after the push = %q, want the bead's notes in one Notes section", remote.Description)
+	}
+
+	runSync(tracker.SyncOptions{Pull: true, Push: true})
+	assertGH8506Fields(t, "after the next sync", store.issue, acceptance)
+	if _, updates := api.snapshot(); updates != 1 {
+		t.Fatalf("next sync: issueUpdate calls = %d, want still 1", updates)
+	}
+}
+
+// TestLinearSyncKeepsStubFieldsWhenLinearWins pins a bead linked with
+// `bd create --external-ref` since the last sync whose Linear issue changed
+// meanwhile, so the sync's conflict resolution takes Linear's version: by the
+// newer timestamp, or by --prefer-linear for a bead newer than Linear's
+// change. The pull takes Linear's title and description but keeps the
+// acceptance criteria, design and notes Linear never received, and the same
+// sync pushes them; the next sync has nothing to send.
+func TestLinearSyncKeepsStubFieldsWhenLinearWins(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		resolution tracker.ConflictResolution
+		// linearEdited is how long ago Linear's issue changed: the last
+		// sync was 25 minutes ago and the bead was linked 10 minutes ago.
+		linearEdited time.Duration
+	}{
+		{name: "linear newer", resolution: tracker.ConflictTimestamp, linearEdited: 5 * time.Minute},
+		{name: "prefer linear", resolution: tracker.ConflictExternal, linearEdited: 15 * time.Minute},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api, store, runSync := newGH8506LinearSync(t)
+			now := time.Now().UTC()
+			store.issue.Title = "stub"
+			store.issue.Description = "STUB-MARK the stub's description."
+			store.issue.CreatedAt = now.Add(-10 * time.Minute)
+			store.issue.UpdatedAt = store.issue.CreatedAt
+			store.linkedAt = store.issue.CreatedAt
+			const acceptance = "AC-MARK the acceptance criteria."
+			api.mu.Lock()
+			api.issue.Title = "Linear's title"
+			api.issue.Description = "DESC-MARK the description."
+			api.issue.UpdatedAt = now.Add(-test.linearEdited).Format(time.RFC3339)
+			api.mu.Unlock()
+
+			opts := tracker.SyncOptions{Pull: true, Push: true, ConflictResolution: test.resolution}
+			result := runSync(opts)
+			if result.Stats.Conflicts != 1 || result.PullStats.Updated != 1 {
+				t.Fatalf("Stats = %+v, PullStats = %+v, want one conflict resolved by pulling Linear's version", result.Stats, result.PullStats)
+			}
+			if store.issue.Title != "Linear's title" {
+				t.Fatalf("bead title after the sync = %q, want Linear's", store.issue.Title)
+			}
+			assertGH8506Fields(t, "after the sync", store.issue, acceptance)
+			remote, updates := api.snapshot()
+			if result.PushStats.Updated != 1 || updates != 1 {
+				t.Fatalf("PushStats = %+v, issueUpdate calls = %d, want the kept fields pushed once", result.PushStats, updates)
+			}
+			for _, text := range []string{"DESC-MARK the description.", acceptance, "DESIGN-MARK the design.", "NOTES-MARK the notes."} {
+				if n := strings.Count(remote.Description, text); n != 1 {
+					t.Fatalf("Linear description after the push = %q, want %q once", remote.Description, text)
+				}
+			}
+
+			runSync(opts)
+			assertGH8506Fields(t, "after the next sync", store.issue, acceptance)
+			if _, updates := api.snapshot(); updates != 1 {
+				t.Fatalf("next sync: issueUpdate calls = %d, want still 1", updates)
+			}
+		})
+	}
+}
+
+// TestLinearPullKeepsFencedHeadings pins that a pull reads a section heading
+// quoted in a fenced code block as code: an example added in Linear to the
+// description and to the notes, each quoting "## Notes", stays whole in the
+// field it was added to, and the next sync sends nothing back.
+func TestLinearPullKeepsFencedHeadings(t *testing.T) {
+	api, store, runSync := newGH8506LinearSync(t)
+	const (
+		description = "DESC-MARK the description.\n\n```markdown\n## Notes\nan example\n```"
+		notes       = "NOTES-MARK the notes.\n\n~~~\n## Notes\nanother example\n~~~"
+	)
+	api.mu.Lock()
+	api.issue.Description = strings.Replace(api.issue.Description, "DESC-MARK the description.", description, 1)
+	api.issue.Description = strings.Replace(api.issue.Description, "NOTES-MARK the notes.", notes, 1)
+	api.issue.UpdatedAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	api.mu.Unlock()
+
+	result := runSync(tracker.SyncOptions{Pull: true, Push: true})
+	if result.PullStats.Updated != 1 {
+		t.Fatalf("PullStats = %+v, want the Linear edit pulled", result.PullStats)
+	}
+	got := store.issue
+	if got.Description != description || got.AcceptanceCriteria != "AC-MARK the acceptance criteria." ||
+		got.Design != "DESIGN-MARK the design." || got.Notes != notes {
+		t.Fatalf("bead after the pull: description %q, acceptance criteria %q, design %q, notes %q; want the fenced examples kept whole in the description and the notes",
+			got.Description, got.AcceptanceCriteria, got.Design, got.Notes)
+	}
+	if _, updates := api.snapshot(); updates != 0 {
+		t.Fatalf("issueUpdate calls = %d, want 0: the pull's edit was pushed back", updates)
+	}
+
+	runSync(tracker.SyncOptions{Pull: true, Push: true})
+	if store.issue.Description != description || store.issue.Notes != notes {
+		t.Fatalf("next sync: description %q, notes %q, want them unchanged", store.issue.Description, store.issue.Notes)
+	}
+	if _, updates := api.snapshot(); updates != 0 {
+		t.Fatalf("next sync: issueUpdate calls = %d, want 0 for the unchanged bead", updates)
+	}
+}
+
 // fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes
 // for one team holding one issue: workflow states, labels (none), the
 // incremental issues query, which honours its updatedAt.gte filter, the
@@ -2269,6 +2401,9 @@ type linearSyncStore struct {
 	config   map[string]string
 	metadata map[string]string
 	issue    types.Issue
+	// linkedAt, when set, is when the issue got its external_ref: its
+	// history at an earlier time holds no ref.
+	linkedAt time.Time
 }
 
 func (s *linearSyncStore) GetConfig(_ context.Context, key string) (string, error) {
@@ -2354,9 +2489,12 @@ func (s *linearSyncStore) AddDependency(context.Context, *types.Dependency, stri
 	return nil
 }
 
-func (s *linearSyncStore) PreviousExternalRef(context.Context, string, time.Time) (string, bool, error) {
+func (s *linearSyncStore) PreviousExternalRef(_ context.Context, _ string, asOf time.Time) (string, bool, error) {
 	if s.issue.ExternalRef == nil {
 		return "", false, nil
+	}
+	if asOf.Before(s.linkedAt) {
+		return "", true, nil
 	}
 	return *s.issue.ExternalRef, true, nil
 }

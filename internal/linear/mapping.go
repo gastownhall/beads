@@ -3,6 +3,7 @@ package linear
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -57,20 +58,26 @@ var descriptionSectionHeadings = [...]string{
 // ParseLinearDescription inverts BuildLinearDescription (and the
 // bd-idempotency marker a create appends) for a Linear description.
 //
-// Every complete bd-idempotency marker is removed, with the newline that
-// AppendIdempotencyMarker put before it, wherever it sits in the text. Then,
-// walking up from the end, only a final run of non-empty "## Acceptance
-// Criteria", "## Design" and "## Notes" sections in that order is lifted
-// into the fields, which is exactly the shape BuildLinearDescription writes.
-// Any other line, including a repeated, out-of-order or empty-body heading,
-// stays in the part above it. Section bodies drop the leading blank lines
-// Linear inserts after a heading and their trailing whitespace.
+// Every marker GenerateIdempotencyMarker makes that stands on a line of its
+// own, as AppendIdempotencyMarker puts it, is removed with the newline
+// before it; other text that only looks like a marker stays. Then, walking
+// up from the end, only a final run of non-empty "## Acceptance Criteria",
+// "## Design" and "## Notes" sections in that order is lifted into the
+// fields, which is exactly the shape BuildLinearDescription writes. A
+// heading inside a fenced code block (``` or ~~~) is code, not a section; a
+// fence that is never closed hides nothing, so text cut off inside a fence
+// keeps the sections a push folded after it. Any other line, including a
+// repeated, out-of-order or empty-body heading, stays in the part above it.
+// Section bodies drop the leading blank lines Linear inserts after a heading
+// and their trailing whitespace.
 //
 // When neither a marker nor a section is found, the text is returned as the
 // description unchanged.
 func ParseLinearDescription(text string) DescriptionParts {
-	stripped, markerRemoved := stripIdempotencyMarkers(text)
+	stripped := idempotencyMarkerLine.ReplaceAllString(text, "")
+	markerRemoved := len(stripped) != len(text)
 	lines := strings.Split(stripped, "\n")
+	fenced := fencedLines(lines)
 
 	var fields [len(descriptionSectionHeadings)]string
 	limit := len(descriptionSectionHeadings)
@@ -78,7 +85,7 @@ func ParseLinearDescription(text string) DescriptionParts {
 	split := false
 	for i := len(lines) - 1; i >= 0 && limit > 0; i-- {
 		rank := descriptionHeadingRank(lines[i])
-		if rank < 0 || rank >= limit {
+		if rank < 0 || rank >= limit || fenced[i] {
 			continue
 		}
 		body := descriptionSectionBody(lines[i+1 : end])
@@ -124,30 +131,67 @@ func descriptionSectionBody(lines []string) string {
 	return strings.TrimRight(strings.Join(lines, "\n"), descriptionTrailingSpace)
 }
 
-// stripIdempotencyMarkers removes every complete bd-idempotency marker and
-// the newline before it. A prefix with no suffix after it stays, as in
-// extractIdempotencyMarker.
-func stripIdempotencyMarkers(text string) (string, bool) {
-	removed := false
-	from := 0
-	for {
-		idx := strings.Index(text[from:], idempotencyPrefix)
-		if idx < 0 {
-			return text, removed
+// idempotencyMarkerLine matches a marker GenerateIdempotencyMarker made (12
+// lowercase hex digits) standing on a line of its own, with the newline
+// AppendIdempotencyMarker put before it. It matches in one linear pass, and
+// never text that merely quotes the marker's prefix.
+var idempotencyMarkerLine = regexp.MustCompile(`(?m)\n?^` + regexp.QuoteMeta(idempotencyPrefix) +
+	`[0-9a-f]{12}` + regexp.QuoteMeta(idempotencySuffix) + `[ \t\r]*$`)
+
+// fencedLines reports, for each line, whether it lies in a fenced code
+// block, the fence lines included. A fence never closed hides nothing.
+func fencedLines(lines []string) []bool {
+	fenced := make([]bool, len(lines))
+	open, opener := -1, ""
+	for i, line := range lines {
+		if open < 0 {
+			if opener = openingFence(line); opener != "" {
+				open = i
+			}
+			continue
 		}
-		start := from + idx
-		end := strings.Index(text[start+len(idempotencyPrefix):], idempotencySuffix)
-		if end < 0 {
-			return text, removed
+		if closesFence(line, opener) {
+			for j := open; j <= i; j++ {
+				fenced[j] = true
+			}
+			open = -1
 		}
-		stop := start + len(idempotencyPrefix) + end + len(idempotencySuffix)
-		if start > 0 && text[start-1] == '\n' {
-			start--
-		}
-		text = text[:start] + text[stop:]
-		from = start
-		removed = true
 	}
+	return fenced
+}
+
+// openingFence returns the fence a line opens, or "": a run of three or more
+// backticks or tildes after at most three spaces, where a backtick fence's
+// info string holds no backtick (CommonMark).
+func openingFence(line string) string {
+	run, rest := fenceRun(line)
+	if run == "" || (run[0] == '`' && strings.Contains(rest, "`")) {
+		return ""
+	}
+	return run
+}
+
+// closesFence reports whether line closes the fence opener began: a run of
+// the same character at least as long, after at most three spaces, with
+// only whitespace after it (CommonMark).
+func closesFence(line, opener string) bool {
+	run, rest := fenceRun(line)
+	return run != "" && run[0] == opener[0] && len(run) >= len(opener) && strings.TrimRight(rest, " \t\r") == ""
+}
+
+// fenceRun splits a line indented at most three spaces into its leading run
+// of three or more backticks or tildes and the text after it; it returns
+// two empty strings for any other line.
+func fenceRun(line string) (run, rest string) {
+	text := strings.TrimLeft(line, " ")
+	if len(line)-len(text) > 3 || text == "" || (text[0] != '`' && text[0] != '~') {
+		return "", ""
+	}
+	n := len(text) - len(strings.TrimLeft(text, text[:1]))
+	if n < 3 {
+		return "", ""
+	}
+	return text[:n], text[n:]
 }
 
 // DescriptionFieldsEqual reports whether a and b push the same Linear

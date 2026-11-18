@@ -399,6 +399,9 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	}
 
 	prelinkedHydrateIDs := make(map[string]bool)
+	// linkedAfterSync caches, per local issue, whether it was linked to its
+	// remote issue after the last sync (keepsMissingSections).
+	linkedAfterSync := make(map[string]bool)
 
 	// Fetch issues from external tracker. The first bulkRows rows come from
 	// the bulk FetchIssues call; only those can be overlap-only.
@@ -443,7 +446,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		if provider, ok := e.Tracker.(PullStatsProvider); ok {
 			stats.Queried, stats.Candidates = provider.LastPullStats()
 		}
-		hydrated, hydratedLocalIDs, err := e.fetchPrelinkedIssues(ctx, extIssues, localIssues, lastSync)
+		hydrated, hydratedLocalIDs, err := e.fetchPrelinkedIssues(ctx, extIssues, localIssues, lastSync, linkedAfterSync)
 		if err != nil {
 			return nil, fmt.Errorf("hydrating pre-linked %s issues: %w", e.Tracker.DisplayName(), err)
 		}
@@ -529,14 +532,19 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 
-		// While the remote text is what the local issue would push, keep the
-		// local split of it between the description and the fields it
-		// carries, so a pull that changes no text never reshapes the issue.
-		if hasDescriptionFields && existing != nil && descriptionFields.DescriptionFieldsEqual(existing, conv.Issue) {
-			conv.Issue.Description = existing.Description
-			conv.Issue.AcceptanceCriteria = existing.AcceptanceCriteria
-			conv.Issue.Design = existing.Design
-			conv.Issue.Notes = existing.Notes
+		// settleDescriptionFields may keep local acceptance criteria, design
+		// or notes in conv.Issue for the push to send; remote is conv.Issue as
+		// the remote holds it.
+		keepMissing, err := e.keepsMissingSections(ctx, descriptionFields, existing, lastSync, linkedAfterSync)
+		if err != nil {
+			return nil, fmt.Errorf("checking whether local issue %s was linked since the last sync: %w", existing.ID, err)
+		}
+		remote, keptFields := settleDescriptionFields(descriptionFields, existing, conv.Issue, keepMissing)
+		if keptFields {
+			// The push must send the kept fields, also for an issue conflict
+			// resolution kept out of the push: the pull takes the remote's
+			// version of it and adds only those fields.
+			delete(pulledIDs, existing.ID)
 		}
 
 		pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes, opts.DependencySources)
@@ -558,8 +566,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		// last push or pull, the pull keeps the labels changed locally since
 		// then, so the push sends them. The push hash keeps fingerprinting the
 		// remote, which holds the pulled labels.
-		pulledLabels := conv.Issue.Labels
-		keepLocalLabels := e.pullKeepsLocalLabels(ctx, existing, conv.Issue, ref)
+		keepLocalLabels := e.pullKeepsLocalLabels(ctx, existing, &remote, ref)
 		if keepLocalLabels {
 			conv.Issue.Labels = existing.Labels
 		}
@@ -568,7 +575,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			if !opts.DryRun {
 				// Both sides can reach this content without a push, which
 				// leaves the hash of the last push stale.
-				e.refreshPushHashAfterPull(ctx, existing, withLabels(conv.Issue, pulledLabels), ref)
+				e.refreshPushHashAfterPull(ctx, existing, asRemote(conv.Issue, &remote), ref)
 			}
 			stats.Skipped++
 			continue
@@ -613,9 +620,9 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Updated++
-			e.refreshPushHashAfterPull(ctx, existing, withLabels(conv.Issue, pulledLabels), ref)
-			if keepLocalLabels {
-				// The push must send the kept labels.
+			e.refreshPushHashAfterPull(ctx, existing, asRemote(conv.Issue, &remote), ref)
+			if keepLocalLabels || keptFields {
+				// The push must send the kept labels or fields.
 				continue
 			}
 			if pulledIDs != nil {
@@ -735,6 +742,83 @@ func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransact
 // by direct and proxied store adapters.
 func markPullIssueFields(updates map[string]interface{}) {
 	updates[issueops.OpForceClosePolicy] = true
+}
+
+// settleDescriptionFields applies a DescriptionFieldsTracker's rules to the
+// description, acceptance criteria, design and notes of pulled, an issue
+// converted from the remote, before the pull compares or writes it. It
+// returns pulled as the remote holds it, and whether pulled now keeps local
+// fields that the push must send.
+//
+// While the remote text is what existing would push, pulled takes
+// existing's split of that text, so a pull that changes no text never
+// reshapes the issue. Otherwise, with keepMissing (keepsMissingSections), a
+// field existing holds that the remote text has no section for keeps its
+// local value. There a missing section cannot tell a field the remote
+// cleared from one that never reached it, so the field stays and the push
+// adds it to the remote.
+func settleDescriptionFields(tr DescriptionFieldsTracker, existing, pulled *types.Issue, keepMissing bool) (types.Issue, bool) {
+	if tr == nil || existing == nil {
+		return *pulled, false
+	}
+	if tr.DescriptionFieldsEqual(existing, pulled) {
+		pulled.Description = existing.Description
+		pulled.AcceptanceCriteria = existing.AcceptanceCriteria
+		pulled.Design = existing.Design
+		pulled.Notes = existing.Notes
+		return *pulled, false
+	}
+	remote := *pulled
+	if !keepMissing {
+		return remote, false
+	}
+	kept := false
+	for _, field := range []struct {
+		pulled *string
+		local  string
+	}{
+		{&pulled.AcceptanceCriteria, existing.AcceptanceCriteria},
+		{&pulled.Design, existing.Design},
+		{&pulled.Notes, existing.Notes},
+	} {
+		if *field.pulled == "" && field.local != "" {
+			*field.pulled = field.local
+			kept = true
+		}
+	}
+	return remote, kept
+}
+
+// keepsMissingSections reports whether a pull of existing from tr keeps a
+// local acceptance criteria, design or notes field that the remote text has
+// no section for (settleDescriptionFields). It does when nothing tells a
+// section the remote deleted from one that never reached it: on the first
+// sync (no lastSync), and for an issue linked to its remote issue after
+// lastSync, by pre-link detection's rule (externalRefChangedAfter), whatever
+// admitted the pull: hydration, or a conflict resolved for the remote's
+// version. linked caches that answer per local issue; fetchPrelinkedIssues
+// records it for each linked issue a bulk pull checks, and any other issue
+// is checked here.
+func (e *Engine) keepsMissingSections(ctx context.Context, tr DescriptionFieldsTracker, existing *types.Issue, lastSync *time.Time, linked map[string]bool) (bool, error) {
+	if tr == nil || existing == nil {
+		return false, nil
+	}
+	if lastSync == nil {
+		return true, nil
+	}
+	if changed, ok := linked[existing.ID]; ok {
+		return changed, nil
+	}
+	ref, ok := e.trackerRef(existing)
+	if !ok {
+		return false, nil
+	}
+	changed, _, err := e.externalRefChangedAfter(ctx, existing, ref, *lastSync)
+	if err != nil {
+		return false, err
+	}
+	linked[existing.ID] = changed
+	return changed, nil
 }
 
 // pullIssueEqual reports whether a pull would leave local as it is. With
@@ -971,7 +1055,13 @@ func (idx pullFallbackIndex) free(local *types.Issue, ref string) bool {
 	return !ok || exact == ref
 }
 
-func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssue, localIssues []*types.Issue, lastSync *time.Time) ([]TrackerIssue, map[string]bool, error) {
+// fetchPrelinkedIssues hydrates the local issues linked to a remote issue
+// after lastSync: it fetches each such remote issue the bulk fetch did not
+// return, and returns those with the IDs of every local issue it hydrated,
+// including the ones whose remote issue only the overlap window returned. It
+// records in linked, for each local issue linked to this tracker, whether
+// that link was made after lastSync.
+func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssue, localIssues []*types.Issue, lastSync *time.Time, linked map[string]bool) ([]TrackerIssue, map[string]bool, error) {
 	hydratedLocalIDs := make(map[string]bool)
 	if lastSync == nil {
 		return nil, hydratedLocalIDs, nil
@@ -1017,6 +1107,7 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if err != nil {
 			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
 		}
+		linked[local.ID] = changedAfterLastSync
 		unverified.note(local, historyUnknown)
 		if !changedAfterLastSync {
 			// An issue whose history at lastSync is missing is not hydrated:
@@ -1427,10 +1518,15 @@ func (e *Engine) pullKeepsLocalLabels(ctx context.Context, existing, pulled *typ
 	return e.pushCacheValue(&local, ref) == stored
 }
 
-// withLabels returns a copy of issue that carries labels.
-func withLabels(issue *types.Issue, labels []string) *types.Issue {
-	copied := *issue
-	copied.Labels = labels
+// asRemote returns a copy of pulled that carries remote's labels, acceptance
+// criteria, design and notes. A pull may keep local ones in pulled for the
+// push to send, and the push hash must fingerprint what the remote holds.
+func asRemote(pulled, remote *types.Issue) *types.Issue {
+	copied := *pulled
+	copied.Labels = remote.Labels
+	copied.AcceptanceCriteria = remote.AcceptanceCriteria
+	copied.Design = remote.Design
+	copied.Notes = remote.Notes
 	return &copied
 }
 

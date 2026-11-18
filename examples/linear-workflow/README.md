@@ -255,12 +255,24 @@ The bead's description.
 
 A pull maps those sections back into the bead's fields when they end the
 description as exact `## Acceptance Criteria`, `## Design` and `## Notes`
-headings in that order, each with a non-empty body; any other heading stays in
-the description. Edit a section's text in Linear and the pull updates that
-field; delete the whole section, heading included, and the pull clears the
-field. A pull also drops the
-`<!-- bd-idempotency: ... -->` marker bd adds to the issues it creates, so it
-never reaches a bead.
+headings in that order, each with a non-empty body. Any other heading stays
+with the text above it, in the description or in the section it follows. So
+does a section heading that repeats, comes out of order or has an empty body,
+and any heading inside a fenced code block. Edit a section's text in Linear
+and the pull updates that field; delete the whole section, heading included,
+and the pull clears the field.
+
+Two kinds of pull cannot tell a deleted section from one that never reached
+Linear, so there a missing section clears nothing: a clone's first sync (no
+`linear.last_sync` yet), and a pull of a bead linked to an existing Linear
+issue since the last sync (`bd create --external-ref ...`), also when that
+issue changed in Linear meanwhile and the sync takes Linear's version of it
+(see [Conflict Resolution](#conflict-resolution)). The bead keeps the field,
+and the next push adds the section to Linear; a two-way `bd linear sync`
+pushes it in the same run.
+
+A pull also drops the `<!-- bd-idempotency: ... -->` marker bd adds, on a line
+of its own, to the issues it creates, so it never reaches a bead.
 
 ## Conflict Resolution
 

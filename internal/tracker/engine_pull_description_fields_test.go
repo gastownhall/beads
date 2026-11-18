@@ -65,6 +65,22 @@ func (t *recordingFieldsTransaction) UpdateIssue(ctx context.Context, id string,
 type descriptionFieldsStore struct {
 	*pureTestStore
 	tx *recordingFieldsTransaction
+	// previousRefs answers external_ref history: each issue's ref at the
+	// last sync ("" for none).
+	previousRefs map[string]string
+}
+
+func (s *descriptionFieldsStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
+	ref, ok := s.previousRefs[id]
+	return ref, ok, nil
+}
+
+// GetConfig answers the issue prefix a pull selecting beads by ID reads.
+func (s *descriptionFieldsStore) GetConfig(_ context.Context, key string) (string, error) {
+	if key == "issue_prefix" {
+		return "bd", nil
+	}
+	return "", nil
 }
 
 func (s *descriptionFieldsStore) RunInIssueLifecycleTransaction(_ context.Context, _ string, fn func(storage.IssueLifecycleTransaction) error) error {
@@ -101,11 +117,16 @@ func newDescriptionFieldsLocal() *types.Issue {
 	}
 }
 
-// runDescriptionFieldsPull pulls remote, which the mapper converts to
-// pulled, into a store holding local, and returns the updates it wrote.
-func runDescriptionFieldsPull(t *testing.T, capability bool, local, pulled *types.Issue) []map[string]interface{} {
+// descriptionFieldsLastSync falls after the last edit of
+// newDescriptionFieldsLocal's issue and before the remote's in
+// newDescriptionFieldsSync, so the conflict guard admits a remote change.
+var descriptionFieldsLastSync = time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+
+// newDescriptionFieldsSync returns an engine syncing a store holding local
+// with one remote issue, EXT-1, whose description is pulled folded and
+// which the mapper converts to pulled. The store has no last_sync.
+func newDescriptionFieldsSync(t *testing.T, capability bool, local, pulled *types.Issue) (*Engine, *descriptionFieldsStore, *mockTracker) {
 	t.Helper()
-	ctx := context.Background()
 	mock := newMockTracker("test")
 	mock.issues = []TrackerIssue{{
 		ID:          "ext-1",
@@ -129,24 +150,41 @@ func runDescriptionFieldsPull(t *testing.T, capability bool, local, pulled *type
 	store := &descriptionFieldsStore{
 		pureTestStore: newPureTestStore(local),
 		tx:            &recordingFieldsTransaction{pullTestTransaction: &pullTestTransaction{issue: local}},
+		previousRefs:  make(map[string]string),
 	}
-	if _, err := NewEngine(tr, store, "sync").Sync(ctx, SyncOptions{Pull: true}); err != nil {
+	return NewEngine(tr, store, "sync"), store, mock
+}
+
+// runDescriptionFieldsPull pulls remote, which the mapper converts to
+// pulled, into a store holding local, and returns the updates it wrote.
+// With lastSync the store holds that last_sync and local was linked before
+// it; without, the pull is the first sync.
+func runDescriptionFieldsPull(t *testing.T, capability bool, lastSync *time.Time, local, pulled *types.Issue) []map[string]interface{} {
+	t.Helper()
+	engine, store, _ := newDescriptionFieldsSync(t, capability, local, pulled)
+	if lastSync != nil {
+		store.localMetadata["test.last_sync"] = lastSync.Format(time.RFC3339)
+		store.previousRefs[local.ID] = descriptionFieldsRef
+	}
+	if _, err := engine.Sync(context.Background(), SyncOptions{Pull: true}); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
 	return store.tx.updates
 }
 
 // TestEnginePullDescriptionFieldsWrittenWhenRemoteChanged checks that a pull
-// from a DescriptionFieldsTracker writes the acceptance criteria, design and
-// notes the remote description carries: an edited section reaches its field
-// and an emptied one clears it, while the description stays as it is.
+// from a DescriptionFieldsTracker, admitted by the conflict guard because the
+// local issue is unchanged since the last sync, writes the acceptance
+// criteria, design and notes the remote description carries: an edited
+// section reaches its field and an emptied one clears it, while the
+// description stays as it is.
 func TestEnginePullDescriptionFieldsWrittenWhenRemoteChanged(t *testing.T) {
 	local := newDescriptionFieldsLocal()
 	pulled := *local
 	pulled.AcceptanceCriteria = "It works, edited remotely"
 	pulled.Notes = ""
 
-	updates := runDescriptionFieldsPull(t, true, local, &pulled)
+	updates := runDescriptionFieldsPull(t, true, &descriptionFieldsLastSync, local, &pulled)
 	if len(updates) != 1 {
 		t.Fatalf("pull wrote %d updates, want 1 for the remote section edit", len(updates))
 	}
@@ -178,7 +216,7 @@ func TestEnginePullDescriptionFieldsKeepUnchangedLocalSplit(t *testing.T) {
 	pulled.Description = "Body"
 	pulled.AcceptanceCriteria = "fill me in"
 
-	if updates := runDescriptionFieldsPull(t, true, local, &pulled); len(updates) != 0 {
+	if updates := runDescriptionFieldsPull(t, true, nil, local, &pulled); len(updates) != 0 {
 		t.Fatalf("pull wrote %v, want no update while the remote text is unchanged", updates)
 	}
 	if local.Description != "Body\n## Acceptance Criteria\nfill me in" || local.AcceptanceCriteria != "" {
@@ -198,7 +236,7 @@ func TestEnginePullDescriptionFieldsLeftAloneWithoutCapability(t *testing.T) {
 	pulled.Design = ""
 	pulled.Notes = "Remote notes"
 
-	updates := runDescriptionFieldsPull(t, false, local, &pulled)
+	updates := runDescriptionFieldsPull(t, false, nil, local, &pulled)
 	if len(updates) != 1 {
 		t.Fatalf("pull wrote %d updates, want 1 for the remote description edit", len(updates))
 	}
@@ -212,5 +250,161 @@ func TestEnginePullDescriptionFieldsLeftAloneWithoutCapability(t *testing.T) {
 	}
 	if local.AcceptanceCriteria != "It works" || local.Design != "Plain" || local.Notes != "Remember" {
 		t.Errorf("local fields after pull = %q, %q, %q, want them unchanged", local.AcceptanceCriteria, local.Design, local.Notes)
+	}
+}
+
+// issueText is the text of an issue a DescriptionFieldsTracker pushes.
+type issueText struct {
+	Title, Description, AcceptanceCriteria, Design, Notes string
+}
+
+func textOf(issue *types.Issue) issueText {
+	return issueText{issue.Title, issue.Description, issue.AcceptanceCriteria, issue.Design, issue.Notes}
+}
+
+// TestEnginePullDescriptionFieldsKeptWhenUnguarded checks the pulls that
+// cannot tell a section the remote deleted from one that never reached it: a
+// first sync (no last_sync), and a pull of a stub linked to the remote issue
+// after the last sync, whether it hydrates the stub or a conflict resolved
+// for the remote's version admits it, in a bulk or a selective pull. There a
+// field the remote text has no section for keeps its local value, and the
+// same sync's push sends it, also for a stub the conflict resolution kept out
+// of the push. A field the remote text carries still wins. With a push hash
+// the pull fingerprints the remote without the kept fields, so the push is
+// not skipped.
+func TestEnginePullDescriptionFieldsKeptWhenUnguarded(t *testing.T) {
+	contentEqual := func(local *types.Issue, remote *TrackerIssue) bool {
+		return local.Title == remote.Title && foldDescriptionFields(local) == remote.Description
+	}
+	hooks := map[string]*PushHooks{
+		"content compare": {ContentEqual: contentEqual},
+		"push hash": {ContentEqual: contentEqual, ContentHash: func(issue *types.Issue) string {
+			return issue.Title + "\x00" + foldDescriptionFields(issue)
+		}},
+	}
+	// The stub rows link bd-1 as bd create --external-ref with
+	// --acceptance/--design/--notes does, ten seconds after the last sync,
+	// to a remote issue last updated at remoteUpdated.
+	linkStub := func(remoteUpdated time.Time) func(*descriptionFieldsStore, *mockTracker) {
+		return func(store *descriptionFieldsStore, mock *mockTracker) {
+			store.localMetadata["test.last_sync"] = descriptionFieldsLastSync.Format(time.RFC3339)
+			store.previousRefs["bd-1"] = "" // no ref at the last sync
+			mock.issues[0].UpdatedAt = remoteUpdated
+		}
+	}
+	stub := func() *types.Issue {
+		stub := newDescriptionFieldsLocal()
+		stub.Title, stub.Description, stub.AcceptanceCriteria = "stub", "stub body", "Local criteria"
+		stub.UpdatedAt = descriptionFieldsLastSync.Add(10 * time.Second)
+		return stub
+	}
+	stubRemote := func(local types.Issue) types.Issue {
+		local.Title, local.Description, local.AcceptanceCriteria = "Fields", "Body", "Remote criteria"
+		local.Design, local.Notes = "", ""
+		return local
+	}
+	stubWant := issueText{Title: "Fields", Description: "Body", AcceptanceCriteria: "Remote criteria", Design: "Plain", Notes: "Remember"}
+	for _, test := range []struct {
+		name string
+		// prepare sets up the store and the remote after
+		// newDescriptionFieldsSync.
+		prepare func(*descriptionFieldsStore, *mockTracker)
+		// options adds to the two-way sync's options.
+		options SyncOptions
+		local   func() *types.Issue
+		// pulled returns what the remote's text converts to.
+		pulled func(local types.Issue) types.Issue
+		// wantConflicts is 1 where a conflict resolution admits the pull.
+		wantConflicts int
+		wantUpdates   int
+		want          issueText // the local issue after the sync, also pushed
+	}{
+		{
+			// The remote text lacks only the notes: with them kept, the
+			// pull has nothing to write.
+			name:   "first sync",
+			local:  newDescriptionFieldsLocal,
+			pulled: func(local types.Issue) types.Issue { local.Notes = ""; return local },
+			want:   issueText{Title: "Fields", Description: "Body", AcceptanceCriteria: "It works", Design: "Plain", Notes: "Remember"},
+		},
+		{
+			// The remote is unchanged since the last sync, so the pull
+			// hydrates the stub.
+			name:        "pre-linked stub",
+			prepare:     linkStub(descriptionFieldsLastSync.Add(-time.Hour)),
+			local:       stub,
+			pulled:      stubRemote,
+			wantUpdates: 1,
+			want:        stubWant,
+		},
+		{
+			// The remote changed after the stub, so the conflict
+			// resolution takes the remote's version.
+			name:          "pre-linked stub, remote newer",
+			prepare:       linkStub(descriptionFieldsLastSync.Add(time.Hour)),
+			local:         stub,
+			pulled:        stubRemote,
+			wantConflicts: 1,
+			wantUpdates:   1,
+			want:          stubWant,
+		},
+		{
+			// --prefer-linear takes the remote's version of a stub newer
+			// than its remote's change.
+			name:          "pre-linked stub, prefer remote",
+			prepare:       linkStub(descriptionFieldsLastSync.Add(5 * time.Second)),
+			options:       SyncOptions{ConflictResolution: ConflictExternal},
+			local:         stub,
+			pulled:        stubRemote,
+			wantConflicts: 1,
+			wantUpdates:   1,
+			want:          stubWant,
+		},
+		{
+			// The same conflict, in a pull selecting the stub by ID.
+			name:          "pre-linked stub, remote newer, selected by ID",
+			prepare:       linkStub(descriptionFieldsLastSync.Add(time.Hour)),
+			options:       SyncOptions{IssueIDs: []string{"bd-1"}},
+			local:         stub,
+			pulled:        stubRemote,
+			wantConflicts: 1,
+			wantUpdates:   1,
+			want:          stubWant,
+		},
+	} {
+		for hooksName, pushHooks := range hooks {
+			t.Run(test.name+"/"+hooksName, func(t *testing.T) {
+				local := test.local()
+				pulled := test.pulled(*local)
+				engine, store, mock := newDescriptionFieldsSync(t, true, local, &pulled)
+				if test.prepare != nil {
+					test.prepare(store, mock)
+				}
+				engine.PushHooks = pushHooks
+
+				opts := test.options
+				opts.Pull, opts.Push = true, true
+				result, err := engine.Sync(context.Background(), opts)
+				if err != nil {
+					t.Fatalf("Sync: %v", err)
+				}
+				if result.Stats.Conflicts != test.wantConflicts {
+					t.Errorf("sync found %d conflicts, want %d", result.Stats.Conflicts, test.wantConflicts)
+				}
+				if len(store.tx.updates) != test.wantUpdates {
+					t.Errorf("pull wrote %v, want %d updates", store.tx.updates, test.wantUpdates)
+				}
+				if got := textOf(local); got != test.want {
+					t.Errorf("local after the sync = %+v, want %+v", got, test.want)
+				}
+				pushed := mock.updated["EXT-1"]
+				if pushed == nil {
+					t.Fatalf("push sent nothing to EXT-1, want the kept fields sent")
+				}
+				if got := textOf(pushed); got != test.want {
+					t.Errorf("pushed issue = %+v, want %+v", got, test.want)
+				}
+			})
+		}
 	}
 }

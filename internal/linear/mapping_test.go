@@ -1227,6 +1227,69 @@ var parseLinearDescriptionCases = []struct {
 		want: DescriptionParts{Description: "Body\n<!-- bd-idempotency: abc"},
 	},
 	{
+		name: "quoted marker prefix before another comment stays",
+		text: "Markers start with `<!-- bd-idempotency: ` and are hex.\n\nKeep this paragraph.\n\n## Acceptance Criteria\nA\n<!-- reviewer: ok -->",
+		want: DescriptionParts{
+			Description:        "Markers start with `<!-- bd-idempotency: ` and are hex.\n\nKeep this paragraph.",
+			AcceptanceCriteria: "A\n<!-- reviewer: ok -->",
+		},
+	},
+	{
+		name: "marker quoted in prose stays",
+		text: "Each create adds a `<!-- bd-idempotency: ... -->` marker.",
+		want: DescriptionParts{Description: "Each create adds a `<!-- bd-idempotency: ... -->` marker."},
+	},
+	{
+		name: "marker on a line of its own without bd's 12 hex digits stays",
+		text: "Body\n<!-- bd-idempotency: a590f1df4a90a590 -->\n<!-- bd-idempotency: A590F1DF4A90 -->",
+		want: DescriptionParts{Description: "Body\n<!-- bd-idempotency: a590f1df4a90a590 -->\n<!-- bd-idempotency: A590F1DF4A90 -->"},
+	},
+	{
+		name: "fenced literal heading stays in the description",
+		text: "Example:\n\n```markdown\n## Notes\nexample note\n```\n\nAfter the example.",
+		want: DescriptionParts{Description: "Example:\n\n```markdown\n## Notes\nexample note\n```\n\nAfter the example."},
+	},
+	{
+		name: "fenced example before a real section",
+		text: "Example:\n\n```markdown\n## Notes\nexample note\n```\n\n## Notes\nreal note",
+		want: DescriptionParts{Description: "Example:\n\n```markdown\n## Notes\nexample note\n```", Notes: "real note"},
+	},
+	{
+		name: "fenced heading in a section body stays in that section",
+		text: "D\n\n## Design\nG\n\n```markdown\n## Notes\nexample\n```",
+		want: DescriptionParts{Description: "D", Design: "G\n\n```markdown\n## Notes\nexample\n```"},
+	},
+	{
+		name: "tilde fence holds a backtick run and a heading",
+		text: "D\n\n## Notes\nN\n\n~~~\n```\n## Notes\n~~~",
+		want: DescriptionParts{Description: "D", Notes: "N\n\n~~~\n```\n## Notes\n~~~"},
+	},
+	{
+		name: "fence closes only on a run at least as long",
+		text: "D\n\n## Notes\nN\n````\n```\n## Design\nx\n````",
+		want: DescriptionParts{Description: "D", Notes: "N\n````\n```\n## Design\nx\n````"},
+	},
+	{
+		name: "fence indented three spaces hides a heading",
+		text: "D\n   ```\n## Notes\nN\n   ```",
+		want: DescriptionParts{Description: "D\n   ```\n## Notes\nN\n   ```"},
+	},
+	{
+		name: "line indented four spaces is no fence",
+		text: "D\n    ```\n## Notes\nN\n    ```",
+		want: DescriptionParts{Description: "D\n    ```", Notes: "N\n    ```"},
+	},
+	{
+		name: "backtick in a backtick fence's info string opens no fence",
+		text: "D\n```a`b\n## Notes\nN\n```",
+		want: DescriptionParts{Description: "D\n```a`b", Notes: "N\n```"},
+	},
+	{
+		name: "fence never closed hides nothing",
+		text: "D\n```\ncut off\n\n## Acceptance Criteria\nA",
+		want: DescriptionParts{Description: "D\n```\ncut off", AcceptanceCriteria: "A"},
+	},
+	{
 		name: "notes heading in the description while acceptance criteria is set",
 		text: "D\n## Notes\nnot a field\n\n## Acceptance Criteria\nA",
 		want: DescriptionParts{Description: "D\n## Notes\nnot a field", AcceptanceCriteria: "A"},

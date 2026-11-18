@@ -115,7 +115,9 @@ type IdentityKeyer interface {
 // acceptance criteria, design and notes inside the description (Linear).
 // A pull then compares and writes those fields along with the description,
 // and keeps the local issue's split of the text while the remote text is
-// unchanged.
+// unchanged. The first sync, and a pull of an issue linked to its remote
+// issue since the last sync, keep a local field the remote text has no
+// section for, and the push sends it.
 type DescriptionFieldsTracker interface {
 	// DescriptionFieldsEqual reports whether a and b push the same description text.
 	DescriptionFieldsEqual(a, b *types.Issue) bool
