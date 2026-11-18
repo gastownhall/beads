@@ -29,6 +29,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("DurableMintCountsBaseNamespaceInWisps", s.useCaseMintDurableCountsBaseNamespaceInWisps)
 	s.Run("LiveWispsDoNotLengthenBaseIDs", s.useCaseMintLiveWispsDoNotLengthenBaseIDs)
 	s.Run("DestinationSubprefixRowsStillCount", s.useCaseMintDestinationSubprefixRowsStillCount)
+	s.Run("TwoPlaneMintsLeaveExistingIDsUnchanged", s.useCaseMintTwoPlaneLeavesExistingIDsUnchanged)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -319,6 +320,50 @@ func (s *testSuite) useCaseMintDestinationSubprefixRowsStillCount() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.assertMintedHashLen(res.Issue.ID, "ucSp", 4)
+}
+
+// useCaseMintTwoPlaneLeavesExistingIDsUnchanged: a wisp mint and a durable
+// mint sized from both planes add their rows and leave every seeded row, in
+// either plane, where it was with the ID it had (bd-u9cfx0).
+func (s *testSuite) useCaseMintTwoPlaneLeavesExistingIDsUnchanged() {
+	s.resetMintConfig("ucKp", "")
+	s.setMaxCollisionProb("0.001")
+	uc := s.issueUseCase()
+	r := s.issueRepo()
+	seeded := map[string]bool{} // id -> in wisps
+	add := func(ids []string, wisps bool) {
+		s.seedMintRows(ids, wisps)
+		for _, id := range ids {
+			seeded[id] = wisps
+		}
+	}
+	add(mintIDs("ucKp-a", 5), false)
+	add(mintIDs("ucKp-b", 5), true)
+	add(mintIDs("ucKp-wisp-c", 3), false) // promoted wisps
+	add(mintIDs("ucKp-wisp-d", 3), true)
+
+	wisp, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "fresh wisp", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+	}, "tester")
+	s.Require().NoError(err)
+	s.assertMintedHashLen(wisp.Issue.ID, "ucKp-wisp", 3)
+	issue, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "fresh issue", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.assertMintedHashLen(issue.Issue.ID, "ucKp", 4)
+	s.NotContains(seeded, wisp.Issue.ID)
+	s.NotContains(seeded, issue.Issue.ID)
+
+	for id, wisps := range seeded {
+		got, err := r.Get(s.Ctx(), id, domain.IssueTableOpts{UseWispsTable: wisps})
+		s.Require().NoError(err, "seeded %s", id)
+		s.Equal(id, got.ID)
+		s.Equal("seeded "+id, got.Title, "seeded %s", id)
+		other, err := r.Exists(s.Ctx(), id, domain.IssueTableOpts{UseWispsTable: !wisps})
+		s.Require().NoError(err)
+		s.False(other, "seeded %s appeared in the other plane", id)
+	}
 }
 
 func (s *testSuite) useCaseMintRespectsPrefixOverride() {
