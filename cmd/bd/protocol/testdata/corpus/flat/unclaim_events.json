@@ -12,7 +12,7 @@
     "event_type": "claimed",
     "issue_id": "corpus-root",
     "new_value": "{\"assignee\":\"protocol-test\",\"status\":\"in_progress\"}",
-    "old_value": "{\"id\":\"corpus-root\",\"title\":\"Corpus root issue\",\"description\":\"updated corpus root\",\"status\":\"open\",\"priority\":0,\"issue_type\":\"feature\",\"owner\":\"test@protocol.test\",\"created_at\":\"<TS>\",\"created_by\":\"protocol-test\",\"updated_at\":\"<TS>\",\"metadata\":{\"phase\":2},\"labels\":[\"corpus-label\"]}"
+    "old_value": "{\"assignee\":null,\"status\":\"open\"}"
   },
   {
     "actor": "protocol-test",
@@ -44,7 +44,7 @@
     "event_type": "unclaimed",
     "issue_id": "corpus-root",
     "new_value": "{\"assignee\":\"\",\"status\":\"open\"}",
-    "old_value": "{\"id\":\"corpus-root\",\"title\":\"Corpus root issue\",\"description\":\"updated corpus root\",\"status\":\"in_progress\",\"priority\":0,\"issue_type\":\"feature\",\"assignee\":\"protocol-test\",\"owner\":\"test@protocol.test\",\"created_at\":\"<TS>\",\"created_by\":\"protocol-test\",\"updated_at\":\"<TS>\",\"started_at\":\"<TS>\",\"lease_expires_at\":\"<TS>\",\"heartbeat_at\":\"<TS>\",\"metadata\":{\"phase\":2},\"labels\":[\"corpus-label\"]}"
+    "old_value": "{\"assignee\":\"protocol-test\",\"status\":\"in_progress\"}"
   },
   {
     "actor": "protocol-test",
@@ -52,6 +52,6 @@
     "event_type": "updated",
     "issue_id": "corpus-root",
     "new_value": "{\"description\":\"updated corpus root\",\"metadata\":{\"phase\":2},\"priority\":0}",
-    "old_value": "{\"id\":\"corpus-root\",\"title\":\"Corpus root issue\",\"description\":\"deterministic corpus root\",\"status\":\"open\",\"priority\":1,\"issue_type\":\"feature\",\"owner\":\"test@protocol.test\",\"created_at\":\"<TS>\",\"created_by\":\"protocol-test\",\"updated_at\":\"<TS>\"}"
+    "old_value": "{\"description\":\"deterministic corpus root\",\"metadata\":null,\"priority\":1}"
   }
 ]
