@@ -17,6 +17,17 @@ import (
 // configured mode:
 //
 //   - Embedded Dolt (default): Opens via the CGo embedded Dolt engine.
+//   - Proxied server (dolt_mode "proxied-server"): Opens through the
+//     workspace's bd proxy, as the bd CLI does. A running proxy is adopted;
+//     with none, one is started from `bd` on PATH; with no bd there the open
+//     fails with ErrProxyUnavailable, having created no embedded store and
+//     started no proxy. A managed-local workspace (no external upstream)
+//     also needs `dolt` on PATH, even to adopt a running proxy. The store
+//     covers the common issue, label, dependency, comment and config methods
+//     and RunInTransaction; the rest return a typed ErrUnsupported. Close
+//     leaves the proxy running. BEADS_DOLT_SERVER_MODE,
+//     BEADS_DOLT_SHARED_SERVER and BEADS_DOLT_SERVER_PORT do not change this
+//     route.
 //   - Dolt server: Connects to a dolt sql-server via OpenFromConfig.
 //
 // The returned Storage must be closed when no longer needed.

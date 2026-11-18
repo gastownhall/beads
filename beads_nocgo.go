@@ -12,8 +12,12 @@ import (
 )
 
 // OpenBestAvailable opens a beads database using the best available backend
-// for the given .beads directory. In non-CGO builds, only Dolt server mode is
-// supported; embedded Dolt returns an error directing the user to server mode.
+// for the given .beads directory. In non-CGO builds, Dolt server mode and
+// proxied-server mode (through the workspace's bd proxy, exactly as in the cgo
+// build) are supported; embedded Dolt returns an error directing the user to
+// server mode. As in the cgo build, BEADS_DOLT_SERVER_MODE,
+// BEADS_DOLT_SHARED_SERVER and BEADS_DOLT_SERVER_PORT do not divert a
+// proxied-server workspace to the server arm.
 //
 // beadsDir is the path to the .beads directory.
 //
