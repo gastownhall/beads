@@ -819,6 +819,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull
   from a configured remote that fails still exits 1.
+- **`bd migrate schema` is refused on proxied-server workspaces unless you
+  pass `--force`.** On those workspaces opening the store applies the
+  migration, which changed the schema underneath every library client
+  connected to the proxy's backend without warning; the proxy does not track
+  those clients. The bare command now exits 1 with the typed refusal
+  `proxy.migrate.unsupported` (`mutates: false`, reason `design`) before
+  anything is opened, and `BD_ALLOW_REMOTE_MIGRATE=1` does not get past it.
+  Stop the clients, run `bd migrate schema --force`, then restart them; the
+  forced command prints a generic reminder to stderr and leaves stdout to its
+  report. If the database has a Dolt remote, that `--force` also confirms you
+  are its single designated migrator, so the remote-migrate gate's adopt and
+  pull-first stops do not run. The refusal says so and tells you to run a
+  read command such as `bd list` first and to follow any of those stops it
+  prints instead of forcing; the reminder repeats the caveat. That read
+  prints the stop even when it cannot run on the database's current schema,
+  as on a 1.3.4 database, and then fails with it. On a team-server
+  workspace, where the forced command only verifies the schema, the refusal
+  and the reminder say that instead. CI jobs that ran the bare command as a
+  proxied check must stop doing so. The forced `--json` report still has no
+  `applied` count; treat its absence as unknown, not zero. Guidance that
+  prescribed the bare command for proxied workspaces now names the forced
+  form: the shared-no-remote gate block, its JSON `expected` field and
+  options, the `--global` consent hint, and a read command's warning on the
+  blunt remote-backed stop, which also names adopting instead, stopping the
+  library clients and pushing from the server host. The shared data-behind
+  stop, which already named the forced form, now also says to stop the
+  library clients first. Direct workspaces are unchanged.
+  ([#6656](https://github.com/gastownhall/beads/issues/6656))
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
@@ -1504,6 +1532,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   everything from the first `-` or `+`, as it already did for an undotted
   `-rc1`, so a release and its candidates record over each other in either
   direction, and a candidate of an earlier release is still refused.
+- **Generated child ids no longer re-mint a suffix a removed or renamed
+  child used** (part of
+  [#4750](https://github.com/gastownhall/beads/issues/4750); the issue stays
+  open for the JSONL leg). An explicit create of `P.N`, a rename into or
+  out of `P.N`, and every removal of `P.N`
+  (`bd delete`, plain `bd purge`/`bd prune`, wisp deletes, source-repo
+  deletes) raise the surviving parent's counter to at least `N`, in the
+  parent's own plane, so the next generated child continues past it. The
+  counter never decreases, no tombstone is written, an explicit
+  `bd create --id P.N` still succeeds, and a parent deleted with its
+  children keeps no counter. Limits: deleting and recreating the parent
+  drops its counter, raw SQL deletes bypass the reservation, a rebuild from
+  `issues.jsonl` loses the counter (the export format carries no counter
+  state), and suffix history already lost before the upgrade is not
+  recovered. On clones synced with `bd dolt pull`, a delete or rename that
+  raises a parent's missing or lagging counter can now conflict with a
+  child another clone created under the same parent: the pull fails on a
+  conflict in that parent's `child_counters` row, as parallel child creates
+  already do ([#4796](https://github.com/gastownhall/beads/issues/4796)).
 - **The aux row id re-key again skips tables with dolthub/dolt#11131
   encoding drift instead of aborting the migration on every open** (#8372).
   The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive
@@ -1586,6 +1633,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The version pair reported there, an embedded Dolt 2.2.3 reading a backup
   written by Dolt 2.4.2, no longer applies: embedded mode now runs the Dolt
   2.6.0 engine.
+- A schema migration that stops on a stored value the engine cannot read
+  (`invalid hash length`, `malformed out-of-band adaptive value`, consistent
+  with schema-encoding drift, dolthub/dolt#11131) now ends in a typed refusal
+  instead of a raw engine error (GH#5699). The refusal names the migration and
+  its cursor source, quotes the symptom without the engine stack, says that
+  partial changes may remain, warns that a later run's "pre-existing dirty
+  tables" advice to run `bd dolt commit` would commit them, and links the new
+  [Schema-Encoding Drift](https://beads.gascity.com/recovery/schema-encoding-drift)
+  runbook; `--json` adds a `schema_encoding_drift` object beside `error` and
+  `hint` on stderr, and the command exits 1. The migration still stops on its
+  first error and is never skipped. Raw engine panics are not intercepted.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
@@ -1749,6 +1807,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitive dependent, so this bd refuses `--cascade` (a `--dry-run` preview
   included) against it with an unsupported-capability error and sends nothing;
   deletions without `--cascade` are unaffected. Upgrade the server first.
+- **`bd delete` no longer marks a live descendant's id as deleted in its
+  neighbors' text.** The rewrite of citations to `[deleted:<id>]` took `.` for
+  a word boundary, and a hierarchical child's id is its parent's id plus
+  `.<n>`, so deleting `fx-k0008.1` turned "step fx-k0008.1.2 failed" into
+  "step [deleted:fx-k0008.1].2 failed" while `fx-k0008.1.2` was still live; a
+  `--cascade` gave `[deleted:fx-k0008].1.2`, and deleting a descendant first
+  nested markers. A `.` followed by an id character is now part of the id,
+  while a sentence-ending `.` still ends a citation. A `.` that follows an id
+  character joins too, so `x.be-1` and either id in `bd-1.bd-2` are left
+  alone, as is a file name such as `be-1.md`; the old rule rewrote them all.
+  Two citations separated by one character ("be-1 be-1") are now both
+  rewritten; before, only the first was. Every route (direct, proxied server,
+  `bd serve`) rewrites by the same rule, and the unforced single-issue
+  `bd delete` preview applies it too, so it no longer lists a neighbor that
+  cites only a descendant; on a proxied-server workspace that preview still
+  lists every connected issue as one whose text may be rewritten. (#8451,
+  from #7377 by @A3Ackerman)
+
+- **On direct-server and embedded workspaces, a tracker pull after
+  `bd compact` or `bd flatten` no longer overwrites unpushed local edits.**
+  When history at the tracker's `last_sync` was gone, the pull treated every
+  linked issue as newly linked, fetched it again and applied the remote copy
+  past the conflict guard, so local edits made since the last sync were lost
+  (a dry run listed every linked issue as a candidate). An issue with no
+  history at `last_sync` is now re-fetched only when it was created at or
+  after that sync; older issues go through the normal conflict checks. The
+  pull prints one warning naming the older issues changed since that sync
+  whose links it could not verify. Such an issue that was linked to another
+  remote issue since then is not re-fetched, and a push writes its local
+  content to that remote issue, so after `bd compact` or `bd flatten` run
+  `bd <tracker> sync --dry-run` first, which changes nothing, and check the
+  issues the warning names before a real sync. Linked ephemeral and
+  `--no-history` beads never have history, so every pull fetched them again
+  and applied the remote copy over their local edits. Now one created
+  before `last_sync` also goes through the normal conflict checks, and no
+  warning names it; one linked to another remote issue since then is not
+  re-fetched either. Proxied-server workspaces do not read history during a
+  pull and are unchanged. (#7294)
 
 - `bd compact` no longer silently changes row data when commit dates are out
   of history order across the cutoff. When a recent-dated commit came before

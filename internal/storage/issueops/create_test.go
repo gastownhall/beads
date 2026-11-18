@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"testing"
@@ -557,6 +558,72 @@ func TestReconcileChildCountersReturnsWispLookupError(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
 	}
+}
+
+// TestReserveChildSuffixesSkipsASuffixBeyondTheCounterColumn pins the INT
+// bound of the GH#4750 reservation. last_child is an INT column, and Dolt
+// refuses an upsert above math.MaxInt32 as out of range, which would fail the
+// rename or removal of a legacy P.3000000000. So a suffix above the bound is
+// skipped, and a sibling exactly at the bound is still reserved. Its
+// real-backend twin is the dolt TestChildSuffixReservation case
+// SuffixBeyondTheCounterColumnIsSkipped.
+func TestReserveChildSuffixesSkipsASuffixBeyondTheCounterColumn(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("AloneItIssuesNoStatement", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+
+		changed, err := ReserveChildSuffixesInTx(ctx, tx, []string{"test-parent.3000000000"}, nil)
+		if err != nil {
+			t.Fatalf("ReserveChildSuffixesInTx error = %v, want nil", err)
+		}
+		if len(changed) != 0 {
+			t.Fatalf("changed tables = %#v, want none", changed)
+		}
+
+		// No routing, parent, counter read or upsert statement is expected.
+		mock.ExpectRollback()
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("ASiblingAtTheBoundIsStillReserved", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
+			WillReturnError(sql.ErrNoRows)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM issues WHERE id = ?")).
+			WithArgs("test-parent").
+			WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT last_child FROM child_counters WHERE parent_id = ?")).
+			WithArgs("test-parent").
+			WillReturnError(sql.ErrNoRows)
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)")).
+			WithArgs("test-parent", math.MaxInt32, math.MaxInt32).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		changed, err := ReserveChildSuffixesInTx(ctx, tx, []string{"test-parent.3000000000", "test-parent.2147483647"}, nil)
+		if err != nil {
+			t.Fatalf("ReserveChildSuffixesInTx error = %v, want nil", err)
+		}
+		if len(changed) != 1 || !changed["child_counters"] {
+			t.Fatalf("changed tables = %#v, want only child_counters", changed)
+		}
+
+		mock.ExpectRollback()
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
 }
 
 // TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking is the

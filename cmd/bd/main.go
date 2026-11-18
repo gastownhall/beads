@@ -463,6 +463,11 @@ func printGlobalDatabaseConsentHint(w io.Writer, e *schema.RemoteMigrateGateErro
 	if e != nil && e.IsDataBehind() && e.Shared {
 		consent = schema.SharedConsentCommandForcedGlobal
 	}
+	// A proxied front door refuses the bare verb (gastownhall/beads#6656), so
+	// the shared-no-remote stop there names the forced one, as its block does.
+	if e != nil && e.Proxied && e.Decision == "shared-no-remote" {
+		consent = schema.SharedConsentCommandForcedGlobal
+	}
 	fmt.Fprintf(w,
 		"\n  This command targeted the global database (--global), so run the\n"+
 			"  migrate step with the same flag:\n"+
@@ -512,6 +517,11 @@ func renderTypedOpenError(err error) bool {
 			fmt.Fprint(os.Stderr, consentErr.UserMessage())
 			printGlobalDatabaseConsentHint(os.Stderr, nil)
 		}
+		return true
+	}
+	// #5699: a migration stopped on schema-encoding drift names the step and
+	// the operator-supervised recovery instead of a raw engine error.
+	if renderSchemaEncodingDrift(err) {
 		return true
 	}
 	return false

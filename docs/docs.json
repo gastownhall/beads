@@ -272,6 +272,7 @@
           "recovery/accidental-1-2-1-release",
           "recovery/init-safety",
           "recovery/database-corruption",
+          "recovery/schema-encoding-drift",
           "recovery/merge-conflicts",
           "recovery/circular-dependencies",
           "recovery/sync-failures",
