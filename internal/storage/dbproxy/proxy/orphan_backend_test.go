@@ -318,8 +318,8 @@ func TestReapUnrecordedBackendReportsKillAndExitFailures(t *testing.T) {
 		root := t.TempDir()
 		infoPath := writeServerInfo(t, root, 4242)
 		fake := &fakeOrphanCandidate{
-			basename: "dolt",
-			cmdline:  "dolt sql-server --config " + filepath.Join(root, server.LaunchConfigFileName),
+			basename:   "dolt",
+			cmdline:    "dolt sql-server --config " + filepath.Join(root, server.LaunchConfigFileName),
 			neverExits: true,
 		}
 		installOrphanCandidate(t, func(int) (orphanCandidate, bool, error) { return fake, false, nil })
