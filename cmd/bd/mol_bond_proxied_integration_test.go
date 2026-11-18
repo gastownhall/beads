@@ -321,6 +321,31 @@ func TestProxiedServerMolBond(t *testing.T) {
 		}
 	})
 
+	// bd-tqdsvo (GH#5732), AC-2's proxied leg: two molecules that live in one
+	// routed rig bond there from a proxied launcher — B depends on A in the
+	// rig database, the served database never sees a write.
+	t.Run("mol_plus_mol_prefix_routed_bonds_in_rig", func(t *testing.T) {
+		t.Parallel()
+		port := requireSharedProxiedServer(t)
+		town := newSharedProxiedProject(t, bd, "mbrm")
+		rigDir, rigDB := serverModeRigOnSharedServer(t, port, "mbrr-bola", "mbrr-bolb")
+		writeProxiedRoute(t, town, "mbrr-", rigDir)
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, town.dir, "mol", "bond", "mbrr-bola", "mbrr-bolb", "--type", "sequential")
+		if err != nil {
+			t.Fatalf("bd mol bond <prefix-routed mol> <prefix-routed mol> from the town: %v\nstdout:%s\nstderr:%s", err, stdout, stderr)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		assertSharedServerCount(t, rigDB, ctx,
+			"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
+			1, "the blocks row mbrr-bolb -> mbrr-bola in the rig", "mbrr-bolb", "mbrr-bola")
+		assertSharedServerCount(t, rigDB, ctx,
+			"SELECT COUNT(*) FROM issues",
+			2, "issues in the rig (a routed mol+mol bond spawns nothing)")
+	})
+
 	t.Run("dry_run_creates_nothing", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "mbdr")

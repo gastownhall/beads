@@ -517,3 +517,19 @@ func TestMolBondProxiedFormulaSpawnsIntoRoutedRig(t *testing.T) {
 		})
 	}
 }
+
+// TestMolBondProxiedMolMolInOneRoutedRig: two molecules that one prefix-routed
+// rig holds bond in that rig (B blocks on A there); the served launcher
+// database is never written.
+func TestMolBondProxiedMolMolInOneRoutedRig(t *testing.T) {
+	f := newMolBondProxiedFixture(t)
+
+	runErr, _, stderr := f.bond(molBondInput{argA: "gt-mol1", argB: "gt-mol2"})
+	if runErr != nil {
+		t.Fatalf("bond gt-mol1 gt-mol2: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if !f.rigDependsOn("gt-mol2", "gt-mol1", types.DepBlocks) {
+		t.Errorf("gt-mol2 does not block on gt-mol1 in the rig")
+	}
+	f.assertServedUnwritten("routed mol + mol")
+}
