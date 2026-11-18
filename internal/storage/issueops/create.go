@@ -143,8 +143,21 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 	return dst
 }
 
+// CreateIssueInTxWithResult creates one issue in tx and reports what it wrote.
+//
+// A MINTED ID IS CREATED CREATE-ONLY. When issue names no id, the id it is
+// minted belongs to this create alone, so the row is written with CreateOnly
+// set and ConflictSkip cleared whatever the caller's options say: the
+// create-only guard (coordination row, one occupancy read) and a strict
+// INSERT. An occupant the mint's snapshot did not show then fails the create
+// with ErrAlreadyExists instead of being upserted over, or silently taken for
+// this create under ConflictSkip. A caller-supplied id keeps the caller's
+// options: explicit upsert, skip, and the stale and retired guards.
 func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
 	var result CreateIssueResult
+	if issue.ID == "" {
+		bc = mintedIDBatchContext(bc)
+	}
 	issueTable, eventTable, outcome, err := prepareCreateIssueInTx(ctx, tx, bc, issue, actor)
 	if err != nil || outcome == prepareSkip {
 		return result, err
@@ -169,6 +182,19 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 		return result, nil
 	}
 	return finishCreateIssueInTx(ctx, tx, bc, issue, actor, issueTable, eventTable, isNew)
+}
+
+// mintedIDBatchContext is bc for one create whose id is minted: a shallow
+// copy, so the caller's options (shared by the rest of its batch) are left
+// alone, with CreateOnly set and ConflictSkip cleared.
+func mintedIDBatchContext(bc *BatchContext) *BatchContext {
+	if bc.Opts.CreateOnly && !bc.Opts.ConflictSkip {
+		return bc
+	}
+	minted := *bc
+	minted.Opts.CreateOnly = true
+	minted.Opts.ConflictSkip = false
+	return &minted
 }
 
 // prepareOutcome is what prepareCreateIssueInTx decided for one issue.

@@ -398,6 +398,14 @@ type DoltStore struct {
 	// createdDatabase reports whether this store's open created its database
 	// (serverConnFacts.created); see CreatedDatabase.
 	createdDatabase bool
+
+	// createAttemptHook, when set, runs inside every CreateIssue and
+	// CreateIssues transaction attempt after the create body succeeds and
+	// before the SQL commit; an error it returns fails that attempt the way a
+	// body error would. Nil in production. Tests set it to commit a
+	// concurrent writer between a create's insert and its commit, the race a
+	// replay must re-mint through.
+	createAttemptHook func(ctx context.Context, issues []*types.Issue) error
 }
 
 // Config holds Dolt database configuration

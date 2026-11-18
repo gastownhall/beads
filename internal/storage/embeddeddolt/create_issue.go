@@ -27,7 +27,10 @@ func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue,
 		issue.Ephemeral = true
 	}
 
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+	// A failed create leaves no id it assigned behind (bd-t4h0n7): a caller's
+	// retry then mints afresh rather than writing to the lost id.
+	assigned := issueops.RecordAssignedIDs(issue)
+	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// SkipPrefixValidation matches DoltStore.CreateIssue, which does not
 		// validate prefixes for explicit IDs on the single-issue path.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -38,6 +41,8 @@ func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue,
 		}
 		return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
 	})
+	assigned.ResetAfterFailure(err)
+	return err
 }
 
 func (s *EmbeddedDoltStore) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
@@ -70,7 +75,10 @@ func (s *EmbeddedDoltStore) CreateIssuesWithFullOptions(ctx context.Context, iss
 		}
 	}
 
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+	assigned := issueops.RecordAssignedIDs(issues...)
+	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 		return issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts)
 	})
+	assigned.ResetAfterFailure(err)
+	return err
 }

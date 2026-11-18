@@ -346,6 +346,7 @@
 40 17 TestEmbeddedOnlyAWriteAnswersTheSwitch
 40 17 TestEmbeddedReaderListRejectsATypeOutsideTheWorkspaceVocabulary
 40 17 TestEmbeddedReadyClaimerLeasesADurableWinButNotAnEphemeralOne
+40 17 TestExplicitIDCreateBehaviorUnchanged
 40 17 TestHeartbeatMatchesActorAcrossSpellingEmbedded
 40 17 TestStatsReporterContract
 40 17 TestVersionReconcilerContract
@@ -468,6 +469,7 @@
 40 25 TestWithPeerAuth_RestoresAbsentEnv
 
 40 26 TestArrivalSeq_EmbeddedConcurrentWritersAreUnique
+40 26 TestCounterMintJumpsPastHeldIDs
 40 26 TestEmbeddedIssueOperationsCreateClosedDerivesTheClosedStamp
 40 26 TestEmbeddedMigration0058CleansOrphanedAndInvalidWispDependenciesRowsBeforeAddingConstraints
 40 26 TestEmbeddedOpenForReadOnlyCommand_LenientGate
@@ -528,6 +530,7 @@
 40 29 TestLifecycleCreateContract
 
 40 30 TestCounterContract
+40 30 TestCreateFailureResetsAssignedIDs
 40 30 TestCycleDetectorContract
 40 30 TestEmbeddedClaimerTakesAnOpenIssueTheActorAlreadyHolds
 40 30 TestEmbeddedCommitToleratesNothingToCommit
