@@ -286,3 +286,56 @@ func TestSpawnRefusesWhenUnrecordedOrphanSurvives(t *testing.T) {
 		})
 	}
 }
+
+// AC-8: the refusal paths keep today's errors and never act on
+// sql-server.info, even when it names a matching dolt.
+func TestCleanupOrphanBackendRefusalsNeverReadServerInfo(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup   func(t *testing.T, root string)
+		wantErr string
+	}{
+		"held child lock": {
+			setup: func(t *testing.T, root string) {
+				childLock, err := util.TryLock(filepath.Join(root, server.LockFileName))
+				require.NoError(t, err)
+				t.Cleanup(childLock.Unlock)
+			},
+			wantErr: "refusing backend cleanup",
+		},
+		"malformed record": {
+			setup: func(t *testing.T, root string) {
+				require.NoError(t, os.WriteFile(pidfile.Path(root, server.PIDFileName), []byte(`{"pid":`), 0o600))
+			},
+			wantErr: "backend cleanup refused for unverifiable process",
+		},
+		"unverifiable live record": {
+			setup: func(t *testing.T, root string) {
+				helper := startHelperProcess(t)
+				require.NoError(t, pidfile.Write(root, server.PIDFileName, pidfile.PidFile{Pid: helper.cmd.Process.Pid, Port: 3306}))
+			},
+			wantErr: "unverifiable live process",
+		},
+		"root identity mismatch": {
+			setup: func(t *testing.T, root string) {
+				pf := v2Record(t, root, pidfile.KindDoltBackend, startHelperProcess(t))
+				pf.RootID = "different-workspace"
+				require.NoError(t, pidfile.Write(root, server.PIDFileName, pf))
+			},
+			wantErr: "root identity mismatch",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			holdProxyLock(t, root)
+			fakeOrphanInfo(t, root)
+			proc := &fakeOrphan{exe: "dolt", cmdline: doltLaunchedWith(filepath.Join(root, "config.yaml"))}
+			opens := useFakeOrphan(t, proc)
+			tc.setup(t, root)
+
+			err := cleanupOrphanBackend(root)
+			require.ErrorContains(t, err, tc.wantErr)
+			assert.Zero(t, opens.Load(), "a refusal path acted on sql-server.info")
+			assert.False(t, proc.killed)
+		})
+	}
+}
