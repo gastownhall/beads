@@ -174,6 +174,122 @@ func TestEmbeddedFederationPeers(t *testing.T) {
 			t.Errorf("expected sovereignty='T2', got %q", sov)
 		}
 	})
+
+	// GH#5213: re-running add-peer without --sovereignty, the documented way to
+	// re-store a peer's credentials, keeps the stored tier and reports it.
+	t.Run("add_peer_rerun_without_sovereignty_keeps_tier", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovk")
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T2")
+		bdFederation(t, bd, dir, "add-peer", "towngamma", "file:///tmp/towngamma",
+			"--user", "gammabot", "--password", "g4mma", "--sovereignty", "T3")
+
+		out := bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret")
+		if !strings.Contains(out, "Sovereignty: T2") {
+			t.Errorf("text re-run should report the kept tier 'Sovereignty: T2', got: %s", out)
+		}
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "T2" {
+			t.Errorf("stored tier after text re-run = %q, want %q (tier silently cleared)", got, "T2")
+		}
+
+		jsonOut := bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--json")
+		payload := assertAddPeerJSON(t, jsonOut)
+		if sov := addPeerJSONSovereignty(t, payload); sov != "T2" {
+			t.Errorf("JSON re-run sovereignty = %q, want %q", sov, "T2")
+		}
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "T2" {
+			t.Errorf("stored tier after JSON re-run = %q, want %q (tier silently cleared)", got, "T2")
+		}
+		if got := storedPeerTier(t, beadsDir, "towngamma"); got != "T3" {
+			t.Errorf("untouched control peer tier = %q, want %q", got, "T3")
+		}
+	})
+
+	// GH#5213: the credential-key repair path. The old password cannot be
+	// decrypted with this machine's key, so the tier must be kept without
+	// reading the old row through the decrypting peer read.
+	t.Run("add_peer_key_mismatch_repair_keeps_tier", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovr")
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T2")
+
+		otherKey := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, otherKey); err != nil {
+			t.Fatalf("generate replacement key: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, ".beads-credential-key"), otherKey, 0600); err != nil {
+			t.Fatalf("write replacement key: %v", err)
+		}
+		if out := bdFederation(t, bd, dir, "status"); !strings.Contains(out, "Local credential error") {
+			t.Fatalf("precondition: stored credentials should not decrypt with the replaced key, got: %s", out)
+		}
+
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "n3wsecret")
+
+		if out := bdFederation(t, bd, dir, "status"); strings.Contains(out, "Local credential error") {
+			t.Errorf("repaired credentials should decrypt with this machine's key, got: %s", out)
+		}
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "T2" {
+			t.Errorf("stored tier after credential repair = %q, want %q (tier silently cleared)", got, "T2")
+		}
+	})
+
+	// An explicit empty --sovereignty is the deliberate way to clear a tier.
+	t.Run("add_peer_explicit_empty_sovereignty_clears_tier", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovc")
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T2")
+
+		out := bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "")
+		if !strings.Contains(out, "Sovereignty: cleared") {
+			t.Errorf("text clear should confirm 'Sovereignty: cleared', got: %s", out)
+		}
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "" {
+			t.Errorf("stored tier after explicit clear = %q, want empty", got)
+		}
+	})
+
+	t.Run("add_peer_explicit_empty_sovereignty_clears_tier_json", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovj")
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T2")
+
+		out := bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty=", "--json")
+		if sov := addPeerJSONSovereignty(t, assertAddPeerJSON(t, out)); sov != "" {
+			t.Errorf("JSON clear sovereignty = %q, want empty", sov)
+		}
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "" {
+			t.Errorf("stored tier after explicit clear = %q, want empty", got)
+		}
+	})
+
+	// A given tier still replaces the stored one (normalized to upper case),
+	// and an invalid tier is refused before anything is written.
+	t.Run("add_peer_explicit_sovereignty_replaces_tier", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovt")
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T2")
+
+		bdFederationFail(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T9")
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "T2" {
+			t.Errorf("stored tier after a refused invalid tier = %q, want %q", got, "T2")
+		}
+
+		out := bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "t3", "--json")
+		if sov := addPeerJSONSovereignty(t, assertAddPeerJSON(t, out)); sov != "T3" {
+			t.Errorf("JSON replace sovereignty = %q, want %q", sov, "T3")
+		}
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "T3" {
+			t.Errorf("stored tier after replace = %q, want %q", got, "T3")
+		}
+	})
 }
 
 func TestEmbeddedFederationStatus(t *testing.T) {
