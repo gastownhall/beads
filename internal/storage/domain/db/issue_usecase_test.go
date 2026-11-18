@@ -26,6 +26,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("HashModePassesOverTheOtherPlanesIDs", s.useCaseMintPassesOverTheOtherPlane)
 	s.Run("MintPassesOverClaimedIDs", s.useCaseMintPassesOverClaimedIDs)
 	s.Run("WispMintCountsPromotedWisps", s.useCaseMintWispCountsPromotedWisps)
+	s.Run("DurableMintCountsBaseNamespaceInWisps", s.useCaseMintDurableCountsBaseNamespaceInWisps)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -265,6 +266,23 @@ func (s *testSuite) useCaseMintWispCountsPromotedWisps() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.assertMintedHashLen(res.Issue.ID, "ucPw-wisp", 4)
+}
+
+// useCaseMintDurableCountsBaseNamespaceInWisps: the proxied durable mint
+// sizes its hash from the issues in its namespace plus the base-namespace
+// rows held in wisps (bd-u9cfx0). 5 + 5 = 10 rows give length 4 at 0.001.
+func (s *testSuite) useCaseMintDurableCountsBaseNamespaceInWisps() {
+	s.resetMintConfig("ucBn", "")
+	s.setMaxCollisionProb("0.001")
+	uc := s.issueUseCase()
+	s.seedMintRows(mintIDs("ucBn-a", 5), false)
+	s.seedMintRows(mintIDs("ucBn-b", 5), true)
+
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "fresh issue", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.assertMintedHashLen(res.Issue.ID, "ucBn", 4)
 }
 
 func (s *testSuite) useCaseMintRespectsPrefixOverride() {

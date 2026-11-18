@@ -46,6 +46,28 @@ func TestAdaptiveIDLengthSpansBothPlanes(t *testing.T) {
 		assertHashSuffixLen(t, id, "kz-wisp", 4)
 		te.assertRowExists(t, ctx, "wisps", id)
 	})
+
+	t.Run("durable mint counts base-namespace rows in wisps", func(t *testing.T) {
+		// AC-2: 5 dm-<hash> rows in issues plus 5 in wisps (demoted issues,
+		// or base-namespace wisps).
+		te, ctx := newAdaptiveIDEnv(t, "dm")
+		seedRows(t, te, seededIDs("dm-a", 5), false)
+		seedRows(t, te, seededIDs("dm-b", 5), true)
+
+		assertAdaptiveSizing(t, te, "issues", "dm", 10, 4)
+		id := mintOne(t, te, "fresh issue", false)
+		assertHashSuffixLen(t, id, "dm", 4)
+		te.assertRowExists(t, ctx, "issues", id)
+	})
+
+	t.Run("durable mint counts a base namespace held only in wisps", func(t *testing.T) {
+		// The reported shape: every dm-<hash> row sits in wisps.
+		te, _ := newAdaptiveIDEnv(t, "dm")
+		seedRows(t, te, seededIDs("dm-b", 10), true)
+		seedRows(t, te, seededIDs("dm-c", 2), true)
+
+		assertAdaptiveSizing(t, te, "issues", "dm", 12, 4)
+	})
 }
 
 // newAdaptiveIDEnv returns an isolated store under prefix with
