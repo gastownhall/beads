@@ -3,11 +3,16 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestGetVersionsSince(t *testing.T) {
@@ -645,6 +650,37 @@ func TestRecoverPreV56IfNeeded_OnlySemverPredecessorsAreRecovered(t *testing.T) 
 				t.Fatalf("predecessor %q: pre-v56 recovery deleted a live .dolt: %v", tt.previous, err)
 			}
 		})
+	}
+}
+
+func TestRecoverPreV56IfNeeded_ReinitializesWithRealDolt(t *testing.T) {
+	testutil.RequireDoltCLIOnly(t)
+	doltDir, sentinel := writePreV56DoltFixture(t)
+
+	recoverPreV56IfNeeded("0.55.4", doltDir)
+
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("legacy fixture was not replaced: %v", err)
+	}
+	marker, err := os.ReadFile(filepath.Join(doltDir, ".bd-dolt-ok"))
+	if err != nil || string(marker) != "ok\n" {
+		t.Fatalf("reinitialization did not write the compatibility marker: %q, %v", marker, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "dolt", "sql", "-r", "csv", "-q", "SELECT 1 AS recovery_ready")
+	cmd.Dir = doltDir
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "recovery_ready\n1") {
+		t.Fatalf("reinitialized database is not queryable: %v\n%s", err, out)
+	}
+
+	if err := os.WriteFile(sentinel, []byte("current database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recoverPreV56IfNeeded("0.55.4", doltDir)
+	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "current database" {
+		t.Fatalf("compatibility marker did not prevent a second recovery: %q, %v", got, err)
 	}
 }
 
