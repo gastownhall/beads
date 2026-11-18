@@ -95,6 +95,68 @@ func TestAdaptiveIDLengthSpansBothPlanes(t *testing.T) {
 		assertHashSuffixLen(t, id, "sp", 4)
 		te.assertRowExists(t, ctx, "issues", id)
 	})
+
+	t.Run("mints under the combined count leave existing IDs unchanged", func(t *testing.T) {
+		// AC-5: rows of both planes in both namespaces, including promoted
+		// wisps; a wisp mint and a durable mint add rows and touch none.
+		te, ctx := newAdaptiveIDEnv(t, "kp")
+		seedRows(t, te, seededIDs("kp-a", 5), false)
+		seedRows(t, te, seededIDs("kp-b", 5), true)
+		promoted := seededIDs("kp-wisp-c", 6)
+		seedRows(t, te, promoted, true)
+		for _, id := range promoted[:3] {
+			if err := te.store.PromoteFromEphemeral(ctx, id, "tester"); err != nil {
+				t.Fatalf("PromoteFromEphemeral(%s): %v", id, err)
+			}
+		}
+		before := snapshotPlanes(t, te)
+
+		wisp := mintOne(t, te, "fresh wisp", true)
+		assertHashSuffixLen(t, wisp, "kp-wisp", 3)
+		issue := mintOne(t, te, "fresh issue", false)
+		assertHashSuffixLen(t, issue, "kp", 4)
+
+		after := snapshotPlanes(t, te)
+		for id, row := range before {
+			if after[id] != row {
+				t.Errorf("existing %s changed: before %q, after %q", id, row, after[id])
+			}
+		}
+		if len(after) != len(before)+2 || after[wisp] != "wisps|fresh wisp" || after[issue] != "issues|fresh issue" {
+			t.Errorf("after the mints: %d rows (want %d), %s=%q, %s=%q", len(after), len(before)+2, wisp, after[wisp], issue, after[issue])
+		}
+	})
+}
+
+// snapshotPlanes returns every live row of both tables as id -> "table|title".
+func snapshotPlanes(t *testing.T, te *testEnv) map[string]string {
+	t.Helper()
+	ctx := t.Context()
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	rows, err := db.QueryContext(ctx, "SELECT 'issues', id, title FROM issues UNION ALL SELECT 'wisps', id, title FROM wisps")
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var table, id, title string
+		if err := rows.Scan(&table, &id, &title); err != nil {
+			t.Fatalf("snapshot scan: %v", err)
+		}
+		if prev, dup := out[id]; dup {
+			t.Fatalf("id %s is in both planes (%s and %s)", id, prev, table)
+		}
+		out[id] = table + "|" + title
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("snapshot rows: %v", err)
+	}
+	return out
 }
 
 // newAdaptiveIDEnv returns an isolated store under prefix with
