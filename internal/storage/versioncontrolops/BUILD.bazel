@@ -50,6 +50,7 @@ go_test(
         "flatten_softreset_dolt_test.go",
         "flatten_test.go",
         "gc_test.go",
+        "merge_settle_completeness_test.go",
         "mergesettle_draincall_regression_test.go",
         "remotes_githooks_test.go",
         "remotes_gittrace_test.go",
