@@ -185,3 +185,32 @@ func TestEnginePullDescriptionFieldsKeepUnchangedLocalSplit(t *testing.T) {
 		t.Fatalf("local after pull = description %q, acceptance criteria %q, want both unchanged", local.Description, local.AcceptanceCriteria)
 	}
 }
+
+// TestEnginePullDescriptionFieldsLeftAloneWithoutCapability pins that a
+// tracker without DescriptionFieldsTracker keeps today's pull: the update
+// writes the description and none of the acceptance criteria, design or
+// notes, which keep their local values even when the mapper fills them.
+func TestEnginePullDescriptionFieldsLeftAloneWithoutCapability(t *testing.T) {
+	local := newDescriptionFieldsLocal()
+	pulled := *local
+	pulled.Description = "Body, edited remotely"
+	pulled.AcceptanceCriteria = "Remote criteria"
+	pulled.Design = ""
+	pulled.Notes = "Remote notes"
+
+	updates := runDescriptionFieldsPull(t, false, local, &pulled)
+	if len(updates) != 1 {
+		t.Fatalf("pull wrote %d updates, want 1 for the remote description edit", len(updates))
+	}
+	if got := updates[0]["description"]; got != "Body, edited remotely" {
+		t.Errorf("update[description] = %#v, want %q", got, "Body, edited remotely")
+	}
+	for _, key := range []string{"acceptance_criteria", "design", "notes"} {
+		if got, ok := updates[0][key]; ok {
+			t.Errorf("update[%q] = %#v, want the field left out of the update", key, got)
+		}
+	}
+	if local.AcceptanceCriteria != "It works" || local.Design != "Plain" || local.Notes != "Remember" {
+		t.Errorf("local fields after pull = %q, %q, %q, want them unchanged", local.AcceptanceCriteria, local.Design, local.Notes)
+	}
+}
