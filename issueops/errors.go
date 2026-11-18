@@ -533,11 +533,17 @@ type DependencyHierarchyConflictError struct {
 // subtree no longer darkens it, and the sentence described a deadlock that no
 // longer happens. The refusal itself stands — a blocks edge is not the way to
 // say "I close after my children" — so the reason has to say what is.
+//
+// It also used to point at "bd gate", which has no way to say "this parent
+// waits on its children" and left the parent in bd ready (GH#6817). The close
+// gate already holds the parent open while a child is open; what the user
+// still needs is to keep it out of ready work, or to make other work wait on
+// its children, and the message names those two commands.
 func (e *DependencyHierarchyConflictError) Error() string {
 	if e.BlockerIsAncestor {
 		return fmt.Sprintf("%s cannot be blocked by its ancestor %s: %s cannot close until its descendants finish, so the gate would never clear",
 			e.IssueID, e.BlockerID, e.BlockerID)
 	}
-	return fmt.Sprintf("%s cannot be blocked by its descendant %s: waiting on your own subtree is a close gate, not a blocks edge — use a waits-for gate over the children (bd gate)",
-		e.IssueID, e.BlockerID)
+	return fmt.Sprintf("%s cannot be blocked by its descendant %s: waiting on your own subtree is a close gate, not a blocks edge, and %s already cannot close while a child is open — to keep it out of ready work use bd ready --exclude-parents; to make other work wait on its children use bd create --waits-for %s",
+		e.IssueID, e.BlockerID, e.IssueID, e.IssueID)
 }
