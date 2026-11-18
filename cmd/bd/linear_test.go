@@ -1966,6 +1966,182 @@ func TestLinearSyncOverlapKeepsEchoOfNameMappedStatus(t *testing.T) {
 	}
 }
 
+// linearSectionsFixture wires one Linear issue and its linked bead for the
+// description-section sync tests. The bead holds a description plus
+// acceptance criteria, design and notes with distinct marker texts; the
+// Linear issue holds what a previous sync pushed, as Linear stores it: the
+// description with those sections folded in, a blank line after each heading
+// (linearStoredDescription), and the create idempotency marker.
+type linearSectionsFixture struct {
+	api   *fakeLinearIssueAPI
+	store *linearSyncStore
+	sync  func(opts tracker.SyncOptions) *tracker.SyncResult
+}
+
+func newLinearSectionsFixture(t *testing.T) *linearSectionsFixture {
+	t.Helper()
+	ctx := context.Background()
+	t.Setenv("LINEAR_API_KEY", "test-api-key")
+	t.Setenv("LINEAR_OAUTH_CLIENT_ID", "")
+	t.Setenv("LINEAR_OAUTH_CLIENT_SECRET", "")
+
+	const ref = "https://linear.app/team/issue/TEAM-9"
+	now := time.Now().UTC()
+	linkedRef := ref
+	bead := types.Issue{
+		ID:                 "bd-9",
+		Title:              "Folds sections",
+		Description:        "DESC-MARK the description.",
+		AcceptanceCriteria: "AC-MARK the acceptance criteria.",
+		Design:             "DESIGN-MARK the design.",
+		Notes:              "NOTES-MARK the notes.",
+		Status:             types.StatusOpen,
+		Priority:           2,
+		IssueType:          types.TypeTask,
+		ExternalRef:        &linkedRef,
+		CreatedAt:          now.Add(-2 * time.Hour),
+		UpdatedAt:          now.Add(-90 * time.Minute),
+	}
+	pushed := linear.AppendIdempotencyMarker(
+		linear.BuildLinearDescription(&bead),
+		linear.GenerateIdempotencyMarker("bd-9", "pusher@example.com", bead.CreatedAt.UnixNano()),
+	)
+	api := &fakeLinearIssueAPI{
+		renderLikeLinear: true,
+		states: []linear.State{
+			{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			{ID: "state-progress", Name: "In Progress", Type: "started"},
+			{ID: "state-blocked", Name: "Blocked", Type: "started"},
+			{ID: "state-done", Name: "Done", Type: "completed"},
+		},
+		issue: linear.Issue{
+			ID:          "uuid-9",
+			Identifier:  "TEAM-9",
+			URL:         ref,
+			Title:       bead.Title,
+			Description: linearStoredDescription(pushed),
+			Priority:    3,
+			State:       &linear.State{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			CreatedAt:   now.Add(-2 * time.Hour).Format(time.RFC3339),
+			UpdatedAt:   now.Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	server := httptest.NewServer(api)
+	t.Cleanup(server.Close)
+	// The endpoint trust gate needs a workspace to key the pin on, and the
+	// store-config linear.api_endpoint is shared configuration that a
+	// private source must confirm before the key goes out.
+	setupEndpointTrustWorkspaceForTest(t)
+	t.Setenv("LINEAR_API_ENDPOINT", server.URL)
+
+	store := &linearSyncStore{
+		config: map[string]string{
+			"linear.team_id":               "team-1",
+			"linear.api_endpoint":          server.URL,
+			"linear.state_map.todo":        "open",
+			"linear.state_map.in progress": "in_progress",
+			"linear.state_map.blocked":     "blocked",
+			"linear.state_map.done":        "closed",
+		},
+		metadata: map[string]string{},
+		issue:    bead,
+	}
+
+	lt := &linear.Tracker{}
+	lt.SetTeamIDs([]string{"team-1"})
+	if err := lt.Init(ctx, store); err != nil {
+		t.Fatalf("Tracker.Init: %v", err)
+	}
+	if err := lt.ValidatePushStateMappings(ctx); err != nil {
+		t.Fatalf("ValidatePushStateMappings: %v", err)
+	}
+	return &linearSectionsFixture{
+		api:   api,
+		store: store,
+		sync: func(opts tracker.SyncOptions) *tracker.SyncResult {
+			t.Helper()
+			engine := tracker.NewEngine(lt, store, "test")
+			engine.PushHooks = buildLinearPushHooksForStore(ctx, store, lt, false)
+			result, err := engine.Sync(ctx, opts)
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			return result
+		},
+	}
+}
+
+// requireSplit fails unless the bead still holds its own description text and
+// the three marker fields, with no section headings or idempotency marker
+// folded into the description.
+func (f *linearSectionsFixture) requireSplit(t *testing.T) {
+	t.Helper()
+	if f.store.issue.Description != "DESC-MARK the description." {
+		t.Errorf("description = %q, want %q", f.store.issue.Description, "DESC-MARK the description.")
+	}
+	if f.store.issue.AcceptanceCriteria != "AC-MARK the acceptance criteria." ||
+		f.store.issue.Design != "DESIGN-MARK the design." ||
+		f.store.issue.Notes != "NOTES-MARK the notes." {
+		t.Errorf("fields = %q / %q / %q, want the marker texts",
+			f.store.issue.AcceptanceCriteria, f.store.issue.Design, f.store.issue.Notes)
+	}
+	if strings.Contains(f.store.issue.Description, "## ") ||
+		strings.Contains(f.store.issue.Description, "bd-idempotency") {
+		t.Errorf("description = %q, want no section headings or idempotency marker", f.store.issue.Description)
+	}
+}
+
+// TestLinearPullAfterPushIsAFixedPoint reproduces #8506 at the command
+// level: bd pushes a bead's acceptance criteria, design and notes folded
+// into the Linear description, Linear stores that text reformatted, and a
+// pull of it used to fold the sections into the bead's description — so
+// every later push added another copy. The pull must invert the push: the
+// description keeps its own text, the three fields keep their values, and a
+// second push sends nothing.
+func TestLinearPullAfterPushIsAFixedPoint(t *testing.T) {
+	f := newLinearSectionsFixture(t)
+
+	// A pull of the pushed description leaves the bead's split alone.
+	if result := f.sync(tracker.SyncOptions{Pull: true}); result.PullStats.Updated != 0 {
+		t.Fatalf("pull of the pushed description: PullStats = %+v, want no update", result.PullStats)
+	}
+	f.requireSplit(t)
+
+	// A local status change pushes the issue: the remote description carries
+	// each section heading exactly once, in Linear's stored form, without the
+	// create marker.
+	f.store.issue.Status = types.StatusInProgress
+	result := f.sync(tracker.SyncOptions{Push: true})
+	remote, updates := f.api.snapshot()
+	if result.PushStats.Updated != 1 || updates != 1 {
+		t.Fatalf("push: PushStats = %+v, issueUpdate calls = %d, want the issue pushed once", result.PushStats, updates)
+	}
+	for _, heading := range []string{"## Acceptance Criteria", "## Design", "## Notes"} {
+		if count := strings.Count(remote.Description, heading); count != 1 {
+			t.Fatalf("remote description holds %q %d times:\n%s", heading, count, remote.Description)
+		}
+	}
+	if strings.Contains(remote.Description, "bd-idempotency") {
+		t.Fatalf("remote description still holds the idempotency marker:\n%s", remote.Description)
+	}
+	if remote.State.ID != "state-progress" {
+		t.Fatalf("remote state = %s, want In Progress", remote.State.Name)
+	}
+
+	// The pull after the push keeps the bead's own description and fields.
+	if result := f.sync(tracker.SyncOptions{Pull: true}); result.PullStats.Updated != 0 {
+		t.Fatalf("pull after push: PullStats = %+v, want no update", result.PullStats)
+	}
+	f.requireSplit(t)
+
+	// And the next push sends nothing: the cycle is a fixed point.
+	result = f.sync(tracker.SyncOptions{Push: true})
+	if _, updates := f.api.snapshot(); result.PushStats.Updated != 0 || updates != 1 {
+		t.Fatalf("second push: PushStats = %+v, issueUpdate calls = %d, want no update", result.PushStats, updates)
+	}
+	f.requireSplit(t)
+}
+
 // fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes
 // for one team holding one issue: workflow states, labels (none), the
 // incremental issues query, which honours its updatedAt.gte filter, the
@@ -1976,6 +2152,26 @@ type fakeLinearIssueAPI struct {
 	states  []linear.State
 	issue   linear.Issue
 	updates int
+	// renderLikeLinear makes update() store a pushed description the way
+	// Linear does: a blank line after each markdown heading.
+	renderLikeLinear bool
+}
+
+// linearStoredDescription renders a description the way Linear stores pushed
+// markdown: a blank line after each heading, so a pull of it does not
+// byte-match the text bd sent.
+func linearStoredDescription(description string) string {
+	var b strings.Builder
+	for i, line := range strings.Split(description, "\n") {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(line)
+		if strings.HasPrefix(line, "## ") {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 func (f *fakeLinearIssueAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -2017,6 +2213,9 @@ func (f *fakeLinearIssueAPI) update(raw interface{}) {
 		f.issue.Title = title
 	}
 	if description, ok := input["description"].(string); ok {
+		if f.renderLikeLinear {
+			description = linearStoredDescription(description)
+		}
 		f.issue.Description = description
 	}
 	if priority, ok := input["priority"].(float64); ok {
@@ -2120,6 +2319,12 @@ func (s *linearSyncStore) ApplyIssueUpdate(_ context.Context, id string, updates
 			next.Title = text
 		case "description":
 			next.Description = text
+		case "acceptance_criteria":
+			next.AcceptanceCriteria = text
+		case "design":
+			next.Design = text
+		case "notes":
+			next.Notes = text
 		case "status":
 			next.Status = types.Status(text)
 		case "assignee":

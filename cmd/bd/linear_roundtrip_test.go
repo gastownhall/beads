@@ -704,7 +704,11 @@ func buildLinearPushHooksForTest(ctx context.Context, lt *linear.Tracker) *track
 			if remoteConv == nil || remoteConv.Issue == nil {
 				return false
 			}
-			return localComparable.ComputeContentHash() == remoteConv.Issue.ComputeContentHash()
+			// IssueToBeads splits the folded sections back into fields; fold
+			// both sides the same way before hashing, mirroring
+			// linear.PushFieldsEqualToBeads.
+			remoteComparable := linear.NormalizeIssueForLinearHash(remoteConv.Issue)
+			return localComparable.ComputeContentHash() == remoteComparable.ComputeContentHash()
 		},
 		BuildStateCache: func(ctx context.Context) (interface{}, error) {
 			return linear.BuildStateCacheFromTracker(ctx, lt)
