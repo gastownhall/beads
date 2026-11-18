@@ -1442,3 +1442,76 @@ func TestLinearPullInvertsPushDescription(t *testing.T) {
 		t.Errorf("second push carries %d Acceptance Criteria sections, want 1", n)
 	}
 }
+
+// TestPushFieldsEqualLinearStoredDescription checks that both push
+// comparators see an unchanged bead as equal to the description Linear
+// stored for its push (a blank line after each heading, with or without the
+// create's idempotency marker), and still see a changed body, section text
+// or section presence (GH#8506).
+func TestPushFieldsEqualLinearStoredDescription(t *testing.T) {
+	config := DefaultMappingConfig()
+	const marker = "<!-- bd-idempotency: a590f1df4a90 -->"
+	local := &types.Issue{
+		Title:              "fields pushed",
+		Description:        team9Parts.Description,
+		AcceptanceCriteria: team9Parts.AcceptanceCriteria,
+		Design:             team9Parts.Design,
+		Notes:              team9Parts.Notes,
+		Status:             types.StatusInProgress,
+		Priority:           2,
+	}
+	stored := linearStoredDescription(BuildLinearDescription(local))
+	remoteFor := func(description string) *Issue {
+		return &Issue{
+			Title:       local.Title,
+			Description: description,
+			Priority:    PriorityToLinear(local.Priority, config),
+			State:       &State{ID: "state-3", Name: "In Progress", Type: "started"},
+		}
+	}
+	beadsFor := func(description string) map[string]*types.Issue {
+		folded := &types.Issue{Title: local.Title, Description: description, Status: local.Status, Priority: local.Priority}
+		split := IssueToBeads(remoteFor(description), config).Issue.(*types.Issue)
+		split.Status, split.Priority = local.Status, local.Priority
+		return map[string]*types.Issue{"folded": folded, "split": split}
+	}
+
+	for name, description := range map[string]string{
+		"Linear stored":            stored,
+		"Linear stored and marker": AppendIdempotencyMarker(stored, marker),
+		"reporter's TEAM-9 text":   team9Description,
+	} {
+		if !PushFieldsEqual(local, remoteFor(description), config, nil) {
+			t.Errorf("%s: PushFieldsEqual = false, want the unchanged bead equal to %q", name, description)
+		}
+		for form, remote := range beadsFor(description) {
+			if !PushFieldsEqualToBeads(local, remote) {
+				t.Errorf("%s: PushFieldsEqualToBeads(%s remote) = false, want equal", name, form)
+			}
+		}
+	}
+
+	changed := map[string]func(*types.Issue){
+		"description body":  func(i *types.Issue) { i.Description = "DESC-MARK an edited description." },
+		"section text":      func(i *types.Issue) { i.AcceptanceCriteria = "AC-MARK edited criteria." },
+		"dropped section":   func(i *types.Issue) { i.Design = "" },
+		"two sections gone": func(i *types.Issue) { i.Notes, i.Design = "", "" },
+	}
+	for name, edit := range changed {
+		other := *local
+		edit(&other)
+		description := AppendIdempotencyMarker(linearStoredDescription(BuildLinearDescription(&other)), marker)
+		if PushFieldsEqual(local, remoteFor(description), config, nil) {
+			t.Errorf("%s: PushFieldsEqual = true for remote %q, want unequal", name, description)
+		}
+		for form, remote := range beadsFor(description) {
+			if PushFieldsEqualToBeads(local, remote) {
+				t.Errorf("%s: PushFieldsEqualToBeads(%s remote) = true, want unequal", name, form)
+			}
+		}
+		// The other direction: the local bead changed, Linear did not.
+		if PushFieldsEqual(&other, remoteFor(AppendIdempotencyMarker(stored, marker)), config, nil) {
+			t.Errorf("%s: PushFieldsEqual(edited local) = true, want unequal", name)
+		}
+	}
+}
