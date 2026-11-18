@@ -279,88 +279,6 @@ func TestProxiedServerAutoExport(t *testing.T) {
 		})
 	})
 
-	// AC-5: the fail-safe guards keep their direct-mode shape over the
-	// proxied read surface — a JSONL record this database cannot prove
-	// deleted, or an export that would empty a non-empty JSONL, refuses with
-	// the same warning, byte-for-byte unchanged file, and no state saved.
-	t.Run("foreign_record_refused", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "paxf")
-		paxEnableAutoExport(t, bd, p, "1ms")
-
-		bdProxiedCreateSilent(t, bd, p.dir, "Foreign guard keeper", "--type", "task")
-		bdProxiedCreateSilent(t, bd, p.dir, "Foreign guard second", "--type", "task")
-
-		foreign := `{"_type": "issue", "id": "pax-foreign-1", "title": "Record this store never had", "status": "open", "issue_type": "task"}` + "\n"
-		f, err := os.OpenFile(paxJSONL(p), os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.WriteString(foreign); err != nil {
-			t.Fatal(err)
-		}
-		f.Close()
-
-		before, _ := os.ReadFile(paxJSONL(p))
-		stateBefore, _ := os.ReadFile(paxState(p))
-
-		_, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "create", "--silent", "Trigger write", "--type", "task")
-		if err != nil {
-			t.Fatalf("trigger create: %v\n%s", err, stderr)
-		}
-		if !strings.Contains(stderr, "Warning: auto-export skipped:") || !strings.Contains(stderr, "refusing to overwrite") {
-			t.Fatalf("stderr lacks the direct-mode refusal warning:\n%s", stderr)
-		}
-
-		after, _ := os.ReadFile(paxJSONL(p))
-		if string(after) != string(before) {
-			t.Fatalf("refused export still rewrote issues.jsonl:\n%s", firstStreamDiff(string(before), string(after)))
-		}
-		stateAfter, _ := os.ReadFile(paxState(p))
-		if string(stateAfter) != string(stateBefore) {
-			t.Fatalf("refused export still saved state:\n%s\n%s", stateBefore, stateAfter)
-		}
-	})
-
-	t.Run("empty_overwrite_refused", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "paxe")
-		paxEnableAutoExport(t, bd, p, "1ms")
-
-		a := bdProxiedCreateSilent(t, bd, p.dir, "Will look infra", "--type", "task")
-
-		// Flip the only issue to an infra type in place: the JSONL keeps its
-		// record while the filtered export set becomes empty — the
-		// empty-overwrite guard's exact wedge shape. The trigger write is a
-		// comment, not a create: a new issue would re-populate the
-		// in-scope set and defuse the guard.
-		db := openProxiedDB(t, p)
-		if _, err := db.Exec("UPDATE issues SET issue_type = 'message' WHERE id = ?", a); err != nil {
-			t.Fatalf("flip issue_type: %v", err)
-		}
-		db.Close()
-
-		before, _ := os.ReadFile(paxJSONL(p))
-		stateBefore, _ := os.ReadFile(paxState(p))
-
-		_, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comment", a, "Trigger write")
-		if err != nil {
-			t.Fatalf("trigger comment: %v\n%s", err, stderr)
-		}
-		if !strings.Contains(stderr, "Warning: auto-export skipped:") || !strings.Contains(stderr, "refusing to overwrite") {
-			t.Fatalf("stderr lacks the empty-overwrite refusal:\n%s", stderr)
-		}
-
-		after, _ := os.ReadFile(paxJSONL(p))
-		if string(after) != string(before) {
-			t.Fatalf("refused export still rewrote issues.jsonl:\n%s", firstStreamDiff(string(before), string(after)))
-		}
-		stateAfter, _ := os.ReadFile(paxState(p))
-		if string(stateAfter) != string(stateBefore) {
-			t.Fatalf("refused export still saved state")
-		}
-	})
-
 	// AC-6: the acceptance oracle — the same corpus auto-exported from a
 	// proxied workspace and from a classic (embedded) workspace holding the
 	// same data must be byte-identical, and neither may carry infra,
@@ -494,4 +412,91 @@ func paxReadExportState(t *testing.T, p proxiedProject) exportAutoState {
 		t.Fatalf("parse export-state.json %s: %v", data, err)
 	}
 	return state
+}
+
+func TestProxiedServerAutoExportRefusalGuards(t *testing.T) {
+	requireSharedProxiedServer(t)
+	bd := buildEmbeddedBD(t)
+
+	// AC-5: the fail-safe guards keep their direct-mode shape over the
+	// proxied read surface — a JSONL record this database cannot prove
+	// deleted, or an export that would empty a non-empty JSONL, refuses with
+	// the same warning, byte-for-byte unchanged file, and no state saved.
+	t.Run("foreign_record_refused", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "paxf")
+		paxEnableAutoExport(t, bd, p, "1ms")
+
+		bdProxiedCreateSilent(t, bd, p.dir, "Foreign guard keeper", "--type", "task")
+		bdProxiedCreateSilent(t, bd, p.dir, "Foreign guard second", "--type", "task")
+
+		foreign := `{"_type": "issue", "id": "pax-foreign-1", "title": "Record this store never had", "status": "open", "issue_type": "task"}` + "\n"
+		f, err := os.OpenFile(paxJSONL(p), os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(foreign); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+
+		before, _ := os.ReadFile(paxJSONL(p))
+		stateBefore, _ := os.ReadFile(paxState(p))
+
+		_, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "create", "--silent", "Trigger write", "--type", "task")
+		if err != nil {
+			t.Fatalf("trigger create: %v\n%s", err, stderr)
+		}
+		if !strings.Contains(stderr, "Warning: auto-export skipped:") || !strings.Contains(stderr, "refusing to overwrite") {
+			t.Fatalf("stderr lacks the direct-mode refusal warning:\n%s", stderr)
+		}
+
+		after, _ := os.ReadFile(paxJSONL(p))
+		if string(after) != string(before) {
+			t.Fatalf("refused export still rewrote issues.jsonl:\n%s", firstStreamDiff(string(before), string(after)))
+		}
+		stateAfter, _ := os.ReadFile(paxState(p))
+		if string(stateAfter) != string(stateBefore) {
+			t.Fatalf("refused export still saved state:\n%s\n%s", stateBefore, stateAfter)
+		}
+	})
+
+	t.Run("empty_overwrite_refused", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "paxe")
+		paxEnableAutoExport(t, bd, p, "1ms")
+
+		a := bdProxiedCreateSilent(t, bd, p.dir, "Will look infra", "--type", "task")
+
+		// Flip the only issue to an infra type in place: the JSONL keeps its
+		// record while the filtered export set becomes empty — the
+		// empty-overwrite guard's exact wedge shape. The trigger write is a
+		// comment, not a create: a new issue would re-populate the
+		// in-scope set and defuse the guard.
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec("UPDATE issues SET issue_type = 'message' WHERE id = ?", a); err != nil {
+			t.Fatalf("flip issue_type: %v", err)
+		}
+		db.Close()
+
+		before, _ := os.ReadFile(paxJSONL(p))
+		stateBefore, _ := os.ReadFile(paxState(p))
+
+		_, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comment", a, "Trigger write")
+		if err != nil {
+			t.Fatalf("trigger comment: %v\n%s", err, stderr)
+		}
+		if !strings.Contains(stderr, "Warning: auto-export skipped:") || !strings.Contains(stderr, "refusing to overwrite") {
+			t.Fatalf("stderr lacks the empty-overwrite refusal:\n%s", stderr)
+		}
+
+		after, _ := os.ReadFile(paxJSONL(p))
+		if string(after) != string(before) {
+			t.Fatalf("refused export still rewrote issues.jsonl:\n%s", firstStreamDiff(string(before), string(after)))
+		}
+		stateAfter, _ := os.ReadFile(paxState(p))
+		if string(stateAfter) != string(stateBefore) {
+			t.Fatalf("refused export still saved state")
+		}
+	})
 }
