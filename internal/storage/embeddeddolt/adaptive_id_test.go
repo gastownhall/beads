@@ -204,4 +204,35 @@ func TestAdaptiveIDLengthSpansBothPlanes(t *testing.T) {
 			t.Fatalf("minted issue id %s: hash %q has %d chars, want 4", id, suffix, len(suffix))
 		}
 	})
+
+	t.Run("ExistingIDsAreUntouched", func(t *testing.T) {
+		te := newTestEnv(t, "mu")
+		ctx := t.Context()
+		strictProb(t, te, ctx)
+
+		durable := ids("mu-d%02d", 3)
+		live := ids("mu-wisp-w%02d", 2)
+		promoted := ids("mu-wisp-p%02d", 2)
+		seed(t, te, ctx, durable, false)
+		seed(t, te, ctx, live, true)
+		seed(t, te, ctx, promoted, false) // promoted-wisp-shaped ids in issues
+
+		issueID := mint(t, te, ctx, "new durable", false)
+		wispID := mint(t, te, ctx, "new wisp", true)
+
+		held := append(append(append([]string{}, durable...), live...), promoted...)
+		for _, id := range held {
+			if id == issueID || id == wispID {
+				t.Fatalf("mint re-used existing id %s", id)
+			}
+		}
+		for _, id := range append(append([]string{}, durable...), promoted...) {
+			te.assertRowExists(t, ctx, "issues", id)
+			te.assertIssueTitle(t, ctx, "issues", id, "seed "+id)
+		}
+		for _, id := range live {
+			te.assertRowExists(t, ctx, "wisps", id)
+			te.assertIssueTitle(t, ctx, "wisps", id, "seed "+id)
+		}
+	})
 }

@@ -24,7 +24,12 @@ P(collision) ≈ 1 - e^(-n²/2N)
 ```
 
 Where:
-- `n` = number of issues in database
+- `n` = the ID population sharing the minted ID's namespace: rows under the
+  prefix in the destination table (children excluded), plus the other
+  plane's rows in the prefix's exact namespace. Issues and wisps share one
+  ID space — a promoted wisp keeps its `<prefix>-wisp-*` ID in `issues`
+  while a demoted issue keeps its ID in `wisps` — so both planes' rows in
+  the namespace count toward the mint's collision risk.
 - `N` = total possible IDs (36^length for lowercase alphanumeric)
 
 ### Default Thresholds (25% max collision)

@@ -32,6 +32,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("DurableMintSizedAcrossBothPlanes", s.useCaseMintDurableSizedByWisps)
 	s.Run("LiveWispsDoNotLengthenBaseMint", s.useCaseMintLiveWispsExcluded)
 	s.Run("SubprefixedRowsStillLengthenBaseMint", s.useCaseMintSubprefixedTargetCounts)
+	s.Run("MintLeavesExistingIDsUnchanged", s.useCaseMintKeepsExistingIDs)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -1139,4 +1140,63 @@ func (s *testSuite) useCaseMintSubprefixedTargetCounts() {
 	s.Require().NoError(err)
 	s.Equal(4, s.hashSuffixLen(res.Issue.ID, "ucAd4"),
 		"the destination's sub-prefixed rows still count, so 10 rows must size to 4 characters, got %q", res.Issue.ID)
+}
+
+// useCaseMintKeepsExistingIDs pins that the combined count only sizes NEW
+// ids: minting over a populated namespace leaves every pre-existing issue
+// and wisp id where it was, in its own table, with its own content.
+func (s *testSuite) useCaseMintKeepsExistingIDs() {
+	s.resetAdaptiveMintConfig("ucAd5")
+	uc := s.issueUseCase()
+	type held struct{ table, title string }
+	seed := map[string]held{}
+	create := func(id, table, title string, ephemeral bool) {
+		seed[id] = held{table: table, title: title}
+		var err error
+		if ephemeral {
+			_, err = uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+				Issue:      &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+				ExplicitID: id, CreateOnly: true,
+			}, "seeder")
+		} else {
+			_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+				Issue:      &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2},
+				ExplicitID: id, CreateOnly: true,
+			}, "seeder")
+		}
+		s.Require().NoError(err, "seed %s", id)
+	}
+	for i := 1; i <= 3; i++ {
+		id := fmt.Sprintf("ucAd5-d%d", i)
+		create(id, "issues", "durable "+id, false)
+	}
+	for i := 1; i <= 2; i++ {
+		id := fmt.Sprintf("ucAd5-wisp-w%d", i)
+		create(id, "wisps", "live "+id, true)
+	}
+	for i := 1; i <= 2; i++ {
+		id := fmt.Sprintf("ucAd5-wisp-p%d", i)
+		create(id, "issues", "promoted "+id, false)
+	}
+
+	issueRes, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "new durable", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	wispRes, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "new wisp", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+	}, "tester")
+	s.Require().NoError(err)
+	for id := range seed {
+		s.NotEqual(id, issueRes.Issue.ID, "mint re-used existing id %s", id)
+		s.NotEqual(id, wispRes.Issue.ID, "mint re-used existing id %s", id)
+	}
+	for id, held := range seed {
+		var title string
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			fmt.Sprintf("SELECT title FROM %s WHERE id = ?", held.table), id).Scan(&title))
+		s.Equal(held.title, title, "existing id %s must keep its content in %s", id, held.table)
+	}
+	// Restore the suite's default collision bound for later subtests.
+	s.Require().NoError(NewConfigSQLRepository(s.Runner()).SetConfig(s.Ctx(), "max_collision_prob", ""))
 }

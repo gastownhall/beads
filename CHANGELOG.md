@@ -1431,6 +1431,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Adaptive hash-ID sizing counts IDs held in both issue planes.**
+  `issues` and `wisps` share one ID space: a promoted wisp keeps its
+  `<prefix>-wisp-*` ID in `issues` and a demoted issue keeps its ID in
+  `wisps`. The sizing count read only the table a new ID was minted into,
+  so a wisp namespace could fill up with promoted rows in `issues` while
+  new wisp IDs stayed at the minimum hash length — and IDs minted by
+  another clone that has not been pulled are invisible to the collision
+  probe, so the length is the only protection against them. Both minters
+  (embedded and proxied server) now add the other table's rows in the
+  prefix's exact namespace to the count. New IDs in an affected namespace
+  may be longer; no existing ID changes, and IDs in other namespaces do
+  not lengthen: live `<prefix>-wisp-*` wisps never count toward the base
+  prefix. (#6968, requested on #6754)
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

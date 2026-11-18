@@ -11,7 +11,11 @@ P(collision) ≈ 1 - e^(-n²/2N)
 ```
 
 Where:
-- **n** = number of issues in database
+- **n** = the ID population sharing the minted ID's namespace: rows under
+  the prefix in the destination table (children excluded), plus the other
+  plane's rows in the prefix's exact namespace (issues and wisps share one
+  ID space: a promoted wisp keeps its `<prefix>-wisp-*` ID in `issues`, a
+  demoted issue keeps its ID in `wisps`)
 - **N** = total possible IDs = 36^length (lowercase alphanumeric: `[a-z0-9]`)
 
 ## Collision Probability Table
