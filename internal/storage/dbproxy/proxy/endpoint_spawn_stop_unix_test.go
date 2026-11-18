@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -542,4 +544,94 @@ func TestSpawnTimeoutStopsChildWithSIGTERMFirst(t *testing.T) {
 	assert.FileExists(t, termed, "the timed-out child never received SIGTERM: it was killed outright")
 	// Well under the production spawnStopGrace (5s): no grace was waited out.
 	assert.Less(t, elapsed, spawnOpenWait+4*time.Second, "a child that exits on SIGTERM must not wait out the grace")
+}
+
+// shortenSpawnStopGrace sets spawnStopGrace for one test.
+func shortenSpawnStopGrace(t *testing.T, grace time.Duration) {
+	t.Helper()
+	previous := spawnStopGrace
+	spawnStopGrace = grace
+	t.Cleanup(func() { spawnStopGrace = previous })
+}
+
+// assertScriptChildGone reads the pid a script child recorded and asserts
+// the process no longer exists (killSpawnedChild reaps it before returning).
+func assertScriptChildGone(t *testing.T, pidPath string) {
+	t.Helper()
+	data, err := os.ReadFile(pidPath)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	require.NoError(t, err)
+	assert.ErrorIs(t, syscall.Kill(pid, 0), syscall.ESRCH, "timed-out child pid %d is still alive", pid)
+}
+
+// startTermTrapChild starts a shell child that records SIGTERM in termed but
+// keeps running, and waits until its trap is installed.
+func startTermTrapChild(t *testing.T, termed string) (*exec.Cmd, chan error) {
+	t.Helper()
+	ready := termed + ".ready"
+	script := `trap 'touch "$2"' TERM; touch "$1"; while :; do sleep 0.05; done`
+	cmd := exec.Command("/bin/sh", "-c", script, "sh", ready, termed)
+	require.NoError(t, cmd.Start())
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(ready)
+		return err == nil
+	}, spawnStopFailAfter, 10*time.Millisecond, "child never installed its SIGTERM trap")
+	return cmd, done
+}
+
+// AC-2 (#8489): a timed-out child still alive spawnStopGrace after SIGTERM is
+// killed, and the spawn returns inside open deadline + grace + confirm.
+func TestSpawnTimeoutKillsChildThatIgnoresSIGTERMAfterGrace(t *testing.T) {
+	grace := 500 * time.Millisecond
+	shortenSpawnStopGrace(t, grace)
+	root := t.TempDir()
+	termed := filepath.Join(root, "termed")
+	ready, pidPath := scriptProxyChild(t, root, `trap 'touch "`+termed+`"' TERM`)
+
+	elapsed, err := spawnUntilTimeout(t, root, ready)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timeout waiting for proxy to become ready on port 3307")
+	assert.NotContains(t, err.Error(), "safe child kill failed")
+	assert.FileExists(t, termed, "the child was killed without SIGTERM first")
+	assert.GreaterOrEqual(t, elapsed, spawnOpenWait+grace, "the child was killed before its SIGTERM grace ended")
+	assert.Less(t, elapsed, spawnOpenWait+grace+shutdownConfirmDeadline)
+	assertScriptChildGone(t, pidPath)
+}
+
+// AC-2: where a stop cannot be requested (Windows), the timed-out child is
+// killed at once rather than after the grace.
+func TestKillSpawnedChildKillsAtOnceWhenStopUnsupported(t *testing.T) {
+	shortenSpawnStopGrace(t, spawnStopFailAfter)
+	previous := requestSpawnedChildStopFn
+	requestSpawnedChildStopFn = func(*exec.Cmd) error { return errGracefulStopUnsupported }
+	t.Cleanup(func() { requestSpawnedChildStopFn = previous })
+
+	termed := filepath.Join(t.TempDir(), "termed")
+	cmd, done := startTermTrapChild(t, termed)
+	start := time.Now()
+	require.NoError(t, killSpawnedChild(&spawnedProxyChild{cmd: cmd, done: done}))
+	assert.Less(t, time.Since(start), shutdownConfirmDeadline, "an unsupported stop request must not wait out the grace")
+	assert.NoFileExists(t, termed)
+	assert.ErrorIs(t, syscall.Kill(cmd.Process.Pid, 0), syscall.ESRCH)
+}
+
+// AC-2: a kill whose exit is never confirmed still returns today's timeout
+// error, which spawnAndHandoff reports as "safe child kill failed".
+func TestKillSpawnedChildUnconfirmedKillStillErrors(t *testing.T) {
+	shortenSpawnStopGrace(t, 100*time.Millisecond)
+	termed := filepath.Join(t.TempDir(), "termed")
+	cmd, _ := startTermTrapChild(t, termed)
+	never := make(chan error)
+
+	err := killSpawnedChild(&spawnedProxyChild{cmd: cmd, done: never})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timeout (5s) waiting for pid "+strconv.Itoa(cmd.Process.Pid))
+	assert.FileExists(t, termed, "the child was killed without SIGTERM first")
 }
