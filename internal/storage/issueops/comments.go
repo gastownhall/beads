@@ -256,7 +256,14 @@ func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text 
 	if !exists {
 		return nil, fmt.Errorf("issue %s not found", issueID)
 	}
+	return insertIssueCommentInTx(ctx, tx, commentTable, issueID, author, text, createdAt, live)
+}
 
+// insertIssueCommentInTx writes a comment to commentTable ("comments" or
+// "wisp_comments") and records its event. The caller must already have found,
+// in tx, that issueID exists in the issue table commentTable belongs to; this
+// function does not check again.
+func insertIssueCommentInTx(ctx context.Context, tx *sql.Tx, commentTable, issueID, author, text string, createdAt time.Time, live bool) (*types.Comment, error) {
 	if live {
 		advanced, err := NextLiveCommentTime(ctx, tx, commentTable, issueID, createdAt)
 		if err != nil {

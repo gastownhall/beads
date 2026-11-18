@@ -353,6 +353,15 @@ func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, update
 // mints once after the last patch, so the version's durable_state carries the
 // patched labels and edges rather than the pre-patch row.
 func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool, mintVersion bool) (*UpdateResult, error) {
+	return updateIssueInTxFromRow(ctx, tx, id, nil, updates, actor, recordEvent, mintVersion)
+}
+
+// updateIssueInTxFromRow is updateIssueInTx for a caller that already holds
+// the row the update starts from, so the funnel does not read it again. current
+// must come from GetIssueInTx on tx, read after the last write tx made to the
+// issue or its lease (for a claim, the row read after the claim). A nil current
+// makes the funnel read the row itself.
+func updateIssueInTxFromRow(ctx context.Context, tx DBTX, id string, current *types.Issue, updates map[string]interface{}, actor string, recordEvent bool, mintVersion bool) (*UpdateResult, error) {
 	updates = cloneUpdateFields(updates)
 	// Pop the override before anything reads the map as a set of columns. It
 	// has to come out ahead of the no-op filter too: the filter keeps every key
@@ -374,7 +383,17 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// transaction — the CLI's old behavior — silently erased concurrent
 	// committed writes to sibling keys (GH audit: 7 of 200 exit-0
 	// --set-metadata writes lost).
-	oldIssue, updates, err := readIssueAndResolveMergeOps(ctx, tx, id, updates)
+	//
+	// A caller-supplied current row was read in this same transaction after
+	// its last write to the issue, so it is the row the read here would return.
+	var oldIssue *types.Issue
+	var err error
+	if current != nil {
+		oldIssue = current
+		updates, err = ResolveMergeOps(oldIssue, updates)
+	} else {
+		oldIssue, updates, err = readIssueAndResolveMergeOps(ctx, tx, id, updates)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +523,11 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		return nil, fmt.Errorf("failed to update issue: %w", err)
 	}
 
-	if clearLease {
+	// oldIssue was read in this transaction, through the leases LEFT JOIN,
+	// after every lease write the transaction made (a claim's insert included).
+	// lease_expires_at is NOT NULL, so a nil LeaseExpiresAt means no lease row
+	// and the DELETE would match nothing.
+	if clearLease && oldIssue.LeaseExpiresAt != nil {
 		if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
 			return nil, err
 		}

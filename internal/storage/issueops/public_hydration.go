@@ -8,20 +8,21 @@ import (
 )
 
 // HydrateIssueOperationResult returns a detached issue with requested relations.
+//
+// The labels and outgoing dependency records come from the table that answered
+// for the body (issues or wisps), read in tx, the same transaction as the body,
+// after every write the caller made in it. For an ID with a row in both tables
+// that is the durable row, as the body is.
 func HydrateIssueOperationResult(ctx context.Context, tx DBTX, id string, includeComments bool) (*types.Issue, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("hydrate issue operation result: transaction is nil")
 	}
-	issue, err := GetIssueInTx(ctx, tx, id)
+	issue, answeredFromWisps, err := getIssueInTxWithPlane(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
-	labels, err := GetLabelsInTx(ctx, tx, "", id)
-	if err != nil {
-		return nil, fmt.Errorf("hydrate issue labels: %w", err)
-	}
-	issue.Labels = labels
-	dependencies, err := GetDependencyRecordsForIssuesInTx(ctx, tx, []string{id})
+	_, _, _, dependencyTable := WispTableRouting(answeredFromWisps)
+	dependencies, err := GetDependencyRecordsForIssuesFromTableInTx(ctx, tx, dependencyTable, []string{id})
 	if err != nil {
 		return nil, fmt.Errorf("hydrate issue dependencies: %w", err)
 	}

@@ -33,12 +33,20 @@ func HistoryEntry(provenance, fallback string) string {
 	return fallback
 }
 
+// createConfigKeys are the settings a guarded create reads in its transaction. A
+// key missing here still works, at the cost of its own round trip.
+var createConfigKeys = []string{
+	"status.custom", "types.custom", "issue_prefix", "allowed_prefixes", "types.infra",
+	"issue_id_mode", "max_collision_prob", "min_hash_length", "max_hash_length",
+}
+
 // ExecuteCreate applies a guarded create in tx and reports durable tables changed.
 func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequest) (publicops.CreateResult, ChangedTables, error) {
 	attempt := CloneCreateRequest(request)
 	if err := ValidatePublicCreateRequest(attempt); err != nil {
 		return publicops.CreateResult{}, nil, err
 	}
+	ctx = withConfigSnapshot(ctx, createConfigKeys...)
 	batch, err := NewBatchContext(ctx, tx, storage.BatchCreateOptions{CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix})
 	if err != nil {
 		return publicops.CreateResult{}, nil, err
@@ -236,7 +244,10 @@ func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		updates[OpForceClosePolicy] = true
 	}
 	if len(updates) > 0 {
-		updated, err := updateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor, true, false)
+		// current was read in tx, and nothing in tx has written the row or its
+		// lease since (a claim's write comes before current is re-read above),
+		// so the funnel starts from it instead of reading the row again.
+		updated, err := updateIssueInTxFromRow(ctx, tx, attempt.IssueID, current, updates, attempt.Actor, true, false)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}

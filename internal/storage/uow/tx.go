@@ -242,7 +242,7 @@ func RunTxEphemeral[T any](ctx context.Context, p UnitOfWorkProvider, work TxRea
 // whole, so another writer's uncommitted change to one of those tables rides
 // in this commit, as it does in the DoltStore funnel. With nothing staged, or
 // under a deferred version commit, there is no Dolt commit. It is the uow
-// twin of the DoltStore funnel's post-transaction DOLT_ADD-per-table commit,
+// twin of the DoltStore funnel's post-transaction staged-table commit,
 // in the same order — the Dolt commit after the SQL COMMIT, never inside the
 // transaction, where it would be built from the transaction's start snapshot
 // (LatentLabsSpace/NEXUS#92) — and what a mutation that mostly touches

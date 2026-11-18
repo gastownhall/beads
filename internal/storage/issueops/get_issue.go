@@ -17,22 +17,32 @@ import (
 // if the ID is an active wisp. Returns storage.ErrNotFound (wrapped) if the
 // issue does not exist in either table.
 func GetIssueInTx(ctx context.Context, tx DBTX, id string) (*types.Issue, error) {
-	issue, err := getIssueFromTableInTx(ctx, tx, "issues", "labels", id)
+	issue, _, err := getIssueInTxWithPlane(ctx, tx, id)
+	return issue, err
+}
+
+// getIssueInTxWithPlane is GetIssueInTx that also reports which table returned
+// the row: answeredFromWisps is true only when the issues table had no row and
+// the wisps table did. It is the table the read succeeded on, not a guess from
+// the row's Ephemeral or NoHistory flags. The labels on the returned issue come
+// from that same table's label table.
+func getIssueInTxWithPlane(ctx context.Context, tx DBTX, id string) (issue *types.Issue, answeredFromWisps bool, err error) {
+	issue, err = getIssueFromTableInTx(ctx, tx, "issues", "labels", id)
 	if err == nil {
-		return issue, nil
+		return issue, false, nil
 	}
 	if !errors.Is(err, storage.ErrNotFound) {
-		return nil, err
+		return nil, false, err
 	}
 
 	issue, err = getIssueFromTableInTx(ctx, tx, "wisps", "wisp_labels", id)
 	if err == nil {
-		return issue, nil
+		return issue, true, nil
 	}
 	if errors.Is(err, storage.ErrNotFound) {
-		return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+		return nil, false, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 	}
-	return nil, err
+	return nil, false, err
 }
 
 // missingOptionalIssueTable reports whether err is the absence of the optional

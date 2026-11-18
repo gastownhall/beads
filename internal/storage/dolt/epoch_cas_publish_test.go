@@ -122,8 +122,11 @@ func (c epochArgConnector) Connect(ctx context.Context) (driver.Conn, error) {
 type epochArgConn struct{ *seqConn }
 
 func (c *epochArgConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	if strings.Contains(query, "DOLT_ADD") && len(args) == 1 {
-		c.parent.rec.add(c.id, fmt.Sprintf("STAGE %v", args[0].Value))
+	if strings.Contains(query, "DOLT_ADD") {
+		// One DOLT_ADD names every table the commit stages.
+		for _, arg := range args {
+			c.parent.rec.add(c.id, fmt.Sprintf("STAGE %v", arg.Value))
+		}
 	}
 	return c.seqConn.QueryContext(ctx, query, args)
 }

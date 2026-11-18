@@ -4,8 +4,59 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 )
+
+// configSnapshot holds one read of a known set of config keys for a single
+// transaction's run of settings lookups. Each lookup is otherwise a round trip
+// inside the transaction. It is not safe for concurrent use, which a transaction
+// already rules out.
+type configSnapshot struct {
+	keys   []string
+	values map[string]string
+	failed bool
+}
+
+type configSnapshotContextKey struct{}
+
+// withConfigSnapshot makes GetConfigInTx on the returned context answer keys from
+// one statement, sent by the first lookup of any of them. Use it for work inside
+// one transaction, whose reads see one state anyway. Any other key, and every key
+// after a failed read, is left to query its own row as it would have with no
+// snapshot.
+func withConfigSnapshot(ctx context.Context, keys ...string) context.Context {
+	return context.WithValue(ctx, configSnapshotContextKey{}, &configSnapshot{keys: keys})
+}
+
+func configSnapshotFrom(ctx context.Context) *configSnapshot {
+	snapshot, _ := ctx.Value(configSnapshotContextKey{}).(*configSnapshot)
+	return snapshot
+}
+
+// lookup reports key's value and whether the snapshot could answer at all.
+func (s *configSnapshot) lookup(ctx context.Context, tx DBTX, key string) (string, bool) {
+	if s.failed || !slices.Contains(s.keys, key) {
+		return "", false
+	}
+	if s.values == nil {
+		values, err := GetConfigKeysInTx(ctx, tx, s.keys...)
+		if err != nil {
+			s.failed = true
+			return "", false
+		}
+		s.values = values
+	}
+	return s.values[key], true
+}
+
+// dropConfigSnapshot makes the next lookup on ctx read the keys again. Every
+// config write in this package calls it.
+func dropConfigSnapshot(ctx context.Context) {
+	if snapshot := configSnapshotFrom(ctx); snapshot != nil {
+		snapshot.values, snapshot.failed = nil, false
+	}
+}
 
 // SetConfigInTx sets a configuration value within an existing transaction.
 // Normalizes issue_prefix by stripping trailing hyphens.
@@ -13,6 +64,7 @@ func SetConfigInTx(ctx context.Context, tx DBTX, key, value string) error {
 	if key == "issue_prefix" {
 		value = strings.TrimSuffix(value, "-")
 	}
+	dropConfigSnapshot(ctx)
 	_, err := tx.ExecContext(ctx, "REPLACE INTO config (`key`, value) VALUES (?, ?)", key, value)
 	if err != nil {
 		return fmt.Errorf("set config %s: %w", key, err)
@@ -23,6 +75,11 @@ func SetConfigInTx(ctx context.Context, tx DBTX, key, value string) error {
 // GetConfigInTx retrieves a configuration value within an existing transaction.
 // Returns ("", nil) if the key does not exist.
 func GetConfigInTx(ctx context.Context, tx DBTX, key string) (string, error) {
+	if snapshot := configSnapshotFrom(ctx); snapshot != nil {
+		if value, ok := snapshot.lookup(ctx, tx, key); ok {
+			return value, nil
+		}
+	}
 	var value string
 	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", key).Scan(&value)
 	if err == sql.ErrNoRows {
