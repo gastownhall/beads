@@ -2369,10 +2369,24 @@ func importJSONLForSync(reason string) {
 	// Tolerate the no-op case: when JSONL matches Dolt exactly, bd import
 	// produces "nothing to commit" from the underlying Dolt commit. That
 	// is success for our purposes.
-	if strings.Contains(string(out), "nothing to commit") {
+	if importOutputIsNoOp(out) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "beads: %s import warning: %v\n%s", reason, err, out)
+}
+
+// importOutputIsNoOp reports whether the output of a failed `bd import` shows
+// Dolt's "nothing to commit" no-op. A commit-incomplete or
+// commit-verification report is never that no-op, though its message, table
+// names or pattern names can contain the same words (GH#5433). The
+// subprocess's output is all the hook has, so this refuses the two reports by
+// their prefixes, as issueops.IsNothingToCommitError refuses their types.
+func importOutputIsNoOp(out []byte) bool {
+	s := string(out)
+	if strings.Contains(s, "commit incomplete:") || strings.Contains(s, "commit verification failed:") {
+		return false
+	}
+	return strings.Contains(s, "nothing to commit")
 }
 
 func warnJSONLWithoutDoltRemote(reason string) {

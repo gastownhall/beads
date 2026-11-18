@@ -143,7 +143,7 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, fo
 	registerBackupRemote(ctx, bs, dir)
 
 	if err := s.Commit(ctx, "bd backup restore"); err != nil {
-		if !strings.Contains(err.Error(), "nothing to commit") {
+		if !isDoltNothingToCommit(err) {
 			return restoreCommitError(err)
 		}
 	}

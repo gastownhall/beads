@@ -284,6 +284,31 @@ var (
 	ErrCommitIndeterminate = storage.ErrCommitIndeterminate
 )
 
+// UncommittedChangesError and ErrCommitVerificationFailed (payload
+// CommitVerificationError) are re-exported, as aliases, from the storage
+// layer: an embedded store's full commit, including the one RemoteStore's
+// Push and Pull make first, returns them when tracked changes stay in the
+// working set after it or when that could not be checked (GH#5433). Callers
+// errors.As or errors.Is them instead of parsing the message. Neither means
+// the writes failed: never replay them.
+type (
+	UncommittedChangesError = storage.UncommittedChangesError
+	CommitVerificationError = storage.CommitVerificationError
+	// CommitOutcome is CommitVerificationError.Outcome: what DOLT_COMMIT
+	// itself answered before the verification read failed.
+	CommitOutcome = storage.CommitOutcome
+)
+
+// ErrCommitVerificationFailed matches a commit whose completeness could not
+// be checked; the payload is a *CommitVerificationError.
+var ErrCommitVerificationFailed = storage.ErrCommitVerificationFailed
+
+// The CommitOutcome values.
+const (
+	CommitOutcomeSucceeded       = storage.CommitOutcomeSucceeded
+	CommitOutcomeNothingToCommit = storage.CommitOutcomeNothingToCommit
+)
+
 // IssueClaimer is the atomic-claim surface of a Storage. ClaimIssue and
 // ClaimReadyIssue live on the storage.BulkIssueStore extension rather than the
 // base Storage interface, so callers reach them by type-assertion via

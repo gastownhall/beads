@@ -675,19 +675,25 @@ var versionGatedDoltIgnorePatterns = []struct {
 // mainSource.migrate bootstraps it): treat that as version 0 and skip the
 // gated ones — the flip migration registers its own pattern when it applies.
 func doltIgnoreSeedCandidates(ctx context.Context, db DBConn) []string {
-	candidates := make([]string, 0, len(doltIgnorePatterns)+len(versionGatedDoltIgnorePatterns))
-	candidates = append(candidates, doltIgnorePatterns...)
 	mainVersion, err := mainSource.currentVersion(ctx, db)
 	if err != nil {
 		mainVersion = 0
 	}
+	return doltIgnorePatternsAt(mainVersion)
+}
+
+// doltIgnorePatternsAt is the canonical pattern set plus every version-gated
+// pattern a main cursor at mainVersion qualifies.
+func doltIgnorePatternsAt(mainVersion int) []string {
+	patterns := make([]string, 0, len(doltIgnorePatterns)+len(versionGatedDoltIgnorePatterns))
+	patterns = append(patterns, doltIgnorePatterns...)
 	for _, gated := range versionGatedDoltIgnorePatterns {
 		if mainVersion < gated.minMainVersion {
 			continue
 		}
-		candidates = append(candidates, gated.pattern)
+		patterns = append(patterns, gated.pattern)
 	}
-	return candidates
+	return patterns
 }
 
 // missingDoltIgnorePatterns reports which candidates have no row in

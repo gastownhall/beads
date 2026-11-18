@@ -2303,7 +2303,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if shouldWriteInitStateToDB(doltCfg.Gateway) {
 			if err := commitInitState(ctx, store); err != nil {
 				// Non-fatal: some setups (e.g. no tables yet) may have nothing to commit
-				if !strings.Contains(err.Error(), "nothing to commit") {
+				if !isDoltNothingToCommit(err) {
 					fmt.Fprintf(os.Stderr, "Warning: failed to commit initial state: %v\n", err)
 				}
 			}

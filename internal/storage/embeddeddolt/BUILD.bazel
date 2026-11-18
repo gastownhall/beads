@@ -16,6 +16,7 @@ go_library(
         "cache_cleanup.go",
         "child_id.go",
         "commenter.go",
+        "commit_verification.go",
         "config_metadata.go",
         "counter.go",
         "counts.go",

@@ -8,6 +8,7 @@ go_test(
         "docsync_test.go",
         "doltpin_test.go",
         "export_contract_test.go",
+        "incomplete_commit_recovery_test.go",
         "init_safety_recovery_test.go",
         "schema_encoding_drift_recovery_test.go",
     ],
