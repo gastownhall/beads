@@ -3,9 +3,13 @@ package dolt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestIsRetryableError(t *testing.T) {
@@ -107,6 +111,18 @@ func TestIsRetryableError(t *testing.T) {
 		{
 			name:     "typed 1105 with connection-like wording is not retryable",
 			err:      &mysql.MySQLError{Number: 1105, Message: "connection lost while validating commit"},
+			expected: false,
+		},
+		{
+			// The typed message still carries the cause's "invalid connection"
+			// text, which the substring checks below would match — but the
+			// retry boundary that classified it already decided not to replay
+			// (GH#5258).
+			name: "classified pool read timeout is not re-retried",
+			err: fmt.Errorf("read transaction: %w", &storage.ReadTimeoutError{
+				Timeout: 10 * time.Second,
+				Err:     mysql.ErrInvalidConn,
+			}),
 			expected: false,
 		},
 		{
