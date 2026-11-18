@@ -46,6 +46,7 @@
 
 100 11 TestEmbeddedKVConcurrent
 100 11 TestEmbeddedMemoryBareKeyRecallsKeysDeriveKeyChanges
+100 11 TestEmbeddedReadonlyWriteAccessDiagnostic
 100 11 TestEmbeddedTelemetryExportCarriesNoIssueContent
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
