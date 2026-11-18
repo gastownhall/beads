@@ -994,6 +994,91 @@ func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
 	}
 }
 
+// TestEmbeddedUpgradeAckConsumesVersionMarker pins why ack is deliberately
+// not a skip-store inspection: after status reports the upgrade without
+// consuming .local_version, ack rides the ordinary pre-run and reconciles
+// the marker in the same run. If ack were ever annotated like status and
+// review, the marker would strand at the old version and every later
+// status would keep reporting the upgrade forever.
+func TestEmbeddedUpgradeAckConsumesVersionMarker(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "uac")
+
+	localVersionPath := filepath.Join(beadsDir, localVersionFile)
+	writeMarker := func(v string) {
+		t.Helper()
+		if err := os.WriteFile(localVersionPath, []byte(v+"\n"), 0o600); err != nil {
+			t.Fatalf("write local version marker: %v", err)
+		}
+	}
+	marker := func() string {
+		t.Helper()
+		raw, err := os.ReadFile(localVersionPath)
+		if err != nil {
+			t.Fatalf("read local version marker: %v", err)
+		}
+		return strings.TrimSpace(string(raw))
+	}
+	writeMarker("0.9.0")
+
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		return stdout.String()
+	}
+
+	// The inspection reports the upgrade and leaves the marker for ack.
+	statusOut := run("upgrade", "status", "--json")
+	var reported struct {
+		Upgraded        bool   `json:"upgraded"`
+		PreviousVersion string `json:"previous_version"`
+	}
+	if err := json.Unmarshal([]byte(statusOut), &reported); err != nil {
+		t.Fatalf("parse upgrade status before ack: %v\nstdout:\n%s", err, statusOut)
+	}
+	if !reported.Upgraded || reported.PreviousVersion != "0.9.0" {
+		t.Fatalf("bd upgrade status before ack: upgraded=%v previous=%q, want true and 0.9.0; stdout:\n%s",
+			reported.Upgraded, reported.PreviousVersion, statusOut)
+	}
+	if got := marker(); got != "0.9.0" {
+		t.Fatalf("bd upgrade status consumed the marker before ack: .local_version = %q, want 0.9.0", got)
+	}
+
+	// ack keeps the ordinary pre-run, so it reconciles the marker now.
+	ackOut := run("upgrade", "ack", "--json")
+	var acked struct {
+		Acknowledged bool `json:"acknowledged"`
+	}
+	if err := json.Unmarshal([]byte(ackOut), &acked); err != nil {
+		t.Fatalf("parse upgrade ack: %v\nstdout:\n%s", err, ackOut)
+	}
+	if !acked.Acknowledged {
+		t.Fatalf("bd upgrade ack did not acknowledge; stdout:\n%s", ackOut)
+	}
+	if got := marker(); got != Version {
+		t.Fatalf("bd upgrade ack did not reconcile the marker: .local_version = %q, want the running %q", got, Version)
+	}
+
+	// With the marker reconciled, the inspection goes quiet — if ack ever
+	// took the skip-store path, this would still report the upgrade.
+	settledOut := run("upgrade", "status", "--json")
+	var settled struct {
+		Upgraded bool `json:"upgraded"`
+	}
+	if err := json.Unmarshal([]byte(settledOut), &settled); err != nil {
+		t.Fatalf("parse settled upgrade status: %v\nstdout:\n%s", err, settledOut)
+	}
+	if settled.Upgraded {
+		t.Fatalf("bd upgrade status still reports an upgrade after ack reconciled the marker; stdout:\n%s", settledOut)
+	}
+}
+
 func TestEmbeddedChangeDirOverridesInheritedBeadsDir(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	callerDir, callerBeadsDir, _ := bdInit(t, bd, "--prefix", "caller")
