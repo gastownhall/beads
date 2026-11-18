@@ -457,7 +457,9 @@ func TestTrackBdVersion_ReleaseCandidateOrdering(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			localVersionPath := newTrackingWorkspace(t, tt.lastVersion, tt.binVersion)
 
-			trackBdVersion()
+			// A detected upgrade is held pending until its maintenance settles
+			// (#6929); the caller persists it, as main does after maintenance.
+			trackBdVersion().persist()
 
 			if versionUpgradeDetected != tt.wantDetected {
 				t.Errorf("versionUpgradeDetected = %v, want %v", versionUpgradeDetected, tt.wantDetected)
