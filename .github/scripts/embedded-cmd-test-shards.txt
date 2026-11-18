@@ -90,6 +90,7 @@
 100 20 TestEmbeddedMetadatalessWorkspaceEnvVarSelectsDatabase
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
 100 20 TestEmbeddedUpdateClaimPassesStaleBlockedFlag
+100 20 TestEmbeddedUpgradeStatusDoesNotMigrate
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
 100 21 TestEmbeddedConfigGetIsReadOnly
