@@ -820,7 +820,7 @@ bd migrate schema
 
 ### `Duplicate key name 'idx_wisp_dep_type_issue'`
 
-Older releases could fail to open a clone with this error:
+A clone can fail to open with this error:
 
 ```text
 ignored migrations: migration 0005_drop_wisp_dependencies_generated_column.up.sql:
@@ -831,13 +831,23 @@ The failing step reshapes `wisp_dependencies`, the clone-local table that holds
 wisp dependencies. It hits clones whose shared schema was already migrated
 while their clone-local schema was several steps behind. The shared migration
 had already created the step's indexes on that table, so the step could not add
-them again. The step stopped before recording itself, so every later open
-tried it again and failed the same way.
+them again. By then the step had already dropped the table's generated column
+and its foreign keys. The next open does not fail: the step finds nothing left
+to drop and records itself as done, and the table stays without its foreign
+keys.
 
-Current releases repair `wisp_dependencies` before that step runs. They keep
-every valid dependency row and restore the table's keys and constraints. To
-recover, install a current release and run any `bd` command in the affected
-clone. You need no manual SQL.
+When the clone's own upgrade takes its shared schema past main migration 0058,
+current releases repair `wisp_dependencies` before that step runs, even on a
+clone that was opened again after the failure. They keep every valid
+dependency row and restore the table's keys and constraints. To recover such a
+clone, install a current release and run any `bd` command in it. You need no
+manual SQL.
+
+A clone whose shared schema was already past 0058, for example one that
+adopted the schema from a clone that migrated first, gets no such repair from
+current releases. Once its next open has recorded the step, only `bd doctor`
+reports the missing keys: in server mode it lists them under `Clone-Local FKs`,
+and `bd doctor --fix` deletes the rows they would reject and adds them back.
 
 Two related limits still apply:
 
@@ -845,7 +855,7 @@ Two related limits still apply:
   migration gate refusal, a dirty working set and a missing migration consent.
   It does not get past a migration step that fails partway, so a failing step
   still blocks those commands.
-- Some reports that show this error also show a later `table not found: new`
+- Some reports that show this error also show an earlier `table not found: new`
   failure in main migration 0053. That failure has not been reproduced and is
   not fixed by this repair. If you see it, keep the full error output and
   report it.
