@@ -956,6 +956,42 @@ func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
 			upgradeReview.PreviousVersion, "0.9.0", stdout.String())
 	}
 	assertMarkerPreserved("bd upgrade review")
+
+	// Invocation 3: the first ordinary store-backed command performs the
+	// deferred reconciliation — the marker advances to the running version.
+	list := exec.Command(bd, "list", "--json")
+	list.Dir = dir
+	list.Env = bdEnv(dir)
+	stdout, stderr, err = runCommandBuffers(t, list)
+	if err != nil {
+		t.Fatalf("bd list failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	raw, err = os.ReadFile(localVersionPath)
+	if err != nil {
+		t.Fatalf("read local version after bd list: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != Version {
+		t.Fatalf("bd list did not reconcile the deferred marker: .local_version = %q, want the running %q", got, Version)
+	}
+
+	// With the marker reconciled, the inspection stops reporting the
+	// upgrade its preview runs kept visible until now.
+	final := exec.Command(bd, "upgrade", "status", "--json")
+	final.Dir = dir
+	final.Env = bdEnv(dir)
+	stdout, stderr, err = runCommandBuffers(t, final)
+	if err != nil {
+		t.Fatalf("bd upgrade status after reconciliation failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var settled struct {
+		Upgraded bool `json:"upgraded"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &settled); err != nil {
+		t.Fatalf("parse settled upgrade status: %v\nstdout:\n%s", err, stdout.String())
+	}
+	if settled.Upgraded {
+		t.Errorf("bd upgrade status still reports an upgrade after bd list reconciled the marker; stdout:\n%s", stdout.String())
+	}
 }
 
 func TestEmbeddedChangeDirOverridesInheritedBeadsDir(t *testing.T) {
