@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -887,4 +888,207 @@ func (s *testSuite) applyGraphWispRouting() {
 	s.Equal(res.IDs["p"], wispDeps[0].dependsOnID)
 	s.Equal("depends_on_wisp_id", wispDeps[0].targetColumn(),
 		"wisp-target dep must use depends_on_wisp_id, got %+v", wispDeps[0])
+}
+
+// TestIssueUseCase_CallerNamedChildAdvancesParentCounter pins the proxied
+// create (bd-qp2au6, #4750): a child the caller names (`bd create --id P.8`)
+// must raise the parent's child_counters row to its suffix, as the issueops
+// create does (#5122), so the slot is never minted again once P.8 is gone.
+func (s *testSuite) TestIssueUseCase_CallerNamedChildAdvancesParentCounter() {
+	s.resetMintConfig("cn", "")
+	s.Run("ExplicitChildRaisesCounterAndBlocksSuffixReuse", s.useCaseCallerNamedChildRaisesCounter)
+	s.Run("CounterHoldsTheSuffixWhileTheChildIsHardDeleted", s.useCaseCallerNamedSuffixNotReminted)
+	s.Run("PresetChildIDRaisesCounter", s.useCasePresetChildIDRaisesCounter)
+	s.Run("ParentFirstBatchRaisesCounter", s.useCaseBatchCallerNamedChildRaisesCounter)
+	s.Run("UpsertKeepsTheCounter", s.useCaseUpsertKeepsCallerNamedCounter)
+}
+
+// requireCounterRow reads parent's child_counters row and fails the test with
+// the bd-qp2au6 message when it is missing.
+func (s *testSuite) requireCounterRow(parentID string, want int) {
+	var lastChild int
+	err := s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT last_child FROM child_counters WHERE parent_id = ?", parentID).Scan(&lastChild)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.Fail(fmt.Sprintf("no child_counters row for %s; want last_child = %d", parentID, want))
+		return
+	}
+	s.Require().NoError(err)
+	s.Equal(want, lastChild, "caller-named child must advance %s's child counter", parentID)
+}
+
+// hardDeleteIssue removes an issue row with no tombstone, the way a hand edit
+// or a pre-#4750 sweep did: every auxiliary row cascades, so the suffix is
+// left with no record that it was ever used.
+func (s *testSuite) hardDeleteIssue(id string) {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM issues WHERE id = ?", id)
+	s.Require().NoError(err)
+}
+
+func (s *testSuite) useCaseCallerNamedChildRaisesCounter() {
+	uc := s.issueUseCase()
+
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "parent", IssueType: types.TypeEpic, Priority: 2},
+		ExplicitID: "cn-p",
+	}, "tester")
+	s.Require().NoError(err)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "named child", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "cn-p.8",
+	}, "tester")
+	s.Require().NoError(err)
+
+	s.requireCounterRow("cn-p", 8)
+
+	// Hard-delete the child with no tombstone: the counter is now the only
+	// record the suffix was used, so the mint must pass over .8.
+	s.hardDeleteIssue("cn-p.8")
+	minted, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:    &types.Issue{Title: "minted child", IssueType: types.TypeTask, Priority: 2},
+		ParentID: "cn-p",
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("cn-p.9", minted.Issue.ID, "a minted child must not reuse the hard-deleted cn-p.8 suffix")
+}
+
+// The reuse the bug report names: with the counter already at 7, a base-tree
+// mint after the hard delete lands on .8 again — the same id the caller just
+// watched disappear.
+func (s *testSuite) useCaseCallerNamedSuffixNotReminted() {
+	uc := s.issueUseCase()
+	for _, id := range []string{"cn-p2", "cn-p2.7", "cn-p2.8"} {
+		_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: id, IssueType: types.TypeTask, Priority: 2},
+			ExplicitID: id,
+		}, "tester")
+		s.Require().NoError(err)
+	}
+	s.requireCounterRow("cn-p2", 8)
+
+	s.hardDeleteIssue("cn-p2.8")
+	minted, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:    &types.Issue{Title: "minted child", IssueType: types.TypeTask, Priority: 2},
+		ParentID: "cn-p2",
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("cn-p2.9", minted.Issue.ID, "the counter at 8 must hold .8 taken even with the row gone")
+}
+
+// A preset Issue.ID (no ExplicitID, no ParentID) is as caller-named as an
+// explicit one: createIDNamedByCaller covers both forms.
+func (s *testSuite) useCasePresetChildIDRaisesCounter() {
+	uc := s.issueUseCase()
+
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "parent", IssueType: types.TypeEpic, Priority: 2},
+		ExplicitID: "cn-p3",
+	}, "tester")
+	s.Require().NoError(err)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{ID: "cn-p3.4", Title: "preset child", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.requireCounterRow("cn-p3", 4)
+}
+
+// A batch that names the parent first: the child's create inside
+// createMany runs the same shared body, so it inherits the advance.
+func (s *testSuite) useCaseBatchCallerNamedChildRaisesCounter() {
+	uc := s.issueUseCase()
+	_, err := uc.CreateIssues(s.Ctx(), []domain.CreateIssueParams{
+		{Issue: &types.Issue{Title: "parent", IssueType: types.TypeEpic, Priority: 2}, ExplicitID: "cn-p4"},
+		{Issue: &types.Issue{Title: "batch child", IssueType: types.TypeTask, Priority: 2}, ExplicitID: "cn-p4.6"},
+	}, "tester")
+	s.Require().NoError(err)
+	s.requireCounterRow("cn-p4", 6)
+}
+
+// Re-creating an existing caller-named child is an upsert on this path (no
+// CreateOnly): it must not error, and the monotonic advance stays a no-op.
+func (s *testSuite) useCaseUpsertKeepsCallerNamedCounter() {
+	uc := s.issueUseCase()
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "parent", IssueType: types.TypeEpic, Priority: 2},
+		ExplicitID: "cn-p5",
+	}, "tester")
+	s.Require().NoError(err)
+
+	child := domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "named child", IssueType: types.TypeTask, Priority: 2}, ExplicitID: "cn-p5.8",
+	}
+	_, err = uc.CreateIssue(s.Ctx(), child, "tester")
+	s.Require().NoError(err)
+	_, err = uc.CreateIssue(s.Ctx(), child, "tester")
+	s.Require().NoError(err, "re-creating an existing caller-named child is an upsert")
+
+	var rows int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM issues WHERE id = ?", "cn-p5.8").Scan(&rows))
+	s.Equal(1, rows)
+	s.requireCounterRow("cn-p5", 8)
+}
+
+// TestIssueUseCase_CallerNamedChildNeverLowersTheCounter: the advance is
+// monotonic through the real create path (AC-3). A caller-named child below
+// the parent's counter leaves it where it was; one above it raises it.
+func (s *testSuite) TestIssueUseCase_CallerNamedChildNeverLowersTheCounter() {
+	s.resetMintConfig("cn", "")
+	uc := s.issueUseCase()
+	s.seedIssueRow("cn-hi")
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)", "cn-hi", 10)
+	s.Require().NoError(err)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "low child", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "cn-hi.8",
+	}, "tester")
+	s.Require().NoError(err)
+	s.requireCounterRow("cn-hi", 10)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "high child", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "cn-hi.12",
+	}, "tester")
+	s.Require().NoError(err)
+	s.requireCounterRow("cn-hi", 12)
+}
+
+// TestIssueUseCase_CallerNamedWispChildAdvancesWispCounter: through the real
+// CreateWisp path (AC-4), a caller-named child of a wisp parent advances the
+// parent's wisp_child_counters row and leaves child_counters unchanged.
+func (s *testSuite) TestIssueUseCase_CallerNamedWispChildAdvancesWispCounter() {
+	s.resetMintConfig("cn", "")
+	uc := s.issueUseCase()
+	_, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "wisp parent", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		ExplicitID: "cn-w",
+	}, "tester")
+	s.Require().NoError(err)
+	before := durableCounterRows(s.counterTablesFingerprint())
+
+	_, err = uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "wisp child", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		ExplicitID: "cn-w.3",
+	}, "tester")
+	s.Require().NoError(err)
+
+	s.requireCounterTable("wisp_child_counters", "cn-w", 3)
+	s.Equal(before, durableCounterRows(s.counterTablesFingerprint()),
+		"a wisp parent's caller-named child must leave child_counters unchanged")
+}
+
+// durableCounterRows keeps only the child_counters lines of a
+// counterTablesFingerprint.
+func durableCounterRows(fingerprint string) string {
+	var b strings.Builder
+	for _, line := range strings.SplitAfter(fingerprint, "\n") {
+		if strings.HasPrefix(line, "child_counters:") {
+			b.WriteString(line)
+		}
+	}
+	return b.String()
 }
