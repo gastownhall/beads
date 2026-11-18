@@ -204,8 +204,10 @@ Two rules follow, and a federated deployment owes both:
    exchange state is meaningless across the bridge: the remote view is a full
    interval old by construction, so a reaper over there would be judging
    liveness from data older than the lease itself. `bd reclaim` defaults its
-   grace to 2× the lease TTL; raise the TTL (or the grace) above your sync
-   interval, never shrink the interval to fit them.
+   grace to 10m, twice the default 5m lease TTL; raise the TTL with
+   `bd config set claim.lease-ttl <duration>` (or the grace with
+   `--older-than`) above your sync interval, never shrink the interval to fit
+   them.
 2. **Reclaim belongs to the granting replica.** Each lease records the replica
    that granted it, and `bd reclaim` skips a lease granted elsewhere, naming
    it on stderr. Reap dead workers on the machine that hired them.

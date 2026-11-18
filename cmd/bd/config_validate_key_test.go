@@ -13,7 +13,7 @@ func TestIsRecognizedConfigKey(t *testing.T) {
 		"doctor.suppress.git-hooks", "no-git-ops", "beads.role",
 		"status.custom", "types.custom", "types.infra", "ai.model",
 		"backup.enabled", "import.path", "dolt.local-only", "agent.profile",
-		"claim.pools",
+		"claim.pools", "claim.lease-ttl",
 		// Tracker namespaces are derived from the registry (GH#4427); cover
 		// ado (the original bug) plus the others removed from the static list.
 		"ado.org", "ado.project", "github.token", "linear.api-key",
@@ -118,6 +118,19 @@ func TestLevenshteinDistance(t *testing.T) {
 		got := levenshteinDistance(tt.a, tt.b)
 		if got != tt.want {
 			t.Errorf("levenshteinDistance(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+func TestValidateClaimLeaseTTL(t *testing.T) {
+	for _, value := range []string{"30m", "48h", "1h30m"} {
+		if err := validateClaimLeaseTTL(value); err != nil {
+			t.Errorf("validateClaimLeaseTTL(%q) = %v, want nil", value, err)
+		}
+	}
+	for _, value := range []string{"", "0", "0s", "-5m", "90", "soon"} {
+		if err := validateClaimLeaseTTL(value); err == nil {
+			t.Errorf("validateClaimLeaseTTL(%q) = nil, want an error", value)
 		}
 	}
 }
