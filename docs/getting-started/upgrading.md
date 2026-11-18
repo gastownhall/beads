@@ -818,6 +818,38 @@ bd migrate --dry-run
 bd migrate schema
 ```
 
+### `Duplicate key name 'idx_wisp_dep_type_issue'`
+
+Older releases could fail to open a clone with this error:
+
+```text
+ignored migrations: migration 0005_drop_wisp_dependencies_generated_column.up.sql:
+Error 1105 (HY000): Duplicate key name 'idx_wisp_dep_type_issue'
+```
+
+The failing step reshapes `wisp_dependencies`, the clone-local table that holds
+wisp dependencies. It hits clones whose shared schema was already migrated
+while their clone-local schema was several steps behind. The shared migration
+had already created the step's indexes on that table, so the step could not add
+them again. The step stopped before recording itself, so every later open
+tried it again and failed the same way.
+
+Current releases repair `wisp_dependencies` before that step runs. They keep
+every valid dependency row and restore the table's keys and constraints. To
+recover, install a current release and run any `bd` command in the affected
+clone. You need no manual SQL.
+
+Two related limits still apply:
+
+- The lenient open used by `bd dolt commit` and `bd vc commit` skips only a
+  migration gate refusal, a dirty working set and a missing migration consent.
+  It does not get past a migration step that fails partway, so a failing step
+  still blocks those commands.
+- Some reports that show this error also show a later `table not found: new`
+  failure in main migration 0053. That failure has not been reproduced and is
+  not fixed by this repair. If you see it, keep the full error output and
+  report it.
+
 ### Recovery after upgrade
 
 If you need to restore from a backup:
