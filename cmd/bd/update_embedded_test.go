@@ -609,6 +609,117 @@ func TestEmbeddedUpdateFieldsNotesClearAndDefer(t *testing.T) {
 		}
 	})
 
+	// GH#8149: the description, design and acceptance fields follow the
+	// --clear-notes contract on the direct route.
+	textFieldsIntact := func(t *testing.T, id, title string) {
+		t.Helper()
+		got := bdShow(t, bd, dir, id)
+		if got.Title != title || got.Description != "precious text" || got.Design != "the plan" || got.AcceptanceCriteria != "done when green" || got.Notes != "keep notes" {
+			t.Errorf("%s changed: title=%q description=%q design=%q acceptance=%q notes=%q", id, got.Title, got.Description, got.Design, got.AcceptanceCriteria, got.Notes)
+		}
+	}
+	createWithText := func(t *testing.T, title string) *types.Issue {
+		t.Helper()
+		return bdCreate(t, bd, dir, title, "--type", "task",
+			"--description", "precious text", "--design", "the plan",
+			"--acceptance", "done when green", "--notes", "keep notes")
+	}
+
+	t.Run("update_empty_text_fields_refused_gh8149", func(t *testing.T) {
+		issue := createWithText(t, "Empty text guard")
+		other := createWithText(t, "Empty text guard other")
+		emptyFile := filepath.Join(t.TempDir(), "empty.md")
+		if err := os.WriteFile(emptyFile, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			args     []string
+			wantFlag string
+		}{
+			{[]string{"--description="}, "--clear-description"},
+			{[]string{"--body="}, "--clear-description"},
+			{[]string{"-m", ""}, "--clear-description"},
+			{[]string{"--description=", "--force", "--allow-empty-description"}, "--clear-description"},
+			{[]string{"--design="}, "--clear-design"},
+			{[]string{"--design-file", emptyFile}, "--clear-design"},
+			{[]string{"--acceptance="}, "--clear-acceptance"},
+			{[]string{"--acceptance-criteria="}, "--clear-acceptance"},
+			// A second requested change and a second ID are not applied either.
+			{[]string{"--title", "Renamed", "--design="}, "--clear-design"},
+			{[]string{other.ID, "--title", "Renamed", "--acceptance="}, "--clear-acceptance"},
+			{[]string{"--json", "--description="}, "--clear-description"},
+		} {
+			args := append([]string{issue.ID}, tc.args...)
+			out := bdUpdateFail(t, bd, dir, args...)
+			if !strings.Contains(out, tc.wantFlag) {
+				t.Errorf("%v: expected refusal naming %s, got:\n%s", tc.args, tc.wantFlag, out)
+			}
+		}
+		textFieldsIntact(t, issue.ID, "Empty text guard")
+		textFieldsIntact(t, other.ID, "Empty text guard other")
+	})
+
+	t.Run("update_clear_text_fields_gh8149", func(t *testing.T) {
+		issue := createWithText(t, "Text clear verbs")
+
+		bdUpdate(t, bd, dir, issue.ID, "--clear-design")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Design != "" || got.Description != "precious text" || got.AcceptanceCriteria != "done when green" || got.Notes != "keep notes" {
+			t.Fatalf("--clear-design: description=%q design=%q acceptance=%q notes=%q", got.Description, got.Design, got.AcceptanceCriteria, got.Notes)
+		}
+
+		// Clears compose, ride a conditional guard, and clearing an
+		// already-empty field is harmless.
+		bdUpdate(t, bd, dir, issue.ID, "--clear-description", "--clear-acceptance", "--clear-design", "--if-assignee", "")
+		got = bdShow(t, bd, dir, issue.ID)
+		if got.Design != "" || got.Description != "" || got.AcceptanceCriteria != "" || got.Notes != "keep notes" || got.Title != "Text clear verbs" {
+			t.Fatalf("combined clears: title=%q description=%q design=%q acceptance=%q notes=%q", got.Title, got.Description, got.Design, got.AcceptanceCriteria, got.Notes)
+		}
+	})
+
+	t.Run("update_clear_text_fields_conflict_gh8149", func(t *testing.T) {
+		issue := createWithText(t, "Text clear conflicts")
+		for _, args := range [][]string{
+			{"--clear-description", "--description", "x"},
+			{"--clear-description", "--body", "x"},
+			{"--clear-design", "--design", "x"},
+			{"--clear-acceptance", "--acceptance", "x"},
+			{"--clear-acceptance", "--acceptance-criteria", "x"},
+		} {
+			out := bdUpdateFail(t, bd, dir, append([]string{issue.ID}, args...)...)
+			if !strings.Contains(out, "none of the others can be") {
+				t.Errorf("%v: expected mutual-exclusion error, got:\n%s", args, out)
+			}
+		}
+		textFieldsIntact(t, issue.ID, "Text clear conflicts")
+	})
+
+	t.Run("update_empty_file_description_opt_in_gh8149", func(t *testing.T) {
+		issue := createWithText(t, "Empty file description")
+		emptyFile := filepath.Join(t.TempDir(), "empty.md")
+		if err := os.WriteFile(emptyFile, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--body-file", emptyFile)
+		if !strings.Contains(out, "--allow-empty-description") || !strings.Contains(out, "--clear-description") {
+			t.Errorf("expected refusal naming both the opt-in and --clear-description, got:\n%s", out)
+		}
+		textFieldsIntact(t, issue.ID, "Empty file description")
+
+		bdUpdate(t, bd, dir, issue.ID, "--body-file", emptyFile, "--allow-empty-description")
+		if got := bdShow(t, bd, dir, issue.ID); got.Description != "" || got.Design != "the plan" {
+			t.Errorf("opt-in clear: description=%q design=%q", got.Description, got.Design)
+		}
+	})
+
+	t.Run("create_empty_text_fields_unchanged_gh8149", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Create empty text", "--type", "task",
+			"--description", "", "--design", "", "--acceptance", "")
+		if issue.Description != "" || issue.Design != "" || issue.AcceptanceCriteria != "" {
+			t.Errorf("create: description=%q design=%q acceptance=%q", issue.Description, issue.Design, issue.AcceptanceCriteria)
+		}
+	})
+
 	t.Run("update_defer", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Defer test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--defer", "2099-01-15")

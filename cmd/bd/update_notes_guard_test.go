@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// TestValidateNotesUpdateRejectsInlineEmpty pins the deliberate contrast with
-// the description guard: an inline empty value IS refused here, because a
-// dead command substitution reaches the flag layer as exactly that (GH#6021)
-// and notes has no stdin/file input to scope the guard to. The refusal must
+// TestValidateNotesUpdateRejectsInlineEmpty pins that an inline empty value
+// is refused, because a dead command substitution reaches the flag layer as
+// exactly that (GH#6021; GH#8149 applies the same rule to the description,
+// design and acceptance fields on update). The refusal must
 // name the verb that clears deliberately.
 func TestValidateNotesUpdateRejectsInlineEmpty(t *testing.T) {
 	err := validateNotesUpdate("")

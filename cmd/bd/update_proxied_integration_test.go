@@ -158,6 +158,60 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("empty_text_fields_refused_clear_flags_clear_gh8149", func(t *testing.T) {
+		// GH#8149 on the proxied route: gatherUpdateInput refuses an empty
+		// description/design/acceptance before any request leaves the CLI,
+		// and the per-field --clear-* verbs authorize the erase.
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "uetc")
+		issue := bdProxiedCreate(t, bd, p.dir, "Text clear guard",
+			"--description", "precious text", "--design", "the plan",
+			"--acceptance", "done when green", "--notes", "keep notes")
+		for _, tc := range []struct {
+			args     []string
+			wantFlag string
+		}{
+			{[]string{"--description="}, "--clear-description"},
+			{[]string{"--body="}, "--clear-description"},
+			{[]string{"--design="}, "--clear-design"},
+			{[]string{"--acceptance="}, "--clear-acceptance"},
+			{[]string{"--acceptance-criteria="}, "--clear-acceptance"},
+			{[]string{"--title", "Renamed", "--description="}, "--clear-description"},
+		} {
+			args := append([]string{"update", issue.ID}, tc.args...)
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			if err == nil {
+				t.Fatalf("%v: expected refusal\nstdout:\n%s\nstderr:\n%s", tc.args, stdout, stderr)
+			}
+			if !strings.Contains(stderr, tc.wantFlag) {
+				t.Errorf("%v: expected stderr to name %s, got: %s", tc.args, tc.wantFlag, stderr)
+			}
+		}
+		for _, args := range [][]string{
+			{"--clear-description", "--description", "x"},
+			{"--clear-design", "--design", "x"},
+			{"--clear-acceptance", "--acceptance", "x"},
+		} {
+			out := bdProxiedUpdateFail(t, bd, p.dir, append([]string{issue.ID}, args...)...)
+			if !strings.Contains(out, "none of the others can be") {
+				t.Errorf("%v: expected mutual-exclusion error, got: %s", args, out)
+			}
+		}
+		got := bdProxiedShow(t, bd, p.dir, issue.ID)
+		if got.Title != "Text clear guard" || got.Description != "precious text" || got.Design != "the plan" || got.AcceptanceCriteria != "done when green" {
+			t.Fatalf("refused updates changed the issue: title=%q description=%q design=%q acceptance=%q", got.Title, got.Description, got.Design, got.AcceptanceCriteria)
+		}
+
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--clear-design")
+		if updated.Design != "" || updated.Description != "precious text" || updated.AcceptanceCriteria != "done when green" || updated.Notes != "keep notes" {
+			t.Errorf("--clear-design: description=%q design=%q acceptance=%q notes=%q", updated.Description, updated.Design, updated.AcceptanceCriteria, updated.Notes)
+		}
+		updated = bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--clear-description", "--clear-acceptance")
+		if updated.Description != "" || updated.AcceptanceCriteria != "" || updated.Notes != "keep notes" {
+			t.Errorf("combined clears: description=%q acceptance=%q notes=%q", updated.Description, updated.AcceptanceCriteria, updated.Notes)
+		}
+	})
+
 	t.Run("claim_sets_assignee_and_in_progress", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "uc")
