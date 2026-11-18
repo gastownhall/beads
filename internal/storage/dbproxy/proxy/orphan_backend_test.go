@@ -368,3 +368,106 @@ func TestSpawnAndHandoffStartsNoChildWhenReapFails(t *testing.T) {
 	assert.ErrorContains(t, err, infoPath)
 	assert.NotContains(t, err.Error(), "spawn reached", "no proxy child may be forked while the orphan cannot be stopped")
 }
+
+// TestCleanupOrphanBackendRefusalsNeverReadServerInfo pins #8489 AC-8: a
+// held proxy-child.lock, a malformed record, an unverifiable live record and
+// a root-ID mismatch keep today's refusal error, and sql-server.info is
+// never consulted — a fully matching dolt named there stays alive.
+func TestCleanupOrphanBackendRefusalsNeverReadServerInfo(t *testing.T) {
+	// matchingCandidate would be killed if the refusal paths ever reached the
+	// reap: a dolt running this root's launch snapshot.
+	matchingCandidate := func(root string) *fakeOrphanCandidate {
+		return &fakeOrphanCandidate{
+			basename: "dolt",
+			cmdline:  "dolt sql-server --config " + filepath.Join(root, server.LaunchConfigFileName),
+		}
+	}
+	installSeam := func(t *testing.T, root string) *fakeOrphanCandidate {
+		t.Helper()
+		fake := matchingCandidate(root)
+		opened := false
+		installOrphanCandidate(t, func(int) (orphanCandidate, bool, error) {
+			opened = true
+			return fake, false, nil
+		})
+		t.Cleanup(func() {
+			assert.False(t, opened, "a refusal path must never open the candidate sql-server.info names")
+		})
+		return fake
+	}
+
+	t.Run("held child lock", func(t *testing.T) {
+		root := t.TempDir()
+		helper := startHelperProcess(t)
+		require.NoError(t, pidfile.Write(root, server.PIDFileName, v2Record(t, root, pidfile.KindDoltBackend, helper)))
+		writeServerInfo(t, root, 4242)
+		fake := installSeam(t, root)
+
+		proxyLock, err := util.TryLock(filepath.Join(root, LockFileName))
+		require.NoError(t, err)
+		defer proxyLock.Unlock()
+		childLock, err := util.TryLock(filepath.Join(root, server.LockFileName))
+		require.NoError(t, err)
+		defer childLock.Unlock()
+
+		err = cleanupOrphanBackend(root)
+		require.ErrorContains(t, err, "refusing backend cleanup")
+		assert.False(t, fake.killed)
+		assertHelperAlive(t, helper)
+	})
+
+	t.Run("malformed record", func(t *testing.T) {
+		root := t.TempDir()
+		require.NoError(t, os.WriteFile(pidfile.Path(root, server.PIDFileName), []byte(`{"pid":`), 0o600))
+		writeServerInfo(t, root, 4242)
+		fake := installSeam(t, root)
+
+		proxyLock, err := util.TryLock(filepath.Join(root, LockFileName))
+		require.NoError(t, err)
+		defer proxyLock.Unlock()
+
+		err = cleanupOrphanBackend(root)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrUnverifiableProcess)
+		assert.False(t, fake.killed)
+	})
+
+	t.Run("unverifiable live record", func(t *testing.T) {
+		root := t.TempDir()
+		helper := startHelperProcess(t)
+		require.NoError(t, pidfile.Write(root, server.PIDFileName, pidfile.PidFile{
+			Pid:  helper.cmd.Process.Pid,
+			Port: 3306,
+		}))
+		writeServerInfo(t, root, 4242)
+		fake := installSeam(t, root)
+
+		proxyLock, err := util.TryLock(filepath.Join(root, LockFileName))
+		require.NoError(t, err)
+		defer proxyLock.Unlock()
+
+		err = cleanupOrphanBackend(root)
+		require.ErrorContains(t, err, "unverifiable live process")
+		assert.False(t, fake.killed)
+		assertHelperAlive(t, helper)
+	})
+
+	t.Run("root identity mismatch", func(t *testing.T) {
+		root := t.TempDir()
+		helper := startHelperProcess(t)
+		pf := v2Record(t, root, pidfile.KindDoltBackend, helper)
+		pf.RootID = "different-workspace"
+		require.NoError(t, pidfile.Write(root, server.PIDFileName, pf))
+		writeServerInfo(t, root, 4242)
+		fake := installSeam(t, root)
+
+		proxyLock, err := util.TryLock(filepath.Join(root, LockFileName))
+		require.NoError(t, err)
+		defer proxyLock.Unlock()
+
+		err = cleanupOrphanBackend(root)
+		require.ErrorContains(t, err, "root identity mismatch")
+		assert.False(t, fake.killed)
+		assertHelperAlive(t, helper)
+	})
+}
