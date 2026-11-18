@@ -30,7 +30,7 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 
 A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
 
-On macOS, bd no longer reads `~/Library/Application Support/bd/config.yaml` or the global `~/Library/Application Support/beads/PRIME.md`: probing that folder can raise a macOS privacy prompt (GH#8113). Move any settings there to `~/.config/bd/config.yaml` (and PRIME.md to `~/.config/beads/`); `bd doctor` lists the settings that differ and prints the commands. On the first run after upgrading, bd carries the metrics settings from the old file into the new one when the new one does not set them.
+On macOS, bd no longer reads `~/Library/Application Support/bd/config.yaml` or the global `~/Library/Application Support/beads/PRIME.md`: probing that folder can raise a macOS privacy prompt (GH#8113). The macOS user config directory is now `$XDG_CONFIG_HOME` when set, otherwise `~/.config`, for both `bd/config.yaml` and `beads/PRIME.md`. Move any settings in the old file to `~/.config/bd/config.yaml` (and PRIME.md to `~/.config/beads/`); `bd doctor` lists the settings that differ and prints the commands. bd reads the old file only when the new config has no `metrics.disabled` (normally once, after upgrading) and carries the metrics settings (`metrics.disabled`, `metrics.endpoint`, `metrics.notice_shown`) into the new config. If the old file cannot be read or parsed, metrics are left off. If the new config cannot be written, bd leaves the old folder alone and metrics stay off on macOS until the user config sets `metrics.disabled` or `BD_DISABLE_METRICS` is set. Paths are unchanged on Linux and Windows.
 
 ### Missing `metadata.json`
 
