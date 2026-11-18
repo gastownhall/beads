@@ -7,7 +7,11 @@ import "strings"
 // that already have uncommitted changes in the working set. Both series are
 // checked before any numbered migration or rekey runs, so that refusal
 // applies none of them (MigrateUp's seed and cursor-heal preparations may
-// already have run). The dependency re-key returns this type too, when it
+// already have run). Ignored migrations that become pending only after the
+// main series ran (a sentinel table went missing mid-pass) are refused by a
+// later backstop with a plain error instead, because main steps have already
+// committed by then (gastownhall/beads#5168); the next open refuses them
+// here, typed. The dependency re-key returns this type too, when it
 // would rewrite such a table, but its plan-time refusal comes after the main
 // series (each step committed) and the custom status and type backfill have
 // run. Dolt-ignored tables (wisps, wisp_comments, ...) are exempt: their rows
