@@ -62,6 +62,14 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if err := briefModeConflictFromFlags(cmd); err != nil {
 			return err
 		}
+		// The same one-body rule as --brief above: the special modes below
+		// answer different questions than the parent-excluded listing, so
+		// the refusal is decided here and in the gatherer, never inside a
+		// branch the gatherer's tests cannot reach (see
+		// excludeParentsModeConflict).
+		if err := excludeParentsModeConflictFromFlags(cmd); err != nil {
+			return err
+		}
 
 		if usesProxiedServer() {
 			// The proxied ready role cannot enforce a row cap, including on
@@ -860,6 +868,10 @@ func init() {
 	readyCmd.Flags().Bool("flat", false, "Alias for --plain, spelled the way bd list spells it")
 	readyCmd.Flags().Bool("include-deferred", false, "Include issues with future defer_until timestamps")
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
+	// GH#6817. The exclusion follows the close gate's open-children rule, so
+	// what this flag hides is exactly what `bd close` still refuses.
+	readyCmd.Flags().Bool("exclude-parents", false,
+		"Exclude parents with non-closed child issues (including pinned children).")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")

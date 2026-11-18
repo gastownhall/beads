@@ -89,6 +89,7 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.ParentID, _ = cmd.Flags().GetString("parent")
 	in.IncludeDeferred, _ = cmd.Flags().GetBool("include-deferred")
 	in.IncludeEphemeral, _ = cmd.Flags().GetBool("include-ephemeral")
+	in.ExcludeParentsWithOpenChildren, _ = cmd.Flags().GetBool("exclude-parents")
 	in.ExcludeTypes, _ = cmd.Flags().GetStringSlice("exclude-type")
 
 	if molTypeStr, _ := cmd.Flags().GetString("mol-type"); molTypeStr != "" {
@@ -112,6 +113,9 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 		return in, HandleErrorRespectJSON("--claim cannot be combined with --explain")
 	}
 	if err := briefModeConflict(in.Brief, in.claim, in.gated, in.explain, in.molID, in.jsonOut); err != nil {
+		return in, err
+	}
+	if err := excludeParentsModeConflict(in.ExcludeParentsWithOpenChildren, in.gated, in.explain, in.molID); err != nil {
 		return in, err
 	}
 	if in.Offset > 0 && in.claim {
@@ -315,4 +319,52 @@ func briefModeConflictFromFlags(cmd *cobra.Command) error {
 	explain, _ := cmd.Flags().GetBool("explain")
 	molID, _ := cmd.Flags().GetString("mol")
 	return briefModeConflict(brief, claim, gated, explain, molID, jsonOutput)
+}
+
+// excludeParentsModeConflict reports the usage error for an --exclude-parents
+// combination that no route can honor, and nil when there is none.
+//
+// --exclude-parents (GH#6817) narrows the ORDINARY ready listing: the same
+// rows `bd ready` shows, minus the parents the close gate counts open
+// children for. The special modes answer different questions — --gated lists
+// molecules ready for gate-resume, --mol lists one molecule's steps, and
+// --explain reports the whole graph's readiness reasoning — so none of them
+// has a parent-excluded listing to narrow. A flag those routes take and
+// ignore is the silent no-op this feature exists to close, so each
+// combination is a usage error naming both flags.
+//
+// --claim is deliberately NOT refused here: a claim's pool is the very same
+// exclusive set, in the same ready order (issueops.ClaimReadyIssueInTx
+// claims the first eligible member of GetReadyWorkInTx's answer), so
+// `bd ready --exclude-parents --claim` is the "claim anything but a parent"
+// request the flag owes its caller.
+//
+// IT IS ONE BODY WITH TWO CALLERS, exactly like briefModeConflict above it:
+// readyCmd's RunE dispatches the special modes before gathering, so the
+// checks have to run above the dispatch, and the gatherer calls them for
+// every other arrival — the proxied route included.
+func excludeParentsModeConflict(excludeParents, gated, explain bool, molID string) error {
+	if !excludeParents {
+		return nil
+	}
+	switch {
+	case gated:
+		return HandleErrorRespectJSON("--gated cannot be combined with --exclude-parents")
+	case molID != "":
+		return HandleErrorRespectJSON("--mol cannot be combined with --exclude-parents")
+	case explain:
+		return HandleErrorRespectJSON("--explain cannot be combined with --exclude-parents")
+	}
+	return nil
+}
+
+// excludeParentsModeConflictFromFlags is readyCmd's entry to the check above,
+// reading the mode flags off the command because it runs before
+// gatherReadyInput has.
+func excludeParentsModeConflictFromFlags(cmd *cobra.Command) error {
+	excludeParents, _ := cmd.Flags().GetBool("exclude-parents")
+	gated, _ := cmd.Flags().GetBool("gated")
+	explain, _ := cmd.Flags().GetBool("explain")
+	molID, _ := cmd.Flags().GetString("mol")
+	return excludeParentsModeConflict(excludeParents, gated, explain, molID)
 }

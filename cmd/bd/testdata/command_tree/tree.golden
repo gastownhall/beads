@@ -6155,6 +6155,7 @@ bd ready
   flag --brief type=bool default="false" usage="Omit the free-form text (description, design, acceptance criteria, notes, payload, waiters) from each row. Filters that read those fields still select on them. An omitted field is indistinguishable from an empty one; fetch a whole issue with bd show. Requires --json, and cannot be combined with --claim, --gated, --mol or --explain."
   flag --claim type=bool default="false" usage="Atomically claim the first ready issue matching the filters"
   flag --exclude-label type=stringSlice default="[]" usage="Exclude issues that have ANY of these labels"
+  flag --exclude-parents type=bool default="false" usage="Exclude parents with non-closed child issues (including pinned children)."
   flag --exclude-type type=stringSlice default="[]" usage="Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)"
   flag --explain type=bool default="false" usage="Show dependency-aware reasoning for why issues are ready or blocked"
   flag --flat type=bool default="false" usage="Alias for --plain, spelled the way bd list spells it"
