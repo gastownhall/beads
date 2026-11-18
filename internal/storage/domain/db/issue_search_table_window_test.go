@@ -11,7 +11,8 @@ import (
 // TestIssueSearchUnionWindow's Go-side-sort membership cases: #5587 fixed the
 // union seam, and these pin the routes that never reach it — SkipWisps and an
 // empty/missing wisps table — where searchTable/scanFilterIDs and the counts
-// twin's finishSearchCountsPage trimmed to the limit with no sort anywhere
+// twin (then its own finishSearchCountsPage, since removed; its ID window now
+// rides the same scanFilterIDs) trimmed to the limit with no sort anywhere
 // (bd-69c1a), and a reversed id sort additionally kept the byte-FIRST rows
 // because sqlbuild.Less ignored sortDesc for "id" (bd-jao3t).
 //

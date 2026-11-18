@@ -75,6 +75,7 @@ go_test(
         "issue_scan_parity_test.go",
         "issue_search_counts_missing_table_test.go",
         "issue_search_counts_test.go",
+        "issue_search_counts_window_test.go",
         "issue_search_missing_table_test.go",
         "issue_search_table_window_test.go",
         "issue_search_test.go",
