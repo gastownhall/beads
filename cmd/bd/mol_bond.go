@@ -815,7 +815,7 @@ func discoverMolBondOperand(ctx context.Context, localStore storage.DoltStorage,
 		}, nil
 	}
 	parser := formula.NewParser()
-	f, loadErr := parser.LoadByName(operand)
+	f, loadErr := loadFormulaByNameOrPath(parser, operand)
 	if loadErr == nil {
 		// Discovery must fail the same way materialization would, and
 		// materialization (resolveAndCookFormulaWithVars) resolves inheritance
@@ -942,7 +942,7 @@ func resolveOrDescribe(ctx context.Context, s molReader, operand string, vars ma
 	}
 
 	parser := formula.NewParser()
-	f, err := parser.LoadByName(operand)
+	f, err := loadFormulaByNameOrPath(parser, operand)
 	if err != nil {
 		return nil, "", fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
 	}

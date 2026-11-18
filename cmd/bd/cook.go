@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"runtime"
 	"sort"
 	"strings"
@@ -152,20 +153,58 @@ func parseCookFlags(cmd *cobra.Command, args []string) (*cookFlags, error) {
 	}, nil
 }
 
+// loadFormulaByNameOrPath resolves a formula argument as a registry name
+// first (the parser's search paths: .beads/formulas/ and friends) and as a
+// formula file path second. bd cook has resolved its argument this way since
+// it learned registry names, but the resolver behind bd mol pour, wisp, bond
+// and seed stayed name-only, so `bd mol pour ./x.formula.toml` failed while
+// `bd cook ./x.formula.toml` worked. Every command now shares this one lookup.
+//
+// When both lookups miss, the error that reaches the caller is the one the
+// argument was most plausibly meant to hit. An argument written as a path
+// reports the file error, so an unreadable or syntactically broken formula
+// file is named as such instead of as a registry miss. A bare name reports
+// the registry miss, so callers that fall through to a proto or issue lookup
+// (pour, wisp, bond) keep their "not found" message.
+func loadFormulaByNameOrPath(parser *formula.Parser, nameOrPath string) (*formula.Formula, error) {
+	f, nameErr := parser.LoadByName(nameOrPath)
+	if nameErr == nil {
+		return f, nil
+	}
+	f, pathErr := parser.ParseFile(nameOrPath)
+	if pathErr == nil {
+		return f, nil
+	}
+	if looksLikeFormulaPath(nameOrPath) {
+		return nil, pathErr
+	}
+	return nil, nameErr
+}
+
+// looksLikeFormulaPath reports whether a formula argument was written as a
+// file path: it has a directory component, carries a formula file extension,
+// or names a file that exists.
+func looksLikeFormulaPath(arg string) bool {
+	if strings.ContainsAny(arg, `/\`) {
+		return true
+	}
+	if strings.HasSuffix(arg, formula.FormulaExtTOML) || strings.HasSuffix(arg, formula.FormulaExtJSON) {
+		return true
+	}
+	_, err := os.Stat(arg)
+	return err == nil
+}
+
 // loadAndResolveFormula parses a formula file and applies all transformations.
 // It first tries to load by name from the formula registry (.beads/formulas/),
 // and falls back to parsing as a file path if that fails.
 func loadAndResolveFormula(formulaPath string, searchPaths []string) (*formula.Formula, error) {
 	parser := formula.NewParser(searchPaths...)
 
-	// Try to load by name first (from .beads/formulas/ registry)
-	f, err := parser.LoadByName(formulaPath)
+	// Registry name first, file path second.
+	f, err := loadFormulaByNameOrPath(parser, formulaPath)
 	if err != nil {
-		// Fall back to parsing as a file path
-		f, err = parser.ParseFile(formulaPath)
-		if err != nil {
-			return nil, fmt.Errorf("parsing formula: %w", err)
-		}
+		return nil, fmt.Errorf("parsing formula: %w", err)
 	}
 
 	// Resolve inheritance
@@ -744,8 +783,10 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 	// Create parser with search paths
 	parser := formula.NewParser(searchPaths...)
 
-	// Load formula by name
-	f, err := parser.LoadByName(formulaName)
+	// Registry name first, file path second: the same resolution contract as
+	// bd cook, so a formula file outside every search path pours, wisps,
+	// bonds and seeds the way it cooks.
+	f, err := loadFormulaByNameOrPath(parser, formulaName)
 	if err != nil {
 		return nil, fmt.Errorf("loading formula %q: %w", formulaName, err)
 	}
