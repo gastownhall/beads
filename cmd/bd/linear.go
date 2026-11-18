@@ -240,6 +240,10 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 	threshold, _ := cmd.Flags().GetDuration("threshold")
 	noWait, _ := cmd.Flags().GetBool("no-wait")
 
+	if err := createOnlyDirectionError("Linear", createOnly, (pull || pullIfStale) && !push); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
 	if pullIfStale {
 		beadsDir := resolveBeadsDirForStaleness()
 		if beadsDir != "" {
