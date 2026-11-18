@@ -2647,7 +2647,7 @@ func TestEnsureGlobalDatabaseRefusesBelowRequiredMin(t *testing.T) {
 		t.Fatal(err)
 	}
 	raiseRequiredMinForTest(t)
-	err = doltserver.EnsureGlobalDatabase("127.0.0.1", port, "root", "")
+	err = doltserver.EnsureGlobalDatabase("127.0.0.1", port, "root", "", nil)
 	if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
 		t.Fatalf("EnsureGlobalDatabase = %v, want ErrBelowRequiredMin before CREATE DATABASE", err)
 	}

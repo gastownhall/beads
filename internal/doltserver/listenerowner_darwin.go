@@ -3,17 +3,22 @@
 package doltserver
 
 import (
+	"context"
 	"errors"
+	"net/netip"
 	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
-// The two process reads classifyListener makes on darwin; tests replace them.
+// The lsof reads classifyListener and classifyListenerAt make on darwin;
+// tests replace them. Both walk the process tree through processParents.
 var (
-	listeningPIDs  = lsofListeningPIDs
-	processParents = psParentPIDs
+	listeningPIDs    = lsofListeningPIDs
+	listeningSockets = lsofListeningSockets
 )
 
 var listenerOwnershipChecked = true
@@ -68,33 +73,15 @@ func processExists(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// descendsFrom reports whether p is ancestor itself or one of its
-// descendants, walking p's parent chain through parents (child -> parent).
-// A chain that reaches a pid the snapshot does not list, pid 0, or a cycle
-// (a stale snapshot) is not a match.
-func descendsFrom(p, ancestor int, parents map[int]int) bool {
-	seen := map[int]bool{}
-	for p > 0 && !seen[p] {
-		if p == ancestor {
-			return true
-		}
-		seen[p] = true
-		next, ok := parents[p]
-		if !ok {
-			return false
-		}
-		p = next
-	}
-	return false
-}
-
 // lsofListeningPIDs lists the processes holding a TCP listener on port.
 // -n and -P skip host and port name lookups, which otherwise dominate the
 // run time; -t prints one pid per line. lsof exits 1 with no output when
 // nothing matches, which is reported as no listener, not as an error, so the
 // caller treats both the same way.
 func lsofListeningPIDs(port int) ([]int, error) {
-	out, err := exec.Command("lsof", "-nP", "-t", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN").Output() //nolint:gosec // G702: port is an internal int, not user input
+	ctx, cancel := context.WithTimeout(context.Background(), listenerLookupTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-t", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN").Output() //nolint:gosec // G702: port is an internal int, not user input
 	if err != nil && len(out) == 0 {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
@@ -116,29 +103,103 @@ func parseLsofPIDs(out []byte) []int {
 	return pids
 }
 
-// psParentPIDs snapshots every process's parent from `ps -axo pid=,ppid=`.
-func psParentPIDs() (map[int]int, error) {
-	out, err := exec.Command("ps", "-axo", "pid=,ppid=").Output()
-	if err != nil {
-		return nil, err
+// classifyListenerAt is classifyListener for one endpoint, as pairing needs
+// it: of the TCP listeners on port, those that receive connections dialed to
+// host (receivingListeners) must all be held by pid or its descendants
+// (classifyHolders). It is OwnershipForeign when any of them is another
+// process's, so a child that holds some socket on the port does not make a
+// foreign listener on the dialed address its own, and OwnershipUnlisted when
+// lsof lists none. It is OwnershipUnknown where classifyListener is, and for
+// a host that names no address.
+func classifyListenerAt(pid int, host string, port int) Ownership {
+	if !processExists(pid) {
+		return OwnershipForeign
 	}
-	return parsePSParents(out), nil
+	want, ok := endpointAddr(host)
+	if !ok {
+		return OwnershipUnknown
+	}
+	sockets, err := listeningSockets(port)
+	if err != nil {
+		return OwnershipUnknown
+	}
+	addrs := make([]netip.Addr, len(sockets))
+	for i, s := range sockets {
+		addrs[i] = s.addr
+	}
+	var holders []int
+	for i, recv := range receivingListeners(addrs, want) {
+		if recv {
+			holders = append(holders, sockets[i].pid)
+		}
+	}
+	return classifyHolders(holders, pid)
 }
 
-// parsePSParents reads `ps -axo pid=,ppid=` output into child -> parent.
-func parsePSParents(out []byte) map[int]int {
-	parents := map[int]int{}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
+// lsofListener is one TCP listener lsof lists: its process and local
+// address, unmapped.
+type lsofListener struct {
+	pid  int
+	addr netip.Addr
+}
+
+// lsofListeningSockets lists the TCP listeners on port with their local
+// addresses. Like lsofListeningPIDs, an lsof that exits 1 with no output
+// lists none.
+func lsofListeningSockets(port int) ([]lsofListener, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), listenerLookupTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-F", "ptn", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN").Output() //nolint:gosec // G702: port is an internal int, not user input
+	if err != nil && len(out) == 0 {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil, nil
 		}
-		pid, err1 := strconv.Atoi(fields[0])
-		ppid, err2 := strconv.Atoi(fields[1])
-		if err1 != nil || err2 != nil || pid <= 0 {
-			continue
-		}
-		parents[pid] = ppid
+		return nil, err
 	}
-	return parents
+	return parseLsofListeners(out, port), nil
+}
+
+// parseLsofListeners reads `lsof -F ptn` output: a "p<pid>" line starts a
+// process, and each of its files has an "f<fd>" line, a "t<IPv4|IPv6>" line
+// and an "n<addr>:<port>" line. lsof prints a wildcard address as "*" for
+// either family; it becomes that family's unspecified address here. Names on
+// another port, and addresses that do not parse, are skipped.
+func parseLsofListeners(out []byte, port int) []lsofListener {
+	var listeners []lsofListener
+	pid, family := 0, ""
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case 'p':
+			pid, _ = strconv.Atoi(line[1:])
+			family = ""
+		case 'f':
+			family = ""
+		case 't':
+			family = line[1:]
+		case 'n':
+			i := strings.LastIndexByte(line, ':')
+			if pid <= 0 || i < 1 || line[i+1:] != strconv.Itoa(port) {
+				continue
+			}
+			name := line[1:i]
+			addr := netip.IPv4Unspecified()
+			if family == "IPv6" {
+				addr = netip.IPv6Unspecified()
+			}
+			if name != "*" {
+				parsed, err := netip.ParseAddr(configfile.UnbracketHost(name))
+				if err != nil {
+					continue
+				}
+				addr = parsed.Unmap()
+			}
+			listeners = append(listeners, lsofListener{pid: pid, addr: addr})
+		}
+	}
+	return listeners
 }

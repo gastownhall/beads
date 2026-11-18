@@ -47,6 +47,7 @@ internal/doltserver/dirty_state_test.go
 internal/doltserver/fdleak_integration_test.go
 internal/doltserver/lifecycle_integration_test.go
 internal/doltserver/port_race_test.go
+internal/doltserver/server_identity_integration_test.go
 internal/doltserver/socket_integration_test.go
 internal/doltserver/testmain_integration_test.go
 internal/storage/dolt/federation_test.go

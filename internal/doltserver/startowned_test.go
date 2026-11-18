@@ -307,6 +307,9 @@ func installFakeDolt(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(testFakeDoltEnv, "1")
 	t.Setenv(testFakeDoltDelayEnv, testFakeDoltDelay)
+	// The fake speaks no SQL, so it has no server UUID to pair; the server
+	// identity tests turn the check back on with their own seams.
+	t.Setenv(VerifyServerIdentityEnv, "false")
 }
 
 func shellQuote(s string) string {

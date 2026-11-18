@@ -4,9 +4,13 @@ package doltserver
 
 import (
 	"bufio"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -157,4 +161,140 @@ func childPIDs(pid int) []int {
 		}
 	}
 	return out
+}
+
+// classifyListenerAt is classifyListener for one endpoint, as pairing needs
+// it: of the TCP listeners on port, those that receive connections dialed to
+// host (receivingListeners) must all be held by pid or its descendants. It
+// is OwnershipForeign when any of them is another process's, so a child that
+// holds some socket on the port does not make a foreign listener on the
+// dialed address its own, and OwnershipUnlisted when none is listed. It is
+// OwnershipUnknown where classifyListener is, and for a host that names no
+// address.
+func classifyListenerAt(pid int, host string, port int) Ownership {
+	want, ok := endpointAddr(host)
+	if !ok {
+		return OwnershipUnknown
+	}
+	if procRoot == "/proc" {
+		if self, err := os.Readlink("/proc/self"); err != nil || self != strconv.Itoa(os.Getpid()) {
+			return OwnershipUnknown
+		}
+	}
+	if _, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(pid), "fd")); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return OwnershipForeign
+		}
+		return OwnershipUnknown
+	}
+	listeners, err := listeningSocketAddrs(port)
+	if err != nil {
+		return OwnershipUnknown
+	}
+	addrs := make([]netip.Addr, len(listeners))
+	for i, l := range listeners {
+		addrs[i] = l.addr
+	}
+	matching := map[string]bool{}
+	for i, recv := range receivingListeners(addrs, want) {
+		if recv {
+			matching[listeners[i].inode] = true
+		}
+	}
+	if len(matching) == 0 {
+		return OwnershipUnlisted
+	}
+	held := map[string]bool{}
+	seen := map[int]bool{}
+	queue := []int{pid}
+	for len(queue) > 0 {
+		p := queue[0]
+		queue = queue[1:]
+		if p <= 0 || seen[p] {
+			continue
+		}
+		seen[p] = true
+		for inode := range matching {
+			if !held[inode] && processHoldsSocket(p, map[string]bool{inode: true}) {
+				held[inode] = true
+			}
+		}
+		queue = append(queue, childPIDs(p)...)
+	}
+	for inode := range matching {
+		if !held[inode] {
+			return OwnershipForeign
+		}
+	}
+	return OwnershipOwned
+}
+
+// procSocket is one TCP listener in /proc/net/tcp{,6}: its socket inode
+// and its local address, unmapped.
+type procSocket struct {
+	inode string
+	addr  netip.Addr
+}
+
+// listeningSocketAddrs returns the TCP listeners on port, from /proc/net/tcp
+// and /proc/net/tcp6.
+func listeningSocketAddrs(port int) ([]procSocket, error) {
+	var listeners []procSocket
+	read := 0
+	for _, name := range []string{"tcp", "tcp6"} {
+		f, err := os.Open(filepath.Join(procRoot, "net", name)) //nolint:gosec // G304: fixed /proc paths
+		if err != nil {
+			continue
+		}
+		read++
+		listeners, err = parseProcNetTCPListenerAddrs(bufio.NewScanner(f), port, listeners)
+		_ = f.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if read == 0 {
+		return nil, fmt.Errorf("no %s/net/tcp", procRoot)
+	}
+	return listeners, nil
+}
+
+// parseProcNetTCPListenerAddrs appends to listeners the inode and local
+// address of every row of a /proc/net/tcp{,6} table that is a listener on
+// port. A row whose address does not decode is kept with the zero address,
+// which receives no endpoint's connections.
+func parseProcNetTCPListenerAddrs(sc *bufio.Scanner, port int, listeners []procSocket) ([]procSocket, error) {
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 10 || fields[3] != tcpListenState {
+			continue
+		}
+		i := strings.LastIndexByte(fields[1], ':')
+		if i < 0 {
+			continue
+		}
+		p, err := strconv.ParseUint(fields[1][i+1:], 16, 16)
+		if err != nil || int(p) != port || fields[9] == "0" {
+			continue
+		}
+		listeners = append(listeners, procSocket{inode: fields[9], addr: decodeProcNetAddr(fields[1][:i])})
+	}
+	return listeners, sc.Err()
+}
+
+// decodeProcNetAddr decodes a /proc/net/tcp{,6} local address: 8 (IPv4) or
+// 32 (IPv6) hex digits, printed as 32-bit words in host byte order, and
+// unmaps an IPv4-mapped IPv6 one. It returns the zero address for anything
+// else.
+func decodeProcNetAddr(h string) netip.Addr {
+	raw, err := hex.DecodeString(h)
+	if err != nil || (len(raw) != net.IPv4len && len(raw) != net.IPv6len) {
+		return netip.Addr{}
+	}
+	ip := make([]byte, len(raw))
+	for i := 0; i < len(raw); i += 4 {
+		binary.NativeEndian.PutUint32(ip[i:], binary.BigEndian.Uint32(raw[i:]))
+	}
+	addr, _ := netip.AddrFromSlice(ip)
+	return addr.Unmap()
 }

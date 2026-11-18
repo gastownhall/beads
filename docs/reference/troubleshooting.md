@@ -415,6 +415,64 @@ bd dolt stop
 bd dolt start
 ```
 
+### Refusing the Dolt server: its identity cannot be verified
+
+**Symptom (server mode):** commands fail before touching any data with
+`refusing the Dolt server at 127.0.0.1:<port>: it is not the server bd
+launched for this data directory`, or `its identity cannot be verified
+because the server identity record ... does not exist` (or `is empty`, `is
+malformed`, `could not be read`). bd says it read and wrote nothing on that
+server.
+
+**Cause:** bd keeps a UUID for each Dolt server data directory in
+`.bd-server-uuid` in that directory, starts its server there with that UUID,
+and checks it on every open
+(see [Dolt server identity](/reference/configuration#dolt-server-identity)).
+Either another process answers on the port (another bd, such as one in WSL2
+whose loopback ports Windows shares, a port forward or a container), or the
+server was started without that UUID: by a bd from before the check, or by a
+`dolt sql-server` you ran yourself.
+
+**Fix:** first find what holds the port:
+
+```bash
+lsof -i :3308                    # macOS / Linux
+netstat -aon | findstr :3308     # Windows
+```
+
+If it is this machine's own bd server (the PID bd reports from its PID file,
+or a server started before you upgraded bd), restart it so bd starts it with
+its data directory's UUID:
+
+```bash
+bd dolt stop && bd dolt start
+```
+
+If it is another process, give the two servers separate ports
+(`BEADS_DOLT_SERVER_PORT` or `dolt.port`). If something other than bd runs
+the server (Docker, systemd, an orchestrator), shared or not, say so: turn
+auto-start off (`dolt.auto-start: false` or `BEADS_DOLT_AUTO_START=0`) or use
+external mode (`BEADS_DOLT_SERVER_MODE=1`); a workspace that
+`bd init --external` created already has `dolt.auto-start: false`. Or turn
+the check off with `BEADS_DOLT_VERIFY_SERVER_IDENTITY=false` or
+`dolt.verify-server-identity: false` in `config.yaml`. None of these touch
+your databases; do not delete or reinitialize anything to get past this
+error.
+
+`bd dolt start` itself fails with `could not verify its server identity`
+when the lookup of who holds the port shows another process holding it, when
+the server exits before bd reads its UUID, or when the server reports a UUID
+other than the one bd started it with. bd stops the server it started; give
+it a free port. Where the platform cannot show which process holds a
+listener (FreeBSD and other platforms without such a lookup, WSL1), the UUID
+check decides alone; if bd also cannot tell your `dolt` binary's version, and
+so cannot set the UUID, it records the server's UUID on the evidence of its
+startup and prints a warning.
+
+The check guards bd's store opens and the shared `beads_global` creation in
+`bd init`. `bd doctor --fix`'s metadata and remote repairs, `bd bootstrap`,
+and the working-set flush before a server stop still connect without it.
+
 ### "bd requires dolt 2.6.0 or newer" error
 
 `bd` refuses to run against Dolt older than **2.6.0** outside embedded mode.

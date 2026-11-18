@@ -237,6 +237,24 @@ func shouldInitSharedGlobalDB(sharedServer, sharedServerMode, gateway bool) bool
 	return (sharedServer || sharedServerMode) && !gateway
 }
 
+// initGlobalDatabaseIdentity is what init expects of the shared server it
+// creates beads_global on (GH#4637): the server bd launched for the shared
+// data directory, or nil, no check, for a port the caller named with
+// --server-port.
+func initGlobalDatabaseIdentity(beadsDir, host string, port int, callerPort bool) *doltserver.ServerIdentityExpectation {
+	if callerPort {
+		return nil
+	}
+	return doltserver.SharedServerIdentityExpectation(beadsDir, host, port)
+}
+
+// initGlobalDatabaseFatal reports whether init stops on EnsureGlobalDatabase's
+// err rather than warning and going on without beads_global: a server older
+// than bd's minimum, or one that is not shown to be bd's shared server.
+func initGlobalDatabaseFatal(err error) bool {
+	return errors.Is(err, doltversion.ErrBelowRequiredMin) || errors.Is(err, doltserver.ErrServerIdentityMismatch)
+}
+
 // externalServerUnreachableMessage returns the message for an --external init
 // whose server could not be dialed or had no port named, or "" when err is any
 // other failure.
@@ -1658,6 +1676,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			CreateIfMissing:        true, // bd init is the only path that should create databases
 			OpenedByInit:           true, // shapes advice only: identity mismatch (GH#5558) and the externally managed endpoint's --server-port
 			AutoStart:              initServerMode && !externalServer && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
+			ServerManagedOutsideBD: externalServer, // no identity record to check a server bd never launched against (GH#4637)
 			ServerTLS:              initDoltServerTLSFromEnv(),
 		}
 		if serverHost != "" {
@@ -1769,10 +1788,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			if serverUser != "" {
 				globalUser = serverUser
 			}
-			if err := doltserver.EnsureGlobalDatabase(globalHost, globalPort, globalUser, ""); err != nil {
-				// A server older than bd's minimum is refused by every open,
-				// the project store's below included, so init stops here.
-				if errors.Is(err, doltversion.ErrBelowRequiredMin) {
+			if err := doltserver.EnsureGlobalDatabase(globalHost, globalPort, globalUser, "",
+				initGlobalDatabaseIdentity(beadsDir, globalHost, globalPort, serverPort != 0)); err != nil {
+				// A server older than bd's minimum, or one that is not bd's
+				// shared server, is refused by every open, the project
+				// store's below included, so init stops here.
+				if initGlobalDatabaseFatal(err) {
 					fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedMessage(err))
 					return &exitError{Code: 1}
 				}
@@ -2097,6 +2118,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Fprintf(os.Stderr, "Warning: failed to enable shared server mode: %v\n", err)
 				} else if !quiet {
 					fmt.Printf("  %s Shared server mode enabled\n", ui.RenderPass("✓"))
+				}
+			}
+
+			// --external declares the server managed outside bd. Persist
+			// that as auto-start off, which later commands read the same
+			// way: bd starts no server for the workspace, and the server
+			// identity check, which has no record of a server bd never
+			// launched, does not apply to it (GH#4637).
+			if externalServer && initServerMode {
+				if err := config.SetYamlConfigInDir(beadsDir, "dolt.auto-start", "false"); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to persist dolt.auto-start: false for the externally managed server: %v\n", err)
 				}
 			}
 
@@ -4415,6 +4447,7 @@ func initGlobalDatabaseConfig(ctx context.Context, projectCfg *dolt.Config, quie
 		ServerMode:             true,
 		CreateIfMissing:        true,
 		AutoStart:              false, // server is already running
+		ServerManagedOutsideBD: projectCfg.ServerManagedOutsideBD,
 	}
 
 	globalStore, err := newDoltStore(ctx, globalCfg)

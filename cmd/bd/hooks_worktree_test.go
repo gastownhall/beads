@@ -62,6 +62,10 @@ func TestConfigureBeadsHooksPath_WorktreeUsesMainRepo(t *testing.T) {
 
 	t.Chdir(worktreeDir)
 	git.ResetCaches()
+	// The caches now name this test's repo, which its cleanup deletes: leave
+	// none behind for a later test in the same binary (an init there
+	// otherwise resolved its workspace gate under the deleted repo).
+	t.Cleanup(git.ResetCaches)
 
 	if !git.IsWorktree() {
 		t.Fatal("expected git.IsWorktree() to return true")
@@ -132,6 +136,7 @@ func TestConfigureSharedHooksPath_WorktreeUsesMainRepo(t *testing.T) {
 
 	t.Chdir(worktreeDir)
 	git.ResetCaches()
+	t.Cleanup(git.ResetCaches) // see TestConfigureBeadsHooksPath_WorktreeUsesMainRepo
 
 	if !git.IsWorktree() {
 		t.Fatal("expected git.IsWorktree() to return true")
@@ -225,6 +230,7 @@ func TestResetHooksPathIfBeadsManaged_Worktree(t *testing.T) {
 	}
 	t.Chdir(worktreeDir)
 	git.ResetCaches()
+	t.Cleanup(git.ResetCaches) // see TestConfigureBeadsHooksPath_WorktreeUsesMainRepo
 
 	if !git.IsWorktree() {
 		t.Fatal("expected git.IsWorktree() to return true")
@@ -322,6 +328,7 @@ func TestConfigureBeadsHooksPath_NormalRepoUnchanged(t *testing.T) {
 
 	t.Chdir(repoDir)
 	git.ResetCaches()
+	t.Cleanup(git.ResetCaches) // see TestConfigureBeadsHooksPath_WorktreeUsesMainRepo
 
 	if git.IsWorktree() {
 		t.Fatal("expected git.IsWorktree() to return false in normal repo")
