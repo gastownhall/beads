@@ -274,6 +274,20 @@ func (f *molBondProxiedFixture) rigDependencies(issueID string) []*types.Depende
 	return deps
 }
 
+// seedRig adds issues to the gt- rig through a writable routed open, closed
+// before the test bonds.
+func (f *molBondProxiedFixture) seedRig(ids ...string) {
+	f.t.Helper()
+	rr, err := resolveViaPrefixRoutingWithAccess(f.ctx, "gt-mol1", true, true)
+	if err != nil {
+		f.t.Fatalf("open the gt- rig writable: %v", err)
+	}
+	defer rr.Close()
+	for _, id := range ids {
+		seedIssue(f.t, f.ctx, rr.Store, id)
+	}
+}
+
 // assertServedUnwritten fails when the served launcher database committed or
 // was asked to write anything.
 func (f *molBondProxiedFixture) assertServedUnwritten(context string) {
@@ -610,4 +624,121 @@ func TestMolBondProxiedRefusesCrossStorePairs(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestMolBondProxiedKeepsRouteErrors: a prefix route that fails to open, or
+// refuses, keeps its own actionable error when no formula has the operand's
+// name; a same-named formula still wins; a plain miss stays "not found".
+func TestMolBondProxiedKeepsRouteErrors(t *testing.T) {
+	f := newMolBondProxiedFixture(t)
+	f.routes = append(f.routes, []byte("{\"prefix\":\"bad-\",\"path\":\"missing-rig\"}\n")...)
+	f.writeRoutes()
+
+	expectRefusal := func(t *testing.T, argA, argB, want string) {
+		t.Helper()
+		reopens := f.reopens
+		runErr, _, stderr := f.bond(molBondInput{argA: argA, argB: argB})
+		if runErr == nil {
+			t.Fatalf("bond %s %s succeeded, want %q", argA, argB, want)
+		}
+		if !strings.Contains(stderr, want) {
+			t.Errorf("bond %s %s: stderr lacks %q:\n%s", argA, argB, want, stderr)
+		}
+		if f.reopens != reopens {
+			t.Errorf("failed bond reopened a routed home writable")
+		}
+		f.assertServedUnwritten(argA + " " + argB)
+	}
+
+	t.Run("route_failure", func(t *testing.T) {
+		expectRefusal(t, "bad-x1", molBondProxiedFormula, "target rig has no dolt_database configured")
+	})
+
+	t.Run("proxied_server_rig_refusal", func(t *testing.T) {
+		previous := f.setRigMode(configfile.DoltModeProxiedServer)
+		defer f.setRigMode(previous)
+		expectRefusal(t, molBondProxiedFormula, "gt-mol1", "will not open a proxied-server workspace")
+	})
+
+	t.Run("same_named_formula_wins", func(t *testing.T) {
+		data, err := json.Marshal(&formula.Formula{
+			Formula: "bad-x2",
+			Version: 1,
+			Type:    formula.TypeWorkflow,
+			Steps:   []*formula.Step{{ID: "only", Title: "Only step", Type: "task"}},
+		})
+		if err != nil {
+			t.Fatalf("marshal formula: %v", err)
+		}
+		f.writeFormula("bad-x2", data)
+		runErr, stdout, stderr := f.bond(molBondInput{argA: "bad-x2", argB: molBondProxiedFormula, dryRun: true})
+		if runErr != nil {
+			t.Fatalf("dry-run bond bad-x2 %s: %v\nstderr:\n%s", molBondProxiedFormula, runErr, stderr)
+		}
+		if want := "A: bad-x2 (formula → will cook as proto)"; !strings.Contains(stdout, want) {
+			t.Errorf("dry-run output lacks %q:\n%s", want, stdout)
+		}
+	})
+
+	t.Run("plain_miss", func(t *testing.T) {
+		expectRefusal(t, "nope-x3", molBondProxiedFormula, "'nope-x3' not found as issue or formula")
+	})
+
+	t.Run("unreadable_routes_file", func(t *testing.T) {
+		// A line past the scanner's token limit makes loadPrefixRoutes fail,
+		// unlike a malformed line, which is skipped silently.
+		if err := os.WriteFile(f.routesPath, []byte(strings.Repeat("a", 70000)), 0o644); err != nil {
+			t.Fatalf("rewrite routes.jsonl: %v", err)
+		}
+		defer f.writeRoutes()
+		expectRefusal(t, molBondProxiedFormula, "gt-any", "loading routes")
+	})
+
+	f.seedRig("gt-amb1", "gt-amb2")
+
+	t.Run("ambiguous_rig_id_without_formula", func(t *testing.T) {
+		before := f.rigIssueIDs("gt-amb1")
+		expectRefusal(t, molBondProxiedFormula, "gt-amb", "ambiguous")
+		if after := f.rigIssueIDs("gt-amb1"); len(after) != len(before) {
+			t.Errorf("failed bond changed the rig's issues: %v -> %v", before, after)
+		}
+		if deps := f.rigDependencies("gt-amb1"); len(deps) != 0 {
+			t.Errorf("failed bond left dependency rows on gt-amb1: %+v", deps)
+		}
+		if deps := f.rigDependencies("gt-amb2"); len(deps) != 0 {
+			t.Errorf("failed bond left dependency rows on gt-amb2: %+v", deps)
+		}
+	})
+
+	t.Run("formula_wins_over_route_refusal", func(t *testing.T) {
+		data, err := json.Marshal(&formula.Formula{
+			Formula: "gt-amb",
+			Version: 1,
+			Type:    formula.TypeWorkflow,
+			Steps:   []*formula.Step{{ID: "only", Title: "Ambiguity shadowed by formula", Type: "task"}},
+		})
+		if err != nil {
+			t.Fatalf("marshal formula: %v", err)
+		}
+		f.writeFormula("gt-amb", data)
+		before := f.rigIssueIDs("gt-amb2")
+		runErr, _, stderr := f.bond(molBondInput{argA: "gt-amb", argB: "gt-amb2"})
+		if runErr != nil {
+			t.Fatalf("bond gt-amb gt-amb2: the same-named formula did not win over the ambiguity refusal: %v\nstderr:\n%s", runErr, stderr)
+		}
+		after := f.rigIssueIDs("gt-amb2")
+		if len(after) != len(before)+2 {
+			t.Fatalf("rig issues %v -> %v, want the formula's root and step spawned there", before, after)
+		}
+		attached := false
+		for _, id := range after {
+			if f.rigDependsOn(id, "gt-amb2", types.DepBlocks) {
+				attached = true
+			}
+		}
+		if !attached {
+			t.Errorf("no spawned rig issue blocks on gt-amb2: the formula did not bond into the rig")
+		}
+		f.assertServedUnwritten("formula over route refusal")
+	})
 }
