@@ -583,11 +583,11 @@ func writePreV56DoltFixture(t *testing.T) (doltDir, sentinel string) {
 }
 
 // TestRecoverPreV56IfNeeded_OnlySemverPredecessorsAreRecovered pins the
-// destructive edge from #5603/#5625/#5650: only a release older than 0.56.0
-// may hand its workspace to the path that deletes .dolt.
+// destructive edge from #5603/#5625/#5650: only a release series older than
+// 0.56 may hand its workspace to the path that deletes .dolt.
 //
-//   - CompareVersions reads any unparsable version part as 0, so the Homebrew
-//     --HEAD stamp compares as pre-0.56 and must fail the validity check.
+//   - A Homebrew --HEAD stamp does not identify an old release and must fail
+//     the validity check before numeric release-series parsing.
 //   - A Go pseudo-version passes the validity check since the GH#6152 fix,
 //     and a major-0 one can compare below 0.56.0, but its numbers only bound
 //     the build from below. It must be refused on its own, with or without
@@ -614,9 +614,16 @@ func TestRecoverPreV56IfNeeded_OnlySemverPredecessorsAreRecovered(t *testing.T) 
 		{name: "pre-0.56 release", previous: "0.55.4", wantRecovery: true},
 		{name: "v-prefixed pre-0.56 release", previous: "v0.55.4", wantRecovery: true},
 		{name: "pre-0.56 pre-release", previous: "0.55.4-rc.1", wantRecovery: true},
-		// Semver puts a 0.56.0 pre-release before 0.56.0 (#6596). No official
-		// build was ever stamped this way; the row pins the choice.
-		{name: "0.56.0 pre-release", previous: "0.56.0-rc.1", wantRecovery: true},
+		// Diagnostic SemVer precedence must not authorize deleting a database
+		// whose witness identifies the 0.56 release series.
+		{name: "0.56.0 pre-release", previous: "0.56.0-rc.1"},
+		{name: "v-prefixed 0.56.0 pre-release", previous: "v0.56.0-rc.1"},
+		{name: "0.56.0 pre-release with build metadata", previous: "0.56.0-rc.1+build.1"},
+		{name: "0.56 release with build metadata", previous: "0.56.0+build.1"},
+		{name: "later 0.56 prerelease", previous: "0.56.1-rc.1"},
+		{name: "suffix on major must not hide a later minor", previous: "0-rc.99.0"},
+		{name: "metadata on major must not hide a later minor", previous: "0+build.99"},
+		{name: "pre-0.56 release with build metadata", previous: "0.55.4+build.1", wantRecovery: true},
 	}
 
 	for _, tt := range tests {
