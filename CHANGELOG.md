@@ -1431,6 +1431,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd linear sync`, `bd jira sync` and `bd notion sync` refuse
+  `--pull --create-only` instead of silently updating linked beads.**
+  `--create-only` only limits pushes, and its help now says so (#8507).
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
