@@ -761,6 +761,96 @@ func TestEmbeddedCreateDryRunCrossRepoDoesNotMigrateTarget(t *testing.T) {
 	}
 }
 
+// TestEmbeddedUpgradeStatusDoesNotMigrate is GH#6669's database half: a
+// status or review query must not initialize the store. A writable open runs
+// schema init, which for a database with a pending migration either applies
+// it (migration consent given, or the smart gate for a remote-backed clone)
+// or refuses the command outright — a status query must do neither. The
+// schema cursor, Dolt HEAD and issue count are the tripwire, and the version
+// marker must survive the query byte-for-byte: a later reconciliation reads
+// it, so consuming it from an inspection would silently decide the upgrade
+// was finished (see trackBdVersionPreview).
+func TestEmbeddedUpgradeStatusDoesNotMigrate(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// consent selects BD_ALLOW_MIGRATE=1, the scripted form that lets a
+	// writable open apply the pending migration; cleared leaves bdEnv's
+	// BD_* strip in force, under which the same open refuses the command.
+	// Both outcomes must be unreachable from a status or review query.
+	for _, tc := range []struct {
+		name    string
+		leaf    string
+		consent bool
+		marker  string
+	}{
+		{name: "status consent old marker", leaf: "status", consent: true, marker: "0.9.0"},
+		{name: "review consent old marker", leaf: "review", consent: true, marker: "0.9.0"},
+		{name: "status consent cleared old marker", leaf: "status", consent: false, marker: "0.9.0"},
+		{name: "review consent cleared old marker", leaf: "review", consent: false, marker: "0.9.0"},
+		// A marker equal to the binary isolates the plain store-open hazard
+		// from the version-bump helper, which only fires on an upgrade.
+		{name: "status consent matching marker", leaf: "status", consent: true, marker: Version},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir, beadsDir, _ := bdInit(t, bd, "--prefix", "upg")
+			bdCreate(t, bd, dir, "Existing issue")
+			regressEmbeddedSchemaCursor(t, beadsDir, "upg")
+
+			localVersionPath := filepath.Join(beadsDir, localVersionFile)
+			markerBytes := []byte(tc.marker + "\n")
+			if err := os.WriteFile(localVersionPath, markerBytes, 0o600); err != nil {
+				t.Fatalf("write local version marker: %v", err)
+			}
+
+			before := readEmbeddedStoreSnapshot(t, beadsDir, "upg")
+			if before.schemaVersion != schema.LatestVersion()-1 {
+				t.Fatalf("fixture schema version = %d, want %d", before.schemaVersion, schema.LatestVersion()-1)
+			}
+
+			env := bdEnv(dir)
+			if tc.consent {
+				env = append(env, "BD_ALLOW_MIGRATE=1")
+			}
+			cmd := exec.Command(bd, "upgrade", tc.leaf, "--json")
+			cmd.Dir = dir
+			cmd.Env = env
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd upgrade %s failed on a database with a pending migration: %v\nstdout:\n%s\nstderr:\n%s",
+					tc.leaf, err, stdout.String(), stderr.String())
+			}
+
+			after := readEmbeddedStoreSnapshot(t, beadsDir, "upg")
+			if after.schemaVersion != before.schemaVersion {
+				t.Errorf("schema version changed during bd upgrade %s: before=%d after=%d",
+					tc.leaf, before.schemaVersion, after.schemaVersion)
+			}
+			if after.head != before.head {
+				t.Errorf("Dolt HEAD changed during bd upgrade %s: before=%s after=%s",
+					tc.leaf, before.head, after.head)
+			}
+			if after.issueCount != before.issueCount {
+				t.Errorf("issue count changed during bd upgrade %s: before=%d after=%d",
+					tc.leaf, before.issueCount, after.issueCount)
+			}
+			raw, readErr := os.ReadFile(localVersionPath)
+			if readErr != nil {
+				t.Fatalf("read local version marker after bd upgrade %s: %v", tc.leaf, readErr)
+			}
+			if string(raw) != string(markerBytes) {
+				t.Errorf("bd upgrade %s rewrote .local_version: got %q, want %q", tc.leaf, raw, markerBytes)
+			}
+		})
+	}
+}
+
 // TestEmbeddedPreviewDoesNotConsumeVersionMarker is the two-invocation
 // regression for the one-shot upgrade signal: a preview run first after an
 // upgrade correctly skips the version-bump reconciliation, so it must also

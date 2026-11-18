@@ -29,14 +29,22 @@ var upgradeStatusCmd = &cobra.Command{
 	Short: "Check if bd version has changed",
 	Long: `Check if bd has been upgraded since you last used it.
 
-This command uses the version tracking that happens automatically
-at startup to detect if bd was upgraded.
+This command compares the running bd binary with the version recorded in
+.beads/.local_version. It is a pure status query: it does not open the
+database, apply schema migrations, or rewrite that file — an ordinary
+command reconciles the marker afterwards.
 
 Examples:
   bd upgrade status
   bd upgrade status --json`,
-	SilenceUsage:  true,
+	SilenceUsage: true,
 	SilenceErrors: true,
+	// status only reads the local version marker and the built-in
+	// changelog, so it opts out of the root pre-run's store
+	// initialization (GH#6669): a writable open would apply pending
+	// schema migrations or refuse this inspection when consent is
+	// missing. ack is deliberately NOT annotated — see its own comment.
+	Annotations: map[string]string{skipStoreAnnotation: "1"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		evt := metrics.NewCommandEvent("upgrade-status")
 		defer func() {
@@ -87,11 +95,17 @@ this command shows ALL changes since your specific last version.
 If you're upgrading from an old version, you'll see the complete
 changelog of everything that changed since then.
 
+Like 'bd upgrade status', this reads the local version marker and the
+built-in changelog without opening the database or applying migrations.
+
 Examples:
   bd upgrade review
   bd upgrade review --json`,
-	SilenceUsage:  true,
+	SilenceUsage: true,
 	SilenceErrors: true,
+	// review is an inspection like status (GH#6669): it never queries the
+	// store, so it takes the same skip-store opt-out above.
+	Annotations: map[string]string{skipStoreAnnotation: "1"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		evt := metrics.NewCommandEvent("upgrade-review")
 		defer func() {
@@ -154,6 +168,12 @@ Examples:
 	},
 }
 
+// upgradeAckCmd is deliberately NOT annotated with skipStoreAnnotation.
+// Acknowledgement rides the ordinary pre-run path so the version marker is
+// reconciled in the same run: status and review preserve .local_version for
+// exactly this moment (see trackBdVersionPreview), and an annotated ack
+// would only update metadata.json while later status runs keep reporting the
+// preserved old marker — the upgrade indication would never clear.
 var upgradeAckCmd = &cobra.Command{
 	Use:   "ack",
 	Short: "Acknowledge the current bd version",
