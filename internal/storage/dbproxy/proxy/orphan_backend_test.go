@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -236,4 +237,22 @@ func TestCleanupOrphanBackendLeavesUnverifiedInfoPidAlone(t *testing.T) {
 			assert.True(t, proc.closed)
 		})
 	}
+}
+
+// AC-6: a dolt whose command line cannot be read (always so on Windows) gets
+// no signal; one log line names the pid, the info file and the remedy.
+func TestCleanupOrphanBackendUnreadableCommandLineSendsNoSignal(t *testing.T) {
+	root := t.TempDir()
+	holdProxyLock(t, root)
+	infoPath := fakeOrphanInfo(t, root)
+	proc := &fakeOrphan{exe: "dolt.exe", cmdErr: errors.New("reading another process's command line is not supported")}
+	useFakeOrphan(t, proc)
+	logs := captureLog(t)
+
+	require.NoError(t, cleanupOrphanBackend(root))
+	assert.False(t, proc.killed)
+	out := logs.String()
+	assert.Equal(t, 1, strings.Count(out, "\n"), "want exactly one log line, got %q", out)
+	assert.Contains(t, out, "dolt pid 4242 named by "+infoPath)
+	assert.Contains(t, out, "if no other bd or dolt serves this workspace, stop pid 4242 and retry")
 }
