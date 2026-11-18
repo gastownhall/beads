@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -155,6 +156,61 @@ func TestProxiedServerAutoExport(t *testing.T) {
 		}
 		if second := readProxiedAutoExportState(t, p); second.LastDoltCommit == first.LastDoltCommit {
 			t.Fatalf("export-state last_dolt_commit did not move under dolt.auto-commit=batch (still %q)", first.LastDoltCommit)
+		}
+	})
+
+	// A delete reconciles its line out of the JSONL and says so, under
+	// auto-commit on (history proves it) and batch (only the in-process
+	// handoff from the delete route can): never the JSONL-only refusal.
+	for _, mode := range []string{"on", "batch"} {
+		t.Run("delete_reconciled_autocommit_"+mode, func(t *testing.T) {
+			t.Parallel()
+			p := newProxiedAutoExportProject(t, bd, "pxd", "dolt.auto-commit", mode)
+			keep := bdProxiedCreateSilent(t, bd, p.dir, "Survivor")
+			gone := bdProxiedCreateSilent(t, bd, p.dir, "Doomed")
+			if ids := exportIssueIDs(exportLines(t, readProxiedAutoExportJSONL(t, p))); !ids[keep] || !ids[gone] {
+				t.Fatalf("seed creates not exported: %v", ids)
+			}
+
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "delete", gone, "--force")
+			if err != nil {
+				t.Fatalf("bd delete: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			if !strings.Contains(stderr, "auto-export: reconciled 1 deleted issue(s)") {
+				t.Errorf("stderr lacks the reconciliation notice:\n%s", stderr)
+			}
+			if strings.Contains(stderr, "JSONL-only") {
+				t.Errorf("delete hit the JSONL-only refusal:\n%s", stderr)
+			}
+			ids := exportIssueIDs(exportLines(t, readProxiedAutoExportJSONL(t, p)))
+			if ids[gone] || !ids[keep] {
+				t.Fatalf("after deleting %s, JSONL ids = %v; want only %s", gone, ids, keep)
+			}
+		})
+	}
+
+	// The --cascade closure rides the same handoff: every id the delete
+	// actually removed is proven, not just the requested one.
+	t.Run("delete_reconciled_cascade", func(t *testing.T) {
+		t.Parallel()
+		p := newProxiedAutoExportProject(t, bd, "pxx")
+		parent := bdProxiedCreateSilent(t, bd, p.dir, "Cascade parent", "--type", "task")
+		child := bdProxiedCreateSilent(t, bd, p.dir, "Cascade child", "--type", "task", "--parent", parent)
+		bystander := bdProxiedCreateSilent(t, bd, p.dir, "Cascade bystander", "--type", "task")
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "delete", parent, "--cascade", "--force")
+		if err != nil {
+			t.Fatalf("bd delete --cascade: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "auto-export: reconciled 2 deleted issue(s)") {
+			t.Errorf("stderr lacks the cascade reconciliation notice:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "refusing to overwrite") {
+			t.Errorf("cascade delete hit the JSONL-only refusal:\n%s", stderr)
+		}
+		ids := exportIssueIDs(exportLines(t, readProxiedAutoExportJSONL(t, p)))
+		if ids[parent] || ids[child] || !ids[bystander] {
+			t.Fatalf("after cascade-deleting %s, JSONL ids = %v; want only %s", parent, ids, bystander)
 		}
 	})
 }

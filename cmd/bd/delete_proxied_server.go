@@ -159,6 +159,13 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	}
 
 	commandDidWrite.Store(true)
+	// Hand the removed ids to post-run auto-export as PROVEN deletions, as
+	// the direct route does (delete.go). Under dolt.auto-commit=batch|off the
+	// delete is invisible to committed history, so without this the export's
+	// orphan guard would refuse this very command's export (GH#5896, #8490).
+	// DeletedIDs is what the delete actually removed, the --cascade closure
+	// included: each id was removed by this command, so each is a valid proof.
+	commandDeletedIssueIDs.add(result.DeletedIDs...)
 	renderDeleteProxiedResult(in, result)
 	return nil
 }
