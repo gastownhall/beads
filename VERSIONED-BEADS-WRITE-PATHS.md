@@ -28,7 +28,7 @@ Row numbers are the historical table's. Line numbers in this table are against t
 | 19 | claim.go:`claimIssueInTx` and domain/db/issue.go:`Claim` | yes | VERSIONED | claim.go:239 and issue.go:551; `ExecuteUpdate`'s Claim flag passes `mintVersion=false` and mints once at its own end |
 | 20 | unclaim.go:`finishUnclaimInTx` (unclaim, release) | yes | VERSIONED | unclaim.go:137 |
 | 21 | lease.go:`ReclaimExpiredLeasesInTx` | yes | VERSIONED | lease.go:786 |
-| 22 | wake_defers.go:`wakeExpiredDefersInTable` | yes | VERSIONED | wake_defers.go:143 |
+| 22 | wake_defers.go:`wakeExpiredDefersInTable` | yes | VERSIONED | wake_defers.go:192 |
 | 23 | labels.go:`addLabelInTx` / `removeLabelInTx` and domain/db/label.go:`Insert` / `Delete` | yes | VERSIONED | labels.go:190 and :239 gated on `RowsAffected() > 0`; label.go:91 and :130; `applyLabelPatch` (aggregate.go:360) mints only when called outside `ExecuteUpdate` |
 | 25 | promote.go:`PromoteFromEphemeralInTx` | yes | VERSIONED | after the label, dependency and comment copies; create-shaped only for a new issues row that carried no participation (the row began as a wisp, or was demoted while history was off); update-shaped when the promotion restored the participation a demotion carried (a legacy row stays legacy, R2.3) and when the issues plane already held the id (dual presence) |
 | 27 | persistence.go:`moveIssuePersistenceInTx` | yes | VERSIONED | the same-plane repair mints update-shaped; a move out of the wisps table mints create-shaped only when the row carried no participation (`PersistenceMoveResult.BeginsHistory`) and update-shaped when the move restored the participation a demotion carried; `ExecuteUpdate` passes `mintVersion=false` and mints once at its own end, choosing the shape the same way |
@@ -68,7 +68,7 @@ Direct legs, `internal/storage/issueops/` (18):
 | reopen.go:126 | `reopenIssueInTx` | reopen |
 | unclaim.go:137 | `finishUnclaimInTx` | unclaim / release |
 | update.go:555 | `updateIssueInTx` | update |
-| wake_defers.go:143 | `wakeExpiredDefersInTable` | defer wake |
+| wake_defers.go:192 | `wakeExpiredDefersInTable` | defer wake |
 
 uow leg, `internal/storage/domain/db/` (9):
 
@@ -122,7 +122,7 @@ The table and notes below are the inventory as derived from the tree at 321a7927
 | 19 | claim.go:`ClaimIssueInTx` (public_claim.go:`ExecuteClaim`; `ClaimReadyIssueInTx` from claim_next.go:`ExecuteClaimNext`; `ExecuteUpdate`'s Claim flag) and domain/db/issue.go:`Claim` (uow) | UPDATE assignee/status/started_at (claim.go:115,124; issue.go:478,488) | yes | no | OUT OF CONTRACT | a claim-only request mints nothing; `ExecuteUpdate` versions only if other fields also change (execution.go: `ClaimIssueInTx` then `if len(updates) > 0`) |
 | 20 | unclaim.go:`UnclaimIssueInTx` / `UnclaimIssueIfAssigneeInTx` via `finishUnclaimInTx`; release_role.go:`ReleaseIssueInTx` wraps them (domain/db `UnclaimIssue`/`ReleaseIssue`) | UPDATE assignee/status (unclaim.go:80,197) | yes | no | OUT OF CONTRACT | direct UPDATE |
 | 21 | lease.go:`ReclaimExpiredLeasesInTx` (dolt/issues.go:473, embeddeddolt/issues.go:134, domain/db `ReclaimExpiredLeases`) | UPDATE issues assignee/status revert (lease.go:758) + DELETE leases | yes | no | OUT OF CONTRACT | `HeartbeatIssueInTx` writes only `leases` and is not an issue-record write |
-| 22 | wake_defers.go:`wakeExpiredDefersInTable` (`WakeExpiredDefersInTx`; dolt/queries.go:63, embeddeddolt/queries.go:33, domain/db `WakeExpiredDefers`) | UPDATE status (wake_defers.go:116) | yes (actor `DeferWakeActor`) | no | OUT OF CONTRACT | scheduled status flip outside the seam |
+| 22 | wake_defers.go:`wakeExpiredDefersInTable` (`WakeExpiredDefersInTx`; dolt/queries.go:145, embeddeddolt/queries.go:69, domain/db `WakeExpiredDefers`) | UPDATE status (wake_defers.go:165) | yes (actor `DeferWakeActor`) | no | OUT OF CONTRACT | scheduled status flip outside the seam |
 | 23 | labels.go:`AddLabelInTx` / `RemoveLabelInTx` (dolt/labels.go, embeddeddolt/labels.go, both transactions, aggregate.go:`ApplyLabelPatch` from `ExecuteUpdate`) and domain/db/label.go:`Insert` / `Delete` (uow `LabelUseCase`) | INSERT IGNORE / DELETE labels or wisp_labels | yes (EventUpdate) | no | OUT OF CONTRACT | labels ARE in `durable_state` (get_issue.go:59 hydrates them) but a label change mints nothing; in `ExecuteUpdate` the label patch runs after `UpdateIssueInTx`'s mint, so a same-call field+label edit records the old label set |
 | 24 | comments.go:`addIssueCommentInTx` (`AddIssueCommentInTx`, `ImportIssueCommentInTx`, commenter.go:`ExecuteAddComment`); dolt/transaction.go:`AddComment` / `ImportIssueComment` (`InsertDerivedEventReturningID` / `InsertDerivedComment`); domain/db/comment.go:`InsertRecord` (uow `CommentUseCase`); create.go:`PersistComments` | INSERT comments or wisp_comments (dolt tx `AddComment` writes an events-table comment row) | yes (`RecordCommentEventInTx`) | no | OUT OF CONTRACT | comments are not in `durable_state` either (`GetIssueInTx` joins labels, not comments) |
 | 25 | promote.go:`PromoteFromEphemeralInTx` (dolt/ephemeral_routing.go:205, embeddeddolt/store.go:1003, domain/db `PromoteFromEphemeral`) | INSERT issues (+ label/dep/comment copies), DELETE wisps | yes | no | OUT OF CONTRACT | promoted row lands with current_revision default 1 and no version row |

@@ -30,8 +30,42 @@ var _ storage.IssuesWithConfigSearcher = (*EmbeddedDoltStore)(nil)
 // mirroring the tip-metadata write's tolerance), anything else warns. It runs
 // OUTSIDE the read connections below because withConn(ctx, false, …) always
 // rolls back.
+//
+// The write transaction opens only when a read transaction's one statement
+// (issueops.ExpiredDefersDue) finds a defer that is due, so a ready read with
+// nothing due commits nothing. The two are separate transactions, so the answer
+// can be stale; see issueops.ExpiredDefersDue for why either stale answer is
+// safe (a false one delays the wake to the next sweep; a true one is rechecked
+// by the sweep's own predicate). A failed preflight is handled like a failed
+// sweep.
 func (s *EmbeddedDoltStore) wakeExpiredDefers(ctx context.Context) {
-	err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
+	if s.readOnly {
+		// The write below would refuse with ErrReadOnly, which is skipped
+		// silently; skip the preflight read that would precede it as well.
+		return
+	}
+	var due bool
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		due, err = issueops.ExpiredDefersDue(ctx, tx)
+		return err
+	})
+	afterDeferWakePreflight(due)
+	if err == nil && due {
+		err = s.wakeExpiredDefersTx(ctx)
+	}
+	if err != nil && !errors.Is(err, ErrReadOnly) {
+		fmt.Fprintf(os.Stderr, "warning: defer-wake sweep skipped: %v\n", err)
+	}
+}
+
+// afterDeferWakePreflight runs between wakeExpiredDefers' preflight and the
+// write transaction it may open, with the preflight's answer. It is a no-op
+// outside tests, which use it to change a row in that window.
+var afterDeferWakePreflight = func(due bool) {}
+
+func (s *EmbeddedDoltStore) wakeExpiredDefersTx(ctx context.Context) error {
+	return s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
 		woke, err := issueops.WakeExpiredDefersInTx(ctx, tx)
 		if err != nil {
 			return nil, "", err
@@ -45,9 +79,6 @@ func (s *EmbeddedDoltStore) wakeExpiredDefers(ctx context.Context) {
 		tables.Add("issues", "events")
 		return tables, issueops.WakeDefersCommitMessage(len(woke.Issues)), nil
 	})
-	if err != nil && !errors.Is(err, ErrReadOnly) {
-		fmt.Fprintf(os.Stderr, "warning: defer-wake sweep skipped: %v\n", err)
-	}
 }
 
 func (s *EmbeddedDoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {

@@ -340,6 +340,8 @@ type DoltStore struct {
 	// journal is disabled or the probe produced no shape; transactions then get
 	// the canonical column list — see journalActivationErr.
 	journalShape atomic.Pointer[issueops.JournalShape]
+	// autocommit caches what serverAutocommits learned: 0 unknown, 1 on, 2 off.
+	autocommit atomic.Int32
 	// journalActivationErr holds the probe's *issueops.JournalShapeError when
 	// SetEventsJournalEnabled(true) found a table shape the journal cannot run
 	// against (a missing required column, or a missing table). Nil otherwise,
@@ -1236,6 +1238,88 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 		defer clearShape()
 		return fn(tx)
 	})
+}
+
+// withSingleRead runs one read statement under the store's read-lock and
+// connection retry, with no transaction where the server allows it. With
+// autocommit on, each statement sees the latest committed state on its own, so
+// START TRANSACTION and ROLLBACK would add two round trips and no consistency.
+// With it off (dolt sql-server --no-auto-commit) a bare SELECT holds its session
+// on that snapshot until a later BEGIN, so the read keeps its transaction. A read
+// of more than one statement that must agree with itself takes withReadTx. So
+// does a read of the events journal: withSingleRead does not scope the probed
+// journal shape (issueops.ScopeEventsJournalShape), and withReadTx does.
+func (s *DoltStore) withSingleRead(ctx context.Context, fn func(q issueops.DBTX) error) error {
+	if s.closed.Load() {
+		return ErrStoreClosed
+	}
+	if !s.serverAutocommits(ctx) {
+		return s.withReadTx(ctx, func(tx *sql.Tx) error { return fn(tx) })
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.withRetry(ctx, func() error {
+		return fn(s.db)
+	})
+}
+
+// serverAutocommits reports whether the server's sessions run with autocommit on,
+// asking once per store. The question follows the circuit breaker as one
+// withRetry attempt does: it is not sent while the breaker refuses requests, and
+// a lost connection counts toward tripping it. Any failure reports false, the
+// safe answer, and is asked again next time unless the server definitely refused
+// the question (autocommitProbeRefused). A refusal is remembered as off, so the
+// store reads in a transaction as it did before this probe existed and does not
+// pay for the probe again on every read. A failure that can clear, such as a lost
+// connection or too many connections, is not remembered, because that would cost
+// the store its single-statement reads after the server recovers.
+func (s *DoltStore) serverAutocommits(ctx context.Context) bool {
+	switch s.autocommit.Load() {
+	case 1:
+		return true
+	case 2:
+		return false
+	}
+	if !circuitWriteManaged(ctx) && s.breaker != nil && !s.breaker.Allow() {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	// A string, so that an unexpected value reads as "not on" rather than failing
+	// to scan on every read.
+	var on sql.NullString
+	if err := s.db.QueryRowContext(ctx, "SELECT @@autocommit").Scan(&on); err != nil {
+		_ = s.recordRetryFailure(ctx, err)
+		if autocommitProbeRefused(err) {
+			s.autocommit.Store(2)
+		}
+		return false
+	}
+	if on.Valid && on.String == "1" {
+		s.autocommit.Store(1)
+		return true
+	}
+	s.autocommit.Store(2)
+	return false
+}
+
+// autocommitProbeRefused reports whether err is the server definitely refusing
+// SELECT @@autocommit, which asking again will not change: a statement it cannot
+// parse (1064, a proxy that does not speak the syntax), a privilege refusal for
+// this statement (1142, 1143, 1227), or an unknown system variable (1193, from
+// another MySQL-speaking server). Dolt reports an unknown variable as the generic
+// 1105, which is not listed because it covers failures that clear. A login
+// refusal (1044, 1045) says nothing about this statement, so it is asked again.
+func autocommitProbeRefused(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) {
+		return false
+	}
+	switch mysqlErr.Number {
+	case 1064, 1142, 1143, 1193, 1227:
+		return true
+	}
+	return false
 }
 
 // execer is satisfied by both *sql.DB and *sql.Conn, letting pinStoreBranch
