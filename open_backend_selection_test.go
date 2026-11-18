@@ -948,4 +948,37 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 		default:
 		}
 	})
+
+	t.Run("options_keep_precedence", func(t *testing.T) {
+		tests := []struct {
+			name string
+			opts beads.OpenOptions
+			want error
+		}{
+			{name: "Credential", opts: beads.OpenOptions{Credential: fixtureCredential{}}, want: beads.ErrCredentialWithoutOpenWith},
+			{name: "HTTPClient", opts: beads.OpenOptions{HTTPClient: &http.Client{}}, want: beads.ErrHTTPClientWithoutOpenWith},
+			{name: "UserAgent", opts: beads.OpenOptions{UserAgent: "test-agent/1.0"}, want: beads.ErrUserAgentWithoutOpenWith},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				proxiedRefusalEnv(t)
+				beadsDir := writeProxiedModeMetadata(t, "proxied-server")
+				before := workspaceTreeDigest(t, filepath.Dir(beadsDir))
+				store, err := beads.OpenBestAvailableWith(context.Background(), beadsDir, tt.opts)
+				if store != nil {
+					_ = store.Close()
+					t.Fatalf("OpenBestAvailableWith returned a %T alongside the %s refusal", store, tt.name)
+				}
+				if !errors.Is(err, tt.want) {
+					t.Fatalf("OpenBestAvailableWith error = %v, want the %s option sentinel %v", err, tt.name, tt.want)
+				}
+				if errors.Is(err, beads.ErrProxiedServerWorkspace) {
+					t.Fatalf("OpenBestAvailableWith error = %v; the %s option sentinel must keep precedence over the proxied refusal", err, tt.name)
+				}
+				if after := workspaceTreeDigest(t, filepath.Dir(beadsDir)); !maps.Equal(after, before) {
+					t.Errorf("%s refusal changed the workspace: before %v, after %v", tt.name, before, after)
+				}
+			})
+		}
+	})
 }
