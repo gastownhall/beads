@@ -71,6 +71,11 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if err := briefModeConflictFromFlags(cmd); err != nil {
 			return err
 		}
+		// Same placement and reason as the --brief check: --gated, --mol and
+		// --explain are dispatched below before the gatherer runs.
+		if err := excludeParentsModeConflictFromFlags(cmd); err != nil {
+			return err
+		}
 
 		if usesProxiedServer() {
 			// The proxied ready role cannot enforce a row cap, including on
