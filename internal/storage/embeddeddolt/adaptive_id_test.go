@@ -186,4 +186,22 @@ func TestAdaptiveIDLengthSpansBothPlanes(t *testing.T) {
 			t.Fatalf("minted issue id %s: hash %q has %d chars, want 3", id, suffix, len(suffix))
 		}
 	})
+
+	t.Run("SubprefixedTargetRowsStillCount", func(t *testing.T) {
+		te := newTestEnv(t, "mp")
+		ctx := t.Context()
+		strictProb(t, te, ctx)
+
+		// Ten sub-prefixed rows in the destination issues table, no sibling
+		// rows: the destination's own count keeps its loose prefix rule, so
+		// the population stays 10 and the length stays 4.
+		seed(t, te, ctx, ids("mp-wisp-p%02d", 10), false)
+		if got := sizedLength(t, te, ctx, "issues", "mp"); got != 4 {
+			t.Fatalf("GetAdaptiveIDLengthTx(issues, mp) = %d, want 4 (sub-prefixed rows of the destination still count)", got)
+		}
+		id := mint(t, te, ctx, "fresh issue", false)
+		if suffix := hashSuffix(t, id, "mp"); len(suffix) != 4 {
+			t.Fatalf("minted issue id %s: hash %q has %d chars, want 4", id, suffix, len(suffix))
+		}
+	})
 }

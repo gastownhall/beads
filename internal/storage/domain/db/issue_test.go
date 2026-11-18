@@ -87,6 +87,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("CountsPromotedWispsInIssues", s.issueCountForPrefixPromotedWisps)
 		s.Run("CountsBaseNamespaceHeldInWisps", s.issueCountForPrefixBaseInWisps)
 		s.Run("LiveWispsDoNotCountForBasePrefix", s.issueCountForPrefixLiveWispsExcluded)
+		s.Run("CountsSubprefixedRowsInTarget", s.issueCountForPrefixSubprefixedTarget)
 		s.Run("EmptyPrefixReturnsError", s.issueCountForPrefixEmptyPrefix)
 	})
 	s.Run("NextCounterID", func() {
@@ -709,6 +710,21 @@ func (s *testSuite) issueCountForPrefixLiveWispsExcluded() {
 	got, err := r.CountForPrefix(s.Ctx(), "cfpLive", domain.IssueTableOpts{})
 	s.Require().NoError(err)
 	s.Equal(3, got, "live wisps in a sub-prefix namespace must not count toward the base prefix")
+}
+
+// issueCountForPrefixSubprefixedTarget guards the destination table's own
+// rule: its prefix-% count stays loose, so sub-prefixed rows of the
+// destination still count (making it exact could shorten existing ids).
+func (s *testSuite) issueCountForPrefixSubprefixedTarget() {
+	r := s.issueRepo()
+	for i := 1; i <= 10; i++ {
+		s.Require().NoError(r.Insert(s.Ctx(),
+			newTestIssue(fmt.Sprintf("cfpSub-wisp-p%d", i), "sub-prefixed"), "tester", domain.InsertIssueOpts{}))
+	}
+
+	got, err := r.CountForPrefix(s.Ctx(), "cfpSub", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(10, got, "the destination table's own count keeps counting its sub-prefixed rows")
 }
 
 func (s *testSuite) issueCountForPrefixEmptyPrefix() {

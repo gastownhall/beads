@@ -31,6 +31,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("WispMintSizedAcrossBothPlanes", s.useCaseMintWispSizedByPromotedWisps)
 	s.Run("DurableMintSizedAcrossBothPlanes", s.useCaseMintDurableSizedByWisps)
 	s.Run("LiveWispsDoNotLengthenBaseMint", s.useCaseMintLiveWispsExcluded)
+	s.Run("SubprefixedRowsStillLengthenBaseMint", s.useCaseMintSubprefixedTargetCounts)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -1115,4 +1116,27 @@ func (s *testSuite) useCaseMintLiveWispsExcluded() {
 	s.Require().NoError(err)
 	s.Equal(3, s.hashSuffixLen(res.Issue.ID, "ucAd3"),
 		"live wisps in a sub-prefix namespace must not lengthen the base prefix, got %q", res.Issue.ID)
+}
+
+// useCaseMintSubprefixedTargetCounts guards the destination table's own rule
+// at the mint: its prefix-% count stays loose, so sub-prefixed rows of the
+// destination still lengthen the base prefix.
+func (s *testSuite) useCaseMintSubprefixedTargetCounts() {
+	s.resetAdaptiveMintConfig("ucAd4")
+	uc := s.issueUseCase()
+	for i := 1; i <= 10; i++ {
+		_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: fmt.Sprintf("sub-prefixed %d", i), IssueType: types.TypeTask, Priority: 2},
+			ExplicitID: fmt.Sprintf("ucAd4-wisp-p%d", i),
+			CreateOnly: true,
+		}, "seeder")
+		s.Require().NoError(err)
+	}
+
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "fresh issue", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(4, s.hashSuffixLen(res.Issue.ID, "ucAd4"),
+		"the destination's sub-prefixed rows still count, so 10 rows must size to 4 characters, got %q", res.Issue.ID)
 }
