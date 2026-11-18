@@ -14,8 +14,12 @@ import (
 // OpenBestAvailable opens a beads database using the best available backend
 // for the given .beads directory. In non-CGO builds, only Dolt server mode is
 // supported; embedded Dolt returns an error directing the user to server mode.
-// A proxied-server workspace is refused with ErrProxiedServerWorkspace, exactly
-// as in the cgo build.
+// A Dolt workspace in proxied-server mode is refused with
+// ErrProxiedServerUnsupported in every build, before anything is opened or
+// created; only the bd CLI serves that mode. The exception is an environment
+// that forces server mode and names the port (BEADS_DOLT_SERVER_PORT): that
+// open dials the named endpoint as in server mode, which the data port of a
+// proxy this bd starts does not accept (see ErrProxiedServerUnsupported).
 //
 // beadsDir is the path to the .beads directory.
 //
@@ -37,6 +41,13 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	// Before Load, which can migrate a legacy config.json, and before any
 	// backend is chosen; IsSupportedBackend below re-checks the loaded config.
 	if err := checkDiscoveredBackend(beadsDir); err != nil {
+		return nil, err
+	}
+	// A proxied-server workspace is served through its proxy, whose data port
+	// the SDK cannot find: refuse it before Load, the option refusals and
+	// every Dolt arm, unless the env forces server mode at a port it names
+	// (GH#8323).
+	if err := checkProxiedServerWorkspace(beadsDir); err != nil {
 		return nil, err
 	}
 	cfg, err := configfile.Load(beadsDir)
@@ -74,15 +85,6 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	}
 	if opts.UserAgent != "" {
 		return nil, fmt.Errorf("beads: OpenOptions.UserAgent is not supported for backend %q (Dolt has no per-open transport seam): %w", cfg.GetBackend(), backends.ErrUserAgentWithoutOpenWith)
-	}
-
-	// A proxied-server workspace's data lives behind the proxy's sql-server,
-	// which neither Dolt arm below opens: the embedded arm would create (or
-	// read a stale) separate database at .beads/embeddeddolt, and an
-	// environment override can make IsDoltServerMode true for it too. Refuse
-	// before either constructor (bd-wrm8e6, GH#6655).
-	if cfg.IsDoltProxiedServerMode() {
-		return nil, proxiedServerWorkspaceError(beadsDir)
 	}
 
 	if cfg.IsDoltServerMode() {

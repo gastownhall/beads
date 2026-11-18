@@ -1431,17 +1431,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`beads.OpenBestAvailable` and `OpenBestAvailableWith` refuse a
-  proxied-server workspace** (#6655). Neither had a proxied-server arm, so with
-  CGO an embedder's call on a workspace whose `metadata.json` sets
-  `dolt_mode: proxied-server` silently opened a separate database at
-  `.beads/embeddeddolt`. That database was created empty, or was stale data
-  left from when the workspace was embedded, never the data the proxy serves.
-  Both calls now return a nil store and an error that matches the new
-  `beads.ErrProxiedServerWorkspace` with `errors.Is`, before any storage is
-  opened or created, also when `BEADS_DOLT_SERVER_MODE` or
-  `BEADS_DOLT_SHARED_SERVER` forces server mode. Earlier refusals (unsupported
-  backend, unsupported per-open options) keep their own errors.
+- **`beads.OpenBestAvailable` no longer opens an empty embedded store on a
+  proxied-server workspace** (#6655, #8323). On a workspace whose metadata sets
+  `dolt_mode: proxied-server`, the public open (and `OpenBestAvailableWith`)
+  fell through to the embedded engine: cgo builds created
+  `.beads/embeddeddolt/` beside the workspace's real database and returned a
+  new, empty store with no error, and pure-Go builds returned the misleading
+  "embedded Dolt requires CGO" error. Both now refuse with the new
+  `beads.ErrProxiedServerUnsupported`, naming the mode and the metadata file
+  that sets it, before anything is opened, created or migrated. The same
+  refusal covers an open that `BEADS_DOLT_SERVER_MODE` or
+  `BEADS_DOLT_SHARED_SERVER` forces into server mode without
+  `BEADS_DOLT_SERVER_PORT`, which would dial a port bd resolves itself rather
+  than the proxy's. An open that also sets `BEADS_DOLT_SERVER_PORT` still
+  dials the endpoint it names, as before, but it gets no session from a proxy
+  this release starts: that proxy's data port accepts only bd's authenticated
+  connections (#7884), and the SDK connects as a plain MySQL client. Use the
+  bd CLI on proxied-server workspaces (`bd sql` for ad-hoc queries).
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row

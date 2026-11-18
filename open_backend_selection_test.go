@@ -11,13 +11,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/beads"
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
@@ -727,261 +723,292 @@ func TestPublicOpensRefuseHistoricalSQLiteWorkspace(t *testing.T) {
 	}
 }
 
-// proxiedOpens are the two best-available entry points bd-wrm8e6 (GH#6655)
-// guards, each called with zero per-open options.
-var proxiedOpens = map[string]func(context.Context, string) (beads.Storage, error){
+// bestAvailableOpens are the public opens that choose a backend from the
+// workspace's metadata, keyed by subtest name. "OpenBestAvailableWith+UserAgent"
+// carries a per-open option Dolt refuses, so a proxied workspace's refusal must
+// win over the option refusal: the workspace cannot be opened whatever the
+// options are.
+var bestAvailableOpens = map[string]func(context.Context, string) (beads.Storage, error){
 	"OpenBestAvailable": beads.OpenBestAvailable,
 	"OpenBestAvailableWith": func(ctx context.Context, beadsDir string) (beads.Storage, error) {
 		return beads.OpenBestAvailableWith(ctx, beadsDir, beads.OpenOptions{})
 	},
+	"OpenBestAvailableWith+UserAgent": func(ctx context.Context, beadsDir string) (beads.Storage, error) {
+		return beads.OpenBestAvailableWith(ctx, beadsDir, beads.OpenOptions{UserAgent: "x"})
+	},
 }
 
-// proxiedServerBeadsDir writes metadata.json naming the Dolt backend in
-// proxied-server mode, spelled as given, under a fresh temp root it returns
-// alongside the .beads path. It clears the environment overrides that force
-// direct-server mode, pins any dial to a port nobody listens on, and turns
-// auto-start off, so a missing refusal fails fast instead of reaching
-// TestMain's shared test server or launching one.
-func proxiedServerBeadsDir(t *testing.T, mode string) (root, beadsDir string) {
+// isolateProxiedServerEnv pins the env every proxied-server open test runs
+// under. A server arm, which an open reaches before the fix or when the env
+// forces server mode at a named port, must fail fast on a port nobody listens
+// on (TestMain's shared test server is otherwise reachable through
+// BEADS_DOLT_PORT), never auto-start a server, and never read the developer's
+// home. BEADS_DOLT_SERVER_PORT=1 names a port, so the tests that leave server
+// mode unforced also show that a named port alone does not get an open past
+// the refusal. serverMode and sharedServer set BEADS_DOLT_SERVER_MODE and
+// BEADS_DOLT_SHARED_SERVER; empty clears an ambient value.
+func isolateProxiedServerEnv(t *testing.T, serverMode, sharedServer string) {
 	t.Helper()
-	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
-	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
-	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DOLT_SERVER_MODE", serverMode)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", sharedServer)
+}
+
+// writeProxiedServerWorkspace builds <root>/.beads holding a stand-in proxied
+// root (.beads/dolt/.dolt) and one metadata file (metadata.json or the legacy
+// config.json) declaring dolt_mode. backend "" omits the key, which selects
+// Dolt. The unknown future_binding key exposes any configfile.Load rewrite.
+func writeProxiedServerWorkspace(t *testing.T, file, backend, doltMode string) (root, beadsDir string) {
+	t.Helper()
 	root = t.TempDir()
 	beadsDir = filepath.Join(root, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
-		t.Fatalf("create .beads: %v", err)
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+		t.Fatal(err)
 	}
-	metadata := `{"backend":"dolt","database":"dolt","dolt_mode":"` + mode + `"}`
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
-		t.Fatalf("write metadata: %v", err)
+	backendField := ""
+	if backend != "" {
+		backendField = `"backend":` + strconv.Quote(backend) + `,`
+	}
+	metadata := `{` + backendField + `"dolt_mode":` + strconv.Quote(doltMode) + `,"dolt_database":"beads_legacy","future_binding":"keep-me"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, file), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	return root, beadsDir
 }
 
-// assertProxiedRefusal fails unless an open returned no store and the typed
-// proxied-server refusal. A store returned anyway is closed.
-func assertProxiedRefusal(t *testing.T, name string, store beads.Storage, err error) {
+// openClosing runs open and closes any store it returns, so a regression that
+// opens a store does not leak it past the assertions.
+func openClosing(t *testing.T, open func(context.Context, string) (beads.Storage, error), beadsDir string) (bool, error) {
 	t.Helper()
+	store, err := open(t.Context(), beadsDir)
 	if store != nil {
 		_ = store.Close()
-		t.Errorf("%s returned a store for a proxied-server workspace", name)
 	}
-	if !errors.Is(err, beads.ErrProxiedServerWorkspace) {
-		t.Fatalf("%s error = %v, want errors.Is ErrProxiedServerWorkspace", name, err)
-	}
+	return store != nil, err
 }
 
-// TestOpenBestAvailableRefusesProxiedServerWorkspace pins bd-wrm8e6 (GH#6655):
-// a proxied-server workspace keeps its live data in the proxy's sql-server
-// root, so neither an embedded nor a direct open can serve it. Both
-// best-available APIs must refuse with a typed error rather than fall through
-// to embeddeddolt.Open, which creates (or reads a stale) separate database at
-// .beads/embeddeddolt and returns it as real, or, without CGO, to a misleading
-// CGO-required error. The mode is matched case-insensitively, as
-// configfile.IsDoltProxiedServerMode does.
+// TestOpenBestAvailableRefusesProxiedServerWorkspace pins GH#8323 (AC-1): a
+// Dolt workspace whose metadata.json sets dolt_mode "proxied-server" is
+// refused with ErrProxiedServerUnsupported and a nil Storage, in cgo and
+// CGO_ENABLED=0 builds alike. Before the fix the cgo build fell through to
+// embeddeddolt.Open and returned a new, empty store with err == nil, and the
+// pure build returned the embedded-Dolt-requires-CGO error.
 func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
-	for _, mode := range []string{"proxied-server", "Proxied-Server"} {
-		for name, open := range proxiedOpens {
-			t.Run(mode+"/"+name, func(t *testing.T) {
-				_, beadsDir := proxiedServerBeadsDir(t, mode)
-
-				store, err := open(context.Background(), beadsDir)
-				assertProxiedRefusal(t, name, store, err)
-				msg := err.Error()
-				for _, want := range []string{
-					"proxied-server",
-					strconv.Quote(filepath.Join(beadsDir, "metadata.json")),
-					configfile.BackendNotOpenedGuarantee,
-					"bd CLI",
-				} {
-					if !strings.Contains(msg, want) {
-						t.Errorf("%s refusal %q does not mention %q", name, msg, want)
+	isolateProxiedServerEnv(t, "", "")
+	for _, backend := range []string{"dolt", ""} {
+		for _, spelling := range []string{"proxied-server", "Proxied-Server"} {
+			for name, open := range bestAvailableOpens {
+				t.Run("backend="+backend+"/"+spelling+"/"+name, func(t *testing.T) {
+					_, beadsDir := writeProxiedServerWorkspace(t, "metadata.json", backend, spelling)
+					gotStore, err := openClosing(t, open, beadsDir)
+					if gotStore {
+						t.Errorf("%s returned a store for a proxied-server workspace (err=%v)", name, err)
 					}
-				}
-				embedded := filepath.Join(beadsDir, "embeddeddolt")
-				if _, statErr := os.Stat(embedded); !os.IsNotExist(statErr) {
-					t.Errorf("%s on a proxied-server workspace created %s (stat error: %v)", name, embedded, statErr)
-				}
-			})
+					if !errors.Is(err, beads.ErrProxiedServerUnsupported) {
+						t.Fatalf("%s error = %v, want errors.Is ErrProxiedServerUnsupported", name, err)
+					}
+				})
+			}
 		}
 	}
 }
 
-// TestOpenBestAvailableProxiedRefusalLeavesWorkspaceUntouched pins that the
-// proxied-server refusal writes nothing, whether the workspace never had an
-// embedded tree or still carries one from before it moved to proxied-server
-// mode. The planted tree is a preservation fixture: no open may create,
-// migrate or read-and-rewrite it, nor create any other storage directory.
-func TestOpenBestAvailableProxiedRefusalLeavesWorkspaceUntouched(t *testing.T) {
-	for _, tree := range []string{"absent", "pre-existing"} {
-		for name, open := range proxiedOpens {
-			t.Run(tree+"/"+name, func(t *testing.T) {
-				root, beadsDir := proxiedServerBeadsDir(t, "proxied-server")
-				if tree == "pre-existing" {
-					marker := filepath.Join(beadsDir, "embeddeddolt", "dolt", "stale-marker")
-					if err := os.MkdirAll(filepath.Dir(marker), 0o750); err != nil {
-						t.Fatalf("create embedded tree: %v", err)
-					}
-					if err := os.WriteFile(marker, []byte("issues as of the last embedded run\n"), 0o600); err != nil {
-						t.Fatalf("write marker: %v", err)
-					}
-				}
+// TestOpenBestAvailableProxiedServerRefusalLeavesWorkspaceUnchanged pins
+// AC-2: the refusal comes before anything writes, whichever file declares the
+// mode. Before the fix the cgo build created .beads/embeddeddolt, and for a
+// legacy config.json configfile.Load migrated it into metadata.json.
+func TestOpenBestAvailableProxiedServerRefusalLeavesWorkspaceUnchanged(t *testing.T) {
+	isolateProxiedServerEnv(t, "", "")
+	for _, file := range []string{"metadata.json", "config.json"} {
+		for name, open := range bestAvailableOpens {
+			t.Run(file+"/"+name, func(t *testing.T) {
+				root, beadsDir := writeProxiedServerWorkspace(t, file, "dolt", "proxied-server")
 				before := workspaceTreeDigest(t, root)
-
-				store, err := open(context.Background(), beadsDir)
-				assertProxiedRefusal(t, name, store, err)
+				_, err := openClosing(t, open, beadsDir)
 				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
-					t.Fatalf("%s refusal changed the workspace:\nbefore %v\nafter  %v", name, before, after)
+					t.Fatalf("%s changed the workspace (err=%v): before %v, after %v", name, err, before, after)
+				}
+				if !errors.Is(err, beads.ErrProxiedServerUnsupported) {
+					t.Fatalf("%s error = %v, want errors.Is ErrProxiedServerUnsupported", name, err)
 				}
 			})
 		}
 	}
 }
 
-// TestOpenBestAvailableProxiedRefusalPrecedesServerOverride pins that the
-// refusal also wins over the environment overrides that force direct-server
-// mode (BEADS_DOLT_SERVER_MODE=1, BEADS_DOLT_SHARED_SERVER=1|true): those make
-// IsDoltServerMode true for a proxied workspace too, so the guard must sit
-// before both Dolt constructors. A test-owned loopback listener stands in for
-// the server the overrides would dial; it must never see a connection.
-func TestOpenBestAvailableProxiedRefusalPrecedesServerOverride(t *testing.T) {
-	overrides := []struct{ key, value string }{
-		{"BEADS_DOLT_SERVER_MODE", "1"},
-		{"BEADS_DOLT_SHARED_SERVER", "1"},
-		{"BEADS_DOLT_SHARED_SERVER", "true"},
-	}
-	for _, o := range overrides {
-		for name, open := range proxiedOpens {
-			t.Run(o.key+"="+o.value+"/"+name, func(t *testing.T) {
-				root, beadsDir := proxiedServerBeadsDir(t, "proxied-server")
-				t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
-				t.Setenv(o.key, o.value)
+// envForcedServerModes are the two env settings that make IsDoltServerMode
+// true ahead of dolt_mode, keyed by the variable they set to "1".
+var envForcedServerModes = []struct{ name, serverMode, sharedServer string }{
+	{"BEADS_DOLT_SERVER_MODE", "1", ""},
+	{"BEADS_DOLT_SHARED_SERVER", "", "1"},
+}
 
-				ln, err := net.Listen("tcp", "127.0.0.1:0")
-				if err != nil {
-					t.Fatalf("listen: %v", err)
-				}
-				var accepted atomic.Int32
-				var wg sync.WaitGroup
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for {
-						conn, err := ln.Accept()
-						if err != nil {
-							return
+// TestOpenBestAvailableProxiedServerRefusalHoldsWithoutNamedPort pins AC-3 as
+// narrowed in review: BEADS_DOLT_SERVER_MODE and BEADS_DOLT_SHARED_SERVER make
+// IsDoltServerMode true ahead of dolt_mode, but without BEADS_DOLT_SERVER_PORT
+// naming a port the server arm would dial a port bd resolves itself, never the
+// proxy's data port, so a proxied workspace is still refused and left
+// unchanged. Neither the legacy BEADS_DOLT_PORT nor a BEADS_DOLT_SERVER_PORT
+// that is not a positive port ("0", "not-a-port") names one. Without the
+// refusal each row fails to connect, not with the sentinel.
+func TestOpenBestAvailableProxiedServerRefusalHoldsWithoutNamedPort(t *testing.T) {
+	ports := []struct{ name, serverPort, legacyPort string }{
+		{"no-port", "", ""},
+		{"legacy-port-only", "", "1"},
+		{"server-port-zero", "0", ""},
+		{"server-port-not-a-port", "not-a-port", ""},
+	}
+	for _, env := range envForcedServerModes {
+		for _, port := range ports {
+			for _, file := range []string{"metadata.json", "config.json"} {
+				for name, open := range bestAvailableOpens {
+					t.Run(env.name+"/"+port.name+"/"+file+"/"+name, func(t *testing.T) {
+						isolateProxiedServerEnv(t, env.serverMode, env.sharedServer)
+						t.Setenv("BEADS_DOLT_SERVER_PORT", port.serverPort)
+						t.Setenv("BEADS_DOLT_PORT", port.legacyPort)
+						root, beadsDir := writeProxiedServerWorkspace(t, file, "dolt", "proxied-server")
+						before := workspaceTreeDigest(t, root)
+						gotStore, err := openClosing(t, open, beadsDir)
+						if gotStore {
+							t.Errorf("%s with %s=1 (%s) returned a store for a proxied-server workspace (err=%v)", name, env.name, port.name, err)
 						}
-						accepted.Add(1)
-						_ = conn.Close()
-					}
-				}()
-				stop := func() { _ = ln.Close(); wg.Wait() }
-				defer stop()
-				t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(ln.Addr().(*net.TCPAddr).Port))
-				before := workspaceTreeDigest(t, root)
-
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				store, err := open(ctx, beadsDir)
-				stop()
-				assertProxiedRefusal(t, name, store, err)
-				if n := accepted.Load(); n != 0 {
-					t.Errorf("%s dialed the server %d time(s) before refusing", name, n)
+						if !errors.Is(err, beads.ErrProxiedServerUnsupported) {
+							t.Fatalf("%s with %s=1 (%s) error = %v, want errors.Is ErrProxiedServerUnsupported", name, env.name, port.name, err)
+						}
+						if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+							t.Fatalf("%s with %s=1 (%s) changed the workspace: before %v, after %v", name, env.name, port.name, before, after)
+						}
+					})
 				}
-				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
-					t.Errorf("%s refusal changed the workspace:\nbefore %v\nafter  %v", name, before, after)
-				}
-			})
+			}
 		}
 	}
 }
 
-// TestOpenBestAvailableWithOptionRefusalPrecedesProxiedRefusal pins that on a
-// proxied-server workspace an unsupported per-open option still returns its
-// own documented sentinel (the option contract predates the proxied guard and
-// fails closed already), with no store and the workspace untouched.
-func TestOpenBestAvailableWithOptionRefusalPrecedesProxiedRefusal(t *testing.T) {
-	tests := []struct {
-		name string
-		opts beads.OpenOptions
-		want error
-	}{
-		{name: "Credential", opts: beads.OpenOptions{Credential: fixtureCredential{}}, want: beads.ErrCredentialWithoutOpenWith},
-		{name: "HTTPClient", opts: beads.OpenOptions{HTTPClient: &http.Client{}}, want: beads.ErrHTTPClientWithoutOpenWith},
-		{name: "UserAgent", opts: beads.OpenOptions{UserAgent: "test-agent/1.0"}, want: beads.ErrUserAgentWithoutOpenWith},
+// closedLoopbackPort returns a 127.0.0.1 port that was free a moment ago and
+// is closed now, so a dial there fails fast. It is never port 1, the port
+// BEADS_TEST_MODE dials when nothing resolves one, so a dial failure that
+// names it shows the open dialed the port it was given.
+func closedLoopbackPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find a free port: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			root, beadsDir := proxiedServerBeadsDir(t, "proxied-server")
-			before := workspaceTreeDigest(t, root)
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close the free port's listener: %v", err)
+	}
+	return port
+}
 
-			store, err := beads.OpenBestAvailableWith(context.Background(), beadsDir, tt.opts)
-			if store != nil {
-				_ = store.Close()
-				t.Errorf("OpenBestAvailableWith returned a store alongside the %s refusal", tt.name)
+// TestOpenBestAvailableProxiedServerAtNamedPortReachesServerArm pins the open
+// the refusal leaves alone: an env that forces server mode and names the port,
+// as Gas City's proxied-native lane names the proxy's data port
+// (BEADS_DOLT_SERVER_MODE=1 with BEADS_DOLT_SERVER_HOST and
+// BEADS_DOLT_SERVER_PORT), still reaches the server arm and dials that
+// endpoint, as it did before the refusal. The named port is closed and is not
+// the port 1 test mode dials when nothing resolves one, so the plain opens'
+// dial failure names it only if the server arm dialed the port the env named.
+// The UserAgent open meets the per-open option refusal any Dolt server open
+// meets. None of them gets the sentinel.
+func TestOpenBestAvailableProxiedServerAtNamedPortReachesServerArm(t *testing.T) {
+	for _, env := range envForcedServerModes {
+		for _, file := range []string{"metadata.json", "config.json"} {
+			for name, open := range bestAvailableOpens {
+				t.Run(env.name+"/"+file+"/"+name, func(t *testing.T) {
+					isolateProxiedServerEnv(t, env.serverMode, env.sharedServer)
+					port := strconv.Itoa(closedLoopbackPort(t))
+					t.Setenv("BEADS_DOLT_SERVER_PORT", port)
+					addr := "127.0.0.1:" + port
+					_, beadsDir := writeProxiedServerWorkspace(t, file, "dolt", "proxied-server")
+					gotStore, err := openClosing(t, open, beadsDir)
+					if gotStore {
+						t.Fatalf("%s with %s=1 returned a store with nothing listening on %s (err=%v)", name, env.name, addr, err)
+					}
+					if errors.Is(err, beads.ErrProxiedServerUnsupported) {
+						t.Fatalf("%s with %s=1 and BEADS_DOLT_SERVER_PORT=%s error = %v, want the server arm's error, not the proxied-server refusal", name, env.name, port, err)
+					}
+					if name == "OpenBestAvailableWith+UserAgent" {
+						if !errors.Is(err, beads.ErrUserAgentWithoutOpenWith) {
+							t.Fatalf("%s with %s=1 error = %v, want errors.Is ErrUserAgentWithoutOpenWith", name, env.name, err)
+						}
+						return
+					}
+					if err == nil || !strings.Contains(err.Error(), "unreachable at "+addr+":") {
+						t.Fatalf("%s with %s=1 error = %v, want the server arm's dial failure at %s", name, env.name, err, addr)
+					}
+				})
 			}
-			if !errors.Is(err, tt.want) {
-				t.Fatalf("OpenBestAvailableWith error = %v, want %v", err, tt.want)
+		}
+	}
+}
+
+// TestOpenBestAvailableProxiedServerRefusalNamesModeFileAndCLI pins AC-4: the
+// refusal quotes the dolt_mode as written, names the file that declares it,
+// carries the shared data-safety guarantee and points at the bd CLI. It must
+// not point at OpenFromConfig (which would dial around the proxy), at
+// bd init --server, or at CGO.
+func TestOpenBestAvailableProxiedServerRefusalNamesModeFileAndCLI(t *testing.T) {
+	isolateProxiedServerEnv(t, "", "")
+	layouts := []struct{ file, other string }{
+		{"metadata.json", "config.json"},
+		{"config.json", "metadata.json"},
+	}
+	for _, layout := range layouts {
+		for _, spelling := range []string{"proxied-server", "Proxied-Server"} {
+			for name, open := range bestAvailableOpens {
+				t.Run(layout.file+"/"+spelling+"/"+name, func(t *testing.T) {
+					_, beadsDir := writeProxiedServerWorkspace(t, layout.file, "dolt", spelling)
+					_, err := openClosing(t, open, beadsDir)
+					if err == nil {
+						t.Fatalf("%s opened a proxied-server workspace", name)
+					}
+					msg := err.Error()
+					for _, want := range []string{
+						strconv.Quote(spelling),
+						filepath.Join(beadsDir, layout.file),
+						"no storage database was opened or modified",
+						"bd CLI",
+					} {
+						if !strings.Contains(msg, want) {
+							t.Errorf("%s error = %q, want it to contain %q", name, msg, want)
+						}
+					}
+					for _, unwanted := range []string{layout.other, "OpenFromConfig", "bd init --server", "CGO"} {
+						if strings.Contains(msg, unwanted) {
+							t.Errorf("%s error = %q, must not contain %q", name, msg, unwanted)
+						}
+					}
+				})
 			}
-			if errors.Is(err, beads.ErrProxiedServerWorkspace) {
-				t.Fatalf("OpenBestAvailableWith error = %v; the %s option sentinel must keep precedence over the proxied refusal", err, tt.name)
-			}
-			if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
-				t.Errorf("%s refusal changed the workspace:\nbefore %v\nafter  %v", tt.name, before, after)
+		}
+	}
+}
+
+// TestOpenBestAvailableProxiedServerRefusalSparesRegisteredBackend pins the
+// AC-5 edge: dolt_mode is a Dolt setting, so a registered extension backend
+// whose metadata also carries "proxied-server" still dispatches to the
+// registry, as on main. The server, embedded and option tests guard the
+// other Dolt arms.
+func TestOpenBestAvailableProxiedServerRefusalSparesRegisteredBackend(t *testing.T) {
+	isolateProxiedServerEnv(t, "", "")
+	const backend = "registry-proxied-mode"
+	registerWorkspaceBackend(t, backend)
+	opens := map[string]func(context.Context, string) (beads.Storage, error){
+		"OpenBestAvailable":     bestAvailableOpens["OpenBestAvailable"],
+		"OpenBestAvailableWith": bestAvailableOpens["OpenBestAvailableWith"],
+	}
+	for name, open := range opens {
+		t.Run(name, func(t *testing.T) {
+			_, beadsDir := writeProxiedServerWorkspace(t, "metadata.json", backend, "proxied-server")
+			_, err := openClosing(t, open, beadsDir)
+			if !errors.Is(err, errRegistryBackendOpen) {
+				t.Fatalf("%s error = %v, want dispatch to the registered backend (%v)", name, err, errRegistryBackendOpen)
 			}
 		})
 	}
-}
-
-// TestOpenBestAvailableProxiedGuardKeepsNonProxiedDispatch pins that the
-// proxied-server guard does not over-fire: server-mode metadata on a dead
-// endpoint still takes the server arm (a dial failure, not the proxied
-// sentinel, and no embedded store), and a registered extension backend whose
-// metadata carries a stale proxied dolt_mode still dispatches to the
-// registry, ahead of every Dolt-path decision.
-func TestOpenBestAvailableProxiedGuardKeepsNonProxiedDispatch(t *testing.T) {
-	t.Run("nonproxied_server_mode_still_dials", func(t *testing.T) {
-		_, beadsDir := proxiedServerBeadsDir(t, "server")
-		store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
-		if store != nil {
-			_ = store.Close()
-			t.Fatal("server-mode open on a dead endpoint returned a store")
-		}
-		if err == nil {
-			t.Fatal("server-mode open on a dead endpoint succeeded; want the dial failure")
-		}
-		if errors.Is(err, beads.ErrProxiedServerWorkspace) {
-			t.Fatalf("server-mode workspace refused with the proxied sentinel; the guard must not over-fire: %v", err)
-		}
-		if _, statErr := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); !os.IsNotExist(statErr) {
-			t.Errorf("server-mode open created an embedded store at embeddeddolt (stat error: %v); it must keep taking the server arm", statErr)
-		}
-	})
-
-	t.Run("nonproxied_registered_backend_dispatches", func(t *testing.T) {
-		const backend = "registry-proxied-mode-guard"
-		registerWorkspaceBackend(t, backend)
-		// A fresh workspace whose metadata names the registered backend but
-		// still carries a proxied dolt_mode, written by hand over the helper's.
-		_, beadsDir := proxiedServerBeadsDir(t, "proxied-server")
-		metadata := `{"backend":"` + backend + `","dolt_mode":"proxied-server"}`
-		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
-			t.Fatalf("write metadata: %v", err)
-		}
-		store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
-		if store != nil {
-			_ = store.Close()
-			t.Fatal("registered backend dispatch returned a store instead of the backend's own result")
-		}
-		if !errors.Is(err, errRegistryBackendOpen) {
-			t.Fatalf("OpenBestAvailable error = %v, want the registered backend's Open result; dispatch must stay ahead of the proxied guard", err)
-		}
-		if _, statErr := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); !os.IsNotExist(statErr) {
-			t.Errorf("registered backend dispatch created embeddeddolt (stat error: %v)", statErr)
-		}
-	})
 }
