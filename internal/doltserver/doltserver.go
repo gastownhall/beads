@@ -1594,6 +1594,23 @@ func startupReadyLineLogged(debug bool) bool {
 	return debug || !listenerOwnershipChecked
 }
 
+// newServerCommand builds, without starting it, the shared dolt sql-server
+// command: it runs in doltDir, logs to logFile, outlives the caller in its
+// own process group and, on Windows, gets CREATE_NEW_PROCESS_GROUP|
+// CREATE_NO_WINDOW so a console-less bd does not give it a console (GH#6076).
+func newServerCommand(doltBin, doltDir string, cmdArgs []string, logFile *os.File) *exec.Cmd {
+	cmd := exec.Command(doltBin, cmdArgs...) //nolint:gosec // doltBin is resolved from PATH, not user input
+	cmd.Dir = doltDir
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.SysProcAttr = procAttrDetached()
+	// After the last SysProcAttr change, as execwin.Hide requires.
+	execwin.Hide(cmd)
+	cmd.Env = ServerSpawnEnv()
+	return cmd
+}
+
 // ServerSpawnEnv returns the environment for a spawned dolt sql-server (the
 // directly-managed spawn here and the proxied one in dbproxy/server). The
 // server runs CALL DOLT_PUSH/FETCH itself, so the guards must be in the
@@ -2078,17 +2095,7 @@ func startLocked(beadsDir string) (*State, error) {
 				cmdArgs = buildDoltServerArgs(cfg.Host, actualPort, cfg.RemotesAPIPort, debug, profDir)
 			}
 
-			cmd := exec.Command(doltBin, cmdArgs...) //nolint:gosec // doltBin is resolved from PATH, not user input
-			cmd.Dir = doltDir
-			cmd.Stdout = logFile
-			cmd.Stderr = logFile
-			cmd.Stdin = nil
-			cmd.SysProcAttr = procAttrDetached()
-			// After the last SysProcAttr change: on Windows the server gets
-			// CREATE_NEW_PROCESS_GROUP|CREATE_NO_WINDOW, so a console-less bd
-			// does not give it a visible console (GH#6076).
-			execwin.Hide(cmd)
-			cmd.Env = ServerSpawnEnv()
+			cmd := newServerCommand(doltBin, doltDir, cmdArgs, logFile)
 
 			// GH#4634: the server outlives the caller, so any descriptor the
 			// caller left non-CLOEXEC (a shell `exec 9>lock`, a CI harness, an

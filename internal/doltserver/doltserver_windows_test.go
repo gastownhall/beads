@@ -43,3 +43,16 @@ func TestIsProcessAliveReportsExitedProcessWithLingeringHandleAsDead(t *testing.
 		t.Fatalf("exited process %d reported alive while its parent handle remained open", pid)
 	}
 }
+
+// GH#6076: the shared dolt sql-server keeps its own process group and gets no
+// console window, so a console-less bd does not make Windows allocate one.
+func TestNewServerCommandHidesTheServerConsoleOnWindows(t *testing.T) {
+	cmd := newServerCommand("dolt-fixture-never-started", t.TempDir(), []string{"sql-server"}, nil)
+	if cmd.SysProcAttr == nil {
+		t.Fatal("newServerCommand left SysProcAttr nil")
+	}
+	want := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW)
+	if got := cmd.SysProcAttr.CreationFlags; got != want {
+		t.Fatalf("CreationFlags = %#x, want CREATE_NEW_PROCESS_GROUP|CREATE_NO_WINDOW (%#x)", got, want)
+	}
+}
