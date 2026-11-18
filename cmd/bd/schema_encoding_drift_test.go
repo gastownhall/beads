@@ -183,6 +183,10 @@ type driftMigratorStore struct {
 
 func (s *driftMigratorStore) ApplySchemaMigrations(context.Context) (int, error) { return 0, s.err }
 
+// MigrationsAppliedAtOpen completes storage.SchemaMigrator: this store has no
+// real open, so the open applied nothing.
+func (s *driftMigratorStore) MigrationsAppliedAtOpen() int { return 0 }
+
 // TestSchemaEncodingDriftMigrateRendering: `bd migrate schema` renders the
 // same refusal instead of its generic "schema migration failed" error or
 // JSON, and exits 1.
