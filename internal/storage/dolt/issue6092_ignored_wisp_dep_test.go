@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -523,4 +524,69 @@ func TestIssue6092IgnoredWispDepUpgradePreservesRowsAndCompletesConstraints(t *t
 	issue6092RequireNamedFinalObjects(t, issue6092ReadShape(t, ctx, db))
 	issue6092RequireReferencedUnchanged(t, ctx, db)
 	issue6092RequireConstraintsEnforced(t, ctx, db)
+}
+
+// issue6092IDDeps are issue6092ValidDeps under the ids an id-keyed table on a
+// converged store holds: depid.New(issue_id, target), which every insert path
+// mints and the dependency re-key pass converges any other id to. The
+// replayed ignored chain runs that re-key (its ignored/0026 marker is pending
+// once the cursor is rewound), so a fixture seeded with arbitrary ids would
+// see them rewritten by the re-key, not by the repair under test.
+func issue6092IDDeps() []issue6092Dep {
+	out := append([]issue6092Dep(nil), issue6092ValidDeps...)
+	for i := range out {
+		out[i].id = depid.New(out[i].issueID, out[i].issueTarget+out[i].wispTarget+out[i].externalTarget)
+	}
+	return out
+}
+
+func issue6092RequireIDsKept(t *testing.T, got, want []issue6092Dep) {
+	t.Helper()
+	byIdentity := map[string]string{}
+	for _, g := range got {
+		byIdentity[issue6092Identity(g)] = g.id
+	}
+	for _, w := range want {
+		if id := byIdentity[issue6092Identity(w)]; id != w.id {
+			t.Errorf("row %s: id = %q, want its existing %q", issue6092Identity(w), id, w.id)
+		}
+	}
+}
+
+// TestIssue6092IgnoredWispDepRepairRestoresConstraintsAfterFailedRun is AC-3:
+// the shape a failed ignored/0005 run leaves -- id primary key and unique keys
+// in place, the generated column gone, but every foreign key and the
+// one-target check missing -- at ignored cursor 4. The frozen body reads
+// @needs_drop = 0 there and records 5 over it; the repair must restore the
+// constraints and keep the existing ids.
+func TestIssue6092IgnoredWispDepRepairRestoresConstraintsAfterFailedRun(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*testTimeout)
+	defer cancel()
+	db := store.db
+
+	issue6092SeedReferenced(t, ctx, db)
+	deps := issue6092IDDeps()
+	issue6092SeedDeps(t, ctx, db, deps, true)
+	for _, c := range []string{"fk_wisp_dep_issue", "fk_wisp_dep_wisp_target", "fk_wisp_dep_issue_target"} {
+		issue6092Exec(t, ctx, db, "ALTER TABLE wisp_dependencies DROP FOREIGN KEY "+c)
+	}
+	issue6092Exec(t, ctx, db, "ALTER TABLE wisp_dependencies DROP CHECK ck_wisp_dep_one_target")
+	partial := issue6092ReadShape(t, ctx, db)
+	if len(partial.foreignKeys) != 0 || partial.checks["ck_wisp_dep_one_target"] || partial.primaryKey != "id" {
+		t.Fatalf("fixture: want an id-keyed table with no foreign keys or check, got pk %q fks %v checks %v",
+			partial.primaryKey, partial.foreignKeys, partial.checks)
+	}
+	issue6092CommitAndRewindIgnored(t, ctx, db, issue6092IgnoredCursorBefore0005)
+
+	if _, err := schema.MigrateUp(ctx, db); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+	issue6092RequireCursorsAtLatest(t, ctx, db)
+	issue6092RequireNamedFinalObjects(t, issue6092ReadShape(t, ctx, db))
+	got := issue6092ReadDeps(t, ctx, db)
+	issue6092RequireDepsPreserved(t, got, deps)
+	issue6092RequireIDsKept(t, got, deps)
+	issue6092RequireReferencedUnchanged(t, ctx, db)
 }
