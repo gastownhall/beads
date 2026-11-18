@@ -86,6 +86,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("RoutedToWisps", s.issueCountForPrefixWispRouting)
 		s.Run("CountsPromotedWispsInIssues", s.issueCountForPrefixPromotedWisps)
 		s.Run("CountsBaseNamespaceHeldInWisps", s.issueCountForPrefixBaseInWisps)
+		s.Run("LiveWispsDoNotCountForBasePrefix", s.issueCountForPrefixLiveWispsExcluded)
 		s.Run("EmptyPrefixReturnsError", s.issueCountForPrefixEmptyPrefix)
 	})
 	s.Run("NextCounterID", func() {
@@ -688,6 +689,26 @@ func (s *testSuite) issueCountForPrefixBaseInWisps() {
 	got, err := r.CountForPrefix(s.Ctx(), "cfpBase", domain.IssueTableOpts{})
 	s.Require().NoError(err)
 	s.Equal(10, got, "the base namespace's population spans both planes: 5 in issues + 5 in wisps")
+}
+
+// issueCountForPrefixLiveWispsExcluded guards the sibling term's exact-
+// namespace rule: a live <prefix>-wisp-* row can never equal a
+// <prefix>-<hash> id, so it must not lengthen the base prefix.
+func (s *testSuite) issueCountForPrefixLiveWispsExcluded() {
+	r := s.issueRepo()
+	for i := 1; i <= 3; i++ {
+		s.Require().NoError(r.Insert(s.Ctx(),
+			newTestIssue(fmt.Sprintf("cfpLive-d%d", i), "durable"), "tester", domain.InsertIssueOpts{}))
+	}
+	for i := 1; i <= 12; i++ {
+		w := newTestIssue(fmt.Sprintf("cfpLive-wisp-w%d", i), "live wisp")
+		w.Ephemeral = true
+		s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	}
+
+	got, err := r.CountForPrefix(s.Ctx(), "cfpLive", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(3, got, "live wisps in a sub-prefix namespace must not count toward the base prefix")
 }
 
 func (s *testSuite) issueCountForPrefixEmptyPrefix() {

@@ -30,6 +30,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("CreateAttachesNormalizedComments", s.useCaseCreateAttachesNormalizedComments)
 	s.Run("WispMintSizedAcrossBothPlanes", s.useCaseMintWispSizedByPromotedWisps)
 	s.Run("DurableMintSizedAcrossBothPlanes", s.useCaseMintDurableSizedByWisps)
+	s.Run("LiveWispsDoNotLengthenBaseMint", s.useCaseMintLiveWispsExcluded)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -1083,4 +1084,35 @@ func (s *testSuite) useCaseMintDurableSizedByWisps() {
 	s.Require().NoError(err)
 	s.Equal(4, s.hashSuffixLen(res.Issue.ID, "ucAd2"),
 		"population 10 across both planes must size the durable hash to 4 characters, got %q", res.Issue.ID)
+}
+
+// useCaseMintLiveWispsExcluded guards the sibling term's exact-namespace
+// rule at the mint: live <prefix>-wisp-* wisps can never collide with a
+// <prefix>-<hash> id, so they must not lengthen the base prefix.
+func (s *testSuite) useCaseMintLiveWispsExcluded() {
+	s.resetAdaptiveMintConfig("ucAd3")
+	uc := s.issueUseCase()
+	for i := 1; i <= 3; i++ {
+		_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: fmt.Sprintf("durable %d", i), IssueType: types.TypeTask, Priority: 2},
+			ExplicitID: fmt.Sprintf("ucAd3-d%d", i),
+			CreateOnly: true,
+		}, "seeder")
+		s.Require().NoError(err)
+	}
+	for i := 1; i <= 12; i++ {
+		_, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: fmt.Sprintf("live wisp %d", i), IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+			ExplicitID: fmt.Sprintf("ucAd3-wisp-w%d", i),
+			CreateOnly: true,
+		}, "seeder")
+		s.Require().NoError(err)
+	}
+
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "fresh issue", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(3, s.hashSuffixLen(res.Issue.ID, "ucAd3"),
+		"live wisps in a sub-prefix namespace must not lengthen the base prefix, got %q", res.Issue.ID)
 }

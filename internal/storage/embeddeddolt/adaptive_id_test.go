@@ -167,4 +167,23 @@ func TestAdaptiveIDLengthSpansBothPlanes(t *testing.T) {
 			t.Fatalf("minted issue id %s: hash %q has %d chars, want 4", id, suffix, len(suffix))
 		}
 	})
+
+	t.Run("LiveWispsDoNotLengthenBasePrefix", func(t *testing.T) {
+		te := newTestEnv(t, "mg")
+		ctx := t.Context()
+		strictProb(t, te, ctx)
+
+		// Three base-namespace issues and twelve live wisps in the
+		// sub-prefix namespace: a plain sum (15) would size to 4, but none
+		// of those wisps can ever collide with an mg-<hash> id.
+		seed(t, te, ctx, ids("mg-d%02d", 3), false)
+		seed(t, te, ctx, ids("mg-wisp-w%02d", 12), true)
+		if got := sizedLength(t, te, ctx, "issues", "mg"); got != 3 {
+			t.Fatalf("GetAdaptiveIDLengthTx(issues, mg) = %d, want 3 (live wisps must not lengthen the base prefix)", got)
+		}
+		id := mint(t, te, ctx, "fresh issue", false)
+		if suffix := hashSuffix(t, id, "mg"); len(suffix) != 3 {
+			t.Fatalf("minted issue id %s: hash %q has %d chars, want 3", id, suffix, len(suffix))
+		}
+	})
 }
