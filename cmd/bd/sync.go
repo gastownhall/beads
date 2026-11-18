@@ -681,8 +681,11 @@ recomputing or pushing and exits 2, and repeated runs keep halting the same way
 until an operator resolves the divergence. (The pull underneath does auto-settle
 the conflict classes it can settle convergently — machine-local metadata,
 audit-only dependency rows, and last-write-wins on issue cells. Anything beyond
-those halts here.) Whether the halted merge was aborted or left live in the
-working set depends on the pull route, so the halt message reports which.
+those halts here, including a close on one side racing a different status on the
+other, such as a claim made without seeing the close: the halt notice names the
+issue and both statuses, and 'bd dolt pull --strategy ours|theirs' chooses a
+side.) Whether the halted merge was aborted or left live in the working set
+depends on the pull route, so the halt message reports which.
 
 Exit codes (a sync timer can branch on these without parsing output):
 
