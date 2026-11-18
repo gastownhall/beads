@@ -433,6 +433,9 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 	if usesProxiedServer() {
 		return HandleErrorRespectJSON("notion sync is not supported in proxied-server mode")
 	}
+	if err := createOnlyDirectionError("Notion", notionCreateOnly, notionSyncPull && !notionSyncPush); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
 	evt := metrics.NewCommandEvent("notion-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {
