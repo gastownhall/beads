@@ -1060,6 +1060,7 @@ go_test(
         "mol_bond_dryrun_validation_test.go",
         "mol_bond_gwn_test.go",
         "mol_bond_proxied_integration_test.go",
+        "mol_bond_proxied_routing_test.go",
         "mol_bond_ref_attach_test.go",
         "mol_bond_routing_test.go",
         "mol_bond_test.go",

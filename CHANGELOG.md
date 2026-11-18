@@ -1315,6 +1315,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hooks installed by a candidate as outdated under its release (fix:
   `bd hooks install --force`), and the Claude plugin check warns when the
   plugin is a candidate and the release is out. (#6596, by rjgeng)
+- **`bd mol bond` on a proxied-server launcher follows prefix routes.** The
+  proxied route resolved both operands in the served database only, so
+  bonding a formula to a molecule that a `routes.jsonl` rig holds failed with
+  `'<id>' not found as issue or formula`. It now plans the bond the way the
+  direct route does: each operand is looked up in the served database, then
+  through its prefix route (opened read-only), then as a formula. A bond whose
+  operands share a routed rig spawns and attaches in that rig's own
+  transaction and leaves the served database untouched; a bond between the
+  served database and a rig, or between two rigs, is refused before anything
+  is written. A route that fails to open or refuses (for example a rig that is
+  itself a proxied-server workspace) keeps its own error unless a formula has
+  the operand's name, and a dry run previews without a writable open. A bond
+  that stays in the served database still commits once.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
