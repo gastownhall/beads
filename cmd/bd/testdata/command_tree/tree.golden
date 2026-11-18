@@ -7420,7 +7420,9 @@ bd vc status
     |
     | Uncommitted changes are the tables the Dolt working set has changed since the
     | last commit, each with its change (modified, new table, deleted) and whether
-    | it is staged or unstaged. The command only reads the working set: it never
+    | it is staged or unstaged. Bookkeeping tables (wisps, wisp_*, leases,
+    | local_metadata, repo_mtimes, events) change by design and are left out, as
+    | bd doctor leaves them out. The command only reads the working set: it never
     | stages or commits anything.
     |
     | With --json the output carries "branch", "commit", and the always-present

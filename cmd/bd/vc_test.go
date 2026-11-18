@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -214,5 +215,34 @@ func TestNewVCWorkingSetSortsAndKeepsEmptySides(t *testing.T) {
 	}
 	if empty := newVCWorkingSet(nil); !empty.clean() || empty.Staged == nil || empty.Unstaged == nil {
 		t.Errorf("nil status must give a clean view with non-nil sides, got %+v", empty)
+	}
+}
+
+// TestNewVCWorkingSetDropsBookkeepingTables pins that bd vc status leaves out
+// the bookkeeping tables bd doctor ignores, on both sides, so a working set
+// changed only there is clean.
+func TestNewVCWorkingSetDropsBookkeepingTables(t *testing.T) {
+	bookkeeping := []storage.StatusEntry{
+		{Table: "wisps", Status: "modified"},
+		{Table: "wisp_labels", Status: "modified"},
+		{Table: "leases", Status: "modified"},
+		{Table: "local_metadata", Status: "modified"},
+		{Table: "repo_mtimes", Status: "new table"},
+		{Table: "events", Status: "modified"},
+	}
+	if ws := newVCWorkingSet(&storage.Status{Staged: bookkeeping, Unstaged: bookkeeping}); !ws.clean() {
+		t.Errorf("bookkeeping-only working set must be clean, got %+v", ws)
+	}
+
+	ws := newVCWorkingSet(&storage.Status{
+		Staged:   append([]storage.StatusEntry{{Table: "issues", Status: "modified"}}, bookkeeping...),
+		Unstaged: append([]storage.StatusEntry{{Table: "labels", Status: "modified"}}, bookkeeping...),
+	})
+	want := vcWorkingSet{
+		Staged:   []vcStatusEntry{{Table: "issues", Status: "modified"}},
+		Unstaged: []vcStatusEntry{{Table: "labels", Status: "modified"}},
+	}
+	if !reflect.DeepEqual(ws, want) {
+		t.Errorf("working set = %+v, want %+v", ws, want)
 	}
 }
