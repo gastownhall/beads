@@ -178,7 +178,7 @@ func TestForceStopHelperProcess(t *testing.T) {
 // systems (Ubuntu 25.10+) sleep is a multicall binary dispatching on
 // argv[0], so a renamed copy exits instantly and the fixture silently loses
 // its live process.
-func startNamedForceStopHelper(t *testing.T, dir, name string) helperProcess {
+func startNamedForceStopHelper(t *testing.T, dir, name string, extraArgs ...string) helperProcess {
 	t.Helper()
 	self, err := os.Executable()
 	require.NoError(t, err)
@@ -197,7 +197,13 @@ func startNamedForceStopHelper(t *testing.T, dir, name string) helperProcess {
 		require.NoError(t, cpErr)
 	}
 
-	cmd := exec.Command(executable, "-test.run=^TestForceStopHelperProcess$")
+	args := []string{"-test.run=^TestForceStopHelperProcess$"}
+	if len(extraArgs) > 0 {
+		// After "--" the test binary takes them as ignored positional args;
+		// they only shape the helper's command line.
+		args = append(append(args, "--"), extraArgs...)
+	}
+	cmd := exec.Command(executable, args...)
 	cmd.Env = append(bazeltest.ShardFreeEnv(os.Environ()), forceStopHelperEnv+"=1")
 	require.NoError(t, cmd.Start())
 	token, err := procid.Capture(cmd.Process.Pid)

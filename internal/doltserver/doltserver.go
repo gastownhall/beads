@@ -741,6 +741,34 @@ func IsTrackedServerRunning(beadsDir string) bool {
 // it to hand the command to that server, through localhost:port.
 const ServerInfoFileName = "sql-server.info"
 
+// ReadServerInfo parses dir/.dolt/sql-server.info (pid:port:secret, port "-"
+// for a socket-only server, reported as -1). Read-only: it never removes,
+// writes or locks the file. The file is only a pointer to a process: a stale
+// one names whatever now holds the PID, so callers must verify the process
+// before acting on it.
+func ReadServerInfo(dir string) (pid, port int, err error) {
+	path := filepath.Join(dir, ".dolt", ServerInfoFileName)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: fixed file name under the caller's database directory
+	if err != nil {
+		return 0, 0, err
+	}
+	parts := strings.Split(strings.TrimSpace(string(data)), ":")
+	if len(parts) != 3 {
+		return 0, 0, fmt.Errorf("malformed %s: want pid:port:secret", path)
+	}
+	pid, err = strconv.Atoi(parts[0])
+	if err != nil || pid <= 0 {
+		return 0, 0, fmt.Errorf("malformed %s: invalid pid %q", path, parts[0])
+	}
+	port = -1
+	if parts[1] != "-" {
+		if port, err = strconv.Atoi(parts[1]); err != nil {
+			return 0, 0, fmt.Errorf("malformed %s: invalid port %q", path, parts[1])
+		}
+	}
+	return pid, port, nil
+}
+
 // ServesDatabaseDirOnPort reports whether dir, a Dolt database directory, is
 // served by a live dolt sql-server listening on port, by the test the dolt
 // CLI makes before it hands a command run in dir to a server: the database

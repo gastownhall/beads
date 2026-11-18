@@ -846,7 +846,7 @@ func cleanupOrphanBackend(rootDir string) error {
 		return fmt.Errorf("read backend record %s: %w", recordPath, readErr)
 	}
 	if pf == nil {
-		return nil
+		return reapUnrecordedBackend(rootDir)
 	}
 	if err := pf.ValidateV2(pidfile.KindDoltBackend); err != nil {
 		dead, live, probeErr := probeUnverifiablePID(pf.Pid)
@@ -854,7 +854,8 @@ func cleanupOrphanBackend(rootDir string) error {
 			if _, quarantineErr := quarantineRecord(rootDir, server.PIDFileName, time.Now()); quarantineErr != nil {
 				return fmt.Errorf("quarantine dead unverifiable backend record: %w", quarantineErr)
 			}
-			return nil
+			// A dead record can sit in front of an older unrecorded orphan.
+			return reapUnrecordedBackend(rootDir)
 		}
 		if probeErr != nil {
 			err = errors.Join(err, fmt.Errorf("probe recorded pid: %w", probeErr))
@@ -897,7 +898,7 @@ func cleanupOrphanBackend(rootDir string) error {
 		if _, err := quarantineRecord(rootDir, server.PIDFileName, time.Now()); err != nil {
 			return fmt.Errorf("quarantine dead backend record: %w", err)
 		}
-		return nil
+		return reapUnrecordedBackend(rootDir)
 	}
 	if err := handle.Kill(); err != nil {
 		_ = handle.Close()
