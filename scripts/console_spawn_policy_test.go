@@ -881,3 +881,88 @@ func start(bin, dir string) {
 		}
 	})
 }
+
+// TestConsoleSpawnPolicyIntegrity pins the anti-disarm rules with an
+// injected scope and allowlist: a scope package that went vacuous (no
+// Windows-buildable file, or no recognised spawn) and an allowlist entry
+// that no longer matches a live unhidden spawn must each fail the guard by
+// name. Without these counts the scope and the allowlist could be hollowed
+// out silently, one quiet deletion at a time.
+func TestConsoleSpawnPolicyIntegrity(t *testing.T) {
+	const hiddenFixture = `package doltserver
+
+import (
+	"os/exec"
+
+	"github.com/steveyegge/beads/internal/execwin"
+)
+
+func probe(bin string) {
+	execwin.Hide(exec.Command(bin, "version"))
+}
+`
+	const bareFixture = "package doltserver\n\nfunc nothingToSeeHere() {}\n"
+
+	scanOne := func(t *testing.T, rel, src string, allowlist map[string][]consoleSpawnAllowlistEntry) string {
+		t.Helper()
+		_, filename := filepath.Split(rel)
+		abs := filepath.Join(t.TempDir(), filename)
+		if err := os.WriteFile(abs, []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(checkConsoleSpawnPolicy(t, allowlist, []consoleSpawnInput{{rel: rel, abs: abs, src: []byte(src)}}), "\n")
+	}
+
+	t.Run("scope package with no file at all is named", func(t *testing.T) {
+		joined := scanOne(t, "internal/doltserver/probe.go", hiddenFixture, nil)
+		if !strings.Contains(joined, "internal/doltversion: contributes no Windows-buildable non-test Go file") {
+			t.Fatalf("findings = %q, want the vacuous scope package named", joined)
+		}
+	})
+
+	t.Run("scope package whose only file is not Windows-buildable is named", func(t *testing.T) {
+		joined := scanOne(t, "internal/doltversion/probe_other.go", "//go:build !windows\n\n"+bareFixture, nil)
+		if !strings.Contains(joined, "internal/doltversion: contributes no Windows-buildable non-test Go file") {
+			t.Fatalf("findings = %q, want the no-Windows-file scope package named", joined)
+		}
+	})
+
+	t.Run("scope package with a Windows-buildable file but no spawn is named", func(t *testing.T) {
+		joined := scanOne(t, "internal/doltversion/probe.go", bareFixture, nil)
+		if !strings.Contains(joined, "internal/doltversion: contributes no recognised spawn") {
+			t.Fatalf("findings = %q, want the spawnless scope package named", joined)
+		}
+	})
+
+	t.Run("allowlist entry matching no live spawn is named", func(t *testing.T) {
+		allowlist := map[string][]consoleSpawnAllowlistEntry{
+			"internal/doltserver/probe.go": {
+				{fn: "probe", snippet: "exec.Command(bin, \"version\")", why: "fixture: the spawn is hidden now, so this entry is dead"},
+			},
+		}
+		joined := scanOne(t, "internal/doltserver/probe.go", hiddenFixture, allowlist)
+		if !strings.Contains(joined, `consoleSpawnAllowlist entry for internal/doltserver/probe.go (func "probe"`) {
+			t.Fatalf("findings = %q, want the dead allowlist entry named", joined)
+		}
+	})
+
+	t.Run("allowlist entry matching a live unhidden spawn excuses it", func(t *testing.T) {
+		const unhiddenFixture = `package doltserver
+
+import "os/exec"
+
+func probe(bin string) {
+	exec.Command(bin, "version")
+}
+`
+		allowlist := map[string][]consoleSpawnAllowlistEntry{
+			"internal/doltserver/probe.go": {
+				{fn: "probe", snippet: "exec.Command(bin, \"version\")", why: "fixture: this one is genuinely excused"},
+			},
+		}
+		joined := scanOne(t, "internal/doltserver/probe.go", unhiddenFixture, allowlist)
+		if strings.Contains(joined, "internal/doltserver/probe.go:") {
+			t.Fatalf("findings = %q, want the matching allowlist entry to excuse the spawn", joined)
+		}
+	})
+}
