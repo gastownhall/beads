@@ -2024,7 +2024,14 @@ bd dolt pull
     | aborting the pull for manual resolution. Embedded storage only (#4992); on
     | server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
     | reports conflicts.
+    |
+    | Use --renumber-children when the pull fails because both clones created
+    | different child issues under the same ids (P.71 here and P.71 there). The
+    | remote keeps its ids; this clone's colliding children, with their subtrees,
+    | move to fresh ids above both sides' counters in one commit before the merge.
+    | Text that mentions a moved id is reported, not rewritten.
   flag --remote type=string default="" usage="Pull from a specific named remote instead of the default"
+  flag --renumber-children type=bool default="false" usage="Before merging, move this clone's child issues that collide with different remote children to fresh ids"
   flag --strategy type=string default="" usage="Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)"
 
 bd dolt push

@@ -1,0 +1,551 @@
+package versioncontrolops
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
+)
+
+// This file is the applying half of `bd dolt pull --renumber-children`
+// (bd-28sb25, GH#4796); see childrenumber.go for the plan.
+
+// childRenumberCommitPrefix starts the message of every rename commit.
+const childRenumberCommitPrefix = "bd: renumber colliding children"
+
+// childRenumberLinePrefix starts each mapping line of a rename commit's
+// message, "renumber: <from> -> <to>", which a retry replays.
+const childRenumberLinePrefix = "renumber: "
+
+// childRenumberMarker closes a rename commit's message with the remote head
+// the renames were planned against: a retry against that same revision finds
+// the commit by it and reports the renames as already made (AC-6).
+const childRenumberMarker = "bd-renumber: remote_head="
+
+// TxScope binds a store's per-transaction state to a transaction begun on a
+// session the store handed over, and returns the function that releases it.
+// The stores pass their events-journal scoping: the renames journal through
+// UpdateIssueIDInTx, which records nothing in a transaction the store never
+// scoped.
+type TxScope func(tx *sql.Tx) (release func())
+
+// RenumberChildrenAndMerge renames the local colliding children PlanChildRenumbers
+// finds between branch and ref (which the caller has just fetched), commits
+// the renames as one Dolt commit, and merges the pinned remote head through
+// MergeAndSettle. conn must be a single session: the rename transaction, the
+// commit and the merge's session flags all run on it. scopeTx is the store's
+// scoping for the rename transaction (see ApplyChildRenumbers).
+//
+// It refuses to start mid-merge or over uncommitted changes, so the rename
+// commit holds the renames and nothing else. When the merge fails after the
+// rename commit landed, that commit stays (the renames are valid on their
+// own) and the report comes back with the error, so the caller can name it.
+// A retry against the same remote revision finds nothing left to rename; it
+// reports the kept commit and its renames (Retained) and merges again,
+// without renaming twice or adding an empty commit.
+func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, actor string, scopeTx TxScope) (*storage.ChildRenumberReport, error) {
+	merging, err := mergeInProgress(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	if merging {
+		return nil, errors.New("renumber children: a merge is in progress; conclude or abort it first")
+	}
+	clean, err := WorkingSetClean(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	if !clean {
+		return nil, errors.New("renumber children: the working set has uncommitted changes; commit them first (bd dolt commit)")
+	}
+
+	report, err := PlanChildRenumbers(ctx, conn, branch, ref)
+	if err != nil {
+		return nil, err
+	}
+	if len(report.Renames) > 0 {
+		if err := ApplyChildRenumbers(ctx, conn, report, actor, scopeTx); err != nil {
+			return report, err
+		}
+	} else if err := retainedChildRenumbers(ctx, conn, report); err != nil {
+		return report, err
+	}
+
+	// Merge the head the plan was made against, not the ref, so a fetch
+	// racing this command cannot slip unplanned commits into the merge.
+	if err := MergeAndSettle(ctx, conn, report.RemoteHead); err != nil {
+		return report, fmt.Errorf("merge %s (%s): %w", ref, report.RemoteHead, err)
+	}
+	report.Merged = true
+	if err := conn.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&report.Head); err != nil {
+		return report, fmt.Errorf("renumber children: read head after merge: %w", err)
+	}
+	return report, nil
+}
+
+// retainedChildRenumbers fills report from the rename commit an earlier
+// renumbering pull made against this same remote head and kept when its merge
+// failed: the commit, its parent and the renames its message records. Once
+// the remote head is part of the branch's history the repair completed, and
+// a marker naming it is history, not a pending result. Only commits the
+// remote head does not have are searched; the newest marker wins.
+func retainedChildRenumbers(ctx context.Context, conn *sql.Conn, report *storage.ChildRenumberReport) error {
+	if report.RemoteHead == "" || report.MergeBase == report.RemoteHead {
+		return nil
+	}
+	rows, err := conn.QueryContext(ctx,
+		"SELECT commit_hash, message FROM dolt_log('HEAD', '--not', ?)", report.RemoteHead)
+	if err != nil {
+		return fmt.Errorf("renumber children: read local commits: %w", err)
+	}
+	marker := childRenumberMarker + report.RemoteHead
+	var commit, message string
+	for rows.Next() {
+		var hash, msg string
+		if err := rows.Scan(&hash, &msg); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("renumber children: read local commits: %w", err)
+		}
+		if commit == "" && strings.HasPrefix(msg, childRenumberCommitPrefix) && hasLine(msg, marker) {
+			commit, message = hash, msg
+		}
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("renumber children: read local commits: %w", err)
+	}
+	if commit == "" {
+		return nil
+	}
+	var parent string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT parent_hash FROM dolt_commit_ancestors WHERE commit_hash = ? AND parent_index = 0", commit).Scan(&parent); err != nil {
+		return fmt.Errorf("renumber children: read parent of %s: %w", commit, err)
+	}
+	report.Renames = parseChildRenumberMessage(message)
+	report.RenameCommit = commit
+	report.RenameParent = parent
+	report.Retained = true
+	return nil
+}
+
+// hasLine reports whether text holds line as one whole line.
+func hasLine(text, line string) bool {
+	for _, l := range strings.Split(text, "\n") {
+		if l == line {
+			return true
+		}
+	}
+	return false
+}
+
+// parseChildRenumberMessage replays the renames a rename commit recorded, one
+// "renumber: <from> -> <to>" line each, in the order they were made (roots
+// first).
+func parseChildRenumberMessage(message string) []storage.ChildRenumber {
+	renames := []storage.ChildRenumber{}
+	for _, line := range strings.Split(message, "\n") {
+		rest, ok := strings.CutPrefix(line, childRenumberLinePrefix)
+		if !ok {
+			continue
+		}
+		from, to, ok := strings.Cut(rest, " -> ")
+		if !ok || from == "" || to == "" {
+			continue
+		}
+		renames = append(renames, storage.ChildRenumber{From: from, To: to})
+	}
+	return renames
+}
+
+// ApplyChildRenumbers renames report.Renames and commits them as one Dolt
+// commit, all inside one SQL transaction on conn: a failure anywhere leaves
+// no rename, counter move, event or commit behind. On success it fills the
+// report's RenameCommit, RenameParent and Mentions.
+//
+// The plan is re-validated inside that transaction, against the state the
+// renames will be written over: HEAD must still be the plan's LocalHead, no
+// merge may be in progress, the working set must be clean, and each
+// destination id must still be free. A plan that went stale fails with
+// "pull again to re-plan" instead of renaming over newer data, and because
+// the working set was clean when the transaction began, the commit stages
+// only what the renames changed.
+//
+// scopeTx is called on the transaction before anything runs in it: it binds
+// the store's events-journal activation and shape, so the renames journal as
+// any other rename on that store does. It must not be nil.
+func ApplyChildRenumbers(ctx context.Context, conn *sql.Conn, report *storage.ChildRenumberReport, actor string, scopeTx TxScope) (retErr error) {
+	renames := report.Renames
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("renumber children: begin: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	defer scopeTx(tx)()
+	var head string
+	if err := tx.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		return fmt.Errorf("renumber children: read head: %w", err)
+	}
+	if head != report.LocalHead {
+		return fmt.Errorf("renumber children: the branch moved since the plan (head %s, planned at %s); pull again to re-plan", head, report.LocalHead)
+	}
+	merging, err := mergeInProgress(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if merging {
+		return errors.New("renumber children: a merge is in progress; conclude or abort it first")
+	}
+	clean, err := WorkingSetClean(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !clean {
+		return errors.New("renumber children: the working set has uncommitted changes; commit them first (bd dolt commit)")
+	}
+	// The rename does not migrate issue_versions rows (that table has no
+	// foreign key to issues), so an issue with versioned history would keep
+	// it under the old id. Refuse before anything is renamed.
+	for _, r := range renames {
+		var versions int
+		if err := tx.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM issue_versions WHERE issue_id = ?", r.From).Scan(&versions); err != nil {
+			return fmt.Errorf("renumber children: check versioned history of %s: %w", r.From, err)
+		}
+		if versions > 0 {
+			return fmt.Errorf("renumber children: %s has %d issue_versions row(s); renaming an issue with versioned history is not supported", r.From, versions)
+		}
+	}
+	renamedTo := make(map[string]bool, len(renames))
+	for _, r := range renames {
+		renamedTo[r.To] = true
+	}
+	highWater := make(map[string]int)
+	for _, r := range renames {
+		var taken int
+		if err := tx.QueryRowContext(ctx,
+			"SELECT (SELECT COUNT(*) FROM issues WHERE id = ?) + (SELECT COUNT(*) FROM wisps WHERE id = ?)",
+			r.To, r.To).Scan(&taken); err != nil {
+			return fmt.Errorf("renumber children: check %s: %w", r.To, err)
+		}
+		if taken > 0 {
+			return fmt.Errorf("renumber children: rename %s -> %s: %s already exists; pull again to re-plan", r.From, r.To, r.To)
+		}
+		issue, err := issueops.GetIssueInTx(ctx, tx, r.From)
+		if err != nil {
+			return fmt.Errorf("renumber children: load %s: %w", r.From, err)
+		}
+		// Capture the issue's own counter BEFORE the rename: a schema whose
+		// child_counters still cascades on the issues FK moves the row during
+		// the rename, so reading it after would read the moved row.
+		counter, hasCounter, err := capturedChildCounterInTx(ctx, tx, r.From)
+		if err != nil {
+			return err
+		}
+		if err := refuseDestinationCounterInTx(ctx, tx, r.To); err != nil {
+			return err
+		}
+		// Text is passed through unchanged: mentions of a renamed id in prose
+		// are reported, never rewritten.
+		if err := issueops.UpdateIssueIDInTx(ctx, tx, r.From, r.To, issue, actor); err != nil {
+			return fmt.Errorf("renumber children: rename %s -> %s: %w", r.From, r.To, err)
+		}
+		if hasCounter {
+			if err := relocateChildCounterInTx(ctx, tx, r.From, r.To, counter); err != nil {
+				return err
+			}
+		}
+		if err := rekeyRenamedRowsInTx(ctx, tx, r); err != nil {
+			return err
+		}
+		// A descendant keeps its suffix under its renamed parent, whose own
+		// counter (relocated above, or absent) already covers it; a counter is
+		// never synthesized for a renamed node that had none.
+		if parent, n, ok := issueops.ParseHierarchicalID(r.To); ok && !renamedTo[parent] {
+			highWater[parent] = max(highWater[parent], n)
+		}
+	}
+	// The allocation parents' counters must cover the suffixes just taken, so
+	// the next `bd create --parent` cannot mint one of them again.
+	for parent, n := range highWater {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?) "+
+				"ON DUPLICATE KEY UPDATE last_child = GREATEST(last_child, VALUES(last_child))",
+			parent, n); err != nil {
+			return fmt.Errorf("renumber children: raise child counter of %s: %w", parent, err)
+		}
+	}
+	// Mentions are read after the rename and re-key, so a comment is named by
+	// the id it now holds; the text itself is left as written.
+	mentions, err := findChildIDMentions(ctx, tx, renames)
+	if err != nil {
+		return err
+	}
+	commit, err := commitChildRenumbersInTx(ctx, tx, renames, report.RemoteHead)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("renumber children: commit transaction: %w", err)
+	}
+	report.RenameCommit = commit
+	report.RenameParent = head
+	report.Mentions = mentions
+	return nil
+}
+
+// rekeyRenamedRowsInTx re-derives the ids of the rows a rename moved to r.To.
+// The comments, events, snapshots and provenance events followed the issue by
+// cascade but keep ids derived from the old one, which the remote's rows of
+// that identity hold too. The aux tables derive from a content digest
+// (schema.RekeyAuxRowsForIssue); provenance events have a derivation of their
+// own (issueops.RekeyProvenanceEventsInTx).
+func rekeyRenamedRowsInTx(ctx context.Context, tx *sql.Tx, r storage.ChildRenumber) error {
+	if err := schema.RekeyAuxRowsForIssue(ctx, tx, r.To); err != nil {
+		return fmt.Errorf("renumber children: %w", err)
+	}
+	if err := issueops.RekeyProvenanceEventsInTx(ctx, tx, r.From, r.To); err != nil {
+		return fmt.Errorf("renumber children: re-key provenance events of %s: %w", r.To, err)
+	}
+	return nil
+}
+
+// capturedChildCounterInTx reads an issue's own child-counter row before its
+// rename: the high-water mark its future children mint from. An issue without
+// a row (its children predate the counter backfill, or it never had any)
+// reports false and relocates nothing.
+func capturedChildCounterInTx(ctx context.Context, tx *sql.Tx, issueID string) (int, bool, error) {
+	var last int
+	err := tx.QueryRowContext(ctx,
+		"SELECT last_child FROM child_counters WHERE parent_id = ?", issueID).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("renumber children: read child counter of %s: %w", issueID, err)
+	}
+	return last, true, nil
+}
+
+// refuseDestinationCounterInTx fails when a counter row already exists under
+// a rename's destination: the plan only picks unused ids, so a row there (only
+// possible on a schema without the counter's foreign key) is state the repair
+// does not understand, and relocating onto it, or leaving it for a counterless
+// source, would hand the renamed issue a high-water mark it never had.
+func refuseDestinationCounterInTx(ctx context.Context, tx *sql.Tx, to string) error {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM child_counters WHERE parent_id = ?", to).Scan(&n); err != nil {
+		return fmt.Errorf("renumber children: check child counter of %s: %w", to, err)
+	}
+	if n > 0 {
+		return fmt.Errorf("renumber children: destination %s already has a child counter row", to)
+	}
+	return nil
+}
+
+// relocateChildCounterInTx moves a renamed issue's own counter row to its new
+// id and verifies the postcondition: the row lives only under the new id with
+// the captured value. The ignored counter migration restores an ON UPDATE
+// CASCADE foreign key that normally moves the row with the issue, leaving the
+// UPDATE nothing to match; a schema without that key leaves the row behind,
+// and the UPDATE is what moves it. Either way the check is the contract, and
+// a mismatch fails the transaction and with it the whole repair.
+func relocateChildCounterInTx(ctx context.Context, tx *sql.Tx, from, to string, captured int) error {
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE child_counters SET parent_id = ? WHERE parent_id = ?", to, from); err != nil {
+		return fmt.Errorf("renumber children: move child counter %s -> %s: %w", from, to, err)
+	}
+	var got int
+	err := tx.QueryRowContext(ctx,
+		"SELECT last_child FROM child_counters WHERE parent_id = ?", to).Scan(&got)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("renumber children: child counter of %s missing after the rename, want %d", to, captured)
+	}
+	if err != nil {
+		return fmt.Errorf("renumber children: read child counter of %s: %w", to, err)
+	}
+	if got != captured {
+		return fmt.Errorf("renumber children: child counter of %s is %d after the rename, want the preserved %d", to, got, captured)
+	}
+	var stale int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM child_counters WHERE parent_id = ?", from).Scan(&stale); err != nil {
+		return fmt.Errorf("renumber children: check child counter of %s: %w", from, err)
+	}
+	if stale > 0 {
+		return fmt.Errorf("renumber children: %d child counter row(s) remain under %s after the rename", stale, from)
+	}
+	return nil
+}
+
+// commitChildRenumbersInTx stages and commits the renamed rows as one Dolt
+// commit inside the rename transaction, the way the store's
+// doltAddAndCommitInTx commits a write, and returns the commit's hash. The
+// transaction began over a clean working set, so every table dolt_status
+// lists here is one the renames dirtied; config and the clone-local wisp
+// tables are never staged (GH#2455).
+func commitChildRenumbersInTx(ctx context.Context, tx *sql.Tx, renames []storage.ChildRenumber, remoteHead string) (string, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT table_name FROM dolt_status")
+	if err != nil {
+		return "", fmt.Errorf("renumber children: read status: %w", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			_ = rows.Close()
+			return "", fmt.Errorf("renumber children: read status: %w", err)
+		}
+		if table == "config" || table == "wisps" || strings.HasPrefix(table, "wisp_") {
+			continue
+		}
+		tables = append(tables, table)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("renumber children: read status: %w", err)
+	}
+	for _, table := range tables {
+		if err := schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table); err != nil {
+			return "", fmt.Errorf("renumber children: stage %s: %w", table, err)
+		}
+	}
+	if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?)", childRenumberCommitMessage(renames, remoteHead)); err != nil {
+		return "", fmt.Errorf("renumber children: commit: %w", err)
+	}
+	var commit string
+	if err := tx.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&commit); err != nil {
+		return "", fmt.Errorf("renumber children: read commit: %w", err)
+	}
+	return commit, nil
+}
+
+// childRenumberCommitMessage is the rename commit's message: the summary
+// line, one mapping line per rename, and the marker naming the remote head
+// the renames were planned against.
+func childRenumberCommitMessage(renames []storage.ChildRenumber, remoteHead string) string {
+	var b strings.Builder
+	b.WriteString(childRenumberCommitPrefix)
+	b.WriteString("\n\n")
+	for _, r := range renames {
+		fmt.Fprintf(&b, "%s%s -> %s\n", childRenumberLinePrefix, r.From, r.To)
+	}
+	fmt.Fprintf(&b, "%s%s\n", childRenumberMarker, remoteHead)
+	return b.String()
+}
+
+// mentionFields are the issue text fields searched for renamed ids, in the
+// column order findChildIDMentions selects them.
+var mentionFields = []string{"title", "description", "design", "acceptance_criteria", "notes"}
+
+// findChildIDMentions lists the local issue fields and comments whose text
+// names a renamed id, ordered by issue, field, comment and id. It runs inside
+// the rename transaction, before the merge brings in the remote's text.
+func findChildIDMentions(ctx context.Context, conn DBConn, renames []storage.ChildRenumber) ([]storage.ChildIDMention, error) {
+	var mentions []storage.ChildIDMention
+	issueRows, err := conn.QueryContext(ctx,
+		"SELECT id, title, description, design, acceptance_criteria, notes FROM issues")
+	if err != nil {
+		return nil, fmt.Errorf("renumber children: read text: %w", err)
+	}
+	for issueRows.Next() {
+		var id string
+		texts := make([]sql.NullString, len(mentionFields))
+		dests := []any{&id}
+		for i := range texts {
+			dests = append(dests, &texts[i])
+		}
+		if err := issueRows.Scan(dests...); err != nil {
+			_ = issueRows.Close()
+			return nil, fmt.Errorf("renumber children: read text: %w", err)
+		}
+		for i, text := range texts {
+			mentions = appendChildIDMentions(mentions, storage.ChildIDMention{IssueID: id, Field: mentionFields[i]}, text.String, renames)
+		}
+	}
+	_ = issueRows.Close()
+	if err := issueRows.Err(); err != nil {
+		return nil, fmt.Errorf("renumber children: read text: %w", err)
+	}
+
+	commentRows, err := conn.QueryContext(ctx, "SELECT id, issue_id, text FROM comments")
+	if err != nil {
+		return nil, fmt.Errorf("renumber children: read comments: %w", err)
+	}
+	for commentRows.Next() {
+		var id, issueID string
+		var text sql.NullString
+		if err := commentRows.Scan(&id, &issueID, &text); err != nil {
+			_ = commentRows.Close()
+			return nil, fmt.Errorf("renumber children: read comments: %w", err)
+		}
+		mentions = appendChildIDMentions(mentions, storage.ChildIDMention{IssueID: issueID, Field: "comment", CommentID: id}, text.String, renames)
+	}
+	_ = commentRows.Close()
+	if err := commentRows.Err(); err != nil {
+		return nil, fmt.Errorf("renumber children: read comments: %w", err)
+	}
+
+	sort.Slice(mentions, func(i, j int) bool {
+		a, b := mentions[i], mentions[j]
+		if a.IssueID != b.IssueID {
+			return a.IssueID < b.IssueID
+		}
+		if a.Field != b.Field {
+			return a.Field < b.Field
+		}
+		if a.CommentID != b.CommentID {
+			return a.CommentID < b.CommentID
+		}
+		return a.ID < b.ID
+	})
+	return mentions, nil
+}
+
+func appendChildIDMentions(mentions []storage.ChildIDMention, where storage.ChildIDMention, text string, renames []storage.ChildRenumber) []storage.ChildIDMention {
+	for _, r := range renames {
+		if namesID(text, r.From) {
+			m := where
+			m.ID, m.RenamedTo = r.From, r.To
+			mentions = append(mentions, m)
+		}
+	}
+	return mentions
+}
+
+// namesID reports whether text names id as a whole id: not inside a longer
+// token (bd-p.721) and not as the prefix of a child (bd-p.72.1). A trailing
+// sentence period still counts.
+func namesID(text, id string) bool {
+	for from := 0; ; {
+		i := strings.Index(text[from:], id)
+		if i < 0 {
+			return false
+		}
+		start, end := from+i, from+i+len(id)
+		before := start == 0 || !isIDByte(text[start-1])
+		after := end == len(text) || !isIDByte(text[end]) ||
+			(text[end] == '.' && (end+1 == len(text) || !isDigit(text[end+1])))
+		if before && after {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+func isIDByte(c byte) bool {
+	return isDigit(c) || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '-' || c == '_' || c == '.'
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }

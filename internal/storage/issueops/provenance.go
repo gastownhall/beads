@@ -144,6 +144,33 @@ func RecordProvenanceEventInTx(ctx context.Context, tx *sql.Tx, ev types.Provena
 	return id, affected == 1, nil
 }
 
+// RekeyProvenanceEventsInTx re-derives the ids of the provenance events a
+// rename of `from` to `to` moved (bd-28sb25). The foreign key's ON UPDATE
+// CASCADE moves a row to `to` but keeps the id ProvenanceEventID derived from
+// `from`, which a clone that kept `from` holds for its own row: merging the
+// two then conflicts, and recording the event for `from` again is dropped as
+// a duplicate. Only a row whose id is the one derived for `from` is
+// re-keyed, which also proves its stored fields reproduce the derivation;
+// any other id never named the old issue.
+func RekeyProvenanceEventsInTx(ctx context.Context, tx *sql.Tx, from, to string) error {
+	events, err := GetProvenanceEventsInTx(ctx, tx, to, "")
+	if err != nil {
+		return err
+	}
+	for _, ev := range events {
+		old := ev
+		old.IssueID = from
+		if ev.ID != ProvenanceEventID(old) {
+			continue
+		}
+		id := ProvenanceEventID(ev)
+		if _, err := tx.ExecContext(ctx, "UPDATE provenance_events SET id = ? WHERE id = ?", id, ev.ID); err != nil {
+			return fmt.Errorf("re-key provenance event %s -> %s: %w", ev.ID, id, err)
+		}
+	}
+	return nil
+}
+
 // GetProvenanceEventsInTx returns the provenance events for an issue, ordered by
 // occurred_at (nulls last) then id. When kindFilter is non-empty, only events of
 // that kind are returned.

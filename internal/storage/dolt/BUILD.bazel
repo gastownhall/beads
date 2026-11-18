@@ -14,6 +14,8 @@ go_library(
         "blockingannotator.go",
         "bootstrap.go",
         "bootstrapper.go",
+        "child_renumber.go",
+        "child_renumber_pull.go",
         "circuit.go",
         "claim_verify.go",
         "commenter.go",
@@ -158,6 +160,8 @@ go_test(
         "bootstrapper_contract_test.go",
         "central_config_integration_test.go",
         "checked_wrapper_smoke_test.go",
+        "child_counters_conflict_test.go",
+        "child_renumber_pull_test.go",
         "circuit_test.go",
         "claim_commit_boundary_test.go",
         "claim_custom_status_test.go",
@@ -417,12 +421,14 @@ go_test(
         "workspace_config_contract_test.go",
     ],
     # Source-scan guards (journal/version scope completeness, helper sentinel
-    # census) parse this package and ../issueops at test time; the PR4107 and
-    # migration replay tests (server-backed) read ../schema/migrations.
+    # census) parse this package, ../issueops and ../versioncontrolops at test
+    # time; the PR4107 and migration replay tests (server-backed) read
+    # ../schema/migrations.
     data = [
         ":go_srcs",
         "//internal/storage/issueops:go_srcs",
         "//internal/storage/schema:migrations",
+        "//internal/storage/versioncontrolops:go_srcs",
     ],
     embed = [":dolt"],
     deps = [
