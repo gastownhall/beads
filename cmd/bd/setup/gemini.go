@@ -236,13 +236,13 @@ func installGemini(env geminiEnv, project bool, stealth bool) error {
 		_, _ = fmt.Fprintln(env.stdout, "✓ Registered SessionStart hook")
 	}
 
-	data, err := json.MarshalIndent(settings, "", "  ")
+	data, err := marshalSettings(settings)
 	if err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: marshal settings: %v\n", err)
 		return err
 	}
 
-	if err := env.writeFile(settingsPath, data); err != nil {
+	if err := writeSettingsIfChanged(env.readFile, env.writeFile, settingsPath, data); err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
 		return err
 	}
@@ -358,13 +358,13 @@ func removeGemini(env geminiEnv, project bool) error {
 				removeHookCommand(env.stdout, hooks, "PreCompress", cmd)
 			}
 
-			data, err = json.MarshalIndent(settings, "", "  ")
+			data, err = marshalSettings(settings)
 			if err != nil {
 				_, _ = fmt.Fprintf(env.stderr, "Error: marshal settings: %v\n", err)
 				return err
 			}
 
-			if err := env.writeFile(settingsPath, data); err != nil {
+			if err := writeSettingsIfChanged(env.readFile, env.writeFile, settingsPath, data); err != nil {
 				_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
 				return err
 			}

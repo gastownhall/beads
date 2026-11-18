@@ -594,6 +594,41 @@ func TestInstallGemini_Idempotent(t *testing.T) {
 	}
 }
 
+// TestInstallGemini_NoOpRerunKeepsNewlineAndSkipsWrite pins GH#6185: like
+// Claude's (#5944), the Gemini installer must leave settings.json ending in a
+// newline and must not rewrite it when a re-run changes nothing.
+func TestInstallGemini_NoOpRerunKeepsNewlineAndSkipsWrite(t *testing.T) {
+	env, _, _ := newGeminiTestEnv(t)
+	settingsPath := geminiGlobalSettingsPath(env.homeDir)
+	writes := 0
+	write := env.writeFile
+	env.writeFile = func(path string, data []byte) error {
+		if path == settingsPath {
+			writes++
+		}
+		return write(path, data)
+	}
+
+	if err := installGemini(env, false, false); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if !bytes.HasSuffix(data, []byte("\n")) {
+		t.Fatalf("settings.json must end in a newline, got %q", data)
+	}
+
+	writes = 0
+	if err := installGemini(env, false, false); err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+	if writes != 0 {
+		t.Fatalf("no-op re-run wrote settings.json %d time(s), want 0", writes)
+	}
+}
+
 // TestInstallGemini_MigratesLegacyHooks verifies that re-running bd setup gemini
 // on a pre-fix installation (which had bare "bd prime" on SessionStart and/or
 // PreCompress) results in exactly one canonical "bd prime --hook-json" entry

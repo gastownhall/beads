@@ -189,7 +189,7 @@ func globalClaudeInstructionsPath(home string) string {
 	return filepath.Join(home, ".claude", claudeInstructionsFile)
 }
 
-// marshalSettings renders a Claude settings map as two-space-indented JSON
+// marshalSettings renders an agent settings map as two-space-indented JSON
 // with the trailing newline json.MarshalIndent omits, so the file stays
 // POSIX-clean and byte-stable across runs.
 func marshalSettings(settings map[string]interface{}) ([]byte, error) {
@@ -204,11 +204,11 @@ func marshalSettings(settings map[string]interface{}) ([]byte, error) {
 // already on disk. GH#5693: bd init / bd setup claude marshaled and wrote
 // settings.json on every run, so a no-op run still churned the file's mtime
 // and — because MarshalIndent emits no trailing newline — silently stripped it.
-func writeSettingsIfChanged(env claudeEnv, path string, data []byte) error {
-	if existing, err := env.readFile(path); err == nil && bytes.Equal(existing, data) {
+func writeSettingsIfChanged(readFile func(string) ([]byte, error), writeFile func(string, []byte) error, path string, data []byte) error {
+	if existing, err := readFile(path); err == nil && bytes.Equal(existing, data) {
 		return nil
 	}
-	return env.writeFile(path, data)
+	return writeFile(path, data)
 }
 
 func claudeAgentsEnv(env claudeEnv) agentsEnv {
@@ -585,7 +585,7 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 			return err
 		}
 
-		if err := writeSettingsIfChanged(env, settingsPath, data); err != nil {
+		if err := writeSettingsIfChanged(env.readFile, env.writeFile, settingsPath, data); err != nil {
 			_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
 			return err
 		}
@@ -1098,7 +1098,7 @@ func removeClaudeHooks(env claudeEnv, settingsPath string) error {
 		_, _ = fmt.Fprintf(env.stderr, "Error: marshal settings: %v\n", err)
 		return err
 	}
-	if err := writeSettingsIfChanged(env, settingsPath, data); err != nil {
+	if err := writeSettingsIfChanged(env.readFile, env.writeFile, settingsPath, data); err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
 		return err
 	}
@@ -1138,7 +1138,7 @@ func removeLocalClaudeHooks(env claudeEnv, legacyPath string) bool {
 	}
 	migrated, err := marshalSettings(legacySettings)
 	if err == nil {
-		err = writeSettingsIfChanged(env, legacyPath, migrated)
+		err = writeSettingsIfChanged(env.readFile, env.writeFile, legacyPath, migrated)
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to remove bd prime hooks from %s: %v\n", legacyPath, err)

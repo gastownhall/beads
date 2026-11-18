@@ -186,6 +186,8 @@ func setupClaudeSettings(verbose bool) error {
 		return fmt.Errorf("failed to marshal settings JSON: %w", err)
 	}
 
+	updatedContent = append(updatedContent, '\n')
+
 	// #nosec G306 - config file needs 0644
 	if err := os.WriteFile(settingsPath, updatedContent, 0644); err != nil {
 		return fmt.Errorf("failed to write claude settings: %w", err)
