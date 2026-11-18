@@ -863,17 +863,43 @@ var hooksListCmd = &cobra.Command{
 		}()
 
 		statuses := CheckGitHooks()
+		// Only an absolute value is checked here: git resolves a relative one
+		// in this worktree, which is where statuses already looked.
+		var hooksPath doctor.HooksPathState
+		if q, ok := doctor.CurrentHooksPathQuery(); ok {
+			if s := doctor.InspectHooksPath(q); !s.Relative {
+				hooksPath = s
+			}
+		}
 
 		if jsonOutput {
 			output := map[string]interface{}{
 				"hooks": statuses,
 			}
+			if hooksPath.Unusable() {
+				output["hooks_path"] = hooksPathReport{
+					Configured:   hooksPath.Configured,
+					Resolved:     hooksPath.Resolved,
+					Exists:       hooksPath.Exists,
+					RelocatedTo:  hooksPath.RelocatedTo,
+					InspectError: hooksPath.InspectError,
+				}
+			}
 			jsonBytes, _ := json.MarshalIndent(output, "", "  ")
 			fmt.Println(string(jsonBytes))
 		} else {
+			if hooksPath.Unusable() {
+				printMissingHooksPath(hooksPath)
+			}
 			fmt.Println("Git hooks status:")
 			for _, status := range statuses {
-				if !status.Installed {
+				if hooksPath.Missing() {
+					// The files were looked up in a directory git cannot use,
+					// so "not installed" would send the user to reinstall.
+					fmt.Printf("  ✗ %s: not run (core.hooksPath directory is missing)\n", status.Name)
+				} else if hooksPath.InspectError != "" {
+					fmt.Printf("  ✗ %s: unknown (core.hooksPath could not be inspected)\n", status.Name)
+				} else if !status.Installed {
 					fmt.Printf("  ✗ %s: not installed\n", status.Name)
 				} else if status.IsShim {
 					// An external manager's integration (GH#946) carries no bd
@@ -896,6 +922,43 @@ var hooksListCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// hooksPathReport is the additive bd hooks list --json view of a configured
+// core.hooksPath whose directory is missing or could not be inspected
+// (GH#5853).
+type hooksPathReport struct {
+	Configured   string `json:"configured"`
+	Resolved     string `json:"resolved"`
+	Exists       bool   `json:"exists"`
+	RelocatedTo  string `json:"relocated_to,omitempty"`
+	InspectError string `json:"inspect_error,omitempty"`
+}
+
+// printMissingHooksPath names the configuration fault behind a missing or
+// uninspectable core.hooksPath and the repair that applies to it.
+func printMissingHooksPath(s doctor.HooksPathState) {
+	if s.InspectError != "" {
+		// Not evidence the directory is gone: name the fault, claim nothing.
+		fmt.Printf("⚠ core.hooksPath %s could not be inspected: %s\n", remedy.PrintedValue(s.Configured), s.InspectError)
+		fmt.Println("  Git runs no hooks from a directory it cannot use, and bd will not change this value.")
+		fmt.Println("  Check that directory, or correct core.hooksPath where it is set (git config --show-scope --get core.hooksPath).")
+		fmt.Println()
+		return
+	}
+	fmt.Printf("⚠ core.hooksPath points at %s, which does not exist\n", remedy.PrintedValue(s.Configured))
+	fmt.Println("  Git runs no hooks at all while core.hooksPath names a missing directory.")
+	switch {
+	case s.RelocatedTo != "":
+		fmt.Printf("  bd hooks are installed at %s; the repository appears to have moved.\n", remedy.PrintedValue(s.RelocatedTo))
+		fmt.Println("  Repair: run 'bd hooks install' or 'bd doctor --fix' to repoint core.hooksPath there.")
+	case s.Managed:
+		fmt.Println("  Repair: run 'bd doctor --fix' to unset it, or 'bd hooks install' to reinstall hooks there.")
+	default:
+		fmt.Printf("  bd will not change it: %s.\n", s.Refusal)
+		fmt.Println("  Restore that directory, or correct core.hooksPath where it is set (git config --show-scope --get core.hooksPath).")
+	}
+	fmt.Println()
 }
 
 // refuseSymlinkedHooksDir refuses a hooks directory that is itself a symlink,
@@ -1130,6 +1193,76 @@ func installHooksWithContext(hookNames []string, force, shared, chain, beadsHook
 	return installHooksAt(hookNames, force, shared, chain, beadsHooks, selected)
 }
 
+// plainHooksPathQuery describes the repository a plain install configures:
+// the selected one when the caller resolved it, else the process's. ok is
+// false when there is no repository config to inspect.
+func plainHooksPathQuery(selected *initHooksContext) (doctor.HooksPathQuery, bool) {
+	if selected == nil {
+		return doctor.CurrentHooksPathQuery()
+	}
+	if selected.paths.CommonDir == "" || selected.paths.MainRepoRoot == "" {
+		return doctor.HooksPathQuery{}, false // absolute-path fallback: no repository config authority
+	}
+	storage := doctor.BeadsManagedStorageHooksDir()
+	if selected.beadsDir != "" {
+		storage = filepath.Join(selected.beadsDir, "hooks")
+	}
+	return doctor.HooksPathQuery{
+		WorkDir:         selected.workDir,
+		RepoRoot:        selected.paths.MainRepoRoot,
+		StorageHooksDir: storage,
+		Env:             selected.env,
+		InheritedEnv:    selected.inheritedEnv,
+	}, true
+}
+
+// hooksPathRelocation is a plain install moved out of a missing core.hooksPath
+// into the moved repository's validated beads hooks directory (GH#5853).
+type hooksPathRelocation struct {
+	query doctor.HooksPathQuery
+	state doctor.HooksPathState
+}
+
+// plainInstallRelocation decides, before an install creates or writes any
+// file, whether a plain install must leave the directory core.hooksPath names.
+// A plain install writes there, and when that directory is missing git runs
+// no hooks from it, so creating it would only entrench the stale value: the
+// install moves to the moved repository's validated beads hooks directory, or
+// is refused (GH#5853). nil means install as usual: --beads and --shared pick
+// their own directory, and the value is unset, exists or cannot be inspected,
+// is a current beads location deleted in place (GH#4440), or is relative,
+// which git resolves in the worktree the install already writes to.
+func plainInstallRelocation(selected *initHooksContext, beadsHooks, shared bool) (*hooksPathRelocation, error) {
+	if beadsHooks || shared {
+		return nil, nil
+	}
+	q, ok := plainHooksPathQuery(selected)
+	if !ok {
+		return nil, nil
+	}
+	s := doctor.InspectHooksPath(q)
+	if !s.Missing() || s.Managed || s.Relative {
+		return nil, nil
+	}
+	if s.RelocatedTo == "" {
+		return nil, fmt.Errorf("core.hooksPath points at %s, which does not exist, so git runs no hooks; "+
+			"bd will not create it: %s\nRestore that directory, or correct core.hooksPath where it is set "+
+			"(git config --show-scope --get core.hooksPath)", remedy.PrintedValue(s.Configured), s.Refusal)
+	}
+	return &hooksPathRelocation{query: q, state: s}, nil
+}
+
+// repoint points core.hooksPath at the relocated directory once the hooks
+// there are written.
+func (r *hooksPathRelocation) repoint() error {
+	if _, err := doctor.RepointRelocatedHooksPath(r.query, r.state.Configured, r.state.RelocatedTo); err != nil {
+		return fmt.Errorf("hooks refreshed in %s, but failed to repoint core.hooksPath: %w", remedy.PrintedValue(r.state.RelocatedTo), err)
+	}
+	fmt.Fprintf(os.Stderr, "Repointed core.hooksPath from missing %s to %s\n",
+		remedy.PrintedValue(r.state.Configured), remedy.PrintedValue(r.state.RelocatedTo))
+	return nil
+}
+
 //nolint:unparam // force and chain remain accepted compatibility no-ops
 func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) error {
 	var hooksDir string
@@ -1164,6 +1297,17 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		if err != nil {
 			return err
 		}
+	}
+
+	// A plain install against a missing core.hooksPath moves to the moved
+	// repository's beads hooks, or is refused, before anything below creates
+	// or writes a file (GH#5853).
+	relocation, err := plainInstallRelocation(selected, beadsHooks, shared)
+	if err != nil {
+		return err
+	}
+	if relocation != nil {
+		hooksDir = relocation.state.RelocatedTo
 	}
 
 	// Check the destination itself before creating, preserving into, or
@@ -1268,7 +1412,11 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 	}
 
 	// Configure git to use the hooks directory after writing, as in ordinary installs.
-	if selected != nil && (beadsHooks || shared) {
+	if relocation != nil {
+		if err := relocation.repoint(); err != nil {
+			return err
+		}
+	} else if selected != nil && (beadsHooks || shared) {
 		if err := selected.configureHooksPath(hooksDir); err != nil {
 			return fmt.Errorf("failed to configure git hooks path: %w", err)
 		}
