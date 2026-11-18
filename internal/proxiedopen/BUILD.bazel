@@ -35,6 +35,7 @@ go_test(
     deps = [
         "//internal/configfile",
         "//internal/doltserver",
+        "//internal/storage/dbproxy/proxy",
         "@com_github_dolthub_dolt_go//libraries/doltcore/servercfg",
     ],
 )

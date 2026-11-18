@@ -76,7 +76,23 @@ type OpenOpts struct {
 	// operator's log elsewhere, which another workspace's live proxy may
 	// still be writing. rootDir/proxy.log is always rotated.
 	RotateLogFile bool
+
+	// ResolveExecutable, when set, names the binary that is exec'd as
+	// `<binary> db-proxy-child` if no proxy is running for the root. Nil
+	// means the package-level ResolveExecutable (os.Executable): the CLI,
+	// which is bd itself. A library host that is not bd (the Go SDK) sets
+	// it so it never execs its own binary; returning an error wrapping
+	// ErrNoProxyExecutable makes the open fail at once rather than poll.
+	// It is consulted only on the spawn path, so adopting a running proxy
+	// never needs it.
+	ResolveExecutable func() (string, error)
 }
+
+// ErrNoProxyExecutable reports that no proxy is running for the root and
+// OpenOpts.ResolveExecutable found no binary to spawn one with. It is
+// terminal: GetCreateDatabaseProxyServerEndpoint returns it without waiting
+// out the open deadline.
+var ErrNoProxyExecutable = errors.New("no executable available to start the proxy")
 
 const (
 	openDeadline          = 15 * time.Second
@@ -286,7 +302,7 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 				registerDataAddress(rootDir, ep)
 				return ep, nil
 			}
-			if errors.Is(lastSpawnErr, errStartInterrupted) {
+			if errors.Is(lastSpawnErr, errStartInterrupted) || errors.Is(lastSpawnErr, ErrNoProxyExecutable) {
 				return Endpoint{}, lastSpawnErr
 			}
 		case !lockfile.IsLocked(err):
@@ -384,6 +400,19 @@ func spawnAndHandoff(
 	if currentEpoch != stopEpoch {
 		return Endpoint{}, fmt.Errorf("%w for %s", errStartInterrupted, rootDir)
 	}
+
+	// Resolve the executable before anything is mutated: a library host with
+	// no binary to spawn (ErrNoProxyExecutable) must fail leaving the root's
+	// records and backend exactly as it found them.
+	resolve := opts.ResolveExecutable
+	if resolve == nil {
+		resolve = ResolveExecutable
+	}
+	self, err := resolve()
+	if err != nil {
+		return Endpoint{}, fmt.Errorf("locate bd executable: %w", err)
+	}
+	opts.ResolveExecutable = func() (string, error) { return self, nil }
 
 	if err := quarantineForSpawn(rootDir, discovery); err != nil {
 		return Endpoint{}, err
@@ -490,7 +519,11 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lo
 		}
 	}()
 
-	self, err := ResolveExecutable()
+	resolve := opts.ResolveExecutable
+	if resolve == nil {
+		resolve = ResolveExecutable
+	}
+	self, err := resolve()
 	if err != nil {
 		return nil, fmt.Errorf("locate bd executable: %w", err)
 	}

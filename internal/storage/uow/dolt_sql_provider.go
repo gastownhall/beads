@@ -226,6 +226,11 @@ type providerOptions struct {
 	// that file: bd sets it for its default server.log, never for a log path
 	// the operator chose.
 	rotateServerLog bool
+	// proxyExecutable resolves the binary spawned as the proxy child when no
+	// proxy is running (proxy.OpenOpts.ResolveExecutable). Nil keeps the
+	// proxy package default, the running executable: right for bd, wrong
+	// for a library host.
+	proxyExecutable func() (string, error)
 }
 
 // WithPreview opens the provider for a non-mutating preview command.
@@ -264,6 +269,16 @@ func WithProxiedServerMode() ProviderOption {
 // See providerOptions.rotateServerLog: pass it only for a log bd owns.
 func WithServerLogRotation() ProviderOption {
 	return func(o *providerOptions) { o.rotateServerLog = true }
+}
+
+// WithProxyExecutable names the binary to spawn as `<binary> db-proxy-child`
+// when no proxy is running for the root, instead of the running executable.
+// The Go SDK passes a resolver for `bd` on PATH so it never execs its host.
+// The resolver is consulted lazily, only on the spawn path (including
+// rediscovery after the proxy retires on idle); an error wrapping
+// proxy.ErrNoProxyExecutable fails the open without waiting.
+func WithProxyExecutable(resolve func() (string, error)) ProviderOption {
+	return func(o *providerOptions) { o.proxyExecutable = resolve }
 }
 
 func applyProviderOptions(opts []ProviderOption) providerOptions {

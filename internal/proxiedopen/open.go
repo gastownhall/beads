@@ -57,6 +57,11 @@ type Options struct {
 	// Advisory receives non-fatal advisories (today only the unverifiable
 	// dolt version warning). nil discards them.
 	Advisory io.Writer
+	// ProxyExecutable resolves the binary spawned as `<binary>
+	// db-proxy-child` when no proxy is running for the root
+	// (uow.WithProxyExecutable). nil keeps the running executable, which is
+	// right only when the caller is bd itself.
+	ProxyExecutable func() (string, error)
 }
 
 // Open resolves a proxied-server workspace's topology and opens its provider.
@@ -110,6 +115,9 @@ func ServerLogProviderOptions(opts []uow.ProviderOption, isCustomLog bool) []uow
 // while reporting success. o.Identity, o.FreshStore and o.DatabaseOverride
 // are Open's; the topology already carries their effect.
 func OpenTopology(ctx context.Context, beadsDir string, topology Topology, o Options) (uow.UnitOfWorkProvider, error) {
+	if o.ProxyExecutable != nil {
+		o.ProviderOptions = append(append([]uow.ProviderOption{}, o.ProviderOptions...), uow.WithProxyExecutable(o.ProxyExecutable))
+	}
 	if topology.External != nil {
 		return newExternalProxiedServerUOWProvider(ctx, beadsDir, topology, o.ProviderOptions...)
 	}

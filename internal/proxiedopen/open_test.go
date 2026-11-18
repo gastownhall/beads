@@ -2,6 +2,8 @@ package proxiedopen
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
 
 // TestZeroOptionsAreTheSafePosture pins that a caller who fills in nothing
@@ -112,5 +115,31 @@ func TestEnsureConfigGeneratesALoopbackConfig(t *testing.T) {
 	}
 	if port, _, ok := CutManagedPortRecord(body[len(ManagedConfigMarker):]); !ok || port != cfg.Port() {
 		t.Errorf("port record = %d (ok %t), want listener.port %d", port, ok, cfg.Port())
+	}
+}
+
+// TestOptionsProxyExecutableReachesTheSpawnPath pins that
+// Options.ProxyExecutable is what the proxy spawn consults: with no proxy
+// running, a resolver reporting proxy.ErrNoProxyExecutable fails the open
+// with that sentinel, so a library host never execs itself.
+func TestOptionsProxyExecutableReachesTheSpawnPath(t *testing.T) {
+	beadsDir := t.TempDir()
+	t.Setenv("BEADS_PROXIED_SERVER_ROOT_PATH", filepath.Join(t.TempDir(), "root"))
+	called := false
+	topology := Topology{
+		Database: "beads",
+		External: &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 3306},
+	}
+	_, err := OpenTopology(context.Background(), beadsDir, topology, Options{
+		ProxyExecutable: func() (string, error) {
+			called = true
+			return "", fmt.Errorf("no bd: %w", proxy.ErrNoProxyExecutable)
+		},
+	})
+	if !errors.Is(err, proxy.ErrNoProxyExecutable) {
+		t.Fatalf("OpenTopology err = %v, want proxy.ErrNoProxyExecutable", err)
+	}
+	if !called {
+		t.Fatal("Options.ProxyExecutable was not consulted on the spawn path")
 	}
 }
