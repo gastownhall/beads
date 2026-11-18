@@ -53,6 +53,13 @@ Examples:
 			}
 		}()
 
+		// The skip-store opt-out also skips the root pre-run's version
+		// detection, so run it here — in preview mode, which reports the
+		// upgrade without consuming the one-shot .local_version signal
+		// (see trackBdVersionPreview): a later ordinary command, or
+		// `bd upgrade ack`, must still find the marker to reconcile.
+		trackBdVersionPreview()
+
 		if jsonOutput {
 			result := map[string]interface{}{
 				"upgraded":        versionUpgradeDetected,
@@ -113,6 +120,11 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		// As in status: the inspection detects the upgrade itself, in
+		// preview mode, so it reports the same prior version without
+		// consuming the marker.
+		trackBdVersionPreview()
 
 		lastVersion := previousVersion
 

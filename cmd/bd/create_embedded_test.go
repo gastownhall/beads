@@ -840,6 +840,23 @@ func TestEmbeddedUpgradeStatusDoesNotMigrate(t *testing.T) {
 				t.Errorf("issue count changed during bd upgrade %s: before=%d after=%d",
 					tc.leaf, before.issueCount, after.issueCount)
 			}
+			// An old marker must still be REPORTED — the inspection runs
+			// its own preview detection — while staying preserved above.
+			if tc.marker == "0.9.0" {
+				var payload struct {
+					Upgraded        bool   `json:"upgraded"`
+					PreviousVersion string `json:"previous_version"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &payload); err != nil {
+					t.Fatalf("parse bd upgrade %s --json: %v\nstdout:\n%s", tc.leaf, err, stdout.String())
+				}
+				if payload.PreviousVersion != "0.9.0" {
+					t.Errorf("bd upgrade %s --json previous_version = %q, want the preserved 0.9.0", tc.leaf, payload.PreviousVersion)
+				}
+				if tc.leaf == "status" && !payload.Upgraded {
+					t.Errorf("bd upgrade status --json upgraded = false, want true for the preserved 0.9.0 marker")
+				}
+			}
 			raw, readErr := os.ReadFile(localVersionPath)
 			if readErr != nil {
 				t.Fatalf("read local version marker after bd upgrade %s: %v", tc.leaf, readErr)
@@ -885,7 +902,22 @@ func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
 		t.Fatalf("preview consumed the version marker: .local_version = %q, want %q", got, "0.9.0")
 	}
 
-	// Invocation 2: an ordinary command, which must still see the upgrade.
+	// Invocation 2: the upgrade inspections. Each must see the upgrade the
+	// preview left behind and report the same prior version — successively,
+	// because neither consumes the marker (GH#6669): skipping the root
+	// pre-run also skips its version detection, so each inspection runs its
+	// own preview detection instead.
+	assertMarkerPreserved := func(when string) {
+		t.Helper()
+		raw, err := os.ReadFile(localVersionPath)
+		if err != nil {
+			t.Fatalf("read local version %s: %v", when, err)
+		}
+		if got := strings.TrimSpace(string(raw)); got != "0.9.0" {
+			t.Fatalf("%s consumed the version marker: .local_version = %q, want %q", when, got, "0.9.0")
+		}
+	}
+
 	status := exec.Command(bd, "upgrade", "status", "--json")
 	status.Dir = dir
 	status.Env = bdEnv(dir)
@@ -901,17 +933,29 @@ func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
 		t.Fatalf("parse upgrade status: %v\nstdout:\n%s", err, stdout.String())
 	}
 	if !upgradeStatus.Upgraded || upgradeStatus.PreviousVersion != "0.9.0" {
-		t.Errorf("ordinary command after a preview no longer sees the upgrade: upgraded=%v previous=%q; stdout:\n%s",
+		t.Errorf("bd upgrade status no longer sees the upgrade a preview preserved: upgraded=%v previous=%q; stdout:\n%s",
 			upgradeStatus.Upgraded, upgradeStatus.PreviousVersion, stdout.String())
 	}
+	assertMarkerPreserved("bd upgrade status")
 
-	raw, err = os.ReadFile(localVersionPath)
+	review := exec.Command(bd, "upgrade", "review", "--json")
+	review.Dir = dir
+	review.Env = bdEnv(dir)
+	stdout, stderr, err = runCommandBuffers(t, review)
 	if err != nil {
-		t.Fatalf("read local version after ordinary command: %v", err)
+		t.Fatalf("bd upgrade review failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
-	if got := strings.TrimSpace(string(raw)); got == "0.9.0" {
-		t.Errorf("ordinary command left .local_version at %q; the marker should have been updated", got)
+	var upgradeReview struct {
+		PreviousVersion string `json:"previous_version"`
 	}
+	if err := json.Unmarshal(stdout.Bytes(), &upgradeReview); err != nil {
+		t.Fatalf("parse upgrade review: %v\nstdout:\n%s", err, stdout.String())
+	}
+	if upgradeReview.PreviousVersion != "0.9.0" {
+		t.Errorf("bd upgrade review after status reported previous_version=%q, want the same preserved %q; stdout:\n%s",
+			upgradeReview.PreviousVersion, "0.9.0", stdout.String())
+	}
+	assertMarkerPreserved("bd upgrade review")
 }
 
 func TestEmbeddedChangeDirOverridesInheritedBeadsDir(t *testing.T) {

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -252,16 +253,37 @@ func TestUpgradeReadOnlySubcommandsSkipStoreInit(t *testing.T) {
 	for _, leaf := range []*cobra.Command{upgradeStatusCmd, upgradeReviewCmd} {
 		for _, asJSON := range []bool{false, true} {
 			resetUpgradeRunState()
-			jsonOutput = asJSON
 			if err := rootCmd.PersistentPreRunE(leaf, nil); err != nil {
 				t.Fatalf("bd upgrade %s must skip store init and return nil even with an unreachable database, got: %v", leaf.Name(), err)
 			}
 			if store != nil {
 				t.Fatalf("bd upgrade %s must not open the store", leaf.Name())
 			}
-			_ = captureStdout(t, func() error {
+			// Real dispatch parses --json into the global before the pre-run,
+			// which then leaves it alone because the flag changed. The manual
+			// call above parses no flags, so the pre-run's viper fallback
+			// resets the global — restore the dispatch value before RunE.
+			jsonOutput = asJSON
+			out := captureStdout(t, func() error {
 				return leaf.RunE(leaf, nil)
 			})
+			// The inspection runs its own preview detection, so the
+			// preserved upgrade is still REPORTED — in both output modes.
+			var wantSubstring string
+			switch {
+			case leaf.Name() == "status" && asJSON:
+				wantSubstring = `"upgraded": true`
+			case leaf.Name() == "status":
+				wantSubstring = "upgraded from v0.9.0"
+			case asJSON:
+				wantSubstring = `"previous_version": "0.9.0"`
+			default:
+				wantSubstring = "Upgraded from v0.9.0"
+			}
+			if !strings.Contains(out, wantSubstring) {
+				t.Errorf("bd upgrade %s (json=%t) output does not report the preserved upgrade, want %q in:\n%s",
+					leaf.Name(), asJSON, wantSubstring, out)
+			}
 			assertMarkerIntact("after bd upgrade " + leaf.Name())
 		}
 	}
