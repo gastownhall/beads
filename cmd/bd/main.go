@@ -2567,6 +2567,18 @@ var rootCmd = &cobra.Command{
 			// topology, so this stays inert off managed-local.
 			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !isPreviewCommand(cmd) && !commandFreeze.Frozen() {
 				runPostRunAutoBackup(rootCtx)
+				// Auto-export, through the same provider (GH#8490): the
+				// auto-backup gate plus the direct arm's read-only
+				// classification. Before this, export.auto was a silent
+				// no-op on every proxied write and issues.jsonl drifted.
+				// An error here (only a failed export.git-add, as in direct
+				// mode) still closes the provider via the deferred
+				// closeStoreBeforeGateRelease.
+				if shouldRunPostCommandAutoExport(cmd) {
+					if err := runPostRunAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
+						return HandleError("%v", err)
+					}
+				}
 			}
 			if uowProvider != nil {
 				_ = uowProvider.Close(rootCtx)

@@ -186,6 +186,13 @@ inside the window is skipped and exports only when a later mutating command
 runs. Without such a command — or an explicit export — the file can remain
 stale indefinitely.
 
+Auto-export runs the same way in every storage mode, including a
+proxied-server workspace: there it reads
+through the connection the command already opened and writes the same
+file, with the same throttle, deletion reconciliation and safety refusals.
+A command run with `--database <other>` never auto-exports, so another
+database's issues cannot overwrite the workspace's file.
+
 The pre-commit hook adds one more refresh opportunity, but only when the
 commit stages at least one `.beads/` path, and never when
 `.beads/issues.jsonl` itself is staged for deletion. A commit that stages no

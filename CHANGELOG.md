@@ -1334,6 +1334,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`export.auto` works on proxied-server workspaces** (#8490). A
+  mutating command on a proxied-server workspace never reached the
+  auto-export hook, so `.beads/issues.jsonl` silently stopped tracking the
+  database. The proxied route now runs the same auto-export as direct
+  mode, through the connection the command already opened and before it
+  closes: the same change detection and `export.interval` throttle, the
+  same deletion reconciliation and foreign-record or empty-store refusals,
+  and byte-identical output. Read-only commands, previews, strict
+  `--readonly`, `bd serve`, a migration freeze, `BD_GIT_HOOK=1` and
+  `--database <other>` still skip it.
+
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that
