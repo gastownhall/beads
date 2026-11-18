@@ -1967,12 +1967,12 @@ commands:
     reason: 'opens the store (the context handshake), then reads or writes the bd version this workspace last acknowledged, kept in the local metadata.json; no issue-store state'
   - command: bd upgrade review
     class: local-only
-    reason: 'opens the store (the context handshake), then reads or writes the bd version this workspace last acknowledged, kept in the local metadata.json; no issue-store state'
+    reason: 'reads the bd version recorded in .beads/.local_version and the built-in changelog (annotated bd:skip_store); never opens the issue store'
   - command: bd upgrade status
     cases:
       - id: upgrade-status
         class: works
-        note: 'the bd version this workspace last acknowledged, kept in the local metadata.json; it opens the store (the context handshake) first'
+        note: 'compares bd with the version recorded in .beads/.local_version (annotated bd:skip_store); never opens the issue store'
         args: [upgrade, status, '--json']
   - command: bd vc commit
     cases:

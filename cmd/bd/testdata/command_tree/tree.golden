@@ -7489,7 +7489,8 @@ bd upgrade status
     | This command compares the running bd binary with the version recorded
     | in .beads/.local_version. It does not open the database, apply schema
     | migrations, or rewrite the recorded version, so it is safe to run as a
-    | probe before deciding whether an upgrade step is needed.
+    | probe. It reports only the version change, not pending schema
+    | migrations.
     |
     | Examples:
     |   bd upgrade status
