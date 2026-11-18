@@ -30,6 +30,23 @@ import (
 // keyed to the pending version is the only vehicle that runs before 0058 on an
 // affected database.
 //
+// Second entry point: before ignored/0005 (gastownhall/beads#6092). The same
+// repair is registered at {ignored_schema_migrations, 5}. Main runs before
+// ignored and main has no sentinel replay, so the pre-0058 entry heals only a
+// clone whose MAIN cursor is still behind 58. Ignored state and the wisp
+// tables are clone-local, so a clone whose main cursor already passed 58 can
+// still hold the legacy table at ignored cursor 4. ignored/0005 sniffs
+// @needs_drop once and then adds idx_wisp_dep_type_{issue,wisp,external}
+// unconditionally; main 0022 has already created those indexes on any
+// wisp_dependencies carrying the split target columns, so the frozen body dies
+// with "Duplicate key name 'idx_wisp_dep_type_issue'" -- after its earlier
+// statements already dropped the generated column and keys. That partial table
+// (id-keyed, every foreign key and possibly the check missing) is the second
+// shape this entry heals: a retry would read @needs_drop = 0 and record 5 over
+// it. Ignored/0003 runs first, so the split target columns this repair relies
+// on are present on every table that reaches this entry. Converging here
+// leaves 0005 on its @needs_drop = 0 branch.
+//
 // Why the destination is the FINAL shape rather than the pre-0058 shape.
 // Restoring the composite-PK generated-column shape was tried twice and failed
 // both times, for one root cause: that shape's rebuild has a keyless window
@@ -115,11 +132,17 @@ var wispDepFinalKeys = []struct{ name, definition string }{
 	{"idx_wisp_dep_type_external", "ADD INDEX idx_wisp_dep_type_external (type, depends_on_external)"},
 }
 
-// repairWispDependenciesForwardShape is the pre-0058 repair. It no-ops on every
-// population except the one 0058 cannot serve: no-ops when the table or either
-// referenced table is absent, when the table is already in the final shape, and
-// on a fresh store (which never had the generated column, so 0058 applies to it
-// cleanly).
+// repairWispDependenciesForwardShape is the pre-0058 and pre-ignored/0005
+// repair. It no-ops on every population except the ones those migrations cannot
+// serve: no-ops when the table or either referenced table is absent, when the
+// table is already in the final shape, and on a fresh store (which never had
+// the generated column, so 0058 applies to it cleanly).
+//
+// Cleanup policy, identical at both entry points: FK orphans and zero-target
+// rows are deleted, multi-target rows are normalized to one target, and rows
+// sharing a natural identity are deduplicated. Valid, distinct single-target
+// rows survive with their type, created_by and timestamps, and an existing id
+// column (the partial ignored/0005 shape) keeps its values.
 func repairWispDependenciesForwardShape(ctx context.Context, db DBConn) error {
 	// Both referenced tables must exist before any foreign key can be added.
 	// 0058 carries the same @has_wisps/@has_issues guards; a database missing
