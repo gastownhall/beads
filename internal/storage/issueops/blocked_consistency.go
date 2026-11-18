@@ -306,7 +306,9 @@ func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs 
 		}
 		total += changed
 		if changed == 0 {
-			if err := recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs); err != nil {
+			// The full recompute is repair (`bd recompute-blocked`, `bd doctor
+			// --fix`): no request is behind the rows it corrects.
+			if err := recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs, NoRequestActor); err != nil {
 				return total, err
 			}
 			return total, nil

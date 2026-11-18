@@ -270,6 +270,17 @@ func runMolReadyGatedProxiedServer(ctx context.Context) error {
 	return renderGatedReadyMolecules(molecules)
 }
 
+// proxiedServedHomeKey is the logical home of an issue the proxied-server
+// launcher's own database serves. It is no store's dependencyStoreKey, so a
+// served issue and a routed one never pass as one home.
+const proxiedServedHomeKey = "proxied-server:launcher"
+
+// molBondReopenRoutedHome reopens a planned routed bond home writable. It is a
+// variable so a test can hand back a handle onto another store.
+var molBondReopenRoutedHome = func(ctx context.Context, id string) (*RoutedResult, error) {
+	return resolveViaPrefixRoutingWithAccess(ctx, id, true, true)
+}
+
 func runMolBondProxiedServer(ctx context.Context, in molBondInput) error {
 	if uowProvider == nil {
 		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
@@ -278,24 +289,36 @@ func runMolBondProxiedServer(ctx context.Context, in molBondInput) error {
 	// the direct route (GH#4995).
 	ctx = explicitCommitPointContext(ctx)
 
-	if in.dryRun {
-		uw, err := proxiedOpenReadUOW(ctx)
-		if err != nil {
+	// Plan read-only, as the direct route does: both operands are discovered
+	// (served database, then prefix routes, then formulas) and must share one
+	// home before anything is opened for writing.
+	plan, err := planMolBondProxied(ctx, in)
+	if err != nil {
+		if isReportedExit(err) {
+			// A provider-open failure reported itself (proxiedOpenReadUOW).
 			return err
 		}
-		defer uw.Close(ctx)
-		r := uowMolReader{uw: uw}
+		return HandleErrorRespectJSON("%v", err)
+	}
+	defer plan.Close()
 
-		issueA, formulaA, err := resolveOrDescribe(ctx, r, in.argA, in.vars)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		issueB, formulaB, err := resolveOrDescribe(ctx, r, in.argB, in.vars)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		renderMolBondDryRun(in, issueA, formulaA, issueB, formulaB)
+	if in.dryRun {
+		renderMolBondDryRun(in, plan.a.issue, plan.a.formula, plan.b.issue, plan.b.formula)
 		return nil
+	}
+	plan.Close()
+
+	if plan.targetStoreKey != proxiedServedHomeKey {
+		// A routed rig owns the bond: write it there, in that store's own
+		// transaction, never through the launcher's unit of work.
+		home, closeHome, err := reopenMolBondHome(plan, func() (*RoutedResult, error) {
+			return molBondReopenRoutedHome(ctx, plan.targetID)
+		})
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		defer closeHome()
+		return executeMolBond(ctx, home, plan, in)
 	}
 
 	type bondTxResult struct {
@@ -307,19 +330,20 @@ func runMolBondProxiedServer(ctx context.Context, in molBondInput) error {
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (bondTxResult, string, error) {
 		w := newUOWMolWriter(uw)
 
-		subgraphA, cookedA, err := resolveOrCookToSubgraph(ctx, w, in.argA, in.vars)
+		opA, err := materializeServedMolBondOperand(ctx, w, plan.a, in.vars)
 		if err != nil {
 			return bondTxResult{}, "", err
 		}
-		subgraphB, cookedB, err := resolveOrCookToSubgraph(ctx, w, in.argB, in.vars)
+		opB, err := materializeServedMolBondOperand(ctx, w, plan.b, in.vars)
 		if err != nil {
 			return bondTxResult{}, "", err
 		}
 
+		subgraphA, subgraphB := opA.subgraph, opB.subgraph
 		issueA := subgraphA.Root
 		issueB := subgraphB.Root
-		aIsProto := issueA.IsTemplate || cookedA
-		bIsProto := issueB.IsTemplate || cookedB
+		aIsProto := opA.bondsAsProto()
+		bIsProto := opB.bondsAsProto()
 
 		var result *BondResult
 		switch {
@@ -343,6 +367,87 @@ func runMolBondProxiedServer(ctx context.Context, in molBondInput) error {
 	}
 
 	return renderMolBondResult(res.result, res.idA, res.idB, in.ephemeral, in.pour)
+}
+
+// planMolBondProxied is planMolBond for a proxied-server launcher, which has
+// no local store: a formula-only bond stays in the served database.
+func planMolBondProxied(ctx context.Context, in molBondInput) (*molBondPlan, error) {
+	return planMolBondWith(in, proxiedServedHomeKey, func(operand string) (*molBondDiscovery, error) {
+		return discoverMolBondOperandProxied(ctx, operand, in.vars)
+	})
+}
+
+// discoverMolBondOperandProxied resolves an operand issue-first: in the served
+// database through a short-lived read unit of work, then, when the served
+// database does not have it, through a prefix route opened read-only. A read
+// that will not open fails the bond; any other miss goes to the formula
+// fallback, which keeps an actionable route error when no formula matches.
+func discoverMolBondOperandProxied(ctx context.Context, operand string, vars map[string]string) (*molBondDiscovery, error) {
+	uw, err := proxiedOpenReadUOW(ctx)
+	if err != nil {
+		return nil, err
+	}
+	issue, issueErr := resolveServedMolBondIssue(ctx, uowMolReader{uw: uw}, operand)
+	uw.Close(ctx)
+	if issueErr == nil {
+		return &molBondDiscovery{operand: operand, issue: issue, storeKey: proxiedServedHomeKey}, nil
+	}
+
+	if isNotFoundErr(issueErr) {
+		rr, routeErr := resolveViaPrefixRoutingWithAccess(ctx, operand, false, false)
+		if routeErr == nil {
+			return &molBondDiscovery{
+				operand:  operand,
+				issue:    rr.Issue,
+				store:    rr.Store,
+				storeKey: dependencyStoreKey(rr.Store),
+				closeFn:  rr.Close,
+			}, nil
+		}
+		if isRoutingFailure(routeErr) {
+			issueErr = routeErr
+		}
+	}
+	return discoverMolBondFormula(operand, vars, issueErr)
+}
+
+// resolveServedMolBondIssue resolves operand to an issue in the served
+// database. An ID the served database does not match reads as not found
+// (isNotFoundErr), so a prefix route may still have it.
+func resolveServedMolBondIssue(ctx context.Context, r molReader, operand string) (*types.Issue, error) {
+	id, err := utils.ResolvePartialID(ctx, r, operand)
+	if err != nil {
+		return nil, err
+	}
+	return r.GetIssue(ctx, id)
+}
+
+// materializeServedMolBondOperand re-reads a planned operand inside the
+// served write transaction by its exact planned ID, or cooks its formula. A
+// planned issue that is gone fails the bond: it is not re-resolved and never
+// falls back to a same-named formula.
+func materializeServedMolBondOperand(ctx context.Context, r molReader, d *molBondDiscovery, vars map[string]string) (*molBondOperand, error) {
+	if d.issue == nil {
+		return cookMolBondFormulaOperand(d.operand, vars)
+	}
+	issue, err := r.GetIssue(ctx, d.issue.ID)
+	if err != nil {
+		return nil, err
+	}
+	if isProto(issue) {
+		subgraph, err := loadTemplateSubgraph(ctx, r, issue.ID)
+		if err != nil {
+			return nil, fmt.Errorf("loading proto subgraph '%s': %w", issue.ID, err)
+		}
+		return &molBondOperand{subgraph: subgraph}, nil
+	}
+	return &molBondOperand{
+		subgraph: &TemplateSubgraph{
+			Root:     issue,
+			Issues:   []*types.Issue{issue},
+			IssueMap: map[string]*types.Issue{issue.ID: issue},
+		},
+	}, nil
 }
 
 func runMolSquashProxiedServer(ctx context.Context, in molSquashInput) error {

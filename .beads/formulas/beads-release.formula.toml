@@ -142,8 +142,9 @@ prevent. Pin the name first and use the variable:
 
 ```bash
 # The branch you are releasing from. For a prerelease this is still the BASE
-# version's branch: an RC for 1.3.0 is cut on release/1.3.0.
-REL_BRANCH="release/1.3.0"
+# version's branch: an RC for 1.4.0 is cut on release/1.4.0.
+BASE="$(printf '%s' "{{version}}" | sed 's/-.*//')"
+REL_BRANCH="release/$BASE"
 
 git rev-parse --abbrev-ref HEAD    # must equal $REL_BRANCH
 ```
@@ -182,7 +183,8 @@ git rebase "origin/$REL_BRANCH"
 After pulling, verify sync:
 ```bash
 git status -sb
-# Should show: "## release/1.3.0...origin/release/1.3.0" (no ahead/behind)
+# Should show: "## $REL_BRANCH...origin/$REL_BRANCH" (no ahead/behind)
+git rev-list --left-right --count "HEAD...origin/$REL_BRANCH"   # must print 0 0
 ```
 """
 

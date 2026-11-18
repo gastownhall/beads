@@ -1,12 +1,16 @@
 package beads
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // TestFindBeadsDir_WorktreeWithInheritedArtifacts covers the case where a
@@ -869,5 +873,630 @@ func TestFindDatabasePath_WorktreeServerModeFromSubdir(t *testing.T) {
 
 	if resultResolved != mainDoltResolved {
 		t.Errorf("FindDatabasePath() from subdir = %q, want main repo dolt dir %q", result, mainDoltDir)
+	}
+}
+
+// metadatalessStoreFixture is a main checkout plus a linked git worktree whose
+// .beads/ holds the tracked config.yaml and a metadata-less embedded store
+// (embeddeddolt/beads), the GH#6552 layout.
+type metadatalessStoreFixture struct {
+	mainRepo      string
+	mainBeads     string
+	worktree      string
+	worktreeBeads string
+	subdir        string
+}
+
+// clearDiscoveryEnv isolates a discovery test from the caller's routing
+// environment.
+func clearDiscoveryEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"BEADS_DIR", "BEADS_DB", "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER", "GIT_DIR", "GIT_WORK_TREE"} {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
+}
+
+func writeFixtureFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeEmbeddedStore creates beadsDir/embeddeddolt/<name>/.dolt with an
+// innocuous entry, the shape configfile.EmbeddedDoltDatabases recognizes.
+func writeEmbeddedStore(t *testing.T, beadsDir, name string) {
+	t.Helper()
+	writeFixtureFile(t, filepath.Join(beadsDir, "embeddeddolt", name, ".dolt", "noms", "manifest"), "fixture\n")
+}
+
+const (
+	mainEmbeddedMetadata = `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`
+	mainServerMetadata   = `{"backend":"dolt","dolt_mode":"server","dolt_database":"myproject"}`
+)
+
+// newMetadatalessStoreFixture builds the main checkout (mainMetadata written
+// to main's metadata.json unless empty; mainStore names an embedded store to
+// create in main unless empty) and a linked worktree whose .beads/ carries
+// the tracked config.yaml plus a metadata-less embeddeddolt/beads store.
+func newMetadatalessStoreFixture(t *testing.T, mainMetadata, mainStore string) *metadatalessStoreFixture {
+	t.Helper()
+	clearDiscoveryEnv(t)
+
+	tmpDir := utils.CanonicalizePath(t.TempDir())
+	f := &metadatalessStoreFixture{mainRepo: filepath.Join(tmpDir, "main-repo")}
+	f.mainBeads = filepath.Join(f.mainRepo, ".beads")
+	f.worktree = filepath.Join(tmpDir, "worktree")
+	f.worktreeBeads = filepath.Join(f.worktree, ".beads")
+	f.subdir = filepath.Join(f.worktree, "src", "pkg")
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+	if err := os.MkdirAll(f.mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(f.mainRepo, "init")
+	runGit(f.mainRepo, "config", "user.email", "test@example.com")
+	runGit(f.mainRepo, "config", "user.name", "Test User")
+	runGit(f.mainRepo, "config", "core.hooksPath", ".git/hooks")
+
+	writeFixtureFile(t, filepath.Join(f.mainBeads, "config.yaml"), "issue-prefix: \"MyProject\"\n")
+	writeFixtureFile(t, filepath.Join(f.mainBeads, ".gitignore"), "metadata.json\nconfig.json\ndolt/\nembeddeddolt/\n*.db\n")
+	writeFixtureFile(t, filepath.Join(f.mainRepo, "README.md"), "# Test\n")
+	if mainMetadata != "" {
+		writeFixtureFile(t, filepath.Join(f.mainBeads, "metadata.json"), mainMetadata)
+	}
+	if mainStore != "" {
+		writeEmbeddedStore(t, f.mainBeads, mainStore)
+	}
+	runGit(f.mainRepo, "add", "README.md", ".beads/config.yaml", ".beads/.gitignore")
+	runGit(f.mainRepo, "commit", "-m", "initial")
+
+	runGit(f.mainRepo, "worktree", "add", f.worktree, "HEAD")
+	t.Cleanup(func() {
+		cmd := gitCommand("worktree", "remove", "--force", f.worktree)
+		cmd.Dir = f.mainRepo
+		_ = cmd.Run()
+	})
+	if _, err := os.Stat(filepath.Join(f.worktreeBeads, "config.yaml")); err != nil {
+		t.Fatalf("worktree did not check out tracked config.yaml: %v", err)
+	}
+	if err := os.MkdirAll(f.subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The phantom: a metadata-less embedded store under the default name.
+	writeEmbeddedStore(t, f.worktreeBeads, "beads")
+	return f
+}
+
+// chdirForDiscovery moves the process into dir and drops cached git state.
+func chdirForDiscovery(t *testing.T, dir string) {
+	t.Helper()
+	t.Chdir(dir)
+	git.ResetCaches()
+}
+
+func assertSamePath(t *testing.T, label, got, want string) {
+	t.Helper()
+	if got == "" || utils.CanonicalizePath(got) != utils.CanonicalizePath(want) {
+		t.Errorf("%s = %q, want %q", label, got, want)
+	}
+}
+
+// pathWithin reports whether path is root or lies beneath it, comparing
+// canonical forms.
+func pathWithin(path, root string) bool {
+	rel, err := filepath.Rel(utils.CanonicalizePath(root), utils.CanonicalizePath(path))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedWorkspace covers
+// GH#6552: a metadata-less embedded store in a linked worktree yields to the
+// main checkout's metadata-backed workspace, from the worktree root and from
+// an ordinary subdirectory, for both directory and database-path discovery.
+func TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *testing.T) {
+	cases := []struct {
+		name      string
+		mainStore string
+	}{
+		{name: "main store named myproject", mainStore: "myproject"},
+		{name: "main store also named beads", mainStore: "beads"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, tc.mainStore)
+			for _, start := range []string{f.worktree, f.subdir} {
+				chdirForDiscovery(t, start)
+				assertSamePath(t, "FindBeadsDir() from "+start, FindBeadsDir(), f.mainBeads)
+				assertSamePath(t, "FindDatabasePath() from "+start, FindDatabasePath(), filepath.Join(f.mainBeads, "embeddeddolt"))
+			}
+		})
+	}
+}
+
+// TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedServer covers the
+// server-mode main checkout with no local data directory: its metadata alone
+// makes it the shared workspace the metadata-less worktree store yields to.
+func TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedServer(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainServerMetadata, "")
+	for _, start := range []string{f.worktree, f.subdir} {
+		chdirForDiscovery(t, start)
+		assertSamePath(t, "FindBeadsDir() from "+start, FindBeadsDir(), f.mainBeads)
+		dbPath := FindDatabasePath()
+		assertSamePath(t, "FindDatabasePath() from "+start, dbPath, filepath.Join(f.mainBeads, "dolt"))
+		if pathWithin(dbPath, f.worktree) {
+			t.Errorf("FindDatabasePath() from %s = %q, lies under the worktree %q", start, dbPath, f.worktree)
+		}
+	}
+}
+
+// TestFindBeadsDirFrom_WorktreeMetadatalessStoreYieldsToSharedWorkspace
+// covers FindBeadsDirFrom called with the worktree root or a subdirectory
+// while the process cwd is outside the repository.
+func TestFindBeadsDirFrom_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+	chdirForDiscovery(t, t.TempDir())
+	for _, start := range []string{f.worktree, f.subdir} {
+		assertSamePath(t, "FindBeadsDirFrom("+start+")", FindBeadsDirFrom(start), f.mainBeads)
+	}
+}
+
+// TestFindBeadsDir_WorktreeStoreWithMetadataPreservesLocal guards the
+// separate-database precedence: any readable or unreadable local metadata
+// keeps the worktree store selected and emits no missing-metadata warning.
+func TestFindBeadsDir_WorktreeStoreWithMetadataPreservesLocal(t *testing.T) {
+	cases := []struct {
+		name     string
+		file     string
+		body     string
+		wantDBIn bool // FindDatabasePath selects the local embedded store
+	}{
+		{name: "own metadata", file: "metadata.json", body: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"wtdb"}`, wantDBIn: true},
+		{name: "inherited metadata", file: "metadata.json", body: mainEmbeddedMetadata, wantDBIn: true},
+		{name: "metadata without database name", file: "metadata.json", body: `{"backend":"dolt","dolt_mode":"embedded"}`, wantDBIn: true},
+		{name: "legacy config.json", file: "config.json", body: `{"backend":"dolt","dolt_mode":"embedded"}`, wantDBIn: true},
+		{name: "malformed metadata", file: "metadata.json", body: `{not json`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+			writeFixtureFile(t, filepath.Join(f.worktreeBeads, tc.file), tc.body)
+			chdirForDiscovery(t, f.worktree)
+			var dir, dbPath string
+			stderr := captureStderr(t, func() {
+				dir = FindBeadsDir()
+				dbPath = FindDatabasePath()
+				_ = FindBeadsDirFrom(f.subdir)
+			})
+			assertSamePath(t, "FindBeadsDir()", dir, f.worktreeBeads)
+			if tc.wantDBIn {
+				assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(f.worktreeBeads, "embeddeddolt"))
+			}
+			if strings.Contains(stderr, "no metadata.json or config.json") {
+				t.Errorf("unexpected missing-metadata warning with local %s:\n%s", tc.file, stderr)
+			}
+			if _, err := os.Stat(filepath.Join(f.worktreeBeads, tc.file)); err != nil {
+				t.Errorf("local %s changed by discovery: %v", tc.file, err)
+			}
+		})
+	}
+}
+
+// TestFindBeadsDir_ExplicitBeadsDirKeepsMetadatalessWorktreeStore guards
+// explicit selection: BEADS_DIR naming the metadata-less local .beads keeps
+// it, without the yield warning.
+func TestFindBeadsDir_ExplicitBeadsDirKeepsMetadatalessWorktreeStore(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+	chdirForDiscovery(t, f.worktree)
+	t.Setenv("BEADS_DIR", f.worktreeBeads)
+	var dir, dbPath string
+	stderr := captureStderr(t, func() {
+		dir = FindBeadsDir()
+		dbPath = FindDatabasePath()
+	})
+	assertSamePath(t, "FindBeadsDir()", dir, f.worktreeBeads)
+	assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(f.worktreeBeads, "embeddeddolt"))
+	if strings.Contains(stderr, "no metadata.json or config.json") {
+		t.Errorf("unexpected missing-metadata warning under explicit BEADS_DIR:\n%s", stderr)
+	}
+}
+
+// captureStdout redirects os.Stdout for the duration of fn and returns
+// whatever was written to it.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing stdout pipe writer: %v", err)
+	}
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	return buf.String()
+}
+
+// TestFindBeadsDir_WorktreeMetadatalessStoreWarnsOnce asserts the yield is
+// reported exactly once per process on stderr, naming both directories, the
+// reason, the observed and declared database names, a backup request and the
+// docs section that shows how to inspect a copy, and that nothing reaches
+// stdout. The warning offers no BEADS_DIR command: without metadata it would
+// open or create the default "beads" database, not the store's own.
+func TestFindBeadsDir_WorktreeMetadatalessStoreWarnsOnce(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+	chdirForDiscovery(t, f.worktree)
+	var stderr string
+	stdout := captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			for i := 0; i < 3; i++ {
+				_ = FindBeadsDir()
+				_ = FindDatabasePath()
+				_ = FindBeadsDirFrom(f.worktree)
+				_ = FindBeadsDirFrom(f.subdir)
+			}
+		})
+	})
+	if stdout != "" {
+		t.Errorf("discovery wrote to stdout:\n%s", stdout)
+	}
+	if n := strings.Count(stderr, "no metadata.json or config.json"); n != 1 {
+		t.Fatalf("missing-metadata warning count = %d, want 1; stderr:\n%s", n, stderr)
+	}
+	local := utils.CanonicalizePath(f.worktreeBeads)
+	for _, want := range []string{
+		local,
+		utils.CanonicalizePath(f.mainBeads),
+		"no metadata.json or config.json",
+		`embedded databases observed: beads`,
+		`declares dolt_database "myproject"`,
+		"back it up before you change or remove it",
+		"docs/reference/worktrees.md#which-beads-a-worktree-uses",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("warning missing %q; stderr:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "bd list") {
+		t.Errorf("warning offers a bd list command, which opens or creates the default database instead of the skipped store's; stderr:\n%s", stderr)
+	}
+}
+
+// TestFindBeadsDir_JJSecondaryMetadatalessStoreYieldsToPrimary mirrors the
+// worktree case for a jj secondary workspace: its metadata-less embedded
+// store yields to the primary's metadata-backed workspace in all three
+// discovery entry points.
+func TestFindBeadsDir_JJSecondaryMetadatalessStoreYieldsToPrimary(t *testing.T) {
+	clearDiscoveryEnv(t)
+	tmpDir := utils.CanonicalizePath(t.TempDir())
+	primaryDir := filepath.Join(tmpDir, "primary")
+	if err := os.MkdirAll(filepath.Join(primaryDir, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secondaryDir := filepath.Join(primaryDir, "workspaces", "secondary")
+	writeFixtureFile(t, filepath.Join(secondaryDir, ".jj", "repo"), filepath.Join(primaryDir, ".jj", "repo")+"\n")
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+	runGit(primaryDir, "init")
+	runGit(primaryDir, "config", "user.email", "test@example.com")
+	runGit(primaryDir, "config", "user.name", "Test User")
+	runGit(primaryDir, "config", "core.hooksPath", ".git/hooks")
+
+	primaryBeads := filepath.Join(primaryDir, ".beads")
+	writeFixtureFile(t, filepath.Join(primaryBeads, "config.yaml"), "issue-prefix: \"MyProject\"\n")
+	writeFixtureFile(t, filepath.Join(primaryBeads, "metadata.json"), mainEmbeddedMetadata)
+	writeEmbeddedStore(t, primaryBeads, "myproject")
+	writeFixtureFile(t, filepath.Join(primaryDir, "README.md"), "# Test\n")
+	runGit(primaryDir, "add", "README.md")
+	runGit(primaryDir, "commit", "-m", "initial")
+
+	secondaryBeads := filepath.Join(secondaryDir, ".beads")
+	writeFixtureFile(t, filepath.Join(secondaryBeads, "config.yaml"), "issue-prefix: \"MyProject\"\n")
+	writeEmbeddedStore(t, secondaryBeads, "beads")
+	subdir := filepath.Join(secondaryDir, "src")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, start := range []string{secondaryDir, subdir} {
+		chdirForDiscovery(t, start)
+		assertSamePath(t, "FindBeadsDir() from "+start, FindBeadsDir(), primaryBeads)
+		assertSamePath(t, "FindDatabasePath() from "+start, FindDatabasePath(), filepath.Join(primaryBeads, "embeddeddolt"))
+		assertSamePath(t, "FindBeadsDirFrom("+start+")", FindBeadsDirFrom(start), primaryBeads)
+	}
+}
+
+// TestFindDatabasePath_WorktreeYieldedStoreNotRediscovered covers a main
+// checkout whose metadata declares embedded mode but holds no embedded data:
+// the yielded worktree store must not come back through lenient acceptance
+// or the trailing ancestor walk, and discovery must not touch either side.
+func TestFindDatabasePath_WorktreeYieldedStoreNotRediscovered(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "")
+	before := snapshotTree(t, filepath.Dir(f.mainRepo))
+	for _, start := range []string{f.worktree, f.subdir} {
+		chdirForDiscovery(t, start)
+		assertSamePath(t, "FindBeadsDir() from "+start, FindBeadsDir(), f.mainBeads)
+		if dbPath := FindDatabasePath(); dbPath != "" && pathWithin(dbPath, f.worktree) {
+			t.Errorf("FindDatabasePath() from %s = %q, reselected the yielded worktree store", start, dbPath)
+		}
+		assertSamePath(t, "FindBeadsDirFrom("+start+")", FindBeadsDirFrom(start), f.mainBeads)
+	}
+	if after := snapshotTree(t, filepath.Dir(f.mainRepo)); after != before {
+		t.Errorf("discovery changed the fixture tree:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// TestFindDatabasePath_JJSecondaryYieldedStoreNotRediscovered is the jj
+// variant of the AC-8 layout: the primary declares embedded mode without
+// embedded data.
+func TestFindDatabasePath_JJSecondaryYieldedStoreNotRediscovered(t *testing.T) {
+	clearDiscoveryEnv(t)
+	tmpDir := utils.CanonicalizePath(t.TempDir())
+	primaryDir := filepath.Join(tmpDir, "primary")
+	if err := os.MkdirAll(filepath.Join(primaryDir, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secondaryDir := filepath.Join(primaryDir, "workspaces", "secondary")
+	writeFixtureFile(t, filepath.Join(secondaryDir, ".jj", "repo"), filepath.Join(primaryDir, ".jj", "repo")+"\n")
+	cmd := gitCommand("init")
+	cmd.Dir = primaryDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+
+	primaryBeads := filepath.Join(primaryDir, ".beads")
+	writeFixtureFile(t, filepath.Join(primaryBeads, "config.yaml"), "issue-prefix: \"MyProject\"\n")
+	writeFixtureFile(t, filepath.Join(primaryBeads, "metadata.json"), mainEmbeddedMetadata)
+	secondaryBeads := filepath.Join(secondaryDir, ".beads")
+	writeFixtureFile(t, filepath.Join(secondaryBeads, "config.yaml"), "issue-prefix: \"MyProject\"\n")
+	writeEmbeddedStore(t, secondaryBeads, "beads")
+
+	chdirForDiscovery(t, secondaryDir)
+	assertSamePath(t, "FindBeadsDir()", FindBeadsDir(), primaryBeads)
+	if dbPath := FindDatabasePath(); dbPath != "" && pathWithin(dbPath, secondaryDir) {
+		t.Errorf("FindDatabasePath() = %q, reselected the yielded secondary store", dbPath)
+	}
+	assertSamePath(t, "FindBeadsDirFrom()", FindBeadsDirFrom(secondaryDir), primaryBeads)
+}
+
+// snapshotTree lists every non-.git path under root with its size, so a test
+// can assert discovery created, removed or rewrote nothing.
+func snapshotTree(t *testing.T, root string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() && info.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		rel, _ := filepath.Rel(root, path)
+		fmt.Fprintf(&b, "%s %d %v\n", rel, info.Size(), info.IsDir())
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+// TestFindBeadsDir_YieldRequiresRecognizedSharedWorkspace guards the other
+// side of the yield decision: it fires only beside a shared workspace that
+// discovery recognizes by readable metadata. A shared candidate without
+// workspace metadata does not displace the metadata-less local store, and a
+// standalone repository is never subject to the yield.
+func TestFindBeadsDir_YieldRequiresRecognizedSharedWorkspace(t *testing.T) {
+	t.Run("shared workspace without metadata does not displace the local store", func(t *testing.T) {
+		f := newMetadatalessStoreFixture(t, "", "myproject")
+		chdirForDiscovery(t, f.worktree)
+		var dir, dbPath string
+		stderr := captureStderr(t, func() {
+			dir = FindBeadsDir()
+			dbPath = FindDatabasePath()
+		})
+		assertSamePath(t, "FindBeadsDir()", dir, f.worktreeBeads)
+		assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(f.worktreeBeads, "embeddeddolt"))
+		if strings.Contains(stderr, "no metadata.json or config.json") {
+			t.Errorf("unexpected missing-metadata warning beside an unrecognized shared candidate:\n%s", stderr)
+		}
+	})
+
+	t.Run("standalone repository keeps its metadata-less store", func(t *testing.T) {
+		clearDiscoveryEnv(t)
+		repo := filepath.Join(utils.CanonicalizePath(t.TempDir()), "repo")
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"init"}, {"config", "core.hooksPath", ".git/hooks"}} {
+			cmd := gitCommand(args...)
+			cmd.Dir = repo
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+		}
+		beadsDir := filepath.Join(repo, ".beads")
+		writeFixtureFile(t, filepath.Join(beadsDir, "config.yaml"), "issue-prefix: \"R\"\n")
+		writeEmbeddedStore(t, beadsDir, "beads")
+		chdirForDiscovery(t, repo)
+		var dir, dbPath string
+		stderr := captureStderr(t, func() {
+			dir = FindBeadsDir()
+			dbPath = FindDatabasePath()
+		})
+		assertSamePath(t, "FindBeadsDir()", dir, beadsDir)
+		assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(beadsDir, "embeddeddolt"))
+		if strings.Contains(stderr, "no metadata.json or config.json") {
+			t.Errorf("unexpected missing-metadata warning in a standalone repository:\n%s", stderr)
+		}
+	})
+}
+
+// TestFindBeadsDir_ExplicitOverridesKeepMetadatalessWorktreeStore guards the
+// remaining explicit selections: BEADS_DB naming the metadata-less local
+// .beads, and a worktree redirect, valid or not, win before the implicit
+// yield in every entry point and emit no missing-metadata warning.
+func TestFindBeadsDir_ExplicitOverridesKeepMetadatalessWorktreeStore(t *testing.T) {
+	t.Run("BEADS_DB names the local store", func(t *testing.T) {
+		f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+		chdirForDiscovery(t, f.worktree)
+		t.Setenv("BEADS_DB", f.worktreeBeads)
+		var dbPath string
+		stderr := captureStderr(t, func() {
+			dbPath = FindDatabasePath()
+		})
+		assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(f.worktreeBeads, "embeddeddolt"))
+		if strings.Contains(stderr, "no metadata.json or config.json") {
+			t.Errorf("unexpected missing-metadata warning under explicit BEADS_DB:\n%s", stderr)
+		}
+	})
+
+	t.Run("valid worktree redirect wins before the yield", func(t *testing.T) {
+		f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+		external := filepath.Join(filepath.Dir(f.worktree), "external", ".beads")
+		writeFixtureFile(t, filepath.Join(external, "metadata.json"), `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"ext"}`)
+		writeEmbeddedStore(t, external, "ext")
+		writeFixtureFile(t, filepath.Join(f.worktreeBeads, "redirect"), external+"\n")
+		chdirForDiscovery(t, f.worktree)
+		var dir, dbPath, fromRoot, fromSubdir string
+		stderr := captureStderr(t, func() {
+			dir = FindBeadsDir()
+			dbPath = FindDatabasePath()
+		})
+		// bd -C <worktree>: FindBeadsDirFrom with the cwd outside the repository.
+		chdirForDiscovery(t, t.TempDir())
+		stderr += captureStderr(t, func() {
+			fromRoot = FindBeadsDirFrom(f.worktree)
+			fromSubdir = FindBeadsDirFrom(f.subdir)
+		})
+		assertSamePath(t, "FindBeadsDir()", dir, external)
+		assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(external, "embeddeddolt"))
+		assertSamePath(t, "FindBeadsDirFrom(worktree)", fromRoot, external)
+		assertSamePath(t, "FindBeadsDirFrom(subdir)", fromSubdir, external)
+		if strings.Contains(stderr, "no metadata.json or config.json") {
+			t.Errorf("unexpected missing-metadata warning under a valid redirect:\n%s", stderr)
+		}
+	})
+
+	// An invalid redirect is ignored with a warning, and FindBeadsDir and
+	// FindDatabasePath then keep the worktree's own .beads (step 3a). The
+	// yield must not override that in FindBeadsDirFrom either, or bd -C
+	// <worktree> and plain bd in the worktree would open different stores.
+	t.Run("invalid worktree redirect keeps the worktree store in every entry point", func(t *testing.T) {
+		f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+		missing := filepath.Join(filepath.Dir(f.worktree), "missing", ".beads")
+		writeFixtureFile(t, filepath.Join(f.worktreeBeads, "redirect"), missing+"\n")
+		chdirForDiscovery(t, f.worktree)
+		var dir, dbPath, fromRoot, fromSubdir string
+		stderr := captureStderr(t, func() {
+			dir = FindBeadsDir()
+			dbPath = FindDatabasePath()
+		})
+		chdirForDiscovery(t, t.TempDir())
+		stderr += captureStderr(t, func() {
+			fromRoot = FindBeadsDirFrom(f.worktree)
+			fromSubdir = FindBeadsDirFrom(f.subdir)
+		})
+		assertSamePath(t, "FindBeadsDir()", dir, f.worktreeBeads)
+		assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(f.worktreeBeads, "embeddeddolt"))
+		assertSamePath(t, "FindBeadsDirFrom(worktree)", fromRoot, f.worktreeBeads)
+		assertSamePath(t, "FindBeadsDirFrom(subdir)", fromSubdir, f.worktreeBeads)
+		if strings.Contains(stderr, "no metadata.json or config.json") {
+			t.Errorf("unexpected missing-metadata warning under an invalid redirect:\n%s", stderr)
+		}
+	})
+}
+
+// TestFindBeadsDirFrom_YieldReturnsTheSharedWorkspace covers a parent
+// directory with a workspace of its own above the main checkout and the
+// worktree. Once the worktree store yields, FindBeadsDirFrom returns the
+// shared workspace, as FindBeadsDir does, instead of walking on to the
+// unrelated parent .beads.
+func TestFindBeadsDirFrom_YieldReturnsTheSharedWorkspace(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+	parentBeads := filepath.Join(filepath.Dir(f.worktree), ".beads")
+	writeFixtureFile(t, filepath.Join(parentBeads, "metadata.json"), `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"umbrella"}`)
+	writeEmbeddedStore(t, parentBeads, "umbrella")
+
+	chdirForDiscovery(t, f.worktree)
+	assertSamePath(t, "FindBeadsDir()", FindBeadsDir(), f.mainBeads)
+
+	chdirForDiscovery(t, t.TempDir())
+	for _, start := range []string{f.worktree, f.subdir} {
+		assertSamePath(t, "FindBeadsDirFrom("+start+")", FindBeadsDirFrom(start), f.mainBeads)
+	}
+}
+
+// TestFindBeadsDir_YieldWarningNamesTheMarkersFound covers stores that hold
+// no embedded database: the warning names the dolt/ directory or the
+// database files it found instead of reporting no embedded databases.
+func TestFindBeadsDir_YieldWarningNamesTheMarkersFound(t *testing.T) {
+	cases := []struct {
+		name   string
+		create func(t *testing.T, beadsDir string)
+		want   string
+	}{
+		{
+			name: "dolt directory",
+			create: func(t *testing.T, beadsDir string) {
+				writeFixtureFile(t, filepath.Join(beadsDir, "dolt", "beads", ".dolt", "noms", "manifest"), "fixture\n")
+			},
+			want: "(a dolt/ directory observed;",
+		},
+		{
+			name: "database file",
+			create: func(t *testing.T, beadsDir string) {
+				writeFixtureFile(t, filepath.Join(beadsDir, "beads.db"), "fixture\n")
+				writeFixtureFile(t, filepath.Join(beadsDir, "beads.backup.db"), "fixture\n")
+			},
+			want: "(database files observed: beads.db;",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+			if err := os.RemoveAll(filepath.Join(f.worktreeBeads, "embeddeddolt")); err != nil {
+				t.Fatal(err)
+			}
+			tc.create(t, f.worktreeBeads)
+			chdirForDiscovery(t, f.worktree)
+			var dir string
+			stderr := captureStderr(t, func() {
+				dir = FindBeadsDir()
+			})
+			assertSamePath(t, "FindBeadsDir()", dir, f.mainBeads)
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("warning missing %q; stderr:\n%s", tc.want, stderr)
+			}
+			if strings.Contains(stderr, "embedded databases") || strings.Contains(stderr, "embeddeddolt/") {
+				t.Errorf("warning describes embedded databases for a store with none; stderr:\n%s", stderr)
+			}
+		})
 	}
 }

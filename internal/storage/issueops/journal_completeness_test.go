@@ -1,6 +1,12 @@
 package issueops
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/journalscan"
@@ -365,4 +371,276 @@ func TestEveryBeadMutatorJournalsOrIsExempt(t *testing.T) {
 			t.Errorf("exemption %q no longer matches an exported bead-writing function — remove it", m)
 		}
 	}
+}
+
+// derivedActorParam is, for each member of the readiness family and the
+// recheck recorders, the position of its actor argument: the identity every
+// derived is_blocked record the call journals (or a post-commit recheck later
+// journals) carries.
+var derivedActorParam = map[string]int{
+	"RecomputeIsBlockedInTx":              4,
+	"RecomputeIsBlockedInTxWithResult":    4,
+	"MarkIsBlockedInTx":                   4,
+	"MarkIsBlockedInTxWithResult":         4,
+	"RecomputeIsBlockedForIDsInTx":        3,
+	"RecomputeIsBlockedForWispIDsInTx":    3,
+	"RecomputeIsBlockedAfterDelete":       4,
+	"recomputeIsBlockedInTxWithResult":    4,
+	"recordBlockedJournalChanges":         5,
+	"NoteStatusChangeBlockedRecheck":      3,
+	"NoteDependencyRemovalBlockedRecheck": 3,
+	"NoteDeleteBlockedRecheck":            3,
+	"noteBlockedRecheck":                  2,
+}
+
+// derivedActorSystemCallers are the only functions under internal/storage that
+// may hand the readiness family, or a function that forwards its actor to it
+// (DeleteIssueInTx and the bulk deletes), NoRequestActor or "": the paths with
+// no request behind them and the storage surfaces that take no actor
+// parameter, so have none to pass, each with why. Every other caller passes
+// the actor of the request whose mutation caused the maintenance.
+var derivedActorSystemCallers = map[string]string{
+	"issueops/blocked_consistency.go:recomputeIsBlockedCounting":   "the full repair behind `bd recompute-blocked` and `bd doctor --fix`",
+	"issueops/blocked_merge.go:recomputeIsBlockedAfterMergeScoped": "a pull's or merge's recompute: the rows came from another clone",
+	"issueops/blocked_merge.go:recomputeIsBlockedForAll":           "a pull's or merge's recompute: the rows came from another clone",
+	"issueops/bulk_ops.go:DeleteIssuesBySourceRepoInTx":            "`bd repo remove`: storage.DeleteIssuesBySourceRepo carries no actor",
+	"dolt/wisps.go:deleteWisp":                                     "the wisp delete surface carries no actor (its delete row names none)",
+	"dolt/wisps.go:deleteWispBatchTx":                              "the wisp delete surface carries no actor (its delete rows name none)",
+	"createbatchequiv/scenario_waitsfor.go:runWaitsFor":            "an equivalence scenario's raw-SQL repair step, not a request",
+	// storage.DeleteIssue, storage.DeleteIssues and storage.Transaction.DeleteIssue
+	// take no actor. Their callers are mostly system cleanup (the Decay phase of a
+	// local `bd gc`, `bd doctor --fix`), but not only: a local `bd cook` proto
+	// delete and the local `bd mol burn`/`bd mol squash` writer reach
+	// Transaction.DeleteIssue holding an actor these surfaces cannot carry, so
+	// their records name no one until the surfaces take one.
+	"dolt/issues.go:deleteIssue":              "storage.DeleteIssue carries no actor (see above)",
+	"dolt/issues.go:deleteIssues":             "storage.DeleteIssues carries no actor (see above)",
+	"dolt/transaction.go:DeleteIssue":         "storage.Transaction.DeleteIssue carries no actor (see above)",
+	"embeddeddolt/store.go:DeleteIssue":       "storage.DeleteIssue carries no actor (see above)",
+	"embeddeddolt/store.go:DeleteIssues":      "storage.DeleteIssues carries no actor (see above)",
+	"embeddeddolt/transaction.go:DeleteIssue": "storage.Transaction.DeleteIssue carries no actor (see above)",
+}
+
+// TestNoRequestActorReachesTheReadinessFamilyOnlyFromSystemPaths is the census
+// behind the explicit actor parameter: the parameter makes every caller of
+// the readiness family decide attribution at compile time, and this holds
+// which callers may decide "no one". A derived record a user's request caused
+// but that names no one reads as system/unknown, so a consumer holding every
+// record of a user's change to that user fails the change. A new caller that passes
+// NoRequestActor or "" fails here until it is listed in
+// derivedActorSystemCallers with its reason.
+//
+// Two ways around a purely syntactic check are closed. A function that hands
+// one of its own parameters to an actor position (DeleteIssueInTx passing its
+// actor to the recompute it runs) joins the family at that parameter, to a
+// fixpoint, so a caller that passes it "" is a caller of the family. And an
+// argument that is a local alias of "" or NoRequestActor (a := ""; f(..., a),
+// or var a string) counts as passing no actor.
+func TestNoRequestActorReachesTheReadinessFamilyOnlyFromSystemPaths(t *testing.T) {
+	root := ".."
+	type parsedFile struct {
+		rel  string
+		fset *token.FileSet
+		file *ast.File
+	}
+	var files []parsedFile
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		files = append(files, parsedFile{rel: filepath.ToSlash(rel), fset: fset, file: file})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+
+	family := derivedActorFamily(func(yield func(*ast.FuncDecl)) {
+		for _, f := range files {
+			for _, decl := range f.file.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+					yield(fn)
+				}
+			}
+		}
+	})
+	for _, forwarder := range []string{"DeleteIssueInTx", "DeleteIssueInTxWithResult"} {
+		if _, ok := family[forwarder]; !ok {
+			t.Errorf("%s hands its actor to the readiness family but the forwarding analysis did not find it: "+
+				"the census no longer sees callers that reach the family through a forwarder", forwarder)
+		}
+	}
+
+	seen := map[string]bool{}
+	for _, f := range files {
+		for _, decl := range f.file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			key := f.rel + ":" + fn.Name.Name
+			empty := emptyActorLocals(fn.Body)
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				name := calleeName(call)
+				idx, inFamily := family[name]
+				if !inFamily || idx >= len(call.Args) {
+					return true
+				}
+				if !namesNoRequestActor(call.Args[idx], empty) {
+					return true
+				}
+				seen[key] = true
+				if _, ok := derivedActorSystemCallers[key]; !ok {
+					t.Errorf("%s (%s) passes no request actor to %s: a path a request drives must pass that "+
+						"request's actor, so the derived is_blocked records it causes name the user who caused "+
+						"them; a genuinely system path passes NoRequestActor and is listed in "+
+						"derivedActorSystemCallers with its reason",
+						key, f.fset.Position(call.Pos()), name)
+				}
+				return true
+			})
+		}
+	}
+	for key := range derivedActorSystemCallers {
+		if !seen[key] {
+			t.Errorf("derivedActorSystemCallers lists %s, which no longer passes NoRequestActor: delete the entry", key)
+		}
+	}
+}
+
+// derivedActorFamily is derivedActorParam closed over forwarding: a function
+// that passes one of its own parameters, unchanged, to a member's actor
+// position is a member at that parameter. Names are matched bare, like the
+// census's callee names, so a method and a function sharing a name share an
+// entry.
+func derivedActorFamily(eachFunc func(yield func(*ast.FuncDecl))) map[string]int {
+	family := make(map[string]int, len(derivedActorParam))
+	for name, idx := range derivedActorParam {
+		family[name] = idx
+	}
+	for changed := true; changed; {
+		changed = false
+		eachFunc(func(fn *ast.FuncDecl) {
+			if _, member := family[fn.Name.Name]; member {
+				return
+			}
+			params := map[string]int{}
+			pos := 0
+			for _, field := range fn.Type.Params.List {
+				if len(field.Names) == 0 {
+					pos++
+					continue
+				}
+				for _, n := range field.Names {
+					params[n.Name] = pos
+					pos++
+				}
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				idx, inFamily := family[calleeName(call)]
+				if !inFamily || idx >= len(call.Args) {
+					return true
+				}
+				if id, ok := call.Args[idx].(*ast.Ident); ok {
+					if p, isParam := params[id.Name]; isParam {
+						if _, member := family[fn.Name.Name]; !member {
+							family[fn.Name.Name] = p
+							changed = true
+						}
+					}
+				}
+				return true
+			})
+		})
+	}
+	return family
+}
+
+func calleeName(call *ast.CallExpr) string {
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name
+	case *ast.SelectorExpr:
+		return fun.Sel.Name
+	}
+	return ""
+}
+
+// emptyActorLocals names the locals of body that are ever given no actor: set
+// to "" or NoRequestActor, to another such local, or declared `var x string`
+// with no value. Any such assignment counts, even one a later branch
+// overwrites, so a conditionally empty actor is caught too.
+func emptyActorLocals(body *ast.BlockStmt) map[string]bool {
+	empty := map[string]bool{}
+	for grew := true; grew; {
+		grew = false
+		mark := func(name string) {
+			if name != "_" && !empty[name] {
+				empty[name] = true
+				grew = true
+			}
+		}
+		ast.Inspect(body, func(n ast.Node) bool {
+			switch s := n.(type) {
+			case *ast.AssignStmt:
+				if len(s.Lhs) != len(s.Rhs) {
+					return true
+				}
+				for i, lhs := range s.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && namesNoRequestActor(s.Rhs[i], empty) {
+						mark(id.Name)
+					}
+				}
+			case *ast.ValueSpec:
+				if len(s.Values) == 0 {
+					if typ, ok := s.Type.(*ast.Ident); ok && typ.Name == "string" {
+						for _, id := range s.Names {
+							mark(id.Name)
+						}
+					}
+					return true
+				}
+				for i, id := range s.Names {
+					if i < len(s.Values) && namesNoRequestActor(s.Values[i], empty) {
+						mark(id.Name)
+					}
+				}
+			}
+			return true
+		})
+	}
+	return empty
+}
+
+// namesNoRequestActor reports whether expr is NoRequestActor (bare or
+// package-qualified), the empty string literal, or a local in empty.
+func namesNoRequestActor(expr ast.Expr, empty map[string]bool) bool {
+	switch e := expr.(type) {
+	case *ast.ParenExpr:
+		return namesNoRequestActor(e.X, empty)
+	case *ast.Ident:
+		return e.Name == "NoRequestActor" || empty[e.Name]
+	case *ast.SelectorExpr:
+		return e.Sel.Name == "NoRequestActor"
+	case *ast.BasicLit:
+		return e.Kind == token.STRING && (e.Value == `""` || e.Value == "``")
+	}
+	return false
 }

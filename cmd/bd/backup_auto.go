@@ -92,7 +92,17 @@ func backupAutoStatusNote(enabled bool) string {
 // host lives only in metadata.json is classified the same way here as
 // by mode inference — the operator's intent is unambiguous from the
 // effective host value alone.
+//
+// A server in a container on this machine, reached at a loopback
+// address, is classified as sharing the filesystem although it does
+// not: the host alone cannot tell it apart from a local server.
 func clientServerShareFilesystem() bool {
+	return configfile.IsLocalHostString(backupServerHost())
+}
+
+// backupServerHost returns the Dolt server host clientServerShareFilesystem
+// judges, by the precedence described there; empty means the default host.
+func backupServerHost() string {
 	host := os.Getenv("BEADS_DOLT_SERVER_HOST")
 	if host == "" {
 		if bd := beads.FindBeadsDir(); bd != "" {
@@ -111,7 +121,7 @@ func clientServerShareFilesystem() bool {
 		// Fall back to in-struct config (config.yaml dolt.host etc.).
 		host = config.GetString("dolt.host")
 	}
-	return configfile.IsLocalHostString(host)
+	return host
 }
 
 // autoBackupSkipNoticeOnce ensures the "auto-backup skipped" INFO

@@ -149,7 +149,8 @@ func recomputeIsBlockedAfterMergeScoped(ctx context.Context, tx *sql.Tx, fromCom
 	if !ok {
 		return recomputeIsBlockedForAll(ctx, tx)
 	}
-	return RecomputeIsBlockedInTx(ctx, tx, issueIDs, wispIDs)
+	// A merge brings in rows no request of this clone wrote.
+	return RecomputeIsBlockedInTx(ctx, tx, issueIDs, wispIDs, NoRequestActor)
 }
 
 // mergeAffectedSets expands the issues/dependencies rows changed since
@@ -291,7 +292,8 @@ func recomputeIsBlockedForAll(ctx context.Context, tx *sql.Tx) error {
 			return fmt.Errorf("recompute is_blocked after merge: list wisps: %w", err)
 		}
 	}
-	return RecomputeIsBlockedInTx(ctx, tx, issueIDs, wispIDs)
+	// A merge brings in rows no request of this clone wrote.
+	return RecomputeIsBlockedInTx(ctx, tx, issueIDs, wispIDs, NoRequestActor)
 }
 
 // allIDs lists every id in table. table must be a hardcoded constant.

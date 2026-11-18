@@ -105,7 +105,7 @@ func largeScenarios() []scenario {
 // recorded from the code BEFORE the batch-create fast paths existed
 // (ebe3b6bcb), so the check holds the current code — fast and per-row
 // bodies alike, including changes the fast-path switch does not gate — to
-// what that code stored, apart from five deliberate behavior changes since.
+// what that code stored, apart from six deliberate behavior changes since.
 //
 // First, the create role defaults an empty created_by to the request's actor
 // (issueops.PreparePublicCreateRequest), so apply.json's issues, wisps and
@@ -144,14 +144,25 @@ func largeScenarios() []scenario {
 // where they read /1. That is what BlockedStateInvariant asks once nothing
 // outside the cycle blocks it. No row count moved.
 //
-// Fifth, settled.json's issues and bd_events_journal digests and its lines
+// Fifth, the bd_events_journal digests of small, depadd, waitsfor, settled,
+// import458 and import458-reject-stale were re-recorded when a derived
+// is_blocked update started naming the request that caused it
+// (gastownhall/beads#8432); recordBlockedJournalChanges used to write those
+// rows with no actor. Only that actor moved: blanking it on the derived
+// update rows of the new journal gives back each old digest exactly, on the
+// embedded and the server engine alike. The request's own records and every
+// row count are unchanged, and apply and retired did not move.
+//
+// Sixth, settled.json's issues and bd_events_journal digests and its lines
 // from step A on were re-recorded when a conditional-blocks edge stopped
 // releasing its source on a close whose reason is not a failure
 // (gastownhall/beads#5577, types.BlockingEdgeHolds). Step A closes eq-zA-x
 // with the reason "done", so its conditional dependent eq-zA-d2 now stays
 // blocked: every line from A on reads eq-zA-d2=open/1 where it read /0, and
 // the journal holds 461 rows instead of 462, because the update that
-// released eq-zA-d2 is no longer written.
+// released eq-zA-d2 is no longer written. Its journal digest also carries
+// the fifth change's actor: blanking it on the derived update rows gives
+// back the digest this change recorded before the fifth change landed.
 //
 // settled.json is younger than the rest: it was recorded from the code before
 // the blocked-state settled-row shortcut (fd54802bc8), on the embedded and the

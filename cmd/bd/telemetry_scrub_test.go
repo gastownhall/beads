@@ -7,436 +7,174 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestScrubArgsForTelemetry locks the invariant that a positional connection
-// string cannot leak an embedded password into the bd.args telemetry span. This
-// defense is backend-neutral and remains useful even when bd does not implement
-// the connection string's database backend.
-func TestScrubArgsForTelemetry(t *testing.T) {
-	const secret = "s3cr3t-pw"
+// telemetryArgsFixture is a command tree shaped like bd's: a root carrying
+// bd's persistent flags and subcommands binding the flags that take issue
+// content, search text and credentials, including the -p shorthand that
+// means --password on federation add-peer and --priority or --prefix
+// elsewhere. Executing it records what commandTelemetryArgs renders for the
+// command cobra resolved, from the PersistentPreRunE position where main.go
+// starts the command span.
+type telemetryArgsFixture struct {
+	root *cobra.Command
+	got  string
+}
+
+func newTelemetryArgsFixture() *telemetryArgsFixture {
+	fx := &telemetryArgsFixture{}
+	noop := func(*cobra.Command, []string) error { return nil }
+	fx.root = &cobra.Command{
+		Use:           "bd",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			fx.got = commandTelemetryArgs(cmd)
+			return nil
+		},
+		RunE: noop,
+	}
+	persistent := fx.root.PersistentFlags()
+	persistent.Bool("json", false, "")
+	persistent.BoolP("quiet", "q", false, "")
+	persistent.BoolP("verbose", "v", false, "")
+	persistent.String("actor", "", "")
+
+	create := &cobra.Command{Use: "create [title]", RunE: noop}
+	create.Flags().String("title", "", "")
+	create.Flags().StringP("description", "d", "", "")
+	create.Flags().String("notes", "", "")
+	create.Flags().StringSliceP("labels", "l", nil, "")
+	create.Flags().IntP("priority", "p", 2, "")
+
+	list := &cobra.Command{Use: "list", RunE: noop}
+	list.Flags().String("title", "", "")
+	list.Flags().IntP("limit", "n", 50, "")
+
+	comments := &cobra.Command{Use: "comments [issue-id]", RunE: noop}
+	comments.AddCommand(&cobra.Command{Use: "add <issue-id> <text>", RunE: noop})
+
+	ready := &cobra.Command{Use: "ready", RunE: noop}
+	ready.Flags().IntP("priority", "p", 0, "")
+
+	initCmd := &cobra.Command{Use: "init", RunE: noop}
+	initCmd.Flags().StringP("prefix", "p", "", "")
+	initCmd.Flags().String("remote", "", "")
+
+	addPeer := &cobra.Command{Use: "add-peer <name> <url>", RunE: noop}
+	addPeer.Flags().String("user", "", "")
+	addPeer.Flags().StringP("password", "p", "", "")
+	federation := &cobra.Command{Use: "federation"}
+	federation.AddCommand(addPeer)
+
+	fx.root.AddCommand(
+		create, list, comments, ready, initCmd, federation,
+		&cobra.Command{Use: "search [query]", RunE: noop},
+		// bd mail hands its arguments to a delegate unparsed.
+		&cobra.Command{Use: "mail", DisableFlagParsing: true, RunE: noop},
+	)
+	return fx
+}
+
+// telemetryArgs runs argv through a fresh fixture and returns bd.args.
+func telemetryArgs(t *testing.T, argv ...string) string {
+	t.Helper()
+	fx := newTelemetryArgsFixture()
+	fx.got = "<PersistentPreRunE did not run>"
+	fx.root.SetArgs(argv)
+	if err := fx.root.Execute(); err != nil {
+		t.Fatalf("bd %q: %v", argv, err)
+	}
+	return fx.got
+}
+
+// TestCommandTelemetryArgsCarryNoContent pins #8505: bd.args is the command
+// path plus the sorted long names of the flags that were set, and nothing a
+// user typed as a value or an argument reaches it. The value scrubber this
+// replaced redacted credentials but passed titles, descriptions, labels and
+// search text through verbatim.
+func TestCommandTelemetryArgsCarryNoContent(t *testing.T) {
+	const secret = "SECRET-8505"
 	cases := []struct {
 		name string
 		argv []string
-		keep []string // non-secret structure that must survive redaction
+		want string
 	}{
-		{
-			name: "url userinfo",
-			argv: []string{"command", "postgres://bts:" + secret + "@127.0.0.1:5432/db"},
-			keep: []string{"postgres://bts:", "127.0.0.1:5432/db"},
-		},
-		{
-			name: "url query param",
-			argv: []string{"command", "postgres://bts@127.0.0.1:5432/db?password=" + secret},
-			keep: []string{"127.0.0.1:5432/db", "password="},
-		},
-		{
-			name: "url sslpassword",
-			argv: []string{"command", "postgres://bts@h:5432/db?sslpassword=" + secret + "&sslmode=require"},
-			keep: []string{"sslmode=require"},
-		},
-		{
-			name: "keyword value connection string",
-			argv: []string{"command", "host=127.0.0.1 user=bts password=" + secret + " dbname=db"},
-			keep: []string{"host=127.0.0.1", "user=bts", "dbname=db"},
-		},
-		{
-			name: "keyword value connection string with whitespace around equals",
-			argv: []string{"command", "host = 127.0.0.1 password=" + secret},
-			keep: []string{"host = 127.0.0.1", "password="},
-		},
-		{
-			name: "password-only keyword connection string",
-			argv: []string{"command", "password=" + secret},
-			keep: []string{"password="},
-		},
-		{
-			name: "service keyword connection string",
-			argv: []string{"command", "service=production password=" + secret},
-			keep: []string{"service=production", "password="},
-		},
-		{
-			name: "scheme-less userinfo",
-			argv: []string{"command", "bts:" + secret + "@tcp(127.0.0.1:3306)/db"},
-			keep: []string{"tcp(127.0.0.1:3306)/db", "bts:"},
-		},
+		{"issue repro: positional title, -d description", []string{"create", secret + "-title", "-d", secret + "-desc", "-q"}, "create --description --quiet"},
+		{"issue repro: list --title", []string{"list", "--limit", "1", "--title", secret}, "list --limit --title"},
+		{"equals forms and a repeated slice flag", []string{"create", "--title=" + secret, "-l", "a," + secret, "-l", secret, "--notes", secret}, "create --labels --notes --title"},
+		{"flags sorted whatever the command-line order", []string{"create", "-q", "--title", secret, "-d", secret}, "create --description --quiet --title"},
+		{"persistent flag before the subcommand", []string{"-q", "create", secret}, "create --quiet"},
+		{"search text", []string{"search", secret, "and more " + secret}, "search"},
+		{"nested command path", []string{"--json", "comments", "add", "bd-1", secret}, "comments add --json"},
+		{"actor value", []string{"--actor", secret, "ready"}, "ready --actor"},
+		{"value shaped like a flag", []string{"create", "--title", "--password=" + secret}, "create --title"},
+		{"value shaped like a flag the command binds", []string{"create", "-d", "--notes=" + secret}, "create --description"},
+		{"arguments after --", []string{"create", "--", "--notes", secret}, "create"},
+		{"concatenated shorthand value", []string{"create", "-d" + secret}, "create --description"},
+		{"shorthand equals value", []string{"create", "-d=" + secret}, "create --description"},
+		{"boolean shorthand cluster ending in a value flag", []string{"create", "-qd" + secret}, "create --description --quiet"},
+		{"boolean shorthand cluster, separate value", []string{"create", "-qd", secret}, "create --description --quiet"},
+		{"federation password", []string{"federation", "add-peer", "partner", "h:3306/db", "--user", "admin", "--password", secret}, "federation add-peer --password --user"},
+		{"federation password equals form", []string{"federation", "add-peer", "partner", "h:3306/db", "--password=" + secret}, "federation add-peer --password"},
+		{"federation password -p", []string{"federation", "add-peer", "partner", "h:3306/db", "-p", secret}, "federation add-peer --password"},
+		{"federation password -p concatenated", []string{"federation", "add-peer", "partner", "h:3306/db", "-p" + secret}, "federation add-peer --password"},
+		{"federation password -p=", []string{"federation", "add-peer", "partner", "h:3306/db", "-p=" + secret}, "federation add-peer --password"},
+		{"federation password in a -qp cluster", []string{"federation", "add-peer", "partner", "h:3306/db", "-qp" + secret}, "federation add-peer --password --quiet"},
+		{"federation password in a -vp cluster, separate value", []string{"federation", "add-peer", "partner", "h:3306/db", "-vp", secret}, "federation add-peer --password --verbose"},
+		{"-p as --priority", []string{"ready", "-p", "1"}, "ready --priority"},
+		{"-p as --prefix", []string{"init", "-p", secret}, "init --prefix"},
+		{"command that disables flag parsing", []string{"mail", "send", "mayor/", "-s", secret}, "mail"},
+		{"root command", []string{"--json"}, "--json"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := scrubArgsForTelemetry(tc.argv, nil)
-			if strings.Contains(out, secret) {
-				t.Fatalf("PASSWORD LEAK: scrubArgsForTelemetry(%v) = %q still contains %q", tc.argv, out, secret)
+			got := telemetryArgs(t, tc.argv...)
+			if strings.Contains(got, secret) {
+				t.Fatalf("CONTENT LEAK: bd.args for %q = %q", tc.argv, got)
 			}
-			if !strings.Contains(out, "xxxxx") {
-				t.Fatalf("expected redaction marker xxxxx in %q", out)
-			}
-			for _, k := range tc.keep {
-				if !strings.Contains(out, k) {
-					t.Errorf("expected %q to survive redaction in %q", k, out)
-				}
+			if got != tc.want {
+				t.Fatalf("bd.args for %q = %q, want %q", tc.argv, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestScrubArgsForTelemetryLeavesOrdinaryArgs proves the scrubber does not mangle
-// non-DSN arguments: an ordinary token that merely contains "password=" is not a
-// credential-flag value and passes through untouched (no over-redaction), while a
-// bare user:pass@host userinfo anywhere is still redacted as defense in depth.
-func TestScrubArgsForTelemetryLeavesOrdinaryArgs(t *testing.T) {
-	argv := []string{"create", "--title", "document the password= knob"}
-	if out := scrubArgsForTelemetry(argv, nil); out != "create --title document the password= knob" {
-		t.Fatalf("over-redacted ordinary args: got %q", out)
-	}
-	argv = []string{"create", "--title", "transport=rail password=foo"}
-	if out := scrubArgsForTelemetry(argv, nil); out != "create --title transport=rail password=foo" {
-		t.Fatalf("over-redacted non-DSN key/value text: got %q", out)
-	}
-
-	argv = []string{"weird", "postgres://u:leak@h:5432/db"}
-	if out := scrubArgsForTelemetry(argv, nil); strings.Contains(out, "leak") {
-		t.Fatalf("userinfo password not scrubbed as defense in depth: %q", out)
-	}
-
-	for _, arg := range []string{
-		"postgres://u@h:5432/db?password=leak",
-		"host=h user=u password=leak dbname=db",
-	} {
-		if out := scrubArgsForTelemetry([]string{"weird", arg}, nil); strings.Contains(out, "leak") {
-			t.Fatalf("positional DSN password not scrubbed as defense in depth: %q", out)
-		}
-	}
-}
-
-// TestSecretFlagTokensResolvesByCommand proves -p is treated as secret only on the
-// command that binds it to --password. federation add-peer binds -p to the SQL
-// password, but init/ready/count bind -p to --prefix/--priority, so the telemetry
-// scrubber must resolve no secret token for them. This is the "redact by flag
-// identity, not by spelling" guarantee that keeps the overloaded -p from being
-// redacted on the far-more-common non-secret commands.
-func TestSecretFlagTokensResolvesByCommand(t *testing.T) {
-	var pw, prefix string
-	addPeer := &cobra.Command{Use: "add-peer"}
-	addPeer.Flags().StringVarP(&pw, "password", "p", "", "SQL password")
-
-	if got := secretFlagTokens(addPeer); !got["--password"] || !got["-p"] {
-		t.Fatalf("add-peer secret tokens = %v, want both --password and -p", got)
-	}
-
-	initLike := &cobra.Command{Use: "init"}
-	initLike.Flags().StringVarP(&prefix, "prefix", "p", "", "issue prefix")
-	if got := secretFlagTokens(initLike); len(got) != 0 {
-		t.Fatalf("init secret tokens = %v, want none (-p is --prefix here)", got)
-	}
-
-	if got := secretFlagTokens(nil); len(got) != 0 {
-		t.Fatalf("nil command secret tokens = %v, want none", got)
-	}
-}
-
-// TestScrubArgsForTelemetryRedactsFederationPassword locks that a SQL password
-// passed to federation add-peer never reaches bd.args, across pflag's space,
-// equals, and concatenated-shorthand spellings for both --password and -p. This is
-// the same sink and harm model as the DSN leak, for a flag whose value is an opaque
-// credential rather than a parseable DSN.
-func TestScrubArgsForTelemetryRedactsFederationPassword(t *testing.T) {
-	const secret = "s3cr3t-pw"
-	secretFlags := map[string]bool{"--password": true, "-p": true}
-	cases := []struct {
-		name string
-		argv []string
-		keep []string // non-secret structure that must survive redaction
-	}{
-		{
-			name: "--password space form",
-			argv: []string{"federation", "add-peer", "partner", "h:3306/db", "--user", "admin", "--password", secret},
-			keep: []string{"--user admin", "--password xxxxx"},
-		},
-		{
-			name: "--password equals form",
-			argv: []string{"federation", "add-peer", "partner", "h:3306/db", "--password=" + secret},
-			keep: []string{"--password=xxxxx"},
-		},
-		{
-			name: "-p space form",
-			argv: []string{"federation", "add-peer", "partner", "h:3306/db", "-p", secret},
-			keep: []string{"h:3306/db", "-p xxxxx"},
-		},
-		{
-			name: "-p equals form",
-			argv: []string{"federation", "add-peer", "partner", "h:3306/db", "-p=" + secret},
-			keep: []string{"-p=xxxxx"},
-		},
-		{
-			name: "-p concatenated shorthand",
-			argv: []string{"federation", "add-peer", "partner", "h:3306/db", "-p" + secret},
-			keep: []string{"-pxxxxx"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			out := scrubArgsForTelemetry(tc.argv, secretFlags)
-			if strings.Contains(out, secret) {
-				t.Fatalf("PASSWORD LEAK: scrubArgsForTelemetry(%v) = %q still contains %q", tc.argv, out, secret)
-			}
-			if !strings.Contains(out, "xxxxx") {
-				t.Fatalf("expected redaction marker xxxxx in %q", out)
-			}
-			for _, k := range tc.keep {
-				if !strings.Contains(out, k) {
-					t.Errorf("expected %q to survive redaction in %q", k, out)
-				}
-			}
-		})
-	}
-}
-
-// TestScrubArgsForTelemetryRedactsShorthandCluster proves a pflag boolean-shorthand
-// cluster ending in the secret shorthand (-qpSECRET, -vpSECRET) is redacted, not just
-// the bare -pSECRET spelling. pflag parses a leading run of registered boolean
-// shorthands followed by a value-taking shorthand as that cluster: -q (--quiet, bool)
-// and -v (--verbose, bool) are both root persistent flags, so `-qp<secret>` on
-// federation add-peer parses as -q, then -p <secret> — the same secret value
-// secretShorthandPrefix must catch when it only recognized a[:2] == "-p".
-func TestScrubArgsForTelemetryRedactsShorthandCluster(t *testing.T) {
-	const secret = "s3cr3t-pw"
-	secretFlags := map[string]bool{"--password": true, "-p": true}
-	cases := []struct {
-		name string
-		argv []string
-	}{
-		{
-			name: "boolean shorthand -q then -p cluster",
-			argv: []string{"federation", "add-peer", "partner", "h:3306/db", "-qp" + secret},
-		},
-		{
-			name: "boolean shorthand -v then -p cluster",
-			argv: []string{"federation", "add-peer", "partner", "h:3306/db", "-vp" + secret},
-		},
-		{
-			name: "boolean shorthand -q then separate -p value",
-			argv: []string{"federation", "add-peer", "partner", "h:3306/db", "-qp", secret},
-		},
-		{
-			name: "boolean shorthand -v then separate -p value",
-			argv: []string{"federation", "add-peer", "partner", "h:3306/db", "-vp", secret},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			out := scrubArgsForTelemetry(tc.argv, secretFlags)
-			if strings.Contains(out, secret) {
-				t.Fatalf("PASSWORD LEAK: scrubArgsForTelemetry(%v) = %q still contains %q", tc.argv, out, secret)
-			}
-			if !strings.Contains(out, "xxxxx") {
-				t.Fatalf("expected redaction marker xxxxx in %q", out)
-			}
-		})
-	}
-}
-
-// TestScrubArgsForTelemetryKeepsOverloadedShortFlag proves the -p value on
-// non-secret commands is left intact: when no secret token is resolved (exactly
-// what secretFlagTokens returns for --priority/--prefix commands), -p and its value
-// pass through untouched. Without this guarantee the fix would silently redact
-// priority/prefix on the most common bd invocations.
-func TestScrubArgsForTelemetryKeepsOverloadedShortFlag(t *testing.T) {
-	if out := scrubArgsForTelemetry([]string{"ready", "-p", "1"}, nil); out != "ready -p 1" {
-		t.Fatalf("over-redacted non-secret -p priority: got %q", out)
-	}
-	if out := scrubArgsForTelemetry([]string{"init", "-p", "myprefix"}, map[string]bool{}); out != "init -p myprefix" {
-		t.Fatalf("over-redacted non-secret -p prefix: got %q", out)
-	}
-	if out := scrubArgsForTelemetry([]string{"init", "-p=myprefix"}, nil); out != "init -p=myprefix" {
-		t.Fatalf("over-redacted non-secret -p=prefix: got %q", out)
-	}
-}
-
-// TestTelemetryRedactionURLInFlagEqualsValue covers URL values embedded in a
-// --flag=value argv element. The flag prefix must not prevent URL query parsing.
-func TestTelemetryRedactionURLInFlagEqualsValue(t *testing.T) {
-	const secret = "query-secret"
-	arg := "--remote=postgres://bts@db.example/beads?password=" + secret
-	out := scrubArgsForTelemetry([]string{"init", arg}, nil)
-	if strings.Contains(out, secret) {
-		t.Fatalf("PASSWORD LEAK: URL query password in --flag=value survived telemetry scrub: %q", out)
-	}
-}
-
-// TestTelemetryRedactionMalformedURLQuery fails closed when a URL-shaped DSN has
-// an invalid percent escape. net/url rejects the whole URL in that case, but the
-// query password must still never reach the bd.args telemetry span.
-func TestTelemetryRedactionMalformedURLQuery(t *testing.T) {
-	const secret = "query-secret"
-	arg := "postgres://bts@db.example/beads%zz?password=" + secret + "&sslmode=require"
-	out := scrubArgsForTelemetry([]string{"command", arg}, nil)
-	if strings.Contains(out, secret) {
-		t.Fatalf("PASSWORD LEAK: malformed URL query password survived telemetry scrub: %q", out)
-	}
-	if !strings.Contains(out, "password=xxxxx") || !strings.Contains(out, "sslmode=require") {
-		t.Fatalf("malformed URL query structure was not preserved after redaction: %q", out)
-	}
-}
-
-// TestScrubArgsForTelemetryAdversarialDSNVectors ports the adversarial regression
-// vectors from the deleted internal/storage/pgdialect redaction tests
-// (redact_error_test.go, redact_matrix_test.go). Each vector was a real leak or a
-// scrubber-bypass near miss in an earlier redactor, so they are pinned here against
-// the argv scrubber — the telemetry sink is backend-neutral and keeps receiving
-// these DSN shapes even though the backends that motivated them are gone.
-//
-// Historical failure modes locked in, per case:
-//   - percent-encoded userinfo/query passwords must vanish in BOTH the raw
-//     (SUPER%2ASECRET) and decoded (SUPER*SECRET) forms;
-//   - percent-encoded query KEYS (pass%77ord, sslpass%77ord, %70assword) decode to
-//     password keys and bypassed key matching done on the raw key only;
-//   - password=SUPER\ SECRET: pgx accepts the backslash-escaped space as part of a
-//     single value, but a \S+-shaped value regex stopped at the space and shipped
-//     with the tail " SECRET" left in cleartext;
-//   - a single-quoted libpq password containing spaces is one value, not several;
-//   - pgx treats \v as inter-token whitespace, but Go's regexp \s class does not
-//     include \v, so a (^|\s)-anchored password regex never matched after \v and the
-//     password leaked entirely;
-//   - when one collected secret is a prefix of another (userinfo "foo", query
-//     "fooACTUAL"), replacing the short secret first turned "fooACTUAL" into
-//     "xxxxxACTUAL" and the tail survived; replacement must be length-descending.
-func TestScrubArgsForTelemetryAdversarialDSNVectors(t *testing.T) {
-	const secret = "SUPERSECRET"
-	cases := []struct {
-		name  string
-		dsn   string
-		leaks []string // every cleartext form that must NOT survive redaction
-		keep  []string // non-secret structure that must survive redaction
-	}{
-		{
-			name:  "url userinfo percent-encoded password",
-			dsn:   "postgres://u:SUPER%2ASECRET@h:5432/db",
-			leaks: []string{"SUPER%2ASECRET", "SUPER*SECRET"},
-			keep:  []string{"postgres://u:", "h:5432/db"},
-		},
-		{
-			name:  "url userinfo percent-encoded special chars",
-			dsn:   "postgres://bts:p%40ss%3Aw%2Frd-" + secret + "@127.0.0.1:5432/db",
-			leaks: []string{"p%40ss%3Aw%2Frd-" + secret, "p@ss:w/rd-" + secret},
-			keep:  []string{"postgres://bts:", "127.0.0.1:5432/db"},
-		},
-		{
-			name:  "url query param percent-encoded value",
-			dsn:   "postgres://u@h:5432/db?password=SUPER%2ASECRET",
-			leaks: []string{"SUPER%2ASECRET", "SUPER*SECRET"},
-			keep:  []string{"password=", "h:5432/db"},
-		},
-		{
-			name:  "url query param percent-encoded key (pass%77ord)",
-			dsn:   "postgres://u@h:5432/db?pass%77ord=" + secret,
-			leaks: []string{secret},
-			keep:  []string{"pass%77ord=", "h:5432/db"},
-		},
-		{
-			name:  "url query sslpassword percent-encoded key (sslpass%77ord)",
-			dsn:   "postgres://u@h:5432/db?sslpass%77ord=" + secret + "&sslmode=require",
-			leaks: []string{secret},
-			keep:  []string{"sslpass%77ord=", "sslmode=require"},
-		},
-		{
-			name:  "url query param fully percent-encoded key (%70assword)",
-			dsn:   "postgres://u@h:5432/db?%70assword=" + secret,
-			leaks: []string{secret},
-			keep:  []string{"%70assword=", "h:5432/db"},
-		},
-		{
-			name:  "url query password with sslmode preserved",
-			dsn:   "postgres://bts@127.0.0.1:5432/db?password=" + secret + "&sslmode=disable",
-			leaks: []string{secret},
-			keep:  []string{"sslmode=disable", "127.0.0.1:5432/db"},
-		},
-		{
-			name:  "url userinfo password with sslmode and application_name preserved",
-			dsn:   "postgres://bts:" + secret + "@127.0.0.1:5432/db?sslmode=require&application_name=beads",
-			leaks: []string{secret},
-			keep:  []string{"sslmode=require", "application_name=beads", "127.0.0.1:5432/db"},
-		},
-		{
-			name:  "url userinfo password but no user",
-			dsn:   "postgres://:" + secret + "@h:5432/db",
-			leaks: []string{secret},
-			keep:  []string{"h:5432/db"},
-		},
-		{
-			name: "keyword value password with backslash-escaped whitespace",
-			dsn:  `host=h user=u password=SUPER\ SECRET dbname=db`,
-			// "SECRET" pins the historical shipped bug: the tail after the escaped
-			// space must not survive in cleartext.
-			leaks: []string{"SECRET", `SUPER\`},
-			keep:  []string{"host=h", "user=u", "dbname=db"},
-		},
-		{
-			name:  "keyword value single-quoted password containing spaces",
-			dsn:   "host=h user=u password='se cret " + secret + "' dbname=db",
-			leaks: []string{"se cret", secret},
-			keep:  []string{"host=h", "user=u", "dbname=db"},
-		},
-		{
-			name:  "keyword value single-quoted password",
-			dsn:   "host=h user=u password='" + secret + "' dbname=db",
-			leaks: []string{secret},
-			keep:  []string{"host=h", "user=u", "dbname=db"},
-		},
-		{
-			name:  "keyword value vertical-tab separator",
-			dsn:   "host=h user=u\vpassword=" + secret + " dbname=db",
-			leaks: []string{secret},
-			keep:  []string{"host=h", "dbname=db"},
-		},
-		{
-			name:  "keyword value sslpassword with sslmode preserved",
-			dsn:   "host=h user=u sslpassword=" + secret + " sslmode=require dbname=db",
-			leaks: []string{secret},
-			keep:  []string{"host=h", "sslmode=require", "dbname=db"},
-		},
-		{
-			name:  "keyword value password but no user",
-			dsn:   "host=h port=5432 password=" + secret + " dbname=db",
-			leaks: []string{secret},
-			keep:  []string{"host=h", "port=5432", "dbname=db"},
-		},
-		{
-			name:  "overlapping secrets where one is a prefix of another",
-			dsn:   "postgres://u:foo@h:5432/db?password=fooACTUAL",
-			leaks: []string{"ACTUAL", ":foo@"},
-			keep:  []string{"postgres://u:", "h:5432/db"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			out := scrubArgsForTelemetry([]string{"command", tc.dsn}, nil)
-			for _, leak := range tc.leaks {
-				if strings.Contains(out, leak) {
-					t.Errorf("PASSWORD LEAK: %q survived telemetry scrub of %q: %q", leak, tc.dsn, out)
-				}
-			}
-			if !strings.Contains(out, "xxxxx") {
-				t.Errorf("expected redaction marker xxxxx in %q", out)
-			}
-			for _, k := range tc.keep {
-				if !strings.Contains(out, k) {
-					t.Errorf("expected %q to survive redaction in %q", k, out)
-				}
-			}
-		})
-	}
-}
-
-// TestScrubArgsForTelemetryPasswordlessDSNUnchanged ports the deleted matrix
-// round-trip invariant: a DSN carrying no password must pass through the scrubber
-// byte-for-byte unchanged, in both URL and libpq keyword/value form. Over-redaction
-// here would destroy the non-secret operational signal the span exists to carry.
-func TestScrubArgsForTelemetryPasswordlessDSNUnchanged(t *testing.T) {
+// TestCommandTelemetryArgsDropConnectionStrings feeds bd.args connection
+// strings that leaked through, or nearly slipped past, the value scrubber that
+// used to guard the attribute: percent-encoded userinfo and query keys, an
+// escaped space, a quoted value, a \v separator, overlapping secrets and a
+// malformed escape. As a positional argument or a flag value none of it
+// reaches the attribute, because no argument or value does.
+func TestCommandTelemetryArgsDropConnectionStrings(t *testing.T) {
 	for _, dsn := range []string{
-		"postgres://bts@127.0.0.1:5432/db?application_name=beads&sslmode=require",
-		"host=127.0.0.1 port=5432 user=bts dbname=db sslmode=require",
+		"postgres://bts:s3cr3t-pw@127.0.0.1:5432/db",
+		"postgres://u:SUPER%2ASECRET@h:5432/db",
+		"postgres://u@h:5432/db?pass%77ord=SUPERSECRET",
+		"postgres://bts@db.example/beads%zz?password=SUPERSECRET&sslmode=require",
+		"postgres://u:foo@h:5432/db?password=fooACTUAL",
+		`host=h user=u password=SUPER\ SECRET dbname=db`,
+		"host=h user=u password='se cret SUPERSECRET' dbname=db",
+		"host=h user=u\vpassword=SUPERSECRET dbname=db",
+		"bts:s3cr3t-pw@tcp(127.0.0.1:3306)/db",
 	} {
-		want := "command " + dsn
-		if out := scrubArgsForTelemetry([]string{"command", dsn}, nil); out != want {
-			t.Errorf("passwordless DSN altered by scrubber:\n in  = %q\n out = %q", want, out)
+		for _, tc := range []struct {
+			argv []string
+			want string
+		}{
+			{[]string{"init", dsn}, "init"},
+			{[]string{"init", "--remote", dsn}, "init --remote"},
+			{[]string{"init", "--remote=" + dsn}, "init --remote"},
+		} {
+			if got := telemetryArgs(t, tc.argv...); got != tc.want {
+				t.Errorf("bd.args for %q = %q, want %q", tc.argv, got, tc.want)
+			}
 		}
+	}
+}
+
+// TestCommandTelemetryArgsNilCommand keeps the helper total: no command, no
+// attribute text.
+func TestCommandTelemetryArgsNilCommand(t *testing.T) {
+	if got := commandTelemetryArgs(nil); got != "" {
+		t.Fatalf("commandTelemetryArgs(nil) = %q, want empty", got)
 	}
 }

@@ -105,13 +105,19 @@ func PlanVersionReconcile(cliVersion, recorded, highWaterMark string) (VersionRe
 // reading a missing or non-numeric component as 0.
 //
 // It is deliberately NOT a semver comparison, and issueops.VersionReconcileRequest
-// says so where callers will read it: "1.2.0" and "1.2.0-rc1" compare EQUAL
-// here, so a pre-release binary reconciles a workspace its release counterpart
-// already recorded without either refusing the other. Tightening it would start
-// refusing binaries that work today.
+// says so where callers will read it: "1.2.0", "1.2.0-rc1" and "1.2.0-rc.3"
+// compare EQUAL here, so a pre-release binary reconciles a workspace its
+// release counterpart already recorded without either refusing the other.
+// Tightening it would start refusing binaries that work today.
+//
+// Everything from the first "-" or "+" is dropped before the scan. Without
+// that, the dotted pre-release the release tags use read as one more release
+// component ("1.4.0-rc.3" as 1.4.0.3), above its own release: a 1.4.0 binary
+// then refused to record itself over a workspace a candidate had prepared,
+// and left the candidate's marker behind (#6595).
 func compareDottedVersions(v1, v2 string) int {
-	parts1 := strings.Split(v1, ".")
-	parts2 := strings.Split(v2, ".")
+	parts1 := strings.Split(releaseCore(v1), ".")
+	parts2 := strings.Split(releaseCore(v2), ".")
 
 	maxLen := len(parts1)
 	if len(parts2) > maxLen {
@@ -134,4 +140,13 @@ func compareDottedVersions(v1, v2 string) int {
 		}
 	}
 	return 0
+}
+
+// releaseCore drops a pre-release ("-...") or build-metadata ("+...") suffix:
+// "1.4.0-rc.3+sha.abc" becomes "1.4.0".
+func releaseCore(v string) string {
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		return v[:i]
+	}
+	return v
 }

@@ -377,11 +377,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		if aerr != nil {
 			return fmt.Errorf("db: Update %s: affected by status change: %w", id, aerr)
 		}
-		if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
+		if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps, actor); err != nil {
 			return fmt.Errorf("db: Update %s: recompute is_blocked: %w", id, err)
 		}
 		if !newActive {
-			issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), affectedIssues, affectedWisps)
+			issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), actor, affectedIssues, affectedWisps)
 		}
 	}
 	// Snapshot only after all derived blocked-state maintenance has completed.
@@ -573,13 +573,14 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		}
 	}
 
-	oldData, _ := json.Marshal(oldIssue)
-	newData, _ := json.Marshal(map[string]any{"assignee": actor, "status": "in_progress"})
+	claimUpdates := map[string]any{"assignee": actor, "status": "in_progress"}
+	oldData := issueops.ChangedFieldsPreImage(oldIssue, claimUpdates)
+	newData, _ := json.Marshal(claimUpdates)
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  id,
 		Type:     types.EventType("claimed"),
 		Actor:    actor,
-		OldValue: string(oldData),
+		OldValue: oldData,
 		NewValue: string(newData),
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: record event: %w", id, err)
@@ -1213,11 +1214,11 @@ func (r *issueSQLRepositoryImpl) AffectedByDeletion(ctx context.Context, issueID
 	return issueops.AffectedByDeletionInTx(ctx, r.runner, issueIDs, wispIDs)
 }
 
-func (r *issueSQLRepositoryImpl) RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string) error {
-	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, issueIDs, wispIDs); err != nil {
+func (r *issueSQLRepositoryImpl) RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string, actor string) error {
+	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, issueIDs, wispIDs, actor); err != nil {
 		return err
 	}
-	issueops.NoteDeleteBlockedRecheck(r.runner, deletedIDs, "", issueIDs, wispIDs)
+	issueops.NoteDeleteBlockedRecheck(r.runner, deletedIDs, "", actor, issueIDs, wispIDs)
 	return nil
 }
 

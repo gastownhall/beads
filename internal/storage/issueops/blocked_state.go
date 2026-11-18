@@ -155,19 +155,42 @@ type RecomputeIsBlockedResult struct {
 	WispRowsChanged  bool
 }
 
+// NoRequestActor is the actor a blocked-state recompute or mark passes when no
+// request's actor reaches it: the derived is_blocked records it journals then
+// name no one, which a journal consumer reads as system/unknown
+// (eventsjournal.Record.Actor). The system paths pass it — a pull's or merge's
+// recompute, `bd recompute-blocked`, `bd doctor --fix`, federation and
+// `bd repo remove` — and so do the storage delete surfaces, which take no
+// actor (storage.DeleteIssue, DeleteIssues and Transaction.DeleteIssue). Their
+// callers are mostly system cleanup (the Decay-phase deletes of `bd gc`
+// outside proxied-server mode), but not only: a local `bd mol burn` or
+// `bd mol squash` and `bd cook`'s proto delete reach them holding an actor the
+// surfaces cannot carry, so those records name no one until the surfaces take
+// one. Every other path a user request drives passes that request's actor, the
+// same value its own record carries: a derived record a user's change caused
+// is that user's change.
+const NoRequestActor = ""
+
 // RecomputeIsBlockedInTx recomputes blocked state and discards the per-table
 // change result retained by RecomputeIsBlockedInTxWithResult.
-func RecomputeIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) error {
-	_, err := RecomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs)
+//
+// actor is the acting identity of the request that caused the recompute, and
+// every derived is_blocked record the recompute journals carries it; pass
+// NoRequestActor only from a path with no request behind it. It is an explicit
+// parameter, like RecordEventInTx's, so a new call site cannot compile without
+// deciding attribution.
+func RecomputeIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string, actor string) error {
+	_, err := RecomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, actor)
 	return err
 }
 
 // RecomputeIsBlockedInTxWithResult recomputes blocked state to a fixpoint and
-// reports whether an UPDATE changed rows in each issue table.
+// reports whether an UPDATE changed rows in each issue table. actor is
+// RecomputeIsBlockedInTx's.
 func RecomputeIsBlockedInTxWithResult(
-	ctx context.Context, tx DBTX, issueIDs, wispIDs []string,
+	ctx context.Context, tx DBTX, issueIDs, wispIDs []string, actor string,
 ) (RecomputeIsBlockedResult, error) {
-	return recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, recomputeOptions{})
+	return recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, actor, recomputeOptions{})
 }
 
 // recomputeOptions is what a caller of recomputeIsBlockedInTxWithResult
@@ -198,9 +221,12 @@ func settledRowRecompute(id string, isWisp bool) recomputeOptions {
 }
 
 // recomputeIsBlockedInTxWithResult is RecomputeIsBlockedInTxWithResult with
-// the caller's say on the shortcuts planRecomputeInTx takes (opts).
+// the caller's say on the shortcuts planRecomputeInTx takes (opts). actor is
+// RecomputeIsBlockedInTx's, and positional for the same reason: an options
+// literal that left it out would compile and journal derived records that
+// name no one, where a missing argument does not compile.
 func recomputeIsBlockedInTxWithResult(
-	ctx context.Context, tx DBTX, issueIDs, wispIDs []string, opts recomputeOptions,
+	ctx context.Context, tx DBTX, issueIDs, wispIDs []string, actor string, opts recomputeOptions,
 ) (RecomputeIsBlockedResult, error) {
 	var result RecomputeIsBlockedResult
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
@@ -236,13 +262,15 @@ func recomputeIsBlockedInTxWithResult(
 		result.WispRowsChanged = result.WispRowsChanged || n > 0
 
 		if changed == 0 {
-			return result, recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs)
+			return result, recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs, actor)
 		}
 	}
 }
 
-func MarkIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) error {
-	_, err := MarkIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs)
+// MarkIsBlockedInTx is the monotonic mark pass a blocking edge add runs. actor
+// is RecomputeIsBlockedInTx's.
+func MarkIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string, actor string) error {
+	_, err := MarkIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, actor)
 	return err
 }
 
@@ -250,7 +278,7 @@ func MarkIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string)
 // rows flipped, the way RecomputeIsBlockedInTxWithResult does, so a caller
 // that stages tables for a Dolt commit can stage `issues` exactly when the
 // mark changed a durable row (GH#6647).
-func MarkIsBlockedInTxWithResult(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) (RecomputeIsBlockedResult, error) {
+func MarkIsBlockedInTxWithResult(ctx context.Context, tx DBTX, issueIDs, wispIDs []string, actor string) (RecomputeIsBlockedResult, error) {
 	var result RecomputeIsBlockedResult
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
 		return result, nil
@@ -277,17 +305,19 @@ func MarkIsBlockedInTxWithResult(ctx context.Context, tx DBTX, issueIDs, wispIDs
 		result.WispRowsChanged = result.WispRowsChanged || n > 0
 
 		if changed == 0 {
-			return result, recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs)
+			return result, recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs, actor)
 		}
 	}
 }
 
-func RecomputeIsBlockedForIDsInTx(ctx context.Context, tx DBTX, ids []string) error {
-	return RecomputeIsBlockedInTx(ctx, tx, ids, nil)
+// RecomputeIsBlockedForIDsInTx is RecomputeIsBlockedInTx over issue ids only.
+func RecomputeIsBlockedForIDsInTx(ctx context.Context, tx DBTX, ids []string, actor string) error {
+	return RecomputeIsBlockedInTx(ctx, tx, ids, nil, actor)
 }
 
-func RecomputeIsBlockedForWispIDsInTx(ctx context.Context, tx DBTX, ids []string) error {
-	return RecomputeIsBlockedInTx(ctx, tx, nil, ids)
+// RecomputeIsBlockedForWispIDsInTx is RecomputeIsBlockedInTx over wisp ids only.
+func RecomputeIsBlockedForWispIDsInTx(ctx context.Context, tx DBTX, ids []string, actor string) error {
+	return RecomputeIsBlockedInTx(ctx, tx, nil, ids, actor)
 }
 
 func markIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {

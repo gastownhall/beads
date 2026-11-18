@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -70,6 +71,11 @@ func RemoveRemote(ctx context.Context, db DBConn, name string) error {
 // (cleanGitRemoteCacheGarbage). Do NOT run DOLT_GC here: dolt_gc invalidates
 // every other open session on the same engine, so a failed fetch would break
 // concurrent in-flight connections (bd-6dnrw.10).
+//
+// Dolt's error quotes the remote's stored URL, credentials included (a
+// git+https://x-access-token:<token>@... remote that cannot be reached is
+// named whole), so it is returned redacted (doltremote.RedactError), as
+// Push, ForcePush and PullWithStrategy return theirs.
 func Fetch(ctx context.Context, db DBConn, peer, user string) error {
 	err := withRemoteEnvGuards(func() error {
 		if user != "" {
@@ -80,7 +86,7 @@ func Fetch(ctx context.Context, db DBConn, peer, user string) error {
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("fetch from %s: %w", peer, err)
+		return fmt.Errorf("fetch from %s: %w", peer, doltremote.RedactError(err))
 	}
 	return nil
 }
@@ -99,7 +105,7 @@ func Push(ctx context.Context, db DBConn, remote, branch, user string) error {
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("push to %s/%s: %w", remote, branch, err)
+		return fmt.Errorf("push to %s/%s: %w", remote, branch, doltremote.RedactError(err))
 	}
 	return nil
 }
@@ -116,7 +122,7 @@ func ForcePush(ctx context.Context, db DBConn, remote, branch, user string) erro
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("force push to %s/%s: %w", remote, branch, err)
+		return fmt.Errorf("force push to %s/%s: %w", remote, branch, doltremote.RedactError(err))
 	}
 	return nil
 }
@@ -150,7 +156,7 @@ func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, stra
 		_, err := db.ExecContext(ctx, "CALL DOLT_FETCH(?, ?)", remote, branch)
 		return err
 	}); err != nil {
-		return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
+		return fmt.Errorf("fetch from %s/%s: %w", remote, branch, doltremote.RedactError(err))
 	}
 	trackingRef := remote + "/" + branch
 	if err := MergeAndSettleWithStrategy(ctx, db, trackingRef, strategy); err != nil {

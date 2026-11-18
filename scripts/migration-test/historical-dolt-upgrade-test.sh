@@ -26,8 +26,8 @@ Usage: historical-dolt-upgrade-test.sh [--version VERSION]
 
 Runs the authentic historical SQLite bridges (v0.9.1, v0.17.0, v0.49.6, v0.50.3), historical server-Dolt corpus
 (v0.55.4, v0.56.1, v0.57.0, v0.62.0), and direct embedded-Dolt corpus
-(v0.63.3, v1.0.0, v1.0.1, v1.1.0, v1.1.2, v1.2.2) against CANDIDATE_BIN. Every release archive is pinned and verified.
-The wisp-capable sources (v1.0.1, v1.1.0, v1.1.2, v1.2.2) additionally run a wisp-plane lane in a fresh workspace,
+(v0.63.3, v1.0.0, v1.0.1, v1.1.0, v1.1.2, v1.2.2, v1.3.3, v1.3.4) against CANDIDATE_BIN. Every release archive is pinned and verified.
+The wisp-capable sources (v1.0.1, v1.1.0, v1.1.2, v1.2.2, v1.3.3, v1.3.4) additionally run a wisp-plane lane in a fresh workspace,
 which needs the pinned external Dolt runtime as a read-only oracle.
 EOF
 }
@@ -1160,17 +1160,17 @@ run_v0554_default_embedded_dolt_upgrade() {
 # Old-binary capabilities, probed against each pinned release rather than
 # assumed, so the lane can stay one shape across both regimes:
 #
-#   v1.0.1  v1.1.0  v1.1.2
-#     yes     yes     yes    bd create --ephemeral
-#     yes     yes     yes    dep add: wisp->issue, wisp->wisp, conditional-blocks
-#     yes     yes     yes    dep add: issue->wisp (main dependencies table)
-#     yes     yes     yes    comments add / label add on a wisp
-#     yes     yes     yes    bd mol wisp list --all --json
-#     yes     yes     yes    bd dolt remote add / push over file://
-#      no     yes     yes    a pre-upgrade remote the candidate will still migrate
-#      no     yes     yes    wisps.is_blocked column
-#      no     yes     yes    post-split wisp_dependencies target columns
-#      no     yes     yes    ignored_schema_migrations cursor
+#   v1.0.1  v1.1.0  v1.1.2  v1.3.3  v1.3.4
+#     yes     yes     yes     yes     yes    bd create --ephemeral
+#     yes     yes     yes     yes     yes    dep add: wisp->issue, wisp->wisp, conditional-blocks
+#     yes     yes     yes     yes     yes    dep add: issue->wisp (main dependencies table)
+#     yes     yes     yes     yes     yes    comments add / label add on a wisp
+#     yes     yes     yes     yes     yes    bd mol wisp list --all --json
+#     yes     yes     yes     yes     yes    bd dolt remote add / push over file://
+#      no     yes     yes     yes     yes    a pre-upgrade remote the candidate will still migrate
+#      no     yes     yes     yes     yes    wisps.is_blocked column
+#      no     yes     yes     yes     yes    post-split wisp_dependencies target columns
+#      no     yes     yes     yes     yes    ignored_schema_migrations cursor
 #
 # The two "no" rows in the last block are the point of keeping v1.0.1: it is the
 # only regime that makes the candidate perform the split and bootstrap the
