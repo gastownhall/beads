@@ -441,3 +441,86 @@ func TestIssue6092IgnoredWispDepDropOverPreexistingTypeIndexes(t *testing.T) {
 	issue6092RequireDepsPreserved(t, issue6092ReadDeps(t, ctx, db), issue6092ValidDeps)
 	issue6092RequireReferencedUnchanged(t, ctx, db)
 }
+
+// issue6092RequireNamedFinalObjects pins the final contract by name, so a
+// reference shape that itself regressed cannot hide a missing object: the id
+// primary key, the three uk_* unique keys, an index over each (type, target)
+// pair, the three foreign keys and the one-target check.
+func issue6092RequireNamedFinalObjects(t *testing.T, s issue6092Shape) {
+	t.Helper()
+	if s.primaryKey != "id" {
+		t.Errorf("primary key = %q, want id", s.primaryKey)
+	}
+	for name, cols := range map[string]string{
+		"uk_wisp_dep_issue_target":    "issue_id,depends_on_issue_id",
+		"uk_wisp_dep_wisp_target":     "issue_id,depends_on_wisp_id",
+		"uk_wisp_dep_external_target": "issue_id,depends_on_external",
+	} {
+		if got := s.uniqueKeys[name]; got != cols {
+			t.Errorf("unique key %s = %q, want %q", name, got, cols)
+		}
+	}
+	for _, cols := range []string{"type,depends_on_issue_id", "type,depends_on_wisp_id", "type,depends_on_external"} {
+		if !s.indexCover[cols] {
+			t.Errorf("no index covers (%s)", cols)
+		}
+	}
+	for name, def := range map[string]string{
+		"fk_wisp_dep_issue":        "issue_id -> wisps(id) ON DELETE CASCADE ON UPDATE CASCADE",
+		"fk_wisp_dep_wisp_target":  "depends_on_wisp_id -> wisps(id) ON DELETE CASCADE ON UPDATE CASCADE",
+		"fk_wisp_dep_issue_target": "depends_on_issue_id -> issues(id) ON DELETE CASCADE ON UPDATE CASCADE",
+	} {
+		if got := s.foreignKeys[name]; got != def {
+			t.Errorf("foreign key %s = %q, want %q", name, got, def)
+		}
+	}
+	if !s.checks["ck_wisp_dep_one_target"] {
+		t.Error("check constraint ck_wisp_dep_one_target missing")
+	}
+	if _, ok := s.columns["depends_on_id"]; ok {
+		t.Error("depends_on_id is still present")
+	}
+}
+
+// issue6092RequireConstraintsEnforced proves the constraints bite, not just
+// that metadata names them: a two-target row, a dangling wisp target and a
+// dangling issue target are each refused.
+func issue6092RequireConstraintsEnforced(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	for name, args := range map[string][]any{
+		"two targets":          {"i6092-w3", "i6092-i1", "i6092-w2", nil},
+		"dangling wisp target": {"i6092-w3", nil, "i6092-ghost", nil},
+		"dangling issue":       {"i6092-w3", "i6092-ghost", nil, nil},
+	} {
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type) VALUES (UUID(), ?, ?, ?, ?, 'blocks')",
+			args...); err == nil {
+			t.Errorf("%s: insert accepted, want it refused by the final constraints", name)
+			issue6092Exec(t, ctx, db, "DELETE FROM wisp_dependencies WHERE issue_id = 'i6092-w3' AND type = 'blocks'")
+		}
+	}
+}
+
+// TestIssue6092IgnoredWispDepUpgradePreservesRowsAndCompletesConstraints is
+// AC-2: the legacy table's valid wisp-, issue- and external-target rows keep
+// their targets, type and created_by under distinct nonempty ids; the final
+// keys, indexes, foreign keys and check exist and are enforced; and the
+// referenced wisps and issue keep their updated_at.
+func TestIssue6092IgnoredWispDepUpgradePreservesRowsAndCompletesConstraints(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*testTimeout)
+	defer cancel()
+	db := store.db
+
+	issue6092BuildLegacyWispDeps(t, ctx, db)
+	issue6092CommitAndRewindIgnored(t, ctx, db, issue6092IgnoredCursorBefore0005)
+
+	if _, err := schema.MigrateUp(ctx, db); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+	issue6092RequireDepsPreserved(t, issue6092ReadDeps(t, ctx, db), issue6092ValidDeps)
+	issue6092RequireNamedFinalObjects(t, issue6092ReadShape(t, ctx, db))
+	issue6092RequireReferencedUnchanged(t, ctx, db)
+	issue6092RequireConstraintsEnforced(t, ctx, db)
+}
