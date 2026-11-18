@@ -2114,6 +2114,58 @@ func TestLinearPullTakesLinearSectionEdits(t *testing.T) {
 	}
 }
 
+// TestLinearPullAfterPushIsAFixedPoint reproduces GH#8506's cycle: a pull of
+// the pushed text, a local status change pushed with --prefer-local, a pull
+// of the now marker-less Linear text, and a push with nothing changed. The
+// bead keeps its description and fields throughout, every pushed
+// description carries each section once, and the last push sends nothing.
+func TestLinearPullAfterPushIsAFixedPoint(t *testing.T) {
+	api, store, runSync := newGH8506LinearSync(t)
+	const acceptance = "AC-MARK the acceptance criteria."
+
+	// bd linear pull TEAM-9
+	runSync(tracker.SyncOptions{Pull: true})
+	assertGH8506Fields(t, "first pull", store.issue, acceptance)
+
+	// bd update --claim; bd linear sync --push --prefer-local
+	store.issue.Status = types.StatusInProgress
+	store.issue.UpdatedAt = time.Now().UTC().Add(-2 * time.Minute)
+	result := runSync(tracker.SyncOptions{Push: true, ConflictResolution: tracker.ConflictLocal})
+	remote, updates := api.snapshot()
+	if result.PushStats.Updated != 1 || updates != 1 {
+		t.Fatalf("first push: PushStats = %+v, issueUpdate calls = %d, want the status change pushed once", result.PushStats, updates)
+	}
+	if strings.Contains(remote.Description, "bd-idempotency") {
+		t.Fatalf("first push: Linear description still carries the marker: %q", remote.Description)
+	}
+
+	// bd linear pull TEAM-9, with nothing edited in Linear since the push
+	runSync(tracker.SyncOptions{Pull: true})
+	assertGH8506Fields(t, "second pull", store.issue, acceptance)
+	if store.issue.Status != types.StatusInProgress {
+		t.Fatalf("second pull: status %q, want %q", store.issue.Status, types.StatusInProgress)
+	}
+
+	// A push with no local change since the pull sends nothing.
+	runSync(tracker.SyncOptions{Push: true, ConflictResolution: tracker.ConflictLocal})
+	remote, updates = api.snapshot()
+	if updates != 1 {
+		t.Fatalf("second push: issueUpdate calls = %d, want still 1: the unchanged bead was pushed again", updates)
+	}
+	assertGH8506Fields(t, "second push", store.issue, acceptance)
+
+	api.mu.Lock()
+	sent := append([]string(nil), api.sent...)
+	api.mu.Unlock()
+	for i, description := range append(sent, remote.Description) {
+		for _, heading := range []string{"## Acceptance Criteria", "## Design", "## Notes"} {
+			if n := strings.Count(description, heading); n != 1 {
+				t.Errorf("description %d holds %q %d times, want once: %q", i, heading, n, description)
+			}
+		}
+	}
+}
+
 // fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes
 // for one team holding one issue: workflow states, labels (none), the
 // incremental issues query, which honours its updatedAt.gte filter, the

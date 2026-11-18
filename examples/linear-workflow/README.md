@@ -235,6 +235,33 @@ bd config set linear.relation_map.causes discovered-from
 bd config set linear.relation_map.duplicate related
 ```
 
+### Description Sections
+
+Linear has no acceptance criteria, design or notes fields, so a push renders
+them as trailing sections of the Linear description:
+
+```markdown
+The bead's description.
+
+## Acceptance Criteria
+...
+
+## Design
+...
+
+## Notes
+...
+```
+
+A pull maps those sections back into the bead's fields when they end the
+description as exact `## Acceptance Criteria`, `## Design` and `## Notes`
+headings in that order, each with a non-empty body; any other heading stays in
+the description. Edit a section's text in Linear and the pull updates that
+field; delete the whole section, heading included, and the pull clears the
+field. A pull also drops the
+`<!-- bd-idempotency: ... -->` marker bd adds to the issues it creates, so it
+never reaches a bead.
+
 ## Conflict Resolution
 
 Conflicts occur when both local and Linear versions are modified since the last sync.
