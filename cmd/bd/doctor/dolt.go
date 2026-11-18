@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/remedy"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -450,16 +451,13 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 	return checkIssueCountWithDB(conn)
 }
 
-// isIgnoredTable returns true if the table name refers to a dolt_ignore'd table.
+// isIgnoredTable returns true if the table name refers to a bookkeeping table.
 // These tables are expected to have uncommitted changes since they are excluded
 // from Dolt version tracking via dolt_ignore. Reporting them as uncommitted
-// produces self-fulfilling warnings that can never be cleared.
+// produces self-fulfilling warnings that can never be cleared. The set is
+// storage.IsBookkeepingTable, which bd vc status shares.
 func isIgnoredTable(tableName string) bool {
-	switch tableName {
-	case "wisps", "leases", "local_metadata", "repo_mtimes", "events":
-		return true
-	}
-	return strings.HasPrefix(tableName, "wisp_")
+	return storage.IsBookkeepingTable(tableName)
 }
 
 // doltStatusRow is one row of the dolt_status system table.
@@ -497,20 +495,9 @@ func scanDoltStatus(rows *sql.Rows) ([]doltStatusRow, error) {
 // ignored set — so the same clean store was clean by one check and dirty by
 // the other, permanently. One filter, one source of truth.
 //
-// The filter is a static name list rather than a read of the store's own
-// dolt_ignore rows, which is worth explaining because the reverse looks
-// obvious. dolt_ignore does not mean "do not report changes to this table".
-// Per doltdb.ShouldIgnoreDelta, "only newly added or dropped tables are
-// matched against the patterns. Changes to already tracked tables are always
-// included." Every table listed here is tracked, so Dolt reports it dirty
-// forever by design and dolt_ignore has no say in it. Deriving the skip-set
-// from that table would therefore borrow a mechanism that answers a different
-// question, and would additionally require reimplementing Dolt's pattern
-// syntax — doltdb.compilePattern treats '*' and '?' and '%' as wildcards, '_'
-// as a literal, and matches case-sensitively, none of which is SQL LIKE.
-//
-// Silencing these tables is a beads decision about which tables are
-// bookkeeping, so it belongs in beads code. See isIgnoredTable.
+// The filter is storage.IsBookkeepingTable (via isIgnoredTable), a static
+// name list rather than a read of the store's own dolt_ignore rows; its doc
+// comment explains why. bd vc status uses the same predicate.
 func describeUncommittedTables(rows []doltStatusRow) []string {
 	var changes []string
 	for _, r := range rows {

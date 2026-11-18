@@ -199,3 +199,70 @@ func TestEmbeddedVCStatusReportsStagedAndUnstaged(t *testing.T) {
 		t.Errorf("bd vc status changed the working set\nbefore: %v\nafter:  %v", before, after)
 	}
 }
+
+// TestEmbeddedVCStatusIgnoresBookkeepingTables pins that bd vc status uses
+// bd doctor's bookkeeping filter: a clean working set and one changed only in
+// bookkeeping tables both report no uncommitted changes in text and empty
+// staged and unstaged arrays in JSON. The bookkeeping tables are made tracked
+// first, the way a store from before their dolt_ignore rows has them, since
+// changes to an ignored, never-committed table do not reach dolt_status.
+func TestEmbeddedVCStatusIgnoresBookkeepingTables(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt vc tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "vcbk")
+	bdCreate(t, bd, dir, "bookkeeping", "--type", "task")
+
+	assertClean := func(t *testing.T, label string) {
+		t.Helper()
+		text := bdVC(t, bd, dir, "status")
+		if !strings.Contains(text, "Uncommitted changes: none") {
+			t.Errorf("%s: text must report no uncommitted changes; got:\n%s", label, text)
+		}
+		out := bdVC(t, bd, dir, "status", "--json")
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(out), &raw); err != nil {
+			t.Fatalf("%s: parse JSON: %v\n%s", label, err, out)
+		}
+		for _, key := range []string{"staged", "unstaged"} {
+			if got := string(raw[key]); got != "[]" {
+				t.Errorf("%s: JSON %q = %s, want []\n%s", label, key, got, out)
+			}
+		}
+	}
+
+	t.Run("clean", func(t *testing.T) {
+		if before := vcStatusSnapshot(t, beadsDir); len(before) != 0 {
+			t.Fatalf("precondition: working set after create is not clean: %v", before)
+		}
+		assertClean(t, "clean")
+	})
+
+	t.Run("bookkeeping_only", func(t *testing.T) {
+		db, cleanup := vcStatusOpenSQL(t, beadsDir)
+		for _, stmt := range []string{
+			"DELETE FROM dolt_ignore WHERE pattern IN ('local_metadata', 'repo_mtimes')",
+			"CALL DOLT_COMMIT('-Am', 'test: track bookkeeping tables as an older store does')",
+			"REPLACE INTO dolt_ignore VALUES ('local_metadata', true), ('repo_mtimes', true)",
+			"CALL DOLT_COMMIT('-Am', 'test: restore the bookkeeping ignore rows')",
+			"REPLACE INTO local_metadata (`key`, value) VALUES ('vc_status_test', 'unstaged')",
+			"INSERT INTO repo_mtimes (repo_path, jsonl_path, mtime_ns) VALUES ('/repo', '/repo/issues.jsonl', 1)",
+			"CALL DOLT_ADD('--force', 'repo_mtimes')",
+		} {
+			if _, err := db.ExecContext(t.Context(), stmt); err != nil {
+				cleanup()
+				t.Fatalf("%s: %v", stmt, err)
+			}
+		}
+		cleanup()
+		snapshot := vcStatusSnapshot(t, beadsDir)
+		want := []string{"local_metadata false modified", "repo_mtimes true modified"}
+		if !reflect.DeepEqual(snapshot, want) {
+			t.Fatalf("precondition: dolt_status = %v, want %v", snapshot, want)
+		}
+		assertClean(t, "bookkeeping only")
+	})
+}

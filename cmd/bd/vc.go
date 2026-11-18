@@ -262,7 +262,9 @@ var vcStatusCmd = &cobra.Command{
 
 Uncommitted changes are the tables the Dolt working set has changed since the
 last commit, each with its change (modified, new table, deleted) and whether
-it is staged or unstaged. The command only reads the working set: it never
+it is staged or unstaged. Bookkeeping tables (wisps, wisp_*, leases,
+local_metadata, repo_mtimes, events) change by design and are left out, as
+bd doctor leaves them out. The command only reads the working set: it never
 stages or commits anything.
 
 With --json the output carries "branch", "commit", and the always-present
@@ -342,7 +344,8 @@ type vcStatusEntry struct {
 }
 
 // vcWorkingSet is bd vc status's view of the Dolt working set: the staged and
-// unstaged table changes, each sorted by table then status. Both slices are
+// unstaged table changes outside the bookkeeping tables
+// (storage.IsBookkeepingTable), each sorted by table then status. Both slices are
 // always non-nil so --json prints [] rather than null for a clean side.
 type vcWorkingSet struct {
 	Staged   []vcStatusEntry
@@ -366,6 +369,11 @@ func (w vcWorkingSet) clean() bool {
 func vcStatusEntries(entries []storage.StatusEntry) []vcStatusEntry {
 	out := make([]vcStatusEntry, 0, len(entries))
 	for _, e := range entries {
+		// Bookkeeping tables carry uncommitted changes by design; bd doctor
+		// leaves them out of its uncommitted-changes checks by the same rule.
+		if storage.IsBookkeepingTable(e.Table) {
+			continue
+		}
 		out = append(out, vcStatusEntry{Table: e.Table, Status: e.Status})
 	}
 	sort.Slice(out, func(i, j int) bool {
