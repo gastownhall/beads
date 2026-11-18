@@ -1804,7 +1804,14 @@ func autoExportBackendForCommand() (autoExportBackend, bool) {
 //
 // There is no topology gate (unlike auto-backup, whose DOLT_BACKUP registers
 // server-global state): export only reads SQL and writes a client-local file.
+// A command run against another database (--database, or a --db naming one)
+// skips: the JSONL and its export state belong to the workspace's configured
+// database, and writing another database's issues over it would be data loss.
 func proxiedAutoExportBackendForCommand() (autoExportBackend, bool) {
+	if commandDatabaseOverride != "" {
+		debug.Logf("auto-export: skipping — command targets database %q, not the workspace's\n", commandDatabaseOverride)
+		return nil, false
+	}
 	if uowProvider == nil {
 		debug.Logf("auto-export: skipping — no proxied provider open\n")
 		return nil, false

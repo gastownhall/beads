@@ -159,6 +159,13 @@ var (
 	// (GH#5896). See deletedIssueIDSet for why it is not persisted.
 	commandDeletedIssueIDs deletedIssueIDSet
 
+	// commandDatabaseOverride is the database a proxied-server command was
+	// pointed at with --database (or a --db value naming one), or "" for the
+	// workspace's configured database. Post-run auto-export skips an
+	// override: the JSONL and its export state belong to the workspace's
+	// database, not to whichever one this invocation read (GH#8490).
+	commandDatabaseOverride string
+
 	// commandDidExplicitDoltCommit is set when a command already created a Dolt commit
 	// explicitly (e.g., bd sync in dolt-native mode, hook flows, bd vc commit).
 	// This prevents a redundant auto-commit attempt in PersistentPostRun.
@@ -1397,6 +1404,7 @@ var rootCmd = &cobra.Command{
 		commandMayEmptyJSONLExport.Store(false)
 		commandSkipsPostRunMaintenance.Store(false)
 		commandDeletedIssueIDs.reset()
+		commandDatabaseOverride = ""
 		commandDidExplicitDoltCommit = false
 		commandDidWriteTipMetadata = false
 		commandTipIDsShown = make(map[string]struct{})
@@ -2299,6 +2307,7 @@ var rootCmd = &cobra.Command{
 				return HandleErrorRespectJSON("%v", err)
 			}
 		}
+		commandDatabaseOverride = databaseOverride
 
 		// In proxied mode the CLI short-circuits to the uowProvider path and
 		// dispatches through the *_proxied_server.go duals.
