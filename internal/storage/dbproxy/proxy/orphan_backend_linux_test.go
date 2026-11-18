@@ -22,3 +22,15 @@ func TestCleanupOrphanBackendKillsRealUnrecordedDolt(t *testing.T) {
 	require.NoError(t, cleanupOrphanBackend(root))
 	assertHelperExited(t, helper)
 }
+
+// AC-5 end to end on Linux: a real dolt launched with another root's
+// config.yaml stays alive.
+func TestCleanupOrphanBackendSparesRealDoltOfAnotherRoot(t *testing.T) {
+	root := t.TempDir()
+	helper := startNamedForceStopHelper(t, t.TempDir(), "dolt", "--config", filepath.Join(t.TempDir(), "config.yaml"))
+	holdProxyLock(t, root)
+	writeServerInfo(t, root, strconv.Itoa(helper.cmd.Process.Pid)+":3307:secret")
+
+	require.NoError(t, cleanupOrphanBackend(root))
+	assertHelperAlive(t, helper)
+}
