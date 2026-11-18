@@ -164,6 +164,20 @@ func StateHash(ctx context.Context, db DBConn) (string, error) {
 	return hash, nil
 }
 
+// StateHashWithHeadFallback is StateHash degrading to the HEAD commit hash on
+// a server too old to have DOLT_HASHOF_DB. It is the conn-level twin of
+// DoltStore.GetStateHash, extracted so the proxied-server maintenance path
+// runs the same working-set-aware change detection on a pinned connection
+// (bd-todbq7): under dolt auto-commit=batch/off, writes land in the working
+// set and HEAD does not advance, so a HEAD-only hash would go permanently
+// quiet after the first export.
+func StateHashWithHeadFallback(ctx context.Context, db DBConn) (string, error) {
+	if hash, err := StateHash(ctx, db); err == nil {
+		return hash, nil
+	}
+	return CurrentCommit(ctx, db)
+}
+
 // HeadHashes returns the hash of the HEAD commit and the hash of its root
 // value, DOLT_HASHOF('HEAD') and DOLT_HASHOF_DB('HEAD'), read in one
 // statement so both describe the same HEAD.
