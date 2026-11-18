@@ -1006,7 +1006,52 @@ func waitForRecordedProcessExit(pf *pidfile.PidFile, timeout time.Duration) erro
 	}
 }
 
+// spawnStopGrace bounds how long a timed-out spawn waits for its proxy child
+// to exit after SIGTERM before killing it. A var so tests can shorten it.
+var spawnStopGrace = 5 * time.Second
+
+// errGracefulStopUnsupported reports a platform where a timed-out proxy
+// child cannot be asked to stop (Windows: the detached child has no console
+// and procid's Signal is TerminateProcess), so it is killed at once.
+var errGracefulStopUnsupported = errors.New("graceful proxy child stop is not supported on this platform")
+
+// requestSpawnedChildStopFn is requestSpawnedChildStop behind a test seam.
+var requestSpawnedChildStopFn = requestSpawnedChildStop
+
+// killSpawnedChild stops a proxy child that missed its spawn deadline. It
+// sends SIGTERM first so the child's shutdown handler runs and stops any dolt
+// backend it already started (#8489): a bare SIGKILL can land between the
+// backend's start and its proxy-child.pid record and leave an unrecorded dolt
+// holding the database lock. Only a child still alive spawnStopGrace later
+// (or any child where the request is unsupported) is killed outright.
 func killSpawnedChild(child *spawnedProxyChild) error {
+	select {
+	case <-child.done:
+		return nil
+	default:
+	}
+	stopErr := requestSpawnedChildStopFn(child.cmd)
+	switch {
+	case errors.Is(stopErr, os.ErrProcessDone):
+		return nil
+	case stopErr == nil:
+		grace := time.NewTimer(spawnStopGrace)
+		select {
+		case <-child.done:
+			grace.Stop()
+			return nil
+		case <-grace.C:
+		}
+		log.Printf("dbproxy: proxy child pid %d did not exit within %s of SIGTERM; killing it", child.cmd.Process.Pid, spawnStopGrace)
+	case !errors.Is(stopErr, errGracefulStopUnsupported):
+		debug.Logf("dbproxy: could not ask proxy child pid %d to stop: %v; killing it", child.cmd.Process.Pid, stopErr)
+	}
+	return forceKillSpawnedChild(child)
+}
+
+// forceKillSpawnedChild kills a proxy child through its verified handle (or
+// directly when none could be opened) and confirms its exit.
+func forceKillSpawnedChild(child *spawnedProxyChild) error {
 	select {
 	case <-child.done:
 		return nil
