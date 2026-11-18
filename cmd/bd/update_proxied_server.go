@@ -186,6 +186,9 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	if notesOverwritten {
 		warnNotesReplacement(id)
 	}
+	// The same sidecar rows the direct route writes, against this route's
+	// advisory pre-read and under the canonical id (GH#6146).
+	logUpdateAuditChanges(updated.ID, currentActor(), updateAuditChanges(patch, in.claim, result.Changed, before, updated))
 	return updated, nil, nil
 }
 

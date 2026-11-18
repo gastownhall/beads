@@ -274,6 +274,7 @@
 34 31 TestProxiedServerMolBond
 
 34 32 TestProxiedServerAssigneeHiddenEmptyClears
+34 32 TestProxiedServerClaimPathsJournalSidecar
 34 32 TestProxiedServerCleanDatabasesPurgeDropped
 34 32 TestProxiedServerConfigConcurrent
 34 32 TestProxiedServerDatabaseFlagForeignProjectIdentity
