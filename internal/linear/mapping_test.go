@@ -1252,6 +1252,11 @@ var parseLinearDescriptionCases = []struct {
 		want: DescriptionParts{Description: "D", Design: "### Storage\nrows\n## Rollout\nslow"},
 	},
 	{
+		name: "section body keeps indentation and inner blank lines",
+		text: "DESC\n\n## Notes\n  - item one\n\n  - item two",
+		want: DescriptionParts{Description: "DESC", Notes: "  - item one\n\n  - item two"},
+	},
+	{
 		name: "CRLF line ends and trailing spaces on a heading line",
 		text: "D\r\n\r\n## Acceptance Criteria  \r\n\r\nA\r\n\r\n## Notes\t\r\nN\r\n",
 		want: DescriptionParts{Description: "D", AcceptanceCriteria: "A", Notes: "N"},
