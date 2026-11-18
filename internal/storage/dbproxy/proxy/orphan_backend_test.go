@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/procid"
@@ -255,4 +256,33 @@ func TestCleanupOrphanBackendUnreadableCommandLineSendsNoSignal(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(out, "\n"), "want exactly one log line, got %q", out)
 	assert.Contains(t, out, "dolt pid 4242 named by "+infoPath)
 	assert.Contains(t, out, "if no other bd or dolt serves this workspace, stop pid 4242 and retry")
+}
+
+// AC-7: a matched orphan whose kill fails, or which outlives
+// backendExitTimeout, fails the spawn with an error naming the pid and info
+// file, and no proxy child is started.
+func TestSpawnRefusesWhenUnrecordedOrphanSurvives(t *testing.T) {
+	for name, proc := range map[string]*fakeOrphan{
+		"kill fails":  {killErr: errors.New("operation not permitted")},
+		"never exits": {neverExits: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			infoPath := fakeOrphanInfo(t, root)
+			proc.exe = "dolt"
+			proc.cmdline = doltLaunchedWith(filepath.Join(root, server.RuntimeConfigFileName))
+			useFakeOrphan(t, proc)
+			previous := ResolveExecutable
+			ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+			t.Cleanup(func() { ResolveExecutable = previous })
+			lock, err := util.TryLock(filepath.Join(root, LockFileName))
+			require.NoError(t, err)
+
+			_, err = spawnAndHandoff(root, externalOpenOpts(root), time.Now().Add(time.Minute), "", lock, adoptionResult{status: adoptionNoRecord})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "spawn reached", "a proxy child was started past a surviving orphan")
+			assert.Contains(t, err.Error(), "pid 4242")
+			assert.Contains(t, err.Error(), infoPath)
+		})
+	}
 }
