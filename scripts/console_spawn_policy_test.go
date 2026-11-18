@@ -464,6 +464,10 @@ func (s *consoleSpawnFileScan) applyStatement(v string, st *boundSpawn, stmt ast
 					st.hidden = false
 					st.hit.hidden = false
 					st.hit.reason = "SysProcAttr is assigned after execwin.Hide(" + v + "), replacing the attr the hide marked CREATE_NO_WINDOW"
+					// Keep this reason: a later Start/pass-on would
+					// otherwise overwrite it with the generic "started or
+					// passed on" wording, losing the diagnosis.
+					st.done = true
 				}
 				return
 			}
@@ -642,4 +646,238 @@ func TestConsoleSpawnPolicy(t *testing.T) {
 	for _, f := range checkConsoleSpawnPolicy(t, consoleSpawnAllowlist, inputs) {
 		t.Error(f)
 	}
+}
+
+// writeConsoleSpawnFixture writes src to a throwaway file named filename
+// and returns its repo-relative in-scope path and the on-disk path.
+func writeConsoleSpawnFixture(t *testing.T, filename, src string) (rel, abs string) {
+	t.Helper()
+	abs = filepath.Join(t.TempDir(), filename)
+	if err := os.WriteFile(abs, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return "internal/doltserver/" + filename, abs
+}
+
+// consoleSpawnFixture scans one fixture file placed at
+// internal/doltserver/<filename>, through the same checkConsoleSpawnPolicy
+// the real tree goes through, and returns only the findings about that file
+// (anti-disarm findings about the fixture's package carry the bare package
+// prefix and are TestConsoleSpawnPolicyIntegrity's business).
+func consoleSpawnFixture(t *testing.T, filename, src string) (fileFindings []string) {
+	t.Helper()
+	rel, abs := writeConsoleSpawnFixture(t, filename, src)
+	for _, f := range checkConsoleSpawnPolicy(t, nil, []consoleSpawnInput{{rel: rel, abs: abs, src: []byte(src)}}) {
+		if strings.HasPrefix(f, rel+":") {
+			fileFindings = append(fileFindings, f)
+		}
+	}
+	return fileFindings
+}
+
+// TestConsoleSpawnPolicyScan pins the scanner on fixtures: every shape the
+// rule must report, and the three shapes it must not. The mutation checks
+// the reviewers run on the real tree (unwrap a spawn, move a Hide before the
+// SysProcAttr assignment, delete the allowlist's live target) are each one
+// of these shapes applied to a real file.
+func TestConsoleSpawnPolicyScan(t *testing.T) {
+	assertReported := func(t *testing.T, filename, src, wantIn string) {
+		t.Helper()
+		findings := consoleSpawnFixture(t, filename, src)
+		if len(findings) == 0 || !strings.Contains(strings.Join(findings, "\n"), wantIn) {
+			t.Fatalf("findings = %v, want one containing %q", findings, wantIn)
+		}
+	}
+	assertNotReported := func(t *testing.T, filename, src string) {
+		t.Helper()
+		if findings := consoleSpawnFixture(t, filename, src); len(findings) != 0 {
+			t.Fatalf("findings = %v, want none for this fixture", findings)
+		}
+	}
+
+	t.Run("unwrapped spawn is reported", func(t *testing.T) {
+		assertReported(t, "probe.go", `package doltserver
+
+import "os/exec"
+
+func probe(bin string) {
+	exec.Command(bin, "version")
+}
+`, "no execwin.Hide anywhere")
+	})
+
+	t.Run("SysProcAttr assignment after Hide is reported", func(t *testing.T) {
+		assertReported(t, "start.go", `package doltserver
+
+import (
+	"os/exec"
+
+	"github.com/steveyegge/beads/internal/execwin"
+)
+
+func start(bin string) {
+	cmd := exec.Command(bin, "sql-server")
+	execwin.Hide(cmd)
+	cmd.SysProcAttr = detached()
+	cmd.Start()
+}
+`, "SysProcAttr is assigned after execwin.Hide")
+	})
+
+	t.Run("Hide only inside an if is reported", func(t *testing.T) {
+		assertReported(t, "start.go", `package doltserver
+
+import (
+	"os/exec"
+
+	"github.com/steveyegge/beads/internal/execwin"
+)
+
+func start(bin string) {
+	cmd := exec.Command(bin, "sql-server")
+	if hidingEnabled() {
+		execwin.Hide(cmd)
+	}
+	cmd.Start()
+}
+`, "not unconditionally")
+	})
+
+	t.Run("Hide after Start is reported", func(t *testing.T) {
+		assertReported(t, "start.go", `package doltserver
+
+import (
+	"os/exec"
+
+	"github.com/steveyegge/beads/internal/execwin"
+)
+
+func start(bin string) {
+	cmd := exec.Command(bin, "sql-server")
+	cmd.Start()
+	execwin.Hide(cmd)
+}
+`, "started or passed on")
+	})
+
+	t.Run("Hide after the cmd is passed on is reported", func(t *testing.T) {
+		assertReported(t, "start.go", `package doltserver
+
+import (
+	"os/exec"
+
+	"github.com/steveyegge/beads/internal/execwin"
+)
+
+func start(bin string, log *os.File) {
+	cmd := exec.Command(bin, "sql-server")
+	launch(cmd)
+	execwin.Hide(cmd)
+}
+`, "started or passed on")
+	})
+
+	t.Run("aliased os/exec import is still a recognised spawn", func(t *testing.T) {
+		assertReported(t, "probe.go", `package doltserver
+
+import ex "os/exec"
+
+func probe(bin string) {
+	ex.Command(bin, "version")
+}
+`, "exec.Command")
+	})
+
+	t.Run("exec.Cmd literal is a recognised spawn", func(t *testing.T) {
+		assertReported(t, "probe.go", `package doltserver
+
+import "os/exec"
+
+func probe(bin string) {
+	cmd := &exec.Cmd{Path: bin}
+	cmd.Run()
+}
+`, "exec.Cmd literal")
+	})
+
+	t.Run("wrapped spawn is not reported", func(t *testing.T) {
+		assertNotReported(t, "probe.go", `package doltserver
+
+import (
+	"os/exec"
+
+	"github.com/steveyegge/beads/internal/execwin"
+)
+
+func probe(bin string) {
+	out, err := execwin.Hide(exec.Command(bin, "version")).Output()
+	_, _ = out, err
+}
+`)
+	})
+
+	t.Run("bound-then-hidden spawn is not reported", func(t *testing.T) {
+		assertNotReported(t, "start.go", `package doltserver
+
+import (
+	"os/exec"
+
+	"github.com/steveyegge/beads/internal/execwin"
+)
+
+func start(bin, dir string) {
+	cmd := exec.Command(bin, "sql-server")
+	cmd.Dir = dir
+	cmd.SysProcAttr = detached()
+	execwin.Hide(cmd)
+	if err := cmd.Start(); err != nil {
+		panic(err)
+	}
+}
+`)
+	})
+
+	t.Run("spawn in a //go:build !windows file is not reported", func(t *testing.T) {
+		src := "//go:build !windows\n\npackage doltserver\n\nimport \"os/exec\"\n\nfunc startOther(bin string) {\n\texec.Command(bin, \"version\")\n}\n"
+		assertNotReported(t, "start_other.go", src)
+		_, abs := writeConsoleSpawnFixture(t, "start_other.go", src)
+		buildable, err := windowsBuildContext().MatchFile(filepath.Dir(abs), filepath.Base(abs))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if buildable {
+			t.Error("MatchFile selected a //go:build !windows file for GOOS=windows; the fixture would be misreported")
+		}
+	})
+
+	t.Run("bare _unix.go without a build tag is still reported", func(t *testing.T) {
+		// "unix" is not a GOOS: the filename suffix alone does not keep a
+		// file out of the Windows build, so a spawn there still gets a
+		// console window. Every real _unix.go/_linux.go in the scan roots
+		// carries an explicit //go:build tag; this pins that the scanner
+		// follows go's rule rather than assuming the suffix excludes.
+		src := "package doltserver\n\nimport \"os/exec\"\n\nfunc startUnix(bin string) {\n\texec.Command(bin, \"version\")\n}\n"
+		assertReported(t, "start_unix.go", src, "no execwin.Hide anywhere")
+		_, abs := writeConsoleSpawnFixture(t, "start_unix.go", src)
+		buildable, err := windowsBuildContext().MatchFile(filepath.Dir(abs), filepath.Base(abs))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !buildable {
+			t.Error("MatchFile excluded a bare _unix.go file for GOOS=windows; go builds such a file everywhere")
+		}
+	})
+
+	t.Run("spawn in a tagged _unix.go file is not reported", func(t *testing.T) {
+		src := "//go:build !windows\n\npackage doltserver\n\nimport \"os/exec\"\n\nfunc startUnix(bin string) {\n\texec.Command(bin, \"version\")\n}\n"
+		assertNotReported(t, "start_unix.go", src)
+		_, abs := writeConsoleSpawnFixture(t, "start_unix.go", src)
+		buildable, err := windowsBuildContext().MatchFile(filepath.Dir(abs), filepath.Base(abs))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if buildable {
+			t.Error("MatchFile selected a tagged _unix.go file for GOOS=windows; the fixture would be misreported")
+		}
+	})
 }
