@@ -87,6 +87,33 @@ If the Beads Copilot plugin is installed, Copilot CLI will automatically run
 ` + "`bd prime`" + ` on session start and before compaction.
 `
 
+// LegacyCopilotInstructions is the .github/copilot-instructions.md that bd
+// setup copilot wrote, the whole file and unmarked, in every release from
+// v1.0.5 until it kept a marked section there. bd treats a file that is
+// exactly this text as its own, so --check accepts it and setup converts it
+// to a section rather than adding a second copy of the guidance. Keep it
+// frozen: it must not follow edits to CopilotInstructionsTemplate.
+const LegacyCopilotInstructions = `# GitHub Copilot Instructions
+
+This repository uses **Beads (bd)** for issue tracking.
+
+## Core Workflow
+
+- Use ` + "`bd ready`" + ` to find unblocked work
+- Use ` + "`bd create`" + ` to track new work
+- Use ` + "`bd update <id> --claim`" + ` before starting
+- Use ` + "`bd close <id>`" + ` when work is complete
+- Treat commit, push, and Dolt remote sync as policy-controlled handoff actions
+- Do not commit, push, or run Dolt remote sync unless explicitly authorized
+
+## Context Loading
+
+Run ` + "`bd prime`" + ` for the full workflow context.
+
+If the Beads Copilot plugin is installed, Copilot CLI will automatically run
+` + "`bd prime`" + ` on session start and before compaction.
+`
+
 // ContentForPath returns the file content that should be written for a recipe path.
 func ContentForPath(recipe Recipe, path string) (string, error) {
 	switch recipe.Type {

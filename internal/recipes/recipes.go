@@ -44,6 +44,27 @@ type Recipe struct {
 	// the files it names to the directory it runs in (PathInside). A
 	// built-in recipe's paths are bd's own, and leave it false.
 	Workspace bool `toml:"-"`
+	// SharedPaths lists the paths in Paths that are files the repository
+	// owns too, such as .github/copilot-instructions.md: bd setup keeps a
+	// marked beads section inside each instead of writing, checking and
+	// deleting the whole file. A built-in recipe sets it; a recipe read
+	// from .beads/recipes.toml cannot.
+	SharedPaths []string `toml:"-"`
+	// LegacyContents maps a shared path to the whole file an older bd wrote
+	// there before it kept a marked section: a file that is exactly that
+	// text is bd's own, not the repository's.
+	LegacyContents map[string]string `toml:"-"`
+}
+
+// IsSharedPath reports whether path, spelled exactly as in Paths, is one
+// of the recipe's SharedPaths.
+func (r Recipe) IsSharedPath(path string) bool {
+	for _, shared := range r.SharedPaths {
+		if shared == path {
+			return true
+		}
+	}
+	return false
 }
 
 // BuiltinRecipes contains the default recipe definitions.
@@ -104,6 +125,12 @@ var BuiltinRecipes = map[string]Recipe{
 		Contents: map[string]string{
 			".copilot-plugin/plugin.json":     beadsplugin.CopilotPluginManifest(),
 			".github/copilot-instructions.md": CopilotInstructionsTemplate,
+		},
+		// The manifest is bd's own; the instructions file is the
+		// repository's, which holds bd's guidance as a marked section.
+		SharedPaths: []string{".github/copilot-instructions.md"},
+		LegacyContents: map[string]string{
+			".github/copilot-instructions.md": LegacyCopilotInstructions,
 		},
 	},
 	"factory": {
