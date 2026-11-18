@@ -2336,6 +2336,91 @@ func RunReaderReadyParentScopesToItsTransitiveDescendants(t *testing.T, ctx cont
 	assertReaderPageIDSet(t, "Ready --parent", page, []string{child, grandchild, dotted, adopted})
 }
 
+// RunReaderReadyExcludeParentsWithOpenChildren pins
+// ReadyRequest.ExcludeParentsWithOpenChildren — `bd ready --exclude-parents`
+// (GH#6817): the flagged ready set drops every parent the CLOSE GATE counts an
+// open child for, and only those parents.
+//
+// WHICH PARENTS, EXACTLY. The definition is the close gate's
+// (issueops countOpenChildrenForTargetInTx), which is why the seeded shapes
+// are what they are. The PARENT's child is BLOCKED — a blocked child is still
+// a non-closed child, so the parent is excluded while remaining unblocked and
+// ready on its own merits; a body that excluded only parents whose children
+// are themselves ready would answer a different, narrower set. The EPIC has
+// one child, CLOSED at seed, because the fixture cannot close in place: an
+// all-children-closed epic keeps an ordinary ready row, and the same shape
+// on DONE-PARENT stands in for the parent P's own after-close state — the
+// only bit of the flag's contract the reader leg cannot observe directly, and
+// the CLI regression covers the actual close transition.
+//
+// THE UNFLAGGED ARM RUNS FIRST AND MUST KEEP THE PARENT. An open child never
+// hid its parent before this field existed; the flagged read's parent set is
+// resolved and folded by the EXECUTOR (sqlbuild folds only what it is handed),
+// so the unflagged arm is the guard against that set leaking into every read.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the ready scoping label alone. The
+// blocker row carries no scope label, so it stays out of the asserted answers
+// while still blocking the child.
+func RunReaderReadyExcludeParentsWithOpenChildren(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope := readerLabel(fixture, "rdyexp")
+	parent := readerID(fixture, "rdyexp", "parent")
+	child := readerID(fixture, "rdyexp", "child")
+	blocker := readerID(fixture, "rdyexp", "blocker")
+	leaf := readerID(fixture, "rdyexp", "leaf")
+	epic := readerID(fixture, "rdyexp", "epic")
+	epicChild := readerID(fixture, "rdyexp", "epic-child")
+	doneParent := readerID(fixture, "rdyexp", "done-parent")
+	doneChild := readerID(fixture, "rdyexp", "done-child")
+
+	parentIssue := readerIssue(parent, types.TypeTask, scope)
+	childIssue := readerIssue(child, types.TypeTask, scope)
+	// No scope label: the blocker must block the child without joining the
+	// asserted answers.
+	blockerIssue := readerIssue(blocker, types.TypeTask, "")
+	leafIssue := readerIssue(leaf, types.TypeTask, scope)
+	epicIssue := readerIssue(epic, types.TypeEpic, scope)
+	epicChildIssue := readerIssue(epicChild, types.TypeTask, scope)
+	epicChildIssue.Status = types.StatusClosed
+	doneParentIssue := readerIssue(doneParent, types.TypeTask, scope)
+	doneChildIssue := readerIssue(doneChild, types.TypeTask, scope)
+	doneChildIssue.Status = types.StatusClosed
+
+	for _, issue := range []*types.Issue{parentIssue, childIssue, blockerIssue, leafIssue, epicIssue, epicChildIssue, doneParentIssue, doneChildIssue} {
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	for _, edge := range []*types.Dependency{
+		{IssueID: child, DependsOnID: parent, Type: types.DepParentChild},
+		{IssueID: child, DependsOnID: blocker, Type: types.DepBlocks},
+		{IssueID: epicChild, DependsOnID: epic, Type: types.DepParentChild},
+		{IssueID: doneChild, DependsOnID: doneParent, Type: types.DepParentChild},
+	} {
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s: %v", edge.IssueID, edge.DependsOnID, err)
+		}
+	}
+
+	// Unflagged: the whole scope-label set is ready — the parent included,
+	// whose open child never hid it — and the blocked child is not.
+	page, err := fixture.Reader.Ready(ctx, publicops.ReadyRequest{Labels: []string{scope}, Sort: "oldest"})
+	if err != nil {
+		t.Fatalf("Ready (unflagged): %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready without the flag", page, []string{parent, leaf, epic, doneParent})
+
+	// Flagged: the parent with a non-closed child drops; the childless leaf,
+	// the all-children-closed epic and its stand-in done-parent stay.
+	page, err = fixture.Reader.Ready(ctx, publicops.ReadyRequest{
+		Labels:                         []string{scope},
+		Sort:                           "oldest",
+		ExcludeParentsWithOpenChildren: true,
+	})
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents: %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready --exclude-parents", page, []string{leaf, epic, doneParent})
+}
+
 // RunReaderListParentReachesEveryDescendantAndOnlyItsOwn is the same field on
 // the listing plane (reader.go:213), where it is rendered differently: one
 // clause with a parent-child subquery ORed against the id prefix

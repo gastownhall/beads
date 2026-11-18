@@ -140,7 +140,41 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 		}
 		p.inputs.ParentDescendantIDs = descendantIDs
 	}
+	// The flagged read's excluded parents, resolved ONCE here so both
+	// families' predicates — and the total — fold the identical sets no
+	// matter which legs of the read consult them.
+	if filter.ExcludeParentsWithOpenChildren {
+		if err := p.readOpenChildParentIDsInTx(ctx, tx); err != nil {
+			return nil, err
+		}
+	}
 	return p, nil
+}
+
+// readOpenChildParentIDsInTx resolves both families' parents with open
+// children (GetOpenChildParentIDsInTx) onto p.inputs, keyed by each family's
+// main table. The wisp set is resolved only where the wisp family takes part
+// in the ready set at all, mirroring how the stale flags are read.
+func (p *readyWorkProbe) readOpenChildParentIDsInTx(ctx context.Context, tx DBTX) error {
+	issueIDs, err := GetOpenChildParentIDsInTx(ctx, tx, IssuesFilterTables.Main)
+	if err != nil {
+		return err
+	}
+	wispIDs := []string(nil)
+	if p.readsWisps() {
+		wispIDs, err = GetOpenChildParentIDsInTx(ctx, tx, WispsFilterTables.Main)
+		if err != nil {
+			return err
+		}
+	}
+	if len(issueIDs) == 0 && len(wispIDs) == 0 {
+		return nil
+	}
+	p.inputs.OpenChildParentIDs = map[string][]string{
+		IssuesFilterTables.Main: issueIDs,
+		WispsFilterTables.Main:  wispIDs,
+	}
+	return nil
 }
 
 // probeTableByTableInTx is the per-table fallback for a database missing part

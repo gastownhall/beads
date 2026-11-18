@@ -137,6 +137,12 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ReadyParentScopesToItsTransitiveDescendants", func(t *testing.T) {
 		conformance.RunReaderReadyParentScopesToItsTransitiveDescendants(t, ctx, fixture)
 	})
+	// The flagged read's parent set is resolved per family by THIS seam's own
+	// buildReadyWorkPredicates, not the shared classic-stack one, so its own
+	// vote is required here too.
+	t.Run("ReadyExcludeParentsWithOpenChildren", func(t *testing.T) {
+		conformance.RunReaderReadyExcludeParentsWithOpenChildren(t, ctx, fixture)
+	})
 	t.Run("ListParentReachesEveryDescendantAndOnlyItsOwn", func(t *testing.T) {
 		conformance.RunReaderListParentReachesEveryDescendantAndOnlyItsOwn(t, ctx, fixture)
 	})

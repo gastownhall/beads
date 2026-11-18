@@ -150,6 +150,70 @@ func AnyDeferredParentSQL(table string) string {
 		table, status, table, future)
 }
 
+// openChildEdgesSQL renders one child-family leg of the close gate's
+// open-children rule (issueops countOpenChildrenForTargetInTx) as a
+// projection: the DISTINCT parents, recorded in typed target column tc,
+// that have at least one recorded non-closed child in depTable's family. A
+// flagged ready request excludes those parents
+// (WorkFilter.ExcludeParentsWithOpenChildren), and the exclusion must agree
+// with what `bd close` refuses on, so the legs are the close gate's count with
+// COUNT(DISTINCT issue_id) turned into the id set: the same joins, the same
+// literal type and status tests, and — on the wisp family, whose dependency
+// rows can be mirrored into the durable table — the same NOT EXISTS dedupe
+// by dependency row id. depTable, childTable and tc are trusted internal
+// identifiers.
+//
+//nolint:gosec // G201: depTable/childTable/tc are hardcoded identifiers from OpenChildParentIDsSQL.
+func openChildEdgesSQL(depTable, childTable, tc string) string {
+	dedupe := ""
+	if depTable == "wisp_dependencies" {
+		dedupe = `
+			  AND NOT EXISTS (
+				SELECT 1 FROM dependencies AS durable WHERE durable.id = dependency.id
+			  )`
+	}
+	return fmt.Sprintf(`SELECT DISTINCT dependency.%s
+			FROM %s AS dependency
+			JOIN %s AS child ON child.id = dependency.issue_id
+			WHERE dependency.type = 'parent-child'
+			  AND child.status != 'closed'
+			  AND dependency.%s IS NOT NULL%s`, tc, depTable, childTable, tc, dedupe)
+}
+
+// OpenChildParentIDsSQL selects the ids of the parents, resident in
+// parentTable's family ("issues" or "wisps"), that the close gate counts open
+// children for: one union of both child families' legs
+// (openChildEdgesSQL) targeting the family's TYPED column — never
+// DepTargetExpr's COALESCE, which would merge the two parent spaces and
+// exclude a parent for children recorded against the other column. Each
+// executor (issueops.GetOpenChildParentIDsInTx) resolves the set once per
+// ready read and hands it to BuildReadyWorkWhere in
+// ReadyWorkWhereInputs.OpenChildParentIDs. parentTable is a trusted
+// internal identifier.
+//
+//nolint:gosec // G201: parentTable is validated by the executors against the two family names.
+func OpenChildParentIDsSQL(parentTable string) string {
+	tc := "depends_on_wisp_id"
+	if parentTable == "issues" {
+		tc = "depends_on_issue_id"
+	}
+	return openChildEdgesSQL("dependencies", "issues", tc) + " UNION " +
+		openChildEdgesSQL("wisp_dependencies", "wisps", tc)
+}
+
+// DurableOpenChildParentIDsSQL is OpenChildParentIDsSQL's durable leg alone,
+// for a database whose missing wisp plane the combined union cannot read; the
+// executors fall back to it exactly where the close gate does.
+//
+//nolint:gosec // G201: parentTable is validated by the executors against the two family names.
+func DurableOpenChildParentIDsSQL(parentTable string) string {
+	tc := "depends_on_wisp_id"
+	if parentTable == "issues" {
+		tc = "depends_on_issue_id"
+	}
+	return openChildEdgesSQL("dependencies", "issues", tc)
+}
+
 // readyBlockedClause renders the ready-work blocked exclusion: the indexed
 // is_blocked projection decides, except for the rows whose flag is stale
 // (StaleBlockedIDsSQL), which it lists by id.
@@ -194,6 +258,13 @@ type ReadyWorkWhereInputs struct {
 	// like the sets above because an id can name a row in both tables and
 	// only one of them may be stale.
 	StaleBlockedIDs map[string][]string
+	// OpenChildParentIDs holds each family's parents with at least one
+	// recorded non-closed child (OpenChildParentIDsSQL over that family's
+	// typed column), keyed by the family's main table; consulted only when
+	// filter.ExcludeParentsWithOpenChildren. Keyed for the same reason as
+	// StaleBlockedIDs: each family excludes its own residents, and an id
+	// present in both tables is routed the close gate's way — durable wins.
+	OpenChildParentIDs map[string][]string
 }
 
 // readyStatusClause renders the ready-work status predicate and its args.
@@ -275,6 +346,16 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 		deferredClauses, deferredArgs := idBatchClauses("id NOT IN (%s)", in.DeferredChildIDs)
 		whereClauses = append(whereClauses, deferredClauses...)
 		args = append(args, deferredArgs...)
+	}
+	// The flagged read's excluded parents (WorkFilter.ExcludeParentsWithOpenChildren),
+	// folded exactly like the deferred-children set: batched id NOT IN. The
+	// flag AND a non-empty set must both be present before the WHERE changes,
+	// so the flag is free when no parent has an open child and no executor
+	// can exclude anything on an unflagged read.
+	if filter.ExcludeParentsWithOpenChildren {
+		openClauses, openArgs := idBatchClauses("id NOT IN (%s)", in.OpenChildParentIDs[tables.Main])
+		whereClauses = append(whereClauses, openClauses...)
+		args = append(args, openArgs...)
 	}
 	excludedClauses, excludedArgs := idBatchClauses("id NOT IN (%s)", filter.ExcludeIDs)
 	whereClauses = append(whereClauses, excludedClauses...)

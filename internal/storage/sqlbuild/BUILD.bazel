@@ -29,6 +29,7 @@ go_test(
         "imports_boundary_test.go",
         "keyset_test.go",
         "labels_test.go",
+        "ready_exclude_parents_test.go",
         "reclaim_test.go",
         "sqlbuild_test.go",
     ],

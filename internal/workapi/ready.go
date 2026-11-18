@@ -65,6 +65,10 @@ func BuildReadyFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 		ExcludeTypes:     normalizeExcludeTypes(in.ExcludeTypes),
 		HasMetadataKey:   in.HasMetadataKey,
 		Lite:             in.Brief,
+		// The storage half of `bd ready --exclude-parents` (GH#6817); carried
+		// the same way as the ready request's other row-selection fields. See
+		// ReadyRequest.ExcludeParentsWithOpenChildren for the full contract.
+		ExcludeParentsWithOpenChildren: in.ExcludeParentsWithOpenChildren,
 	}
 
 	if in.Priority != nil {

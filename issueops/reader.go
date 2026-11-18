@@ -121,6 +121,21 @@ type ReadyRequest struct {
 	// the row carries types.Issue.IsLitePartial. See ListRequest.Brief, which
 	// is the same knob on the other operation and carries the full contract.
 	Brief bool
+
+	// ExcludeParentsWithOpenChildren drops every parent the close gate counts
+	// an open child for — `bd ready --exclude-parents` (GH#6817). A counted
+	// child is any recorded non-closed child of either table family,
+	// regardless of the child's own readiness, visibility in this query or
+	// pinned flag: the definition is the close gate's
+	// (issueops countOpenChildrenForTargetInTx), so `bd close` still refuses
+	// what this flag hides. A parent with NO open child — childless, or every
+	// child closed — stays an ordinary ready row. Opt-in: the zero-value
+	// request answers exactly what it answered before this field existed.
+	//
+	// The special ready modes (--gated, --mol, --explain) refuse the flag in
+	// cmd/bd, and the HTTP wire does not carry it: a proxied ready request
+	// that sets it fails before any query runs.
+	ExcludeParentsWithOpenChildren bool
 }
 
 // ListRequest describes one issue-list query.

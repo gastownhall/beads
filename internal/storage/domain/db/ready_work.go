@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -48,6 +49,18 @@ func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, f
 			return nil, fmt.Errorf("get parent descendants: %w", descErr)
 		}
 		inputs.ParentDescendantIDs = descendantIDs
+	}
+	// `bd ready --exclude-parents` (GH#6817): the shared issueops resolver, so
+	// this stack's parent set is the close gate's set by construction rather
+	// than by re-implementation (Seam A parity).
+	if filter.ExcludeParentsWithOpenChildren {
+		parentIDs, ocErr := issueops.GetOpenChildParentIDsInTx(ctx, r.runner, tables.Main)
+		if ocErr != nil {
+			return nil, fmt.Errorf("get ready work: parents with open children in %s: %w", tables.Main, ocErr)
+		}
+		if len(parentIDs) > 0 {
+			inputs.OpenChildParentIDs = map[string][]string{tables.Main: parentIDs}
+		}
 	}
 
 	whereSQL, args, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)

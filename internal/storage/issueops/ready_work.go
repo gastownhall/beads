@@ -70,6 +70,15 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
 	}
 	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
+	if filter.ExcludeParentsWithOpenChildren {
+		parentIDs, ocErr := GetOpenChildParentIDsInTx(ctx, tx, tables.Main)
+		if ocErr != nil {
+			return nil, fmt.Errorf("get ready work: parents with open children in %s: %w", tables.Main, ocErr)
+		}
+		if len(parentIDs) > 0 {
+			inputs.OpenChildParentIDs = map[string][]string{tables.Main: parentIDs}
+		}
+	}
 	return buildReadyWorkPredicatesFrom(filter, tables, inputs)
 }
 
@@ -192,6 +201,16 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 	if err != nil {
 		return nil, err
 	}
+	// The flagged read's excluded wisp parents, resolved ONCE per read: the
+	// wisp page query renders no ready WHERE, so this set reaches the Go-side
+	// filter below rather than sqlbuild (see filterReadyWispsInTx).
+	var openChildParentIDs []string
+	if filter.ExcludeParentsWithOpenChildren {
+		openChildParentIDs, err = GetOpenChildParentIDsInTx(ctx, tx, WispsFilterTables.Main)
+		if err != nil {
+			return nil, fmt.Errorf("search wisps (ready work): parents with open children: %w", err)
+		}
+	}
 
 	wispFilter := readyWorkWispIssueFilter(filter)
 	if filter.Limit <= 0 {
@@ -203,7 +222,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 			}
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
-		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs, stale)
+		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs, stale, openChildParentIDs)
 	}
 
 	pageSize := readyWorkPageSize(filter.Limit)
@@ -225,7 +244,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 		if err != nil {
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
-		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs, stale)
+		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs, stale, openChildParentIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -386,8 +405,11 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 }
 
 // filterReadyWispsInTx applies the ready predicates the wisp page query does
-// not. stale is the wisp family's stale-flagged rows (excludeBlockedWispsInTx).
-func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs []string, stale map[string]bool) ([]*types.Issue, error) {
+// not. stale is the wisp family's stale-flagged rows (excludeBlockedWispsInTx);
+// openChildParentIDs is the flagged read's excluded wisp parents
+// (GetOpenChildParentIDsInTx), consulted only when
+// filter.ExcludeParentsWithOpenChildren.
+func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs []string, stale map[string]bool, openChildParentIDs []string) ([]*types.Issue, error) {
 	if len(wisps) == 0 {
 		return wisps, nil
 	}
@@ -433,6 +455,16 @@ func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter,
 			}
 		}
 		for _, id := range deferredChildIDs {
+			excluded[id] = struct{}{}
+		}
+	}
+
+	// The wisp arm of `bd ready --exclude-parents`: the parents the close
+	// gate counts open children for, folded Go-side because this path's
+	// page query renders no ready WHERE. Gated on the flag here as well as at
+	// the caller so no caller can smuggle a set onto an unflagged read.
+	if filter.ExcludeParentsWithOpenChildren {
+		for _, id := range openChildParentIDs {
 			excluded[id] = struct{}{}
 		}
 	}

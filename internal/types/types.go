@@ -2566,6 +2566,18 @@ type WorkFilter struct {
 	// (SkipLabels, SkipCounts) have no WorkFilter counterpart on purpose; see
 	// issueops.readyHydrationFor.
 	Lite bool
+
+	// ExcludeParentsWithOpenChildren drops every parent the close gate counts
+	// an open child for — the storage half of `bd ready --exclude-parents`
+	// (GH#6817). The executor resolves each table family's parent set with
+	// sqlbuild.OpenChildParentIDsSQL (the close gate's own legs, projection
+	// form) and folds it into BuildReadyWorkWhere as a batched id NOT IN; the
+	// field plus a resolved set must both be present before the WHERE
+	// changes, so the flag costs nothing when no parent has an open child
+	// and a set smuggled onto the inputs never excludes anything unflagged.
+	// Opt-in: the zero-value filter matches rows exactly as it did before
+	// this field existed.
+	ExcludeParentsWithOpenChildren bool
 }
 
 // StaleFilter is used to filter stale issue queries
