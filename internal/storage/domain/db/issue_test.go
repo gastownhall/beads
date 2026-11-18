@@ -85,6 +85,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("ExcludesChildIDs", s.issueCountForPrefixExcludesChildren)
 		s.Run("RoutedToWisps", s.issueCountForPrefixWispRouting)
 		s.Run("CountsPromotedWispsInIssues", s.issueCountForPrefixPromotedWisps)
+		s.Run("CountsBaseNamespaceHeldInWisps", s.issueCountForPrefixBaseInWisps)
 		s.Run("EmptyPrefixReturnsError", s.issueCountForPrefixEmptyPrefix)
 	})
 	s.Run("NextCounterID", func() {
@@ -666,6 +667,27 @@ func (s *testSuite) issueCountForPrefixPromotedWisps() {
 	got, err := r.CountForPrefix(s.Ctx(), "cfpProm-wisp", domain.IssueTableOpts{UseWispsTable: true})
 	s.Require().NoError(err)
 	s.Equal(10, got, "the wisp namespace's population spans both planes: 5 live + 5 promoted")
+}
+
+// issueCountForPrefixBaseInWisps pins the other direction of bd-u9cfx0: a
+// demoted issue keeps its base-namespace id in wisps, so sizing a new
+// durable id must count those rows too.
+func (s *testSuite) issueCountForPrefixBaseInWisps() {
+	r := s.issueRepo()
+	for i := 1; i <= 5; i++ {
+		s.Require().NoError(r.Insert(s.Ctx(),
+			newTestIssue(fmt.Sprintf("cfpBase-d%d", i), "durable"), "tester", domain.InsertIssueOpts{}))
+	}
+	// Base-namespace ids only wisps holds.
+	for i := 1; i <= 5; i++ {
+		w := newTestIssue(fmt.Sprintf("cfpBase-h%d", i), "held in wisps")
+		w.Ephemeral = true
+		s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	}
+
+	got, err := r.CountForPrefix(s.Ctx(), "cfpBase", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(10, got, "the base namespace's population spans both planes: 5 in issues + 5 in wisps")
 }
 
 func (s *testSuite) issueCountForPrefixEmptyPrefix() {

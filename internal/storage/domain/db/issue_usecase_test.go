@@ -29,6 +29,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
 	s.Run("CreateAttachesNormalizedComments", s.useCaseCreateAttachesNormalizedComments)
 	s.Run("WispMintSizedAcrossBothPlanes", s.useCaseMintWispSizedByPromotedWisps)
+	s.Run("DurableMintSizedAcrossBothPlanes", s.useCaseMintDurableSizedByWisps)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -1050,4 +1051,36 @@ func (s *testSuite) useCaseMintWispSizedByPromotedWisps() {
 	s.Require().NoError(err)
 	s.Equal(4, s.hashSuffixLen(res.Issue.ID, "ucAd1-wisp"),
 		"population 10 across both planes must size the wisp hash to 4 characters, got %q", res.Issue.ID)
+}
+
+// useCaseMintDurableSizedByWisps pins the other direction of bd-u9cfx0 on
+// the proxied mint: a demoted issue keeps its base-namespace id in wisps, so
+// a durable mint sizes against both planes.
+func (s *testSuite) useCaseMintDurableSizedByWisps() {
+	s.resetAdaptiveMintConfig("ucAd2")
+	uc := s.issueUseCase()
+	for i := 1; i <= 5; i++ {
+		_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: fmt.Sprintf("durable %d", i), IssueType: types.TypeTask, Priority: 2},
+			ExplicitID: fmt.Sprintf("ucAd2-d%d", i),
+			CreateOnly: true,
+		}, "seeder")
+		s.Require().NoError(err)
+	}
+	// Base-namespace ids only the wisps table holds.
+	for i := 1; i <= 5; i++ {
+		_, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: fmt.Sprintf("held in wisps %d", i), IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+			ExplicitID: fmt.Sprintf("ucAd2-h%d", i),
+			CreateOnly: true,
+		}, "seeder")
+		s.Require().NoError(err)
+	}
+
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "fresh issue", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(4, s.hashSuffixLen(res.Issue.ID, "ucAd2"),
+		"population 10 across both planes must size the durable hash to 4 characters, got %q", res.Issue.ID)
 }

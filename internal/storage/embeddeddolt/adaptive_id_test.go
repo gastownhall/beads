@@ -143,4 +143,28 @@ func TestAdaptiveIDLengthSpansBothPlanes(t *testing.T) {
 			t.Fatalf("minted wisp id %s: hash %q has %d chars, want 4", id, suffix, len(suffix))
 		}
 	})
+
+	t.Run("IssueMintCountsBaseNamespaceHeldInWisps", func(t *testing.T) {
+		te := newTestEnv(t, "dm")
+		ctx := t.Context()
+		strictProb(t, te, ctx)
+
+		// Five durable issues, and five base-namespace ids only wisps holds
+		// (a demoted issue keeps its id in wisps).
+		seed(t, te, ctx, ids("dm-d%02d", 5), false)
+		seed(t, te, ctx, ids("dm-h%02d", 5), true)
+		if got := countUnder(t, te, ctx, "issues", "dm"); got != 5 {
+			t.Fatalf("issues under dm = %d, want 5", got)
+		}
+		if got := countUnder(t, te, ctx, "wisps", "dm"); got != 5 {
+			t.Fatalf("wisps under dm = %d, want 5", got)
+		}
+		if got := sizedLength(t, te, ctx, "issues", "dm"); got != 4 {
+			t.Fatalf("GetAdaptiveIDLengthTx(issues, dm) = %d, want 4 (population 10 across both planes)", got)
+		}
+		id := mint(t, te, ctx, "fresh issue", false)
+		if suffix := hashSuffix(t, id, "dm"); len(suffix) != 4 {
+			t.Fatalf("minted issue id %s: hash %q has %d chars, want 4", id, suffix, len(suffix))
+		}
+	})
 }
