@@ -270,6 +270,7 @@ go_test(
         "is_blocked_batch_test.go",
         "is_blocked_filter_test.go",
         "is_blocked_test.go",
+        "issue6092_ignored_wisp_dep_test.go",
         "issue_lifecycle_test.go",
         "issue_operations_behavior_test.go",
         "issue_operations_claim_verify_test.go",
