@@ -274,7 +274,7 @@ func TestEmbeddedLenientOpenWarning_DataBehind(t *testing.T) {
 		{
 			name: "openReadOnlyCommand (bd list)",
 			open: func(t *testing.T, beadsDir string) (*embeddeddolt.EmbeddedDoltStore, error) {
-				return embeddeddolt.OpenForReadOnlyCommand(t.Context(), beadsDir, "testdb", "main")
+				return embeddeddolt.OpenForReadOnlyCommand(t.Context(), beadsDir, "testdb", "main", false)
 			},
 			modeText: "Read-only command: continuing on schema v",
 		},
@@ -359,7 +359,7 @@ func TestEmbeddedLenientOpenWarning_OtherRefusalsKeepBluntGuidance(t *testing.T)
 	var store *embeddeddolt.EmbeddedDoltStore
 	var openErr error
 	warning := captureStderr(t, func() {
-		store, openErr = embeddeddolt.OpenForReadOnlyCommand(t.Context(), beadsDir, "testdb", "main")
+		store, openErr = embeddeddolt.OpenForReadOnlyCommand(t.Context(), beadsDir, "testdb", "main", false)
 	})
 	if openErr != nil {
 		t.Fatalf("lenient open with the smart gate off = %v; it must warn and continue", openErr)
