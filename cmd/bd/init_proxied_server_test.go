@@ -39,7 +39,7 @@ func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 		require.NoError(t, err, "fixture git %v: %s", args, out)
 		return strings.TrimSpace(string(out))
 	}
-	for _, name := range []string{"ordinary", "decoy", "invalid", "inline", "scp", "missing", "nonrepo", "bare", "stealth", "keep_home_clean", "explicit", "explicit_empty", "configured", "configured_stealth", "configured_keep_home_clean", "legacy", "canceled"} {
+	for _, name := range []string{"ordinary", "decoy", "invalid", "inline", "scp", "missing", "nonrepo", "bare", "stealth", "keep_home_clean", "explicit", "explicit_empty", "configured", "configured_stealth", "configured_keep_home_clean", "legacy", "canceled", "no_adopt", "no_adopt_env", "explicit_no_adopt", "configured_no_adopt"} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
 			for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
@@ -68,7 +68,7 @@ func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 			}
 			storage := t.TempDir()
 			t.Setenv("BEADS_DIR", storage)
-			for _, key := range []string{"BD_SYNC_REMOTE", "BEADS_SYNC_REMOTE", "BD_SYNC_GIT_REMOTE", "BEADS_SYNC_GIT_REMOTE"} {
+			for _, key := range []string{"BD_SYNC_REMOTE", "BEADS_SYNC_REMOTE", "BD_SYNC_GIT_REMOTE", "BEADS_SYNC_GIT_REMOTE", "BD_NO_REMOTE_ADOPT"} {
 				t.Setenv(key, "")
 			}
 			in := initProxiedServerInput{}
@@ -83,6 +83,21 @@ func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 			case "keep_home_clean":
 				// The opt-out from a home inside another repository: its origin is not this workspace's remote.
 				in.keepHomeClean, want = true, ""
+			case "no_adopt":
+				// GH#6099: the opt-out skips the derived origin on this route too.
+				in.noAdopt, want = true, ""
+			case "no_adopt_env":
+				t.Setenv("BD_NO_REMOTE_ADOPT", "1")
+				want = ""
+			case "explicit_no_adopt", "configured_no_adopt":
+				// A named source is not derived: the opt-out leaves it alone.
+				in.noAdopt = true
+				if name == "explicit_no_adopt" {
+					in.initRemoteChanged, in.initRemote = true, "dolthub://fixture/explicit"
+				} else {
+					t.Setenv("BD_SYNC_REMOTE", "dolthub://fixture/configured")
+				}
+				want = map[string]string{"explicit_no_adopt": "dolthub://fixture/explicit", "configured_no_adopt": "dolthub://fixture/configured"}[name]
 			case "explicit", "explicit_empty":
 				in.initRemoteChanged = true
 				in.initRemote = "dolthub://fixture/explicit"

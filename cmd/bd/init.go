@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -556,12 +557,19 @@ for viewers (bv), interchange, and issue-level migration; not backup.
 Cross-machine sync and backups use Dolt remotes/backups, not JSONL import/export.
 To enable: bd config set export.auto true
 
+Git origin with Dolt history: when no --remote or sync.remote is set and git
+origin has Dolt history (refs/dolt/data), adopting it imports that remote's
+issue history and identity. bd init asks once before adopting it; --yes
+consents ahead of time. Without --yes, non-interactive and --json runs refuse.
+--no-adopt (or BD_NO_REMOTE_ADOPT=1) never derives a remote from git origin.
+
 Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   Skips all interactive prompts, using sensible defaults:
   • Role defaults to "maintainer" (override with --role)
   • Fork exclude auto-configured when fork detected
   • Auto-export left at default (disabled)
   • --contributor and --team flags are rejected (wizards require interaction)
+  • Never consents to adopting git origin's Dolt history (pass --yes)
   Also auto-detected when stdin is not a terminal or CI=true is set.`,
 	RunE: func(cmd *cobra.Command, _ []string) (retErr error) {
 		// First, before anything with an effect: never turn $HOME into a git
@@ -597,6 +605,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
 		initRemote, _ := cmd.Flags().GetString("remote")
 		initRemoteChanged := cmd.Flags().Changed("remote")
+		assumeYes, _ := cmd.Flags().GetBool("yes")
+		noAdopt, _ := cmd.Flags().GetBool("no-adopt")
+		// The opt-out wins over --yes: never probe, clone or wire a remote
+		// derived from git origin (GH#6099).
+		skipDerivedRemote := initSkipsDerivedRemote(noAdopt)
 		// Dolt server connection flags
 		backendFlag, _ := cmd.Flags().GetString("backend")
 		initServerMode, _ := cmd.Flags().GetBool("server")
@@ -902,6 +915,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				teamServer:             initTeamServer,
 				fromJSONL:              fromJSONL,
 				nonInteractive:         nonInteractive,
+				noAdopt:                noAdopt,
 			}); err != nil {
 				// runInitProxiedServer runs the same checkExistingBeadsData
 				// the route below does, but it runs it inside itself — so
@@ -1100,6 +1114,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// valid (directory names like "001" are common in temp dirs).
 		prefix = normalizeIssuePrefix(prefix)
 		remoteDivergenceConfirmed := false
+		// Inbound adoption consent for a git-origin-derived remote (GH#6099):
+		// --yes, or a yes at the early prompt for that exact URL. Neither
+		// --non-interactive nor --json is consent, and JSON never prompts.
+		adoptConsent := initAdoptionConsent{assumeYes: assumeYes}
+		adoptInteractive := !nonInteractive && !jsonOutput
 
 		// Cross-boundary safety (bd-q83 / ADR 0002): check remote state
 		// BEFORE any filesystem side-effects so a refusal exits cleanly.
@@ -1110,6 +1129,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			earlyRemoteSource := initSyncRemoteNone
 			earlyRemoteHasDoltData := false
 			var earlyProbeNote string
+			earlyDerived, earlyProbeUnknown := false, false
 			if !initRemoteChanged {
 				if _, err := resolveSyncRemoteChecked(); err != nil {
 					return err
@@ -1133,13 +1153,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// --reinit-local / local init.
 				hasData, err := gitRemoteHasDoltDataRefStatus(earlySyncURL)
 				earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, err)
-			} else if earlyRemoteSource == initSyncRemoteNone && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
+			} else if earlyRemoteSource == initSyncRemoteNone && !skipDerivedRemote && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
 				// Not under keepHomeClean: a repository git finds from the
 				// home is not the project's, so its origin is not this
 				// workspace's remote (see guardInitInHomeDir).
 				if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 					earlySyncURL = normalizeRemoteURL(originURL)
+					earlyDerived = true
 					hasData, probeErr := gitOriginHasDoltDataRefStatus()
+					earlyProbeUnknown = probeErr != nil
 					earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, probeErr)
 				}
 			}
@@ -1156,8 +1178,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					ExpectedToken:     FormatDestroyToken(prefix),
 					RemoteHasDoltData: earlyRemoteHasDoltData,
 					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+
+					DerivedFromGitOrigin: earlyDerived,
+					RemoteProbeUnknown:   earlyProbeUnknown,
+					AdoptionConsented:    adoptConsent.grants(earlySyncURL),
+					AdoptionInteractive:  adoptInteractive,
 				})
-				if _, err := handleRemoteSafetyDecision(earlyDecision, prefix, earlySyncURL, destroyToken, func() (bool, error) {
+				if handled, err := handleInitAdoptionDecision(earlyDecision, earlySyncURL, false, &adoptConsent); handled {
+					if err != nil {
+						return err
+					}
+				} else if _, err := handleRemoteSafetyDecision(earlyDecision, prefix, earlySyncURL, destroyToken, func() (bool, error) {
 					switch earlyRemoteSource {
 					case initSyncRemoteExplicit, initSyncRemoteConfigured:
 						return gitRemoteHasDoltDataRefStatus(earlySyncURL)
@@ -1535,7 +1566,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Printf("  %s Remote has no Dolt data yet; initialized a fresh local database\n", ui.RenderWarn("!"))
 				}
 			}
-		} else if syncRemoteSource == initSyncRemoteNone && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
+		} else if syncRemoteSource == initSyncRemoteNone && !skipDerivedRemote && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
 			// keepHomeClean: as in the early remote check above.
 			if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 				syncURL = normalizeRemoteURL(originURL)
@@ -1546,6 +1577,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), lateProbeNote)
 				}
 
+				// Workspace writes have begun, so this checkpoint never
+				// prompts: only --yes or the early answer for THIS URL is
+				// consent. An origin that was unknown or empty at the early
+				// probe, or has since changed URL, refuses here (GH#6099).
 				decision := CheckRemoteSafety(RemoteSafetyInput{
 					Force:             force,
 					ReinitLocal:       reinitLocal,
@@ -1555,7 +1590,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					ExpectedToken:     FormatDestroyToken(prefix),
 					RemoteHasDoltData: remoteHasDoltData,
 					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+
+					DerivedFromGitOrigin: true,
+					RemoteProbeUnknown:   probeErr != nil,
+					AdoptionConsented:    adoptConsent.grants(syncURL),
 				})
+				if handled, err := handleInitAdoptionDecision(decision, syncURL, true, &adoptConsent); handled {
+					return err
+				}
 
 				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, gitOriginHasDoltDataRefStatus, remoteHasDoltData, &remoteDivergenceConfirmed)
 				if err != nil {
@@ -1581,6 +1623,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 		if syncFromRemote {
+			if syncURLFromGitOrigin && !adoptConsent.prompted && !quiet {
+				// --yes consented ahead of time: still name the source
+				// before importing from it, so a scripted run leaves a
+				// record of whose history it adopted (GH#6099). --quiet
+				// suppresses this record, as it does init's other output.
+				fmt.Fprintf(os.Stderr, "Adopting Dolt issue history from git origin: %s\n", remedy.PrintedValue(redactRemoteURL(syncURL)))
+			}
 			// A raw https:// forge URL would route through Dolt's remotesapi
 			// client and spin forever (#4421); its git+ form routes through
 			// the git remote factory. Non-forge URLs are untouched (GH#3339).
@@ -2574,6 +2623,8 @@ func init() {
 	initCmd.Flags().String("agents-profile", "", "AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)")
 	initCmd.Flags().String("agents-file", "", "Custom filename for agent instructions (default: AGENTS.md)")
 	initCmd.Flags().String("remote", "", "Dolt remote URL to clone from and persist as sync.remote")
+	initCmd.Flags().BoolP("yes", "y", false, "Consent to adopting the Dolt history of a remote derived from git origin (never implied by --non-interactive or --json)")
+	initCmd.Flags().Bool("no-adopt", false, "Never derive a Dolt remote from git origin: no probe, no clone, no remote wiring (also BD_NO_REMOTE_ADOPT=1)")
 
 	// Non-interactive mode for CI/cloud agents
 	initCmd.Flags().Bool("non-interactive", false, "Skip all interactive prompts (auto-detected in CI or non-TTY environments)")
@@ -3696,6 +3747,77 @@ func handleRemoteSafetyDecision(decision RemoteSafetyDecision, prefix, syncURL, 
 		}
 	}
 	return false, nil
+}
+
+// initAdoptionConsent is the inbound adoption consent one init invocation
+// holds (GH#6099): --yes for any derived URL, or an affirmative early answer
+// bound to the URL it was given for. Binding matters because the late
+// checkpoint re-probes origin after workspace writes; consent to one URL must
+// not authorize importing from another.
+type initAdoptionConsent struct {
+	assumeYes bool
+	url       string
+	// prompted records that the early prompt already disclosed the URL, so
+	// the pre-clone announcement does not repeat it.
+	prompted bool
+}
+
+func (c initAdoptionConsent) grants(syncURL string) bool {
+	return c.assumeYes || (c.url != "" && c.url == syncURL)
+}
+
+// handleInitAdoptionDecision applies the derived-origin adoption actions of
+// CheckRemoteSafety. It returns handled=false for every other action, which
+// the caller then passes to handleRemoteSafetyDecision. lateCheck marks the
+// checkpoint after workspace scaffolding, whose refusal must not claim that
+// nothing was written.
+func handleInitAdoptionDecision(decision RemoteSafetyDecision, syncURL string, lateCheck bool, consent *initAdoptionConsent) (bool, error) {
+	switch decision.Action {
+	case ActionAskAdoption:
+		ok, err := confirmInitRemoteAdoption(getRootContext(), os.Stdin, os.Stdin, os.Stderr, syncURL)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "\nSetup canceled.")
+			return true, errCanceled()
+		}
+		if !ok {
+			fmt.Fprintf(os.Stderr, "\n%s\n\n", refusalMessageAdoptionDeclined(syncURL))
+			return true, &exitError{Code: 1}
+		}
+		consent.url, consent.prompted = syncURL, true
+		return true, nil
+	case ActionRefuseAdoption:
+		fmt.Fprintf(os.Stderr, "\n%s\n\n", refusalMessageAdoption(syncURL, lateCheck))
+		return true, &exitError{Code: decision.ExitCode}
+	}
+	return false, nil
+}
+
+// confirmInitRemoteAdoption asks once, on out, whether to adopt the derived
+// remote's history, naming the URL and every consequence of a yes. The
+// default is NO: an empty line, EOF, invalid input or a read error does not
+// consent. Cancellation returns the context error so the caller can keep the
+// usual exit 130.
+func confirmInitRemoteAdoption(ctx context.Context, in io.Reader, closer io.Closer, out io.Writer, remoteURL string) (bool, error) {
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Git origin already has Dolt issue history, and no Dolt remote is configured.")
+	fmt.Fprintf(out, "  Derived from git origin: %s\n", remedy.PrintedValue(redactRemoteURL(remoteURL)))
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Adopting it will:")
+	fmt.Fprintln(out, "  • import that remote's entire issue history and project identity")
+	fmt.Fprintln(out, "  • add it as Dolt remote \"origin\"")
+	fmt.Fprintln(out, "  • write sync.remote into .beads/config.yaml")
+	fmt.Fprintln(out)
+	fmt.Fprint(out, "Adopt this remote's issue history? [y/N] ")
+
+	line, err := readLineWithContext(ctx, bufio.NewReader(in), closer)
+	if err != nil {
+		if isCanceled(err) {
+			return false, err
+		}
+		return false, nil
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
 }
 
 func configureInitDoltRemote(ctx context.Context, store storage.DoltStorage, syncURL string, quiet bool) {
