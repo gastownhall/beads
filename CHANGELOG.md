@@ -819,35 +819,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **On macOS, bd no longer reads `~/Library/Application Support/bd/config.yaml`
-  or `~/Library/Application Support/beads/PRIME.md`.** Probing those paths on
-  every launch could raise a macOS 26 privacy prompt ("would like to access
-  data from other apps"). bd now resolves its macOS user config directory as
-  it does on Linux: `$XDG_CONFIG_HOME` when set, otherwise `~/.config`. That
-  directory holds both files, `bd/config.yaml` and `beads/PRIME.md`, so the
-  defaults are `~/.config/bd/config.yaml` and `~/.config/beads/PRIME.md`, and
-  a set `XDG_CONFIG_HOME` is now honored on macOS for both. Apart from
-  `bd doctor`, bd reads the old config only when the new one has no
-  `metrics.disabled` (normally once, after upgrading) and carries your metrics
-  settings (`metrics.disabled`, `metrics.endpoint`, `metrics.notice_shown`)
-  into the new config. If the old file exists but cannot be read or parsed,
-  metrics are left off and bd says so (`bd metrics on` re-enables them). If
-  the new config cannot be written (for example, a read-only `~/.config`), bd
-  does not touch the old folder and metrics stay off on macOS until the user
-  config sets `metrics.disabled` or `BD_DISABLE_METRICS` is set (a false or
-  empty `BD_DISABLE_METRICS` turns metrics on). Metrics on macOS also stay
-  off, silently, when the user config has a commented-out `metrics` block,
-  unparseable YAML, a `metrics` key that is not a section, a dangling symlink
-  or a non-bool `metrics.disabled`; `bd metrics on` or `bd metrics off`
-  settles it (fix unparseable YAML or a non-section `metrics` key first). On
-  macOS bd leaves a `config.yaml.lock` next to the user config (beside its
-  target when the config is a symlink to an existing file). Other settings
-  left in the old file stop applying, including `node_id` and
-  `mail.delegate`. Run `bd doctor` to list the settings that differ and the
-  commands to move them.
-  On every platform, a dangling `config.yaml` symlink no longer crashes bd at
-  startup, and shell completion no longer writes the user config. Paths and
-  output are unchanged on Linux and Windows.
+- **On macOS, bd no longer reads `~/Library/Application
+  Support/bd/config.yaml` or `~/Library/Application Support/beads/PRIME.md`.**
+  Probing those paths on every launch could raise a macOS 26 privacy prompt
+  ("would like to access data from other apps"). bd now resolves its macOS
+  user config directory as it does on Linux: `$XDG_CONFIG_HOME` when set,
+  otherwise `~/.config`. That directory holds both files, `bd/config.yaml` and
+  `beads/PRIME.md`, so the defaults are `~/.config/bd/config.yaml` and
+  `~/.config/beads/PRIME.md`, and a set `XDG_CONFIG_HOME` is now honored on
+  macOS for both. Apart from `bd doctor`, bd reads the old config only when
+  the new one has no `metrics.disabled` (normally once, after upgrading) and
+  carries your metrics settings (`metrics.disabled`, `metrics.endpoint`,
+  `metrics.notice_shown`) into the new config. If the old file exists but
+  cannot be read or parsed, metrics are left off and bd says so (`bd metrics
+  on` re-enables them). If the new config cannot be written (for example, a
+  read-only `~/.config`), bd does not touch the old folder and metrics stay
+  off on macOS until the user config sets `metrics.disabled` or
+  `BD_DISABLE_METRICS` is set (`BD_DISABLE_METRICS` set to `0`, `false` or
+  empty turns metrics on). Metrics on macOS also stay off, silently, when the
+  user config has a commented-out `metrics` block, unparseable YAML, a top
+  level that is not a mapping (for example a file holding only `---`), a
+  `metrics` key that is not a section, a dangling symlink or a non-bool
+  `metrics.disabled`; `bd metrics on` or `bd metrics off` settles it (first
+  fix unparseable YAML, a non-mapping top level or a non-section `metrics`
+  key, and create the target folder of a dangling symlink). On macOS bd leaves
+  a `.lock` file named after the user config (`config.yaml.lock`), or after
+  its target when the config is a symlink to an existing file. Other settings
+  left in the old file stop applying, including `node_id` and `mail.delegate`.
+  Run `bd doctor` to list the settings that differ and the commands to move
+  them. On every platform, a dangling `config.yaml` symlink no longer crashes
+  bd at startup, and shell completion no longer writes the user config. Paths
+  and output are unchanged on Linux and Windows.
   ([#8113](https://github.com/gastownhall/beads/issues/8113))
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
