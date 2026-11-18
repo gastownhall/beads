@@ -579,6 +579,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		stealth, _ := cmd.Flags().GetBool("stealth")
 		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
 		skipAgents, _ := cmd.Flags().GetBool("skip-agents")
+		skipGitCommit, _ := cmd.Flags().GetBool("skip-git-commit")
 		force, _ := cmd.Flags().GetBool("force")
 		reinitLocal, _ := cmd.Flags().GetBool("reinit-local")
 		initIfMissing, _ := cmd.Flags().GetBool("init-if-missing")
@@ -895,6 +896,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				stealth:                stealth,
 				skipHooks:              skipHooks,
 				skipAgents:             skipAgents,
+				skipGitCommit:          skipGitCommit,
 				keepHomeClean:          keepHomeClean,
 				reinitLocal:            reinitLocal,
 				contributor:            contributor,
@@ -1262,7 +1264,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+			return newInitReinitPreflight(reinitLocal, nonInteractive, beadsDirForInit, destroyTokenPrefix, destroyToken, database).run()
 		})
 		if gateErr != nil {
 			return gateErr
@@ -2451,7 +2453,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Not under keepHomeClean: the repository git finds from the home is
 		// not the project's, and the commit would stage the legacy ~/.beads
 		// and the home's own agent files into it (see guardInitInHomeDir).
-		if !stealth && useLocalBeads && !keepHomeClean {
+		// --skip-git-commit leaves the project's index and HEAD alone.
+		if !stealth && useLocalBeads && !keepHomeClean && !skipGitCommit {
 			commitEmbeddedInitArtifacts(cwd, quiet)
 		}
 
@@ -2563,6 +2566,7 @@ func init() {
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
 	initCmd.Flags().Bool("skip-agents", false, "Skip AGENTS.md and Claude/Codex/Cursor setup generation")
+	initCmd.Flags().Bool("skip-git-commit", false, "Skip staging and committing init artifacts in the project's Git repository")
 	initCmd.Flags().Bool("force", false, "Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence or recreating a missing server-mode database (see 'bd help init-safety').")
 	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence (see --discard-remote) or recreating a missing server-mode database (see --recreate-missing).")
 	initCmd.Flags().Bool("discard-remote", false, "Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.")
@@ -3064,31 +3068,37 @@ func countExistingIssues(_ string) (int, error) {
 	return stats.TotalIssues, nil
 }
 
-// runInitReinitPreflight confirms the destructive local replacement while the
-// caller holds init's complete exclusive gate set.
-func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error {
-	if !reinitLocal {
+// confirmPopulatedStore confirms the destructive local replacement of the
+// recorded store while the caller holds init's complete exclusive gate set.
+func (p initReinitPreflight) confirmPopulatedStore() error {
+	w := p.stderr
+	count, err := p.countIssues()
+	if err != nil {
+		// The existing policy proceeds when the store cannot be counted, but
+		// not silently, and without claiming the store is empty. Printed
+		// under --quiet too: it says the store went uninspected.
+		fmt.Fprintf(w, "%s could not count the existing issues before re-initializing (%v); proceeding without the destroy confirmation.\n",
+			ui.RenderWarn("WARNING:"), remedy.PrintedError(err))
 		return nil
 	}
-	count, err := countExistingIssues(prefix)
-	if err != nil || count == 0 {
+	if count == 0 {
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "\n%s Re-initializing will destroy the existing database.\n\n", ui.RenderWarn("WARNING:"))
-	fmt.Fprintf(os.Stderr, "  Existing issues: %d\n\n", count)
-	fmt.Fprintf(os.Stderr, "  This action CANNOT be undone. All issues, dependencies, and\n")
-	fmt.Fprintf(os.Stderr, "  Dolt commit history will be permanently lost.\n\n")
-	fmt.Fprintf(os.Stderr, "  Before proceeding, consider:\n")
-	fmt.Fprintf(os.Stderr, "    bd export > issue-export.jsonl    # Export issue records, not full DB state\n")
-	fmt.Fprintf(os.Stderr, "    bd dolt status              # Check if this is a server config issue\n\n")
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		fmt.Fprintf(os.Stderr, "Type 'destroy %d issues' to confirm: ", count)
-		scanner := bufio.NewScanner(os.Stdin)
+	fmt.Fprintf(w, "\n%s Re-initializing will destroy the existing database.\n\n", ui.RenderWarn("WARNING:"))
+	fmt.Fprintf(w, "  Existing issues: %d\n\n", count)
+	fmt.Fprintf(w, "  This action CANNOT be undone. All issues, dependencies, and\n")
+	fmt.Fprintf(w, "  Dolt commit history will be permanently lost.\n\n")
+	fmt.Fprintf(w, "  Before proceeding, consider:\n")
+	fmt.Fprintf(w, "    bd export > issue-export.jsonl    # Export issue records, not full DB state\n")
+	fmt.Fprintf(w, "    bd dolt status              # Check if this is a server config issue\n\n")
+	if !p.nonInteractive && p.isTerminal() {
+		fmt.Fprintf(w, "Type 'destroy %d issues' to confirm: ", count)
+		scanner := bufio.NewScanner(p.stdin)
 		scanner.Scan()
 		expected := fmt.Sprintf("destroy %d issues", count)
 		if strings.TrimSpace(scanner.Text()) != expected {
-			fmt.Fprintf(os.Stderr, "\nAborted. Database was NOT modified.\n")
+			fmt.Fprintf(w, "\nAborted. Database was NOT modified.\n")
 			return &exitError{Code: ExitLocalExistsRefused}
 		}
 		return nil
@@ -3100,14 +3110,14 @@ func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error
 	// error text must not echo a complete destructive invocation. See
 	// 'bd help init-safety' for the token format. This closes the
 	// 58f5989bf failure class where an agent copy-pasted the suggestion.
-	expectedToken := FormatDestroyToken(prefix)
-	if destroyToken == expectedToken {
-		fmt.Fprintf(os.Stderr, "Destroy token accepted. Proceeding with re-initialization.\n")
+	expectedToken := FormatDestroyToken(p.prefix)
+	if p.destroyToken == expectedToken {
+		fmt.Fprintf(w, "Destroy token accepted. Proceeding with re-initialization.\n")
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "Refusing to destroy %d issues in non-interactive mode.\n", count)
-	fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the required --destroy-token format.\n")
-	fmt.Fprintf(os.Stderr, "  Or export issue records first: bd export > issue-export.jsonl\n")
+	fmt.Fprintf(w, "Refusing to destroy %d issues in non-interactive mode.\n", count)
+	fmt.Fprintf(w, "  See 'bd help init-safety' for the required --destroy-token format.\n")
+	fmt.Fprintf(w, "  Or export issue records first: bd export > issue-export.jsonl\n")
 	return &exitError{Code: ExitDestroyTokenMissing}
 }
 

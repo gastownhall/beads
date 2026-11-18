@@ -258,9 +258,9 @@ func TestProtocol_ExitCode11_LocalExistsRefused(t *testing.T) {
 		<-waitCh
 		out := got()
 		if !strings.Contains(out, "Re-initializing will destroy") {
-			// runInitReinitPreflight skips the confirmation, without a warning,
-			// when countExistingIssues errors (it has its own 5s timeout) or
-			// counts zero. The reinit then goes on and blocks at init's next
+			// The reinit preflight skips the confirmation when
+			// countExistingIssues errors (it has its own 5s timeout; only a
+			// warning is printed) or counts zero. The reinit then goes on and blocks at init's next
 			// TTY prompt (e.g. "Change role? [y/N]:"), which lands here.
 			t.Fatalf("timed out waiting for the destroy-confirmation prompt: the reinit preflight never warned, so it skipped the confirmation (its issue count failed, e.g. the 5s store timeout lapsed, or found none)\n%s", out)
 		}
