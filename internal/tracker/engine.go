@@ -456,6 +456,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 	fallback := e.newPullFallbackIndex(localIssues, extIssues)
 	mapper := e.Tracker.FieldMapper()
+	descriptionFields, hasDescriptionFields := e.Tracker.(DescriptionFieldsTracker)
 	var pendingDeps []DependencyInfo
 	var dryRunIssues []*types.Issue
 
@@ -528,6 +529,16 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 
+		// While the remote text is what the local issue would push, keep the
+		// local split of it between the description and the fields it
+		// carries, so a pull that changes no text never reshapes the issue.
+		if hasDescriptionFields && existing != nil && descriptionFields.DescriptionFieldsEqual(existing, conv.Issue) {
+			conv.Issue.Description = existing.Description
+			conv.Issue.AcceptanceCriteria = existing.AcceptanceCriteria
+			conv.Issue.Design = existing.Design
+			conv.Issue.Notes = existing.Notes
+		}
+
 		pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes, opts.DependencySources)
 		if opts.DryRun {
 			dryRunIssue := *conv.Issue
@@ -553,7 +564,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			conv.Issue.Labels = existing.Labels
 		}
 
-		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
+		if existing != nil && pullIssueEqual(existing, conv.Issue, ref, hasDescriptionFields) {
 			if !opts.DryRun {
 				// Both sides can reach this content without a push, which
 				// leaves the hash of the last push stale.
@@ -575,7 +586,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil {
-			updates := buildPullIssueUpdates(existing, conv.Issue, ref)
+			updates := buildPullIssueUpdates(existing, conv.Issue, ref, hasDescriptionFields)
 			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
 				updates["metadata"] = raw
 				// The push hash below fingerprints the row this update writes.
@@ -726,8 +737,16 @@ func markPullIssueFields(updates map[string]interface{}) {
 	updates[issueops.OpForceClosePolicy] = true
 }
 
-func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
+// pullIssueEqual reports whether a pull would leave local as it is. With
+// descriptionFields (a DescriptionFieldsTracker) it also compares the
+// acceptance criteria, design and notes the remote description carries.
+func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string, descriptionFields bool) bool {
 	if local == nil || remote == nil {
+		return false
+	}
+	if descriptionFields && (local.AcceptanceCriteria != remote.AcceptanceCriteria ||
+		local.Design != remote.Design ||
+		local.Notes != remote.Notes) {
 		return false
 	}
 	if local.Title != remote.Title ||
@@ -746,7 +765,10 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 	return localRef == strings.TrimSpace(ref)
 }
 
-func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref string) map[string]interface{} {
+// buildPullIssueUpdates returns the fields a pull writes to existing. With
+// descriptionFields (a DescriptionFieldsTracker) they include the acceptance
+// criteria, design and notes, so a section emptied remotely clears its field.
+func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref string, descriptionFields bool) map[string]interface{} {
 	updates := map[string]interface{}{
 		"title":       remote.Title,
 		"description": remote.Description,
@@ -754,6 +776,11 @@ func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref strin
 		"status":      string(remote.Status),
 		"issue_type":  string(remote.IssueType),
 		"assignee":    remote.Assignee,
+	}
+	if descriptionFields {
+		updates["acceptance_criteria"] = remote.AcceptanceCriteria
+		updates["design"] = remote.Design
+		updates["notes"] = remote.Notes
 	}
 	trimmedRef := strings.TrimSpace(ref)
 	if trimmedRef == "" {
@@ -1820,6 +1847,11 @@ func (e *Engine) reimportIssue(ctx context.Context, c Conflict) {
 		"description": conv.Issue.Description,
 		"priority":    conv.Issue.Priority,
 		"status":      string(conv.Issue.Status),
+	}
+	if _, ok := e.Tracker.(DescriptionFieldsTracker); ok {
+		updates["acceptance_criteria"] = conv.Issue.AcceptanceCriteria
+		updates["design"] = conv.Issue.Design
+		updates["notes"] = conv.Issue.Notes
 	}
 	if extIssue.Metadata != nil {
 		if raw, err := json.Marshal(extIssue.Metadata); err == nil {
