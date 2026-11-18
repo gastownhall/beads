@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"os"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestVcCommitStdinFlag(t *testing.T) {
@@ -108,4 +114,78 @@ func trimTrailingNewlines(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// vcStatusUnreadableStore is a DoltStorage stand-in whose branch and commit
+// reads succeed but whose working-set status read fails. It embeds a nil
+// DoltStorage and overrides only the reads bd vc status makes.
+type vcStatusUnreadableStore struct {
+	storage.DoltStorage
+}
+
+func (vcStatusUnreadableStore) CurrentBranch(context.Context) (string, error) {
+	return "main", nil
+}
+
+func (vcStatusUnreadableStore) GetCurrentCommit(context.Context) (string, error) {
+	return "0123456789abcdef0123456789abcdef", nil
+}
+
+func (vcStatusUnreadableStore) Status(context.Context) (*storage.Status, error) {
+	return nil, errors.New("dolt_status exploded")
+}
+
+// TestVCStatusFailsWhenWorkingSetUnreadable pins that bd vc status fails with
+// a status-read error, in text and JSON, when the working-set status cannot be
+// read, instead of printing the branch and commit as if the store were clean.
+func TestVCStatusFailsWhenWorkingSetUnreadable(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		name := "text"
+		if asJSON {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			saveAndRestoreGlobals(t)
+			origJSON, origCtx := jsonOutput, rootCtx
+			t.Cleanup(func() { jsonOutput, rootCtx = origJSON, origCtx })
+			store = vcStatusUnreadableStore{}
+			jsonOutput = asJSON
+			rootCtx = context.Background()
+
+			var runErr error
+			stdioMutex.Lock()
+			stdout, stderr := captureStdio(t, func() {
+				runErr = vcStatusCmd.RunE(vcStatusCmd, nil)
+			})
+			stdioMutex.Unlock()
+
+			if runErr == nil {
+				t.Fatalf("bd vc status succeeded although the working-set status could not be read\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+			}
+			var report string
+			if asJSON {
+				var payload map[string]interface{}
+				if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+					t.Fatalf("JSON error output does not parse: %v\n%s", err, stdout)
+				}
+				msg, _ := payload["error"].(string)
+				report = msg
+				for _, key := range []string{"branch", "commit", "staged", "unstaged"} {
+					if _, ok := payload[key]; ok {
+						t.Errorf("JSON output carries %q alongside the error: %s", key, stdout)
+					}
+				}
+			} else {
+				report = stderr
+				if strings.Contains(stdout, "Branch") || strings.Contains(stdout, "no uncommitted changes") {
+					t.Errorf("text output reports a status despite the failed read:\n%s", stdout)
+				}
+			}
+			for _, want := range []string{"working-set status", "dolt_status exploded"} {
+				if !strings.Contains(report, want) {
+					t.Errorf("error report must mention %q, got:\n%s", want, report)
+				}
+			}
+		})
+	}
 }

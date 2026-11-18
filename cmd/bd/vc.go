@@ -286,6 +286,13 @@ Examples:
 			currentCommit = "(unknown)"
 		}
 
+		// A status that could not be read is not a clean status: fail rather
+		// than print the branch and commit alone, which reads as "nothing to
+		// commit".
+		if _, err := store.Status(ctx); err != nil {
+			return HandleErrorRespectJSON("failed to read working-set status: %v", err)
+		}
+
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"branch": currentBranch,
