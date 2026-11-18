@@ -1104,11 +1104,12 @@ func TestUpdateGuardsDistinguishAbsentFromEmpty(t *testing.T) {
 // and the reason the three are assembled in one loop rather than three `if`s.
 func TestUpdateAssemblesTheThreeLabelMembersAsOnePatch(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		patch   string
-		replace *[]string
-		add     []string
-		remove  []string
+		name           string
+		patch          string
+		replace        *[]string
+		add            []string
+		remove         []string
+		removePrefixes []string
 	}{
 		{
 			name:    "replacement alone still sets Replace",
@@ -1137,6 +1138,14 @@ func TestUpdateAssemblesTheThreeLabelMembersAsOnePatch(t *testing.T) {
 			replace: &[]string{"a"},
 			add:     []string{"b"},
 			remove:  []string{"a"},
+		},
+		{
+			// The fourth member slots into the same one-patch assembly — the
+			// set-state pair, "drop the dimension, land the new value".
+			name:           "a prefix removal beside an addition",
+			patch:          `{"remove_label_prefixes":["state:"],"add_labels":["state:c"]}`,
+			add:            []string{"state:c"},
+			removePrefixes: []string{"state:"},
 		},
 		{
 			name:    "an empty replacement clears, and is not read as absent",
@@ -1170,18 +1179,22 @@ func TestUpdateAssemblesTheThreeLabelMembersAsOnePatch(t *testing.T) {
 			if !slices.Equal(labels.Remove, tc.remove) {
 				t.Errorf("Remove = %v, want %v", labels.Remove, tc.remove)
 			}
+			if !slices.Equal(labels.RemovePrefixes, tc.removePrefixes) {
+				t.Errorf("RemovePrefixes = %v, want %v", labels.RemovePrefixes, tc.removePrefixes)
+			}
 		})
 	}
 }
 
 // TestUpdateBoundsEveryLabelMember: the length rule is about what a label may
-// BE, so it holds on all three members — including `remove_labels`, where a
-// value the column could not hold could never have been stored. The role
-// refuses it there too and writes nothing, so the edge refuses it where the
-// 400 can name the member and the index.
+// BE, so it holds on every label member — including `remove_labels`, where a
+// value the column could not hold could never have been stored, and
+// `remove_label_prefixes`, where a prefix longer than a whole label can never
+// match one. The role refuses both there too and writes nothing, so the edge
+// refuses them where the 400 can name the member and the index.
 func TestUpdateBoundsEveryLabelMember(t *testing.T) {
 	long := strings.Repeat("x", types.MaxFieldLen+1)
-	for _, member := range []string{"labels", "add_labels", "remove_labels"} {
+	for _, member := range []string{"labels", "add_labels", "remove_labels", "remove_label_prefixes"} {
 		t.Run(member, func(t *testing.T) {
 			lifecycle := &roleLifecycle{}
 			ts := newUpdateServer(t, lifecycle)
@@ -1204,6 +1217,26 @@ func TestUpdateBoundsEveryLabelMember(t *testing.T) {
 				t.Errorf("a refused label reached the role: %+v", got)
 			}
 		})
+	}
+}
+
+// TestUpdateAcceptsTheLabelPrefixMember: `remove_label_prefixes` is the
+// fourth label edit — the set-state shape, "drop whatever this dimension
+// currently holds, then land the new value" — and it must cross the edge as
+// one request rather than being refused as an unknown member. It travels
+// beside `add_labels`, the pair `bd set-state` sends, and reaches the role
+// exactly once.
+func TestUpdateAcceptsTheLabelPrefixMember(t *testing.T) {
+	lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1"), Changed: true}}
+	ts := newUpdateServer(t, lifecycle)
+
+	resp := ts.updateIssue(t, updatePath,
+		`{"actor":"alice","patch":{"remove_label_prefixes":["state:"],"add_labels":["state:c"]}}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if got := lifecycle.updateRequests(); len(got) != 1 {
+		t.Fatalf("the role was called %d times, want 1", len(got))
 	}
 }
 

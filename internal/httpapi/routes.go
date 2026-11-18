@@ -361,6 +361,18 @@ const CapIssuesCreateGates = "issues.create.gates"
 // separate cutover dependency from gate create.
 const CapIssuesUpdateGates = "issues.update.gates"
 
+// CapIssuesUpdateLabelPrefixes is the behavior capability that advertises
+// the label edit's prefix removal (issueops.LabelPatch.RemovePrefixes, GH#5657)
+// on both patch documents: IssuePatchBody's `remove_label_prefixes` on
+// updateIssue and ApplyLabelPatch's `remove_prefixes` on an issues:batchApply
+// update item. One token covers both, CapIssuesUpdateGates' precedent. It is
+// what `bd set-state` sends to replace a whole dimension. An older server
+// answers either member with `400 invalid_argument`/`unknown_parameter`, so a
+// client that does not see this token refuses a prefix removal before the
+// dial, naming the token; `bd set-state` asks first and sends the exact labels
+// it read instead.
+const CapIssuesUpdateLabelPrefixes = "issues.update.labelPrefixes"
+
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that this server's ready, blocked-listing, claim, claim-next, close,
 // blocking-annotation and dependency-tree operations already apply bd's
@@ -1191,7 +1203,7 @@ var behaviorCapabilities = []string{
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
-	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade,
+	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade, CapIssuesUpdateLabelPrefixes,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

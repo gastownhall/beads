@@ -135,6 +135,14 @@ func ValidateUpdateRequest(request publicops.UpdateRequest) error {
 	if patch.Persistence.Set && !patch.Persistence.Value.IsValid() {
 		return fmt.Errorf("%w: invalid persistence mode %q", storage.ErrValidation, patch.Persistence.Value)
 	}
+	// A prefix longer than the label column can never match a stored label;
+	// refuse it with the same typed error an over-length label gets, before
+	// any write.
+	for _, prefix := range patch.Labels.RemovePrefixes {
+		if err := types.CheckFieldLen("label", prefix); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -394,7 +402,7 @@ func ApplyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 // the patch mints its own version row; ExecuteUpdate passes false and mints
 // once for the whole guarded update after its last patch.
 func applyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch publicops.LabelPatch, actor string, mintVersion bool) (bool, error) {
-	if !patch.Replace.Set && len(patch.Add) == 0 && len(patch.Remove) == 0 {
+	if !patch.Replace.Set && len(patch.Add) == 0 && len(patch.Remove) == 0 && len(patch.RemovePrefixes) == 0 {
 		return false, nil
 	}
 	existing := stringSet(current.Labels)
@@ -424,6 +432,16 @@ func applyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 		}
 		target[label] = struct{}{}
 	}
+	// Prefix removal runs on the replaced-or-current set and before Add, so
+	// "drop every state:* value, then add state:b" lands exactly state:b even
+	// when the snapshot already held it, and the diff below writes nothing
+	// for a set that comes out unchanged. Matching is literal HasPrefix,
+	// never SQL LIKE, and an empty prefix matches nothing.
+	for label := range target {
+		if hasAnyLabelPrefix(label, patch.RemovePrefixes) {
+			delete(target, label)
+		}
+	}
 	for _, label := range patch.Add {
 		if label == "" {
 			continue
@@ -439,6 +457,17 @@ func applyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 	sqlTx, ok := tx.(*sql.Tx)
 	if !ok {
 		return false, fmt.Errorf("apply labels: transaction must be *sql.Tx")
+	}
+	// A replacement or a prefix removal chose its deletions from the set read
+	// above, so an overlapping one on this issue must conflict at commit and
+	// replay against the labels it committed (GH#5657). Named adds and removes
+	// read nothing they act on and leave the cell alone, so they never
+	// conflict through it; see TouchLabelCoordinationInTx.
+	if labelPatchReadsTheSet(patch) {
+		_, labelTable, _, _ := WispTableRouting(IsActiveWispInTx(ctx, sqlTx, current.ID))
+		if err := TouchLabelCoordinationInTx(ctx, sqlTx, current.ID, labelTable); err != nil {
+			return false, fmt.Errorf("apply labels: %w", err)
+		}
 	}
 	// The per-label helpers run without minting: the patch is one mutation
 	// and is versioned once below, after the last row, so the version carries
@@ -459,6 +488,17 @@ func applyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 		}
 	}
 	return true, nil
+}
+
+// hasAnyLabelPrefix reports whether label starts with one of the non-empty
+// prefixes.
+func hasAnyLabelPrefix(label string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if prefix != "" && strings.HasPrefix(label, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ParentPatchResult reports the concrete changes made by ApplyParentPatch.

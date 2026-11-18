@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -361,7 +362,12 @@ type UpdateSpec struct {
 	AddLabels       []string
 	RemoveLabels    []string
 	SetLabels       *[]string
-	Reparent        *string
+	// RemoveLabelPrefixes drops every current (or SetLabels) label starting
+	// with one of these literal prefixes before AddLabels and RemoveLabels
+	// apply, the uow twin of publicops.LabelPatch.RemovePrefixes. ApplyUpdate
+	// resolves it against the labels it reads inside its own transaction.
+	RemoveLabelPrefixes []string
+	Reparent            *string
 
 	// ExpectedAssignee and ExpectedStatus are the bd-wsqvw compare-and-set
 	// guards (`bd update --if-assignee/--if-status`): when non-nil, the whole
@@ -790,6 +796,106 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 	}
 }
 
+// labelPrefixPatchTarget evaluates a label patch that carries a replacement in
+// LabelPatch order (the replacement, then RemoveLabelPrefixes, then AddLabels,
+// then RemoveLabels) and returns the final set. An empty label in the
+// replacement or the adds is dropped and an empty prefix matches nothing, as
+// on the direct route.
+func labelPrefixPatchTarget(replace []string, spec UpdateSpec) []string {
+	target := make(map[string]struct{}, len(replace)+len(spec.AddLabels))
+	for _, label := range replace {
+		if label != "" && !hasAnyLabelPrefix(label, spec.RemoveLabelPrefixes) {
+			target[label] = struct{}{}
+		}
+	}
+	for _, label := range spec.AddLabels {
+		if label != "" {
+			target[label] = struct{}{}
+		}
+	}
+	for _, label := range spec.RemoveLabels {
+		delete(target, label)
+	}
+	out := make([]string, 0, len(target))
+	for label := range target {
+		out = append(out, label)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// labelPrefixRemovals resolves spec's RemoveLabelPrefixes, for a patch with no
+// replacement, into the exact labels the Remove path drops: every label the
+// issue holds in this transaction that a prefix matches, except one AddLabels
+// puts back, plus spec's own RemoveLabels, which win over an add. ApplyUpdate
+// writes AddLabels before RemoveLabels, so the pair lands LabelPatch order.
+// A legacy empty-string label row matches no prefix and is left alone, as
+// the direct route leaves it.
+//
+// changed reports whether the edit leaves a different set than the one read:
+// a label it removes is held, or a label it adds is new and not removed again.
+// ApplyUpdate rewrites the label coordination cell only then, as the direct
+// route does only for a patch that changes the set.
+func (u *issueUseCaseImpl) labelPrefixRemovals(ctx context.Context, id string, spec UpdateSpec, useWisp bool) (remove []string, changed bool, err error) {
+	var current []string
+	if useWisp {
+		current, err = u.labelUC.GetWispLabels(ctx, id)
+	} else {
+		current, err = u.labelUC.GetLabels(ctx, id)
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("ApplyUpdate: read labels of %s: %w", id, err)
+	}
+	added := make(map[string]bool, len(spec.AddLabels))
+	for _, label := range spec.AddLabels {
+		added[label] = true
+	}
+	remove = append([]string(nil), spec.RemoveLabels...)
+	for _, label := range current {
+		if !added[label] && hasAnyLabelPrefix(label, spec.RemoveLabelPrefixes) {
+			remove = append(remove, label)
+		}
+	}
+	held := make(map[string]bool, len(current))
+	for _, label := range current {
+		held[label] = true
+	}
+	removed := make(map[string]bool, len(remove))
+	for _, label := range remove {
+		removed[label] = true
+		if held[label] {
+			changed = true
+		}
+	}
+	for _, label := range spec.AddLabels {
+		if label != "" && !held[label] && !removed[label] {
+			changed = true
+		}
+	}
+	return remove, changed, nil
+}
+
+func hasAnyLabelPrefix(label string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if prefix != "" && strings.HasPrefix(label, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasNonEmptyLabelPrefix reports whether prefixes names one that can match a
+// label (an empty prefix matches nothing): only then did the edit choose its
+// deletions from the set it read, issueops' labelPatchReadsTheSet rule.
+func hasNonEmptyLabelPrefix(prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if prefix != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // ApplyUpdate applies spec's guarded field updates and returns the resulting
 // issue. When ExpectedAssignee is set, the guard compares under
 // validation.ActorMatches, not verbatim ==, so two spellings of the same
@@ -865,6 +971,40 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		} else {
 			if err := u.UpdateIssue(ctx, id, spec.Fields, actor); err != nil {
 				return nil, err
+			}
+		}
+	}
+
+	if len(spec.RemoveLabelPrefixes) > 0 {
+		if spec.SetLabels != nil {
+			// A replacement is a whole-set write already: resolve the patch
+			// to its final set and let the diffing SetLabels path write only
+			// what differs.
+			target := labelPrefixPatchTarget(*spec.SetLabels, spec)
+			spec.SetLabels = &target
+			spec.AddLabels = nil
+			spec.RemoveLabels = nil
+		} else {
+			// Without one the patch stays an Add/Remove edit, as on the
+			// direct route: the prefixes resolve, against this transaction's
+			// labels, into the exact labels they drop, and the Add and Remove
+			// paths below write only rows that change. Clearing and re-adding
+			// the dimension's one existing value is then a true no-op that
+			// writes no row, event or coordination cell.
+			remove, changed, err := u.labelPrefixRemovals(ctx, id, spec, useWisp)
+			if err != nil {
+				return nil, err
+			}
+			spec.RemoveLabels = remove
+			// The removals came from the set just read, so an overlapping
+			// set-reading edit of this issue must conflict at commit and
+			// replay against the set this one commits (GH#5657). A
+			// replacement goes through SetLabels below, which touches the
+			// cell itself.
+			if changed && hasNonEmptyLabelPrefix(spec.RemoveLabelPrefixes) {
+				if err := u.labelRepo.TouchCoordination(ctx, id, LabelOpts{UseWispsTable: useWisp}); err != nil {
+					return nil, fmt.Errorf("ApplyUpdate: %w", err)
+				}
 			}
 		}
 	}

@@ -1279,6 +1279,33 @@ func ServesMoleculeAdvance(ctx context.Context, s DoltStorage) (bool, error) {
 	return prober.ServesMoleculeAdvance(ctx)
 }
 
+// LabelPrefixPatchProber is implemented by a DoltStorage whose updates may not
+// accept issueops.LabelPatch.RemovePrefixes — today exactly httpclient.Store,
+// whose server advertises it with issues.update.labelPrefixes. Every local
+// backend evaluates the prefix removal in the update's own transaction and
+// does not implement this.
+type LabelPrefixPatchProber interface {
+	ServesLabelPrefixPatch(ctx context.Context) (bool, error)
+}
+
+// ServesLabelPrefixPatch reports whether updates through s may carry
+// issueops.LabelPatch.RemovePrefixes (LabelPrefixPatchProber, looked up
+// through every decorator). A store that does not implement the prober
+// evaluates it itself and is answered true. A probe that fails returns its
+// error.
+//
+// `bd set-state` asks BEFORE it writes its state-change event: the label patch
+// is a second write after the event commits, so a refusal learned only then
+// would leave an event behind for a change that never happened. That is also
+// why a failed probe is not answered true.
+func ServesLabelPrefixPatch(ctx context.Context, s DoltStorage) (bool, error) {
+	prober, ok := UnwrapStore(s).(LabelPrefixPatchProber)
+	if !ok {
+		return true, nil
+	}
+	return prober.ServesLabelPrefixPatch(ctx)
+}
+
 // ExcludeIDsUnsupportedStore is implemented by a DoltStorage whose ready-work
 // reads cannot express types.WorkFilter.ExcludeIDs over their own transport.
 // Today that is exactly httpclient.Store: the v0 wire's listReadyWork and

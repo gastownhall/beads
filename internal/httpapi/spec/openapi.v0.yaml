@@ -9250,7 +9250,12 @@ components:
             parent-child descendants and orphans every other dependent (see
             `DeleteIssuesRequest.cascade`; a server without it deletes every
             transitive dependent, so a client refuses to send `cascade` to
-            one). One behavior token is
+            one), and `issues.update.labelPrefixes`, which announces that
+            `PATCH /v0/beads/issues/{id}`'s `patch` accepts
+            `remove_label_prefixes` and an `issues:batchApply` update item's
+            label patch accepts `remove_prefixes` (see `IssuePatchBody` and
+            `ApplyLabelPatch`), rather than a `400` naming the member unknown.
+            One behavior token is
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -11783,8 +11788,9 @@ components:
       type: object
       additionalProperties: false
       description: >-
-        An ordered label edit: `replace` first, then `add`, then `remove`, so
-        REMOVAL WINS when the same label appears in more than one member.
+        An ordered label edit: `replace` first, then `remove_prefixes`, then
+        `add`, then `remove`, so REMOVAL WINS when the same label appears in
+        more than one member.
 
 
         It is the full patch rather than `IssuePatchBody.labels`' complete
@@ -11812,13 +11818,28 @@ components:
           items:
             type: string
             maxLength: 255
-          description: Labels to add after any replacement.
+          description: Labels to add after any replacement and prefix removal.
         remove:
           type: array
           items:
             type: string
             maxLength: 255
           description: Labels to remove after replacement and addition.
+        remove_prefixes:
+          type: array
+          items:
+            type: string
+            maxLength: 255
+          description: >-
+            Removes every label that starts with one of these strings, applied
+            after `replace` and before `add`, so `remove_prefixes: ["state:"]`
+            with `add: ["state:b"]` leaves exactly `state:b` in that dimension
+            however many values it held. Matching is a literal string prefix:
+            `%` and `_` match only themselves. An empty prefix is dropped
+            rather than matching every label. Requires the behavior token
+            `issues.update.labelPrefixes`: a server that predates the member
+            answers it with a `400` naming it unknown, so a client that does
+            not see the token refuses the plan before the dial.
 
     ApplyMetadataPatch:
       type: object
@@ -13360,9 +13381,10 @@ components:
 
 
             It is the REPLACE half of the same ordered edit `ApplyPatchBody`
-            spells as `labels.replace`, and `add_labels`/`remove_labels` are the
-            other two. All three may travel together and are applied in that
-            order — replace, then add, then remove — so REMOVAL WINS when one
+            spells as `labels.replace`, and `remove_label_prefixes`,
+            `add_labels` and `remove_labels` are the others. All of them may
+            travel together and are applied in that order — replace, then
+            prefix removal, then add, then remove — so REMOVAL WINS when one
             label appears in more than one of them. That is the role's own
             algebra, not this operation's arrangement of it.
 
@@ -13422,6 +13444,24 @@ components:
             longer than the column is refused here as it is there — the length
             rule is about what a label may BE, not about whether this particular
             row happens to carry one.
+        remove_label_prefixes:
+          type: array
+          items:
+            type: string
+            maxLength: 255
+          description: >-
+            Removes every label that starts with one of these strings, applied
+            after `labels` and before `add_labels`, so
+            `remove_label_prefixes: ["state:"]` with `add_labels: ["state:b"]`
+            leaves exactly `state:b` in that dimension however many values it
+            held. Matching is a literal string prefix: `%` and `_` match only
+            themselves. An empty prefix is dropped rather than matching every
+            label, and the whole patch is evaluated against the issue's labels
+            in the update's own transaction, so a result equal to the current
+            set changes no labels. Requires the behavior token
+            `issues.update.labelPrefixes`: a server that predates the member
+            answers it with a `400` naming it unknown, so a client that does
+            not see the token refuses the update before the dial.
         estimated_minutes:
           type: integer
           nullable: true

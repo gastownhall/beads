@@ -192,6 +192,9 @@ func TestTheProjectIdentityVocabularyMatchesTheServer(t *testing.T) {
 	if CapDeleteContainmentCascade != httpapi.CapIssuesDeleteContainmentCascade {
 		t.Errorf("CapDeleteContainmentCascade = %q, server says %q", CapDeleteContainmentCascade, httpapi.CapIssuesDeleteContainmentCascade)
 	}
+	if CapIssuesUpdateLabelPrefixes != httpapi.CapIssuesUpdateLabelPrefixes {
+		t.Errorf("CapIssuesUpdateLabelPrefixes = %q, server says %q", CapIssuesUpdateLabelPrefixes, httpapi.CapIssuesUpdateLabelPrefixes)
+	}
 	if CapSweepLimit != httpapi.CapIssuesSweepLimit {
 		t.Errorf("CapSweepLimit = %q, server says %q", CapSweepLimit, httpapi.CapIssuesSweepLimit)
 	}
@@ -240,12 +243,12 @@ func TestTheProjectIdentityVocabularyMatchesTheServer(t *testing.T) {
 		httpapi.CapIssuesCloseAutoCloseMolecule, httpapi.CapIssuesListSearch,
 		httpapi.CapIssuesListNoAssignee, httpapi.CapIssuesListTitle, httpapi.CapListIDs, httpapi.CapIssuesUpdatePersistence, httpapi.CapDependenciesBlockingIsBlocked, httpapi.CapIssuesUpdateClaim,
 		httpapi.CapIssuesCreateGates, httpapi.CapIssuesUpdateGates, httpapi.CapIssuesListFilters,
-		httpapi.CapIssuesArrivalSeq, httpapi.CapIssuesDeleteContainmentCascade,
+		httpapi.CapIssuesArrivalSeq, httpapi.CapIssuesDeleteContainmentCascade, httpapi.CapIssuesUpdateLabelPrefixes,
 	}) {
 		t.Errorf("behaviorCapabilities = %v, want the server's project.enforce, issues.batchApplyLarge, issues.list.sort, "+
 			"issues.count.scope, issues.sweep.wispsPlane, issues.sweep.liveDependents, issues.sweep.limit, issues.sweep.retainIds, issues.sweep.retainedTypes, "+
 			"issues.batchApply.depAddLineage, issues.update.allowTemplate, issues.create.defaultPriority, issues.close.autoCloseMolecule, issues.list.search, "+
-			"issues.list.noAssignee, issues.list.title, issues.list.ids, issues.update.persistence, dependencies.blocking.isBlocked, issues.update.claim, issues.create.gates, issues.update.gates, issues.list.filters, issues.arrivalSeq and issues.delete.containmentCascade tokens", behaviorCapabilities)
+			"issues.list.noAssignee, issues.list.title, issues.list.ids, issues.update.persistence, dependencies.blocking.isBlocked, issues.update.claim, issues.create.gates, issues.update.gates, issues.list.filters, issues.arrivalSeq, issues.delete.containmentCascade and issues.update.labelPrefixes tokens", behaviorCapabilities)
 	}
 }
 

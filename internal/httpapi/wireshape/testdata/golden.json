@@ -457,6 +457,13 @@
     },
     {
       "schema": "ApplyLabelPatch",
+      "member": "remove_prefixes",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyLabelPatch",
       "member": "replace",
       "type": "array",
       "required": false,
@@ -3455,6 +3462,13 @@
       "member": "priority",
       "type": "integer",
       "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "remove_label_prefixes",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "IssuePatchBody",
@@ -7157,6 +7171,7 @@
     "ApplyLabelPatch": "request",
     "ApplyLabelPatch.add[]": "request",
     "ApplyLabelPatch.remove[]": "request",
+    "ApplyLabelPatch.remove_prefixes[]": "request",
     "ApplyLabelPatch.replace[]": "request",
     "ApplyMetadataPatch": "request",
     "ApplyMetadataPatch.set": "request",
@@ -7246,6 +7261,7 @@
     "IssuePatchBody": "request",
     "IssuePatchBody.add_labels[]": "request",
     "IssuePatchBody.labels[]": "request",
+    "IssuePatchBody.remove_label_prefixes[]": "request",
     "IssuePatchBody.remove_labels[]": "request",
     "IssuePatchBody.waiters[]": "request",
     "IssueWithCounts": "response",
