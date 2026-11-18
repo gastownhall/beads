@@ -846,7 +846,10 @@ func cleanupOrphanBackend(rootDir string) error {
 		return fmt.Errorf("read backend record %s: %w", recordPath, readErr)
 	}
 	if pf == nil {
-		return nil
+		// No record at all: an unrecorded orphan (a kill inside startAttempt's
+		// cmd.Start → pidfile.Write window, #8489) is still nameable through
+		// dolt's own server info file, verified before any signal.
+		return reapUnrecordedBackend(rootDir)
 	}
 	if err := pf.ValidateV2(pidfile.KindDoltBackend); err != nil {
 		dead, live, probeErr := probeUnverifiablePID(pf.Pid)
@@ -854,7 +857,9 @@ func cleanupOrphanBackend(rootDir string) error {
 			if _, quarantineErr := quarantineRecord(rootDir, server.PIDFileName, time.Now()); quarantineErr != nil {
 				return fmt.Errorf("quarantine dead unverifiable backend record: %w", quarantineErr)
 			}
-			return nil
+			// A storm iteration killed after its own dolt recorded leaves a
+			// dead record in front of the original unrecorded orphan.
+			return reapUnrecordedBackend(rootDir)
 		}
 		if probeErr != nil {
 			err = errors.Join(err, fmt.Errorf("probe recorded pid: %w", probeErr))
@@ -897,7 +902,9 @@ func cleanupOrphanBackend(rootDir string) error {
 		if _, err := quarantineRecord(rootDir, server.PIDFileName, time.Now()); err != nil {
 			return fmt.Errorf("quarantine dead backend record: %w", err)
 		}
-		return nil
+		// Same storm shape as above: the dead record may sit in front of an
+		// unrecorded orphan (#8489).
+		return reapUnrecordedBackend(rootDir)
 	}
 	if err := handle.Kill(); err != nil {
 		_ = handle.Close()

@@ -798,6 +798,35 @@ func ServesDatabaseDirOnPort(dir string, port int) bool {
 	return false
 }
 
+// ReadServerInfo reads the server info file dolt keeps in dir/.dolt while a
+// sql-server serves it, in the same pid:port:secret form the dolt CLI reads
+// (ServesDatabaseDirOnPort): "-" in the port position is a socket-only
+// server, reported as port 0. A file that cannot be read or parsed is an
+// error; callers treat any failure, and a pid <= 0, as "no server named".
+// Read-only: bd never writes, removes or locks this file. The proxy layer
+// uses it only as a pointer to a pid it then independently verifies before
+// signaling (#8489).
+func ReadServerInfo(dir string) (pid int, port int, err error) {
+	data, err := os.ReadFile(filepath.Join(dir, ".dolt", ServerInfoFileName)) //nolint:gosec // G304: fixed file name under the caller's dolt root
+	if err != nil {
+		return 0, 0, err
+	}
+	content := strings.TrimSpace(string(data))
+	parts := strings.Split(content, ":")
+	if len(parts) != 3 {
+		return 0, 0, fmt.Errorf("malformed %s: %q", ServerInfoFileName, content)
+	}
+	pid, pidErr := strconv.Atoi(parts[0])
+	port, portErr := 0, error(nil)
+	if parts[1] != "-" {
+		port, portErr = strconv.Atoi(parts[1])
+	}
+	if pidErr != nil || portErr != nil || pid <= 0 {
+		return 0, 0, fmt.Errorf("malformed %s: %q", ServerInfoFileName, content)
+	}
+	return pid, port, nil
+}
+
 // databaseLocked reports whether a process holds the lock dolt takes on the
 // database in dir, .dolt/noms/LOCK, which every dolt process that has the
 // database open holds, a dolt sql-server for as long as it serves it. The
