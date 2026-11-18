@@ -2,6 +2,7 @@ package compact
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -496,5 +499,230 @@ func TestBytesWriterAppends(t *testing.T) {
 	}
 	if got := string(w.buf); got != "hello world" {
 		t.Fatalf("unexpected buffer content: %q", got)
+	}
+}
+
+// stubMessagesServer serves a fixed Messages API reply with the given stop
+// reason and content blocks, and counts the requests it receives.
+func stubMessagesServer(t *testing.T, stopReason string, content []map[string]any) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		hits.Add(1)
+		body := map[string]any{
+			"id":            "msg_test",
+			"type":          "message",
+			"role":          "assistant",
+			"model":         "claude-haiku-4-5",
+			"content":       content,
+			"stop_reason":   stopReason,
+			"stop_sequence": nil,
+			"usage":         map[string]any{"input_tokens": 1, "output_tokens": 1},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(body); err != nil {
+			t.Errorf("encode stub reply: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// newStubHaikuClient returns a haikuClient whose requests go to srv only.
+func newStubHaikuClient(t *testing.T, srv *httptest.Server) *haikuClient {
+	t.Helper()
+	isolateEndpointPins(t)
+	h, err := newHaikuClient("test-key")
+	if err != nil {
+		t.Fatalf("newHaikuClient: %v", err)
+	}
+	h.client = anthropic.NewClient(
+		option.WithoutEnvironmentDefaults(),
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(srv.URL),
+		option.WithMaxRetries(0),
+	)
+	h.initialBackoff = time.Millisecond
+	return h
+}
+
+func thinkingBlock() map[string]any {
+	return map[string]any{"type": "thinking", "thinking": "pondering", "signature": "sig"}
+}
+
+func redactedThinkingBlock() map[string]any {
+	return map[string]any{"type": "redacted_thinking", "data": "opaque"}
+}
+
+func textBlock(text string) map[string]any {
+	return map[string]any{"type": "text", "text": text}
+}
+
+// TestSummarizeTier1_ReadsFirstTextBlock pins GH#7515: a reply may open with
+// non-text blocks (thinking), and the summary is the first text block.
+func TestSummarizeTier1_ReadsFirstTextBlock(t *testing.T) {
+	tests := []struct {
+		name       string
+		stopReason string
+		content    []map[string]any
+		want       string
+	}{
+		{"thinking then text", "end_turn", []map[string]any{thinkingBlock(), textBlock("S")}, "S"},
+		{"redacted thinking then text", "end_turn", []map[string]any{redactedThinkingBlock(), textBlock("S")}, "S"},
+		{"first of two text blocks", "end_turn", []map[string]any{thinkingBlock(), textBlock("A"), textBlock("B")}, "A"},
+		{"text only", "end_turn", []map[string]any{textBlock("S")}, "S"},
+		// Only an unfinished reply is refused: a finished one need not say end_turn.
+		{"stopped at a stop sequence", "stop_sequence", []map[string]any{thinkingBlock(), textBlock("S")}, "S"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, hits := stubMessagesServer(t, tt.stopReason, tt.content)
+			h := newStubHaikuClient(t, srv)
+
+			got, err := h.SummarizeTier1(context.Background(), &types.Issue{ID: "bd-1", Title: "t", Description: "d"})
+			if err != nil {
+				t.Fatalf("SummarizeTier1: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("SummarizeTier1 = %q, want %q", got, tt.want)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Fatalf("requests = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// TestSummarizeTier1_NoTextBlockFails pins that a reply with no text block is
+// a format error after one request, never a summary built from thinking.
+func TestSummarizeTier1_NoTextBlockFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		content []map[string]any
+		wantErr string
+	}{
+		{"thinking only", []map[string]any{thinkingBlock()}, "no text block in 1 content blocks (types: [thinking]; stop_reason: end_turn)"},
+		{"no content", []map[string]any{}, "no text block in 0 content blocks (types: []; stop_reason: end_turn)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, hits := stubMessagesServer(t, "end_turn", tt.content)
+			h := newStubHaikuClient(t, srv)
+
+			got, err := h.SummarizeTier1(context.Background(), &types.Issue{ID: "bd-1", Title: "t", Description: "d"})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("SummarizeTier1 error = %v, want one containing %q", err, tt.wantErr)
+			}
+			if got != "" {
+				t.Fatalf("SummarizeTier1 = %q, want empty", got)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Fatalf("requests = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// TestSummarizeTier1_RefusesUnfinishedOrEmptyReply pins that compaction never
+// takes a partial or empty summary: a reply cut off at max_tokens or the
+// context window, a refusal, or an empty first text block is an error after
+// one request. Thinking shares the max_tokens budget, so a reply that opens
+// with thinking is the one most likely to be cut off.
+func TestSummarizeTier1_RefusesUnfinishedOrEmptyReply(t *testing.T) {
+	tests := []struct {
+		name       string
+		stopReason string
+		content    []map[string]any
+		wantErr    string
+	}{
+		{"cut off at max_tokens after thinking", "max_tokens", []map[string]any{thinkingBlock(), textBlock("partial")},
+			"incomplete response: stop_reason max_tokens (types: [thinking text])"},
+		{"cut off at max_tokens", "max_tokens", []map[string]any{textBlock("partial")},
+			"incomplete response: stop_reason max_tokens (types: [text])"},
+		{"thinking used up max_tokens", "max_tokens", []map[string]any{thinkingBlock()},
+			"incomplete response: stop_reason max_tokens (types: [thinking])"},
+		{"context window exceeded", "model_context_window_exceeded", []map[string]any{thinkingBlock(), textBlock("partial")},
+			"incomplete response: stop_reason model_context_window_exceeded (types: [thinking text])"},
+		{"refusal", "refusal", []map[string]any{textBlock("I can't help with that.")},
+			"incomplete response: stop_reason refusal (types: [text])"},
+		// The first text block is the answer even when it is empty: never a later block.
+		{"empty first text block", "end_turn", []map[string]any{thinkingBlock(), textBlock(""), textBlock("B")},
+			"unexpected response format: empty text block (types: [thinking text text]; stop_reason: end_turn)"},
+		{"whitespace-only text block", "end_turn", []map[string]any{textBlock(" \n\t")},
+			"unexpected response format: empty text block (types: [text]; stop_reason: end_turn)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, hits := stubMessagesServer(t, tt.stopReason, tt.content)
+			h := newStubHaikuClient(t, srv)
+
+			got, err := h.SummarizeTier1(context.Background(), &types.Issue{ID: "bd-1", Title: "t", Description: "d"})
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("SummarizeTier1 error = %v, want %q", err, tt.wantErr)
+			}
+			if got != "" {
+				t.Fatalf("SummarizeTier1 = %q, want empty", got)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Fatalf("requests = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// TestCompactTier1_UnusableReplyKeepsIssue drives compaction through the
+// Haiku client: a reply cut off after thinking, or an empty summary, fails
+// before the snapshot and the overwrite, so the issue keeps its content.
+func TestCompactTier1_UnusableReplyKeepsIssue(t *testing.T) {
+	tests := []struct {
+		name       string
+		stopReason string
+		content    []map[string]any
+	}{
+		{"cut off at max_tokens after thinking", "max_tokens", []map[string]any{thinkingBlock(), textBlock("partial")}},
+		{"empty summary after thinking", "end_turn", []map[string]any{thinkingBlock(), textBlock("")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, hits := stubMessagesServer(t, tt.stopReason, tt.content)
+			var writes []string
+			store := &stubStore{
+				checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
+				getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+				snapshotIssueFn: func(context.Context, string, int) error {
+					writes = append(writes, "snapshot")
+					return nil
+				},
+				updateIssueFn: func(context.Context, string, map[string]interface{}, string) error {
+					writes = append(writes, "update")
+					return nil
+				},
+				applyCompactionFn: func(context.Context, string, int, int, int, string) error {
+					writes = append(writes, "apply")
+					return nil
+				},
+				addCommentFn: func(context.Context, string, string, string) error {
+					writes = append(writes, "comment")
+					return nil
+				},
+			}
+			c := &Compactor{store: store, summarizer: newStubHaikuClient(t, srv), config: &Config{}}
+
+			err := c.CompactTier1(context.Background(), "bd-123")
+			if err == nil || !strings.HasPrefix(err.Error(), "failed to summarize: ") {
+				t.Fatalf("CompactTier1 error = %v, want a summarize failure", err)
+			}
+			if len(writes) != 0 {
+				t.Fatalf("store writes = %v, want none", writes)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Fatalf("requests = %d, want 1", n)
+			}
+		})
 	}
 }
