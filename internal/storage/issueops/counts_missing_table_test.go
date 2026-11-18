@@ -65,9 +65,9 @@ func groupRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"k", "n"}).AddRow("open", 1)
 }
 
-// emptyCountsRows stands in for a counts mega-query that matched nothing.
-// scanCountsRowsInTx never scans a column here, so the narrow column set is
-// enough and the test does not have to restate the mega-query's projection.
+// emptyCountsRows stands in for a counts ID selection (or a counts mega-query)
+// that matched nothing. No column is ever scanned here, so the narrow column
+// set is enough and the test does not have to restate the projection.
 func emptyCountsRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"id"})
 }
@@ -147,8 +147,12 @@ var countsEntryPoints = []countsEntryPoint{
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			// The wisp leg selects an ID, then its by-IDs hydration (the
+			// statement that reaches every table in countsMegaQueryTables)
+			// fails.
+			mock.ExpectQuery(`(?s)^SELECT wisps\.id FROM wisps\b`).WillReturnRows(idRows("bd-w1"))
 			mock.ExpectQuery(`(?s)FROM wisps i`).WillReturnError(wispErr)
-			mock.ExpectQuery(`(?s)FROM issues i`).WillReturnRows(emptyCountsRows())
+			mock.ExpectQuery(`(?s)^SELECT issues\.id FROM issues\b`).WillReturnRows(emptyCountsRows())
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
 			out, err := SearchIssuesWithCountsInTx(ctx, tx, "", types.IssueFilter{Ephemeral: boolPtr(true)})
@@ -162,9 +166,10 @@ var countsEntryPoints = []countsEntryPoint{
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
 			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-			mock.ExpectQuery(`(?s)FROM issues i`).WillReturnRows(emptyCountsRows())
+			mock.ExpectQuery(`(?s)^SELECT issues\.id FROM issues\b`).WillReturnRows(emptyCountsRows())
 			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			mock.ExpectQuery(`(?s)^SELECT wisps\.id FROM wisps\b`).WillReturnRows(idRows("bd-w1"))
 			mock.ExpectQuery(`(?s)FROM wisps i`).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
