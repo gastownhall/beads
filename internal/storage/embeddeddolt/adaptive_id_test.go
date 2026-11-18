@@ -47,6 +47,31 @@ func TestAdaptiveIDLengthSpansBothPlanes(t *testing.T) {
 		te.assertRowExists(t, ctx, "wisps", id)
 	})
 
+	t.Run("wisp mint counts a wisp namespace promoted entirely into issues", func(t *testing.T) {
+		// The reported shape (PR #6968): every kz-wisp-* row was promoted,
+		// so the wisps table is empty and its own count reads zero.
+		te, ctx := newAdaptiveIDEnv(t, "kz")
+		ids := seededIDs("kz-wisp-q", 10)
+		ids = append(ids, seededIDs("kz-wisp-r", 2)...)
+		seedRows(t, te, ids, true)
+		for _, id := range ids {
+			if err := te.store.PromoteFromEphemeral(ctx, id, "tester"); err != nil {
+				t.Fatalf("PromoteFromEphemeral(%s): %v", id, err)
+			}
+		}
+		var inIssues, inWisps int
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM issues WHERE id LIKE 'kz-wisp-%'", nil, &inIssues)
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM wisps", nil, &inWisps)
+		if inIssues != len(ids) || inWisps != 0 {
+			t.Fatalf("after promotion: issues kz-wisp-* rows = %d, wisps rows = %d; want %d and 0", inIssues, inWisps, len(ids))
+		}
+
+		assertAdaptiveSizing(t, te, "wisps", "kz-wisp", 12, 4)
+		id := mintOne(t, te, "next wisp", true)
+		assertHashSuffixLen(t, id, "kz-wisp", 4)
+		te.assertRowExists(t, ctx, "wisps", id)
+	})
+
 	t.Run("durable mint counts base-namespace rows in wisps", func(t *testing.T) {
 		// AC-2: 5 dm-<hash> rows in issues plus 5 in wisps (demoted issues,
 		// or base-namespace wisps).
