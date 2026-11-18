@@ -121,8 +121,14 @@ func assertDefaultMetricsConfig(t *testing.T, home string) {
 }
 
 func TestLegacyDarwinCarryOver_DisabledOptOutCarried(t *testing.T) {
+	for _, goos := range []string{"darwin", "ios"} {
+		t.Run(goos, func(t *testing.T) { testDisabledOptOutCarried(t, goos) })
+	}
+}
+
+func testDisabledOptOutCarried(t *testing.T, goos string) {
 	home := setupUserConfigHome(t)
-	probes := useLegacyCarryOver(t, "darwin")
+	probes := useLegacyCarryOver(t, goos)
 	plantLegacyDarwinConfig(t, home,
 		"actor: legacy-actor\nnode_id: legacy-node\nmetrics:\n  disabled: true\n  notice_shown: true\n")
 
@@ -289,7 +295,7 @@ func TestLegacyDarwinCarryOver_ExistingConfigFailsClosed(t *testing.T) {
 }
 
 func TestLegacyDarwinCarryOver_NeverProbesOffDarwin(t *testing.T) {
-	for _, goos := range []string{"linux", "windows", "ios", "freebsd"} {
+	for _, goos := range []string{"linux", "windows", "freebsd"} {
 		t.Run(goos, func(t *testing.T) {
 			home := setupUserConfigHome(t)
 			probes := useLegacyCarryOver(t, goos)
@@ -300,6 +306,11 @@ func TestLegacyDarwinCarryOver_NeverProbesOffDarwin(t *testing.T) {
 			}
 			assertLegacyProbes(t, probes, home, 0)
 			assertDefaultMetricsConfig(t, home)
+			// Off macOS there is nothing to probe, so no lock either: the
+			// hard-link publish alone keeps creation atomic.
+			if _, err := os.Lstat(userConfigPath(home) + ".lock"); !os.IsNotExist(err) {
+				t.Errorf("lock file created off macOS: %v", err)
+			}
 		})
 	}
 }

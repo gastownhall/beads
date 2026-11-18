@@ -24,13 +24,17 @@ var commentedMetricsRe = regexp.MustCompile(`(?m)^\s*#\s*metrics\s*:`)
 // EnsureUserConfigDefaults writes metrics.disabled and metrics.endpoint into
 // the user config bd reads when either is absent.
 //
-// On darwin, when metrics.disabled is about to be written, it first carries a
-// metrics choice over from the pre-GH#8113 user config in ~/Library/Application
-// Support (see legacyDarwinMetricsCarryOver). That probe runs only under the
-// <config>.lock lock and only once the write is known to be possible, so it
-// happens once per user config: after a successful write metrics.disabled is
-// present and every later run returns before the lock. A user config bd cannot
-// write never triggers the probe.
+// On macOS (darwin and ios), when metrics.disabled is about to be written, it
+// first carries a metrics choice over from the pre-GH#8113 user config in
+// ~/Library/Application Support (see legacyDarwinMetricsCarryOver). That probe
+// runs only under the <config>.lock lock and only once the write is known to
+// be possible, so it happens once per user config: after a successful write
+// metrics.disabled is present and every later run returns before the lock. A
+// user config bd cannot write never triggers the probe; the caller then keeps
+// metrics off for the run (see cmd/bd metricsEnabledAfterBootstrap).
+//
+// Elsewhere there is nothing to probe and no lock: the hard-link publish in
+// createUserConfig already makes creating the file atomic.
 func EnsureUserConfigDefaults() error {
 	path, err := config.UserConfigYamlPath()
 	if err != nil {
@@ -53,27 +57,30 @@ func EnsureUserConfigDefaults() error {
 		return fmt.Errorf("ensure user config: mkdir %s: %w", filepath.Dir(path), err)
 	}
 
-	// Creating the lock file also proves the directory takes new files,
-	// which is all the new-file path needs. An existing config is locked
-	// beside its symlink-resolved target, the directory the check above
-	// proved writable.
-	lockPath := path
-	if state.exists {
-		if target, err := filepath.EvalSymlinks(path); err == nil {
-			lockPath = target
+	if MacOSFamilyPlatform() {
+		// Creating the lock file also proves the directory takes new files,
+		// which is all the new-file path needs. An existing config is locked
+		// beside its symlink-resolved target, the directory the check above
+		// proved writable.
+		lockPath := path
+		if state.exists {
+			if target, err := filepath.EvalSymlinks(path); err == nil {
+				lockPath = target
+			}
 		}
-	}
-	unlock, err := lockUserConfig(lockPath)
-	if err != nil {
-		return fmt.Errorf("ensure user config: lock %s: %w", lockPath, err)
-	}
-	defer unlock()
+		unlock, err := lockUserConfig(lockPath)
+		if err != nil {
+			return fmt.Errorf("ensure user config: lock %s: %w", lockPath, err)
+		}
+		defer unlock()
 
-	// Re-read under the lock: another bd may have finished while this one
-	// waited, and then there is nothing left to do (and nothing to probe).
-	state, err = readMetricsKeyState(path)
-	if err != nil || !state.needsWrite() {
-		return err
+		// Re-read under the lock: another bd may have finished while this
+		// one waited, and then there is nothing left to do (and nothing to
+		// probe).
+		state, err = readMetricsKeyState(path)
+		if err != nil || !state.needsWrite() {
+			return err
+		}
 	}
 	if !state.exists {
 		if _, lerr := os.Lstat(path); lerr == nil {
@@ -145,6 +152,9 @@ func writeMissingMetricsKeys(state metricsKeyState, carry metricsCarryOver) erro
 		if err := config.SetUserYamlConfig("metrics.disabled", carry.disabledValue()); err != nil {
 			return fmt.Errorf("ensure user config: set metrics.disabled: %w", err)
 		}
+		// The opt-out the notice describes is now on disk, whatever happens
+		// to the companion keys below.
+		carry.announce()
 	}
 	if state.needEndpoint {
 		if err := config.SetUserYamlConfig("metrics.endpoint", carry.endpointValue()); err != nil {
@@ -155,9 +165,6 @@ func writeMissingMetricsKeys(state metricsKeyState, carry metricsCarryOver) erro
 		if err := config.SetUserYamlConfig("metrics.notice_shown", "true"); err != nil {
 			return fmt.Errorf("ensure user config: set metrics.notice_shown: %w", err)
 		}
-	}
-	if state.needDisabled {
-		carry.announce()
 	}
 	return nil
 }
@@ -186,8 +193,10 @@ func lockUserConfig(path string) (unlock func(), err error) {
 // hard-links it into place, which fails rather than replaces when the path
 // already exists. created is false, with no error, when another writer got
 // there first. On a filesystem without hard links it falls back to an
-// exclusive create, which other bootstraps still cannot observe half-written
-// because they read it only under the same lock.
+// exclusive create, the way bd created this file before GH#8113. That
+// publishes the name before the content is written, so a bd reading the file
+// without the lock (any concurrent run off macOS, or the pre-lock check on
+// macOS) can see it partly written there.
 func createUserConfig(path string, body []byte) (created bool, err error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".~"+filepath.Base(path)+".bootstrap.") // mode 0600
@@ -244,6 +253,12 @@ var (
 	readLegacyDarwinUserConfig = config.ReadLegacyDarwinUserConfigYaml
 	legacyCarryOverNotice      io.Writer
 )
+
+// MacOSFamilyPlatform reports whether the bootstrap runs on darwin or ios
+// (config.IsMacOSFamily), the platforms with the GH#8113 carry-over. Callers
+// that make the post-bootstrap consent decision ask it too, so tests that
+// install another GOOS with SetLegacyDarwinCarryOverForTest drive both.
+func MacOSFamilyPlatform() bool { return config.IsMacOSFamily(bootstrapGOOS) }
 
 // SetLegacyDarwinCarryOverForTest makes the bootstrap behave as if running on
 // goos and, when read is non-nil, routes the legacy darwin config read through
@@ -339,7 +354,7 @@ func (c metricsCarryOver) announce() {
 // legacyDarwinMetricsCarryOver reads the pre-GH#8113 macOS user config
 // (~/Library/Application Support/bd/config.yaml) and returns its
 // metrics.disabled, metrics.endpoint and metrics.notice_shown, and nothing
-// else. It runs only on darwin, only from the bootstrap, and only when
+// else. It runs only on darwin and ios, only from the bootstrap, and only when
 // metrics.disabled is about to be written, so the folder macOS can guard with
 // a privacy prompt is touched once per user config.
 //
@@ -349,7 +364,7 @@ func (c metricsCarryOver) announce() {
 // the size cap, an I/O error) or does not parse as a YAML mapping fails
 // closed: metrics.disabled true, nothing else carried, and a notice.
 func legacyDarwinMetricsCarryOver() metricsCarryOver {
-	if bootstrapGOOS != "darwin" {
+	if !MacOSFamilyPlatform() {
 		return metricsCarryOver{}
 	}
 	path, err := config.LegacyDarwinUserConfigYamlPath()

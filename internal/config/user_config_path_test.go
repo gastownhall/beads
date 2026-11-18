@@ -698,15 +698,17 @@ func TestReadLegacyDarwinUserConfigYaml(t *testing.T) {
 	if _, err := ReadLegacyDarwinUserConfigYaml(missing); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("missing file: err = %v, want fs.ErrNotExist", err)
 	}
-	if _, err := ReadLegacyDarwinUserConfigYaml(dir); err == nil || errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("directory: err = %v, want a not-a-regular-file error", err)
+	_, err := ReadLegacyDarwinUserConfigYaml(dir)
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) || pathErr.Path != dir || pathErr.Err.Error() != "not a regular file" {
+		t.Fatalf("directory: err = %v, want a *fs.PathError for %s: not a regular file", err, dir)
 	}
 	big := filepath.Join(dir, "big.yaml")
 	if err := os.WriteFile(big, make([]byte, LegacyDarwinUserConfigMaxBytes+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadLegacyDarwinUserConfigYaml(big); err == nil || errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("oversized file: err = %v, want a size error", err)
+	if _, err := ReadLegacyDarwinUserConfigYaml(big); !errors.As(err, &pathErr) || pathErr.Path != big || errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("oversized file: err = %v, want a *fs.PathError size error", err)
 	}
 	ok := filepath.Join(dir, "ok.yaml")
 	if err := os.WriteFile(ok, []byte("node_id: n1\n"), 0o600); err != nil {
@@ -831,5 +833,54 @@ func TestDarwinXDGUserConfigReadsAndWritesXDGFile(t *testing.T) {
 	}
 	if got := GetUserYamlConfig("node_id"); got != "written-node" {
 		t.Errorf("GetUserYamlConfig(node_id) after write = %q", got)
+	}
+}
+
+func TestIsMacOSFamily(t *testing.T) {
+	for goos, want := range map[string]bool{"darwin": true, "ios": true, "linux": false, "windows": false, "freebsd": false, "": false} {
+		if got := IsMacOSFamily(goos); got != want {
+			t.Errorf("IsMacOSFamily(%q) = %v, want %v", goos, got, want)
+		}
+	}
+}
+
+// TestUserConfigSetsBoolKey pins the macOS post-bootstrap metrics gate's
+// question: does the user config bd reads hold a valid bool for the key?
+func TestUserConfigSetsBoolKey(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string // "" writes no file
+		want bool
+	}{
+		"no file":          {},
+		"nested true":      {body: "metrics:\n  disabled: true\n", want: true},
+		"nested false":     {body: "metrics:\n  disabled: false\n", want: true},
+		"flat quoted":      {body: "metrics.disabled: \"FALSE\"\n", want: true},
+		"not a bool":       {body: "metrics:\n  disabled: maybe\n"},
+		"null":             {body: "metrics:\n  disabled:\n"},
+		"absent":           {body: "actor: alice\n"},
+		"commented out":    {body: "# metrics:\n#   disabled: true\n"},
+		"malformed":        {body: "metrics: [unclosed\n"},
+		"not a mapping":    {body: "- metrics\n"},
+		"other key is set": {body: "metrics:\n  endpoint: https://x.example\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Cleanup(SetUserConfigDirForTest(func() (string, error) { return filepath.Join(home, ".config"), nil }))
+			if tc.body != "" {
+				path := filepath.Join(home, ".config", "bd", "config.yaml")
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := UserConfigSetsBoolKey("metrics.disabled"); got != tc.want {
+				t.Fatalf("UserConfigSetsBoolKey = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

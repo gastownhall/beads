@@ -182,19 +182,163 @@ func TestMetricsBootstrapUnreadableLegacyConfigFailsClosed(t *testing.T) {
 }
 
 // TestMetricsBootstrapSkipsShellCompletion: a Tab press never bootstraps the
-// user config, so it neither probes the legacy file nor writes anything.
+// user config, so it neither probes the legacy file nor writes anything, and
+// on macOS, with no metrics.disabled in the user config, it runs with metrics
+// off and creates no metrics data dir. (cobra runs __completeNoDesc as an
+// alias, so cmd.Name() is always __complete.)
 func TestMetricsBootstrapSkipsShellCompletion(t *testing.T) {
-	for _, name := range []string{cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd} {
-		t.Run(name, func(t *testing.T) {
+	home, probes := isolateMetricsBootstrap(t, "darwin")
+	plantLegacyDarwinMetricsOptOut(t, home)
+	bootstrapAndInitMetrics(cobra.ShellCompRequestCmd)
+	if len(*probes) != 0 {
+		t.Fatalf("legacy probes = %q, want none for completion", *probes)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "bd", "config.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("completion created the user config: %v", err)
+	}
+	if metrics.Enabled() {
+		t.Fatal("metrics enabled for completion on macOS with no metrics.disabled in the user config")
+	}
+	assertNoMetricsDataDir(t)
+}
+
+func assertNoMetricsDataDir(t *testing.T) {
+	t.Helper()
+	dir, err := metrics.DataDir()
+	if err != nil {
+		t.Fatalf("metrics.DataDir: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("metrics data dir %s exists: %v", dir, err)
+	}
+}
+
+// requireUnwritableForTest skips when path still takes writes after its mode
+// was dropped (a root test runner ignores permission bits).
+func requireUnwritableForTest(t *testing.T, dir string) {
+	t.Helper()
+	probe := filepath.Join(dir, ".write-probe")
+	if f, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		_ = f.Close()
+		_ = os.Remove(probe)
+		t.Skip("permission bits are not enforced for this user (root?)")
+	}
+}
+
+// TestMetricsUnwritableUserConfigKeepsMacOptOut: when the bootstrap cannot
+// write metrics.disabled, it skips the legacy probe, so a metrics opt-out left
+// in the pre-GH#8113 Application Support config would be lost. On macOS the
+// run then keeps metrics off unless the user config bd reads holds a valid
+// metrics.disabled, silently and with no write; on Linux nothing changes.
+func TestMetricsUnwritableUserConfigKeepsMacOptOut(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, home string)
+	}{
+		{"config dir 0500 with no config", func(t *testing.T, home string) {
+			dir := filepath.Join(home, ".config")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			requireUnwritableForTest(t, dir)
+		}},
+		{"read-only XDG config without metrics keys", func(t *testing.T, home string) {
+			xdg := filepath.Join(home, "xdg")
+			t.Setenv("XDG_CONFIG_HOME", xdg)
+			path := filepath.Join(xdg, "bd", "config.yaml")
+			writeTestUserConfig(t, path, "actor: alice\n")
+			if err := os.Chmod(path, 0o400); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(filepath.Dir(path), 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(filepath.Dir(path), 0o755) })
+			requireUnwritableForTest(t, filepath.Dir(path))
+		}},
+		{"dangling config symlink", func(t *testing.T, home string) {
+			path := filepath.Join(home, ".config", "bd", "config.yaml")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(home, "missing.yaml"), path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"malformed XDG config", func(t *testing.T, home string) {
+			writeTestUserConfig(t, filepath.Join(home, ".config", "bd", "config.yaml"), "metrics: [unclosed\n")
+		}},
+		{"commented-out metrics block", func(t *testing.T, home string) {
+			writeTestUserConfig(t, filepath.Join(home, ".config", "bd", "config.yaml"), "# metrics:\n#   disabled: true\nactor: alice\n")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run("darwin/"+tc.name, func(t *testing.T) {
 			home, probes := isolateMetricsBootstrap(t, "darwin")
 			plantLegacyDarwinMetricsOptOut(t, home)
-			bootstrapMetricsUserConfig(name)
-			if len(*probes) != 0 {
-				t.Fatalf("legacy probes = %q, want none for %s", *probes, name)
+			tc.setup(t, home)
+			if !resolveMetricsEnabled() {
+				t.Fatal("precondition: metrics resolve enabled before the bootstrap")
 			}
-			if _, err := os.Stat(filepath.Join(home, ".config", "bd", "config.yaml")); !os.IsNotExist(err) {
-				t.Fatalf("%s created the user config: %v", name, err)
+
+			stderr := captureStderrDuring(t, func() { bootstrapAndInitMetrics("ready") })
+
+			if len(*probes) != 0 {
+				t.Fatalf("legacy probes = %q, want none for a config bd cannot write", *probes)
+			}
+			if metrics.Enabled() || metricsEnabledAfterBootstrap() {
+				t.Fatal("metrics on after the bootstrap could not keep the legacy opt-out")
+			}
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want silence", stderr)
+			}
+			assertNoMetricsDataDir(t)
+		})
+		t.Run("linux/"+tc.name, func(t *testing.T) {
+			home, probes := isolateMetricsBootstrap(t, "linux")
+			plantLegacyDarwinMetricsOptOut(t, home)
+			tc.setup(t, home)
+			// The bootstrap only, then the decision: Init is not told to
+			// start a real collector.
+			bootstrapMetricsUserConfig("ready")
+			if len(*probes) != 0 {
+				t.Fatalf("legacy probes = %q, want none off macOS", *probes)
+			}
+			if !metricsEnabledAfterBootstrap() {
+				t.Fatal("metrics off on Linux; want the pre-GH#8113 decision (on)")
 			}
 		})
+	}
+
+	t.Run("darwin env decides", func(t *testing.T) {
+		home, _ := isolateMetricsBootstrap(t, "darwin")
+		plantLegacyDarwinMetricsOptOut(t, home)
+		cases[0].setup(t, home)
+		t.Setenv(metrics.EnvDisableMetrics, "0")
+		bootstrapMetricsUserConfig("ready")
+		if !metricsEnabledAfterBootstrap() {
+			t.Fatalf("%s=0 did not turn metrics on", metrics.EnvDisableMetrics)
+		}
+	})
+	t.Run("darwin valid metrics.disabled", func(t *testing.T) {
+		_, _ = isolateMetricsBootstrap(t, "darwin")
+		bootstrapMetricsUserConfig("ready") // writes metrics.disabled: false
+		if !metricsEnabledAfterBootstrap() {
+			t.Fatal("metrics off with a written metrics.disabled: false")
+		}
+	})
+}
+
+func writeTestUserConfig(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

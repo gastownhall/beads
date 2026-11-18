@@ -683,6 +683,21 @@ func MetricsDisabledByUserConfig() bool {
 	return disabled
 }
 
+// UserConfigSetsBoolKey reports whether the user-global config.yaml bd reads
+// holds key with a value ParseUserConfigBool accepts. An absent file, an
+// unreadable or malformed one, an absent or commented-out key, and a value
+// that is not a bool all read as false. On macOS, metrics stay off for a run
+// unless this holds for metrics.disabled (GH#8113): bd cannot tell a user
+// whose opt-out it failed to carry over from one who never had one.
+func UserConfigSetsBoolKey(key string) bool {
+	raw, ok := readUserGlobalYamlValue(key)
+	if !ok {
+		return false
+	}
+	_, valid := ParseUserConfigBool(raw)
+	return valid
+}
+
 // UserMetricsEndpoint returns the metrics endpoint configured in the user-global
 // config.yaml, or "" if unset. Project/BEADS_DIR config is intentionally ignored
 // so a repository can never redirect a user's metrics endpoint. Callers fall

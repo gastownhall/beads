@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -54,8 +55,7 @@ func SetUserConfigDirForTest(fn func() (string, error)) (restore func()) {
 // cleaning); everywhere else it returns osUserConfigDir() itself, value and
 // error, so non-Apple platforms are unchanged.
 func userConfigDirFor(goos string, getenv func(string) string, osUserConfigDir func() (string, error)) (string, error) {
-	switch goos {
-	case "darwin", "ios":
+	if IsMacOSFamily(goos) {
 		if dir := getenv("XDG_CONFIG_HOME"); dir != "" {
 			if !filepath.IsAbs(dir) {
 				return "", errors.New("path in $XDG_CONFIG_HOME is relative")
@@ -67,9 +67,17 @@ func userConfigDirFor(goos string, getenv func(string) string, osUserConfigDir f
 			return "", errors.New("neither $XDG_CONFIG_HOME nor $HOME are defined")
 		}
 		return home + "/.config", nil
-	default:
-		return osUserConfigDir()
 	}
+	return osUserConfigDir()
+}
+
+// IsMacOSFamily reports whether goos is an Apple platform (darwin or ios),
+// where bd's user config directory follows the Unix rule instead of
+// ~/Library/Application Support (GH#8113). Every GH#8113 platform decision
+// (the resolver, the metrics carry-over and post-bootstrap consent, the doctor
+// check) asks this one question.
+func IsMacOSFamily(goos string) bool {
+	return goos == "darwin" || goos == "ios"
 }
 
 func currentUserConfigYamlCandidates() userConfigYamlCandidates {
@@ -130,7 +138,9 @@ const LegacyDarwinUserConfigMaxBytes = 1 << 20
 // ReadLegacyDarwinUserConfigYaml reads the legacy macOS user config at path
 // for its two sanctioned readers (the metrics bootstrap carry-over and the
 // macOS doctor check). It stats before opening, so a FIFO or device there is
-// refused without the open that could block, re-checks the opened file, and
+// refused without the open that could block, opens non-blocking on Unix (so a
+// FIFO swapped in after the stat cannot block either), re-checks the opened
+// file, and
 // refuses anything larger than LegacyDarwinUserConfigMaxBytes. A missing file
 // returns an error that matches fs.ErrNotExist.
 func ReadLegacyDarwinUserConfigYaml(path string) ([]byte, error) {
@@ -141,7 +151,10 @@ func ReadLegacyDarwinUserConfigYaml(path string) ([]byte, error) {
 	if err := checkLegacyDarwinUserConfigInfo(path, info); err != nil {
 		return nil, err
 	}
-	f, err := os.Open(path) //nolint:gosec // path is the fixed legacy darwin user config path
+	// Open non-blocking where the platform has it: a FIFO swapped in after
+	// the stat then opens without waiting for a writer, and the fstat
+	// re-check below refuses it.
+	f, err := openLegacyDarwinUserConfig(path)
 	if err != nil {
 		return nil, err
 	}
@@ -158,19 +171,27 @@ func ReadLegacyDarwinUserConfigYaml(path string) ([]byte, error) {
 		return nil, err
 	}
 	if len(data) > LegacyDarwinUserConfigMaxBytes {
-		return nil, fmt.Errorf("%s is larger than %d bytes", path, LegacyDarwinUserConfigMaxBytes)
+		return nil, legacyTooLargeError(path)
 	}
 	return data, nil
 }
 
+// checkLegacyDarwinUserConfigInfo refuses a legacy config that is not a
+// regular file or is over the size cap. Its errors are *fs.PathError, like
+// the open and read errors, so a caller that prints the path itself can print
+// just the reason.
 func checkLegacyDarwinUserConfigInfo(path string, info os.FileInfo) error {
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", path)
+		return &fs.PathError{Op: "read", Path: path, Err: errors.New("not a regular file")}
 	}
 	if info.Size() > LegacyDarwinUserConfigMaxBytes {
-		return fmt.Errorf("%s is larger than %d bytes", path, LegacyDarwinUserConfigMaxBytes)
+		return legacyTooLargeError(path)
 	}
 	return nil
+}
+
+func legacyTooLargeError(path string) error {
+	return &fs.PathError{Op: "read", Path: path, Err: fmt.Errorf("larger than %d bytes", LegacyDarwinUserConfigMaxBytes)}
 }
 
 // nativeUserConfigValidationSource names the source of a relative directory

@@ -56,6 +56,11 @@ func TestLegacyDarwinCarryOver_UnwritableConfigDirNeverProbes(t *testing.T) {
 	if err := os.WriteFile(path, []byte("actor: unwritable-dir\n"), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	// A lock file left by an earlier run means taking the lock no longer
+	// needs a new file in dir: only the writability check stops the probe.
+	if err := os.WriteFile(path+".lock", nil, 0o600); err != nil {
+		t.Fatalf("seed lock: %v", err)
+	}
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
