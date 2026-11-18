@@ -159,6 +159,16 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	}
 
 	commandDidWrite.Store(true)
+	// Tell this command's own post-run auto-export that these ids are
+	// supposed to be gone, the same handoff the direct route makes
+	// (delete.go). The whole resolved set, cascade closure included: on the
+	// proxied write path under dolt.auto-commit=batch/off a delete never
+	// lands in committed history during this run, so the export's later
+	// deletion proofs (dolt_diff against a moved anchor, dolt_history under
+	// a frozen HEAD) can come up empty, the orphan guard would read these as
+	// JSONL-only records and refuse to overwrite — the permanent wedge shape
+	// of GH#5896. Dry-run returns above, so a preview never registers.
+	commandDeletedIssueIDs.add(result.DeletedIDs...)
 	renderDeleteProxiedResult(in, result)
 	return nil
 }

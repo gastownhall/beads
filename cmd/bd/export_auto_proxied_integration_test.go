@@ -205,11 +205,11 @@ func TestProxiedServerAutoExport(t *testing.T) {
 	// the note says so, and the JSONL-only refusal never fires — under both
 	// auto-commit modes.
 	t.Run("delete_reconciled", func(t *testing.T) {
-		// dolt.auto-commit=batch joins this table with the P1 in-process
-		// delete handoff (bd-todbq7 AC-4): under batch the delete never
-		// reaches committed history, so only the handoff can prove the id
-		// and the orphan guard refuses instead of reconciling.
-		for _, mode := range []string{"on"} {
+		// dolt.auto-commit=batch exercises the P1 in-process delete handoff
+		// (bd-todbq7 AC-4): under batch the delete never reaches committed
+		// history in this run, so only the handoff can prove the id —
+		// without it the orphan guard refuses instead of reconciling.
+		for _, mode := range []string{"on", "batch"} {
 			t.Run("auto_commit_"+mode, func(t *testing.T) {
 				t.Parallel()
 				p := newSharedProxiedProject(t, bd, "paxd")
