@@ -95,6 +95,25 @@ outcomes by reading `INFORMATION_SCHEMA`, never an exit code, and test guarded
 migrations through the embedded (cgo) engine, where `PREPARE`/`EXECUTE` behaves
 normally. See `internal/storage/embeddeddolt/migrate_frozen_guard_convergence_test.go`.
 
+**A multi-object rebuild guarded by one sniffed flag strands the population
+that fails mid-body.** ignored/0005 sniffs `@needs_drop` (is the legacy
+generated column still there?) once and conditions its whole body on it —
+drops, surrogate key, unique keys, constraint restores. A failure after the
+drop half leaves a table the retry's sniff reads as already migrated: every
+step no-ops, the cursor advances, and the store converges on the outside
+while carrying none of the four final constraints. That is the #6092 strand
+(main 0022's colliding index names abort the restore half), and its mirror:
+on a clone whose main cursor already recorded 0022's indexes over the legacy
+table, the drop half itself aborts and the cursor never moves. Guard each
+drop and add on the object it targets rather than on one entry condition, or
+pair the step with a pre-migration repair that resumes from any prefix.
+`repairWispDependenciesForwardShape` is that repair, and it is registered at
+both entry points — `schema_migrations` 58 and `ignored_schema_migrations` 5
+— because the two cursors move independently on real clones: a store whose
+main cursor is already past 58 replays the ignored chain with no pending
+main step to host the repair, so a table the ignored chain rebuilds needs an
+entry in that chain too.
+
 **Moving a tracked table onto the dolt_ignored plane loses its rows on every
 clone but the one that migrates.** 0062 drops versioned `events`, commits the
 drop, and recreates the table ignored, refilled from a temp copy. The commit

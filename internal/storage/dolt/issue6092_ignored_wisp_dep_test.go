@@ -86,7 +86,11 @@ type issue6092Conn interface {
 // pinned connection everything else runs on. No DROP DATABASE on cleanup:
 // rapid CREATE/DROP cycles crash the Dolt server (see events_preflip_restore_
 // test.go).
-func issue6092Setup(t *testing.T) (string, *sql.Conn, context.Context) {
+// issue6092Connect opens the private single-branch database and pins one
+// connection to it, WITHOUT migrating: fixtures that need a specific
+// starting cursor (see the main-46 test) build on this; issue6092Setup is
+// the plain to-latest variant.
+func issue6092Connect(t *testing.T) (string, *sql.Conn, context.Context) {
 	t.Helper()
 	skipIfNoDolt(t)
 	acquireTestSlot()
@@ -118,6 +122,11 @@ func issue6092Setup(t *testing.T) (string, *sql.Conn, context.Context) {
 	}
 	t.Cleanup(func() { conn.Close() })
 
+	return dbName, conn, ctx
+}
+
+func issue6092Setup(t *testing.T) (string, *sql.Conn, context.Context) {
+	dbName, conn, ctx := issue6092Connect(t)
 	if _, err := schema.MigrateUpWithLock(ctx, conn, dbName); err != nil {
 		t.Fatalf("initial migration pass: %v", err)
 	}
@@ -827,4 +836,61 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('wisps', 'wisp_dependencies',
 		t.Fatalf("dolt_log grew across the second pass: %d -> %d", logBefore, got)
 	}
 	issue6092RequireFinalWispDepShape(t, ctx, conn)
+}
+
+// TestIssue6092UpgradeFromMain46ConvergesViaMain58Repair is the reporter's
+// original population: a clone last migrated by a binary at main 46 whose
+// ignored chain sat at 4, so wisp_dependencies still carried ignored 0003's
+// legacy generated-column shape when main 0022 ran over it and left its
+// three type indexes. The upgrade to latest must converge the table through
+// the pre-existing main-58 repair, and the ignored-5 entry this fix adds
+// must then no-op over the already-final shape rather than conflict with it
+// (a duplicate constraint or key would abort the pass).
+func TestIssue6092UpgradeFromMain46ConvergesViaMain58Repair(t *testing.T) {
+	dbName, conn, ctx := issue6092Connect(t)
+
+	scalar := func(query string) int64 {
+		t.Helper()
+		var v int64
+		if err := conn.QueryRowContext(ctx, query).Scan(&v); err != nil {
+			t.Fatalf("query %.80q: %v", query, err)
+		}
+		return v
+	}
+
+	// Binary history: the ignored chain (1..4) predates main 0022 on this
+	// clone, so 0022's indexes landed on the legacy table for real.
+	if _, err := schema.MigrateUpTo(ctx, conn, 46); err != nil {
+		t.Fatalf("seed main schema to 46: %v", err)
+	}
+	if _, err := schema.MigrateIgnoredUpTo(ctx, conn, 4); err != nil {
+		t.Fatalf("seed ignored schema to 4: %v", err)
+	}
+	issue6092RunMigrationFile(t, ctx, conn, "../schema/migrations/0022_wisp_dep_type_index.up.sql")
+
+	issue6092SeedReferencedRows(t, ctx, conn)
+	issue6092SeedValidWispDeps(t, ctx, conn)
+	updatedBefore := issue6092SnapshotUpdatedAt(t, ctx, conn)
+	issue6092CommitFixture(t, ctx, conn, "test: #6092 main-46 clone with legacy wisp_dependencies and 0022's indexes")
+
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations"); got != 46 {
+		t.Fatalf("fixture main cursor = %d, want 46", got)
+	}
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"); got != 4 {
+		t.Fatalf("fixture ignored cursor = %d, want 4", got)
+	}
+
+	// The upgrade: main 47..74 with the 58 repair converging the table,
+	// then the ignored replay whose new ignored-5 repair must no-op over it.
+	if _, err := schema.MigrateUpWithLock(ctx, conn, dbName); err != nil {
+		t.Fatalf("upgrade from main 46 over the reporter's legacy table (#6092): %v", err)
+	}
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations"); got != int64(schema.LatestVersion()) {
+		t.Fatalf("main cursor = %d after the upgrade, want latest %d", got, schema.LatestVersion())
+	}
+	if got := scalar("SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"); got != int64(schema.LatestIgnoredVersion()) {
+		t.Fatalf("ignored cursor = %d after the upgrade, want latest %d", got, schema.LatestIgnoredVersion())
+	}
+	issue6092RequireFinalWispDepShape(t, ctx, conn)
+	issue6092RequireSeededRowsPreserved(t, ctx, conn, updatedBefore)
 }

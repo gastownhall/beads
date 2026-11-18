@@ -832,3 +832,19 @@ Or pull from a Dolt remote:
 ```bash
 bd dolt pull
 ```
+
+### `wisp_dependencies` failed to migrate on a long-lived clone
+
+A clone whose local tables were created by an older bd can fail its first
+migration after upgrading with `Duplicate key name 'idx_wisp_dep_type_issue'`
+at ignored migration 0005, or the pass can succeed yet leave
+`wisp_dependencies` without its foreign keys and its one-target check
+(gastownhall/beads#6092). bd heals both populations in place on the first
+run that performs migrations after upgrading: no export, re-clone or manual
+SQL is needed, and existing dependency rows keep their ids.
+
+The healing covers exactly those two shapes. A `wisp_dependencies` table in
+some other drift shape is left untouched, and the separate failure some
+clones saw at main migration 0053 (`table not found: new`) is not fixed by
+it — report that one with `bd doctor` output instead of retrying the
+upgrade.
