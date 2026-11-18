@@ -150,6 +150,33 @@ func stripIdempotencyMarkers(text string) (string, bool) {
 	}
 }
 
+// DescriptionFieldsEqual reports whether a and b push the same Linear
+// description text: their descriptions, acceptance criteria, design and
+// notes, folded by BuildLinearDescription and parsed back, match up to
+// trailing whitespace. Either side may hold the sections folded into its
+// description or split into the fields.
+func DescriptionFieldsEqual(a, b *types.Issue) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return descriptionTextEqual(BuildLinearDescription(a), BuildLinearDescription(b))
+}
+
+// descriptionTextEqual reports whether two Linear description texts parse
+// to the same parts, up to trailing whitespace in each part.
+func descriptionTextEqual(x, y string) bool {
+	return canonicalDescriptionParts(x) == canonicalDescriptionParts(y)
+}
+
+func canonicalDescriptionParts(text string) DescriptionParts {
+	parts := ParseLinearDescription(text)
+	parts.Description = strings.TrimRight(parts.Description, descriptionTrailingSpace)
+	parts.AcceptanceCriteria = strings.TrimRight(parts.AcceptanceCriteria, descriptionTrailingSpace)
+	parts.Design = strings.TrimRight(parts.Design, descriptionTrailingSpace)
+	parts.Notes = strings.TrimRight(parts.Notes, descriptionTrailingSpace)
+	return parts
+}
+
 // NormalizeIssueForLinearHash returns a copy of the issue using Linear's description
 // formatting and clears fields not present in Linear's model to avoid false conflicts.
 func NormalizeIssueForLinearHash(issue *types.Issue) *types.Issue {
@@ -734,7 +761,10 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig, l
 	if local.Title != remote.Title {
 		return false
 	}
-	if BuildLinearDescription(local) != remote.Description {
+	// Compare parsed forms: Linear stores a blank line after each heading
+	// and a create adds the idempotency marker, neither of which a push
+	// would change.
+	if !descriptionTextEqual(BuildLinearDescription(local), remote.Description) {
 		return false
 	}
 	if PriorityToLinear(local.Priority, config) != remote.Priority {
@@ -764,7 +794,9 @@ func PushFieldsEqualToBeads(local, remote *types.Issue) bool {
 	if local.Title != remote.Title {
 		return false
 	}
-	if BuildLinearDescription(local) != remote.Description {
+	// remote may carry the sections split into its fields (IssueToBeads) or
+	// folded into its description.
+	if !DescriptionFieldsEqual(local, remote) {
 		return false
 	}
 	if local.Priority != remote.Priority {
