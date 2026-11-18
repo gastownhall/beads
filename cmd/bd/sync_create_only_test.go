@@ -77,10 +77,16 @@ func TestTrackerSyncRefusesCreateOnlyOnPull(t *testing.T) {
 		{name: "linear_pull", tracker: "Linear", cmd: linearSyncCmd, flags: []string{"pull", "create-only"}, refused: true},
 		{name: "linear_pull_if_stale", tracker: "Linear", cmd: linearSyncCmd, flags: []string{"pull-if-stale", "create-only"}, refused: true},
 		{name: "linear_pull_dry_run", tracker: "Linear", cmd: linearSyncCmd, flags: []string{"pull", "create-only", "dry-run"}, refused: true},
+		{name: "jira_pull", tracker: "Jira", cmd: jiraSyncCmd, flags: []string{"pull", "create-only"}, refused: true},
+		{name: "notion_pull", tracker: "Notion", cmd: notionSyncCmd, flags: []string{"pull", "create-only"}, refused: true},
 		// Accepted: --push runs a push the flag limits, and the default
 		// bidirectional sync keeps pulling linked beads current.
 		{name: "linear_push", tracker: "Linear", cmd: linearSyncCmd, flags: []string{"push", "create-only"}},
 		{name: "linear_bidirectional", tracker: "Linear", cmd: linearSyncCmd, flags: []string{"create-only"}},
+		{name: "jira_push", tracker: "Jira", cmd: jiraSyncCmd, flags: []string{"push", "create-only"}},
+		{name: "jira_bidirectional", tracker: "Jira", cmd: jiraSyncCmd, flags: []string{"create-only"}},
+		{name: "notion_push", tracker: "Notion", cmd: notionSyncCmd, flags: []string{"push", "create-only"}},
+		{name: "notion_bidirectional", tracker: "Notion", cmd: notionSyncCmd, flags: []string{"create-only"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateTrackerSyncCommand(t, tc.cmd, tc.flags)
