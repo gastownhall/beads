@@ -215,3 +215,19 @@ func TestIDTakenReadsBothPlanesInOneStatement(t *testing.T) {
 		})
 	}
 }
+
+// TestAdaptiveIDCountRefusesAnUnknownTable pins that the shared adaptive count
+// names its sibling from the issues/wisps pair only and refuses any other
+// table before it builds or sends SQL (bd-u9cfx0).
+func TestAdaptiveIDCountRefusesAnUnknownTable(t *testing.T) {
+	db, mock := newIDRetentionMock(t)
+	if _, err := AdaptiveIDCountInTx(context.Background(), db, "issues; DROP TABLE wisps", "bd"); err == nil {
+		t.Fatal("AdaptiveIDCountInTx(unknown table) = nil error, want a refusal")
+	}
+	if got, err := GetAdaptiveIDLengthTx(context.Background(), db, "events", "bd"); err == nil || got != 6 {
+		t.Fatalf("GetAdaptiveIDLengthTx(unknown table) = %d, %v; want 6 and an error", got, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

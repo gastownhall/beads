@@ -785,15 +785,7 @@ func (r *issueSQLRepositoryImpl) CountForPrefix(ctx context.Context, prefix stri
 	if prefix == "" {
 		return 0, errors.New("db: CountForPrefix: prefix must not be empty")
 	}
-	table := pickIssueTable(opts.UseWispsTable)
-	var count int
-	//nolint:gosec // G201: table is one of two hardcoded constants
-	err := r.runner.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT COUNT(*)
-		FROM %s
-		WHERE id LIKE CONCAT(?, '-%%')
-		  AND INSTR(SUBSTRING(id, LENGTH(?) + 2), '.') = 0
-	`, table), prefix, prefix).Scan(&count)
+	count, err := issueops.AdaptiveIDCountInTx(ctx, r.runner, pickIssueTable(opts.UseWispsTable), prefix)
 	if err != nil {
 		return 0, fmt.Errorf("db: CountForPrefix %s: %w", prefix, err)
 	}
