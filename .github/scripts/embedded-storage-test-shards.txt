@@ -220,6 +220,7 @@
 40 7 TestMergeAndSettleWithStrategy_ResolvesDeclinedConflict
 
 40 8 TestArrivalSeq_EmbeddedCreateLeavesTheStampOnTheCallersIssue
+40 8 TestClaimReadyIssueSkipsChildOfUndatedDeferredParent
 40 8 TestDeleterContract
 40 8 TestEmbeddedDependencyEditorRoutesWispSourcedRemovalToTheWispPlane
 40 8 TestEmbeddedMergeAndSettleDirtyWorkingSetSurvivesRefusedMerge
@@ -268,6 +269,7 @@
 40 11 TestEmbeddedReadyClaimerRecordsOneHistoryEntryForAWin
 40 11 TestEventsJournal_ActorMatrixOnEmbedded
 40 11 TestMemoriesContract
+40 11 TestReadyWorkDeferredParentShapes
 40 11 TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordStored
 
 40 12 TestCounterExcludeStatusAcceptsAWorkspaceCustomStatusWithoutIncludeInfra
@@ -631,6 +633,7 @@
 40 36 TestEmbeddedRelationsRefusesAnUnusableTypeFilter
 40 36 TestGetReadyWorkMoleculeFilter
 40 36 TestMergeWithStrategy_KeepsCleanMergedTables
+40 36 TestReadyWorkHidesChildrenOfUndatedDeferredParent
 40 36 TestReleaserContract
 40 36 TestSchemaAfterInit
 

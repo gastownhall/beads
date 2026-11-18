@@ -4,12 +4,14 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -150,6 +152,34 @@ func TestReadyWorkWithMissingDeferredParentTables(t *testing.T) {
 		}
 		if len(ids) != 1 || ids[0] != "rww-free" {
 			t.Fatalf("ready work = %v, want [rww-free] (the deferred parent's child must still be withheld)", ids)
+		}
+	})
+
+	// The deferred-parent gate's undated legs name wisp_dependencies as well,
+	// so a database without it fails the gate's first statement. Each stack
+	// must then ask dependencies alone rather than read the failure as "no
+	// deferred parent" (or return it): the undated deferred parent's child
+	// stays withheld.
+	t.Run("missing_wisp_dependencies_still_withholds_undated_deferred_child", func(t *testing.T) {
+		te := newTestEnv(t, "rwu")
+		seedUndatedDeferredParent(t, te, "rwu")
+		te.exec(t, t.Context(), "RENAME TABLE wisp_dependencies TO wisp_dependencies_renamed_away")
+		want := []string{"rwu-free"}
+
+		ids, err := readyWorkIDs(t, te)
+		if err != nil {
+			t.Fatalf("repository ready work over a database with no wisp_dependencies table: %v", err)
+		}
+		if !slices.Equal(ids, want) {
+			t.Fatalf("repository ready work = %v, want %v (the undated deferred parent's child must still be withheld)", ids, want)
+		}
+		var classic []*types.Issue
+		withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+			classic, err = issueops.GetReadyWorkInTx(t.Context(), tx, types.WorkFilter{})
+			return err
+		})
+		if got := issueIDsOf(classic); !slices.Equal(got, want) {
+			t.Fatalf("classic ready work = %v, want %v (the undated deferred parent's child must still be withheld)", got, want)
 		}
 	})
 }

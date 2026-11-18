@@ -146,3 +146,85 @@ func TestGetChildrenOfDeferredParentsInTx_UnrelatedErrorPropagates(t *testing.T)
 		t.Fatalf("a failed deferred-parent join did not propagate: %v", err)
 	}
 }
+
+func deferredParentRows(found bool) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"deferred"}).AddRow(found)
+}
+
+// TestAnyDeferredParentInTx_MissingWispDependenciesAsksDependenciesAlone: the
+// gate's undated legs look for a child in both dependency tables, and a
+// database that predates the wisp plane has no wisp_dependencies. Read as "no
+// deferred parent", that failure would list a deferred parent's children as
+// ready; returned, it would stop ready work answering on such a database. The
+// gate must ask again over dependencies alone, for that table and the next.
+func TestAnyDeferredParentInTx_MissingWispDependenciesAsksDependenciesAlone(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	durableOnly := []string{"dependencies"}
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnError(tableNotFound("wisp_dependencies"))
+	mock.ExpectQuery(deferredParentGateRegex("issues", durableOnly)).WillReturnRows(deferredParentRows(false))
+	mock.ExpectQuery(deferredParentGateRegex("wisps", durableOnly)).WillReturnRows(deferredParentRows(true))
+
+	got, err := anyDeferredParentInTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("anyDeferredParentInTx on a database with no wisp_dependencies: %v", err)
+	}
+	if !got {
+		t.Fatal("anyDeferredParentInTx = false, want true: the wisps table holds a deferred parent")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestAnyDeferredParentInTx_NoWispPlaneIsNoDeferredParent is the control for a
+// database with neither wisp table: the issues gate falls back to
+// dependencies, and the missing wisps table means no wisp parent.
+func TestAnyDeferredParentInTx_NoWispPlaneIsNoDeferredParent(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	durableOnly := []string{"dependencies"}
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnError(tableNotFound("wisp_dependencies"))
+	mock.ExpectQuery(deferredParentGateRegex("issues", durableOnly)).WillReturnRows(deferredParentRows(false))
+	mock.ExpectQuery(deferredParentGateRegex("wisps", durableOnly)).WillReturnError(tableNotFound("wisps"))
+
+	got, err := anyDeferredParentInTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("anyDeferredParentInTx on a database with no wisp plane: %v", err)
+	}
+	if got {
+		t.Fatal("anyDeferredParentInTx = true, want false")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestAnyDeferredParentInTx_MissingDependenciesIsAnError: the undated legs name
+// dependencies, a table every beads database has. The wisps gate used to
+// excuse any missing table, which was safe only while its statement named
+// wisps alone; read now as "no wisp parent", a missing dependencies would
+// skip the child scan and list a deferred parent's children as ready.
+func TestAnyDeferredParentInTx_MissingDependenciesIsAnError(t *testing.T) {
+	t.Parallel()
+
+	for _, table := range deferredChildIssueTables {
+		t.Run(table, func(t *testing.T) {
+			t.Parallel()
+
+			_, mock, tx := beginMockTx(t)
+			gone := tableNotFound("dependencies")
+			if table == "wisps" {
+				mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnRows(deferredParentRows(false))
+			}
+			mock.ExpectQuery(deferredParentProbeRegex(table)).WillReturnError(gone)
+
+			got, err := anyDeferredParentInTx(context.Background(), tx)
+			if !errors.Is(err, gone) {
+				t.Fatalf("anyDeferredParentInTx = %v, %v; want the missing-dependencies failure", got, err)
+			}
+		})
+	}
+}

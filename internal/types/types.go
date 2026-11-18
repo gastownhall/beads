@@ -2521,7 +2521,7 @@ type WorkFilter struct {
 	WispType *WispType // Filter by wisp type (nil = any, heartbeat/ping/patrol/gc_report/recovery/error/escalation)
 
 	// Time-based deferral filtering (GH#820)
-	IncludeDeferred bool // If true, include issues with future defer_until timestamps
+	IncludeDeferred bool // If true, include issues with future defer_until timestamps and children of deferred parents
 
 	// Ephemeral issue filtering
 	// By default, GetReadyWork excludes ephemeral wisps but includes
