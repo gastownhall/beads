@@ -565,6 +565,13 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 	return &linearFieldMapper{config: t.config}
 }
 
+// DescriptionFieldsEqual implements tracker.DescriptionFieldsTracker: Linear
+// carries a bead's acceptance criteria, design and notes inside the issue
+// description, so a pull of an unchanged description keeps the local split.
+func (t *Tracker) DescriptionFieldsEqual(a, b *types.Issue) bool {
+	return DescriptionFieldsEqual(a, b)
+}
+
 // MappingConfig returns the resolved Linear mapping configuration.
 func (t *Tracker) MappingConfig() *MappingConfig {
 	return t.config

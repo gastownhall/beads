@@ -456,6 +456,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 	fallback := e.newPullFallbackIndex(localIssues, extIssues)
 	mapper := e.Tracker.FieldMapper()
+	// A tracker that carries the acceptance criteria, design and notes inside
+	// its description text (Linear) has its pulls compare and write those
+	// fields too.
+	descriptionFields, _ := e.Tracker.(DescriptionFieldsTracker)
+	comparesDescriptionFields := descriptionFields != nil
 	var pendingDeps []DependencyInfo
 	var dryRunIssues []*types.Issue
 
@@ -528,6 +533,18 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 
+		// DescriptionFieldsTracker: when the remote description text is
+		// unchanged (a and b push the same text) but the parsed split differs
+		// from the local one, keep the local split, so a pull that changes no
+		// text never reshapes a bead (a description holding a template
+		// "## Acceptance Criteria" heading keeps it while its field is empty).
+		if existing != nil && comparesDescriptionFields && descriptionFields.DescriptionFieldsEqual(existing, conv.Issue) {
+			conv.Issue.Description = existing.Description
+			conv.Issue.AcceptanceCriteria = existing.AcceptanceCriteria
+			conv.Issue.Design = existing.Design
+			conv.Issue.Notes = existing.Notes
+		}
+
 		pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes, opts.DependencySources)
 		if opts.DryRun {
 			dryRunIssue := *conv.Issue
@@ -553,7 +570,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			conv.Issue.Labels = existing.Labels
 		}
 
-		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
+		if existing != nil && pullIssueEqual(existing, conv.Issue, ref, comparesDescriptionFields) {
 			if !opts.DryRun {
 				// Both sides can reach this content without a push, which
 				// leaves the hash of the last push stale.
@@ -575,7 +592,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil {
-			updates := buildPullIssueUpdates(existing, conv.Issue, ref)
+			updates := buildPullIssueUpdates(existing, conv.Issue, ref, comparesDescriptionFields)
 			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
 				updates["metadata"] = raw
 				// The push hash below fingerprints the row this update writes.
@@ -726,7 +743,7 @@ func markPullIssueFields(updates map[string]interface{}) {
 	updates[issueops.OpForceClosePolicy] = true
 }
 
-func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
+func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string, descriptionFields bool) bool {
 	if local == nil || remote == nil {
 		return false
 	}
@@ -739,6 +756,14 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 		!equalNormalizedStrings(local.Labels, remote.Labels) {
 		return false
 	}
+	// For a tracker carrying the three description fields inside its
+	// description text, they are pull-written fields like the description.
+	if descriptionFields &&
+		(local.AcceptanceCriteria != remote.AcceptanceCriteria ||
+			local.Design != remote.Design ||
+			local.Notes != remote.Notes) {
+		return false
+	}
 	localRef := ""
 	if local.ExternalRef != nil {
 		localRef = strings.TrimSpace(*local.ExternalRef)
@@ -746,7 +771,7 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 	return localRef == strings.TrimSpace(ref)
 }
 
-func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref string) map[string]interface{} {
+func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref string, descriptionFields bool) map[string]interface{} {
 	updates := map[string]interface{}{
 		"title":       remote.Title,
 		"description": remote.Description,
@@ -754,6 +779,12 @@ func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref strin
 		"status":      string(remote.Status),
 		"issue_type":  string(remote.IssueType),
 		"assignee":    remote.Assignee,
+	}
+	if descriptionFields {
+		// Always written, so a section emptied on the tracker clears the field.
+		updates["acceptance_criteria"] = remote.AcceptanceCriteria
+		updates["design"] = remote.Design
+		updates["notes"] = remote.Notes
 	}
 	trimmedRef := strings.TrimSpace(ref)
 	if trimmedRef == "" {

@@ -111,6 +111,13 @@ type IdentityKeyer interface {
 	RemoteIdentityKey(issue *TrackerIssue) string
 }
 
+// DescriptionFieldsTracker is implemented by trackers that carry a bead's
+// acceptance criteria, design and notes inside the description (Linear).
+type DescriptionFieldsTracker interface {
+	// DescriptionFieldsEqual reports whether a and b push the same description text.
+	DescriptionFieldsEqual(a, b *types.Issue) bool
+}
+
 // FieldMapper handles bidirectional conversion of issue fields between
 // an external tracker and beads. Each tracker provides its own mapper.
 type FieldMapper interface {
