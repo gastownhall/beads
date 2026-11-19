@@ -285,6 +285,11 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyCarriesTheGateMembers(t, ctx, fixture)
 	})
+	t.Run("RowEntriesShareTheLatestSnapshot", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyRowEntriesShareTheLatestSnapshot(t, ctx, fixture)
+	})
 }
 
 // newDoltBatchApplyFixture composes the frozen role kit with this backend's

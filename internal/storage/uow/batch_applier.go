@@ -138,6 +138,7 @@ func (o *batchApplier) ApplyBatch(ctx context.Context, request publicops.ApplyBa
 			uw:     uw,
 			keys:   make(map[string]string, len(plan.KeyIndex)),
 			planes: map[string]bool{},
+			latest: storageissueops.BatchSnapshots{},
 			result: publicops.ApplyBatchResult{
 				Keys:  make(map[string]string, len(plan.KeyIndex)),
 				Items: make([]publicops.ItemResult, len(plan.Items)),
@@ -161,6 +162,9 @@ type uowApplyRun struct {
 	planes map[string]bool
 	edges  []uowAppliedEdge
 	result publicops.ApplyBatchResult
+	// latest is the one snapshot per row the request has written; the items
+	// carry none until apply attaches them after the end gate.
+	latest storageissueops.BatchSnapshots
 	// write records whether this unit of work has anything to commit, on the
 	// same terms the store bodies record it: a create and an edge always write,
 	// an update and a close write when they changed something. It carries no
@@ -188,7 +192,11 @@ func (r *uowApplyRun) apply(ctx context.Context) error {
 	if err := r.spliceMetadataRefs(ctx); err != nil {
 		return err
 	}
-	return r.runEndGate(ctx)
+	if err := r.runEndGate(ctx); err != nil {
+		return err
+	}
+	r.latest.Attach(r.result.Items)
+	return nil
 }
 
 func (r *uowApplyRun) applyItem(ctx context.Context, index int) error {
@@ -269,8 +277,8 @@ func (r *uowApplyRun) applyCreate(ctx context.Context, index int, item *publicop
 		IssueID:    issue.ID,
 		Changed:    true,
 		RowVersion: issue.RowVersion,
-		Issue:      issue,
 	}
+	r.latest.Record(issue)
 	return nil
 }
 
@@ -321,8 +329,8 @@ func (r *uowApplyRun) applyUpdate(ctx context.Context, index int, item *publicop
 		IssueID:    id,
 		Changed:    updated.Changed,
 		RowVersion: updated.Issue.RowVersion,
-		Issue:      updated.Issue,
 	}
+	r.latest.Record(updated.Issue)
 	return nil
 }
 
@@ -434,8 +442,8 @@ func (r *uowApplyRun) applyClose(ctx context.Context, index int, item *publicops
 		IssueID:    id,
 		Changed:    closeChanged,
 		RowVersion: hydrated.RowVersion,
-		Issue:      hydrated,
 	}
+	r.latest.Record(hydrated)
 	return nil
 }
 
@@ -549,7 +557,7 @@ func (r *uowApplyRun) spliceMetadataRefs(ctx context.Context) error {
 		if err != nil {
 			return &publicops.ItemError{Index: index, Kind: publicops.ItemCreate, Key: item.Create.Key, IssueID: id, Err: err}
 		}
-		r.result.Items[index].Issue = updated.Issue
+		r.latest.Record(updated.Issue)
 		r.result.Items[index].RowVersion = updated.Issue.RowVersion
 	}
 	return nil
