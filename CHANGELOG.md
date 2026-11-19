@@ -1431,6 +1431,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Edges between local rows are local, whatever their id prefix.**
+  Dependency targets are classified by what they name, not by prefix: a bare
+  id that names an issue or wisp this database holds — including one created
+  with a foreign-prefix explicit id — stores the edge in the local target
+  column with full blocking, hierarchy, wisp and foreign-key behavior,
+  instead of `depends_on_external`, where blocked/ready computation could
+  not see it. An `external:` reference is still external, and a bare id
+  this database holds no row for is still stored with the existing
+  not-found warning; explicit-id creation, import and batch paths share the
+  same presence-based rule. On upgrade, a schema migration repairs rows the
+  old classification mis-stored in both dependency tables: targets that
+  name local rows move to the typed columns and blocked state is recomputed,
+  preserving ids, provenance and timestamps; absent targets and explicit
+  external refs are untouched. If that repair is needed while the issues or
+  dependencies table has uncommitted changes, the migration refuses before
+  writing anything and the marker stays pending: `bd dolt commit`, then
+  re-run, and it goes through. (#6066)
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
