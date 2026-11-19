@@ -222,7 +222,7 @@ func cloneOnComplete(oc *OnCompleteSpec) *OnCompleteSpec {
 		return nil
 	}
 	clone := *oc
-	if len(oc.Vars) > 0 {
+	if oc.Vars != nil {
 		clone.Vars = make(map[string]string, len(oc.Vars))
 		for k, v := range oc.Vars {
 			clone.Vars[k] = v

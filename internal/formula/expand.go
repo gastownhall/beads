@@ -230,6 +230,10 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 		expanded.Description = expandText(tmpl.Description)
 		expanded.Notes = expandText(tmpl.Notes)
 		expanded.Assignee = subst(tmpl.Assignee)
+		if tmpl.Priority != nil {
+			priority := *tmpl.Priority
+			expanded.Priority = &priority
+		}
 		// waits_for can name its spawner (children-of({target}.spawn)), so it
 		// resolves like needs; the bare all-children/any-children values
 		// carry no placeholder and pass through unchanged.
@@ -286,9 +290,9 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 }
 
 // expandStrings returns a new slice holding expand applied to each element
-// of ss, or nil when ss is empty.
+// of ss; nil stays nil and empty stays empty.
 func expandStrings(ss []string, expand func(string) string) []string {
-	if len(ss) == 0 {
+	if ss == nil {
 		return nil
 	}
 	out := make([]string, len(ss))
