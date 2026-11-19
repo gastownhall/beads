@@ -358,14 +358,26 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 	})
 
-	t.Run("closed_force_purges_regardless_of_age", func(t *testing.T) {
+	t.Run("closed_force_honors_age_floor", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "wgcl")
-		closedWisp := bdProxiedCreate(t, bd, p.dir, "Just-closed wisp", "--ephemeral")
-		if out, err := bdProxiedRun(t, bd, p.dir, "close", closedWisp.ID); err != nil {
+		justClosed := bdProxiedCreate(t, bd, p.dir, "Just-closed wisp", "--ephemeral")
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", justClosed.ID); err != nil {
+			t.Fatalf("bd close: %v\n%s", err, out)
+		}
+		aged := bdProxiedCreate(t, bd, p.dir, "Aged closed wisp", "--ephemeral")
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", aged.ID); err != nil {
 			t.Fatalf("bd close: %v\n%s", err, out)
 		}
 
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec("UPDATE wisps SET updated_at = ? WHERE id = ?",
+			time.Now().UTC().Add(-2*time.Hour), aged.ID); err != nil {
+			t.Fatalf("backdate wisp: %v", err)
+		}
+
+		// Default --closed --force honors the 1h age floor (GH#8202): the aged
+		// wisp is purged, the one closed moments ago survives.
 		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
 		if err != nil {
 			t.Fatalf("bd mol wisp gc --closed --force --json: %v\n%s", err, out)
@@ -377,16 +389,36 @@ func TestProxiedServerWispGC(t *testing.T) {
 			t.Fatalf("unmarshal: %v\n%s", err, out)
 		}
 		if got.DeletedCount != 1 {
-			t.Errorf("deleted_count = %d, want 1", got.DeletedCount)
+			t.Errorf("deleted_count = %d, want 1 (only the aged wisp is inside the floor)", got.DeletedCount)
+		}
+		for wispID, want := range map[string]int{justClosed.ID: 1, aged.ID: 0} {
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", wispID).Scan(&count); err != nil {
+				t.Fatalf("query wisps: %v", err)
+			}
+			if count != want {
+				t.Errorf("wisp %s: count = %d, want %d", wispID, count, want)
+			}
 		}
 
-		db := openProxiedDB(t, p)
+		// Escape hatch: --age 0s selects the just-closed wisp too.
+		out, err = bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--force", "--age", "0s", "--json")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --closed --force --age 0s --json: %v\n%s", err, out)
+		}
+		got.DeletedCount = 0
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if got.DeletedCount != 1 {
+			t.Errorf("--age 0s deleted_count = %d, want 1 (the just-closed wisp)", got.DeletedCount)
+		}
 		var count int
-		if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", closedWisp.ID).Scan(&count); err != nil {
+		if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", justClosed.ID).Scan(&count); err != nil {
 			t.Fatalf("query wisps: %v", err)
 		}
 		if count != 0 {
-			t.Errorf("expected closed wisp %s purged", closedWisp.ID)
+			t.Errorf("expected just-closed wisp %s purged by --age 0s", justClosed.ID)
 		}
 	})
 }

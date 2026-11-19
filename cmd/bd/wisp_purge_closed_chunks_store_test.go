@@ -212,3 +212,53 @@ func TestWispPurgeClosedPersistsCompletedChunksOnRealStore(t *testing.T) {
 		t.Errorf("live step %s did not survive the rerun: %v", live.ID, err)
 	}
 }
+
+// TestWispPurgeClosedRealStoreHonorsAgeInQuery is the storage-query half of
+// the GH#8202 age floor: the UpdatedBefore bound the shared selector puts in
+// the filter must reach the wisps query itself, so on a real Dolt store a
+// wisp closed moments ago is ineligible under a positive --age and eligible
+// once the clock passes the threshold. The clock is the selector's wispGCNow
+// seam; the rows carry the real clock, which is what makes the first half a
+// genuine storage-bound check rather than the fake reader's cooperation.
+func TestWispPurgeClosedRealStoreHonorsAgeInQuery(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t, filepath.Join(t.TempDir(), ".beads", "beads.db"))
+
+	wisp := &types.Issue{
+		Title:     "patrol report step",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := s.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatalf("creating closed wisp: %v", err)
+	}
+
+	const threshold = time.Hour
+	old := wispGCNow
+	t.Cleanup(func() { wispGCNow = old })
+
+	// Ineligible at the current time: the storage bound (updated_at <
+	// now-threshold) and the Go-side guard agree the wisp is too young.
+	sel, err := selectClosedWispPurgeCandidates(ctx, s, threshold, nil)
+	if err != nil {
+		t.Fatalf("selecting at the current time: %v", err)
+	}
+	for _, issue := range sel.candidates {
+		if issue.ID == wisp.ID {
+			t.Errorf("closed wisp %s selected under the --age %v floor moments after it was written", wisp.ID, threshold)
+		}
+	}
+
+	// Eligible once the clock passes the threshold.
+	now := wispGCNow()
+	wispGCNow = func() time.Time { return now.Add(2 * threshold) }
+	sel, err = selectClosedWispPurgeCandidates(ctx, s, threshold, nil)
+	if err != nil {
+		t.Fatalf("selecting past the threshold: %v", err)
+	}
+	if len(sel.candidates) != 1 || sel.candidates[0].ID != wisp.ID {
+		t.Errorf("selection past the threshold = %v, want exactly the aged wisp %s", sel.candidates, wisp.ID)
+	}
+}

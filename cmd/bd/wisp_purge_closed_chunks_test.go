@@ -658,7 +658,7 @@ func TestWispPurgeClosedProxiedBoundsEachUnitOfWork(t *testing.T) {
 		jsonOutput = true
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, 0, nil)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -702,7 +702,7 @@ func TestWispPurgeClosedProxiedBoundsEachUnitOfWork(t *testing.T) {
 		}
 
 		stdout, _, err := captureWispGC(t, func() error {
-			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, 0, nil)
 		})
 		if err == nil || !isReportedExit(err) {
 			t.Fatalf("error = %v, want an already-reported nonzero exit\nstdout:\n%s", err, stdout)
@@ -994,7 +994,7 @@ func TestWispPurgeClosedReportsCappedScan(t *testing.T) {
 		p := useWispPurgeProxied(t, 6000)
 		jsonOutput = true
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, 0, nil)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -1070,7 +1070,7 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 			p := useWispPurgeProxied(t, 450)
 			jsonOutput = true
 			stdout, stderr, err := captureWispGC(t, func() error {
-				return runWispPurgeClosedProxiedServer(context.Background(), tc.dryRun, tc.force, nil)
+				return runWispPurgeClosedProxiedServer(context.Background(), tc.dryRun, tc.force, 0, nil)
 			})
 			if err != nil {
 				t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstderr:\n%s", err, stderr)

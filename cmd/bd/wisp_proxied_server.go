@@ -133,7 +133,7 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 	}
 
 	if closedMode {
-		return runWispPurgeClosedProxiedServer(ctx, dryRun, force, excludeTypes)
+		return runWispPurgeClosedProxiedServer(ctx, dryRun, force, ageThreshold, excludeTypes)
 	}
 
 	uw, err := proxiedOpenReadUOW(ctx)
@@ -227,54 +227,32 @@ func renderWispGCDeleteResult(ids []string, res domain.DeleteIssuesResult) error
 	return nil
 }
 
-func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, excludeTypes []types.IssueType) error {
+func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ageThreshold time.Duration, excludeTypes []types.IssueType) error {
 	uw, err := proxiedOpenReadUOW(ctx)
 	if err != nil {
 		return err
 	}
 	r := uowMolReader{uw: uw}
 
-	statusClosed := types.StatusClosed
-	ephemeralTrue := true
-	filter := types.IssueFilter{
-		Status:       &statusClosed,
-		Ephemeral:    &ephemeralTrue,
-		ExcludeTypes: excludeTypes,
-		Limit:        wispPurgeScanLimit,
-	}
-	closedIssues, err := r.SearchIssues(ctx, "", filter)
+	// The same closed-GC selection as the direct route (GH#8202): the --age
+	// floor, pinned and infra protection and excluded types all live in the
+	// shared selector, so both routes apply one policy.
+	sel, err := selectClosedWispPurgeCandidates(ctx, r, ageThreshold, excludeTypes)
+	uw.Close(ctx)
 	if err != nil {
-		uw.Close(ctx)
 		return HandleError("listing closed wisps: %v", err)
 	}
-	scanCapped := len(closedIssues) >= wispPurgeScanLimit
+	closedIssues := sel.candidates
 
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
+	if sel.pinned > 0 && !jsonOutput {
+		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", sel.pinned)
 	}
-	closedIssues = filtered
-	uw.Close(ctx)
-
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
-	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
+	if sel.infra > 0 && !jsonOutput {
+		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", sel.infra)
 	}
 
 	if len(closedIssues) == 0 {
-		return renderNoClosedWisps(force && !dryRun && scanCapped, 0)
+		return renderNoClosedWisps(force && !dryRun && sel.scanCapped, ageThreshold)
 	}
 
 	ids := make([]string, len(closedIssues))
@@ -284,24 +262,24 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 
 	if !force && !dryRun {
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"candidates": len(ids),
-				"dry_run":    true,
-			})
+			return outputJSON(wispPurgeClosedPreviewJSON(len(ids), ageThreshold))
 		}
-		fmt.Printf("Found %d closed wisp(s) to delete\n", len(ids))
+		fmt.Printf("%s to delete\n", wispPurgeClosedFoundLine(len(ids), ageThreshold))
+		if ageThreshold > 0 {
+			fmt.Printf("%s\n", wispPurgeZeroAgeHint)
+		}
 		fmt.Printf("\nUse --force to proceed, or --dry-run for detailed preview.\n")
 		return nil
 	}
 
 	if dryRun {
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"candidates": len(ids),
-				"dry_run":    true,
-			})
+			return outputJSON(wispPurgeClosedPreviewJSON(len(ids), ageThreshold))
 		}
-		fmt.Printf("Found %d closed wisp(s)\n", len(ids))
+		fmt.Printf("%s\n", wispPurgeClosedFoundLine(len(ids), ageThreshold))
+		if ageThreshold > 0 {
+			fmt.Printf("%s\n", wispPurgeZeroAgeHint)
+		}
 		fmt.Println("DRY RUN - no changes will be made")
 		return nil
 	}
@@ -339,5 +317,5 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 			orphaned:          res.OrphanedIssues,
 		}, nil
 	})
-	return renderWispPurgeOutcome(outcome, scanCapped, false)
+	return renderWispPurgeOutcome(outcome, sel.scanCapped, false)
 }
