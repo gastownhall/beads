@@ -142,7 +142,8 @@ func renderStaleResult(result *StaleResult, blockingOnly bool) {
 
 // findStaleMolecules queries the database for stale molecules
 func findStaleMolecules(ctx context.Context, s molReader, blockingOnly, unassignedOnly, showAll bool) (*StaleResult, error) {
-	// Get all epics eligible for closure (complete but unclosed)
+	// One row per non-closed epic; the loop below keeps the eligible ones
+	// (complete but unclosed).
 	epicStatuses, err := s.GetEpicsEligibleForClosure(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("querying epics: %w", err)
