@@ -220,6 +220,9 @@ func runBackupExport(ctx context.Context, backend localBackupBackend, force bool
 	// contain. If HEAD moved during the sync, the next backup must see it.
 	state.LastDoltCommit = currentCommit
 	state.Timestamp = time.Now().UTC()
+	state.LastSuccessAt = state.Timestamp
+	state.LastError = ""
+	state.LastErrorAt = time.Time{}
 
 	if err := saveBackupState(dir, state); err != nil {
 		return nil, err
