@@ -2181,6 +2181,248 @@ func RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *testing.T,
 	}
 }
 
+// seedReaderListBatch seeds sqlbuild.QueryBatchSize+5 rows under one scoping
+// label for the two List cases below, and returns the label and the ids in
+// the "created" display order (created_at DESC): row j is created j seconds
+// before row 0. The two rows that straddle the hydration boundary carry
+// distinct nonzero cardinalities — the last row of the first batch one comment
+// and one reverse blocker, the first row of the second batch one blocks edge —
+// so a batch that was dropped, overwritten or merged back out of order fails on
+// a row rather than on a length. The blocker and the dependent sit outside the
+// label, so neither is a member of the listing.
+func seedReaderListBatch(t *testing.T, ctx context.Context, fixture ReaderFixture, caseTag string) (string, []string) {
+	t.Helper()
+	scope := readerLabel(fixture, caseTag)
+	total := sqlbuild.QueryBatchSize + 5
+	lastOfFirst, firstOfSecond := sqlbuild.QueryBatchSize-1, sqlbuild.QueryBatchSize
+	top := time.Now().UTC().Truncate(time.Second).Add(-2 * time.Hour)
+	order := make([]string, 0, total)
+	for j := range total {
+		member := readerID(fixture, caseTag, fmt.Sprintf("%04d", j))
+		order = append(order, member)
+		issue := readerIssue(member, types.TypeTask, scope)
+		at := top.Add(-time.Duration(j) * time.Second)
+		issue.CreatedAt, issue.UpdatedAt = at, at
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	blocker := readerIssue(readerID(fixture, caseTag, "blocker"), types.TypeTask, "")
+	blocker.Status = types.StatusClosed
+	seedReaderIssue(t, ctx, fixture, blocker)
+	dependent := readerIssue(readerID(fixture, caseTag, "dependent"), types.TypeTask, "")
+	seedReaderIssue(t, ctx, fixture, dependent)
+	for _, edge := range []*types.Dependency{
+		{IssueID: order[firstOfSecond], DependsOnID: blocker.ID, Type: types.DepBlocks},
+		{IssueID: dependent.ID, DependsOnID: order[lastOfFirst], Type: types.DepBlocks},
+	} {
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed the edge %s -> %s: %v", edge.IssueID, edge.DependsOnID, err)
+		}
+	}
+	if err := fixture.AddComment(ctx, order[lastOfFirst], "seed", "the last row of the first batch"); err != nil {
+		t.Fatalf("seed the comment on the last row of the first batch: %v", err)
+	}
+	return scope, order
+}
+
+// readListBatchReference reads the unlimited "created" listing of a
+// seedReaderListBatch fixture and pins it: every seeded row in the seeded
+// order, no has-more, and the boundary rows' exact cardinalities. Every
+// window the cases below drive is compared against this page.
+func readListBatchReference(t *testing.T, ctx context.Context, fixture ReaderFixture, scope string, order []string) publicops.IssuePage {
+	t.Helper()
+	unbounded, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		Labels: []string{scope}, SortBy: "created", Limit: readerLimit(0),
+	})
+	if err != nil {
+		t.Fatalf("List unlimited over %d rows: %v", len(order), err)
+	}
+	assertReaderPageIDs(t, "List unlimited", unbounded, order)
+	if unbounded.HasMore {
+		t.Errorf("List unlimited reported HasMore over the whole result set")
+	}
+	lastOfFirst, firstOfSecond := order[sqlbuild.QueryBatchSize-1], order[sqlbuild.QueryBatchSize]
+	assertReaderRowCounts(t, "List unlimited", unbounded, readerCounts{id: lastOfFirst, dependents: 1, comments: 1})
+	assertReaderRowCounts(t, "List unlimited", unbounded, readerCounts{id: firstOfSecond, dependencies: 1})
+	return unbounded
+}
+
+// assertReaderWindowWithItsCounts compares page against the n rows of
+// unbounded that start at from, ids and cardinalities both, and the has-more
+// verdict against whether any row lies past the window.
+func assertReaderWindowWithItsCounts(t *testing.T, what string, page, unbounded publicops.IssuePage, from, n int) {
+	t.Helper()
+	want := readerPageIDs(unbounded)[from : from+n]
+	assertReaderPageIDs(t, what, page, want)
+	if len(page.Items) != n {
+		return
+	}
+	for i, item := range page.Items {
+		if got, ref := readerCountsOf(item), readerCountsOf(unbounded.Items[from+i]); !got.equal(ref) {
+			t.Errorf("%s at position %d returned %s, want %s", what, i, got, ref)
+		}
+	}
+	if wantMore := from+n < len(unbounded.Items); page.HasMore != wantMore {
+		t.Errorf("%s reported HasMore = %v, want %v", what, page.HasMore, wantMore)
+	}
+}
+
+// RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts drives a List
+// result set wider than one hydration batch (GH#4370). Both seams now select a
+// page's ordered ids first and hydrate exactly those ids in batches of
+// sqlbuild.QueryBatchSize, so the window the caller asked for is decided
+// before the counts are read and the batches are stitched back in the
+// window's order. None of that may show: bounded, keyset, capped and
+// unlimited requests answer the same items, has-more verdicts and cap
+// refusals they did when the counts query filtered the whole plane.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE: seedReaderListBatch's boundary rows
+// carry distinct counts, the 201-row bound lands one row into the second
+// batch, and the keyset page starts two rows before the boundary and ends one
+// row past it, so a window that was hydrated by batch rather than by the ids
+// the window kept fails on a row.
+//
+// Offset, and a bounded request under a cap (whose boundary is Limit+Offset),
+// are their own case below, because the served wire publishes no list offset
+// (E-ListRequest.Offset) and this one must run there too.
+func RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope, order := seedReaderListBatch(t, ctx, fixture, "lsbatch")
+	total := len(order)
+	firstOfSecond := sqlbuild.QueryBatchSize
+	unbounded := readListBatchReference(t, ctx, fixture, scope, order)
+	request := func(limit int) publicops.ListRequest {
+		return publicops.ListRequest{Labels: []string{scope}, SortBy: "created", Limit: readerLimit(limit)}
+	}
+
+	// Bounded: the first row, one row into the second batch, every row.
+	for _, limit := range []int{1, firstOfSecond + 1, total} {
+		what := fmt.Sprintf("List --limit %d", limit)
+		page, err := fixture.Reader.List(ctx, request(limit))
+		if err != nil {
+			t.Errorf("%s: %v", what, err)
+			continue
+		}
+		assertReaderWindowWithItsCounts(t, what, page, unbounded, 0, limit)
+	}
+
+	// Keyset: one bounded page across the boundary, and an unlimited walk
+	// from near the top that hydrates across it.
+	for _, test := range []struct {
+		after, limit int
+	}{
+		{firstOfSecond - 3, 3},
+		{1, 0},
+	} {
+		what := fmt.Sprintf("List after row %d --limit %d", test.after, test.limit)
+		position := unbounded.Items[test.after]
+		at := position.CreatedAt.UTC()
+		req := request(test.limit)
+		req.AfterCreatedAt, req.AfterID = &at, position.ID
+		page, err := fixture.Reader.List(ctx, req)
+		if err != nil {
+			t.Errorf("%s: %v", what, err)
+			continue
+		}
+		from := test.after + 1
+		n := total - from
+		if test.limit > 0 {
+			n = min(n, test.limit)
+		}
+		assertReaderWindowWithItsCounts(t, what, page, unbounded, from, n)
+	}
+
+	// Capped, unlimited: the cap fires one row below the result set and
+	// answers the whole set at it. A bounded request under a cap is
+	// RunReaderListOffsetPastTheHydrationBatchKeepsItsWindow's, whose cap
+	// boundary is Limit+Offset.
+	for _, test := range []struct {
+		maxRows int
+		fires   bool
+	}{
+		{total - 1, true},
+		{total, false},
+	} {
+		what := fmt.Sprintf("List unlimited under MaxRows=%d", test.maxRows)
+		req := request(0)
+		req.MaxRows, req.MaxRowsSource = test.maxRows, "--max-rows"
+		page, err := fixture.Reader.List(ctx, req)
+		if !test.fires {
+			if err != nil {
+				t.Errorf("%s: %v; the result set fits the cap, so it must not fire", what, err)
+				continue
+			}
+			assertReaderWindowWithItsCounts(t, what, page, unbounded, 0, total)
+			continue
+		}
+		var tooMany *storageops.ErrTooManyRows
+		if !errors.As(err, &tooMany) {
+			t.Errorf("%s returned %v (page %d rows), want *ErrTooManyRows", what, err, len(page.Items))
+			continue
+		}
+		if tooMany.Cap != test.maxRows || tooMany.Found <= tooMany.Cap || tooMany.Source != "--max-rows" {
+			t.Errorf("%s: the cap error reports Cap=%d Found=%d Source=%q, want Cap=%d, Found past it and the request's source",
+				what, tooMany.Cap, tooMany.Found, tooMany.Source, test.maxRows)
+		}
+	}
+}
+
+// RunReaderListOffsetPastTheHydrationBatchKeepsItsWindow is the Offset half
+// of RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts (GH#4370):
+// the rows an offset skips are skipped once, on the ids, before the window is
+// hydrated, whatever batch they fall in. The windows start inside the first
+// batch and end inside the second, start past the last row, and run unlimited
+// behind an offset; the cap still counts the skipped rows (Limit+Offset), on
+// both sides of that boundary, and with no offset a page exactly at the cap
+// is a page with more behind it while one row more fires.
+func RunReaderListOffsetPastTheHydrationBatchKeepsItsWindow(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope, order := seedReaderListBatch(t, ctx, fixture, "lsbatchoff")
+	total := len(order)
+	firstOfSecond := sqlbuild.QueryBatchSize
+	unbounded := readListBatchReference(t, ctx, fixture, scope, order)
+
+	for _, test := range []struct {
+		offset, limit, maxRows int
+		fires                  bool
+	}{
+		{firstOfSecond - 2, 3, 0, false},
+		{2, 0, 0, false},
+		{total - 1, 5, 0, false},
+		{total, 2, 0, false},
+		{firstOfSecond - 1, 2, firstOfSecond + 1, false},
+		{firstOfSecond, 2, firstOfSecond + 1, true},
+		{0, firstOfSecond + 1, firstOfSecond + 1, false},
+		{0, firstOfSecond + 2, firstOfSecond + 1, true},
+	} {
+		what := fmt.Sprintf("List --offset %d --limit %d under MaxRows=%d", test.offset, test.limit, test.maxRows)
+		req := publicops.ListRequest{
+			Labels: []string{scope}, SortBy: "created", Limit: readerLimit(test.limit), Offset: test.offset,
+		}
+		if test.maxRows > 0 {
+			req.MaxRows, req.MaxRowsSource = test.maxRows, "--max-rows"
+		}
+		page, err := fixture.Reader.List(ctx, req)
+		if test.fires {
+			var tooMany *storageops.ErrTooManyRows
+			if !errors.As(err, &tooMany) {
+				t.Errorf("%s returned %v (page %d rows), want *ErrTooManyRows: a skipped row is a row the query touched", what, err, len(page.Items))
+			} else if tooMany.Cap != test.maxRows {
+				t.Errorf("%s: the cap error reports Cap = %d, want %d", what, tooMany.Cap, test.maxRows)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", what, err)
+			continue
+		}
+		n := max(0, total-test.offset)
+		if test.limit > 0 {
+			n = min(n, test.limit)
+		}
+		assertReaderWindowWithItsCounts(t, what, page, unbounded, min(test.offset, total), n)
+	}
+}
+
 // RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge pins the exact
 // cardinalities on BOTH read planes at once, and with them the fact that the
 // two planes count different things.

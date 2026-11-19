@@ -99,6 +99,27 @@ func TestServedReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *tes
 	conformance.RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// TestServedReaderListWiderThanTheHydrationBatchKeepsItsPageContracts drives
+// bounded, keyset, unlimited and unlimited-capped List requests over a result
+// set wider than the server's hydration batch (GH#4370).
+func TestServedReaderListWiderThanTheHydrationBatchKeepsItsPageContracts(t *testing.T) {
+	conformance.RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
+// TestServedReaderListOffsetPastTheHydrationBatchKeepsItsWindow parks on
+// OFFSET: the case moves the cap's Limit+Offset boundary along the offset
+// axis, and listIssues publishes no offset parameter. Its two offset-free
+// arms (a Limit at and one past the cap) belong to that same boundary; the
+// wire's walk enforces the cap over every row it accumulates (D12), and
+// TestServedReaderListMaxRowsBoundsWireRowsFetched drives that over this wire.
+func TestServedReaderListOffsetPastTheHydrationBatchKeepsItsWindow(t *testing.T) {
+	skipKnownDivergence(t, "E-ListRequest.Offset", readParkBead,
+		"the case moves the cap's Limit+Offset boundary along the Offset axis, and listIssues publishes no "+
+			"offset parameter; the batch-wide bounded, keyset and unlimited-capped windows run over this wire in "+
+			"TestServedReaderListWiderThanTheHydrationBatchKeepsItsPageContracts")
+	conformance.RunReaderListOffsetPastTheHydrationBatchKeepsItsWindow(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
 // TestServedReaderReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary is the
 // merged-plane half: alternating durable and ephemeral rows, every Limit from
 // inside the first run to past the end, and the cuts that land between a wisp

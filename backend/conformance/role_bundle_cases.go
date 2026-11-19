@@ -655,6 +655,8 @@ var roleContractCases = []roleContract{
 		RunReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded,
 		RunReaderReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary,
 		RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix,
+		RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts,
+		RunReaderListOffsetPastTheHydrationBatchKeepsItsWindow,
 		RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge,
 		RunReaderReadyParentScopesToItsTransitiveDescendants,
 		RunReaderListParentReachesEveryDescendantAndOnlyItsOwn,
