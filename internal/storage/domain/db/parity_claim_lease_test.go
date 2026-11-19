@@ -115,6 +115,7 @@ func (s *testSuite) TestClaimAssigneeOverrideLease() {
 	s.Run("ClaimOverrideToPoolAliasLeavesNoLease", s.claimOverrideToPoolAliasLeavesNoLease)
 	s.Run("ClaimWhosePatchEndsTheClaimLeavesNoLease", s.claimWhosePatchEndsTheClaimLeavesNoLease)
 	s.Run("ClaimOverrideOnWispLeavesNoLease", s.claimOverrideOnWispLeavesNoLease)
+	s.Run("UpdateWithoutClaimNeverArms", s.updateWithoutClaimNeverArms)
 }
 
 // claimOverrideArmsLeaseForFinalHolder is AC-1: alice claims an open,
@@ -235,6 +236,41 @@ func (s *testSuite) claimOverrideOnWispLeavesNoLease() {
 			s.Equal(types.StatusInProgress, got.Status)
 			s.Equal("bob", got.Assignee)
 			s.Equal(0, s.countClaimLeaseRows(id), "a wisp must never hold a lease")
+		})
+	}
+}
+
+// updateWithoutClaimNeverArms is AC-6: without --claim, an update that changes
+// status or assignee deletes the lease and never arms one (bd-9hpgf,
+// GH#4716): a hand-dole of an open issue stays unleased, and handing alice's
+// leased claim to bob drops alice's lease without granting bob one.
+func (s *testSuite) updateWithoutClaimNeverArms() {
+	for _, stack := range claimLeaseStacks() {
+		s.Run(stack.name+"/hand-dole", func() {
+			id := "bd-cl-noclaim-dole-" + stack.name
+			s.seedOpenIssue(id)
+			s.Require().NoError(stack.apply(s, id, "alice", claimLeaseUpdate{
+				assignee: claimLeaseString("bob"),
+				status:   claimLeaseStatus(types.StatusInProgress),
+			}))
+
+			got := s.readClaimLeaseIssue(id, false)
+			s.Equal(types.StatusInProgress, got.Status)
+			s.Equal("bob", got.Assignee)
+			s.Equal(0, s.countClaimLeaseRows(id), "an update without --claim must not arm a lease")
+		})
+		s.Run(stack.name+"/transfer", func() {
+			id := "bd-cl-noclaim-xfer-" + stack.name
+			s.seedOpenIssue(id)
+			_, err := s.issueUseCase().ClaimIssue(s.Ctx(), id, "alice")
+			s.Require().NoError(err)
+			s.Require().Equal(1, s.countClaimLeaseRows(id), "seed claim must arm alice's lease")
+
+			s.Require().NoError(stack.apply(s, id, "alice", claimLeaseUpdate{assignee: claimLeaseString("bob")}))
+
+			got := s.readClaimLeaseIssue(id, false)
+			s.Equal("bob", got.Assignee)
+			s.Equal(0, s.countClaimLeaseRows(id), "a transfer without --claim must delete the lease and arm none")
 		})
 	}
 }

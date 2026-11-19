@@ -186,6 +186,26 @@ func TestLeaseOutcomeOnUpdate(t *testing.T) {
 			wisp:       true,
 			wantResult: LeaseClear,
 		},
+		{
+			name:       "update without a claim that transfers clears",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"assignee": "bob"},
+			wantResult: LeaseClear,
+		},
+		{
+			name:       "update without a claim that hand-doles an open issue clears",
+			oldStatus:  types.StatusOpen,
+			updates:    map[string]interface{}{"status": types.StatusInProgress, "assignee": "bob"},
+			wantResult: LeaseClear,
+		},
+		{
+			name:       "update without a claim re-asserting the claim keeps",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"status": types.StatusInProgress, "assignee": "alice"},
+			wantResult: LeaseKeep,
+		},
 	}
 
 	for _, tt := range tests {
