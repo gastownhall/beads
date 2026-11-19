@@ -1270,10 +1270,20 @@ func TestExpansionVarRefs(t *testing.T) {
 					Labels:      []string{"team:{team}"},
 					DependsOn:   []string{"{target}.prep-{stage}"},
 					Needs:       []string{"{target.id}.gate-{gate}"},
-					// Neither field is carried into the expanded step, so
-					// nothing in them is ever substituted.
-					Notes:     "{notes_only}",
+					Notes:       "{notes_only}",
+					Metadata:    map[string]interface{}{"run": map[string]interface{}{"channel": "{meta_var}"}},
+					WaitsFor:    "children-of({target}.spawn-{spawner})",
+					// Condition, Gate and OnComplete stay verbatim through an
+					// expansion: their {{vars}} belong to the cook/pour-time
+					// substitution and their runtime placeholders to the
+					// molecule runtime, so none of them is consumed by the
+					// expansion's own vars.
 					Condition: "{{condition_only}}",
+					Gate:      &Gate{Type: "gh:run", AwaitID: "{{gate_only}}"},
+					OnComplete: &OnCompleteSpec{
+						ForEach: "output.items",
+						Vars:    map[string]string{"name": "{item}"},
+					},
 					Children: []*Step{
 						{ID: "{target}.child", Title: "Work on {{feature}}"},
 					},
@@ -1285,9 +1295,11 @@ func TestExpansionVarRefs(t *testing.T) {
 		// variable is, so none of them is a name; {target.description} pulls
 		// in the formula's description, whose {release} IS substituted. The
 		// single-brace pattern also matches inside {{feature}}, so a
-		// --var feature=x is consumed there too.
+		// --var feature=x is consumed there too. Notes, the metadata string
+		// leaves and waits_for are carried into the expanded step (GH#6433),
+		// so their names are consumed as well.
 		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
-		if want := "component env feature gate owner release stage team"; got != want {
+		if want := "component env feature gate meta_var notes_only owner release spawner stage team"; got != want {
 			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
 		}
 		if f.Steps != nil {
@@ -1327,4 +1339,138 @@ func TestExpansionVarRefs(t *testing.T) {
 			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
+}
+
+// TestExpandStepCarriesTemplateFields: expandStep must not drop Step fields
+// it does not substitute (bd-w153uq / #6433).
+func TestExpandStepCarriesTemplateFields(t *testing.T) {
+	target := &Step{ID: "implement", Title: "Implement"}
+	template := []*Step{{
+		ID:        "{target}.review",
+		Title:     "Review",
+		Notes:     "check {target}",
+		Metadata:  map[string]interface{}{"owner": "qa"},
+		WaitsFor:  "all-children",
+		Condition: "{{ready}}",
+		Gate:      &Gate{Type: "human", Timeout: "1h"},
+	}}
+
+	result, err := expandStep(target, template, nil)
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	got := result[0]
+	if got.Gate == nil || got.Gate.Type != "human" {
+		t.Errorf("Gate dropped: got %+v", got.Gate)
+	}
+	if got.WaitsFor != "all-children" {
+		t.Errorf("WaitsFor = %q, want %q", got.WaitsFor, "all-children")
+	}
+	if got.Condition == "" {
+		t.Errorf("Condition dropped")
+	}
+	if got.Notes == "" {
+		t.Errorf("Notes dropped")
+	}
+	if got.Metadata["owner"] != "qa" {
+		t.Errorf("Metadata dropped: got %v", got.Metadata)
+	}
+}
+
+// TestExpandStepPreservesTemplateFields: AC-1 of #6433. Notes, Metadata,
+// WaitsFor and OnComplete carry through an expansion with the substitution
+// each field's contract promises; Gate stays verbatim because its
+// double-brace fields are substituted at cook/pour time, not during
+// expansion.
+func TestExpandStepPreservesTemplateFields(t *testing.T) {
+	target := &Step{ID: "implement", Title: "Implement", Description: "Write the code"}
+	priority := 2
+	template := []*Step{{
+		ID:    "{target}.review",
+		Title: "Review",
+		Notes: "Review {target} against notes for {owner}",
+		Metadata: map[string]interface{}{
+			"count":  7,
+			"live":   true,
+			"owner":  "the {owner} team",
+			"nested": map[string]interface{}{"lead": "{owner}"},
+			"list":   []interface{}{"{owner}", "fixed"},
+		},
+		WaitsFor:   "children-of({target}.spawn)",
+		Gate:       &Gate{Type: "gh:run", ID: "ci.yml", AwaitID: "{{await}}", Timeout: "1h", Repo: "{{repo}}"},
+		OnComplete: &OnCompleteSpec{ForEach: "output.items", Bond: "item-mol", Vars: map[string]string{"name": "{item}"}, Parallel: true},
+		Priority:   &priority,
+	}}
+
+	// {await}, {repo} and {item} exist only to catch the expand path
+	// substituting into fields that must stay verbatim.
+	vars := map[string]string{"owner": "qa", "await": "CORRUPT", "repo": "CORRUPT", "item": "CORRUPT"}
+	result, err := expandStep(target, template, vars)
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(result))
+	}
+	got := result[0]
+
+	if want := "Review implement against notes for qa"; got.Notes != want {
+		t.Errorf("Notes = %q, want %q", got.Notes, want)
+	}
+
+	meta := got.Metadata
+	if meta == nil {
+		t.Fatal("Metadata dropped")
+	}
+	if meta["count"] != 7 {
+		t.Errorf("Metadata[count] = %v (%T), want scalar 7 unchanged", meta["count"], meta["count"])
+	}
+	if meta["live"] != true {
+		t.Errorf("Metadata[live] = %v (%T), want scalar true unchanged", meta["live"], meta["live"])
+	}
+	if meta["owner"] != "the qa team" {
+		t.Errorf("Metadata[owner] = %v, want leaf substitution", meta["owner"])
+	}
+	if nested, ok := meta["nested"].(map[string]interface{}); ok {
+		if nested["lead"] != "qa" {
+			t.Errorf("Metadata[nested][lead] = %v, want %q", nested["lead"], "qa")
+		}
+	} else {
+		t.Errorf("Metadata[nested] = %T, want a detached map", meta["nested"])
+	}
+	if list, ok := meta["list"].([]interface{}); ok {
+		if len(list) != 2 || list[0] != "qa" || list[1] != "fixed" {
+			t.Errorf("Metadata[list] = %v, want [qa fixed]", meta["list"])
+		}
+	} else {
+		t.Errorf("Metadata[list] = %T, want a detached slice", meta["list"])
+	}
+
+	if want := "children-of(implement.spawn)"; got.WaitsFor != want {
+		t.Errorf("WaitsFor = %q, want %q", got.WaitsFor, want)
+	}
+
+	if got.Gate == nil {
+		t.Fatal("Gate dropped")
+	}
+	if got.Gate.Type != "gh:run" || got.Gate.ID != "ci.yml" || got.Gate.Timeout != "1h" {
+		t.Errorf("Gate scalars not verbatim: %+v", got.Gate)
+	}
+	if got.Gate.AwaitID != "{{await}}" || got.Gate.Repo != "{{repo}}" {
+		t.Errorf("Gate double-brace fields substituted during expansion: %+v", got.Gate)
+	}
+
+	if got.OnComplete == nil {
+		t.Fatal("OnComplete dropped")
+	}
+	if got.OnComplete.ForEach != "output.items" || got.OnComplete.Bond != "item-mol" || !got.OnComplete.Parallel {
+		t.Errorf("OnComplete not verbatim: %+v", got.OnComplete)
+	}
+	if got.OnComplete.Vars["name"] != "{item}" {
+		t.Errorf("OnComplete.Vars[name] = %q, want runtime placeholder %q", got.OnComplete.Vars["name"], "{item}")
+	}
+
+	if got.Priority == nil || *got.Priority != 2 {
+		t.Errorf("Priority = %v, want 2", got.Priority)
+	}
 }

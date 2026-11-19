@@ -205,6 +205,30 @@ func expandStep(target *Step, template []*Step, vars map[string]string) ([]*Step
 // after the {target} placeholders in it are replaced, where those apply. It
 // exists so ExpansionVarRefs can see exactly those strings without keeping a
 // second list of the fields that carry them.
+//
+// Each expanded step starts as a copy of the template step, with the fields
+// that carry placeholders rewritten over the copy (GH#6433). A Step field
+// added later therefore carries through by default; the failure mode inverts
+// from "the field silently vanishes" (invisible in the cooked output) to "a
+// forgotten substitution shows up as a literal placeholder".
+//
+// Fields that are rewritten rather than copied verbatim:
+//
+//   - ID, Title, Description, Notes, Assignee, Labels, DependsOn, Needs,
+//     generatedNeeds and WaitsFor: target placeholders, then subst.
+//   - Metadata: a new decoded tree, target placeholders and subst on the
+//     string leaves only (expandStepMetadata).
+//   - Priority: the pointed-to integer is copied, so two expansions of one
+//     template never share it.
+//   - Gate, OnComplete: detached copies with every field verbatim. Their
+//     double-brace fields belong to the cook/pour-time substitution, and
+//     OnComplete's {item}/{index} are runtime bindings, none of which
+//     expansion-time vars may touch.
+//   - Condition: verbatim, without even target replacement. It is a
+//     double-brace expression FilterStepsByCondition evaluates at
+//     cook/pour time against the enclosing formula's vars; rewriting inside
+//     its braces would corrupt it.
+//   - Children: expanded recursively, as before.
 func expandStepWith(target *Step, template []*Step, depth int, subst func(string) string) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("expansion depth limit exceeded: max %d levels (currently at %d) - step %q",
@@ -214,39 +238,37 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 	result := make([]*Step, 0, len(template))
 
 	for _, tmpl := range template {
-		expanded := &Step{
-			ID:             subst(substituteTargetPlaceholders(tmpl.ID, target)),
-			Title:          subst(substituteTargetPlaceholders(tmpl.Title, target)),
-			Description:    subst(substituteTargetPlaceholders(tmpl.Description, target)),
-			Type:           tmpl.Type,
-			Priority:       tmpl.Priority,
-			Assignee:       subst(tmpl.Assignee),
-			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template
-			SourceLocation: tmpl.SourceLocation, // Preserve source location
+		expanded := *tmpl
+
+		expanded.ID = subst(substituteTargetPlaceholders(tmpl.ID, target))
+		expanded.Title = subst(substituteTargetPlaceholders(tmpl.Title, target))
+		expanded.Description = subst(substituteTargetPlaceholders(tmpl.Description, target))
+		expanded.Notes = subst(substituteTargetPlaceholders(tmpl.Notes, target))
+		expanded.Assignee = subst(tmpl.Assignee)
+		expanded.WaitsFor = subst(substituteTargetPlaceholders(tmpl.WaitsFor, target))
+
+		expanded.Labels = substituteStepRefs(tmpl.Labels, target, subst)
+		expanded.DependsOn = substituteStepRefs(tmpl.DependsOn, target, subst)
+		expanded.Needs = substituteStepRefs(tmpl.Needs, target, subst)
+		expanded.generatedNeeds = substituteStepRefs(tmpl.generatedNeeds, target, subst)
+
+		if tmpl.Metadata != nil {
+			metadata, err := expandStepMetadata(tmpl.Metadata, target, 0, subst)
+			if err != nil {
+				return nil, fmt.Errorf("template step %q: %w", tmpl.ID, err)
+			}
+			// tmpl.Metadata is map[string]interface{} by type, so the
+			// recursive copy below returns that same shape for it.
+			expanded.Metadata = metadata.(map[string]interface{})
 		}
 
-		// Substitute placeholders in labels
-		if len(tmpl.Labels) > 0 {
-			expanded.Labels = make([]string, len(tmpl.Labels))
-			for i, l := range tmpl.Labels {
-				expanded.Labels[i] = subst(substituteTargetPlaceholders(l, target))
-			}
+		if tmpl.Priority != nil {
+			priority := *tmpl.Priority
+			expanded.Priority = &priority
 		}
 
-		// Substitute placeholders in dependencies
-		if len(tmpl.DependsOn) > 0 {
-			expanded.DependsOn = make([]string, len(tmpl.DependsOn))
-			for i, d := range tmpl.DependsOn {
-				expanded.DependsOn[i] = subst(substituteTargetPlaceholders(d, target))
-			}
-		}
-
-		if len(tmpl.Needs) > 0 {
-			expanded.Needs = make([]string, len(tmpl.Needs))
-			for i, n := range tmpl.Needs {
-				expanded.Needs[i] = subst(substituteTargetPlaceholders(n, target))
-			}
-		}
+		expanded.Gate = cloneGate(tmpl.Gate)
+		expanded.OnComplete = cloneOnComplete(tmpl.OnComplete)
 
 		// Handle children recursively with depth tracking
 		if len(tmpl.Children) > 0 {
@@ -257,10 +279,85 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 			expanded.Children = children
 		}
 
-		result = append(result, expanded)
+		result = append(result, &expanded)
 	}
 
 	return result, nil
+}
+
+// substituteStepRefs returns a fresh slice with {target} placeholders and
+// then expansion vars substituted into each entry. A nil slice stays nil,
+// and a non-nil slice of any length - including empty - comes back detached
+// from the input, so expanding a template twice never shares backing
+// arrays. The copy is always fresh even for entries without placeholders,
+// because the caller may mutate the result's slice fields.
+func substituteStepRefs(src []string, target *Step, subst func(string) string) []string {
+	if src == nil {
+		return nil
+	}
+	out := make([]string, len(src))
+	for i, s := range src {
+		out[i] = subst(substituteTargetPlaceholders(s, target))
+	}
+	return out
+}
+
+// expandStepMetadata returns a new decoded metadata tree with {target}
+// placeholders and expansion vars substituted into every string leaf. Map
+// keys and non-string scalars are carried verbatim: keys are never rewritten
+// (they are identifiers, not prose), and numbers and booleans are the
+// immutable values TOML/JSON decoding produced.
+//
+// The recursion is bounded at maxMetadataScanDepth, like metadataStrings:
+// metadata is arbitrary user-supplied nesting, and the alternatives at the
+// bound are worse than an error - sharing the tail would alias template and
+// expansion, silently dropping it would lose data.
+func expandStepMetadata(v interface{}, target *Step, depth int, subst func(string) string) (interface{}, error) {
+	if depth >= maxMetadataScanDepth {
+		return nil, fmt.Errorf("metadata nested deeper than %d levels: expansion refuses to share or drop the tail", maxMetadataScanDepth)
+	}
+	switch val := v.(type) {
+	case string:
+		return subst(substituteTargetPlaceholders(val, target)), nil
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(val))
+		for k, elem := range val {
+			copied, err := expandStepMetadata(elem, target, depth+1, subst)
+			if err != nil {
+				return nil, fmt.Errorf("key %q: %w", k, err)
+			}
+			out[k] = copied
+		}
+		return out, nil
+	case []interface{}:
+		out := make([]interface{}, len(val))
+		for i, elem := range val {
+			copied, err := expandStepMetadata(elem, target, depth+1, subst)
+			if err != nil {
+				return nil, fmt.Errorf("index %d: %w", i, err)
+			}
+			out[i] = copied
+		}
+		return out, nil
+	default:
+		return val, nil
+	}
+}
+
+// cloneGate returns a detached copy of a step's gate, or nil. Every field is
+// verbatim: the double-brace fields a gate carries are substituted at
+// cook/pour time, and expansion-time single-brace vars must not touch them.
+func cloneGate(g *Gate) *Gate {
+	if g == nil {
+		return nil
+	}
+	return &Gate{
+		Type:    g.Type,
+		ID:      g.ID,
+		AwaitID: g.AwaitID,
+		Timeout: g.Timeout,
+		Repo:    g.Repo,
+	}
 }
 
 // substituteTargetPlaceholders replaces {target} and {target.*} placeholders.
