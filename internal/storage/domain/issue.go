@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,11 @@ type InsertIssueOpts struct {
 
 type IssueTableOpts struct {
 	UseWispsTable bool
+	// RefuseBlocked asks Claim to refuse, after its compare-and-set wins and
+	// before any claim bookkeeping, an issue with a live local blocker
+	// (issueops.EnforceClaimPolicyInTx). Only the lifecycle update's claim
+	// sets it; other readers and writers ignore it.
+	RefuseBlocked bool
 }
 
 type ClaimRowResult struct {
@@ -84,9 +90,6 @@ type IssueSQLRepository interface {
 	// space): a live row of either table holds it, or a retaining retention
 	// sweep retired it (either tombstone table). One statement.
 	Taken(ctx context.Context, id string) (bool, error)
-	// Retired reports whether a retaining retention sweep retired id (either
-	// tombstone table), whatever the row tables hold.
-	Retired(ctx context.Context, id string) (bool, error)
 	// RetiredIDs returns which of ids a retaining retention sweep retired
 	// (either tombstone table), with the closed_at each tombstone recorded
 	// (issueops.RetiredIDsInTx).
@@ -103,6 +106,12 @@ type IssueSQLRepository interface {
 	CoordinateCreates(ctx context.Context, ids []string) error
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
 	NextCounterID(ctx context.Context, prefix string) (int, error)
+	// AdvanceCounterPastHeld moves prefix's issue counter over the run of held
+	// values right above it, in one read however long the run
+	// (issueops.AdvanceCounterPastHeldIDsTx): its next value is then the first
+	// number above the current one that Taken reports free and claimed does
+	// not name.
+	AdvanceCounterPastHeld(ctx context.Context, prefix string, claimed map[string]bool) error
 	SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
@@ -354,6 +363,11 @@ type ClaimReadyResult struct {
 type UpdateSpec struct {
 	Fields map[string]any
 	Claim  bool
+	// ForceClaimBlocked lets Claim take an issue that still has a live local
+	// blocker; without it a claim of such an issue refuses with a
+	// publicops.BlockedError wrapping storage.ErrClaimBlocked and nothing is
+	// written. It has no meaning without Claim.
+	ForceClaimBlocked bool
 	// ExpectedVersion requires the current row version to match before any
 	// claim or field writes.
 	ExpectedVersion *int64
@@ -723,22 +737,31 @@ func canonicalIssueUpdateTypeError(field string, value any, want string) error {
 }
 
 func (u *issueUseCaseImpl) ClaimIssue(ctx context.Context, id, actor string) (ClaimResult, error) {
-	return u.claim(ctx, id, actor, false)
+	return u.claim(ctx, id, actor, false, false)
 }
 
 func (u *issueUseCaseImpl) ClaimWisp(ctx context.Context, id, actor string) (ClaimResult, error) {
-	return u.claim(ctx, id, actor, true)
+	return u.claim(ctx, id, actor, true, false)
 }
 
-func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp bool) (ClaimResult, error) {
+// claim is the body of ClaimIssue and ClaimWisp. refuseBlocked is the
+// lifecycle update's opt-in to the blocked-claim refusal (see
+// IssueTableOpts.RefuseBlocked); the public claim methods never set it.
+func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp, refuseBlocked bool) (ClaimResult, error) {
 	if id == "" {
 		return ClaimResult{}, fmt.Errorf("claim: id must not be empty")
 	}
 	if actor == "" {
 		return ClaimResult{}, fmt.Errorf("claim: actor must not be empty")
 	}
-	row, err := u.issueRepo.Claim(ctx, id, actor, IssueTableOpts{UseWispsTable: useWisp})
+	row, err := u.issueRepo.Claim(ctx, id, actor, IssueTableOpts{UseWispsTable: useWisp, RefuseBlocked: refuseBlocked})
 	if err != nil {
+		// The blocked-claim refusal already names the issue and its blockers,
+		// and must read the same on every route, so it is not prefixed.
+		var blocked *publicops.BlockedError
+		if errors.As(err, &blocked) {
+			return ClaimResult{}, err
+		}
 		return ClaimResult{}, fmt.Errorf("claim %s: %w", id, err)
 	}
 	if row.Updated {
@@ -846,14 +869,8 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	}
 
 	if spec.Claim {
-		if useWisp {
-			if _, err := u.ClaimWisp(ctx, id, actor); err != nil {
-				return nil, err
-			}
-		} else {
-			if _, err := u.ClaimIssue(ctx, id, actor); err != nil {
-				return nil, err
-			}
+		if _, err := u.claim(ctx, id, actor, useWisp, !spec.ForceClaimBlocked); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1729,7 +1746,8 @@ func (u *issueUseCaseImpl) resolveTopLevelPrefix(ctx context.Context, issue *typ
 // issue_id_mode=counter); otherwise uses adaptive hash-mode IDs that mirror
 // issueops.GenerateIssueIDInTable. Reads issue.CreatedAt (caller must have
 // stabilized it before this call so retries hash the same value). Both modes
-// pass over the ids claimed names (CreateIssueParams.ClaimedIDs).
+// pass over the ids claimed names (CreateIssueParams.ClaimedIDs) and every id
+// Taken reports: a live row of either plane or a tombstone (GH#8456).
 func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issue, actor string, useWisp bool, claimed map[string]bool) (string, error) {
 	prefix, err := u.resolveTopLevelPrefix(ctx, issue, useWisp)
 	if err != nil {
@@ -1745,7 +1763,7 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 			return "", fmt.Errorf("read issue_id_mode: %w", err)
 		}
 		if mode == "counter" {
-			return u.nextUnretiredCounterID(ctx, prefix, claimed)
+			return u.nextFreeCounterID(ctx, prefix, claimed)
 		}
 	}
 
@@ -1782,34 +1800,56 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 	return "", fmt.Errorf("failed to generate unique ID for prefix %q after lengths %d..%d with 10 nonces each", prefix, baseLength, cfg.MaxLength)
 }
 
-// maxRetiredCounterSkips bounds how many retired counter values one
-// counter-mode mint walks past (issueops.GenerateIssueIDInTable's bound).
-const maxRetiredCounterSkips = 1000
+// maxCounterSkips bounds how many held counter values one counter-mode mint
+// walks past one probe at a time before it skips the rest of the held run in
+// one read, and again after (issueops.GenerateIssueIDInTable's bound).
+const maxCounterSkips = 1000
 
-// nextUnretiredCounterID is the counter-mode mint skipping values a retaining
-// sweep retired or the caller's batch claimed, so a fresh create is never
-// handed an id it would be refused. The counter only advances, so a skipped
-// value is never offered again.
-func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix string, claimed map[string]bool) (string, error) {
-	for skips := 0; ; skips++ {
+// nextFreeCounterID is the counter-mode mint skipping values a live row of
+// either plane holds, a retaining sweep retired, or the caller's batch
+// claimed, so a fresh create is never handed an id it would overwrite or be
+// refused. The counter only advances on its own mints, so an explicit id, an
+// import or a wisp can sit ahead of it; a skipped value is never offered again.
+//
+// A held run longer than one walk (a bulk import ahead of an existing counter)
+// is skipped in one read, AdvanceCounterPastHeld, rather than failing every
+// auto create for good: a failed create rolls its bumps back with it, so the
+// next one would walk the same run (issueops.nextFreeCounterIDTx).
+func (u *issueUseCaseImpl) nextFreeCounterID(ctx context.Context, prefix string, claimed map[string]bool) (string, error) {
+	if id, err := u.walkCounter(ctx, prefix, claimed); id != "" || err != nil {
+		return id, err
+	}
+	if err := u.issueRepo.AdvanceCounterPastHeld(ctx, prefix, claimed); err != nil {
+		return "", err
+	}
+	if id, err := u.walkCounter(ctx, prefix, claimed); id != "" || err != nil {
+		return id, err
+	}
+	return "", fmt.Errorf("issue counter for prefix %q walked past %d taken or claimed ids without finding a free one", prefix, maxCounterSkips)
+}
+
+// walkCounter bumps prefix's counter at most maxCounterSkips+1 times and
+// returns the first value claimed does not name and Taken reports free, or ""
+// when every value it reached was held.
+func (u *issueUseCaseImpl) walkCounter(ctx context.Context, prefix string, claimed map[string]bool) (string, error) {
+	for range maxCounterSkips + 1 {
 		n, err := u.issueRepo.NextCounterID(ctx, prefix)
 		if err != nil {
 			return "", err
 		}
 		candidate := fmt.Sprintf("%s-%d", prefix, n)
-		if !claimed[candidate] {
-			retired, err := u.issueRepo.Retired(ctx, candidate)
-			if err != nil {
-				return "", err
-			}
-			if !retired {
-				return candidate, nil
-			}
+		if claimed[candidate] {
+			continue
 		}
-		if skips >= maxRetiredCounterSkips {
-			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
+		taken, err := u.issueRepo.Taken(ctx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !taken {
+			return candidate, nil
 		}
 	}
+	return "", nil
 }
 
 func (u *issueUseCaseImpl) CloseIssue(ctx context.Context, id string, params CloseIssueParams, actor string) (CloseIssueResult, error) {
@@ -1899,11 +1939,11 @@ func (u *issueUseCaseImpl) reopen(ctx context.Context, id string, params ReopenI
 }
 
 func (u *issueUseCaseImpl) ClaimIssueIfOpen(ctx context.Context, id, actor string) (ClaimResult, error) {
-	return u.claim(ctx, id, actor, false)
+	return u.claim(ctx, id, actor, false, false)
 }
 
 func (u *issueUseCaseImpl) ClaimWispIfOpen(ctx context.Context, id, actor string) (ClaimResult, error) {
-	return u.claim(ctx, id, actor, true)
+	return u.claim(ctx, id, actor, true, false)
 }
 
 func (u *issueUseCaseImpl) CountOpenChildren(ctx context.Context, id string) (int, error) {

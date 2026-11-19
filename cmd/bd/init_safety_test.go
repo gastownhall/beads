@@ -10,11 +10,17 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 )
@@ -324,6 +330,84 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 				ExpectedToken: "DESTROY-bd",
 			},
 			ActionProceedWithDivergence, 0,
+		},
+
+		// Derived-from-git-origin column (GH#6099). Adopting a remote the
+		// user never named needs consent; the absence of consent refuses
+		// unless the caller can still ask.
+		{
+			"derived/remote/no-consent/non-interactive",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true},
+			ActionRefuseAdoption, 1,
+		},
+		{
+			// A TTY that cannot be prompted for adoption (JSON, or past
+			// workspace writes) is not consent either.
+			"derived/remote/no-consent/tty-but-no-adoption-prompt",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, IsInteractive: true},
+			ActionRefuseAdoption, 1,
+		},
+		{
+			"derived/remote/yes",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, AdoptionConsented: true},
+			ActionBootstrap, 0,
+		},
+		{
+			"derived/fresh/no-consent",
+			RemoteSafetyInput{DerivedFromGitOrigin: true},
+			ActionNoRemoteData, 0,
+		},
+		// Explicit/configured sources keep their old outcome without consent.
+		{
+			"configured/remote/no-consent",
+			RemoteSafetyInput{RemoteHasDoltData: true},
+			ActionBootstrap, 0,
+		},
+		// Consent never bypasses the override guards.
+		{
+			"derived/remote/force+yes",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, Force: true, AdoptionConsented: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
+		{
+			"derived/remote/discard+yes/non-interactive/no-token",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, DiscardRemote: true, AdoptionConsented: true, ExpectedToken: "DESTROY-bd"},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			// The early checkpoint of an interactive, non-JSON init asks.
+			"derived/remote/no-consent/can-ask",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, AdoptionInteractive: true},
+			ActionAskAdoption, 0,
+		},
+		// The opt-out (--no-adopt / BD_NO_REMOTE_ADOPT) skips a derived
+		// remote and beats consent: the safer of two contradictory
+		// instructions wins, before even the no-data branch. It never
+		// touches a remote the caller named or configured.
+		{
+			"derived/no-adopt",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, AdoptionDisabled: true},
+			ActionSkipDerivedRemote, 0,
+		},
+		{
+			"derived/no-adopt+yes",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, AdoptionDisabled: true, AdoptionConsented: true},
+			ActionSkipDerivedRemote, 0,
+		},
+		{
+			"derived/no-adopt/no-data",
+			RemoteSafetyInput{DerivedFromGitOrigin: true, AdoptionDisabled: true},
+			ActionSkipDerivedRemote, 0,
+		},
+		{
+			"explicit/no-adopt",
+			RemoteSafetyInput{RemoteHasDoltData: true, AdoptionDisabled: true},
+			ActionBootstrap, 0,
+		},
+		{
+			"explicit/yes+no-adopt",
+			RemoteSafetyInput{RemoteHasDoltData: true, AdoptionConsented: true, AdoptionDisabled: true},
+			ActionBootstrap, 0,
 		},
 	}
 
@@ -970,3 +1054,633 @@ func TestInitForceDiscardRemoteProceedsWithToken(t *testing.T) {
 
 // Helpers used above: buildBDForInitTests, runGitForBootstrapTest — both
 // defined elsewhere in the test package (init_test.go and bootstrap_test.go).
+
+// derivedOriginWithDoltDataFixture builds the GH#6099 shape without a real
+// Dolt database: a bare git remote advertising refs/dolt/data, and a fresh
+// git clone (no .beads, no sync.remote) whose origin IS that remote. The ref
+// is an ordinary commit, so any clone attempt fails: a test that sees a
+// consent refusal instead of a clone error proves the gate ran first.
+func derivedOriginWithDoltDataFixture(t *testing.T) (workDir, remoteDir string) {
+	t.Helper()
+	remoteDir = filepath.Join(t.TempDir(), "upstream.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", remoteDir)
+
+	sourceDir := t.TempDir()
+	runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", remoteDir)
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+	workDir = t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	runGitForBootstrapTest(t, workDir, "remote", "add", "origin", remoteDir)
+	return workDir, remoteDir
+}
+
+// runInitForAdoptionTest runs bd init in workDir with a hermetic env and the
+// given stdin, returning combined output and the exit code (0 on success).
+func runInitForAdoptionTest(t *testing.T, workDir, stdin string, extraEnv []string, args ...string) (string, int) {
+	t.Helper()
+	bdBin := buildBDForInitTests(t)
+	cmd := exec.Command(bdBin, append([]string{"init"}, args...)...)
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(t.TempDir(), extraEnv...)
+	cmd.Stdin = strings.NewReader(stdin)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	if err == nil {
+		return out.String(), 0
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("bd init did not run: %v\noutput:\n%s", err, out.String())
+	}
+	return out.String(), exitErr.ExitCode()
+}
+
+// TestInitDerivedOriginAdoptionRefusesWithoutConsent is AC-1 of GH#6099: a
+// fresh clone whose git origin carries Dolt history, no configured remote,
+// and no TTY. Init must refuse with exit 1 BEFORE creating .beads, name the
+// origin, and say how to consent or opt out, without prompting.
+// --non-interactive, --quiet and --json are not consent.
+func TestInitDerivedOriginAdoptionRefusesWithoutConsent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		env   []string
+		stdin string
+	}{
+		{name: "non-interactive", args: []string{"--non-interactive"}},
+		{name: "no-tty"},
+		{name: "quiet", args: []string{"--non-interactive", "--quiet"}},
+		{name: "json", args: []string{"--json"}},
+		// BD_NON_INTERACTIVE=0 forces init's interactive mode on piped
+		// stdin, so only --json keeps this run from prompting: JSON never
+		// prompts, and the yes waiting on stdin is never read as consent.
+		{name: "json-forced-interactive", args: []string{"--json"}, env: []string{"BD_NON_INTERACTIVE=0"}, stdin: "y\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir, remoteDir := derivedOriginWithDoltDataFixture(t)
+			args := append([]string{"--prefix", "mine", "--skip-hooks", "--skip-agents"}, tc.args...)
+			out, code := runInitForAdoptionTest(t, workDir, tc.stdin, tc.env, args...)
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1 (adoption refused without consent)\noutput:\n%s", code, out)
+			}
+			for _, want := range []string{"will not adopt it without consent", remoteDir, "--yes", "--no-adopt", "BD_NO_REMOTE_ADOPT"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("refusal does not mention %q:\n%s", want, out)
+				}
+			}
+			if n := strings.Count(out, "[y/N]"); n != 0 {
+				t.Errorf("init prompted %d time(s); a run that cannot ask must refuse without prompting:\n%s", n, out)
+			}
+			if strings.Contains(out, "failed to clone") {
+				t.Errorf("init attempted the clone before refusing:\n%s", out)
+			}
+			if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
+				t.Errorf("refusal created .beads (stat err=%v); the early refusal must write nothing", err)
+			}
+		})
+	}
+}
+
+// TestInitDerivedOriginYesAnnouncesBeforeCloning pins the order of the
+// --yes disclosure (GH#6099): init names the origin it adopts from before it
+// clones. The fixture's refs/dolt/data is an ordinary commit, so the clone
+// fails, and its error goes to stderr, the stream the announcement is on.
+// One stream keeps the order init wrote them in; a buffer merging stdout and
+// stderr, drained by two goroutines, does not.
+func TestInitDerivedOriginYesAnnouncesBeforeCloning(t *testing.T) {
+	workDir, remoteDir := derivedOriginWithDoltDataFixture(t)
+	bdBin := buildBDForInitTests(t)
+	cmd := exec.Command(bdBin, "init", "--prefix", "mine", "--skip-hooks", "--skip-agents", "--non-interactive", "--yes")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(t.TempDir())
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("init succeeded although the fixture's refs/dolt/data holds no Dolt history:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	announced := strings.Index(errText, "Adopting Dolt issue history from git origin: ")
+	cloned := strings.Index(errText, "failed to clone")
+	if announced < 0 || cloned < 0 || announced > cloned {
+		t.Fatalf("on stderr the --yes announcement is at %d and the clone failure at %d; want the announcement first:\n%s", announced, cloned, errText)
+	}
+	if line, _, _ := strings.Cut(errText[announced:], "\n"); !strings.Contains(line, remoteDir) {
+		t.Errorf("the announcement does not name the origin %s: %q", remoteDir, line)
+	}
+}
+
+// TestConfirmInitRemoteAdoptionAnswerTable pins the adoption prompt's
+// consent semantics (GH#6099): only an explicit y/yes grants consent. Every
+// other answer, EOF and a read error decline without an error, so the caller
+// refuses with exit 1; cancellation alone comes back as an error, so the
+// caller keeps exit 130.
+func TestConfirmInitRemoteAdoptionAnswerTable(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name         string
+		ctx          context.Context
+		in           io.Reader
+		wantGrant    bool
+		wantCanceled bool
+	}{
+		{name: "y grants", in: strings.NewReader("y\n"), wantGrant: true},
+		{name: "yes grants", in: strings.NewReader("yes\n"), wantGrant: true},
+		{name: "uppercase YES grants", in: strings.NewReader("YES\n"), wantGrant: true},
+		{name: "padded y grants", in: strings.NewReader("  y  \n"), wantGrant: true},
+		{name: "n declines", in: strings.NewReader("n\n")},
+		{name: "no declines", in: strings.NewReader("no\n")},
+		{name: "empty line declines", in: strings.NewReader("\n")},
+		{name: "unrelated word declines", in: strings.NewReader("maybe\n")},
+		{name: "EOF declines", in: strings.NewReader("")},
+		{name: "read error declines", in: iotest.ErrReader(errors.New("read: resource temporarily unavailable"))},
+		{name: "cancellation is an error", ctx: canceled, in: strings.NewReader("y\n"), wantCanceled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := tc.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			var out bytes.Buffer
+			granted, err := confirmInitRemoteAdoption(ctx, tc.in, nil, &out, "file:///tmp/upstream.git")
+			if granted != tc.wantGrant {
+				t.Errorf("granted = %v, want %v", granted, tc.wantGrant)
+			}
+			if tc.wantCanceled {
+				if !isCanceled(err) {
+					t.Errorf("err = %v, want a cancellation", err)
+				}
+			} else if err != nil {
+				t.Errorf("err = %v, want nil (a decline is not an error)", err)
+			}
+		})
+	}
+}
+
+// TestConfirmInitRemoteAdoptionDisclosesURL pins the prompt's disclosure: it
+// names the URL it would adopt with credentials stripped, says what adoption
+// does, and defaults to NO.
+func TestConfirmInitRemoteAdoptionDisclosesURL(t *testing.T) {
+	var out bytes.Buffer
+	granted, err := confirmInitRemoteAdoption(context.Background(), strings.NewReader("n\n"), nil, &out,
+		"https://x-access-token:s3cret@example.com/org/upstream.git")
+	if err != nil || granted {
+		t.Fatalf("decline = (%v, %v), want (false, nil)", granted, err)
+	}
+	text := out.String()
+	for _, want := range []string{"https://example.com/org/upstream.git", "entire issue history", "sync.remote", "Adopt this remote's issue history?", "[y/N]"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompt missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "s3cret") {
+		t.Errorf("prompt leaked the URL's credentials:\n%s", text)
+	}
+}
+
+// TestInitDerivedOriginAdoptionDeclined is AC-3 of GH#6099: on an interactive
+// init, anything but an affirmative answer to the adoption prompt (a no, an
+// empty line, invalid input, EOF) exits 1 before the workspace exists, with
+// guidance, and never falls through to a fresh database or a clone.
+func TestInitDerivedOriginAdoptionDeclined(t *testing.T) {
+	for _, tc := range []struct{ name, stdin string }{
+		{"no", "n\n"},
+		{"empty", "\n"},
+		{"invalid", "maybe\n"},
+		{"eof", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir, remoteDir := derivedOriginWithDoltDataFixture(t)
+			out, code := runInitForAdoptionTest(t, workDir, tc.stdin, []string{"BD_NON_INTERACTIVE=0"},
+				"--prefix", "mine", "--skip-hooks", "--skip-agents", "--quiet")
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1 (adoption declined)\noutput:\n%s", code, out)
+			}
+			if got := strings.Count(out, "Adopt this remote's issue history?"); got != 1 {
+				t.Errorf("prompt shown %d times, want 1:\n%s", got, out)
+			}
+			for _, want := range []string{"declined", remoteDir, "--yes", "--no-adopt", "BD_NO_REMOTE_ADOPT", "bd bootstrap"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("decline output does not mention %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "failed to clone") {
+				t.Errorf("init attempted the clone after a decline:\n%s", out)
+			}
+			if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
+				t.Errorf("decline created .beads (stat err=%v)", err)
+			}
+		})
+	}
+}
+
+// TestInitDerivedOriginAdoptionPromptCanceled pins the other half of AC-3:
+// an interrupt at the adoption prompt keeps init's existing cancellation
+// exit (130), not the decline's exit 1, and writes nothing.
+func TestInitDerivedOriginAdoptionPromptCanceled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Interrupt cannot be delivered to a child process on Windows")
+	}
+	workDir, _ := derivedOriginWithDoltDataFixture(t)
+	bdBin := buildBDForInitTests(t)
+	cmd := exec.Command(bdBin, "init", "--prefix", "mine", "--skip-hooks", "--skip-agents", "--quiet")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(t.TempDir(), "BD_NON_INTERACTIVE=0")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var seen bytes.Buffer
+	buf := make([]byte, 4096)
+	for !strings.Contains(seen.String(), "[y/N]") {
+		n, readErr := stderr.Read(buf)
+		seen.Write(buf[:n])
+		if readErr != nil {
+			_ = cmd.Wait()
+			t.Fatalf("init exited before prompting: %v\n%s", readErr, seen.String())
+		}
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	rest, _ := io.ReadAll(stderr)
+	seen.Write(rest)
+	err = cmd.Wait()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != exitCodeCanceled {
+		t.Fatalf("init after interrupt = %v, want exit %d\n%s", err, exitCodeCanceled, seen.String())
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
+		t.Errorf("canceled prompt created .beads (stat err=%v)", err)
+	}
+}
+
+// TestInitDerivedOriginOptOut is AC-4 of GH#6099: --no-adopt or a truthy
+// BD_NO_REMOTE_ADOPT skips the derived origin entirely (no probe, no clone,
+// no remote wiring, no persisted sync.remote) and creates a local database,
+// even when --yes is also supplied: the safer instruction wins.
+func TestInitDerivedOriginOptOut(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		env         []string
+		unreachable bool
+	}{
+		{name: "flag", args: []string{"--no-adopt"}},
+		{name: "env", env: []string{"BD_NO_REMOTE_ADOPT=1"}},
+		{name: "env-true", env: []string{"BD_NO_REMOTE_ADOPT=true"}},
+		{name: "flag-beats-yes", args: []string{"--no-adopt", "--yes"}},
+		// An origin whose probe would fail prints a "could not verify" note
+		// when probed; its absence shows no probe ran.
+		{name: "no-probe", args: []string{"--no-adopt"}, unreachable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var workDir, remoteDir string
+			if tc.unreachable {
+				workDir = t.TempDir()
+				runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+				runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+				remoteDir = filepath.Join(t.TempDir(), "does-not-exist.git")
+				runGitForBootstrapTest(t, workDir, "remote", "add", "origin", remoteDir)
+			} else {
+				workDir, remoteDir = derivedOriginWithDoltDataFixture(t)
+			}
+			args := append([]string{"--prefix", "mine", "--non-interactive", "--skip-hooks", "--skip-agents"}, tc.args...)
+			// GIT_TRACE logs every git command bd (and Dolt's git remote
+			// factory) runs, so the absence of the probe and the clone is
+			// asserted directly, not inferred from missing wording.
+			gitTrace := filepath.Join(t.TempDir(), "git-trace.log")
+			out, code := runInitForAdoptionTest(t, workDir, "", append([]string{"GIT_TRACE=" + gitTrace}, tc.env...), args...)
+			if code != 0 {
+				t.Fatalf("opted-out init exit code = %d, want 0\noutput:\n%s", code, out)
+			}
+			trace, err := os.ReadFile(gitTrace)
+			if err != nil || !strings.Contains(string(trace), "trace: ") {
+				t.Fatalf("GIT_TRACE recorded no git command (err=%v); the no-probe check would be vacuous", err)
+			}
+			if strings.Contains(string(trace), "ls-remote") || strings.Contains(string(trace), remoteDir) {
+				t.Errorf("opted-out init ran git against the derived origin:\n%s", trace)
+			}
+			for _, unwanted := range []string{"could not verify", "failed to clone", "Bootstrapped from remote", "Adopting Dolt issue history"} {
+				if strings.Contains(out, unwanted) {
+					t.Errorf("opted-out init output contains %q (probe/clone ran):\n%s", unwanted, out)
+				}
+			}
+			cfg, err := os.ReadFile(filepath.Join(workDir, ".beads", "config.yaml"))
+			if err != nil {
+				t.Fatalf("opted-out init created no local workspace: %v\n%s", err, out)
+			}
+			if strings.Contains(string(cfg), remoteDir) {
+				t.Errorf("opted-out init persisted the derived origin:\n%s", cfg)
+			}
+
+			bdBin := buildBDForInitTests(t)
+			remotes := exec.Command(bdBin, "dolt", "remote", "list")
+			remotes.Dir = workDir
+			remotes.Env = hermeticInitEnv(t.TempDir())
+			remotesOut, _ := remotes.CombinedOutput()
+			if strings.Contains(string(remotesOut), remoteDir) {
+				t.Errorf("opted-out init wired the derived origin as a Dolt remote:\n%s", remotesOut)
+			}
+		})
+	}
+}
+
+// TestInitAdoptionFlagsKeepExistingGuards is AC-5 of GH#6099: --yes is
+// consent to adopt a derived origin, nothing more. It does not authorize
+// divergence, stand in for a destroy-token, bypass the local-data guard, or
+// change an explicit --remote; an unreachable origin still falls back to a
+// fresh local database. --no-adopt leaves explicit remotes alone.
+func TestInitAdoptionFlagsKeepExistingGuards(t *testing.T) {
+	base := []string{"--prefix", "mine", "--non-interactive", "--skip-hooks", "--skip-agents"}
+	plainRepo := func(t *testing.T, origin string) string {
+		t.Helper()
+		dir := t.TempDir()
+		runGitForBootstrapTest(t, dir, "init", "-b", "main")
+		runGitForBootstrapTest(t, dir, "config", "core.hooksPath", ".git/hooks")
+		if origin != "" {
+			runGitForBootstrapTest(t, dir, "remote", "add", "origin", origin)
+		}
+		return dir
+	}
+	noDoltDataBare := func(t *testing.T) string {
+		t.Helper()
+		// A branch but no refs/dolt/data: dolt cannot clone a branchless repo.
+		dir := filepath.Join(t.TempDir(), "empty.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", dir)
+		src := t.TempDir()
+		runGitForBootstrapTest(t, src, "init", "-b", "main")
+		runGitForBootstrapTest(t, src, "config", "user.email", "test@test.com")
+		runGitForBootstrapTest(t, src, "config", "user.name", "Test User")
+		runGitForBootstrapTest(t, src, "commit", "--allow-empty", "-m", "init")
+		runGitForBootstrapTest(t, src, "push", dir, "HEAD:refs/heads/main")
+		return dir
+	}
+
+	t.Run("derived/force+yes refuses divergence", func(t *testing.T) {
+		workDir, _ := derivedOriginWithDoltDataFixture(t)
+		out, code := runInitForAdoptionTest(t, workDir, "", nil, append(base, "--force", "--yes")...)
+		if code != ExitRemoteDivergenceRefused || !strings.Contains(out, "already has Dolt history") {
+			t.Fatalf("exit %d, want %d with the divergence refusal:\n%s", code, ExitRemoteDivergenceRefused, out)
+		}
+	})
+	t.Run("derived/discard+wrong-token+yes refuses", func(t *testing.T) {
+		workDir, _ := derivedOriginWithDoltDataFixture(t)
+		out, code := runInitForAdoptionTest(t, workDir, "", nil, append(base, "--discard-remote", "--destroy-token=WRONG", "--yes")...)
+		if code != ExitDestroyTokenMissing || !strings.Contains(out, "does not match") {
+			t.Fatalf("exit %d, want %d with the token-mismatch refusal:\n%s", code, ExitDestroyTokenMissing, out)
+		}
+	})
+	t.Run("derived/force+discard+yes without a token refuses", func(t *testing.T) {
+		workDir, _ := derivedOriginWithDoltDataFixture(t)
+		out, code := runInitForAdoptionTest(t, workDir, "", nil, append(base, "--force", "--discard-remote", "--yes")...)
+		if code != ExitDestroyTokenMissing {
+			t.Fatalf("exit %d, want %d: consent is not a destroy token:\n%s", code, ExitDestroyTokenMissing, out)
+		}
+		if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
+			t.Errorf("token refusal created .beads (stat err=%v)", err)
+		}
+	})
+	t.Run("configured-empty/no-adopt succeeds", func(t *testing.T) {
+		// --no-adopt opts out of DERIVATION only: a configured sync.remote
+		// with no Dolt data keeps flowing exactly as before (GH#4861 shape).
+		remoteDir := filepath.Join(t.TempDir(), "empty.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", remoteDir)
+		workDir := plainRepo(t, "")
+		out, code := runInitForAdoptionTest(t, workDir, "", []string{"BD_SYNC_REMOTE=" + remoteDir}, append(base, "--no-adopt")...)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0: --no-adopt must not block a configured sync.remote:\n%s", code, out)
+		}
+		if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
+			t.Fatalf("configured-remote init created no workspace: %v\n%s", err, out)
+		}
+	})
+	t.Run("configured/force+yes refuses divergence", func(t *testing.T) {
+		_, remoteDir := derivedOriginWithDoltDataFixture(t)
+		workDir := plainRepo(t, "")
+		out, code := runInitForAdoptionTest(t, workDir, "", []string{"BD_SYNC_REMOTE=" + remoteDir}, append(base, "--force", "--yes", "--no-adopt")...)
+		if code != ExitRemoteDivergenceRefused || !strings.Contains(out, "already has Dolt history") {
+			t.Fatalf("exit %d, want %d: --no-adopt must not disarm a configured remote's guard:\n%s", code, ExitRemoteDivergenceRefused, out)
+		}
+	})
+	t.Run("derived/unreachable+yes falls back to fresh", func(t *testing.T) {
+		workDir := plainRepo(t, filepath.Join(t.TempDir(), "does-not-exist.git"))
+		out, code := runInitForAdoptionTest(t, workDir, "", nil, append(base, "--yes")...)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0 (fresh fallback):\n%s", code, out)
+		}
+		if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
+			t.Fatalf("no workspace after fallback: %v\n%s", err, out)
+		}
+	})
+	for _, extra := range [][]string{{"--yes"}, {"--no-adopt"}} {
+		t.Run("explicit/"+extra[0]+" keeps --remote", func(t *testing.T) {
+			remoteDir := noDoltDataBare(t)
+			workDir := plainRepo(t, "")
+			out, code := runInitForAdoptionTest(t, workDir, "", nil, append(append(base, "--remote", remoteDir), extra...)...)
+			if code != 0 {
+				t.Fatalf("exit %d, want 0:\n%s", code, out)
+			}
+			if strings.Contains(out, "Adopting Dolt issue history from git origin") {
+				t.Errorf("explicit --remote announced as a git-origin adoption:\n%s", out)
+			}
+			cfg, err := os.ReadFile(filepath.Join(workDir, ".beads", "config.yaml"))
+			if err != nil || !strings.Contains(string(cfg), remoteDir) {
+				t.Fatalf("explicit --remote not persisted (err=%v):\n%s\noutput:\n%s", err, cfg, out)
+			}
+		})
+	}
+	t.Run("local-data guard ignores --yes", func(t *testing.T) {
+		workDir := plainRepo(t, "")
+		if out, code := runInitForAdoptionTest(t, workDir, "", nil, base...); code != 0 {
+			t.Fatalf("first init exit %d:\n%s", code, out)
+		}
+		out, code := runInitForAdoptionTest(t, workDir, "", nil, append(base, "--yes")...)
+		if code == 0 || !strings.Contains(out, "already initialized") {
+			t.Fatalf("re-init over an existing workspace: exit %d, want the already-initialized refusal:\n%s", code, out)
+		}
+	})
+}
+
+// TestInitDerivedOriginLateCheckpointRefusesUnconsentedURL is AC-6 of
+// GH#6099: consent at the early prompt is for that URL only. If origin
+// changes before the late checkpoint (here, while init waits at the prompt)
+// and the new origin has Dolt history, init refuses before cloning rather
+// than adopting a remote nobody agreed to.
+func TestInitDerivedOriginLateCheckpointRefusesUnconsentedURL(t *testing.T) {
+	workDir, consentedRemote := derivedOriginWithDoltDataFixture(t)
+	_, otherRemote := derivedOriginWithDoltDataFixture(t)
+	bdBin := buildBDForInitTests(t)
+	cmd := exec.Command(bdBin, "init", "--prefix", "mine", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(t.TempDir(), "BD_NON_INTERACTIVE=0")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Bound the interactive child: a hung init is killed, which closes its
+	// stderr and fails the reads below instead of stalling the suite.
+	killer := time.AfterFunc(2*time.Minute, func() { _ = cmd.Process.Kill() })
+	defer killer.Stop()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	var seen bytes.Buffer
+	buf := make([]byte, 4096)
+	for !strings.Contains(seen.String(), "[y/N]") {
+		n, readErr := stderr.Read(buf)
+		seen.Write(buf[:n])
+		if readErr != nil {
+			_ = cmd.Wait()
+			t.Fatalf("init exited before prompting: %v\n%s%s", readErr, seen.String(), stdout.String())
+		}
+	}
+	if !strings.Contains(seen.String(), consentedRemote) {
+		t.Fatalf("prompt does not name the origin being consented to (%s):\n%s", consentedRemote, seen.String())
+	}
+	runGitForBootstrapTest(t, workDir, "remote", "set-url", "origin", otherRemote)
+	if _, err := io.WriteString(stdin, "y\n"); err != nil {
+		t.Fatal(err)
+	}
+	rest, _ := io.ReadAll(stderr)
+	seen.Write(rest)
+	err = cmd.Wait()
+	out := seen.String() + stdout.String()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("init after origin changed = %v, want exit 1\n%s", err, out)
+	}
+	for _, want := range []string{"bd init refuses", "Derived from git origin: " + otherRemote, "bd init --yes"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("late refusal missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"failed to clone", "Adopting Dolt issue history"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("late checkpoint reached the clone (%q):\n%s", unwanted, out)
+		}
+	}
+	if cfg, err := os.ReadFile(filepath.Join(workDir, ".beads", "config.yaml")); err == nil && strings.Contains(string(cfg), otherRemote) {
+		t.Errorf("refused origin persisted as sync.remote:\n%s", cfg)
+	}
+}
+
+// TestInitAdoptionConsentAcrossCheckpoints pins how the two checkpoints of
+// one init share consent (GH#6099), through the same CheckRemoteSafety and
+// handleInitAdoptionDecision calls init.go makes. The late checkpoint never
+// prompts; only --yes, or the early answer for the SAME URL, lets it clone.
+// Its refusal says the workspace was scaffolded rather than "nothing was
+// written".
+func TestInitAdoptionConsentAcrossCheckpoints(t *testing.T) {
+	const (
+		originURL = "file:///tmp/upstream.git"
+		otherURL  = "file:///tmp/unrelated.git"
+	)
+	// lateCheckpoint runs the late decision exactly as init.go builds it.
+	lateCheckpoint := func(t *testing.T, consent initAdoptionConsent, syncURL string) (RemoteSafetyDecision, bool, error, string) {
+		t.Helper()
+		decision := CheckRemoteSafety(RemoteSafetyInput{
+			RemoteHasDoltData:    true,
+			IsInteractive:        true,
+			DerivedFromGitOrigin: true,
+			AdoptionConsented:    consent.grants(syncURL),
+		})
+		var handled bool
+		var err error
+		stderr := captureStderr(t, func() {
+			handled, err = handleInitAdoptionDecision(decision, syncURL, true, &consent)
+		})
+		return decision, handled, err, stderr
+	}
+	refuses := func(t *testing.T, decision RemoteSafetyDecision, handled bool, err error, stderr, syncURL string) {
+		t.Helper()
+		if decision.Action != ActionRefuseAdoption || !handled {
+			t.Fatalf("late decision = %v (handled=%v), want a refusal that never prompts", decision.Action, handled)
+		}
+		if code, ok := exitCodeFromError(err); !ok || code != 1 {
+			t.Fatalf("late refusal err = %v, want exit 1", err)
+		}
+		for _, want := range []string{syncURL, "The workspace was scaffolded, but no history was imported.", "bd init --yes"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("late refusal missing %q:\n%s", want, stderr)
+			}
+		}
+		if strings.Contains(stderr, "Nothing was written.") {
+			t.Errorf("late refusal claims nothing was written:\n%s", stderr)
+		}
+	}
+
+	t.Run("early answer covers the same URL without a second prompt", func(t *testing.T) {
+		// What the early prompt's yes leaves behind (handleInitAdoptionDecision).
+		decision, handled, err, _ := lateCheckpoint(t, initAdoptionConsent{url: originURL, prompted: true}, originURL)
+		if decision.Action != ActionBootstrap || handled || err != nil {
+			t.Fatalf("late decision = %v (handled=%v, err=%v), want bootstrap", decision.Action, handled, err)
+		}
+	})
+	t.Run("early empty then late history without consent refuses", func(t *testing.T) {
+		// The early probe found no Dolt data, so nothing was asked and
+		// nothing consented; the late probe now finds history.
+		var consent initAdoptionConsent
+		early := CheckRemoteSafety(RemoteSafetyInput{DerivedFromGitOrigin: true, AdoptionInteractive: true})
+		if early.Action != ActionNoRemoteData {
+			t.Fatalf("early decision = %v, want ActionNoRemoteData", early.Action)
+		}
+		decision, handled, err, stderr := lateCheckpoint(t, consent, originURL)
+		refuses(t, decision, handled, err, stderr, originURL)
+	})
+	t.Run("consent for an unrelated URL is not reused", func(t *testing.T) {
+		decision, handled, err, stderr := lateCheckpoint(t, initAdoptionConsent{url: otherURL, prompted: true}, originURL)
+		refuses(t, decision, handled, err, stderr, originURL)
+	})
+	t.Run("--yes covers a late URL", func(t *testing.T) {
+		decision, handled, err, _ := lateCheckpoint(t, initAdoptionConsent{assumeYes: true}, otherURL)
+		if decision.Action != ActionBootstrap || handled || err != nil {
+			t.Fatalf("late decision under --yes = %v (handled=%v, err=%v), want bootstrap", decision.Action, handled, err)
+		}
+	})
+}
+
+// TestInitAdoptionConsentGrants pins the consent predicate: --yes grants any
+// derived URL; a prompted answer grants exactly the URL it was given for.
+func TestInitAdoptionConsentGrants(t *testing.T) {
+	const url = "file:///tmp/upstream.git"
+	for _, tc := range []struct {
+		name    string
+		consent initAdoptionConsent
+		want    bool
+	}{
+		{"yes grants with no answer", initAdoptionConsent{assumeYes: true}, true},
+		{"answer for this URL grants", initAdoptionConsent{url: url}, true},
+		{"answer for another URL does not", initAdoptionConsent{url: "file:///tmp/other.git"}, false},
+		{"no consent does not", initAdoptionConsent{}, false},
+	} {
+		if got := tc.consent.grants(url); got != tc.want {
+			t.Errorf("%s: grants = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

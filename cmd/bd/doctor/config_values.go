@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -100,7 +101,9 @@ func findConfigPath(repoPath string) string {
 	if _, err := os.Stat(configPath); err == nil {
 		return configPath
 	}
-	if configDir, err := os.UserConfigDir(); err == nil {
+	// config.UserConfigDir, not os.UserConfigDir: on macOS bd never touches
+	// ~/Library/Application Support (GH#8113).
+	if configDir, err := config.UserConfigDir(); err == nil {
 		userConfigPath := filepath.Join(configDir, "bd", "config.yaml")
 		if _, err := os.Stat(userConfigPath); err == nil {
 			return userConfigPath

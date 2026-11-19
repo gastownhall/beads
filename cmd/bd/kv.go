@@ -266,6 +266,15 @@ Examples:
 		if err := store.SetConfig(ctx, storageKey, value); err != nil {
 			return HandleErrorRespectJSON("setting key: %v", err)
 		}
+		// Arms the embedded end-of-command auto-commit, which stages config
+		// with everything else; without it the row stays in the working set
+		// (GH#7523). On the direct SQL-server route nothing else commits a
+		// config row, so commitKVWrite does. The row has landed by then, so a
+		// refused or failed commit is a warning, not the command's failure.
+		noteDirectConfigWrite()
+		if err := commitKVWrite(ctx, store, "kv set"); err != nil {
+			WarnError("%v", err)
+		}
 
 		return printKVSetResult(key, value)
 	},
@@ -353,6 +362,10 @@ Examples:
 		ctx := rootCtx
 		if err := store.DeleteConfig(ctx, storageKey); err != nil {
 			return HandleErrorRespectJSON("deleting key: %v", err)
+		}
+		noteDirectConfigWrite()
+		if err := commitKVWrite(ctx, store, "kv clear"); err != nil {
+			WarnError("%v", err)
 		}
 
 		return printKVClearResult(key)

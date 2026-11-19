@@ -15,6 +15,7 @@ go_library(
     deps = [
         "//internal/config",
         "//internal/execenv",
+        "//internal/lockfile",
         "@com_github_dolthub_eventkit//:eventkit",
         "@com_github_dolthub_eventkit//transport/ga4",
         "@in_gopkg_yaml_v3//:yaml_v3",
@@ -30,10 +31,13 @@ go_test(
         "spawn_reap_test.go",
         "spawn_test.go",
         "spawn_throttle_test.go",
+        "userconfig_legacy_test.go",
+        "userconfig_legacy_unix_test.go",
         "userconfig_test.go",
     ],
     embed = [":metrics"],
     deps = [
+        "//internal/config",
         "//internal/testutil/bazeltest",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],

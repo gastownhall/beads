@@ -14,6 +14,9 @@ This runbook helps you recover from Dolt sync failures.
 - `bd dolt push`, `bd sync` or dolt auto-push fails with "Found dangling
   references to HashSet" — see
   [Push fails with "Found dangling references"](#push-fails-with-found-dangling-references)
+- `bd dolt push` fails with `dangling chunk reference` or `pre-push integrity
+  check …` — see
+  [Push refused by the pre-push integrity check](#push-refused-by-the-pre-push-integrity-check)
 - A pull, `bd sync` or merge after migration 0062 refuses with `local changes
   would be stomped by merge: events` or `the table(s) events have schema
   conflicts` — see
@@ -84,6 +87,7 @@ bd doctor
 | Corrupted state | Back up, then `bd doctor --fix` |
 | Merge conflicts | See [Merge Conflicts](/recovery/merge-conflicts) |
 | Remote refused a chunk ("Found dangling references") | See [Push fails with "Found dangling references"](#push-fails-with-found-dangling-references) |
+| Local `dolt fsck` refused the push | See [Push refused by the pre-push integrity check](#push-refused-by-the-pre-push-integrity-check) |
 
 ## Push fails with "Found dangling references"
 
@@ -109,8 +113,8 @@ whether it has every chunk the pushed data points to. The remote said it does
 not have the chunk named in the message, so Dolt refused the push. The remote
 branch was **not** moved. This is not a sign of local corruption: the check
 asks the remote, not your local store. (When bd pushes through the dolt CLI,
-its pre-push check reports local corruption separately, as
-`dangling chunk reference`.)
+its pre-push check reports local problems separately; see
+[Push refused by the pre-push integrity check](#push-refused-by-the-pre-push-integrity-check).)
 
 **Telling the cases apart:** under the error, bd prints this clone's HEAD
 commit hash and HEAD root hash, which it reads right after the failure:
@@ -187,6 +191,68 @@ bd sql "SELECT dolt_hashof('HEAD') AS head_commit, dolt_hashof_db('HEAD') AS hea
    the remote type, the output of `bd version` (and of `dolt version` in server
    mode: embedded mode runs the Dolt engine built into bd), and the UTC times
    of the failures (DoltHub can match them to its manifest logs).
+
+## Push refused by the pre-push integrity check
+
+When `bd` pushes through the dolt CLI, it first runs `dolt fsck --quiet` on
+the local database, bounded by `BEADS_FSCK_TIMEOUT` (default 30 seconds). It
+refuses the push in one of four ways. Only the first can carry fsck's verdict
+that the local store is damaged; the other three mean the check ended without
+a verdict:
+
+- **`dangling chunk reference: aborting push to prevent propagating corrupt
+  chunks: …`** — fsck reported a finding: a `Corrupt Chunks` or
+  `Commit Errors` report, or a corrupted chunk journal
+  (`WARNING: Chunk journal is corrupted`). The local store is damaged; do not
+  work around the check. Recover it first: see
+  [Database Corruption](/recovery/database-corruption).
+
+  bd v1.3.4 and earlier also refuse an fsck that failed without a finding
+  this way. With those releases the refusal reports a finding only when the
+  output it quotes after `corrupt chunks:` holds a `Corrupt Chunks` or
+  `Commit Errors` header or `WARNING: Chunk journal is corrupted`. If nothing
+  follows `corrupt chunks`, or only a warning or another error does, check
+  the store by hand as described for `pre-push integrity check failed` below.
+- **`pre-push integrity check timed out: …`** — fsck did not finish in time.
+  The store is not necessarily corrupt. Shrink it with `dolt gc` (or
+  `CALL DOLT_GC()` on a running sql-server) or raise `BEADS_FSCK_TIMEOUT`
+  (for example `BEADS_FSCK_TIMEOUT=2m bd dolt push`). If the message says the
+  surrounding operation's deadline expired, raise that caller's timeout
+  instead (for auto-push, `dolt.auto-push-timeout`).
+- **`pre-push integrity check interrupted: …`** — the check was canceled
+  before it finished, for example with Ctrl-C. The store is not implicated:
+  run the push again.
+- **`pre-push integrity check failed: …`** (bd v1.4.0 and later) — fsck
+  exited with an error but reported no finding: for example dolt could not
+  start, printed only a warning, or was killed. The message quotes the error
+  and fsck's output (or `(no output)`) and names the database directory. The
+  store is not necessarily corrupt, but bd has no verdict on it, so it still
+  refuses the push. Fix what the quoted output names, then run fsck yourself
+  in that directory:
+
+  ```bash
+  cd <database directory>
+  dolt fsck
+  ```
+
+  bd v1.3.4 and earlier do not name the directory. It is the database's
+  subdirectory of the Dolt data directory: `.beads/dolt/<database>` by
+  default, or `~/.beads/shared-server/dolt/<database>` with the shared
+  server. `bd dolt show` prints the database name (`Database:`), and
+  `bd dolt status` prints the data directory of a server bd runs (`Data:`).
+
+  - If fsck ends with `No problems found.`, re-run `bd dolt push`.
+  - If it prints a `Corrupt Chunks` or `Commit Errors` report, or
+    `WARNING: Chunk journal is corrupted`, the store is damaged: treat it as
+    the first case.
+  - If it keeps failing without a report, for example with
+    `commit DAG walking failed`, `failed during full chunk scan` or a panic,
+    the store may still be damaged: fsck stops on some damage before it can
+    report it. Do not bypass the check with a direct `dolt push`. Back up the
+    database directory and follow
+    [Database Corruption](/recovery/database-corruption), or report the
+    output to Dolt at
+    [dolthub/dolt issues](https://github.com/dolthub/dolt/issues).
 
 ## Merge blocked on the events table (migration 0062)
 

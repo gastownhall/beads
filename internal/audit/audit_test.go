@@ -3,8 +3,10 @@ package audit
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -116,4 +118,67 @@ func TestEnsureFile_DoesNotTruncateWhenConcurrentCreatorWins(t *testing.T) {
 	if !bytes.Equal(gotContents, wantContents) {
 		t.Fatalf("EnsureFile truncated seeded content: got %q, want %q", gotContents, wantContents)
 	}
+}
+
+func TestLogClaimed(t *testing.T) {
+	setup := func(t *testing.T, enabled string) string {
+		t.Helper()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0644); err != nil {
+			t.Fatalf("write metadata.json: %v", err)
+		}
+		t.Setenv("BEADS_DIR", beadsDir)
+		t.Setenv("BD_AUDIT_ENABLED", enabled)
+		return beadsDir
+	}
+
+	t.Run("enabled writes one post-state-only claimed entry", func(t *testing.T) {
+		beadsDir := setup(t, "1")
+		LogClaimed("bd-1", "alice", "in_progress", "alice")
+
+		data, err := os.ReadFile(filepath.Join(beadsDir, FileName))
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+		if len(lines) != 1 {
+			t.Fatalf("expected 1 line, got %d: %s", len(lines), data)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(lines[0], &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got["kind"] != "claimed" || got["issue_id"] != "bd-1" || got["actor"] != "alice" {
+			t.Fatalf("entry = %v, want kind claimed for bd-1 by alice", got)
+		}
+		if _, ok := got["reason"]; ok {
+			t.Fatalf("entry = %v, want no reason", got)
+		}
+		want := map[string]any{"status": "in_progress", "assignee": "alice"}
+		if !reflect.DeepEqual(got["extra"], want) {
+			t.Fatalf("extra = %v, want exactly %v (no old/new values)", got["extra"], want)
+		}
+	})
+
+	for _, enabled := range []string{"", "0"} {
+		t.Run("disabled ("+enabled+") creates nothing", func(t *testing.T) {
+			beadsDir := setup(t, enabled)
+			LogClaimed("bd-1", "alice", "in_progress", "alice")
+			if _, err := os.Stat(filepath.Join(beadsDir, FileName)); !os.IsNotExist(err) {
+				t.Fatalf("disabled LogClaimed created %s: %v", FileName, err)
+			}
+		})
+	}
+
+	t.Run("unwritable sidecar stays best-effort", func(t *testing.T) {
+		beadsDir := setup(t, "1")
+		// A directory where the log should be makes every append fail.
+		if err := os.Mkdir(filepath.Join(beadsDir, FileName), 0750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		LogClaimed("bd-1", "alice", "in_progress", "alice")
+	})
 }

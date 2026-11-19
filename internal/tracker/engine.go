@@ -159,6 +159,10 @@ type Engine struct {
 
 	// warnings collects warning messages during a Sync() call for inclusion in SyncResult.
 	warnings []string
+
+	// pushesAfterPull is set by Sync: whether this run pushes once its pull
+	// ends, so a pull warning can say whether its advice comes before a push.
+	pushesAfterPull bool
 }
 
 // NewEngine creates a new sync engine for the given tracker and storage.
@@ -198,6 +202,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		opts.Pull = true
 		opts.Push = true
 	}
+	e.pushesAfterPull = opts.Push && !opts.DryRun
 
 	// Track IDs to skip/force during push based on conflict resolution
 	skipPushIDs := make(map[string]bool)
@@ -968,6 +973,11 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 	}
 
 	var hydrated []TrackerIssue
+	// unverified collects the issues whose links this pull could not check
+	// against history, for one warning after the loop. Each issue is still
+	// decided on its own history: one missing row says nothing about the
+	// next issue's.
+	unverified := unverifiedLinks{lastSync: *lastSync}
 	for _, local := range localIssues {
 		if local == nil || local.ExternalRef == nil {
 			continue
@@ -976,11 +986,15 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if ref == "" || !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		changedAfterLastSync, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+		changedAfterLastSync, historyUnknown, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
 		if err != nil {
 			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
 		}
+		unverified.note(local, historyUnknown)
 		if !changedAfterLastSync {
+			// An issue whose history at lastSync is missing is not hydrated:
+			// hydration exempts it from the conflict and overlap guards,
+			// which would let a stale remote overwrite unpushed local edits.
 			continue
 		}
 		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
@@ -1018,14 +1032,65 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		seen[identifier] = struct{}{}
 		seen[strings.ToLower(identifier)] = struct{}{}
 	}
+	e.warnUnverifiedLinks(unverified)
 	return hydrated, hydratedLocalIDs, nil
+}
+
+// maxListedUnverifiedLinks caps how many issue IDs the missing-history
+// warning names.
+const maxListedUnverifiedLinks = 5
+
+// unverifiedLinks collects, over one pull, the linked issues whose history
+// at lastSync is missing (prelinkDecision reported historyUnknown) and that
+// changed locally after lastSync. Only those can have been linked to
+// another remote issue since that sync: every update stamps updated_at, so
+// an issue untouched since lastSync still holds the link it had then.
+type unverifiedLinks struct {
+	lastSync time.Time
+	ids      []string
+}
+
+// note records local when its link could not be verified and it changed
+// after lastSync.
+func (u *unverifiedLinks) note(local *types.Issue, historyUnknown bool) {
+	if historyUnknown && local.UpdatedAt.After(u.lastSync) {
+		u.ids = append(u.ids, local.ID)
+	}
+}
+
+// warnUnverifiedLinks prints one warning for the issues u collected, naming
+// up to maxListedUnverifiedLinks of them. The pull did not hydrate them as
+// newly linked, so the conflict checks decided their content, and a push
+// writes their local content to the remote issue each one is linked to now;
+// for an issue linked to another remote issue since lastSync, that
+// overwrites the remote. The advice says whether this run's own push
+// follows the pull.
+func (e *Engine) warnUnverifiedLinks(u unverifiedLinks) {
+	if len(u.ids) == 0 {
+		return
+	}
+	listed := u.ids
+	if len(listed) > maxListedUnverifiedLinks {
+		listed = listed[:maxListedUnverifiedLinks]
+	}
+	names := strings.Join(listed, ", ")
+	if more := len(u.ids) - len(listed); more > 0 {
+		names += fmt.Sprintf(" and %d more", more)
+	}
+	advice := "a push writes its local content to that remote issue: check their links before a sync that pushes"
+	if e.pushesAfterPull {
+		advice = "this sync's push may write its local content to that remote issue: check their links"
+	}
+	e.warn("%s: cannot verify the links of %d issue(s) changed since the last sync (%s): %s. Their history at that sync is missing (bd compact or bd flatten rewrote it, an issue was renamed, or changes were committed after that sync), so the pull did not treat them as newly linked, and the conflict checks decided their content. If one of them was linked to another remote issue since that sync, %s.",
+		e.Tracker.DisplayName(), len(u.ids), u.lastSync.UTC().Format(time.RFC3339), names, advice)
 }
 
 // externalRefChangedAfter reports whether local's external_ref differed
 // from currentRef as of lastSync. When the backing store can answer this
 // precisely (storage.ExternalRefHistoryQuerier — Dolt-shaped stores that
-// expose dolt_history_issues), it does; otherwise it falls back to a
-// coarser timestamp heuristic.
+// expose dolt_history_issues), it does, and prelinkDecision decides from
+// the history it returns; otherwise it falls back to a coarser timestamp
+// heuristic.
 //
 // The fast path is gated on the ExternalRefHistoryQuerier capability, not on
 // whether the store happens to expose a raw *sql.DB: some Dolt-shaped
@@ -1033,23 +1098,72 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 // dolt_history_issues query without a pooled *sql.DB, and a non-Dolt SQL
 // backend could expose *sql.DB without having that Dolt system table at
 // all. Gating on the capability keeps this correct in both directions.
-func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (bool, error) {
+//
+// A store without the history capability keeps the timestamp heuristic and
+// never reports historyUnknown.
+func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (changed, historyUnknown bool, err error) {
 	if local == nil {
-		return false, nil
+		return false, false, nil
 	}
 	querier, ok := externalRefHistoryQuerier(e.Store)
 	if !ok {
-		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), nil
+		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), false, nil
 	}
 
 	previousRef, found, err := querier.PreviousExternalRef(ctx, local.ID, lastSync)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	if !found {
-		return true, nil
+	changed, historyUnknown = prelinkDecision(local, currentRef, previousRef, found, lastSync)
+	return changed, historyUnknown, nil
+}
+
+// prelinkDecision decides, from the history a store holds for the linked
+// local issue at lastSync, whether pre-link detection treats the issue as
+// linked after lastSync (changed: hydrate it from its remote) or cannot
+// tell (historyUnknown). previousRef and found are what
+// storage.ExternalRefHistoryQuerier.PreviousExternalRef returned for the
+// issue at lastSync, and currentRef is its ref now. A path that reads this
+// history for many issues at once must decide each issue here as well, so
+// every path keeps the same rule (#7294).
+//
+// With a history row, the issue changed when its ref then differs from
+// currentRef (a NULL ref reads as ""). Without one, the issue may be newer
+// than lastSync, or the history that held its baseline was compacted,
+// flattened or otherwise rewritten. An issue created at or after lastSync
+// is reported changed, so a new pre-linked stub is still hydrated: last_sync
+// is a whole second and created_at is rounded to one, so a stub created
+// within half a second after the sync's stamp carries a created_at equal to
+// it. This assumes an issue a pull created carries the remote's creation
+// time, as the GitHub, GitLab, Linear and Notion mappers set it. The Jira
+// and ADO mappers leave it to the store's clock, so an issue such a pull
+// created in its last half second carries the stamp too, and reads as a new
+// stub once its history at lastSync is missing. An older issue, or one with
+// no creation time, reports historyUnknown instead: it is not hydrated, so
+// the pull's conflict and overlap guards keep its local edits. UpdatedAt
+// never decides this case, because a local edit after lastSync is exactly
+// what those guards protect.
+//
+// An older wisps-plane issue (Ephemeral or NoHistory) is not hydrated
+// either, and it does not report historyUnknown: Dolt does not version the
+// wisps table that holds it, so it never has a history row, and the missing
+// row is no sign of a rewritten history. No warning names it, and as for a
+// compacted issue, nothing shows whether it was linked to another remote
+// issue since lastSync.
+func prelinkDecision(local *types.Issue, currentRef, previousRef string, found bool, lastSync time.Time) (changed, historyUnknown bool) {
+	if local == nil {
+		return false, false
 	}
-	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), nil
+	if found {
+		return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), false
+	}
+	if !local.CreatedAt.Before(lastSync) {
+		return true, false
+	}
+	if local.Ephemeral || local.NoHistory {
+		return false, false
+	}
+	return false, true
 }
 
 // externalRefHistoryQuerier type-asserts store to storage.ExternalRefHistoryQuerier,

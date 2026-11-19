@@ -53,6 +53,11 @@ type AdvanceResult struct {
 // still reports the first one as NextStep. Any other claim failure is
 // returned.
 //
+// READINESS IS THE MOLECULE'S OWN (MoleculeView.ReadySteps), on both planes.
+// The Claimer applies no live-local-blocker check, so the wisp claim sends
+// ForceClaimBlocked to waive Lifecycle.Update's: a step blocked only from
+// outside the molecule is claimed on either plane alike.
+//
 // Implementations never mutate the caller's request. Validation failures
 // match ErrValidation and write nothing.
 type MoleculeStepper interface {
@@ -177,10 +182,12 @@ func (s moleculeStepper) Advance(ctx context.Context, req AdvanceRequest) (Advan
 
 // claimStep claims one step for actor and answers its post-claim row, labels
 // carried over from the row the view read (the claim answers the bare row).
+// The wisp claim waives the live-local-blocker refusal the Claimer never
+// applies, so both planes claim by the molecule's readiness alone.
 func (s moleculeStepper) claimStep(ctx context.Context, step *Issue, actor string) (*Issue, error) {
 	var post *Issue
 	if step.Ephemeral || step.NoHistory {
-		res, err := s.roles.Lifecycle.Update(ctx, UpdateRequest{Actor: actor, IssueID: step.ID, Claim: true})
+		res, err := s.roles.Lifecycle.Update(ctx, UpdateRequest{Actor: actor, IssueID: step.ID, Claim: true, ForceClaimBlocked: true})
 		if err != nil {
 			return nil, err
 		}

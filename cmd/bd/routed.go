@@ -103,10 +103,32 @@ func resolveAndGetIssueForMutation(ctx context.Context, localStore storage.DoltS
 }
 
 func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, error) {
+	result, _, err := resolveAndGetIssueWithRoutingScope(ctx, localStore, id, writable)
+	return result, err
+}
+
+// resolveAndGetIssueWithRoutingSearchScope resolves id for a read like
+// resolveAndGetIssueWithRouting, and also reports whether a routed tier
+// searched for it (resolveAndGetIssueWithRoutingScope). bd show uses that to
+// tell a miss in this workspace's store alone from one a routed store also
+// answered (GH#5259).
+func resolveAndGetIssueWithRoutingSearchScope(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, bool, error) {
+	return resolveAndGetIssueWithRoutingScope(ctx, localStore, id, false)
+}
+
+// resolveAndGetIssueWithRoutingScope is the routed resolution cascade: the
+// local store, then the routes.jsonl prefix route, then the auto-route. Its
+// bool reports whether a routed tier reached a lookup, that is, whether a
+// routed store answered for id: true once either tier succeeds or misses,
+// and after a prefix-tier refusal; false when neither tier had a store to
+// ask. With an error other than not-found it covers only the tiers tried
+// before that error (an auto-tier refusal after no prefix search is false),
+// so read it for a miss alone. It does not mean the issue's owner was found.
+func resolveAndGetIssueWithRoutingScope(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, bool, error) {
 	// Try local store first.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
-		return result, nil
+		return result, false, nil
 	}
 
 	// The first routed tier that refuses the id answers instead of the local
@@ -114,17 +136,21 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	// isRoutingFailure, which it would also satisfy, so the auto tier still
 	// gets its chance.
 	var refusal error
+	routedSearched := false
 
 	// If not found locally, try prefix-based routing via routes.jsonl.
 	// This handles cross-rig lookups where the ID's prefix maps to a different
 	// database (e.g., hr-8wn.1 routes to the herald rig's database).
 	if isNotFoundErr(err) {
 		if prefixResult, prefixErr := resolveViaPrefixRoutingWithAccess(ctx, id, writable, false); prefixErr == nil {
-			return prefixResult, nil
+			return prefixResult, true, nil
 		} else if isRoutedResolutionRefusal(prefixErr) {
 			refusal = prefixErr
+			routedSearched = true
 		} else if isRoutingFailure(prefixErr) {
-			return nil, prefixErr
+			return nil, routedSearched, prefixErr
+		} else if isNotFoundErr(prefixErr) {
+			routedSearched = true
 		}
 	}
 
@@ -132,15 +158,17 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	// The target reopens writable when the caller has write intent.
 	if isNotFoundErr(err) {
 		if autoResult, autoErr := resolveViaAutoRoutingWithAccess(ctx, localStore, id, writable, false); autoErr == nil {
-			return autoResult, nil
+			return autoResult, true, nil
 		} else if refusal != nil {
-			return nil, refusal
+			return nil, routedSearched, refusal
 		} else if isRoutingFailure(autoErr) {
-			return nil, autoErr
+			return nil, routedSearched, autoErr
+		} else if isNotFoundErr(autoErr) {
+			routedSearched = true
 		}
 	}
 
-	return nil, err
+	return nil, routedSearched, err
 }
 
 // isRoutedResolutionRefusal reports whether a routed tier's resolution error

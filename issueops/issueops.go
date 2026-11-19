@@ -261,7 +261,10 @@ type UpdateRequest struct {
 	// active status and it is unassigned, assigned to Actor, or assigned to a
 	// configured pool. StatusInProgress assigned to the same Actor is an
 	// idempotent success. A foreign assignment returns ErrAlreadyClaimed; an
-	// ineligible status returns ErrNotClaimable.
+	// ineligible status returns ErrNotClaimable. A claim that wins the
+	// compare-and-set on an issue with a live local blocker then refuses with
+	// a BlockedError wrapping ErrClaimBlocked unless ForceClaimBlocked is set;
+	// the idempotent re-claim writes nothing and is not refused.
 	// ExpectedAssignee and ExpectedStatus must be nil when Claim is true because
 	// the claim has its own compare-and-set eligibility rules.
 	Claim bool
@@ -297,6 +300,15 @@ type UpdateRequest struct {
 	// It is the update-side spelling of CloseRequest.Force; a command adapter
 	// that maps one flag to both spells both.
 	ForceClosePolicy bool
+	// ForceClaimBlocked bypasses only the blocked-claim refusal: a Claim of an
+	// issue with a live local blocker (an open blocks, waits-for or
+	// conditional-blocks edge) refuses with a BlockedError wrapping
+	// ErrClaimBlocked unless it is set. The zero value enforces the refusal. It
+	// requires Claim, and never bypasses validation, the preconditions, an
+	// existing claim conflict, the close policy, or an unresolved external
+	// reference. A command adapter's single --force maps to it alongside
+	// --claim.
+	ForceClaimBlocked bool
 	// AllowTemplate says the caller edits a template deliberately, so the
 	// template read-only refusal (*TemplateReadOnlyError) stands down for this
 	// request. bd label and bd set-state set it to keep their pre-guard
@@ -565,7 +577,9 @@ type Lifecycle interface {
 	// returns ErrCloseBlocked, both without mutation. ForceClosePolicy bypasses
 	// those two refusals and nothing else. A Claim that loses its
 	// compare-and-set returns *ClaimConflictError carrying the state that beat
-	// it. An update of a template returns *TemplateReadOnlyError whatever its
+	// it; one that wins it on an issue with a live local blocker returns a
+	// *BlockedError wrapping ErrClaimBlocked, without mutation, unless
+	// ForceClaimBlocked is set. An update of a template returns *TemplateReadOnlyError whatever its
 	// patch and force flags, unless it sets AllowTemplate — templates are
 	// read-only — checked after the
 	// compare-and-set preconditions, so a stale guard still reports the

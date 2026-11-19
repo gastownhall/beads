@@ -337,6 +337,17 @@ const CapIssuesUpdatePersistence = "issues.update.persistence"
 // ErrUnsupported naming it.
 const CapIssuesUpdateClaim = "issues.update.claim"
 
+// CapIssuesUpdateForceClaimBlocked is the behavior capability announcing that
+// updateIssue refuses a claim of an issue with a live local blocker (409
+// `not_claimable` naming `claim` with a `blockers` member) and accepts
+// `force_claim_blocked` as that refusal's bypass, spelled exactly as httpapi's
+// constant of the same name. Lifecycle.Update reads it from the cached
+// handshake before the dial: without it, the client cannot know the refusal's
+// vocabulary, so it refuses a `force_claim_blocked` request before the dial
+// with ErrUnsupported naming the member rather than send it to a server that
+// would reject it as unknown — or worse, silently claim a blocked issue.
+const CapIssuesUpdateForceClaimBlocked = "issues.update.forceClaimBlocked"
+
 // CapIssuesCreateGates and CapIssuesUpdateGates are the behavior capabilities
 // announcing the gate members, spelled exactly as
 // httpapi's constants of the same names: await_type, await_id, timeout and
@@ -511,7 +522,7 @@ var behaviorCapabilities = []string{
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapListFilters,
-	CapArrivalSeq, CapDeleteContainmentCascade,
+	CapArrivalSeq, CapDeleteContainmentCascade, CapIssuesUpdateForceClaimBlocked,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

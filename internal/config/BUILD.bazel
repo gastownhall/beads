@@ -11,6 +11,8 @@ go_library(
         "permissions_windows.go",
         "repos.go",
         "sync.go",
+        "user_config_open_other.go",
+        "user_config_open_unix.go",
         "user_config_path.go",
         "yaml_config.go",
     ],

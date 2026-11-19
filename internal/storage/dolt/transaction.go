@@ -967,6 +967,10 @@ func (t *doltTransaction) DeleteIssue(ctx context.Context, id string) error {
 	if result.IssueRowsChanged {
 		t.markIssuesChanged(table)
 	}
+	// The suffix reservation's counter (GH#4750), on the session that wrote it.
+	for changed := range result.ChangedTables {
+		t.markChanged(table, changed)
+	}
 	return nil
 }
 

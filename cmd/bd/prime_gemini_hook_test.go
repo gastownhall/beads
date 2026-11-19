@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // runPrimeBinary runs the bd binary built by buildBDUnderTest in the given
@@ -247,7 +249,9 @@ func isolatedGlobalPrimeConfigFixture(t *testing.T) (string, []string) {
 		t.Setenv(variable.key, variable.value)
 	}
 
-	configDir, err := os.UserConfigDir()
+	// bd resolves the global PRIME.md through config.UserConfigDir, which on
+	// macOS differs from os.UserConfigDir (GH#8113); plant where bd reads.
+	configDir, err := config.UserConfigDir()
 	if err != nil {
 		t.Fatalf("resolve isolated user config dir: %v", err)
 	}
