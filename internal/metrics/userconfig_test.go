@@ -225,3 +225,27 @@ func TestEnsureUserConfigDefaults_UnsafeRootsFailBeforeMutation(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureUserConfigDefaults_DanglingSymlinkFailsWithoutRecursing: a
+// dangling symlink at the user config path reads as missing, yet the
+// exclusive create reports it as existing. The bootstrap must return an
+// error instead of re-entering itself until the stack is exhausted.
+func TestEnsureUserConfigDefaults_DanglingSymlinkFailsWithoutRecursing(t *testing.T) {
+	home := setupUserConfigHome(t)
+	path := userConfigPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(home, "dotfiles", "bd", "config.yaml") // never created
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	err := EnsureUserConfigDefaults()
+	if err == nil || !strings.Contains(err.Error(), "dangling symlink") {
+		t.Fatalf("EnsureUserConfigDefaults() = %v, want a dangling symlink error", err)
+	}
+	if _, statErr := os.Lstat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("bootstrap created the symlink target: %v", statErr)
+	}
+}

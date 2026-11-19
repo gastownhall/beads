@@ -1442,6 +1442,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   global `PRIME.md` must move:
   `mkdir -p ~/.config/beads && mv ~/Library/Application\ Support/beads/PRIME.md ~/.config/beads/`.
 
+- **A dangling symlink at the user config path no longer crashes bd.** When
+  `~/.config/bd/config.yaml` was a symlink to a missing file, the metrics
+  bootstrap re-entered itself until the stack overflowed. It now reports
+  the dangling symlink and the command continues. This applies on every
+  platform.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
