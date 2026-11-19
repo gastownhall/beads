@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -606,5 +607,50 @@ func TestDarwinFirstRunCarriesLegacyMetricsOptOut(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(newPath); string(got) != legacyBody {
 		t.Fatalf("second run rewrote the user config: %q", got)
+	}
+}
+
+// TestDarwinUnreadableLegacyConfigFailsClosed: when the legacy Application
+// Support config exists but cannot be read (a macOS privacy denial reports a
+// permission error), bd cannot tell whether the user opted out, so the new
+// ~/.config/bd/config.yaml turns metrics off. They stay off on that run and
+// every later one until `bd metrics on` (GH#8113).
+func TestDarwinUnreadableLegacyConfigFailsClosed(t *testing.T) {
+	home, nativeCalls := darwinMetricsRunFixture(t, "node_id: n1\n")
+	newPath := filepath.Join(home, ".config", "bd", "config.yaml")
+	stats := 0
+	t.Cleanup(config.SetLegacyUserConfigStatForTest(func(name string) (fs.FileInfo, error) {
+		stats++
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrPermission}
+	}))
+
+	enabled, stderr := runMetricsLaunch(t)
+	if enabled || strings.Contains(stderr, "Thanks for using bd") {
+		t.Fatalf("first run: enabled=%v stderr=%q; want metrics off and no notice", enabled, stderr)
+	}
+	if stats != 1 {
+		t.Fatalf("legacy config statted %d times, want 1", stats)
+	}
+	if !config.MetricsDisabledByUserConfig() {
+		got, _ := os.ReadFile(newPath)
+		t.Fatalf("new user config does not turn metrics off:\n%s", got)
+	}
+
+	*nativeCalls, stats = 0, 0
+	if enabled, stderr = runMetricsLaunch(t); enabled || strings.Contains(stderr, "Thanks for using bd") {
+		t.Fatalf("second run: enabled=%v stderr=%q; want metrics off and no notice", enabled, stderr)
+	}
+	if *nativeCalls != 0 || stats != 0 {
+		t.Fatalf("second run probed Application Support: native=%d stat=%d", *nativeCalls, stats)
+	}
+
+	var buf bytes.Buffer
+	metricsOnCmd.SetOut(&buf)
+	metricsOnCmd.SetErr(&buf)
+	if err := metricsOnCmd.RunE(metricsOnCmd, nil); err != nil {
+		t.Fatalf("bd metrics on: %v", err)
+	}
+	if enabled, _ = runMetricsLaunch(t); !enabled {
+		t.Fatal("metrics still off after `bd metrics on`")
 	}
 }
