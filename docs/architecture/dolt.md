@@ -401,8 +401,11 @@ auto-starts, and the watcher stops the server the way `bd dolt stop` does
 (working set flushed, `dolt-server.pid` and `dolt-server.port` removed). The
 next bd command starts it again, so idle stop costs only that start.
 
-The server counts as idle only while it has accepted no new SQL connection
-and holds no open one apart from the watcher's own check. When it is stopped,
+The server counts as idle only while it has accepted no new SQL connection,
+holds no open one apart from the watcher's own check, and no running bd
+process has the workspace's store open (each open store leaves a lease file
+for the watcher; a lease whose process has died does not count). When it is
+stopped,
 `dolt-server.log` gets a line saying so. The watcher's own files live in
 `.beads/dolt-server.activity/`.
 

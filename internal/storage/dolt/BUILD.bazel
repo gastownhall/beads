@@ -168,6 +168,7 @@ go_test(
         "cli_mirror_ref_test.go",
         "cli_pull_fetch_merge_test.go",
         "cli_transfer_timeout_test.go",
+        "client_lease_test.go",
         "close_issue_checked_test.go",
         "close_policy_gate_test.go",
         "close_recheck_blocked_regression_test.go",

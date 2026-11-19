@@ -2,8 +2,10 @@ package doltserver
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -26,14 +28,16 @@ import (
 // none is running, and nothing used to stop it: each workspace a user had
 // touched kept a server (about 2 GB in the report) until reboot. Each
 // auto-start now launches a small watcher process beside its server. Once
-// the server has had no new or open SQL connection for the idle window, the
-// watcher stops it through the `bd dolt stop` path, and the next bd command
-// auto-starts it as before.
+// the server has had no new or open SQL connection and no open bd store for
+// the idle window, the watcher stops it through the `bd dolt stop` path, and
+// the next bd command auto-starts it as before.
 //
 // All watcher state lives under <serverDir>/dolt-server.activity/, a name the
 // shipped .gitignore template already ignores:
 //
 //	watcher.pid        the watcher process: "<pid>\n<window>\n"
+//	reaping            a watcher is stopping the server right now
+//	client-<pid>-<id>  a client lease: a bd store is open on this server
 
 const (
 	// DefaultIdleTimeout is the idle window when none is configured.
@@ -41,6 +45,8 @@ const (
 
 	activityDirName    = "dolt-server.activity"
 	watcherPIDFileName = "watcher.pid"
+	reapingMarkerName  = "reaping"
+	clientLeasePrefix  = "client-"
 
 	minIdlePollEvery = time.Second
 	maxIdlePollEvery = 5 * time.Minute
@@ -49,6 +55,9 @@ const (
 func activityDir(serverDir string) string { return filepath.Join(serverDir, activityDirName) }
 func watcherPIDPath(serverDir string) string {
 	return filepath.Join(activityDir(serverDir), watcherPIDFileName)
+}
+func reapingMarkerPath(serverDir string) string {
+	return filepath.Join(activityDir(serverDir), reapingMarkerName)
 }
 
 // ensureActivityDir creates serverDir's activity directory. It never creates
@@ -129,9 +138,10 @@ func launchIdleWatcherLocked(serverDir string, state *State, host string, timeou
 	}
 }
 
-// clearIdleWatchRecords removes the per-server watcher records.
+// clearIdleWatchRecords removes the per-server watcher records. Leases are
+// left alone: they belong to open stores, not to a server.
 func clearIdleWatchRecords(serverDir string) {
-	for _, p := range []string{watcherPIDPath(serverDir)} {
+	for _, p := range []string{watcherPIDPath(serverDir), reapingMarkerPath(serverDir)} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			debug.Logf("idle watch: removing %s: %v", p, err)
 		}
@@ -151,6 +161,71 @@ func readPIDFile(serverDir string) int {
 	return pid
 }
 
+// AcquireClientLease records that this process has a bd store open on
+// serverDir's server, so its idle watcher does not stop the server while the
+// store holds no SQL connection. release removes the lease; a lease whose
+// process died is removed by the watcher.
+//
+// The lease is written before the reaping marker is read, and a reaping
+// watcher writes the marker before it re-reads leases, so one side always
+// sees the other: when a reap is in flight, this waits for it to finish
+// (by taking and releasing the lifecycle lock) and the caller's auto-start
+// then starts a fresh server.
+func AcquireClientLease(serverDir string) (release func(), err error) {
+	if err := ensureActivityDir(serverDir); err != nil {
+		return nil, err
+	}
+	var nonce [6]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(activityDir(serverDir),
+		fmt.Sprintf("%s%d-%s", clientLeasePrefix, os.Getpid(), hex.EncodeToString(nonce[:])))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: path under bd's own server dir
+	if err != nil {
+		return nil, err
+	}
+	_ = f.Close()
+	if _, statErr := os.Stat(reapingMarkerPath(serverDir)); statErr == nil {
+		if lockF, lockErr := acquireLifecycleLock(serverDir); lockErr == nil {
+			releaseLifecycleLock(lockF)
+		}
+	}
+	var once atomic.Bool
+	return func() {
+		if once.CompareAndSwap(false, true) {
+			_ = os.Remove(path)
+		}
+	}, nil
+}
+
+// liveClientLeases reports whether any client lease names a live process,
+// removing leases whose process is gone.
+func liveClientLeases(serverDir string, alive func(int) bool) bool {
+	entries, err := os.ReadDir(activityDir(serverDir))
+	if err != nil {
+		return false
+	}
+	live := false
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, clientLeasePrefix) {
+			continue
+		}
+		pidText, _, _ := strings.Cut(strings.TrimPrefix(name, clientLeasePrefix), "-")
+		pid, err := strconv.Atoi(pidText)
+		if err != nil || pid <= 0 {
+			continue
+		}
+		if alive(pid) {
+			live = true
+			continue
+		}
+		_ = os.Remove(filepath.Join(activityDir(serverDir), name))
+	}
+	return live
+}
+
 // serverStatus is one poll of the server's connection counters.
 type serverStatus struct {
 	// connections is the Connections status variable: every connection the
@@ -167,6 +242,7 @@ type serverStatus struct {
 type idleSample struct {
 	status    serverStatus
 	statusErr error
+	leaseLive bool
 }
 
 // idleTracker decides when a server has been idle for its window. It never
@@ -205,6 +281,9 @@ func (t *idleTracker) observe(now time.Time, s idleSample) bool {
 		if s.status.threads > 1 {
 			active = true
 		}
+	}
+	if s.leaseLive {
+		active = true
 	}
 	if active {
 		t.lastActivity = now
@@ -325,7 +404,7 @@ func (w *idleWatcher) serverGone() bool {
 }
 
 func (w *idleWatcher) sample(ctx context.Context) idleSample {
-	var s idleSample
+	s := idleSample{leaseLive: liveClientLeases(w.opts.ServerDir, w.alive)}
 	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	s.status, s.statusErr = w.readStatus(pollCtx, w.opts.Host, w.opts.Port)
@@ -346,6 +425,16 @@ func (w *idleWatcher) reap(ctx context.Context) (outcome IdleWatchOutcome, done 
 	if w.serverGone() {
 		return IdleWatchServerGone, true, nil
 	}
+	if err := ensureActivityDir(serverDir); err != nil {
+		return IdleWatchCanceled, true, err
+	}
+	if err := os.WriteFile(reapingMarkerPath(serverDir), nil, 0o600); err != nil {
+		return IdleWatchCanceled, true, err
+	}
+	defer func() { _ = os.Remove(reapingMarkerPath(serverDir)) }()
+
+	// A store that opened between the last poll and the marker holds a
+	// lease (written before it read the marker) or a connection.
 	if w.tracker.observe(w.now(), w.sample(ctx)) {
 		return 0, false, nil
 	}

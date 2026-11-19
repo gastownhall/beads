@@ -5,6 +5,7 @@ package doltserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,5 +174,147 @@ func TestIdleWatch_ReapsIdleAutoStartedServer(t *testing.T) {
 	next := autoStartForTest(t, beadsDir)
 	if next.PID == state.PID {
 		t.Errorf("next auto-start reports the reaped PID %d", next.PID)
+	}
+}
+
+// TestIdleWatch_LeaseKeepsServerAlive: an open store's client lease keeps an
+// idle server up, and the server is stopped within the window plus one poll
+// after the store closes or its process dies.
+func TestIdleWatch_LeaseKeepsServerAlive(t *testing.T) {
+	const window = time.Minute
+	const holdFor = 5 * time.Minute
+
+	t.Run("store closes", func(t *testing.T) {
+		beadsDir, _ := fakeStartWorkspace(t)
+		calls := stubIdleWatchSpawner(t)
+		state := autoStartForTest(t, beadsDir)
+		release, err := AcquireClientLease(beadsDir)
+		if err != nil {
+			t.Fatalf("AcquireClientLease: %v", err)
+		}
+
+		clock := newFakeClock()
+		t0 := clock.Now()
+		var conns int64
+		quiet := quietStatus(&conns)
+		var releasedAt time.Time
+		read := func(ctx context.Context, host string, port int) (serverStatus, error) {
+			if releasedAt.IsZero() && clock.Now().Sub(t0) >= holdFor {
+				release()
+				releasedAt = clock.Now()
+			}
+			return quiet(ctx, host, port)
+		}
+		opts := (*calls)[0]
+		opts.Timeout = window
+		w := testIdleWatcher(opts, clock, read)
+		outcome, err := w.run(context.Background())
+		if err != nil || outcome != IdleWatchReaped {
+			t.Fatalf("run = (%s, %v), want reaped", outcome, err)
+		}
+		if releasedAt.IsZero() {
+			t.Fatalf("server reaped at +%s while the lease was held", clock.Now().Sub(t0))
+		}
+		if late := clock.Now().Sub(releasedAt); late > window+w.pollEvery {
+			t.Errorf("reaped %s after the store closed, want within %s", late, window+w.pollEvery)
+		}
+		if isProcessAlive(state.PID) {
+			t.Errorf("server PID %d still running", state.PID)
+		}
+	})
+
+	t.Run("store process dies", func(t *testing.T) {
+		beadsDir, _ := fakeStartWorkspace(t)
+		calls := stubIdleWatchSpawner(t)
+		state := autoStartForTest(t, beadsDir)
+
+		// A lease left by a store process that dies at t0+holdFor.
+		const storePID = 1<<22 + 4242
+		if err := ensureActivityDir(beadsDir); err != nil {
+			t.Fatal(err)
+		}
+		lease := filepath.Join(activityDir(beadsDir), fmt.Sprintf("client-%d-0a0b0c", storePID))
+		if err := os.WriteFile(lease, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		clock := newFakeClock()
+		t0 := clock.Now()
+		diesAt := t0.Add(holdFor)
+		var conns int64
+		opts := (*calls)[0]
+		opts.Timeout = window
+		w := testIdleWatcher(opts, clock, quietStatus(&conns))
+		w.alive = func(pid int) bool {
+			if pid == storePID {
+				return clock.Now().Before(diesAt)
+			}
+			return isProcessAlive(pid)
+		}
+		outcome, err := w.run(context.Background())
+		if err != nil || outcome != IdleWatchReaped {
+			t.Fatalf("run = (%s, %v), want reaped", outcome, err)
+		}
+		if clock.Now().Before(diesAt) {
+			t.Fatalf("server reaped at +%s while the store process was alive", clock.Now().Sub(t0))
+		}
+		if late := clock.Now().Sub(diesAt); late > window+w.pollEvery {
+			t.Errorf("reaped %s after the store process died, want within %s", late, window+w.pollEvery)
+		}
+		if _, err := os.Stat(lease); !os.IsNotExist(err) {
+			t.Errorf("dead process's lease kept (stat err %v)", err)
+		}
+		if isProcessAlive(state.PID) {
+			t.Errorf("server PID %d still running", state.PID)
+		}
+	})
+}
+
+// TestAcquireClientLease_WaitsForInFlightReap: a store that opens while a
+// watcher is stopping the server waits for the stop to finish, so its
+// auto-start finds the server gone rather than racing the stop.
+func TestAcquireClientLease_WaitsForInFlightReap(t *testing.T) {
+	serverDir := t.TempDir()
+	lockF, err := acquireLifecycleLock(serverDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureActivityDir(serverDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reapingMarkerPath(serverDir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		release func()
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		release, err := AcquireClientLease(serverDir)
+		done <- result{release, err}
+	}()
+	select {
+	case <-done:
+		releaseLifecycleLock(lockF)
+		t.Fatal("AcquireClientLease returned while a reap held the lifecycle lock")
+	case <-time.After(300 * time.Millisecond):
+	}
+	releaseLifecycleLock(lockF)
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("AcquireClientLease did not return after the reap released the lock")
+	}
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if !liveClientLeases(serverDir, isProcessAlive) {
+		t.Error("lease not recorded")
+	}
+	r.release()
+	if liveClientLeases(serverDir, isProcessAlive) {
+		t.Error("lease kept after release")
 	}
 }
