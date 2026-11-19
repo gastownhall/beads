@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1544,7 +1545,7 @@ func TestExpandedStepConditionIsVerbatim(t *testing.T) {
 		"compose expand": {"{{flag}}", "!{{flag}}", "{{target}} == prod"},
 		"compose map":    {"{{flag}}", "!{{flag}}", "{{target}} == prod"},
 		"inline expand":  {"{{flag}}", "!{{flag}}", "{{target}} == prod"},
-		"standalone":    {"{{flag}}"},
+		"standalone":     {"{{flag}}"},
 	}
 	for path, steps := range expanded {
 		if got := conditions(steps); !slices.Equal(got, want[path]) {
@@ -1587,20 +1588,20 @@ func TestExpandStepTemplateIsolation(t *testing.T) {
 	}
 
 	tmpl := &Step{
-		ID:          "{target}.revise",
-		Title:       "Revise",
-		Notes:       "notes",
-		Labels:      []string{},
-		DependsOn:   []string{"design"},
-		Needs:       []string{"design"},
-		WaitsFor:    "all-children",
-		Assignee:    "qa",
-		Priority:    &priority,
-		Condition:   "{{flag}}",
-		Metadata:    map[string]interface{}{},
-		Gate:        &Gate{Type: "human", ID: "approval", AwaitID: "await-1", Timeout: "1h", Repo: "octo/app"},
-		OnComplete:  &OnCompleteSpec{ForEach: "output.items", Bond: "item-mol", Vars: map[string]string{}},
-		Children:    []*Step{{ID: "{target}.child", Title: "Child", Labels: []string{}}},
+		ID:            "{target}.revise",
+		Title:         "Revise",
+		Notes:         "notes",
+		Labels:        []string{},
+		DependsOn:     []string{"design"},
+		Needs:         []string{"design"},
+		WaitsFor:      "all-children",
+		Assignee:      "qa",
+		Priority:      &priority,
+		Condition:     "{{flag}}",
+		Metadata:      map[string]interface{}{},
+		Gate:          &Gate{Type: "human", ID: "approval", AwaitID: "await-1", Timeout: "1h", Repo: "octo/app"},
+		OnComplete:    &OnCompleteSpec{ForEach: "output.items", Bond: "item-mol", Vars: map[string]string{}},
+		Children:      []*Step{{ID: "{target}.child", Title: "Child", Labels: []string{}}},
 		SourceFormula: "iso",
 	}
 	tmpl.Metadata["nested"] = map[string]interface{}{"lead": "{owner}", "list": []interface{}{"{owner}"}}
@@ -1839,5 +1840,79 @@ func TestExpandStepClearsInlineExpand(t *testing.T) {
 	}
 	if template[0].Expand != "inner-exp" || len(template[0].ExpandVars) != 1 {
 		t.Errorf("clearing wrote back into the template: %+v", template[0])
+	}
+}
+
+// TestExpandStepFieldGuard: every exported field of Step survives expansion
+// unless it is in the allowlist below (#6433). The fixture populates every
+// non-allowlisted field, so a field added to Step fails this test until the
+// expand path carries it and the fixture names it: a dropped gate is
+// invisible in cooked output, while a forgotten substitution shows up as a
+// literal placeholder.
+func TestExpandStepFieldGuard(t *testing.T) {
+	priority := 2
+	tmpl := &Step{
+		ID:             "revise",
+		Title:          "Revise",
+		Description:    "Second pass",
+		Notes:          "Review notes",
+		Type:           "chore",
+		Priority:       &priority,
+		Labels:         []string{"gate:review"},
+		Metadata:       map[string]interface{}{"team": "core"},
+		DependsOn:      []string{"revise"},
+		Needs:          []string{"revise"},
+		WaitsFor:       "all-children",
+		Assignee:       "julian",
+		Condition:      "{{flag}}",
+		Children:       []*Step{{ID: "revise.child", Title: "Child"}},
+		Gate:           &Gate{Type: "human", ID: "approval", AwaitID: "await-1", Timeout: "1h", Repo: "octo/app"},
+		OnComplete:     &OnCompleteSpec{ForEach: "output.items", Bond: "item-mol", Vars: map[string]string{"name": "{item}"}, Parallel: true},
+		SourceFormula:  "guard-exp",
+		SourceLocation: "template[0]",
+	}
+	// Fields expansion deliberately does not carry, each with its reason.
+	allowlist := map[string]string{
+		"Loop":       "rejected: control flow already ran before the expansion",
+		"Expand":     "cleared: nested template expansion is not supported",
+		"ExpandVars": "cleared: nested template expansion is not supported",
+	}
+
+	ty := reflect.TypeOf(*tmpl)
+	fixture := reflect.ValueOf(*tmpl)
+	for i := 0; i < ty.NumField(); i++ {
+		field := ty.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if _, dropped := allowlist[field.Name]; dropped {
+			continue
+		}
+		if fixture.Field(i).IsZero() {
+			t.Errorf("fixture step has zero %s: populate it so the guard can see the expand path drop it", field.Name)
+		}
+	}
+
+	// Identity substitution (nil vars, no placeholders in the fixture):
+	// every non-allowlisted field must come through non-zero.
+	result, err := expandStep(&Step{ID: "implement", Title: "Implement"}, []*Step{tmpl}, nil)
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(result))
+	}
+	out := reflect.ValueOf(*result[0])
+	for i := 0; i < ty.NumField(); i++ {
+		field := ty.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if _, dropped := allowlist[field.Name]; dropped {
+			continue
+		}
+		if out.Field(i).IsZero() {
+			t.Errorf("expansion dropped %s: carry it in expandStepWith or add it to the allowlist with a reason", field.Name)
+		}
 	}
 }
