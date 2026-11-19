@@ -481,9 +481,11 @@ func removeHookSection(content string) (string, bool) {
 	return result, true
 }
 
-// nonShellHookInstall is what installing into a non-shell hook does: print
-// warning (a skip) when it is set.
+// nonShellHookInstall is what installing into a non-shell hook does: write
+// content when write is true, and print warning (a skip) when it is set.
 type nonShellHookInstall struct {
+	content string
+	write   bool
 	warning string
 }
 
@@ -491,27 +493,64 @@ type nonShellHookInstall struct {
 // shebang names a non-shell interpreter (GH#6348). nonShell is false for a
 // hook bd's shell section can share, which keeps the ordinary install path.
 //
-// A non-shell hook stays byte-identical. One that already calls
-// `bd hooks run` is a recognized integration and stays untouched and silent;
-// any other is skipped with a warning. bd never restores a .backup over the
-// hook: it may predate the user's later edits.
+// A clean non-shell hook stays byte-identical. One that already calls
+// `bd hooks run` is a recognized integration and stays untouched and silent.
+// Complete bd sections an earlier install appended are removed; ambiguous
+// markers are left for a person to inspect. bd never
+// restores a .backup over the hook: it may predate the user's later edits.
 func planNonShellHookInstall(hookName, hookPath, content string) (out nonShellHookInstall, nonShell bool) {
 	interp, nonShell := doctor.NonShellHookInterpreter(content)
 	if !nonShell {
 		return out, false
 	}
 	advice := fmt.Sprintf("To integrate bd, have the hook call \"bd hooks run %s\", passing it the hook's arguments and stdin.", hookName)
-	if !hookContentHasMarkers(content) && doctor.IsBdHookContent(content) {
-		return out, true // recognized integration: nothing to add, nothing to report
+	if !hookContentHasMarkers(content) {
+		if doctor.IsBdHookContent(content) {
+			return out, true // recognized integration: nothing to add, nothing to report
+		}
+		out.warning = fmt.Sprintf("Warning: skipped bd integration for the %s hook at %s: it runs under %s, which cannot run bd's shell section. %s",
+			hookName, hookPath, interp, advice)
+		return out, true
 	}
-	out.warning = fmt.Sprintf("Warning: skipped bd integration for the %s hook at %s: it runs under %s, which cannot run bd's shell section. %s",
-		hookName, hookPath, interp, advice)
+	repaired, removed, problem := removeNonShellHookSections(content)
+	if problem != "" {
+		out.warning = fmt.Sprintf("Warning: left the %s hook at %s unchanged: it runs under %s and its bd markers need manual inspection (%s). "+
+			"Remove bd's shell section by hand. %s", hookName, hookPath, interp, problem, advice)
+		return out, true
+	}
+	out.content, out.write = repaired, true
+	out.warning = fmt.Sprintf("Warning: removed %d bd shell section(s) from the %s hook at %s, which runs under %s; bd integration is skipped for it and no .backup was restored. %s",
+		removed, hookName, hookPath, interp, advice)
 	return out, true
 }
 
 // hookContentHasMarkers reports whether content holds any bd section marker text.
 func hookContentHasMarkers(content string) bool {
 	return strings.Contains(content, "BEGIN BEADS INTEGRATION") || strings.Contains(content, "END BEADS INTEGRATION")
+}
+
+// removeNonShellHookSections removes the complete bd sections from a non-shell
+// hook. Bytes outside the sections are kept as they are (no line-ending
+// normalization); removeHookSection also takes the blank separator line the
+// injector added before a section. When the markers are not complete, ordered,
+// non-nested whole-line pairs, it changes nothing and returns the problem.
+func removeNonShellHookSections(content string) (repaired string, removed int, problem string) {
+	pairs, problem := doctor.NonShellHookSectionPairs(content)
+	if problem != "" {
+		return content, 0, problem
+	}
+	result := content
+	for i := 0; i < pairs; i++ {
+		next, found := removeHookSection(result)
+		if !found || len(next) >= len(result) {
+			return content, 0, "a bd section could not be removed cleanly"
+		}
+		result = next
+	}
+	if hookContentHasMarkers(result) {
+		return content, 0, "bd marker text remains after removing the complete sections"
+	}
+	return result, pairs, ""
 }
 
 // isOnlyShebangOrEmpty reports whether the given hook content consists of
@@ -552,16 +591,40 @@ func isOnlyShebangOrEmpty(content string) bool {
 //   - When fromHusky is true, sanitize the (possibly stripped) content so
 //     it doesn't depend on husky's helper-layout being mirrored into the
 //     target directory (GH#3132).
+//   - A hook whose shebang names a non-shell interpreter (GH#6348) is
+//     decided first, before any stripping, empty-content filtering or husky
+//     rewrite, all of which assume shell: it is preserved with only its
+//     complete bd sections removed, and unchanged when its markers are
+//     ambiguous.
 //
 // The function is pure: no I/O, no global state.
 func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
+	preserved, keep, _ := preserveHookContent(content, fromHusky)
+	return preserved, keep
+}
+
+// preserveHookContent is shouldPreserveHookContent that also returns the
+// number of bd sections removed from a non-shell hook, for the caller to
+// report.
+func preserveHookContent(content string, fromHusky bool) (preserved string, keep bool, nonShellRemoved int) {
+	if _, nonShell := doctor.NonShellHookInterpreter(content); nonShell {
+		if !hookContentHasMarkers(content) {
+			return content, true, 0
+		}
+		repaired, removed, problem := removeNonShellHookSections(content)
+		if problem != "" {
+			// Copied as-is; the install reports the markers for inspection.
+			return content, true, 0
+		}
+		return repaired, true, removed
+	}
 	if strings.Contains(content, inlineHookMarker) {
-		return "", false
+		return "", false, 0
 	}
 	if strings.Contains(content, hookSectionBeginPrefix) {
 		stripped, _ := removeHookSection(content)
 		if isOnlyShebangOrEmpty(stripped) {
-			return "", false
+			return "", false, 0
 		}
 		// Normalize CRLF → LF on the preserved-and-stripped content so
 		// Windows / autocrlf=true repos don't end up with `\r\n` line
@@ -572,7 +635,7 @@ func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
 	if fromHusky {
 		content = sanitizeHuskyHook(content)
 	}
-	return content, true
+	return content, true, 0
 }
 
 // HookStatus represents the status of a single git hook
@@ -1287,6 +1350,12 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		// normalization so such a hook keeps its bytes.
 		if readErr == nil {
 			if outcome, nonShell := planNonShellHookInstall(hookName, hookPath, string(existing)); nonShell {
+				if outcome.write {
+					// #nosec G306 -- git hooks must be executable for Git to run them
+					if err := os.WriteFile(hookPath, []byte(outcome.content), 0755); err != nil {
+						return nil, fmt.Errorf("failed to write %s: %w", hookName, err)
+					}
+				}
 				if outcome.warning != "" {
 					fmt.Fprintln(os.Stderr, outcome.warning)
 					skipped = append(skipped, hookName)
@@ -1441,7 +1510,7 @@ func preservePreexistingHooksAt(targetDir, currentDir string, mainRoot func() st
 			continue
 		}
 
-		newContent, keep := shouldPreserveHookContent(string(content), fromHusky)
+		newContent, keep, nonShellRemoved := preserveHookContent(string(content), fromHusky)
 		if !keep {
 			continue
 		}
@@ -1459,6 +1528,10 @@ func preservePreexistingHooksAt(targetDir, currentDir string, mainRoot func() st
 			continue
 		}
 		fmt.Printf("  Preserving existing %s hook from %s\n", entry.Name(), currentDir)
+		if nonShellRemoved > 0 {
+			fmt.Fprintf(os.Stderr, "Warning: removed %d bd shell section(s) from the preserved %s hook (%s), which does not run under a shell; %s is unchanged\n",
+				nonShellRemoved, entry.Name(), dstPath, srcPath)
+		}
 	}
 
 	// GH#3132: Fix husky hook layout after copying.
