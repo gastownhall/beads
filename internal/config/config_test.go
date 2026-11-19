@@ -1955,7 +1955,8 @@ func TestGetStringFromDir(t *testing.T) {
 }
 
 // TestXDGConfigPath_Loaded verifies that ~/.config/bd/config.yaml is loaded
-// when it exists, even if os.UserConfigDir() returns a different path (macOS).
+// when it exists, even if UserConfigDir() returns a different path (for
+// example an XDG_CONFIG_HOME pointing elsewhere).
 func TestXDGConfigPath_Loaded(t *testing.T) {
 	restore := envSnapshot(t)
 	defer restore()
@@ -1980,8 +1981,8 @@ func TestXDGConfigPath_Loaded(t *testing.T) {
 		t.Fatalf("failed to write xdg config: %v", err)
 	}
 
-	// Set XDG_CONFIG_HOME to a DIFFERENT directory so os.UserConfigDir()
-	// won't return ~/.config (simulates macOS behavior).
+	// Set XDG_CONFIG_HOME to a DIFFERENT directory so UserConfigDir()
+	// won't return ~/.config on any platform that honors it.
 	altConfigDir := filepath.Join(tmpHome, "Library", "Application Support")
 	if err := os.MkdirAll(altConfigDir, 0o755); err != nil {
 		t.Fatalf("failed to create alt config dir: %v", err)
@@ -2001,7 +2002,7 @@ func TestXDGConfigPath_Loaded(t *testing.T) {
 	}
 }
 
-// TestXDGConfigPath_Dedup verifies that when os.UserConfigDir() already returns
+// TestXDGConfigPath_Dedup verifies that when UserConfigDir() already returns
 // ~/.config, the path is not added twice.
 func TestXDGConfigPath_Dedup(t *testing.T) {
 	restore := envSnapshot(t)
@@ -2016,7 +2017,7 @@ func TestXDGConfigPath_Dedup(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	t.Setenv("USERPROFILE", tmpHome)
 
-	// Make XDG_CONFIG_HOME point to ~/.config so os.UserConfigDir() returns it
+	// Make XDG_CONFIG_HOME point to ~/.config so UserConfigDir() returns it
 	dotConfig := filepath.Join(tmpHome, ".config")
 	t.Setenv("XDG_CONFIG_HOME", dotConfig)
 

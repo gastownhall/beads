@@ -64,15 +64,16 @@ func primeStoreTimeout() time.Duration {
 	return primeStoreTimeoutDefault
 }
 
-// resolveGlobalPrimePath returns the path to ~/.config/beads/PRIME.md if it
-// exists. configDirOverride is used for testing; pass "" for production.
+// resolveGlobalPrimePath returns the path to <config.UserConfigDir()>/beads/PRIME.md
+// (~/.config/beads/PRIME.md on Linux and macOS unless $XDG_CONFIG_HOME is set)
+// if it exists. configDirOverride is used for testing; pass "" for production.
 func resolveGlobalPrimePath(configDirOverride string) string {
 	var configDir string
 	if configDirOverride != "" {
 		configDir = configDirOverride
 	} else {
 		var err error
-		configDir, err = os.UserConfigDir()
+		configDir, err = config.UserConfigDir()
 		if err != nil {
 			return ""
 		}
@@ -121,8 +122,7 @@ Config options:
 	      (honors $BEADS_DIR, which -C overrides; a redirected .beads is
 	      followed);
 	  (3) the global PRIME.md in bd's user config dir:
-	      ~/.config/beads/ on Linux ($XDG_CONFIG_HOME/beads/ if set),
-	      ~/Library/Application Support/beads/ on macOS,
+	      ~/.config/beads/ on Linux and macOS ($XDG_CONFIG_HOME/beads/ if set),
 	      %AppData%\beads\ on Windows.
 	- Persistent memories (from bd remember) are still appended so memory
 	  injection keeps working under a custom template.
@@ -260,7 +260,7 @@ func init() {
 // true when one is found. It checks, in priority order: the workspace-local
 // .beads/PRIME.md under workspaceDir (clone-specific customization; "" means
 // the cwd), the redirected workspace PRIME.md under beadsDir (shared
-// customization), then the global ~/.config/beads/PRIME.md. It returns
+// customization), then the global PRIME.md under config.UserConfigDir(). It returns
 // ("", false) when no override exists, so callers fall through to the
 // generated default.
 func readCustomPrimeContent(workspaceDir, beadsDir string) (string, bool) {
@@ -276,9 +276,9 @@ func readCustomPrimeContent(workspaceDir, beadsDir string) (string, bool) {
 	if content, err := os.ReadFile(redirectedPrimePath); err == nil {
 		return string(content), true
 	}
-	// Fall back to global config (~/.config/beads/PRIME.md).
+	// Fall back to global config (<config.UserConfigDir()>/beads/PRIME.md).
 	if globalPath := resolveGlobalPrimePath(""); globalPath != "" {
-		// #nosec G304 -- path constructed from UserConfigDir which we control
+		// #nosec G304 -- path constructed from config.UserConfigDir which we control
 		if content, err := os.ReadFile(globalPath); err == nil {
 			return string(content), true
 		}

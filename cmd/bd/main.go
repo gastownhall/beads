@@ -1421,23 +1421,7 @@ var rootCmd = &cobra.Command{
 		// span.
 		initTelemetry(rootCtx, Version)
 
-		// Materialize the user-level metrics config only when metrics are
-		// actually enabled. When metrics are disabled (BD_DISABLE_METRICS or a
-		// user-global metrics.disabled), there is nothing to bootstrap. The
-		// send-metrics flusher is exempt so it never recurses into bootstrap.
-		// This mirrors the resolveMetricsEnabled() gate on the first-run notice
-		// below. (~/.config/bd/ lives outside the repo, so this write is not a
-		// stealth/per-repository trace; stealth init is handled by suppressing
-		// the first-run notice, not by skipping this user-global bootstrap.)
-		if cmd.Name() != metrics.SendMetricsSubcommand && resolveMetricsEnabled() {
-			if err := metrics.EnsureUserConfigDefaults(); err != nil {
-				debug.Logf("warning: ensure user config defaults failed: %v", err)
-			}
-		}
-
-		if _, err := metrics.Init(Version, resolveMetricsEnabled(), resolveMetricsEndpoint()); err != nil {
-			debug.Logf("warning: metrics init failed: %v", err)
-		}
+		bootstrapAndInitMetrics(cmd.Name())
 
 		if cmd.Name() == metrics.SendMetricsSubcommand {
 			return nil
@@ -3153,6 +3137,43 @@ func main() {
 	}
 }
 
+// bootstrapAndInitMetrics is the PersistentPreRun metrics step: bootstrap the
+// user-level metrics config, then initialize the collector from
+// metricsEnabledAfterBootstrap, so a value the bootstrap just wrote (a metrics
+// opt-out carried over from the pre-GH#8113 macOS config), or its failure to
+// write one, governs this very run.
+func bootstrapAndInitMetrics(cmdName string) {
+	bootstrapMetricsUserConfig(cmdName)
+	if _, err := metrics.Init(Version, metricsEnabledAfterBootstrap(), resolveMetricsEndpoint()); err != nil {
+		debug.Logf("warning: metrics init failed: %v", err)
+	}
+}
+
+// bootstrapMetricsUserConfig materializes the user-level metrics config only
+// when metrics are actually enabled. When metrics are disabled
+// (BD_DISABLE_METRICS or a user-global metrics.disabled), there is nothing to
+// bootstrap. The send-metrics flusher is exempt so it never recurses into
+// bootstrap. This mirrors the resolveMetricsEnabled() gate on the first-run
+// notice. (~/.config/bd/ lives outside the repo, so this write is not a
+// stealth/per-repository trace; stealth init is handled by suppressing the
+// first-run notice, not by skipping this user-global bootstrap.) Shell
+// completion is exempt too: it runs on every Tab press, must stay fast and
+// quiet, and should never be the command that writes the user config or
+// prints the GH#8113 carry-over notice into a completion menu. (cobra
+// registers __completeNoDesc as an alias of __complete, so cmd.Name() is
+// always the latter.)
+func bootstrapMetricsUserConfig(cmdName string) {
+	switch cmdName {
+	case metrics.SendMetricsSubcommand, cobra.ShellCompRequestCmd:
+		return
+	}
+	if resolveMetricsEnabled() {
+		if err := metrics.EnsureUserConfigDefaults(); err != nil {
+			debug.Logf("warning: ensure user config defaults failed: %v", err)
+		}
+	}
+}
+
 func resolveMetricsEnabled() bool {
 	if v, ok := os.LookupEnv(metrics.EnvDisableMetrics); ok {
 		return !envTruthyValue(v)
@@ -3170,6 +3191,40 @@ func resolveMetricsEnabled() bool {
 	// repository's .beads/config.yaml (highest viper precedence) could re-enable
 	// metrics for a user who ran `bd metrics off`.
 	return !config.MetricsDisabledByUserConfig()
+}
+
+// metricsEnabledAfterBootstrap is the metrics consent for a run once the
+// user-config bootstrap has had its chance: resolveMetricsEnabled, except on
+// macOS (darwin and ios, GH#8113). There an opt-out may still sit in the
+// pre-GH#8113 ~/Library/Application Support config, which bd no longer reads
+// and carries over only when the bootstrap can write metrics.disabled. So
+// unless BD_DISABLE_METRICS decides, metrics run only when the user config bd
+// reads holds a valid bool metrics.disabled; otherwise (no config, an
+// unwritable or malformed one, a commented-out metrics block, a skipped
+// bootstrap) this run keeps metrics off, silently, with no Application
+// Support access and no write. The metrics collector, the first-run notice,
+// bd metrics status and the doctor check all use it, so they agree.
+// resolveMetricsEnabled stays the gate in front of the bootstrap itself.
+func metricsEnabledAfterBootstrap() bool {
+	if !resolveMetricsEnabled() {
+		return false
+	}
+	if _, ok := os.LookupEnv(metrics.EnvDisableMetrics); ok {
+		return true // a falsey BD_DISABLE_METRICS turned metrics on explicitly
+	}
+	return savedMetricsConsent()
+}
+
+// savedMetricsConsent is the metrics choice the user config records, before
+// any environment override: metricsEnabledByConfig, except that on macOS
+// (darwin and ios, GH#8113) it is on only when the user config holds a valid
+// bool metrics.disabled (see metricsEnabledAfterBootstrap). Off macOS it is
+// exactly metricsEnabledByConfig.
+func savedMetricsConsent() bool {
+	if !metricsEnabledByConfig() {
+		return false
+	}
+	return !metrics.MacOSFamilyPlatform() || config.UserConfigSetsBoolKey("metrics.disabled")
 }
 
 func resolveMetricsEndpoint() string {

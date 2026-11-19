@@ -132,7 +132,7 @@ func initialize(beadsDirSetting string) error {
 	//
 	// Precedence (highest to lowest):
 	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
-	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
+	//   <home>/.config/bd/config.yaml > native UserConfigDir()/bd/config.yaml
 	//   > legacy <home>/.beads/config.yaml
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),

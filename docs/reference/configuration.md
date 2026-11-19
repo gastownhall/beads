@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-11-10
+Last reviewed: 2026-11-19
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -23,11 +23,14 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 `config.yaml` is searched in this order, with later files overriding earlier ones:
 
 1. `~/.beads/config.yaml` (legacy user-level, lowest priority)
-2. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
-3. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
-4. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
+2. `$XDG_CONFIG_HOME/bd/config.yaml` on Linux and macOS when `XDG_CONFIG_HOME` is set, `%AppData%\bd\config.yaml` on Windows (native user-level; with `XDG_CONFIG_HOME` unset on Linux or macOS this is the next entry)
+3. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
+4. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
+5. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
 
 A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
+
+On macOS, bd no longer reads `~/Library/Application Support/bd/config.yaml` or the global `~/Library/Application Support/beads/PRIME.md`: probing that folder can raise a macOS privacy prompt (GH#8113). The macOS user config directory is now `$XDG_CONFIG_HOME` when set, otherwise `~/.config`, for both `bd/config.yaml` and `beads/PRIME.md`. Move any settings in the old file to `bd/config.yaml`, and PRIME.md to `beads/PRIME.md`, in that directory; `bd doctor` lists the settings that differ and prints the commands. Apart from `bd doctor`, bd reads the old config only when the new one has no `metrics.disabled` (normally once, after upgrading). It then carries the metrics settings (`metrics.disabled`, `metrics.endpoint`, `metrics.notice_shown`) into the new config, keeping any value the new config already sets, and in the same write the per-machine settings `bd config set` writes there: `node_id` unless the new config sets it or `bd config unset` removed it, and `mail.delegate` and `dolt.remotesapi-port` only when bd creates the new config (bd read those two from `~/.config/bd/config.yaml` alone whenever it existed). When bd never reads the old file (`BD_DISABLE_METRICS` or `DO_NOT_TRACK` turns metrics off, the new config already has `metrics.disabled`, or one of the cases below keeps bd out of the old folder), nothing is carried; without `node_id`, the guard that keeps `bd reclaim` from reverting leases another replica granted is off. If the old file cannot be read or parsed, nothing is carried and metrics are left off. If the new config cannot be written, bd leaves the old folder alone and metrics stay off on macOS until the user config sets `metrics.disabled` or `BD_DISABLE_METRICS` is set (`BD_DISABLE_METRICS` set to `0`, `false` or empty turns metrics on). Metrics on macOS also stay off, silently, when the user config has a commented-out `metrics` block, unparseable YAML, a top level that is not a mapping (for example a file holding only `---`), a `metrics` key that is not a section, a dangling symlink or a non-bool `metrics.disabled`; `bd metrics on` or `bd metrics off` settles it (first fix unparseable YAML, a non-mapping top level or a non-section `metrics` key, and create the target folder of a dangling symlink). On macOS bd leaves a `.lock` file named after the user config (`config.yaml.lock`), or after its target when the config is a symlink to an existing file. Paths are unchanged on Linux and Windows.
 
 ### Missing `metadata.json`
 
