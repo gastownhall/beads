@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // bdBackup runs "bd backup" with extra args. Returns combined output.
@@ -416,5 +418,213 @@ func TestEmbeddedBackupRestoreStrictReadonly(t *testing.T) {
 				t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
 			}
 		})
+	}
+}
+
+// runBDBackupEnv runs bd in dir with extraEnv layered on the hermetic env and
+// returns its stdout, stderr and exit code.
+func runBDBackupEnv(t *testing.T, bd, dir string, extraEnv []string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), extraEnv...)
+	outBuf, errBuf, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("bd %v did not run: %v", args, err)
+		}
+		return outBuf.String(), errBuf.String(), ee.ExitCode()
+	}
+	return outBuf.String(), errBuf.String(), 0
+}
+
+// damageBackupTableFiles leaves a Dolt backup directory in the GH#4070 state:
+// its manifest still names table files that are no longer there. It removes
+// every regular top-level file except the manifest, Dolt's LOCK and bd's own
+// state file, without reading the manifest.
+func damageBackupTableFiles(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(dir, "manifest")); err != nil {
+		t.Fatalf("precondition: no backup manifest in %s: %v", dir, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed := 0
+	for _, e := range entries {
+		switch e.Name() {
+		case "manifest", "LOCK", "backup_state.json":
+			continue
+		}
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			t.Fatal(err)
+		}
+		removed++
+	}
+	if removed == 0 {
+		t.Fatalf("precondition: no table files to remove in %s", dir)
+	}
+}
+
+// TestEmbeddedBackupSyncDamagedDestination pins bd-5mwx39 (GH#4070) for
+// `bd backup sync`: a destination that lost table files its manifest names
+// used to be reported as "no backup destination configured", whose advice
+// re-registers the same broken directory. The sync error must name the
+// destination instead.
+func TestEmbeddedBackupSyncDamagedDestination(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "bkdmgs")
+	bdCreateSilent(t, bd, dir, "issue in the first backup")
+
+	dest := filepath.Join(t.TempDir(), "dolt-backup")
+	bdBackup(t, bd, dir, "init", "file://"+dest)
+	bdBackup(t, bd, dir, "sync")
+
+	damageBackupTableFiles(t, dest)
+	bdCreateSilent(t, bd, dir, "issue after the damage")
+
+	out := bdBackupFail(t, bd, dir, "sync")
+	if strings.Contains(out, "no backup destination configured") {
+		t.Errorf("a damaged destination is reported as unconfigured:\n%s", out)
+	}
+	if !strings.Contains(out, dest) {
+		t.Errorf("sync error does not name the destination %s:\n%s", dest, out)
+	}
+	if !strings.Contains(out, "table file not found") {
+		t.Errorf("sync error does not carry Dolt's missing-table-file text:\n%s", out)
+	}
+}
+
+// autoBackupStatus is the `backup` object of `bd backup status --json`,
+// decoded by key.
+type autoBackupStatus struct {
+	LastDoltCommit string    `json:"last_dolt_commit"`
+	Timestamp      time.Time `json:"timestamp"`
+	LastSuccessAt  time.Time `json:"last_success_at"`
+	LastError      string    `json:"last_error"`
+	LastErrorAt    time.Time `json:"last_error_at"`
+}
+
+func readAutoBackupStatus(t *testing.T, bd, dir string) autoBackupStatus {
+	t.Helper()
+	out := bdBackup(t, bd, dir, "status", "--json")
+	var resp struct {
+		Backup autoBackupStatus `json:"backup"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("parse backup status JSON: %v\n%s", err, out)
+	}
+	return resp.Backup
+}
+
+// TestEmbeddedAutoBackupDamagedDestination is the GH#4070 (bd-5mwx39) report
+// end to end: once the auto-backup directory lost table files its manifest
+// names, every later auto-backup fails. The command must still succeed, the
+// warning must say where the backup is and where to look, and status must
+// keep the last good backup while reporting the failure.
+func TestEmbeddedAutoBackupDamagedDestination(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "bkdmga")
+	autoDir := filepath.Join(beadsDir, "backup")
+	autoBackupOn := []string{"BD_BACKUP_ENABLED=true", "BD_BACKUP_INTERVAL=1ms"}
+
+	create := func(title string, env []string) (id, stderr string) {
+		t.Helper()
+		stdout, stderr, code := runBDBackupEnv(t, bd, dir, env, "create", "--silent", title)
+		if code != 0 {
+			t.Fatalf("bd create %q exited %d\nstdout:\n%s\nstderr:\n%s", title, code, stdout, stderr)
+		}
+		return strings.TrimSpace(stdout), stderr
+	}
+
+	_, stderr := create("issue A", autoBackupOn)
+	if strings.Contains(stderr, "auto-backup failed") {
+		t.Fatalf("first auto-backup failed:\n%s", stderr)
+	}
+	good := readAutoBackupStatus(t, bd, dir)
+	if good.LastDoltCommit == "" || good.Timestamp.IsZero() {
+		t.Fatalf("first auto-backup recorded no backup: %+v", good)
+	}
+
+	damageBackupTableFiles(t, autoDir)
+
+	_, stderr = create("issue B", autoBackupOn)
+	if !strings.Contains(stderr, "auto-backup failed") {
+		t.Fatalf("auto-backup into a damaged directory did not warn:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, autoDir) {
+		t.Errorf("warning does not name the backup directory %s:\n%s", autoDir, stderr)
+	}
+	if !strings.Contains(stderr, "bd backup status") {
+		t.Errorf("warning does not point at `bd backup status`:\n%s", stderr)
+	}
+	failed := readAutoBackupStatus(t, bd, dir)
+	if failed.LastError == "" {
+		t.Errorf("status reports no last_error after a failed auto-backup: %+v", failed)
+	} else if !strings.Contains(failed.LastError, "table file not found") {
+		t.Errorf("last_error %q does not name the missing table file", failed.LastError)
+	}
+	if !failed.LastSuccessAt.Equal(good.Timestamp) {
+		t.Errorf("last_success_at = %v, want the last good backup %v", failed.LastSuccessAt, good.Timestamp)
+	}
+
+	// The recovery status and the docs give: move the directory aside and
+	// let the next auto-backup write a fresh full backup at the same path.
+	if err := os.Rename(autoDir, autoDir+".broken"); err != nil {
+		t.Fatal(err)
+	}
+	idC, stderr := create("issue C", autoBackupOn)
+	if strings.Contains(stderr, "auto-backup failed") {
+		t.Fatalf("auto-backup after moving the damaged directory aside still fails:\n%s", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(autoDir, "manifest")); err != nil {
+		t.Fatalf("no fresh backup at %s after the move-aside: %v", autoDir, err)
+	}
+	recovered := readAutoBackupStatus(t, bd, dir)
+	if recovered.LastError != "" {
+		t.Errorf("last_error = %q after the recovery backup, want empty", recovered.LastError)
+	}
+	if !recovered.LastSuccessAt.After(good.Timestamp) {
+		t.Errorf("last_success_at = %v, want newer than the last good backup %v", recovered.LastSuccessAt, good.Timestamp)
+	}
+
+	// The fresh backup holds every issue, including B, created while
+	// backups were failing. D is created with auto-backup off, so a restore
+	// that really ran from the backup drops it.
+	want := []string{}
+	for _, issue := range bdListJSON(t, bd, dir) {
+		want = append(want, issue.ID)
+	}
+	if !slices.Contains(want, idC) || len(want) != 3 {
+		t.Fatalf("precondition: issues before the restore = %v, want A, B and %s", want, idC)
+	}
+	bdCreateSilent(t, bd, dir, "issue D, not in the backup")
+	stdout, stderr, code := runBDBackupEnv(t, bd, dir, nil, "backup", "restore", "--force", autoDir)
+	if code != 0 {
+		t.Fatalf("bd backup restore --force %s exited %d\nstdout:\n%s\nstderr:\n%s", autoDir, code, stdout, stderr)
+	}
+	var got []string
+	for _, issue := range bdListJSON(t, bd, dir) {
+		got = append(got, issue.ID)
+	}
+	sort.Strings(want)
+	sort.Strings(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("issues after restoring the recovered backup = %v, want %v", got, want)
 	}
 }

@@ -463,7 +463,10 @@ bd backup sync
     | This pushes the entire database state (all branches, full history) to the
     | backup location configured with 'bd backup init'.
     |
-    | The backup is atomic — if the sync fails, the previous backup state is preserved.
+    | If a sync fails, bd reports the error and the next sync retries. If a
+    | filesystem destination fails the same way on every sync, it may be damaged:
+    | move its directory aside (keep it until a new sync succeeds) and run
+    | 'bd backup sync' again to write a fresh full backup.
     |
     | Run 'bd backup init <path>' first to configure a destination.
 

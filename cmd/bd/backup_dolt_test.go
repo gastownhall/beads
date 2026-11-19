@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -247,5 +248,41 @@ func TestShowDoltBackupStatusJSON_NilWhenNotConfigured(t *testing.T) {
 	configured, ok := result["configured"].(bool)
 	if !ok || configured {
 		t.Errorf("expected configured=false, got %v", result)
+	}
+}
+
+// TestBackupSyncHelpMakesNoAtomicClaim pins bd-5mwx39 (GH#4070): the help
+// promised that a failed sync preserves the previous backup, which is false
+// for a destination that has lost table files its manifest names. It must
+// instead say the failure is reported and how to recover such a destination.
+func TestBackupSyncHelpMakesNoAtomicClaim(t *testing.T) {
+	long := backupSyncCmd.Long
+	if strings.Contains(strings.ToLower(long), "atomic") {
+		t.Errorf("bd backup sync --help still claims atomicity:\n%s", long)
+	}
+	for _, want := range []string{"reports the error", "aside"} {
+		if !strings.Contains(long, want) {
+			t.Errorf("bd backup sync --help is missing %q:\n%s", want, long)
+		}
+	}
+}
+
+// TestIsBackupSyncNotConfigured pins the matcher both `bd backup sync` routes
+// share (bd-5mwx39): only Dolt's unknown-backup error for the synced name
+// means "not configured"; a damaged destination's "table file not found" does
+// not.
+func TestIsBackupSyncNotConfigured(t *testing.T) {
+	for _, tc := range []struct {
+		err  string
+		want bool
+	}{
+		{"Error 1105: backup 'default' not found", true},
+		{"no backup named default", true},
+		{"Error 1105: error opening table file: table file not found: /x/backup/abc", false},
+		{"Error 1105: backup 'other' not found", false},
+	} {
+		if got := isBackupSyncNotConfigured(errors.New(tc.err), "default"); got != tc.want {
+			t.Errorf("isBackupSyncNotConfigured(%q) = %v, want %v", tc.err, got, tc.want)
+		}
 	}
 }
