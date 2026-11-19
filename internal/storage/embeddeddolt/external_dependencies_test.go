@@ -394,3 +394,25 @@ func TestForeignPrefixAncestorBlockIsRefused(t *testing.T) {
 		t.Fatalf("refused hierarchy edge left %d blocks rows for %s", edges, child)
 	}
 }
+
+// A held foreign-prefix wisp target is a wisp target: the edge lands in
+// depends_on_wisp_id and the open wisp blocks its dependent.
+func TestForeignPrefixWispTargetIsAWispEdge(t *testing.T) {
+	e := newForeignPrefixEnv(t)
+	ctx := t.Context()
+	const wisp, dependent = "treehouse-wisp-lease", "firstmate-lease-adopt"
+	e.create(&types.Issue{ID: wisp, Ephemeral: true}, &types.Issue{ID: dependent})
+	e.assertRowExists(t, ctx, "wisps", wisp)
+	if err := e.store.AddDependency(ctx, &types.Dependency{IssueID: dependent, DependsOnID: wisp, Type: types.DepBlocks}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	if got := e.targetColumn("dependencies", dependent, wisp); got != "depends_on_wisp_id" {
+		t.Fatalf("edge stored in %s, want depends_on_wisp_id: %s is a local wisp", got, wisp)
+	}
+	if got := e.readyIDs(); slices.Contains(got, dependent) {
+		t.Fatalf("ready = %v, want %s withheld by its open wisp blocker", got, dependent)
+	}
+	if got := e.blockedBy(dependent); !slices.Equal(got, []string{wisp}) {
+		t.Fatalf("blocked: %s blocked by %v, want [%s]", dependent, got, wisp)
+	}
+}
