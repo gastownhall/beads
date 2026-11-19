@@ -13,12 +13,14 @@ You need two tools installed on every machine:
 |------|---------|---------|
 | **bd** (beads CLI) | 0.59.0+ | See [Installation](/getting-started/installation) |
 | **Dolt** | 2.6.0 or newer (`bd` refuses older); install the pinned version, not "latest" | See [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install) |
+| **Git** | a current release; an old Git rejects arguments Dolt's transport passes (see [the usage-banner entry](#usage-git-banner-on-push-pull-or-bootstrap) below) | [git-scm.com](https://git-scm.com/downloads) |
 
-Verify both are installed:
+Verify all three are installed:
 
 ```bash
 bd version     # must be 0.59.0+
 dolt version   # must match the pinned version (2.6.0 or newer)
+git --version  # a current release, found first on PATH
 ```
 
 Install a specific Dolt version rather than `releases/latest`. On Dolt 2.3.0
@@ -242,6 +244,51 @@ bd list                            # sees the closed task
 - **Do not use JSONL as sync** — `.beads/issues.jsonl` is an export for viewers and interchange. It is not the source of truth, not a full database backup, and cannot safely reconcile deletes or pruning.
 
 ## Troubleshooting
+
+### "usage: git" banner on push, pull or bootstrap
+
+`bd dolt push`, `bd dolt pull` and `bd bootstrap` reach the remote through
+Dolt's embedded git transport, which passes arguments an old Git rejects:
+
+```text
+usage: git ls-remote [--heads] [--tags] [-u <exec> | --upload-pack <exec>] [<repository> [<refs>...]]
+hint: dolt does not support interactive credential prompts
+hint: configure git credentials (credential helper, token) for HTTPS remotes
+```
+
+The banner is Git refusing the *arguments* — the `--` separator before the
+URL in the ls-remote probe, or `--force-with-lease=<ref>:<hash>` on push —
+before any authentication ran. The `hint:` lines around it are added by
+Dolt's wrapper to every git failure; they are not evidence of an
+authentication problem. In our measurement these banners stop at Git 2.10 —
+an observed floor, not a supported-version matrix.
+
+Check which Git actually runs:
+
+```bash
+git --version
+where.exe git         # Windows
+Get-Command git -All  # PowerShell
+which -a git          # Unix
+```
+
+Install a current Git and make sure it is the one found **first on PATH**.
+The remote URL is not the problem: keep GitHub remotes in their
+`git+ssh://` form — Dolt uses it to route them over the git transport
+(a plain `ssh://` URL goes to Dolt's remotesapi client instead).
+
+If a current Git still fails, capture a trace:
+
+```bash
+GIT_TRACE=1 bd dolt push            # Unix
+$env:GIT_TRACE='1'; bd dolt push    # PowerShell
+```
+
+The trace lines name the binary that ran. bd and Dolt pass `GIT_TRACE`,
+`GIT_SSH_COMMAND` and `SSH_AUTH_SOCK` through to the transport, so your ssh
+agent and ssh config apply as usual. In server mode the transport runs the
+Git on the **server process's PATH** — check that environment, not your
+shell's.
 
 ### "no common ancestor" on push
 
