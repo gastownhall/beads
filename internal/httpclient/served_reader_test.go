@@ -111,6 +111,33 @@ func TestServedReaderReadyParentScopesToItsTransitiveDescendants(t *testing.T) {
 	conformance.RunReaderReadyParentScopesToItsTransitiveDescendants(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// The three exclude-parents cases park TOGETHER, on one ledger row
+// (E-ReadyRequest.ExcludeParentsWithOpenChildren, GH#6817): their subject is
+// a member this wire refuses — listReadyWork publishes no exclude-parents
+// parameter, and a dropped flag would answer with the wider set that still
+// lists the parents the caller asked to hide — so running a case body here
+// would fail on the refusal rather than on a semantic divergence. The refusal
+// itself — typed, ledger-named, and fired before any wide request could be
+// answered — is pinned by TestServedReaderRefusesExcludeParents in
+// served_list_test.go. Each park retires when the wire grows the parameter.
+func TestServedReaderReadyExcludeParentsWithOpenChildren(t *testing.T) {
+	skipKnownDivergence(t, "E-ReadyRequest.ExcludeParentsWithOpenChildren", readParkBead,
+		"the case's subject is the parent exclusion, which listReadyWork does not publish (GH#6817); "+
+			"the typed refusal this wire answers with instead is pinned by TestServedReaderRefusesExcludeParents")
+}
+
+func TestServedReaderReadyExcludeParentsCountsChildrenTheQueryCannotSee(t *testing.T) {
+	skipKnownDivergence(t, "E-ReadyRequest.ExcludeParentsWithOpenChildren", readParkBead,
+		"the case's subject is the parent exclusion, which listReadyWork does not publish (GH#6817); "+
+			"the typed refusal this wire answers with instead is pinned by TestServedReaderRefusesExcludeParents")
+}
+
+func TestServedReaderReadyExcludeParentsPagesTheFilteredSet(t *testing.T) {
+	skipKnownDivergence(t, "E-ReadyRequest.ExcludeParentsWithOpenChildren", readParkBead,
+		"the case's subject is the parent exclusion, which listReadyWork does not publish (GH#6817); "+
+			"the typed refusal this wire answers with instead is pinned by TestServedReaderRefusesExcludeParents")
+}
+
 // TestServedReaderListParentReachesEveryDescendantAndOnlyItsOwn is the LIST
 // case that needs no id scope at all — `parent` is its scope, and listIssues
 // publishes it — so it is the one member of the List family here that runs

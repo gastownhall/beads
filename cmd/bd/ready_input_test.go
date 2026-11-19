@@ -578,3 +578,117 @@ func TestReadyExplainFilterDerivesTheReadyDefault(t *testing.T) {
 		t.Errorf("explain filter = %+v\nwant the listing default, unlimited = %+v", got, want)
 	}
 }
+
+// TestGatherReadyInputExcludeParentsRefusesTheSpecialModes pins
+// excludeParentsModeConflict's gatherer half (GH#6817, AC-5): the special
+// modes answer different questions than the parent-excluded listing, so each
+// combination is a usage error naming BOTH flags, JSON-aware like every other
+// gatherer refusal (the JSON-awareness itself is the pinned pattern of
+// TestGatherReadyInputUsageErrorsRespectJSON, so it is asserted the same way).
+// --claim is deliberately not among the refusals, and that is asserted too:
+// a claim's pool is the very same exclusive set, in the same ready order, so
+// `bd ready --exclude-parents --claim` is the request the flag owes its
+// caller.
+func TestGatherReadyInputExcludeParentsRefusesTheSpecialModes(t *testing.T) {
+	pinJSONOutput(t, true)
+	for _, c := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"gated", []string{"--exclude-parents", "--gated"}, []string{"--gated", "--exclude-parents"}},
+		{"mol", []string{"--exclude-parents", "--mol", "bd-x"}, []string{"--mol", "--exclude-parents"}},
+		{"explain", []string{"--exclude-parents", "--explain"}, []string{"--explain", "--exclude-parents"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := runGatherReadyInput(t, newReadyFlagsCommand(t, c.args...), nil)
+			if got.err == nil {
+				t.Fatalf("gatherReadyInput(%v) = nil error, want the usage error", c.args)
+			}
+			if got.stderr != "" {
+				t.Errorf("under --json nothing should reach stderr, got:\n%s", got.stderr)
+			}
+			msg := jsonErrorMessage(t, got.stdout)
+			for _, needle := range c.want {
+				if !strings.Contains(msg, needle) {
+					t.Errorf("the usage error %q does not name both flags; want %q in it", msg, needle)
+				}
+			}
+		})
+	}
+
+	t.Run("claim_is_not_refused", func(t *testing.T) {
+		got := runGatherReadyInput(t, newReadyFlagsCommand(t, "--exclude-parents", "--claim"), nil)
+		if got.err != nil {
+			t.Fatalf("gatherReadyInput(--exclude-parents --claim) = %v, want no error: the claim's pool is the same exclusive set", got.err)
+		}
+		if !got.in.ExcludeParentsWithOpenChildren {
+			t.Error("the flag did not survive the gatherer onto the request the claim will send")
+		}
+		if !got.in.claim {
+			t.Error("--claim did not survive the gatherer")
+		}
+	})
+}
+
+// TestExcludeParentsModeConflictFromFlagsPinsTheRunEEntry pins the OTHER call
+// site: readyCmd's RunE decides the special-mode conflicts ABOVE the dispatch,
+// before --gated/--mol/--explain branch away and the gatherer's tests cannot
+// reach them. The FromFlags twin is the entry RunE calls, so driving it with
+// the same flag state as the gatherer pins that the two sites answer
+// identically — deleting the RunE call re-opens a silent no-op
+// (--exclude-parents --gated would run --gated and ignore the flag) while
+// every gatherer test stays green.
+func TestExcludeParentsModeConflictFromFlagsPinsTheRunEEntry(t *testing.T) {
+	if err := excludeParentsModeConflictFromFlags(newReadyFlagsCommand(t)); err != nil {
+		t.Errorf("an empty command line is no conflict: %v", err)
+	}
+	if err := excludeParentsModeConflictFromFlags(newReadyFlagsCommand(t, "--gated")); err != nil {
+		t.Errorf("--gated alone is no conflict: %v", err)
+	}
+	if err := excludeParentsModeConflictFromFlags(newReadyFlagsCommand(t, "--exclude-parents")); err != nil {
+		t.Errorf("--exclude-parents alone is no conflict: %v", err)
+	}
+	// The message TEXT is HandleErrorRespectJSON's to print, and the
+	// gatherer test above pins where it lands for a --json caller and that
+	// it names both flags; this entry's VERDICT is the subject here, so each
+	// arm asserts only conflict against no conflict, the one thing a
+	// deleted or drifted RunE call site can get wrong.
+	for _, c := range []struct {
+		name     string
+		args     []string
+		conflict bool
+	}{
+		{"gated", []string{"--exclude-parents", "--gated"}, true},
+		{"mol", []string{"--exclude-parents", "--mol", "bd-x"}, true},
+		{"explain", []string{"--exclude-parents", "--explain"}, true},
+		{"claim rides along", []string{"--exclude-parents", "--claim"}, false},
+		{"no mode at all", []string{"--exclude-parents"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := excludeParentsModeConflictFromFlags(newReadyFlagsCommand(t, c.args...))
+			if c.conflict && err == nil {
+				t.Fatalf("excludeParentsModeConflictFromFlags(%v) = nil, want the usage error", c.args)
+			}
+			if !c.conflict && err != nil {
+				t.Errorf("excludeParentsModeConflictFromFlags(%v) = %v, want nil", c.args, err)
+			}
+		})
+	}
+}
+
+// TestGatherReadyInputExcludeParentsMapsOntoTheFilter pins the flag's sane
+// half: gathered onto the ready request (and so onto
+// workapi.BuildReadyFilter's output, the request every role sends).
+func TestGatherReadyInputExcludeParentsMapsOntoTheFilter(t *testing.T) {
+	got := runGatherReadyInput(t, newReadyFlagsCommand(t, "--exclude-parents"), nil)
+	if got.err != nil {
+		t.Fatalf("gatherReadyInput(--exclude-parents): %v", got.err)
+	}
+	if !got.in.ExcludeParentsWithOpenChildren {
+		t.Error("gatherReadyInput dropped --exclude-parents")
+	}
+	if !got.in.filter.ExcludeParentsWithOpenChildren {
+		t.Error("BuildReadyFilter dropped ExcludeParentsWithOpenChildren")
+	}
+}

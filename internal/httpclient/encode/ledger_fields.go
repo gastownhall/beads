@@ -96,6 +96,10 @@ func readyRequestRows() []Row {
 			SpecRow:  fieldSpec + ", D8 row 2",
 			PinnedBy: fieldPin,
 		},
+		refusal("E-ReadyRequest.ExcludeParentsWithOpenChildren", tyReadyRequest, "ExcludeParentsWithOpenChildren",
+			"an ExcludeParentsWithOpenChildren on ready work refuses",
+			"neither listReadyWork nor countReadyWork publishes an exclude-parents parameter, and the ready query applies the parent exclusion inside — so a dropped flag would answer with the wider set that still lists the parents the caller asked to hide (GH#6817)",
+			fieldSpec),
 	}
 }
 
@@ -429,5 +433,7 @@ func workFilterRows() []Row {
 			"listReadyWork publishes no id-exclusion parameter; the set is what the external-dependency policy decorator (upstream #4753) injects to hide sources behind unsatisfied external blockers, and dropping it would widen the answer to exactly the issues the caller's policy excluded (L12). A server that advertises policy.external_dependencies applies the policy itself, so the client never builds the set for it"),
 		bridge("Offset", "a non-zero Offset on ready work refuses",
 			"no wire parameter, and ready work carries no keyset position to page by; see E-ReadyRequest.Offset"),
+		bridge("ExcludeParentsWithOpenChildren", "an ExcludeParentsWithOpenChildren on a bridged work filter refuses",
+			"the ready bridge encodes a raw WorkFilter back into ready parameters, and no parameter carries the parent exclusion; a request that dropped it would silently list the parents the caller's filter hides (GH#6817); the same absence reached from the other source shape, recorded as E-ReadyRequest.ExcludeParentsWithOpenChildren"),
 	}
 }

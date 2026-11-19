@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // The ReadyClaimer contract against the served surface, and the tier is WHOLE:
@@ -152,4 +154,65 @@ func TestServedReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t
 // and the client's only job is not to recompute them.
 func TestServedReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t *testing.T) {
 	conformance.RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t, t.Context(), newServedReadyClaimerFixture(t, "hrcc"))
+}
+
+// TestServedReadyClaimerClaimsTheFrontOfTheExcludedSet parks on the same
+// ledger row its listing sibling does (E-ReadyRequest.ExcludeParentsWithOpenChildren,
+// GH#6817): the claim encodes its filter through the same ready table, so a
+// flagged pool refuses rather than narrowing, and the case body — which
+// expects the narrowed pool to answer — would fail on the refusal instead of
+// on a semantic divergence. The refusal itself, along with the proof that it
+// fires before any wide claim could happen, is pinned right below.
+func TestServedReadyClaimerClaimsTheFrontOfTheExcludedSet(t *testing.T) {
+	skipKnownDivergence(t, "E-ReadyRequest.ExcludeParentsWithOpenChildren", readParkBead,
+		"the case's subject is the parent exclusion, which claimNext does not publish (GH#6817); the typed "+
+			"refusal this wire answers with instead is pinned by TestServedReadyClaimerRefusesExcludeParents")
+}
+
+// TestServedReadyClaimerRefusesExcludeParents is the claim side of
+// TestServedReaderRefusesExcludeParents, with the one thing only a claim can
+// show: a request that had been issued without the flag would have WON a row
+// and written the claim, so the winnable front is seeded and asserted
+// untouched after the refusal — the refusal fired before anything was
+// claimed, not after.
+func TestServedReadyClaimerRefusesExcludeParents(t *testing.T) {
+	ctx := t.Context()
+	env := newServedEnv(t, "hrce")
+	claimer, err := env.subject.ReadyClaimer()
+	if err != nil {
+		t.Fatalf("ReadyClaimer(): %v", err)
+	}
+	label := env.prefix + "-ep"
+	winnable := env.prefix + "-ep-a"
+	if err := env.createIssue(ctx, &types.Issue{
+		ID: winnable, Title: winnable, Status: types.StatusOpen, Priority: 0,
+		IssueType: types.TypeTask, Labels: []string{label},
+	}, "seed"); err != nil {
+		t.Fatalf("seed the winnable row: %v", err)
+	}
+
+	result, err := claimer.ClaimNext(ctx, issueops.ClaimNextRequest{
+		Actor: "claimer",
+		Filter: issueops.ReadyRequest{
+			Labels:                         []string{label},
+			Sort:                           "priority",
+			ExcludeParentsWithOpenChildren: true,
+		},
+	})
+	if err == nil {
+		t.Fatalf("claimNext with ExcludeParentsWithOpenChildren claimed %v instead of refusing: a dropped flag claims a parent the caller asked to hide", result.Claimed)
+	}
+	assertServedRefusal(t, "claimNext with ExcludeParentsWithOpenChildren", err, "ExcludeParentsWithOpenChildren")
+
+	// The refusal fired before anything was claimed: the winnable front row
+	// is exactly what a client that dropped the flag and issued the request
+	// anyway would have taken.
+	var status, assignee string
+	if err := env.queryScalar(ctx,
+		"SELECT status, COALESCE(assignee, '') FROM issues WHERE id = ?", []any{winnable}, &status, &assignee); err != nil {
+		t.Fatalf("read the winnable row back: %v", err)
+	}
+	if status != string(types.StatusOpen) || assignee != "" {
+		t.Errorf("the winnable row moved to (status %q, assignee %q) behind a refusal, want (open, unassigned)", status, assignee)
+	}
 }

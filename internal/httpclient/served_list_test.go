@@ -1412,21 +1412,21 @@ func TestServedReaderDoesNotMutateTheCallerRequestOverTheWire(t *testing.T) {
 	build := func() (issueops.ReadyRequest, issueops.ListRequest, issueops.GetRequest) {
 		limit := 5
 		return issueops.ReadyRequest{
-			Labels:         []string{"Beta", "alpha"},
-			LabelsAny:      []string{"gamma", " delta "},
-			ExcludeLabels:  []string{"omega"},
-			ExcludeTypes:   []string{"chore,epic", " feat "},
-			MetadataFields: map[string]string{"kind": "probe"},
-			Sort:           "priority",
-			Limit:          &limit,
-		}, issueops.ListRequest{
-			Labels:         []string{"Beta", "alpha"},
-			LabelsAny:      []string{"gamma", " delta "},
-			ExcludeLabels:  []string{"omega"},
-			MetadataFields: map[string]string{"kind": "probe"},
-			SortBy:         "id",
-			Limit:          &limit,
-		}, issueops.GetRequest{ID: listID("nomut", "absent")}
+				Labels:         []string{"Beta", "alpha"},
+				LabelsAny:      []string{"gamma", " delta "},
+				ExcludeLabels:  []string{"omega"},
+				ExcludeTypes:   []string{"chore,epic", " feat "},
+				MetadataFields: map[string]string{"kind": "probe"},
+				Sort:           "priority",
+				Limit:          &limit,
+			}, issueops.ListRequest{
+				Labels:         []string{"Beta", "alpha"},
+				LabelsAny:      []string{"gamma", " delta "},
+				ExcludeLabels:  []string{"omega"},
+				MetadataFields: map[string]string{"kind": "probe"},
+				SortBy:         "id",
+				Limit:          &limit,
+			}, issueops.GetRequest{ID: listID("nomut", "absent")}
 	}
 	ready, list, get := build()
 	wantReady, wantList, wantGet := build()
@@ -1494,6 +1494,52 @@ func TestServedReaderRefusesTheFiltersTheWireCannotCarry(t *testing.T) {
 	} else {
 		assertServedRefusal(t, "Ready with an Offset", err, "Offset")
 	}
+}
+
+// TestServedReaderRefusesExcludeParents pins GH#6817's wire half: a ready
+// request carrying ExcludeParentsWithOpenChildren refuses with the typed
+// unsupported error and its ledger row, BEFORE any wider request could be
+// answered. The CONTROL arm is the strongest "before" this package can show:
+// the seeded database would hand the request WITHOUT the flag an answer that
+// lists the parent, so a client that dropped the flag and issued the request
+// anyway would return rows instead of an error — answering this test's
+// refusal arm is the one thing a compliant encoder cannot do.
+func TestServedReaderRefusesExcludeParents(t *testing.T) {
+	ctx := t.Context()
+	c, reader := servedReader(t)
+	const scope = "ep-refuse"
+	parent := listID("ep-refuse", "parent")
+	child := listID("ep-refuse", "child")
+	leaf := listID("ep-refuse", "leaf")
+	seedListIssue(t, ctx, c, parent, scope, time.Time{}, 2)
+	seedListIssue(t, ctx, c, leaf, scope, time.Time{}, 2)
+	// The child exists to make the parent excluded; its separate label keeps
+	// it off both answers.
+	seedListIssue(t, ctx, c, child, scope+"-child", time.Time{}, 2)
+	if err := c.seedDependency(ctx, &types.Dependency{
+		IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the parent-child edge: %v", err)
+	}
+
+	// Control: unflagged, this wire answers, and the parent is on the page.
+	page, err := reader.Ready(ctx, issueops.ReadyRequest{Labels: []string{scope}, Sort: "priority"})
+	if err != nil {
+		t.Fatalf("Ready without the flag (control): %v", err)
+	}
+	if !slices.Contains(pageIDs(page), parent) {
+		t.Errorf("control: the parent %s is not on the unflagged page (%v), so the seeded exclusion story is not what the refusal arm below would be refusing over", parent, pageIDs(page))
+	}
+
+	_, err = reader.Ready(ctx, issueops.ReadyRequest{
+		Labels:                         []string{scope},
+		Sort:                           "priority",
+		ExcludeParentsWithOpenChildren: true,
+	})
+	if err == nil {
+		t.Fatal("Ready with ExcludeParentsWithOpenChildren answered instead of refusing: a dropped flag lists the parents the caller asked to hide")
+	}
+	assertServedRefusal(t, "Ready with ExcludeParentsWithOpenChildren", err, "ExcludeParentsWithOpenChildren")
 }
 
 // TestServedListTitleContainsAnswersWhatTitleAnswers: `bd list

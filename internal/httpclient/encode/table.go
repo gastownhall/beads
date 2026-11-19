@@ -265,6 +265,11 @@ func readyFilterEntries() []FieldEntry {
 		refused("MolType", "E-ReadyRequest.MolType"),
 		param("IncludeDeferred", "include_deferred"),
 		param("IncludeEphemeral", "include_ephemeral"),
+		// GH#6817: the exclusion is a filter neither listReadyWork nor
+		// countReadyWork publishes, and a dropped flag would answer with the
+		// wider set that still lists the parents the caller asked to hide, so
+		// it refuses here rather than reaching the wire unexpressed.
+		refused("ExcludeParentsWithOpenChildren", "E-ReadyRequest.ExcludeParentsWithOpenChildren"),
 		paramTo("ExcludeTypes", "exclude_type", "ExcludeTypes"),
 		paramTo("MetadataFields", "metadata_field", "MetadataFields"),
 		param("HasMetadataKey", "has_metadata_key"),
@@ -612,6 +617,11 @@ func readyBridgeTable() Table {
 			refused("MoleculeID", "E-WorkFilter.MoleculeID"),
 			refused("MolType", "E-WorkFilter.MolType"),
 			refused("WispType", "E-WorkFilter.WispType"),
+			// GH#6817: the raw-filter bridge encodes a WorkFilter back into
+			// ready parameters, and no parameter can carry the parent
+			// exclusion; a request that dropped it would silently list the
+			// parents the caller's filter hides.
+			refused("ExcludeParentsWithOpenChildren", "E-WorkFilter.ExcludeParentsWithOpenChildren"),
 			paramTo("IncludeDeferred", "include_deferred", "IncludeDeferred"),
 			paramTo("IncludeEphemeral", "include_ephemeral", "IncludeEphemeral"),
 			paramTo("ExcludeTypes", "exclude_type", "ExcludeTypes"),
