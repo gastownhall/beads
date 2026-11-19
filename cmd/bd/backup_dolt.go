@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -64,6 +65,15 @@ After adding, run 'bd backup sync' to push your data.`,
 
 		ctx := rootCtx
 		rawPath := args[0]
+
+		// Reject a URL-shaped destination whose scheme init does not accept
+		// BEFORE the proxied dispatch: both routes register the remote and
+		// save the config before Dolt ever opens the destination, so without
+		// this refusal an unlisted scheme would silently register a local
+		// file:// path under the user's working directory (GH#6227).
+		if err := validateBackupInitTarget(rawPath); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		if usesProxiedServer() {
 			return runBackupInitProxied(ctx, rawPath)
@@ -236,6 +246,32 @@ func isDoltBackupURL(raw string) bool {
 		}
 	}
 	return false
+}
+
+// backupURLShapePattern matches an init argument shaped like a URL: a scheme
+// token followed by "://". Only the scheme prefix matches, so the validator's
+// error can name the scheme without repeating the rest of the URL.
+var backupURLShapePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+
+// validateBackupInitTarget rejects a URL-shaped backup init argument whose
+// scheme bd does not accept, before any dispatch, registration, or config
+// write. It is init's closed policy, not a claim about Dolt's transport
+// support: an unlisted scheme used to fall through to filepath.Abs and
+// silently register a local destination (GH#6227).
+//
+// Accepted schemes and plain filesystem inputs return nil; the resolver
+// decides what those become. The error names only the scheme token, never
+// the URL's userinfo, host, path, or query.
+func validateBackupInitTarget(raw string) error {
+	if isDoltBackupURL(raw) {
+		return nil
+	}
+	if shape := backupURLShapePattern.FindString(raw); shape != "" {
+		scheme := strings.TrimSuffix(shape, "://")
+		return fmt.Errorf("unsupported backup URL scheme %q; accepted forms: %s",
+			scheme, strings.Join(doltBackupInitSchemes, ", "))
+	}
+	return nil
 }
 
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.

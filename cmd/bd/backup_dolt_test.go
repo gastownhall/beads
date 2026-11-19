@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -373,4 +374,207 @@ func TestBackupInitPreservesCloudURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// backupInitAcceptedForms pins the validator's error suffix literally, not
+// by joining the production list: the message is a contract (GH#6227 AC-3),
+// and a production refactor of the scheme list must not silently rewrite it.
+const backupInitAcceptedForms = "accepted forms: https://, http://, file://, aws://, gs://, s3://, az://, oci://"
+
+// TestValidateBackupInitTarget pins the init validator (GH#6227 AC-3): every
+// advertised scheme is accepted, an unlisted URL-shaped argument is refused
+// with the exact scheme error — the scheme token only, never userinfo, host,
+// path or query — and plain filesystem inputs are left to the resolver.
+func TestValidateBackupInitTarget(t *testing.T) {
+	t.Parallel()
+	rejected := func(input, scheme string) struct {
+		name    string
+		raw     string
+		wantErr string
+	} {
+		return struct {
+			name    string
+			raw     string
+			wantErr string
+		}{
+			name:    input,
+			raw:     input,
+			wantErr: fmt.Sprintf("unsupported backup URL scheme %q; %s", scheme, backupInitAcceptedForms),
+		}
+	}
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr string // empty = want nil error
+	}{
+		// Every accepted scheme, OCI included: it is advertised and the
+		// pinned Dolt registry provides an OCI factory.
+		{name: "https", raw: "https://doltremoteapi.dolthub.com/user/repo"},
+		{name: "http", raw: "http://localhost:50051/repo"},
+		{name: "file", raw: "file:///tmp/backup"},
+		{name: "aws", raw: "aws://bucket/path"},
+		{name: "gs", raw: "gs://bucket/path"},
+		{name: "s3 with query", raw: "s3://bucket/beads?endpoint=https://minio.local&region=auto&path-style=true"},
+		{name: "az", raw: "az://account.blob.core.windows.net/container/beads"},
+		{name: "oci", raw: "oci://registry.example/tenant/beads"},
+		// Unlisted URL-shaped schemes are refused; matching is case-sensitive.
+		rejected("nope://container/beads", "nope"),
+		rejected("dolthub://org/repo", "dolthub"),
+		rejected("git+ssh://git@github.com/org/repo", "git+ssh"),
+		rejected("oss://bucket/beads", "oss"),
+		rejected("S3://bucket/beads", "S3"),
+		rejected("HTTPS://host/path", "HTTPS"),
+		// Non-URL filesystem inputs are none of the validator's business.
+		{name: "empty"},
+		{name: "relative path", raw: "my-backup"},
+		{name: "absolute path", raw: "/mnt/usb/beads-backup"},
+		{name: "tilde path", raw: "~/Dropbox/beads-backup"},
+		{name: "dot-prefixed scheme-like directory", raw: "./odd://name"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateBackupInitTarget(tc.raw)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("validateBackupInitTarget(%q) = %v, want nil", tc.raw, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateBackupInitTarget(%q) = nil, want %q", tc.raw, tc.wantErr)
+			}
+			if err.Error() != tc.wantErr {
+				t.Errorf("validateBackupInitTarget(%q) = %q, want %q", tc.raw, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestValidateBackupInitTargetHidesUserinfo pins the security half of the
+// error contract: a URL with embedded credentials must be refused naming
+// only its scheme, so a secret in the authority or query never reaches the
+// console, a log, or a bug report.
+func TestValidateBackupInitTargetHidesUserinfo(t *testing.T) {
+	t.Parallel()
+	const raw = "nope://user:secret@host/path?token=value"
+	err := validateBackupInitTarget(raw)
+	if err == nil {
+		t.Fatalf("validateBackupInitTarget(%q) = nil, want the unsupported-scheme error", raw)
+	}
+	want := fmt.Sprintf("unsupported backup URL scheme %q; %s", "nope", backupInitAcceptedForms)
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+	for _, secret := range []string{"user", "secret", "host", "token", "value"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error %q leaks the URL's %q", err.Error(), secret)
+		}
+	}
+}
+
+// TestBackupInitRefusesUnsupportedSchemeBeforeRegistering pins the AC-3
+// command contract end to end: an unlisted URL-shaped argument is refused
+// with the exact scheme error — through the existing text and --json error
+// channels — before any backup registration, config write, or write marker,
+// and on a proxied workspace before any proxied backup access.
+//
+// Not parallel: it swaps the global store, root context, proxied mode, and
+// output mode.
+func TestBackupInitRefusesUnsupportedSchemeBeforeRegistering(t *testing.T) {
+	const rawURL = "nope://user:secret@host/path?token=value"
+	const wantMsg = `unsupported backup URL scheme "nope"; accepted forms: https://, http://, file://, aws://, gs://, s3://, az://, oci://`
+
+	// beginRefusedInit isolates the workspace and installs the recording
+	// store. proxied=true also claims proxied-server mode without any
+	// live server, so a validation that fired too late would surface as a
+	// proxied-gate or connection error instead of the scheme error.
+	beginRefusedInit := func(t *testing.T, proxied bool) *recordingBackupInitStore {
+		t.Helper()
+		prepareBackupStatusTest(t)
+		beads.ResetCaches()
+		t.Cleanup(beads.ResetCaches)
+
+		fake := &recordingBackupInitStore{}
+		oldStore, oldCtx, oldWrote := store, rootCtx, commandDidWrite.Load()
+		store, rootCtx = fake, context.Background()
+		if proxied {
+			proxiedServerMode = true
+		}
+		t.Cleanup(func() {
+			store, rootCtx = oldStore, oldCtx
+			commandDidWrite.Store(oldWrote)
+		})
+		return fake
+	}
+
+	assertNothingHappened := func(t *testing.T, fake *recordingBackupInitStore) {
+		t.Helper()
+		if len(fake.adds) != 0 {
+			t.Errorf("refused init still registered a backup: %v", fake.adds)
+		}
+		cfg, err := loadDoltBackupConfig()
+		if err != nil {
+			t.Fatalf("loadDoltBackupConfig: %v", err)
+		}
+		if cfg != nil {
+			t.Errorf("refused init still wrote a backup config: %+v", cfg)
+		}
+		if commandDidWrite.Load() {
+			t.Errorf("refused init set the write marker")
+		}
+	}
+
+	t.Run("text error names the scheme and nothing else", func(t *testing.T) {
+		fake := beginRefusedInit(t, false)
+		var runErr error
+		stderr := captureStderrForBackupLockTest(t, func() {
+			runErr = backupInitCmd.RunE(backupInitCmd, []string{rawURL})
+		})
+		// The assertions live outside the capture closure: a t.Fatalf inside
+		// it would skip the stderr restore and leak fd 7 to later tests.
+		assertExitCode(t, runErr, 1)
+		if !strings.Contains(stderr, "Error: "+wantMsg) {
+			t.Errorf("stderr = %q, want the exact scheme error %q", stderr, wantMsg)
+		}
+		if strings.Contains(stderr, "secret") || strings.Contains(stderr, "user:") {
+			t.Errorf("stderr leaks the URL's credentials: %q", stderr)
+		}
+		assertNothingHappened(t, fake)
+	})
+
+	t.Run("json error uses the existing JSON error representation", func(t *testing.T) {
+		fake := beginRefusedInit(t, false)
+		jsonOutput = true
+		stdout, err := captureStdoutWithError(t, func() error {
+			return backupInitCmd.RunE(backupInitCmd, []string{rawURL})
+		})
+		assertExitCode(t, err, 1)
+		var response struct {
+			Error string `json:"error"`
+		}
+		if jsonErr := json.Unmarshal([]byte(stdout), &response); jsonErr != nil {
+			t.Fatalf("stdout is not a JSON error object: %v\n%s", jsonErr, stdout)
+		}
+		if response.Error != wantMsg {
+			t.Errorf("JSON error = %q, want %q", response.Error, wantMsg)
+		}
+		assertNothingHappened(t, fake)
+	})
+
+	t.Run("refusal precedes proxied backup access", func(t *testing.T) {
+		fake := beginRefusedInit(t, true)
+		var runErr error
+		stderr := captureStderrForBackupLockTest(t, func() {
+			runErr = backupInitCmd.RunE(backupInitCmd, []string{rawURL})
+		})
+		assertExitCode(t, runErr, 1)
+		if !strings.Contains(stderr, wantMsg) {
+			t.Errorf("stderr = %q, want the scheme error before any proxied access", stderr)
+		}
+		if strings.Contains(stderr, "proxied-server mode") {
+			t.Errorf("refusal came from the proxied capability gate, not the validator: %q", stderr)
+		}
+		assertNothingHappened(t, fake)
+	})
 }
