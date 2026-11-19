@@ -266,3 +266,23 @@ func TestBackupSyncHelpMakesNoAtomicClaim(t *testing.T) {
 		}
 	}
 }
+
+// TestIsBackupSyncNotConfigured pins the matcher both `bd backup sync` routes
+// share (bd-5mwx39): only Dolt's unknown-backup error for the synced name
+// means "not configured"; a damaged destination's "table file not found" does
+// not.
+func TestIsBackupSyncNotConfigured(t *testing.T) {
+	for _, tc := range []struct {
+		err  string
+		want bool
+	}{
+		{"Error 1105: backup 'default' not found", true},
+		{"no backup named default", true},
+		{"Error 1105: error opening table file: table file not found: /x/backup/abc", false},
+		{"Error 1105: backup 'other' not found", false},
+	} {
+		if got := isBackupSyncNotConfigured(errors.New(tc.err), "default"); got != tc.want {
+			t.Errorf("isBackupSyncNotConfigured(%q) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}

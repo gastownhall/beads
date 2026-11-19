@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -416,5 +417,86 @@ func TestEmbeddedBackupRestoreStrictReadonly(t *testing.T) {
 				t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
 			}
 		})
+	}
+}
+
+// runBDBackupEnv runs bd in dir with extraEnv layered on the hermetic env and
+// returns its stdout, stderr and exit code.
+func runBDBackupEnv(t *testing.T, bd, dir string, extraEnv []string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), extraEnv...)
+	outBuf, errBuf, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("bd %v did not run: %v", args, err)
+		}
+		return outBuf.String(), errBuf.String(), ee.ExitCode()
+	}
+	return outBuf.String(), errBuf.String(), 0
+}
+
+// damageBackupTableFiles leaves a Dolt backup directory in the GH#4070 state:
+// its manifest still names table files that are no longer there. It removes
+// every regular top-level file except the manifest, Dolt's LOCK and bd's own
+// state file, without reading the manifest.
+func damageBackupTableFiles(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(dir, "manifest")); err != nil {
+		t.Fatalf("precondition: no backup manifest in %s: %v", dir, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed := 0
+	for _, e := range entries {
+		switch e.Name() {
+		case "manifest", "LOCK", "backup_state.json":
+			continue
+		}
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			t.Fatal(err)
+		}
+		removed++
+	}
+	if removed == 0 {
+		t.Fatalf("precondition: no table files to remove in %s", dir)
+	}
+}
+
+// TestEmbeddedBackupSyncDamagedDestination pins bd-5mwx39 (GH#4070) for
+// `bd backup sync`: a destination that lost table files its manifest names
+// used to be reported as "no backup destination configured", whose advice
+// re-registers the same broken directory. The sync error must name the
+// destination instead.
+func TestEmbeddedBackupSyncDamagedDestination(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "bkdmgs")
+	bdCreateSilent(t, bd, dir, "issue in the first backup")
+
+	dest := filepath.Join(t.TempDir(), "dolt-backup")
+	bdBackup(t, bd, dir, "init", "file://"+dest)
+	bdBackup(t, bd, dir, "sync")
+
+	damageBackupTableFiles(t, dest)
+	bdCreateSilent(t, bd, dir, "issue after the damage")
+
+	out := bdBackupFail(t, bd, dir, "sync")
+	if strings.Contains(out, "no backup destination configured") {
+		t.Errorf("a damaged destination is reported as unconfigured:\n%s", out)
+	}
+	if !strings.Contains(out, dest) {
+		t.Errorf("sync error does not name the destination %s:\n%s", dest, out)
 	}
 }
