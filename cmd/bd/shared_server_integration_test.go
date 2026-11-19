@@ -16,7 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/workspacegate"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -129,21 +132,28 @@ func TestSharedServerConcurrent(t *testing.T) {
 		defer cancel()
 	}
 
-	// ── Init project directories ────────────────────────────────────────
-	// All at once: in shared-server mode every project's physical root is
-	// the one shared dolt dir, and bd init holds that root's gate
-	// EXCLUSIVELY (acquireInitMutationGate), so concurrent inits of
-	// different projects serialize on it. Each waits up to
-	// initGateWaitDefault (60s) for the others, which covers the lane's
-	// small BEADS_TEST_SS_DIRS at ~8s per init. Larger manual runs queue
-	// numDirs inits behind one gate, so raise the bound to match rather
-	// than reintroduce client-side serialization.
-	initEnv := baseEnv
-	if perInit := 15 * time.Second; time.Duration(numDirs)*perInit > initGateWaitDefault {
-		bound := time.Duration(numDirs) * perInit
-		initEnv = append(append([]string{}, baseEnv...), initGateTimeoutEnv+"="+bound.String())
-		t.Logf("init: %d concurrent inits; %s=%s", numDirs, initGateTimeoutEnv, bound)
+	// A resident SHARED holder of the shared physical root for the whole
+	// test, standing in for another project's long-running `bd serve`
+	// (GH#7122). It is NOT advertised to the bd children
+	// (workspacegate.InheritedHoldEnv is absent from baseEnv), so they treat
+	// it as an unrelated process. Ordinary shared-server init takes that
+	// root SHARED, so every init below must complete while it is held.
+	residentRoot, err := workspacegate.ForPhysicalRoot(filepath.Join(sharedDir, "dolt"))
+	if err != nil {
+		t.Fatalf("shared root gate: %v", err)
 	}
+	resident, err := residentRoot.Acquire(ctx, workspacegate.Shared, workspacegate.Options{})
+	if err != nil {
+		t.Fatalf("resident shared hold of the shared root: %v", err)
+	}
+	t.Cleanup(func() { _ = resident.Release() })
+
+	// ── Init project directories ────────────────────────────────────────
+	// All at once: each init holds only its own workspace gate EXCLUSIVE
+	// and the shared dolt root SHARED (acquireInitMutationGate), so
+	// concurrent inits of different projects no longer queue behind one
+	// root gate; each one's own startup and schema work fits the default
+	// init bound.
 	phase = time.Now()
 	type project struct {
 		dir, prefix string
@@ -162,7 +172,7 @@ func TestSharedServerConcurrent(t *testing.T) {
 			if err := gitInit(egCtx, dir); err != nil {
 				return fmt.Errorf("project %d git init: %w", i, err)
 			}
-			out, err := ssExec(egCtx, bdBinary, dir, initEnv,
+			out, err := ssExec(egCtx, bdBinary, dir, baseEnv,
 				"init", "--shared-server", "--external",
 				"--prefix", prefix, "--quiet", "--non-interactive")
 			if err != nil {
@@ -177,17 +187,33 @@ func TestSharedServerConcurrent(t *testing.T) {
 	}
 	t.Logf("init %d dirs: %s", numDirs, time.Since(phase))
 
+	// Every project got a usable, distinct identity and the shared global
+	// configuration, with the resident holder still in place.
+	seenIDs := make(map[string]string, numDirs)
+	for _, p := range projects {
+		cfg, err := configfile.Load(filepath.Join(p.dir, ".beads"))
+		if err != nil || cfg == nil {
+			t.Fatalf("%s metadata.json: %v", p.prefix, err)
+		}
+		if cfg.ProjectID == "" {
+			t.Fatalf("%s has no project_id", p.prefix)
+		}
+		if other, dup := seenIDs[cfg.ProjectID]; dup {
+			t.Fatalf("%s and %s share project_id %s", p.prefix, other, cfg.ProjectID)
+		}
+		seenIDs[cfg.ProjectID] = p.prefix
+		if cfg.GlobalDoltDatabase != doltserver.GlobalDatabaseName || cfg.GlobalProjectID != doltserver.GlobalProjectID {
+			t.Fatalf("%s global config = (%q, %q), want (%q, %q)", p.prefix,
+				cfg.GlobalDoltDatabase, cfg.GlobalProjectID, doltserver.GlobalDatabaseName, doltserver.GlobalProjectID)
+		}
+	}
+
 	// ── Fan out client workloads ────────────────────────────────────────
 	// Plus one late `bd init` of a fresh project that starts while the
-	// workloads are running. It holds the shared physical root's gate
-	// EXCLUSIVELY for its whole run, so this exercises both directions of
-	// the gate wait: every client command that lands during the init waits
-	// for it (BEADS_GATE_WAIT_TIMEOUT, default 30s) instead of failing, and
-	// the init gets the gate despite the steady stream of short client
-	// commands (workspacegate writer fairness: once the init is queued, new
-	// shared acquirers wait behind it). Its bound is pinned to 30s, half the
-	// 60s default, rather than initEnv's raised one: a generous bound would
-	// mask a fairness regression.
+	// workloads are running and the resident holder still holds the shared
+	// root. The init takes that root SHARED and only its own new workspace
+	// EXCLUSIVE, so it neither waits for the other projects' client commands
+	// nor makes them wait; it runs with the default init bound.
 	phase = time.Now()
 	eg, egCtx = errgroup.WithContext(ctx)
 	eg.SetLimit(maxProcs + 1) // +1: the late init below must not take a client's slot
@@ -205,8 +231,7 @@ func TestSharedServerConcurrent(t *testing.T) {
 			return fmt.Errorf("late project git init: %w", err)
 		}
 		start := time.Now()
-		lateEnv := append(append([]string{}, baseEnv...), initGateTimeoutEnv+"=30s")
-		out, err := ssExec(egCtx, bdBinary, dir, lateEnv,
+		out, err := ssExec(egCtx, bdBinary, dir, baseEnv,
 			"init", "--shared-server", "--external",
 			"--prefix", "projlate", "--quiet", "--non-interactive")
 		if err != nil {
