@@ -500,6 +500,9 @@ func TestEmbeddedBackupSyncDamagedDestination(t *testing.T) {
 	if !strings.Contains(out, dest) {
 		t.Errorf("sync error does not name the destination %s:\n%s", dest, out)
 	}
+	if !strings.Contains(out, "table file not found") {
+		t.Errorf("sync error does not carry Dolt's missing-table-file text:\n%s", out)
+	}
 }
 
 // autoBackupStatus is the `backup` object of `bd backup status --json`,
