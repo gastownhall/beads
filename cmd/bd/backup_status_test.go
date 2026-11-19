@@ -453,3 +453,99 @@ func assertExitCode(t *testing.T, err error, want int) {
 		t.Fatalf("command error = %v, want exit code %d", err, want)
 	}
 }
+
+// seedFailedAutoBackupState writes a backup_state.json, as raw JSON so the
+// fixture does not depend on backupState's Go fields, for a workspace whose
+// last good backup ran at t1 and whose later attempt at t2 failed with
+// errText. It returns the backup directory.
+func seedFailedAutoBackupState(t *testing.T, t1, t2, capWarn time.Time, errText string) string {
+	t.Helper()
+	dir, err := backupDir()
+	if err != nil {
+		t.Fatalf("backupDir: %v", err)
+	}
+	raw := map[string]any{
+		"last_dolt_commit": "deadbeef",
+		"timestamp":        t2,
+		"last_cap_warn_at": capWarn,
+		"last_success_at":  t1,
+		"last_error":       errText,
+		"last_error_at":    t2,
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "backup_state.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestBackupStatusReportsFailedAutoBackup pins bd-5mwx39 (GH#4070): a backup
+// destination that fails on every attempt must not read as backed up. Each
+// failed attempt advances the throttle timestamp, so status has to report the
+// last success and the last failure separately.
+func TestBackupStatusReportsFailedAutoBackup(t *testing.T) {
+	sizeDatabase := func(context.Context) (int64, bool, error) { return 0, false, nil }
+	t1 := time.Date(2026, 5, 5, 18, 31, 51, 0, time.UTC)
+	t2 := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+	capWarn := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	const errText = "sync to backup: sync backup backup_export: Error 1105: error opening table file: table file not found: boom"
+
+	t.Run("json", func(t *testing.T) {
+		prepareBackupStatusTest(t)
+		seedFailedAutoBackupState(t, t1, t2, capWarn, errText)
+
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status", "--json"})
+		stdout, stderr, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status --json: %v\nstderr: %s", err, stderr)
+		}
+		var response struct {
+			Backup map[string]json.RawMessage `json:"backup"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+			t.Fatalf("stdout is not valid JSON: %v\nstdout: %s", err, stdout)
+		}
+		wantTime := func(key string, want time.Time) {
+			t.Helper()
+			raw, ok := response.Backup[key]
+			if !ok {
+				t.Errorf("backup.%s missing: %s", key, stdout)
+				return
+			}
+			var got time.Time
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Errorf("backup.%s = %s, not a time: %v", key, raw, err)
+				return
+			}
+			if !got.Equal(want) {
+				t.Errorf("backup.%s = %v, want %v", key, got, want)
+			}
+		}
+		wantString := func(key, want string) {
+			t.Helper()
+			raw, ok := response.Backup[key]
+			if !ok {
+				t.Errorf("backup.%s missing: %s", key, stdout)
+				return
+			}
+			var got string
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Errorf("backup.%s = %s, not a string: %v", key, raw, err)
+				return
+			}
+			if got != want {
+				t.Errorf("backup.%s = %q, want %q", key, got, want)
+			}
+		}
+		wantTime("last_success_at", t1)
+		wantString("last_error", errText)
+		wantTime("last_error_at", t2)
+		wantString("last_dolt_commit", "deadbeef")
+		wantTime("timestamp", t2)
+		wantTime("last_cap_warn_at", capWarn)
+	})
+}

@@ -16,10 +16,19 @@ import (
 )
 
 // backupState tracks watermarks for backup change detection.
+//
+// Timestamp is the time of the last attempt, successful or not: it is the
+// auto-backup throttle watermark. LastSuccessAt is the time of the last
+// backup that completed, and LastError/LastErrorAt describe the most recent
+// failed attempt since then (both empty once a backup succeeds). State files
+// written before these fields existed carry neither.
 type backupState struct {
 	LastDoltCommit string    `json:"last_dolt_commit"`
 	Timestamp      time.Time `json:"timestamp"`
 	LastCapWarnAt  time.Time `json:"last_cap_warn_at"`
+	LastSuccessAt  time.Time `json:"last_success_at"`
+	LastError      string    `json:"last_error"`
+	LastErrorAt    time.Time `json:"last_error_at"`
 }
 
 // backupDir returns the backup directory path, creating it if needed.
