@@ -33,12 +33,15 @@ import (
 // Extracted from main.go's PersistentPreRunE so the chain composition is
 // unit-testable — the bug this PR fixes was a missing WrapStorage call,
 // and the regression class deserves test coverage.
-func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, hooksDisabled bool) storage.DoltStorage {
+//
+// policyOpts configure the external-dependency policy layer (for example
+// crossPrefixBlockerRouting, which bd serve's chain does not take).
+func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, hooksDisabled bool, policyOpts ...externaldeps.Option) storage.DoltStorage {
 	if store == nil {
 		return nil
 	}
 	store = telemetry.WrapStorage(store)
-	store = wireExternalDependencyPolicy(store)
+	store = wireExternalDependencyPolicy(store, policyOpts...)
 	if hookRunner != nil && !hooksDisabled {
 		store = storage.NewHookFiringStore(store, hookRunner)
 	}
@@ -58,7 +61,7 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 // place. Skipping the wrap here for every remote backend (the pre-S6-fix
 // behavior) silently dropped the policy entirely against such a server; the
 // capability-aware skip now lives inside the decorator, not at wrap time.
-func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage {
+func wireExternalDependencyPolicy(store storage.DoltStorage, opts ...externaldeps.Option) storage.DoltStorage {
 	if store == nil {
 		return nil
 	}
@@ -71,6 +74,7 @@ func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
 			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 		},
+		opts...,
 	)
 }
 

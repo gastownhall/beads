@@ -29,6 +29,11 @@ func externalBlockingDependencyRecordsQueryRegex(table string) string {
 		regexp.QuoteMeta(table) + `\s+WHERE depends_on_external LIKE 'external:%'\s+AND type IN \('blocks', 'conditional-blocks', 'waits-for'\)\s+ORDER BY issue_id`
 }
 
+func crossPrefixBlockingDependencyRecordsQueryRegex(table string) string {
+	return `(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM ` +
+		regexp.QuoteMeta(table) + `\s+WHERE depends_on_external IS NOT NULL\s+AND depends_on_external NOT LIKE 'external:%'\s+AND type IN \('blocks', 'conditional-blocks'\)\s+ORDER BY issue_id`
+}
+
 func dependencyRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{
 		"issue_id",
@@ -105,10 +110,14 @@ func TestGetExternalBlockingDependencyRecordsInTxReadsPermanentAndWispEdges(t *t
 		WillReturnRows(dependencyRows().AddRow(
 			"perm-source", "external:remote:payments", types.DepBlocks, now, "tester", "{}", "",
 		))
+	mock.ExpectQuery(crossPrefixBlockingDependencyRecordsQueryRegex("dependencies")).
+		WillReturnRows(dependencyRows())
 	mock.ExpectQuery(externalBlockingDependencyRecordsQueryRegex("wisp_dependencies")).
 		WillReturnRows(dependencyRows().AddRow(
 			"wisp-source", "external:remote:identity", types.DepWaitsFor, now, "tester", "{}", "",
 		))
+	mock.ExpectQuery(crossPrefixBlockingDependencyRecordsQueryRegex("wisp_dependencies")).
+		WillReturnRows(dependencyRows())
 
 	got, err := GetExternalBlockingDependencyRecordsInTx(context.Background(), tx)
 	if err != nil {
@@ -119,6 +128,41 @@ func TestGetExternalBlockingDependencyRecordsInTxReadsPermanentAndWispEdges(t *t
 	}
 	if dep := onlyDependency(t, got, "wisp-source"); dep.DependsOnID != "external:remote:identity" {
 		t.Fatalf("wisp external target = %q", dep.DependsOnID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestGetExternalBlockingDependencyRecordsInTxReadsCrossPrefixBlockers
+// (GH#4647): bare cross-prefix blocks / conditional-blocks targets are read
+// beside external: refs and merged per source, and a missing wisp dependency
+// table is still tolerated.
+func TestGetExternalBlockingDependencyRecordsInTxReadsCrossPrefixBlockers(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	now := time.Now()
+	mock.ExpectQuery(externalBlockingDependencyRecordsQueryRegex("dependencies")).
+		WillReturnRows(dependencyRows().AddRow(
+			"perm-source", "external:remote:payments", types.DepBlocks, now, "tester", "{}", "",
+		))
+	mock.ExpectQuery(crossPrefixBlockingDependencyRecordsQueryRegex("dependencies")).
+		WillReturnRows(dependencyRows().
+			AddRow("perm-source", "other-1", types.DepBlocks, now, "tester", "{}", "").
+			AddRow("cond-source", "other-2", types.DepConditionalBlocks, now, "tester", "{}", ""))
+	mock.ExpectQuery(externalBlockingDependencyRecordsQueryRegex("wisp_dependencies")).
+		WillReturnError(errors.New("Error 1146: Table 'db.wisp_dependencies' doesn't exist"))
+
+	got, err := GetExternalBlockingDependencyRecordsInTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("GetExternalBlockingDependencyRecordsInTx: %v", err)
+	}
+	if deps := got["perm-source"]; len(deps) != 2 || deps[0].DependsOnID != "external:remote:payments" || deps[1].DependsOnID != "other-1" {
+		t.Fatalf("perm-source records = %+v, want the external ref then other-1", deps)
+	}
+	if dep := onlyDependency(t, got, "cond-source"); dep.DependsOnID != "other-2" || dep.Type != types.DepConditionalBlocks {
+		t.Fatalf("cond-source record = %+v, want other-2 conditional-blocks", dep)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)

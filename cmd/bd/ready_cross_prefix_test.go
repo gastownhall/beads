@@ -1,0 +1,96 @@
+//go:build cgo
+
+package main
+
+import (
+	"context"
+	"slices"
+	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// TestReadyHonorsRoutedCrossPrefixBlocker (GH#4647, AC-4): in the town, hq-src1
+// blocks on gt-target1, which lives in the gt- rig routes.jsonl names. The
+// command's policy chain follows the route, so hq-src1 is not ready, counted
+// or claimable while gt-target1 is open, and is ready again once gt-target1
+// is closed — and once it is pinned — with nothing written to the town.
+func TestReadyHonorsRoutedCrossPrefixBlocker(t *testing.T) {
+	r := setupRelateRigs(t, nil)
+	if err := r.town.AddDependency(r.ctx, &types.Dependency{IssueID: "hq-src1", DependsOnID: "gt-target1", Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("add hq-src1 blocks on gt-target1: %v", err)
+	}
+	policy := wireStorageDecorators(r.town, nil, true, crossPrefixBlockerRouting())
+
+	ready := func() []string {
+		t.Helper()
+		issues, err := policy.GetReadyWork(r.ctx, types.WorkFilter{})
+		if err != nil {
+			t.Fatalf("GetReadyWork: %v", err)
+		}
+		ids := make([]string, 0, len(issues))
+		for _, issue := range issues {
+			ids = append(ids, issue.ID)
+		}
+		return ids
+	}
+	setRigStatus := func(status types.Status) {
+		t.Helper()
+		rig, err := openExistingTestDB(t, r.rigDBPath)
+		if err != nil {
+			t.Fatalf("reopen rig store: %v", err)
+		}
+		defer rig.Close()
+		if err := rig.UpdateIssue(r.ctx, "gt-target1", map[string]interface{}{"status": string(status)}, "test"); err != nil {
+			t.Fatalf("set gt-target1 %s: %v", status, err)
+		}
+	}
+
+	if got := ready(); slices.Contains(got, "hq-src1") {
+		t.Fatalf("ready = %v with gt-target1 open; hq-src1 must be excluded", got)
+	}
+	counter, ok := policy.(interface {
+		CountReadyWork(context.Context, types.WorkFilter) (int, error)
+	})
+	if !ok {
+		t.Fatalf("policy chain %T has no CountReadyWork", policy)
+	}
+	if n, err := counter.CountReadyWork(r.ctx, types.WorkFilter{}); err != nil || n != 0 {
+		t.Fatalf("CountReadyWork = %d, %v; want 0", n, err)
+	}
+	if claimed, err := policy.ClaimReadyIssue(r.ctx, types.WorkFilter{}, "worker"); err != nil || claimed != nil {
+		t.Fatalf("ClaimReadyIssue = %+v, %v; want nothing claimable", claimed, err)
+	}
+	before := sourceRow(t, r.ctx, r.town)
+
+	for _, status := range []types.Status{types.StatusClosed, types.StatusPinned} {
+		setRigStatus(status)
+		if got := ready(); !slices.Equal(got, []string{"hq-src1"}) {
+			t.Fatalf("ready = %v with gt-target1 %s, want [hq-src1]", got, status)
+		}
+	}
+	if after := sourceRow(t, r.ctx, r.town); after != before {
+		t.Fatalf("hq-src1 row changed from %+v to %+v; admitting it must not write the source store", before, after)
+	}
+}
+
+// sourceRowState is what a write to hq-src1 would change.
+type sourceRowState struct {
+	status    types.Status
+	updatedAt string
+	edges     int
+}
+
+func sourceRow(t *testing.T, ctx context.Context, s *dolt.DoltStore) sourceRowState {
+	t.Helper()
+	issue, err := s.GetIssue(ctx, "hq-src1")
+	if err != nil {
+		t.Fatalf("GetIssue(hq-src1): %v", err)
+	}
+	deps, err := s.GetDependencyRecords(ctx, "hq-src1")
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(hq-src1): %v", err)
+	}
+	return sourceRowState{status: issue.Status, updatedAt: issue.UpdatedAt.String(), edges: len(deps)}
+}
