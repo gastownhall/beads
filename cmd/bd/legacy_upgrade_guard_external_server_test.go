@@ -233,3 +233,30 @@ func TestExternalServerInitWritesWitnessWhenDataDirSpelledOutsideBeadsDir(t *tes
 		assertCurrentVersionWitness(t, beadsDir)
 	})
 }
+
+// TestExternalServerInitRefusesPopulatedRootWithoutWitnessOutsideLayout keeps
+// the guard's protection: widening the witness writer must not let init stamp
+// an ambiguous, already-populated server root it never admitted.
+func TestExternalServerInitRefusesPopulatedRootWithoutWitnessOutsideLayout(t *testing.T) {
+	skipIfNoDolt(t)
+	repoDir, beadsDir, aliasRepoDir := explicitServerWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", "legacydb", ".dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := append(externalServerTestEnv(t),
+		"BEADS_DIR="+beadsDir,
+		"BEADS_DOLT_DATA_DIR="+filepath.Join(aliasRepoDir, ".beads", "dolt"))
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	out, err := runExternalServerBD(t, repoDir, env, externalServerInitArgs(database)...)
+	if err == nil {
+		t.Fatalf("bd init over a populated witness-less server root succeeded; want explicit-migration refusal:\n%s", out)
+	}
+	if !strings.Contains(out, "explicit migration is required") {
+		t.Fatalf("bd init failed without the explicit-migration refusal: %v\n%s", err, out)
+	}
+	if _, statErr := os.Stat(filepath.Join(beadsDir, localVersionFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("refused init must leave %s absent; stat err = %v", localVersionFile, statErr)
+	}
+}
