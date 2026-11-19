@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
@@ -250,5 +251,92 @@ func TestEmbeddedLocalExternalDepRepairRefusesDirtyTables(t *testing.T) {
 				t.Fatalf("ignored migration %d not recorded after the retried pass", localExternalDepRepairVersion)
 			}
 		})
+	}
+}
+
+// localExternalDepRecomputeFaultTrigger fails the repair's recompute from
+// inside the repair's own SQL transaction: the first issues row whose
+// is_blocked the recompute flips raises an error. A trigger rather than a
+// wrapper around the migration's connection, because the repair opens a real
+// transaction (BeginTx) and runs the recompute on the *sql.Tx, which a
+// wrapper cannot see; a wrapper that hid BeginTx would make the repair run
+// untransacted and the test would pin nothing.
+const localExternalDepRecomputeFaultTrigger = `
+CREATE TRIGGER local_external_dep_recompute_fault BEFORE UPDATE ON issues
+FOR EACH ROW
+BEGIN
+  IF NEW.is_blocked <> OLD.is_blocked THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'injected recompute failure (test)';
+  END IF;
+END`
+
+// TestEmbeddedDepLocalityRepairRollsBackMovesAndRecomputeTogether pins the
+// repair's atomicity: a failure after the moves, inside the recompute, rolls
+// BOTH back. The rows keep their external shape, blocked flags stay as they
+// were, issues and dependencies stay clean, and the marker stays pending, so
+// the next open retries the whole repair rather than resuming half-applied
+// (autocommitted moves would have stranded the moved-source seed).
+func TestEmbeddedDepLocalityRepairRollsBackMovesAndRecomputeTogether(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMigratedStore(t, ctx)
+	conn, closeConn := openDepConn(t, ctx, dataDir)
+	seedLocalExternalDepFixture(t, ctx, conn)
+	commitSeed(t, ctx, conn, "test: edges onto held foreign-prefix targets stored as external")
+	unrecordIgnoredVersionsFrom(t, ctx, conn, localExternalDepRepairVersion)
+	mustExecConn(t, ctx, conn, localExternalDepRecomputeFaultTrigger)
+	closeConn()
+
+	edges := []localDepEdge{
+		{"dependencies", "demo-a", "ops-blk"},
+		{"dependencies", "demo-a", "ops-wsp"},
+		{"wisp_dependencies", "demo-w", "ops-blk"},
+	}
+	conn2, closeConn2 := openDepConn(t, ctx, dataDir)
+	before := map[localDepEdge]localDepRow{}
+	for _, e := range edges {
+		before[e] = readLocalDepRow(t, ctx, conn2, e)
+	}
+	dirtyBefore := dirtyStatus(t, ctx, conn2)
+
+	_, err := schema.MigrateUp(ctx, conn2)
+	if err == nil || !strings.Contains(err.Error(), "injected recompute failure") {
+		t.Fatalf("MigrateUp with the recompute fault = %v, want the injected recompute failure", err)
+	}
+	for _, e := range edges {
+		if got := readLocalDepRow(t, ctx, conn2, e); got != before[e] {
+			t.Errorf("%s edge %s -> %s after the failed repair = %+v, want %+v: the moves must roll back with the recompute",
+				e.table, e.issueID, e.target, got, before[e])
+		}
+	}
+	if blocked, _ := readBlockedState(t, ctx, conn2, "issues", "demo-a"); blocked != 0 {
+		t.Errorf("demo-a is_blocked = %d after the failed repair, want 0", blocked)
+	}
+	if blocked, _ := readBlockedState(t, ctx, conn2, "wisps", "demo-w"); blocked != 0 {
+		t.Errorf("wisp demo-w is_blocked = %d after the failed repair, want 0", blocked)
+	}
+	if dirty := dirtyStatus(t, ctx, conn2); dirty != dirtyBefore {
+		t.Errorf("working set after the failed repair = %q, want %q: the rollback leaves no debris", dirty, dirtyBefore)
+	}
+	if ignoredVersionRecorded(t, ctx, conn2, localExternalDepRepairVersion) {
+		t.Fatalf("the failed repair recorded ignored migration %d; it must stay pending", localExternalDepRepairVersion)
+	}
+
+	// Without the fault, a plain retry converges.
+	mustExecConn(t, ctx, conn2, "DROP TRIGGER local_external_dep_recompute_fault")
+	closeConn2()
+	conn3, _ := openDepConn(t, ctx, dataDir)
+	if _, err := schema.MigrateUp(ctx, conn3); err != nil {
+		t.Fatalf("retry MigrateUp: %v", err)
+	}
+	if got := readLocalDepRow(t, ctx, conn3, edges[0]); got.issueTarget != "ops-blk" || got.external != "" {
+		t.Errorf("demo-a -> ops-blk after the retry = %+v, want it in depends_on_issue_id", got)
+	}
+	if blocked, _ := readBlockedState(t, ctx, conn3, "issues", "demo-a"); blocked != 1 {
+		t.Errorf("demo-a is_blocked = %d after the retry, want 1", blocked)
+	}
+	if !ignoredVersionRecorded(t, ctx, conn3, localExternalDepRepairVersion) {
+		t.Fatalf("ignored migration %d not recorded after the retry", localExternalDepRepairVersion)
 	}
 }

@@ -401,13 +401,14 @@ var derivedActorParam = map[string]int{
 // parameter, so have none to pass, each with why. Every other caller passes
 // the actor of the request whose mutation caused the maintenance.
 var derivedActorSystemCallers = map[string]string{
-	"issueops/blocked_consistency.go:recomputeIsBlockedCounting":   "the full repair behind `bd recompute-blocked` and `bd doctor --fix`",
-	"issueops/blocked_merge.go:recomputeIsBlockedAfterMergeScoped": "a pull's or merge's recompute: the rows came from another clone",
-	"issueops/blocked_merge.go:recomputeIsBlockedForAll":           "a pull's or merge's recompute: the rows came from another clone",
-	"issueops/bulk_ops.go:DeleteIssuesBySourceRepoInTx":            "`bd repo remove`: storage.DeleteIssuesBySourceRepo carries no actor",
-	"dolt/wisps.go:deleteWisp":                                     "the wisp delete surface carries no actor (its delete row names none)",
-	"dolt/wisps.go:deleteWispBatchTx":                              "the wisp delete surface carries no actor (its delete rows name none)",
-	"createbatchequiv/scenario_waitsfor.go:runWaitsFor":            "an equivalence scenario's raw-SQL repair step, not a request",
+	"issueops/blocked_consistency.go:recomputeIsBlockedCounting":     "the full repair behind `bd recompute-blocked` and `bd doctor --fix`",
+	"issueops/blocked_merge.go:recomputeIsBlockedAfterMergeScoped":   "a pull's or merge's recompute: the rows came from another clone",
+	"issueops/blocked_merge.go:recomputeIsBlockedForAll":             "a pull's or merge's recompute: the rows came from another clone",
+	"issueops/bulk_ops.go:DeleteIssuesBySourceRepoInTx":              "`bd repo remove`: storage.DeleteIssuesBySourceRepo carries no actor",
+	"dolt/wisps.go:deleteWisp":                                       "the wisp delete surface carries no actor (its delete row names none)",
+	"dolt/wisps.go:deleteWispBatchTx":                                "the wisp delete surface carries no actor (its delete rows name none)",
+	"createbatchequiv/scenario_waitsfor.go:runWaitsFor":              "an equivalence scenario's raw-SQL repair step, not a request",
+	"schema/local_external_dep_repair.go:applyLocalExternalDepMoves": "the 0032 upgrade repair's recompute: a migration on open, not a request",
 	// storage.DeleteIssue, storage.DeleteIssues and storage.Transaction.DeleteIssue
 	// take no actor. Their callers are mostly system cleanup (the Decay phase of a
 	// local `bd gc`, `bd doctor --fix`), but not only: a local `bd cook` proto

@@ -179,6 +179,12 @@ with that label is closed. `bd ready`, `bd blocked`, and `bd dep tree` resolve
 the capability at query time; an unconfigured or unavailable project remains
 blocking.
 
+A bare ID is classified by what it names, not by its prefix: an ID this
+database holds — an issue or a wisp, even one created with a foreign-prefix
+explicit ID — makes the edge a local edge, with the same blocking, hierarchy
+and foreign-key behavior as any other. `bd ready`, `bd blocked` and
+`bd dep tree` treat it exactly like a same-prefix local target.
+
 A bare ID whose prefix names another rig (`bd dep add bd-abc gt-123`) is
 stored even when bd cannot find it in this database or through routes. `bd dep
 add` then warns on stderr that the ID was not found, or says why it could not
@@ -194,6 +200,20 @@ cross-repository edge not verifiable here instead of reporting it as an
 orphaned dependency, and `bd doctor --fix` keeps it. An edge whose target is
 under this database's own `issue_prefix` or `allowed_prefixes` and is gone is
 still reported and removed.
+
+### Upgrading databases with mis-stored local edges
+
+Older bd classified a dependency target by prefix alone, so an edge between
+two local rows whose IDs carried a foreign prefix was stored as an external
+reference — invisible to `bd ready` and `bd blocked`. The schema migration
+that ships with the fix repairs such rows in both dependency tables: targets
+that name local issues or wisps move to the local target columns and blocked
+state is recomputed, preserving IDs, provenance and timestamps; explicit
+`external:` references and IDs this database holds no row for are untouched.
+If the repair is needed while the issues or dependencies table has uncommitted
+changes, bd refuses before writing anything and leaves the repair pending:
+commit the working set at the current schema with `bd dolt commit`, then
+re-run — the migration then goes through.
 
 ## Gates
 
