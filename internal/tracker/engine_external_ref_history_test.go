@@ -478,12 +478,19 @@ type countingHistoryStore struct {
 	singleCalls int
 	batchCalls  [][]string
 	batchAsOf   []time.Time
+	// failID, when set, makes any history read that covers it fail with
+	// failErr.
+	failID  string
+	failErr error
 }
 
 var _ ExternalRefHistoryStore = (*countingHistoryStore)(nil)
 
 func (s *countingHistoryStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
 	s.singleCalls++
+	if s.failID != "" && id == s.failID {
+		return "", false, s.failErr
+	}
 	ref, ok := s.previousRefs[id]
 	return ref, ok, nil
 }
@@ -491,6 +498,9 @@ func (s *countingHistoryStore) PreviousExternalRef(_ context.Context, id string,
 func (s *countingHistoryStore) PreviousExternalRefs(_ context.Context, ids []string, asOf time.Time) (map[string]string, error) {
 	s.batchCalls = append(s.batchCalls, append([]string(nil), ids...))
 	s.batchAsOf = append(s.batchAsOf, asOf)
+	if s.failID != "" && slices.Contains(ids, s.failID) {
+		return nil, s.failErr
+	}
 	refs := make(map[string]string)
 	for _, id := range ids {
 		if ref, ok := s.previousRefs[id]; ok {
@@ -586,4 +596,76 @@ func TestEnginePullAsksExternalRefHistoryOncePerPull(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEnginePullPrelinkHydrationKeepsDecisionsAndAbortsOnHistoryError pins
+// what the batch read must keep from the per-issue loop: duplicate local rows
+// cost one id and one hydration, a store without the history capability
+// still decides by timestamps, and a history error fails the pull before it
+// fetches any remote, never falling back to the heuristic for some links.
+func TestEnginePullPrelinkHydrationKeepsDecisionsAndAbortsOnHistoryError(t *testing.T) {
+	old := overlapLastSync.Add(-24 * time.Hour)
+	before := overlapLastSync.Add(-time.Hour)
+	after := overlapLastSync.Add(time.Hour)
+	ctx := context.Background()
+	// remote is a row the bulk fetch from lastSync misses, so only a
+	// FetchIssue can hydrate a link to it.
+	remote := TrackerIssue{ID: "EXT-1", Identifier: "EXT-1", Title: "remote", UpdatedAt: old}
+
+	t.Run("history error aborts before any FetchIssue", func(t *testing.T) {
+		// bd-a was relinked after lastSync, so it would be hydrated; bd-b's
+		// history read fails. Asking per issue fetched bd-a's remote first.
+		relinked := linkedIssue("bd-a", "EXT-1", "a", old, before)
+		failing := linkedIssue("bd-b", "EXT-2", "b", old, before)
+		store := &countingHistoryStore{missingHistoryStore: newMissingHistoryStore(relinked, failing)}
+		store.previousRefs["bd-a"] = "https://test.test/EXT-OLD"
+		store.previousRefs["bd-b"] = *failing.ExternalRef
+		cause := errors.New("history unavailable")
+		store.failID, store.failErr = "bd-b", cause
+		mock, _ := newOverlapTracker(remote)
+
+		_, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true, DryRun: true})
+		if !errors.Is(err, cause) {
+			t.Fatalf("Sync error = %v, want it to wrap %v", err, cause)
+		}
+		if mock.fetchCalls != 0 {
+			t.Errorf("FetchIssue calls = %d, want 0: a history error must stop hydration before it starts", mock.fetchCalls)
+		}
+	})
+
+	t.Run("duplicate local rows ask once and hydrate once", func(t *testing.T) {
+		relinked := linkedIssue("bd-a", "EXT-1", "a", old, before)
+		store := &countingHistoryStore{missingHistoryStore: newMissingHistoryStore(relinked, relinked)}
+		store.previousRefs["bd-a"] = "https://test.test/EXT-OLD"
+		mock, _ := newOverlapTracker(remote)
+
+		if _, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true, DryRun: true}); err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if len(store.batchCalls) != 1 || !slices.Equal(store.batchCalls[0], []string{"bd-a"}) {
+			t.Errorf("batch history calls = %v, want one call for [bd-a]", store.batchCalls)
+		}
+		if mock.fetchCalls != 1 {
+			t.Errorf("FetchIssue calls = %d, want 1: both rows name the same relinked remote", mock.fetchCalls)
+		}
+	})
+
+	t.Run("no history capability decides by timestamps", func(t *testing.T) {
+		edited := linkedIssue("bd-a", "EXT-1", "a", old, after)
+		quiet := linkedIssue("bd-b", "EXT-2", "b", old, before)
+		// Only the Store methods are promoted, which hides the history
+		// capability the inner store has.
+		store := struct{ Store }{newMissingHistoryStore(edited, quiet)}
+		if _, ok := externalRefHistoryQuerier(store); ok {
+			t.Fatal("store unexpectedly has the history capability")
+		}
+		mock, _ := newOverlapTracker(remote)
+
+		if _, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true, DryRun: true}); err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if mock.fetchCalls != 1 {
+			t.Errorf("FetchIssue calls = %d, want 1: only the local updated after lastSync", mock.fetchCalls)
+		}
+	})
 }
