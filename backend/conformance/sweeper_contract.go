@@ -932,6 +932,89 @@ func RunSweeperProtectsLiveDependentsThroughExcludedIntermediaries(t *testing.T,
 	}
 }
 
+// RunSweeperProtectsLiveDependentsThroughUnselectedChains pins that the
+// protection keeps a candidate EXACTLY when a live row reaches it through
+// protecting edges, however many unselected closed rows lie between them
+// (GH#7043), and that the walk ends on a cycle of such rows. Every middle row
+// closed after the cutoff, so only the roots are candidates:
+//
+//   - deep:      root ← m1 (parent-child) ← m2 (blocks) ← open leaf (tracks): kept
+//   - cycle:     root ← c1 ⇄ c2 ← open leaf: kept
+//   - nolive:    root ← m1 ← m2, nothing live: swept
+//   - related:   root ← m1 ← open row through a related edge only: swept
+//   - deadcycle: root ← c1 ⇄ c2, nothing live: swept
+func RunSweeperProtectsLiveDependentsThroughUnselectedChains(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	if fixture.AddDependencies == nil {
+		t.Skip("fixture has no AddDependencies hook; cannot wire the chains this case needs")
+	}
+	const tag = "unchain"
+	closedRoot := func(chain string) string {
+		return sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, tag, chain+"-root", true), nil)
+	}
+	unselected := func(chain, name string) string {
+		return sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, tag, chain+"-"+name, true), func(issue *types.Issue) {
+			after := sweeperCutoff.Add(24 * time.Hour)
+			issue.ClosedAt = &after
+		})
+	}
+	open := func(chain string) string {
+		return sweeperSeedOpen(t, ctx, fixture, sweeperIssue(fixture, tag, chain+"-leaf", true))
+	}
+	edge := func(source, target string, typ publicops.DependencyType) publicops.DependencyEdge {
+		return publicops.DependencyEdge{IssueID: source, DependsOnID: target, Type: typ}
+	}
+
+	deepRoot, deepM1, deepM2, deepLeaf := closedRoot("deep"), unselected("deep", "m1"), unselected("deep", "m2"), open("deep")
+	cycRoot, cycC1, cycC2, cycLeaf := closedRoot("cycle"), unselected("cycle", "c1"), unselected("cycle", "c2"), open("cycle")
+	noliveRoot, noliveM1, noliveM2 := closedRoot("nolive"), unselected("nolive", "m1"), unselected("nolive", "m2")
+	relRoot, relM1, relLeaf := closedRoot("related"), unselected("related", "m1"), open("related")
+	deadRoot, deadC1, deadC2 := closedRoot("deadcycle"), unselected("deadcycle", "c1"), unselected("deadcycle", "c2")
+
+	sweeperWire(t, ctx, fixture,
+		edge(deepM1, deepRoot, publicops.DepParentChild),
+		edge(deepM2, deepM1, publicops.DepBlocks),
+		edge(deepLeaf, deepM2, publicops.DepTracks),
+
+		edge(cycC1, cycRoot, publicops.DepParentChild),
+		edge(cycC2, cycC1, publicops.DepTracks),
+		edge(cycC1, cycC2, publicops.DepTracks),
+		edge(cycLeaf, cycC2, publicops.DepParentChild),
+
+		edge(noliveM1, noliveRoot, publicops.DepParentChild),
+		edge(noliveM2, noliveM1, publicops.DepParentChild),
+
+		edge(relM1, relRoot, publicops.DepParentChild),
+		edge(relLeaf, relM1, publicops.DepRelated),
+
+		edge(deadC1, deadRoot, publicops.DepParentChild),
+		edge(deadC2, deadC1, publicops.DepTracks),
+		edge(deadC1, deadC2, publicops.DepTracks),
+	)
+
+	request := publicops.SweepRequest{
+		Tier:                  publicops.SweepEphemeral,
+		IDPattern:             sweeperPattern(fixture, tag),
+		ClosedBefore:          &sweeperCutoff,
+		ProtectLiveDependents: true,
+	}
+	want := publicops.SweepSkips{LiveDependent: 2}
+	for _, step := range []struct {
+		name    string
+		request publicops.SweepRequest
+	}{{"dry run", sweeperAsDryRun(request)}, {"sweep", request}} {
+		result := sweeperSweep(t, ctx, fixture, step.request)
+		if result.Swept != 3 || result.Skipped != want {
+			t.Errorf("%s: Swept = %d, Skipped = %+v; want 3 (nolive, related, deadcycle roots) and %+v "+
+				"(deep and cycle roots)", step.name, result.Swept, result.Skipped, want)
+		}
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 2, deepRoot, cycRoot)
+	sweeperAssertWispRows(t, ctx, fixture, 0, noliveRoot, relRoot, deadRoot)
+	sweeperAssertWispRows(t, ctx, fixture, 12, deepM1, deepM2, deepLeaf, cycC1, cycC2, cycLeaf,
+		noliveM1, noliveM2, relM1, relLeaf, deadC1, deadC2)
+}
+
 // RunSweeperProtectsLiveDependentsAcrossPlanes pins that the live-dependent
 // protection reads BOTH dependency tables: a closed wisp that a live DURABLE
 // (issues-table) bead depends on through parent-child, tracks or blocks is
