@@ -119,7 +119,7 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	middle := stubs(inner)
 	policyReadErr := errors.New("external dependency lookup failed")
 	middle.dependencyReadErr = policyReadErr
-	chained := wireStorageDecorators(middle, hooks.NewRunner(t.TempDir()), false)
+	chained := wireStorageDecorators(middle, hooks.NewRunner(t.TempDir()), false, nil)
 
 	if _, ok := chained.(*storage.HookFiringStore); !ok {
 		t.Fatalf("wireStorageDecorators produced %T, not a hook-firing store; this test proves nothing", chained)
@@ -326,7 +326,7 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	t.Run("a workspace with hooks disabled has no layer to peel", func(t *testing.T) {
 		// BD_NO_HOOKS=1 wires no hook decorator at all, so the roles are the
 		// store's own and the peel must be conditional.
-		bare := wireStorageDecorators(middle, hooks.NewRunner(t.TempDir()), true)
+		bare := wireStorageDecorators(middle, hooks.NewRunner(t.TempDir()), true, nil)
 		roles, err := serveIssueRoles(bare, false)
 		if err != nil {
 			t.Fatalf("serveIssueRoles: %v", err)

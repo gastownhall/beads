@@ -55,7 +55,7 @@ func (s *stubPrefixChainStore) GetAllConfig(context.Context) (map[string]string,
 // baseline.
 
 func TestWireStorageDecorators_NilStorePassesThrough(t *testing.T) {
-	if got := wireStorageDecorators(nil, hooks.NewRunner("/nonexistent"), false); got != nil {
+	if got := wireStorageDecorators(nil, hooks.NewRunner("/nonexistent"), false, nil); got != nil {
 		t.Errorf("wireStorageDecorators(nil, ...) = %v; want nil", got)
 	}
 }
@@ -63,7 +63,7 @@ func TestWireStorageDecorators_NilStorePassesThrough(t *testing.T) {
 func TestWireStorageDecorators_TelemetryOff_HookOn(t *testing.T) {
 	clearTelemetryEnv(t)
 	raw := &stubChainStore{}
-	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 
 	hf, ok := got.(*storage.HookFiringStore)
 	if !ok {
@@ -86,7 +86,7 @@ func TestWireStorageDecorators_TelemetryOn_HookOn(t *testing.T) {
 	clearTelemetryEnv(t)
 	t.Setenv("BD_OTEL_STDOUT", "true")
 	raw := &stubChainStore{}
-	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 
 	hf, ok := got.(*storage.HookFiringStore)
 	if !ok {
@@ -113,7 +113,7 @@ func TestDoltBackupSizeUnwrapsStorageDecorators(t *testing.T) {
 	clearTelemetryEnv(t)
 	t.Setenv("BD_OTEL_STDOUT", "true")
 	raw := &stubChainStore{databaseSize: 99}
-	wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+	wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 
 	size, available, err := doltBackupSizeForStore(t.Context(), wrapped)
 	if err != nil {
@@ -128,7 +128,7 @@ func TestGCStoreSizeUnwrapsStorageDecorators(t *testing.T) {
 	clearTelemetryEnv(t)
 	t.Setenv("BD_OTEL_STDOUT", "true")
 	raw := &stubChainStore{databaseSize: 99}
-	wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+	wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 
 	if got := storeSizeBytesForStore(t.Context(), wrapped); got != 99 {
 		t.Fatalf("storeSizeBytesForStore = %d, want 99", got)
@@ -163,7 +163,7 @@ func TestKVPrefixReaderUnwrapsStorageDecorators(t *testing.T) {
 				t.Setenv("BD_OTEL_STDOUT", "true")
 			}
 			raw := &stubPrefixChainStore{}
-			wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), tc.hooksDisabled)
+			wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), tc.hooksDisabled, nil)
 
 			got, err := readKVListConfig(t.Context(), wrapped, "mail.")
 			if err != nil {
@@ -201,7 +201,7 @@ func TestKVPrefixReaderAbsentCapabilityFallsBack(t *testing.T) {
 				t.Setenv("BD_OTEL_STDOUT", "true")
 			}
 			raw := &stubChainStore{}
-			wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+			wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 
 			if _, ok := configPrefixReaderFor(wrapped); ok {
 				t.Errorf("store without GetConfigByPrefix reported as prefix-capable through %T", wrapped)
@@ -347,7 +347,7 @@ func TestWireStorageDecorators_TelemetryOn_HookDisabled(t *testing.T) {
 	clearTelemetryEnv(t)
 	t.Setenv("BD_OTEL_STDOUT", "true")
 	raw := &stubChainStore{}
-	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true)
+	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true, nil)
 
 	ext, ok := got.(*externaldeps.Store)
 	if !ok {
@@ -365,7 +365,7 @@ func TestWireStorageDecorators_TelemetryOn_HookDisabled(t *testing.T) {
 func TestWireStorageDecorators_TelemetryOff_HookDisabled(t *testing.T) {
 	clearTelemetryEnv(t)
 	raw := &stubChainStore{}
-	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true)
+	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true, nil)
 	ext, ok := got.(*externaldeps.Store)
 	if !ok {
 		t.Fatalf("outer decorator: got %T; want *externaldeps.Store", got)
@@ -378,7 +378,7 @@ func TestWireStorageDecorators_TelemetryOff_HookDisabled(t *testing.T) {
 func TestWireStorageDecorators_NilHookRunner(t *testing.T) {
 	clearTelemetryEnv(t)
 	raw := &stubChainStore{}
-	got := wireStorageDecorators(raw, nil, false)
+	got := wireStorageDecorators(raw, nil, false, nil)
 	ext, ok := got.(*externaldeps.Store)
 	if !ok {
 		t.Fatalf("outer decorator: got %T; want *externaldeps.Store", got)

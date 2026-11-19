@@ -27,12 +27,21 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*ty
 	return result, nil
 }
 
-// GetExternalBlockingDependencyRecordsInTx returns explicit external: edges
-// whose dependency type can block ready work. Cross-prefix issue IDs may share
-// depends_on_external storage, so the external: prefix check is intentional.
+// GetExternalBlockingDependencyRecordsInTx returns the dependency rows the
+// external/cross-prefix blocking policy scours a workspace for: explicit
+// external: references, and bare cross-prefix issue ids that share
+// depends_on_external storage with them (GH#4647 — a target whose id prefix
+// names another repository has no row in this database, so the external
+// column is where the FK-free single rule of IsExternalDepTarget puts it).
+// Cross-prefix issue IDs may share depends_on_external storage with external:
+// refs, so the external: LIKE and its NOT LIKE complement are what keep the
+// two legs disjoint.
 func GetExternalBlockingDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*types.Dependency, error) {
 	result := make(map[string][]*types.Dependency)
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		// The external: leg runs first and the cross-prefix leg only when it
+		// succeeded, so a missing wisp plane short-circuits here before the
+		// second query the way the one-query shape did.
 		if err := getExternalBlockingDependencyRecordsIntoFromTable(ctx, tx, depTable, result); err != nil {
 			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
 				continue
@@ -45,27 +54,56 @@ func GetExternalBlockingDependencyRecordsInTx(ctx context.Context, tx DBTX) (map
 
 //nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
 func getExternalBlockingDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, result map[string][]*types.Dependency) error {
-	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+	// The external: leg keeps its own predicate (and its waits-for type, an
+	// external fanout gate) exactly as before.
+	if err := scanDependencyRecordsQuery(ctx, tx, fmt.Sprintf(`
 		SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
 		FROM %s
 		WHERE depends_on_external LIKE 'external:%%'
 		  AND type IN ('blocks', 'conditional-blocks', 'waits-for')
 		ORDER BY issue_id
-	`, DepTargetExpr, depTable))
+	`, DepTargetExpr, depTable), depTable, "external blocking", result); err != nil {
+		return err
+	}
+	// The cross-prefix leg picks up every bare id in the same column — the id
+	// a routed `bd dep add` stored for another rig's issue — of the types the
+	// read-time policy classifies (DependencyType.IsBlockingEdge, mirrored
+	// here in SQL: blocks, conditional-blocks, waits-for). All source statuses
+	// are returned: the served queries filter by their own semantics, and the
+	// caller (the policy) needs closed sources too, to leave them admitted.
+	// Every bare value this leg returns carries a foreign prefix, but the
+	// prefix comparison itself is NOT a SQL concern: it only holds per source
+	// row, and the policy classifies in Go where the source id is known.
+	return scanDependencyRecordsQuery(ctx, tx, fmt.Sprintf(`
+		SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
+		FROM %s
+		WHERE depends_on_external IS NOT NULL
+		  AND depends_on_external NOT LIKE 'external:%%'
+		  AND type IN ('blocks', 'conditional-blocks', 'waits-for')
+		ORDER BY issue_id
+	`, DepTargetExpr, depTable), depTable, "cross-prefix blocking", result)
+}
+
+// scanDependencyRecordsQuery runs one dependency-records SELECT and appends
+// its rows to result keyed by source id. label names the leg in errors.
+//
+//nolint:gosec // G201: depTable and label are hardcoded by the caller.
+func scanDependencyRecordsQuery(ctx context.Context, tx DBTX, query, depTable, label string, result map[string][]*types.Dependency) error {
+	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
-		return fmt.Errorf("get external blocking dependency records from %s: %w", depTable, err)
+		return fmt.Errorf("get %s dependency records from %s: %w", label, depTable, err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		dep, scanErr := scanDependencyRow(rows)
 		if scanErr != nil {
-			return fmt.Errorf("get external blocking dependency records from %s: %w", depTable, scanErr)
+			return fmt.Errorf("get %s dependency records from %s: %w", label, depTable, scanErr)
 		}
 		result[dep.IssueID] = append(result[dep.IssueID], dep)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("get external blocking dependency records from %s: %w", depTable, err)
+		return fmt.Errorf("get %s dependency records from %s: %w", label, depTable, err)
 	}
 	return nil
 }

@@ -2504,7 +2504,7 @@ var rootCmd = &cobra.Command{
 		// BD_NO_HOOKS=1, which is useful for bulk imports, migrations, or
 		// environments where on_create/on_update/on_close hooks should not
 		// run). Order matters — see wireStorageDecorators in storage_chain.go.
-		store = wireStorageDecorators(store, hookRunner, config.GetBool("no-hooks"))
+		store = wireStorageDecorators(store, hookRunner, config.GetBool("no-hooks"), cmd)
 
 		// Warn if multiple databases detected in directory hierarchy
 		warnMultipleDatabases(dbPath)

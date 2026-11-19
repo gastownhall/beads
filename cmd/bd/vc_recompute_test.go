@@ -63,7 +63,7 @@ func TestBlockedAfterMergeRecomputerFor_PeelsHookAndTelemetryLayers(t *testing.T
 	t.Setenv("BD_OTEL_STDOUT", "true")
 
 	raw := &recomputingStore{}
-	decorated := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+	decorated := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 
 	// Prove the chain really is two layers deep, so this is not a
 	// hooks-only peel wearing a telemetry label.
@@ -88,7 +88,7 @@ func TestBlockedAfterMergeRecomputerFor_PeelsHookLayerOnly(t *testing.T) {
 	clearTelemetryEnv(t)
 
 	raw := &recomputingStore{}
-	decorated := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+	decorated := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 
 	hf, ok := decorated.(*storage.HookFiringStore)
 	if !ok {
@@ -106,7 +106,7 @@ func TestBlockedAfterMergeRecomputerFor_UndecoratedStore(t *testing.T) {
 	clearTelemetryEnv(t)
 
 	raw := &recomputingStore{}
-	decorated := wireStorageDecorators(raw, nil, true)
+	decorated := wireStorageDecorators(raw, nil, true, nil)
 	if storage.UnwrapStore(decorated) != raw {
 		t.Fatalf("expected the external decorator to unwrap to the raw store; got %T", storage.UnwrapStore(decorated))
 	}
@@ -129,7 +129,7 @@ func TestBlockedAfterMergeRecomputerFor_UnsupportedBackend(t *testing.T) {
 	clearTelemetryEnv(t)
 	t.Setenv("BD_OTEL_STDOUT", "true")
 
-	decorated := wireStorageDecorators(&plainRecomputeStore{}, hooks.NewRunner("/nonexistent"), false)
+	decorated := wireStorageDecorators(&plainRecomputeStore{}, hooks.NewRunner("/nonexistent"), false, nil)
 	if rs, ok := blockedAfterMergeRecomputerFor(decorated); ok {
 		t.Errorf("blockedAfterMergeRecomputerFor(%T) = %T, true; want false", decorated, rs)
 	}

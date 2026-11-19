@@ -1431,6 +1431,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Ready selection honors a cross-prefix blocker** (#4647). A bare
+  cross-prefix `blocks` or `conditional-blocks` edge — the shape
+  `bd dep add <source> <other-rig-target>` stores in
+  `depends_on_external` — was invisible to the ready policy, so a source
+  whose routed target was still open showed up in `bd ready`, `bd ready
+  --count` and `bd claim` anyway. The dependency query now reads those
+  edges alongside the permanent and wisp external ones, and the CLI's
+  dependency policy resolves each routed target through routes.jsonl
+  read-only (the same route resolution `bd dep add` uses) before every
+  ready evaluation: an open target excludes its source, and the next
+  query admits the source once the target closes or pins, with no write
+  to the source row. A server (`bd serve`) and the proxied-server chain
+  keep their existing external behavior for now; targets with no route,
+  absent targets, and proxied-server workspaces do not yet have their
+  final compatibility verdicts.
+
 - **`bd relate` and `bd unrelate` resolve cross-prefix endpoints through
   routing** (#4647). `bd dep add` and `bd dep remove` route a cross-prefix
   target through routes.jsonl (#3168), but the relates-to verbs resolved

@@ -4,6 +4,8 @@ import (
 	"context"
 	"path/filepath"
 
+	"github.com/spf13/cobra"
+
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
@@ -33,12 +35,12 @@ import (
 // Extracted from main.go's PersistentPreRunE so the chain composition is
 // unit-testable — the bug this PR fixes was a missing WrapStorage call,
 // and the regression class deserves test coverage.
-func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, hooksDisabled bool) storage.DoltStorage {
+func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, hooksDisabled bool, cmd *cobra.Command) storage.DoltStorage {
 	if store == nil {
 		return nil
 	}
 	store = telemetry.WrapStorage(store)
-	store = wireExternalDependencyPolicy(store)
+	store = wireExternalDependencyPolicy(store, directPolicyRouterFor(cmd))
 	if hookRunner != nil && !hooksDisabled {
 		store = storage.NewHookFiringStore(store, hookRunner)
 	}
@@ -58,9 +60,19 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 // place. Skipping the wrap here for every remote backend (the pre-S6-fix
 // behavior) silently dropped the policy entirely against such a server; the
 // capability-aware skip now lives inside the decorator, not at wrap time.
-func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage {
+// routeIssues is the cross-prefix issue router (GH#4647) for the composed
+// policy. It is a PARAMETER, not constructed here, because who may route is
+// the caller's decision: nil for the surfaces the design bars (bd serve's
+// chains — directPolicyRouterFor decides that from the command — and the
+// proxied unit-of-work provider below), the read-only prefix-route reader
+// everywhere else.
+func wireExternalDependencyPolicy(store storage.DoltStorage, routeIssues externaldeps.IssueRouter) storage.DoltStorage {
 	if store == nil {
 		return nil
+	}
+	opts := []externaldeps.Option{}
+	if routeIssues != nil {
+		opts = append(opts, externaldeps.WithIssueRouter(routeIssues))
 	}
 	return externaldeps.New(
 		store,
@@ -71,6 +83,7 @@ func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
 			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 		},
+		opts...,
 	)
 }
 
@@ -105,6 +118,11 @@ func wireProxiedUOWProvider(provider uow.UnitOfWorkProvider, sinks uow.Sinks) uo
 	return wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(provider, sinks))
 }
 
+// wireExternalDependencyUOWProvider wires the proxied policy WITHOUT a
+// cross-prefix IssueRouter, by design: the proxied CLI must not open routed
+// stores beside the provider's connection, and #5861 leaves no routed read
+// for it. Bare cross-prefix targets there keep their AC-7 compatibility
+// treatment (non-blocking).
 func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.UnitOfWorkProvider {
 	return externaldeps.WrapUOWProvider(
 		provider,

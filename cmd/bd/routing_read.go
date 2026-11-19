@@ -212,5 +212,10 @@ func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writabl
 	if err != nil {
 		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
 	}
-	return wireExternalDependencyPolicy(targetStore), true, rule, nil
+	// A routed store's read policy is a direct CLI policy instance: it gets
+	// the cross-prefix router like the launching workspace's own store
+	// (GH#4647). Its routes still come from the LAUNCHING workspace's
+	// routes.jsonl — the one routingRuleContext resolved — which is the same
+	// file a routed command reads.
+	return wireExternalDependencyPolicy(targetStore, cliIssueRouter{}), true, rule, nil
 }

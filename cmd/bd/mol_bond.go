@@ -217,7 +217,9 @@ func reopenMolBondHome(plan *molBondPlan, reopen func() (*RoutedResult, error)) 
 	}
 	home := rr.Store
 	if !externaldeps.Applied(home) {
-		home = wireExternalDependencyPolicy(home)
+		// The bond home's policy is a direct CLI policy instance: it gets the
+		// cross-prefix router like any other (GH#4647).
+		home = wireExternalDependencyPolicy(home, cliIssueRouter{})
 	}
 	return home, rr.Close, nil
 }

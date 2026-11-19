@@ -140,7 +140,7 @@ func TestRunCompactDoltTargetsOnlyAuthorizedActiveDatabase(t *testing.T) {
 			}
 			if tc.decorated {
 				t.Setenv("BD_OTEL_STDOUT", "true")
-				store = wireStorageDecorators(store, hooks.NewRunner(filepath.Join(project, "missing-hooks")), false)
+				store = wireStorageDecorators(store, hooks.NewRunner(filepath.Join(project, "missing-hooks")), false, nil)
 				if storage.UnwrapStore(store) != candidate {
 					t.Fatal("production decorator chain lost the active store")
 				}

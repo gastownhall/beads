@@ -90,7 +90,7 @@ func TestWireStorageDecoratorsLeavesActivationToTheFactories(t *testing.T) {
 			t.Cleanup(func() { _ = config.Initialize() })
 
 			raw := &configProbeStore{cfg: &settingsPlane{value: "true"}}
-			chain := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+			chain := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 
 			if chain == nil {
 				t.Fatal("wireStorageDecorators returned nil for a non-nil store")

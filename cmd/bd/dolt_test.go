@@ -1225,7 +1225,7 @@ func TestHasNoRemoteConfigured_ProbesThroughDecoratedStore(t *testing.T) {
 				t.Setenv("BD_OTEL_STDOUT", "true")
 			}
 			decorate := func(raw storage.DoltStorage) storage.DoltStorage {
-				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 			}
 
 			// The load-bearing case: dolt_remotes is empty, but the remote is
@@ -1302,7 +1302,7 @@ func TestAdoptGitOriginRemoteForPush_PersistedRemoteVetoesAdoption(t *testing.T)
 				t.Setenv("BD_OTEL_STDOUT", "true")
 			}
 			decorate := func(raw storage.DoltStorage) storage.DoltStorage {
-				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 			}
 
 			// The load-bearing case, driven through the real call site:
@@ -1446,7 +1446,7 @@ func TestHasConfiguredRemote_RemoteOnlyInALeftoverDatabase(t *testing.T) {
 				t.Setenv("BD_OTEL_STDOUT", "true")
 			}
 			decorate := func(raw storage.DoltStorage) storage.DoltStorage {
-				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 			}
 
 			raw := newFakeLeftoverCopyStore()
@@ -1573,7 +1573,7 @@ func TestPushPullSyncRefuseARemoteOnlyInALeftoverDatabase(t *testing.T) {
 
 				raw := newFakeLeftoverCopyStore()
 				setupSyncCommandTest(t, &raw.fakeSyncStore)
-				store = wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+				store = wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false, nil)
 				syncAdoptGitOrigin = adoptGitOriginRemoteForPush
 				jsonOutput, quietFlag = verb.json, verb.quiet
 				for _, f := range []struct {

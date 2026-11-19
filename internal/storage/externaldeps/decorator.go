@@ -22,14 +22,20 @@ type Store struct {
 	inner         storage.DoltStorage
 	locateProject ProjectLocator
 	openProject   StoreOpener
-	warnProject   func(ProjectName)
-	warnMu        sync.Mutex
-	warned        map[ProjectName]struct{}
+	// routeIssues resolves bare cross-prefix dependency targets (GH#4647);
+	// nil where routing is not wired for this policy instance (the serve
+	// chains, the proxied unit-of-work provider).
+	routeIssues IssueRouter
+	warnProject func(ProjectName)
+	warnMu      sync.Mutex
+	warned      map[ProjectName]struct{}
 }
 
-// New constructs an external-capability-aware storage decorator.
-func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener) *Store {
-	return &Store{
+// New constructs an external-capability-aware storage decorator. The options
+// attach the cross-prefix IssueRouter where the embedding CLI supports it
+// (WithIssueRouter).
+func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener, opts ...Option) *Store {
+	s := &Store{
 		DoltStorage:   inner,
 		inner:         inner,
 		locateProject: locateProject,
@@ -37,6 +43,12 @@ func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject St
 		warnProject:   defaultProjectWarning,
 		warned:        make(map[ProjectName]struct{}),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 // Unwrap exposes the decorated store to storage.UnwrapStore.
@@ -187,36 +199,10 @@ func (s *Store) serverEnforcesPolicy(ctx context.Context) (bool, error) {
 }
 
 func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string][]*types.Dependency) (blockingState, error) {
-	refs := make([]reference, 0)
-	refsByIssue := make(map[string][]string)
-	for issueID, deps := range allDeps {
-		for _, dep := range deps {
-			if dep == nil || !dep.Type.IsBlockingEdge() || !isExternalReference(dep.DependsOnID) {
-				continue
-			}
-			refs = append(refs, parseReference(dep.DependsOnID))
-			refsByIssue[issueID] = appendUnique(refsByIssue[issueID], dep.DependsOnID)
-		}
-	}
-
-	satisfied, err := s.resolveReferences(ctx, refs)
+	refsByIssue, err := s.policyBlockersFor(ctx, allDeps)
 	if err != nil {
-		return blockingState{}, fmt.Errorf("external dependencies: resolve blockers: %w", err)
+		return blockingState{}, err
 	}
-	for issueID, issueRefs := range refsByIssue {
-		unsatisfied := issueRefs[:0]
-		for _, ref := range issueRefs {
-			if !satisfied[ref] {
-				unsatisfied = append(unsatisfied, ref)
-			}
-		}
-		if len(unsatisfied) == 0 {
-			delete(refsByIssue, issueID)
-			continue
-		}
-		refsByIssue[issueID] = unsatisfied
-	}
-
 	return blockingState{refsByIssue: refsByIssue}, nil
 }
 
