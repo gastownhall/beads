@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `comment_count` and `comments_omitted`.
 
 ### Fixed
+- Re-resolve supplied workspace paths after a symlink changes target or a worktree
+  gains a local database, preserving per-workspace client pooling. Restore the
+  five worktree integration tests with isolated Dolt roots, checked native
+  Git-backed history sync and passive JSONL export.
 - `show`, `list` and `ready` no longer drop the CLI's `comment_count` and
   `comments_omitted`, so a response whose comment bodies were left out no
   longer looks complete. `list`/`ready` rows and compacted previews carry both
