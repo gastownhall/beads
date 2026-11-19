@@ -1356,6 +1356,65 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			}
 		})
 	})
+
+	// AC7: the lease an override claim arms (the AC1 shape) must take part
+	// in reclaim like any other lease. At the base the fields leg deleted
+	// the lease the claim leg had just armed, so the live in_progress
+	// claim was invisible to reclaim forever (#6501).
+	t.Run("AC7 override-armed lease is reclaimable", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		issue := &types.Issue{
+			ID:        "bd-lease-cao-7",
+			Title:     "override claim reclaim",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "seeder"); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		ops, err := store.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("lifecycle: %v", err)
+		}
+		if _, err := ops.Update(ctx, publicops.UpdateRequest{
+			Actor: "alice", IssueID: "bd-lease-cao-7", Claim: true,
+			Patch: publicops.IssuePatch{Assignee: setAssignee("bob")},
+		}); err != nil {
+			t.Fatalf("claim with override: %v", err)
+		}
+
+		// A cutoff pushed into the future (negative olderThan) makes even a
+		// freshly armed lease look expired, the same sweep the
+		// TestBareUpdateClaimDoesNotArmLease guard uses.
+		reclaimed, err := store.ReclaimExpiredLeases(ctx, -time.Hour, types.ReclaimFilter{}, "reaper")
+		if err != nil {
+			t.Fatalf("reclaim sweep: %v", err)
+		}
+		var found *types.ReclaimedLease
+		for i := range reclaimed {
+			if reclaimed[i].ID == "bd-lease-cao-7" {
+				found = &reclaimed[i]
+			}
+		}
+		if found == nil {
+			t.Fatalf("override claim was not reclaimed; got %+v", reclaimed)
+		}
+		if found.PreviousOwner != "bob" {
+			t.Fatalf("previous owner = %q, want bob", found.PreviousOwner)
+		}
+		after := readLeaseState(t, ctx, store, "bd-lease-cao-7")
+		if after.status != string(types.StatusOpen) || after.assignee.String != "" {
+			t.Fatalf("reclaimed row = %s/%q, want open/unassigned", after.status, after.assignee.String)
+		}
+		if after.leaseExpires.Valid || after.heartbeatAt.Valid {
+			t.Fatalf("reclaim left lease state behind: %+v", after)
+		}
+	})
 }
 
 // setAssignee and setStatus build the patch fields of a claim-override update.
