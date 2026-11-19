@@ -157,6 +157,135 @@ func TestWispGCRaisingAgeDoesNotSaveFreshChild(t *testing.T) {
 	}
 }
 
+// closedGCSelectorReader records the filter the closed-GC selector sends and
+// answers with fixture rows regardless of what that filter says, so a test
+// can see both halves of the age floor: the storage-side bound in the filter
+// and the Go-side guard on the rows that come back. The embedded nil
+// molReader makes any other call panic loudly.
+type closedGCSelectorReader struct {
+	molReader
+	rows   []*types.Issue
+	infra  map[types.IssueType]bool
+	filter types.IssueFilter
+}
+
+func (r *closedGCSelectorReader) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
+	r.filter = filter
+	return r.rows, nil
+}
+
+func (r *closedGCSelectorReader) IsInfraTypeCtx(_ context.Context, t types.IssueType) bool {
+	return r.infra[t]
+}
+
+// TestWispGCClosedSelectorHonorsAge pins the closed-GC selection the GH#8202
+// fix put behind --age (GH#8202): the age bound rides in the storage query —
+// before the 5000-row scan limit, so recent rows cannot fill the window and
+// starve older purgeable rows — with wispIsAbandoned as the Go-side guard for
+// readers that do not enforce UpdatedBefore. A row exactly at the cutoff
+// stays (the strict comparison the abandoned-wisp scan already makes), and
+// zero or negative --age omits the bound entirely: the purge-all escape hatch.
+// Pinned and configured infra wisps keep their protection; excluded types
+// keep riding in the filter.
+func TestWispGCClosedSelectorHonorsAge(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	old := wispGCNow
+	t.Cleanup(func() { wispGCNow = old })
+	wispGCNow = func() time.Time { return now }
+	const threshold = time.Hour
+
+	rows := []*types.Issue{
+		{ID: "gc-closed-recent", Status: types.StatusClosed, Ephemeral: true, UpdatedAt: now.Add(-10 * time.Second)},
+		{ID: "gc-closed-at-cutoff", Status: types.StatusClosed, Ephemeral: true, UpdatedAt: now.Add(-threshold)},
+		{ID: "gc-closed-older", Status: types.StatusClosed, Ephemeral: true, UpdatedAt: now.Add(-2 * threshold)},
+		{ID: "gc-closed-pinned", Status: types.StatusClosed, Ephemeral: true, UpdatedAt: now.Add(-2 * threshold), Pinned: true},
+		{ID: "gc-closed-infra", Status: types.StatusClosed, Ephemeral: true, UpdatedAt: now.Add(-2 * threshold), IssueType: "agent"},
+	}
+	excludeTypes := []types.IssueType{"patrol"}
+	collect := func(sel closedWispPurgeSelection) map[string]bool {
+		out := map[string]bool{}
+		for _, issue := range sel.candidates {
+			out[issue.ID] = true
+		}
+		return out
+	}
+
+	r := &closedGCSelectorReader{
+		rows:  rows,
+		infra: map[types.IssueType]bool{"agent": true},
+	}
+	sel, err := selectClosedWispPurgeCandidates(context.Background(), r, threshold, excludeTypes)
+	if err != nil {
+		t.Fatalf("selectClosedWispPurgeCandidates: %v", err)
+	}
+
+	// The age bound rides in the storage query, beside the scan limit.
+	if r.filter.Limit != wispPurgeScanLimit {
+		t.Errorf("filter.Limit = %d, want the %d-row scan window", r.filter.Limit, wispPurgeScanLimit)
+	}
+	if r.filter.UpdatedBefore == nil {
+		t.Fatal("filter.UpdatedBefore is nil: a positive --age must bound the scan in storage, not post-filter it")
+	}
+	if want := now.Add(-threshold); !r.filter.UpdatedBefore.Equal(want) {
+		t.Errorf("filter.UpdatedBefore = %v, want now-age %v", r.filter.UpdatedBefore, want)
+	}
+	if r.filter.Status == nil || *r.filter.Status != types.StatusClosed {
+		t.Errorf("filter.Status = %v, want closed", r.filter.Status)
+	}
+	if r.filter.Ephemeral == nil || !*r.filter.Ephemeral {
+		t.Errorf("filter.Ephemeral = %v, want true", r.filter.Ephemeral)
+	}
+	if len(r.filter.ExcludeTypes) != 1 || r.filter.ExcludeTypes[0] != "patrol" {
+		t.Errorf("filter.ExcludeTypes = %v, want the caller's excluded types to ride in the filter", r.filter.ExcludeTypes)
+	}
+
+	deleted := collect(sel)
+	if deleted["gc-closed-recent"] {
+		t.Errorf("recent closed wisp selected under --age %v; the Go-side guard must spare rows the reader returns past UpdatedBefore", threshold)
+	}
+	if deleted["gc-closed-at-cutoff"] {
+		t.Errorf("wisp exactly at the cutoff selected: the strict comparison keeps it, as the abandoned-wisp scan does")
+	}
+	if !deleted["gc-closed-older"] {
+		t.Errorf("closed wisp older than the threshold not selected")
+	}
+	if deleted["gc-closed-pinned"] {
+		t.Errorf("pinned closed wisp selected; pinned wisps stay protected")
+	}
+	if deleted["gc-closed-infra"] {
+		t.Errorf("configured infra wisp selected; infra types stay protected")
+	}
+	if sel.pinned != 1 || sel.infra != 1 {
+		t.Errorf("protection counts = pinned %d, infra %d; want 1 and 1 for the route's reporting", sel.pinned, sel.infra)
+	}
+
+	// Zero and negative --age omit the bound: every otherwise eligible closed
+	// wisp is selected regardless of age (the documented escape hatch).
+	for _, tc := range []struct {
+		name string
+		age  time.Duration
+	}{
+		{"zero age", 0},
+		{"negative age", -5 * time.Minute},
+	} {
+		r := &closedGCSelectorReader{rows: rows, infra: map[types.IssueType]bool{"agent": true}}
+		sel, err := selectClosedWispPurgeCandidates(context.Background(), r, tc.age, nil)
+		if err != nil {
+			t.Fatalf("selectClosedWispPurgeCandidates(%s): %v", tc.name, err)
+		}
+		if r.filter.UpdatedBefore != nil {
+			t.Errorf("%s: filter.UpdatedBefore = %v, want nil so every closed wisp stays eligible", tc.name, r.filter.UpdatedBefore)
+		}
+		deleted := collect(sel)
+		if !deleted["gc-closed-recent"] || !deleted["gc-closed-at-cutoff"] || !deleted["gc-closed-older"] {
+			t.Errorf("%s: selection %v; the escape hatch must select recent, at-cutoff and older rows alike", tc.name, deleted)
+		}
+		if deleted["gc-closed-pinned"] || deleted["gc-closed-infra"] {
+			t.Errorf("%s: pinned and infra wisps must stay protected even with the age bound off", tc.name)
+		}
+	}
+}
+
 // TestWispGCCascadeChildAgesAtStoragePrecision holds cascade children to the
 // parents' age predicate, wispIsAbandoned, at Dolt's DATETIME(0) precision
 // (#7236). A step closed at 12:00:00.7 is stored as 12:00:01, so a gc at
