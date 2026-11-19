@@ -819,6 +819,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd update --status closed` warns when `bd close` would have refused.**
+  `bd update` applies close policy but not close's pin and assignee guards,
+  and that is unchanged. After an unforced update closes an issue that was
+  pinned or assigned to another actor when bd read it, stderr now says so
+  once, for example `! update closed bd-1; bd close would refuse the observed
+  pre-update state: assignee is "alice", actor is "bob"`. Stdout, `--json`
+  output and the exit code are unchanged, and `--force` closes stay silent.
+  (#5787)
+
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull
