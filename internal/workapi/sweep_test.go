@@ -1,6 +1,7 @@
 package workapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -623,4 +624,320 @@ func TestPartitionSweepRetainedTypes(t *testing.T) {
 	if len(candidates) != 3 || candidates[0] != op {
 		t.Errorf("PartitionSweepRetainedTypes reordered or truncated its input: %v", candidates)
 	}
+}
+
+// scriptedSweepGraph answers the resolver's callbacks from a fixed edge map
+// and liveness set, recording every id each callback was asked about, so the
+// tests assert the traversal's SHAPE — one batch per frontier, each id at most
+// once — rather than only its answer.
+type scriptedSweepGraph struct {
+	incoming map[string][]*types.Dependency
+	live     map[string]bool
+	fetches  [][]string
+	scans    [][]string
+}
+
+func (g *scriptedSweepGraph) fetch(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	g.fetches = append(g.fetches, append([]string(nil), ids...))
+	out := make(map[string][]*types.Dependency, len(ids))
+	for _, id := range ids {
+		if deps := g.incoming[id]; len(deps) > 0 {
+			out[id] = append(out[id], deps...)
+		}
+	}
+	return out, nil
+}
+
+func (g *scriptedSweepGraph) scan(_ context.Context, ids []string) (map[string]bool, error) {
+	g.scans = append(g.scans, append([]string(nil), ids...))
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if g.live[id] {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
+func (g *scriptedSweepGraph) resolve(t *testing.T, candidates []string) map[string]bool {
+	t.Helper()
+	protected, err := ResolveSweepLiveDependents(context.Background(), candidates, g.fetch, g.scan)
+	if err != nil {
+		t.Fatalf("ResolveSweepLiveDependents: %v", err)
+	}
+	return protected
+}
+
+// batchIDs flattens the recorded batches, keeping order, for "each id at most
+// once" and "which level asked about which id" assertions.
+func (g *scriptedSweepGraph) batchIDs() []string {
+	var ids []string
+	for _, batch := range g.fetches {
+		ids = append(ids, batch...)
+	}
+	return ids
+}
+
+func sweepDep(source, target string) *types.Dependency {
+	return &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepParentChild}
+}
+
+func TestResolveSweepLiveDependents(t *testing.T) {
+	// The chain R ← S1 ← S2 with S1 closed and unselected and S2 open is the
+	// reported shape (#7043): the candidates' own edge read finds S1, the
+	// liveness scan finds it closed, and only a SECOND edge read — the one
+	// the callers used not to make — finds the live S2 that protects R.
+	t.Run("protects through an unselected closed middle", func(t *testing.T) {
+		g := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{
+				"r":  {sweepDep("s1", "r")},
+				"s1": {sweepDep("s2", "s1")},
+			},
+			live: map[string]bool{"s2": true},
+		}
+		protected := g.resolve(t, []string{"r"})
+		if len(protected) != 1 || !protected["r"] {
+			t.Errorf("protected = %v; want exactly r — s1 is protected by the walk but "+
+				"is no candidate and must not appear", protected)
+		}
+		if len(g.fetches) != 2 {
+			t.Errorf("fetch batches = %v; want r then s1", g.fetches)
+		}
+	})
+
+	t.Run("empty candidates read nothing", func(t *testing.T) {
+		g := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{"r": {sweepDep("s1", "r")}},
+			live:     map[string]bool{"s1": true},
+		}
+		protected := g.resolve(t, nil)
+		if len(protected) != 0 {
+			t.Errorf("protected = %v; want empty", protected)
+		}
+		if len(g.fetches) != 0 || len(g.scans) != 0 {
+			t.Errorf("fetches = %v, scans = %v; want no reads at all", g.fetches, g.scans)
+		}
+	})
+
+	t.Run("protects through two unselected middles and prunes live sources", func(t *testing.T) {
+		g := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{
+				"r":  {sweepDep("m1", "r")},
+				"m1": {sweepDep("m2", "m1")},
+				"m2": {sweepDep("leaf", "m2")},
+				// The live leaf's own sources are irrelevant — its path
+				// already protects — and must not be read.
+				"leaf": {sweepDep("never-fetched", "leaf")},
+			},
+			live: map[string]bool{"leaf": true},
+		}
+		protected := g.resolve(t, []string{"r"})
+		if len(protected) != 1 || !protected["r"] {
+			t.Errorf("protected = %v; want exactly r", protected)
+		}
+		for _, id := range g.batchIDs() {
+			if id == "never-fetched" {
+				t.Errorf("fetched %s; a live source's own incoming edges are not read", id)
+			}
+		}
+	})
+
+	t.Run("retains exactly when a live source reaches the candidate", func(t *testing.T) {
+		g := &scriptedSweepGraph{
+			// A chain with no live row anywhere: discovery crosses m1 and m2
+			// (both not live), finds no further sources, and protects nothing.
+			incoming: map[string][]*types.Dependency{
+				"r":  {sweepDep("m1", "r")},
+				"m1": {sweepDep("m2", "m1")},
+			},
+			live: map[string]bool{},
+		}
+		if protected := g.resolve(t, []string{"r"}); len(protected) != 0 {
+			t.Errorf("protected = %v; want empty — no live source reaches r", protected)
+		}
+
+		// A related edge from a live row is a link, not structure: it must not
+		// protect, and the resolver must not even scan its source.
+		related := &types.Dependency{IssueID: "relater", DependsOnID: "r2", Type: types.DepRelated}
+		waits := &types.Dependency{IssueID: "waiter", DependsOnID: "r2", Type: types.DepWaitsFor}
+		g2 := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{"r2": {related, waits}},
+			live:     map[string]bool{"relater": true, "waiter": true},
+		}
+		if protected := g2.resolve(t, []string{"r2"}); len(protected) != 0 {
+			t.Errorf("protected = %v; want empty — related and waits-for edges do not protect", protected)
+		}
+		if len(g2.scans) != 0 {
+			t.Errorf("scans = %v; want none — no protecting edge reached a source", g2.scans)
+		}
+
+		// The same graph with a protecting edge from a live row does protect.
+		g3 := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{"r3": {{
+				IssueID: "convoy", DependsOnID: "r3", Type: types.DepTracks,
+			}}},
+			live: map[string]bool{"convoy": true},
+		}
+		if protected := g3.resolve(t, []string{"r3"}); len(protected) != 1 || !protected["r3"] {
+			t.Errorf("protected = %v; want exactly r3 — a tracks edge from a live row protects", protected)
+		}
+	})
+
+	t.Run("expands a source the liveness scan cannot see", func(t *testing.T) {
+		// A missing (or done-custom-status) source answers the scan with
+		// not-live; the resolver takes that answer as eligibility for the next
+		// frontier rather than applying a second existence policy.
+		g := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{"r": {sweepDep("ghost", "r")}},
+			live:     map[string]bool{},
+		}
+		if protected := g.resolve(t, []string{"r"}); len(protected) != 0 {
+			t.Errorf("protected = %v; want empty", protected)
+		}
+		if len(g.scans) != 1 || len(g.scans[0]) != 1 || g.scans[0][0] != "ghost" {
+			t.Errorf("scans = %v; want exactly [ghost]", g.scans)
+		}
+		if len(g.fetches) != 2 {
+			t.Errorf("fetch batches = %v; want r then ghost", g.fetches)
+		}
+	})
+
+	t.Run("terminates on a closed cycle", func(t *testing.T) {
+		// a ← b ← a is a cycle among non-live rows; with no live path into it
+		// nothing is protected, and each id is read at most once.
+		g := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{
+				"r": {sweepDep("a", "r")},
+				"a": {sweepDep("b", "a")},
+				"b": {sweepDep("a", "b")},
+			},
+			live: map[string]bool{},
+		}
+		if protected := g.resolve(t, []string{"r"}); len(protected) != 0 {
+			t.Errorf("protected = %v; want empty — no live source reaches the cycle", protected)
+		}
+		seen := make(map[string]int)
+		for _, id := range g.batchIDs() {
+			seen[id]++
+		}
+		for id, n := range seen {
+			if n != 1 {
+				t.Errorf("id %s fetched %d times; the known set must read each id once", id, n)
+			}
+		}
+
+		// With a live row beyond the cycle, protection crosses it to the root.
+		g2 := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{
+				"r": {sweepDep("a", "r")},
+				"a": {sweepDep("b", "a")},
+				"b": {sweepDep("a", "b"), sweepDep("leaf", "b")},
+			},
+			live: map[string]bool{"leaf": true},
+		}
+		protected := g2.resolve(t, []string{"r"})
+		if len(protected) != 1 || !protected["r"] {
+			t.Errorf("protected = %v; want exactly r — the live leaf protects through the cycle", protected)
+		}
+	})
+
+	t.Run("deduplicates candidates and duplicate edges", func(t *testing.T) {
+		g := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{
+				"r": {sweepDep("s1", "r"), sweepDep("s1", "r")},
+			},
+			live: map[string]bool{"s1": true},
+		}
+		protected := g.resolve(t, []string{"r", "r"})
+		if len(protected) != 1 || !protected["r"] {
+			t.Errorf("protected = %v; want exactly r", protected)
+		}
+		if len(g.fetches) != 1 || len(g.fetches[0]) != 1 {
+			t.Errorf("fetch batches = %v; want one batch with one id", g.fetches)
+		}
+		if len(g.scans) != 1 || len(g.scans[0]) != 1 {
+			t.Errorf("scans = %v; want one scan with one id", g.scans)
+		}
+	})
+
+	t.Run("protects each of several candidates independently", func(t *testing.T) {
+		g := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{
+				"kept":  {sweepDep("live-1", "kept")},
+				"swept": {sweepDep("closed-1", "swept")},
+				"both":  {sweepDep("live-2", "both"), sweepDep("closed-2", "both")},
+			},
+			live: map[string]bool{"live-1": true, "live-2": true},
+		}
+		protected := g.resolve(t, []string{"kept", "swept", "both"})
+		if len(protected) != 2 || !protected["kept"] || !protected["both"] {
+			t.Errorf("protected = %v; want kept and both", protected)
+		}
+	})
+}
+
+func TestResolveSweepLiveDependentsBatchesByFrontier(t *testing.T) {
+	t.Run("a wide frontier is one fetch per level", func(t *testing.T) {
+		// Two candidates share one source: the shared source must be
+		// discovered once, in ONE liveness scan with the frontier's other
+		// fresh sources — not once per candidate that reaches it — and the
+		// not-live sources are the one next edge read.
+		g := &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{
+				"r1": {sweepDep("shared", "r1"), sweepDep("own1", "r1")},
+				"r2": {sweepDep("shared", "r2"), sweepDep("own2", "r2")},
+			},
+			live: map[string]bool{"shared": true},
+		}
+		protected := g.resolve(t, []string{"r1", "r2"})
+		if len(protected) != 2 || !protected["r1"] || !protected["r2"] {
+			t.Errorf("protected = %v; want r1 and r2", protected)
+		}
+		if fmt.Sprint(g.fetches) != "[[r1 r2] [own1 own2]]" {
+			t.Errorf("fetch batches = %v; want one batch per frontier: [r1 r2] then [own1 own2]",
+				g.fetches)
+		}
+		if fmt.Sprint(g.scans) != "[[own1 own2 shared]]" {
+			t.Errorf("scan batches = %v; want ONE scan with the 3 unique sources", g.scans)
+		}
+	})
+
+	t.Run("a deep chain reaches its live leaf with no depth cap", func(t *testing.T) {
+		const depth = 50
+		incoming := make(map[string][]*types.Dependency, depth+1)
+		chain := make([]string, 0, depth+2)
+		root := "root"
+		chain = append(chain, root)
+		for i := 0; i < depth; i++ {
+			next := fmt.Sprintf("m%02d", i)
+			incoming[chain[len(chain)-1]] = []*types.Dependency{sweepDep(next, chain[len(chain)-1])}
+			chain = append(chain, next)
+		}
+		leaf := "leaf"
+		incoming[chain[len(chain)-1]] = []*types.Dependency{sweepDep(leaf, chain[len(chain)-1])}
+		g := &scriptedSweepGraph{incoming: incoming, live: map[string]bool{leaf: true}}
+
+		protected := g.resolve(t, []string{root})
+		if len(protected) != 1 || !protected[root] {
+			t.Fatalf("protected = %v; want exactly root — a %d-level chain needs no depth cap",
+				protected, depth)
+		}
+		if len(g.fetches) != depth+1 {
+			t.Errorf("fetch batches = %d; want %d (root plus each middle once)", len(g.fetches), depth+1)
+		}
+		seen := make(map[string]int)
+		for _, id := range g.batchIDs() {
+			seen[id]++
+		}
+		for id, n := range seen {
+			if n != 1 {
+				t.Errorf("id %s fetched %d times; the known set must read each id once", id, n)
+			}
+		}
+		for _, id := range g.batchIDs() {
+			if id == leaf {
+				t.Errorf("the live leaf was fetched; live sources are never expanded")
+			}
+		}
+	})
 }
