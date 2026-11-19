@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 var backupCmd = &cobra.Command{
@@ -103,7 +105,7 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 				return nil
 			}
 
-			hasBackup := state.LastDoltCommit != ""
+			hasBackup := state.LastDoltCommit != "" || state.LastError != ""
 			hasDolt := false
 			if cfg, _ := loadDoltBackupConfig(); cfg != nil {
 				hasDolt = true
@@ -123,10 +125,19 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 
 			if hasBackup {
 				fmt.Println("Backup:")
-				fmt.Printf("  Last backup: %s (%s ago)\n",
-					state.Timestamp.Format(time.RFC3339),
-					time.Since(state.Timestamp).Round(time.Second))
-				fmt.Printf("  Dolt commit: %s\n", state.LastDoltCommit)
+				if last := lastSuccessfulBackup(state); last.IsZero() {
+					fmt.Println("  Last backup: none succeeded yet")
+				} else {
+					fmt.Printf("  Last backup: %s (%s ago)\n",
+						last.Format(time.RFC3339),
+						time.Since(last).Round(time.Second))
+				}
+				if state.LastDoltCommit != "" {
+					fmt.Printf("  Dolt commit: %s\n", state.LastDoltCommit)
+				}
+				if state.LastError != "" {
+					showFailedBackupAttempt(state, dir)
+				}
 			}
 
 			// Show config (effective values with source)
@@ -151,6 +162,46 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// lastSuccessfulBackup returns when the last backup into the auto-backup
+// directory succeeded, or the zero time if none is known to have. A state
+// file from an older bd has no LastSuccessAt; its Timestamp is the last
+// success as long as no failure has been recorded since.
+func lastSuccessfulBackup(state *backupState) time.Time {
+	if !state.LastSuccessAt.IsZero() {
+		return state.LastSuccessAt
+	}
+	if state.LastError == "" && state.LastDoltCommit != "" {
+		return state.Timestamp
+	}
+	return time.Time{}
+}
+
+// showFailedBackupAttempt prints the most recent failed backup attempt and
+// how to recover a damaged destination (bd-5mwx39, GH#4070). bd does not
+// classify the error or touch the directory; moving it aside makes the next
+// backup write a fresh full copy.
+func showFailedBackupAttempt(state *backupState, dir string) {
+	fmt.Printf("  Last attempt: %s %s (%s ago)\n",
+		ui.RenderFail("FAILED"),
+		state.LastErrorAt.Format(time.RFC3339),
+		time.Since(state.LastErrorAt).Round(time.Second))
+	fmt.Printf("    %s\n", state.LastError)
+	fmt.Println("  If every attempt fails with the same error, the backup directory may be")
+	fmt.Println("  damaged. Move it aside and keep it until a new backup succeeds; the next")
+	fmt.Println("  auto-backup then writes a fresh full backup:")
+	aside := fmt.Sprintf("%s.broken-%s", dir, time.Now().Format("20060102"))
+	fmt.Printf("    mv %s %s\n", backupShellArg(dir), backupShellArg(aside))
+}
+
+// backupShellArg quotes a path for a copy-pasteable shell command when it
+// holds characters a POSIX shell would split or expand.
+func backupShellArg(path string) string {
+	if path != "" && !strings.ContainsAny(path, " \t\n'\"\\$`!*?[]{}()<>|&;#~") {
+		return path
+	}
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
 func init() {
