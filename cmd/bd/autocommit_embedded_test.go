@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -433,4 +434,115 @@ func TestEmbeddedRoutedMutatingSiblingDeleteCloseClose(t *testing.T) {
 			t.Fatalf("target status = %s, want %s", got.Status, types.StatusClosed)
 		}
 	})
+}
+
+// embeddedRelatesToEdges lists, as "source->target", the relates-to edges whose
+// source is one of ids in the embedded database. It opens the store only for
+// the read, so the next bd command does not meet its lock.
+func embeddedRelatesToEdges(t *testing.T, beadsDir, database string, ids ...string) []string {
+	t.Helper()
+	st, err := embeddeddolt.Open(t.Context(), beadsDir, database, "main")
+	if err != nil {
+		t.Fatalf("open embedded store %s: %v", database, err)
+	}
+	defer func() { _ = st.Close() }()
+	var edges []string
+	for _, id := range ids {
+		deps, err := st.GetDependencyRecords(t.Context(), id)
+		if err != nil {
+			t.Fatalf("GetDependencyRecords(%s): %v", id, err)
+		}
+		for _, d := range deps {
+			if d.Type == types.DepRelatesTo {
+				edges = append(edges, d.IssueID+"->"+d.DependsOnID)
+			}
+		}
+	}
+	return edges
+}
+
+// assertEmbeddedRelateCommitted fails unless command advanced the rig's HEAD,
+// left no dependency row uncommitted there, and left exactly want as the
+// relates-to edges of ids in it.
+func assertEmbeddedRelateCommitted(t *testing.T, beadsDir, database, before, command string, ids, want []string) {
+	t.Helper()
+	assertEmbeddedHeadAdvanced(t, beadsDir, database, before, command)
+	_, dirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+	for _, table := range dirty {
+		if strings.HasPrefix(table, "dependencies:") {
+			t.Fatalf("%s left %s uncommitted in %s (dirty: %v)", command, table, database, dirty)
+		}
+	}
+	if got := embeddedRelatesToEdges(t, beadsDir, database, ids...); !slices.Equal(got, want) {
+		t.Fatalf("%s: %s relates-to edges = %v, want %v", command, database, got, want)
+	}
+}
+
+// TestEmbeddedRoutedMutatingSiblingRelate* hold bd dep relate and unrelate to
+// the routed write-through contract above (GH#4647): run from the source rig,
+// each commits every rig it writes. WithinTarget relates two issues of the
+// routed rig, whose halves only the command's own commit of that rig
+// versions, since the post-run auto-commit covers the source store alone;
+// AcrossRigs relates an issue of each rig, one half in each store.
+func TestEmbeddedRoutedMutatingSiblingRelateWithinTarget(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "srw", "trw")
+	sourceBeadsDir := filepath.Join(sourceDir, ".beads")
+	one := bdCreate(t, bd, targetDir, "Routed relate one")
+	two := bdCreate(t, bd, targetDir, "Routed relate two")
+	ids := []string{one.ID, two.ID}
+
+	for _, step := range []struct {
+		verb string
+		want []string
+	}{
+		{"relate", []string{one.ID + "->" + two.ID, two.ID + "->" + one.ID}},
+		{"unrelate", nil},
+	} {
+		command := "routed dep " + step.verb
+		before := embeddedCurrentCommit(t, targetBeadsDir, "trw")
+
+		bdCommand(t, bd, sourceDir, "dep", step.verb, one.ID, two.ID)
+
+		assertEmbeddedRelateCommitted(t, targetBeadsDir, "trw", before, command, ids, step.want)
+		if got := embeddedRelatesToEdges(t, sourceBeadsDir, "srw", ids...); len(got) != 0 {
+			t.Fatalf("%s wrote relates-to edges into the source store: %v", command, got)
+		}
+	}
+}
+
+func TestEmbeddedRoutedMutatingSiblingRelateAcrossRigs(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "srx", "trx")
+	sourceBeadsDir := filepath.Join(sourceDir, ".beads")
+	local := bdCreate(t, bd, sourceDir, "Local relate end")
+	routed := bdCreate(t, bd, targetDir, "Routed relate end")
+	ids := []string{local.ID, routed.ID}
+
+	for _, step := range []struct {
+		verb                   string
+		wantSource, wantTarget []string
+	}{
+		{"relate", []string{local.ID + "->" + routed.ID}, []string{routed.ID + "->" + local.ID}},
+		{"unrelate", nil, nil},
+	} {
+		command := "cross-rig dep " + step.verb
+		sourceBefore := embeddedCurrentCommit(t, sourceBeadsDir, "srx")
+		targetBefore := embeddedCurrentCommit(t, targetBeadsDir, "trx")
+
+		bdCommand(t, bd, sourceDir, "dep", step.verb, local.ID, routed.ID)
+
+		assertEmbeddedRelateCommitted(t, sourceBeadsDir, "srx", sourceBefore, command, ids, step.wantSource)
+		assertEmbeddedRelateCommitted(t, targetBeadsDir, "trx", targetBefore, command, ids, step.wantTarget)
+	}
 }

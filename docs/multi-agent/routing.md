@@ -116,6 +116,26 @@ Hint: the prefix "hq" is not among this store's configured prefixes (its issue p
 A proxied-server workspace, or one connected to `bd serve` over HTTP, prints
 the general not-found hint instead.
 
+### Links across routed stores
+
+`bd dep relate` and `bd dep unrelate` resolve both IDs through routes too.
+Each half of the `relates-to` link is written to, or removed from, the store
+that holds its source bead, with a `dependency_added` or
+`dependency_removed` event there. An ID that resolves nowhere fails the
+command before either store is written.
+
+When the two beads live in different stores, bd first reads the edge each
+holds to the other. A bead holds at most one edge to another, so when either
+edge has another type (a `blocks` edge, say), `bd dep relate` refuses and
+writes nothing, and `bd dep unrelate` removes only the `relates-to` half,
+leaving the other edge in place with a warning that names it.
+
+The two stores share no transaction: bd writes the halves in argument order
+and commits each before the next. If the second fails, the error says the
+first is already done and what to run next: the same command again to
+finish, or, when the store refused the second half, `bd dep unrelate` to
+remove the first.
+
 ## Role detection
 
 The role that drives auto mode comes from git config — `beads.role` is the

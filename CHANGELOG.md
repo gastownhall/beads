@@ -1431,6 +1431,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd dep relate` and `bd dep unrelate` resolve cross-prefix endpoints
+  through routing** (#4647). `bd dep add` and `bd dep remove` route a
+  cross-prefix target through routes.jsonl (#3168), but the relates-to verbs
+  resolved both arguments against the local store only, so relating an issue
+  to one in another rig failed with "no issue found" for a target the
+  dependency verbs resolve. Both endpoints now resolve through the same
+  cascade before anything is written, each direction of the bidirectional
+  link is written to (and, for unrelate, removed from) the store that owns
+  its source issue, and a cross-rig pair records both halves with their own
+  dependency_added and dependency_removed events. A cross-rig relate refuses,
+  writing nothing, when either issue already holds an edge of another type to
+  the other, and a cross-rig unrelate removes only relates-to halves, leaving
+  such an edge in place with a warning.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
