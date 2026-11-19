@@ -3529,17 +3529,39 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) (int, error) {
 
 // initSchemaOnDBWithBootstrapHeal threads one-shot, incarnation-bound reset
 // authority into the migration lock. A nil capability always fails closed.
+//
+// A FAILED init never hands its pinned session back to the pool (gastownhall/
+// beads#6504): the failing statement may have left it mid-script — a migration
+// between its FOREIGN_KEY_CHECKS-clearing SET and the restoring one — or pinned
+// to its pre-statement catalog snapshot (be-bv7x), and this pool is the one the
+// store serves ordinary queries from. The deferred discard makes that
+// structurally impossible: database/sql drops (and closes) a driver connection
+// whose Raw callback returns driver.ErrBadConn. The named results carry the
+// attempt's verdict, so the discard never replaces the applied count or masks
+// the wrapped error. A successful init keeps its session — the converged steady
+// state pays for one session per open. The uow provider's initSchemaAttempt
+// carries the same contract; see internal/storage/uow/dolt_sql_provider.go and
+// internal/storage/schema/migrations/README.md.
 func initSchemaOnDBWithBootstrapHeal(
 	ctx context.Context,
 	db *sql.DB,
 	bootstrapHeal *schema.FreshBootstrapHealCapability,
 	endpoint string,
-) (int, error) {
+) (applied int, err error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("schema: pin connection: %w", err)
 	}
-	defer conn.Close()
+	// A failure path that already discarded the session — the migration lock's
+	// release-failure cleanup does — answers Raw and Close with
+	// sql.ErrConnDone; those cleanup results are ignored on purpose, so the
+	// original error stays exactly what this attempt decided.
+	defer func() {
+		if err != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
 
 	var dbName string
 	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&dbName); err != nil {
@@ -3550,7 +3572,7 @@ func initSchemaOnDBWithBootstrapHeal(
 	if bootstrapHeal != nil {
 		opts = append(opts, schema.WithFreshBootstrapHeal(bootstrapHeal, endpoint))
 	}
-	applied, err := schema.MigrateUpWithLock(ctx, conn, dbName, opts...)
+	applied, err = schema.MigrateUpWithLock(ctx, conn, dbName, opts...)
 	if err != nil {
 		return applied, fmt.Errorf("schema migration: %w", err)
 	}
