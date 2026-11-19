@@ -158,6 +158,18 @@ func TestServedSweeperProtectsTransitiveLiveDependents(t *testing.T) {
 	conformance.RunSweeperProtectsTransitiveLiveDependents(t, t.Context(), newServedSweeperFixture(t, "hs16"))
 }
 
+func TestServedSweeperProtectsLiveDependentsThroughUnselectedRows(t *testing.T) {
+	conformance.RunSweeperProtectsLiveDependentsThroughUnselectedRows(t, t.Context(), newServedSweeperFixture(t, "hs19"))
+}
+
+func TestServedSweeperProtectsLiveDependentsThroughExcludedIntermediaries(t *testing.T) {
+	conformance.RunSweeperProtectsLiveDependentsThroughExcludedIntermediaries(t, t.Context(), newServedSweeperFixture(t, "hs20"))
+}
+
+func TestServedSweeperProtectsLiveDependentsThroughUnselectedChains(t *testing.T) {
+	conformance.RunSweeperProtectsLiveDependentsThroughUnselectedChains(t, t.Context(), newServedSweeperFixture(t, "hs21"))
+}
+
 func TestServedSweeperProtectsLiveDependentsAcrossPlanes(t *testing.T) {
 	conformance.RunSweeperProtectsLiveDependentsAcrossPlanes(t, t.Context(), newServedSweeperFixture(t, "hs17"))
 }

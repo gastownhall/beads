@@ -1431,6 +1431,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd purge` keeps a closed root whose live descendant hangs below a
+  closed bead the purge did not select** (#7043). The live-dependent
+  protection read only the edges pointing at the purge candidates, so in a
+  chain root ← parent ← open child where the closed parent fell outside
+  `--older-than` or `--pattern` (or was pinned, retained, or in the other
+  storage plane), the open child was never seen and the root was deleted,
+  orphaning the live hierarchy. The protection now follows protecting edges
+  through such rows, one batched read per level, until it reaches a live
+  bead or runs out of edges.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

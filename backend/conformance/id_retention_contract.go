@@ -1144,6 +1144,41 @@ func RunIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit(t *tes
 		}
 		sweeperAssertWispRows(t, ctx, fixture.Sweep, 1, parent)
 	})
+
+	// A retained row is held back before the live-dependent protection, but it
+	// is still a link of the chain that protection follows (GH#7043): in
+	// root ← retained middle ← open leaf, the root is a candidate the open
+	// leaf keeps, and the middle is counted once, as retained.
+	t.Run("a retained intermediary still carries the live-dependent protection", func(t *testing.T) {
+		if fixture.Sweep.AddDependencies == nil {
+			t.Skip("fixture has no AddDependencies hook; cannot wire the chain this clause needs")
+		}
+		const tag = "retmid"
+		root := sweeperSeed(t, ctx, fixture.Sweep, sweeperIssue(fixture.Sweep, tag, "root", true), nil)
+		middle := sweeperSeed(t, ctx, fixture.Sweep, retained(tag, "middle", true), nil)
+		leaf := sweeperSeedOpen(t, ctx, fixture.Sweep, sweeperIssue(fixture.Sweep, tag, "leaf", true))
+		sweeperWire(t, ctx, fixture.Sweep,
+			publicops.DependencyEdge{IssueID: middle, DependsOnID: root, Type: publicops.DepParentChild},
+			publicops.DependencyEdge{IssueID: leaf, DependsOnID: middle, Type: publicops.DepParentChild},
+		)
+
+		request := publicops.SweepRequest{
+			Tier: publicops.SweepEphemeral, IDPattern: sweeperPattern(fixture.Sweep, tag), ProtectLiveDependents: true,
+		}
+		want := publicops.SweepSkips{RetentionRequired: 1, LiveDependent: 1}
+		for _, step := range []struct {
+			name    string
+			request publicops.SweepRequest
+		}{{"dry run", sweeperAsDryRun(request)}, {"sweep", request}} {
+			result := sweeperSweep(t, ctx, fixture.Sweep, step.request)
+			if result.Swept != 0 || result.Skipped != want {
+				t.Errorf("%s: Swept = %d, Skipped = %+v; want 0 and %+v — the open leaf under the retained "+
+					"middle row must keep the root, and the middle is counted only as retained",
+					step.name, result.Swept, result.Skipped, want)
+			}
+		}
+		sweeperAssertWispRows(t, ctx, fixture.Sweep, 3, root, middle, leaf)
+	})
 }
 
 // RunIDRetentionARetainedTypeReadErrorFailsTheSweep pins that the retained

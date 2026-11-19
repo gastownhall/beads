@@ -1,6 +1,7 @@
 package workapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -452,6 +453,305 @@ func TestSweepLiveDependentTargetsPropagatesThroughProtectedCandidates(t *testin
 		if protected[id] {
 			t.Errorf("%s protected without a live path into its closed cycle", id)
 		}
+	}
+}
+
+// sweepGraph is a scripted dependency graph for ResolveSweepLiveDependents:
+// the edges keyed by target, the live rows, and a record of every callback
+// batch, so a test can check which rows were read and how often.
+type sweepGraph struct {
+	incoming map[string][]*types.Dependency
+	live     map[string]bool
+	fetches  [][]string
+	scans    [][]string
+}
+
+func newSweepGraph() *sweepGraph {
+	return &sweepGraph{incoming: make(map[string][]*types.Dependency), live: make(map[string]bool)}
+}
+
+func (g *sweepGraph) edge(source, target string, typ types.DependencyType) *sweepGraph {
+	g.incoming[target] = append(g.incoming[target], &types.Dependency{IssueID: source, DependsOnID: target, Type: typ})
+	return g
+}
+
+func (g *sweepGraph) chain(typ types.DependencyType, ids ...string) *sweepGraph {
+	for i := 1; i < len(ids); i++ {
+		g.edge(ids[i], ids[i-1], typ)
+	}
+	return g
+}
+
+func (g *sweepGraph) fetch(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	g.fetches = append(g.fetches, append([]string(nil), ids...))
+	out := make(map[string][]*types.Dependency)
+	for _, id := range ids {
+		if deps, ok := g.incoming[id]; ok {
+			out[id] = deps
+		}
+	}
+	return out, nil
+}
+
+func (g *sweepGraph) scan(_ context.Context, ids []string) (map[string]bool, error) {
+	g.scans = append(g.scans, append([]string(nil), ids...))
+	out := make(map[string]bool)
+	for _, id := range ids {
+		if g.live[id] {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
+func (g *sweepGraph) resolve(t *testing.T, candidates ...string) map[string]bool {
+	t.Helper()
+	protected, err := ResolveSweepLiveDependents(context.Background(), candidates, g.fetch, g.scan)
+	if err != nil {
+		t.Fatalf("ResolveSweepLiveDependents(%v) error = %v", candidates, err)
+	}
+	return protected
+}
+
+// countReads reports how many times each id entered a fetch or a scan batch.
+func countReads(batches [][]string) map[string]int {
+	counts := make(map[string]int)
+	for _, batch := range batches {
+		for _, id := range batch {
+			counts[id]++
+		}
+	}
+	return counts
+}
+
+func assertProtected(t *testing.T, got map[string]bool, want ...string) {
+	t.Helper()
+	wantSet := make(map[string]bool, len(want))
+	for _, id := range want {
+		wantSet[id] = true
+	}
+	if !maps.Equal(trueOnly(got), wantSet) {
+		t.Errorf("protected = %v, want %v", got, wantSet)
+	}
+}
+
+func trueOnly(m map[string]bool) map[string]bool {
+	out := make(map[string]bool)
+	for id, v := range m {
+		if v {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+// The GH#7043 shape: R is the only candidate, S1 is a closed row the sweep did
+// not select, S2 is open. Reading R's edges alone sees S1 → R and S1 not live.
+func TestResolveSweepLiveDependentsFollowsAnUnselectedClosedRow(t *testing.T) {
+	g := newSweepGraph().chain(types.DepParentChild, "R", "S1", "S2")
+	g.live["S2"] = true
+
+	assertProtected(t, g.resolve(t, "R"), "R")
+	if want := [][]string{{"R"}, {"S1"}}; fmt.Sprint(g.fetches) != fmt.Sprint(want) {
+		t.Errorf("fetch batches = %v, want %v", g.fetches, want)
+	}
+	if want := [][]string{{"S1"}, {"S2"}}; fmt.Sprint(g.scans) != fmt.Sprint(want) {
+		t.Errorf("scan batches = %v, want %v", g.scans, want)
+	}
+}
+
+func TestResolveSweepLiveDependentsReachesADeepLiveLeafWithoutADepthCap(t *testing.T) {
+	ids := []string{"root"}
+	for i := 0; i < 200; i++ {
+		ids = append(ids, fmt.Sprintf("mid-%03d", i))
+	}
+	ids = append(ids, "leaf")
+	g := newSweepGraph().chain(types.DepParentChild, ids...)
+	g.live["leaf"] = true
+
+	assertProtected(t, g.resolve(t, "root"), "root")
+	if len(g.fetches) != 201 {
+		t.Errorf("fetch rounds = %d, want 201 (one per level, the live leaf not expanded)", len(g.fetches))
+	}
+
+	// The same chain with nothing live leaves the root sweepable.
+	g = newSweepGraph().chain(types.DepParentChild, ids...)
+	assertProtected(t, g.resolve(t, "root"))
+}
+
+func TestResolveSweepLiveDependentsReadsAWideLevelInOneBatch(t *testing.T) {
+	g := newSweepGraph()
+	for i := 0; i < 50; i++ {
+		mid := fmt.Sprintf("mid-%02d", i)
+		g.edge(mid, "root", types.DepParentChild)
+		g.edge(fmt.Sprintf("leaf-%02d", i), mid, types.DepBlocks)
+	}
+	g.live["leaf-49"] = true
+
+	assertProtected(t, g.resolve(t, "root"), "root")
+	if len(g.fetches) != 3 || len(g.fetches[1]) != 50 {
+		t.Errorf("fetch batches = %d (second %d ids); want 3 rounds with all 50 middles in one batch",
+			len(g.fetches), len(g.fetches[min(1, len(g.fetches)-1)]))
+	}
+	if len(g.scans) != 2 {
+		t.Errorf("scan batches = %d, want 2 (one per discovered level)", len(g.scans))
+	}
+	for id, n := range countReads(g.fetches) {
+		if n != 1 {
+			t.Errorf("%s fetched %d times, want once", id, n)
+		}
+	}
+	for id, n := range countReads(g.scans) {
+		if n != 1 {
+			t.Errorf("%s scanned %d times, want once", id, n)
+		}
+	}
+}
+
+func TestResolveSweepLiveDependentsTerminatesOnCycles(t *testing.T) {
+	cyclic := func() *sweepGraph {
+		return newSweepGraph().
+			edge("c1", "root", types.DepParentChild).
+			edge("c2", "c1", types.DepTracks).
+			edge("c1", "c2", types.DepBlocks).
+			edge("root", "c2", types.DepBlocks)
+	}
+
+	g := cyclic()
+	assertProtected(t, g.resolve(t, "root"))
+	for id, n := range countReads(g.fetches) {
+		if n != 1 {
+			t.Errorf("no live path: %s fetched %d times, want once", id, n)
+		}
+	}
+
+	g = cyclic().edge("leaf", "c2", types.DepParentChild)
+	g.live["leaf"] = true
+	assertProtected(t, g.resolve(t, "root"), "root")
+	for id, n := range countReads(g.fetches) {
+		if n != 1 {
+			t.Errorf("live path: %s fetched %d times, want once", id, n)
+		}
+	}
+}
+
+func TestResolveSweepLiveDependentsKeepsExactlyTheCandidatesALiveRowReaches(t *testing.T) {
+	g := newSweepGraph().
+		// Two candidates on one chain: the upper one is a candidate, so it is
+		// never scanned, and both are protected.
+		chain(types.DepParentChild, "cand-a", "cand-b", "mid-ab", "live-ab").
+		// A candidate whose only live source is a non-protecting edge, through
+		// an unselected row.
+		edge("mid-rel", "cand-rel", types.DepParentChild).
+		edge("live-rel", "mid-rel", types.DepRelated).
+		// A done-custom or missing source the scan does not report: expanded
+		// like any other non-live row.
+		chain(types.DepTracks, "cand-done", "done-custom", "live-done").
+		// A candidate with no edges at all.
+		edge("unrelated", "elsewhere", types.DepParentChild)
+	g.live["live-ab"] = true
+	g.live["live-rel"] = true
+	g.live["live-done"] = true
+
+	protected := g.resolve(t, "cand-a", "cand-b", "cand-rel", "cand-done", "cand-lone")
+	assertProtected(t, protected, "cand-a", "cand-b", "cand-done")
+
+	scanned := countReads(g.scans)
+	for _, id := range []string{"cand-a", "cand-b", "cand-rel", "cand-done", "cand-lone", "live-rel"} {
+		if scanned[id] != 0 {
+			t.Errorf("%s scanned; candidates are known closed and a related-only source is never a chain link", id)
+		}
+	}
+	for id, n := range scanned {
+		if n != 1 {
+			t.Errorf("%s scanned %d times, want once", id, n)
+		}
+	}
+}
+
+func TestResolveSweepLiveDependentsDoesNotExpandALiveSource(t *testing.T) {
+	g := newSweepGraph().
+		chain(types.DepParentChild, "root", "live", "above")
+	g.live["live"] = true
+
+	assertProtected(t, g.resolve(t, "root"), "root")
+	if fetched := countReads(g.fetches); fetched["live"] != 0 {
+		t.Errorf("live source fetched %d times; its path already protects the root", fetched["live"])
+	}
+}
+
+func TestResolveSweepLiveDependentsHandlesDuplicatesAndEmptyInput(t *testing.T) {
+	g := newSweepGraph().chain(types.DepParentChild, "R", "S1", "S2")
+	g.edge("S1", "R", types.DepParentChild) // the same edge from the other dependency table
+	g.live["S2"] = true
+
+	assertProtected(t, g.resolve(t, "R", "R"), "R")
+	if want := [][]string{{"R"}, {"S1"}}; fmt.Sprint(g.fetches) != fmt.Sprint(want) {
+		t.Errorf("fetch batches = %v, want %v (each id once)", g.fetches, want)
+	}
+
+	empty := newSweepGraph()
+	assertProtected(t, empty.resolve(t))
+	if len(empty.fetches)+len(empty.scans) != 0 {
+		t.Errorf("empty candidates read %d fetch and %d scan batches, want none", len(empty.fetches), len(empty.scans))
+	}
+}
+
+// A read failure or a cancellation on ANY discovery round returns a nil map
+// and the error: a caller that sweeps on a partial graph would delete a root
+// whose live leaf sat one level further than the failed read.
+func TestResolveSweepLiveDependentsReturnsNoPartialResultOnError(t *testing.T) {
+	boom := errors.New("injected read failure")
+	graph := func() *sweepGraph {
+		// cand-near is protected after round one; cand-far needs round three.
+		g := newSweepGraph().
+			edge("live-near", "cand-near", types.DepParentChild).
+			chain(types.DepParentChild, "cand-far", "m1", "m2", "live-far")
+		g.live["live-near"] = true
+		g.live["live-far"] = true
+		return g
+	}
+	failFetch := func(g *sweepGraph, round int) FetchSweepIncomingEdges {
+		return func(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+			if len(g.fetches) == round {
+				return nil, boom
+			}
+			return g.fetch(ctx, ids)
+		}
+	}
+	failScan := func(g *sweepGraph, round int) ScanSweepLiveRows {
+		return func(ctx context.Context, ids []string) (map[string]bool, error) {
+			if len(g.scans) == round {
+				return nil, boom
+			}
+			return g.scan(ctx, ids)
+		}
+	}
+
+	for round := 0; round < 3; round++ {
+		g := graph()
+		got, err := ResolveSweepLiveDependents(context.Background(), []string{"cand-near", "cand-far"}, failFetch(g, round), g.scan)
+		if !errors.Is(err, boom) || got != nil {
+			t.Errorf("fetch fails on round %d: got %v, %v; want nil and the read error", round+1, got, err)
+		}
+		g = graph()
+		got, err = ResolveSweepLiveDependents(context.Background(), []string{"cand-near", "cand-far"}, g.fetch, failScan(g, round))
+		if !errors.Is(err, boom) || got != nil {
+			t.Errorf("scan fails on round %d: got %v, %v; want nil and the read error", round+1, got, err)
+		}
+	}
+
+	// Canceled between rounds: the round-one fetch cancels the context.
+	g := graph()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	canceling := func(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+		cancel()
+		return g.fetch(ctx, ids)
+	}
+	got, err := ResolveSweepLiveDependents(ctx, []string{"cand-near", "cand-far"}, canceling, g.scan)
+	if !errors.Is(err, context.Canceled) || got != nil {
+		t.Errorf("canceled mid-discovery: got %v, %v; want nil and context.Canceled", got, err)
 	}
 }
 
