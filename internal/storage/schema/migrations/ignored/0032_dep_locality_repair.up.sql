@@ -1,0 +1,23 @@
+-- Ignored migration 0032: dependency locality repair marker
+-- (gastownhall/beads#6066).
+--
+-- Before the presence-aware dep-target resolver landed, an edge between two
+-- local rows whose ids carried a foreign prefix (created via explicit-id
+-- creation) was classified external by prefix alone and stored in the
+-- depends_on_external column, where blocked/ready computation cannot see it.
+-- The pre-repair registered for this marker (repairDepLocalityExternalRows)
+-- reclassifies such rows of both edge tables to the local target columns,
+-- wisp target first, and recomputes blocked state in one ordinary SQL
+-- transaction before this marker records. Explicit external: references and
+-- targets this database holds no row for stay external; row identity,
+-- provenance and timestamps are preserved.
+--
+-- This marker deliberately runs no SQL of its own beyond the SELECT below,
+-- and its comment deliberately names no table in a shape the pre-flight
+-- dirty-table text guard recognises: on a database whose repair is needed
+-- but whose graph has uncommitted changes, the refusal must come from the
+-- repair itself — typed as DirtyTablesError, so the documented
+-- commit-and-retry recovery stays reachable — not from this text, which
+-- would wedge every open of a dirty database whose repair has nothing to do.
+-- See migrations/README.md for the marker rules this file follows.
+SELECT 1;

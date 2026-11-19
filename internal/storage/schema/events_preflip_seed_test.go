@@ -14,16 +14,19 @@ import (
 
 const ignoredMigration0031Up = "0031_restore_preflip_events.up.sql"
 
-// TestLatestIgnoredVersionIncludesMigration0031 pins the ignored slot the
-// pre-upgrade events restore claims (gastownhall/beads#7039), directly above
-// wisp_id_tombstones' (ignored 0030), and that the slot carries its repair.
-func TestLatestIgnoredVersionIncludesMigration0031(t *testing.T) {
-	const wantIgnored = 31
+// TestLatestIgnoredVersionIncludesMigration0032 pins the latest ignored slot
+// — the dependency locality repair's marker (gastownhall/beads#6066),
+// directly above the pre-upgrade events restore (ignored 0031) — and that
+// both markers carry their repairs.
+func TestLatestIgnoredVersionIncludesMigration0032(t *testing.T) {
+	const wantIgnored = 32
 	if got := LatestIgnoredVersion(); got != wantIgnored {
-		t.Fatalf("LatestIgnoredVersion() = %d, want %d (pre-upgrade events restore)", got, wantIgnored)
+		t.Fatalf("LatestIgnoredVersion() = %d, want %d (dependency locality repair)", got, wantIgnored)
 	}
-	if _, ok := preMigrationRepairs[repairKey{ignoredSource.cursorTable, wantIgnored}]; !ok {
-		t.Fatalf("ignored 0031 has no pre-migration repair registered; the marker alone restores nothing")
+	for _, version := range []int{31, 32} {
+		if _, ok := preMigrationRepairs[repairKey{ignoredSource.cursorTable, version}]; !ok {
+			t.Fatalf("ignored %d has no pre-migration repair registered; the marker alone repairs nothing", version)
+		}
 	}
 }
 
