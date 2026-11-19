@@ -1510,6 +1510,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command, instead of `bd migrate --force`, `bd dolt push` and `bd
   bootstrap`. What is refused, and the consent it takes, are unchanged;
   server and embedded mode print, and emit as JSON, what they did before.
+- The target-filtered dependency counts (dependent counts and the ready
+  counts by id) read through one guarded branch per target column
+  (`sqlbuild.DepTargetUnion`) instead of the COALESCE'd filters, so each
+  branch can seek its index. `bd show`'s dependents listing and the other
+  COALESCE-filtered readers are unchanged (#7666).
+- docs/core-concepts/dependencies.md creates gates with `bd gate create
+  --blocks`; it documented a `bd create --await-type` flag that does not
+  exist. `bd create --graph` help now says which end of an edge is the
+  dependent (`from_key`) and which the blocker (`to_key`) (#7664).
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
