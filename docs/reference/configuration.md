@@ -23,11 +23,16 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 `config.yaml` is searched in this order, with later files overriding earlier ones:
 
 1. `~/.beads/config.yaml` (legacy user-level, lowest priority)
-2. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
-3. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
-4. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
+2. The native user-level file: `$XDG_CONFIG_HOME/bd/config.yaml` on Linux and macOS, `%AppData%\bd\config.yaml` on Windows. Without `XDG_CONFIG_HOME` it is the next entry on Linux and macOS, so it is read once.
+3. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
+4. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
+5. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
 
 A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
+
+### macOS: `~/Library/Application Support` is no longer read
+
+Earlier releases also read `~/Library/Application Support/bd/config.yaml` on macOS, and looked for a global `PRIME.md` in `~/Library/Application Support/beads/`. Accessing that folder on every launch can raise a macOS privacy prompt (GH#8113), so bd no longer reads either location when it starts.
 
 ### Missing `metadata.json`
 

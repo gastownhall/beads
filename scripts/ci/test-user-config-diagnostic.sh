@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Exercise the native config source label, including both XDG states.
+# Exercise the native config source label, including both XDG states, and on
+# darwin the native check that ~/Library/Application Support is never read.
 # Compatible with macOS Bash 3.2; run with linux, darwin, or windows.
 set -euo pipefail
 
@@ -29,11 +30,18 @@ host_info="$("$go_executable" env GOHOSTOS GOOS)"
 }
 parent=TestUserConfigYamlPathNamesNativeEnvironmentSource
 expected=("$parent" "$parent/XDG_configured" "$parent/XDG_absent")
+run_pattern="^$parent$"
+if [[ "$expected_os" = darwin ]]; then
+    # GH#8113: bd must never read ~/Library/Application Support natively.
+    darwin_test=TestDarwinUserConfigIgnoresApplicationSupport
+    expected+=("$darwin_test")
+    run_pattern="^($parent|$darwin_test)$"
+fi
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 status=0
 "$go_executable" test -tags "$BEADS_BUILD_TAGS" -v -count=1 -timeout 3m \
-    -run "^$parent$" ./internal/config >"$log" 2>&1 || status=$?
+    -run "$run_pattern" ./internal/config >"$log" 2>&1 || status=$?
 cat "$log"
 [[ $status -eq 0 ]] || exit "$status"
 if grep -Eq -- '^[[:space:]]*--- (FAIL|SKIP):' "$log"; then

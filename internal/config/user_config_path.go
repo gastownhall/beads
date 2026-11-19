@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 const userConfigYamlDisplayFallback = "~/.config/bd/config.yaml"
@@ -15,7 +14,7 @@ const userConfigYamlDisplayFallback = "~/.config/bd/config.yaml"
 // its source could not be resolved safely.
 type userConfigYamlCandidates struct {
 	legacy     string // <home>/.beads/config.yaml
-	native     string // <os.UserConfigDir()>/bd/config.yaml
+	native     string // <UserConfigDir()>/bd/config.yaml (never Application Support on macOS)
 	documented string // <home>/.config/bd/config.yaml
 
 	homeErr   error
@@ -24,15 +23,16 @@ type userConfigYamlCandidates struct {
 
 func currentUserConfigYamlCandidates() userConfigYamlCandidates {
 	homeDir, homeErr := os.UserHomeDir()
-	nativeConfigDir, nativeErr := os.UserConfigDir()
+	nativeConfigDir, nativeErr := UserConfigDir()
 	return buildUserConfigYamlCandidates(homeDir, homeErr, nativeConfigDir, nativeErr)
 }
 
 // nativeUserConfigValidationSource names the source of a relative directory
-// returned without a resolver error. On Unix, os.UserConfigDir already rejects
-// relative XDG_CONFIG_HOME values itself; only HOME can reach our validation.
+// returned without a resolver error. On Unix, including darwin/ios through
+// UserConfigDir, the resolver already rejects relative XDG_CONFIG_HOME values
+// itself; only HOME can reach our validation.
 func nativeUserConfigValidationSource() string {
-	switch runtime.GOOS {
+	switch userConfigGOOS {
 	case "windows":
 		return "APPDATA"
 	case "plan9":
@@ -81,7 +81,7 @@ func cleanAbsoluteUserDirectory(label, path string, resolutionErr error) (string
 // UserConfigYamlPath resolves the user-level config.yaml to a cleaned,
 // absolute path suitable for native filesystem APIs. It prefers the documented
 // <home>/.config/bd location when that file exists, then an existing native
-// os.UserConfigDir location. For a new file it keeps the documented location
+// UserConfigDir location. For a new file it keeps the documented location
 // as the creation target when possible, falling back to the native location
 // only when the home directory itself cannot be resolved safely.
 func UserConfigYamlPath() (string, error) {
