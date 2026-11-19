@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -150,6 +151,151 @@ func TestPlanHookMigration_MissingHookWithBackupSidecar(t *testing.T) {
 	if hook.State != "missing_with_backup_sidecar" {
 		t.Fatalf("expected state missing_with_backup_sidecar, got %q", hook.State)
 	}
+}
+
+// TestPlanHookMigration_NonShell pins the non-shell half of hook-migration
+// classification (GH#6348): bd's sh section cannot run in these hooks, so
+// migration repairs one an older bd version left behind — and never
+// injects, retires sidecars, or rewrites ambiguous/binary content.
+func TestPlanHookMigration_NonShell(t *testing.T) {
+	pyBody := "#!/usr/bin/env python3\nimport sys\n\nif __name__ == \"__main__\":\n    sys.exit(0)\n"
+
+	t.Run("paired section needs repair even with current-version markers", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setupGitRepoInDir(t, tmpDir)
+		forceRepoHooksPath(t, tmpDir)
+
+		_, hooksDir, err := resolveGitHooksDir(tmpDir)
+		if err != nil {
+			t.Fatalf("resolveGitHooksDir failed: %v", err)
+		}
+
+		corrupted := pyBody + "\n# --- BEGIN BEADS INTEGRATION v9.9.9 ---\nbd hooks run pre-commit \"$@\"\n# --- END BEADS INTEGRATION v9.9.9 ---\n"
+		writeHookFile(t, filepath.Join(hooksDir, "pre-commit"), corrupted)
+		writeHookFile(t, filepath.Join(hooksDir, "pre-commit.old"), "#!/usr/bin/env sh\necho old\n")
+		writeHookFile(t, filepath.Join(hooksDir, "pre-commit.backup"), "#!/usr/bin/env sh\necho backup\n")
+
+		plan, err := PlanHookMigration(tmpDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration returned error: %v", err)
+		}
+
+		hook, ok := findHookPlan(plan, "pre-commit")
+		if !ok {
+			t.Fatal("pre-commit hook not found in plan")
+		}
+		if !hook.NeedsMigration {
+			t.Fatal("a non-shell hook carrying a bd section must be reported for repair")
+		}
+		if hook.State != "marker_managed_non_shell" {
+			t.Fatalf("state = %q, want marker_managed_non_shell", hook.State)
+		}
+		if hook.HookLanguage != "python3" {
+			t.Fatalf("hook_language = %q, want python3", hook.HookLanguage)
+		}
+		if plan.NeedsMigrationCount != 1 {
+			t.Fatalf("expected 1 migration, got %d", plan.NeedsMigrationCount)
+		}
+	})
+
+	t.Run("ambiguous markers plan manual inspection, not repair", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setupGitRepoInDir(t, tmpDir)
+		forceRepoHooksPath(t, tmpDir)
+
+		_, hooksDir, err := resolveGitHooksDir(tmpDir)
+		if err != nil {
+			t.Fatalf("resolveGitHooksDir failed: %v", err)
+		}
+
+		ambiguous := "#!/usr/bin/env python3\nimport sys\ns = \"# --- BEGIN BEADS INTEGRATION v1.0.0 ---\"\n"
+		writeHookFile(t, filepath.Join(hooksDir, "pre-commit"), ambiguous)
+
+		plan, err := PlanHookMigration(tmpDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration returned error: %v", err)
+		}
+
+		hook, ok := findHookPlan(plan, "pre-commit")
+		if !ok {
+			t.Fatal("pre-commit hook not found in plan")
+		}
+		if hook.NeedsMigration {
+			t.Fatal("ambiguous markers must not be reported as repairable")
+		}
+		if hook.State != "non_shell_manual" {
+			t.Fatalf("state = %q, want non_shell_manual", hook.State)
+		}
+		if !strings.Contains(hook.SuggestedAction, "manually") {
+			t.Fatalf("suggested action must explain manual inspection, got %q", hook.SuggestedAction)
+		}
+		if plan.NeedsMigrationCount != 0 {
+			t.Fatalf("expected no migrations, got %d", plan.NeedsMigrationCount)
+		}
+	})
+
+	t.Run("clean non-shell hook with sidecars needs no migration", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setupGitRepoInDir(t, tmpDir)
+		forceRepoHooksPath(t, tmpDir)
+
+		_, hooksDir, err := resolveGitHooksDir(tmpDir)
+		if err != nil {
+			t.Fatalf("resolveGitHooksDir failed: %v", err)
+		}
+
+		writeHookFile(t, filepath.Join(hooksDir, "pre-commit"), pyBody)
+		writeHookFile(t, filepath.Join(hooksDir, "pre-commit.old"), "#!/usr/bin/env sh\necho old\n")
+		writeHookFile(t, filepath.Join(hooksDir, "pre-commit.backup"), "#!/usr/bin/env sh\necho backup\n")
+
+		plan, err := PlanHookMigration(tmpDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration returned error: %v", err)
+		}
+
+		hook, ok := findHookPlan(plan, "pre-commit")
+		if !ok {
+			t.Fatal("pre-commit hook not found in plan")
+		}
+		if hook.NeedsMigration {
+			t.Fatalf("clean non-shell hook must need no migration, state %q", hook.State)
+		}
+		if hook.State != "unmanaged_custom" {
+			t.Fatalf("state = %q, want unmanaged_custom", hook.State)
+		}
+		if plan.NeedsMigrationCount != 0 {
+			t.Fatalf("expected no migrations, got %d", plan.NeedsMigrationCount)
+		}
+	})
+
+	t.Run("binary content is never migrated", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		setupGitRepoInDir(t, tmpDir)
+		forceRepoHooksPath(t, tmpDir)
+
+		_, hooksDir, err := resolveGitHooksDir(tmpDir)
+		if err != nil {
+			t.Fatalf("resolveGitHooksDir failed: %v", err)
+		}
+
+		writeHookFile(t, filepath.Join(hooksDir, "pre-commit"), "#!/bin/sh\n\x00binary\x00\n")
+
+		plan, err := PlanHookMigration(tmpDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration returned error: %v", err)
+		}
+
+		hook, ok := findHookPlan(plan, "pre-commit")
+		if !ok {
+			t.Fatal("pre-commit hook not found in plan")
+		}
+		if hook.NeedsMigration {
+			t.Fatalf("binary content must not be reported as repairable, state %q", hook.State)
+		}
+		if hook.State != "non_shell_manual" {
+			t.Fatalf("state = %q, want non_shell_manual", hook.State)
+		}
+	})
 }
 
 func TestDetectHookMarkerState_DuplicateBeginTags(t *testing.T) {

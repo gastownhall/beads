@@ -327,6 +327,124 @@ func TestBuildExecutionPlan_UnmodifiedLegacyHookProceeds(t *testing.T) {
 	}
 }
 
+// TestApplyHookMigration_NonShell pins migration's non-shell repair
+// (GH#6348): the stale bd section is stripped in place, nothing is
+// re-injected, sidecars are retained, and a second plan is clean.
+func TestApplyHookMigration_NonShell(t *testing.T) {
+	pyBody := "#!/usr/bin/env python3\nimport sys\n\nif __name__ == \"__main__\":\n    sys.exit(0)\n"
+
+	t.Run("stale section stripped in place, sidecars retained, second plan clean", func(t *testing.T) {
+		repoDir, hooksDir := setupHookMigrationRepo(t)
+		preCommitPath := filepath.Join(hooksDir, "pre-commit")
+
+		// The corruption an older bd version left: its sh section appended
+		// after the python body. The section text below is what the current
+		// bd generates — repair must be reported even for current-version
+		// markers, since the hook cannot run them either way.
+		corrupted := pyBody + "\n" + generateHookSection("pre-commit")
+		writeHookMigrationFile(t, preCommitPath, corrupted)
+		writeHookMigrationFile(t, preCommitPath+".old", "#!/usr/bin/env sh\necho old\n")
+		writeHookMigrationFile(t, preCommitPath+".backup", "#!/usr/bin/env sh\necho backup\n")
+
+		plan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration failed: %v", err)
+		}
+		var hook *doctor.HookMigrationHookPlan
+		for i := range plan.Hooks {
+			if plan.Hooks[i].Name == "pre-commit" {
+				hook = &plan.Hooks[i]
+				break
+			}
+		}
+		if hook == nil {
+			t.Fatal("pre-commit not found in plan")
+		}
+		if hook.State != "marker_managed_non_shell" || !hook.NeedsMigration {
+			t.Fatalf("expected marker_managed_non_shell needing migration, got state %q needs=%v", hook.State, hook.NeedsMigration)
+		}
+
+		execPlan := buildHookMigrationExecutionPlan(plan)
+		if len(execPlan.BlockingErrors) > 0 {
+			t.Fatalf("repair must not be blocked, got: %v", execPlan.BlockingErrors)
+		}
+		if len(execPlan.WriteOps) != 1 {
+			t.Fatalf("expected exactly 1 write op, got %d", len(execPlan.WriteOps))
+		}
+		if execPlan.WriteOps[0].SourceKind != hookMigrationWriteFromHookFileStrip {
+			t.Fatalf("source kind = %q, want %q", execPlan.WriteOps[0].SourceKind, hookMigrationWriteFromHookFileStrip)
+		}
+		if len(execPlan.RetireOps) != 0 {
+			t.Fatalf("sidecars must be retained, got %d retire ops", len(execPlan.RetireOps))
+		}
+
+		summary, err := applyHookMigrationExecution(execPlan)
+		if err != nil {
+			t.Fatalf("applyHookMigrationExecution failed: %v", err)
+		}
+		if summary.WrittenHookCount != 1 {
+			t.Fatalf("expected 1 written hook, got %d", summary.WrittenHookCount)
+		}
+		if summary.RetiredCount != 0 {
+			t.Fatalf("sidecars must be retained, retired %d", summary.RetiredCount)
+		}
+
+		rendered := mustReadHookMigrationFile(t, preCommitPath)
+		if rendered != pyBody {
+			t.Fatalf("repair must strip the section byte-exact without re-injecting, got:\n%s", rendered)
+		}
+		assertExistsHookMigrationFile(t, preCommitPath+".old")
+		assertExistsHookMigrationFile(t, preCommitPath+".backup")
+		assertMissingHookMigrationFile(t, preCommitPath+".old.migrated")
+		assertMissingHookMigrationFile(t, preCommitPath+".backup.migrated")
+
+		secondPlan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("second PlanHookMigration failed: %v", err)
+		}
+		if secondPlan.NeedsMigrationCount != 0 {
+			t.Fatalf("second plan must be clean, got %d pending migrations", secondPlan.NeedsMigrationCount)
+		}
+		secondExec := buildHookMigrationExecutionPlan(secondPlan)
+		if secondExec.operationCount() != 0 {
+			t.Fatalf("second execution must be a no-op, got %d operations", secondExec.operationCount())
+		}
+	})
+
+	t.Run("ambiguous markers are not rewritten and do not block other migrations", func(t *testing.T) {
+		repoDir, hooksDir := setupHookMigrationRepo(t)
+		preCommitPath := filepath.Join(hooksDir, "pre-commit")
+		prePushPath := filepath.Join(hooksDir, "pre-push")
+
+		// A python hook with a marker tag embedded in a string literal: never
+		// rewritten automatically.
+		ambiguous := "#!/usr/bin/env python3\nimport sys\ns = \"# --- BEGIN BEADS INTEGRATION v1.0.0 ---\"\n"
+		writeHookMigrationFile(t, preCommitPath, ambiguous)
+		// And a plain shell hook that does need ordinary migration.
+		writeHookMigrationFile(t, prePushPath, "#!/usr/bin/env sh\n# bd-shim v2\n# bd-hooks-version: 0.56.1\nexec bd hooks run pre-push \"$@\"\n")
+
+		plan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration failed: %v", err)
+		}
+		execPlan := buildHookMigrationExecutionPlan(plan)
+		if len(execPlan.BlockingErrors) > 0 {
+			t.Fatalf("ambiguous non-shell hook must not block migration, got: %v", execPlan.BlockingErrors)
+		}
+
+		summary, err := applyHookMigrationExecution(execPlan)
+		if err != nil {
+			t.Fatalf("applyHookMigrationExecution failed: %v", err)
+		}
+		if summary.WrittenHookCount != 1 {
+			t.Fatalf("expected only the shell hook to be written, got %d", summary.WrittenHookCount)
+		}
+		if got := mustReadHookMigrationFile(t, preCommitPath); got != ambiguous {
+			t.Fatalf("ambiguous non-shell hook must stay byte-identical, got:\n%s", got)
+		}
+	})
+}
+
 func setupHookMigrationRepo(t *testing.T) (repoDir string, hooksDir string) {
 	t.Helper()
 	repoDir = newGitRepo(t)

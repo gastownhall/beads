@@ -35,6 +35,7 @@ type HookMigrationHookPlan struct {
 	LegacyBDHook     bool   `json:"legacy_bd_hook"`
 	HasOldSidecar    bool   `json:"has_old_sidecar"`
 	HasBackupSidecar bool   `json:"has_backup_sidecar"`
+	HookLanguage     string `json:"hook_language,omitempty"`
 	State            string `json:"state"`
 	NeedsMigration   bool   `json:"needs_migration"`
 	SuggestedAction  string `json:"suggested_action,omitempty"`
@@ -105,9 +106,10 @@ func inspectHookMigration(hooksDir, hookName string) HookMigrationHookPlan {
 	}
 
 	content, err := os.ReadFile(hookPath) // #nosec G304 -- path is derived from git hooks dir + known hook names
+	var contentStr string
 	if err == nil {
 		plan.Exists = true
-		contentStr := string(content)
+		contentStr = string(content)
 		plan.MarkerState = detectHookMarkerState(contentStr)
 		plan.LegacyBDHook = isLegacyBDHook(contentStr)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -117,13 +119,24 @@ func inspectHookMigration(hooksDir, hookName string) HookMigrationHookPlan {
 		return plan
 	}
 
-	classifyHookMigration(&plan)
+	classifyHookMigration(&plan, contentStr)
 	return plan
 }
 
-func classifyHookMigration(hook *HookMigrationHookPlan) {
+func classifyHookMigration(hook *HookMigrationHookPlan, content string) {
 	if hook.ReadError != "" {
 		return
+	}
+
+	// GH#6348: a hook whose interpreter cannot run bd's POSIX-sh section never
+	// gets one injected. Migration of such a hook only ever repairs one an
+	// older bd version already left in it, and leaves everything else —
+	// including a clean script and its sidecars — alone.
+	if hook.Exists {
+		if lang := ClassifyHookLanguage([]byte(content)); lang.Kind != HookLanguageShell {
+			classifyNonShellHookMigration(hook, lang, content)
+			return
+		}
 	}
 
 	switch hook.MarkerState {
@@ -184,6 +197,38 @@ func classifyHookMigration(hook *HookMigrationHookPlan) {
 	}
 
 	hook.State = "unmanaged_custom"
+}
+
+// classifyNonShellHookMigration is the non-shell half of hook migration
+// classification (GH#6348). The hook's interpreter cannot execute bd's sh
+// section, so:
+//   - a complete, ordered, whole-line bd section left by an older bd version
+//     is reported for repair: the section is removed, never re-injected, and
+//     the sidecars are retained;
+//   - markers that do not validate as pairs — and binary content — are never
+//     rewritten automatically; the plan explains manual inspection instead;
+//   - a clean non-shell script is out of bd's reach either way: it needs no
+//     migration and its sidecars stay.
+func classifyNonShellHookMigration(hook *HookMigrationHookPlan, lang HookLanguage, content string) {
+	hook.HookLanguage = lang.Interpreter
+	if lang.Kind == HookLanguageBinary {
+		hook.State = "non_shell_manual"
+		hook.SuggestedAction = "Binary content; bd never rewrites it — inspect manually."
+		return
+	}
+	switch InspectBdSectionMarkers(content) {
+	case BdSectionMarkersPaired:
+		hook.State = "marker_managed_non_shell"
+		hook.NeedsMigration = true
+		hook.SuggestedAction = "Remove bd's stale shell section in place (never re-injected: this interpreter cannot run it)."
+		return
+	case BdSectionMarkersAmbiguous:
+		hook.State = "non_shell_manual"
+		hook.SuggestedAction = "bd section markers do not form complete, ordered BEGIN/END pairs; remove the stale section manually."
+		return
+	}
+	hook.State = "unmanaged_custom"
+	hook.SuggestedAction = "Integrate manually by calling 'bd hooks run <hook>' from the hook itself."
 }
 
 func detectHookMarkerState(content string) string {

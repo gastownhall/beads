@@ -54,6 +54,10 @@ const (
 	hookMigrationWriteFromHookFile hookMigrationWriteSource = "hook_file"
 	hookMigrationWriteFromOld      hookMigrationWriteSource = "old_sidecar"
 	hookMigrationWriteFromBackup   hookMigrationWriteSource = "backup_sidecar"
+	// hookMigrationWriteFromHookFileStrip repairs a non-shell hook an older bd
+	// version corrupted (GH#6348): the stale bd section is stripped in place —
+	// no re-injection, no shebang, no newline normalization.
+	hookMigrationWriteFromHookFileStrip hookMigrationWriteSource = "hook_file_strip"
 )
 
 type hookMigrationWriteOp struct {
@@ -132,8 +136,24 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 
 	for _, hook := range plan.Hooks {
 		switch hook.State {
-		case "marker_managed", "unmanaged_custom", "missing_no_artifacts":
+		case "marker_managed", "unmanaged_custom", "missing_no_artifacts", "non_shell_manual":
+			// non_shell_manual (GH#6348) is deliberate: bd never rewrites a
+			// non-shell hook whose markers do not validate as pairs, or binary
+			// content — the plan row's suggested action carries the
+			// manual-inspection diagnostic instead.
 			execPlan.NoopHooks = append(execPlan.NoopHooks, hook.Name)
+			continue
+		case "marker_managed_non_shell":
+			// GH#6348: strip the stale bd section in place. The hook's
+			// interpreter cannot run bd's sh section, so nothing is
+			// re-injected, and its sidecars are retained, not retired.
+			execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
+				HookName:   hook.Name,
+				HookPath:   hook.HookPath,
+				State:      hook.State,
+				SourceKind: hookMigrationWriteFromHookFileStrip,
+				SourcePath: hook.HookPath,
+			})
 			continue
 		case "read_error":
 			execPlan.BlockingErrors = append(execPlan.BlockingErrors, formatHookMigrationBlockingError(hook))
@@ -310,6 +330,8 @@ func renderMigratedHookContent(op hookMigrationWriteOp) ([]byte, error) {
 	switch op.SourceKind {
 	case hookMigrationWriteFromTemplate:
 		baseContent = ""
+	case hookMigrationWriteFromHookFileStrip:
+		return renderNonShellSectionStrip(op)
 	case hookMigrationWriteFromHookFile, hookMigrationWriteFromOld, hookMigrationWriteFromBackup:
 		content, err := os.ReadFile(op.SourcePath) // #nosec G304 -- source paths come from migration planner + known sidecar suffixes
 		if err != nil {
@@ -330,6 +352,30 @@ func renderMigratedHookContent(op hookMigrationWriteOp) ([]byte, error) {
 	}
 
 	return []byte(content), nil
+}
+
+// renderNonShellSectionStrip repairs a non-shell hook that an older bd
+// version corrupted by appending its POSIX-sh section (GH#6348). It
+// re-validates the language classification and the marker pairs before
+// reusing the remover, then strips the section: byte-exact — no shebang
+// insertion, no newline normalization, no re-injection. The sidecars are
+// untouched (the caller emits no retire ops for this source kind).
+func renderNonShellSectionStrip(op hookMigrationWriteOp) ([]byte, error) {
+	content, err := os.ReadFile(op.SourcePath) // #nosec G304 -- source paths come from migration planner + known sidecar suffixes
+	if err != nil {
+		return nil, fmt.Errorf("reading source content for %s from %s: %w", op.HookName, op.SourcePath, err)
+	}
+	if lang := doctor.ClassifyHookLanguage(content); lang.Kind == doctor.HookLanguageShell {
+		return nil, fmt.Errorf("%s at %s no longer classifies as a non-shell hook; refusing to strip its bd section", op.HookName, op.SourcePath)
+	}
+	if doctor.InspectBdSectionMarkers(string(content)) != doctor.BdSectionMarkersPaired {
+		return nil, fmt.Errorf("%s at %s: bd section markers no longer form complete, ordered pairs; inspect manually", op.HookName, op.SourcePath)
+	}
+	stripped, ok := stripBdSectionPairsValidated(string(content))
+	if !ok {
+		return nil, fmt.Errorf("%s at %s: stripping the stale bd section no longer validates; inspect manually", op.HookName, op.SourcePath)
+	}
+	return []byte(stripped), nil
 }
 
 func ensureHookShebang(content string) string {
