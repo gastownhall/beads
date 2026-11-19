@@ -1431,6 +1431,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd backup` records and reports a failing backup destination instead of forgetting the last good backup** (#4070). A backup destination whose manifest names missing table files — the state an interrupted sync leaves behind — fails every later sync with Dolt's `error opening table file: table file not found`. Auto-backup used to overwrite its state file on each failed attempt, so `bd backup status` showed the failing attempt as the last backup and its `--json` output reported nothing else; the per-command warning named neither the directory nor where its state lives. The failure (error and timestamp) is now recorded next to the last successful backup and cleared by the next success: `bd backup status` prints the failed attempt under an unchanged "Last backup" line, `bd backup status --json` adds `last_error`, `last_error_at` and `last_success_at`, and the auto-backup warning points at `bd backup status`. `bd backup sync` no longer misreports such a damaged destination as "no backup destination configured" — that advice only renders for a genuinely unconfigured remote — and its help no longer claims the sync is atomic. Recovery stays manual by design: move the damaged directory aside (out of the git repository for `backup.git-repo`), keep it until `bd backup status` shows a newer successful backup, and let the next sync write a fresh full copy; see "When the backup destination is damaged" in the configuration reference.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

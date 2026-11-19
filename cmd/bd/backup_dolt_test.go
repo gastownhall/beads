@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -247,5 +248,25 @@ func TestShowDoltBackupStatusJSON_NilWhenNotConfigured(t *testing.T) {
 	configured, ok := result["configured"].(bool)
 	if !ok || configured {
 		t.Errorf("expected configured=false, got %v", result)
+	}
+}
+
+// TestBackupSyncHelpMakesNoAtomicClaim pins the GH#4070 (bd-5mwx39) help fix:
+// `bd backup sync --help` claimed "The backup is atomic — if the sync fails,
+// the previous backup state is preserved", which is false for exactly the
+// failure the report hit — a destination whose manifest names table files
+// that never arrived fails every later sync. The help must say the error is
+// reported and how to recover a damaged filesystem destination.
+func TestBackupSyncHelpMakesNoAtomicClaim(t *testing.T) {
+	t.Parallel()
+
+	long := backupSyncCmd.Long
+	if strings.Contains(long, "atomic") {
+		t.Errorf("backup sync help still claims the sync is atomic:\n%s", long)
+	}
+	for _, want := range []string{"aside", "fresh full backup"} {
+		if !strings.Contains(long, want) {
+			t.Errorf("backup sync help does not say how to recover a damaged destination (%q missing):\n%s", want, long)
+		}
 	}
 }

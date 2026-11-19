@@ -288,7 +288,20 @@ How it works:
 - If data changed and the throttle interval has passed, `bd` checks the destination directory's on-disk size against `backup.size-cap-mb`. `CALL DOLT_BACKUP('sync', ...)` only ever adds new chunks to the destination — it never prunes ones that became unreachable on the source (history rewrites, superseded data), and Dolt exposes no supported way to GC a backup destination in place. Left uncapped, the destination can only grow until disk fills; this was the root cause of a 2026-06-19 outage where a 1.7GB store produced a 43GB backup directory. Once the cap is reached, auto-backup pauses — nothing is deleted, but no further syncs run until you raise `backup.size-cap-mb` or point `backup.git-repo` at a different git repository, whose `backup/` directory then becomes the destination. `bd backup init` does not end the pause: it configures the separate destination that manual `bd backup sync` pushes to. Set `size-cap-mb: 0` to disable the cap entirely.
 - If the destination is under its cap, a Dolt-native backup is synced to `.beads/backup/` (or to a `backup/` directory inside `backup.git-repo` when configured).
 - State is tracked in `backup_state.json` inside the backup directory. `bd backup status` prints `PAUSED (cap exceeded)` when the destination is over its cap, and its `--json` output reports the same state as `size_cap.exceeded: true` — so an agent/CI caller relying on `--json` or `--quiet` can see that auto-backup has stopped instead of reading a reassuring "Last backup" line while nothing further syncs.
+- A failed backup attempt no longer overwrites the record of the last good one: the error and its timestamp are recorded alongside the last successful backup, and the next successful backup clears them. `bd backup status` prints the failed attempt (error and when) under the unchanged "Last backup" line, and `bd backup status --json` reports the same in the `last_error`, `last_error_at` and `last_success_at` keys of the `backup` object. In releases after v1.4.0, the three keys are always present (`last_error` empty when the last attempt succeeded); before that, only the `timestamp` key existed, and a failing destination reported the time of the last attempt as the last backup.
 - The cap applies only to auto-backup; manual `bd backup` / `bd backup sync` are not capped.
+
+#### When the backup destination is damaged
+
+A backup destination whose manifest names table files that are not in the directory — the state an interrupted backup or a filesystem fault can leave behind — fails every later sync with `error opening table file: table file not found`, naming the missing file. `bd` does not repair or re-seed such a destination: Dolt's backup sync has no re-send for missing chunks, so retrying (or re-running `bd backup init` on the same path) can never succeed. The recovery is to move the whole directory aside, keep it until a new backup exists, and let the next backup write a fresh full copy:
+
+```bash
+mv .beads/backup .beads/backup.broken-YYYYMMDD
+# then trigger a backup (any write command, or `bd backup sync` for the manual destination)
+bd backup status   # once "Last backup" is newer than the move, the .broken copy can be deleted
+```
+
+With `backup.git-repo` configured, the `backup/` directory lives inside that git repository: move it out of the repository, not just aside, so the repo tree does not keep advertising the broken directory. A destination that fails once (a full disk, a transient error) does not need this — only one that fails the same way on every attempt.
 
 Manual commands (see [bd backup](/cli-reference/backup)):
 
