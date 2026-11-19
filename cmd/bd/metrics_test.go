@@ -510,3 +510,76 @@ func TestWarnIfMetricsEnvOverrideNamesActiveVar(t *testing.T) {
 		}
 	})
 }
+
+// TestMetricsEnabledForRunFailsClosedOnConsentUnknown is the cmd/bd glue for
+// the GH#8113 fail-closed rule: when the darwin/ios user-config bootstrap
+// fails with config.ErrUserConfigConsentUnknown, the run could neither carry
+// over nor rule out a legacy macOS opt-out, so metrics.Init's enable argument
+// and the first-run notice — both resolved through metricsEnabledForRun —
+// must report disabled even though the config read sees no opt-out.
+func TestMetricsEnabledForRunFailsClosedOnConsentUnknown(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	// Env escape hatches must be genuinely unset so consent resolves through
+	// the config path. CI sets BD_DISABLE_METRICS; restore it afterward.
+	unsetEnv := func(key string) {
+		if orig, ok := os.LookupEnv(key); ok {
+			_ = os.Unsetenv(key)
+			t.Cleanup(func() { _ = os.Setenv(key, orig) })
+		}
+	}
+	unsetEnv("BD_DISABLE_METRICS")
+	unsetEnv("DO_NOT_TRACK")
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	// Precondition: no user config exists, so nothing is opted out and the
+	// config read says metrics are on.
+	if !resolveMetricsEnabled() {
+		t.Fatalf("precondition: resolveMetricsEnabled() = false with no opt-out present")
+	}
+
+	metricsConsentUnknown = true
+	t.Cleanup(func() { metricsConsentUnknown = false })
+
+	if metricsEnabledForRun() {
+		t.Errorf("metricsEnabledForRun() = true with consent unknown; the run must fail closed (GH#8113)")
+	}
+
+	// The first-run notice is gated through the same resolver: with consent
+	// unknown it must neither print nor record metrics.notice_shown.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	maybeShowMetricsFirstRunNotice(&cobra.Command{Use: "list"})
+	os.Stderr = origStderr
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+	var notice bytes.Buffer
+	if _, err := notice.ReadFrom(r); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if notice.Len() != 0 {
+		t.Errorf("first-run notice printed despite consent unknown:\n%s", notice.String())
+	}
+	if config.MetricsNoticeShownByUserConfig() {
+		t.Errorf("metrics.notice_shown recorded despite consent unknown")
+	}
+
+	// With consent known again the resolver returns to the config read.
+	metricsConsentUnknown = false
+	if !metricsEnabledForRun() {
+		t.Errorf("metricsEnabledForRun() = false with consent known and no opt-out; fail-closed must not outlive the run")
+	}
+}

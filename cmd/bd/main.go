@@ -1431,11 +1431,18 @@ var rootCmd = &cobra.Command{
 		// the first-run notice, not by skipping this user-global bootstrap.)
 		if cmd.Name() != metrics.SendMetricsSubcommand && resolveMetricsEnabled() {
 			if err := metrics.EnsureUserConfigDefaults(); err != nil {
+				// GH#8113 fail-closed rule: on darwin/ios a bootstrap that
+				// could not create the user config could not carry over (or
+				// rule out) a legacy macOS metrics opt-out. The run must not
+				// turn metrics on over an opt-out it cannot read.
+				if errors.Is(err, config.ErrUserConfigConsentUnknown) {
+					metricsConsentUnknown = true
+				}
 				debug.Logf("warning: ensure user config defaults failed: %v", err)
 			}
 		}
 
-		if _, err := metrics.Init(Version, resolveMetricsEnabled(), resolveMetricsEndpoint()); err != nil {
+		if _, err := metrics.Init(Version, metricsEnabledForRun(), resolveMetricsEndpoint()); err != nil {
 			debug.Logf("warning: metrics init failed: %v", err)
 		}
 
@@ -3151,6 +3158,23 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// metricsConsentUnknown records that the user-config bootstrap failed on a
+// darwin/ios host with config.ErrUserConfigConsentUnknown: bd could not
+// create the user config, so the one-time carry-over of the legacy macOS
+// config (GH#8113) could neither confirm nor rule out a metrics opt-out.
+var metricsConsentUnknown bool
+
+// metricsEnabledForRun is resolveMetricsEnabled with the GH#8113 fail-closed
+// rule: while consent is unknown, metrics stay off for the run regardless of
+// the config read, because an opt-out bd cannot read must not be overridden.
+// metrics.Init and the first-run notice both gate through it.
+func metricsEnabledForRun() bool {
+	if metricsConsentUnknown {
+		return false
+	}
+	return resolveMetricsEnabled()
 }
 
 func resolveMetricsEnabled() bool {
