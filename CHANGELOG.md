@@ -1652,7 +1652,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the GitHub release redirect, the postinstall script scheduled a delete of
   the archive path and then downloaded to that same path, so the delete could
   remove the finished archive before extraction (#7780, reported by
-  @ganniterix; fix supersedes #7791).
+  @ganniterix; first fixed by @rjgeng in #7791).
 - **Migration 0059 (and its wisp twin, ignored migration 0015) no longer runs
   for hours on clones with many wisp dependencies** (#6520). Their
   `is_blocked` recompute probed the wisp dependency graph with correlated
