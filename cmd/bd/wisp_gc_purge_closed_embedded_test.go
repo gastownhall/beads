@@ -185,3 +185,32 @@ func TestEmbeddedWispGCPurgeClosedKeepsRecentlyClosedWisps(t *testing.T) {
 	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--age", "0s")
 	bdShowFail(t, bd, dir, fresh)
 }
+
+// TestEmbeddedWispGCPurgeClosedZeroAgeIsPurgeAll guards the escape hatch of
+// the GH#8202 age floor: --closed --force with --age 0s — or any non-positive
+// duration — still selects every closed ephemeral wisp regardless of age, the
+// behavior --closed had before the floor. The floor must not overreach.
+func TestEmbeddedWispGCPurgeClosedZeroAgeIsPurgeAll(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pc5")
+
+	first := bdCreate(t, bd, dir, "closed moments ago", "--ephemeral").ID
+	second := bdCreate(t, bd, dir, "also closed moments ago", "--ephemeral").ID
+	bdClose(t, bd, dir, first)
+	bdClose(t, bd, dir, second)
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--age", "0s")
+	bdShowFail(t, bd, dir, first)
+	bdShowFail(t, bd, dir, second)
+
+	// A non-positive duration omits the age bound the same way zero does.
+	third := bdCreate(t, bd, dir, "negative age window", "--ephemeral").ID
+	bdClose(t, bd, dir, third)
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--age=-1s")
+	bdShowFail(t, bd, dir, third)
+}
