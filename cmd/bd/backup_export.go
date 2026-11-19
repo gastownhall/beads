@@ -197,7 +197,19 @@ func runBackupExport(ctx context.Context, backend localBackupBackend, force bool
 		// shared-dolt CPU-pin incident). LastDoltCommit is deliberately
 		// left unchanged so change-detection still sees pending work and
 		// a real backup runs once the failure clears.
-		state.Timestamp = time.Now().UTC()
+		//
+		// The failure is recorded next to the last success rather than in
+		// place of it (bd-5mwx39, GH#4070): Timestamp alone made a
+		// destination that failed for days read as freshly backed up. A
+		// state file from an older bd has no LastSuccessAt; its Timestamp
+		// is the last success unless an error was recorded since.
+		now := time.Now().UTC()
+		if state.LastSuccessAt.IsZero() && state.LastError == "" && state.LastDoltCommit != "" {
+			state.LastSuccessAt = state.Timestamp
+		}
+		state.LastError = err.Error()
+		state.LastErrorAt = now
+		state.Timestamp = now
 		if saveErr := saveBackupState(dir, state); saveErr != nil {
 			debug.Logf("backup: failed to persist throttle state after error: %v\n", saveErr)
 		}
