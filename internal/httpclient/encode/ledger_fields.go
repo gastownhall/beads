@@ -70,7 +70,7 @@ func readyRequestRows() []Row {
 			fieldSpec+", D12"),
 		refusal("E-ReadyRequest.ExcludeParentsWithOpenChildren", tyReadyRequest, "ExcludeParentsWithOpenChildren",
 			"excluding parents with open children from ready work refuses",
-			"neither listReadyWork, countReadyWork nor claimNext publishes a parameter for it, and the open-child test reads parent-child edges the client cannot see from a ready page — so a dropped exclusion would answer, count and claim the very containers the caller asked to leave out (GH#6817)",
+			"neither listReadyWork, countReadyWork nor claimNext publishes a parameter for it, and the open-child test reads parent-child edges the client cannot see from a ready page — so a dropped exclusion would answer, count and claim the very containers the caller asked to leave out (GH#6817). The refusal of a parent blocked by its own descendant (issueops.DependencyHierarchyConflictError) recommends bd ready --exclude-parents, so over this transport that advice reaches this refusal until the wire publishes the parameter",
 			fieldSpec),
 		{
 			ID: "E-ReadyRequest.Brief", Kind: KindRetired,

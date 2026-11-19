@@ -801,9 +801,11 @@ func TestEmbeddedReadyEmptyStateRealBlocker(t *testing.T) {
 
 // GH#6817: `bd ready --exclude-parents` leaves out a parent while any child is
 // open (here its only child is blocked, so ready offered the container and
-// nothing under it), keeps a childless leaf and an epic whose children all
+// nothing under it), keeps a childless leaf and a parent whose children all
 // closed, and offers the parent again once the child closes. Without the flag
-// the parent stays in the ready set.
+// the parent stays in the ready set. Both parents are features, not epics, so
+// the flag is the only thing that can tell them apart, and the test holds
+// whether or not bare `bd ready` also hides epics by type (open PR #5930).
 func TestEmbeddedReadyExcludeParents(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -838,13 +840,13 @@ func TestEmbeddedReadyExcludeParents(t *testing.T) {
 		return ids
 	}
 
-	parent := bdCreate(t, bd, dir, "Container", "--type", "epic")
+	parent := bdCreate(t, bd, dir, "Container", "--type", "feature")
 	child := bdCreate(t, bd, dir, "Blocked child", "--type", "task", "--parent", parent.ID)
 	blocker := bdCreate(t, bd, dir, "Blocker", "--type", "task")
 	run(t, "dep", "add", child.ID, blocker.ID)
 	leaf := bdCreate(t, bd, dir, "Childless leaf", "--type", "task")
-	doneEpic := bdCreate(t, bd, dir, "Epic with closed children", "--type", "epic")
-	doneChild := bdCreate(t, bd, dir, "Closed child", "--type", "task", "--parent", doneEpic.ID)
+	doneParent := bdCreate(t, bd, dir, "Parent with closed children", "--type", "feature")
+	doneChild := bdCreate(t, bd, dir, "Closed child", "--type", "task", "--parent", doneParent.ID)
 	run(t, "close", doneChild.ID)
 
 	if ready := readySet(t); !ready[parent.ID] || ready[child.ID] {
@@ -855,7 +857,7 @@ func TestEmbeddedReadyExcludeParents(t *testing.T) {
 	if ready[parent.ID] {
 		t.Errorf("--exclude-parents offered parent %s while its child %s is open; ready=%v", parent.ID, child.ID, ready)
 	}
-	for _, id := range []string{leaf.ID, doneEpic.ID, blocker.ID} {
+	for _, id := range []string{leaf.ID, doneParent.ID, blocker.ID} {
 		if !ready[id] {
 			t.Errorf("--exclude-parents dropped %s, which has no open child; ready=%v", id, ready)
 		}
