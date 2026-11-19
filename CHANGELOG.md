@@ -1431,6 +1431,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A dependency on a local issue or wisp with another rig's prefix blocks
+  again** (#6066). bd decided whether a dependency target was external by
+  comparing id prefixes, so an edge onto a local issue whose id carries a
+  foreign prefix (an explicit `--id` created with `--force`, or an imported
+  row) was stored as external: `bd ready` offered the dependent while its
+  blocker was open, and the parent hierarchy check skipped it. bd now asks
+  whether the database holds the target. On upgrade, each clone moves the
+  edges already stored this way to their local column once and recomputes
+  blocked state; explicit `external:` references and targets the database
+  does not hold stay external.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
