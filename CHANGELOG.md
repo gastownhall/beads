@@ -1431,6 +1431,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Incremental pulls no longer read issue history once per linked issue**
+  ([#6605](https://github.com/gastownhall/beads/issues/6605)). Since #4734,
+  a pull's pre-link check asked the store for every linked local issue's
+  previous external_ref one issue at a time; on the embedded backend each
+  answer reopened the SQL engine and scanned `dolt_history_issues`, so a
+  pull on a mature tracker spent most of its time in history scans — on a
+  tracker with 3.8k issues, 35 minutes. The engine now resolves every
+  linked issue's previous external_ref in one batched history query per
+  200 issues at the pull's `last_sync`, and both Dolt backends expose
+  only that batched form. Relink detection, the missing-history warning
+  and the overlap guards decide each issue by the same rule as before,
+  and each answer still reads the store's reachable history at call time.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

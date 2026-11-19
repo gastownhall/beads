@@ -450,3 +450,141 @@ func TestDoltServerPreviousExternalRefsMatchSingleIDOracle(t *testing.T) {
 		t.Fatalf("PreviousExternalRefs(no ids) = %v, want empty", refs)
 	}
 }
+
+// TestEmbeddedPreviousExternalRefsSeeHistoryCommittedAfterAnEarlierCall pins
+// freshness (AC-5): the batch answers must come from the store's reachable
+// history at call time, never from a per-cutoff memo of an earlier answer.
+// The same id and the same cutoff are asked twice, with a second writer
+// committing a new historical row (dated before the cutoff) in between; the
+// second answer must see it. On the embedded backend the second writer is a
+// raw connection while the store is closed — the one-holder engine — dated
+// with @@dolt_committer_date, no wall-clock sleeps.
+func TestEmbeddedPreviousExternalRefsSeeHistoryCommittedAfterAnEarlierCall(t *testing.T) {
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	const database = "zz6605"
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	cutoff := time.Now().UTC().Add(time.Minute) // after every fixture commit
+
+	// The store creates the issue; a raw connection commits it at a past
+	// date below the cutoff.
+	store, err := embeddeddolt.Open(ctx, beadsDir, database, "main")
+	if err != nil {
+		t.Fatalf("Open embedded store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "zz"); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	if err := store.CreateIssue(ctx, previousRefsFixtureIssue("zz-fresh", refValue("OLD")), "tester"); err != nil {
+		t.Fatalf("CreateIssue(zz-fresh): %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close store: %v", err)
+	}
+	commitRawAt := func(at time.Time, updates map[string]string) {
+		t.Helper()
+		db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, database, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer func() {
+			if err := cleanup(); err != nil {
+				t.Fatalf("cleanup raw handle: %v", err)
+			}
+		}()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("db.Conn: %v", err)
+		}
+		if _, err := conn.ExecContext(ctx, "SET @@dolt_committer_date = ?",
+			at.UTC().Format("2006-01-02T15:04:05.000Z07:00")); err != nil {
+			t.Fatalf("set committer date: %v", err)
+		}
+		for id, ref := range updates {
+			if _, err := conn.ExecContext(ctx, "UPDATE issues SET external_ref = ? WHERE id = ?", ref, id); err != nil {
+				t.Fatalf("update %s: %v", id, err)
+			}
+		}
+		if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'fixture: fresh history')"); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatalf("close raw connection: %v", err)
+		}
+	}
+	commitRawAt(time.Now().UTC().Add(-20*time.Minute), nil)
+
+	ask := func() string {
+		t.Helper()
+		store, err := embeddeddolt.Open(ctx, beadsDir, database, "main")
+		if err != nil {
+			t.Fatalf("reopen embedded store: %v", err)
+		}
+		defer func() { _ = store.Close() }()
+		refs, err := store.PreviousExternalRefs(ctx, []string{"zz-fresh"}, cutoff)
+		if err != nil {
+			t.Fatalf("PreviousExternalRefs: %v", err)
+		}
+		return refs["zz-fresh"]
+	}
+
+	if got := ask(); got != "OLD" {
+		t.Fatalf("first batch call = %q, want OLD: the fixture must hold the baseline", got)
+	}
+	// A second writer commits a newer historical row, still below the
+	// cutoff.
+	commitRawAt(time.Now().UTC().Add(-10*time.Minute), map[string]string{"zz-fresh": "NEW"})
+	if got := ask(); got != "NEW" {
+		t.Fatalf("second batch call = %q, want NEW: the batch must read the history committed after the first call, not a memoized answer", got)
+	}
+}
+
+// TestDoltServerPreviousExternalRefsSeeHistoryCommittedAfterAnEarlierCall is
+// the server backend's half of the freshness pin (AC-5): the same id and
+// cutoff asked twice, with a second commit landing between the calls through
+// the store's pooled session, must answer the new history the second time.
+func TestDoltServerPreviousExternalRefsSeeHistoryCommittedAfterAnEarlierCall(t *testing.T) {
+	store := newTestStore(t) // skips if the shared test Dolt server is absent
+	defer store.Close()
+	ctx := context.Background()
+	db := store.DB()
+
+	if err := store.CreateIssue(ctx, previousRefsFixtureIssue("zz-fresh", refValue("OLD")), "tester"); err != nil {
+		t.Fatalf("CreateIssue(zz-fresh): %v", err)
+	}
+	// The create auto-commits at the wall clock, so the second commit must
+	// be dated after it and still below the cutoff.
+	created := time.Now().UTC()
+	cutoff := created.Add(time.Minute)
+	ask := func() string {
+		t.Helper()
+		refs, err := store.PreviousExternalRefs(ctx, []string{"zz-fresh"}, cutoff)
+		if err != nil {
+			t.Fatalf("PreviousExternalRefs: %v", err)
+		}
+		return refs["zz-fresh"]
+	}
+	if got := ask(); got != "OLD" {
+		t.Fatalf("first batch call = %q, want OLD: the fixture must hold the baseline", got)
+	}
+
+	// A second commit lands between the calls, dated after the create and
+	// below the cutoff.
+	if _, err := db.ExecContext(ctx, "SET @@dolt_committer_date = ?",
+		created.Add(30*time.Second).UTC().Format("2006-01-02T15:04:05.000Z07:00")); err != nil {
+		t.Fatalf("set committer date: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE issues SET external_ref = ? WHERE id = ?", "NEW", "zz-fresh"); err != nil {
+		t.Fatalf("update zz-fresh: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'fixture: fresh history')"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "SET @@dolt_committer_date = ?", ""); err != nil {
+		t.Fatalf("reset committer date: %v", err)
+	}
+
+	if got := ask(); got != "NEW" {
+		t.Fatalf("second batch call = %q, want NEW: the batch must read the history committed after the first call, not a memoized answer", got)
+	}
+}
