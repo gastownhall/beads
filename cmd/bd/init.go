@@ -1292,7 +1292,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if fi, statErr := os.Stat(plannedDBPathAbs); statErr == nil && !fi.IsDir() {
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
-		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
+		initGateHandle, gateErr := acquireInitMutationGateFor(rootCtx, beadsDirAbs, plannedDBPathAbs, reinitLocal, func() error {
 			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
 		})
 		if gateErr != nil {

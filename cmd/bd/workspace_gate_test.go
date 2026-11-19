@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/workspacegate"
@@ -1135,5 +1136,190 @@ func TestStrictReadonlyCommandCreatesNoGateFiles(t *testing.T) {
 	}
 	if len(gateFiles) != 0 {
 		t.Fatalf("bd --readonly created gate files %v\noutput: %s", gateFiles, out)
+	}
+}
+
+// bd-xicgb8 (GH#7122): in shared-server mode another project's long-running
+// `bd serve` holds its command gate set SHARED, which includes the shared
+// physical root. Initialising a NEW project only creates a new database on
+// that server, so init must not be refused by that unrelated holder.
+func TestAcquireInitMutationGateNewSharedServerProjectNotBlockedByOtherProjectServe(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	t.Setenv(initGateTimeoutEnv, "500ms")
+	countGateNotices(t)
+
+	// Project B: an existing shared-server workspace whose `bd serve` holds
+	// the chokepoint gate set SHARED for its whole lifetime.
+	otherBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(otherBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"backend":"dolt","database":"other","dolt_mode":"server","dolt_database":"other"}`
+	if err := os.WriteFile(filepath.Join(otherBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sharedRoot := doltserver.DoltDirPath(otherBeadsDir)
+	if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	serveGates, err := buildWorkspaceGateSet(otherBeadsDir)
+	if err != nil {
+		t.Fatalf("build other project's gate set: %v", err)
+	}
+	serveHold, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{}, serveGates...)
+	if err != nil {
+		t.Fatalf("other project's serve shared hold: %v", err)
+	}
+	t.Cleanup(func() { _ = serveHold.Release() })
+
+	// Project A: a fresh repo running `bd init --shared-server`; .beads does
+	// not exist yet and the planned DB path is the shared dolt dir, exactly
+	// as init.go computes it.
+	newBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	planned := doltserver.DoltDirPath(newBeadsDir)
+	if planned != sharedRoot {
+		t.Fatalf("planned init root %q, want shared root %q", planned, sharedRoot)
+	}
+
+	h, err := acquireInitMutationGate(context.Background(), newBeadsDir, planned, nil)
+	if err != nil {
+		t.Fatalf("bd init for a new shared-server project refused while another project's bd serve runs: %v", err)
+	}
+	_ = h.Release()
+}
+
+// sharedServerGateFixture is a shared-server machine for the init-gate
+// tests: shared-server mode with a private shared server dir, the shared
+// dolt root's parent on disk, and another project's workspace whose gate set
+// includes that root.
+type sharedServerGateFixture struct {
+	sharedRoot    string
+	otherBeadsDir string
+}
+
+func newSharedServerGateFixture(t *testing.T) sharedServerGateFixture {
+	t.Helper()
+	resetGateTestEnv(t)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	countGateNotices(t)
+	otherBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(otherBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"backend":"dolt","database":"other","dolt_mode":"server","dolt_database":"other"}`
+	if err := os.WriteFile(filepath.Join(otherBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sharedRoot, err := doltserver.SharedDoltPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return sharedServerGateFixture{sharedRoot: sharedRoot, otherBeadsDir: otherBeadsDir}
+}
+
+// holdOtherProjectServe takes the other project's command gate set SHARED,
+// as its resident `bd serve` does for its whole lifetime.
+func (f sharedServerGateFixture) holdOtherProjectServe(t *testing.T) *workspacegate.MultiHandle {
+	t.Helper()
+	gates, err := buildWorkspaceGateSet(f.otherBeadsDir)
+	if err != nil {
+		t.Fatalf("build other project's gate set: %v", err)
+	}
+	h, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{}, gates...)
+	if err != nil {
+		t.Fatalf("other project's serve shared hold: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Release() })
+	return h
+}
+
+// holdOtherProjectMaintenance takes the other project's maintenance gate set
+// EXCLUSIVE (its workspace plus the shared root), as bd migrate does.
+func (f sharedServerGateFixture) holdOtherProjectMaintenance(t *testing.T) *workspacegate.MultiHandle {
+	t.Helper()
+	h, err := acquireExclusiveWorkspaceGatesWithOptions(context.Background(), f.otherBeadsDir, workspacegate.Options{Reason: "test maintenance"})
+	if err != nil {
+		t.Fatalf("other project's maintenance hold: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Release() })
+	return h
+}
+
+func (f sharedServerGateFixture) rootGate(t *testing.T) workspacegate.Gate {
+	t.Helper()
+	g, err := workspacegate.ForPhysicalRoot(f.sharedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// newProjectBeadsDir returns a new project's .beads path, created (with
+// fresh metadata) or absent.
+func newProjectBeadsDir(t *testing.T, exists bool) string {
+	t.Helper()
+	if exists {
+		return newGateTestWorkspace(t)
+	}
+	return filepath.Join(t.TempDir(), ".beads")
+}
+
+func assertGateBusy(t *testing.T, g workspacegate.Gate, mode workspacegate.Mode, what string) {
+	t.Helper()
+	h, err := g.Acquire(context.Background(), mode, workspacegate.Options{})
+	if err == nil {
+		_ = h.Release()
+		t.Fatalf("%s: fail-fast %s acquisition of %s succeeded, want ErrBusy", what, mode, g.Path())
+	}
+	if !errors.Is(err, workspacegate.ErrBusy) {
+		t.Fatalf("%s: err = %v, want ErrBusy", what, err)
+	}
+}
+
+// AC-1: a resident SHARED holder of the shared root (another project's bd
+// serve) does not stop an ordinary shared-server init of a new project,
+// whether or not its .beads exists yet; the holder keeps its hold and init
+// still holds its own workspace EXCLUSIVE.
+func TestAcquireInitMutationGateSharedServerResidentHolder(t *testing.T) {
+	for _, exists := range []bool{false, true} {
+		name := "absent-beads"
+		if exists {
+			name = "existing-beads"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newSharedServerGateFixture(t)
+			t.Setenv(initGateTimeoutEnv, "500ms")
+			f.holdOtherProjectServe(t)
+			beadsDir := newProjectBeadsDir(t, exists)
+
+			preflightRan := false
+			h, err := acquireInitMutationGate(context.Background(), beadsDir, doltserver.DoltDirPath(beadsDir), func() error {
+				preflightRan = true
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("ordinary shared-server init refused under another project's resident serve: %v", err)
+			}
+			if !preflightRan {
+				t.Fatal("preflight did not run")
+			}
+			ws, err := workspacegate.ForWorkspace(beadsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertGateBusy(t, ws, workspacegate.Shared, "init's own workspace while init holds it")
+			if err := h.Release(); err != nil {
+				t.Fatalf("release: %v", err)
+			}
+			// The resident holder never let go: shared-root maintenance is
+			// still excluded after init is done.
+			assertGateBusy(t, f.rootGate(t), workspacegate.Exclusive, "shared root after init released")
+		})
 	}
 }
