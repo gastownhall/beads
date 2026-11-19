@@ -234,7 +234,7 @@ func formatHookMigrationOperations(execPlan hookMigrationExecutionPlan) []string
 		case "repair_hook":
 			lines = append(lines, fmt.Sprintf("- remove bd's shell section from %s: %s (non-shell hook; sidecars kept)", op.HookName, op.Path))
 		case "restore_hook":
-			lines = append(lines, fmt.Sprintf("- restore %s: %s from %s without bd's shell section (non-shell script; sidecars kept)", op.HookName, op.Path, op.SourcePath))
+			lines = append(lines, fmt.Sprintf("- restore %s: %s from %s without bd's shell section (non-shell script)", op.HookName, op.Path, op.SourcePath))
 		case "retire_sidecar":
 			lines = append(lines, fmt.Sprintf("- retire %s: %s -> %s", op.HookName, op.SourcePath, op.Destination))
 		}

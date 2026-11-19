@@ -103,12 +103,21 @@ If an earlier install appended `bd`'s section to a non-shell hook, the next
 `bd hooks install`, `bd migrate hooks --apply` or `bd doctor --fix` removes
 complete, well-formed sections and keeps every other byte. It never restores
 an old `.backup` over the hook and never retires its `.old`/`.backup`
-sidecars. When the markers are incomplete, out of order, nested or not on
-lines of their own, or the hook is a binary, `bd` changes nothing: install
-warns, and migration stops with a blocking error that asks you to remove the
-section by hand. A legacy `bd` shim whose saved `.old` or `.backup` hook is a
-non-shell script gets that script back as the active hook, without the shell
-section.
+sidecars. A section counts as `bd`'s only while the code between its markers
+is exactly the shell code some `bd` version wrote there, from
+`if command -v bd` to its closing `fi`. Blank lines, comments and indentation
+do not count, and a section left with only comments is removed too. If you
+changed a line of that code, added one of your own anywhere between the
+markers, or replaced the code, for example with a port to the hook's own
+language, `bd` leaves the hook as it is: install warns and names the section,
+and migration has nothing to do. When the markers are incomplete, out of
+order, nested or not on lines of their own, or the hook is a binary, `bd`
+changes nothing: install warns, and migration stops with a blocking error that
+asks you to remove the section by hand. A legacy `bd` shim whose saved `.old` or
+`.backup` hook is a non-shell script gets that script back as the active
+hook, without the shell section. As for a shell hook, the sidecars are then
+retired to `.old.migrated` and `.backup.migrated`, so `bd hooks run` does not
+run the script a second time.
 
 ### Status
 

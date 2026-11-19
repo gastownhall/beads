@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -492,5 +493,116 @@ func TestNonShellHookInterpreter(t *testing.T) {
 				t.Fatalf("interp = %q, want %q", interp, tc.wantInterp)
 			}
 		})
+	}
+}
+
+// TestNonShellHookSectionPairs pins which bd sections in a non-shell hook bd
+// may remove (GH#6348): whole-line, ordered pairs whose body is still the
+// shell code bd writes. A body someone replaced, such as the issue's own port
+// of the section to Python, is reported as edited so that bd never deletes it.
+func TestNonShellHookSectionPairs(t *testing.T) {
+	const (
+		python  = "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n" // lines 1-3
+		begin   = "# --- BEGIN BEADS INTEGRATION v1.2.2 ---\n"
+		end     = "# --- END BEADS INTEGRATION v1.2.2 ---\n"
+		managed = "# This section is managed by beads. Do not remove these markers.\n"
+	)
+	// The section bd wrote from GH#1380 until the timeout arrived: six lines.
+	const guard = "if command -v bd >/dev/null 2>&1; then\n"
+	shellBody := managed + guard +
+		"  export BD_GIT_HOOK=1\n" +
+		"  bd hooks run pre-push \"$@\"\n" +
+		"  _bd_exit=$?; if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi\n" +
+		"fi\n"
+	// The same code reindented with tabs and trailing blanks.
+	reindented := managed + guard +
+		"\texport BD_GIT_HOOK=1 \n" +
+		"\tbd  hooks run pre-push \"$@\"\n" +
+		"\t_bd_exit=$?; if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi\t\n" +
+		"fi\n"
+	// The GH#6348 workaround: the shell code ported to Python in place, five
+	// lines.
+	pythonPort := managed +
+		"import subprocess as _sp\n" +
+		"_bd_exit = _sp.call([\"bd\", \"hooks\", \"run\", \"pre-push\"] + sys.argv[1:])\n" +
+		"if _bd_exit != 0:\n" +
+		"    sys.exit(_bd_exit)\n"
+
+	cases := []struct {
+		name        string
+		content     string
+		wantPairs   int
+		wantProblem bool
+		wantEdited  string
+	}{
+		{"no markers", python, 0, false, ""},
+		{"bd shell section", python + begin + shellBody + end, 1, false, ""},
+		{"crlf bd shell section", python + strings.ReplaceAll(begin+shellBody+end, "\n", "\r\n"), 1, false, ""},
+		{"comment after fi", python + begin + shellBody + "# end of bd\n" + end, 1, false, ""},
+		{"reindented", python + begin + reindented + end, 1, false, ""},
+		{"section for another hook", python + begin + strings.Replace(shellBody, "pre-push", "pre-commit", 1) + end, 1, false, ""},
+		{"code deleted, markers kept", python + begin + managed + "\n" + end, 1, false, ""},
+		{"empty section", python + begin + end, 1, false, ""},
+		{"python port", python + begin + pythonPort + end, 1, false, "lines 4-10"},
+		{"code before the guard", python + begin + "print('mine')\n" + shellBody + end, 1, false, "lines 4-12"},
+		{"code after the guard", python + begin + strings.Replace(shellBody, guard, guard+"print('mine')\n", 1) + end, 1, false, "lines 4-12"},
+		{"code before fi", python + begin + strings.TrimSuffix(shellBody, "fi\n") + "print('mine')\nfi\n" + end, 1, false, "lines 4-12"},
+		{"code after fi", python + begin + shellBody + "print('mine')\n" + end, 1, false, "lines 4-12"},
+		{"statement changed", python + begin + strings.Replace(shellBody, "BD_GIT_HOOK=1", "BD_GIT_HOOK=0", 1) + end, 1, false, "lines 4-11"},
+		{"statement removed", python + begin + strings.Replace(shellBody, "  export BD_GIT_HOOK=1\n", "", 1) + end, 1, false, "lines 4-10"},
+		{"guard never closed by fi", python + begin + strings.TrimSuffix(shellBody, "fi\n") + end, 1, false, "lines 4-10"},
+		{"no bd hooks run call", python + begin + managed + "if command -v bd >/dev/null 2>&1; then\n  :\nfi\n" + end, 1, false, "lines 4-9"},
+		{"second of two pairs edited", python + begin + shellBody + end + begin + pythonPort + end, 2, false, "lines 12-18"},
+		{"orphan begin", python + begin + pythonPort, 0, true, ""},
+		{"nested", python + begin + begin + shellBody + end + end, 0, true, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pairs, problem, edited := NonShellHookSectionPairs(tc.content)
+			if pairs != tc.wantPairs || (problem != "") != tc.wantProblem || edited != tc.wantEdited {
+				t.Fatalf("got pairs=%d problem=%q edited=%q, want pairs=%d problem=%v edited=%q",
+					pairs, problem, edited, tc.wantPairs, tc.wantProblem, tc.wantEdited)
+			}
+		})
+	}
+}
+
+// TestNonShellHookSectionPairsKnowsEveryShape runs each section bd has written
+// (bdShellSectionShapes) through the classifier for every managed hook: the
+// section is bd's, and one line added anywhere in its code, or a default
+// timeout those versions never wrote, makes it edited (GH#6348).
+func TestNonShellHookSectionPairsKnowsEveryShape(t *testing.T) {
+	const python = "#!/usr/bin/env python3\nimport sys\n"
+	section := func(code string) string {
+		return python + "# --- BEGIN BEADS INTEGRATION v1.3.2 ---\n" +
+			"# This section is managed by beads. Do not remove these markers.\n" +
+			code + "# --- END BEADS INTEGRATION v1.3.2 ---\n"
+	}
+	for i, shape := range bdShellSectionShapes {
+		for _, hook := range managedHookNames {
+			code := strings.NewReplacer("@HOOK@", hook, "@TIMEOUT@", shape.timeout).Replace(strings.TrimPrefix(shape.code, "\n"))
+			t.Run(fmt.Sprintf("shape_%d_timeout_%s_%s", i, shape.timeout, hook), func(t *testing.T) {
+				if pairs, problem, edited := NonShellHookSectionPairs(section(code)); pairs != 1 || problem != "" || edited != "" {
+					t.Fatalf("bd's own section must be removable, got pairs=%d problem=%q edited=%q", pairs, problem, edited)
+				}
+				lines := strings.SplitAfter(code, "\n")
+				for at := range lines { // before the guard, between any two lines, after fi
+					added := strings.Join(lines[:at], "") + "print('mine')\n" + strings.Join(lines[at:], "")
+					if _, _, edited := NonShellHookSectionPairs(section(added)); edited == "" {
+						t.Fatalf("a line added before code line %d must make the section edited", at+1)
+					}
+				}
+				if shape.timeout != "" {
+					other := strings.Replace(code, ":-"+shape.timeout+"}", ":-600}", 1)
+					if other == code {
+						t.Fatal("the shape's default timeout was not found")
+					}
+					if _, _, edited := NonShellHookSectionPairs(section(other)); edited == "" {
+						t.Fatal("a default timeout bd never wrote must make the section edited")
+					}
+				}
+			})
+		}
 	}
 }

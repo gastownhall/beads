@@ -496,8 +496,10 @@ type nonShellHookInstall struct {
 // A clean non-shell hook stays byte-identical. One that already calls
 // `bd hooks run` is a recognized integration and stays untouched and silent.
 // Complete bd sections an earlier install appended are removed; ambiguous
-// markers and binary content are left for a person to inspect. bd never
-// restores a .backup over the hook: it may predate the user's later edits.
+// markers and binary content are left for a person to inspect, and a section
+// whose body is not bd's shell code (an edit, or a port of it to the hook's
+// language) is left alone. bd never restores a .backup over the hook: it may
+// predate the user's later edits.
 func planNonShellHookInstall(hookName, hookPath, content string) (out nonShellHookInstall, nonShell bool) {
 	interp, nonShell := doctor.NonShellHookInterpreter(content)
 	if !nonShell {
@@ -517,10 +519,16 @@ func planNonShellHookInstall(hookName, hookPath, content string) (out nonShellHo
 			hookName, hookPath, interp, advice)
 		return out, true
 	}
-	repaired, removed, problem := removeNonShellHookSections(content)
-	if problem != "" {
+	repaired, removed, problem, edited := removeNonShellHookSections(content)
+	switch {
+	case problem != "":
 		out.warning = fmt.Sprintf("Warning: left the %s hook at %s unchanged: it runs under %s and its bd markers need manual inspection (%s). "+
 			"Remove bd's shell section by hand. %s", hookName, hookPath, interp, problem, advice)
+		return out, true
+	case edited != "":
+		out.warning = fmt.Sprintf("Warning: left the %s hook at %s unchanged: it runs under %s and its bd section at %s is not the shell code bd writes "+
+			"(an edit, or a port of it to %s), so bd does not remove it. Remove that section by hand if it is not your own. %s",
+			hookName, hookPath, interp, edited, interp, advice)
 		return out, true
 	}
 	out.content, out.write = repaired, true
@@ -539,23 +547,25 @@ func hookContentHasMarkers(content string) bool {
 // normalization); removeHookSection also takes the blank separator line the
 // injector added before a section. When the markers are not complete, ordered,
 // non-nested whole-line pairs, it changes nothing and returns the problem.
-func removeNonShellHookSections(content string) (repaired string, removed int, problem string) {
-	pairs, problem := doctor.NonShellHookSectionPairs(content)
-	if problem != "" {
-		return content, 0, problem
+// When a pair encloses anything but bd's shell code, it changes nothing either
+// and edited names that section: the code there is not bd's to delete.
+func removeNonShellHookSections(content string) (repaired string, removed int, problem, edited string) {
+	pairs, problem, edited := doctor.NonShellHookSectionPairs(content)
+	if problem != "" || edited != "" {
+		return content, 0, problem, edited
 	}
 	result := content
 	for i := 0; i < pairs; i++ {
 		next, found := removeHookSection(result)
 		if !found || len(next) >= len(result) {
-			return content, 0, "a bd section could not be removed cleanly"
+			return content, 0, "a bd section could not be removed cleanly", ""
 		}
 		result = next
 	}
 	if hookContentHasMarkers(result) {
-		return content, 0, "bd marker text remains after removing the complete sections"
+		return content, 0, "bd marker text remains after removing the complete sections", ""
 	}
-	return result, pairs, ""
+	return result, pairs, "", ""
 }
 
 // isOnlyShebangOrEmpty reports whether the given hook content consists of
@@ -600,7 +610,8 @@ func isOnlyShebangOrEmpty(content string) bool {
 //     decided first, before any stripping, empty-content filtering or husky
 //     rewrite, all of which assume shell: it is preserved with only its
 //     complete bd sections removed, and unchanged when its markers are
-//     ambiguous or it is binary content.
+//     ambiguous, a section holds code other than bd's shell code, or it is
+//     binary content.
 //
 // The function is pure: no I/O, no global state.
 func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
@@ -616,9 +627,10 @@ func preserveHookContent(content string, fromHusky bool) (preserved string, keep
 		if interp == "binary content" || !hookContentHasMarkers(content) {
 			return content, true, 0
 		}
-		repaired, removed, problem := removeNonShellHookSections(content)
-		if problem != "" {
-			// Copied as-is; the install reports the markers for inspection.
+		repaired, removed, problem, edited := removeNonShellHookSections(content)
+		if problem != "" || edited != "" {
+			// Copied as-is; the install reports the markers or the edited
+			// section.
 			return content, true, 0
 		}
 		return repaired, true, removed

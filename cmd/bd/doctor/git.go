@@ -353,9 +353,16 @@ func resolveEnvShebang(args []string) (command []string, ok bool) {
 // trailing CR) and the pairs are ordered and not nested. problem is non-empty
 // when the markers cannot be removed without guessing at the block's extent:
 // an unpaired, reversed or nested marker, or marker text inside another line.
-func NonShellHookSectionPairs(content string) (pairs int, problem string) {
-	inside := false
-	for n, line := range strings.Split(content, "\n") {
+//
+// edited is non-empty when the markers pair cleanly but a pair encloses
+// something other than the code of a section bd wrote: the hook's own port
+// of that code (the GH#6348 workaround), a line added anywhere in it, or a
+// changed one. It names the first such section by its marker lines. That code
+// is not bd's to delete.
+func NonShellHookSectionPairs(content string) (pairs int, problem, edited string) {
+	lines := strings.Split(content, "\n")
+	begin := -1
+	for n, line := range lines {
 		line = strings.TrimRight(line, "\r")
 		hasBegin := strings.Contains(line, hookMarkerBeginTag)
 		hasEnd := strings.Contains(line, hookMarkerEndTag)
@@ -364,29 +371,74 @@ func NonShellHookSectionPairs(content string) (pairs int, problem string) {
 		}
 		lineNo := n + 1
 		if !hookSectionMarkerLinePattern.MatchString(line) {
-			return 0, fmt.Sprintf("line %d holds bd marker text that is not a whole marker line", lineNo)
+			return 0, fmt.Sprintf("line %d holds bd marker text that is not a whole marker line", lineNo), ""
 		}
 		switch {
-		case hasBegin && inside:
-			return 0, fmt.Sprintf("line %d opens a bd section inside another one", lineNo)
+		case hasBegin && begin >= 0:
+			return 0, fmt.Sprintf("line %d opens a bd section inside another one", lineNo), ""
 		case hasBegin:
-			inside = true
-		case !inside:
-			return 0, fmt.Sprintf("line %d closes a bd section that was never opened", lineNo)
+			begin = n
+		case begin < 0:
+			return 0, fmt.Sprintf("line %d closes a bd section that was never opened", lineNo), ""
 		default:
-			inside = false
+			if edited == "" && !isBdShellSectionBody(lines[begin+1:n]) {
+				edited = fmt.Sprintf("lines %d-%d", begin+1, lineNo)
+			}
+			begin = -1
 			pairs++
 		}
 	}
-	if inside {
-		return 0, "a bd section is opened but never closed"
+	if begin >= 0 {
+		return 0, "a bd section is opened but never closed", ""
 	}
-	return pairs, ""
+	return pairs, "", edited
 }
 
 // hookSectionMarkerLinePattern matches a whole BEGIN or END marker line as
 // bd writes it, with or without a version.
 var hookSectionMarkerLinePattern = regexp.MustCompile(`^# --- (BEGIN|END) BEADS INTEGRATION( v[^ \t]+)? ---$`)
+
+// bdSectionHookNamePattern finds the hook a section's code runs.
+var bdSectionHookNamePattern = regexp.MustCompile(`\bbd hooks run (\S+)`)
+
+// isBdShellSectionBody reports whether the lines between a BEGIN and an END
+// marker are a section bd wrote: their code is one of bdShellSectionShapes
+// for the hook it runs, line for line. Blank lines, comment lines and
+// whitespace are ignored; any other added, removed or changed line makes the
+// section someone else's. A section reduced to comments counts as bd's:
+// removing it loses no code.
+func isBdShellSectionBody(body []string) bool {
+	code := strings.Join(bdSectionCodeLines(body), "\n")
+	if code == "" {
+		return true
+	}
+	hook := bdSectionHookNamePattern.FindStringSubmatch(code)
+	if hook == nil {
+		return false
+	}
+	for _, shape := range bdShellSectionShapes {
+		written := strings.NewReplacer("@HOOK@", hook[1], "@TIMEOUT@", shape.timeout).Replace(shape.code)
+		if strings.Join(bdSectionCodeLines(strings.Split(written, "\n")), "\n") == code {
+			return true
+		}
+	}
+	return false
+}
+
+// bdSectionCodeLines returns the lines of a section body that hold code, each
+// with its runs of whitespace (a CR included) collapsed to one space. Blank
+// lines and comment lines are dropped.
+func bdSectionCodeLines(lines []string) []string {
+	var code []string
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		code = append(code, strings.Join(fields, " "))
+	}
+	return code
+}
 
 func parseBDHookVersion(content string) (string, bool) {
 	for _, line := range strings.Split(content, "\n") {

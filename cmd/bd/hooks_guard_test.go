@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -763,6 +765,20 @@ func TestInstallHooksDoesNotAppendShellToPythonHook(t *testing.T) {
 // ends in sys.exit, the shape GH#6348 reported.
 const nonShellPythonPrePush = "#!/usr/bin/env python3\nimport sys\n\n\ndef main():\n    return 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main())\n"
 
+// TestGenerateHookSectionIsAKnownShape keeps doctor's record of the sections
+// bd has written current: a non-shell hook's repair removes a section only
+// when its code is one of them (GH#6348).
+func TestGenerateHookSectionIsAKnownShape(t *testing.T) {
+	for _, hookName := range managedHookNames {
+		t.Run(hookName, func(t *testing.T) {
+			pairs, problem, edited := doctor.NonShellHookSectionPairs(nonShellPythonPrePush + "\n" + generateHookSection(hookName))
+			require.Equal(t, 1, pairs)
+			require.Empty(t, problem)
+			require.Empty(t, edited, "generateHookSection writes code doctor does not know: append it to bdShellSectionShapes in cmd/bd/doctor/hook_section_shapes.go")
+		})
+	}
+}
+
 func writeNonShellHookForTest(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
@@ -920,6 +936,8 @@ func TestInstallHooks_NonShell(t *testing.T) {
 			{"missing_final_newline", injectHookSection(noFinalNL, section), noFinalNL + "\n"},
 			{"content_after_end", nonShellPythonPrePush + "\n" + section + "print('after')\n", nonShellPythonPrePush + "print('after')\n"},
 			{"two_disjoint_pairs", nonShellPythonPrePush + "\n" + section + "x = 1\n\n" + section, nonShellPythonPrePush + "x = 1\n"},
+			// Shell code deleted by hand, markers kept: no code is lost.
+			{"code_deleted_markers_kept", nonShellPythonPrePush + "\n" + hookSectionBeginLine() + "\n# This section is managed by beads. Do not remove these markers.\n" + hookSectionEndLine() + "\n", nonShellPythonPrePush},
 			{"node", injectHookSection(node, section), node},
 			{"ruby", injectHookSection(ruby, section), ruby},
 			{"fish", injectHookSection(fish, section), fish},
@@ -960,6 +978,55 @@ func TestInstallHooks_NonShell(t *testing.T) {
 			require.Contains(t, stderr, "removed 1 bd shell section(s) from the preserved pre-push hook")
 			require.Equal(t, before, readNonShellHookForTest(t, src), "the source hook is not modified by preservation")
 		})
+	})
+
+	t.Run("AC4_edited_sections_are_left_alone", func(t *testing.T) {
+		// GH#6348's own workaround ports bd's section to the hook's language
+		// between the kept markers. Only bd's shell code is bd's to remove.
+		begin, end := hookSectionBeginPrefix+" v1.2.2 ---\n", hookSectionEndPrefix+" v1.2.2 ---\n"
+		port := begin + "# This section is managed by beads. Do not remove these markers.\n" +
+			"import subprocess as _sp\n" +
+			"_sp.call([\"bd\", \"hooks\", \"run\", \"pre-push\"] + sys.argv[1:])\n" + end
+		section := generateHookSection("pre-push")
+		addedLine := strings.Replace(section, hookSectionBeginLine()+"\n", hookSectionBeginLine()+"\nprint('mine')\n", 1)
+		const guard = "if command -v bd >/dev/null 2>&1; then\n"
+		afterGuard := strings.Replace(section, guard, guard+"print('mine')\n", 1)
+		beforeFi := strings.Replace(section, "\nfi\n"+hookSectionEndLine(), "\nprint('mine')\nfi\n"+hookSectionEndLine(), 1)
+		require.NotEqual(t, section, afterGuard)
+		require.NotEqual(t, section, beforeFi)
+		cases := []struct{ name, before, edited string }{
+			{"python_port", nonShellPythonPrePush + "\n", port},
+			{"line_added_inside_bd_section", nonShellPythonPrePush + "\n", addedLine},
+			{"line_added_after_the_guard", nonShellPythonPrePush + "\n", afterGuard},
+			{"line_added_before_fi", nonShellPythonPrePush + "\n", beforeFi},
+			// A bd section beside a port is not removed either: bd keeps the
+			// whole hook rather than guess which part is whose.
+			{"bd_section_beside_a_port", nonShellPythonPrePush + "\n" + section, port},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				content := tc.before + tc.edited
+				first := strings.Count(tc.before, "\n") + 1
+				lines := fmt.Sprintf("lines %d-%d", first, first+strings.Count(tc.edited, "\n")-1)
+
+				repoDir := setupGuardTestRepo(t)
+				hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+				writeNonShellHookForTest(t, hookPath, content)
+
+				stderr := installHooksCapturingStderr(t, false)
+				require.Equal(t, content, readNonShellHookForTest(t, hookPath), "the edited hook must not be rewritten")
+				_, err := os.Lstat(hookPath + ".backup")
+				require.True(t, os.IsNotExist(err), "no backup for an untouched hook: %v", err)
+				for _, want := range []string{"pre-push", hookPath, "python3", lines, "is not the shell code bd writes"} {
+					require.Contains(t, stderr, want, "the warning must name %q", want)
+				}
+				require.NotContains(t, stderr, "removed")
+
+				got, keep := shouldPreserveHookContent(content, false)
+				require.True(t, keep, "preservation keeps the hook")
+				require.Equal(t, content, got, "preservation copies it unchanged")
+			})
+		}
 	})
 
 	t.Run("AC5_shell_and_plain_text_hooks_keep_injection", func(t *testing.T) {

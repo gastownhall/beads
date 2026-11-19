@@ -159,7 +159,7 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 			// its suggested action explains what to inspect (GH#6348).
 			execPlan.BlockingErrors = append(execPlan.BlockingErrors, formatHookMigrationBlockingError(hook))
 			continue
-		case doctor.HookStateNonShellCustom:
+		case doctor.HookStateNonShellCustom, doctor.HookStateNonShellEdited:
 			execPlan.NoopHooks = append(execPlan.NoopHooks, hook.Name)
 			continue
 		case doctor.HookStateNonShellRepair:
@@ -207,35 +207,27 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 			continue
 		}
 
-		// A non-shell sidecar becomes the active hook as it is (less any
-		// complete bd sections), without bd's shell section. Both sidecars
-		// stay in place: the restored script is the user's, and a retired
-		// sidecar would hide where it came from (GH#6348).
-		if hook.SourceInterpreter != "" && sourceKind != hookMigrationWriteFromTemplate {
-			if hook.MarkerProblem != "" {
-				execPlan.BlockingErrors = append(execPlan.BlockingErrors, formatHookMigrationBlockingError(hook))
-				continue
-			}
-			execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
-				HookName:    hook.Name,
-				HookPath:    hook.HookPath,
-				State:       hook.State,
-				SourceKind:  sourceKind,
-				SourcePath:  sourcePath,
-				NonShell:    true,
-				Interpreter: hook.SourceInterpreter,
-			})
-			continue
-		}
-
-		execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
+		write := hookMigrationWriteOp{
 			HookName:   hook.Name,
 			HookPath:   hook.HookPath,
 			State:      hook.State,
 			SourceKind: sourceKind,
 			SourcePath: sourcePath,
-		})
+		}
+		// A non-shell sidecar becomes the active hook as it is (less any
+		// complete bd sections), without bd's shell section (GH#6348).
+		if hook.SourceInterpreter != "" && sourceKind != hookMigrationWriteFromTemplate {
+			if hook.MarkerProblem != "" {
+				execPlan.BlockingErrors = append(execPlan.BlockingErrors, formatHookMigrationBlockingError(hook))
+				continue
+			}
+			write.NonShell, write.Interpreter = true, hook.SourceInterpreter
+		}
+		execPlan.WriteOps = append(execPlan.WriteOps, write)
 
+		// The sidecars are retired on both paths. Left in place, a restored
+		// .old would run twice: as the active hook, and again when that hook
+		// calls bd hooks run, which chains any non-bd .old (runChainedHook).
 		if hook.HasOldSidecar {
 			execPlan.RetireOps = append(execPlan.RetireOps, hookMigrationRetireOp{
 				HookName:        hook.Name,
@@ -410,7 +402,8 @@ func renderNonShellHookContent(op hookMigrationWriteOp, content string) ([]byte,
 	if !hookContentHasMarkers(content) {
 		return []byte(content), nil
 	}
-	repaired, _, problem := removeNonShellHookSections(content)
+	// A section whose body is not bd's shell code is the user's: it stays.
+	repaired, _, problem, _ := removeNonShellHookSections(content)
 	if problem != "" {
 		return nil, fmt.Errorf("%s: bd markers need manual inspection (%s); not rewritten", op.SourcePath, problem)
 	}
