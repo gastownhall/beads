@@ -1474,3 +1474,99 @@ func TestExpandStepPreservesTemplateFields(t *testing.T) {
 		t.Errorf("Priority = %v, want 2", got.Priority)
 	}
 }
+
+// TestExpandedStepConditionIsVerbatim: a template step's condition survives
+// every expansion entry point untouched (#6433). It is a {{var}} expression
+// the cook/pour-time filter evaluates against the enclosing formula's
+// vars, and expansion-time single-brace substitution would corrupt its
+// braces.
+func TestExpandedStepConditionIsVerbatim(t *testing.T) {
+	tmpDir := t.TempDir()
+	conditionExpansion := `{
+		"formula": "cond-expansion",
+		"type": "expansion",
+		"version": 1,
+		"vars": {"flag": {"default": "unset"}, "target": {"default": "prod"}},
+		"template": [
+			{"id": "{target}.plain", "title": "Always", "condition": "{{flag}}"},
+			{"id": "{target}.negated", "title": "Negated", "condition": "!{{flag}}"},
+			{"id": "{target}.targeted", "title": "Target", "condition": "{{target}} == prod"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "cond-expansion.formula.json"), []byte(conditionExpansion), 0644); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(tmpDir)
+
+	// Both a single-brace {flag} and {target} expansion var and a
+	// double-brace condition on the same name: the expansion vars would
+	// rewrite the inside of {{flag}} if the condition were substituted.
+	conflicting := map[string]string{"flag": "CORRUPT", "target": "CORRUPT"}
+
+	conditions := func(steps []*Step) []string {
+		var out []string
+		for _, s := range steps {
+			out = append(out, s.Condition)
+		}
+		return out
+	}
+
+	// All materialization paths substitute expansion vars; none of them may
+	// touch the condition.
+	expanded := map[string][]*Step{}
+
+	composeResult, err := ApplyExpansions([]*Step{{ID: "implement", Title: "Implement"}}, &ComposeRules{Expand: []*ExpandRule{{Target: "implement", With: "cond-expansion", Vars: conflicting}}}, parser)
+	if err != nil {
+		t.Fatalf("ApplyExpansions failed: %v", err)
+	}
+	expanded["compose expand"] = composeResult
+
+	mapResult, err := ApplyExpansions([]*Step{{ID: "implement.api", Title: "API"}}, &ComposeRules{Map: []*MapRule{{Select: "implement.*", With: "cond-expansion", Vars: conflicting}}}, parser)
+	if err != nil {
+		t.Fatalf("ApplyExpansions map failed: %v", err)
+	}
+	expanded["compose map"] = mapResult
+
+	inlineResult, err := ApplyInlineExpansions([]*Step{{ID: "work", Title: "Work", Expand: "cond-expansion", ExpandVars: conflicting}}, parser)
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansions failed: %v", err)
+	}
+	expanded["inline expand"] = inlineResult
+
+	f := &Formula{Formula: "cond-expansion", Type: TypeExpansion,
+		Template: []*Step{{ID: "{target}.plain", Title: "Always", Condition: "{{flag}}"}}}
+	if err := MaterializeExpansion(f, "main", conflicting); err != nil {
+		t.Fatalf("MaterializeExpansion failed: %v", err)
+	}
+	expanded["standalone"] = f.Steps
+
+	want := map[string][]string{
+		"compose expand": {"{{flag}}", "!{{flag}}", "{{target}} == prod"},
+		"compose map":    {"{{flag}}", "!{{flag}}", "{{target}} == prod"},
+		"inline expand":  {"{{flag}}", "!{{flag}}", "{{target}} == prod"},
+		"standalone":    {"{{flag}}"},
+	}
+	for path, steps := range expanded {
+		if got := conditions(steps); !slices.Equal(got, want[path]) {
+			t.Errorf("%s: conditions = %v, want %v", path, got, want[path])
+		}
+	}
+
+	// The preserved conditions evaluate against the ENCLOSING formula's
+	// vars, not the expansion's own bindings.
+	kept, err := FilterStepsByCondition(composeResult, map[string]string{"flag": "true", "target": "dev"})
+	if err != nil {
+		t.Fatalf("FilterStepsByCondition failed: %v", err)
+	}
+	if got := conditions(kept); !slices.Equal(got, []string{"{{flag}}"}) {
+		t.Errorf("flag=true kept %v, want only the {{flag}} step", got)
+	}
+
+	kept, err = FilterStepsByCondition(composeResult, map[string]string{"flag": "false", "target": "prod"})
+	if err != nil {
+		t.Fatalf("FilterStepsByCondition failed: %v", err)
+	}
+	if got := conditions(kept); !slices.Equal(got, []string{"!{{flag}}", "{{target}} == prod"}) {
+		t.Errorf("flag=false, target=prod kept %v, want the negated and targeted steps", got)
+	}
+}

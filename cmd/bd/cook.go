@@ -853,8 +853,11 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 	// Handle standalone expansion formulas (bd-qzb).
 	// Expansion formulas store content in Template, not Steps. Materialize
 	// the template into Steps using a synthetic "main" target so the normal
-	// cooking pipeline can process them.
+	// cooking pipeline can process them. MaterializeExpansion skips a
+	// formula that already has Steps, including pre-existing steps the
+	// filter above kept.
 	if resolved.Type == formula.TypeExpansion && len(resolved.Template) > 0 {
+		materializes := len(resolved.Steps) == 0
 		expansionVars := make(map[string]string)
 		for name, def := range resolved.Vars {
 			if def != nil && def.Default != nil {
@@ -866,8 +869,25 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 				expansionVars[k] = v
 			}
 		}
-		if err := formula.MaterializeExpansion(resolved, expansionTarget, expansionVars); err != nil {
-			return nil, fmt.Errorf("standalone expansion %q: %w", formulaName, err)
+		if materializes {
+			if err := formula.MaterializeExpansion(resolved, expansionTarget, expansionVars); err != nil {
+				return nil, fmt.Errorf("standalone expansion %q: %w", formulaName, err)
+			}
+			// The materialized steps never met the var scan or the condition
+			// filter above - both ran before the template existed as steps -
+			// so run both on them now, names first: a condition or handlebar
+			// that lives only in a template step the filter is about to drop
+			// must still count as consumable (GH#6433). Compose and inline
+			// expansions happen earlier in the pipeline and already reach the
+			// filter above.
+			formulaVarNames = append(formulaVarNames, formulaVarRefs(resolved.Steps)...)
+			if conditionVars != nil {
+				filteredSteps, err := formula.FilterStepsByCondition(resolved.Steps, expansionVars)
+				if err != nil {
+					return nil, fmt.Errorf("filtering materialized steps by condition: %w", err)
+				}
+				resolved.Steps = filteredSteps
+			}
 		}
 	}
 

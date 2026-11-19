@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // has_spike appears ONLY in a step condition: it is not declared in [vars] and
@@ -322,6 +324,256 @@ func TestCookedSubgraphAcceptsAVarAStandaloneExpansionTemplateConsumes(t *testin
 		}
 		if !strings.Contains(err.Error(), "available: component") {
 			t.Errorf("error does not offer the template's placeholder among the available names: %v", err)
+		}
+	})
+}
+
+// gateExpandingPour is a standalone expansion formula whose template steps
+// carry the fields the expand path used to drop (#6433): a timer gate, a
+// notes/metadata pair, a fanout collector with an explicit waits_for, and an
+// optional step behind an undeclared condition-only flag whose title holds a
+// double-brace content var.
+const gateExpandingPourFormula = `formula = "expansion-gate-pour"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "{target}.timed"
+title = "Wait for the timer"
+type = "task"
+notes = "Notes for {target}"
+metadata = { run = { channel = "{channel}" } }
+
+[template.gate]
+type = "timer"
+timeout = "1h"
+
+[[template]]
+id = "{target}.spawn"
+title = "Spawn follow-ups"
+type = "task"
+
+[[template]]
+id = "{target}.collect"
+title = "Collect results"
+type = "task"
+needs = ["{target}.spawn"]
+waits_for = "children-of({target}.spawn)"
+
+[[template]]
+id = "{target}.optional"
+title = "Only when {{flag}} is set ({{area}})"
+type = "task"
+condition = "{{flag}}"
+`
+
+// expansionDefaultsPourFormula filters a materialized step with a DECLARED
+// var's default, not a supplied value.
+const expansionDefaultsPourFormula = `formula = "expansion-defaults-pour"
+version = 1
+type = "expansion"
+
+[vars.deploy]
+default = "false"
+
+[[template]]
+id = "{target}.build"
+title = "Build"
+type = "task"
+
+[[template]]
+id = "{target}.deploy"
+title = "Deploy"
+type = "task"
+needs = ["{target}.build"]
+condition = "{{deploy}}"
+`
+
+// expansionAllConditionalPourFormula's every step is behind a condition, so
+// a falsey pour filters them all out.
+const expansionAllConditionalPourFormula = `formula = "expansion-all-conditional-pour"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "{target}.one"
+title = "One"
+type = "task"
+condition = "{{off}}"
+
+[[template]]
+id = "{target}.two"
+title = "Two"
+type = "task"
+needs = ["{target}.one"]
+condition = "{{off}}"
+`
+
+// expansionPreexistingPourFormula has Steps AND a Template: the template
+// materializes only when the condition filter empties the steps.
+const expansionPreexistingPourFormula = `formula = "expansion-preexisting-pour"
+version = 1
+type = "expansion"
+
+[[steps]]
+id = "design"
+title = "Design"
+type = "task"
+condition = "{{build}}"
+
+[[template]]
+id = "{target}.later"
+title = "Later"
+type = "task"
+`
+
+// TestPourStandaloneExpansionKeepsTemplateGatesAndConditions: materializing
+// a standalone expansion formula ran AFTER the condition filter and the var
+// scan, so a template step's gate, waits_for edge and content reached the
+// cook, but its condition was never evaluated and a condition-only var was
+// rejected as unknown (#6433). The materialized steps now get both passes.
+func TestPourStandaloneExpansionKeepsTemplateGatesAndConditions(t *testing.T) {
+	searchPaths := []string{writePipelineFormula(t, "expansion-gate-pour", gateExpandingPourFormula)}
+
+	issue := func(subgraph *TemplateSubgraph, id string) *types.Issue {
+		t.Helper()
+		for _, i := range subgraph.Issues {
+			if i.ID == id {
+				return i
+			}
+		}
+		return nil
+	}
+	hasDep := func(subgraph *TemplateSubgraph, issueID, dependsOnID string, depType types.DependencyType) bool {
+		t.Helper()
+		for _, d := range subgraph.Dependencies {
+			if d.IssueID == issueID && d.DependsOnID == dependsOnID && d.Type == depType {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, flag := range []string{"true", "false"} {
+		t.Run("flag_"+flag, func(t *testing.T) {
+			vars := map[string]string{"flag": flag, "area": "parser", "channel": "api"}
+			subgraph, err := resolveAndCookFormulaWithVars("expansion-gate-pour", searchPaths, vars)
+			if err != nil {
+				t.Fatalf("cook: %v", err)
+			}
+
+			// The timer gate survived into its own issue and blocks its step.
+			gate := issue(subgraph, "expansion-gate-pour.gate-main.timed")
+			if gate == nil {
+				t.Fatal("the template step's gate never cooked into a gate issue")
+			}
+			if gate.AwaitType != "timer" {
+				t.Errorf("gate AwaitType = %q, want timer", gate.AwaitType)
+			}
+			if !hasDep(subgraph, "expansion-gate-pour.main.timed", "expansion-gate-pour.gate-main.timed", types.DepBlocks) {
+				t.Error("no blocks edge from the gated step onto its gate issue")
+			}
+
+			// The waits_for collector edge survived, with the {target} in the
+			// spawner reference resolved.
+			if !hasDep(subgraph, "expansion-gate-pour.main.collect", "expansion-gate-pour.main.spawn", types.DepWaitsFor) {
+				t.Error("no waits-for edge from the collector onto the spawner")
+			}
+
+			// Notes and metadata carried through, with the expansion's own
+			// placeholders substituted.
+			timed := issue(subgraph, "expansion-gate-pour.main.timed")
+			if timed == nil {
+				t.Fatal("main.timed never cooked")
+			}
+			if timed.Notes != "Notes for main" {
+				t.Errorf("timed Notes = %q, want %q", timed.Notes, "Notes for main")
+			}
+			if !strings.Contains(string(timed.Metadata), `"channel":"api"`) {
+				t.Errorf("timed Metadata = %s, want the substituted channel value", timed.Metadata)
+			}
+
+			// The optional step exists exactly while the condition holds.
+			optional := issue(subgraph, "expansion-gate-pour.main.optional")
+			if (optional != nil) != (flag == "true") {
+				t.Errorf("flag=%s: optional step present = %v, want %v", flag, optional != nil, flag == "true")
+			}
+
+			// Both the condition-only flag and the content var a dropped
+			// step carries stay consumable, whichever way the condition
+			// went.
+			if err := checkPourVars(subgraph, nil, applyVariableDefaults(vars, subgraph)); err != nil {
+				t.Errorf("pour rejected vars of a template step the condition removed (flag=%s): %v", flag, err)
+			}
+		})
+	}
+
+	t.Run("nil_condition_vars_skips_the_filter", func(t *testing.T) {
+		subgraph, err := resolveAndCookFormulaWithVars("expansion-gate-pour", searchPaths, nil)
+		if err != nil {
+			t.Fatalf("cook: %v", err)
+		}
+		if issue(subgraph, "expansion-gate-pour.main.optional") == nil {
+			t.Error("nil conditionVars dropped the optional step instead of skipping the filter")
+		}
+		if issue(subgraph, "expansion-gate-pour.gate-main.timed") == nil {
+			t.Error("nil conditionVars lost the gate issue")
+		}
+	})
+
+	t.Run("declared_default_filters_without_supplied_vars", func(t *testing.T) {
+		paths := []string{writePipelineFormula(t, "expansion-defaults-pour", expansionDefaultsPourFormula)}
+		subgraph, err := resolveAndCookFormulaWithVars("expansion-defaults-pour", paths, map[string]string{})
+		if err != nil {
+			t.Fatalf("cook: %v", err)
+		}
+		if issue(subgraph, "expansion-defaults-pour.main.deploy") != nil {
+			t.Error("empty supplied vars left the deploy step in despite default=false")
+		}
+		if issue(subgraph, "expansion-defaults-pour.main.build") == nil {
+			t.Error("the unconditional build step went missing")
+		}
+	})
+
+	t.Run("filtering_every_step_materializes_nothing_left", func(t *testing.T) {
+		paths := []string{writePipelineFormula(t, "expansion-all-conditional-pour", expansionAllConditionalPourFormula)}
+		vars := map[string]string{"off": "false"}
+		subgraph, err := resolveAndCookFormulaWithVars("expansion-all-conditional-pour", paths, vars)
+		if err != nil {
+			t.Fatalf("cook: %v", err)
+		}
+		for _, id := range []string{"expansion-all-conditional-pour.main.one", "expansion-all-conditional-pour.main.two"} {
+			if issue(subgraph, id) != nil {
+				t.Errorf("a falsey condition left %s in the subgraph", id)
+			}
+		}
+		if err := checkPourVars(subgraph, nil, applyVariableDefaults(vars, subgraph)); err != nil {
+			t.Errorf("pour rejected the condition var after filtering every step out: %v", err)
+		}
+	})
+
+	t.Run("preexisting_steps_are_not_filtered_twice", func(t *testing.T) {
+		paths := []string{writePipelineFormula(t, "expansion-preexisting-pour", expansionPreexistingPourFormula)}
+
+		subgraph, err := resolveAndCookFormulaWithVars("expansion-preexisting-pour", paths, map[string]string{"build": "true"})
+		if err != nil {
+			t.Fatalf("cook: %v", err)
+		}
+		if issue(subgraph, "expansion-preexisting-pour.design") == nil {
+			t.Error("the surviving pre-existing step went missing")
+		}
+		if issue(subgraph, "expansion-preexisting-pour.main.later") != nil {
+			t.Error("the template materialized although pre-existing steps survived")
+		}
+
+		// All pre-existing steps filtered out: the template materializes
+		// after all, and its steps are the ones the pour sees.
+		subgraph, err = resolveAndCookFormulaWithVars("expansion-preexisting-pour", paths, map[string]string{"build": "false"})
+		if err != nil {
+			t.Fatalf("cook: %v", err)
+		}
+		if issue(subgraph, "expansion-preexisting-pour.main.later") == nil {
+			t.Error("the template did not materialize after the filter emptied the steps")
 		}
 	})
 }
