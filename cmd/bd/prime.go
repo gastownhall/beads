@@ -66,13 +66,16 @@ func primeStoreTimeout() time.Duration {
 
 // resolveGlobalPrimePath returns the path to ~/.config/beads/PRIME.md if it
 // exists. configDirOverride is used for testing; pass "" for production.
+// The global dir resolves through config.UserConfigDir() (GH#8113), so a
+// macOS launch never reads ~/Library/Application Support — the historical
+// location only the SessionStart hook ever probed.
 func resolveGlobalPrimePath(configDirOverride string) string {
 	var configDir string
 	if configDirOverride != "" {
 		configDir = configDirOverride
 	} else {
 		var err error
-		configDir, err = os.UserConfigDir()
+		configDir, err = config.UserConfigDir()
 		if err != nil {
 			return ""
 		}
@@ -121,8 +124,7 @@ Config options:
 	      (honors $BEADS_DIR, which -C overrides; a redirected .beads is
 	      followed);
 	  (3) the global PRIME.md in bd's user config dir:
-	      ~/.config/beads/ on Linux ($XDG_CONFIG_HOME/beads/ if set),
-	      ~/Library/Application Support/beads/ on macOS,
+	      ~/.config/beads/ on Linux and macOS ($XDG_CONFIG_HOME/beads/ if set),
 	      %AppData%\beads\ on Windows.
 	- Persistent memories (from bd remember) are still appended so memory
 	  injection keeps working under a custom template.

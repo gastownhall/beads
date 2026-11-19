@@ -913,17 +913,62 @@ func TestPrimeHelpMentionsAllFallbackTiers(t *testing.T) {
 		}
 	}
 
-	// Tier (3) resolves via os.UserConfigDir(), whose location differs per
-	// platform. The help text is static, so it must spell out every OS's
-	// path rather than pinning one platform's spelling as if it were
-	// universal.
+	// Tier (3) resolves via config.UserConfigDir() (GH#8113): the XDG rule on
+	// Linux and macOS, %AppData% on Windows. The help text is static, so it
+	// must spell out each OS's path — and, per GH#8113, must no longer name
+	// ~/Library/Application Support, which bd never reads on macOS.
 	for _, configDirPath := range []string{
-		"~/.config/beads/",
-		"~/Library/Application Support/beads/",
+		"~/.config/beads/ on Linux and macOS",
 		`%AppData%\beads\`,
 	} {
 		if !strings.Contains(primeCmd.Long, configDirPath) {
 			t.Errorf("prime help tier (3) missing user config dir path %q", configDirPath)
 		}
+	}
+	if strings.Contains(primeCmd.Long, "Application Support") {
+		t.Errorf("prime help tier (3) still names ~/Library/Application Support; bd never reads it on macOS (GH#8113)")
+	}
+}
+
+// TestResolveGlobalPrimePathDarwinNeverReadsApplicationSupport pins the
+// GH#8113 contract for the SessionStart hook's global PRIME.md lookup: with
+// the platform seam simulating macOS, a PRIME.md planted in the historical
+// ~/Library/Application Support/beads/ location is never resolved, and the
+// documented ~/.config/beads/ tier is.
+func TestResolveGlobalPrimePathDarwinNeverReadsApplicationSupport(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	nativeDir := filepath.Join(home, "Library", "Application Support")
+	if err := os.MkdirAll(filepath.Join(nativeDir, "beads"), 0o755); err != nil {
+		t.Fatalf("mkdir application support stand-in: %v", err)
+	}
+	legacy := filepath.Join(nativeDir, "beads", "PRIME.md")
+	if err := os.WriteFile(legacy, []byte("# legacy\n"), 0o600); err != nil {
+		t.Fatalf("plant legacy PRIME.md: %v", err)
+	}
+
+	restore := config.SetUserConfigPlatformForTest("darwin", func() (string, error) {
+		return nativeDir, nil
+	})
+	t.Cleanup(restore)
+
+	// Only the Application Support file exists: the global lookup must come
+	// up empty, not fall back to the location bd no longer reads.
+	if got := resolveGlobalPrimePath(""); got != "" {
+		t.Errorf("resolveGlobalPrimePath() = %q, want \"\"; the lookup must not read ~/Library/Application Support on macOS (GH#8113)", got)
+	}
+
+	// The documented tier is still honored on the same simulated host.
+	documented := filepath.Join(home, ".config", "beads", "PRIME.md")
+	if err := os.MkdirAll(filepath.Dir(documented), 0o755); err != nil {
+		t.Fatalf("mkdir documented tier: %v", err)
+	}
+	if err := os.WriteFile(documented, []byte("# documented\n"), 0o600); err != nil {
+		t.Fatalf("plant documented PRIME.md: %v", err)
+	}
+	if got := resolveGlobalPrimePath(""); got != documented {
+		t.Errorf("resolveGlobalPrimePath() = %q, want the documented tier %q", got, documented)
 	}
 }
