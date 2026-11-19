@@ -213,8 +213,15 @@ func TestPersistDependenciesClassifiesBareCrossPrefixTargetAsExternal(t *testing
 	}
 	var skipped []string
 
-	// A bare target with a different issue prefix is external. In particular,
-	// persistence must not probe either local target table before this insert.
+	// A bare target with a different issue prefix is external (GH#6066 keeps
+	// this for absent targets): classification probes wisps and issues for the
+	// cross-prefix id, both miss, and the edge lands in depends_on_external.
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("mkt-456").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+		WithArgs("mkt-456").
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec("INSERT INTO dependencies \\(id, issue_id, depends_on_external").
 		WithArgs(depid.New("sym-3su", "mkt-456"), "sym-3su", "mkt-456", types.DepRelated, "tester", sqlmock.AnyArg(), "{}", "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -292,6 +299,11 @@ func TestPersistDependenciesSkipsValidationErrorsWhenConfigured(t *testing.T) {
 	}
 	var skipped []string
 
+	// The pending-source routing probe and the classify probe each read wisps
+	// for the self-referenced id (GH#6066 presence classification).
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("source").
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
 		WithArgs("source").
 		WillReturnError(sql.ErrNoRows)
@@ -386,6 +398,17 @@ func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T
 		}},
 	}
 
+	// Expected statement sequence (GH#6066: classify probes wisps per target):
+	// the pending-source routing probes (child twice, parent once), then the
+	// parent-child phase — each edge classifies (wisps probe), checks the
+	// target (issues probe), runs the cycle CTE, inserts and coordinates —
+	// then the blocks phase: classify + target check for bd-grand, and the
+	// ancestors CTE that refuses the planned ancestor as a blocker.
+	for _, id := range []string{"bd-child", "bd-child", "bd-parent"} {
+		mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+			WithArgs(id).
+			WillReturnError(sql.ErrNoRows)
+	}
 	for _, pair := range [][2]string{{"bd-child", "bd-parent"}, {"bd-parent", "bd-grand"}} {
 		mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
 			WithArgs(pair[1]).
@@ -440,8 +463,15 @@ func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T)
 		}},
 	}
 
-	// No target or ancestors query: target existence and hierarchy cannot be
-	// validated locally across rig prefixes.
+	// An ABSENT cross-prefix target stays external (GH#6066): classification
+	// probes wisps and issues, both miss, and no target-existence, hierarchy
+	// or ancestors query runs for the external edge.
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("bb-target").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+		WithArgs("bb-target").
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("WITH RECURSIVE reachable").
 		WithArgs("bb-target", "aa-source").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
