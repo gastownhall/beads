@@ -1191,4 +1191,31 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			t.Errorf("reclaimed issue = %s/%q, want open/unassigned", ls.status, ls.assignee.String)
 		}
 	})
+
+	// bob's first heartbeat after the handoff takes the normal path: it
+	// refreshes the lease the claim armed for him. Had the claim left no lease
+	// row that bob holds, the heartbeat would re-arm one instead (Rearmed), the
+	// slow path of a hand-doled claim. Carried from quad341's #5349, whose
+	// sqlmock TestHeartbeatAfterClaimAssigneeOverrideUsesNormalPath pinned the
+	// same contract.
+	t.Run("final holder's heartbeat refreshes the armed lease", func(t *testing.T) {
+		seedOpen(t, "lease-ovr-heartbeat")
+		claimFor(t, "lease-ovr-heartbeat", "alice", "bob")
+
+		heartbeater, err := store.Heartbeater()
+		if err != nil {
+			t.Fatalf("Heartbeater: %v", err)
+		}
+		result, err := heartbeater.Heartbeat(ctx, publicops.HeartbeatRequest{Actor: "bob", IssueID: "lease-ovr-heartbeat"})
+		if err != nil {
+			t.Fatalf("bob's heartbeat: %v", err)
+		}
+		if result.Rearmed {
+			t.Errorf("bob's heartbeat re-armed the lease, want a refresh of the lease the claim armed for him")
+		}
+		lease := readClaimOverrideLease(t, ctx, store, "lease-ovr-heartbeat")
+		if lease.rows != 1 || lease.holder != "bob" {
+			t.Errorf("lease after the heartbeat = %+v, want exactly one row held by bob", lease)
+		}
+	})
 }

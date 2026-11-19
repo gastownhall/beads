@@ -313,9 +313,14 @@ func LeaseOutcomeOnUpdate(oldIssue *types.Issue, updates map[string]interface{},
 // A holder that is a claim.pools alias gets no lease: the claim leg's row is
 // deleted and the issue stays leaseless. Nobody heartbeats as a pool, so its
 // lease could only expire and let bd reclaim un-assign live pool work (the
-// reclaim bait GH#4716 forbids), while pool members can still take the issue
-// through the claim CAS. Membership is exact-string, as in the claim CAS
-// (ClaimIssueInTx): an alias is a literal config value, never respelled.
+// reclaim bait GH#4716 forbids). The issue stays in_progress under the alias
+// with no lease, as it did before this arm existed, so neither recovery path
+// reaches it: the claim CAS takes only claimable source statuses, never
+// in_progress, so a pool member cannot claim it, and bd reclaim drives off
+// lease rows. It moves only when someone reassigns it (bd assign or bd update
+// --assignee, which may move a pool-held claim without --force) or changes its
+// status. Membership is exact-string, as in the claim CAS (ClaimIssueInTx): an
+// alias is a literal config value, never respelled.
 func ApplyLeaseOutcomeInTx(ctx context.Context, tx DBTX, id string, outcome LeaseOutcome, holder string, now time.Time) error {
 	switch outcome {
 	case LeaseClear:
