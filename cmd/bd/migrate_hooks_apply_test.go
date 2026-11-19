@@ -495,4 +495,73 @@ func TestApplyHookMigration_NonShell(t *testing.T) {
 			t.Fatal("hook must be unchanged")
 		}
 	})
+
+	t.Run("AC7_non_shell_sidecar_restored_without_injection", func(t *testing.T) {
+		repaired := injectHookSection(nonShellMigrationPython, section)
+		cases := []struct {
+			name         string
+			active       string // "" = missing hook
+			old, backup  string
+			wantSource   string
+			wantContents string
+		}{
+			{name: "legacy_shim_with_old", active: nonShellMigrationLegacyShim, old: nonShellMigrationPython, wantSource: ".old", wantContents: nonShellMigrationPython},
+			{name: "missing_hook_with_backup", backup: nonShellMigrationPython, wantSource: ".backup", wantContents: nonShellMigrationPython},
+			{name: "both_sidecars_old_wins", active: nonShellMigrationLegacyShim, old: nonShellMigrationPython, backup: "#!/usr/bin/env python3\nprint('backup')\n", wantSource: ".old", wantContents: nonShellMigrationPython},
+			{name: "sidecar_with_paired_section", active: nonShellMigrationLegacyShim, old: repaired, wantSource: ".old", wantContents: nonShellMigrationPython},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				repoDir, hooksDir := setupHookMigrationRepo(t)
+				hookPath := filepath.Join(hooksDir, "pre-push")
+				if tc.active != "" {
+					writeHookMigrationFile(t, hookPath, tc.active)
+				}
+				if tc.old != "" {
+					writeHookMigrationFile(t, hookPath+".old", tc.old)
+				}
+				if tc.backup != "" {
+					writeHookMigrationFile(t, hookPath+".backup", tc.backup)
+				}
+
+				plan, err := doctor.PlanHookMigration(repoDir)
+				if err != nil {
+					t.Fatalf("PlanHookMigration failed: %v", err)
+				}
+				dryRun := buildHookMigrationExecutionPlan(plan)
+				var restore *hookMigrationOutputOperation
+				for _, op := range dryRun.outputOperations() {
+					if op.HookName != "pre-push" {
+						continue
+					}
+					if op.Action == "retire_sidecar" {
+						t.Fatalf("no sidecar may be retired for a non-shell restore: %+v", op)
+					}
+					op := op
+					restore = &op
+				}
+				if restore == nil || restore.Action != "restore_hook" || restore.SourcePath != hookPath+tc.wantSource {
+					t.Fatalf("expected restore_hook from %s, got %+v", tc.wantSource, restore)
+				}
+				if !strings.Contains(strings.Join(formatHookMigrationOperations(dryRun), "\n"), "without bd's shell section") {
+					t.Fatalf("dry run must describe the restore: %v", formatHookMigrationOperations(dryRun))
+				}
+
+				_, _, summary := planAndApplyHookMigrationForTest(t, repoDir)
+				if got := mustReadHookMigrationFile(t, hookPath); got != tc.wantContents {
+					t.Fatalf("restored hook mismatch, got:\n%q", got)
+				}
+				if tc.old != "" && mustReadHookMigrationFile(t, hookPath+".old") != tc.old {
+					t.Fatal(".old must be kept unchanged")
+				}
+				if tc.backup != "" && mustReadHookMigrationFile(t, hookPath+".backup") != tc.backup {
+					t.Fatal(".backup must be kept unchanged")
+				}
+				if !strings.Contains(strings.Join(formatHookMigrationApplySummary(summary), "\n"), "bd integration skipped") {
+					t.Fatalf("summary must report the skipped integration: %+v", summary)
+				}
+				assertHookMigrationConverged(t, repoDir)
+			})
+		}
+	})
 }

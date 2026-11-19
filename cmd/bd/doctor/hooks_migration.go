@@ -42,6 +42,9 @@ type HookMigrationHookPlan struct {
 	// Interpreter names the non-shell interpreter of the active hook, or
 	// "binary content"; empty for shell hooks (GH#6348).
 	Interpreter string `json:"interpreter,omitempty"`
+	// SourceInterpreter names the non-shell interpreter of the sidecar a
+	// legacy or missing hook would be restored from; empty for shell.
+	SourceInterpreter string `json:"source_interpreter,omitempty"`
 }
 
 // Hook migration states for hooks run by a non-shell interpreter (GH#6348).
@@ -133,8 +136,35 @@ func inspectHookMigration(hooksDir, hookName string) HookMigrationHookPlan {
 		return plan
 	}
 
+	if plan.Interpreter == "" && (plan.LegacyBDHook || !plan.Exists) {
+		inspectHookMigrationSource(&plan)
+	}
+
 	classifyHookMigration(&plan)
 	return plan
+}
+
+// inspectHookMigrationSource classifies the sidecar a legacy or missing hook
+// would be restored from, keeping the existing precedence (.old, then
+// .backup). A non-shell sidecar is restored as the active hook without bd's
+// shell section.
+func inspectHookMigrationSource(plan *HookMigrationHookPlan) {
+	var source string
+	switch {
+	case plan.HasOldSidecar:
+		source = plan.HookPath + ".old"
+	case plan.HasBackupSidecar:
+		source = plan.HookPath + ".backup"
+	default:
+		return
+	}
+	content, err := os.ReadFile(source) // #nosec G304 -- sidecar of a known hook name in the git hooks dir
+	if err != nil {
+		return // the apply step reports the read failure
+	}
+	if interp, nonShell := NonShellHookInterpreter(string(content)); nonShell {
+		plan.SourceInterpreter = interp
+	}
 }
 
 func classifyHookMigration(hook *HookMigrationHookPlan) {
@@ -170,6 +200,7 @@ func classifyHookMigration(hook *HookMigrationHookPlan) {
 
 	if hook.LegacyBDHook {
 		hook.NeedsMigration = true
+		defer describeNonShellSource(hook)
 		switch {
 		case hook.HasOldSidecar && hook.HasBackupSidecar:
 			hook.State = "legacy_with_both_sidecars"
@@ -188,6 +219,7 @@ func classifyHookMigration(hook *HookMigrationHookPlan) {
 	}
 
 	if !hook.Exists {
+		defer describeNonShellSource(hook)
 		switch {
 		case hook.HasOldSidecar && hook.HasBackupSidecar:
 			hook.State = "missing_with_both_sidecars"
@@ -215,6 +247,17 @@ func classifyHookMigration(hook *HookMigrationHookPlan) {
 	}
 
 	hook.State = "unmanaged_custom"
+}
+
+// describeNonShellSource rewrites the suggested action of a legacy or missing
+// hook whose selected sidecar is a non-shell script: it is restored as the
+// active hook without bd's shell section, and the sidecars are kept.
+func describeNonShellSource(hook *HookMigrationHookPlan) {
+	if hook.SourceInterpreter == "" || !hook.NeedsMigration {
+		return
+	}
+	hook.SuggestedAction = fmt.Sprintf("Restore the %s script from the sidecar as the active hook without bd's shell section; "+
+		"keep the sidecars; bd integration stays skipped.", hook.SourceInterpreter)
 }
 
 func detectHookMarkerState(content string) string {
