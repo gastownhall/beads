@@ -3715,6 +3715,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file now fails with `bufio.Scanner: token too long`. `bd config set` leaves
   the file as it was. `set-many` stops at that key, but it has already written
   any `config.yaml` keys listed before it, such as a dotted `sync.remote`.
+- **`bd config unset` no longer leaves part of a wrapped value behind, or
+  changes more of `config.yaml` than the key**
+  ([#7684](https://github.com/gastownhall/beads/pull/7684)). An unset comments
+  out the lines that match the key. A value that started on the key's line and
+  wrapped onto the next (a `{...}` or `[...]` collection, a quoted string or a
+  plain value spread over lines, in either spelling) had only its first line
+  commented out: the command succeeded, and the rest of the value stayed
+  behind, to re-read as a key nobody set (`branch: b}` became `sync.branch`),
+  to turn the enclosing section into a string, or to stop the file from
+  parsing. That unset is now refused, and the same value written on one line
+  still unsets. A flat `sync.remote` in a top level written in flow style
+  (`{sync.remote: a, node_id: b}`) used to exit 0 while the value stayed live;
+  it is now refused like any key in a flow-style mapping. Every unset is also
+  checked by its effect before it writes, and refused when the edit would
+  change anything but the key: a duplicate of the key whose value wraps, a
+  wrapped value in a later YAML document, an anchor on the key's line that an
+  alias further down still uses, a value under an anchor that an alias or a
+  merge (`<<: *s`) reads elsewhere, or an edit that would stop bd from reading
+  the file. An unset in a file that nests more than 64 levels deep is refused
+  too, because it costs too much to check. A refused unset leaves the file
+  byte-identical. Unsetting a key that is not set remains a successful no-op,
+  and no longer edits a line inside another value that only looks like the
+  key.
 - **`bd show --as-of` exits 1 when it reads no issue.** A ref the Dolt AS OF
   read does not take (an instant, a versioned-history address), a ref that
   does not exist, or an issue that did not exist at the ref was reported on
