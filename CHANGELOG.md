@@ -1431,6 +1431,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Expansion template steps keep their gates, `waits_for`, conditions,
+  notes, metadata and `on_complete`** (#6433). Expanding a template step
+  (through `compose.expand`, `compose.map`, an inline `expand`, or pouring an
+  expansion formula on its own) silently dropped `gate`, `waits_for`,
+  `condition`, `notes`, `metadata` and `on_complete`, so the gates and
+  fanout edges the template declared were missing from the poured molecule.
+  They are now carried: `notes`, `metadata` string values and `waits_for` get
+  the same `{target}` and `{name}` substitution as the description, and the
+  gate, `on_complete` and condition are kept verbatim. Pouring an expansion
+  formula on its own now also filters its template steps by their
+  conditions and accepts a variable used only in such a condition.
+  `expand`/`expand_vars` on a template step are still cleared (an expanded
+  step is never expanded again). Two cases that were silently dropped are now
+  errors: a `loop` on an expansion template step, and template metadata
+  nested inside 32 or more tables or arrays (`maxMetadataScanDepth`, the
+  `metadata` table itself counting as one).
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

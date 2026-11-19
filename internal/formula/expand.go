@@ -214,6 +214,13 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 	result := make([]*Step, 0, len(template))
 
 	for _, tmpl := range template {
+		// Control flow (ApplyControlFlow) runs before expansions, so a loop
+		// on a template step would never be expanded; refuse it rather than
+		// drop it.
+		if tmpl.Loop != nil {
+			return nil, fmt.Errorf("template step %q: loop is not supported on expansion template steps", tmpl.ID)
+		}
+
 		// Start from a copy of the template step so that every field carries
 		// through by default - a field added to Step later included - and
 		// then rewrite the fields the expansion transforms. Anything that
@@ -265,13 +272,14 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 		}
 		expanded.OnComplete = cloneOnComplete(tmpl.OnComplete)
 
-		// Nested template directives are deliberately not carried: an
-		// expansion template step that itself names an expansion (expand,
-		// expand_vars) is not expanded again, and its loop is not
-		// expanded either, since control flow has already run.
+		// Nested template expansion is deliberately disabled: a template
+		// step's expand/expand_vars are cleared, so an expanded step is
+		// never expanded again. Only the inline-expansion path would act on
+		// them, and the compose and standalone paths never would, so
+		// carrying them would make nested expansion depend on how the
+		// template was reached.
 		expanded.Expand = ""
 		expanded.ExpandVars = nil
-		expanded.Loop = nil
 
 		// Handle children recursively with depth tracking
 		expanded.Children = nil
