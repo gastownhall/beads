@@ -383,7 +383,7 @@ func firstRunNoticeSuppressedByContext(cmd *cobra.Command) bool {
 // quiet / stealth contexts (see firstRunNoticeSuppressedByContext) so it can
 // never corrupt machine-readable output.
 func maybeShowMetricsFirstRunNotice(cmd *cobra.Command) {
-	if !resolveMetricsEnabled() {
+	if metricsConsentUnknownForRun || !resolveMetricsEnabled() {
 		return
 	}
 	// Resolve the "already shown" marker from user-global config only. Reading it

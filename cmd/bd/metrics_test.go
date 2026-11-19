@@ -654,3 +654,33 @@ func TestDarwinUnreadableLegacyConfigFailsClosed(t *testing.T) {
 		t.Fatal("metrics still off after `bd metrics on`")
 	}
 }
+
+// TestDarwinUncreatableUserConfigDirLeavesMetricsOffForTheRun: when bd cannot
+// create ~/.config/bd (here ~/.config is a dangling symlink), it never probes
+// the legacy Application Support config, and since it cannot know whether the
+// user opted out there, metrics stay off for the run with no notice (GH#8113).
+func TestDarwinUncreatableUserConfigDirLeavesMetricsOffForTheRun(t *testing.T) {
+	home, nativeCalls := darwinMetricsRunFixture(t, "metrics:\n  disabled: true\n")
+	missing := filepath.Join(home, "dotfiles", "config") // never created
+	if err := os.Symlink(missing, filepath.Join(home, ".config")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	stats := 0
+	t.Cleanup(config.SetLegacyUserConfigStatForTest(func(name string) (fs.FileInfo, error) {
+		stats++
+		return os.Stat(name)
+	}))
+
+	for run := 1; run <= 2; run++ {
+		enabled, stderr := runMetricsLaunch(t)
+		if enabled || strings.Contains(stderr, "Thanks for using bd") {
+			t.Fatalf("run %d: enabled=%v stderr=%q; want metrics off and no notice", run, enabled, stderr)
+		}
+	}
+	if *nativeCalls != 0 || stats != 0 {
+		t.Fatalf("Application Support probed without a user config to create: native=%d stat=%d", *nativeCalls, stats)
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("symlink target was created: %v", err)
+	}
+}

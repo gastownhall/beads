@@ -15,6 +15,13 @@ import (
 // path once instead of retrying the create, so a dangling symlink cannot loop.
 var ErrUserConfigExists = errors.New("user config.yaml already exists")
 
+// ErrUserConfigConsentUnknown reports that on darwin/ios bd could not create
+// the user config at all (its directory or a staging file in it could not be
+// made), so it never looked at the legacy Application Support config and
+// cannot know whether the user opted out of metrics there. Callers treat
+// metrics as off for the run and show no first-run notice.
+var ErrUserConfigConsentUnknown = errors.New("user config.yaml cannot be created, so metrics consent is unknown")
+
 // statLegacyUserConfig is os.Stat for the legacy macOS config; a seam so tests
 // can stand in the permission error a macOS privacy (TCC) denial returns.
 var statLegacyUserConfig = os.Stat
@@ -50,10 +57,14 @@ const legacyUserConfigReadCap = 64 << 10
 // used and never names a legacy path.
 func CreateUserConfigYaml(path string, seed []byte) error {
 	dir := filepath.Dir(path)
+	darwin := isDarwinUserConfigPlatform()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		if darwin {
+			return fmt.Errorf("mkdir %s: %w (%w)", dir, err, ErrUserConfigConsentUnknown)
+		}
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
-	if !isDarwinUserConfigPlatform() {
+	if !darwin {
 		return createExclusive(path, seed)
 	}
 
@@ -61,7 +72,7 @@ func CreateUserConfigYaml(path string, seed []byte) error {
 	// turns into a probe of the legacy path on every launch.
 	tmp, err := os.CreateTemp(dir, ".config.yaml.*")
 	if err != nil {
-		return fmt.Errorf("create %s: %w", path, err)
+		return fmt.Errorf("create %s: %w (%w)", path, err, ErrUserConfigConsentUnknown)
 	}
 	tmpPath := tmp.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
