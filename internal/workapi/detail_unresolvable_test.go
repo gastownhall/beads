@@ -24,8 +24,9 @@ import (
 type skewSource struct {
 	issue *types.Issue
 
-	deps    []*types.IssueWithDependencyMetadata
-	depsErr error
+	deps         []*types.IssueWithDependencyMetadata
+	unresolvable []*types.Dependency
+	depsErr      error
 
 	dependents []*types.IssueWithDependencyMetadata
 
@@ -40,8 +41,8 @@ func (s skewSource) GetWisp(_ context.Context, id string) (*types.Issue, error) 
 	return nil, notFound(id)
 }
 func (s skewSource) Labels(_ context.Context, _ string, _ bool) ([]string, error) { return nil, nil }
-func (s skewSource) Dependencies(_ context.Context, _ string, _ bool) ([]*types.IssueWithDependencyMetadata, error) {
-	return s.deps, s.depsErr
+func (s skewSource) Dependencies(_ context.Context, _ string, _ bool) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return s.deps, s.unresolvable, s.depsErr
 }
 func (s skewSource) CountDependencies(_ context.Context, _ string, _ bool) (int64, error) {
 	return s.depCount, s.depCountErr
@@ -84,17 +85,22 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 		count int64
 	}{
 		{
-			name:  "all edges unresolvable",
-			src:   skewSource{issue: issue, deps: nil, depCount: 1},
+			name: "all edges unresolvable",
+			src: skewSource{
+				issue:        issue,
+				unresolvable: []*types.Dependency{depRecord("rp-1", "external:liveop:liveop-kmf", types.DepTracks)},
+				depCount:     1,
+			},
 			want:  ptr64(1),
 			count: 1,
 		},
 		{
 			name: "one of two edges unresolvable",
 			src: skewSource{
-				issue:    issue,
-				deps:     []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
-				depCount: 2,
+				issue:        issue,
+				deps:         []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
+				unresolvable: []*types.Dependency{depRecord("rp-1", "liveop-kmf", types.DepBlocks)},
+				depCount:     2,
 			},
 			want:  ptr64(1),
 			count: 2,
@@ -123,22 +129,28 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 			// empty. Only the first must stay silent: reporting it
 			// would announce a data property on the strength of a
 			// query that never ran.
-			name:  "dependency read failed, not merely short",
-			src:   skewSource{issue: issue, depsErr: errors.New("backend down"), depCount: 3},
+			name: "dependency read failed, not merely short",
+			src: skewSource{
+				issue:        issue,
+				unresolvable: []*types.Dependency{depRecord("rp-1", "liveop-kmf", types.DepBlocks)},
+				depsErr:      errors.New("backend down"),
+				depCount:     3,
+			},
 			want:  nil,
 			count: 3,
 		},
 		{
-			// Symmetric: a failed COUNT yields 0, and 0 minus a
-			// populated slice is negative, but say so explicitly
-			// rather than relying on the sign.
+			// A failed COUNT leaves dependency_count 0 but does not
+			// hide the records the combined read named: the report
+			// comes from the read, not from the count (bd-uschhs).
 			name: "count read failed",
 			src: skewSource{
-				issue:       issue,
-				deps:        []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
-				depCountErr: errors.New("backend down"),
+				issue:        issue,
+				deps:         []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
+				unresolvable: []*types.Dependency{depRecord("rp-1", "liveop-kmf", types.DepBlocks)},
+				depCountErr:  errors.New("backend down"),
 			},
-			want:  nil,
+			want:  ptr64(1),
 			count: 0,
 		},
 	}
@@ -159,6 +171,11 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 				t.Errorf("UnresolvableDependencies unset, want %d", *tc.want)
 			case tc.want != nil && *details.UnresolvableDependencies != *tc.want:
 				t.Errorf("UnresolvableDependencies = %d, want %d", *details.UnresolvableDependencies, *tc.want)
+			}
+			// Only the failed read is flagged: a short read, an empty one
+			// and a failed COUNT all read the edges (bd-uschhs).
+			if got, want := details.DependenciesUnavailable != nil && *details.DependenciesUnavailable, tc.src.depsErr != nil; got != want {
+				t.Errorf("DependenciesUnavailable = %v, want %v", details.DependenciesUnavailable, want)
 			}
 		})
 	}
@@ -236,13 +253,13 @@ func (m *mutatingSource) GetWisp(_ context.Context, id string) (*types.Issue, er
 func (m *mutatingSource) Labels(_ context.Context, _ string, _ bool) ([]string, error) {
 	return nil, nil
 }
-func (m *mutatingSource) Dependencies(_ context.Context, _ string, _ bool) ([]*types.IssueWithDependencyMetadata, error) {
+func (m *mutatingSource) Dependencies(_ context.Context, _ string, _ bool) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
 	n := m.observe()
 	out := make([]*types.IssueWithDependencyMetadata, 0, n)
 	for i := 0; i < n; i++ {
 		out = append(out, depRow(fmt.Sprintf("rp-%d", i+2), types.DepBlocks))
 	}
-	return out, nil
+	return out, nil, nil
 }
 func (m *mutatingSource) CountDependencies(_ context.Context, _ string, _ bool) (int64, error) {
 	return int64(m.observe()), nil
@@ -272,9 +289,9 @@ func (m *mutatingSource) IterComments(_ context.Context, _ string, _ bool) (stor
 // data, which is the expensive direction. Found by a codex review of the
 // first cut of this change.
 //
-// The source above mutates between calls, so swapping the two reads in
-// BuildIssueDetails turns this red. That is the control; without it the case
-// passes under either order.
+// Since bd-uschhs the outgoing report comes from the combined read alone, so
+// this holds under either order; it stays as the concurrent-add half beside
+// TestBuildIssueDetails_ConcurrentDeleteIsNotReportedAsUnresolvable.
 func TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable(t *testing.T) {
 	ctx := context.Background()
 	issue := &types.Issue{ID: "rp-1"}
@@ -290,4 +307,123 @@ func TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable(t *testing.T
 	}
 }
 
+// AC-5 (bd-uschhs, #5850): the aggregate count is read before the combined
+// read, so an edge deleted in between leaves it stale-HIGH. The combined read
+// names every edge it could not resolve, so a read that names none means
+// there is none: a count of two beside one resolved edge and no records is a
+// concurrent delete, not an unresolvable edge, and publishes neither member.
+func TestBuildIssueDetails_ConcurrentDeleteIsNotReportedAsUnresolvable(t *testing.T) {
+	ctx := context.Background()
+	issue := &types.Issue{ID: "rp-1"}
+	src := skewSource{
+		issue:    issue,
+		deps:     []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
+		depCount: 2,
+	}
+
+	details, err := BuildIssueDetails(ctx, src, issue, false, DetailOptions{})
+	if err != nil {
+		t.Fatalf("BuildIssueDetails: %v", err)
+	}
+	if details.UnresolvableDependencies != nil {
+		t.Errorf("UnresolvableDependencies = %d, want unset: the combined read named no unresolvable edge, so the stale count is a concurrent delete",
+			*details.UnresolvableDependencies)
+	}
+	if details.UnresolvableDependencyEdges != nil {
+		t.Errorf("UnresolvableDependencyEdges = %+v, want unset", details.UnresolvableDependencyEdges)
+	}
+	if details.DependencyCount == nil || *details.DependencyCount != 2 {
+		t.Errorf("DependencyCount = %v, want the aggregate 2 unchanged", details.DependencyCount)
+	}
+}
+
 func ptr64(v int64) *int64 { return &v }
+
+func depRecord(source, target string, t types.DependencyType) *types.Dependency {
+	return &types.Dependency{IssueID: source, DependsOnID: target, Type: t, CreatedBy: "seed", Metadata: `{"k":"v"}`}
+}
+
+// AC-4 (bd-uschhs, #5850): a successful combined read publishes the exact
+// stored records of the edges whose far end has no row here, beside a
+// dependencies list of real issues only, and unresolvable_dependencies is the
+// number of those records. Brief mode keeps the records; a fully local issue
+// and a failed read publish neither member.
+func TestBuildIssueDetails_UnresolvableDependencyEdges(t *testing.T) {
+	ctx := context.Background()
+	issue := &types.Issue{ID: "rp-1"}
+	records := []*types.Dependency{
+		depRecord("rp-1", "external:liveop:liveop-kmf", types.DepTracks),
+		depRecord("rp-1", "liveop-abc", types.DepRelated),
+	}
+	src := skewSource{
+		issue:        issue,
+		deps:         []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
+		unresolvable: records,
+		depCount:     3,
+	}
+
+	for _, opts := range []DetailOptions{{}, {BriefDeps: true}} {
+		details, err := BuildIssueDetails(ctx, src, issue, false, opts)
+		if err != nil {
+			t.Fatalf("BuildIssueDetails(%+v): %v", opts, err)
+		}
+		if len(details.Dependencies) != 1 || details.Dependencies[0].ID != "rp-2" {
+			t.Errorf("BriefDeps=%v: Dependencies = %+v, want only the real issue rp-2", opts.BriefDeps, details.Dependencies)
+		}
+		if len(details.UnresolvableDependencyEdges) != 2 ||
+			details.UnresolvableDependencyEdges[0] != records[0] || details.UnresolvableDependencyEdges[1] != records[1] {
+			t.Errorf("BriefDeps=%v: UnresolvableDependencyEdges = %+v, want the two stored records in order", opts.BriefDeps, details.UnresolvableDependencyEdges)
+		}
+		if details.UnresolvableDependencies == nil || *details.UnresolvableDependencies != 2 {
+			t.Errorf("BriefDeps=%v: UnresolvableDependencies = %v, want 2 (the record count)", opts.BriefDeps, details.UnresolvableDependencies)
+		}
+		if details.DependencyCount == nil || *details.DependencyCount != 3 {
+			t.Errorf("BriefDeps=%v: DependencyCount = %v, want the aggregate 3", opts.BriefDeps, details.DependencyCount)
+		}
+	}
+
+	t.Run("fully local omits both members", func(t *testing.T) {
+		local := skewSource{issue: issue, deps: []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)}, depCount: 1}
+		details, err := BuildIssueDetails(ctx, local, issue, false, DetailOptions{})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if details.UnresolvableDependencyEdges != nil || details.UnresolvableDependencies != nil {
+			t.Errorf("got edges=%+v count=%v, want both unset", details.UnresolvableDependencyEdges, details.UnresolvableDependencies)
+		}
+	})
+
+	t.Run("failed read fabricates nothing", func(t *testing.T) {
+		failed := skewSource{issue: issue, depsErr: errors.New("backend down"), depCount: 2}
+		details, err := BuildIssueDetails(ctx, failed, issue, false, DetailOptions{})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if details.UnresolvableDependencyEdges != nil || details.UnresolvableDependencies != nil {
+			t.Errorf("got edges=%+v count=%v, want both unset", details.UnresolvableDependencyEdges, details.UnresolvableDependencies)
+		}
+		// Best effort still answers, but says the edges were never read, so
+		// the absent members cannot pass for "no edges" (bd-uschhs).
+		if details.DependenciesUnavailable == nil || !*details.DependenciesUnavailable {
+			t.Errorf("DependenciesUnavailable = %v, want true after a failed dependency read", details.DependenciesUnavailable)
+		}
+		if details.Dependencies != nil {
+			t.Errorf("Dependencies = %+v, want none published from a failed read", details.Dependencies)
+		}
+	})
+
+	t.Run("successful reads are never flagged", func(t *testing.T) {
+		for name, ok := range map[string]skewSource{
+			"no outgoing edges": {issue: issue},
+			"records named":     src,
+		} {
+			details, err := BuildIssueDetails(ctx, ok, issue, false, DetailOptions{})
+			if err != nil {
+				t.Fatalf("%s: BuildIssueDetails: %v", name, err)
+			}
+			if details.DependenciesUnavailable != nil {
+				t.Errorf("%s: DependenciesUnavailable = %v, want unset after a successful read", name, *details.DependenciesUnavailable)
+			}
+		}
+	})
+}

@@ -204,74 +204,36 @@ func (s *DoltStore) GetDependents(ctx context.Context, issueID string) ([]*types
 	return result, err
 }
 
-// GetDependenciesWithMetadata returns dependencies with metadata
+// GetDependenciesWithMetadata returns the real issues issueID depends on, with
+// the edge type. It delegates to issueops.GetDependenciesWithMetadataInTx in one
+// read transaction, as the embedded store does, so both backends read both
+// dependency planes with the same durable-first, one-per-far-end answer for a
+// durable source and a wisp source alike (bd-uschhs).
 func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	if s.isActiveWisp(ctx, issueID) {
-		return s.getWispDependenciesWithMetadata(ctx, issueID)
-	}
+	var result []*types.IssueWithDependencyMetadata
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependenciesWithMetadataInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
+}
 
-	rows, err := s.queryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS depends_on_id, d.type, d.created_at, d.created_by, d.metadata, d.thread_id
-		FROM dependencies d
-		WHERE d.issue_id = ?
-	`, issueops.DepTargetExpr), issueID)
+// GetDependenciesWithUnresolvable returns the resolved outgoing issues and the
+// stored records of the edges whose far end has no row here, from one read
+// transaction (issueops.GetDependenciesWithUnresolvableInTx).
+func (s *DoltStore) GetDependenciesWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	var resolved []*types.IssueWithDependencyMetadata
+	var unresolvable []*types.Dependency
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		resolved, unresolvable, err = issueops.GetDependenciesWithUnresolvableInTx(ctx, tx, issueID)
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get dependencies with metadata: %w", err)
+		return nil, nil, err
 	}
-
-	// Collect dep metadata first, then close rows before fetching issues.
-	// This avoids connection pool deadlock when MaxOpenConns=1 (embedded dolt).
-	type depMeta struct {
-		depID, depType string
-	}
-	var deps []depMeta
-	for rows.Next() {
-		var depID, depType, createdBy string
-		var createdAt sql.NullTime
-		var metadata, threadID sql.NullString
-
-		if err := rows.Scan(&depID, &depType, &createdAt, &createdBy, &metadata, &threadID); err != nil {
-			_ = rows.Close() // Best effort cleanup on error path
-			return nil, fmt.Errorf("failed to scan dependency: %w", err)
-		}
-		deps = append(deps, depMeta{depID: depID, depType: depType})
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close() // Best effort cleanup on error path
-		return nil, wrapQueryError("get dependencies with metadata: rows", err)
-	}
-	_ = rows.Close() // Redundant close for safety (rows already iterated)
-
-	if len(deps) == 0 {
-		return nil, nil
-	}
-
-	// Batch-fetch all issues after rows are closed (connection released)
-	ids := make([]string, len(deps))
-	for i, d := range deps {
-		ids[i] = d.depID
-	}
-	issues, err := s.GetIssuesByIDs(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("get dependencies with metadata: fetch issues: %w", err)
-	}
-	issueMap := make(map[string]*types.Issue, len(issues))
-	for _, iss := range issues {
-		issueMap[iss.ID] = iss
-	}
-
-	var results []*types.IssueWithDependencyMetadata
-	for _, d := range deps {
-		issue, ok := issueMap[d.depID]
-		if !ok {
-			continue
-		}
-		results = append(results, &types.IssueWithDependencyMetadata{
-			Issue:          *issue,
-			DependencyType: types.DependencyType(d.depType),
-		})
-	}
-	return results, nil
+	return resolved, unresolvable, nil
 }
 
 // GetDependentsWithMetadata returns dependents with metadata.

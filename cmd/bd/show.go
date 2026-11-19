@@ -326,8 +326,11 @@ var showCmd = &cobra.Command{
 			// listing's error is KEPT, not discarded: rendering stays best
 			// effort, but a FAILED listing and a SHORT one both leave the
 			// slice empty, and only the second is an unresolvable edge.
+			//
+			// The combined read (bd-uschhs) also names the outgoing edges whose
+			// far end has no row here; they render in their own sections.
 			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
-			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
+			depsWithMeta, unresolvedDeps, depsNamed, depsErr := readOutgoingDeps(ctx, issueStore, issue.ID)
 			gates := types.GatesHolding(issue, depsWithMeta)
 
 			if idx > 0 {
@@ -374,7 +377,8 @@ var showCmd = &cobra.Command{
 
 			// Show dependencies - grouped by dependency type for clarity
 			// (read above, with the header's gate decoration).
-			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+			outSections, relatedUnresolved := withUnresolvedSections(groupDepSections(depsWithMeta, true, relatedSeen), unresolvedDeps, true)
+			for _, sec := range outSections {
 				printDepSection(sec)
 			}
 
@@ -387,17 +391,16 @@ var showCmd = &cobra.Command{
 				}
 			}
 
-			// Both listings above drop every edge whose far end has no row in
-			// this database, so a cross-repo or `external:` dependency renders
-			// as no dependency at all — indistinguishable from having none
-			// (be-lpi). --json says so in unresolvable_dependencies; say it
-			// here too, or `bd dep add x liveop-y` reports success and then
-			// `bd show x` shows nothing.
+			// The dependents listing drops every edge whose far end has no row
+			// in this database, so a cross-repo or `external:` dependent
+			// renders as nothing at all (be-lpi); say so on stderr. The
+			// outgoing side named its records and rendered them above, so it
+			// needs no warning (bd-uschhs).
 			warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-				depListing{rows: len(depsWithMeta), err: depsErr},
+				depListing{rows: len(depsWithMeta), err: depsErr, named: depsNamed},
 				depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
-			printRelatedSection(relatedSeen)
+			printRelatedSection(relatedSeen, relatedUnresolved)
 
 			// Show comments
 			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable

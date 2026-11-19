@@ -94,6 +94,34 @@ func (s *Store) GetDependenciesWithMetadata(ctx context.Context, id string) ([]*
 	return details.Dependencies, nil
 }
 
+// GetDependenciesWithUnresolvable answers the combined outgoing read from the
+// same detail response GetDependenciesWithMetadata reads: dependencies is the
+// resolved half and unresolvable_dependency_edges the stored records of edges
+// whose far end has no row on the server.
+//
+// The detail view is best effort, so a server whose own dependency read failed
+// still answers it, with no edge members and dependencies_unavailable set. That
+// answer is an error here, as the same failed read is on a local backend: an
+// empty success would say the issue has no outgoing edges.
+//
+// A server older than that member publishes only the unresolvable_dependencies
+// count. A positive count with no records means the server could not name its
+// edges, so the read refuses with a typed *ErrUnsupported rather than answer a
+// falsely complete empty list; the caller keeps the count-only disclosure.
+func (s *Store) GetDependenciesWithUnresolvable(ctx context.Context, id string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	details, err := s.getIssueDetails(ctx, id, url.Values{})
+	if err != nil || details == nil {
+		return nil, nil, err
+	}
+	if details.DependenciesUnavailable != nil && *details.DependenciesUnavailable {
+		return nil, nil, fmt.Errorf("get dependencies of %s: the server could not read them (dependencies_unavailable)", id)
+	}
+	if len(details.UnresolvableDependencyEdges) == 0 && details.UnresolvableDependencies != nil && *details.UnresolvableDependencies > 0 {
+		return nil, nil, &issueops.ErrUnsupported{Op: "GetDependenciesWithUnresolvable", Backend: "http"}
+	}
+	return details.Dependencies, details.UnresolvableDependencyEdges, nil
+}
+
 // GetDependentsWithMetadata answers getIssue's dependents arm, which is carried
 // only when asked: include_dependents is the parameter D4 landed for it.
 //

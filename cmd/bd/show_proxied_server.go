@@ -548,8 +548,12 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	// listing's error is KEPT, not discarded: rendering stays best effort,
 	// but a FAILED listing and a SHORT one both leave the slice empty, and
 	// only the second is an unresolvable edge.
+	//
+	// The combined read (bd-uschhs) also names the outgoing edges whose far
+	// end has no row here; they render in their own sections. It reads both
+	// dependency planes for either kind of source, so it needs no isWisp.
 	depCountsSnapshot := readDepCounts(ctx, proxiedDepCounter{src: workapi.NewUOWDetailSource(uw), isWisp: isWisp}, issue.ID)
-	depsWithMeta, depsErr := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
+	depsWithMeta, unresolvedDeps, depsErr := uw.DependencyUseCase().ListOutgoingWithUnresolvable(ctx, issue.ID)
 	gates := types.GatesHolding(issue, depsWithMeta)
 
 	if idx > 0 {
@@ -601,7 +605,8 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
 	// (read above, with the header's gate decoration).
-	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+	outSections, relatedUnresolved := withUnresolvedSections(groupDepSections(depsWithMeta, true, relatedSeen), unresolvedDeps, true)
+	for _, sec := range outSections {
 		printDepSection(sec)
 	}
 
@@ -624,11 +629,14 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	// surviving on the route a server-backed repo actually uses. The
 	// precedent this design follows covers both of its own routes the same
 	// way — warnDroppedDepEdges at dep.go:1148 and dep_proxied_server.go:457.
+	//
+	// bd-uschhs: the outgoing side now names its records and renders them in
+	// their sections, so only the inbound warning can still fire here.
 	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-		depListing{rows: len(depsWithMeta), err: depsErr},
+		depListing{rows: len(depsWithMeta), err: depsErr, named: true},
 		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
-	printRelatedSection(relatedSeen)
+	printRelatedSection(relatedSeen, relatedUnresolved)
 
 	comments, _ := proxiedGetComments(ctx, uw, issue.ID, isWisp)
 	printComments(comments, in.commentsTail, formatTime, issue.ID)

@@ -3010,6 +3010,12 @@
     },
     {
       "schema": "IssueDetails",
+      "member": "dependencies_unavailable",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
       "member": "dependency_count",
       "type": "integer",
       "format": "int64",
@@ -3288,6 +3294,13 @@
       "type": "integer",
       "format": "int64",
       "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "unresolvable_dependency_edges",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueDetails",

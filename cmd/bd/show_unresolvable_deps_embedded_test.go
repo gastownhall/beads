@@ -67,16 +67,29 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 				t.Fatalf("unresolvable_dependencies = %v, want 1 — a count the caller cannot enumerate must say so (be-lpi)",
 					details["unresolvable_dependencies"])
 			}
-
-			// Text mode: the notice goes to stderr, so stdout stays
-			// byte-identical for scripts. Assert on stderr alone, or
-			// this passes on a build that prints nothing anywhere.
-			stdout, stderr := runShowSplit(t, bd, dir, subject.ID)
-			if !strings.Contains(stderr, "no row in this database") {
-				t.Errorf("bd show stderr did not disclose the unrenderable edge:\nstderr:\n%s", stderr)
+			// bd-uschhs: the count names its edge. The stored record rides
+			// beside the issue-only dependencies list, never inside it.
+			edges, _ := details["unresolvable_dependency_edges"].([]interface{})
+			if len(edges) != 1 {
+				t.Fatalf("unresolvable_dependency_edges = %v, want the one stored edge", details["unresolvable_dependency_edges"])
 			}
-			if strings.Contains(stdout, "no row in this database") {
-				t.Errorf("the notice reached stdout, which must stay unchanged:\n%s", stdout)
+			edge, _ := edges[0].(map[string]interface{})
+			if edge["issue_id"] != subject.ID || edge["depends_on_id"] != tc.target || edge["type"] != tc.depTyp {
+				t.Errorf("unresolvable_dependency_edges[0] = %v, want %s -> %s (%s)", edge, subject.ID, tc.target, tc.depTyp)
+			}
+
+			// Text mode (bd-uschhs AC-3): the edge renders in its own
+			// relation section, named exactly and marked as having no row
+			// here, even as the section's only entry; the outgoing count
+			// warning it replaces is gone from stderr.
+			stdout, stderr := runShowSplit(t, bd, dir, subject.ID)
+			heading := map[string]string{"tracks": "TRACKS", "blocks": "DEPENDS ON"}[tc.depTyp]
+			wantLine := "→ " + tc.target + " (not in this database)"
+			if !strings.Contains(stdout, heading) || !strings.Contains(stdout, wantLine) {
+				t.Errorf("bd show stdout did not render %q under %s:\nstdout:\n%s", wantLine, heading, stdout)
+			}
+			if strings.Contains(stderr, "dependency edge(s)") || strings.Contains(stderr, "For raw edge records") {
+				t.Errorf("bd show still printed the redundant outgoing warning:\nstderr:\n%s", stderr)
 			}
 		})
 	}
@@ -91,6 +104,9 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 		details := bdShowDetails(t, bd, dir, anchor.ID)
 		if v, present := details["unresolvable_dependencies"]; present {
 			t.Errorf("unresolvable_dependencies = %v on a fully local edge, want absent", v)
+		}
+		if v, present := details["unresolvable_dependency_edges"]; present {
+			t.Errorf("unresolvable_dependency_edges = %v on a fully local edge, want absent", v)
 		}
 		deps, _ := details["dependencies"].([]interface{})
 		if len(deps) != 1 {

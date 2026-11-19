@@ -74,6 +74,23 @@ func (s *EmbeddedDoltStore) GetDependenciesWithMetadata(ctx context.Context, iss
 	return result, err
 }
 
+// GetDependenciesWithUnresolvable returns the resolved outgoing issues and the
+// stored records of the edges whose far end has no row here, from one
+// connection's transaction (issueops.GetDependenciesWithUnresolvableInTx).
+func (s *EmbeddedDoltStore) GetDependenciesWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	var resolved []*types.IssueWithDependencyMetadata
+	var unresolvable []*types.Dependency
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		resolved, unresolvable, err = issueops.GetDependenciesWithUnresolvableInTx(ctx, tx, issueID)
+		return err
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return resolved, unresolvable, nil
+}
+
 // GetDependentsWithMetadata returns issues that depend on the given issue,
 // along with the dependency type.
 func (s *EmbeddedDoltStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {

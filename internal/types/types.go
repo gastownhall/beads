@@ -1354,6 +1354,26 @@ type IssueDetails struct {
 	UnresolvableDependencies *int64 `json:"unresolvable_dependencies,omitempty"`
 	UnresolvableDependents   *int64 `json:"unresolvable_dependents,omitempty"`
 
+	// UnresolvableDependencyEdges names the outgoing edges
+	// UnresolvableDependencies counts: the exact stored record of each edge
+	// whose far end has no issue row in this database, one per target,
+	// sorted by target then type (bd-uschhs). It comes from the same
+	// snapshot as Dependencies, which stays issue-only, and when it is set
+	// UnresolvableDependencies is its length. Omitted when there is none
+	// and when the read failed; a response from an older server omits it
+	// even when its count is positive.
+	UnresolvableDependencyEdges []*Dependency `json:"unresolvable_dependency_edges,omitempty"`
+
+	// DependenciesUnavailable is set true only when the outgoing dependency
+	// read failed. The detail view is best effort and still answers, but
+	// then Dependencies, UnresolvableDependencyEdges, UnresolvableDependencies
+	// and the members derived from the edges (GatedBy, Parent) are absent
+	// because they were never read, not because there are none (bd-uschhs).
+	// A reader that must not take a failed read for "no edges" checks it.
+	// Never set after a successful read, so an issue with no outgoing edges
+	// stays plain omission, and an older server never sends it.
+	DependenciesUnavailable *bool `json:"dependencies_unavailable,omitempty"`
+
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`

@@ -819,6 +819,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`storage.Storage` gains a required `GetDependenciesWithUnresolvable`
+  method (bd-uschhs, #5850).** It reads an issue's outgoing edges in one
+  snapshot and returns the targets that resolve to an issue in this database
+  plus the exact stored records (source, target, type, created_at,
+  created_by, metadata, thread_id) of the edges whose target has no issue row,
+  one per target, the durable row first, sorted by target then type. The
+  issue-only readers (`GetDependenciesWithMetadata`, `GetDependencies`,
+  `GetDependents`, `GetDependentsWithMetadata`) keep their semantics. The
+  server store's `GetDependenciesWithMetadata` now reads both edge planes the
+  way the embedded store does, so the two backends answer the same set.
+  **Out-of-tree storage backends must implement the new method to compile**:
+  `GetDependenciesWithUnresolvable(ctx, issueID) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)`.
+  It must return the exact records, or an error when it cannot read them
+  back. The issue detail and the conformance suite treat any error,
+  `*storage.ErrUnsupported` included, as a failed dependency read. The
+  issue detail (`bd show --json`, `GET /v0/beads/issues/{id}`) names the
+  records in `unresolvable_dependency_edges`. When its dependency read
+  fails, it now sets `dependencies_unavailable: true` instead of answering
+  as if the issue had no outgoing edges.
+
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull

@@ -37,7 +37,10 @@ type DetailSource interface {
 	GetWisp(ctx context.Context, id string) (*types.Issue, error)
 
 	Labels(ctx context.Context, id string, isWisp bool) ([]string, error)
-	Dependencies(ctx context.Context, id string, isWisp bool) ([]*types.IssueWithDependencyMetadata, error)
+	// Dependencies is the outgoing read in one snapshot: the far ends that
+	// resolve to an issue here, and the exact stored records of the edges
+	// whose far end does not (storage.Storage.GetDependenciesWithUnresolvable).
+	Dependencies(ctx context.Context, id string, isWisp bool) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 
 	CountDependencies(ctx context.Context, id string, isWisp bool) (int64, error)
 	CountDependents(ctx context.Context, id string, isWisp bool) (int64, error)
@@ -106,7 +109,9 @@ func GetIssueOrWisp(ctx context.Context, src DetailSource, id string) (*types.Is
 //
 // Labels, dependencies, and counts are best effort, matching what both CLI
 // paths have always shipped: a detail view missing an edge list still beats
-// refusing to show the issue. The opt-in row streams are not best effort,
+// refusing to show the issue. A failed dependency read is flagged
+// (DependenciesUnavailable) rather than left to look like an issue with no
+// edges. The opt-in row streams are not best effort,
 // because a caller that asked for the rows gets a truthful answer or an
 // error rather than a silently short list.
 func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue, isWisp bool, opts DetailOptions) (*types.IssueDetails, error) {
@@ -120,30 +125,31 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 
 	// Aggregate counts - O(1) queries, no row materialization.
 	//
-	// THE COUNTS ARE READ BEFORE THE ROW LISTS, and the order is load-bearing
-	// wherever the source is not snapshot-consistent. The UOW source runs the
-	// whole build inside one read transaction and is immune; the store-backed
-	// source issues a connection per call, so a concurrent write can land
-	// between the two reads and skew the delta below. Counting first puts that
-	// skew on the safe side: an edge ADDED in the window leaves the count
-	// stale-LOW, so the delta goes negative and is suppressed, where the
-	// reverse order would have announced a fresh local edge as unresolvable.
-	// A concurrent DELETE still produces a spurious report, which is the
-	// residual and is why this is an ordering mitigation rather than a fix —
-	// only a shared snapshot or a direct count of unresolvable edges closes
-	// it (be-lpi).
+	// The outgoing unresolvable report no longer derives from these: it comes
+	// from the combined read alone (bd-uschhs), so a write landing between the
+	// count and the listing on the store-backed source can skew
+	// dependency_count but never invent an unresolvable edge. The inbound
+	// delta below still subtracts, and reads the count first so an edge added
+	// in the window leaves it stale-LOW and suppressed (be-lpi).
 	dependentCount, dependentCountErr := src.CountDependents(ctx, id, isWisp)
 	details.DependentCount = &dependentCount
-	dependencyCount, dependencyCountErr := src.CountDependencies(ctx, id, isWisp)
+	dependencyCount, _ := src.CountDependencies(ctx, id, isWisp)
 	details.DependencyCount = &dependencyCount
 	commentCount, _ := src.CountComments(ctx, id, isWisp)
 	details.CommentCount = &commentCount
 
-	// depsErr is kept rather than discarded: it is what separates "the edge
-	// list came back short" from "the edge list never came back", and the
-	// unresolvable-edge delta below is only meaningful in the first case.
-	deps, depsErr := src.Dependencies(ctx, id, isWisp)
-	details.Dependencies = deps
+	// depsErr is kept rather than discarded: it is what separates "the read
+	// named no unresolvable edge" from "the read never came back", and only
+	// the first may publish anything. The second is published as
+	// dependencies_unavailable, so a client of the wire cannot read the
+	// absent edge members as "no edges" (bd-uschhs).
+	deps, unresolvable, depsErr := src.Dependencies(ctx, id, isWisp)
+	if depsErr != nil {
+		unavailable := true
+		details.DependenciesUnavailable = &unavailable
+	} else {
+		details.Dependencies = deps
+	}
 
 	// The gates blocking this issue are the gate-typed subset of the
 	// dependencies JUST read (types.GatesHolding, the one predicate the
@@ -155,15 +161,17 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	// rewrites the slice.
 	details.GatedBy = types.GateRefs(types.GatesHolding(issue, details.Dependencies))
 
-	// The count counts edge ROWS; the slice carries the issues on the far
-	// end, and drops any whose id has no row in this database. The two
-	// therefore disagree by exactly the cross-repo and `external:` edges,
-	// which is real stored data rather than a phantom count (be-lpi).
-	// Publish the difference instead of leaving the caller to infer it.
-	if depsErr == nil && dependencyCountErr == nil {
-		if n := dependencyCount - int64(len(details.Dependencies)); n > 0 {
-			details.UnresolvableDependencies = &n
-		}
+	// The slice carries the issues on the far end; the combined read returns
+	// the stored record of every edge whose far end has no row in this
+	// database (the cross-repo and `external:` edges, be-lpi) from the same
+	// snapshot. Publish those records and their number. No count delta: an
+	// aggregate count read before the listing goes stale-HIGH under a
+	// concurrent delete, and the read that named no record is the authority
+	// (bd-uschhs).
+	if depsErr == nil && len(unresolvable) > 0 {
+		details.UnresolvableDependencyEdges = unresolvable
+		n := int64(len(unresolvable))
+		details.UnresolvableDependencies = &n
 	}
 
 	if opts.IncludeDependents {
@@ -338,7 +346,7 @@ func applyEpicProgress(details *types.IssueDetails, dependents []*types.IssueWit
 type StoreDetailReader interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetLabels(ctx context.Context, issueID string) ([]string, error)
-	GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
+	GetDependenciesWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 	CountDependencies(ctx context.Context, issueID string) (int64, error)
 	CountDependents(ctx context.Context, issueID string) (int64, error)
 	CountIssueComments(ctx context.Context, issueID string) (int64, error)
@@ -371,8 +379,8 @@ func (s storeDetailSource) Labels(ctx context.Context, id string, _ bool) ([]str
 	return s.store.GetLabels(ctx, id)
 }
 
-func (s storeDetailSource) Dependencies(ctx context.Context, id string, _ bool) ([]*types.IssueWithDependencyMetadata, error) {
-	return s.store.GetDependenciesWithMetadata(ctx, id)
+func (s storeDetailSource) Dependencies(ctx context.Context, id string, _ bool) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return s.store.GetDependenciesWithUnresolvable(ctx, id)
 }
 
 func (s storeDetailSource) CountDependencies(ctx context.Context, id string, _ bool) (int64, error) {
@@ -410,8 +418,7 @@ type (
 	}
 
 	detailDepReader interface {
-		ListWithIssueMetadata(ctx context.Context, issueID string, filter domain.DepListFilter) ([]*types.IssueWithDependencyMetadata, error)
-		ListWispWithIssueMetadata(ctx context.Context, wispID string, filter domain.DepListFilter) ([]*types.IssueWithDependencyMetadata, error)
+		ListOutgoingWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 		IterWithIssueMetadata(ctx context.Context, issueID string, filter domain.DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error)
 		IterWispWithIssueMetadata(ctx context.Context, wispID string, filter domain.DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error)
 		CountByIssueID(ctx context.Context, issueID string, filter domain.DepListFilter) (int64, error)
@@ -457,12 +464,11 @@ func (u useCaseDetailSource) Labels(ctx context.Context, id string, isWisp bool)
 	return u.labels.GetLabels(ctx, id)
 }
 
-func (u useCaseDetailSource) Dependencies(ctx context.Context, id string, isWisp bool) ([]*types.IssueWithDependencyMetadata, error) {
-	filter := domain.DepListFilter{Direction: domain.DepDirectionOut}
-	if isWisp {
-		return u.deps.ListWispWithIssueMetadata(ctx, id, filter)
-	}
-	return u.deps.ListWithIssueMetadata(ctx, id, filter)
+// Dependencies needs no wisp routing: the combined read spans both edge
+// planes for an issue or a wisp source alike, as the per-table metadata reads
+// it replaced already did underneath.
+func (u useCaseDetailSource) Dependencies(ctx context.Context, id string, _ bool) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return u.deps.ListOutgoingWithUnresolvable(ctx, id)
 }
 
 func (u useCaseDetailSource) CountDependencies(ctx context.Context, id string, isWisp bool) (int64, error) {

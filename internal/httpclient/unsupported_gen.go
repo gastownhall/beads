@@ -717,4 +717,4 @@ func (unsupportedDoltStorage) VersionReconciler() (_ issueops.VersionReconciler,
 	return
 }
 
-// NOTE: partial shell (140 of 205 methods generated; 65 left to this package's hand-written set).
+// NOTE: partial shell (140 of 206 methods generated; 66 left to this package's hand-written set).

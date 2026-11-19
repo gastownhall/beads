@@ -88,6 +88,9 @@ type depSection struct {
 	Heading string
 	Glyph   string
 	Deps    []*types.IssueWithDependencyMetadata
+	// Unresolved holds the stored edges of this type whose far end has no
+	// issue row in this database (bd-uschhs), printed after Deps.
+	Unresolved []*types.Dependency
 }
 
 // groupDepSections splits one direction's edges into printable sections, in
@@ -141,4 +144,63 @@ func groupDepSections(deps []*types.IssueWithDependencyMetadata, outgoing bool, 
 		emit(t)
 	}
 	return sections
+}
+
+// withUnresolvedSections adds the stored records of outgoing edges whose far
+// end has no issue row here (storage.Storage.GetDependenciesWithUnresolvable,
+// bd-uschhs) to the outgoing sections groupDepSections built. Each record
+// joins the section of its type after the resolved rows, sorted by target, and
+// a type holding only records gets its own section in display order. With
+// divertRelated (the caller passed groupDepSections a relatedSeen map) the
+// symmetric related records are returned for printRelatedSection instead; no
+// issue row is fabricated for any of them.
+func withUnresolvedSections(sections []depSection, unresolved []*types.Dependency, divertRelated bool) ([]depSection, []*types.Dependency) {
+	var related []*types.Dependency
+	for _, rec := range sortedUnresolved(unresolved) {
+		t := rec.Type
+		if t == types.DepRelatesTo {
+			t = types.DepRelated
+		}
+		if t == types.DepRelated && divertRelated {
+			related = append(related, rec)
+			continue
+		}
+		idx := slices.IndexFunc(sections, func(sec depSection) bool { return sec.Type == t })
+		if idx < 0 {
+			rel := depRelationFor(t)
+			sections = append(sections, depSection{Type: t, Heading: rel.outHeading, Glyph: rel.outGlyph})
+			idx = len(sections) - 1
+		}
+		sections[idx].Unresolved = append(sections[idx].Unresolved, rec)
+	}
+	slices.SortStableFunc(sections, func(a, b depSection) int {
+		ra, rb := depSectionRank(a.Type), depSectionRank(b.Type)
+		if ra != rb {
+			return ra - rb
+		}
+		return strings.Compare(string(a.Type), string(b.Type))
+	})
+	return sections, related
+}
+
+// depSectionRank is a type's position in depSectionOrder; custom types share
+// the rank after the last built-in and sort by name among themselves.
+func depSectionRank(t types.DependencyType) int {
+	if i := slices.Index(depSectionOrder, t); i >= 0 {
+		return i
+	}
+	return len(depSectionOrder)
+}
+
+// sortedUnresolved orders records by target id, then type, without touching
+// the caller's slice.
+func sortedUnresolved(recs []*types.Dependency) []*types.Dependency {
+	out := slices.Clone(recs)
+	slices.SortStableFunc(out, func(a, b *types.Dependency) int {
+		if c := strings.Compare(a.DependsOnID, b.DependsOnID); c != 0 {
+			return c
+		}
+		return strings.Compare(string(a.Type), string(b.Type))
+	})
+	return out
 }
