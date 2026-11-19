@@ -367,14 +367,55 @@ func seedInitWorkspaceIdentity(
 
 	bootstrapper, err := store.Bootstrapper()
 	if err != nil {
-		return fmt.Errorf("failed to reach the workspace identity: %v", err)
+		return fmt.Errorf("failed to reach the workspace identity: %w", err)
 	}
 	_, err = bootstrapper.Bootstrap(ctx, issueops.BootstrapRequest{
 		Prefix:    prefix,
 		ProjectID: projectID,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to record the workspace identity: %v", err)
+		return fmt.Errorf("failed to record the workspace identity: %w", err)
+	}
+	return nil
+}
+
+// seedInitIdentityThenPublish records the workspace identity in the database
+// BEFORE metadata.json publishes it (GH#7122 AC-6).
+//
+// Two initializers can race onto one unidentified database — different
+// projects initializing against a fresh shared server, or two rigs on one
+// workspace — and the loser's Bootstrap is refused (ErrAlreadyIdentified) by
+// the role's own transaction. Losing must not also publish the loser's
+// freshly minted LOCAL identity: a metadata.json that carries it makes every
+// later open of that workspace verify against an id the database never
+// accepted, and the first sync or `bd doctor --fix` turns that divergence
+// into PROJECT IDENTITY MISMATCH. So the seed runs first and its failure is
+// FATAL to init; the metadata publish (cfg.Save) runs only after the
+// substrate accepted the identity, and its own failure stays the non-fatal
+// warning it always was — the identity IS recorded, and the next open
+// rebuilds the file.
+//
+// Gateway workspaces skip the seed (shouldWriteInitStateToDB): the identity
+// is server-authoritative and the credential may be read-only, so bd adopts
+// what it verified rather than writing it back — and the file still
+// publishes the reconciled identity, exactly as before.
+func seedInitIdentityThenPublish(
+	ctx context.Context,
+	store storage.DoltStorage,
+	dbIdentity issueops.VerifyIdentityResult,
+	issuePrefix string,
+	cfg *configfile.Config,
+	beadsDir string,
+	gateway bool,
+) error {
+	if shouldWriteInitStateToDB(gateway) {
+		if err := seedInitWorkspaceIdentity(ctx, store, dbIdentity, issuePrefix, cfg.ProjectID, beadsDir); err != nil {
+			return err
+		}
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
+		// Non-fatal - continue anyway
 	}
 	return nil
 }
@@ -1987,13 +2028,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		// bootstrapProjectID is the identity seedInitWorkspaceIdentity will
-		// record, resolved inside the metadata.json block below because that is
-		// where local and database identities are reconciled. It stays "" when
-		// that block does not run, and the seeding step falls back to the
-		// workspace's own metadata.json.
-		bootstrapProjectID := ""
-
 		// Create or preserve metadata.json for database metadata (bd-zai fix)
 		if useLocalBeads {
 			// First, check if metadata.json already exists
@@ -2129,14 +2163,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 			}
 
-			if err := cfg.Save(beadsDir); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
-				// Non-fatal - continue anyway
+			// Record the identity in the database BEFORE metadata.json
+			// publishes it (GH#7122 AC-6): a refusal from the seed (another
+			// initializer won the race onto this unidentified database) fails
+			// init without the loser's freshly minted local identity ever
+			// reaching disk.
+			if err := seedInitIdentityThenPublish(ctx, store, dbIdentity, issuePrefix, cfg, beadsDir, doltCfg.Gateway); err != nil {
+				_ = store.Close()
+				return err
 			}
-
-			// The write itself happens once, below this block, through
-			// seedInitWorkspaceIdentity; this is where its id is decided.
-			bootstrapProjectID = cfg.ProjectID
 
 			// Create config.yaml template (prefix is stored in DB, not config.yaml)
 			if err := createConfigYaml(beadsDir); err != nil {
@@ -2197,12 +2232,18 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		// Seed the workspace's identity, through issueops.Bootstrapper, in the
-		// one place this route writes it. Gateway mode skips it: the identity
-		// is server-authoritative and the credential may be read-only, so bd
-		// adopts what it verified rather than writing it back.
-		if shouldWriteInitStateToDB(doltCfg.Gateway) {
-			if err := seedInitWorkspaceIdentity(ctx, store, dbIdentity, issuePrefix, bootstrapProjectID, beadsDir); err != nil {
+		// Seed the workspace's identity, through issueops.Bootstrapper, in
+		// the one place this route writes it. The useLocalBeads path seeded
+		// inside its metadata block, BEFORE cfg.Save published the identity
+		// (GH#7122 AC-6); this is the complementary route, which composes no
+		// metadata.json of its own (an explicit BEADS_DIR whose Dolt data lives
+		// elsewhere), so the seed falls back to the workspace's existing
+		// metadata.json for the id to record. Gateway mode skips it on both
+		// routes: the identity is server-authoritative and the credential may
+		// be read-only, so bd adopts what it verified rather than writing it
+		// back.
+		if shouldWriteInitStateToDB(doltCfg.Gateway) && !useLocalBeads {
+			if err := seedInitWorkspaceIdentity(ctx, store, dbIdentity, issuePrefix, "", beadsDir); err != nil {
 				_ = store.Close()
 				return err
 			}

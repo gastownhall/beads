@@ -23,6 +23,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // hermeticInitEnv sets sync.remote via BD_SYNC_REMOTE (viper AutomaticEnv,
@@ -1682,5 +1685,218 @@ func TestInitAdoptionConsentGrants(t *testing.T) {
 		if got := tc.consent.grants(url); got != tc.want {
 			t.Errorf("%s: grants = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// bd-xicgb8 (GH#7122): identity seeding happens before metadata.json publishes it
+// ---------------------------------------------------------------------------
+
+// seedProbeStore stands in for the store at the identity-seed step. Its
+// Bootstrapper runs the test's onBootstrap observation hook (which can check
+// the workspace state at the moment Bootstrap is asked) and then answers with
+// the test's verdict.
+type seedProbeStore struct {
+	storage.DoltStorage
+	bootstrapCalls int
+	onBootstrap    func()
+	verdict        func(context.Context, issueops.BootstrapRequest) (issueops.BootstrapResult, error)
+}
+
+func (s *seedProbeStore) Bootstrapper() (issueops.Bootstrapper, error) { return s, nil }
+
+func (s *seedProbeStore) Bootstrap(ctx context.Context, req issueops.BootstrapRequest) (issueops.BootstrapResult, error) {
+	s.bootstrapCalls++
+	if s.onBootstrap != nil {
+		s.onBootstrap()
+	}
+	if s.verdict == nil {
+		return issueops.BootstrapResult{Prefix: req.Prefix, ProjectID: req.ProjectID}, nil
+	}
+	return s.verdict(ctx, req)
+}
+
+// A seed that succeeds publishes the identity only afterwards: Bootstrap is
+// asked while metadata.json does not exist yet, and the published file carries
+// exactly the identity the substrate accepted.
+func TestInitIdentitySeedHappensBeforeTheMetadataPublish(t *testing.T) {
+	store := &seedProbeStore{}
+	beadsDir := t.TempDir()
+	cfg := configfile.DefaultConfig()
+	cfg.ProjectID = "proj-fresh"
+	cfg.Backend = configfile.BackendDolt
+
+	var metadataExistedAtBootstrap bool
+	store.onBootstrap = func() {
+		_, err := os.Stat(filepath.Join(beadsDir, "metadata.json"))
+		metadataExistedAtBootstrap = err == nil
+	}
+
+	if err := seedInitIdentityThenPublish(context.Background(), store, issueops.VerifyIdentityResult{}, "app", cfg, beadsDir, false); err != nil {
+		t.Fatalf("seed then publish: %v", err)
+	}
+	if store.bootstrapCalls != 1 {
+		t.Fatalf("bootstrap called %d times, want exactly 1", store.bootstrapCalls)
+	}
+	if metadataExistedAtBootstrap {
+		t.Error("metadata.json existed before Bootstrap recorded the identity: the publish is not behind the seed")
+	}
+	published, err := configfile.Load(beadsDir)
+	if err != nil || published == nil {
+		t.Fatalf("published metadata.json unreadable: %v", err)
+	}
+	if published.ProjectID != "proj-fresh" {
+		t.Errorf("published project id %q, want the freshly minted proj-fresh", published.ProjectID)
+	}
+}
+
+// The race's loser — Bootstrapper refuses with ErrAlreadyIdentified — fails
+// init WITHOUT publishing its own freshly minted identity: metadata.json is
+// absent on a fresh workspace, and a pre-existing file's bytes are untouched.
+func TestInitIdentityRefusalPublishesNothing(t *testing.T) {
+	t.Run("fresh workspace", func(t *testing.T) {
+		store := &seedProbeStore{verdict: func(context.Context, issueops.BootstrapRequest) (issueops.BootstrapResult, error) {
+			return issueops.BootstrapResult{}, &issueops.AlreadyIdentifiedError{Prefix: "app", ProjectID: "proj-winner"}
+		}}
+		beadsDir := t.TempDir()
+		cfg := configfile.DefaultConfig()
+		cfg.ProjectID = "proj-loser"
+		cfg.Backend = configfile.BackendDolt
+
+		err := seedInitIdentityThenPublish(context.Background(), store, issueops.VerifyIdentityResult{}, "app", cfg, beadsDir, false)
+		if !errors.Is(err, issueops.ErrAlreadyIdentified) {
+			t.Fatalf("err = %v, want it to wrap ErrAlreadyIdentified", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json")); !os.IsNotExist(statErr) {
+			t.Errorf("the losing initializer published metadata.json anyway (stat err = %v)", statErr)
+		}
+	})
+
+	t.Run("existing metadata bytes unchanged", func(t *testing.T) {
+		store := &seedProbeStore{verdict: func(context.Context, issueops.BootstrapRequest) (issueops.BootstrapResult, error) {
+			return issueops.BootstrapResult{}, &issueops.AlreadyIdentifiedError{Prefix: "app", ProjectID: "proj-winner"}
+		}}
+		beadsDir := t.TempDir()
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		before := []byte(`{"backend":"dolt","database":"dolt","dolt_mode":"server","project_id":"proj-earlier"}`)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), before, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := configfile.DefaultConfig()
+		cfg.ProjectID = "proj-loser"
+		cfg.Backend = configfile.BackendDolt
+
+		err := seedInitIdentityThenPublish(context.Background(), store, issueops.VerifyIdentityResult{}, "app", cfg, beadsDir, false)
+		if !errors.Is(err, issueops.ErrAlreadyIdentified) {
+			t.Fatalf("err = %v, want it to wrap ErrAlreadyIdentified", err)
+		}
+		after, rerr := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+		if rerr != nil {
+			t.Fatalf("pre-existing metadata.json vanished: %v", rerr)
+		}
+		if string(after) != string(before) {
+			t.Errorf("the losing initializer rewrote metadata.json:\nbefore: %s\nafter:  %s", before, after)
+		}
+	})
+}
+
+// Any other seed failure is fatal the same way — nothing is published when
+// the substrate did not accept the identity.
+func TestInitIdentitySeedFailureWrapsAndPublishesNothing(t *testing.T) {
+	boom := errors.New("transient storage failure")
+	store := &seedProbeStore{verdict: func(context.Context, issueops.BootstrapRequest) (issueops.BootstrapResult, error) {
+		return issueops.BootstrapResult{}, boom
+	}}
+	beadsDir := t.TempDir()
+	cfg := configfile.DefaultConfig()
+	cfg.ProjectID = "proj-fresh"
+	cfg.Backend = configfile.BackendDolt
+
+	err := seedInitIdentityThenPublish(context.Background(), store, issueops.VerifyIdentityResult{}, "app", cfg, beadsDir, false)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want it to wrap the seed failure %v", err, boom)
+	}
+	if _, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json")); !os.IsNotExist(statErr) {
+		t.Errorf("a failed seed still published metadata.json (stat err = %v)", statErr)
+	}
+}
+
+// An identified substrate is adopted, not bootstrapped — the seed is a no-op
+// and the publish still happens (this is the re-init shape).
+func TestInitIdentityAdoptionStillPublishes(t *testing.T) {
+	store := &seedProbeStore{}
+	beadsDir := t.TempDir()
+	cfg := configfile.DefaultConfig()
+	cfg.ProjectID = "proj-adopted"
+	cfg.Backend = configfile.BackendDolt
+
+	err := seedInitIdentityThenPublish(context.Background(), store,
+		issueops.VerifyIdentityResult{Prefix: "app", ProjectID: "proj-adopted"}, "app", cfg, beadsDir, false)
+	if err != nil {
+		t.Fatalf("adoption seed then publish: %v", err)
+	}
+	if store.bootstrapCalls != 0 {
+		t.Errorf("an identified substrate was bootstrapped %d times instead of adopted", store.bootstrapCalls)
+	}
+	published, err := configfile.Load(beadsDir)
+	if err != nil || published == nil {
+		t.Fatalf("published metadata.json unreadable: %v", err)
+	}
+	if published.ProjectID != "proj-adopted" {
+		t.Errorf("published project id %q, want the adopted proj-adopted", published.ProjectID)
+	}
+}
+
+// Gateway mode never seeds (the server is authoritative and the credential
+// may be read-only) but still publishes the reconciled identity.
+func TestInitIdentityGatewaySkipsSeedButPublishes(t *testing.T) {
+	store := &seedProbeStore{}
+	beadsDir := t.TempDir()
+	cfg := configfile.DefaultConfig()
+	cfg.ProjectID = "proj-server-authoritative"
+	cfg.Backend = configfile.BackendDolt
+
+	err := seedInitIdentityThenPublish(context.Background(), store,
+		issueops.VerifyIdentityResult{Prefix: "app", ProjectID: "proj-server-authoritative"}, "app", cfg, beadsDir, true)
+	if err != nil {
+		t.Fatalf("gateway seed then publish: %v", err)
+	}
+	if store.bootstrapCalls != 0 {
+		t.Errorf("gateway mode bootstrapped %d times; the identity is server-authoritative", store.bootstrapCalls)
+	}
+	published, err := configfile.Load(beadsDir)
+	if err != nil || published == nil {
+		t.Fatalf("published metadata.json unreadable: %v", err)
+	}
+	if published.ProjectID != "proj-server-authoritative" {
+		t.Errorf("published project id %q, want the reconciled identity", published.ProjectID)
+	}
+}
+
+// A publish failure after a successful seed stays non-fatal, exactly as
+// before: the identity IS recorded, the next open rebuilds the file.
+func TestInitIdentityPublishFailureStaysNonFatal(t *testing.T) {
+	store := &seedProbeStore{}
+	cfg := configfile.DefaultConfig()
+	cfg.ProjectID = "proj-fresh"
+	cfg.Backend = configfile.BackendDolt
+	// A FILE where metadata.json's directory belongs makes cfg.Save fail.
+	blocker := filepath.Join(t.TempDir(), "occupied")
+	if err := os.WriteFile(blocker, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stderr := captureStderr(t, func() {
+		if err := seedInitIdentityThenPublish(context.Background(), store, issueops.VerifyIdentityResult{}, "app", cfg, blocker, false); err != nil {
+			t.Errorf("a publish failure after a successful seed must stay non-fatal, got %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "failed to create metadata.json") {
+		t.Errorf("expected the metadata.json warning on stderr, got: %s", stderr)
+	}
+	if store.bootstrapCalls != 1 {
+		t.Errorf("bootstrap called %d times, want exactly 1", store.bootstrapCalls)
 	}
 }
