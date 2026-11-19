@@ -50,6 +50,7 @@ go_test(
         "store_test.go",
         "test_helpers_pure_test.go",
         "testmain_test.go",
+        "unresolvable_dependency_boundary_test.go",
         "uow_store_engine_test.go",
     ],
     embed = [":tracker"],
@@ -62,6 +63,7 @@ go_test(
         "//internal/storage/uow",
         "//internal/testutil",
         "//internal/types",
+        "//issueops",
     ],
 )
 
