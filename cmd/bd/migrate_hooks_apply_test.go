@@ -383,3 +383,116 @@ func assertMissingHookMigrationFile(t *testing.T, path string) {
 		t.Fatalf("expected %s to be missing, got err=%v", path, err)
 	}
 }
+
+const nonShellMigrationPython = "#!/usr/bin/env python3\nimport sys\n\n\nif __name__ == \"__main__\":\n    sys.exit(0)\n"
+
+const nonShellMigrationLegacyShim = "#!/usr/bin/env sh\n# bd-shim v2\n# bd-hooks-version: 0.56.1\nexec bd hooks run pre-push \"$@\"\n"
+
+func planAndApplyHookMigrationForTest(t *testing.T, repoDir string) (doctor.HookMigrationPlan, hookMigrationExecutionPlan, hookMigrationApplySummary) {
+	t.Helper()
+	plan, err := doctor.PlanHookMigration(repoDir)
+	if err != nil {
+		t.Fatalf("PlanHookMigration failed: %v", err)
+	}
+	execPlan := buildHookMigrationExecutionPlan(plan)
+	if len(execPlan.BlockingErrors) > 0 {
+		t.Fatalf("unexpected blocking errors: %v", execPlan.BlockingErrors)
+	}
+	summary, err := applyHookMigrationExecution(execPlan)
+	if err != nil {
+		t.Fatalf("applyHookMigrationExecution failed: %v", err)
+	}
+	return plan, execPlan, summary
+}
+
+func hookMigrationPlanFor(t *testing.T, plan doctor.HookMigrationPlan, name string) doctor.HookMigrationHookPlan {
+	t.Helper()
+	for _, hook := range plan.Hooks {
+		if hook.Name == name {
+			return hook
+		}
+	}
+	t.Fatalf("hook %s missing from plan", name)
+	return doctor.HookMigrationHookPlan{}
+}
+
+func assertHookMigrationConverged(t *testing.T, repoDir string) {
+	t.Helper()
+	plan, err := doctor.PlanHookMigration(repoDir)
+	if err != nil {
+		t.Fatalf("PlanHookMigration failed: %v", err)
+	}
+	if plan.NeedsMigrationCount != 0 {
+		t.Fatalf("expected the migration to converge, still needed: %+v", plan.Hooks)
+	}
+	execPlan := buildHookMigrationExecutionPlan(plan)
+	if execPlan.operationCount() != 0 || len(execPlan.BlockingErrors) != 0 {
+		t.Fatalf("expected a no-op rerun, got ops=%+v blocking=%v", execPlan.outputOperations(), execPlan.BlockingErrors)
+	}
+}
+
+// TestApplyHookMigration_NonShell pins GH#6348 for bd migrate hooks and the
+// bd doctor --fix hook migration: they never add bd's shell section to a
+// non-shell hook, repair sections an earlier install appended, restore a
+// non-shell sidecar as-is, and stop on markers they cannot remove safely.
+func TestApplyHookMigration_NonShell(t *testing.T) {
+	section := generateHookSection("pre-push")
+	oldSection := strings.NewReplacer(
+		hookSectionBeginLine(), hookSectionBeginPrefix+" v0.56.1 ---",
+		hookSectionEndLine(), hookSectionEndPrefix+" v0.56.1 ---",
+	).Replace(section)
+
+	t.Run("AC6_marker_repair_keeps_sidecars", func(t *testing.T) {
+		for name, injected := range map[string]string{"current_version": section, "old_version": oldSection} {
+			t.Run(name, func(t *testing.T) {
+				repoDir, hooksDir := setupHookMigrationRepo(t)
+				hookPath := filepath.Join(hooksDir, "pre-push")
+				writeHookMigrationFile(t, hookPath, injectHookSection(nonShellMigrationPython, injected))
+				oldSidecar := "#!/usr/bin/env python3\nprint('old')\n"
+				backupSidecar := "#!/usr/bin/env python3\nprint('backup')\n"
+				writeHookMigrationFile(t, hookPath+".old", oldSidecar)
+				writeHookMigrationFile(t, hookPath+".backup", backupSidecar)
+
+				plan, _, summary := planAndApplyHookMigrationForTest(t, repoDir)
+				hook := hookMigrationPlanFor(t, plan, "pre-push")
+				if hook.State != "non_shell_marker_repair" || !hook.NeedsMigration {
+					t.Fatalf("expected non_shell_marker_repair needing migration, got %+v", hook)
+				}
+				if got := mustReadHookMigrationFile(t, hookPath); got != nonShellMigrationPython {
+					t.Fatalf("expected the original python hook back, got:\n%q", got)
+				}
+				if mustReadHookMigrationFile(t, hookPath+".old") != oldSidecar || mustReadHookMigrationFile(t, hookPath+".backup") != backupSidecar {
+					t.Fatal("sidecars must be kept unchanged")
+				}
+				assertMissingHookMigrationFile(t, hookPath+".old.migrated")
+				assertMissingHookMigrationFile(t, hookPath+".backup.migrated")
+				if !strings.Contains(strings.Join(formatHookMigrationApplySummary(summary), "\n"), "bd integration skipped") {
+					t.Fatalf("summary must report the skipped integration: %+v", summary)
+				}
+				assertHookMigrationConverged(t, repoDir)
+			})
+		}
+	})
+
+	t.Run("AC6_clean_non_shell_hook_is_a_noop", func(t *testing.T) {
+		repoDir, hooksDir := setupHookMigrationRepo(t)
+		hookPath := filepath.Join(hooksDir, "pre-push")
+		content := nonShellMigrationPython + "# bd-shim v1\n# bd-hooks-version: 0.40.0\n"
+		writeHookMigrationFile(t, hookPath, content)
+		writeHookMigrationFile(t, hookPath+".old", "#!/bin/sh\necho old\n")
+		writeHookMigrationFile(t, hookPath+".backup", "#!/bin/sh\necho backup\n")
+
+		plan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration failed: %v", err)
+		}
+		hook := hookMigrationPlanFor(t, plan, "pre-push")
+		if hook.State != "non_shell_custom" || hook.NeedsMigration {
+			t.Fatalf("expected non_shell_custom with no migration, got %+v", hook)
+		}
+		assertHookMigrationConverged(t, repoDir)
+		if mustReadHookMigrationFile(t, hookPath) != content {
+			t.Fatal("hook must be unchanged")
+		}
+	})
+}
