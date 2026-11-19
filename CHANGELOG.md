@@ -1431,6 +1431,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd init` on a shared server no longer waits on other projects' live
+  commands** (#7122). In shared-server mode every project shares one server
+  root, and `bd init` (including `bd init --external`) asked for that root's
+  gate exclusively, so a `bd serve` or any long-running command of another
+  project on the same server made it wait out `BEADS_INIT_GATE_TIMEOUT` and
+  refuse, for as long as that command ran. An ordinary `bd init` now holds
+  its own workspace exclusively and the shared server root shared, the way
+  other commands do: it runs alongside other projects' commands and still
+  waits for, and keeps out, maintenance (another project's
+  `bd init --reinit-local`, backup restore, migrate or bootstrap) on the
+  shared server. `bd init --reinit-local` (and `--force`) on a shared server,
+  an init whose `--db` names another root, and every init outside
+  shared-server mode keep the exclusive gate; a refused reinit now says it
+  needs the shared server free of other projects' commands, such as
+  `bd serve`. A bd that opens a database on the server while another bd is
+  still migrating it (the init that just created it, say) now waits for that
+  migration pass instead of refusing as if the migration needed consent.
+  When two inits claim the same database name before either has recorded an
+  identity in it, the database settles it: one records its identity, and the
+  other is refused and writes nothing that names it, neither a
+  `metadata.json` (an existing one stays unchanged) nor its Dolt remote or
+  repository fingerprint in the database. To share that database, rerun the
+  refused init with `--database` naming it, which adopts the other's
+  identity; for a separate project, rerun it with a different `--database`.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

@@ -23,7 +23,8 @@
 //
 //   - a gated operation must never replace or rename the gate file's
 //     parent directory;
-//   - every gate a call path needs is acquired in a single AcquireAll —
+//   - every gate a call path needs is acquired in a single AcquireAll (or
+//     AcquireAllMixed, when the set mixes modes) —
 //     never nest a Gate.Acquire inside a held MultiHandle, or acquire
 //     gates one by one in ad-hoc order; the sorted-path total order only
 //     protects callers that go through one AcquireAll.
@@ -768,35 +769,75 @@ func (m *MultiHandle) Release() error {
 	return errors.Join(errs...)
 }
 
-// AcquireAll takes several gates in one mode, always in sorted
-// canonical-path order so that every process acquiring overlapping gate
-// sets uses the same total order and cannot deadlock against another
-// AcquireAll caller. Duplicate gates (workspace and physical root
-// resolving to the same file) collapse to one acquisition. On any
-// failure, gates already acquired are released in reverse order.
+// Request names one gate and the mode AcquireAllMixed takes it in.
+type Request struct {
+	Gate Gate
+	Mode Mode
+}
+
+// SameGate reports whether g and o name the same gate file under the
+// comparison AcquireAll uses for dedupe and ordering (case-insensitive on
+// Windows and macOS), so callers can classify a gate in a set without
+// re-deriving that platform rule.
+func (g Gate) SameGate(o Gate) bool {
+	return g.path != "" && o.path != "" && gateKey(g.path) == gateKey(o.path)
+}
+
+// AcquireAll takes several gates in one mode. It is AcquireAllMixed with
+// every request in mode; see there for ordering, dedupe, budget and
+// cleanup.
+func AcquireAll(ctx context.Context, mode Mode, opts Options, gates ...Gate) (*MultiHandle, error) {
+	reqs := make([]Request, len(gates))
+	for i, g := range gates {
+		reqs[i] = Request{Gate: g, Mode: mode}
+	}
+	return AcquireAllMixed(ctx, opts, reqs...)
+}
+
+// AcquireAllMixed takes several gates, each in its own mode, always in
+// sorted canonical-path order so that every process acquiring overlapping
+// gate sets uses the same total order and cannot deadlock against another
+// AcquireAll/AcquireAllMixed caller. Duplicate gates (workspace and
+// physical root resolving to the same file) collapse to one acquisition;
+// when duplicates disagree on mode, Exclusive wins, so a request can only
+// ever be strengthened by a duplicate, never weakened. Every request is
+// validated before any gate is touched. On any failure, gates already
+// acquired are released in reverse order.
+//
+// Mixed modes do not relax the single-acquisition rule: there is still no
+// upgrade, and each gate is locked once in its final mode.
 //
 // Options.Wait is a TOTAL budget across the whole set, not per gate, and
-// Options.OnWait fires at most once. Gates rank before every other beads
-// lock: callers must call AcquireAll before touching migrate.lock, the
-// init lock, proxy locks, the dolt-server start lock, or schema GET_LOCK,
-// and release it after those.
-func AcquireAll(ctx context.Context, mode Mode, opts Options, gates ...Gate) (*MultiHandle, error) {
+// Options.OnWait fires at most once. Options.Reason is recorded only for
+// gates taken Exclusive; Options.ReadOnly and IgnoreQueuedExclusive apply
+// only to gates taken Shared (see Options). Gates rank before every other
+// beads lock: callers must call AcquireAll/AcquireAllMixed before touching
+// migrate.lock, the init lock, proxy locks, the dolt-server start lock, or
+// schema GET_LOCK, and release it after those.
+func AcquireAllMixed(ctx context.Context, opts Options, requests ...Request) (*MultiHandle, error) {
 	// See Acquire: nil contexts are normalized, not dereferenced.
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	uniq := make(map[string]Gate, len(gates))
-	for _, g := range gates {
-		if g.path == "" {
+	uniq := make(map[string]Request, len(requests))
+	for _, r := range requests {
+		if r.Gate.path == "" {
 			return nil, errors.New("workspacegate: zero Gate in AcquireAll")
 		}
-		uniq[gateKey(g.path)] = g
+		if r.Mode != Shared && r.Mode != Exclusive {
+			return nil, fmt.Errorf("workspacegate: invalid mode %d for %s", int(r.Mode), r.Gate.path)
+		}
+		k := gateKey(r.Gate.path)
+		if prev, ok := uniq[k]; ok && prev.Mode == Exclusive {
+			continue
+		}
+		uniq[k] = r
 	}
-	ordered := make([]Gate, 0, len(uniq))
-	for _, g := range uniq {
-		ordered = append(ordered, g)
+	ordered := make([]Request, 0, len(uniq))
+	for _, r := range uniq {
+		ordered = append(ordered, r)
 	}
-	sort.Slice(ordered, func(i, j int) bool { return gateKey(ordered[i].path) < gateKey(ordered[j].path) })
+	sort.Slice(ordered, func(i, j int) bool { return gateKey(ordered[i].Gate.path) < gateKey(ordered[j].Gate.path) })
 
 	perGate := opts
 	if opts.OnWait != nil {
@@ -807,7 +848,7 @@ func AcquireAll(ctx context.Context, mode Mode, opts Options, gates ...Gate) (*M
 	deadline := time.Now().Add(opts.Wait)
 
 	m := &MultiHandle{handles: make([]*Handle, 0, len(ordered))}
-	for _, g := range ordered {
+	for _, r := range ordered {
 		if opts.Wait > 0 {
 			// An exhausted budget leaves later gates one non-blocking
 			// attempt (Wait 0), which ignores the writer-fairness queue —
@@ -817,7 +858,7 @@ func AcquireAll(ctx context.Context, mode Mode, opts Options, gates ...Gate) (*M
 				perGate.Wait = 0
 			}
 		}
-		h, err := g.Acquire(ctx, mode, perGate)
+		h, err := r.Gate.Acquire(ctx, r.Mode, perGate)
 		if err != nil {
 			rerr := m.Release()
 			return nil, errors.Join(err, rerr)

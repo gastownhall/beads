@@ -367,16 +367,160 @@ func seedInitWorkspaceIdentity(
 
 	bootstrapper, err := store.Bootstrapper()
 	if err != nil {
-		return fmt.Errorf("failed to reach the workspace identity: %v", err)
+		return fmt.Errorf("failed to reach the workspace identity: %w", err)
 	}
 	_, err = bootstrapper.Bootstrap(ctx, issueops.BootstrapRequest{
 		Prefix:    prefix,
 		ProjectID: projectID,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to record the workspace identity: %v", err)
+		return fmt.Errorf("failed to record the workspace identity: %w", err)
 	}
 	return nil
+}
+
+// publishInitWorkspaceIdentity seeds (or adopts) the database identity and
+// only then publishes what names this workspace: the local metadata.json init
+// composed, then the workspace state it records in the database (see
+// recordInitWorkspaceState).
+//
+// PUBLICATION FOLLOWS THE BOOTSTRAP. Two initializers can both read an
+// unidentified database and each choose a project id; the transactional
+// Bootstrapper lets exactly one record it and refuses the other. Saving
+// metadata.json first would leave the loser's newly chosen id on disk,
+// disagreeing with the database, and recording its workspace state first
+// would leave its Dolt remote and fingerprints in the winner's database. So a
+// refused or failed seed returns before anything is written: new metadata
+// stays absent, existing metadata keeps its bytes, and the database gets
+// nothing from the loser. The loser can rerun init with --database naming the
+// database to adopt the winner's identity, or with another --database for a
+// project of its own (initIdentityRaceHint). cfg is nil when init composed no
+// metadata.json; seed is false in gateway mode, where the identity is
+// server-authoritative.
+func publishInitWorkspaceIdentity(
+	ctx context.Context,
+	store storage.DoltStorage,
+	found issueops.VerifyIdentityResult,
+	prefix, projectID, beadsDir string,
+	cfg *configfile.Config,
+	seed bool,
+	state initWorkspaceState,
+) error {
+	if seed {
+		if err := seedInitWorkspaceIdentity(ctx, store, found, prefix, projectID, beadsDir); err != nil {
+			return err
+		}
+	}
+	if cfg != nil {
+		if err := cfg.Save(beadsDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
+			// Non-fatal - continue anyway
+		}
+	}
+	recordInitWorkspaceState(ctx, store, state)
+	return nil
+}
+
+// initWorkspaceState is the per-workspace state init records in the database
+// beside the identity. The zero value records nothing.
+type initWorkspaceState struct {
+	// remoteURL is the Dolt origin remote to configure, added only when the
+	// database has none; "" configures no remote.
+	remoteURL string
+	// tracking records the tracking metadata (bd_version, repo_id, clone_id);
+	// false in gateway mode (shouldWriteInitStateToDB).
+	tracking bool
+	// quiet suppresses the lines naming the remote and fingerprints recorded.
+	quiet bool
+}
+
+// recordInitWorkspaceState writes the Dolt origin remote and the tracking
+// metadata that state asks for. Every write warns and continues.
+//
+// IT RUNS ONLY ONCE THE IDENTITY IS SETTLED, from publishInitWorkspaceIdentity.
+// These values name THIS workspace (its git origin, its repository and clone
+// fingerprints), and they land in a database another initializer may be racing
+// this one for, where nothing arbitrates them: the remote is added only when
+// the database has none, and the fingerprints are overwritten. Written before a
+// bootstrap that is then refused, the loser's would stay in the winner's
+// database, and the winner's next `bd dolt push` would write its issues into the
+// loser's repository. Written after, an init that loses writes nothing that
+// names it. Two inits that both settle (one bootstraps, the other adopts) share
+// one database, and with it one origin, as any two sharers of a database do.
+func recordInitWorkspaceState(ctx context.Context, store storage.DoltStorage, state initWorkspaceState) {
+	// Configure the remote in the Dolt store so bd dolt push/pull work
+	// immediately after init/bootstrap. A git origin is a valid Dolt
+	// remote even before refs/dolt/data exists; the first bd dolt push
+	// creates that ref. This keeps the default path durable without
+	// falling back to JSONL-as-sync. The caller leaves remoteURL empty in
+	// gateway mode: the hosted server owns the database, so
+	// DOLT_REMOTE('add', ...) must not run against it (see
+	// shouldWriteInitDoltRemote).
+	if state.remoteURL != "" {
+		configureInitDoltRemote(ctx, store, state.remoteURL, state.quiet)
+	}
+
+	// === TRACKING METADATA (Pattern B: Warn and Continue) ===
+	// Tracking metadata enhances functionality (diagnostics, version checks, collision detection)
+	// but the system works without it. Failures here degrade gracefully - we warn but continue.
+	// Belt-and-suspenders: write then verify read-back for each field.
+
+	// Tracking metadata (bd_version, repo_id, clone_id) is clone-local state.
+	// In gateway mode it must not be written into the shared, server-owned
+	// database: repo_id/clone_id are per-clone fingerprints and a last-init-wins
+	// overwrite feeds false cross-project mismatch diagnostics, while a read-only
+	// credential would only warn per field.
+	if !state.tracking {
+		return
+	}
+	// Store bd version in clone-local metadata (dolt-ignored, no merge conflicts)
+	if err := store.SetLocalMetadata(ctx, "bd_version", Version); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to write bd_version local metadata: %v\n", err)
+	}
+
+	// Compute and store repository fingerprint (FR-015)
+	repoID, err := beads.ComputeRepoID()
+	if err != nil {
+		if !state.quiet {
+			fmt.Fprintf(os.Stderr, "Warning: could not compute repository ID: %v\n", err)
+		}
+	} else {
+		if verifyMetadata(ctx, store, "repo_id", repoID) && !state.quiet {
+			fmt.Printf("  Repository ID: %s\n", repoID[:8])
+		}
+	}
+
+	// Compute and store clone-specific ID (FR-016: skip on failure)
+	cloneID, err := beads.GetCloneID()
+	if err != nil {
+		if !state.quiet {
+			fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
+		}
+	} else {
+		if verifyMetadata(ctx, store, "clone_id", cloneID) && !state.quiet {
+			fmt.Printf("  Clone ID: %s\n", cloneID)
+		}
+	}
+}
+
+// initIdentityRaceHint is the remedy for an init that lost the identity race
+// on database dbName, or "" when err is not that refusal. The refusal can only
+// mean a race: seedInitWorkspaceIdentity bootstraps only a database its own
+// read found unidentified, so another init identified it in between. Rerun
+// with --database naming that database, an init whose workspace has no
+// project id yet (the loser published none) consults it and adopts the
+// winner's identity (shouldConsultInitProjectID); another --database gives
+// this project a database of its own. The sentence names dbName with
+// remedy.PrintedWord, not PrintedValue: the same line pastes it into the
+// rerun, so pasting the line must run no part of it.
+func initIdentityRaceHint(err error, dbName string) string {
+	var identified *issueops.AlreadyIdentifiedError
+	if !errors.As(err, &identified) {
+		return ""
+	}
+	arg, note := remedy.CommandArg(runtime.GOOS, dbName, "<database>")
+	return fmt.Sprintf("another bd init identified database %s first: to share that database, rerun with --database %s%s; for a separate project, rerun with a different --database",
+		remedy.PrintedWord(dbName), arg, note)
 }
 
 // resolveUserHomeDir returns the user's home directory.
@@ -1271,9 +1415,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			beadsDirAbs = filepath.Clean(beadsDir)
 		}
 		// Workspace operation gate: bd init REPLACES/creates workspace state,
-		// so it holds the workspace gate (plus any resolvable physical-root
-		// gates, e.g. a shared-server dolt dir) EXCLUSIVELY for the rest of
-		// init. init is in noDbCommands, so the PersistentPreRunE chokepoint
+		// so it holds the workspace gate EXCLUSIVELY for the rest of init,
+		// together with any resolvable physical-root gates. Those are
+		// EXCLUSIVE too, except that an ordinary (non-reinit) init in
+		// shared-server mode holds the machine-global shared dolt dir SHARED,
+		// as every other project's commands do; --reinit-local (and its
+		// --force alias) holds everything EXCLUSIVELY (see initGateRequests).
+		// init is in noDbCommands, so the PersistentPreRunE chokepoint
 		// never covers it — this is its own acquisition site. The workspace
 		// gate file lives BESIDE .beads (<parent>/.beads.gate.lock), so it
 		// works before .beads exists; the acquisition must come before any
@@ -1292,7 +1440,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if fi, statErr := os.Stat(plannedDBPathAbs); statErr == nil && !fi.IsDir() {
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
-		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
+		initGateHandle, gateErr := acquireInitMutationGateFor(rootCtx, beadsDirAbs, plannedDBPathAbs, reinitLocal, func() error {
 			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
 		})
 		if gateErr != nil {
@@ -1883,23 +2031,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			initGlobalDatabaseConfig(ctx, doltCfg, quiet)
 		}
 
-		// Configure the remote in the Dolt store so bd dolt push/pull work
-		// immediately after init/bootstrap. A git origin is a valid Dolt
-		// remote even before refs/dolt/data exists; the first bd dolt push
-		// creates that ref. This keeps the default path durable without
-		// falling back to JSONL-as-sync. Gateway mode skips it: the hosted
-		// server owns the database, so DOLT_REMOTE('add', ...) must not run
-		// against it (see shouldWriteInitDoltRemote).
-		// The URL is routed here too, not just on the clone path: the
-		// no-Dolt-data-yet case (the pre-first-push wiring this is for) never
-		// clones, so without routing a raw https forge URL would be stored
-		// verbatim in dolt_remotes and the *first* `bd dolt push` would take
-		// it to the remotesapi client — the #4421 storm, one leg further down
-		// (#5743).
-		if shouldWriteInitDoltRemote(doltCfg.Gateway, syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin, isDoltLocalOnly()) {
-			configureInitDoltRemote(ctx, store, doltRemoteURL(syncURL), quiet)
-		}
-
 		// === CONFIGURATION METADATA (Pattern A: Fatal) ===
 		// Configuration metadata is essential for core functionality and must succeed.
 		// These settings define fundamental behavior (issue IDs, sync workflow).
@@ -1929,47 +2060,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			return err
 		}
 
-		// === TRACKING METADATA (Pattern B: Warn and Continue) ===
-		// Tracking metadata enhances functionality (diagnostics, version checks, collision detection)
-		// but the system works without it. Failures here degrade gracefully - we warn but continue.
-		// Belt-and-suspenders: write then verify read-back for each field.
-
-		// Tracking metadata (bd_version, repo_id, clone_id) is clone-local state.
-		// In gateway mode it must not be written into the shared, server-owned
-		// database: repo_id/clone_id are per-clone fingerprints and a last-init-wins
-		// overwrite feeds false cross-project mismatch diagnostics, while a read-only
-		// credential would only warn per field.
-		if shouldWriteInitStateToDB(doltCfg.Gateway) {
-			// Store bd version in clone-local metadata (dolt-ignored, no merge conflicts)
-			if err := store.SetLocalMetadata(ctx, "bd_version", Version); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to write bd_version local metadata: %v\n", err)
-			}
-
-			// Compute and store repository fingerprint (FR-015)
-			repoID, err := beads.ComputeRepoID()
-			if err != nil {
-				if !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: could not compute repository ID: %v\n", err)
-				}
-			} else {
-				if verifyMetadata(ctx, store, "repo_id", repoID) && !quiet {
-					fmt.Printf("  Repository ID: %s\n", repoID[:8])
-				}
-			}
-
-			// Compute and store clone-specific ID (FR-016: skip on failure)
-			cloneID, err := beads.GetCloneID()
-			if err != nil {
-				if !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
-				}
-			} else {
-				if verifyMetadata(ctx, store, "clone_id", cloneID) && !quiet {
-					fmt.Printf("  Clone ID: %s\n", cloneID)
-				}
-			}
-		}
-
 		// bootstrapProjectID is the identity seedInitWorkspaceIdentity will
 		// record, resolved inside the metadata.json block below because that is
 		// where local and database identities are reconciled. It stays "" when
@@ -1977,7 +2067,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// workspace's own metadata.json.
 		bootstrapProjectID := ""
 
-		// Create or preserve metadata.json for database metadata (bd-zai fix)
+		// localCfg is the metadata.json this init composes. It is composed in
+		// memory here and published (saved) only after the database identity
+		// is seeded or adopted, by publishInitWorkspaceIdentity below: a
+		// losing concurrent initializer must not leave the identity it minted
+		// on disk.
+		var localCfg *configfile.Config
+
+		// Compose or preserve metadata.json for database metadata (bd-zai fix)
 		if useLocalBeads {
 			// First, check if metadata.json already exists
 			existingCfg, err := configfile.Load(beadsDir)
@@ -2112,15 +2209,38 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 			}
 
-			if err := cfg.Save(beadsDir); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
-				// Non-fatal - continue anyway
-			}
-
 			// The write itself happens once, below this block, through
 			// seedInitWorkspaceIdentity; this is where its id is decided.
 			bootstrapProjectID = cfg.ProjectID
+			localCfg = cfg
+		}
 
+		// Seed the workspace's identity, through issueops.Bootstrapper, in the
+		// one place this route writes it, and only then publish metadata.json
+		// and record the workspace's Dolt remote and tracking metadata (see
+		// recordInitWorkspaceState for why they wait for the seed).
+		// Gateway mode skips the seed: the identity is server-authoritative
+		// and the credential may be read-only, so bd adopts what it verified
+		// rather than writing it back. It records no workspace state either.
+		initState := initWorkspaceState{tracking: shouldWriteInitStateToDB(doltCfg.Gateway), quiet: quiet}
+		if shouldWriteInitDoltRemote(doltCfg.Gateway, syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin, isDoltLocalOnly()) {
+			// The URL is routed here too, not just on the clone path: the
+			// no-Dolt-data-yet case (the pre-first-push wiring this is for)
+			// never clones, so without routing a raw https forge URL would
+			// be stored verbatim in dolt_remotes and the *first*
+			// `bd dolt push` would take it to the remotesapi client — the
+			// #4421 storm, one leg further down (#5743).
+			initState.remoteURL = doltRemoteURL(syncURL)
+		}
+		if err := publishInitWorkspaceIdentity(ctx, store, dbIdentity, issuePrefix, bootstrapProjectID, beadsDir, localCfg, shouldWriteInitStateToDB(doltCfg.Gateway), initState); err != nil {
+			_ = store.Close()
+			if hint := initIdentityRaceHint(err, dbName); hint != "" {
+				return HandleErrorWithHint(err.Error(), hint)
+			}
+			return err
+		}
+
+		if useLocalBeads {
 			// Create config.yaml template (prefix is stored in DB, not config.yaml)
 			if err := createConfigYaml(beadsDir); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
@@ -2180,17 +2300,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		// Seed the workspace's identity, through issueops.Bootstrapper, in the
-		// one place this route writes it. Gateway mode skips it: the identity
-		// is server-authoritative and the credential may be read-only, so bd
-		// adopts what it verified rather than writing it back.
-		if shouldWriteInitStateToDB(doltCfg.Gateway) {
-			if err := seedInitWorkspaceIdentity(ctx, store, dbIdentity, issuePrefix, bootstrapProjectID, beadsDir); err != nil {
-				_ = store.Close()
-				return err
-			}
-		}
-
 		// Initialize last_import_time metadata to mark the database as synced.
 		// This prevents bd doctor from reporting "No last_import_time recorded in database"
 		// after init completes. Sets the metadata to current time in RFC3339 format.
@@ -2198,8 +2307,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// sync state that must not be written into the shared, server-owned database.
 		//
 		// It is NOT part of the bootstrap, and neither are the fingerprints
-		// above: those four values are refreshed on EVERY init, adopt or not,
-		// while the identity is written once and adopted forever.
+		// recordInitWorkspaceState wrote above: those four values are
+		// refreshed on EVERY init, adopt or not, while the identity is written
+		// once and adopted forever.
 		if shouldWriteInitStateToDB(doltCfg.Gateway) {
 			if err := store.SetMetadata(ctx, "last_import_time", time.Now().Format(time.RFC3339)); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to initialize last_import_time: %v\n", err)

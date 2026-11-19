@@ -174,18 +174,24 @@ func exclusiveGateOptions(reason string) workspacegate.Options {
 // a Go duration ("90s", "2m") or bare whole seconds ("90").
 const initGateTimeoutEnv = "BEADS_INIT_GATE_TIMEOUT"
 
-// initGateWaitDefault is how long bd init waits for its EXCLUSIVE gate set.
-// It is deliberately longer than exclusiveGateWait and scoped to init only:
-// in shared-server mode every project's physical root is the one shared
-// dolt data dir, so init in project A contends with init (or any gated
-// command) in project B. A single init holds the gate for ~8s, so the
+// initGateWaitDefault is how long bd init waits for its gate set (see
+// initGateRequests for which gates it holds EXCLUSIVE). It is deliberately
+// longer than exclusiveGateWait and scoped to init only. It was sized when
+// every init took the one shared dolt data dir of shared-server mode
+// EXCLUSIVELY, so init in project A contended with init (or any gated
+// command) in project B: a single init holds its gates for ~8s, so the
 // generic 5s budget made two concurrent `bd init --shared-server` runs in
-// different projects refuse each other. Under load a single init holds the
-// gate for 10-15s and each queued init waits for every one ahead of it, so
-// 60s rides out a few back-to-back inits while still failing with a clear
-// error on a genuinely stuck holder. (Waiting this long is only acceptable
-// because a waiting init no longer holds ordinary commands back for its
-// whole budget: workspacegate caps how long it queues them, maxIntentHold.)
+// different projects refuse each other, and under load (10-15s an init,
+// each queued init waiting for every one ahead of it) 60s rode out a few
+// back-to-back inits while still failing with a clear error on a genuinely
+// stuck holder. An ordinary shared-server init now holds that root SHARED,
+// so it waits only for its own workspace and for maintenance on the shared
+// root (another project's `bd init --reinit-local`, backup restore, migrate
+// or bootstrap); `bd init --reinit-local` still takes the root EXCLUSIVE and
+// waits for every other project's commands. (Waiting this long is only
+// acceptable because a waiting init no longer holds ordinary commands back
+// for its whole budget: workspacegate caps how long it queues them,
+// maxIntentHold.)
 // The other exclusive callers (backup restore, bootstrap, migrate) keep
 // exclusiveGateWait: they are rare, deliberate maintenance operations rather
 // than routine setup that tooling fans out across many projects at once.
@@ -260,12 +266,15 @@ const sharedGateWaitEnv = "BEADS_GATE_WAIT_TIMEOUT"
 // exclusive maintenance holder (bd init ~8s, backup restore, migrate,
 // bootstrap) — or for a queued one, see workspacegate's writer fairness —
 // before failing. In shared-server mode every project shares one physical
-// root gate, so another project's `bd init` briefly excludes every bd
-// command on the machine; failing those instantly made routine tooling
-// flaky. Queued maintenance operations run one after another (two inits
-// fanned out across projects hold the gate back to back, 10-15s each under
-// load), and a waiting command waits for all of them, so the default matches
-// init's own patience rather than a single init: 30s. Humans see the notice
+// root gate, so another project's shared-root maintenance (`bd init
+// --reinit-local`, backup restore, migrate, bootstrap) briefly excludes
+// every bd command on the machine; an ordinary `bd init` holds that root
+// SHARED and excludes only commands on its own workspace. Failing those
+// instantly made routine tooling flaky. Queued maintenance operations run
+// one after another (as two inits fanned out across projects did when every
+// init took the shared root EXCLUSIVELY, 10-15s each under load), and a
+// waiting command waits for all of them, so the default matches init's own
+// patience rather than a single init: 30s. Humans see the notice
 // after 2s and can Ctrl-C; agents and CI, the callers that suffered most
 // from fail-fast, just get their command run. A genuinely long restore or
 // migration still fails with a clear error naming the holder and the knob.
@@ -514,12 +523,14 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 }
 
 // acquireExclusiveWorkspaceGates is the maintenance-side acquisition used by
-// bd init and bd migrate, which live on the skip-store path and therefore
-// never reach the chokepoint. It takes the workspace gate plus the resolved
-// physical roots (when .beads exists — bd init on a fresh directory has
-// nothing to resolve yet) plus any extraRoots, all EXCLUSIVE in ONE
-// AcquireAll (never nested — that is a workspacegate invariant). Failures
-// are returned, not softened: maintenance refuses rather than pretends.
+// bd migrate and bd bootstrap, which live on the skip-store path and
+// therefore never reach the chokepoint (bd init plans the same gate set but
+// acquires it through acquireInitMutationGateFor, which can hold the shared
+// root SHARED). It takes the workspace gate plus the resolved physical roots
+// (when .beads exists — a fresh directory has nothing to resolve yet) plus
+// any extraRoots, all EXCLUSIVE in ONE AcquireAll (never nested — that is a
+// workspacegate invariant). Failures are returned, not softened: maintenance
+// refuses rather than pretends.
 //
 // Lock ordering (normative for the callers): workspace gate(s) →
 // physical-root gate(s) → migrate.lock → embedded .lock → proxy locks →
@@ -538,19 +549,31 @@ func acquireExclusiveWorkspaceGates(ctx context.Context, beadsDir, reason string
 }
 
 // acquireExclusiveWorkspaceGatesWithOptions is acquireExclusiveWorkspaceGates
-// with caller-supplied acquisition options (bd init uses a longer wait).
+// with caller-supplied acquisition options.
 func acquireExclusiveWorkspaceGatesWithOptions(ctx context.Context, beadsDir string, opts workspacegate.Options, extraRoots ...string) (*workspacegate.MultiHandle, error) {
-	// Defense against callers that computed no workspace (bootstrap plans
-	// are the untrusted case): gating "" would resolve against the CWD and
-	// fence an arbitrary directory.
-	if strings.TrimSpace(beadsDir) == "" {
-		return nil, errors.New("workspace gate: empty beads directory")
-	}
 	// Normalize a nil context (tests and helpers call maintenance paths
 	// directly, before the process-level signal context exists); the
 	// workspacegate package also defends, but do not rely on callees.
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	gates, err := maintenanceGateSet(beadsDir, extraRoots...)
+	if err != nil {
+		return nil, err
+	}
+	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive, opts, gates...)
+}
+
+// maintenanceGateSet is the gate set a skip-store maintenance command (bd
+// init, bd migrate) acquires: the workspace gate plus the resolved physical
+// roots (when .beads exists) plus any extraRoots whose parent exists. It
+// only plans; it never acquires and never creates a guarded directory.
+func maintenanceGateSet(beadsDir string, extraRoots ...string) ([]workspacegate.Gate, error) {
+	// Defense against callers that computed no workspace (bootstrap plans
+	// are the untrusted case): gating "" would resolve against the CWD and
+	// fence an arbitrary directory.
+	if strings.TrimSpace(beadsDir) == "" {
+		return nil, errors.New("workspace gate: empty beads directory")
 	}
 	var gates []workspacegate.Gate
 	if _, err := os.Stat(beadsDir); err == nil {
@@ -583,32 +606,119 @@ func acquireExclusiveWorkspaceGatesWithOptions(ctx context.Context, beadsDir str
 			gates = append(gates, g)
 		}
 	}
-	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive, opts, gates...)
+	return gates, nil
 }
 
-// acquireInitMutationGate holds init's complete exclusive gate set while its
+// initGateRequests turns init's planned gate set into per-gate modes. Every
+// gate is EXCLUSIVE except, for an ordinary (non-reinit) init in resolved
+// shared-server mode, the machine-global shared dolt root, which is SHARED.
+//
+// Why the shared root may be SHARED: ordinary init in shared-server mode only
+// ADDS a database to a server every other shared-server project is already
+// using; it never replaces or rewrites theirs. Those projects' commands (and
+// their long-running `bd serve`) hold the same root SHARED for their whole
+// lifetime, so an EXCLUSIVE request there could never be granted while any of
+// them runs (GH#7122). SHARED still excludes shared-root maintenance in both
+// directions. The additive work itself is covered by the server lifecycle
+// lock, CREATE DATABASE IF NOT EXISTS, database-scoped schema serialization
+// and the transactional identity bootstrap (see publishInitWorkspaceIdentity).
+//
+// Destructive reinit (reinitLocal, including the --force alias) keeps the
+// whole set EXCLUSIVE, as do non-shared-server roots and an explicit --db
+// root that is not the shared root. The workspace gate always stays
+// EXCLUSIVE: should it name the same gate file as the shared root,
+// AcquireAllMixed's EXCLUSIVE-wins dedupe keeps it exclusive.
+func initGateRequests(gates []workspacegate.Gate, reinitLocal bool) ([]workspacegate.Request, error) {
+	var sharedRoot workspacegate.Gate
+	sharedRootKnown := false
+	if !reinitLocal && doltserver.IsSharedServerMode() {
+		if dir, err := doltserver.SharedDoltPath(); err == nil {
+			if _, serr := os.Stat(filepath.Dir(dir)); serr == nil {
+				g, gerr := workspacegate.ForPhysicalRoot(dir)
+				if gerr != nil {
+					return nil, gerr
+				}
+				sharedRoot, sharedRootKnown = g, true
+			}
+		}
+	}
+	reqs := make([]workspacegate.Request, 0, len(gates))
+	for i, g := range gates {
+		mode := workspacegate.Exclusive
+		// gates[0] is the workspace gate (maintenanceGateSet's contract).
+		if i > 0 && sharedRootKnown && g.SameGate(sharedRoot) {
+			mode = workspacegate.Shared
+		}
+		reqs = append(reqs, workspacegate.Request{Gate: g, Mode: mode})
+	}
+	return reqs, nil
+}
+
+// acquireInitMutationGate holds init's complete gate set while its
 // destructive preflight runs. A refusal or preflight error releases the gates;
-// a successful caller owns the returned handle through replacement.
+// a successful caller owns the returned handle through replacement. It plans
+// an ordinary (non-reinit) init; see acquireInitMutationGateFor. The set is
+// acquired in ONE AcquireAllMixed; see initGateRequests for which gates are
+// SHARED. Preflight runs only once the complete set is held.
 //
 // Contention waits up to initGateWait() (not the generic exclusiveGateWait),
 // honoring ctx cancellation, and prints one notice if the wait outlasts
-// gateWaitNoticeDelay. Exclusivity is unchanged; past the bound init fails
-// with the same refusal, naming the budget and the knob that raises it.
+// gateWaitNoticeDelay. Past the bound init fails with the same refusal,
+// naming the budget and the knob that raises it.
 func acquireInitMutationGate(ctx context.Context, beadsDir, physicalRoot string, preflight func() error) (*workspacegate.MultiHandle, error) {
+	return acquireInitMutationGateFor(ctx, beadsDir, physicalRoot, false, preflight)
+}
+
+// acquireInitMutationGateFor is acquireInitMutationGate for an init whose
+// destructiveness is known: reinitLocal (the resolved --reinit-local, which
+// --force aliases) keeps every gate EXCLUSIVE.
+func acquireInitMutationGateFor(ctx context.Context, beadsDir, physicalRoot string, reinitLocal bool, preflight func() error) (*workspacegate.MultiHandle, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmdName := "bd init"
+	if reinitLocal {
+		cmdName = "bd init --reinit-local"
+	}
+	where := "this workspace"
+	if doltserver.IsSharedServerMode() {
+		where = "this workspace or its shared server"
+	}
+	refusal := fmt.Sprintf("%s refuses to run over live bd activity on %s", cmdName, where)
+	if reinitLocal && doltserver.IsSharedServerMode() {
+		// Known limitation: destructive reinit takes the shared root
+		// EXCLUSIVE, so any other project's resident bd command (bd serve)
+		// on the shared server blocks it until that command exits.
+		refusal += " (reinitializing needs the shared server free of other projects' bd commands, such as bd serve)"
+	}
+
+	gates, err := maintenanceGateSet(beadsDir, physicalRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", refusal, err)
+	}
+	reqs, err := initGateRequests(gates, reinitLocal)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", refusal, err)
+	}
+
+	// The holder sidecar (and, while a destructive reinit waits behind a
+	// resident shared holder, the queued-writer intent sidecar) records why
+	// this process holds the gate, so waiters can tell a destructive reinit
+	// from an ordinary init.
 	wait := initGateWait()
 	onWait, stopNotice := delayedGateNotice()
 	opts := workspacegate.Options{
 		Wait:   wait,
-		Reason: "bd init",
+		Reason: cmdName,
 		OnWait: onWait,
 	}
-	h, err := acquireExclusiveWorkspaceGatesWithOptions(ctx, beadsDir, opts, physicalRoot)
+	h, err := workspacegate.AcquireAllMixed(ctx, opts, reqs...)
 	stopNotice()
 	if err != nil {
 		if errors.Is(err, workspacegate.ErrBusy) {
-			return nil, fmt.Errorf("bd init refuses to run over live bd activity on this workspace (waited %s; set %s to wait longer): %w", wait, initGateTimeoutEnv, err)
+			return nil, fmt.Errorf("%s (waited %s; set %s to wait longer): %w", refusal, wait, initGateTimeoutEnv, err)
 		}
-		return nil, fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", err)
+		return nil, fmt.Errorf("%s: %w", refusal, err)
 	}
 	if preflight != nil {
 		if err := preflight(); err != nil {

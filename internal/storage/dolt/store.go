@@ -3529,11 +3529,14 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) (int, error) {
 
 // initSchemaOnDBWithBootstrapHeal threads one-shot, incarnation-bound reset
 // authority into the migration lock. A nil capability always fails closed.
+// extra carries any further MigrateUpWithLock options (the retry loop's
+// locked re-check of a gate refusal).
 func initSchemaOnDBWithBootstrapHeal(
 	ctx context.Context,
 	db *sql.DB,
 	bootstrapHeal *schema.FreshBootstrapHealCapability,
 	endpoint string,
+	extra ...schema.MigrateLockOption,
 ) (int, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -3550,6 +3553,7 @@ func initSchemaOnDBWithBootstrapHeal(
 	if bootstrapHeal != nil {
 		opts = append(opts, schema.WithFreshBootstrapHeal(bootstrapHeal, endpoint))
 	}
+	opts = append(opts, extra...)
 	applied, err := schema.MigrateUpWithLock(ctx, conn, dbName, opts...)
 	if err != nil {
 		return applied, fmt.Errorf("schema migration: %w", err)
@@ -3566,9 +3570,84 @@ func initSchemaOnDBWithRetry(ctx context.Context, db *sql.DB) (int, error) {
 // (schema_migrations, dolt_remotes) can hit the same transient Dolt
 // startup/catalog races the migration retry absorbs, so gate probe errors are
 // retried with them instead of failing the open fast (bd-6dnrw.30); a
-// *schema.RemoteMigrateGateError refusal stays permanent.
-func initSchemaOnDBWithRetryAndGate(ctx context.Context, db *sql.DB, gate func(context.Context, *sql.DB) error) (int, error) {
+// *schema.RemoteMigrateGateError refusal stays permanent once the gate has
+// read it again under the database's migration lock (lockedGateRecheck).
+//
+// The gate takes a schema.DBConn because it reads on two sessions: the
+// migration pool first, then MigrateUpWithLock's pinned, locked session.
+func initSchemaOnDBWithRetryAndGate(ctx context.Context, db *sql.DB, gate func(context.Context, schema.DBConn) error) (int, error) {
 	return initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, db, gate, nil, "")
+}
+
+// lockedGateRecheck reads a gate refusal a second time, under the database's
+// migration lock, before the retry loop treats it as final (GH#7122).
+//
+// The gate's first read runs before, and outside, the lock, and a migrating
+// session commits every migration step as it goes. An open that reads while
+// another session's pass is still running (the init that just created the
+// database, or one upgrading it with consent) therefore sees an advanced
+// cursor with migrations pending, and the gate refuses as if an operator had
+// to consent to a migration nobody started. The pass finishes a few seconds
+// later and the refusal was never true. Its advice, to get consent from every
+// client and upgrade them first, is wrong for a race that waiting would
+// settle.
+//
+// So the first refusal is provisional. The attempt then runs the gate inside
+// MigrateUpWithLock, which first tries its convergence fast path and
+// otherwise reads the gate again once it holds the lock, the way the proxied
+// path always runs its gate (schema.WithMigrationGate). Holding the lock means
+// no pass is in flight, so that second read is the answer:
+//
+//   - nothing pending (the pass finished): the gate allows, or the fast path
+//     finds the database converged, and the open goes on;
+//   - still refused (nobody was migrating, or the pass died part-way): the
+//     refusal is final, exactly as before;
+//   - the lock stays busy (the pass runs past GET_LOCK's wait): the attempt
+//     fails retryably and the loop tries again within serverRetryMaxElapsed.
+type lockedGateRecheck struct {
+	gate func(context.Context, schema.DBConn) error
+	// refusal is the gate's first, unlocked answer.
+	refusal error
+	// satisfied is the retry loop's latch; run sets it when the locked read
+	// allows, so a retry after a failed migration pass does not ask again.
+	satisfied *bool
+	// lockedErr is what the locked read returned when it did not allow; nil
+	// when it allowed or never ran.
+	lockedErr error
+}
+
+// run is the schema.MigrationGate MigrateUpWithLock calls under the lock.
+func (r *lockedGateRecheck) run(ctx context.Context, conn *sql.Conn) error {
+	if err := r.gate(ctx, conn); err != nil {
+		r.lockedErr = err
+		return err
+	}
+	*r.satisfied = true
+	return nil
+}
+
+// outcome is the retry loop's verdict on an attempt whose gate refused before
+// the lock and has not allowed since. schemaErr is the attempt's error.
+func (r *lockedGateRecheck) outcome(schemaErr error) error {
+	switch {
+	case schemaErr == nil:
+		// The fast path found the database converged: the pass the first
+		// read saw has finished, and nothing is left to authorize.
+		return nil
+	case r.lockedErr != nil && schema.IsRemoteMigrateGateError(r.lockedErr):
+		return backoff.Permanent(r.lockedErr)
+	case r.lockedErr != nil && isRetryableError(r.lockedErr):
+		return r.lockedErr
+	case r.lockedErr != nil:
+		return backoff.Permanent(r.lockedErr)
+	case schema.IsMigrationLockError(schemaErr):
+		// Another session still holds the lock: its pass is in flight.
+		return schemaErr
+	default:
+		// The lock was never reached (no session, no database name), so
+		// nothing contradicts the first read, and its refusal stands.
+		return backoff.Permanent(r.refusal)
+	}
 }
 
 // initSchemaOnDBWithRetryAndGateBootstrapHeal shares one capability across the
@@ -3576,7 +3655,7 @@ func initSchemaOnDBWithRetryAndGate(ctx context.Context, db *sql.DB, gate func(c
 func initSchemaOnDBWithRetryAndGateBootstrapHeal(
 	ctx context.Context,
 	db *sql.DB,
-	gate func(context.Context, *sql.DB) error,
+	gate func(context.Context, schema.DBConn) error,
 	bootstrapHeal *schema.FreshBootstrapHealCapability,
 	endpoint string,
 ) (int, error) {
@@ -3605,22 +3684,36 @@ func initSchemaOnDBWithRetryAndGateBootstrapHeal(
 	// Same argument, same shape as the proxied path's skip in
 	// schema.MigrateUpWithLock. Only the ALLOW is latched: a gate whose probes
 	// hit a transient startup/catalog race has not decided anything yet, and
-	// is still retried below.
+	// is still retried below. A refusal is not final until the gate has read
+	// it again under the migration lock (lockedGateRecheck), and an allow from
+	// that locked read is latched the same way.
 	gateSatisfied := bootstrapHeal != nil
 
 	var applied int
 	err := backoff.Retry(func() error {
+		var recheck *lockedGateRecheck
 		if gate != nil && !gateSatisfied {
-			if gateErr := gate(ctx, db); gateErr != nil {
-				if !schema.IsRemoteMigrateGateError(gateErr) && isRetryableError(gateErr) {
-					return gateErr
-				}
+			gateErr := gate(ctx, db)
+			switch {
+			case gateErr == nil:
+				gateSatisfied = true
+			case schema.IsRemoteMigrateGateError(gateErr):
+				recheck = &lockedGateRecheck{gate: gate, refusal: gateErr, satisfied: &gateSatisfied}
+			case isRetryableError(gateErr):
+				return gateErr
+			default:
 				return backoff.Permanent(gateErr)
 			}
-			gateSatisfied = true
+		}
+		var opts []schema.MigrateLockOption
+		if recheck != nil {
+			opts = append(opts, schema.WithMigrationGate(recheck.run))
 		}
 		var schemaErr error
-		applied, schemaErr = initSchemaOnDBWithBootstrapHeal(ctx, db, bootstrapHeal, endpoint)
+		applied, schemaErr = initSchemaOnDBWithBootstrapHeal(ctx, db, bootstrapHeal, endpoint, opts...)
+		if recheck != nil && !gateSatisfied {
+			return recheck.outcome(schemaErr)
+		}
 		if schemaErr != nil && isRetryableError(schemaErr) {
 			return schemaErr
 		}
@@ -3747,7 +3840,10 @@ func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshB
 	// already-initialized database — that is how two clones fork the schema.
 	// The gate runs inside the retry loop, before each migration attempt: its
 	// reads can hit transient startup/catalog races (retryable) while a gate
-	// refusal is permanent and never retried into a migration.
+	// refusal is permanent and never retried into a migration, once the gate
+	// has read it again under the migration lock (a refusal read while another
+	// session's migration pass is still running is that pass, not a database
+	// that needs consent; see lockedGateRecheck).
 	// Use the on-disk fallback: a freshly (auto-)started server can report an
 	// empty dolt_remotes table even though remotes are persisted in .dolt/config
 	// (GH#2315), so an SQL-only check would miss the remote on the first write
@@ -3790,7 +3886,7 @@ func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshB
 	// unprompted. On a server whose lifecycle bd owns for this one workspace,
 	// the pre-existing contract stands and the open migrates (see
 	// sharedServerDatabase).
-	gate := func(ctx context.Context, db *sql.DB) error {
+	gate := func(ctx context.Context, db schema.DBConn) error {
 		if !sharedServerDatabase(s.cfg) {
 			return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(
 				ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)

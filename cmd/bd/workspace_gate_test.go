@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/workspacegate"
@@ -1136,4 +1138,501 @@ func TestStrictReadonlyCommandCreatesNoGateFiles(t *testing.T) {
 	if len(gateFiles) != 0 {
 		t.Fatalf("bd --readonly created gate files %v\noutput: %s", gateFiles, out)
 	}
+}
+
+// bd-xicgb8 (GH#7122): in shared-server mode another project's long-running
+// `bd serve` holds its command gate set SHARED, which includes the shared
+// physical root. Initialising a NEW project only creates a new database on
+// that server, so init must not be refused by that unrelated holder.
+func TestAcquireInitMutationGateNewSharedServerProjectNotBlockedByOtherProjectServe(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	t.Setenv(initGateTimeoutEnv, "500ms")
+	countGateNotices(t)
+
+	// Project B: an existing shared-server workspace whose `bd serve` holds
+	// the chokepoint gate set SHARED for its whole lifetime.
+	otherBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(otherBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"backend":"dolt","database":"other","dolt_mode":"server","dolt_database":"other"}`
+	if err := os.WriteFile(filepath.Join(otherBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sharedRoot := doltserver.DoltDirPath(otherBeadsDir)
+	if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	serveGates, err := buildWorkspaceGateSet(otherBeadsDir)
+	if err != nil {
+		t.Fatalf("build other project's gate set: %v", err)
+	}
+	serveHold, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{}, serveGates...)
+	if err != nil {
+		t.Fatalf("other project's serve shared hold: %v", err)
+	}
+	t.Cleanup(func() { _ = serveHold.Release() })
+
+	// Project A: a fresh repo running `bd init --shared-server`; .beads does
+	// not exist yet and the planned DB path is the shared dolt dir, exactly
+	// as init.go computes it.
+	newBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	planned := doltserver.DoltDirPath(newBeadsDir)
+	if planned != sharedRoot {
+		t.Fatalf("planned init root %q, want shared root %q", planned, sharedRoot)
+	}
+
+	h, err := acquireInitMutationGate(context.Background(), newBeadsDir, planned, nil)
+	if err != nil {
+		t.Fatalf("bd init for a new shared-server project refused while another project's bd serve runs: %v", err)
+	}
+	_ = h.Release()
+}
+
+// sharedServerGateFixture is a shared-server machine for the init-gate
+// tests: shared-server mode with a private shared server dir, the shared
+// dolt root's parent on disk, and another project's workspace whose gate set
+// includes that root.
+type sharedServerGateFixture struct {
+	sharedRoot    string
+	otherBeadsDir string
+}
+
+func newSharedServerGateFixture(t *testing.T) sharedServerGateFixture {
+	t.Helper()
+	resetGateTestEnv(t)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	countGateNotices(t)
+	otherBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(otherBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"backend":"dolt","database":"other","dolt_mode":"server","dolt_database":"other"}`
+	if err := os.WriteFile(filepath.Join(otherBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sharedRoot, err := doltserver.SharedDoltPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return sharedServerGateFixture{sharedRoot: sharedRoot, otherBeadsDir: otherBeadsDir}
+}
+
+// holdOtherProjectServe takes the other project's command gate set SHARED,
+// as its resident `bd serve` does for its whole lifetime.
+func (f sharedServerGateFixture) holdOtherProjectServe(t *testing.T) *workspacegate.MultiHandle {
+	t.Helper()
+	gates, err := buildWorkspaceGateSet(f.otherBeadsDir)
+	if err != nil {
+		t.Fatalf("build other project's gate set: %v", err)
+	}
+	h, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{}, gates...)
+	if err != nil {
+		t.Fatalf("other project's serve shared hold: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Release() })
+	return h
+}
+
+// holdOtherProjectMaintenance takes the other project's maintenance gate set
+// EXCLUSIVE (its workspace plus the shared root), as bd migrate does.
+func (f sharedServerGateFixture) holdOtherProjectMaintenance(t *testing.T) *workspacegate.MultiHandle {
+	t.Helper()
+	h, err := acquireExclusiveWorkspaceGatesWithOptions(context.Background(), f.otherBeadsDir, workspacegate.Options{Reason: "test maintenance"})
+	if err != nil {
+		t.Fatalf("other project's maintenance hold: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Release() })
+	return h
+}
+
+func (f sharedServerGateFixture) rootGate(t *testing.T) workspacegate.Gate {
+	t.Helper()
+	g, err := workspacegate.ForPhysicalRoot(f.sharedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// newProjectBeadsDir returns a new project's .beads path, created (with
+// fresh metadata) or absent.
+func newProjectBeadsDir(t *testing.T, exists bool) string {
+	t.Helper()
+	if exists {
+		return newGateTestWorkspace(t)
+	}
+	return filepath.Join(t.TempDir(), ".beads")
+}
+
+func assertGateBusy(t *testing.T, g workspacegate.Gate, mode workspacegate.Mode, what string) {
+	t.Helper()
+	h, err := g.Acquire(context.Background(), mode, workspacegate.Options{})
+	if err == nil {
+		_ = h.Release()
+		t.Fatalf("%s: fail-fast %s acquisition of %s succeeded, want ErrBusy", what, mode, g.Path())
+	}
+	if !errors.Is(err, workspacegate.ErrBusy) {
+		t.Fatalf("%s: err = %v, want ErrBusy", what, err)
+	}
+}
+
+// AC-1: a resident SHARED holder of the shared root (another project's bd
+// serve) does not stop an ordinary shared-server init of a new project,
+// whether or not its .beads exists yet; the holder keeps its hold and init
+// still holds its own workspace EXCLUSIVE.
+func TestAcquireInitMutationGateSharedServerResidentHolder(t *testing.T) {
+	for _, exists := range []bool{false, true} {
+		name := "absent-beads"
+		if exists {
+			name = "existing-beads"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newSharedServerGateFixture(t)
+			t.Setenv(initGateTimeoutEnv, "500ms")
+			f.holdOtherProjectServe(t)
+			beadsDir := newProjectBeadsDir(t, exists)
+
+			preflightRan := false
+			h, err := acquireInitMutationGate(context.Background(), beadsDir, doltserver.DoltDirPath(beadsDir), func() error {
+				preflightRan = true
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("ordinary shared-server init refused under another project's resident serve: %v", err)
+			}
+			if !preflightRan {
+				t.Fatal("preflight did not run")
+			}
+			ws, err := workspacegate.ForWorkspace(beadsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertGateBusy(t, ws, workspacegate.Shared, "init's own workspace while init holds it")
+			if err := h.Release(); err != nil {
+				t.Fatalf("release: %v", err)
+			}
+			// The resident holder never let go: shared-root maintenance is
+			// still excluded after init is done.
+			assertGateBusy(t, f.rootGate(t), workspacegate.Exclusive, "shared root after init released")
+		})
+	}
+}
+
+// AC-2: while ordinary shared-server init holds its complete gate set,
+// another project's ordinary command acquires its own gates and proceeds.
+func TestAcquireInitMutationGateSharedServerOtherCommandProceeds(t *testing.T) {
+	f := newSharedServerGateFixture(t)
+	t.Cleanup(releaseWorkspaceGates)
+	t.Setenv(sharedGateWaitEnv, "300ms")
+	beadsDir := newProjectBeadsDir(t, false)
+
+	initHold, err := acquireInitMutationGate(context.Background(), beadsDir, f.sharedRoot, nil)
+	if err != nil {
+		t.Fatalf("init gate: %v", err)
+	}
+	t.Cleanup(func() { _ = initHold.Release() })
+
+	var cmdErr error
+	stderr := captureStderr(t, func() {
+		cmdErr = acquireCommandWorkspaceGates(context.Background(), &cobra.Command{Use: "list"}, f.otherBeadsDir)
+	})
+	if cmdErr != nil {
+		t.Fatalf("other project's command blocked by an ordinary init: %v\nstderr: %s", cmdErr, stderr)
+	}
+	if workspaceGateHandle == nil || workspaceGateHandle.Empty() {
+		t.Fatal("other project's command proceeded without holding its gates")
+	}
+	ws, err := workspacegate.ForWorkspace(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGateBusy(t, ws, workspacegate.Shared, "init's workspace while the other command runs")
+}
+
+// AC-3: shared-root maintenance requesting EXCLUSIVE access waits while an
+// ordinary shared-server init holds its gate set, and enters only after init
+// releases.
+func TestAcquireInitMutationGateSharedServerExcludesMaintenance(t *testing.T) {
+	f := newSharedServerGateFixture(t)
+	beadsDir := newProjectBeadsDir(t, false)
+
+	initHold, err := acquireInitMutationGate(context.Background(), beadsDir, f.sharedRoot, nil)
+	if err != nil {
+		t.Fatalf("init gate: %v", err)
+	}
+	t.Cleanup(func() { _ = initHold.Release() })
+
+	waiting := make(chan struct{})
+	var once sync.Once
+	entered := make(chan error, 1)
+	go func() {
+		h, err := acquireExclusiveWorkspaceGatesWithOptions(context.Background(), f.otherBeadsDir, workspacegate.Options{
+			Wait:   10 * time.Second,
+			Reason: "test maintenance",
+			OnWait: func(string) { once.Do(func() { close(waiting) }) },
+		})
+		if err == nil {
+			_ = h.Release()
+		}
+		entered <- err
+	}()
+
+	select {
+	case <-waiting:
+	case err := <-entered:
+		t.Fatalf("maintenance entered while init held the shared root (err %v)", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("maintenance never reported waiting")
+	}
+	select {
+	case err := <-entered:
+		t.Fatalf("maintenance entered while init held the shared root (err %v)", err)
+	default:
+	}
+	if err := initHold.Release(); err != nil {
+		t.Fatalf("release init: %v", err)
+	}
+	select {
+	case err := <-entered:
+		if err != nil {
+			t.Fatalf("maintenance after init released: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("maintenance did not enter after init released")
+	}
+}
+
+// AC-4: while maintenance holds the shared root EXCLUSIVE, ordinary
+// shared-server init refuses within its bound and never runs preflight.
+func TestAcquireInitMutationGateSharedServerBlockedByMaintenance(t *testing.T) {
+	f := newSharedServerGateFixture(t)
+	t.Setenv(initGateTimeoutEnv, "300ms")
+	maint := f.holdOtherProjectMaintenance(t)
+	beadsDir := newProjectBeadsDir(t, false)
+
+	preflightRan := false
+	start := time.Now()
+	_, err := acquireInitMutationGate(context.Background(), beadsDir, f.sharedRoot, func() error {
+		preflightRan = true
+		return nil
+	})
+	if !errors.Is(err, workspacegate.ErrBusy) {
+		t.Fatalf("err = %v, want ErrBusy under exclusive maintenance", err)
+	}
+	if waited := time.Since(start); waited > 3*time.Second {
+		t.Fatalf("init waited %s, want about the 300ms bound", waited)
+	}
+	if preflightRan {
+		t.Fatal("preflight ran while maintenance held the shared root")
+	}
+	// The refused init left nothing behind: once maintenance is done, init
+	// proceeds.
+	_ = maint.Release()
+	h, err := acquireInitMutationGate(context.Background(), beadsDir, f.sharedRoot, nil)
+	if err != nil {
+		t.Fatalf("init after maintenance released: %v", err)
+	}
+	_ = h.Release()
+}
+
+// AC-5: a SHARED holder of a gate init must keep EXCLUSIVE refuses the
+// acquisition within its budget, without preflight: destructive reinit on a
+// shared server, an explicit non-shared root, a non-shared-server root, and
+// the new project's own workspace.
+func TestAcquireInitMutationGateKeepsExclusiveWhereRequired(t *testing.T) {
+	type tc struct {
+		name   string
+		setup  func(t *testing.T) (beadsDir, root string)
+		reinit bool
+	}
+	holdShared := func(t *testing.T, g workspacegate.Gate) {
+		t.Helper()
+		h, err := g.Acquire(context.Background(), workspacegate.Shared, workspacegate.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = h.Release() })
+	}
+	for _, c := range []tc{
+		{name: "reinit-vs-resident-serve", reinit: true, setup: func(t *testing.T) (string, string) {
+			f := newSharedServerGateFixture(t)
+			f.holdOtherProjectServe(t)
+			beadsDir := newProjectBeadsDir(t, true)
+			return beadsDir, f.sharedRoot
+		}},
+		{name: "explicit-db-root-on-shared-server", setup: func(t *testing.T) (string, string) {
+			newSharedServerGateFixture(t)
+			beadsDir := newProjectBeadsDir(t, false)
+			root := filepath.Join(t.TempDir(), "custom-dolt")
+			g, err := workspacegate.ForPhysicalRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			holdShared(t, g)
+			return beadsDir, root
+		}},
+		{name: "non-shared-server-root", setup: func(t *testing.T) (string, string) {
+			resetGateTestEnv(t)
+			countGateNotices(t)
+			beadsDir := newGateTestWorkspace(t)
+			root := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
+			g, err := workspacegate.ForPhysicalRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			holdShared(t, g)
+			return beadsDir, root
+		}},
+		{name: "own-workspace-on-shared-server", setup: func(t *testing.T) (string, string) {
+			f := newSharedServerGateFixture(t)
+			beadsDir := newProjectBeadsDir(t, true)
+			ws, err := workspacegate.ForWorkspace(beadsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			holdShared(t, ws)
+			return beadsDir, f.sharedRoot
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			beadsDir, root := c.setup(t)
+			t.Setenv(initGateTimeoutEnv, "300ms")
+			preflightRan := false
+			start := time.Now()
+			_, err := acquireInitMutationGateFor(context.Background(), beadsDir, root, c.reinit, func() error {
+				preflightRan = true
+				return nil
+			})
+			if !errors.Is(err, workspacegate.ErrBusy) {
+				t.Fatalf("err = %v, want ErrBusy against a SHARED holder of an EXCLUSIVE gate", err)
+			}
+			if waited := time.Since(start); waited > 3*time.Second {
+				t.Fatalf("refusal took %s, want about the 300ms budget", waited)
+			}
+			if preflightRan {
+				t.Fatal("preflight ran without the complete gate set")
+			}
+		})
+	}
+}
+
+// AC-5, end to end: the deprecated --force alias folds into reinitLocal
+// before gate planning, so a real `bd init --shared-server --force` keeps the
+// all-EXCLUSIVE plan and refuses within its BEADS_INIT_GATE_TIMEOUT while
+// another project's resident serve holds the shared root SHARED, leaving no
+// .beads behind.
+func TestAcquireInitMutationGateForceAliasKeepsExclusivePlan(t *testing.T) {
+	f := newSharedServerGateFixture(t)
+	f.holdOtherProjectServe(t)
+	sharedDir := os.Getenv("BEADS_SHARED_SERVER_DIR")
+
+	bdBin := buildBDForInitTests(t)
+	workDir := t.TempDir()
+	cmd := exec.Command(bdBin, "init", "--shared-server", "--force", "--prefix", "bd",
+		"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(t.TempDir(),
+		"BEADS_SHARED_SERVER_DIR="+sharedDir,
+		initGateTimeoutEnv+"=300ms",
+		"BEADS_DOLT_AUTO_START=0")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatal("bd init --force completed while another project's serve held the shared root")
+	}
+	out := stderr.String()
+	for _, want := range []string{
+		"bd init --reinit-local refuses to run over live bd activity on this workspace or its shared server",
+		"waited 300ms", initGateTimeoutEnv,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("init --force refusal %q missing %q", out, want)
+		}
+	}
+	// The refusal happens at the gate, before any directory writes.
+	if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
+		t.Errorf("refused init left .beads behind (stat err = %v)", err)
+	}
+}
+
+// AC-8: a shared-server init that times out on a gate keeps ErrBusy, the
+// gate path and mode, the wait budget and its knob, and says the contention
+// may be in the workspace or its shared server; reinit names itself.
+func TestAcquireInitMutationGateSharedServerRefusalText(t *testing.T) {
+	t.Run("ordinary-vs-maintenance", func(t *testing.T) {
+		f := newSharedServerGateFixture(t)
+		t.Setenv(initGateTimeoutEnv, "300ms")
+		f.holdOtherProjectMaintenance(t)
+		_, err := acquireInitMutationGate(context.Background(), newProjectBeadsDir(t, false), f.sharedRoot, nil)
+		if !errors.Is(err, workspacegate.ErrBusy) {
+			t.Fatalf("err = %v, want ErrBusy", err)
+		}
+		for _, want := range []string{
+			"bd init refuses to run over live bd activity on this workspace or its shared server",
+			"waited 300ms", initGateTimeoutEnv, f.rootGate(t).Path(), "test maintenance",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+	})
+	t.Run("reinit-vs-resident-serve", func(t *testing.T) {
+		f := newSharedServerGateFixture(t)
+		t.Setenv(initGateTimeoutEnv, "300ms")
+		f.holdOtherProjectServe(t)
+		_, err := acquireInitMutationGateFor(context.Background(), newProjectBeadsDir(t, true), f.sharedRoot, true, nil)
+		if !errors.Is(err, workspacegate.ErrBusy) {
+			t.Fatalf("err = %v, want ErrBusy", err)
+		}
+		for _, want := range []string{
+			"bd init --reinit-local refuses to run over live bd activity on this workspace or its shared server",
+			"other projects' bd commands",
+			"waited 300ms", initGateTimeoutEnv, f.rootGate(t).Path(), "exclusive mode",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+	})
+	t.Run("reinit-queued-intent-names-itself", func(t *testing.T) {
+		f := newSharedServerGateFixture(t)
+		t.Setenv(initGateTimeoutEnv, "300ms")
+		f.holdOtherProjectServe(t)
+		// While the destructive reinit waits behind the resident serve, its
+		// queued-writer intent sidecar names --reinit-local, so a waiter (or
+		// a human reading the sidecar) can tell it from an ordinary init.
+		done := make(chan error, 1)
+		go func() {
+			_, gerr := acquireInitMutationGateFor(context.Background(), newProjectBeadsDir(t, false), f.sharedRoot, true, nil)
+			done <- gerr
+		}()
+		intentPath := f.rootGate(t).Path() + ".intent.info"
+		var intentReason string
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if info, rerr := os.ReadFile(intentPath); rerr == nil && len(info) > 0 {
+				intentReason = string(info)
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		select {
+		case gerr := <-done:
+			if !errors.Is(gerr, workspacegate.ErrBusy) {
+				t.Fatalf("err = %v, want ErrBusy", gerr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("destructive reinit did not return within its bound")
+		}
+		if !strings.Contains(intentReason, "bd init --reinit-local") {
+			t.Errorf("queued-writer intent sidecar %q does not name %q", intentReason, "bd init --reinit-local")
+		}
+	})
 }
