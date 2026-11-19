@@ -8,7 +8,9 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -33,6 +35,9 @@ type wispPurgeStubStore struct {
 	deleter *wispPurgeStubDeleter
 	scanned bool
 	lookups int
+	// fresh, when set, reads every wisp back as updated now: a closed wisp
+	// inside any positive --age floor, for tests of the age-aware selection.
+	fresh bool
 }
 
 func (s *wispPurgeStubStore) issue(id string) *types.Issue {
@@ -40,7 +45,11 @@ func (s *wispPurgeStubStore) issue(id string) *types.Issue {
 	if s.infra[id] {
 		issueType = "agent"
 	}
-	return &types.Issue{ID: id, Title: "wisp " + id, Status: types.StatusClosed, Ephemeral: true, IssueType: issueType, Pinned: s.pinned[id]}
+	issue := &types.Issue{ID: id, Title: "wisp " + id, Status: types.StatusClosed, Ephemeral: true, IssueType: issueType, Pinned: s.pinned[id]}
+	if s.fresh {
+		issue.UpdatedAt = time.Now()
+	}
+	return issue
 }
 
 func (s *wispPurgeStubStore) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
@@ -1084,4 +1093,120 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWispPurgeClosedPreviewExplainsAgeFloor pins the output half of the
+// GH#8202 age floor: with a positive --age, the preview and the
+// empty-selection answer name the threshold and the zero-age escape hatch,
+// the JSON answers keep the keys these routes have always printed
+// (candidates, dry_run, deleted_count, message), and the preview names
+// exactly the candidate set a forced run deletes.
+func TestWispPurgeClosedPreviewExplainsAgeFloor(t *testing.T) {
+	const threshold = time.Hour
+
+	t.Run("preview names the candidates force deletes", func(t *testing.T) {
+		s := useWispPurgeStub(t, 450)
+		jsonOutput = true
+
+		stdout, stderr, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(context.Background(), false, false, threshold, nil)
+		})
+		if err != nil {
+			t.Fatalf("preview: %v\nstderr:\n%s", err, stderr)
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if obj["candidates"] != float64(450) || obj["dry_run"] != true {
+			t.Errorf("preview = %v, want the unchanged candidates 450 and dry_run true", obj)
+		}
+		if got := obj["age_threshold"]; got != "1h0m0s" {
+			t.Errorf("age_threshold = %v, want \"1h0m0s\"", got)
+		}
+		if got, _ := obj["hint"].(string); !strings.Contains(got, "--age 0s") {
+			t.Errorf("hint = %q, want it to explain the zero-age escape hatch", got)
+		}
+		if len(s.deleter.requests) != 0 {
+			t.Errorf("preview sent %d deletion requests", len(s.deleter.requests))
+		}
+
+		// The forced run deletes exactly what the preview named.
+		stdout, _, err = captureWispGC(t, func() error {
+			return runWispPurgeClosed(context.Background(), false, true, threshold, nil)
+		})
+		if err != nil {
+			t.Fatalf("forced run: %v", err)
+		}
+		obj = decodeSingleJSONObject(t, stdout)
+		if got := obj["deleted_count"]; got != float64(450) {
+			t.Errorf("forced run deleted_count = %v, want the 450 candidates the preview named", got)
+		}
+		if len(s.deleter.deleted) != 450 {
+			t.Errorf("forced run deleted %d wisps, want the 450 the preview named", len(s.deleter.deleted))
+		}
+	})
+
+	t.Run("text preview names the threshold and escape hatch", func(t *testing.T) {
+		useWispPurgeStub(t, 3)
+		stdout, _, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(context.Background(), false, false, threshold, nil)
+		})
+		if err != nil {
+			t.Fatalf("text preview: %v", err)
+		}
+		for _, want := range []string{"Found 3 closed wisp(s) not updated in the last 1h0m0s", wispPurgeZeroAgeHint} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("text preview lacks %q:\n%s", want, stdout)
+			}
+		}
+	})
+
+	t.Run("empty selection explains why", func(t *testing.T) {
+		s := useWispPurgeStub(t, 5)
+		s.fresh = true
+		jsonOutput = true
+
+		stdout, _, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(context.Background(), false, true, threshold, nil)
+		})
+		if err != nil {
+			t.Fatalf("forced run with fresh rows: %v", err)
+		}
+		if len(s.deleter.requests) != 0 {
+			t.Errorf("fresh rows went to the deleter: %d requests", len(s.deleter.requests))
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if got := obj["deleted_count"]; got != float64(0) {
+			t.Errorf("deleted_count = %v, want 0 (the key stays)", got)
+		}
+		if got, _ := obj["message"].(string); !strings.Contains(got, "1h0m0s") {
+			t.Errorf("message = %q, want it to name the threshold", got)
+		}
+		if got := obj["age_threshold"]; got != "1h0m0s" {
+			t.Errorf("age_threshold = %v, want \"1h0m0s\"", got)
+		}
+		if got, _ := obj["hint"].(string); !strings.Contains(got, "--age 0s") {
+			t.Errorf("hint = %q, want the zero-age escape hatch", got)
+		}
+	})
+
+	t.Run("proxied preview answers the same", func(t *testing.T) {
+		p := useWispPurgeProxied(t, 450)
+		jsonOutput = true
+
+		stdout, _, err := captureWispGC(t, func() error {
+			return runWispPurgeClosedProxiedServer(context.Background(), false, false, threshold, nil)
+		})
+		if err != nil {
+			t.Fatalf("proxied preview: %v", err)
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if obj["candidates"] != float64(450) || obj["dry_run"] != true {
+			t.Errorf("proxied preview = %v, want candidates 450 and dry_run true", obj)
+		}
+		if got := obj["age_threshold"]; got != "1h0m0s" {
+			t.Errorf("proxied age_threshold = %v, want \"1h0m0s\"", got)
+		}
+		if units := p.deletionUnits(); len(units) != 0 {
+			t.Errorf("proxied preview opened %d deletion units of work", len(units))
+		}
+	})
 }
