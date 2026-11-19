@@ -135,13 +135,13 @@ func toDriverValues(args []any) []driver.Value {
 
 // cliPullStore is a server-mode store whose CLI pull route runs the dolt on
 // PATH in its served database directory, on a sqlmock pool that answers the
-// route's remote listings with origin at remoteURL.
-func cliPullStore(t *testing.T, mock sqlmock.Sqlmock, db *sql.DB, beadsDir, remoteURL string) *DoltStore {
+// route's remote listings with the remote named remote at remoteURL.
+func cliPullStore(t *testing.T, mock sqlmock.Sqlmock, db *sql.DB, beadsDir, remote, remoteURL string) *DoltStore {
 	t.Helper()
 	mock.MatchExpectationsInOrder(false)
 	for i := 0; i < 8; i++ {
 		mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes").
-			WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow("origin", remoteURL, nil))
+			WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow(remote, remoteURL, nil))
 	}
 	store := &DoltStore{
 		serverMode: true,
@@ -251,13 +251,13 @@ func TestCLIPullRoutesFetchThenMergeTrackingRef(t *testing.T) {
 			if tc.portVar {
 				t.Setenv("BEADS_DOLT_SERVER_PORT", "3310")
 			}
-			callLog := fakeDoltOnPath(t, tc.remoteURL)
+			callLog := fakeDoltOnPath(t, "origin", tc.remoteURL)
 			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 			if err != nil {
 				t.Fatalf("sqlmock: %v", err)
 			}
 			t.Cleanup(func() { _ = db.Close() })
-			store := cliPullStore(t, mock, db, tc.workspace(t), tc.remoteURL)
+			store := cliPullStore(t, mock, db, tc.workspace(t), "origin", tc.remoteURL)
 			store.remoteUser = tc.user
 			store.remotePassword = tc.password
 			session := cliMergeSession(t)
@@ -327,13 +327,13 @@ func TestCLIPeerPullFetchesThenMergesTrackingRef(t *testing.T) {
 			"|fetch --user user peer main|DOLT_REMOTE_PASSWORD=client-secret"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			callLog := fakeDoltOnPath(t, peerURL)
+			callLog := fakeDoltOnPath(t, "peer", peerURL)
 			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 			if err != nil {
 				t.Fatalf("sqlmock: %v", err)
 			}
 			t.Cleanup(func() { _ = db.Close() })
-			store := cliPullStore(t, mock, db, unmanagedWorkspace(t), peerURL)
+			store := cliPullStore(t, mock, db, unmanagedWorkspace(t), "peer", peerURL)
 			session := cliMergeSession(t)
 			expectCLIMerge(mock, session, "peer/main")
 
@@ -359,6 +359,86 @@ func TestCLIPeerPullFetchesThenMergesTrackingRef(t *testing.T) {
 				t.Errorf("the peer CLI route's pool statements: %v", err)
 			}
 		})
+	}
+}
+
+// TestCLIPeerPullReportsDeclinedMergeAndRollsBack pins PullFrom's conflict
+// contract on the CLI-routed federation peer (GH#7839): a peer pull whose
+// merge the settle machinery declines rolls the merge back in its own
+// transaction — the merge session commits nothing — and peerPullOutcome
+// surfaces the conflicts captured pre-rollback (MergeConflictsError) as
+// PullFrom's data with a nil error, not through a pool GetConflicts that a
+// rolled-back merge could never answer. The route asks the pool for the
+// peer's remote listings, its federation_peers credentials row, and the
+// merge's branch pin, and nothing else.
+func TestCLIPeerPullReportsDeclinedMergeAndRollsBack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	clearPredicateEnv(t)
+	const peerURL = "git+ssh://git@example.com/org/peer.git"
+
+	callLog := fakeDoltOnPath(t, "peer", peerURL)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := cliPullStore(t, mock, db, unmanagedWorkspace(t), "peer", peerURL)
+	// A read-only store surfaces the CLI pull's result untouched: with the
+	// merge rolled back, the working set holds nothing for finishCLIPull's
+	// resolver to settle anyway, so what reaches peerPullOutcome is the
+	// merge's own conflicts error either way.
+	store.readOnly = true
+	session := cliMergeSession(t)
+
+	// The peer's federation_peers row is absent: the pull proceeds without
+	// stored credentials.
+	mock.ExpectQuery("\n\t\tSELECT name, remote_url, username, password_encrypted, sovereignty, last_sync, created_at, updated_at\n\t\tFROM federation_peers WHERE name = ?\n\t").
+		WithArgs("peer").
+		WillReturnError(sql.ErrNoRows)
+	// The merge's branch pin reads the store's branch from the pool, and the
+	// session, which starts on the default branch, moves onto it.
+	mock.ExpectQuery("SELECT active_branch()").WillReturnRows(activeBranchRow("main"))
+	session.ExpectQuery("SELECT active_branch()").WillReturnRows(activeBranchRow("default"))
+	session.ExpectExec("CALL DOLT_CHECKOUT(?)").WithArgs("main").WillReturnResult(sqlmock.NewResult(0, 0))
+	session.ExpectExec("SET @@dolt_force_transaction_commit = 1").WillReturnResult(sqlmock.NewResult(0, 0))
+	session.ExpectExec("SET @@dolt_allow_commit_conflicts = 1").WillReturnResult(sqlmock.NewResult(0, 0))
+	session.ExpectBegin()
+	session.ExpectQuery("CALL DOLT_MERGE(?)").WithArgs("peer/main").WillReturnRows(doltMergeRow(1))
+	// The settle pass reads the conflicts twice (the resolver's screen, the
+	// pre-rollback capture), declines pull_msg_marker, and rolls the merge
+	// back. The session commits nothing: no open merge, no live conflicts.
+	session.ExpectQuery("SELECT `table`, num_conflicts FROM dolt_conflicts").
+		WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("pull_msg_marker", 1))
+	session.ExpectQuery("SELECT `table`, num_conflicts FROM dolt_conflicts").
+		WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("pull_msg_marker", 1))
+	session.ExpectRollback()
+	session.ExpectClose()
+
+	conflicts, err := store.PullFrom(context.Background(), "peer")
+	if err != nil {
+		t.Fatalf("PullFrom: %v, want nil (the declined conflicts are data, not an error)", err)
+	}
+	if len(conflicts) == 0 || !conflictsNameTable(conflicts, "pull_msg_marker") {
+		t.Fatalf("PullFrom conflicts = %+v, want the declined pull_msg_marker conflicts reported", conflicts)
+	}
+	calls := readCallLog(t, callLog)
+	cliDir, err := filepath.EvalSymlinks(store.CLIDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := cliDir + "|fetch peer main|DOLT_REMOTE_PASSWORD="; !strings.Contains(calls, want) {
+		t.Errorf("dolt calls %q lack the peer fetch %q", calls, want)
+	}
+	if strings.Contains(calls, "|pull ") {
+		t.Errorf("the peer pull ran `dolt pull`, whose merge message records the peer URL:\n%s", calls)
+	}
+	if err := session.ExpectationsWereMet(); err != nil {
+		t.Errorf("the peer merge did not settle in its own transaction: %v", err)
+	}
+	if err := expectationsMetBesideSpareListings(db, mock); err != nil {
+		t.Errorf("the peer pull's pool statements: %v", err)
 	}
 }
 

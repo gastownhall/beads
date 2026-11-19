@@ -443,12 +443,14 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 
 // fakeDoltOnPath puts a dolt on PATH that appends "<dir>|<args>|<the
 // DOLT_REMOTE_PASSWORD it got>" to the returned log for every call, and
-// answers `dolt remote -v` with origin at remoteURL.
-func fakeDoltOnPath(t *testing.T, remoteURL string) string {
+// answers `dolt remote -v` with remoteName at remoteURL. The name is the
+// remote's own: a route whose mirror check (hasMatchingCLIRemote) looks the
+// remote up in that listing finds it under the name SQL reports.
+func fakeDoltOnPath(t *testing.T, remoteName, remoteURL string) string {
 	t.Helper()
 	binDir := t.TempDir()
 	callLog := filepath.Join(binDir, "calls.log")
-	script := fmt.Sprintf("#!/bin/sh\necho \"$(pwd -P)|$*|DOLT_REMOTE_PASSWORD=${DOLT_REMOTE_PASSWORD:-}\" >> '%s'\nif [ \"$1 $2\" = \"remote -v\" ]; then echo 'origin %s'; fi\nexit 0\n", callLog, remoteURL)
+	script := fmt.Sprintf("#!/bin/sh\necho \"$(pwd -P)|$*|DOLT_REMOTE_PASSWORD=${DOLT_REMOTE_PASSWORD:-}\" >> '%s'\nif [ \"$1 $2\" = \"remote -v\" ]; then echo '%s %s'; fi\nexit 0\n", callLog, remoteName, remoteURL)
 	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
 		t.Fatal(err)
 	}
@@ -473,7 +475,7 @@ func TestPushAtAHostBdDoesNotRunRunsNoDoltInTheLeftoverDatabase(t *testing.T) {
 	}
 	clearPredicateEnv(t)
 	const gitURL = "git+ssh://git@example.com/org/repo.git"
-	callLog := fakeDoltOnPath(t, gitURL)
+	callLog := fakeDoltOnPath(t, "origin", gitURL)
 
 	for _, tc := range []struct {
 		host           string
@@ -616,7 +618,7 @@ func TestCredentialPushOnAnEnvNamedPortKeepsTheCLIOnlyForBdsOwnServer(t *testing
 	clearPredicateEnv(t)
 	clearCloudAuthEnv(t)
 	const hostedURL = "https://doltremoteapi.dolthub.com/org/repo"
-	callLog := fakeDoltOnPath(t, hostedURL)
+	callLog := fakeDoltOnPath(t, "origin", hostedURL)
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "3310")
 
 	for _, tc := range []struct {
