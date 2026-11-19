@@ -510,6 +510,35 @@ func TestCLIPullMergeSettlesOnRealDolt(t *testing.T) {
 			t.Errorf("local row = %q (%v) after the declined merge, want %q", local, err, "local")
 		}
 	})
+
+	// GH#7839's wedge, end to end: a declined merge left open made every later
+	// write and pull fail. With the settle-in-transaction fix, an unrelated
+	// commit still succeeds right after the declined pull, and the next pull
+	// fails with the same conflict — not with Dolt's active-merge refusal.
+	t.Run("a declined merge leaves the branch writable and the retry repeats", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		fx := newPullFixture(t, ctx, "origin", false, false)
+		execAllOn(t, ctx, fx.store.db, "local",
+			"INSERT INTO pull_msg_marker VALUES (1, 'local')",
+			"CALL DOLT_COMMIT('-Am', 'local: conflicting row')")
+
+		err := fetchAndMergeAsCLIPull(t, ctx, fx.store)
+		var declined *versioncontrolops.MergeConflictsError
+		if !errors.As(err, &declined) || !conflictsNameTable(declined.Conflicts, "pull_msg_marker") {
+			t.Fatalf("first pull = %v, want a MergeConflictsError naming pull_msg_marker", err)
+		}
+
+		execAllOn(t, ctx, fx.store.db, "local",
+			"INSERT INTO pull_msg_marker VALUES (2, 'unrelated')",
+			"CALL DOLT_COMMIT('-Am', 'local: unrelated row')")
+
+		err = fetchAndMergeAsCLIPull(t, ctx, fx.store)
+		var retried *versioncontrolops.MergeConflictsError
+		if !errors.As(err, &retried) || !conflictsNameTable(retried.Conflicts, "pull_msg_marker") {
+			t.Fatalf("second pull = %v, want the same MergeConflictsError naming pull_msg_marker again", err)
+		}
+	})
 }
 
 // conflictsNameTable reports whether conflicts names table.
