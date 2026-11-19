@@ -186,6 +186,13 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	if notesOverwritten {
 		warnNotesReplacement(id)
 	}
+	// The same advisory close-guard sentence the direct route prints, against
+	// this route's advisory pre-read and under the canonical id.
+	if statusVal, ok := in.fields["status"].(string); ok && statusVal == "closed" {
+		if w := updateCloseGuardWarning(updated.ID, before, currentActor(), in.force); w != "" {
+			fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), w)
+		}
+	}
 	// The same sidecar rows the direct route writes, against this route's
 	// advisory pre-read and under the canonical id (GH#6146).
 	logUpdateAuditChanges(updated.ID, currentActor(), updateAuditChanges(patch, in.claim, result.Changed, before, updated))

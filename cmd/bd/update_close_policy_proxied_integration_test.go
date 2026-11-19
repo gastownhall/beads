@@ -126,4 +126,36 @@ func TestProxiedServerUpdateClosePolicy(t *testing.T) {
 			t.Errorf("status = %q, want closed", got)
 		}
 	})
+
+	// GH#5787 issue 3: a close through `bd update --status closed` keeps its
+	// admission contract and still closes, but a pre-image `bd close` would
+	// have refused (assignee authority) now says so — once, on stderr, after
+	// the write landed.
+	t.Run("close_guard_difference_warns_after_success", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "upgw")
+		issue := bdProxiedCreate(t, bd, p.dir, "Assigned finding", "--assignee", "alice")
+
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BEADS_ACTOR=bob"}, "update", issue.ID, "--status", "closed")
+		if err != nil {
+			t.Fatalf("close-through-update failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		combined := stdout + stderr
+		if n := strings.Count(combined, "update closed"); n != 1 {
+			t.Fatalf("expected exactly one close-guard warning, got %d; output:\n%s", n, combined)
+		}
+		for _, want := range []string{
+			"update closed " + issue.ID,
+			"bd close would refuse the observed pre-update state",
+			`assignee is "alice", actor is "bob"`,
+		} {
+			if !strings.Contains(combined, want) {
+				t.Fatalf("warning should contain %q; output:\n%s", want, combined)
+			}
+		}
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, issue.ID); got != types.StatusClosed {
+			t.Fatalf("the update should still close; status = %q", got)
+		}
+	})
 }

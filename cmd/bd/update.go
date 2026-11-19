@@ -455,6 +455,7 @@ pointless).`,
 		}
 		mutatedStores := map[storage.DoltStorage][]string{}
 		notesOverwriteWarnings := map[storage.DoltStorage][]string{}
+		closeGuardWarnings := map[storage.DoltStorage][]string{}
 		mutatedResults := map[*RoutedResult]bool{}
 		pendingCloseResults := []*RoutedResult{}
 		trackMutation := func(result *RoutedResult) {
@@ -634,6 +635,15 @@ pointless).`,
 			if notesOverwritten {
 				notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
 			}
+			// A successful --status closed is admitted here without the pin
+			// and assignee authority fences `bd close` runs, so a close that
+			// observed a state bd close would have refused says so — queued
+			// beside the notes warning until the store commits, then printed.
+			if statusVal, ok := updates["status"].(string); ok && statusVal == "closed" {
+				if w := updateCloseGuardWarning(result.ResolvedID, issue, currentActor(), forceFlag); w != "" {
+					closeGuardWarnings[issueStore] = append(closeGuardWarnings[issueStore], w)
+				}
+			}
 			// Audit log key field changes (survives Dolt GC flatten), a
 			// --claim's implied status and assignee included (GH#6146).
 			logUpdateAuditChanges(result.ResolvedID, currentActor(),
@@ -679,6 +689,9 @@ pointless).`,
 				}
 				for _, id := range notesOverwriteWarnings[s] {
 					warnNotesReplacement(id)
+				}
+				for _, w := range closeGuardWarnings[s] {
+					fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), w)
 				}
 			}
 		}
@@ -908,6 +921,40 @@ func claimBlockedRefusal(err error) (error, bool) {
 // the fence means the caller passed --force: it is the audit trail for a
 // habitual --force that never saw the refusal, worded as a statement of what
 // happened rather than a repeat of the refusal's advice.
+// updateCloseGuardWarning is the advisory sentence a successful
+// `bd update <id> --status closed` prints when the pre-image it observed
+// would have made `bd close` refuse: update's contract admits the close
+// without the pin and assignee authority fences (they belong to close), so
+// the user should hear what bd close would have said about the state the
+// update observed. The pre-image is a read taken before the mutation, so it
+// is advisory under concurrency — a warning, never a refusal, and it never
+// recommends --force (force bypasses the close policy too).
+//
+// Silent when there is no guard difference: an absent or already-closed
+// pre-image, a guard-passing one, and --force (the same bypass in both
+// commands) warn nothing. A template pre-image is silent as well: the
+// mutation itself refuses templates, so the close's read-only refusal never
+// differs from what update did.
+func updateCloseGuardWarning(id string, preImage *types.Issue, actor string, force bool) string {
+	if preImage == nil || preImage.Status == types.StatusClosed || force {
+		return ""
+	}
+	var (
+		pinned      *issueops.PinnedError
+		notAssignee *issueops.CloseNotAssigneeError
+	)
+	switch err := storageissueops.CheckClosable(id, preImage, actor, force); {
+	case err == nil:
+		return ""
+	case errors.As(err, &pinned):
+		return fmt.Sprintf("update closed %s; bd close would refuse the observed pre-update state: issue is pinned", id)
+	case errors.As(err, &notAssignee):
+		return fmt.Sprintf("update closed %s; bd close would refuse the observed pre-update state: assignee is %q, actor is %q", id, notAssignee.Assignee, notAssignee.Actor)
+	default:
+		return ""
+	}
+}
+
 func warnNotesReplacement(id string) {
 	fmt.Fprintf(os.Stderr, "warning: %s: --force replaced existing notes (--append-notes preserves history)\n", id) //nolint:gosec // G705: stderr, not a browser context
 }
