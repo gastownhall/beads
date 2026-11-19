@@ -331,6 +331,45 @@ func TestForeignPrefixAncestorBlockerRefusedEmbedded(t *testing.T) {
 	}
 }
 
+// TestForeignPrefixWispTargetBlocksEmbeddedReady pins the wisp half of
+// GH#6066: a wisp created with a foreign-prefix explicit id is found by the
+// presence probe, so a durable issue blocked on it stores the edge against
+// depends_on_wisp_id and is gated (and released when the wisp closes)
+// instead of silently tracking a phantom external target.
+func TestForeignPrefixWispTargetBlocksEmbeddedReady(t *testing.T) {
+	store := openExternalDependencyStore(t, "demo")
+	ctx := t.Context()
+	wisp := &types.Issue{ID: "treehouse-lease-w8", Title: "foreign-prefix wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+	source := &types.Issue{ID: "demo-wisp-blocked", Title: "blocked on the wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{wisp, source} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", issue.ID, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: source.ID, DependsOnID: wisp.ID, Type: types.DepBlocks}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	if got := embeddedIssueIDs(ready); slices.Contains(got, source.ID) {
+		t.Fatalf("ready IDs = %v: the open foreign-prefix wisp %s must gate %s", got, wisp.ID, source.ID)
+	}
+
+	if err := store.CloseIssue(ctx, wisp.ID, "done", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue(%s): %v", wisp.ID, err)
+	}
+	ready, err = store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork after wisp close: %v", err)
+	}
+	if got := embeddedIssueIDs(ready); !slices.Contains(got, source.ID) {
+		t.Fatalf("ready IDs after wisp close = %v, want %s among them: closing the wisp must release its durable dependent", got, source.ID)
+	}
+}
+
 func openExternalDependencyStore(t *testing.T, prefix string) *embeddeddolt.EmbeddedDoltStore {
 	t.Helper()
 	store, err := embeddeddolt.Open(t.Context(), filepath.Join(t.TempDir(), ".beads"), prefix, "main")
