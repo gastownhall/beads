@@ -33,6 +33,24 @@ func TestPreviousExternalRefsContract(t *testing.T) {
 			_, err = db.ExecContext(ctx, stmt, args...)
 			return err
 		},
+		ExecSession: func(ctx context.Context, stmts []storagecontract.SessionStatement) error {
+			db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = conn.Close() }()
+			for _, stmt := range stmts {
+				if _, err := conn.ExecContext(ctx, stmt.SQL, stmt.Args...); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
 		ReadTx: func(ctx context.Context, fn func(*sql.Tx) error) error {
 			db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
 			if err != nil {

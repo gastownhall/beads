@@ -26,10 +26,21 @@ type PreviousExternalRefsFixture struct {
 	// Exec runs one statement on the store's database, outside the store's
 	// own read path, and returns once it has completed.
 	Exec func(ctx context.Context, stmt string, args ...any) error
+	// ExecSession runs stmts in order on ONE session of the store's
+	// database (session state such as DOLT_CHECKOUT carries from one
+	// statement to the next) and returns once they have completed. The
+	// contract leaves the session on main.
+	ExecSession func(ctx context.Context, stmts []SessionStatement) error
 	// ReadTx runs fn in a read transaction on the store's database. The
 	// contract uses it to ask the single-id oracle,
 	// issueops.PreviousExternalRefInTx.
 	ReadTx func(ctx context.Context, fn func(*sql.Tx) error) error
+}
+
+// SessionStatement is one statement ExecSession runs.
+type SessionStatement struct {
+	SQL  string
+	Args []any
 }
 
 // RunPreviousExternalRefsContract runs every case in order against one
@@ -62,11 +73,14 @@ func at(hours float64) time.Time {
 // RunPreviousExternalRefsMatchesTheSingleIDOracle seeds, over four commits an
 // hour apart:
 //
-//	1h: same=A  relink=A  nullset=NULL  gone=G1  multi=M1
+//	1h: same=A  relink=A  nullset=NULL  gone=G1  multi=M1  merged=A
 //	2h:         relink=B  nullset=N     gone=G2  multi=M2
 //	3h: gone deleted, late=L created            multi=M3
 //	4h: multi deleted
 //
+// then merged ancestry: at 4.25h a side branch relinks merged=S, and main
+// folds it in with a --no-ff merge commit (dated at the wall clock, after
+// every cutoff), so merged=S is reachable from main only through the merge;
 // plus working (inserted, never committed) and never (never inserted). At
 // cutoffs before all history, on and between each commit, and after the
 // last, the batch must agree with the oracle on every id's presence and
@@ -74,13 +88,14 @@ func at(hours float64) time.Time {
 func RunPreviousExternalRefsMatchesTheSingleIDOracle(t *testing.T, ctx context.Context, fx PreviousExternalRefsFixture) {
 	t.Helper()
 	id := func(name string) string { return fx.Prefix + "-" + name }
-	ids := []string{id("same"), id("relink"), id("nullset"), id("gone"), id("multi"), id("late"), id("working"), id("never")}
+	ids := []string{id("same"), id("relink"), id("nullset"), id("gone"), id("multi"), id("late"), id("working"), id("never"), id("merged")}
 
 	mustExec(t, ctx, fx, insertSQL, id("same"), "https://tracker.test/A")
 	mustExec(t, ctx, fx, insertSQL, id("relink"), "https://tracker.test/A")
 	mustExec(t, ctx, fx, insertSQL, id("nullset"), nil)
 	mustExec(t, ctx, fx, insertSQL, id("gone"), "https://tracker.test/G1")
 	mustExec(t, ctx, fx, insertSQL, id("multi"), "https://tracker.test/M1")
+	mustExec(t, ctx, fx, insertSQL, id("merged"), "https://tracker.test/A")
 	commitAt(t, ctx, fx, "seed refs", at(1))
 
 	mustExec(t, ctx, fx, updateSQL, "https://tracker.test/B", id("relink"))
@@ -96,6 +111,18 @@ func RunPreviousExternalRefsMatchesTheSingleIDOracle(t *testing.T, ctx context.C
 
 	mustExec(t, ctx, fx, deleteSQL, id("multi"))
 	commitAt(t, ctx, fx, "delete multi", at(4))
+
+	side := fx.Prefix + "-side"
+	if err := fx.ExecSession(ctx, []SessionStatement{
+		{SQL: "CALL DOLT_CHECKOUT('-b', ?)", Args: []any{side}},
+		{SQL: updateSQL, Args: []any{"https://tracker.test/S", id("merged")}},
+		commitStatement("relink merged on a side branch", at(4.25)),
+		{SQL: "CALL DOLT_CHECKOUT('main')"},
+		{SQL: "CALL DOLT_MERGE(?, '--no-ff', '-m', 'merge side branch')", Args: []any{side}},
+	}); err != nil {
+		t.Fatalf("merge a side branch: %v", err)
+	}
+	mustExec(t, ctx, fx, "CALL DOLT_BRANCH('-d', ?)", side)
 
 	mustExec(t, ctx, fx, insertSQL, id("working"), "https://tracker.test/W")
 
@@ -113,8 +140,9 @@ func RunPreviousExternalRefsMatchesTheSingleIDOracle(t *testing.T, ctx context.C
 		{1, map[string]answer{id("same"): present("https://tracker.test/A"), id("nullset"): present(""), id("late"): absent}},
 		{1.5, map[string]answer{id("relink"): present("https://tracker.test/A"), id("nullset"): present("")}},
 		{2, map[string]answer{id("relink"): present("https://tracker.test/B"), id("nullset"): present("https://tracker.test/N")}},
-		{3, map[string]answer{id("gone"): present("https://tracker.test/G2"), id("late"): present("https://tracker.test/L"), id("multi"): present("https://tracker.test/M3")}},
-		{10, map[string]answer{id("multi"): present("https://tracker.test/M3"), id("working"): absent, id("never"): absent}},
+		{3, map[string]answer{id("gone"): present("https://tracker.test/G2"), id("late"): present("https://tracker.test/L"), id("multi"): present("https://tracker.test/M3"), id("merged"): present("https://tracker.test/A")}},
+		{4.25, map[string]answer{id("merged"): present("https://tracker.test/S")}},
+		{10, map[string]answer{id("multi"): present("https://tracker.test/M3"), id("working"): absent, id("never"): absent, id("merged"): present("https://tracker.test/S")}},
 	} {
 		t.Run(fmt.Sprintf("cutoff %gh", cutoff.hours), func(t *testing.T) {
 			asOf := at(cutoff.hours)
@@ -202,7 +230,15 @@ func mustExec(t *testing.T, ctx context.Context, fx PreviousExternalRefsFixture,
 
 func commitAt(t *testing.T, ctx context.Context, fx PreviousExternalRefsFixture, msg string, when time.Time) {
 	t.Helper()
-	mustExec(t, ctx, fx, "CALL DOLT_COMMIT('-A', '-m', ?, '--date', ?)", msg, when.UTC().Format("2006-01-02T15:04:05"))
+	stmt := commitStatement(msg, when)
+	mustExec(t, ctx, fx, stmt.SQL, stmt.Args...)
+}
+
+func commitStatement(msg string, when time.Time) SessionStatement {
+	return SessionStatement{
+		SQL:  "CALL DOLT_COMMIT('-A', '-m', ?, '--date', ?)",
+		Args: []any{msg, when.UTC().Format("2006-01-02T15:04:05")},
+	}
 }
 
 func containsID(ids []string, id string) bool {

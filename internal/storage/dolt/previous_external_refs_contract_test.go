@@ -26,6 +26,22 @@ func TestPreviousExternalRefsContract(t *testing.T) {
 			_, err := store.db.ExecContext(ctx, stmt, args...)
 			return err
 		},
+		ExecSession: func(ctx context.Context, stmts []storagecontract.SessionStatement) error {
+			conn, err := store.db.Conn(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = conn.Close() }()
+			for _, stmt := range stmts {
+				if _, err := conn.ExecContext(ctx, stmt.SQL, stmt.Args...); err != nil {
+					// Hand the pooled connection back on main, whatever the
+					// failed statement left checked out.
+					_, _ = conn.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')")
+					return err
+				}
+			}
+			return nil
+		},
 		ReadTx: func(ctx context.Context, fn func(*sql.Tx) error) error {
 			tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 			if err != nil {
