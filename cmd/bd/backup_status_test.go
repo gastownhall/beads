@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -547,5 +548,130 @@ func TestBackupStatusReportsFailedAutoBackup(t *testing.T) {
 		wantString("last_dolt_commit", "deadbeef")
 		wantTime("timestamp", t2)
 		wantTime("last_cap_warn_at", capWarn)
+	})
+
+	runText := func(t *testing.T) string {
+		t.Helper()
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status"})
+		stdout, stderr, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v\nstderr: %s", err, stderr)
+		}
+		return stdout
+	}
+	lineWith := func(out, substr string) string {
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, substr) {
+				return line
+			}
+		}
+		return ""
+	}
+
+	t.Run("text", func(t *testing.T) {
+		prepareBackupStatusTest(t)
+		dir := seedFailedAutoBackupState(t, t1, t2, capWarn, errText)
+
+		out := runText(t)
+		last := lineWith(out, "Last backup:")
+		if !strings.Contains(last, t1.Format(time.RFC3339)) {
+			t.Errorf("Last backup line = %q, want the last success %s\n%s", last, t1.Format(time.RFC3339), out)
+		}
+		if strings.Contains(last, t2.Format(time.RFC3339)) {
+			t.Errorf("Last backup line shows the failed attempt %s: %q", t2.Format(time.RFC3339), last)
+		}
+		failed := lineWith(out, "FAILED")
+		if failed == "" || !strings.Contains(failed, t2.Format(time.RFC3339)) {
+			t.Errorf("no FAILED line carrying the attempt time %s:\n%s", t2.Format(time.RFC3339), out)
+		}
+		if !strings.Contains(out, errText) {
+			t.Errorf("status does not show the error text %q:\n%s", errText, out)
+		}
+		mv := lineWith(out, "mv ")
+		if mv == "" || !strings.Contains(mv, dir) {
+			t.Errorf("no move-aside hint naming the backup directory %s:\n%s", dir, out)
+		}
+	})
+
+	t.Run("legacy_state_unchanged", func(t *testing.T) {
+		prepareBackupStatusTest(t)
+		dir, err := backupDir()
+		if err != nil {
+			t.Fatalf("backupDir: %v", err)
+		}
+		t0 := time.Date(2026, 5, 5, 18, 31, 51, 0, time.UTC)
+		data := fmt.Sprintf(`{"last_dolt_commit":"deadbeef","timestamp":%q,"last_cap_warn_at":"0001-01-01T00:00:00Z"}`, t0.Format(time.RFC3339))
+		if err := os.WriteFile(filepath.Join(dir, "backup_state.json"), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out := runText(t)
+		if last := lineWith(out, "Last backup:"); !strings.Contains(last, t0.Format(time.RFC3339)) {
+			t.Errorf("Last backup line = %q, want the legacy timestamp %s", last, t0.Format(time.RFC3339))
+		}
+		if strings.Contains(out, "FAILED") || strings.Contains(out, "mv ") {
+			t.Errorf("legacy state with no recorded failure shows a failure:\n%s", out)
+		}
+	})
+
+	t.Run("failure_without_success", func(t *testing.T) {
+		prepareBackupStatusTest(t)
+		dir, err := backupDir()
+		if err != nil {
+			t.Fatalf("backupDir: %v", err)
+		}
+		data, err := json.Marshal(map[string]any{
+			"last_dolt_commit": "",
+			"timestamp":        t2,
+			"last_cap_warn_at": time.Time{},
+			"last_success_at":  time.Time{},
+			"last_error":       errText,
+			"last_error_at":    t2,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "backup_state.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out := runText(t)
+		if strings.Contains(out, "No backup has been performed yet") {
+			t.Errorf("a recorded failure reads as no attempt at all:\n%s", out)
+		}
+		if !strings.Contains(lineWith(out, "Last backup:"), "none succeeded yet") {
+			t.Errorf("want \"Last backup: none succeeded yet\":\n%s", out)
+		}
+		if lineWith(out, "FAILED") == "" || !strings.Contains(out, errText) {
+			t.Errorf("failure block missing:\n%s", out)
+		}
+	})
+
+	t.Run("no_failure_no_hint", func(t *testing.T) {
+		prepareBackupStatusTest(t)
+		dir, err := backupDir()
+		if err != nil {
+			t.Fatalf("backupDir: %v", err)
+		}
+		data, err := json.Marshal(map[string]any{
+			"last_dolt_commit": "deadbeef",
+			"timestamp":        t1,
+			"last_cap_warn_at": time.Time{},
+			"last_success_at":  t1,
+			"last_error":       "",
+			"last_error_at":    time.Time{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "backup_state.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out := runText(t)
+		if last := lineWith(out, "Last backup:"); !strings.Contains(last, t1.Format(time.RFC3339)) {
+			t.Errorf("Last backup line = %q, want %s", last, t1.Format(time.RFC3339))
+		}
+		if strings.Contains(out, "FAILED") || strings.Contains(out, "mv ") {
+			t.Errorf("a healthy backup shows a failure or a recovery hint:\n%s", out)
+		}
 	})
 }
