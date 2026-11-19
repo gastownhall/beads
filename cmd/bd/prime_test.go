@@ -913,17 +913,69 @@ func TestPrimeHelpMentionsAllFallbackTiers(t *testing.T) {
 		}
 	}
 
-	// Tier (3) resolves via os.UserConfigDir(), whose location differs per
-	// platform. The help text is static, so it must spell out every OS's
+	// Tier (3) resolves via config.UserConfigDir(), whose location differs
+	// per platform. The help text is static, so it must spell out every OS's
 	// path rather than pinning one platform's spelling as if it were
-	// universal.
+	// universal. macOS shares the Linux path: bd no longer reads
+	// ~/Library/Application Support (GH#8113).
 	for _, configDirPath := range []string{
-		"~/.config/beads/",
-		"~/Library/Application Support/beads/",
+		"~/.config/beads/ on Linux and macOS",
 		`%AppData%\beads\`,
 	} {
 		if !strings.Contains(primeCmd.Long, configDirPath) {
 			t.Errorf("prime help tier (3) missing user config dir path %q", configDirPath)
 		}
 	}
+	if strings.Contains(primeCmd.Long, "Application Support") {
+		t.Errorf("prime help still names ~/Library/Application Support, which bd no longer reads")
+	}
+}
+
+// TestPrimeGlobalFallbackDarwinSkipsApplicationSupport: on macOS a PRIME.md
+// left in ~/Library/Application Support/beads is never statted or read, so
+// prime falls through to its default output (GH#8113).
+func TestPrimeGlobalFallbackDarwinSkipsApplicationSupport(t *testing.T) {
+	home := t.TempDir()
+	appSupport := filepath.Join(home, "Library", "Application Support")
+	if err := os.MkdirAll(filepath.Join(appSupport, "beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	const custom = "# Application Support PRIME\n"
+	if err := os.WriteFile(filepath.Join(appSupport, "beads", "PRIME.md"), []byte(custom), 0o600); err != nil {
+		t.Fatalf("write PRIME.md: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	workspace := t.TempDir()
+
+	nativeCalls := 0
+	native := func() (string, error) {
+		nativeCalls++
+		return appSupport, nil
+	}
+
+	t.Run("darwin", func(t *testing.T) {
+		nativeCalls = 0
+		t.Cleanup(config.SetUserConfigPlatformForTest("darwin", native))
+		if got := resolveGlobalPrimePath(""); got != "" {
+			t.Fatalf("resolveGlobalPrimePath = %q, want empty", got)
+		}
+		if content, ok := readCustomPrimeContent(workspace, filepath.Join(workspace, ".beads")); ok {
+			t.Fatalf("prime used a custom PRIME.md %q, want the default output", content)
+		}
+		if nativeCalls != 0 {
+			t.Fatalf("Application Support named %d times by bd prime", nativeCalls)
+		}
+	})
+
+	// Control: on Linux the same native root is honored, which proves the
+	// lookup goes through config.UserConfigDir.
+	t.Run("linux control", func(t *testing.T) {
+		nativeCalls = 0
+		t.Cleanup(config.SetUserConfigPlatformForTest("linux", native))
+		content, ok := readCustomPrimeContent(workspace, filepath.Join(workspace, ".beads"))
+		if !ok || content != custom || nativeCalls == 0 {
+			t.Fatalf("native root not consulted: ok=%v content=%q calls=%d", ok, content, nativeCalls)
+		}
+	})
 }
