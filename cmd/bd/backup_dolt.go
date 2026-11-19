@@ -122,6 +122,19 @@ After adding, run 'bd backup sync' to push your data.`,
 	},
 }
 
+// isBackupSyncNotConfigured reports whether err, from DOLT_BACKUP('sync')
+// on the backup registered as name, means no such backup is registered. It
+// matches Dolt's unknown-backup error for that name (env.ErrBackupNotFound,
+// "backup '<name>' not found") rather than any "not found": a registered
+// destination that lost table files its manifest names fails with "table
+// file not found: <path>", and calling that unconfigured sends the user to
+// re-register the same broken directory (bd-5mwx39, GH#4070).
+func isBackupSyncNotConfigured(err error, name string) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "no backup") ||
+		strings.Contains(msg, fmt.Sprintf("backup '%s' not found", name))
+}
+
 var backupSyncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Push database to configured Dolt backup",
@@ -185,8 +198,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 
 		// Sync to the configured backup
 		if err := bs.BackupSync(ctx, defaultDoltBackupName); err != nil {
-			if strings.Contains(err.Error(), "no backup") ||
-				strings.Contains(err.Error(), "not found") {
+			if isBackupSyncNotConfigured(err, defaultDoltBackupName) {
 				return fmt.Errorf("no backup destination configured. Run 'bd backup init <path>' first")
 			}
 			return fmt.Errorf("backup sync failed: %w", err)
