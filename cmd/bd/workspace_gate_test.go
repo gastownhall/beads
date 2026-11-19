@@ -1461,3 +1461,86 @@ func TestSharedServerInitDoesNotHoldOtherProjectsCommandsOut(t *testing.T) {
 		t.Fatalf("shared-root exclusive acquisition under the shared holders: err = %v, want ErrBusy", err)
 	}
 }
+
+// bd-xicgb8 (GH#7122) AC-3: the SHARED shared-root hold does not smuggle a
+// maintenance operation past init. While an ordinary shared-server init
+// holds its complete gate set, shared-root maintenance requesting EXCLUSIVE
+// on that root cannot enter until init releases, exactly as it could not
+// when init held everything EXCLUSIVE.
+func TestSharedServerInitHoldsMaintenanceOutOfTheSharedRoot(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	t.Setenv(initGateTimeoutEnv, "500ms")
+
+	// Project B: the resident serve ends before the maintenance phase of
+	// the test, so the only holder the maintenance contention can blame is
+	// init's set.
+	otherBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(otherBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"backend":"dolt","database":"other","dolt_mode":"server","dolt_database":"other"}`
+	if err := os.WriteFile(filepath.Join(otherBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sharedRoot := doltserver.DoltDirPath(otherBeadsDir)
+	if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	serveGates, err := buildWorkspaceGateSet(otherBeadsDir)
+	if err != nil {
+		t.Fatalf("build other project's gate set: %v", err)
+	}
+	serveHold, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{Reason: "bd serve"}, serveGates...)
+	if err != nil {
+		t.Fatalf("other project's serve shared hold: %v", err)
+	}
+	t.Cleanup(func() { _ = serveHold.Release() })
+
+	rootGate, err := workspacegate.ForPhysicalRoot(sharedRoot)
+	if err != nil {
+		t.Fatalf("gate for the shared root: %v", err)
+	}
+
+	// Project A's ordinary shared-server init acquires and holds its
+	// complete gate set (workspace EXCLUSIVE, shared root SHARED); the
+	// red/base premise is that this very acquisition is refused when the
+	// root is taken EXCLUSIVE.
+	initRan := false
+	newBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	initHold, err := acquireInitMutationGate(context.Background(), initGateRequest{
+		beadsDir:     newBeadsDir,
+		physicalRoot: sharedRoot,
+		sharedServer: true,
+		preflight:    func() error { initRan = true; return nil },
+	})
+	if err != nil {
+		t.Fatalf("init gate acquisition refused: %v", err)
+	}
+	t.Cleanup(func() { _ = initHold.Release() })
+	if !initRan {
+		t.Fatal("init's preflight did not run under the held gates")
+	}
+
+	// The resident serve stops. From here on, init's set is the only hold
+	// on the shared root, and it must still keep EXCLUSIVE maintenance out.
+	_ = serveHold.Release()
+
+	if _, err := rootGate.Acquire(context.Background(), workspacegate.Exclusive,
+		workspacegate.Options{Wait: 250 * time.Millisecond, Reason: "test maintenance"}); !errors.Is(err, workspacegate.ErrBusy) {
+		t.Fatalf("shared-root maintenance entered while init held its gate set: err = %v, want ErrBusy", err)
+	}
+
+	// Once init releases, the same maintenance acquisition enters.
+	if err := initHold.Release(); err != nil {
+		t.Fatalf("release init gate set: %v", err)
+	}
+	maintHold, err := rootGate.Acquire(context.Background(), workspacegate.Exclusive,
+		workspacegate.Options{Wait: 250 * time.Millisecond, Reason: "test maintenance"})
+	if err != nil {
+		t.Fatalf("shared-root maintenance still refused after init released: %v", err)
+	}
+	t.Cleanup(func() { _ = maintHold.Release() })
+}
