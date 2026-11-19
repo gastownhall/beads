@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **bd no longer reads `~/Library/Application Support` on macOS (GH#8113).**
+  Every bd launch, `bd prime` hook and `bd doctor` run stat-ed the macOS
+  user config root (`os.UserConfigDir`), which triggers the macOS 26
+  "access to Application Support" privacy prompt. bd's native user config
+  dir on macOS (and iOS) now follows the XDG rule — `$XDG_CONFIG_HOME` if
+  set, else `~/.config` — matching Linux; Windows (`%AppData%`) is
+  unchanged. A user config that already exists at
+  `~/.config/bd/config.yaml` is found where it always was; a legacy
+  `~/Library/Application Support/bd/config.yaml` is carried over verbatim
+  exactly once, at the moment bd first creates the new file, and only if
+  it is a readable regular file (64 KiB cap). If bd cannot read the
+  legacy file (for example after a TCC denial) or cannot create the new
+  one, the run fails closed with metrics disabled rather than override an
+  opt-out it cannot see; `bd metrics on` re-enables. The global
+  `PRIME.md` and the doctor config lookup moved to the new tier as well.
+  To migrate a legacy config by hand: `mkdir -p ~/.config/bd && cp
+  "~/Library/Application Support/bd/config.yaml" ~/.config/bd/config.yaml`
+  (or move a custom global `PRIME.md` to `~/.config/beads/`). (#8113)
+
+### Fixed
+
+- **A dangling symlink at the user config path no longer crashes bd.** The
+  metrics bootstrap and `bd config`/`bd metrics` writes observed the
+  dangling symlink as "missing" and their create as "already exists"
+  forever, recursing until the stack ran out. Both now re-read exactly
+  once and report the failure ("dangling symlink" / the underlying read
+  error) without materializing the target, on every platform. (#8113)
+
 ### Security
 
 - **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and

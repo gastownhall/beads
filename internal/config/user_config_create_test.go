@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -228,5 +229,32 @@ func TestCreateUserConfigYamlAlreadyExistsIsTyped(t *testing.T) {
 				t.Errorf("existing file was disturbed: %q, %v", got, rerr)
 			}
 		})
+	}
+}
+
+// TestSetUserYamlConfigDanglingSymlinkSurfacesReadError: a dangling symlink
+// at the user config path makes the pre-create stat report not-exist and the
+// create report EEXIST forever. SetUserYamlConfig must fall through to the
+// read-modify-write exactly once and surface its read error — never retry
+// the create, never report bare "already exists" for a file nothing can
+// read, never materialize the target (GH#8113, all platforms).
+func TestSetUserYamlConfigDanglingSymlinkSurfacesReadError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	path := seedUserConfigDir(t, home)
+	if err := os.Symlink(filepath.Join(home, "nowhere"), path); err != nil {
+		t.Fatalf("plant dangling symlink: %v", err)
+	}
+
+	err := SetUserYamlConfig("metrics.disabled", "true")
+	if err == nil {
+		t.Fatal("expected an error for a dangling symlink at the user config path")
+	}
+	if !strings.Contains(err.Error(), "failed to read config.yaml") {
+		t.Errorf("error %q does not surface the read failure", err)
+	}
+	if _, serr := os.Lstat(filepath.Join(home, "nowhere")); !os.IsNotExist(serr) {
+		t.Errorf("the dangling symlink's target was materialized: %v", serr)
 	}
 }
