@@ -79,10 +79,19 @@ migrations here clear `FOREIGN_KEY_CHECKS` and restore it (0041, 0043, 0047,
 `uow.openAndInitSchema` hands the pool that ran the migration straight to the
 provider for live queries, so a system session variable still changed when a
 script reports success leaks into ordinary queries. Pairing the SETs inside one
-script is what makes that safe — `initSchemaAttempt` pins one session per
-attempt, so both statements land on the same session, and an attempt that dies
-between them returns its connection to the pool, which is why the restore
-cannot be the caller's job. User variables (`SET @sql`, `SET @needs_add`) are
+script is what makes the success path safe: `initSchemaAttempt` pins one session
+per attempt, so both statements land on the same session, and no caller can
+restore what a successful script left changed.
+
+A script that dies *between* its SETs cannot restore anything, and the caller
+does not try to. Instead, a failed attempt discards its session: both
+`uow.initSchemaAttempt` and `dolt.initSchemaOnDBWithBootstrapHeal` hand it back
+as `driver.ErrBadConn`, so `database/sql` closes it rather than pooling it, and
+neither the retry nor a live query can reuse it (gastownhall/beads#6504). An
+open that fails for good also closes its whole pool. Session cleanup
+therefore splits cleanly: on failure the session is thrown away; on success the
+script itself must have restored every system session variable it changed.
+Keep the paired SETs. User variables (`SET @sql`, `SET @needs_add`) are
 exempt: nothing outside these scripts reads one, and each assigns before it
 reads.
 
