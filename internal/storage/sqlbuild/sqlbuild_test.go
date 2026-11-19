@@ -580,8 +580,9 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 
 	// By-IDs form: driver and every subquery are constrained to the ids, and the
-	// arg count matches the placeholder injection points (labels, dc, rc-deps,
-	// rc-wisp, cc, pc, d, driver = 8 for the wisp family with labels).
+	// arg count matches the placeholder injection points (labels, dc, the three
+	// rc-dep legs, the three rc-wisp legs, cc, pc, d, driver = 12 for the wisp
+	// family with labels).
 	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{})
 	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
 		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
@@ -595,15 +596,50 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
 		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
 	}
-	if len(idArgs) != 8*2 {
-		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 8*2)
+	if len(idArgs) != 12*2 {
+		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 12*2)
+	}
+
+	// The by-IDs reverse-blocker must be the three DISJOINT legs per dependency
+	// table — each leg constrains a real (indexed) target column, with guards
+	// that keep the legs disjoint in COALESCE-precedence order — and must NOT
+	// carry the unindexable COALESCE key the predicate form pays for.
+	for _, want := range []string{
+		"SELECT depends_on_issue_id AS dep_id",
+		"AND depends_on_issue_id IN (?,?)",
+		"SELECT depends_on_wisp_id AS dep_id",
+		"depends_on_issue_id IS NULL AND depends_on_wisp_id IN (?,?)",
+		"SELECT depends_on_external AS dep_id",
+		"depends_on_issue_id IS NULL AND depends_on_wisp_id IS NULL AND depends_on_external IN (?,?)",
+		"SELECT depends_on_issue_id AS dep_id",
+	} {
+		if !strings.Contains(byIDs, want) {
+			t.Errorf("by-IDs counts SQL missing guarded leg %q:\n%s", want, byIDs)
+		}
+	}
+	if strings.Count(byIDs, "UNION ALL") != 5 {
+		// Three legs per dependency table: two separators each, plus the one
+		// joining the wisp block to the dependencies block.
+		t.Errorf("by-IDs counts SQL wants 5 UNION ALL joins (3 legs per dependency table), got %d", strings.Count(byIDs, "UNION ALL"))
+	}
+	// The rc SELECT itself must not project the unindexable COALESCE key; pc
+	// and d (parent and dependency JSON) still resolve their own COALESCEs,
+	// which are one-shot per driver row and not what made rc quadratic.
+	if strings.Contains(byIDs, "SELECT COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS dep_id") {
+		t.Errorf("by-IDs counts SQL rc must not project the unindexable COALESCE key:\n%s", byIDs)
+	}
+	// Every leg guards type = 'blocks' — matches the predicate form's rc
+	// input — and the dc join keeps its guard: 6 legs + dc.
+	if strings.Count(byIDs, "type = 'blocks'") != 7 {
+		t.Errorf("by-IDs counts SQL wants its rc legs and dc guard; type = 'blocks' appears %d times, want 7", strings.Count(byIDs, "type = 'blocks'"))
 	}
 
 	// skipLabels drops the labels point and !includeWispReverseDeps drops the
-	// rc-wisp point, leaving 6 injection points (dc, rc-deps, cc, pc, d, driver).
+	// three rc-wisp legs, leaving 8 injection points (dc, rc-dep x3, cc, pc, d,
+	// driver).
 	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{SkipLabels: true})
-	if len(idArgsNoLabels) != 6*2 {
-		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
+	if len(idArgsNoLabels) != 8*2 {
+		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 8*2)
 	}
 
 	// SkipCounts drops the three cardinality joins and projects constants in

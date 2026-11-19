@@ -81,11 +81,11 @@ func (h CountsHydration) IssueColumns() string {
 //
 //   - By-IDs form (ids non-empty): whereSQL/orderBySQL/limitSQL are ignored and
 //     the driver AND every count subquery are constrained to ids. This keeps
-//     each subquery from scanning its whole side table and, crucially, keeps
-//     the reverse-blocker rc self-join — whose COALESCE(...) key the pure-Go
-//     GMS analyzer cannot auto-index — from re-scanning its full materialization
-//     once per driver row. The returned args are the ids repeated once per
-//     injection point, in left-to-right placeholder order.
+//     each subquery from scanning its whole side table, and rewrites the
+//     reverse-blocker rc — whose COALESCE(...) key no supported backend can
+//     auto-index — as three disjoint, indexable UNION ALL legs per dependency
+//     table (see reverseBlockerSelect below). The returned args are the ids
+//     repeated once per injection point, in left-to-right placeholder order.
 //
 // The by-IDs form is result-identical to the predicate form over the same set
 // of surviving rows: each per-issue count is a function of the whole dependency
@@ -136,27 +136,72 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	// Per-subquery id constraints. Empty strings in the predicate form leave the
 	// projection unchanged; in the by-IDs form they push the page down so no
 	// subquery aggregates more than the page's worth of rows.
-	var labelWhere, depBlocksExtra, rcDepExtra, rcWispExtra, ccWhere, pcExtra, depWhere string
+	var labelWhere, depBlocksExtra, ccWhere, pcExtra, depWhere string
 	if byIDs {
 		labelWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		depBlocksExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
-		rcDepExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
-		rcWispExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
 		ccWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		pcExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
 		depWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 	}
 
+	// THE REVERSE-BLOCKER'S KEY IS THE ONE EXPRESSION NEITHER ENGINE CAN SEEK:
+	// rc joins on COALESCE(depends_on_issue_id, ...), which no supported backend
+	// auto-indexes - the pure-Go GMS analyzer and the Dolt server planner alike
+	// re-scan the materialization - so the predicate form (the parity oracle)
+	// pays that scan by construction. The by-IDs form need not: the three target
+	// columns are mutually exclusive by schema (a later one is populated only
+	// when the preceding ones are NULL), so the COALESCE's precedence restates
+	// as three DISJOINT UNION ALL legs, each constraining a REAL column to the
+	// page ids. Every leg is then a plain equality/IN on an indexed column -
+	// idx_dep_issue_target / idx_dep_type_issue and the 0047 wisp twins - that a
+	// plan can seek (dolt's TestSearchCountsByIDsPlanNeverScansADependencyTable
+	// pins it), and the COALESCE semantics fall out unchanged: a row counts its
+	// target only when that target is in the page, which is exactly when the
+	// COALESCE would resolve it there. A row whose populated target column is
+	// not in the page contributes nothing in either form.
 	reverseBlockerSelect := fmt.Sprintf(`
-				SELECT %s AS dep_id
-				FROM dependencies WHERE type = 'blocks'%s
-	`, DepTargetExpr, rcDepExtra)
+			SELECT %s AS dep_id
+			FROM dependencies WHERE type = 'blocks'
+	`, DepTargetExpr)
+	if byIDs {
+		reverseBlockerSelect = fmt.Sprintf(`
+			SELECT depends_on_issue_id AS dep_id
+			FROM dependencies
+			WHERE type = 'blocks' AND depends_on_issue_id IN (%s)
+			UNION ALL
+			SELECT depends_on_wisp_id AS dep_id
+			FROM dependencies
+			WHERE type = 'blocks' AND depends_on_issue_id IS NULL AND depends_on_wisp_id IN (%s)
+			UNION ALL
+			SELECT depends_on_external AS dep_id
+			FROM dependencies
+			WHERE type = 'blocks' AND depends_on_issue_id IS NULL AND depends_on_wisp_id IS NULL AND depends_on_external IN (%s)
+		`, inSQL, inSQL, inSQL)
+	}
 	if includeWispReverseDeps {
-		reverseBlockerSelect += fmt.Sprintf(`
-				UNION ALL
-				SELECT %s AS dep_id
-				FROM wisp_dependencies WHERE type = 'blocks'%s
-		`, DepTargetExpr, rcWispExtra)
+		if byIDs {
+			reverseBlockerSelect += fmt.Sprintf(`
+			UNION ALL
+			SELECT depends_on_issue_id AS dep_id
+			FROM wisp_dependencies
+			WHERE type = 'blocks' AND depends_on_issue_id IN (%s)
+			UNION ALL
+			SELECT depends_on_wisp_id AS dep_id
+			FROM wisp_dependencies
+			WHERE type = 'blocks' AND depends_on_issue_id IS NULL AND depends_on_wisp_id IN (%s)
+			UNION ALL
+			SELECT depends_on_external AS dep_id
+			FROM wisp_dependencies
+			WHERE type = 'blocks' AND depends_on_issue_id IS NULL AND depends_on_wisp_id IS NULL AND depends_on_external IN (%s)
+		`, inSQL, inSQL, inSQL)
+		} else {
+			reverseBlockerSelect += fmt.Sprintf(`
+			UNION ALL
+			SELECT %s AS dep_id
+			FROM wisp_dependencies WHERE type = 'blocks'
+		`, DepTargetExpr)
+		}
 	}
 
 	labelsSelect := "l.labels_json AS labels_json"
@@ -266,17 +311,24 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	}
 
 	// args follow the placeholder order in sqlText: labels join (unless
-	// skipped), dc, rc dependencies branch, rc wisp branch (if any), cc (all
-	// four unless the counts are skipped), pc, d, then the driver.
-	args := make([]any, 0, len(idArgs)*8)
+	// skipped), dc, the rc dependencies legs (three, one per disjoint target),
+	// the rc wisp legs (three more, only when included), cc (all unless the
+	// counts are skipped), pc, d, then the driver. Full hydration therefore
+	// binds the page ids nine times without wisp dependencies and twelve
+	// times with - 2,400 bindings at the QueryBatchSize batch of 200.
+	args := make([]any, 0, len(idArgs)*12)
 	if !hyd.SkipLabels {
 		args = append(args, idArgs...)
 	}
 	if !hyd.SkipCounts {
 		args = append(args, idArgs...) // dc
-		args = append(args, idArgs...) // rc dependencies
+		for i := 0; i < 3; i++ {
+			args = append(args, idArgs...) // rc dependencies legs
+		}
 		if includeWispReverseDeps {
-			args = append(args, idArgs...) // rc wisp_dependencies
+			for i := 0; i < 3; i++ {
+				args = append(args, idArgs...) // rc wisp_dependencies legs
+			}
 		}
 		args = append(args, idArgs...) // cc
 	}
