@@ -138,6 +138,7 @@ func (o *batchApplier) ApplyBatch(ctx context.Context, request publicops.ApplyBa
 			uw:     uw,
 			keys:   make(map[string]string, len(plan.KeyIndex)),
 			planes: map[string]bool{},
+			latest: map[string]*publicops.Issue{},
 			result: publicops.ApplyBatchResult{
 				Keys:  make(map[string]string, len(plan.KeyIndex)),
 				Items: make([]publicops.ItemResult, len(plan.Items)),
@@ -160,6 +161,11 @@ type uowApplyRun struct {
 	keys   map[string]string
 	planes map[string]bool
 	edges  []uowAppliedEdge
+	// latest holds ONE post-write snapshot per row the batch touched, keyed
+	// by row id — the sibling of the store body's per-row map, on the same
+	// terms (bd-xx3ma9): a row written forty times retains one snapshot, and
+	// every row-verb entry shares it when the apply publishes.
+	latest map[string]*publicops.Issue
 	result publicops.ApplyBatchResult
 	// write records whether this unit of work has anything to commit, on the
 	// same terms the store bodies record it: a create and an edge always write,
@@ -188,7 +194,24 @@ func (r *uowApplyRun) apply(ctx context.Context) error {
 	if err := r.spliceMetadataRefs(ctx); err != nil {
 		return err
 	}
-	return r.runEndGate(ctx)
+	if err := r.runEndGate(ctx); err != nil {
+		return err
+	}
+	r.publishLatestSnapshots()
+	return nil
+}
+
+// publishLatestSnapshots hands every create/update/close entry the ONE
+// snapshot its row finished the apply with, mirroring the store body's body:
+// one snapshot per row, shared by every entry for it; dep_add entries never
+// carry one.
+func (r *uowApplyRun) publishLatestSnapshots() {
+	for i := range r.result.Items {
+		switch r.result.Items[i].Kind {
+		case publicops.ItemCreate, publicops.ItemUpdate, publicops.ItemClose:
+			r.result.Items[i].Issue = r.latest[r.result.Items[i].IssueID]
+		}
+	}
 }
 
 func (r *uowApplyRun) applyItem(ctx context.Context, index int) error {
@@ -264,12 +287,14 @@ func (r *uowApplyRun) applyCreate(ctx context.Context, index int, item *publicop
 	}
 	r.planes[issue.ID] = useWisp
 	r.write.Changed = true
+	// One snapshot per row, held until the apply publishes; the entry is
+	// facts-only until then.
+	r.latest[issue.ID] = issue
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:       publicops.ItemCreate,
 		IssueID:    issue.ID,
 		Changed:    true,
 		RowVersion: issue.RowVersion,
-		Issue:      issue,
 	}
 	return nil
 }
@@ -316,12 +341,12 @@ func (r *uowApplyRun) applyUpdate(ctx context.Context, index int, item *publicop
 		return itemErr(err)
 	}
 	r.write.Changed = r.write.Changed || updated.Changed
+	r.latest[id] = updated.Issue
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:       publicops.ItemUpdate,
 		IssueID:    id,
 		Changed:    updated.Changed,
 		RowVersion: updated.Issue.RowVersion,
-		Issue:      updated.Issue,
 	}
 	return nil
 }
@@ -429,12 +454,12 @@ func (r *uowApplyRun) applyClose(ctx context.Context, index int, item *publicops
 		rewindBatchNotifications(r.uw, mark)
 	}
 	r.write.Changed = r.write.Changed || closeChanged
+	r.latest[id] = hydrated
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:       publicops.ItemClose,
 		IssueID:    id,
 		Changed:    closeChanged,
 		RowVersion: hydrated.RowVersion,
-		Issue:      hydrated,
 	}
 	return nil
 }
@@ -549,7 +574,10 @@ func (r *uowApplyRun) spliceMetadataRefs(ctx context.Context) error {
 		if err != nil {
 			return &publicops.ItemError{Index: index, Kind: publicops.ItemCreate, Key: item.Create.Key, IssueID: id, Err: err}
 		}
-		r.result.Items[index].Issue = updated.Issue
+		// The entry keeps the post-splice RowVersion; the snapshot replaces
+		// the create's in the per-row map so every entry for the row shares
+		// it when the apply publishes.
+		r.latest[id] = updated.Issue
 		r.result.Items[index].RowVersion = updated.Issue.RowVersion
 	}
 	return nil

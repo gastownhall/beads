@@ -2797,3 +2797,86 @@ func RunBatchApplyAppliesTheDefaultPriority(t *testing.T, ctx context.Context, f
 	}
 	assertBatchApplyRowCount(t, ctx, fixture, "issues", conflict, 0)
 }
+
+// RunBatchApplyRowEntriesShareTheLatestSnapshot pins the snapshot-retention
+// contract of ItemResult.Issue (bd-xx3ma9, #7882): a batch that creates one row
+// carrying large metadata and then updates it forty times hands EVERY row-verb
+// entry for that row the SAME snapshot — the one after the row's last verb —
+// so the accumulator retains one snapshot per row rather than one per write.
+// A second row created by the same batch carries its own snapshot, never the
+// first row's, and each entry's own facts still report what THAT item did:
+// Changed per item, and the last verb's RowVersion matching the shared
+// snapshot's.
+func RunBatchApplyRowEntriesShareTheLatestSnapshot(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	id := fixture.IssuePrefix + "-forty-updates"
+	bystander := fixture.IssuePrefix + "-forty-bystander"
+
+	// 8 KiB of metadata: large enough that forty retained snapshots of the row
+	// would be forty retained copies of it.
+	first := batchApplyIssue(id, "updated forty times in one batch")
+	first.Metadata = json.RawMessage(`{"gc.payload":"` + strings.Repeat("x", 8<<10) + `"}`)
+
+	items := []publicops.ApplyItem{batchApplyCreate("edited", first)}
+	for i := 1; i <= 40; i++ {
+		items = append(items, batchApplyUpdate(
+			publicops.Ref{Key: "edited"},
+			publicops.IssuePatch{AppendNotes: publicops.Field[string]{Set: true, Value: fmt.Sprintf("note-%d", i)}},
+		))
+	}
+	items = append(items, batchApplyCreate("bystander", batchApplyIssue(bystander, "one verb, its own row")))
+
+	result := batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor:         "apply-writer",
+		ForceIDPrefix: true,
+		Items:         items,
+	})
+	if len(result.Items) != 42 {
+		t.Fatalf("result carries %d items; want 42", len(result.Items))
+	}
+
+	// Every entry for the edited row shares ONE snapshot.
+	shared := result.Items[0].Issue
+	if shared == nil {
+		t.Fatalf("the create entry for %s carries no snapshot", id)
+	}
+	for i := 0; i <= 40; i++ {
+		if result.Items[i].IssueID != id {
+			t.Fatalf("entry %d acted on %q, want %q", i, result.Items[i].IssueID, id)
+		}
+		if result.Items[i].Issue != shared {
+			t.Fatalf("entry %d for %s does not share the row's snapshot; want every row-verb entry to carry the one the row finished with", i, id)
+		}
+	}
+	// ...which is the FINAL state: all forty notes and the large metadata.
+	if !strings.Contains(shared.Notes, "note-1") || !strings.Contains(shared.Notes, "note-40") {
+		t.Errorf("the shared snapshot's notes are not the row's final notes: %q", shared.Notes)
+	}
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(shared.Metadata, &meta); err != nil {
+		t.Fatalf("the shared snapshot's metadata did not survive: %v", err)
+	}
+	if len(meta["gc.payload"]) < 8<<10 {
+		t.Errorf("the shared snapshot's large metadata was truncated: %d bytes", len(meta["gc.payload"]))
+	}
+
+	// The bystander row carries its own snapshot, never the edited row's.
+	own := result.Items[41].Issue
+	if own == nil || own == shared {
+		t.Fatalf("the bystander entry must carry its own snapshot; got %v shared with the edited row", own == shared)
+	}
+	if own.ID != bystander {
+		t.Errorf("the bystander entry's snapshot is %q, want %q", own.ID, bystander)
+	}
+
+	// Each entry's own facts are intact: the create and every append changed
+	// something, and the last verb's version is the shared snapshot's.
+	for i := 0; i <= 40; i++ {
+		if !result.Items[i].Changed {
+			t.Errorf("entry %d reports Changed false; per-item facts must survive the shared snapshot", i)
+		}
+	}
+	if result.Items[40].RowVersion != shared.RowVersion {
+		t.Errorf("the last update's RowVersion (%d) is not the shared snapshot's (%d)", result.Items[40].RowVersion, shared.RowVersion)
+	}
+}

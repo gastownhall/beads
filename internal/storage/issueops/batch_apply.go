@@ -62,6 +62,7 @@ func ApplyBatchInTx(ctx context.Context, tx *sql.Tx, plan storage.ApplyBatchPlan
 		plan:   plan,
 		keys:   make(map[string]string, len(plan.KeyIndex)),
 		planes: map[string]bool{},
+		latest: map[string]*publicops.Issue{},
 		write:  BatchApplyWrite{Tables: ChangedTables{}},
 		result: publicops.ApplyBatchResult{
 			Keys:  make(map[string]string, len(plan.KeyIndex)),
@@ -180,7 +181,13 @@ type applyBatchRun struct {
 	planes map[string]bool
 	// edges records every edge the request added, with the item each came from,
 	// so the end gate can name the item that refused.
-	edges  []appliedEdge
+	edges []appliedEdge
+	// latest holds ONE post-write snapshot per row the batch touched, keyed by
+	// row id: the snapshot after the row's LAST verb (and after the metadata
+	// splice, for a spliced create). A batch that writes one row forty times
+	// retains forty item entries but ONE snapshot, and every row-verb entry is
+	// handed that same snapshot when the apply finishes (bd-xx3ma9).
+	latest map[string]*publicops.Issue
 	write  BatchApplyWrite
 	result publicops.ApplyBatchResult
 }
@@ -192,7 +199,8 @@ type appliedEdge struct {
 }
 
 // apply runs the three phases in order: the items, the metadata splice, the end
-// gate.
+// gate — then hands every row-verb entry the one snapshot its row finished
+// with.
 func (r *applyBatchRun) apply(ctx context.Context, tx *sql.Tx) error {
 	if err := coordinateApplyBatchCreatesInTx(ctx, tx, r.plan); err != nil {
 		return err
@@ -205,7 +213,25 @@ func (r *applyBatchRun) apply(ctx context.Context, tx *sql.Tx) error {
 	if err := r.spliceMetadataRefs(ctx, tx); err != nil {
 		return err
 	}
-	return r.runEndGate(ctx, tx)
+	if err := r.runEndGate(ctx, tx); err != nil {
+		return err
+	}
+	r.publishLatestSnapshots()
+	return nil
+}
+
+// publishLatestSnapshots assigns each create/update/close entry the ONE
+// snapshot its row finished the apply with, so a batch that writes the same
+// row many times retains one snapshot per row instead of one per write, and
+// every entry for a row shares that snapshot. dep_add entries never carry one:
+// an edge is a fact about two rows, not a row state.
+func (r *applyBatchRun) publishLatestSnapshots() {
+	for i := range r.result.Items {
+		switch r.result.Items[i].Kind {
+		case publicops.ItemCreate, publicops.ItemUpdate, publicops.ItemClose:
+			r.result.Items[i].Issue = r.latest[r.result.Items[i].IssueID]
+		}
+	}
 }
 
 // coordinateApplyBatchCreatesInTx takes the coordination cell of every
@@ -273,12 +299,14 @@ func (r *applyBatchRun) applyCreate(ctx context.Context, tx *sql.Tx, index int, 
 		r.result.Keys[item.Key] = created.Issue.ID
 	}
 	r.planes[created.Issue.ID] = IsWisp(created.Issue)
+	// The snapshot is held once per row, not once per item; the entry is
+	// facts-only until the apply publishes the row's finished snapshot.
+	r.latest[created.Issue.ID] = created.Issue
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:       publicops.ItemCreate,
 		IssueID:    created.Issue.ID,
 		Changed:    true,
 		RowVersion: created.Issue.RowVersion,
-		Issue:      created.Issue,
 	}
 	return nil
 }
@@ -307,12 +335,12 @@ func (r *applyBatchRun) applyUpdate(ctx context.Context, tx *sql.Tx, index int, 
 	}
 	r.write.Tables.Merge(tables)
 	r.write.Changed = r.write.Changed || updated.Changed || len(tables) > 0
+	r.latest[id] = updated.Issue
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:       publicops.ItemUpdate,
 		IssueID:    id,
 		Changed:    updated.Changed,
 		RowVersion: updated.Issue.RowVersion,
-		Issue:      updated.Issue,
 	}
 	return nil
 }
@@ -338,12 +366,12 @@ func (r *applyBatchRun) applyClose(ctx context.Context, tx *sql.Tx, index int, i
 	}
 	r.write.Tables.Merge(tables)
 	r.write.Changed = r.write.Changed || closed.Changed || len(tables) > 0
+	r.latest[id] = closed.Issue
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:       publicops.ItemClose,
 		IssueID:    id,
 		Changed:    closed.Changed,
 		RowVersion: closed.Issue.RowVersion,
-		Issue:      closed.Issue,
 	}
 	return nil
 }
@@ -527,8 +555,11 @@ func (r *applyBatchRun) spliceMetadataRefs(ctx context.Context, tx *sql.Tx) erro
 		r.write.Tables.Merge(tables)
 		// The create already reported Changed; the splice re-reads the row so
 		// the snapshot the caller is handed carries the spliced metadata and the
-		// version token the splice produced, rather than the ones from before it.
-		r.result.Items[index].Issue = updated.Issue
+		// version token the splice produced, rather than the ones from before
+		// it. The entry keeps the post-splice RowVersion now, and the snapshot
+		// replaces the one the create recorded in the per-row map, so every
+		// entry for the row shares it when the apply publishes.
+		r.latest[id] = updated.Issue
 		r.result.Items[index].RowVersion = updated.Issue.RowVersion
 	}
 	return nil

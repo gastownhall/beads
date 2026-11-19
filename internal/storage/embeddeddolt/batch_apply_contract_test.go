@@ -131,6 +131,9 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("SplicesASelfMetadataRef", func(t *testing.T) {
 		conformance.RunBatchApplySplicesASelfMetadataRef(t, ctx, fixture)
 	})
+	t.Run("RowEntriesShareTheLatestSnapshot", func(t *testing.T) {
+		conformance.RunBatchApplyRowEntriesShareTheLatestSnapshot(t, ctx, fixture)
+	})
 	t.Run("RefusesAMetadataRefNoItemDeclares", func(t *testing.T) {
 		conformance.RunBatchApplyRefusesAMetadataRefNoItemDeclares(t, ctx, fixture)
 	})
