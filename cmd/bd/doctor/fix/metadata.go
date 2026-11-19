@@ -310,18 +310,23 @@ func fallbackDatabaseEligible(db serverDatabaseMetadata) bool {
 //     it, unless a different current database with schema asserts a
 //     conflicting project_id — the reconcile's conflict refusal. This also
 //     covers a mode-gated reconcile that did not run.
-//  3. no eligible alternatives: no rewrite.
-//  4. local project_id set but no eligible alternative carries it: skip.
+//  3. current database already has Beads schema: no rewrite. The workspace is
+//     already pointed at a real database; a schema quirk or missing identity
+//     never justifies moving it. This comes only after the identity checks
+//     above: an established identity contradiction is never permission to
+//     stand still behind a schema technicality.
+//  4. no eligible alternatives: no rewrite.
+//  5. local project_id set but no eligible alternative carries it: skip.
 //     Absence of identity is not a match, even for a sole candidate, in
 //     either mode.
-//  5. no local project_id, shared-server mode: skip, sole candidate or
+//  6. no local project_id, shared-server mode: skip, sole candidate or
 //     several: without an anchor, adoption can redirect this workspace to
 //     another project's data.
-//  6. no local project_id, non-shared mode, exactly one eligible
+//  7. no local project_id, non-shared mode, exactly one eligible
 //     alternative: select it — the GH#2160 legacy migration recovery. The
 //     caller backfills an absent local project_id from the selected
 //     candidate's identity.
-//  7. no local project_id, non-shared mode, several eligible alternatives:
+//  8. no local project_id, non-shared mode, several eligible alternatives:
 //     skip; never choose by enumeration order.
 //
 // Every skip says why selection is unsafe, lists the eligible alternatives in
@@ -378,6 +383,13 @@ func selectFallbackDoltDatabase(localProjectID, currentDatabase string, sharedSe
 			}
 			return &selected, nil
 		}
+	}
+
+	// The no-op comes only after the identity checks above: an established
+	// identity contradiction is never permission to stand still behind a
+	// schema technicality.
+	if hasCurrent && current.HasSchema {
+		return nil, nil
 	}
 
 	if len(eligible) == 0 {

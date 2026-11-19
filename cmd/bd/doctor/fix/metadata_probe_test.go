@@ -625,6 +625,82 @@ func TestSelectFallbackDoltDatabase_AdoptsSoleCandidateOnOwnServer(t *testing.T)
 	}
 }
 
+// A current database that already has Beads schema is never moved away from:
+// no rewrite, whatever the alternatives, whatever the mode — the selector is
+// handed the effective current name (configfile GetDoltDatabase, which honors
+// BEADS_DOLT_SERVER_DATABASE), so an environment-selected current database is
+// protected the same way.
+func TestSelectFallbackDoltDatabase_KeepsCurrentSchemaDatabase(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		localID     string
+		current     string
+		shared      bool
+		databases   []serverDatabaseMetadata
+		wantErrText string
+	}{
+		{
+			name:    "other schema database present, no local id",
+			current: configfile.DefaultDoltDatabase,
+			databases: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase, HasSchema: true, ProjectID: ""},
+				{Name: "other_db", HasSchema: true, ProjectID: ""},
+			},
+		},
+		{
+			name:    "current database selected by the environment",
+			current: "env_db",
+			databases: []serverDatabaseMetadata{
+				{Name: "env_db", HasSchema: true, ProjectID: ""},
+				{Name: "other_db", HasSchema: true, ProjectID: ""},
+			},
+		},
+		{
+			name:    "shared-server decline never moves a schema-holding current database",
+			current: configfile.DefaultDoltDatabase,
+			shared:  true,
+			databases: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase, HasSchema: true, ProjectID: ""},
+				{Name: "foreign_db", HasSchema: true, ProjectID: "other"},
+			},
+		},
+		{
+			name:    "no local id carried by any candidate",
+			localID: "proj-123",
+			current: configfile.DefaultDoltDatabase,
+			databases: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase, HasSchema: true, ProjectID: ""},
+				{Name: "other_db", HasSchema: true, ProjectID: "someone-else"},
+			},
+		},
+		{
+			// The no-op is not permission to overlook an identity
+			// contradiction: the conflict refusal comes first.
+			name:    "conflicting current identity still refuses",
+			localID: "proj-123",
+			current: "current_db",
+			databases: []serverDatabaseMetadata{
+				{Name: "current_db", HasSchema: true, ProjectID: "server-authoritative-id"},
+				{Name: "canonical_db", HasSchema: true, ProjectID: "proj-123"},
+			},
+			wantErrText: "conflicting project identity",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			selected, err := selectFallbackDoltDatabase(tt.localID, tt.current, tt.shared, tt.databases)
+			if tt.wantErrText != "" {
+				if selected != nil || err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Fatalf("selected %+v, err %v, want the %q refusal", selected, err, tt.wantErrText)
+				}
+				return
+			}
+			if selected != nil || err != nil {
+				t.Fatalf("selected %+v, err %v, want nil/nil (current database already has schema)", selected, err)
+			}
+		})
+	}
+}
+
 // Server-supplied names in a policy skip are spelled by remedy.PrintedValue:
 // a name carrying control characters cannot redraw the diagnostic.
 func TestSelectFallbackDoltDatabase_EscapesControlCharactersInNames(t *testing.T) {

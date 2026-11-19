@@ -794,6 +794,30 @@ func TestFixMissingDoltDatabase_AdoptsSoleLegacyCandidateSkippingTestFixture(t *
 	}
 }
 
+// TestFixMissingDoltDatabase_KeepsCurrentSchemaDatabase pins GH#5576: when
+// the effective current database already has Beads schema, a schema quirk or
+// missing identity on it never justifies moving the workspace — the fallback
+// returns nil without selecting the other schema database and without
+// changing metadata.json. Pre-fix, the raw dial returned a connection skip.
+func TestFixMissingDoltDatabase_KeepsCurrentSchemaDatabase(t *testing.T) {
+	isolateDoltEnvForFallbackTest(t)
+	port := newRefusingDoltListener(t)
+	dir, beadsDir, before := newFallbackFixWorkspace(t, port, "")
+
+	calls := stubServerMetadataCatalog(t, []serverDatabaseMetadata{
+		{Name: configfile.DefaultDoltDatabase, HasSchema: true, ProjectID: ""},
+		{Name: "other_db", HasSchema: true, ProjectID: ""},
+	})
+
+	if err := FixMissingDoltDatabase(dir); err != nil {
+		t.Fatalf("FixMissingDoltDatabase = %v, want nil (current database already has schema)", err)
+	}
+	assertMetadataUnchanged(t, beadsDir, before)
+	if *calls != 2 {
+		t.Fatalf("catalog read %d times, want 2 (reconcile + fallback)", *calls)
+	}
+}
+
 // TestInspectServerMetadataDatabasesNamesTheDataDirectoryEscaped pins the
 // remedy printer on the data directory inspectServerMetadataDatabases names
 // when no port is resolved and the workspace's own server, stopped, would
