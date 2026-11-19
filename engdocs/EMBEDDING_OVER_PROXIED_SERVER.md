@@ -1,11 +1,13 @@
-# Embedding over a proxied-server workspace: observed behaviour at 1.3.1
+# Embedding over a proxied-server workspace
 
-Last reviewed: 2026-09-23
+Last reviewed: 2026-11-19
 
-Read at: `e1e1158dd` (`v1.3.1-rc.1-2-ge1e1158dd`). Because this document
-describes observed behaviour rather than a contract, a stale marker makes it
-wrong, not merely old. Re-read it against the sources below before trusting it
-against a later build.
+Read at: `e1e1158dd` (`v1.3.1-rc.1-2-ge1e1158dd`), except §8 and the
+corrections marked 1.4.0, read at `release/1.4.0` (`ef08cbaf65`, the code
+v1.4.0-rc.4 ships). Because this
+document describes observed behaviour rather than a contract, a stale marker
+makes it wrong, not merely old. Re-read it against the sources below before
+trusting it against a later build.
 
 §8 is the exception: it was rewritten when `OpenBestAvailable` gained its
 proxied-server arm (GH#8323) and describes that later behaviour, not 1.3.1's.
@@ -40,18 +42,18 @@ An embedder — an external tool that links bd's Go packages, or one that runs
 beside `bd` against the same workspace — ends up leaning on surfaces bd never
 published: a PID file's field names, a child process's argv, the shape of a
 `--json` payload, whether a Go symbol is exported. This document writes those
-down as **observed behaviour at 1.3.1**, so that an embedder can build against
-what the code actually does instead of guessing.
+down as **observed behaviour at the commits the header names**, so that an
+embedder can build against what the code actually does instead of guessing.
 
 It is not a compatibility contract. Nothing here is a published interface with a
 deprecation policy behind it. Every surface below is an implementation detail
 that bd's own code reaches through, and each one may change in any release,
-including a patch release. Five of the eleven are moving in 1.3.1 itself and say
-so in place: §7 and §10 have landed and are described in their new shape, and
-§5, §6 and §11 are decided for 1.3.1 but had not landed at the commit above, so
-each is given as before/after with the current behaviour marked as current. Read
-this as a snapshot with the commit it was taken at, and re-read it against the
-source before an upgrade.
+including a patch release. Five of the eleven have changed or were planned to:
+§7 and §10 changed in 1.3.1, §11's exit handling in 1.3.1 and §5 in
+1.4.0-rc.1, each described in its shipped shape; §6's planned change and the
+rest of §11's (#6651) have not shipped as of 1.4.0. Read this as a snapshot
+with the commits it was taken at, and re-read it against the source before an
+upgrade.
 
 Two things follow for anyone building on this:
 
@@ -63,7 +65,8 @@ Two things follow for anyone building on this:
   unexpected `schema` number, a new argv flag — treat these as "this bd is not
   the one I was written against", not as a default to paper over.
 
-Everything below was checked by reading the source at `e1e1158dd`. Where a claim
+Everything below was checked by reading the source at the commit the header
+names for it. Where a claim
 would need a running proxy to confirm end to end, it says so.
 
 ## The topology being described
@@ -83,7 +86,7 @@ The control files in that root, as enumerated by `proxy.ControlFilePaths`:
 | `proxy.pid` | the proxy | the published endpoint record (§1) |
 | `proxy.lock` | the proxy | held for the proxy's whole lifetime |
 | `proxy.log` | the proxy | proxy trace log |
-| `proxy.secret` | the proxy | 64 hex chars authenticating the control port |
+| `proxy.secret` | the proxy | 64 hex chars authenticating the control port and, since 1.4.0-rc.1, every data-port connection's `BDPROXY1` exchange; rotated on every proxy start |
 | `proxy.spawn` | the spawning parent | in-progress-start marker |
 | `proxy.stop-epoch` | `bd dolt stop` | monotonic token that dooms in-flight starts |
 | `proxy-child.pid` | the proxy | the `dolt sql-server` record |
@@ -138,8 +141,9 @@ expected one, or an empty `birth`.
 `proxy.pid` is not the same as knowing a proxy is live on it. Before bd adopts a
 record (`proxy.readAndDial`) it also verifies `birth` against the live PID,
 completes the authenticated challenge on `control_port` and cross-checks every
-field of the reply against the file and the workspace, and TCP-probes the data
-port. A record left behind by a killed proxy passes a naive parse and points at
+field of the reply against the file and the workspace. Since 1.4.0-rc.1 it does
+not probe the data port: the authenticated identity reply is the liveness proof
+(§11). A record left behind by a killed proxy passes a naive parse and points at
 a port that may since have been recycled by an unrelated process. If you read
 this file at all, verify liveness yourself before connecting — or use `bd dolt
 status --json` (§10), which performs that whole check for you.
@@ -159,8 +163,11 @@ bd db-proxy-child --root <abs proxied root> --port <n> --idle-timeout <dur> --ba
 Then, each only when its value is non-empty:
 
 ```
---config <path>  --logpath <path>  --dolt-bin <path>  --database <name>
+--config <path>  --logpath <path> [--rotate-logpath]  --dolt-bin <path>  --database <name>
 ```
+
+`--rotate-logpath` (since 1.4.0-rc.1, #8037) follows `--logpath` when bd owns
+the log; bd 1.3.x rejects it (§8).
 
 And, only when `--backend` is `external` — and then, like the group above, each
 only when its own value is set (non-empty string, non-zero number or duration):
@@ -196,20 +203,27 @@ Notes on three values an embedder is likely to read:
   the watcher in §4. This is the third of three different encodings of the same
   setting — see §5 before writing one.
 
-## 3. A loopback root / no-password client on the data port
+## 3. Plain MySQL clients on the data port
 
 Two separate facts combine here, and they live in different files.
 
 **The proxy does not parse what it carries.** `proxyServer.handleConn` in
-`internal/storage/dbproxy/proxy/server.go` dials the backend once per accepted
-client connection and then runs two `io.Copy` goroutines, client→backend and
-backend→client, in an errgroup. There is no MySQL protocol awareness, no
-connection pooling and no multiplexing: the proxy is a byte pump, and *N* client
+`internal/storage/dbproxy/proxy/server.go` dials the backend once per
+authenticated client connection (per accepted one at 1.3.x) and then runs two
+`io.Copy` goroutines, client→backend and backend→client, in an errgroup. There
+is no MySQL protocol awareness, no connection pooling and no multiplexing:
+after the `BDPROXY1` exchange that opens every data-port connection since
+1.4.0-rc.1 (see below), the proxy is a byte pump, and *N* client
 connections become *N* backend connections. When either direction finishes, or
-the proxy's context is cancelled, both sides are closed.
+the proxy's context is cancelled, both sides are closed. One exception since
+1.4.0-rc.1: when an external upstream is not serving (nothing accepts the dial,
+or the upstream closes before its greeting), the proxy writes a MySQL ERR
+packet to the client itself (`writeUpstreamOutage` in `server.go`,
+`UpstreamOutagePacket` in `upstream_error.go`; external backends only).
 
 **The managed-local backend authenticates as `root` with no password.** In
-`newManagedProxiedServerUOWProvider` (`cmd/bd/uow_factory.go`) bd passes the
+`newManagedProxiedServerUOWProvider` (`internal/proxiedopen/open.go` since
+1.4.0-rc.4; `cmd/bd/uow_factory.go` before) bd passes the
 literal `"root"` and `""` to the provider, commented "proxy is loopback-only, no
 auth". The generated `dolt sql-server` config (`renderProxiedServerConfig` in
 `cmd/bd/proxied_server.go`) binds `127.0.0.1` on a free port, sets log level
@@ -227,40 +241,46 @@ supplied, so "ready" here means only that something is listening. That is worth
 knowing in both directions: it is why the probes cannot be cited as evidence of
 the auth posture, and it is the same shallowness §11 turns on.
 
-**What an embedder can observe.** On a managed-local proxied workspace, a
-plain MySQL client connecting to `127.0.0.1:<port from proxy.pid>` as `root`
-with no password reaches the same database bd does, and the proxy passes the
-handshake through untouched. That is what lets an embedder read and write the
-workspace's live database without standing up a server of its own.
-*Not verified by running:* this is the composition of three separately-read
-facts — the credential pair, the generated config's loopback bind with no users
-section, and the proxy's lack of protocol handling — not an observed connection.
-The proxy dials the backend per accepted connection and closes the client on any
-dial or handshake failure, so treat a successful connect as the thing to check
-first, not as given.
+**What an embedder can observe.** Up to bd 1.3.x, a plain MySQL client
+connecting to `127.0.0.1:<port from proxy.pid>` as `root` with no password
+reached the same database bd does, because the proxy passed the handshake
+through untouched. Since 1.4.0-rc.1 the data port accepts only bd: every
+connection opens with a `BDPROXY1` exchange keyed by the owner-only
+`proxy.secret` (#7884), so a plain client gets no session (the Go MySQL driver
+reports "invalid connection"). An embedder reaches the workspace's live
+database through `OpenBestAvailable` (§8); `bd sql` runs ad-hoc SQL.
+*Not verified by running at 1.3.x:* that claim was the composition of three
+separately-read facts — the credential pair, the generated config's loopback
+bind with no users section, and the proxy's lack of protocol handling — not an
+observed connection.
 
-Three qualifications worth carrying:
+At 1.3.x three qualifications applied:
 
-- It follows from the *generated config*, not from a decision to offer an
-  authentication posture. A workspace that supplies its own server config, or
+- It followed from the *generated config*, not from a decision to offer an
+  authentication posture. A workspace that supplied its own server config, or
   the external topology (where credentials come from `ExternalDoltConfig` and
-  the password from that config's environment variable), does not behave this
+  the password from that config's environment variable), did not behave this
   way.
-- The loopback bind is the whole access control. Anything that can open a TCP
-  connection to that port on the host is `root` on the database.
-- The **control** port in the same record is not open in this sense: it requires
-  the `proxy.secret` value.
+- The loopback bind was the whole access control. Anything that could open a
+  TCP connection to that port on the host was `root` on the database.
+- The **control** port in the same record was not open in this sense: it
+  required the `proxy.secret` value.
+
+The proxy dialed the backend per accepted connection and closed the client on
+any dial or handshake failure, so a successful connect was the thing to check
+first, not a given.
 
 ## 4. Open connections, idle exit, and `bd dolt stop`
 
-**Any accepted connection defers idle exit.** `proxyServer.idleWatcher`
+**Any authenticated connection defers idle exit.** `proxyServer.idleWatcher`
 (`internal/storage/dbproxy/proxy/server.go`) returns immediately into a wait
 when `idleTimeout <= 0` — that is the "never" case. Otherwise it ticks every
 `idleTimeout/4`, with a 1s floor. A tick that sees `activeConns > 0` clears the
 armed state; the first tick that sees zero *arms* a timestamp; a later tick then
-exits once `timeout` has elapsed since arming. `activeConns` is incremented in
-`handleConn`, so an accepted TCP connection counts even if it never sends a
-byte.
+exits once `timeout` has elapsed since arming. Since 1.4.0-rc.1 `handleConn`
+completes the `BDPROXY1` exchange before it increments `activeConns` or dials
+the backend, so only an authenticated connection holds off idle exit; at 1.3.x
+an accepted TCP connection counted even if it never sent a byte.
 
 Two consequences an embedder should plan for:
 
@@ -276,7 +296,7 @@ Two consequences an embedder should plan for:
 At 1.3.1 a unit-of-work provider's pool pins the proxy address it was
 constructed with, so once its connections drain and the proxy exits, every
 later new connection dials the retired port (or whatever now listens there).
-On main, `internal/storage/uow/endpoint_rediscovery.go` runs
+Since 1.4.0-rc.1, `internal/storage/uow/endpoint_rediscovery.go` runs
 `proxy.GetCreateDatabaseProxyServerEndpoint` again, with the constructor's
 `OpenOpts`, before each new physical connection of both
 `NewDoltServerUOWProvider` and `NewExternalDoltServerUOWProvider`. That adopts
@@ -318,7 +338,7 @@ If `Shutdown` refuses because a record's identity cannot be verified,
 `bd dolt stop --force` escalates to `proxy.ForceStopUnverified`; the refusal is
 recognisable with `proxy.CanForceStopUnverified`.
 
-## 5. The sidecar's `idle_timeout` — changing in 1.3.1
+## 5. The sidecar's `idle_timeout`
 
 One setting has three encodings, and they disagree about what `0` means. Getting
 this wrong is how a workspace ends up with a proxy that never exits, or one that
@@ -336,15 +356,12 @@ to `proxy.IdleTimeoutNever` before storing it.
 `configfile.ProxiedServerClientInfo`:
 
 The full key set is `root_path`, `config_path`, `log_path`, `port`,
-`idle_timeout`, `external` — and **every one of them carries `omitempty`**, so a
-realistic managed-local sidecar with an OS-assigned port and an explicit 45s
-timeout is just:
+`idle_timeout`, `external`. Every key but `idle_timeout` carries `omitempty`. A
+default `bd init --proxied-server` writes no sidecar at all; with
+`--proxied-server-idle-timeout 45s` the sidecar is just:
 
 ```json
-{
-  "root_path": "/abs/path/.beads/dolt",
-  "idle_timeout": 45000000000
-}
+{"idle_timeout": 45000000000}
 ```
 
 `port: 0` (the OS-assigned case), a nil `external`, and unset paths are all
@@ -354,8 +371,10 @@ what bd uses to join them.
 
 `idle_timeout` is a Go `time.Duration` with no custom marshaller, so it is **an
 integer number of nanoseconds**, not a duration string: 45s is `45000000000`,
-30s is `30000000000`, never is `-1`. Combined with `omitempty`, that means a
-value of `0` is written as *no key at all*.
+30s is `30000000000`, never is `-1`. bd does not write `0`: since 1.4.0-rc.1
+it saves the effective value, so the default is written as `30000000000`. bd
+1.3.x left the key out for the default, and bd 1.4 reads a sidecar without it
+as 30s.
 
 **(c) The effective value.** `NewDoltServerUOWProvider`
 (`internal/storage/uow/doltserver_provider.go`) applies
@@ -366,46 +385,34 @@ The external provider does the same. So, at the sidecar layer:
 | sidecar `idle_timeout` | effective |
 |---|---|
 | key absent | 30s |
-| `0` (cannot occur — `omitempty` drops it) | 30s |
+| `0` (bd does not write it) | 30s |
 | negative, e.g. `-1` | never |
 | positive | as written |
 
-**What is changing in 1.3.1.** Writing the *effective* `idle_timeout`
-explicitly, rather than letting `omitempty` drop it and relying on the
-provider-side default, is approved for 1.3.1. It had not landed at
-`e1e1158dd`, and there is no tracking issue for it at the time of writing.
+**Changed in 1.4.0-rc.1.** bd writes the effective `idle_timeout` instead of
+letting `omitempty` drop it, and reads a sidecar without the key as 30s;
+`bd dolt status --json` shows `"30s"` for such a sidecar. Status leaves the key out
+when the timeout is never, and when the workspace has no sidecar, which is the
+default managed-local case and also runs at 30s (§10). An embedder should read
+an absent status key as "ask this bd, do not assume", not as "no timeout".
 
-Before (observed at this commit): a workspace on the default timeout has **no**
-`idle_timeout` key in its sidecar, and "default" is therefore indistinguishable
-from "unset" to any reader. That also makes the effective value invisible in
-`bd dolt status --json`, which only emits `idle_timeout` when the sidecar value
-is `> 0` (§10) — so both "default 30s" and "never" render as an absent key.
+## 6. `bd migrate schema` on a proxied workspace
 
-After: the key is expected to be present with the effective value. An embedder
-should read an absent key as "ask this bd, do not assume", not as "no timeout".
+**Observed at `e1e1158dd`, and still so in 1.4.0: the verb is permitted, and
+on a served database with no remote it migrates. With a remote configured it is
+still permitted — it reaches the store open — but the §7 gate refuses the
+migration there, because the verb's own consent is not read on that arm.**
 
-## 6. `bd migrate schema` on a proxied workspace — changing in 1.3.1
-
-**Observed at this commit: the verb is permitted, and on a served database with
-no remote it migrates. With a remote configured it is still permitted — it
-reaches the store open — but the §7 gate refuses the migration there, because
-the verb's own consent is not read on that arm.**
-
-`proxyMaintenanceRefusals` in `cmd/bd/proxy_capability.go` refuses the bare
-`migrate` command with code `proxy.migrate.unsupported`, and its `init()`
-expands child rows for `migrate hooks` and `migrate issues`. The same table
-carries `migrate sync`, `migrate-personal` and `migrate-issues` as rows of their
-own — the `migrate` neighbourhood is enumerated, not covered by a prefix rule.
-`migrate schema` is in none of it.
-
-Two gates then stand between an unmatched path and the store open, and only the
-second is a fall-through: `validateProxyMaintenanceBeforeProvider` consults
-`LookupHistoryCapability` first and refuses anything classed `HistoryDirectOnly`
-with `proxy.history.unsupported`; *after* that it returns `nil` for any
-unmatched multi-word command path. `migrate schema` matches neither gate, so the
-verb reaches the store open. A reader predicting some other multi-word verb from
-this section should apply both gates in that order — the multi-word `return nil`
-on its own over-predicts "permitted".
+Two validators run in the root pre-run before the store open
+(`cmd/bd/main.go`). `validateProxyCapabilitiesBeforeProvider`
+(`cmd/bd/proxy_capability.go`) refuses flag combinations.
+`validateProxyRegistryBeforeProvider` (`cmd/bd/capability_registry.go`)
+refuses a command path whose registry row is refused for the workspace's
+topology; a path with no row passes. The registry refuses `migrate`,
+`migrate sync`, `migrate hooks`, `migrate issues`, `migrate-issues` and
+`migrate-personal` with `proxy.migrate.unsupported`, and lists
+`migrate schema` as permitted, because "the provider open runs it under the
+migration gate". So the verb reaches the store open.
 
 The mechanics matter, because they are not "a command that applies a migration":
 
@@ -419,7 +426,8 @@ The mechanics matter, because they are not "a command that applies a migration":
   designated-migrator confirmation". When the served database *does* have a
   remote — on the proxied path that is read from its own `dolt_remotes` alone,
   because `dolt_sql_provider.go` calls the gate as
-  `CheckSharedStoreMigrateGate(ctx, c, "", nil, nil)` and so supplies no on-disk
+  `CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly))`
+  and so supplies no on-disk
   fallback probe — the gate takes the other arm, which consults only `--force`
   (`bd migrate schema --force` trips `isForcedMigrate`; `bd migrate --force`
   trips it too, but only off a proxied workspace, since the bare verb is
@@ -455,21 +463,23 @@ from its absence.
 
 **What an embedder can observe.** The DDL lands under co-resident clients that
 already hold connections and prepared state, with no coordination of any kind —
-the proxy is a byte pump (§3) and has no notion of who is connected. An embedder
+the proxy relays each authenticated connection (§3) and does not track who
+holds one. An embedder
 whose process outlives a `bd migrate schema` should treat the schema as changed
 beneath it and re-establish its connections; in practice, restart.
 
-**What is changing in 1.3.1.** Refusing `bd migrate schema` on a proxied
-workspace is approved for 1.3.1: a flat typed refusal by default, with `--force`
-emitting a **generic** warning to close co-resident library clients first. The
-approved scope is a generic warning with no enumeration of connected clients, for
-the reason above — the proxy does not track them, so there is nothing truthful to
-list. This had not landed at `e1e1158dd`, and there is no tracking issue for it
-at the time of writing.
-
-So an embedder should expect the verb to stop working on proxied workspaces
-rather than build a workflow on it, and should not read the absence of a refusal
-today as the absence of one tomorrow.
+**Not changed in 1.4.0.** A refusal by default, with `--force` emitting a
+generic warning to close co-resident library clients first, was approved for
+1.3.1 and has not shipped. In 1.4.0, running `bd migrate schema` in the
+workspace is how an embedder clears the schema gates its open reports (§8).
+On a database with a Dolt remote the bare verb refuses, as the mechanics above
+explain, and `bd migrate schema --force`, run on one clone of that remote only,
+is the form that migrates. With no remote, the bd that migrates warns only that
+co-resident bd clients on an older binary will refuse the database. With a
+remote, it warns only that one clone should migrate and then run
+`bd dolt push`, which proxied-server mode refuses. Neither warning mentions
+library clients. An embedder whose process outlives the migration should still
+restart.
 
 ## 7. The shared-store migration gate — main lane only, new stop in 1.3.1
 
@@ -519,22 +529,23 @@ callers of `CheckSharedStoreMigrateGate`:
 
 - `internal/storage/dolt`'s store open — the **server-mode** open — wires
   `AheadBehind` (added expressly for #6575), so the stop is live there.
-- `internal/storage/uow/dolt_sql_provider.go` passes `nil`, and per
-  `cmd/bd/uow_factory.go` that funnel is "the proxied CLI path AND `bd serve`'s
-  own provider". A **proxied** workspace therefore reaches the shared gate with
-  no ancestry fact at all.
+- `internal/storage/uow/dolt_sql_provider.go`, the funnel for the proxied CLI
+  path and `bd serve`'s own provider, passed `nil` at `e1e1158dd`, so a
+  **proxied** workspace reached the shared gate with no ancestry fact at all.
+  Since 1.3.1 it passes `dataBehindAdopter(p.readOnly)`, which wires
+  `AheadBehind` (the call §6 quotes), and marks the error proxied, so the stop
+  is live there too.
 
-So do not expect this refusal on a proxied workspace. A proxied, remote-backed
-clone that is data-behind at schema parity reads as level, the smart gate routes
-to `smartAutoMigrate`, and the shared arm then returns the ordinary
-`fallbackReasonSharedStore` refusal — the one whose framing ("the gate would
-have resolved and was overruled") the data-behind comment says is *not* true of
-this state. Embedded mode reaches the stop by a different route: it calls
+At `e1e1158dd` a proxied, remote-backed clone that was data-behind at schema
+parity therefore read as level, the smart gate routed to `smartAutoMigrate`, and
+the shared arm returned the ordinary `fallbackReasonSharedStore` refusal — the
+one whose framing ("the gate would have resolved and was overruled") the
+data-behind comment says is *not* true of this state. Since 1.3.1 that clone
+gets the data-behind refusal, with proxied-specific remedy text (below).
+Embedded mode reaches the stop by a different route: it calls
 `CheckRemoteMigrateGateWithAdopt` with a fully-wired adopter
 (`internal/storage/embeddeddolt/store.go`), which is why the `OpenForRemoteSync`
-carve-out below has anything to carve. That the proxied injection site reads no
-ancestry is base behaviour at this commit — #6575's protection is absent on the
-path this section is about — and it is not this document's to fix.
+carve-out below has anything to carve.
 
 Where the stop *is* live, it fires when schema parity with the cached remote ref
 holds but this clone's local HEAD is **missing commits the cached ref has**
@@ -585,22 +596,22 @@ refusal that prescribed the command.
 
 Two observations worth carrying, neither of them this document's to fix:
 
-- On a **proxied** workspace the pull is still the precondition, the workspace
-  still refuses the verb, and the gate never names it.
-  `proxyMaintenanceRefusals` in `cmd/bd/proxy_capability.go` holds
-  `"dolt pull"` with code `proxy.dolt_pull.unsupported`, so the one command a
-  data-behind clone needs is declined by that same workspace. And because the
-  proxied call site wires no ancestry adopter (above), the gate does not
-  prescribe it there either: the operator gets the shared-store refusal, with no
-  mention of the data they are missing. That is the worse of the two shapes — a
-  named remedy you must route around is at least diagnosable. An embedder that
-  surfaces gate remedies to users should expect to detect the data-behind state
-  itself on this path, and to pull outside proxied mode to clear it.
-- The shared store's second option names `SharedConsentCommand`
-  (`bd migrate schema`), whose own declaration scopes it to "a shared database
-  that has **no** remote". Do not read that option as a confirmed unlock for the
-  remote-backed shared case; treat the pull as the part of the remedy this
-  document vouches for.
+- On a **proxied** workspace the pull is still the precondition, and the
+  workspace still refuses the verb: the capability registry declares
+  `refusedPath("dolt pull", "proxy.dolt_pull.unsupported", ...)`
+  (`cmd/bd/capability_registry.go`), so the one command a data-behind clone
+  needs is declined by that same workspace. Since 1.3.1 the gate says so: on a
+  proxied workspace its first option is `pull-first-on-server-host`, which
+  says to run the pull on the machine that hosts the database, from a
+  workspace with direct access to it, and then retry here. An embedder that
+  surfaces gate remedies to users should pass that location on, not just the
+  command.
+- The shared store's second option, `migrate-shared-after-pulling`, names
+  `SharedConsentCommandForced` (`bd migrate schema --force`), because this stop
+  is always remote-backed and the bare verb's consent is read only with no
+  remote. Unlike the pull, it is runnable from a proxied workspace, so run it
+  only after the pull has completed and every co-resident bd client is
+  upgraded.
 
 ## 8. `OpenBestAvailable` on a proxied-server workspace
 
@@ -622,13 +633,15 @@ One open keeps the server arm: an environment that forces server mode
 to dial in `BEADS_DOLT_SERVER_PORT` (a positive port, parsed as the server
 store parses it). That open dials the named port as a plain MySQL client, as
 it did before this arm existed (`routesThroughProxy` in `beads.go`; the
-named-port exemption #8476 approved). Gas City's proxied-native lane opens
-that way against bd 1.3.x proxies, whose data port still answers a plain
-MySQL client, and its environment also pins what the proxied arm would ignore:
-no auto-start, the commit author and the pool bound. Without a named port,
-forced server mode would dial a port bd resolves itself, never the proxy's
-data port, so that open takes the proxied arm. The legacy `BEADS_DOLT_PORT`
-does not count as a named port.
+named-port exemption proposed in #8476). The named port must be a plain Dolt
+server's: the data port of a proxy started by bd 1.4 accepts only bd, so
+naming it fails ("invalid connection"); a pre-1.4 proxy's data port still
+answers a plain client until a 1.4 bd replaces that proxy. An embedder that
+opens this way usually also pins in its environment what the proxied arm
+would ignore: no auto-start, the commit author and the pool bound. Without a
+named port, forced server mode would dial a port bd resolves itself, never the
+proxy's data port, so that open takes the proxied arm. The legacy
+`BEADS_DOLT_PORT` does not count as a named port.
 
 Before this arm existed, a proxied workspace fell through to the embedded arm
 (cgo), which created and migrated a second, unrelated database at
@@ -639,37 +652,59 @@ embedded-requires-CGO error (pure). Neither happens now: the open creates no
 **What the open does.** It goes through `internal/proxiedopen`, the same
 construction the bd CLI uses, with a root bd command's posture:
 
-- The workspace's project identity is asserted, and a managed-local root that
-  holds no Dolt database is refused rather than initialized.
+- On a team-server workspace (`dolt_team_server` in `metadata.json`) the
+  workspace's project identity is asserted against the shared database.
+  Other proxied-server workspaces are not checked, by the library or by bd. A
+  managed-local root that holds no Dolt database is refused rather than
+  initialized.
 - A bd proxy already running for the server root is adopted. With none, one is
   started from the `bd` found on `PATH`, so an embedder's open may spawn
   `bd db-proxy-child` from its own `PATH`. With no `bd` on `PATH` the open
   fails with `beads.ErrProxyUnavailable` (match with `errors.Is`); it creates
   no embedded store, starts no proxy, and leaves any stale proxy record and
   orphaned backend alone. It may still create the server root directory and
-  write the proxied sql-server config. The library never starts the proxy
-  from the host executable, because the host is not bd.
+  write the proxied sql-server config. An open refused later, for example by
+  a schema gate, can leave a proxy it started running until the proxy's idle
+  exit. The library never starts the proxy from the host executable, because
+  the host is not bd.
 - A proxy started by a bd older than 1.4 (before the authenticated control
   handshake) cannot answer the library, and the library does not stop it:
   every older bd on the workspace shares that proxy, and the `bd` on `PATH`
-  may be too old to replace it. The open fails at once with
+  may be too old to replace it. The open fails with
   `beads.ErrProxyUnavailable` and leaves the proxy, its record and its
   backend alone. Upgrading the `bd` on `PATH` and running a bd command in the
-  workspace replaces the old proxy, as does waiting for its idle exit. The
-  bd CLI itself stops such a proxy and starts its own.
+  workspace replaces the old proxy, as does waiting for its idle exit. A
+  workspace an older bd still uses is usually still at its 1.3.x schema; bd
+  then refuses it with a schema version mismatch and the library with
+  `beads.RemoteMigrateGateError` until `bd migrate schema` (one-way) migrates
+  it. If the database has a Dolt remote, which proxied init adds from the git
+  `origin` by default, the bare verb refuses too (§6), and
+  `bd migrate schema --force`, run on one clone of that remote only, migrates
+  it. The bd CLI itself stops such a proxy and starts its own.
 - A managed-local workspace (no external upstream in the sidecar) probes the
   `dolt` binary before it looks for a proxy, so it needs `dolt` on `PATH`
-  even to adopt a running proxy. Without it the open fails with the dolt
-  resolution error, not `ErrProxyUnavailable`.
+  (or named by `BEADS_DOLT_BIN`) even to adopt a running proxy. Without it
+  the open fails with the dolt resolution error, not `ErrProxyUnavailable`.
 - A `bd` on `PATH` that is a different build from the one that owns the
-  workspace can reject a newer child flag. The open then retries until its
-  deadline and fails with an untyped "proxy child exited" error.
-- The events journal and versioned history are activated under the same
-  workspace switches as the CLI's. A later `SetEventsJournalEnabled` call wins.
+  workspace can reject a newer child flag (bd 1.3.x rejects
+  `--rotate-logpath`). The open then retries until its deadline, about 15 s,
+  and fails with an untyped "timeout waiting for proxy to become ready on its
+  OS-assigned port" error; the child's "unknown flag" error is in
+  `.beads/dolt/server.log`.
+- The events journal is activated under the same workspace switches as the
+  CLI's. Versioned history follows only the store's own
+  `versioned-history.enabled` row: `BD_VERSIONED_HISTORY_ENABLED` and
+  `config.yaml`, which turn it on for bd, do not reach the library. A later
+  `SetEventsJournalEnabled` call wins.
 - Schema refusals surface as the exported `beads.SchemaSkewError`,
   `beads.RemoteMigrateGateError` and `beads.MigrateConsentError` (match with
-  `errors.As`). `AllowSharedSchemaMigration` applies to this arm as it does to
-  the server arm.
+  `errors.As`). `AllowSharedSchemaMigration` clears only the shared-database
+  gate (`RemoteMigrateGateError`), and only on a database with no Dolt remote;
+  the consent gate (`MigrateConsentError`) also needs `BD_ALLOW_MIGRATE=1`.
+  `BD_ALLOW_REMOTE_MIGRATE=1` alone clears both, with or without a remote.
+  `bd migrate schema` run in the workspace clears both on a database with no
+  Dolt remote; with one it refuses (§6), and `bd migrate schema --force`, run
+  on one clone of that remote only, clears both.
 
 The returned `Storage` (`internal/storage/uowstore`) runs each call as one
 unit of work over the proxy. Its `Close` releases this handle's connections and
@@ -688,15 +723,16 @@ routing by `IsWisp` (so `NoHistory` lands on the wisp plane; the flat single
 refusal for a caller-named ID the other plane holds, `Labels` and `Comments`
 persisted with the issue, and for `CreateIssues` the mixed-bucket dependency
 check and `Dependencies` persisted with no `dependency_added` event. A flat
-create that fails definitely clears the IDs it minted, as `DoltStore` does; a
+create that fails definitely clears the IDs it minted (`DoltStore` in 1.4.0
+keeps them); a
 commit whose outcome is unknown returns `ErrCommitIndeterminate` (§9), keeps
 the IDs, and is never retried.
 
 **Method coverage.** The store serves the issue, label, dependency, comment,
 config, local-metadata, ready-work, blocked, statistics and claim methods, the
 role accessors, and `RunInTransaction`. A `RunInTransaction` callback runs
-exactly once. A setup failure before the callback can be retried, but the
-callback is never replayed. The other `Storage` methods return a typed
+at most once and is never replayed. A setup failure before the callback can
+be retried. The other `Storage` methods return a typed
 `beads.ErrUnsupported` with backend `"proxied-server"` rather than a silent
 default. They include the event and provenance reads, the `Iter*` streams,
 merge slots and slot state, `GetDependencies`/`GetDependents` and
@@ -727,16 +763,17 @@ Divergences an embedder may notice:
     out of list order.
   - Two identical create-time comments collapse onto one row but are each
     journaled. An explicit comment ID that is already stored fails with a
-    duplicate-key error, where `DoltStore` skips it.
+    duplicate-key error. `DoltStore` in 1.4.0 fails the same way unless the
+    stored comment is identical, which it skips.
   - On such a re-create, an existing dependency edge of a different type fails
     with a type-conflict error. One of the same type with changed metadata or
     thread is rewritten, where `DoltStore` leaves it untouched.
 - Dependencies on an external reference are not resolved through routes.
 - Dolt commits carry no `--author`: they are attributed to the proxy's SQL
   user, where `DoltStore` takes the author from `GIT_AUTHOR_NAME` and
-  `GIT_AUTHOR_EMAIL` or the bd config. An embedder that needs its own author
-  on each commit keeps using the server arm until the proxied arm carries
-  one.
+  `GIT_AUTHOR_EMAIL`, defaulting to `beads <beads@local>`. An embedder that
+  needs its own author on each commit keeps using the server arm until the
+  proxied arm carries one.
 - `ErrCircuitOpen` (§9) is never produced on this arm. The circuit breaker
   belongs to the direct server store.
 - `UnderlyingDB()` and `DB()` return the proxy's connection pool as raw-SQL
@@ -749,15 +786,21 @@ Divergences an embedder may notice:
 proxied workspace onto the server arm by forcing server mode and naming the
 port (`BEADS_DOLT_SERVER_MODE=1` with `BEADS_DOLT_SERVER_PORT`) keeps that
 route. Forcing server mode without naming a port now takes the proxied arm.
-An embedder that moves to the proxied arm should keep any read-only fence on
-proxied handles until it runs a beads release that carries the create
-contract, the failed-create ID reset and the quiet dependency writes
-described above, and should check the commit-author divergence.
+In 1.4.0 the proxied arm already carries the create contract, the
+failed-create ID reset and the quiet dependency writes described above; an
+embedder that moves to it should check the commit-author divergence first.
 
-**The other public opens are unchanged.** `Open`, `OpenFromConfig` and
-`OpenGated` still construct the direct server store. On a proxied workspace
-they dial the configured server around the proxy instead of through it.
-Embedders should use `OpenBestAvailable` there.
+**The other public opens are unchanged, and do not go through the proxy.**
+`Open`, `OpenFromConfig` and `OpenGated` still construct the direct server
+store. On a proxied workspace `Open` does not read the database name from
+`metadata.json` and, while the proxy runs, creates an empty `beads` database
+on the proxy's backend. While a proxy runs, `OpenFromConfig` and `OpenGated`
+dial its backend directly; the proxy does not count those connections and can
+idle out under them. With no proxy running, they start a standalone
+`dolt sql-server` on the workspace's data directory. It outlives the program
+and blocks every bd command until it is killed (`bd dolt stop` does not stop
+it). `BEADS_DOLT_AUTO_START=0` makes them fail instead. Embedders should use
+`OpenBestAvailable` there.
 
 **`SetEventsJournalEnabled`.** The method is not on the `Storage` interface.
 `beads.Storage` aliases `internal/beads.Storage`, which aliases
@@ -831,7 +874,8 @@ The proxied payload is `proxiedDoltStatus` in
 
 The full key set is `mode`, `root`, `running`, `proxy_pid`, `proxy_port`,
 `backend_managed`, `backend_running`, `backend_pid`, `backend_port`,
-`backend_endpoint`, `idle_timeout`. Five are always present: `mode`, `root`,
+`backend_endpoint`, `idle_timeout`, plus the `schema_version` that bd adds to
+its `--json` output. Six are always present: `schema_version`, `mode`, `root`,
 `running`, `backend_managed` and `backend_running`. None of the three `bool`s
 carries `omitempty` — for a bool, `false` is the answer rather than the absence
 of one, and `backend_running: false` in the external example below is that rule
@@ -844,6 +888,7 @@ explicit positive timeout:
 
 ```json
 {
+  "schema_version": 1,
   "mode": "proxied-server",
   "root": "/abs/path/.beads/dolt",
   "running": true,
@@ -861,6 +906,7 @@ The same workspace on an external topology, where bd supervises no dolt:
 
 ```json
 {
+  "schema_version": 1,
   "mode": "proxied-server",
   "root": "/abs/path/.beads/dolt",
   "running": true,
@@ -884,57 +930,42 @@ Reading the fields:
   backend is down" from "bd never had a backend to report" is exactly what the
   flag is for.
 - **`idle_timeout` here is a duration *string*** (`"45s"`), unlike the sidecar's
-  nanosecond integer in §5 — and it is emitted only when the sidecar's value is
-  `> 0`. Both "default 30s" and "never" therefore render as an absent key today,
-  which is why neither example above could show the default. That is the
-  observation §5's 1.3.1 change is about.
+  nanosecond integer in §5 — and it is emitted only when the timeout is `> 0`.
+  It is absent when the timeout is never, and on a workspace with no sidecar,
+  which a default `bd init --proxied-server` leaves (its proxy runs at the 30s
+  default). A sidecar without the key, as bd 1.3.x wrote for the default,
+  reports `"30s"` (§5).
 
 The command has no lifecycle side effects, which is why polling it beats parsing
 `proxy.pid`: `proxy.ReadStatus` reads the two records and verifies the recorded
 processes without starting, stopping or adopting anything. A record that fails
 any check reports nothing rather than a PID a caller might act on.
 
-## 11. A clean backend exit — changing in 1.3.1
+## 11. A clean backend exit
 
-**Observed at this commit: the proxy does not notice.** `DoltServer.Start`
-(`internal/storage/dbproxy/server/doltserver.go`) feeds `cmd.Wait()` into an
-`errgroup.WithContext`, and an errgroup cancels its context only on a **non-nil**
-return. A `dolt sql-server` that stops cleanly returns 0 — its ordinary
-shutdown path, not a crash — so:
+**Up to 1.3.1-rc.1 the proxy did not notice** a `dolt sql-server` child that
+stopped cleanly (dolt exits 0 on SIGTERM). `DoltServer.Start` fed `cmd.Wait()`
+into an errgroup, which cancels only on a non-nil return. So the proxy kept its
+records and listener, and it closed each client after the backend dial failed,
+until `bd dolt stop`. This is #6651, reproduced 3/3 against v1.3.0. The trigger
+is a signal to the dolt child alone, such as a per-PID supervisor stop or
+`kill <dolt pid>`.
 
-- the group context is never cancelled;
-- `DoltServer.Running` returns `egCtx.Err() == nil`, which stays true;
-- the proxy's 100ms backend health tick (`proxy/server.go`) never fires.
+**Since 1.3.1 the proxy exits** (#6937). The supervising goroutine reports any
+`cmd.Wait()` return as a backend exit (`errBackendExited` in
+`internal/storage/dbproxy/server/doltserver.go`), so `DoltServer.Running` turns
+false and the proxy's 100ms backend health tick (`proxy/server.go`) stops the
+proxy, which removes `proxy.pid`. Observed on 1.4.0-rc.4: after a SIGTERM to
+the dolt child alone the proxy was gone within 0.3 s, and
+`bd dolt status --json` reported `running: false` and `backend_running: false`.
+The next bd command started a new proxy and backend.
 
-The proxy therefore keeps `proxy.pid`, `proxy.lock`, its control port and its
-listener, and goes on accepting clients — closing each one after the backend
-dial in `handleConn` fails. Adoption does not catch it either: `readAndDial`
-verifies the proxy's identity and TCP-probes the *proxy*, never the backend, so
-an adopting client succeeds and then fails its first query. The workspace stays
-wedged until `bd dolt stop`.
-
-This is #6651, which reports it reproduced 3/3 against v1.3.0. The trigger is a
-signal delivered to the dolt child *alone* — a per-PID supervisor stop, or
-`kill <dolt pid>`. A `kill -9` of the child and a cgroup-wide SIGTERM are not
-affected; the latter signals the proxy too.
-
-**What an embedder can observe.** Reading the code, this state is visible in
-`bd dolt status --json` (§10) as `running: true` with `backend_running: false` —
-`readBackendRecord` verifies the recorded backend PID's birth token, which a
-departed process fails — while a liveness check that only adopts the proxy
-reports healthy. That asymmetry is what makes §10 the better probe of the two.
-*Not verified by running:* this document was written without starting a proxy,
-so the `status` output in that specific wedged state is inferred from the source
-rather than observed.
-
-**What is changing in 1.3.1.** Two fixes are approved under #6651: treating
-**any** `cmd.Wait()` return as a backend exit, rather than relying on errgroup's
-nil-means-keep-going semantics, and making adoption **probe the backend** rather
-than only the proxy. Neither had landed at `e1e1158dd`. After they land, a clean
-backend exit is expected to tear the proxy down like any other backend loss, and
-adoption is expected to decline a proxy whose backend is gone — so an embedder
-should not build recovery logic that depends on the zombie persisting, nor on
-adoption succeeding while the backend is absent.
+Adoption does not probe the backend: `readAndDial` takes the proxy's
+authenticated identity reply on its control port as the liveness proof
+(`proxy/endpoint.go`). So until the health tick fires, an adopting client can
+succeed and then fail its first query. Backend-probing adoption was approved
+for 1.3.1 under #6651 and has not shipped. (This window is read from the code,
+not run.)
 
 ---
 
@@ -942,10 +973,10 @@ adoption succeeding while the backend is absent.
 
 Not all eleven carry the same risk, and it is worth saying which is which.
 
-**Most likely to move, and already in motion:** §6 (`bd migrate schema` becomes
-a refusal), §11 (clean-backend-exit handling and backend-probing adoption), §5
-(the sidecar starts writing its effective `idle_timeout`). All three are decided
-for 1.3.1 and described above as before/after.
+**Already moved:** §5 (since 1.4.0-rc.1 the sidecar writes its effective
+`idle_timeout`) and §11's exit handling (since 1.3.1 a clean backend exit stops
+the proxy). **Approved for 1.3.1 but not shipped as of 1.4.0:** §6's refusal of
+`bd migrate schema`, and §11's backend-probing adoption.
 
 **Likely to move:** §2, the `db-proxy-child` argv. It is a hidden internal
 command whose flags exist to serve the parent that spawns it, and flags have
@@ -959,10 +990,8 @@ that can disappear without a compile error anywhere.
 
 **Less likely to move, for a reason:** §9's two error sentinels, because
 `errors.Is` on them is the only way a caller can tell those two conditions
-apart. §10's payload, because it was *just* reshaped deliberately. §3's loopback
-byte-pump behaviour, because the proxy's whole design is to not understand the
-protocol — though the credentials half of §3 is a property of a generated config
-file, which is a much softer thing than the byte-pump half.
+apart. §10's payload, because it was *just* reshaped deliberately. §3 already
+moved: since 1.4.0-rc.1 the data port requires the BDPROXY1 exchange.
 
 **A caveat on that ranking.** It is a reading of the direction of current work,
 not a schedule and not a promise. A surface in the third group can still change
@@ -971,18 +1000,21 @@ checking.
 
 ## Not verified by running
 
-This document was written by reading the source at `e1e1158dd`. No proxy was
-started and no test suite was run while writing it. The claims that would need a
+Sections other than §8 were first written by reading the source at
+`e1e1158dd`, with no proxy started and no test suite run; the corrections
+marked 1.4.0 were read at the release branch, and the few marked observed were
+run against a 1.4.0-rc.4 proxy. §8 is backed by
+tests (see the top of this document). The claims that would need a
 live proxy to confirm end to end, and are therefore inferred from the code:
 
-- The exact `bd dolt status --json` output in the §11 wedged state
-  (`running: true` with `backend_running: false`).
 - The observed idle-exit latency in §4 being longer than the configured timeout
   by up to roughly two watcher ticks.
-- That a third-party MySQL client authenticating as `root` with no password
-  succeeds against the data port on a managed-local workspace (§3). The
-  credentials, the loopback bind and the absence of protocol handling in the
-  proxy are all read directly from the source; the end-to-end connection is not.
+- That, at 1.3.x, a third-party MySQL client authenticating as `root` with no
+  password succeeded against the data port on a managed-local workspace (§3).
+  The credentials, the loopback bind and the absence of protocol handling in
+  the proxy were all read directly from the source; the end-to-end connection
+  was not. Since 1.4.0-rc.1 it does not: observed against a 1.4.0-rc.4 proxy,
+  it gets "invalid connection".
 
 Everything else — field names, JSON keys and their types, argv and flag
 spellings, exported Go symbols, default values, and which code path decides

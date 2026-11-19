@@ -23,13 +23,15 @@ import (
 //     a proxy an older bd (before 1.4) started, the open fails with
 //     ErrProxyUnavailable, having created no embedded store and started or
 //     stopped no proxy. A managed-local workspace (no external upstream)
-//     also needs `dolt` on PATH, even to adopt a running proxy. The store
-//     covers the common issue, label, dependency, comment and config methods
-//     and RunInTransaction; the rest return a typed ErrUnsupported. Close
-//     leaves the proxy running. The one exception is an environment that
-//     forces server mode (BEADS_DOLT_SERVER_MODE or BEADS_DOLT_SHARED_SERVER)
-//     and names the port (BEADS_DOLT_SERVER_PORT): that open takes the Dolt
-//     server arm below and dials the named port as a plain MySQL client.
+//     also needs `dolt` on PATH (or BEADS_DOLT_BIN), even to adopt a running
+//     proxy. The store covers the common issue, label, dependency, comment
+//     and config methods and RunInTransaction; the rest return a typed
+//     ErrUnsupported. Close leaves the proxy running. The one exception is
+//     an environment that forces server mode (BEADS_DOLT_SERVER_MODE or
+//     BEADS_DOLT_SHARED_SERVER) and names the port (BEADS_DOLT_SERVER_PORT):
+//     that open takes the Dolt server arm below and dials the named port as
+//     a plain MySQL client (a plain Dolt server's; a 1.4 proxy's data port
+//     accepts only bd).
 //   - Dolt server: Connects to a dolt sql-server via OpenFromConfig.
 //
 // The returned Storage must be closed when no longer needed.

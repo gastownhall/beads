@@ -18,7 +18,8 @@ import (
 // server mode. As in the cgo build, a proxied-server workspace takes the
 // server arm only when the environment forces server mode
 // (BEADS_DOLT_SERVER_MODE or BEADS_DOLT_SHARED_SERVER) and names the port
-// (BEADS_DOLT_SERVER_PORT).
+// (BEADS_DOLT_SERVER_PORT), which must be a plain Dolt server's: a 1.4
+// proxy's data port accepts only bd.
 //
 // beadsDir is the path to the .beads directory.
 //

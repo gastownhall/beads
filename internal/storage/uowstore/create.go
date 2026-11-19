@@ -65,8 +65,9 @@ type createOpts struct {
 //     second and read back in digest order rather than list order;
 //   - two identical create-time comments collapse onto one row but are each
 //     journaled (DoltStore journals only inserted comments), and an explicit
-//     comment ID that is already stored fails with a duplicate-key error where
-//     DoltStore skips it or names the issue that owns it;
+//     comment ID that is already stored fails with a duplicate-key error
+//     (DoltStore in 1.4.0 fails the same way unless the stored comment is
+//     identical, which it skips);
 //   - on such a re-create, a batch dependency edge that already exists with a
 //     different type fails with DependencyTypeConflictError, and one with the
 //     same type but changed metadata or thread is rewritten, journaled and
