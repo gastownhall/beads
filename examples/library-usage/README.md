@@ -109,6 +109,12 @@ The `beads.Storage` interface provides:
 - `RemoveDependency(ctx, issueID, dependsOnID, actor)` - Remove dependency
 - `GetDependencies(ctx, issueID)` - Get what this issue depends on
 - `GetDependents(ctx, issueID)` - Get what depends on this issue
+- `GetDependenciesWithUnresolvable(ctx, issueID)` - Get what this issue
+  depends on in one snapshot, split into the issues found here and the exact
+  stored records of the edges whose target has no issue row in this database
+  (`external:` refs, other-prefix ids). `GetDependenciesWithMetadata` returns
+  only the first list. A custom `storage.Storage` implementation must add this
+  method; one that cannot supply the records returns `*storage.ErrUnsupported`
 - `GetDependencyTree(ctx, issueID, maxDepth, showAllPaths)` - Visualize tree
 
 ### Labels
