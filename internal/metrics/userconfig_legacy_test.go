@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -96,6 +97,51 @@ func plantLegacyDarwinConfig(t *testing.T, home, body string) string {
 	return path
 }
 
+// userConfigWrite is the user config as another bd reads it just before and
+// just after one write the bootstrap makes ("" while there is no file).
+type userConfigWrite struct{ before, after string }
+
+// recordUserConfigWrites records every write the bootstrap makes to the user
+// config (publishUserConfigHook).
+func recordUserConfigWrites(t *testing.T) *[]userConfigWrite {
+	t.Helper()
+	var writes []userConfigWrite
+	prev := publishUserConfigHook
+	publishUserConfigHook = func(path string, publish func() error) error {
+		before := readUserConfigIfAny(t, path)
+		err := publish()
+		writes = append(writes, userConfigWrite{before: before, after: readUserConfigIfAny(t, path)})
+		return err
+	}
+	t.Cleanup(func() { publishUserConfigHook = prev })
+	return &writes
+}
+
+func readUserConfigIfAny(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// seedUserConfig writes body as the user config bd reads under home.
+func seedUserConfig(t *testing.T, home, body string) string {
+	t.Helper()
+	path := userConfigPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	return path
+}
+
 func assertLegacyProbes(t *testing.T, probes *[]string, home string, want int) {
 	t.Helper()
 	if len(*probes) != want {
@@ -146,10 +192,13 @@ func testDisabledOptOutCarried(t *testing.T, goos string) {
 	if got := metricsLeaf(t, parsed, "notice_shown"); got != true {
 		t.Errorf("metrics.notice_shown = %v, want true (carried)", got)
 	}
-	for _, key := range []string{"actor", "node_id"} {
-		if _, ok := parsed[key]; ok {
-			t.Errorf("carry-over copied non-metrics key %q", key)
-		}
+	// node_id is a per-machine setting bd config set wrote there, so it is
+	// carried; actor is not one, so bd doctor lists it instead.
+	if got := parsed["node_id"]; got != "legacy-node" {
+		t.Errorf("node_id = %#v, want the carried per-machine setting %q", got, "legacy-node")
+	}
+	if _, ok := parsed["actor"]; ok {
+		t.Errorf("carry-over copied actor, which is not a per-machine setting: %#v", parsed)
 	}
 	// The value main.go re-resolves before metrics.Init: a carried opt-out
 	// must disable sending on this very run.
@@ -195,6 +244,217 @@ func TestLegacyDarwinCarryOver_FlatKeysCarried(t *testing.T) {
 	if got := metricsLeaf(t, parsed, "endpoint"); got != "https://flat.example.com" {
 		t.Errorf("metrics.endpoint = %v, want flat-key carry", got)
 	}
+}
+
+// The per-machine settings bd config set wrote to the legacy config (node_id,
+// mail.delegate, dolt.remotesapi-port) are carried with the metrics choice, in
+// either YAML spelling. Other settings are left for bd doctor to list.
+func TestLegacyDarwinCarryOver_MachineSettingsCarried(t *testing.T) {
+	home := setupUserConfigHome(t)
+	probes := useLegacyCarryOver(t, "darwin")
+	plantLegacyDarwinConfig(t, home, "actor: legacy-actor\n"+
+		"node_id: mac-mini\n"+
+		"mail:\n  delegate: gt mail send\n"+
+		"dolt.remotesapi-port: 8085\n"+
+		"prime:\n  disabled: true\n"+
+		"metrics:\n  disabled: true\n")
+
+	if err := EnsureUserConfigDefaults(); err != nil {
+		t.Fatalf("EnsureUserConfigDefaults: %v", err)
+	}
+	assertLegacyProbes(t, probes, home, 1)
+	for key, want := range map[string]string{
+		"node_id":              "mac-mini",
+		"mail.delegate":        "gt mail send",
+		"dolt.remotesapi-port": "8085",
+		"metrics.disabled":     "true",
+		"actor":                "",
+		"prime.disabled":       "",
+	} {
+		if got := config.GetUserYamlConfig(key); got != want {
+			t.Errorf("GetUserYamlConfig(%q) = %q, want %q", key, got, want)
+		}
+	}
+
+	// Carried once: a later run neither probes nor rewrites the user config.
+	first, err := os.ReadFile(userConfigPath(home))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if err := EnsureUserConfigDefaults(); err != nil {
+		t.Fatalf("second EnsureUserConfigDefaults: %v", err)
+	}
+	assertLegacyProbes(t, probes, home, 1)
+	if again, err := os.ReadFile(userConfigPath(home)); err != nil || string(again) != string(first) {
+		t.Fatalf("second run rewrote the user config: %v %q -> %q", err, first, again)
+	}
+}
+
+// The carry-over fills in only the per-machine settings that applied before
+// the move and that an existing user config does not settle itself. node_id is
+// read through the merged config, where the legacy value applied under any
+// user config that did not set it, so it is carried into one. mail.delegate
+// and dolt.remotesapi-port were read from ~/.config/bd/config.yaml alone
+// whenever that file existed, so the legacy values never applied and stay
+// out. A value the user config sets, in either spelling, and a key bd config
+// unset commented out are the user's choice and are left alone.
+func TestLegacyDarwinCarryOver_MachineSettingsNeverReplaceTheUserConfig(t *testing.T) {
+	for name, tc := range map[string]struct {
+		seed  string
+		unset string // a key bd config unset removes from seed first
+		want  map[string]string
+	}{
+		"set in either spelling": {
+			seed: "node_id: chosen-since\nmail.delegate: current-mail\n",
+			want: map[string]string{"node_id": "chosen-since", "mail.delegate": "current-mail", "dolt.remotesapi-port": ""},
+		},
+		"absent from an existing user config": {
+			seed: "actor: me\n",
+			want: map[string]string{"node_id": "mac-mini", "mail.delegate": "", "dolt.remotesapi-port": "", "actor": "me"},
+		},
+		"unset with bd config unset": {
+			seed: "node_id: \"A\"\n", unset: "node_id",
+			want: map[string]string{"node_id": "", "mail.delegate": "", "dolt.remotesapi-port": ""},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := setupUserConfigHome(t)
+			probes := useLegacyCarryOver(t, "darwin")
+			plantLegacyDarwinConfig(t, home, "node_id: mac-mini\nmail:\n  delegate: legacy-mail\ndolt:\n  remotesapi-port: 8085\n")
+			path := seedUserConfig(t, home, tc.seed)
+			if tc.unset != "" {
+				if changed, err := config.UnsetUserYamlConfig(tc.unset); err != nil || !changed {
+					t.Fatalf("UnsetUserYamlConfig(%q) = %v, %v; want the key commented out", tc.unset, changed, err)
+				}
+			}
+
+			if err := EnsureUserConfigDefaults(); err != nil {
+				t.Fatalf("EnsureUserConfigDefaults: %v", err)
+			}
+			assertLegacyProbes(t, probes, home, 1)
+			for key, want := range tc.want {
+				if got := config.GetUserYamlConfig(key); got != want {
+					t.Errorf("GetUserYamlConfig(%q) = %q, want %q", key, got, want)
+				}
+			}
+			if !config.UserConfigSetsBoolKey("metrics.disabled") {
+				t.Error("metrics.disabled was not written")
+			}
+			if line := "# " + tc.unset + ":"; tc.unset != "" && !strings.Contains(readUserConfigIfAny(t, path), line) {
+				t.Errorf("the %q line bd config unset left is gone:\n%s", line, readUserConfigIfAny(t, path))
+			}
+		})
+	}
+}
+
+// The carried per-machine settings are published in the same write as the
+// metrics keys, into a new user config and into an existing one. Another bd
+// that finds metrics.disabled no longer waits for the lock (with metrics off
+// it skips the bootstrap altogether), so it goes on with whatever node_id the
+// file holds: no write may show metrics.disabled without the settings carried
+// with it.
+func TestLegacyDarwinCarryOver_MachineSettingsPublishedWithTheMetricsKeys(t *testing.T) {
+	const legacy = "node_id: mac-mini\nmail:\n  delegate: gt mail send\ndolt:\n  remotesapi-port: 8085\nmetrics:\n  disabled: true\n"
+	for name, tc := range map[string]struct {
+		seed string // the user config before the bootstrap; "" for none
+		want map[string]string
+	}{
+		"new user config": {want: map[string]string{
+			"metrics.disabled": "true", "node_id": "mac-mini",
+			"mail.delegate": "gt mail send", "dolt.remotesapi-port": "8085",
+		}},
+		"existing user config": {seed: "actor: me\n", want: map[string]string{
+			"metrics.disabled": "true", "node_id": "mac-mini", "actor": "me",
+			"mail.delegate": "", "dolt.remotesapi-port": "",
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := setupUserConfigHome(t)
+			probes := useLegacyCarryOver(t, "darwin")
+			plantLegacyDarwinConfig(t, home, legacy)
+			path := userConfigPath(home)
+			if tc.seed != "" {
+				seedUserConfig(t, home, tc.seed)
+			}
+			writes := recordUserConfigWrites(t)
+
+			if err := EnsureUserConfigDefaults(); err != nil {
+				t.Fatalf("EnsureUserConfigDefaults: %v", err)
+			}
+			assertLegacyProbes(t, probes, home, 1)
+			if len(*writes) != 1 {
+				t.Fatalf("the bootstrap wrote the user config %d times (%q), want once", len(*writes), *writes)
+			}
+			w := (*writes)[0]
+			if w.before != tc.seed {
+				t.Errorf("just before its write the user config held %q, want the untouched %q", w.before, tc.seed)
+			}
+			for key, want := range tc.want {
+				if got, _, _ := config.YamlValueFromBytes([]byte(w.after), key); strings.TrimSpace(got) != want {
+					t.Errorf("the published user config sets %s = %q, want %q:\n%s", key, got, want, w.after)
+				}
+			}
+			if final := readUserConfigIfAny(t, path); final != w.after {
+				t.Errorf("the user config changed after its one write: %q -> %q", w.after, final)
+			}
+		})
+	}
+}
+
+// An empty per-machine setting, or one bd refuses to write (a port out of
+// range, which bd's readers ignored too), is not carried.
+func TestLegacyDarwinCarryOver_MachineSettingsSkipValuesBdRefuses(t *testing.T) {
+	home := setupUserConfigHome(t)
+	probes := useLegacyCarryOver(t, "darwin")
+	plantLegacyDarwinConfig(t, home, "node_id: \"  \"\nmail:\n  delegate:\ndolt:\n  remotesapi-port: 70000\n")
+
+	if err := EnsureUserConfigDefaults(); err != nil {
+		t.Fatalf("EnsureUserConfigDefaults: %v", err)
+	}
+	assertLegacyProbes(t, probes, home, 1)
+	assertDefaultMetricsConfig(t, home)
+}
+
+// A writer that takes no lock (bd config set) can create the user config
+// while the bootstrap reads the legacy file. The file is still new to the
+// bootstrap, so the settings carried only into a new user config go in too,
+// in one write with the metrics keys. One the file cannot take (mail.delegate
+// under a mail key that holds a value) is returned as an error, the others
+// are still written, and the next run neither probes nor fails.
+func TestLegacyDarwinCarryOver_MachineSettingWriteFailureNeverRepeatsTheProbe(t *testing.T) {
+	home := setupUserConfigHome(t)
+	plantLegacyDarwinConfig(t, home, "node_id: mac-mini\nmail:\n  delegate: legacy-mail\ndolt:\n  remotesapi-port: 8085\nmetrics:\n  disabled: true\n")
+	path := userConfigPath(home)
+	probes := useLegacyCarryOverRead(t, func(legacy string) ([]byte, error) {
+		// bd config set mail off, landing between the bootstrap's read of
+		// the user config and its write.
+		if err := os.WriteFile(path, []byte("mail: off\n"), 0o600); err != nil {
+			return nil, err
+		}
+		return config.ReadLegacyDarwinUserConfigYaml(legacy)
+	})
+
+	err := EnsureUserConfigDefaults()
+	if err == nil || !strings.Contains(err.Error(), "mail.delegate") {
+		t.Fatalf("EnsureUserConfigDefaults = %v, want the mail.delegate write failure", err)
+	}
+	assertLegacyProbes(t, probes, home, 1)
+	if !config.MetricsDisabledByUserConfig() {
+		t.Error("the carried opt-out is not on disk")
+	}
+	for key, want := range map[string]string{"node_id": "mac-mini", "dolt.remotesapi-port": "8085"} {
+		if got := config.GetUserYamlConfig(key); got != want {
+			t.Errorf("%s = %q, want %q written despite the mail.delegate failure", key, got, want)
+		}
+	}
+	if got := config.GetUserYamlConfig("mail"); got != "off" {
+		t.Errorf("mail = %q, want the user's own value left alone", got)
+	}
+
+	if err := EnsureUserConfigDefaults(); err != nil {
+		t.Fatalf("second EnsureUserConfigDefaults: %v", err)
+	}
+	assertLegacyProbes(t, probes, home, 1)
 }
 
 func TestLegacyDarwinCarryOver_NoLegacyFileUsesDefaults(t *testing.T) {
@@ -299,7 +559,7 @@ func TestLegacyDarwinCarryOver_NeverProbesOffDarwin(t *testing.T) {
 		t.Run(goos, func(t *testing.T) {
 			home := setupUserConfigHome(t)
 			probes := useLegacyCarryOver(t, goos)
-			plantLegacyDarwinConfig(t, home, "metrics:\n  disabled: true\n")
+			plantLegacyDarwinConfig(t, home, "node_id: legacy-node\nmetrics:\n  disabled: true\n")
 
 			if err := EnsureUserConfigDefaults(); err != nil {
 				t.Fatalf("EnsureUserConfigDefaults: %v", err)
@@ -446,11 +706,12 @@ func requireUnwritable(t *testing.T, path string) {
 }
 
 // Concurrent first runs serialize on the lock: the legacy file is read at most
-// once, every run succeeds, and no reader ever sees an empty or partial user
-// config (the file is published by hard link of a complete temp file).
+// once, every run succeeds, and a reader only ever sees no user config or the
+// complete one, the carried per-machine settings included: the file is
+// published once, by hard link of a complete temp file.
 func TestLegacyDarwinCarryOver_ConcurrentFirstRunsProbeOnce(t *testing.T) {
 	home := setupUserConfigHome(t)
-	plantLegacyDarwinConfig(t, home, "metrics:\n  disabled: true\n")
+	plantLegacyDarwinConfig(t, home, "node_id: mac-mini\nmail:\n  delegate: gt mail send\nmetrics:\n  disabled: true\n")
 	var mu sync.Mutex
 	probes := 0
 	t.Cleanup(SetLegacyDarwinCarryOverForTest("darwin", func(path string) ([]byte, error) {
@@ -462,12 +723,11 @@ func TestLegacyDarwinCarryOver_ConcurrentFirstRunsProbeOnce(t *testing.T) {
 		return config.ReadLegacyDarwinUserConfigYaml(path)
 	}))
 	path := userConfigPath(home)
-	want := "metrics:\n  disabled: true\n  endpoint: " + DefaultEndpoint + "\n"
 
 	const runs = 8
 	start := make(chan struct{})
 	stop := make(chan struct{})
-	var readerErr error
+	seen := map[string]bool{} // every user config the reader saw; only the reader writes it
 	var readerWG, runWG sync.WaitGroup
 	readerWG.Add(1)
 	go func() {
@@ -479,8 +739,8 @@ func TestLegacyDarwinCarryOver_ConcurrentFirstRunsProbeOnce(t *testing.T) {
 				return
 			default:
 			}
-			if data, err := os.ReadFile(path); err == nil && string(data) != want && readerErr == nil {
-				readerErr = fmt.Errorf("reader saw %q, want only the complete %q", data, want)
+			if data, err := os.ReadFile(path); err == nil {
+				seen[string(data)] = true
 			}
 		}
 	}()
@@ -506,11 +766,24 @@ func TestLegacyDarwinCarryOver_ConcurrentFirstRunsProbeOnce(t *testing.T) {
 	if probes != 1 {
 		t.Errorf("legacy probes = %d across %d concurrent first runs, want 1", probes, runs)
 	}
-	if readerErr != nil {
-		t.Error(readerErr)
+	final, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read user config: %v", err)
 	}
-	if data, _ := os.ReadFile(path); string(data) != want {
-		t.Errorf("user config = %q, want %q", data, want)
+	for key, want := range map[string]string{
+		"metrics.disabled": "true",
+		"metrics.endpoint": DefaultEndpoint,
+		"node_id":          "mac-mini",
+		"mail.delegate":    "gt mail send",
+	} {
+		if got, _, _ := config.YamlValueFromBytes(final, key); strings.TrimSpace(got) != want {
+			t.Errorf("user config sets %s = %q, want %q:\n%s", key, got, want, final)
+		}
+	}
+	for data := range seen {
+		if data != string(final) {
+			t.Errorf("a reader saw %q, want only the complete %q", data, final)
+		}
 	}
 }
 

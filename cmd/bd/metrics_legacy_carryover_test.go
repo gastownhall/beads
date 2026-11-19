@@ -10,6 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/metrics"
 )
 
@@ -87,6 +89,55 @@ func TestMetricsBootstrapCarriedOptOutStopsSendingThisRun(t *testing.T) {
 	bootstrapAndInitMetrics("ready")
 	if len(*probes) != 1 {
 		t.Fatalf("second run probed the legacy config again: %q", *probes)
+	}
+}
+
+// TestMetricsBootstrapCarriesPerMachineSettings: on a Mac whose only user
+// config was the pre-GH#8113 Application Support file, the first run after
+// upgrade carries the per-machine settings bd config set wrote there. node_id
+// (the replica identity bd reclaim's guard compares), the mail delegate and
+// the shared server's remotesapi port keep applying, on that same run for a
+// store command, which re-reads the config after the bootstrap
+// (prepareSelectedCommandContext).
+func TestMetricsBootstrapCarriesPerMachineSettings(t *testing.T) {
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	home, probes := isolateMetricsBootstrap(t, "darwin")
+	for _, key := range []string{"BEADS_DIR", "BEADS_NODE_ID", "BD_NODE_ID", "BEADS_MAIL_DELEGATE", "BD_MAIL_DELEGATE", "BEADS_DOLT_REMOTESAPI_PORT"} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+	}
+	t.Chdir(home)
+	legacy := filepath.Join(home, "Library", "Application Support", "bd", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := "node_id: mac-mini\nmail:\n  delegate: gt mail send\ndolt:\n  remotesapi-port: 8085\nactor: legacy-actor\nmetrics:\n  disabled: true\n"
+	if err := os.WriteFile(legacy, []byte(body), 0o600); err != nil {
+		t.Fatalf("plant: %v", err)
+	}
+
+	bootstrapAndInitMetrics("ready")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	if len(*probes) != 1 {
+		t.Fatalf("legacy probes = %q, want exactly one", *probes)
+	}
+	if got := config.NodeID(); got != "mac-mini" {
+		t.Errorf("config.NodeID() = %q, want the carried %q", got, "mac-mini")
+	}
+	if got := findMailDelegate(); got != "gt mail send" {
+		t.Errorf("findMailDelegate() = %q, want the carried %q", got, "gt mail send")
+	}
+	if got := doltserver.ResolveRemotesAPIPortForMode(filepath.Join(home, ".beads"), true); got != 8085 {
+		t.Errorf("shared-server remotesapi port = %d, want the carried 8085", got)
+	}
+	if got := config.GetUserYamlConfig("actor"); got != "" {
+		t.Errorf("actor = %q was carried; only the per-machine settings are", got)
 	}
 }
 

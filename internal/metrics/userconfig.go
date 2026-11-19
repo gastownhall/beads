@@ -26,16 +26,21 @@ var commentedMetricsRe = regexp.MustCompile(`(?m)^\s*#\s*metrics\s*:`)
 //
 // On macOS (darwin and ios), when metrics.disabled is about to be written, it
 // first carries a metrics choice over from the pre-GH#8113 user config in
-// ~/Library/Application Support (see legacyDarwinMetricsCarryOver). The probe
-// runs only under the <config>.lock lock (created beside the config, or beside
-// its symlink target, and left in place), and only after the write is shown
-// to be possible: the directory or file is writable and, for an existing
-// config, the metrics keys fit its YAML shape (checkMetricsKeysWritable). A
-// successful write leaves metrics.disabled present, so every later run returns
-// before the lock and the probe happens once per user config. A config bd
-// cannot write, cannot parse, whose metrics block is commented out, or whose
-// shape refuses the keys never triggers the probe; the caller then keeps
-// metrics off for the run (see cmd/bd metricsEnabledAfterBootstrap).
+// ~/Library/Application Support (see legacyDarwinMetricsCarryOver), together
+// with the per-machine settings bd config set wrote there (node_id,
+// mail.delegate, dolt.remotesapi-port). Those go into the same write as the
+// metrics keys (writeUserConfig), and only where they applied before the move
+// and the user config does not settle them itself (applyMachineSettings).
+// The probe runs only under the <config>.lock lock (created beside the
+// config, or beside its symlink target, and left in place), and only after
+// the write is shown to be possible: the directory or file is writable and,
+// for an existing config, the metrics keys fit its YAML shape
+// (checkMetricsKeysWritable). A successful write leaves metrics.disabled
+// present, so every later run returns before the lock and the probe happens
+// once per user config. A config bd cannot write, cannot parse, whose
+// metrics block is commented out, or whose shape refuses the keys never
+// triggers the probe; the caller then keeps metrics off for the run (see
+// cmd/bd metricsEnabledAfterBootstrap).
 //
 // Elsewhere there is nothing to probe, no lock and no shape check: the
 // hard-link publish in createUserConfig already makes creating the file
@@ -106,23 +111,70 @@ func EnsureUserConfigDefaults() error {
 	if state.needDisabled {
 		carry = legacyDarwinMetricsCarryOver()
 	}
+	return writeUserConfig(path, state, carry)
+}
 
-	if !state.exists {
-		created, err := createUserConfig(path, carry.bootstrapBody())
-		if err != nil {
-			return err
-		}
-		if created {
-			carry.announce()
-			return nil
-		}
-		// A writer that does not take the lock (an older bd, or bd config
-		// set) created the file meanwhile: fill in what it lacks.
-		if state, err = readMetricsKeyState(path); err != nil || !state.needsWrite() {
-			return err
+// writeUserConfig publishes the metrics keys and the per-machine settings
+// carried with them in one write: it creates the user config at path holding
+// all of them, or fills in what an existing one lacks with one atomic replace.
+// Another bd never waits for this one once metrics.disabled is on disk: it
+// returns before the lock, or skips the bootstrap when metrics are off, and
+// goes on with whatever node_id the file holds. A second, later write of the
+// carried settings would let it run without them (with no node_id the bd
+// reclaim replica guard is off), and lose them for good if this bd died in
+// between, since the probe never runs again.
+func writeUserConfig(path string, state metricsKeyState, carry metricsCarryOver) error {
+	if state.exists {
+		return updateUserConfig(path, state, carry, false)
+	}
+	body, machineErr := carry.bootstrapBody()
+	var created bool
+	err := publishUserConfig(path, func() (err error) {
+		created, err = createUserConfig(path, body)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if created {
+		carry.announce()
+		return machineErr
+	}
+	// A writer that does not take the lock (an older bd, or bd config set)
+	// created the file meanwhile: fill in what it lacks. The file is still
+	// new to this bootstrap, so the settings carried only into a user config
+	// it creates go in too.
+	if state, err = readMetricsKeyState(path); err != nil {
+		return err
+	}
+	return updateUserConfig(path, state, carry, true)
+}
+
+// updateUserConfig fills in what the existing user config at path lacks (the
+// metrics keys state names, and the carried per-machine settings
+// applyMachineSettings picks) and publishes the result with one atomic
+// replace, so a reader sees all of it or none. newFile reports that the file
+// did not exist when this bootstrap read it.
+func updateUserConfig(path string, state metricsKeyState, carry metricsCarryOver, newFile bool) error {
+	data, err := os.ReadFile(path) //nolint:gosec // path is a validated absolute user config path
+	if err != nil {
+		return fmt.Errorf("ensure user config: read %s: %w", path, err)
+	}
+	content, err := config.ApplyYamlConfigUpdates(data, metricsKeyUpdates(state, carry)...)
+	if err != nil {
+		return fmt.Errorf("ensure user config: %s cannot take the metrics keys: %w", path, err)
+	}
+	content, machineErr := carry.applyMachineSettings(content, newFile)
+	if !bytes.Equal(content, data) {
+		if err := publishUserConfig(path, func() error { return config.ReplaceConfigYaml(path, content) }); err != nil {
+			return fmt.Errorf("ensure user config: write %s: %w", path, err)
 		}
 	}
-	return writeMissingMetricsKeys(state, carry)
+	if state.needDisabled {
+		// The opt-out the notice describes is on disk now.
+		carry.announce()
+	}
+	return machineErr
 }
 
 // metricsKeyState is what the user config at a path holds of the keys the
@@ -158,7 +210,7 @@ func readMetricsKeyState(path string) (metricsKeyState, error) {
 	return state, nil
 }
 
-// checkMetricsKeysWritable runs writeMissingMetricsKeys' metrics.disabled and
+// checkMetricsKeysWritable runs updateUserConfig's metrics.disabled and
 // metrics.endpoint updates against the config at path in memory, with the
 // writer's own update code (config.CheckYamlConfigUpdates), and returns the
 // error the real write would hit. The values are placeholders: a carried
@@ -168,42 +220,28 @@ func checkMetricsKeysWritable(path string, state metricsKeyState) error {
 	if err != nil {
 		return fmt.Errorf("ensure user config: read %s: %w", path, err)
 	}
-	var updates []config.YamlKeyValue
-	if state.needDisabled {
-		updates = append(updates, config.YamlKeyValue{Key: "metrics.disabled", Value: "false"})
-	}
-	if state.needEndpoint {
-		updates = append(updates, config.YamlKeyValue{Key: "metrics.endpoint", Value: DefaultEndpoint})
-	}
-	if err := config.CheckYamlConfigUpdates(data, updates...); err != nil {
+	if err := config.CheckYamlConfigUpdates(data, metricsKeyUpdates(state, metricsCarryOver{})...); err != nil {
 		return fmt.Errorf("ensure user config: %s cannot take the metrics keys: %w", path, err)
 	}
 	return nil
 }
 
-// writeMissingMetricsKeys fills the missing keys of an existing user config.
-// carry is only consulted for metrics.disabled's companions when
-// metrics.disabled itself is missing; it is the zero value otherwise.
-func writeMissingMetricsKeys(state metricsKeyState, carry metricsCarryOver) error {
+// metricsKeyUpdates lists the metrics keys an existing user config lacks and
+// the values to fill them with. carry is only consulted for metrics.disabled's
+// companions when metrics.disabled itself is missing; it is the zero value
+// otherwise, which gives today's defaults.
+func metricsKeyUpdates(state metricsKeyState, carry metricsCarryOver) []config.YamlKeyValue {
+	var updates []config.YamlKeyValue
 	if state.needDisabled {
-		if err := config.SetUserYamlConfig("metrics.disabled", carry.disabledValue()); err != nil {
-			return fmt.Errorf("ensure user config: set metrics.disabled: %w", err)
-		}
-		// The opt-out the notice describes is now on disk, whatever happens
-		// to the companion keys below.
-		carry.announce()
+		updates = append(updates, config.YamlKeyValue{Key: "metrics.disabled", Value: carry.disabledValue()})
 	}
 	if state.needEndpoint {
-		if err := config.SetUserYamlConfig("metrics.endpoint", carry.endpointValue()); err != nil {
-			return fmt.Errorf("ensure user config: set metrics.endpoint: %w", err)
-		}
+		updates = append(updates, config.YamlKeyValue{Key: "metrics.endpoint", Value: carry.endpointValue()})
 	}
 	if carry.noticeShown && !state.hasNoticeShown {
-		if err := config.SetUserYamlConfig("metrics.notice_shown", "true"); err != nil {
-			return fmt.Errorf("ensure user config: set metrics.notice_shown: %w", err)
-		}
+		updates = append(updates, config.YamlKeyValue{Key: "metrics.notice_shown", Value: "true"})
 	}
-	return nil
+	return updates
 }
 
 // lockUserConfig takes an exclusive lock on <path>.lock, serializing the
@@ -285,11 +323,24 @@ func createUserConfigExclusive(path string, body []byte) (bool, error) {
 // darwin carry-over; tests inject another GOOS, count reads, and inject read
 // errors. legacyCarryOverNotice, when non-nil, receives the fail-closed
 // notice instead of the os.Stderr current at the time it is printed.
+// publishUserConfigHook, when non-nil, runs each write of the user config the
+// bootstrap makes by calling publish itself: tests read the file just before
+// and just after it, as another bd would.
 var (
 	bootstrapGOOS              = runtime.GOOS
 	readLegacyDarwinUserConfig = config.ReadLegacyDarwinUserConfigYaml
 	legacyCarryOverNotice      io.Writer
+	publishUserConfigHook      func(path string, publish func() error) error
 )
+
+// publishUserConfig runs publish, the bootstrap's write of the user config at
+// path, through publishUserConfigHook when a test installed one.
+func publishUserConfig(path string, publish func() error) error {
+	if publishUserConfigHook != nil {
+		return publishUserConfigHook(path, publish)
+	}
+	return publish()
+}
 
 // MacOSFamilyPlatform reports whether the bootstrap runs on darwin or ios
 // (config.IsMacOSFamily), the platforms with the GH#8113 carry-over. Callers
@@ -310,12 +361,18 @@ func SetLegacyDarwinCarryOverForTest(goos string, read func(path string) ([]byte
 	return func() { bootstrapGOOS, readLegacyDarwinUserConfig = prevGOOS, prevRead }
 }
 
-// metricsCarryOver holds the metrics choices found in the legacy darwin user
-// config. The zero value means "nothing to carry": today's defaults.
+// metricsCarryOver holds the metrics choices and per-machine settings found in
+// the legacy darwin user config. The zero value means "nothing to carry":
+// today's defaults.
 type metricsCarryOver struct {
 	disabled    *bool
 	endpoint    string
 	noticeShown bool
+
+	// machine holds the per-machine settings the legacy file sets (see
+	// legacyDarwinMachineSettings). applyMachineSettings decides which of
+	// them go into the user config, in the same write as the metrics keys.
+	machine []config.YamlKeyValue
 
 	// unreadablePath and unreadableErr are set when the legacy file exists
 	// but could not be read or parsed. The carry-over then fails closed:
@@ -324,7 +381,9 @@ type metricsCarryOver struct {
 	unreadableErr  error
 }
 
-func (c metricsCarryOver) isZero() bool {
+// metricsAreDefault reports whether there is no metrics choice to carry, so
+// the bootstrap body is the historical one.
+func (c metricsCarryOver) metricsAreDefault() bool {
 	return c.disabled == nil && c.endpoint == "" && !c.noticeShown
 }
 
@@ -342,11 +401,20 @@ func (c metricsCarryOver) endpointValue() string {
 	return DefaultEndpoint
 }
 
-// bootstrapBody returns the new user config.yaml. With nothing to carry it is
-// byte-for-byte the historical bootstrap body; otherwise it is YAML-encoded
-// (so any endpoint is quoted safely) with the same 2-space indentation.
-func (c metricsCarryOver) bootstrapBody() []byte {
-	if c.isZero() {
+// bootstrapBody returns the new user config.yaml: the metrics keys
+// (metricsBody) and the carried per-machine settings applyMachineSettings
+// adds, so they are published together. The error names the settings left
+// out because the body cannot take them.
+func (c metricsCarryOver) bootstrapBody() ([]byte, error) {
+	return c.applyMachineSettings(c.metricsBody(), true)
+}
+
+// metricsBody returns the metrics keys of a new user config.yaml. With
+// nothing to carry it is byte-for-byte the historical bootstrap body;
+// otherwise it is YAML-encoded (so any endpoint is quoted safely) with the
+// same 2-space indentation.
+func (c metricsCarryOver) metricsBody() []byte {
+	if c.metricsAreDefault() {
 		return []byte("metrics:\n  disabled: false\n  endpoint: " + DefaultEndpoint + "\n")
 	}
 	type metricsBlock struct {
@@ -390,10 +458,12 @@ func (c metricsCarryOver) announce() {
 
 // legacyDarwinMetricsCarryOver reads the pre-GH#8113 macOS user config
 // (~/Library/Application Support/bd/config.yaml) and returns its
-// metrics.disabled, metrics.endpoint and metrics.notice_shown, and nothing
-// else. It runs only on darwin and ios, only from the bootstrap, and only when
-// metrics.disabled is about to be written, so the folder macOS can guard with
-// a privacy prompt is touched once per user config.
+// metrics.disabled, metrics.endpoint and metrics.notice_shown, and its
+// per-machine settings (legacyDarwinMachineSettings). Every other setting
+// there is left for bd doctor to list. It runs only on darwin and ios, only
+// from the bootstrap, and only when metrics.disabled is about to be written,
+// so the folder macOS can guard with a privacy prompt is touched once per user
+// config.
 //
 // Only a missing file (or no resolvable home, under which bd never read that
 // file either) means "use today's defaults". A file that exists but cannot be
@@ -431,7 +501,81 @@ func legacyDarwinMetricsCarryOver() metricsCarryOver {
 	if raw, ok, _ := config.YamlValueFromBytes(data, "metrics.notice_shown"); ok {
 		carry.noticeShown, _ = config.ParseUserConfigBool(raw)
 	}
+	carry.machine = legacyDarwinMachineSettings(data)
 	return carry
+}
+
+// legacyDarwinMachineSettings returns the per-machine settings
+// (config.UserGlobalExactKeys: dolt.remotesapi-port, mail.delegate, node_id)
+// that the legacy config data sets. bd config set wrote these to the user
+// config, so on a Mac whose only user config was the legacy file
+// they are nowhere else, and losing node_id turns off the guard that keeps bd
+// reclaim from reverting leases another replica granted. Values are read the
+// way bd's user-config reader reads them (YamlValueFromBytes, trimmed). An
+// empty value, and one bd refuses to write (an invalid port, which bd's
+// readers ignored too), is skipped.
+func legacyDarwinMachineSettings(data []byte) []config.YamlKeyValue {
+	var settings []config.YamlKeyValue
+	for _, key := range config.UserGlobalExactKeys() {
+		raw, ok, _ := config.YamlValueFromBytes(data, key)
+		value := strings.TrimSpace(raw)
+		if !ok || value == "" {
+			continue
+		}
+		setting := config.YamlKeyValue{Key: key, Value: value}
+		if config.CheckYamlConfigUpdates(nil, setting) != nil {
+			continue
+		}
+		settings = append(settings, setting)
+	}
+	return settings
+}
+
+// mergedMachineSettings are the per-machine settings bd reads through the
+// merged config: config.NodeID reads node_id with viper, over every user
+// config layer, so before GH#8113 a legacy node_id applied under any
+// ~/.config/bd/config.yaml that did not set one. bd reads the other
+// per-machine settings (mail.delegate, dolt.remotesapi-port) with
+// config.GetUserYamlConfig, from the one user config it selects. That was
+// ~/.config/bd/config.yaml whenever the file existed, so a legacy value of
+// those applied only while bd had no user config there.
+var mergedMachineSettings = map[string]bool{"node_id": true}
+
+// applyMachineSettings adds to content, the user config about to be
+// published, each carried per-machine setting that applied before the move
+// and that content does not settle itself (userConfigSettles), using bd config
+// set's own update code. newFile reports that this bootstrap creates the user
+// config: only then does a setting outside mergedMachineSettings go in. A
+// setting content cannot take is left out and named in the joined error; the
+// others still go in.
+func (c metricsCarryOver) applyMachineSettings(content []byte, newFile bool) ([]byte, error) {
+	var errs []error
+	for _, setting := range c.machine {
+		if (!newFile && !mergedMachineSettings[setting.Key]) || userConfigSettles(content, setting.Key) {
+			continue
+		}
+		next, err := config.ApplyYamlConfigUpdates(content, setting)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("ensure user config: set %s: %w", setting.Key, err))
+			continue
+		}
+		content = next
+	}
+	return content, errors.Join(errs...)
+}
+
+// userConfigSettles reports whether the user config content decides key
+// itself, so a carried value must not replace it: content sets key to a
+// non-empty value, in either YAML spelling, or holds the key's line commented
+// out ("# node_id: ..."), which is what bd config unset leaves and what bd
+// config set's writer would otherwise un-comment. A commented-out nested key
+// is not looked for: node_id, a top-level key, is the only setting carried
+// into a user config that existed before this bootstrap.
+func userConfigSettles(content []byte, key string) bool {
+	if raw, ok, _ := config.YamlValueFromBytes(content, key); ok && strings.TrimSpace(raw) != "" {
+		return true
+	}
+	return regexp.MustCompile(`(?m)^[ \t]*#[ \t]*` + regexp.QuoteMeta(key) + `[ \t]*:`).Match(content)
 }
 
 func failClosedCarryOver(path string, err error) metricsCarryOver {

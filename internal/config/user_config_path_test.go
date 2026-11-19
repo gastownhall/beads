@@ -576,7 +576,10 @@ func TestUserConfigNeverReadsMacOSApplicationSupport(t *testing.T) {
 						if dir, err := os.UserConfigDir(); err != nil || dir != appSupport {
 							t.Fatalf("precondition: os.UserConfigDir() = %q, %v; want %q", dir, err, appSupport)
 						}
-						wantNative := filepath.Join(home, ".config")
+						// The darwin resolver is Go's Unix branch verbatim, so it
+						// joins with "/" on every host (as TestUserConfigDirFor
+						// expects); filepath.Join would use "\" on Windows.
+						wantNative := home + "/.config"
 						if tc.xdg {
 							wantNative = xdg
 						}
@@ -886,7 +889,9 @@ func TestUserConfigSetsBoolKey(t *testing.T) {
 }
 
 // TestCheckYamlConfigUpdates: the in-memory check refuses exactly the
-// documents SetUserYamlConfig's writer refuses, and never touches a file.
+// documents SetUserYamlConfig's writer refuses, ApplyYamlConfigUpdates
+// returns the document that writer leaves after one write per update, and
+// neither touches a file.
 func TestCheckYamlConfigUpdates(t *testing.T) {
 	metricsKeys := []YamlKeyValue{
 		{Key: "metrics.disabled", Value: "false"},
@@ -913,6 +918,22 @@ func TestCheckYamlConfigUpdates(t *testing.T) {
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("CheckYamlConfigUpdates: %v", err)
+				}
+				applied, err := ApplyYamlConfigUpdates([]byte(tc.content), metricsKeys...)
+				if err != nil {
+					t.Fatalf("ApplyYamlConfigUpdates: %v", err)
+				}
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				if werr := os.WriteFile(path, []byte(tc.content), 0o600); werr != nil {
+					t.Fatal(werr)
+				}
+				for _, u := range metricsKeys {
+					if werr := setYamlConfigAtPath(path, u.Key, u.Value); werr != nil {
+						t.Fatalf("setYamlConfigAtPath(%s): %v", u.Key, werr)
+					}
+				}
+				if written, rerr := os.ReadFile(path); rerr != nil || string(written) != string(applied) {
+					t.Fatalf("ApplyYamlConfigUpdates = %q, want what one write per key leaves, %q (%v)", applied, written, rerr)
 				}
 				return
 			}

@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -418,6 +420,14 @@ func IsUserGlobalKey(key string) bool {
 	return false
 }
 
+// UserGlobalExactKeys returns the per-machine keys bd config set writes to the
+// user config (userGlobalExactKeys), sorted. The GH#8113 macOS metrics
+// bootstrap carries these from the old ~/Library/Application Support config
+// along with the metrics keys.
+func UserGlobalExactKeys() []string {
+	return slices.Sorted(maps.Keys(userGlobalExactKeys))
+}
+
 // readUserGlobalYamlValue reads a single dotted key from the user-global
 // config.yaml ONLY, never project or BEADS_DIR config. It accepts both the
 // nested form (metrics:\n  disabled: true) and the flat dotted form
@@ -788,31 +798,40 @@ func SetUserYamlConfig(key, value string) error {
 	return setYamlConfigAtPath(configPath, key, value)
 }
 
-// YamlKeyValue is one key and value for CheckYamlConfigUpdates.
+// YamlKeyValue is one key and value for ApplyYamlConfigUpdates and
+// CheckYamlConfigUpdates.
 type YamlKeyValue struct {
 	Key, Value string
 }
 
-// CheckYamlConfigUpdates applies updates, in order, to a copy of a config.yaml
-// held in content, using the same validation and update code SetUserYamlConfig
-// writes with, and returns the first error. Nothing is written. Callers use it
-// to learn whether a later SetUserYamlConfig call can succeed before doing
-// work that only makes sense if it will — a config whose top level is not a
-// mapping, or whose section already holds a scalar or list, fails here as the
-// write would.
-func CheckYamlConfigUpdates(content []byte, updates ...YamlKeyValue) error {
+// ApplyYamlConfigUpdates applies updates, in order, to a copy of a
+// config.yaml held in content, using the same validation and update code
+// SetUserYamlConfig writes with, and returns the result: the document a
+// SetUserYamlConfig call per update would leave on disk. Nothing is written.
+// On error it returns nil and the first error.
+func ApplyYamlConfigUpdates(content []byte, updates ...YamlKeyValue) ([]byte, error) {
 	updated := string(content)
 	for _, u := range updates {
 		if err := validateYamlConfigValue(u.Key, u.Value); err != nil {
-			return err
+			return nil, err
 		}
 		next, err := updateYamlKey(updated, u.Key, u.Value)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		updated = next
 	}
-	return nil
+	return []byte(updated), nil
+}
+
+// CheckYamlConfigUpdates is ApplyYamlConfigUpdates without the result.
+// Callers use it to learn whether a later SetUserYamlConfig call can succeed
+// before doing work that only makes sense if it will — a config whose top
+// level is not a mapping, or whose section already holds a scalar or list,
+// fails here as the write would.
+func CheckYamlConfigUpdates(content []byte, updates ...YamlKeyValue) error {
+	_, err := ApplyYamlConfigUpdates(content, updates...)
+	return err
 }
 
 func setYamlConfigAtPath(configPath, key, value string) error {
@@ -899,6 +918,16 @@ func ConfigYamlReplaceable(configPath string) error {
 		return err
 	}
 	return w.Abort()
+}
+
+// ReplaceConfigYaml replaces the whole content of the existing config.yaml at
+// configPath in one step, the way SetUserYamlConfig writes it: through a
+// symlink to its target, keeping the file's mode, and refusing a file its
+// owner made read-only. A reader sees the old content or the new, never a mix,
+// so several keys written with one call (ApplyYamlConfigUpdates) become
+// visible together.
+func ReplaceConfigYaml(configPath string, content []byte) error {
+	return replaceConfigYaml(configPath, content)
 }
 
 // GetYamlConfig gets a configuration value from config.yaml.
