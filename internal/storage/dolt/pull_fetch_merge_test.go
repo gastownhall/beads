@@ -138,10 +138,17 @@ func toDriverValues(args []any) []driver.Value {
 // route's remote listings with origin at remoteURL.
 func cliPullStore(t *testing.T, mock sqlmock.Sqlmock, db *sql.DB, beadsDir, remoteURL string) *DoltStore {
 	t.Helper()
+	return cliPullStoreWithRemote(t, mock, db, beadsDir, "origin", remoteURL)
+}
+
+// cliPullStoreWithRemote is cliPullStore with the listed remote named
+// remoteName, so a peer route can find its peer.
+func cliPullStoreWithRemote(t *testing.T, mock sqlmock.Sqlmock, db *sql.DB, beadsDir, remoteName, remoteURL string) *DoltStore {
+	t.Helper()
 	mock.MatchExpectationsInOrder(false)
 	for i := 0; i < 8; i++ {
 		mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes").
-			WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow("origin", remoteURL, nil))
+			WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow(remoteName, remoteURL, nil))
 	}
 	store := &DoltStore{
 		serverMode: true,
@@ -351,6 +358,51 @@ func TestCLIPeerPullFetchesThenMergesTrackingRef(t *testing.T) {
 				t.Errorf("the peer CLI route's pool statements: %v", err)
 			}
 		})
+	}
+}
+
+// TestCLIPeerPullFromReportsDeclinedConflicts pins PullFrom's
+// conflict-reporting contract on the CLI peer route (GH#7839): a conflict the
+// resolver declines comes back as data with a nil error, captured on the merge
+// session before its transaction rolls back, so the declined merge is never
+// committed and no merge is left open. The pool is never asked for the working
+// set's conflicts: they are not there to see.
+func TestCLIPeerPullFromReportsDeclinedConflicts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	clearPredicateEnv(t)
+	const peerURL = "git+ssh://git@example.com/org/peer.git"
+	fakeDoltOnPathWithRemote(t, "peer", peerURL)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := cliPullStoreWithRemote(t, mock, db, unmanagedWorkspace(t), "peer", peerURL)
+	session := cliMergeSession(t)
+	// pullFromPeer's own reads: a clean working set to auto-commit, the
+	// pre-pull HEAD, and no federation_peers row (no stored credentials).
+	mock.ExpectQuery(`SELECT s.table_name FROM dolt_status s WHERE NOT EXISTS ( SELECT 1 FROM dolt_ignore di WHERE di.ignored = 1 AND s.table_name LIKE di.pattern )`).
+		WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
+	mock.ExpectQuery("SELECT DOLT_HASHOF('HEAD')").WillReturnRows(sqlmock.NewRows([]string{"hash"}).AddRow("prehead"))
+	mock.ExpectQuery("SELECT name, remote_url, username, password_encrypted, sovereignty, last_sync, created_at, updated_at FROM federation_peers WHERE name = ?").
+		WithArgs("peer").
+		WillReturnRows(sqlmock.NewRows([]string{"name", "remote_url", "username", "password_encrypted", "sovereignty", "last_sync", "created_at", "updated_at"}))
+	expectCLIMerge(mock, session, "peer/main", 1)
+
+	conflicts, err := store.PullFrom(context.Background(), "peer")
+	if err != nil {
+		t.Fatalf("PullFrom with a declined conflict = %v, want the conflict as data and a nil error", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Field != "pull_msg_marker" {
+		t.Fatalf("PullFrom conflicts = %+v, want pull_msg_marker", conflicts)
+	}
+	if err := session.ExpectationsWereMet(); err != nil {
+		t.Errorf("merge session statements (the declined merge must roll back, not commit): %v", err)
+	}
+	if err := expectationsMetBesideSpareListings(db, mock); err != nil {
+		t.Errorf("pool statements: %v", err)
 	}
 }
 

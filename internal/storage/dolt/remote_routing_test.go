@@ -446,9 +446,16 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 // answers `dolt remote -v` with origin at remoteURL.
 func fakeDoltOnPath(t *testing.T, remoteURL string) string {
 	t.Helper()
+	return fakeDoltOnPathWithRemote(t, "origin", remoteURL)
+}
+
+// fakeDoltOnPathWithRemote is fakeDoltOnPath answering `dolt remote -v` with
+// remoteName, so a peer route finds its peer materialized.
+func fakeDoltOnPathWithRemote(t *testing.T, remoteName, remoteURL string) string {
+	t.Helper()
 	binDir := t.TempDir()
 	callLog := filepath.Join(binDir, "calls.log")
-	script := fmt.Sprintf("#!/bin/sh\necho \"$(pwd -P)|$*|DOLT_REMOTE_PASSWORD=${DOLT_REMOTE_PASSWORD:-}\" >> '%s'\nif [ \"$1 $2\" = \"remote -v\" ]; then echo 'origin %s'; fi\nexit 0\n", callLog, remoteURL)
+	script := fmt.Sprintf("#!/bin/sh\necho \"$(pwd -P)|$*|DOLT_REMOTE_PASSWORD=${DOLT_REMOTE_PASSWORD:-}\" >> '%s'\nif [ \"$1 $2\" = \"remote -v\" ]; then echo '%s %s'; fi\nexit 0\n", callLog, remoteName, remoteURL)
 	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
 		t.Fatal(err)
 	}
