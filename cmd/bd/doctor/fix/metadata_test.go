@@ -1,9 +1,11 @@
 package fix
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -530,6 +532,144 @@ func TestIsExpectedProbeError(t *testing.T) {
 				t.Errorf("isExpectedProbeError(%v) = %v, want %v", tt.err, got, tt.expected)
 			}
 		})
+	}
+}
+
+// isolateDoltEnvForFallbackTest clears inherited Dolt endpoint, database and
+// shared-mode settings and isolates user configuration, so a fallback
+// selection test sees only the workspace metadata.json it writes.
+func isolateDoltEnvForFallbackTest(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_SOCKET",
+		"BEADS_DOLT_DATA_DIR", "BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_PASSWORD",
+	} {
+		t.Setenv(name, "")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+}
+
+// newRefusingDoltListener holds a loopback listener that accepts connections
+// and closes them at once. The fallback tests point the workspace's server
+// endpoint at it, so any raw dial (the pre-fix probe's, or a stray one after)
+// fails promptly without contacting any real server.
+func newRefusingDoltListener(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on loopback: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// stubServerMetadataCatalog pins the catalog every listServerMetadataDatabases
+// call returns and counts the calls. The count lets a test assert its case
+// actually reaches the fallback's own catalog read (the second call), rather
+// than being answered — or hidden — by the authoritative reconcile's first one.
+func stubServerMetadataCatalog(t *testing.T, catalog []serverDatabaseMetadata) *int {
+	t.Helper()
+	orig := listServerMetadataDatabases
+	calls := 0
+	listServerMetadataDatabases = func(_ string, _ *configfile.Config) ([]serverDatabaseMetadata, error) {
+		calls++
+		return catalog, nil
+	}
+	t.Cleanup(func() { listServerMetadataDatabases = orig })
+	return &calls
+}
+
+// newFallbackFixWorkspace writes a server-mode metadata.json with an empty
+// dolt_database, the local project_id the caller names, and the server
+// endpoint at the refusing listener. It returns the workspace dir, its
+// .beads dir, and metadata.json's current bytes.
+func newFallbackFixWorkspace(t *testing.T, port int, projectID string) (string, string, []byte) {
+	t.Helper()
+	dir := setupTestWorkspace(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	cfg := &configfile.Config{
+		Backend:        configfile.BackendDolt,
+		Database:       "dolt",
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: port,
+		ProjectID:      projectID,
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+	before, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	if err != nil {
+		t.Fatalf("read metadata.json: %v", err)
+	}
+	return dir, beadsDir, before
+}
+
+// assertMetadataUnchanged fails the test when metadata.json's bytes changed.
+func assertMetadataUnchanged(t *testing.T, beadsDir string, before []byte) {
+	t.Helper()
+	after, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	if err != nil {
+		t.Fatalf("re-read metadata.json: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("metadata.json changed:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+// TestFixMissingDoltDatabase_SharedServerDeclinesUnanchoredCandidate pins
+// GH#5576: in shared-server mode, with no local project_id and no
+// dolt_database, FixMissingDoltDatabase's schema-only fallback must not adopt
+// a sole schema-matching candidate — the exact auto-adoption
+// reconcileAuthoritativeServerMetadata refuses as able to redirect this
+// workspace to another project's data. It declines with a skip that names the
+// candidates and the manual database-setting command, and metadata.json
+// stays byte-for-byte unchanged. Pre-fix, the raw probe dialed the server and
+// adopted the first schema-matching database; the refusing listener makes
+// that path fail as a connection skip without the policy diagnostic.
+func TestFixMissingDoltDatabase_SharedServerDeclinesUnanchoredCandidate(t *testing.T) {
+	isolateDoltEnvForFallbackTest(t)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	port := newRefusingDoltListener(t)
+	dir, beadsDir, before := newFallbackFixWorkspace(t, port, "")
+
+	calls := stubServerMetadataCatalog(t, []serverDatabaseMetadata{
+		{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+		{Name: "foreign_db", HasSchema: true, ProjectID: "other-project"},
+	})
+
+	err := FixMissingDoltDatabase(dir)
+
+	if err == nil {
+		t.Fatal("FixMissingDoltDatabase returned nil, want a skip refusing to adopt the sole candidate")
+	}
+	var skip *SkipError
+	if !errors.As(err, &skip) {
+		t.Fatalf("FixMissingDoltDatabase error = %v, want a *fix.SkipError", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "foreign_db") {
+		t.Errorf("skip does not name the candidate:\n%s", msg)
+	}
+	if !strings.Contains(msg, "bd dolt set database <name>") {
+		t.Errorf("skip does not give the manual remedy:\n%s", msg)
+	}
+	assertMetadataUnchanged(t, beadsDir, before)
+	if *calls != 2 {
+		t.Fatalf("catalog read %d times, want 2 (reconcile + fallback)", *calls)
 	}
 }
 

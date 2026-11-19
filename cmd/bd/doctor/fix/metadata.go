@@ -191,8 +191,12 @@ func FixProjectIdentity(path string) error {
 // FixMissingDoltDatabase detects and repairs missing dolt_database in metadata.json.
 // Pre-#2142 migrations created databases without writing dolt_database to config,
 // so after upgrading, bd falls back to default "beads" (empty) instead of the real
-// database. This fix probes the server for a database with beads tables and backfills
-// the config. (GH#2160)
+// database (GH#2160). The authoritative reconcile runs first; when it makes no
+// change, a fallback selects from the same identity-aware server catalog, adopting
+// another database only when the selection is unambiguous (GH#5576): an exact
+// project_id match, or a sole candidate without an identity on a non-shared
+// server. Unsafe or ambiguous selections are skipped with the candidates and the
+// manual remedy, never silently taken by enumeration order.
 func FixMissingDoltDatabase(path string) error {
 	beadsDir, err := resolvedWorkspaceBeadsDir(path)
 	if err != nil {
@@ -219,78 +223,167 @@ func FixMissingDoltDatabase(path string) error {
 		return nil
 	}
 
-	// Connect to the server and probe for the correct database. No
-	// verifyFixTargetIdentity guard here: cfg.DoltDatabase is empty at this
-	// point (that's the condition that got us here), so there is no target
-	// database identity to verify yet — this call establishes it by probing
-	// schema across the server, it does not delete or mutate anything.
-	db, _, err := openDoltDB(beadsDir)
+	// GH#5576: select from the same identity-aware server catalog the
+	// authoritative reconcile reads, never a raw first-match probe. The
+	// reconcile above already declined to auto-adopt in exactly the risky
+	// cases (shared-server mode without a project_id anchor, conflicting or
+	// ambiguous identity); this fallback must not undo those refusals by
+	// adopting whatever database enumerates first. A catalog read failure
+	// here is a skip, not an error: the reconcile's own probe failures
+	// still propagate above.
+	databases, err := listServerMetadataDatabases(beadsDir, cfg)
 	if err != nil {
 		return skipFix(err)
 	}
-	defer db.Close()
-
-	correctDB := probeForCorrectDoltDatabase(db, configfile.DefaultDoltDatabase)
-	if correctDB == "" {
-		return nil // No alternate database found
+	selected, err := selectFallbackDoltDatabase(cfg.ProjectID, cfg.GetDoltDatabase(), doltserver.IsSharedServerMode(), databases)
+	if err != nil {
+		return err
+	}
+	if selected == nil {
+		return nil // Nothing safe to adopt
 	}
 
-	// Backfill dolt_database in metadata.json
-	cfg.DoltDatabase = correctDB
+	// Backfill dolt_database in metadata.json. A known local project_id is
+	// preserved; an absent one is backfilled from the selected candidate's
+	// identity, as the authoritative sole-candidate adoption does.
+	cfg.DoltDatabase = selected.Name
+	if cfg.ProjectID == "" && selected.ProjectID != "" {
+		cfg.ProjectID = selected.ProjectID
+		if err := cfg.Save(beadsDir); err != nil {
+			return fmt.Errorf("failed to save metadata.json: %w", err)
+		}
+		fmt.Printf("  Fixed dolt_database: set to %q in metadata.json (was using default %q); backfilled project_id %s\n",
+			selected.Name, configfile.DefaultDoltDatabase, remedy.PrintedValue(selected.ProjectID))
+		return nil
+	}
 	if err := cfg.Save(beadsDir); err != nil {
 		return fmt.Errorf("failed to save metadata.json: %w", err)
 	}
 
 	fmt.Printf("  Fixed dolt_database: set to %q in metadata.json (was using default %q)\n",
-		correctDB, configfile.DefaultDoltDatabase)
+		selected.Name, configfile.DefaultDoltDatabase)
 	return nil
 }
 
-// probeForCorrectDoltDatabase checks if another database on the server has the
-// expected beads tables (issues, dependencies, config). Returns the database name
-// if found, empty string otherwise.
-func probeForCorrectDoltDatabase(db *sql.DB, skipDB string) string {
-	ctx := context.Background()
-	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
-	if err != nil {
-		return ""
-	}
-	defer rows.Close()
+// fallbackManualRemedy is the manual remedy every fallback selection skip
+// names. <name> stays a literal placeholder: no server-supplied value is ever
+// spliced into a shell instruction.
+const fallbackManualRemedy = "set the correct database with `bd dolt set database <name>`"
 
-	skip := map[string]bool{
-		"information_schema": true,
-		"mysql":              true,
-		skipDB:               true,
+// fallbackDatabaseEligible reports whether db may be adopted by the
+// FixMissingDoltDatabase fallback. Eligible databases have Beads schema and
+// are not system databases, test fixtures (the testdb_/doctest_/doctortest_
+// prefixes), or the global issue database. The literal "beads" name is not
+// excluded: the effective current database name is a separate input to the
+// selector, and a workspace's real database can legitimately be named beads.
+func fallbackDatabaseEligible(db serverDatabaseMetadata) bool {
+	if !db.HasSchema {
+		return false
+	}
+	if db.Name == "information_schema" || db.Name == "mysql" {
+		return false
+	}
+	if db.ProjectID == doltserver.GlobalProjectID {
+		return false
+	}
+	if strings.HasPrefix(db.Name, "testdb_") || strings.HasPrefix(db.Name, "doctest_") ||
+		strings.HasPrefix(db.Name, "doctortest_") {
+		return false
+	}
+	return true
+}
+
+// selectFallbackDoltDatabase selects the server database FixMissingDoltDatabase's
+// schema-only fallback may adopt (GH#5576), from the same identity-aware catalog
+// the authoritative reconcile reads. It is pure: the caller passes the local
+// project_id, the effective current database (configfile GetDoltDatabase, which
+// honors the environment), and the shared-server mode it runs in. A returned
+// database is a catalog copy; nil/nil means no applicable repair.
+//
+// Eligible alternatives are those fallbackDatabaseEligible admits; the effective
+// current database is kept aside for the safety checks regardless of
+// eligibility. The rules, in order:
+//
+//  1. local project_id set, multiple eligible databases carry it: hard error
+//     (the reconcile's ambiguous-match refusal).
+//  2. local project_id set, exactly one eligible database carries it: select
+//     it, unless a different current database with schema asserts a
+//     conflicting project_id — the reconcile's conflict refusal. This also
+//     covers a mode-gated reconcile that did not run.
+//  3. no eligible alternatives: no rewrite.
+//  4. no local project_id, shared-server mode: skip, sole candidate or
+//     several: without an anchor, adoption can redirect this workspace to
+//     another project's data. In non-shared mode nothing is selected here
+//     yet: the identity-free recovery policies land with their own ACs.
+//
+// Every skip says why selection is unsafe, lists the eligible alternatives in
+// sorted order, and names the manual remedy. Server-supplied names and IDs are
+// rendered with remedy.PrintedValue/PrintedList so they cannot redraw the
+// diagnostic.
+func selectFallbackDoltDatabase(localProjectID, currentDatabase string, sharedServerMode bool, databases []serverDatabaseMetadata) (*serverDatabaseMetadata, error) {
+	var eligible []serverDatabaseMetadata
+	var current serverDatabaseMetadata
+	hasCurrent := false
+	for _, db := range databases {
+		if db.Name == currentDatabase {
+			current = db
+			hasCurrent = true
+		}
+		if fallbackDatabaseEligible(db) {
+			eligible = append(eligible, db)
+		}
 	}
 
-	var candidates []string
-	for rows.Next() {
-		var dbName string
-		if err := rows.Scan(&dbName); err != nil {
-			continue
+	eligibleNames := make([]string, 0, len(eligible))
+	for _, db := range eligible {
+		eligibleNames = append(eligibleNames, db.Name)
+	}
+	sort.Strings(eligibleNames)
+
+	if localProjectID != "" {
+		var matches []serverDatabaseMetadata
+		for _, db := range eligible {
+			if db.ProjectID == localProjectID {
+				matches = append(matches, db)
+			}
 		}
-		if skip[dbName] {
-			continue
+		if len(matches) > 1 {
+			return nil, fmt.Errorf(
+				"multiple server databases match project_id %s: %s",
+				remedy.PrintedValue(localProjectID),
+				remedy.PrintedList(eligibleNames, ", "))
 		}
-		// Skip known test databases
-		if strings.HasPrefix(dbName, "testdb_") || strings.HasPrefix(dbName, "doctest_") ||
-			strings.HasPrefix(dbName, "doctortest_") {
-			continue
+		if len(matches) == 1 {
+			selected := matches[0]
+			// Safety guard, the reconcile's: when a different current database
+			// has its own project_id that disagrees with the local one the
+			// match carries, the identity signals conflict, and auto-switching
+			// can silently attach this workspace to another project.
+			if hasCurrent && current.Name != selected.Name && current.HasSchema &&
+				current.ProjectID != "" && current.ProjectID != localProjectID {
+				return nil, fmt.Errorf(
+					"conflicting project identity: metadata.json project_id %s matches database %s, but configured database %s reports project_id %s",
+					remedy.PrintedValue(localProjectID),
+					remedy.PrintedValue(selected.Name),
+					remedy.PrintedValue(current.Name),
+					remedy.PrintedValue(current.ProjectID))
+			}
+			return &selected, nil
 		}
-		candidates = append(candidates, dbName)
 	}
 
-	for _, dbName := range candidates {
-		var count int
-		//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
-		err := db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT COUNT(*) FROM %s.issues LIMIT 1", doltutil.QuoteIdentifierUnvalidated(dbName))).Scan(&count)
-		if err == nil {
-			return dbName
-		}
+	if len(eligible) == 0 {
+		return nil, nil
 	}
 
-	return ""
+	if sharedServerMode {
+		return nil, skipFix(fmt.Errorf(
+			"shared Dolt server and no local project_id to anchor selection (candidates: %s); adopting one can redirect this workspace to another project's data; %s",
+			remedy.PrintedList(eligibleNames, ", "),
+			fallbackManualRemedy))
+	}
+
+	return nil, nil
 }
 
 // ResolveAuthoritativeServerMetadata reconciles local metadata.json against the
@@ -456,7 +549,17 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 	}
 	defer db.Close()
 
-	ctx := context.Background()
+	return readServerMetadataDatabases(context.Background(), db)
+}
+
+// readServerMetadataDatabases reads the catalog of the server at db: every
+// non-system database, whether it has Beads schema (an issues table), and the
+// project_id in its metadata table. The endpoint checks and connection
+// ownership stay with inspectServerMetadataDatabases; this is the SQL body,
+// so its actual queries stay testable with sqlmock. A database the beads user
+// cannot read is cataloged without schema or identity (isExpectedProbeError),
+// never an error: shared sql-servers often host unrelated databases (GH#4931).
+func readServerMetadataDatabases(ctx context.Context, db *sql.DB) ([]serverDatabaseMetadata, error) {
 	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
 	if err != nil {
 		return nil, err
