@@ -315,6 +315,14 @@ linters:
           pkg: '^os$'
           # Keep the prefix in sync with the list/graph text exclusion below.
           msg: "do not write list/graph output through process stdout: route format output through the command writer; mark an intentional non-format path locally"
+        - pattern: '^os\.UserConfigDir$'
+          pkg: '^os$'
+          # GH#8113: a direct stdlib call resolves ~/Library/Application
+          # Support on macOS, which bd must never read on a launch path.
+          # The only legitimate caller is the platform seam in
+          # internal/config/user_config_dir.go, which the first forbidigo
+          # path-except already keeps out of scope.
+          msg: "route the user config dir through config.UserConfigDir (GH#8113): a direct stdlib call reads ~/Library/Application Support on macOS; only the seam in internal/config/user_config_dir.go may name the stdlib resolver"
     errcheck:
       exclude-functions:
         - (*database/sql.DB).Close

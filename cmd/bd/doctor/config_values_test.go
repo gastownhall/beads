@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 func TestConfigValidationStoreOptionsAreStrictReadOnly(t *testing.T) {
@@ -668,4 +670,52 @@ repos:
 			t.Errorf("expected ok status, got %s: %s", check.Status, check.Detail)
 		}
 	})
+}
+
+// TestFindConfigPathDarwinNeverReadsApplicationSupport pins the GH#8113
+// contract for the doctor config lookup: with the platform seam simulating
+// macOS, a config.yaml planted in the historical
+// ~/Library/Application Support/bd/ location is never resolved, and the
+// documented ~/.config/bd/ tier still is.
+func TestFindConfigPathDarwinNeverReadsApplicationSupport(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	// Keep the workspace tier from resolving to a store the test environment
+	// may point at; no config.yaml exists under it.
+	t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), "isolated-beads"))
+
+	nativeDir := filepath.Join(home, "Library", "Application Support")
+	if err := os.MkdirAll(filepath.Join(nativeDir, "bd"), 0o755); err != nil {
+		t.Fatalf("mkdir application support stand-in: %v", err)
+	}
+	legacy := filepath.Join(nativeDir, "bd", "config.yaml")
+	if err := os.WriteFile(legacy, []byte("metrics:\n  disabled: true\n"), 0o600); err != nil {
+		t.Fatalf("plant legacy config.yaml: %v", err)
+	}
+
+	restore := config.SetUserConfigPlatformForTest("darwin", func() (string, error) {
+		return nativeDir, nil
+	})
+	t.Cleanup(restore)
+
+	// The workspace has no .beads/config.yaml and $HOME has no
+	// ~/.beads/config.yaml, so only the user config tier can match — and it
+	// must not be the Application Support one.
+	repoPath := t.TempDir()
+	if got := findConfigPath(repoPath); got != "" {
+		t.Errorf("findConfigPath() = %q, want \"\"; doctor must not read ~/Library/Application Support on macOS (GH#8113)", got)
+	}
+
+	// The documented tier is still found on the same simulated host.
+	documented := filepath.Join(home, ".config", "bd", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(documented), 0o755); err != nil {
+		t.Fatalf("mkdir documented tier: %v", err)
+	}
+	if err := os.WriteFile(documented, []byte("metrics:\n  disabled: false\n"), 0o600); err != nil {
+		t.Fatalf("plant documented config.yaml: %v", err)
+	}
+	if got := findConfigPath(repoPath); got != documented {
+		t.Errorf("findConfigPath() = %q, want the documented tier %q", got, documented)
+	}
 }
