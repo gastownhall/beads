@@ -89,6 +89,32 @@ func readDoltProcessPIDs() ([]int, error) {
 	return pids, nil
 }
 
+// readDoltProcessRows is readDoltProcessPIDs with each process's command
+// line, one "<pid><TAB><command line>" row per process.
+func readDoltProcessRows() ([]doltProcessRow, error) {
+	script := `Get-CimInstance Win32_Process -Filter "Name='dolt.exe'" | ` +
+		`Where-Object { $_.CommandLine -match 'sql-server' } | ` +
+		`ForEach-Object { "$($_.ProcessId)` + "`t" + `$($_.CommandLine)" }`
+	out, err := exec.Command("powershell.exe", "-NoProfile", "-Command", script).Output()
+	if err != nil {
+		return nil, fmt.Errorf("listing processes: %w", err)
+	}
+	var rows []doltProcessRow
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		pidText, command, _ := strings.Cut(strings.TrimSpace(line), "\t")
+		pid, err := strconv.Atoi(strings.TrimSpace(pidText))
+		if err != nil || pid <= 0 {
+			continue
+		}
+		rows = append(rows, doltProcessRow{PID: pid, Command: strings.TrimSpace(command)})
+	}
+	return rows, nil
+}
+
+// processCwd returns "" on Windows, which exposes no process working
+// directory (see isProcessInDir), so discovery uses the command line only.
+func processCwd(pid int) string { return "" }
+
 // isProcessInDir returns false on Windows. Windows doesn't expose process CWD
 // through standard APIs. The consequence: reclaimPort will kill any untracked
 // dolt server on the canonical port rather than adopting it. This is conservative

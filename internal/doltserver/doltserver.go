@@ -1564,8 +1564,11 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		return 0, false, err
 	}
 	clearIdleWatchRecords(serverDir)
-	if timeout := ResolveIdleTimeout(beadsDir); idleWatchEligible(preCfg, mode, IsSharedServerMode(), timeout) {
+	timeout := ResolveIdleTimeout(beadsDir)
+	if reason := idleOffReason(preCfg, mode, IsSharedServerMode(), timeout); reason == "" {
 		launchIdleWatcherLocked(serverDir, s, preCfg.Host, timeout)
+	} else {
+		recordIdleOff(serverDir, reason)
 	}
 	return s.Port, true, nil
 }
@@ -1881,6 +1884,7 @@ func Start(beadsDir string) (*State, error) {
 		// An explicitly started server is never stopped for idleness: cancel
 		// the watcher of an auto-started server this start adopted.
 		clearIdleWatchRecords(beadsDir)
+		recordIdleOff(beadsDir, IdleOffExplicitStart)
 	}
 	return state, err
 }
@@ -2391,6 +2395,7 @@ func Restart(beadsDir string) (*State, error) {
 		return nil, restartErr
 	}
 	clearIdleWatchRecords(beadsDir)
+	recordIdleOff(beadsDir, IdleOffExplicitRestart)
 	return state, nil
 }
 

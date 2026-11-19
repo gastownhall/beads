@@ -42,6 +42,7 @@ import (
 //
 //	watcher.pid        the watcher process: "<pid>\n<window>\n"
 //	reaping            a watcher is stopping the server right now
+//	idle-off           why the running server has no watcher (for status)
 //	client-<pid>-<id>  a client lease: a bd store is open on this server
 
 const (
@@ -55,6 +56,7 @@ const (
 	activityDirName    = "dolt-server.activity"
 	watcherPIDFileName = "watcher.pid"
 	reapingMarkerName  = "reaping"
+	idleOffFileName    = "idle-off"
 	clientLeasePrefix  = "client-"
 
 	// idleWatchLivenessEvery bounds how long a watcher outlives its server
@@ -70,6 +72,9 @@ func watcherPIDPath(serverDir string) string {
 }
 func reapingMarkerPath(serverDir string) string {
 	return filepath.Join(activityDir(serverDir), reapingMarkerName)
+}
+func idleOffPath(serverDir string) string {
+	return filepath.Join(activityDir(serverDir), idleOffFileName)
 }
 
 // ensureActivityDir creates serverDir's activity directory. It never creates
@@ -149,21 +154,28 @@ func parseIdleTimeout(raw string) (time.Duration, error) {
 	return d, nil
 }
 
-// idleWatchEligible reports whether an auto-start of serverDir's server, with
-// the pre-start config cfg, launches an idle watcher. Only a server bd fully
-// owns qualifies: an owned (not external, not shared) server on a port bd
-// chose, with no remotesapi listener another machine may be using.
-func idleWatchEligible(cfg *Config, mode ServerMode, sharedMode bool, timeout time.Duration) bool {
-	if timeout <= 0 || IdleWatchSpawner == nil {
-		return false
+// idleOffReason says why an auto-start of serverDir's server, with the
+// pre-start config cfg, launches no idle watcher, or returns "" when it
+// launches one. Only a server bd fully owns qualifies: an owned (not
+// external, not shared) server on a port bd chose, with no remotesapi
+// listener another machine may be using.
+func idleOffReason(cfg *Config, mode ServerMode, sharedMode bool, timeout time.Duration) string {
+	if timeout <= 0 {
+		return idleOffTimeoutZero
+	}
+	if IdleWatchSpawner == nil {
+		return idleOffNoSpawner
 	}
 	if mode != ServerModeOwned || sharedMode || cfg == nil || cfg.PortSharedServer {
-		return false
+		return idleOffNotBdOnly
 	}
 	if cfg.Port > 0 && cfg.PortSource != PortSourcePortFile {
-		return false
+		return idleOffNotBdOnly
 	}
-	return cfg.RemotesAPIPort <= 0
+	if cfg.RemotesAPIPort > 0 {
+		return idleOffNotBdOnly
+	}
+	return ""
 }
 
 // launchIdleWatcherLocked launches the watcher for a server EnsureRunning just
@@ -194,11 +206,81 @@ func launchIdleWatcherLocked(serverDir string, state *State, host string, timeou
 // clearIdleWatchRecords removes the per-server watcher records. Leases are
 // left alone: they belong to open stores, not to a server.
 func clearIdleWatchRecords(serverDir string) {
-	for _, p := range []string{watcherPIDPath(serverDir), reapingMarkerPath(serverDir)} {
+	for _, p := range []string{watcherPIDPath(serverDir), reapingMarkerPath(serverDir), idleOffPath(serverDir)} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			debug.Logf("idle watch: removing %s: %v", p, err)
 		}
 	}
+}
+
+// Reasons recordIdleOff stores for a running server with no idle watcher.
+const (
+	IdleOffExplicitStart   = "started with bd dolt start"
+	IdleOffExplicitRestart = "started with bd dolt restart"
+	idleOffTimeoutZero     = "dolt.idle-timeout is 0"
+	idleOffNoSpawner       = "started by a program that runs no idle watcher"
+	idleOffNotBdOnly       = "shared server, pinned port or remotesapi listener"
+)
+
+// recordIdleOff notes, for bd dolt status, why serverDir's running server
+// has no idle watcher. Best effort: a missing note only makes status less
+// specific.
+func recordIdleOff(serverDir, reason string) {
+	if err := ensureActivityDir(serverDir); err != nil {
+		debug.Logf("idle watch: %v", err)
+		return
+	}
+	if err := os.WriteFile(idleOffPath(serverDir), []byte(reason+"\n"), 0o600); err != nil {
+		debug.Logf("idle watch: recording idle-off reason: %v", err)
+	}
+}
+
+// IdleStopState is a running bd-owned server's idle-stop setting as
+// bd dolt status reports it.
+type IdleStopState struct {
+	// On is true while an idle watcher is running for the server.
+	On bool
+	// Window is the idle window when On.
+	Window time.Duration
+	// Reason says why idle stop is off.
+	Reason string
+}
+
+func (s IdleStopState) String() string {
+	if s.On {
+		return "after " + FormatIdleWindow(s.Window)
+	}
+	return "off: " + s.Reason
+}
+
+// FormatIdleWindow prints an idle window without zero trailing units
+// ("30m", "2h", "1h30m").
+func FormatIdleWindow(d time.Duration) string {
+	out := d.String()
+	if strings.HasSuffix(out, "m0s") {
+		out = strings.TrimSuffix(out, "0s")
+	}
+	if strings.HasSuffix(out, "h0m") {
+		out = strings.TrimSuffix(out, "0m")
+	}
+	return out
+}
+
+// ReadIdleStopState reports the idle-stop setting of serverDir's running
+// server from its activity records.
+func ReadIdleStopState(serverDir string) IdleStopState {
+	if pid, window, ok := readWatcherRecord(serverDir); ok {
+		if isProcessAlive(pid) {
+			return IdleStopState{On: true, Window: window}
+		}
+		return IdleStopState{Reason: "watcher exited"}
+	}
+	if b, err := os.ReadFile(idleOffPath(serverDir)); err == nil { //nolint:gosec // G304: path under bd's own server dir
+		if reason := strings.TrimSpace(string(b)); reason != "" {
+			return IdleStopState{Reason: reason}
+		}
+	}
+	return IdleStopState{Reason: "no watcher (started by an older bd)"}
 }
 
 // readWatcherRecord parses watcher.pid. ok is false when it is missing or
