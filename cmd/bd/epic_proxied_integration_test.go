@@ -179,6 +179,63 @@ func TestProxiedServerEpic(t *testing.T) {
 		}
 	})
 
+	// GH#5720: every open epic is listed, including a childless epic and an
+	// epic whose only "child" is a dotted-ID issue with no parent-child edge.
+	pAll := newSharedProxiedProject(t, bd, "epa")
+	linked := bdProxiedCreate(t, bd, pAll.dir, "Epic with linked child", "--type", "epic")
+	bdProxiedCreate(t, bd, pAll.dir, "Linked child", "--type", "task", "--parent", linked.ID)
+	childless := bdProxiedCreate(t, bd, pAll.dir, "Childless epic", "--type", "epic")
+	dotted := bdProxiedCreate(t, bd, pAll.dir, "Epic with dotted issue only", "--type", "epic")
+	dottedIssue := bdProxiedCreate(t, bd, pAll.dir, "Unlinked dotted issue", "--type", "task", "--id", dotted.ID+".1")
+
+	epicStatusAll := func(t *testing.T, args ...string) map[string]*types.EpicStatus {
+		t.Helper()
+		out, err := bdProxiedRun(t, bd, pAll.dir, append([]string{"epic", "status", "--json"}, args...)...)
+		if err != nil {
+			t.Fatalf("epic status %v: %v\n%s", args, err, out)
+		}
+		var rows []*types.EpicStatus
+		if err := json.Unmarshal(out, &rows); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		return epicStatusByID(t, rows)
+	}
+	epicStatusAllHuman := func(t *testing.T, ids ...string) map[string]string {
+		t.Helper()
+		out, err := bdProxiedRun(t, bd, pAll.dir, "epic", "status")
+		if err != nil {
+			t.Fatalf("epic status: %v\n%s", err, out)
+		}
+		return epicStatusBlocks(t, string(out), ids...)
+	}
+
+	t.Run("status_lists_every_open_epic", func(t *testing.T) {
+		byID := epicStatusAll(t)
+		if len(byID) != 3 {
+			t.Errorf("epic status listed %v, want exactly the 3 open epics", epicRowIDs(byID))
+		}
+		assertEpicRow(t, byID, linked.ID, 1, 0, false)
+		assertEpicRow(t, byID, childless.ID, 0, 0, false)
+		assertEpicRow(t, byID, dotted.ID, 0, 0, false)
+
+		blocks := epicStatusAllHuman(t, linked.ID, childless.ID, dotted.ID)
+		if !strings.Contains(blocks[linked.ID], "Progress: 0/1 children closed (0%)") {
+			t.Errorf("linked epic block = %q, want 0/1 progress", blocks[linked.ID])
+		}
+		assertZeroChildEpicBlock(t, blocks, childless.ID)
+		assertZeroChildEpicBlock(t, blocks, dotted.ID)
+
+		// Closing the unlinked dotted issue changes nothing: it is not a
+		// child, so it is neither counted nor makes its epic eligible.
+		if out, err := bdProxiedRun(t, bd, pAll.dir, "close", dottedIssue.ID); err != nil {
+			t.Fatalf("close dotted issue: %v\n%s", err, out)
+		}
+		byID = epicStatusAll(t)
+		assertEpicRow(t, byID, dotted.ID, 0, 0, false)
+		assertEpicRow(t, byID, childless.ID, 0, 0, false)
+		assertZeroChildEpicBlock(t, epicStatusAllHuman(t, dotted.ID), dotted.ID)
+	})
+
 	t.Run("write_closes_with_reason", func(t *testing.T) {
 		p2 := newSharedProxiedProject(t, bd, "epr")
 		e2 := bdProxiedCreate(t, bd, p2.dir, "Reason epic", "--type", "epic")
