@@ -435,3 +435,62 @@ func TestCheckStaleLegacyHooks(t *testing.T) {
 		})
 	})
 }
+
+// TestNonShellHookInterpreter pins which hook files bd treats as run by a
+// non-shell interpreter, so it never splices its POSIX-sh section into them
+// (GH#6348). The first rows are adapted from cyb3rd0g01's table in PR #6625;
+// an `env` with no command is ambiguous here and so counts as non-shell.
+func TestNonShellHookInterpreter(t *testing.T) {
+	cases := []struct {
+		name         string
+		content      string
+		wantInterp   string
+		wantNonShell bool
+	}{
+		{"python3 via env", "#!/usr/bin/env python3\nimport sys\n", "python3", true},
+		{"python direct path", "#!/usr/bin/python3\nimport sys\n", "python3", true},
+		{"node via env", "#!/usr/bin/env node\nconsole.log('hi')\n", "node", true},
+		{"ruby via env", "#!/usr/bin/env ruby\nputs 'hi'\n", "ruby", true},
+		{"sh via env is fine", "#!/usr/bin/env sh\necho hi\n", "", false},
+		{"bash direct path is fine", "#!/bin/bash\necho hi\n", "", false},
+		{"zsh is fine", "#!/usr/bin/env zsh\necho hi\n", "", false},
+		{"no shebang at all", "echo hi\n", "", false},
+		{"empty file", "", "", false},
+		{"env with no interpreter argument", "#!/usr/bin/env\n", "/usr/bin/env", true},
+
+		{"fish", "#!/usr/bin/env fish\nexit 0\n", "fish", true},
+		{"perl with flags", "#!/usr/bin/perl -w\n", "perl", true},
+		{"dash", "#!/bin/dash\n", "", false},
+		{"ksh93", "#!/usr/bin/ksh93\n", "", false},
+		{"space after bang", "#! /bin/sh\n", "", false},
+		{"crlf sh", "#!/bin/sh\r\necho hi\r\n", "", false},
+		{"crlf python", "#!/usr/bin/env python3\r\nimport sys\r\n", "python3", true},
+		{"env -S bash -e", "#!/usr/bin/env -S bash -e\n", "", false},
+		{"env -Sbash", "#!/usr/bin/env -Sbash -e\n", "", false},
+		{"env -S python3 -u", "#!/usr/bin/env -S python3 -u\n", "python3", true},
+		{"env assignment then sh", "#!/usr/bin/env LC_ALL=C sh\n", "", false},
+		{"env -i assignment python", "#!/usr/bin/env -i PATH=/usr/bin python3\n", "python3", true},
+		{"env -u NAME bash", "#!/usr/bin/env -u FOO bash\n", "", false},
+		{"env -- sh", "#!/usr/bin/env -- sh\n", "", false},
+		{"env unknown option", "#!/usr/bin/env --chdir=/tmp sh\n", "/usr/bin/env --chdir=/tmp sh", true},
+		{"busybox sh", "#!/bin/busybox sh\n", "", false},
+		{"busybox ash", "#!/bin/busybox ash\n", "", false},
+		{"busybox without applet", "#!/bin/busybox\n", "/bin/busybox", true},
+		{"windows bash.exe", "#!C:\\Git\\bin\\bash.exe\n", "", false},
+		{"windows python.exe", "#!C:/Python311/python.exe\n", "python", true},
+		{"empty shebang", "#!\necho hi\n", "empty shebang", true},
+		{"binary content", "\x7fELF\x02\x01\x01\x00", "binary content", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			interp, nonShell := NonShellHookInterpreter(tc.content)
+			if nonShell != tc.wantNonShell {
+				t.Fatalf("nonShell = %v, want %v (interp=%q)", nonShell, tc.wantNonShell, interp)
+			}
+			if interp != tc.wantInterp {
+				t.Fatalf("interp = %q, want %q", interp, tc.wantInterp)
+			}
+		})
+	}
+}
