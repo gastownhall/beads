@@ -30,8 +30,9 @@ import (
 // touched kept a server (about 2 GB in the report) until reboot. Each
 // auto-start now launches a small watcher process beside its server. Once
 // the server has had no new or open SQL connection and no open bd store for
-// the idle window, the watcher stops it through the `bd dolt stop` path, and
-// the next bd command auto-starts it as before.
+// the idle window, the watcher stops it the way `bd dolt stop` does, minus
+// that command's working-set flush (stopIdleLocked), and the next bd command
+// auto-starts it as before.
 //
 // A server started explicitly (`bd dolt start`, `bd dolt restart`) gets no
 // watcher, and Start cancels the watcher of an auto-started server it adopts,
@@ -292,6 +293,13 @@ func ReadIdleStopState(serverDir string) IdleStopState {
 	return IdleStopState{Reason: "no watcher (started by an older bd)"}
 }
 
+// IdleWatchRunning reports whether an idle watcher is watching serverDir's
+// server: watcher.pid names a live process.
+func IdleWatchRunning(serverDir string) bool {
+	pid, _, ok := readWatcherRecord(serverDir)
+	return ok && isProcessAlive(pid)
+}
+
 // readWatcherRecord parses watcher.pid. ok is false when it is missing or
 // unreadable.
 func readWatcherRecord(serverDir string) (pid int, timeout time.Duration, ok bool) {
@@ -325,8 +333,11 @@ func readPIDFile(serverDir string) int {
 
 // AcquireClientLease records that this process has a bd store open on
 // serverDir's server, so its idle watcher does not stop the server while the
-// store holds no SQL connection. release removes the lease; a lease whose
-// process died is removed by the watcher.
+// store holds no SQL connection. release removes the lease. A process that
+// dies with its store open, as a failing or killed bd command does (it never
+// runs Close), leaves its lease behind: the next AcquireClientLease on
+// serverDir removes it, and so does the watcher, so the leases stay bounded
+// by live processes also where no watcher runs.
 //
 // The lease is written before the reaping marker is read, and a reaping
 // watcher writes the marker before it re-reads leases, so one side always
@@ -337,6 +348,7 @@ func AcquireClientLease(serverDir string) (release func(), err error) {
 	if err := ensureActivityDir(serverDir); err != nil {
 		return nil, err
 	}
+	liveClientLeases(serverDir, isProcessAlive) // prunes dead processes' leases
 	var nonce [6]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, err
@@ -522,7 +534,7 @@ func newIdleWatcher(opts IdleWatchOpts) *idleWatcher {
 		sleep:         sleepCtx,
 		readStatus:    readServerStatus,
 		alive:         isProcessAlive,
-		stop:          stopLocked,
+		stop:          stopIdleLocked,
 		livenessEvery: liveness,
 		pollEvery:     poll,
 	}

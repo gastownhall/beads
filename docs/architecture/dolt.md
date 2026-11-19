@@ -398,15 +398,22 @@ When a bd command needs the server and none is running, bd starts one in the
 background (auto-start). That server is stopped again once it has been idle
 for 30 minutes: bd launches a small watcher process beside each server it
 auto-starts, and the watcher stops the server the way `bd dolt stop` does
-(working set flushed, `dolt-server.pid` and `dolt-server.port` removed). The
-next bd command starts it again, so idle stop costs only that start.
+(`dolt-server.pid` and `dolt-server.port` removed). Unlike `bd dolt stop`, it
+does not commit the working set first: with `dolt.auto-commit: batch` or
+`off`, pending changes stay uncommitted across the stop, and `bd dolt commit`
+still records them. The next bd command starts the server again, so idle stop
+costs only that start. A `--readonly` command never starts a server, so after
+an idle stop it fails until another bd command or `bd dolt start` starts one.
 
 The server counts as idle only while it has accepted no new SQL connection,
 holds no open one apart from the watcher's own check, and no running bd
-process has the workspace's store open (each open store leaves a lease file
-for the watcher; a lease whose process has died does not count). When it is
-stopped,
-`dolt-server.log` gets a line saying so. The watcher's own files live in
+process has the workspace's store open. Each open store leaves a lease file
+for the watcher, whether or not it may start a server; a `--readonly` store,
+which writes no file, holds a connection to the server open instead. A lease
+whose process has died does not count and is removed. When the server is
+stopped, `dolt-server.log` gets a line saying so, and a `bd dolt stop` run
+afterwards reports `dolt server is not running` and exits 1, as it does for
+any server that is not running. The watcher's own files live in
 `.beads/dolt-server.activity/`.
 When the server stops some other way (`bd dolt stop`, a crash, a restart that
 replaces it), the watcher notices within 5 seconds and exits without acting.

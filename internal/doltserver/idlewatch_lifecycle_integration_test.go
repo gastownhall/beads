@@ -105,9 +105,10 @@ func waitForIdleReap(t *testing.T, beadsDir string, port int, timeout time.Durat
 
 // TestLifecycle_IdleWatchReapsIdleServer is GH#4282's acceptance on a real
 // server: an auto-started server with a short idle window and no client
-// activity stops itself through the `bd dolt stop` path (pid and port files
-// and watcher.pid removed, the dirty working set flushed to a commit), and
-// the next EnsureRunning auto-starts a fresh server with a new watcher.
+// activity stops itself the way `bd dolt stop` does (pid and port files and
+// watcher.pid removed) but leaves the dirty working set uncommitted, as a
+// dolt.auto-commit batch or off user left it for `bd dolt commit`, and the
+// next EnsureRunning auto-starts a fresh server with a new watcher.
 func TestLifecycle_IdleWatchReapsIdleServer(t *testing.T) {
 	beadsDir := setupLifecycleTestDir(t)
 	reg := integration.NewProcessRegistry(t)
@@ -154,7 +155,8 @@ func TestLifecycle_IdleWatchReapsIdleServer(t *testing.T) {
 	}
 
 	// The next open auto-starts a new server and a new watcher for it, and
-	// the dirty working set the reap flushed is a real commit.
+	// the dirty working set is there as it was left: uncommitted, with no
+	// commit of the reap's own.
 	port2, startedByUs, err := doltserver.EnsureRunningDetailed(beadsDir)
 	if err != nil {
 		t.Fatalf("EnsureRunningDetailed after reap: %v", err)
@@ -174,8 +176,15 @@ func TestLifecycle_IdleWatchReapsIdleServer(t *testing.T) {
 	if err := db2.QueryRow("SELECT COUNT(*) FROM dolt_log WHERE message = 'auto-flush: commit working set before server stop'").Scan(&flushes); err != nil {
 		t.Fatalf("querying dolt_log: %v", err)
 	}
-	if flushes < 1 {
-		t.Error("the idle reap did not flush the dirty working set to a commit")
+	if flushes != 0 {
+		t.Errorf("the idle reap committed the dirty working set (%d auto-flush commit(s)); it must leave it uncommitted", flushes)
+	}
+	var pending int
+	if err := db2.QueryRow("SELECT COUNT(*) FROM dolt_status WHERE table_name = 'idle_reap_probe'").Scan(&pending); err != nil {
+		t.Fatalf("querying dolt_status: %v", err)
+	}
+	if pending != 1 {
+		t.Errorf("idle_reap_probe has %d dolt_status row(s) after the reap, want 1: still uncommitted", pending)
 	}
 	var val string
 	if err := db2.QueryRow("SELECT val FROM idle_reap_probe WHERE id = 1").Scan(&val); err != nil {

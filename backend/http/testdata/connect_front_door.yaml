@@ -714,6 +714,9 @@ commands:
         exit: 1
         words: 'not using Dolt backend \(configured backend "http"\)'
         embedded_exit: 1
+  - command: bd dolt-idle-watch
+    class: local-only
+    reason: 'internal: the idle watcher bd spawns beside a dolt sql-server it auto-started; never run by hand'
   - command: bd duplicate
     cases:
       - id: duplicate

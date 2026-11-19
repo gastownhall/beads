@@ -150,6 +150,9 @@ func TestIdleWatch_ReapsIdleAutoStartedServer(t *testing.T) {
 	if _, err := os.Stat(watcherPIDPath(beadsDir)); err != nil {
 		t.Fatalf("watcher.pid not recorded: %v", err)
 	}
+	if !IdleWatchRunning(beadsDir) {
+		t.Error("IdleWatchRunning = false for a server whose watcher is recorded and alive")
+	}
 
 	clock := newFakeClock()
 	var conns int64
@@ -157,6 +160,9 @@ func TestIdleWatch_ReapsIdleAutoStartedServer(t *testing.T) {
 	outcome, err := testIdleWatcher(opts, clock, quietStatus(&conns)).run(context.Background())
 	if err != nil || outcome != IdleWatchReaped {
 		t.Fatalf("run = (%s, %v), want reaped", outcome, err)
+	}
+	if IdleWatchRunning(beadsDir) {
+		t.Error("IdleWatchRunning = true after the reap removed watcher.pid")
 	}
 	if isProcessAlive(state.PID) {
 		t.Errorf("server PID %d still running after the reap", state.PID)
@@ -316,6 +322,42 @@ func TestAcquireClientLease_WaitsForInFlightReap(t *testing.T) {
 	r.release()
 	if liveClientLeases(serverDir, isProcessAlive) {
 		t.Error("lease kept after release")
+	}
+}
+
+// TestAcquireClientLease_PrunesDeadLeases: a bd command that fails or is
+// killed never closes its store, so its lease outlives it. With no watcher
+// running to prune it (a server bd dolt start started, a pinned port,
+// dolt.idle-timeout 0), the next lease taken on the server dir removes it,
+// and keeps the lease of a process that is still alive.
+func TestAcquireClientLease_PrunesDeadLeases(t *testing.T) {
+	serverDir := t.TempDir()
+	if err := ensureActivityDir(serverDir); err != nil {
+		t.Fatal(err)
+	}
+	// Above Linux's largest pid_max (1<<22), so no process has it.
+	const deadPID = 1<<22 + 4242
+	dead := filepath.Join(activityDir(serverDir), fmt.Sprintf("%s%d-0a0b0c", clientLeasePrefix, deadPID))
+	live := filepath.Join(activityDir(serverDir), fmt.Sprintf("%s%d-0d0e0f", clientLeasePrefix, os.Getpid()))
+	for _, p := range []string{dead, live} {
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if IdleWatchRunning(serverDir) {
+		t.Fatal("premise: no watcher runs for this server dir")
+	}
+
+	release, err := AcquireClientLease(serverDir)
+	if err != nil {
+		t.Fatalf("AcquireClientLease: %v", err)
+	}
+	defer release()
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Errorf("the dead process's lease was kept (stat err %v)", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("a live process's lease was removed: %v", err)
 	}
 }
 
