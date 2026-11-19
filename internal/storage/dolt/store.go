@@ -395,6 +395,12 @@ type DoltStore struct {
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
 
+	// idleLeaseRelease removes this store's idle-watch lease (GH#4282),
+	// taken in newServerMode for the life of the store so a watcher does not
+	// reap the local server while the store is open even though its pool
+	// holds no open SQL connection at a given moment. Close() releases it.
+	idleLeaseRelease func()
+
 	// createdDatabase reports whether this store's open created its database
 	// (serverConnFacts.created); see CreatedDatabase.
 	createdDatabase bool
@@ -2503,15 +2509,33 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Close the pool on any failure path below; cleared once ownership passes to the caller.
 	storeReady := false
+	var idleLeaseRelease func()
 	defer func() {
 		if !storeReady {
 			_ = db.Close()
+			if idleLeaseRelease != nil {
+				idleLeaseRelease()
+			}
 		}
 	}()
 
 	// Test connection
 	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("failed to ping Dolt database: %w", err)
+	}
+
+	// GH#4282: hold an idle-watch lease for the life of this store, so a
+	// watcher does not reap the local server while the store is open even
+	// though its pool holds no open SQL connection at a given moment. Only
+	// a local TCP server bd manages gets one (a shared server has no
+	// watcher; a socket or external server is not bd's to end). A lease
+	// error is logged and swallowed: a lease must never fail a command.
+	if cfg.ServerSocket == "" && !isExternalServerHost(cfg.ServerHost) && !doltserver.IsSharedServerMode() {
+		if release, leaseErr := doltserver.AcquireClientLease(serverDir); leaseErr != nil {
+			debug.Logf("idle watch lease: %v", leaseErr)
+		} else {
+			idleLeaseRelease = release
+		}
 	}
 
 	beadsDir := cfg.BeadsDir
@@ -2539,6 +2563,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		readOnly:               cfg.ReadOnly,
 		classifiedRead:         cfg.ClassifiedRead,
 		autoStartedServerDir:   autoStartedDir,
+		idleLeaseRelease:       idleLeaseRelease,
 		createdDatabase:        dbFacts.created,
 	}
 
@@ -3888,6 +3913,13 @@ func (s *DoltStore) Close() error {
 		}
 	}
 	s.db = nil
+
+	// GH#4282: release this store's idle-watch lease; with nothing else
+	// holding the workspace open, a watcher may now reap the server.
+	if s.idleLeaseRelease != nil {
+		s.idleLeaseRelease()
+		s.idleLeaseRelease = nil
+	}
 
 	// Stop auto-started server when the last store referencing it closes.
 	if s.autoStartedServerDir != "" {

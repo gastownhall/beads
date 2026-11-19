@@ -6,9 +6,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -235,4 +237,153 @@ func TestLifecycle_IdleWatchKeepsServerWithShortLivedClients(t *testing.T) {
 	_ = held.Close()
 	waitForIdleReap(t, beadsDir, port, 30*time.Second)
 	_ = doltserver.IgnoreNotRunning(doltserver.Stop(beadsDir))
+}
+
+// TestLifecycle_IdleWatchHonorsClientLease pins GH#4282's lease rule: a live
+// client lease in the activity directory keeps the idle server alive even
+// with no SQL connection anywhere, and releasing it lets the next window
+// reap the server.
+func TestLifecycle_IdleWatchHonorsClientLease(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	t.Setenv("BEADS_DOLT_IDLE_TIMEOUT", "4s")
+	port, _, pid := startIdleWatchedServerForTest(t, beadsDir)
+	if p, err := os.FindProcess(pid); err == nil {
+		reg.Register(p)
+	}
+	running := func() bool {
+		data, err := os.ReadFile(filepath.Join(beadsDir, doltserver.PIDFileName))
+		return err == nil && strings.TrimSpace(string(data)) == fmt.Sprint(pid)
+	}
+
+	// A store-like holder: a lease, no connection at all.
+	release, err := doltserver.AcquireClientLease(beadsDir)
+	if err != nil {
+		t.Fatalf("AcquireClientLease: %v", err)
+	}
+	defer release()
+
+	// Two-plus windows with the lease held: the server must stay.
+	time.Sleep(9 * time.Second)
+	if !running() {
+		t.Fatal("server was reaped while a live client lease held the workspace")
+	}
+
+	// Released: the same window that spared the lease reaps the server.
+	release()
+	waitForIdleReap(t, beadsDir, port, 30*time.Second)
+	_ = doltserver.IgnoreNotRunning(doltserver.Stop(beadsDir))
+}
+
+// TestLifecycle_IdleWatchPrunesDeadClientLease pins the crash half of the
+// lease rule: a lease whose owning process died no longer protects the
+// server — the watcher prunes it and reaps within the window.
+func TestLifecycle_IdleWatchPrunesDeadClientLease(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	t.Setenv("BEADS_DOLT_IDLE_TIMEOUT", "4s")
+	port, _, pid := startIdleWatchedServerForTest(t, beadsDir)
+	if p, err := os.FindProcess(pid); err == nil {
+		reg.Register(p)
+	}
+	running := func() bool {
+		data, err := os.ReadFile(filepath.Join(beadsDir, doltserver.PIDFileName))
+		return err == nil && strings.TrimSpace(string(data)) == fmt.Sprint(pid)
+	}
+
+	// A lease named for another process, the way a crashed bd store's lease
+	// would look to the watcher once the process is gone.
+	helper := exec.Command("sleep", "60")
+	if err := helper.Start(); err != nil {
+		t.Fatalf("starting lease-owning helper: %v", err)
+	}
+	defer func() { _ = helper.Process.Kill(); _ = helper.Wait() }()
+	leasePath := filepath.Join(beadsDir, doltserver.ActivityDirName,
+		fmt.Sprintf("client-%d-1234567890", helper.Process.Pid))
+	if err := os.WriteFile(leasePath, []byte(fmt.Sprint(helper.Process.Pid)), 0o600); err != nil {
+		t.Fatalf("writing helper lease: %v", err)
+	}
+
+	// The helper is alive, so its lease protects the server across windows.
+	time.Sleep(9 * time.Second)
+	if !running() {
+		t.Fatal("server was reaped while a live helper's lease protected it")
+	}
+
+	// The helper dies: the watcher prunes the dead lease and reaps.
+	if err := helper.Process.Kill(); err != nil {
+		t.Fatalf("killing lease-owning helper: %v", err)
+	}
+	_ = helper.Wait()
+	waitForIdleReap(t, beadsDir, port, 30*time.Second)
+	_ = doltserver.IgnoreNotRunning(doltserver.Stop(beadsDir))
+}
+
+// TestAcquireClientLeaseWaitsForInFlightReap pins the lease/reap
+// synchronization: with a reap in flight (marker present) and the lifecycle
+// lock held, a new lease waits for the reap to finish rather than writing a
+// lease the reaper will never see. A marker with no lock held — a watcher
+// that died mid-reap — must not wedge later opens.
+func TestAcquireClientLeaseWaitsForInFlightReap(t *testing.T) {
+	beadsDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(beadsDir, doltserver.ActivityDirName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// A stale marker from a crashed watcher, with the lock free: the lease
+	// is taken promptly (the marker alone does not wedge the open).
+	if err := os.WriteFile(filepath.Join(beadsDir, doltserver.ActivityDirName, "reaping"),
+		[]byte("0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, err := doltserver.AcquireClientLease(beadsDir)
+	if err != nil {
+		t.Fatalf("AcquireClientLease past a stale reaping marker: %v", err)
+	}
+	release()
+
+	// A reap in flight: the marker present and the lifecycle lock held. The
+	// lease must wait for the lock; once released it completes.
+	lockF, err := os.OpenFile(filepath.Join(beadsDir, "dolt-server.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("opening lifecycle lock file: %v", err)
+	}
+	defer lockF.Close()
+	if err := syscall.Flock(int(lockF.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("holding lifecycle lock: %v", err)
+	}
+	defer func() { _ = syscall.Flock(int(lockF.Fd()), syscall.LOCK_UN) }()
+
+	acquired := make(chan error, 1)
+	go func() {
+		rel, err := doltserver.AcquireClientLease(beadsDir)
+		if err != nil {
+			acquired <- err
+			return
+		}
+		rel()
+		acquired <- nil
+	}()
+	select {
+	case err := <-acquired:
+		t.Fatalf("AcquireClientLease completed while the reap held the lifecycle lock: %v", err)
+	case <-time.After(1500 * time.Millisecond):
+	}
+	if err := syscall.Flock(int(lockF.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("releasing lifecycle lock: %v", err)
+	}
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("AcquireClientLease after the reap released the lock: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("AcquireClientLease did not complete after the lifecycle lock was released")
+	}
 }
