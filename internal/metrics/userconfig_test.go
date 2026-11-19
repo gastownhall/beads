@@ -3,6 +3,7 @@ package metrics
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -205,6 +206,9 @@ func TestEnsureUserConfigDefaults_UnsafeRootsFailBeforeMutation(t *testing.T) {
 	t.Chdir(sentinel)
 	t.Setenv("HOME", "~")
 	t.Setenv("USERPROFILE", "~")
+	if runtime.GOOS != "windows" {
+		t.Setenv("home", "~")
+	}
 	t.Setenv("HOMEDRIVE", "")
 	t.Setenv("HOMEPATH", "")
 	t.Setenv("XDG_CONFIG_HOME", "relative-xdg")
@@ -217,6 +221,16 @@ func TestEnsureUserConfigDefaults_UnsafeRootsFailBeforeMutation(t *testing.T) {
 	if !strings.Contains(err.Error(), "resolve user config.yaml") ||
 		!strings.Contains(err.Error(), "not an absolute native path") {
 		t.Fatalf("EnsureUserConfigDefaults error = %v, want native path resolution context", err)
+	}
+	wantHomeLabel := "user home directory (HOME)"
+	switch runtime.GOOS {
+	case "windows":
+		wantHomeLabel = "user home directory (USERPROFILE)"
+	case "plan9":
+		wantHomeLabel = "user home directory (home)"
+	}
+	if !strings.Contains(err.Error(), wantHomeLabel) {
+		t.Errorf("EnsureUserConfigDefaults error %q does not contain home label %q", err, wantHomeLabel)
 	}
 
 	for _, relativeRoot := range []string{"~", "relative-xdg", "relative-appdata"} {
