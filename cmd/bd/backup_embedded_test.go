@@ -577,4 +577,49 @@ func TestEmbeddedAutoBackupDamagedDestination(t *testing.T) {
 	if !failed.LastSuccessAt.Equal(good.Timestamp) {
 		t.Errorf("last_success_at = %v, want the last good backup %v", failed.LastSuccessAt, good.Timestamp)
 	}
+
+	// The recovery status and the docs give: move the directory aside and
+	// let the next auto-backup write a fresh full backup at the same path.
+	if err := os.Rename(autoDir, autoDir+".broken"); err != nil {
+		t.Fatal(err)
+	}
+	idC, stderr := create("issue C", autoBackupOn)
+	if strings.Contains(stderr, "auto-backup failed") {
+		t.Fatalf("auto-backup after moving the damaged directory aside still fails:\n%s", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(autoDir, "manifest")); err != nil {
+		t.Fatalf("no fresh backup at %s after the move-aside: %v", autoDir, err)
+	}
+	recovered := readAutoBackupStatus(t, bd, dir)
+	if recovered.LastError != "" {
+		t.Errorf("last_error = %q after the recovery backup, want empty", recovered.LastError)
+	}
+	if !recovered.LastSuccessAt.After(good.Timestamp) {
+		t.Errorf("last_success_at = %v, want newer than the last good backup %v", recovered.LastSuccessAt, good.Timestamp)
+	}
+
+	// The fresh backup holds every issue, including B, created while
+	// backups were failing. D is created with auto-backup off, so a restore
+	// that really ran from the backup drops it.
+	want := []string{}
+	for _, issue := range bdListJSON(t, bd, dir) {
+		want = append(want, issue.ID)
+	}
+	if !slices.Contains(want, idC) || len(want) != 3 {
+		t.Fatalf("precondition: issues before the restore = %v, want A, B and %s", want, idC)
+	}
+	bdCreateSilent(t, bd, dir, "issue D, not in the backup")
+	stdout, stderr, code := runBDBackupEnv(t, bd, dir, nil, "backup", "restore", "--force", autoDir)
+	if code != 0 {
+		t.Fatalf("bd backup restore --force %s exited %d\nstdout:\n%s\nstderr:\n%s", autoDir, code, stdout, stderr)
+	}
+	var got []string
+	for _, issue := range bdListJSON(t, bd, dir) {
+		got = append(got, issue.ID)
+	}
+	sort.Strings(want)
+	sort.Strings(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("issues after restoring the recovered backup = %v, want %v", got, want)
+	}
 }
