@@ -74,7 +74,8 @@ After adding, run 'bd backup sync' to push your data.`,
 		}
 
 		// Resolve filesystem paths to absolute and add file:// prefix.
-		// DoltHub URLs are passed through as-is.
+		// Backup URLs (https://, http://, file://, aws://, gs://, s3://,
+		// az://, oci://) are passed through as-is.
 		backupURL := resolveDoltBackupURL(rawPath)
 
 		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
@@ -208,14 +209,42 @@ Run 'bd backup init <path>' first to configure a destination.`,
 	},
 }
 
+// doltBackupInitSchemes is the closed list of URL schemes `bd backup init`
+// accepts and passes to Dolt byte-for-byte. This is bd's init policy, not
+// Dolt's exhaustive transport list: the pinned Dolt's factory registry also
+// speaks oss://, which bd does not advertise, and init refuses an unlisted
+// URL-shaped argument rather than silently misrouting it to a local path
+// (validateBackupInitTarget).
+var doltBackupInitSchemes = []string{
+	"https://",
+	"http://",
+	"file://",
+	"aws://",
+	"gs://",
+	"az://",
+	"oci://",
+}
+
+// isDoltBackupURL reports whether raw starts with one of the URL schemes bd
+// backup init accepts. Matching is case-sensitive: "S3://" is a different
+// token from "s3://" and is not accepted.
+func isDoltBackupURL(raw string) bool {
+	for _, scheme := range doltBackupInitSchemes {
+		if strings.HasPrefix(raw, scheme) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.
 // Filesystem paths get resolved to absolute and prefixed with file://
-// URLs (https://, http://) are passed through as-is.
+// Backup URLs (https://, http://, file://, aws://, gs://, az://, oci://) are
+// returned unchanged, so every byte of the destination — including an S3
+// endpoint query such as ?endpoint=https://minio.local&region=auto — survives.
 func resolveDoltBackupURL(raw string) string {
-	// DoltHub or other remote URLs — pass through
-	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") ||
-		strings.HasPrefix(raw, "file://") || strings.HasPrefix(raw, "aws://") ||
-		strings.HasPrefix(raw, "gs://") {
+	// A URL with a scheme init accepts — pass through byte-for-byte.
+	if isDoltBackupURL(raw) {
 		return raw
 	}
 

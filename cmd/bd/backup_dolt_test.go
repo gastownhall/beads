@@ -6,9 +6,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -52,6 +54,16 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			name:      "gs:// URL passes through",
 			input:     "gs://bucket/path",
 			wantExact: "gs://bucket/path",
+		},
+		{
+			name:      "az:// URL passes through",
+			input:     "az://account.blob.core.windows.net/container/beads",
+			wantExact: "az://account.blob.core.windows.net/container/beads",
+		},
+		{
+			name:      "oci:// URL passes through",
+			input:     "oci://registry.example/tenant/beads",
+			wantExact: "oci://registry.example/tenant/beads",
 		},
 		{
 			name:      "absolute path gets file:// prefix",
@@ -247,5 +259,113 @@ func TestShowDoltBackupStatusJSON_NilWhenNotConfigured(t *testing.T) {
 	configured, ok := result["configured"].(bool)
 	if !ok || configured {
 		t.Errorf("expected configured=false, got %v", result)
+	}
+}
+
+// TestResolveDoltBackupURL_AzurePassesThrough pins #6227: az:// is a Dolt
+// remote scheme (remotecache.remoteSchemes, the credential map), so a backup
+// destination like az://container/beads must reach Dolt unchanged instead of
+// being resolved as a relative filesystem path under file://.
+func TestResolveDoltBackupURL_AzurePassesThrough(t *testing.T) {
+	t.Parallel()
+	const in = "az://container/beads"
+	if got := resolveDoltBackupURL(in); got != in {
+		t.Errorf("resolveDoltBackupURL(%q) = %q, want %q (az:// misrouted to a local path)", in, got, in)
+	}
+}
+
+// recordingBackupInitStore is a DoltStorage stand-in for backupInitCmd.RunE:
+// it embeds a nil DoltStorage for the type assertion and records every
+// BackupAdd call, so a test can assert the exact destination bd registered.
+type recordingBackupInitStore struct {
+	storage.DoltStorage
+	adds []backupAddCall
+}
+
+type backupAddCall struct{ name, url string }
+
+func (r *recordingBackupInitStore) BackupAdd(_ context.Context, name, url string) error {
+	r.adds = append(r.adds, backupAddCall{name: name, url: url})
+	return nil
+}
+
+func (r *recordingBackupInitStore) BackupSync(context.Context, string) error     { return nil }
+func (r *recordingBackupInitStore) BackupRemove(context.Context, string) error   { return nil }
+func (r *recordingBackupInitStore) BackupDatabase(context.Context, string) error { return nil }
+func (r *recordingBackupInitStore) RestoreDatabase(context.Context, string, bool) error {
+	return nil
+}
+
+// TestBackupInitPreservesCloudURL pins the direct-route half of #6227
+// (AC-1): `bd backup init az://…` / `oci://…` must register, save, and echo
+// the exact supplied URL. At base the resolver rewrote these to
+// `file://<cwd>/az:/…`, so the backup silently targeted a local directory.
+//
+// Not parallel: it swaps the global store, root context, and jsonOutput.
+func TestBackupInitPreservesCloudURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{name: "azure", url: "az://account.blob.core.windows.net/container/beads"},
+		{name: "oci", url: "oci://registry.example/tenant/beads"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prepareBackupStatusTest(t)
+			beads.ResetCaches()
+			t.Cleanup(beads.ResetCaches)
+
+			fake := &recordingBackupInitStore{}
+			oldStore, oldCtx, oldWrote := store, rootCtx, commandDidWrite.Load()
+			store, rootCtx = fake, context.Background()
+			t.Cleanup(func() {
+				store, rootCtx = oldStore, oldCtx
+				commandDidWrite.Store(oldWrote)
+			})
+
+			stdout := captureStdout(t, func() error {
+				return backupInitCmd.RunE(backupInitCmd, []string{tc.url})
+			})
+
+			if len(fake.adds) != 1 {
+				t.Fatalf("BackupAdd called %d times, want 1 (%v)", len(fake.adds), fake.adds)
+			}
+			if fake.adds[0].name != "default" || fake.adds[0].url != tc.url {
+				t.Errorf("registered (%q, %q), want (%q, %q): the cloud URL must reach Dolt unchanged",
+					fake.adds[0].name, fake.adds[0].url, "default", tc.url)
+			}
+
+			cfg, err := loadDoltBackupConfig()
+			if err != nil || cfg == nil {
+				t.Fatalf("loadDoltBackupConfig: %v, %v", cfg, err)
+			}
+			if cfg.BackupURL != tc.url {
+				t.Errorf("saved backup_url = %q, want the exact supplied URL %q", cfg.BackupURL, tc.url)
+			}
+
+			if !strings.Contains(stdout, "Backup destination configured: "+tc.url) {
+				t.Errorf("text output does not echo the supplied URL: %q", stdout)
+			}
+			if !commandDidWrite.Load() {
+				t.Errorf("commandDidWrite not set after a successful init")
+			}
+
+			// The --json success object keeps the URL too.
+			jsonOutput = true
+			jsonStdout := captureStdout(t, func() error {
+				return backupInitCmd.RunE(backupInitCmd, []string{tc.url})
+			})
+			var result struct {
+				BackupURL   string `json:"backup_url"`
+				BackupName  string `json:"backup_name"`
+				Initialized bool   `json:"initialized"`
+			}
+			if err := json.Unmarshal([]byte(jsonStdout), &result); err != nil {
+				t.Fatalf("parse init JSON: %v\n%s", err, jsonStdout)
+			}
+			if !result.Initialized || result.BackupName != "default" || result.BackupURL != tc.url {
+				t.Errorf("JSON init result = %+v, want the exact supplied URL %q", result, tc.url)
+			}
+		})
 	}
 }
