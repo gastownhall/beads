@@ -139,3 +139,49 @@ func crossPrefixReadyIDs(t *testing.T, ctx context.Context, st storage.DoltStora
 	slices.Sort(ids)
 	return ids
 }
+
+// TestReadyAdmitsUnroutedAndAbsentCrossPrefixTargets pins AC-7 (GH#4647) end
+// to end through the real CLI router: a bare cross-prefix blocks edge whose
+// target NO route reaches (a prefix routes.jsonl never mentions) and one whose
+// route reaches a rig that does not hold the issue neither exclude their
+// sources from ready. The router's verdicts — IssueRouteUnrouted and
+// IssueRouteAbsent — are compatibility non-blockers.
+//
+// This test uses os.Chdir and assigns the CLI globals, so it cannot run in
+// parallel.
+func TestReadyAdmitsUnroutedAndAbsentCrossPrefixTargets(t *testing.T) {
+	e := setupCrossPrefixRelateEnv(t)
+	ctx := e.ctx
+
+	// A second town source, so the absent-target case gets its own edge.
+	if err := e.townStore.CreateIssue(ctx, &types.Issue{
+		ID:        "hq-src2",
+		Title:     "Second town source",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+	}, "test"); err != nil {
+		t.Fatalf("create hq-src2: %v", err)
+	}
+	// No route is configured for the xx- prefix anywhere: its target is
+	// unrouted. gt-nobody IS routed (the fixture's gt- route) but the rig
+	// holds no such issue: absent.
+	for _, edge := range []struct{ source, target string }{
+		{source: "hq-src1", target: "xx-missing"},
+		{source: "hq-src2", target: "gt-nobody"},
+	} {
+		if err := e.townStore.AddDependencyWithOptions(ctx, &types.Dependency{
+			IssueID:     edge.source,
+			DependsOnID: edge.target,
+			Type:        types.DepBlocks,
+		}, "seed", storage.DependencyAddOptions{}); err != nil {
+			t.Fatalf("seed blocks edge %s -> %s: %v", edge.source, edge.target, err)
+		}
+	}
+
+	wired := wireExternalDependencyPolicy(e.townStore, cliIssueRouter{})
+	got := crossPrefixReadyIDs(t, ctx, wired)
+	if !slices.Contains(got, "hq-src1") || !slices.Contains(got, "hq-src2") {
+		t.Fatalf("ready IDs with an unrouted and an absent cross-prefix target = %v, want hq-src1 and hq-src2 among them", got)
+	}
+}

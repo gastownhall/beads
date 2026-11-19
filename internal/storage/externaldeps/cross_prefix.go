@@ -187,15 +187,17 @@ func (s *Store) policyBlockersFor(ctx context.Context, depsByIssue map[string][]
 //
 //   - Whatever the inner store missed goes to the IssueRouter once. Its
 //     verdicts decide: found-and-closed/pinned satisfies the blocker; any
-//     other found status leaves it standing; and absent, unrouted and
-//     unavailable results are the compatibility and fail-closed cases the
-//     verdicts document.
+//     other found status leaves it standing; and absent and unrouted results
+//     are the compatibility non-blockers, while unavailable (a configured
+//     route's failure) keeps the blocker standing (AC-8).
 //
 // A policy instance with no router (a serve chain, the proxied unit-of-work
-// provider) treats every id it cannot resolve locally like an unavailable
-// route: fail closed, because an outage must not silently expose work the
-// workspace's own edges say is blocked (the deliberate complement of external:
-// refs' add-now-verify-later passthrough on the WRITE path).
+// provider) treats every id it cannot resolve locally like an unrouted one —
+// the compatibility verdict, non-blocking: such an instance can never
+// distinguish "no route" from "a route I may not open", and compatibility
+// with the pre-#4647 behavior of those chains demands the source not be
+// stranded on an edge the instance cannot verify. The fail-closed case needs
+// a configured route to have FAILED, which only a router can observe.
 func (s *Store) resolveCrossPrefixIssueIDs(ctx context.Context, ids []string) (map[string]bool, error) {
 	satisfied := make(map[string]bool, len(ids))
 	if len(ids) == 0 {
@@ -225,7 +227,7 @@ func (s *Store) resolveCrossPrefixIssueIDs(ctx context.Context, ids []string) (m
 	}
 	if s.routeIssues == nil {
 		for _, id := range remaining {
-			satisfied[id] = false
+			satisfied[id] = true
 		}
 		return satisfied, nil
 	}
@@ -248,15 +250,20 @@ func (s *Store) resolveCrossPrefixIssueIDs(ctx context.Context, ids []string) (m
 }
 
 // routedIssueSatisfiesBlocker is the verdict ladder for one routed target.
-// The compatibility verdicts (absent, unrouted) land as fail-closed first and
-// are refined to satisfied by their own acceptance criterion: until then the
-// ladder errs on the side of NOT exposing work whose blockers it could not
-// verify.
+// The compatibility verdicts — absent (the owning store answered and holds no
+// such row, exactly a local missing-target join's dangling row) and unrouted
+// (no route reaches the target, or the mode is one routing does not support,
+// a proxied-server workspace a direct store cannot open) — satisfy the
+// blocker: they neither exclude the source nor warn. Only IssueRouteFound
+// with an open status, and IssueRouteUnavailable (a CONFIGURED route's
+// failure, AC-8), leave the blocker standing.
 func routedIssueSatisfiesBlocker(routed RoutedIssue) bool {
 	switch routed.Verdict {
 	case IssueRouteFound:
 		return issueStatusSatisfiesBlocker(routed.Status)
-	case IssueRouteAbsent, IssueRouteUnrouted, IssueRouteUnavailable:
+	case IssueRouteAbsent, IssueRouteUnrouted:
+		return true
+	case IssueRouteUnavailable:
 		return false
 	default:
 		return true

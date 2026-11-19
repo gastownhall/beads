@@ -274,11 +274,47 @@ func TestCrossPrefixNonBlockingEdgeTypesDoNotExclude(t *testing.T) {
 	}
 }
 
-// TestRouterlessPolicyInstanceHasLegacyCrossPrefixBehavior documents the
-// staged boundary: a policy instance with NO router (a serve chain, the
-// proxied provider) treats bare cross-prefix targets as blockers it cannot
-// verify until AC-7 lands its compatibility refinement.
-func TestRouterlessPolicyInstanceHasLegacyCrossPrefixBehavior(t *testing.T) {
+// TestCrossPrefixUnroutedAndAbsentTargetsDoNotExclude pins AC-7 (GH#4647): a
+// target no route reaches (IssueRouteUnrouted — also the verdict a
+// proxied-server workspace gets, which a direct store cannot open) and a
+// target the owning store answered but does not hold (IssueRouteAbsent) are
+// compatibility non-blockers: their sources stay ready and unblocked, exactly
+// as the local missing-target join treats a dangling row.
+func TestCrossPrefixUnroutedAndAbsentTargetsDoNotExclude(t *testing.T) {
+	a, b := issue("be-a"), issue("be-b")
+	raw := &fakeStore{
+		ready: []*types.Issue{a, b},
+		deps: map[string][]*types.Dependency{
+			"be-a": {crossPrefixDep("be-a", "gt-absent", types.DepBlocks)},
+			"be-b": {crossPrefixDep("be-b", "xx-unrouted", types.DepBlocks)},
+		},
+	}
+	router := &fakeIssueRouter{statuses: map[string]RoutedIssue{
+		"gt-absent":   {Verdict: IssueRouteAbsent},
+		"xx-unrouted": {Verdict: IssueRouteUnrouted},
+	}}
+	store := testStoreWithRouter(raw, router)
+
+	if got := readyIDList(t, store, types.WorkFilter{}); !slices.Equal(got, []string{"be-a", "be-b"}) {
+		t.Fatalf("ready IDs with an absent and an unrouted target = %v, want both sources", got)
+	}
+	for _, id := range []string{"be-a", "be-b"} {
+		if blocked, blockers, err := store.IsBlocked(t.Context(), id); err != nil {
+			t.Fatalf("IsBlocked(%s): %v", id, err)
+		} else if blocked || len(blockers) > 0 {
+			t.Fatalf("IsBlocked(%s) over an absent/unrouted target = (%v, %v), want unblocked", id, blocked, blockers)
+		}
+	}
+}
+
+// TestRouterlessPolicyInstanceHasCrossPrefixCompatBehavior pins the
+// routerless half of AC-7's compatibility verdict: a policy instance with NO
+// router (a serve chain, the proxied provider) cannot verify a bare
+// cross-prefix target, and compatibility demands it not strand the source on
+// an unverifiable edge — the target the local store does not hold is admitted
+// exactly like an absent one. Only a CONFIGURED route's failure (AC-8,
+// reachable only through a router) keeps sources blocked.
+func TestRouterlessPolicyInstanceHasCrossPrefixCompatBehavior(t *testing.T) {
 	a, b := issue("be-a"), issue("be-b")
 	raw := &fakeStore{
 		ready: []*types.Issue{a, b},
@@ -288,7 +324,7 @@ func TestRouterlessPolicyInstanceHasLegacyCrossPrefixBehavior(t *testing.T) {
 	}
 	store := testStore(raw, &fakeStore{}, false)
 
-	if got := readyIDList(t, store, types.WorkFilter{}); !slices.Equal(got, []string{"be-b"}) {
-		t.Fatalf("routerless ready IDs = %v, want [be-b] under the fail-closed stage", got)
+	if got := readyIDList(t, store, types.WorkFilter{}); !slices.Equal(got, []string{"be-a", "be-b"}) {
+		t.Fatalf("routerless ready IDs = %v, want both sources under the compatibility verdict", got)
 	}
 }
