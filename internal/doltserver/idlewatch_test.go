@@ -103,6 +103,18 @@ func TestIdleDecision(t *testing.T) {
 		{name: "quiet for the window", samples: []idleSample{quiet, quiet, quiet, quiet, quiet, quiet, quiet, quiet}, want: true},
 		{name: "no poll succeeded", samples: []idleSample{{statusErr: errors.New("refused")}}, want: false},
 		{name: "a failed poll restarts the window", samples: []idleSample{quiet, quiet, quiet, {statusErr: errors.New("refused")}, quiet, quiet, quiet, quiet}, want: false},
+		// A client that connects and disconnects between two polls is seen
+		// only as a Connections increment beyond the poll's own dial.
+		{name: "connection churn between polls", samples: []idleSample{quiet, quiet, quiet, quiet,
+			{status: serverStatus{connections: 9, threads: 1, ownDials: 1}}, {status: serverStatus{connections: 9, threads: 1, ownDials: 0}},
+			{status: serverStatus{connections: 9, threads: 1}}, {status: serverStatus{connections: 9, threads: 1}}}, want: false},
+		{name: "the poll's own retried dials are not activity", samples: []idleSample{
+			{status: serverStatus{connections: 3, threads: 1, ownDials: 1}}, {status: serverStatus{connections: 6, threads: 1, ownDials: 3}},
+			{status: serverStatus{connections: 7, threads: 1, ownDials: 1}}, {status: serverStatus{connections: 8, threads: 1, ownDials: 1}},
+			{status: serverStatus{connections: 9, threads: 1, ownDials: 1}}, {status: serverStatus{connections: 10, threads: 1, ownDials: 1}},
+			{status: serverStatus{connections: 11, threads: 1, ownDials: 1}}, {status: serverStatus{connections: 12, threads: 1, ownDials: 1}}}, want: true},
+		{name: "one held connection", samples: []idleSample{quiet, quiet, quiet, quiet, quiet, quiet, quiet,
+			{status: serverStatus{connections: 7, threads: 2, ownDials: 1}}}, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t0 := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
