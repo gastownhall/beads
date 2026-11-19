@@ -274,6 +274,42 @@ bd compact --dry-run
 bd compact --force
 ```
 
+### Listing Large Workspaces
+
+`bd list` reads the issues it shows plus their labels, dependencies and
+counts. It first picks the IDs of the rows on the page, in order, and then
+loads labels, dependencies and counts for those IDs only, 200 at a time. A
+bounded page therefore costs about the same however many issues the
+workspace holds, and an unlimited listing reads its rows in batches rather
+than all at once.
+
+The fastest list is the smallest one. Narrow it with filters and a limit
+before you reach for anything else:
+
+```bash
+# Filter at the source: status, type, label, assignee, parent
+bd list --status open,in_progress --type bug --label backend
+
+# Bound the page (default 50; 0 lists every match)
+bd list --limit 20
+bd list --limit 0
+
+# Skip label loading when you do not need labels
+bd list --json --skip-labels
+
+# Stop with exit code 2 instead of fetching more than N rows
+bd list --max-rows 5000
+```
+
+- When stdout is piped (`bd list | ...`) and you pass no `--limit`, `bd list`
+  lists every match.
+- `list.limit` in config (or `BD_LIST_LIMIT`) sets your own default; an
+  explicit `--limit` overrides it.
+- `--max-rows` and `BEADS_MAX_ROWS` are an opt-in safety cap: when the
+  result holds more rows than the cap, `bd list` prints a "too many rows"
+  error and exits 2. They are off by default.
+- `--offset` pages past the first rows on a proxied-server workspace only.
+
 ### Many Concurrent Agents
 
 Beads uses Dolt server mode to handle concurrent access from multiple agents.
