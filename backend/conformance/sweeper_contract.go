@@ -850,6 +850,88 @@ func RunSweeperProtectsLiveDependentsThroughUnselectedRows(t *testing.T, ctx con
 	}
 }
 
+// RunSweeperProtectsLiveDependentsThroughExcludedIntermediaries pins that a
+// closed intermediary the sweep left out for any reason of its own selection
+// still carries a live dependent's protection to the candidate below it
+// (GH#7043), and keeps the skip its selection gave it: excluded by the ID
+// pattern (no count), stored in the plane a wisps-plane sweep does not select
+// (no count), or pinned (counted once as Pinned). The root is counted once as
+// LiveDependent in each. The retained-type intermediary is pinned by
+// RunIDRetentionARetainedTypeIsHeldBackBeforeTheProtectionsAndTheLimit, the
+// case whose fixture can set types.retained.
+func RunSweeperProtectsLiveDependentsThroughExcludedIntermediaries(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	if fixture.AddDependencies == nil {
+		t.Skip("fixture has no AddDependencies hook; cannot wire the chains this case needs")
+	}
+	for _, variant := range []struct {
+		tag string
+		// tier and pattern build the request; middle seeds the intermediary.
+		tier    publicops.SweepTier
+		pattern func(tag string) string
+		middle  func(issue *types.Issue)
+		want    publicops.SweepSkips
+	}{
+		{
+			tag:     "xpat",
+			tier:    publicops.SweepEphemeral,
+			pattern: func(tag string) string { return fixture.IssuePrefix + "-" + tag + "-r*" },
+			want:    publicops.SweepSkips{LiveDependent: 1},
+		},
+		{
+			tag:    "xplane",
+			tier:   publicops.SweepWispsPlane,
+			middle: func(issue *types.Issue) { issue.Ephemeral = false },
+			want:   publicops.SweepSkips{LiveDependent: 1},
+		},
+		{
+			tag:    "xpin",
+			tier:   publicops.SweepEphemeral,
+			middle: func(issue *types.Issue) { issue.Pinned = true },
+			want:   publicops.SweepSkips{Pinned: 1, LiveDependent: 1},
+		},
+	} {
+		t.Run(variant.tag, func(t *testing.T) {
+			tag := variant.tag + "mid"
+			root := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, tag, "root", true), nil)
+			middleIssue := sweeperIssue(fixture, tag, "middle", true)
+			middle := sweeperSeed(t, ctx, fixture, middleIssue, variant.middle)
+			leaf := sweeperSeedOpen(t, ctx, fixture, sweeperIssue(fixture, tag, "leaf", true))
+			sweeperWire(t, ctx, fixture,
+				publicops.DependencyEdge{IssueID: middle, DependsOnID: root, Type: publicops.DepParentChild},
+				publicops.DependencyEdge{IssueID: leaf, DependsOnID: middle, Type: publicops.DepParentChild},
+			)
+
+			pattern := sweeperPattern(fixture, tag)
+			if variant.pattern != nil {
+				pattern = variant.pattern(tag)
+			}
+			request := publicops.SweepRequest{
+				Tier:                  variant.tier,
+				IDPattern:             pattern,
+				ClosedBefore:          &sweeperCutoff,
+				ProtectLiveDependents: true,
+			}
+			for _, step := range []struct {
+				name    string
+				request publicops.SweepRequest
+			}{{"dry run", sweeperAsDryRun(request)}, {"sweep", request}} {
+				result := sweeperSweep(t, ctx, fixture, step.request)
+				if result.Swept != 0 || result.Skipped != variant.want {
+					t.Errorf("%s: Swept = %d, Skipped = %+v; want 0 and %+v — the open leaf under the "+
+						"excluded middle row must keep the root", step.name, result.Swept, result.Skipped, variant.want)
+				}
+			}
+			sweeperAssertWispRows(t, ctx, fixture, 2, root, leaf)
+			if middleIssue.Ephemeral {
+				sweeperAssertWispRows(t, ctx, fixture, 1, middle)
+			} else {
+				sweeperAssertIssueRows(t, ctx, fixture, 1, middle)
+			}
+		})
+	}
+}
+
 // RunSweeperProtectsLiveDependentsAcrossPlanes pins that the live-dependent
 // protection reads BOTH dependency tables: a closed wisp that a live DURABLE
 // (issues-table) bead depends on through parent-child, tracks or blocks is
