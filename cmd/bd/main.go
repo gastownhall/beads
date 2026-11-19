@@ -2592,12 +2592,13 @@ var rootCmd = &cobra.Command{
 			if shouldAutoPruneEventsJournal(cmd) {
 				maybeAutoPruneEventsJournal(rootCtx, beads.FindBeadsDir())
 			}
-			// Auto-backup, through the provider this command opened. Same
-			// gate as the direct arm's maintenance net below (strict
-			// --readonly, `bd serve` and a migration freeze all skip it),
-			// plus previews: a --dry-run must not register a backup remote
-			// or write backup state. proxiedAutoBackupBackend decides the
-			// topology, so this stays inert off managed-local.
+			// Auto-backup, through the provider this command opened. The
+			// gate is one rule with the direct arm's maintenance net below:
+			// strict --readonly, `bd serve`, a preview (--dry-run/--inspect)
+			// and a migration freeze all skip it — a --dry-run must not
+			// register a backup remote or write backup state.
+			// proxiedAutoBackupBackend decides the topology, so this stays
+			// inert off managed-local.
 			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !isPreviewCommand(cmd) && !commandFreeze.Frozen() {
 				runPostRunAutoBackup(rootCtx)
 			}
@@ -2615,7 +2616,15 @@ var rootCmd = &cobra.Command{
 			// of them. Guarding the outer block keeps that promise in one
 			// place instead of six. Writes never get here at all: they were
 			// refused in PersistentPreRunE.
-			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !commandFreeze.Frozen() {
+			//
+			// A preview (--dry-run, --inspect) is excluded the same way and
+			// for the same reason: it promised not to mutate anything. The
+			// backup, export and push steps write outside the store the
+			// preview opened — .beads/backup, the issues.jsonl/export-state
+			// pair, push-state.json, the Dolt remote — and on embedded the
+			// refused backup also stamps the throttle window (GH#8325),
+			// starving the next real write of its backup.
+			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !isPreviewCommand(cmd) && !commandFreeze.Frozen() {
 				// Dolt auto-commit: after a successful write command (and after final flush),
 				// create a Dolt commit so changes don't remain only in the working set.
 				if commandDidWrite.Load() && !commandDidExplicitDoltCommit {

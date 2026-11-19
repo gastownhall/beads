@@ -1431,6 +1431,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `--dry-run`/`--inspect` preview no longer runs the post-command
+  maintenance on the direct route** (#8325). The proxied route already
+  refused auto-backup for a preview; the direct route ran the whole net —
+  auto-backup, auto-export and auto-push — against a store the preview
+  opened read-only, so `bd create x --dry-run` wrote
+  `.beads/backup/backup_state.json`, `issues.jsonl`/`export-state.json` and
+  `push-state.json`, and on embedded it printed
+  `Warning: auto-backup failed: … store is read-only` and consumed the backup
+  interval, so the next real write skipped its backup. An ordinary command
+  still runs every step as before.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
