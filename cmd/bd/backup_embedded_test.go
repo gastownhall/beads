@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // bdBackup runs "bd backup" with extra args. Returns combined output.
@@ -498,5 +499,82 @@ func TestEmbeddedBackupSyncDamagedDestination(t *testing.T) {
 	}
 	if !strings.Contains(out, dest) {
 		t.Errorf("sync error does not name the destination %s:\n%s", dest, out)
+	}
+}
+
+// autoBackupStatus is the `backup` object of `bd backup status --json`,
+// decoded by key.
+type autoBackupStatus struct {
+	LastDoltCommit string    `json:"last_dolt_commit"`
+	Timestamp      time.Time `json:"timestamp"`
+	LastSuccessAt  time.Time `json:"last_success_at"`
+	LastError      string    `json:"last_error"`
+	LastErrorAt    time.Time `json:"last_error_at"`
+}
+
+func readAutoBackupStatus(t *testing.T, bd, dir string) autoBackupStatus {
+	t.Helper()
+	out := bdBackup(t, bd, dir, "status", "--json")
+	var resp struct {
+		Backup autoBackupStatus `json:"backup"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("parse backup status JSON: %v\n%s", err, out)
+	}
+	return resp.Backup
+}
+
+// TestEmbeddedAutoBackupDamagedDestination is the GH#4070 (bd-5mwx39) report
+// end to end: once the auto-backup directory lost table files its manifest
+// names, every later auto-backup fails. The command must still succeed, the
+// warning must say where the backup is and where to look, and status must
+// keep the last good backup while reporting the failure.
+func TestEmbeddedAutoBackupDamagedDestination(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "bkdmga")
+	autoDir := filepath.Join(beadsDir, "backup")
+	autoBackupOn := []string{"BD_BACKUP_ENABLED=true", "BD_BACKUP_INTERVAL=1ms"}
+
+	create := func(title string, env []string) (id, stderr string) {
+		t.Helper()
+		stdout, stderr, code := runBDBackupEnv(t, bd, dir, env, "create", "--silent", title)
+		if code != 0 {
+			t.Fatalf("bd create %q exited %d\nstdout:\n%s\nstderr:\n%s", title, code, stdout, stderr)
+		}
+		return strings.TrimSpace(stdout), stderr
+	}
+
+	_, stderr := create("issue A", autoBackupOn)
+	if strings.Contains(stderr, "auto-backup failed") {
+		t.Fatalf("first auto-backup failed:\n%s", stderr)
+	}
+	good := readAutoBackupStatus(t, bd, dir)
+	if good.LastDoltCommit == "" || good.Timestamp.IsZero() {
+		t.Fatalf("first auto-backup recorded no backup: %+v", good)
+	}
+
+	damageBackupTableFiles(t, autoDir)
+
+	_, stderr = create("issue B", autoBackupOn)
+	if !strings.Contains(stderr, "auto-backup failed") {
+		t.Fatalf("auto-backup into a damaged directory did not warn:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, autoDir) {
+		t.Errorf("warning does not name the backup directory %s:\n%s", autoDir, stderr)
+	}
+	if !strings.Contains(stderr, "bd backup status") {
+		t.Errorf("warning does not point at `bd backup status`:\n%s", stderr)
+	}
+	failed := readAutoBackupStatus(t, bd, dir)
+	if failed.LastError == "" {
+		t.Errorf("status reports no last_error after a failed auto-backup: %+v", failed)
+	}
+	if !failed.LastSuccessAt.Equal(good.Timestamp) {
+		t.Errorf("last_success_at = %v, want the last good backup %v", failed.LastSuccessAt, good.Timestamp)
 	}
 }
