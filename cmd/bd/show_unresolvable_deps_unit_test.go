@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // fakeDepCounter answers the two aggregate queries readDepCounts makes,
@@ -321,5 +322,66 @@ func TestWarnUnresolvableDepEdgesSkipsANamedListing(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 dependent edge(s)") {
 		t.Errorf("inbound warning lost:\n%q", out)
+	}
+}
+
+// fakeOutgoingReader answers show's two outgoing reads; combinedErr makes the
+// combined read refuse as a backend that cannot name its records does.
+type fakeOutgoingReader struct {
+	combinedErr  error
+	resolved     []*types.IssueWithDependencyMetadata
+	unresolvable []*types.Dependency
+}
+
+func (f fakeOutgoingReader) GetDependenciesWithUnresolvable(context.Context, string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	if f.combinedErr != nil {
+		return nil, nil, f.combinedErr
+	}
+	return f.resolved, f.unresolvable, nil
+}
+
+func (f fakeOutgoingReader) GetDependenciesWithMetadata(context.Context, string) ([]*types.IssueWithDependencyMetadata, error) {
+	return f.resolved, nil
+}
+
+// AC-7 (bd-uschhs): an http workspace on a server older than
+// unresolvable_dependency_edges refuses the combined read with a typed
+// *ErrUnsupported. bd show falls back to the issue-only listing as an UNNAMED
+// listing, so the count-only warning still discloses the edge; a server that
+// names its records keeps the named listing and the warning stays silent.
+func TestReadOutgoingDepsFallsBackWhenTheRecordsAreUnsupported(t *testing.T) {
+	ctx := context.Background()
+	local := []*types.IssueWithDependencyMetadata{{Issue: types.Issue{ID: "ud-b"}, DependencyType: types.DepBlocks}}
+	record := []*types.Dependency{{IssueID: "ud-a", DependsOnID: "liveop-kmf", Type: types.DepBlocks}}
+	counts := depCounts{deps: depCount{n: 2}}
+
+	deps, unresolved, named, err := readOutgoingDeps(ctx, fakeOutgoingReader{
+		combinedErr: &issueops.ErrUnsupported{Op: "GetDependenciesWithUnresolvable", Backend: "http"},
+		resolved:    local,
+	}, "ud-a")
+	if err != nil || named || len(deps) != 1 || unresolved != nil {
+		t.Fatalf("legacy server: got (%v, %v, named=%v, %v), want (one local row, nil, false, nil)", deps, unresolved, named, err)
+	}
+	stderr := captureStderr(t, func() {
+		warnUnresolvableDepEdges("ud-a", counts, depListing{rows: len(deps), err: err, named: named}, depListing{})
+	})
+	if !strings.Contains(stderr, "has 1 dependency edge(s)") {
+		t.Errorf("legacy server: the count-only warning is gone:\n%s", stderr)
+	}
+
+	deps, unresolved, named, err = readOutgoingDeps(ctx, fakeOutgoingReader{resolved: local, unresolvable: record}, "ud-a")
+	if err != nil || !named || len(deps) != 1 || len(unresolved) != 1 {
+		t.Fatalf("current server: got (%v, %v, named=%v, %v), want (one local row, one record, true, nil)", deps, unresolved, named, err)
+	}
+	stderr = captureStderr(t, func() {
+		warnUnresolvableDepEdges("ud-a", counts, depListing{rows: len(deps), err: err, named: named}, depListing{})
+	})
+	if stderr != "" {
+		t.Errorf("current server: a named listing still warned:\n%s", stderr)
+	}
+
+	other := errors.New("boom")
+	if _, _, _, err := readOutgoingDeps(ctx, fakeOutgoingReader{combinedErr: other}, "ud-a"); !errors.Is(err, other) {
+		t.Errorf("a non-capability error = %v, want it returned unchanged", err)
 	}
 }

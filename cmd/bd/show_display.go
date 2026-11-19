@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // watchCommentFormatTime is the watch path's comment timestamp formatter.
@@ -194,7 +195,7 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 	// combined read names the outgoing edges with no row here, which render
 	// in their sections (bd-uschhs).
 	depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
-	depsWithMeta, unresolvedDeps, depsErr := issueStore.GetDependenciesWithUnresolvable(ctx, issue.ID)
+	depsWithMeta, unresolvedDeps, depsNamed, depsErr := readOutgoingDeps(ctx, issueStore, issue.ID)
 	outSections, relatedUnresolved := withUnresolvedSections(groupDepSections(depsWithMeta, true, relatedSeen), unresolvedDeps, true)
 	for _, sec := range outSections {
 		printDepSection(sec)
@@ -212,7 +213,7 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 	// scope: they answer an alternate query with no count beside it to
 	// contradict.
 	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-		depListing{rows: len(depsWithMeta), err: depsErr, named: true},
+		depListing{rows: len(depsWithMeta), err: depsErr, named: depsNamed},
 		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
 	// Related (bidirectional, deduplicated)
@@ -316,6 +317,30 @@ func readDepCounts(ctx context.Context, store unresolvableDepCounter, issueID st
 	c.deps.n, c.deps.err = store.CountDependencies(ctx, issueID)
 	c.dependents.n, c.dependents.err = store.CountDependents(ctx, issueID)
 	return c
+}
+
+// outgoingDepReader is the pair of outgoing reads readOutgoingDeps chooses
+// between.
+type outgoingDepReader interface {
+	GetDependenciesWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
+	GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
+}
+
+// readOutgoingDeps is show's outgoing listing (bd-uschhs): the resolved
+// dependencies and the stored record of every edge with no row here, with
+// named reporting that those records were returned. A backend that cannot
+// name them — an http workspace on a server older than
+// unresolvable_dependency_edges refuses with *ErrUnsupported — falls back to
+// the issue-only listing with named false, so the count-only warning still
+// discloses the edges it cannot name.
+func readOutgoingDeps(ctx context.Context, store outgoingDepReader, issueID string) (deps []*types.IssueWithDependencyMetadata, unresolved []*types.Dependency, named bool, err error) {
+	deps, unresolved, err = store.GetDependenciesWithUnresolvable(ctx, issueID)
+	var unsupported *issueops.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		return deps, unresolved, true, err
+	}
+	deps, err = store.GetDependenciesWithMetadata(ctx, issueID)
+	return deps, nil, false, err
 }
 
 func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents depListing) {

@@ -95,9 +95,23 @@ func (s *Store) GetDependenciesWithMetadata(ctx context.Context, id string) ([]*
 }
 
 // GetDependenciesWithUnresolvable answers the combined outgoing read from the
-// same detail response GetDependenciesWithMetadata reads.
+// same detail response GetDependenciesWithMetadata reads: dependencies is the
+// resolved half and unresolvable_dependency_edges the stored records of edges
+// whose far end has no row on the server.
+//
+// A server older than that member publishes only the unresolvable_dependencies
+// count. A positive count with no records means the server could not name its
+// edges, so the read refuses with a typed *ErrUnsupported rather than answer a
+// falsely complete empty list; the caller keeps the count-only disclosure.
 func (s *Store) GetDependenciesWithUnresolvable(ctx context.Context, id string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
-	return nil, nil, &issueops.ErrUnsupported{Op: "GetDependenciesWithUnresolvable", Backend: "http"}
+	details, err := s.getIssueDetails(ctx, id, url.Values{})
+	if err != nil || details == nil {
+		return nil, nil, err
+	}
+	if len(details.UnresolvableDependencyEdges) == 0 && details.UnresolvableDependencies != nil && *details.UnresolvableDependencies > 0 {
+		return nil, nil, &issueops.ErrUnsupported{Op: "GetDependenciesWithUnresolvable", Backend: "http"}
+	}
+	return details.Dependencies, details.UnresolvableDependencyEdges, nil
 }
 
 // GetDependentsWithMetadata answers getIssue's dependents arm, which is carried
