@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 func TestConfigValidationStoreOptionsAreStrictReadOnly(t *testing.T) {
@@ -666,6 +668,65 @@ repos:
 		// Should be OK because maintainer="." doesn't need hydration
 		if check.Status != "ok" {
 			t.Errorf("expected ok status, got %s: %s", check.Status, check.Detail)
+		}
+	})
+}
+
+// TestFindConfigPathDarwinSkipsApplicationSupport: on macOS the config-values
+// check never stats ~/Library/Application Support/bd/config.yaml; with
+// XDG_CONFIG_HOME unset its native user config is ~/.config/bd/config.yaml
+// (GH#8113).
+func TestFindConfigPathDarwinSkipsApplicationSupport(t *testing.T) {
+	home := t.TempDir()
+	appSupport := filepath.Join(home, "Library", "Application Support")
+	appSupportConfig := filepath.Join(appSupport, "bd", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(appSupportConfig), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(appSupportConfig, []byte("actor: appsupport\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("BEADS_DIR", "")
+	repo := t.TempDir() // no .beads/config.yaml
+
+	nativeCalls := 0
+	native := func() (string, error) {
+		nativeCalls++
+		return appSupport, nil
+	}
+
+	t.Run("darwin", func(t *testing.T) {
+		nativeCalls = 0
+		t.Cleanup(config.SetUserConfigPlatformForTest("darwin", native))
+		if got := findConfigPath(repo); got != "" {
+			t.Fatalf("findConfigPath = %q, want empty (no user config outside Application Support)", got)
+		}
+		documented := filepath.Join(home, ".config", "bd", "config.yaml")
+		if err := os.MkdirAll(filepath.Dir(documented), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(documented, []byte("actor: documented\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Remove(documented) })
+		if got := findConfigPath(repo); got != documented {
+			t.Fatalf("findConfigPath = %q, want %q", got, documented)
+		}
+		if nativeCalls != 0 {
+			t.Fatalf("Application Support named %d times by bd doctor", nativeCalls)
+		}
+	})
+
+	// Control: on Linux the same native root is honored, which proves the
+	// lookup goes through config.UserConfigDir.
+	t.Run("linux control", func(t *testing.T) {
+		nativeCalls = 0
+		t.Cleanup(config.SetUserConfigPlatformForTest("linux", native))
+		if got := findConfigPath(repo); got != appSupportConfig || nativeCalls == 0 {
+			t.Fatalf("native root not consulted: findConfigPath = %q, calls=%d", got, nativeCalls)
 		}
 	})
 }
