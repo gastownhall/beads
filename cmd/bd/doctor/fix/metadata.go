@@ -283,9 +283,14 @@ func isFallbackCandidate(db serverDatabaseMetadata) bool {
 // make, or an error (a SkipError when selection is unsafe) explaining why it
 // will not choose. It never chooses by enumeration order.
 func selectFallbackDoltDatabase(localID, current string, shared bool, databases []serverDatabaseMetadata) (*serverDatabaseMetadata, error) {
+	var currentDB *serverDatabaseMetadata
 	var candidates []serverDatabaseMetadata
 	for _, db := range databases {
-		if db.Name == current || !isFallbackCandidate(db) {
+		if db.Name == current {
+			currentDB = &db
+			continue
+		}
+		if !isFallbackCandidate(db) {
 			continue
 		}
 		candidates = append(candidates, db)
@@ -296,16 +301,66 @@ func selectFallbackDoltDatabase(localID, current string, shared bool, databases 
 		names[i] = db.Name
 	}
 
+	if localID != "" {
+		var matches []serverDatabaseMetadata
+		for _, db := range candidates {
+			if db.ProjectID == localID {
+				matches = append(matches, db)
+			}
+		}
+		// The current database counts toward the match, as it does in the
+		// authoritative reconcile: when the reconcile is mode-gated, it is
+		// the only place a duplicate holding the current database is caught.
+		currentMatches := currentDB != nil && isFallbackCandidate(*currentDB) && currentDB.ProjectID == localID
+		if len(matches) > 1 || (currentMatches && len(matches) > 0) {
+			var matchNames []string
+			if currentMatches {
+				matchNames = append(matchNames, currentDB.Name)
+			}
+			for _, db := range matches {
+				matchNames = append(matchNames, db.Name)
+			}
+			sort.Strings(matchNames)
+			return nil, fmt.Errorf("multiple server databases match project_id %s: %s",
+				remedy.PrintedValue(localID), remedy.PrintedList(matchNames, ", "))
+		}
+		if currentMatches {
+			// The database bd opens today already carries this workspace's
+			// identity: there is nothing to move.
+			return nil, nil
+		}
+		if len(matches) == 1 {
+			// Conflicting identity signals: the database bd opens today has
+			// Beads schema and another project's id. Moving the workspace
+			// is the same guess the authoritative reconcile refuses.
+			if currentDB != nil && currentDB.HasSchema && currentDB.ProjectID != "" && currentDB.ProjectID != localID {
+				return nil, fmt.Errorf(
+					"conflicting project identity: metadata.json project_id %s matches database %s, but configured database %s reports project_id %s",
+					remedy.PrintedValue(localID), remedy.PrintedValue(matches[0].Name),
+					remedy.PrintedValue(currentDB.Name), remedy.PrintedValue(currentDB.ProjectID))
+			}
+			return &matches[0], nil
+		}
+	}
+
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	if localID == "" && shared {
+	if localID != "" {
+		// No database carries this workspace's identity. One without any
+		// identity is no match either: the store's identity check accepts a
+		// database with no _project_id, so adopting it would go unnoticed.
+		return nil, skipFix(fmt.Errorf(
+			"no server database carries this workspace's project_id %s (candidates: %s); %s",
+			remedy.PrintedValue(localID), remedy.PrintedList(names, ", "), manualDatabaseRemedy))
+	}
+	if shared {
 		return nil, skipFix(fmt.Errorf(
 			"in shared-server mode a database with Beads schema may belong to another project, "+
 				"and metadata.json has no project_id to tell which is this workspace's (candidates: %s); %s",
 			remedy.PrintedList(names, ", "), manualDatabaseRemedy))
 	}
-	if localID == "" && len(candidates) == 1 {
+	if len(candidates) == 1 {
 		return &candidates[0], nil
 	}
 	return nil, nil
