@@ -33,7 +33,20 @@ const DefaultMaxExpansionDepth = 5
 //
 // The parser is used to load referenced expansion formulas by name.
 // If parser is nil, no expansions are applied.
+//
+// The expansions are metered by a fresh ExpansionBudget seeded with steps;
+// see ApplyExpansionsWithBudget.
 func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*Step, error) {
+	return ApplyExpansionsWithBudget(steps, compose, parser, NewExpansionBudget(steps))
+}
+
+// ApplyExpansionsWithBudget is ApplyExpansions charging every expansion to
+// budget, which must already count steps. Each expansion releases the target
+// subtree it replaces and reserves its template's steps before the template
+// is cloned, so chained expand and map rules share one budget and cannot each
+// multiply the formula: the rule that would cross the limit fails with
+// ErrExpansionLimit, naming the rule and its target.
+func ApplyExpansionsWithBudget(steps []*Step, compose *ComposeRules, parser *Parser, budget *ExpansionBudget) ([]*Step, error) {
 	if compose == nil || parser == nil {
 		return steps, nil
 	}
@@ -76,6 +89,12 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 		// Merge formula default vars with rule overrides
 		vars := mergeVars(expFormula, rule.Vars)
+
+		// Swap the target's charge for the template's before cloning it.
+		what := fmt.Sprintf("expand rule on %q (with %q)", rule.Target, rule.With)
+		if err := budget.replace(stepGraphSize([]*Step{targetStep}), templateSize(expFormula.Template), what); err != nil {
+			return nil, err
+		}
 
 		// Expand the target step (start at depth 0)
 		expandedSteps, err := expandStep(targetStep, expFormula.Template, vars)
@@ -134,6 +153,21 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 		// Expand each matching step
 		for _, targetStep := range toExpand {
+			// A match can be stale: expanding a parent that also matched
+			// replaced this step along with it. Only a step still in the
+			// graph releases a charge; a stale one is charged for the
+			// template it clones and refunded once nothing inserted it.
+			current, present := stepMap[targetStep.ID]
+			removed := 0
+			if present {
+				removed = stepGraphSize([]*Step{current})
+			}
+			added := templateSize(expFormula.Template)
+			what := fmt.Sprintf("map rule %q (with %q) on %q", rule.Select, rule.With, targetStep.ID)
+			if err := budget.replace(removed, added, what); err != nil {
+				return nil, err
+			}
+
 			expandedSteps, err := expandStep(targetStep, expFormula.Template, vars)
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
@@ -144,6 +178,9 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 			result = replaceStep(result, targetStep.ID, expandedSteps)
 			expanded[targetStep.ID] = true
+			if !present {
+				budget.release(added)
+			}
 
 			// Update dependencies: any step that depended on the target should now
 			// depend on the last step of the expansion
