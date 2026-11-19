@@ -1407,3 +1407,36 @@ func TestAcquireInitMutationGateSharedServerExcludesMaintenance(t *testing.T) {
 		t.Fatal("maintenance did not enter after init released")
 	}
 }
+
+// AC-4: while maintenance holds the shared root EXCLUSIVE, ordinary
+// shared-server init refuses within its bound and never runs preflight.
+func TestAcquireInitMutationGateSharedServerBlockedByMaintenance(t *testing.T) {
+	f := newSharedServerGateFixture(t)
+	t.Setenv(initGateTimeoutEnv, "300ms")
+	maint := f.holdOtherProjectMaintenance(t)
+	beadsDir := newProjectBeadsDir(t, false)
+
+	preflightRan := false
+	start := time.Now()
+	_, err := acquireInitMutationGate(context.Background(), beadsDir, f.sharedRoot, func() error {
+		preflightRan = true
+		return nil
+	})
+	if !errors.Is(err, workspacegate.ErrBusy) {
+		t.Fatalf("err = %v, want ErrBusy under exclusive maintenance", err)
+	}
+	if waited := time.Since(start); waited > 3*time.Second {
+		t.Fatalf("init waited %s, want about the 300ms bound", waited)
+	}
+	if preflightRan {
+		t.Fatal("preflight ran while maintenance held the shared root")
+	}
+	// The refused init left nothing behind: once maintenance is done, init
+	// proceeds.
+	_ = maint.Release()
+	h, err := acquireInitMutationGate(context.Background(), beadsDir, f.sharedRoot, nil)
+	if err != nil {
+		t.Fatalf("init after maintenance released: %v", err)
+	}
+	_ = h.Release()
+}
