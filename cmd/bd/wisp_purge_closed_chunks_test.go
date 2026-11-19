@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -33,6 +34,11 @@ type wispPurgeStubStore struct {
 	deleter *wispPurgeStubDeleter
 	scanned bool
 	lookups int
+	// updated is each wisp's updated_at; an unset one reads as the zero
+	// time, older than any --age.
+	updated map[string]time.Time
+	// scans is every filter the closed-wisp scan sent.
+	scans []types.IssueFilter
 }
 
 func (s *wispPurgeStubStore) issue(id string) *types.Issue {
@@ -40,7 +46,7 @@ func (s *wispPurgeStubStore) issue(id string) *types.Issue {
 	if s.infra[id] {
 		issueType = "agent"
 	}
-	return &types.Issue{ID: id, Title: "wisp " + id, Status: types.StatusClosed, Ephemeral: true, IssueType: issueType, Pinned: s.pinned[id]}
+	return &types.Issue{ID: id, Title: "wisp " + id, Status: types.StatusClosed, Ephemeral: true, IssueType: issueType, Pinned: s.pinned[id], UpdatedAt: s.updated[id]}
 }
 
 func (s *wispPurgeStubStore) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
@@ -55,6 +61,7 @@ func (s *wispPurgeStubStore) SearchIssues(_ context.Context, _ string, filter ty
 		return out, nil
 	}
 	s.scanned = true
+	s.scans = append(s.scans, filter)
 	for _, id := range s.closed {
 		if s.deleter.deleted[id] {
 			continue
@@ -539,6 +546,12 @@ type wispPurgeProxiedProvider struct {
 	units []*wispPurgeProxiedUOW
 	// fail, when it returns an error, refuses a DeleteIssues call.
 	fail func(ids []string) error
+	// updated, pinned and infra shape a wisp the scan returns, as on
+	// wispPurgeStubStore; scans is every filter the scan sent.
+	updated map[string]time.Time
+	pinned  map[string]bool
+	infra   map[string]bool
+	scans   []types.IssueFilter
 }
 
 func (p *wispPurgeProxiedProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
@@ -594,6 +607,7 @@ type wispPurgeProxiedIssues struct {
 }
 
 func (s wispPurgeProxiedIssues) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) (domain.SearchPage, error) {
+	s.u.p.scans = append(s.u.p.scans, filter)
 	var page domain.SearchPage
 	for _, id := range s.u.p.closed {
 		if s.u.p.deleted[id] {
@@ -603,7 +617,12 @@ func (s wispPurgeProxiedIssues) SearchIssues(_ context.Context, _ string, filter
 			page.HasMore = true
 			break
 		}
-		page.Items = append(page.Items, &types.Issue{ID: id, Status: types.StatusClosed, Ephemeral: true, IssueType: types.TypeTask})
+		issueType := types.TypeTask
+		if s.u.p.infra[id] {
+			issueType = "agent"
+		}
+		page.Items = append(page.Items, &types.Issue{ID: id, Status: types.StatusClosed, Ephemeral: true, IssueType: issueType,
+			Pinned: s.u.p.pinned[id], UpdatedAt: s.u.p.updated[id]})
 	}
 	return page, nil
 }
@@ -658,7 +677,7 @@ func TestWispPurgeClosedProxiedBoundsEachUnitOfWork(t *testing.T) {
 		jsonOutput = true
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -702,7 +721,7 @@ func TestWispPurgeClosedProxiedBoundsEachUnitOfWork(t *testing.T) {
 		}
 
 		stdout, _, err := captureWispGC(t, func() error {
-			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil, 0)
 		})
 		if err == nil || !isReportedExit(err) {
 			t.Fatalf("error = %v, want an already-reported nonzero exit\nstdout:\n%s", err, stdout)
@@ -994,7 +1013,7 @@ func TestWispPurgeClosedReportsCappedScan(t *testing.T) {
 		p := useWispPurgeProxied(t, 6000)
 		jsonOutput = true
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -1070,7 +1089,7 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 			p := useWispPurgeProxied(t, 450)
 			jsonOutput = true
 			stdout, stderr, err := captureWispGC(t, func() error {
-				return runWispPurgeClosedProxiedServer(context.Background(), tc.dryRun, tc.force, nil)
+				return runWispPurgeClosedProxiedServer(context.Background(), tc.dryRun, tc.force, nil, 0)
 			})
 			if err != nil {
 				t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstderr:\n%s", err, stderr)
@@ -1081,6 +1100,101 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 			}
 			if len(p.deleted) != 0 {
 				t.Errorf("preview deleted %d wisps", len(p.deleted))
+			}
+		})
+	}
+}
+
+// TestWispPurgeClosedRoutesShareAgeSelection pins GH#8202 on both routes of
+// `bd mol wisp gc --closed --force`: each scans with the same now-age bound,
+// and each deletes only the closed wisp idle longer than --age, sparing the
+// recently closed, pinned and infra ones, uncascaded. --age 0s deletes every
+// unprotected one on both. Neither stub applies the bound, so the shared Go
+// check is what keeps the recent wisp.
+func TestWispPurgeClosedRoutesShareAgeSelection(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	oldNow := wispGCNow
+	t.Cleanup(func() { wispGCNow = oldNow })
+	wispGCNow = func() time.Time { return now }
+
+	ids := wispPurgeIDs(4)
+	idle, recent, pinned, infra := ids[0], ids[1], ids[2], ids[3]
+	updated := map[string]time.Time{
+		idle:   now.Add(-2 * time.Hour),
+		recent: now.Add(-time.Minute),
+		pinned: now.Add(-2 * time.Hour),
+		infra:  now.Add(-2 * time.Hour),
+	}
+
+	for _, tc := range []struct {
+		age        time.Duration
+		wantBound  bool
+		wantDelete []string
+	}{
+		{time.Hour, true, []string{idle}},
+		{0, false, []string{idle, recent}},
+	} {
+		checkScan := func(route string, scans []types.IssueFilter) {
+			t.Helper()
+			if len(scans) != 1 {
+				t.Fatalf("%s --age %s: scan sent %d queries, want 1", route, tc.age, len(scans))
+			}
+			bound := scans[0].UpdatedBefore
+			switch {
+			case tc.wantBound && (bound == nil || !bound.Equal(now.Add(-tc.age))):
+				t.Errorf("%s --age %s: UpdatedBefore = %v, want %v", route, tc.age, bound, now.Add(-tc.age))
+			case !tc.wantBound && bound != nil:
+				t.Errorf("%s --age %s: UpdatedBefore = %v, want no bound", route, tc.age, *bound)
+			}
+		}
+
+		t.Run(fmt.Sprintf("direct age %s", tc.age), func(t *testing.T) {
+			s := useWispPurgeStub(t, 4)
+			s.updated = updated
+			s.pinned[pinned] = true
+			s.infra[infra] = true
+			jsonOutput = true
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosed(context.Background(), false, true, nil, tc.age)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			checkScan("direct", s.scans)
+			var got []string
+			for _, req := range s.deleter.requests {
+				if req.Cascade {
+					t.Errorf("direct: deletion request cascades")
+				}
+				got = append(got, req.IDs...)
+			}
+			if !slices.Equal(got, tc.wantDelete) {
+				t.Errorf("direct --age %s deleted %v, want %v", tc.age, got, tc.wantDelete)
+			}
+		})
+
+		t.Run(fmt.Sprintf("proxied age %s", tc.age), func(t *testing.T) {
+			p := useWispPurgeProxied(t, 4)
+			p.updated = updated
+			p.pinned = map[string]bool{pinned: true}
+			p.infra = map[string]bool{infra: true}
+			jsonOutput = true
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil, tc.age)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			checkScan("proxied", p.scans)
+			var got []string
+			for _, u := range p.deletionUnits() {
+				if u.params.Cascade {
+					t.Errorf("proxied: deletion unit cascades")
+				}
+				got = append(got, u.params.IDs...)
+			}
+			if !slices.Equal(got, tc.wantDelete) {
+				t.Errorf("proxied --age %s deleted %v, want %v", tc.age, got, tc.wantDelete)
 			}
 		})
 	}

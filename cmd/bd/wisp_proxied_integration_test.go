@@ -358,35 +358,62 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 	})
 
-	t.Run("closed_force_purges_regardless_of_age", func(t *testing.T) {
+	// GH#8202: closed GC honors --age (default 1h). A wisp closed moments
+	// ago survives the default run, one idle past the threshold goes, and
+	// --age 0s purges the just-closed one too.
+	t.Run("closed_force_honors_age", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "wgcl")
 		closedWisp := bdProxiedCreate(t, bd, p.dir, "Just-closed wisp", "--ephemeral")
-		if out, err := bdProxiedRun(t, bd, p.dir, "close", closedWisp.ID); err != nil {
-			t.Fatalf("bd close: %v\n%s", err, out)
+		agedWisp := bdProxiedCreate(t, bd, p.dir, "Long-closed wisp", "--ephemeral")
+		for _, id := range []string{closedWisp.ID, agedWisp.ID} {
+			if out, err := bdProxiedRun(t, bd, p.dir, "close", id); err != nil {
+				t.Fatalf("bd close %s: %v\n%s", id, err, out)
+			}
 		}
-
-		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
-		if err != nil {
-			t.Fatalf("bd mol wisp gc --closed --force --json: %v\n%s", err, out)
-		}
-		var got struct {
-			DeletedCount int `json:"deleted_count"`
-		}
-		if err := json.Unmarshal(out, &got); err != nil {
-			t.Fatalf("unmarshal: %v\n%s", err, out)
-		}
-		if got.DeletedCount != 1 {
-			t.Errorf("deleted_count = %d, want 1", got.DeletedCount)
-		}
-
 		db := openProxiedDB(t, p)
-		var count int
-		if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", closedWisp.ID).Scan(&count); err != nil {
-			t.Fatalf("query wisps: %v", err)
+		if _, err := db.Exec("UPDATE wisps SET updated_at = ? WHERE id = ?", time.Now().UTC().Add(-2*time.Hour), agedWisp.ID); err != nil {
+			t.Fatalf("backdate wisp: %v", err)
 		}
-		if count != 0 {
-			t.Errorf("expected closed wisp %s purged", closedWisp.ID)
+		wispRows := func(id string) int {
+			t.Helper()
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&count); err != nil {
+				t.Fatalf("query wisps: %v", err)
+			}
+			return count
+		}
+		gcDeleted := func(args ...string) int {
+			t.Helper()
+			args = append([]string{"mol", "wisp", "gc", "--closed", "--force", "--json"}, args...)
+			out, err := bdProxiedRun(t, bd, p.dir, args...)
+			if err != nil {
+				t.Fatalf("bd %v: %v\n%s", args, err, out)
+			}
+			var got struct {
+				DeletedCount int `json:"deleted_count"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("unmarshal: %v\n%s", err, out)
+			}
+			return got.DeletedCount
+		}
+
+		if got := gcDeleted(); got != 1 {
+			t.Errorf("default run deleted_count = %d, want 1 (only the wisp idle past 1h)", got)
+		}
+		if wispRows(agedWisp.ID) != 0 {
+			t.Errorf("expected long-closed wisp %s purged", agedWisp.ID)
+		}
+		if wispRows(closedWisp.ID) != 1 {
+			t.Fatalf("default run purged wisp %s closed moments ago", closedWisp.ID)
+		}
+
+		if got := gcDeleted("--age", "0s"); got != 1 {
+			t.Errorf("--age 0s deleted_count = %d, want 1", got)
+		}
+		if wispRows(closedWisp.ID) != 0 {
+			t.Errorf("expected --age 0s to purge just-closed wisp %s", closedWisp.ID)
 		}
 	})
 }
