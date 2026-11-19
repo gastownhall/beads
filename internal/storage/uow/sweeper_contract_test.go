@@ -2,10 +2,14 @@ package uow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -89,6 +93,168 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunSweeperDoesNotMutateTheCallerRequest(t, ctx, fixture)
 	})
+}
+
+// TestSweepInUOWAbortsOnALiveDependentDiscoveryReadError pins that every read
+// the live-dependent discovery makes past the candidates' own edges is
+// required (GH#7043): a failed incoming-edge or status read on a LATER round
+// fails the sweep, and nothing is deleted on the strength of the partial
+// graph. The graph is root ← middle ← leaf, with only the root a candidate,
+// over a stub unit of work whose reads of the middle row can be broken.
+func TestSweepInUOWAbortsOnALiveDependentDiscoveryReadError(t *testing.T) {
+	boom := errors.New("injected read failure")
+	for _, tc := range []struct {
+		name   string
+		inject func(*sweepDiscoveryUOW)
+	}{
+		{"durable edges of the unselected row", func(u *sweepDiscoveryUOW) { u.deps.failDurableFor = "t-middle" }},
+		{"wisp edges of the unselected row", func(u *sweepDiscoveryUOW) { u.deps.failWispFor = "t-middle" }},
+		{"status of the second-level source", func(u *sweepDiscoveryUOW) { u.issues.failScanFor = "t-leaf" }},
+		{"custom statuses", func(u *sweepDiscoveryUOW) { u.config.failCustom = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uw := newSweepDiscoveryUOW(boom)
+			tc.inject(uw)
+			for _, dryRun := range []bool{true, false} {
+				result, err := sweepInUOW(context.Background(), uw, issueops.SweepRequest{
+					Tier:                  issueops.SweepWispsPlane,
+					IDPattern:             "t-*",
+					ProtectLiveDependents: true,
+					DryRun:                dryRun,
+				})
+				if !errors.Is(err, boom) {
+					t.Fatalf("DryRun=%v: sweepInUOW error = %v, want the injected read failure", dryRun, err)
+				}
+				if result.Swept != 0 || result.Skipped != (issueops.SweepSkips{}) {
+					t.Errorf("DryRun=%v: result = %+v, want the zero result on error", dryRun, result)
+				}
+			}
+			if uw.issues.deletes != 0 {
+				t.Errorf("DeleteIssues called %d times after a failed discovery read, want 0", uw.issues.deletes)
+			}
+		})
+	}
+
+	// The same stub with nothing broken protects the root, so the cases above
+	// fail on the read and not on some other path.
+	uw := newSweepDiscoveryUOW(boom)
+	result, err := sweepInUOW(context.Background(), uw, issueops.SweepRequest{
+		Tier: issueops.SweepWispsPlane, IDPattern: "t-*", ProtectLiveDependents: true,
+	})
+	if err != nil || result.Swept != 0 || result.Skipped.LiveDependent != 1 {
+		t.Fatalf("unbroken stub: result = %+v, err = %v; want Swept 0, LiveDependent 1", result, err)
+	}
+}
+
+type sweepDiscoveryUOW struct {
+	UnitOfWork
+	issues *sweepDiscoveryIssues
+	deps   *sweepDiscoveryDeps
+	config *sweepDiscoveryConfig
+}
+
+func newSweepDiscoveryUOW(boom error) *sweepDiscoveryUOW {
+	closedAt := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	edge := func(source, target string) *types.Dependency {
+		return &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepParentChild}
+	}
+	return &sweepDiscoveryUOW{
+		issues: &sweepDiscoveryIssues{
+			boom:       boom,
+			candidates: []*types.Issue{{ID: "t-root", Status: types.StatusClosed, ClosedAt: &closedAt, Ephemeral: true}},
+			live:       map[string]bool{"t-leaf": true},
+		},
+		deps: &sweepDiscoveryDeps{
+			boom: boom,
+			wispIncoming: map[string][]*types.Dependency{
+				"t-root":   {edge("t-middle", "t-root")},
+				"t-middle": {edge("t-leaf", "t-middle")},
+			},
+		},
+		config: &sweepDiscoveryConfig{boom: boom},
+	}
+}
+
+func (u *sweepDiscoveryUOW) IssueUseCase() domain.IssueUseCase           { return u.issues }
+func (u *sweepDiscoveryUOW) DependencyUseCase() domain.DependencyUseCase { return u.deps }
+func (u *sweepDiscoveryUOW) ConfigUseCase() domain.ConfigUseCase         { return u.config }
+
+type sweepDiscoveryIssues struct {
+	domain.IssueUseCase
+	boom        error
+	candidates  []*types.Issue
+	live        map[string]bool
+	failScanFor string
+	deletes     int
+}
+
+func (s *sweepDiscoveryIssues) SearchWispsPlane(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
+	return s.candidates, nil
+}
+
+// SearchIssues is only the live-status scan here: the wisps-plane tier reads
+// its candidates through SearchWispsPlane.
+func (s *sweepDiscoveryIssues) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) (domain.SearchPage, error) {
+	var page domain.SearchPage
+	for _, id := range filter.IDs {
+		if id == s.failScanFor {
+			return domain.SearchPage{}, s.boom
+		}
+		if s.live[id] {
+			page.Items = append(page.Items, &types.Issue{ID: id, Status: types.StatusOpen})
+		}
+	}
+	return page, nil
+}
+
+func (s *sweepDiscoveryIssues) DeleteIssues(_ context.Context, params domain.DeleteIssuesParams, _ string) (domain.DeleteIssuesResult, error) {
+	s.deletes++
+	return domain.DeleteIssuesResult{DeletedCount: len(params.IDs)}, nil
+}
+
+type sweepDiscoveryDeps struct {
+	domain.DependencyUseCase
+	boom           error
+	wispIncoming   map[string][]*types.Dependency
+	failDurableFor string
+	failWispFor    string
+}
+
+func (d *sweepDiscoveryDeps) ListByIssueIDs(_ context.Context, ids []string, _ domain.DepListFilter) (domain.DepBulkResult, error) {
+	for _, id := range ids {
+		if id == d.failDurableFor {
+			return domain.DepBulkResult{}, d.boom
+		}
+	}
+	return domain.DepBulkResult{}, nil
+}
+
+func (d *sweepDiscoveryDeps) ListByWispIDs(_ context.Context, ids []string, _ domain.DepListFilter) (domain.DepBulkResult, error) {
+	out := domain.DepBulkResult{Incoming: make(map[string][]*types.Dependency)}
+	for _, id := range ids {
+		if id == d.failWispFor {
+			return domain.DepBulkResult{}, d.boom
+		}
+		if deps, ok := d.wispIncoming[id]; ok {
+			out.Incoming[id] = deps
+		}
+	}
+	return out, nil
+}
+
+type sweepDiscoveryConfig struct {
+	domain.ConfigUseCase
+	boom       error
+	failCustom bool
+}
+
+func (c *sweepDiscoveryConfig) GetConfig(context.Context, string) (string, error) { return "", nil }
+
+func (c *sweepDiscoveryConfig) GetCustomStatuses(context.Context) ([]types.CustomStatus, error) {
+	if c.failCustom {
+		return nil, c.boom
+	}
+	return nil, nil
 }
 
 func newUOWSweeperFixture(t *testing.T, ctx context.Context, prefix string) conformance.SweeperFixture {

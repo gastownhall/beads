@@ -697,6 +697,64 @@ func TestResolveSweepLiveDependentsHandlesDuplicatesAndEmptyInput(t *testing.T) 
 	}
 }
 
+// A read failure or a cancellation on ANY discovery round returns a nil map
+// and the error: a caller that sweeps on a partial graph would delete a root
+// whose live leaf sat one level further than the failed read.
+func TestResolveSweepLiveDependentsReturnsNoPartialResultOnError(t *testing.T) {
+	boom := errors.New("injected read failure")
+	graph := func() *sweepGraph {
+		// cand-near is protected after round one; cand-far needs round three.
+		g := newSweepGraph().
+			edge("live-near", "cand-near", types.DepParentChild).
+			chain(types.DepParentChild, "cand-far", "m1", "m2", "live-far")
+		g.live["live-near"] = true
+		g.live["live-far"] = true
+		return g
+	}
+	failFetch := func(g *sweepGraph, round int) FetchSweepIncomingEdges {
+		return func(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+			if len(g.fetches) == round {
+				return nil, boom
+			}
+			return g.fetch(ctx, ids)
+		}
+	}
+	failScan := func(g *sweepGraph, round int) ScanSweepLiveRows {
+		return func(ctx context.Context, ids []string) (map[string]bool, error) {
+			if len(g.scans) == round {
+				return nil, boom
+			}
+			return g.scan(ctx, ids)
+		}
+	}
+
+	for round := 0; round < 3; round++ {
+		g := graph()
+		got, err := ResolveSweepLiveDependents(context.Background(), []string{"cand-near", "cand-far"}, failFetch(g, round), g.scan)
+		if !errors.Is(err, boom) || got != nil {
+			t.Errorf("fetch fails on round %d: got %v, %v; want nil and the read error", round+1, got, err)
+		}
+		g = graph()
+		got, err = ResolveSweepLiveDependents(context.Background(), []string{"cand-near", "cand-far"}, g.fetch, failScan(g, round))
+		if !errors.Is(err, boom) || got != nil {
+			t.Errorf("scan fails on round %d: got %v, %v; want nil and the read error", round+1, got, err)
+		}
+	}
+
+	// Canceled between rounds: the round-one fetch cancels the context.
+	g := graph()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	canceling := func(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+		cancel()
+		return g.fetch(ctx, ids)
+	}
+	got, err := ResolveSweepLiveDependents(ctx, []string{"cand-near", "cand-far"}, canceling, g.scan)
+	if !errors.Is(err, context.Canceled) || got != nil {
+		t.Errorf("canceled mid-discovery: got %v, %v; want nil and context.Canceled", got, err)
+	}
+}
+
 func TestValidateSweepRequestRefusesANegativeLimit(t *testing.T) {
 	err := ValidateSweepRequest(issueops.SweepRequest{Tier: issueops.SweepEphemeral, Limit: -1})
 	if !errors.Is(err, issueops.ErrValidation) {
