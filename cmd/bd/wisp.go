@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -777,13 +778,19 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	if closedMode {
 		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes)
 	}
+	return runWispGCAbandoned(ctx, dryRun, cleanAll, ageThreshold, excludeTypes)
+}
 
+// runWispGCAbandoned is the age half of `bd mol wisp gc` on the direct route:
+// it selects the abandoned wisps and deletes them in chunks of
+// wispPurgeChunkSize, as the closed purge does (bd-xfuna8, GH#6246).
+func runWispGCAbandoned(ctx context.Context, dryRun, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) error {
 	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
 	if err != nil && abandoned == nil {
 		return HandleError("%v", err)
 	}
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: cascade expansion incomplete: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: cascade expansion incomplete: %v\n", err)
 	}
 
 	if len(abandoned) == 0 {
@@ -826,16 +833,21 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	}
 	// Cascade must stay OFF here too. findAbandonedWisps has already expanded
 	// dependents and kept only the unprotected ones that meet --age, so a
-	// deleteBatch cascade would re-expand from that set to ALL transitive
-	// dependents — including blocked/in-progress steps that isProtectedWisp
-	// just excluded (GH#4394's protection is only enforced in the pre-filter;
-	// cascade bypasses it) and fresh steps the --age check just spared.
-	// Without cascade the list is deleted exactly as filtered and live
-	// dependents are orphaned (edges dropped, is_blocked recomputed).
-	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, nil, "wisp gc"); err != nil {
+	// cascade would re-expand from that set to ALL transitive dependents —
+	// including blocked/in-progress steps that isProtectedWisp just excluded
+	// (GH#4394's protection is only enforced in the pre-filter; cascade
+	// bypasses it) and fresh steps the --age check just spared. Without
+	// cascade the list is deleted exactly as filtered and live dependents are
+	// orphaned (edges dropped, is_blocked recomputed).
+	//
+	// The selection goes to the deletion role in chunks, each its own
+	// transaction: one request for the whole selection was one transaction
+	// whose blocked-state recompute grew with it (GH#6246).
+	outcome, err := deleteSelectedWispsDirect(ctx, ids)
+	if err != nil {
 		return HandleError("%v", err)
 	}
-	return nil
+	return renderWispPurgeOutcome(outcome, wispGCReport{withDeletedIDs: true})
 }
 
 // wispIsAbandoned reports whether a wisp counts as abandoned for GC
@@ -1039,11 +1051,11 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		return nil
 	}
 
-	outcome, err := purgeClosedWispsDirect(ctx, ids)
+	outcome, err := deleteSelectedWispsDirect(ctx, ids)
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	if err := renderWispPurgeOutcome(outcome, scanCapped, true); err != nil {
+	if err := renderWispPurgeOutcome(outcome, wispGCReport{withScanCapped: true, scanCapped: scanCapped, withDeletedIDs: true}); err != nil {
 		return err
 	}
 	if !jsonOutput {
@@ -1190,11 +1202,11 @@ func (o wispPurgeOutcome) remaining() int {
 // and it does not promise the failed chunk wrote nothing: a rerun reselects.
 const wispPurgeRerunHint = "Rerun the same command to reselect current data and delete the remaining closed wisps."
 
-// purgeClosedWispsDirect deletes ids, which this store's own scan just
-// selected, through its deletion role. The ids go to the role as they are: the
+// deleteSelectedWispsDirect deletes ids, which this store's own scan just
+// selected (closed purge or age GC), through its deletion role. The ids go to the role as they are: the
 // front door's per-id resolution (deleteBatch) would re-read each one to learn
 // what the scan already said.
-func purgeClosedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutcome, error) {
+func deleteSelectedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutcome, error) {
 	deleter, err := store.Deleter()
 	if err != nil {
 		return wispPurgeOutcome{}, err
@@ -1229,15 +1241,26 @@ func purgeClosedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutcome
 	}), nil
 }
 
-// renderWispPurgeOutcome prints a forced closed purge's result with the keys
-// each route has always printed, plus candidates_capped (scanCapped: the scan
-// came back full, so more may remain); withDeletedIDs adds the direct route's
-// deleted_ids. A purge a failure stopped prints the same summary of what its
-// committed chunks deleted, then the cause and the rerun hint, and returns an
-// already-reported exit: under --json all of it is one stdout object
-// (remaining_count, error and hint beside the success keys), so a caller that
-// reads one JSON value still gets the progress.
-func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs bool) error {
+// wispGCReport says how renderWispPurgeOutcome prints a chunked gc's result
+// for the route and mode that ran it.
+type wispGCReport struct {
+	// withScanCapped adds candidates_capped, set from scanCapped: the closed
+	// purge's scan came back full, so more may remain.
+	withScanCapped bool
+	scanCapped     bool
+	// withDeletedIDs adds the direct route's deleted_ids.
+	withDeletedIDs bool
+}
+
+// renderWispPurgeOutcome prints a forced chunked gc's result with the keys
+// each route and mode has always printed (see wispGCReport). A gc a failure
+// stopped prints the same summary of what its committed chunks deleted, then
+// the cause and the rerun hint, and returns an already-reported exit: under
+// --json the summary is one stdout object (remaining_count, error and hint
+// beside the success keys), so a caller that reads one JSON value still gets
+// the progress.
+func renderWispPurgeOutcome(out wispPurgeOutcome, report wispGCReport) error {
+	scanCapped := report.withScanCapped && report.scanCapped
 	if jsonOutput {
 		answer := map[string]interface{}{
 			"deleted":              out.confirmed,
@@ -1247,9 +1270,11 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs boo
 			"events_removed":       out.events,
 			"references_updated":   out.referencesUpdated,
 			"orphaned_issues":      out.orphaned,
-			"candidates_capped":    scanCapped,
 		}
-		if withDeletedIDs {
+		if report.withScanCapped {
+			answer["candidates_capped"] = report.scanCapped
+		}
+		if report.withDeletedIDs {
 			answer["deleted_ids"] = out.deletedIDs
 		}
 		if out.err != nil {
