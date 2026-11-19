@@ -260,3 +260,26 @@ func TestExternalServerInitRefusesPopulatedRootWithoutWitnessOutsideLayout(t *te
 		t.Fatalf("refused init must leave %s absent; stat err = %v", localVersionFile, statErr)
 	}
 }
+
+// TestExternalServerInitLeavesAbsentBeadsDirUntouched: init records a witness
+// only in an explicit workspace that already exists; it never creates a
+// provisioner-owned BEADS_DIR solely to hold one.
+func TestExternalServerInitLeavesAbsentBeadsDirUntouched(t *testing.T) {
+	skipIfNoDolt(t)
+	repoDir := t.TempDir()
+	initGitRepo(t, repoDir)
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	env := append(externalServerTestEnv(t),
+		"BEADS_DIR="+beadsDir,
+		"BEADS_DOLT_DATA_DIR="+filepath.Join(t.TempDir(), "dolt-data"))
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	out, err := runExternalServerBD(t, repoDir, env, externalServerInitArgs(database)...)
+	if err != nil {
+		t.Fatalf("bd init --server --external with an absent explicit BEADS_DIR failed: %v\n%s", err, out)
+	}
+	if _, statErr := os.Stat(beadsDir); !os.IsNotExist(statErr) {
+		t.Fatalf("init created the absent explicit BEADS_DIR %s; stat err = %v", beadsDir, statErr)
+	}
+}
