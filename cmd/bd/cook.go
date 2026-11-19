@@ -218,6 +218,17 @@ func loadAndResolveFormula(formulaPath string, searchPaths []string) (*formula.F
 		}
 	}
 
+	// Drop each step that its expansion's own value excluded (with its
+	// advice), routing or refusing the edges onto it, as every pour does.
+	// Nothing in the JSON or a persisted proto would record the exclusion,
+	// so the step would read as unconditional there. Every other condition
+	// stays for the pour (bd-w153uq / #6433).
+	keptSteps, err := formula.DropExpansionExcludedSteps(resolved.Steps)
+	if err != nil {
+		return nil, fmt.Errorf("applying expansion conditions: %w", err)
+	}
+	resolved.Steps = keptSteps
+
 	return resolved, nil
 }
 
@@ -1182,7 +1193,8 @@ func collectDependencies(step *formula.Step, idMapping, exitGates map[string]str
 		if !ok {
 			// FilterStepsByCondition has already rejected a reference the
 			// formula wrote to a step its condition dropped, and routed an
-			// edge that a loop, compose.branch or advice added around one. A
+			// edge that a loop, compose.branch, advice or an expansion's
+			// stand-in for the step it replaced added around one. A
 			// target still missing here is a step that a transform replaced
 			// without rewriting the references to it: a loop container named
 			// from outside the loop (Validate accepts it as written, ApplyLoops

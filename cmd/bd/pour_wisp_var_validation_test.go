@@ -214,3 +214,62 @@ func TestWispMissingVarHintUnchanged(t *testing.T) {
 		t.Fatalf("runWispCreate stderr = %q, want the wisp-specific --var hint text", stderr)
 	}
 }
+
+// writeTemplateLoopFormulas puts a workflow formula that composes an
+// expansion whose template step declares a loop under a temp GT_ROOT, as
+// writeVarValidationFormula does.
+func writeTemplateLoopFormulas(t *testing.T) {
+	t.Helper()
+	gtRoot := t.TempDir()
+	formulaDir := filepath.Join(gtRoot, ".beads", "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir formula dir: %v", err)
+	}
+	files := map[string]string{
+		"pour-wisp-loop-exp.formula.json": `{"formula": "pour-wisp-loop-exp", "type": "expansion", "version": 1,
+			"template": [{"id": "{target}.loop", "title": "L", "loop": {"count": 2, "body": [{"id": "iter", "title": "Iter"}]}}]}`,
+		"pour-wisp-template-loop-test.formula.json": `{"formula": "pour-wisp-template-loop-test", "type": "workflow", "version": 1,
+			"steps": [{"id": "work", "title": "Work"}],
+			"compose": {"expand": [{"target": "work", "with": "pour-wisp-loop-exp"}]}}`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(formulaDir, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write formula fixture: %v", err)
+		}
+	}
+	t.Setenv("GT_ROOT", gtRoot)
+}
+
+// TestPourAndWispReportATemplateLoop: an expansion template step's loop is
+// refused with an error wrapping formula.ErrValidation, so pour and wisp
+// report it instead of falling through to the proto-ID lookup, which would
+// say the formula was not found (bd-w153uq / #6433).
+func TestPourAndWispReportATemplateLoop(t *testing.T) {
+	for name, run := range map[string]func() error{
+		"pour": func() error {
+			return runPour(makePourVarTestCmd(nil), []string{"pour-wisp-template-loop-test"})
+		},
+		"wisp": func() error {
+			return runWispCreate(makeWispVarTestCmd(nil), []string{"pour-wisp-template-loop-test"})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeTemplateLoopFormulas(t)
+			s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+			withWispTestGlobals(t, s, context.Background())
+
+			var runErr error
+			stderr := captureStderr(t, func() { runErr = run() })
+
+			if runErr == nil {
+				t.Fatalf("%s accepted a formula whose expansion template declares a loop", name)
+			}
+			if !strings.Contains(stderr, "declares a loop") {
+				t.Errorf("%s stderr = %q, want the template loop error", name, stderr)
+			}
+			if strings.Contains(stderr, "not found") {
+				t.Errorf("%s stderr = %q: the loop error was reported as a missing formula", name, stderr)
+			}
+		})
+	}
+}
