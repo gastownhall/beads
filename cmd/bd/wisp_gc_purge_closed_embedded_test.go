@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -71,7 +72,9 @@ func TestEmbeddedWispGCPurgeClosedDoesNotCascadeIntoLiveSteps(t *testing.T) {
 	// step purges closed wisps. The other 25 steps are live work (open) and
 	// must survive the purge.
 	bdClose(t, bd, dir, stepIDs[0])
-	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+	// --age 0s: the step closed moments ago, and closed GC now keeps wisps
+	// updated within --age (GH#8202); this test is about cascade, not age.
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--age", "0s")
 
 	// The closed step itself is gone.
 	bdShowFail(t, bd, dir, stepIDs[0])
@@ -118,9 +121,62 @@ func TestEmbeddedWispGCPurgeClosedStillPurgesFullyClosedMolecules(t *testing.T) 
 		bdClose(t, bd, dir, id)
 	}
 
-	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+	// --age 0s: the steps closed moments ago (see GH#8202).
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--age", "0s")
 
 	for _, id := range stepIDs {
 		bdShowFail(t, bd, dir, id)
 	}
+}
+
+// TestEmbeddedWispGCPurgeClosedSparesFreshAuditBearingWisp asserts the
+// behaviour GH#8202 expects: `bd mol wisp gc --closed --force` must not
+// hard-delete a wisp that closed moments ago and carries a report in its
+// notes. The wisps table is Dolt-ignored, so the delete is unrecoverable.
+func TestEmbeddedWispGCPurgeClosedSparesFreshAuditBearingWisp(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pc3")
+
+	report := bdCreate(t, bd, dir, "patrol report step", "--ephemeral").ID
+	bdUpdate(t, bd, dir, report, "--notes", "patrol report: 0 reaped / 0 purged / 0 anomalies")
+	bdClose(t, bd, dir, report)
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+
+	if !bdShowSucceeds(t, bd, dir, report) {
+		t.Errorf("gc --closed --force hard-deleted wisp %s seconds after it closed, along with its report notes", report)
+	}
+}
+
+// TestEmbeddedWispGCPurgeClosedKeepsRecentlyClosedWisps pins GH#8202 end to
+// end: closed GC honors --age (default 1h), so a wisp closed moments ago is
+// neither deleted nor counted, and --age 0s still purges it at once.
+func TestEmbeddedWispGCPurgeClosedKeepsRecentlyClosedWisps(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pc4")
+
+	fresh := bdCreate(t, bd, dir, "just finished step", "--ephemeral").ID
+	bdClose(t, bd, dir, fresh)
+
+	out := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
+	if !strings.Contains(out, `"deleted_count": 0`) {
+		t.Errorf("default gc --closed --force counted a wisp closed moments ago as deleted:\n%s", out)
+	}
+	if !bdShowSucceeds(t, bd, dir, fresh) {
+		t.Fatalf("default gc --closed --force deleted wisp %s moments after it closed", fresh)
+	}
+
+	// --age 0s is the explicit purge-all escape hatch.
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--age", "0s")
+	bdShowFail(t, bd, dir, fresh)
 }

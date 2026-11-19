@@ -775,7 +775,7 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	}
 
 	if closedMode {
-		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes)
+		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes, ageThreshold)
 	}
 
 	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
@@ -954,7 +954,24 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	return abandoned, cascadeErr
 }
 
-func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
+// closedWispSelection is what one `bd mol wisp gc --closed` scan selected:
+// the purge candidates, how many scanned rows each protection kept, and
+// whether the scan came back full.
+type closedWispSelection struct {
+	candidates []*types.Issue
+	pinned     int
+	infra      int
+	scanCapped bool
+}
+
+// selectClosedWispsForPurge is the one candidate selection both routes of
+// `bd mol wisp gc --closed` share (GH#8202). A closed ephemeral wisp is a
+// candidate only once it has gone unupdated for longer than ageThreshold, the
+// same idle-time contract (wispIsAbandoned) the abandoned-wisp GC applies, so
+// a molecule that finished moments ago keeps its record for a review window.
+// ageThreshold <= 0 (--age 0s) selects every closed wisp regardless of age.
+// Pinned wisps and configured infra types stay protected at any age.
+func selectClosedWispsForPurge(ctx context.Context, r molReader, ageThreshold time.Duration, excludeTypes []types.IssueType) (closedWispSelection, error) {
 	statusClosed := types.StatusClosed
 	ephemeralTrue := true
 	filter := types.IssueFilter{
@@ -963,29 +980,40 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		ExcludeTypes: excludeTypes,
 		Limit:        wispPurgeScanLimit,
 	}
+	now := wispGCNow()
 
-	closedIssues, err := store.SearchIssues(ctx, "", filter)
+	closedIssues, err := r.SearchIssues(ctx, "", filter)
+	if err != nil {
+		return closedWispSelection{}, err
+	}
+	sel := closedWispSelection{
+		candidates: make([]*types.Issue, 0, len(closedIssues)),
+		scanCapped: len(closedIssues) >= wispPurgeScanLimit,
+	}
+	for _, issue := range closedIssues {
+		if issue.Pinned {
+			sel.pinned++
+			continue
+		}
+		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
+			sel.infra++
+			continue
+		}
+		if !wispIsAbandoned(now, issue.UpdatedAt, ageThreshold) {
+			continue
+		}
+		sel.candidates = append(sel.candidates, issue)
+	}
+	return sel, nil
+}
+
+func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType, ageThreshold time.Duration) error {
+	sel, err := selectClosedWispsForPurge(ctx, store, ageThreshold, excludeTypes)
 	if err != nil {
 		return HandleError("listing closed wisps: %v", err)
 	}
-	scanCapped := len(closedIssues) >= wispPurgeScanLimit
-
-	// Filter out pinned and infra issues (protected from cleanup)
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if store.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	closedIssues = filtered
+	closedIssues, scanCapped := sel.candidates, sel.scanCapped
+	pinnedCount, infraCount := sel.pinned, sel.infra
 
 	if pinnedCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
