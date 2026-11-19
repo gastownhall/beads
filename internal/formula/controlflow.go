@@ -21,9 +21,23 @@ import (
 // A reference to a loop step, which no longer exists after expansion, is
 // retargeted to the loop's ends, so it waits for the whole loop (GH#7636).
 // Returns a new steps slice with loops expanded.
+//
+// The expansion is metered by a fresh ExpansionBudget seeded with steps; see
+// ApplyLoopsWithBudget.
 func ApplyLoops(steps []*Step) ([]*Step, error) {
+	return ApplyLoopsWithBudget(steps, NewExpansionBudget(steps))
+}
+
+// ApplyLoopsWithBudget is ApplyLoops charging every loop iteration to budget,
+// which must already count steps. Each loop is charged for all of its
+// iterations before the first is cloned, nested loop bodies included, so a
+// loop the budget cannot hold fails with ErrExpansionLimit instead of being
+// materialized. A nested loop's charge is released when it expands, so the
+// budget counts the steps the expansion outputs, not the ones it passed
+// through.
+func ApplyLoopsWithBudget(steps []*Step, budget *ExpansionBudget) ([]*Step, error) {
 	ends := make(map[string][]string)
-	result, err := applyLoops(steps, ends)
+	result, err := applyLoops(steps, ends, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +47,7 @@ func ApplyLoops(steps []*Step) ([]*Step, error) {
 
 // applyLoops expands loops like ApplyLoops and records each expanded loop's
 // ends (loopEnds) in ends, keyed by the loop step's ID, without retargeting.
-func applyLoops(steps []*Step, ends map[string][]string) ([]*Step, error) {
+func applyLoops(steps []*Step, ends map[string][]string, budget *ExpansionBudget) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps))
 
 	for _, step := range steps {
@@ -41,7 +55,7 @@ func applyLoops(steps []*Step, ends map[string][]string) ([]*Step, error) {
 			// No loop - recursively process children
 			clone := cloneStep(step)
 			if len(step.Children) > 0 {
-				children, err := applyLoops(step.Children, ends)
+				children, err := applyLoops(step.Children, ends, budget)
 				if err != nil {
 					return nil, err
 				}
@@ -57,7 +71,7 @@ func applyLoops(steps []*Step, ends map[string][]string) ([]*Step, error) {
 		}
 
 		// Expand the loop
-		expanded, err := expandLoop(step, ends)
+		expanded, err := expandLoop(step, ends, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -122,18 +136,30 @@ func validateLoopSpec(loop *LoopSpec, stepID string) error {
 }
 
 // expandLoop expands a loop step into its constituent steps.
-func expandLoop(step *Step, ends map[string][]string) ([]*Step, error) {
-	return expandLoopWithVars(step, nil, ends)
+func expandLoop(step *Step, ends map[string][]string, budget *ExpansionBudget) ([]*Step, error) {
+	return expandLoopWithVars(step, nil, ends, budget)
 }
 
 // expandLoopWithVars expands a loop step using the given variable context.
 // The vars map is used to resolve range expressions with variables.
 // The loop's ends, and those of nested loops, are recorded in ends.
-func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]string) ([]*Step, error) {
+//
+// The loop step and its body leave the graph and its iterations enter it, so
+// budget is released for the one and charged for the other before any
+// iteration is cloned.
+func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]string, budget *ExpansionBudget) ([]*Step, error) {
 	var result []*Step
+	what := fmt.Sprintf("loop %q", step.ID)
+	// validateLoopSpec refused an empty body; one step per iteration is the
+	// least an iteration can cost, which also keeps the divisions below safe.
+	bodySize := max(stepGraphSize(step.Loop.Body), 1)
+	budget.release(stepGraphSize([]*Step{step}))
 
 	if step.Loop.Count > 0 {
 		// Fixed-count loop: expand body N times
+		if err := budget.reserveCopies(uint64(step.Loop.Count), bodySize, what); err != nil {
+			return nil, err
+		}
 		for i := 1; i <= step.Loop.Count; i++ {
 			iterSteps, err := expandLoopIteration(step, i, nil)
 			if err != nil {
@@ -144,7 +170,7 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 
 		// Recursively expand any nested loops FIRST
 		var err error
-		result, err = applyLoops(result, ends)
+		result, err = applyLoops(result, ends, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -167,11 +193,23 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 				step.ID, rangeSpec.End, rangeSpec.Start)
 		}
 
-		// Expand body for each value in range
-		count := rangeSpec.End - rangeSpec.Start + 1
-		iterNum := 0
-		for val := rangeSpec.Start; val <= rangeSpec.End; val++ {
-			iterNum++
+		// Charge every value in the range before expanding any. The span is
+		// computed in uint64, where End-Start cannot overflow, and charged
+		// as span+1 copies without computing span+1, which could.
+		span := uint64(rangeSpec.End) - uint64(rangeSpec.Start)
+		if span >= uint64(budget.remaining()/bodySize) {
+			return nil, budget.limitError(what)
+		}
+		count := int(span) + 1
+		if err := budget.reserveCopies(uint64(count), bodySize, what); err != nil {
+			return nil, err
+		}
+
+		// Expand body for each value in range. Counting iterations rather
+		// than incrementing val never steps past End, which may be the
+		// largest int.
+		for iterNum := 1; iterNum <= count; iterNum++ {
+			val := rangeSpec.Start + (iterNum - 1)
 			// Build iteration vars: include the loop variable if specified
 			iterVars := make(map[string]string)
 			if step.Loop.Var != "" {
@@ -185,7 +223,7 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 		}
 
 		// Recursively expand any nested loops FIRST
-		result, err = applyLoops(result, ends)
+		result, err = applyLoops(result, ends, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -197,6 +235,9 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 	} else {
 		// Conditional loop: expand once with loop metadata
 		// The runtime executor will re-run until condition is met or max reached
+		if err := budget.reserve(bodySize, what); err != nil {
+			return nil, err
+		}
 		iterSteps, err := expandLoopIteration(step, 1, nil)
 		if err != nil {
 			return nil, err
@@ -215,7 +256,7 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 		}
 
 		// Recursively expand any nested loops
-		result, err = applyLoops(iterSteps, ends)
+		result, err = applyLoops(iterSteps, ends, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -746,11 +787,21 @@ func applyGatesWithMap(stepMap map[string]*Step, compose *ComposeRules) error {
 // 3. Gates (add condition labels)
 //
 // Returns a new steps slice. The original steps slice is not modified.
+//
+// Loop expansion is metered by a fresh ExpansionBudget seeded with steps; see
+// ApplyControlFlowWithBudget.
 func ApplyControlFlow(steps []*Step, compose *ComposeRules) ([]*Step, error) {
+	return ApplyControlFlowWithBudget(steps, compose, NewExpansionBudget(steps))
+}
+
+// ApplyControlFlowWithBudget is ApplyControlFlow charging loop expansion to
+// budget (see ApplyLoopsWithBudget), so one budget can meter every phase of a
+// formula resolution. Branches and gates add no steps.
+func ApplyControlFlowWithBudget(steps []*Step, compose *ComposeRules, budget *ExpansionBudget) ([]*Step, error) {
 	var err error
 
 	// Apply loops first (expands steps) - ApplyLoops already returns new slice
-	steps, err = ApplyLoops(steps)
+	steps, err = ApplyLoopsWithBudget(steps, budget)
 	if err != nil {
 		return nil, fmt.Errorf("applying loops: %w", err)
 	}
