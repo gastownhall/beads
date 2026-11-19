@@ -47,6 +47,9 @@ func RunPreviousExternalRefsContract(t *testing.T, ctx context.Context, fx Previ
 			t.Fatalf("PreviousExternalRefs(nil) = (%v, %v), want an empty map", refs, err)
 		}
 	})
+	t.Run("ObservesACompletedHistoryChange", func(t *testing.T) {
+		RunPreviousExternalRefsObservesACompletedHistoryChange(t, ctx, fx)
+	})
 }
 
 // contractBase is the first seeded commit's date minus an hour.
@@ -144,6 +147,44 @@ func RunPreviousExternalRefsMatchesTheSingleIDOracle(t *testing.T, ctx context.C
 			}
 		})
 	}
+}
+
+// RunPreviousExternalRefsObservesACompletedHistoryChange pins that no answer
+// outlives its call: after a history change completes, the same ids at the
+// same cutoff read the new reachable history, both a new commit and a reset
+// that rewinds commits away.
+func RunPreviousExternalRefsObservesACompletedHistoryChange(t *testing.T, ctx context.Context, fx PreviousExternalRefsFixture) {
+	t.Helper()
+	issueID := fx.Prefix + "-requery"
+	asOf := at(10)
+	ask := func(want string, wantFound bool) {
+		t.Helper()
+		refs, err := fx.Refs.PreviousExternalRefs(ctx, []string{issueID}, asOf)
+		if err != nil {
+			t.Fatalf("PreviousExternalRefs: %v", err)
+		}
+		if ref, found := refs[issueID]; ref != want || found != wantFound {
+			t.Fatalf("PreviousExternalRefs(%s) = (%q, %v), want (%q, %v)", issueID, ref, found, want, wantFound)
+		}
+	}
+
+	var anchor string
+	if err := fx.ReadTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&anchor)
+	}); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+
+	mustExec(t, ctx, fx, insertSQL, issueID, "https://tracker.test/R1")
+	commitAt(t, ctx, fx, "seed requery", at(5))
+	ask("https://tracker.test/R1", true)
+
+	mustExec(t, ctx, fx, updateSQL, "https://tracker.test/R2", issueID)
+	commitAt(t, ctx, fx, "relink requery", at(6))
+	ask("https://tracker.test/R2", true)
+
+	mustExec(t, ctx, fx, "CALL DOLT_RESET('--hard', ?)", anchor)
+	ask("", false)
 }
 
 const (
