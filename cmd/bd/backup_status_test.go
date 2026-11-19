@@ -526,6 +526,50 @@ func TestBackupStatusReportsFailedAutoBackup(t *testing.T) {
 		}
 	})
 
+	t.Run("json_carries_success_failure_and_watermarks", func(t *testing.T) {
+		beadsDir := prepareBackupStatusTest(t)
+		seedBackupStateJSON(t, beadsDir, seeded)
+
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status", "--json"})
+		stdout, _, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status --json: %v", err)
+		}
+		var response struct {
+			Backup struct {
+				LastDoltCommit string    `json:"last_dolt_commit"`
+				Timestamp      time.Time `json:"timestamp"`
+				LastCapWarnAt  time.Time `json:"last_cap_warn_at"`
+				LastSuccessAt  time.Time `json:"last_success_at"`
+				LastError      string    `json:"last_error"`
+				LastErrorAt    time.Time `json:"last_error_at"`
+			} `json:"backup"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+			t.Fatalf("parse backup status JSON (%v):\n%s", err, stdout)
+		}
+		b := response.Backup
+		if !b.LastSuccessAt.Equal(t1) {
+			t.Errorf("backup.last_success_at = %v, want the last success %v", b.LastSuccessAt, t1)
+		}
+		if b.LastError != failureText {
+			t.Errorf("backup.last_error = %q, want %q", b.LastError, failureText)
+		}
+		if !b.LastErrorAt.Equal(t2) {
+			t.Errorf("backup.last_error_at = %v, want %v", b.LastErrorAt, t2)
+		}
+		if b.LastDoltCommit != "deadbeef" {
+			t.Errorf("backup.last_dolt_commit = %q, want deadbeef", b.LastDoltCommit)
+		}
+		if !b.Timestamp.Equal(t2) {
+			t.Errorf("backup.timestamp = %v, want the failed attempt's watermark %v", b.Timestamp, t2)
+		}
+		if !b.LastCapWarnAt.Equal(t3) {
+			t.Errorf("backup.last_cap_warn_at = %v, want %v", b.LastCapWarnAt, t3)
+		}
+	})
+
 	t.Run("legacy_state_prints_its_watermark_unchanged", func(t *testing.T) {
 		t0 := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
 		beadsDir := prepareBackupStatusTest(t)
