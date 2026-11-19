@@ -198,3 +198,34 @@ func TestUnrelateCrossPrefixRemovesBothHalves(t *testing.T) {
 		t.Errorf("rig dependency_removed events for gt-target1 = %d, want 1", got)
 	}
 }
+
+// TestRelateCrossPrefixUnresolvableEndpointWritesNothing (GH#4647, AC-3): when
+// one endpoint resolves nowhere, bd relate names THAT endpoint and writes no
+// edge or event into either store, even though the other endpoint resolved
+// through a route first.
+func TestRelateCrossPrefixUnresolvableEndpointWritesNothing(t *testing.T) {
+	r := setupRelateRigs(t, nil)
+
+	err := runRelate(relateCmd, []string{"gt-target1", "hq-missing"})
+	if err == nil {
+		t.Fatalf("bd relate gt-target1 hq-missing succeeded; want a resolution error")
+	}
+	if !strings.Contains(err.Error(), "failed to resolve hq-missing") {
+		t.Errorf("error = %q, want it to name the unresolvable endpoint hq-missing", err)
+	}
+
+	if deps, _ := r.town.GetDependencyRecords(r.ctx, "hq-src1"); len(deps) != 0 {
+		t.Errorf("town hq-src1 gained edges after a failed relate: %+v", deps)
+	}
+	rig := r.openRig(t)
+	deps, err := rig.GetDependencyRecords(r.ctx, "gt-target1")
+	if err != nil {
+		t.Fatalf("rig GetDependencyRecords: %v", err)
+	}
+	if len(deps) != 0 {
+		t.Errorf("rig gt-target1 gained edges after a failed relate: %+v", deps)
+	}
+	if got := countEvents(t, r.ctx, rig, "gt-target1", types.EventDependencyAdded); got != 0 {
+		t.Errorf("rig dependency_added events for gt-target1 = %d, want 0", got)
+	}
+}
