@@ -1521,3 +1521,44 @@ func TestAcquireInitMutationGateKeepsExclusiveWhereRequired(t *testing.T) {
 		})
 	}
 }
+
+// AC-8: a shared-server init that times out on a gate keeps ErrBusy, the
+// gate path and mode, the wait budget and its knob, and says the contention
+// may be in the workspace or its shared server; reinit names itself.
+func TestAcquireInitMutationGateSharedServerRefusalText(t *testing.T) {
+	t.Run("ordinary-vs-maintenance", func(t *testing.T) {
+		f := newSharedServerGateFixture(t)
+		t.Setenv(initGateTimeoutEnv, "300ms")
+		f.holdOtherProjectMaintenance(t)
+		_, err := acquireInitMutationGate(context.Background(), newProjectBeadsDir(t, false), f.sharedRoot, nil)
+		if !errors.Is(err, workspacegate.ErrBusy) {
+			t.Fatalf("err = %v, want ErrBusy", err)
+		}
+		for _, want := range []string{
+			"bd init refuses to run over live bd activity on this workspace or its shared server",
+			"waited 300ms", initGateTimeoutEnv, f.rootGate(t).Path(), "test maintenance",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+	})
+	t.Run("reinit-vs-resident-serve", func(t *testing.T) {
+		f := newSharedServerGateFixture(t)
+		t.Setenv(initGateTimeoutEnv, "300ms")
+		f.holdOtherProjectServe(t)
+		_, err := acquireInitMutationGateFor(context.Background(), newProjectBeadsDir(t, true), f.sharedRoot, true, nil)
+		if !errors.Is(err, workspacegate.ErrBusy) {
+			t.Fatalf("err = %v, want ErrBusy", err)
+		}
+		for _, want := range []string{
+			"bd init --reinit-local refuses to run over live bd activity on this workspace or its shared server",
+			"other projects' bd commands",
+			"waited 300ms", initGateTimeoutEnv, f.rootGate(t).Path(), "exclusive mode",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+	})
+}
