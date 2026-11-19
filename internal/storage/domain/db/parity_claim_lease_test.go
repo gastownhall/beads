@@ -113,6 +113,7 @@ func (s *testSuite) TestClaimAssigneeOverrideLease() {
 	s.Run("ClaimOverrideArmsLeaseForFinalHolder", s.claimOverrideArmsLeaseForFinalHolder)
 	s.Run("ClaimOverrideRedolesHeldLeaseFromUpdateTime", s.claimOverrideRedolesHeldLeaseFromUpdateTime)
 	s.Run("ClaimOverrideToPoolAliasLeavesNoLease", s.claimOverrideToPoolAliasLeavesNoLease)
+	s.Run("ClaimWhosePatchEndsTheClaimLeavesNoLease", s.claimWhosePatchEndsTheClaimLeavesNoLease)
 }
 
 // claimOverrideArmsLeaseForFinalHolder is AC-1: alice claims an open,
@@ -184,5 +185,38 @@ func (s *testSuite) claimOverrideToPoolAliasLeavesNoLease() {
 			s.Equal("fable-crew", got.Assignee)
 			s.Equal(0, s.countClaimLeaseRows(id), "a claim handed to a claim.pools alias must hold no lease")
 		})
+	}
+}
+
+// claimWhosePatchEndsTheClaimLeavesNoLease is AC-4: a --claim update whose
+// patch ends the claim (a status other than in_progress, built-in or custom,
+// or an empty assignee) commits with no lease row.
+func (s *testSuite) claimWhosePatchEndsTheClaimLeavesNoLease() {
+	s.Require().NoError(s.configRepo().SetConfig(s.Ctx(), "status.custom", "triaged:active"))
+	defer func() { s.Require().NoError(s.configRepo().SetConfig(s.Ctx(), "status.custom", "")) }()
+	cases := []struct {
+		name   string
+		update claimLeaseUpdate
+	}{
+		{name: "open", update: claimLeaseUpdate{claim: true, assignee: claimLeaseString("bob"), status: claimLeaseStatus(types.StatusOpen)}},
+		{name: "blocked", update: claimLeaseUpdate{claim: true, assignee: claimLeaseString("bob"), status: claimLeaseStatus(types.StatusBlocked)}},
+		{name: "custom", update: claimLeaseUpdate{claim: true, assignee: claimLeaseString("bob"), status: claimLeaseStatus("triaged")}},
+		{name: "unassigned", update: claimLeaseUpdate{claim: true, assignee: claimLeaseString("")}},
+	}
+	for _, stack := range claimLeaseStacks() {
+		for _, tc := range cases {
+			s.Run(stack.name+"/"+tc.name, func() {
+				id := "bd-cl-end-" + stack.name + "-" + tc.name
+				s.seedOpenIssue(id)
+				s.Require().NoError(stack.apply(s, id, "alice", tc.update))
+
+				got := s.readClaimLeaseIssue(id, false)
+				if tc.update.status != nil {
+					s.Equal(*tc.update.status, got.Status)
+				}
+				s.Equal(*tc.update.assignee, got.Assignee)
+				s.Equal(0, s.countClaimLeaseRows(id), "a claim whose patch ends the claim must leave no lease")
+			})
+		}
 	}
 }
