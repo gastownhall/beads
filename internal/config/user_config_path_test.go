@@ -23,8 +23,6 @@ func TestUserConfigYamlPathNamesNativeEnvironmentSource(t *testing.T) {
 		switch runtime.GOOS {
 		case "windows":
 			wantSource = "APPDATA"
-		case "darwin", "ios":
-			wantSource = "HOME"
 		case "plan9":
 			wantSource = "home"
 		}

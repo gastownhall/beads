@@ -1431,6 +1431,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **bd no longer reads `~/Library/Application Support` on macOS** (#8113).
+  Every launch looked for `~/Library/Application Support/bd/config.yaml`
+  (Go's `os.UserConfigDir()` on macOS), and `bd prime` looked for
+  `~/Library/Application Support/beads/PRIME.md`; on macOS 26 that access is
+  reported to raise a privacy prompt each time. On macOS bd's native user
+  config directory now follows the Linux rule: `$XDG_CONFIG_HOME` when set,
+  otherwise `~/.config`. The merge order (`~/.beads` < native <
+  `~/.config/bd` < project) is unchanged, and so are Linux and Windows. A
+  global `PRIME.md` must move:
+  `mkdir -p ~/.config/beads && mv ~/Library/Application\ Support/beads/PRIME.md ~/.config/beads/`.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
