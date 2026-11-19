@@ -94,6 +94,12 @@ func (s *Store) GetDependenciesWithMetadata(ctx context.Context, id string) ([]*
 	return details.Dependencies, nil
 }
 
+// GetDependenciesWithUnresolvable answers the combined outgoing read from the
+// same detail response GetDependenciesWithMetadata reads.
+func (s *Store) GetDependenciesWithUnresolvable(ctx context.Context, id string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return nil, nil, &issueops.ErrUnsupported{Op: "GetDependenciesWithUnresolvable", Backend: "http"}
+}
+
 // GetDependentsWithMetadata answers getIssue's dependents arm, which is carried
 // only when asked: include_dependents is the parameter D4 landed for it.
 //

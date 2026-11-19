@@ -723,63 +723,6 @@ func (s *DoltStore) getWispDependents(ctx context.Context, issueID string) ([]*t
 	return s.GetIssuesByIDs(ctx, ids)
 }
 
-// getWispDependenciesWithMetadata returns wisp dependencies with metadata.
-func (s *DoltStore) getWispDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	rows, err := s.queryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS depends_on_id, type FROM wisp_dependencies WHERE issue_id = ?
-	`, issueops.DepTargetExpr), issueID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get wisp dependencies with metadata: %w", err)
-	}
-
-	type depMeta struct {
-		depID, depType string
-	}
-	var deps []depMeta
-	for rows.Next() {
-		var depID, depType string
-		if err := rows.Scan(&depID, &depType); err != nil {
-			_ = rows.Close()
-			return nil, wrapScanError("scan wisp dependency metadata", err)
-		}
-		deps = append(deps, depMeta{depID: depID, depType: depType})
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, wrapQueryError("iterate wisp dependencies", err)
-	}
-
-	if len(deps) == 0 {
-		return nil, nil
-	}
-
-	ids := make([]string, len(deps))
-	for i, d := range deps {
-		ids[i] = d.depID
-	}
-	issues, err := s.GetIssuesByIDs(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	issueMap := make(map[string]*types.Issue, len(issues))
-	for _, iss := range issues {
-		issueMap[iss.ID] = iss
-	}
-
-	var results []*types.IssueWithDependencyMetadata
-	for _, d := range deps {
-		issue, ok := issueMap[d.depID]
-		if !ok {
-			continue
-		}
-		results = append(results, &types.IssueWithDependencyMetadata{
-			Issue:          *issue,
-			DependencyType: types.DependencyType(d.depType),
-		})
-	}
-	return results, nil
-}
-
 // FindWispDependentsRecursive finds all wisp dependents of the given IDs,
 // recursively. Uses batched IN-clause queries against wisp_dependencies for
 // efficiency. Returns the set of all discovered dependent IDs (excluding the

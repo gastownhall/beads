@@ -398,6 +398,14 @@ func (s *InstrumentedStorage) GetDependenciesWithMetadata(ctx context.Context, i
 	return v, err
 }
 
+func (s *InstrumentedStorage) GetDependenciesWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "GetDependenciesWithUnresolvable", attrs...)
+	resolved, unresolvable, err := s.inner.GetDependenciesWithUnresolvable(ctx, issueID)
+	s.done(ctx, span, t, err)
+	return resolved, unresolvable, err
+}
+
 func (s *InstrumentedStorage) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetDependentsWithMetadata", attrs...)

@@ -52,6 +52,7 @@ go_library(
         "memories_contract.go",
         "metadata_cas_contract.go",
         "molecule_contract.go",
+        "outgoing_dependency_readers.go",
         "portable.go",
         "querier_contract.go",
         "reader_contract.go",

@@ -205,6 +205,7 @@ func RunAll(t *testing.T, factory Factory) {
 	// Dependencies
 	t.Run("AddAndGetDeps", func(t *testing.T) { testAddAndGetDeps(t, factory) })
 	t.Run("DepCounts", func(t *testing.T) { testDepCounts(t, factory) })
+	t.Run("CombinedOutgoingRead", func(t *testing.T) { testCombinedOutgoingRead(t, factory) })
 
 	// Ready/Blocked
 	t.Run("ReadyNoDeps", func(t *testing.T) { testReadyNoDeps(t, factory) })
