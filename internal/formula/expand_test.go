@@ -1669,3 +1669,89 @@ func TestExpandStepMetadataDepthBound(t *testing.T) {
 		}
 	})
 }
+
+// TestExpandStepRejectsTemplateLoop: control flow runs before expansions, so
+// a loop on an expansion template step would never be expanded; it is an
+// error naming the step instead of being dropped (bd-w153uq / #6433).
+func TestExpandStepRejectsTemplateLoop(t *testing.T) {
+	target := &Step{ID: "work", Title: "Work"}
+	loop := &LoopSpec{Count: 2, Body: []*Step{{ID: "iter", Title: "Iter"}}}
+
+	t.Run("top_level", func(t *testing.T) {
+		_, err := expandStep(target, []*Step{{ID: "{target}.loop", Title: "L", Loop: loop}}, nil)
+		if err == nil || !strings.Contains(err.Error(), `"{target}.loop"`) || !strings.Contains(err.Error(), "loop") {
+			t.Fatalf("err = %v, want a loop error naming {target}.loop", err)
+		}
+	})
+
+	t.Run("child", func(t *testing.T) {
+		tmpl := &Step{ID: "{target}.parent", Title: "P", Children: []*Step{{ID: "{target}.inner", Title: "I", Loop: loop}}}
+		_, err := expandStep(target, []*Step{tmpl}, nil)
+		if err == nil || !strings.Contains(err.Error(), `"{target}.inner"`) {
+			t.Fatalf("err = %v, want a loop error naming {target}.inner", err)
+		}
+	})
+
+	t.Run("wrappers", func(t *testing.T) {
+		f := &Formula{Formula: "looped", Type: TypeExpansion, Template: []*Step{{ID: "{target}.loop", Title: "L", Loop: loop}}}
+		if err := MaterializeExpansion(f, "main", nil); err == nil || !strings.Contains(err.Error(), "loop") {
+			t.Errorf("MaterializeExpansion err = %v, want the loop error", err)
+		}
+		if f.Steps != nil {
+			t.Errorf("MaterializeExpansion produced steps %v", f.Steps)
+		}
+		if got := ExpansionVarRefs(f, "main"); got != nil {
+			t.Errorf("ExpansionVarRefs = %v, want nil for a template that cannot expand", got)
+		}
+
+		tmpDir := t.TempDir()
+		body := `{"formula": "looped", "type": "expansion", "version": 1,
+			"template": [{"id": "{target}.loop", "title": "L", "loop": {"count": 2, "body": [{"id": "iter", "title": "Iter"}]}}]}`
+		if err := os.WriteFile(filepath.Join(tmpDir, "looped.formula.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		parser := NewParser(tmpDir)
+		_, err := ApplyExpansions([]*Step{{ID: "work", Title: "Work"}}, &ComposeRules{Expand: []*ExpandRule{{Target: "work", With: "looped"}}}, parser)
+		if err == nil || !strings.Contains(err.Error(), `"{target}.loop"`) {
+			t.Errorf("ApplyExpansions err = %v, want the loop error", err)
+		}
+		_, err = ApplyInlineExpansions([]*Step{{ID: "work", Title: "Work", Expand: "looped"}}, parser)
+		if err == nil || !strings.Contains(err.Error(), `"{target}.loop"`) {
+			t.Errorf("ApplyInlineExpansions err = %v, want the loop error", err)
+		}
+	})
+}
+
+// TestExpandStepClearsInlineExpand pins the documented policy that nested
+// template expansion directives are cleared: an expanded step carries no
+// expand/expand_vars, so it is neither re-expanded nor an error to load
+// (bd-w153uq / #6433). This matched the old behavior as well; it is
+// compatibility coverage for the copy-based expansion.
+func TestExpandStepClearsInlineExpand(t *testing.T) {
+	target := &Step{ID: "work", Title: "Work"}
+	tmpl := &Step{ID: "{target}.nested", Title: "N", Expand: "does-not-exist", ExpandVars: map[string]string{"k": "v"},
+		Children: []*Step{{ID: "{target}.child", Title: "C", Expand: "does-not-exist"}}}
+
+	result, err := expandStep(target, []*Step{tmpl}, nil)
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	if result[0].Expand != "" || result[0].ExpandVars != nil || result[0].Children[0].Expand != "" {
+		t.Errorf("expand directives carried: Expand=%q ExpandVars=%v child Expand=%q",
+			result[0].Expand, result[0].ExpandVars, result[0].Children[0].Expand)
+	}
+
+	tmpDir := t.TempDir()
+	body := `{"formula": "outer", "type": "expansion", "version": 1,
+		"template": [{"id": "{target}.nested", "title": "N", "expand": "does-not-exist", "expand_vars": {"k": "v"}}]}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "outer.formula.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ApplyInlineExpansions([]*Step{{ID: "work", Title: "Work", Expand: "outer"}}, NewParser(tmpDir))
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansions: %v", err)
+	}
+	if len(out) != 1 || out[0].ID != "work.nested" || out[0].Expand != "" {
+		t.Errorf("ApplyInlineExpansions = %+v, want the single cleared step work.nested", out)
+	}
+}

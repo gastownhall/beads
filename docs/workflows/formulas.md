@@ -219,6 +219,33 @@ title = "Deploy to production"
 needs = ["approval"]   # waits for the prep task and for bd gate resolve
 ```
 
+## Expansion templates
+
+An `expansion` formula's `[[template]]` steps are copied in place of a target
+step: through `compose.expand` or `compose.map`, an inline `expand` on a step,
+or by pouring the expansion formula on its own (the target is then a synthetic
+step named `main`). `{target}` (or `{target.id}`), `{target.title}`,
+`{target.description}` and the expansion's `{name}` variables are filled in as
+the steps are copied:
+
+| Template step field | When expanded |
+|---------------------|---------------|
+| `id`, `title`, `description`, `notes`, `labels`, `needs`, `depends_on`, `waits_for` | `{target…}` placeholders and `{name}` variables filled in |
+| `assignee` | `{name}` variables filled in |
+| `metadata` | String values filled in like `notes`, at any depth; keys unchanged |
+| `type`, `priority`, `children` | Kept (children are expanded the same way) |
+| `condition` | Kept verbatim, then evaluated against the enclosing formula's variables when the formula is cooked or poured |
+| `gate`, `on_complete` | Kept verbatim; the gate gets the usual `{{variable}}` substitution when cooked |
+| `expand`, `expand_vars` | Cleared: an expanded step is never expanded again |
+| `loop` | Not supported: expansion fails with an error naming the step; move the loop onto the step that expands the template, or the loop body's steps into the template |
+
+`waits_for` can name its spawner through the target, for example
+`waits_for = "children-of({target}.spawn)"`. A template metadata value nested
+inside 32 or more tables or arrays (the `metadata` table itself counts as one)
+is an error rather than being dropped. When an expansion formula
+is poured on its own, its template steps' conditions filter the poured steps,
+and a variable a template step uses only in its condition is accepted.
+
 ## Aspects (Cross-cutting)
 
 Apply transformations to matching steps:
