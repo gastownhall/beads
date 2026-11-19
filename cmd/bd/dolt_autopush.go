@@ -199,6 +199,8 @@ func maybeAutoPush(ctx context.Context) {
 				printDivergedHistoryGuidance("push")
 			} else if isRemoteDanglingReferenceErr(err) {
 				printRemoteDanglingReferenceGuidance(ctx, st, "")
+			} else if isGitUsageRefusalErr(err) {
+				printGitUsageRefusalGuidance(os.Stderr)
 			}
 		}
 		debug.Logf("dolt auto-push: push error: %v\n", err)
