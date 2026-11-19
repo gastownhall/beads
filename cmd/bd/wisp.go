@@ -636,10 +636,13 @@ Use --closed to purge ALL closed wisps (regardless of age). This is the
 fastest way to reclaim space from accumulated wisp bloat. Safe by default:
 requires --force to actually delete.
 
---closed --force deletes in batches of 200 wisps, each committed on its own,
-so a failure keeps the batches already committed. The summary then reports
-only the deletions that committed, plus remaining_count, error and hint in
---json output, and the command exits nonzero; rerun it to delete the rest.
+Deletion (age-based gc, and --closed --force) goes in batches of 200 wisps,
+each committed on its own, so a failure keeps the batches already committed
+and sends no further batch. The summary then reports only the deletions that
+committed; --json adds unconfirmed_count (selected wisps no committed batch
+confirmed, the failed batch included), remaining_count (the same number),
+error and hint, and writes one error object to stderr. The command exits
+nonzero; rerun it to reselect and delete the rest.
 A scan reads at most 5000 closed wisps: when it reaches that limit the output
 says more may remain (candidates_capped in --json), even if every wisp it
 read was excluded.
