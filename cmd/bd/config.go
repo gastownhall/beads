@@ -1450,6 +1450,17 @@ func isRecognizedConfigKey(key string) bool {
 	if recognizedConfigKeys[key] {
 		return true
 	}
+	// Yaml-only keys are settable through `bd config set` — they route to
+	// the config.yaml writer below — and several of them (audit.enabled,
+	// list.limit, mail.delegate, the events-journal family) are documented
+	// as `bd config set` invocations. The recognizer must accept what the
+	// writer accepts, or every documented set warns "not a recognized
+	// config key" next to a write that took effect (GH#5787). Keys a
+	// dedicated lifecycle refuses (no-db, issue-prefix) are still rejected
+	// by rejectProtectedConfigKey before this runs.
+	if config.IsYamlOnlyKey(key) {
+		return true
+	}
 	for _, prefix := range allRecognizedConfigPrefixes() {
 		if strings.HasPrefix(key, prefix) {
 			return true

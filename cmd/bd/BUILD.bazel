@@ -666,6 +666,7 @@ go_test(
         "config_list_test.go",
         "config_nodb_embedded_test.go",
         "config_proxied_integration_test.go",
+        "config_recognition_test.go",
         "config_setmany_test.go",
         "config_show_kv_exclusion_test.go",
         "config_show_test.go",
