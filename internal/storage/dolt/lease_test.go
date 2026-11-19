@@ -1151,4 +1151,17 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			t.Errorf("lease = %+v, want no lease row for a claim.pools alias", lease)
 		}
 	})
+
+	// AC-5: wisps are never leased.
+	t.Run("wisp claimed for another holder", func(t *testing.T) {
+		wisp := &types.Issue{ID: "lease-ovr-wisp", Title: "lease wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+		if err := store.CreateIssue(ctx, wisp, "seeder"); err != nil {
+			t.Fatalf("seed wisp: %v", err)
+		}
+		claimFor(t, "lease-ovr-wisp", "alice", "bob")
+
+		if lease := readClaimOverrideLease(t, ctx, store, "lease-ovr-wisp"); lease.rows != 0 {
+			t.Errorf("lease = %+v, want no lease row for a wisp", lease)
+		}
+	})
 }

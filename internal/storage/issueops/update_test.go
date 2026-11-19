@@ -177,6 +177,15 @@ func TestLeaseOutcomeOnUpdate(t *testing.T) {
 			claim:      true,
 			wantResult: LeaseClear,
 		},
+		{
+			name:       "claim with an assignee override on a wisp clears",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"assignee": "bob"},
+			claim:      true,
+			wisp:       true,
+			wantResult: LeaseClear,
+		},
 	}
 
 	for _, tt := range tests {
