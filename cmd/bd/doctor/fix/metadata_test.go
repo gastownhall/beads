@@ -757,6 +757,43 @@ func TestFixMissingDoltDatabase_MultipleCandidatesWithoutIdentityDeclinesSorted(
 	}
 }
 
+// TestFixMissingDoltDatabase_AdoptsSoleLegacyCandidateSkippingTestFixture
+// pins the retained GH#2160 recovery: on a non-shared server with no local
+// project_id, a single eligible legacy candidate is adopted — while the
+// schema-matching test-fixture decoy is excluded from the fallback and (by
+// making two schema candidates) keeps the authoritative reconcile from
+// adopting first and hiding the fallback. The absent project_id is backfilled
+// from the selected candidate's identity.
+func TestFixMissingDoltDatabase_AdoptsSoleLegacyCandidateSkippingTestFixture(t *testing.T) {
+	isolateDoltEnvForFallbackTest(t)
+	port := newRefusingDoltListener(t)
+	dir, beadsDir, _ := newFallbackFixWorkspace(t, port, "")
+
+	calls := stubServerMetadataCatalog(t, []serverDatabaseMetadata{
+		{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+		{Name: "testdb_decoy", HasSchema: true, ProjectID: "decoy"},
+		{Name: "my-project", HasSchema: true, ProjectID: "legacy-proj"},
+	})
+
+	if err := FixMissingDoltDatabase(dir); err != nil {
+		t.Fatalf("FixMissingDoltDatabase failed: %v", err)
+	}
+
+	after, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("reload metadata.json: %v", err)
+	}
+	if after.DoltDatabase != "my-project" {
+		t.Fatalf("DoltDatabase = %q, want the legacy candidate %q", after.DoltDatabase, "my-project")
+	}
+	if after.ProjectID != "legacy-proj" {
+		t.Fatalf("ProjectID = %q, want it backfilled from the candidate as %q", after.ProjectID, "legacy-proj")
+	}
+	if *calls != 2 {
+		t.Fatalf("catalog read %d times, want 2 (reconcile + fallback)", *calls)
+	}
+}
+
 // TestInspectServerMetadataDatabasesNamesTheDataDirectoryEscaped pins the
 // remedy printer on the data directory inspectServerMetadataDatabases names
 // when no port is resolved and the workspace's own server, stopped, would

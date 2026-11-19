@@ -317,7 +317,11 @@ func fallbackDatabaseEligible(db serverDatabaseMetadata) bool {
 //  5. no local project_id, shared-server mode: skip, sole candidate or
 //     several: without an anchor, adoption can redirect this workspace to
 //     another project's data.
-//  6. no local project_id, non-shared mode, several eligible alternatives:
+//  6. no local project_id, non-shared mode, exactly one eligible
+//     alternative: select it — the GH#2160 legacy migration recovery. The
+//     caller backfills an absent local project_id from the selected
+//     candidate's identity.
+//  7. no local project_id, non-shared mode, several eligible alternatives:
 //     skip; never choose by enumeration order.
 //
 // Every skip says why selection is unsafe, lists the eligible alternatives in
@@ -395,14 +399,20 @@ func selectFallbackDoltDatabase(localProjectID, currentDatabase string, sharedSe
 			fallbackManualRemedy))
 	}
 
-	if len(eligible) > 1 {
-		return nil, skipFix(fmt.Errorf(
-			"multiple server databases have Beads schema and no local project_id disambiguates them (candidates: %s); %s",
-			remedy.PrintedList(eligibleNames, ", "),
-			fallbackManualRemedy))
+	if len(eligible) == 1 {
+		// The GH#2160 legacy migration recovery: a sole schema-matching
+		// database on the workspace's own server is the one this workspace's
+		// pre-#2142 migration created. Shared-server mode never gets here
+		// (declined above): there, a sole candidate can belong to a
+		// different workspace.
+		selected := eligible[0]
+		return &selected, nil
 	}
 
-	return nil, nil
+	return nil, skipFix(fmt.Errorf(
+		"multiple server databases have Beads schema and no local project_id disambiguates them (candidates: %s); %s",
+		remedy.PrintedList(eligibleNames, ", "),
+		fallbackManualRemedy))
 }
 
 // ResolveAuthoritativeServerMetadata reconciles local metadata.json against the

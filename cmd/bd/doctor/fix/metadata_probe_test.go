@@ -583,6 +583,48 @@ func TestSelectFallbackDoltDatabase_MultipleCandidatesWithoutIdentityDeclinePerm
 	}
 }
 
+// The retained GH#2160 recovery: on a non-shared server, with no local
+// project_id, a sole eligible candidate is selected — with or without an
+// identity of its own. The caller saves the name and backfills an absent
+// local project_id only when the candidate supplies one.
+func TestSelectFallbackDoltDatabase_AdoptsSoleCandidateOnOwnServer(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		databases []serverDatabaseMetadata
+		wantID    string
+	}{
+		{
+			name: "with identity, for the caller to backfill",
+			databases: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+				{Name: "my-project", HasSchema: true, ProjectID: "legacy-proj"},
+			},
+			wantID: "legacy-proj",
+		},
+		{
+			name: "without identity",
+			databases: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+				{Name: "legacy_db", HasSchema: true, ProjectID: ""},
+			},
+			wantID: "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			selected, err := selectFallbackDoltDatabase("", configfile.DefaultDoltDatabase, false, tt.databases)
+			if err != nil {
+				t.Fatalf("selectFallbackDoltDatabase: %v", err)
+			}
+			if selected == nil || selected.Name != "my-project" && selected.Name != "legacy_db" {
+				t.Fatalf("selected %+v, want the sole eligible candidate", selected)
+			}
+			if selected.ProjectID != tt.wantID {
+				t.Fatalf("selected identity %q, want %q", selected.ProjectID, tt.wantID)
+			}
+		})
+	}
+}
+
 // Server-supplied names in a policy skip are spelled by remedy.PrintedValue:
 // a name carrying control characters cannot redraw the diagnostic.
 func TestSelectFallbackDoltDatabase_EscapesControlCharactersInNames(t *testing.T) {
