@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -182,6 +183,58 @@ func TestLifecycle_IdleWatchReapsIdleServer(t *testing.T) {
 	}
 	if val != "dirty" {
 		t.Errorf("probe row = %q, want %q", val, "dirty")
+	}
+	_ = doltserver.IgnoreNotRunning(doltserver.Stop(beadsDir))
+}
+
+// TestLifecycle_IdleWatchPrunesDeadClientLease pins the crash half of the
+// lease rule on a real server: a lease whose process is alive keeps the
+// idle server up across several windows; once that process dies, the
+// watcher prunes its lease and reaps the server within a window plus a poll.
+func TestLifecycle_IdleWatchPrunesDeadClientLease(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	t.Setenv("BEADS_DOLT_IDLE_TIMEOUT", "4s")
+	port, _, pid := startIdleWatchedServerForTest(t, beadsDir)
+	if p, err := os.FindProcess(pid); err == nil {
+		reg.Register(p)
+	}
+	running := func() bool {
+		data, err := os.ReadFile(filepath.Join(beadsDir, doltserver.PIDFileName))
+		return err == nil && strings.TrimSpace(string(data)) == fmt.Sprint(pid)
+	}
+
+	// A lease named for another process, the way a bd store in another
+	// process looks to the watcher; that process later dies without
+	// releasing it.
+	helper := exec.Command("sleep", "60")
+	if err := helper.Start(); err != nil {
+		t.Fatalf("starting lease-owning helper: %v", err)
+	}
+	defer func() { _ = helper.Process.Kill(); _ = helper.Wait() }()
+	leasePath := filepath.Join(beadsDir, idleActivityDirName,
+		fmt.Sprintf("client-%d-0a0b0c0d0e0f", helper.Process.Pid))
+	if err := os.WriteFile(leasePath, nil, 0o600); err != nil {
+		t.Fatalf("writing helper lease: %v", err)
+	}
+
+	// The helper is alive, so its lease keeps the server up across windows.
+	time.Sleep(9 * time.Second)
+	if !running() {
+		t.Fatal("server was reaped while a live helper's lease protected it")
+	}
+
+	// The helper dies: the watcher prunes the dead lease and reaps.
+	if err := helper.Process.Kill(); err != nil {
+		t.Fatalf("killing lease-owning helper: %v", err)
+	}
+	_ = helper.Wait()
+	waitForIdleReap(t, beadsDir, port, 30*time.Second)
+	if _, err := os.Stat(leasePath); err == nil {
+		t.Error("the dead helper's lease was not pruned")
 	}
 	_ = doltserver.IgnoreNotRunning(doltserver.Stop(beadsDir))
 }

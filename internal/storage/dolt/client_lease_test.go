@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // countClientLeases counts this process's client leases on serverDir.
@@ -56,5 +59,66 @@ func TestNewServerMode_HoldsClientLeaseFromBeforeAutoStart(t *testing.T) {
 	}
 	if n := countClientLeases(t, serverDir); n != 0 {
 		t.Errorf("failed open left %d client lease(s)", n)
+	}
+}
+
+// TestOpen_OwnedServerHoldsClientLeaseUntilClose pins GH#4282's store side
+// for a successful open: a server-mode open that may auto-start the
+// workspace's server holds one client lease, owned by this process, in the
+// server directory's activity directory for the life of the store, and
+// Close removes it. The idle watcher therefore sees the store even while
+// its pool holds no SQL connection.
+func TestOpen_OwnedServerHoldsClientLeaseUntilClose(t *testing.T) {
+	portStr := testutil.StartIsolatedDoltContainer(t)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse container port %q: %v", portStr, err)
+	}
+	// The server is reachable, so the open never auto-starts; a stray
+	// auto-start must not launch a real server either.
+	stubEnsureRunningDetailed(t, 0, false, errors.New("stub: no auto-start in this test"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	beadsDir := t.TempDir()
+	cfg := &Config{
+		Path:             filepath.Join(beadsDir, "dolt"),
+		BeadsDir:         beadsDir,
+		CommitterName:    "client-lease",
+		CommitterEmail:   "client-lease@example.com",
+		Database:         "client_lease_probe",
+		ServerHost:       "127.0.0.1",
+		ServerPort:       port,
+		ServerPortSource: doltserver.PortSourcePortFile,
+		AutoStart:        true,
+		CreateIfMissing:  true,
+	}
+	if !serverOpenCanAutoStart(cfg) {
+		t.Fatal("premise: this open must be allowed to auto-start")
+	}
+	serverDir := doltserver.ResolveServerDir(beadsDir)
+
+	store, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("New against the local server: %v", err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = store.Close()
+		}
+	})
+
+	if n := countClientLeases(t, serverDir); n != 1 {
+		t.Fatalf("an open server-mode store holds %d client leases of this process, want 1", n)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	closed = true
+	if n := countClientLeases(t, serverDir); n != 0 {
+		t.Errorf("Close left %d client lease(s) behind", n)
 	}
 }
