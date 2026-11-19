@@ -305,6 +305,35 @@ func TestCheckEpicCompleteness_DuplicateClosedChildIsNotReady(t *testing.T) {
 	}
 }
 
+// TestCheckEpicCompleteness_ZeroLinkedChildrenNotReady pins GH#5720: the
+// epic rows now include epics with no parent-child children. A childless
+// epic and an epic whose only dotted-ID issue (no parent-child edge) is
+// closed for a completing reason must not be reported ready to close.
+func TestCheckEpicCompleteness_ZeroLinkedChildrenNotReady(t *testing.T) {
+	store := newTestDoltStore(t, "zc")
+	ctx := context.Background()
+
+	for _, issue := range []*types.Issue{
+		{ID: "zc-none", Title: "Childless epic", Status: types.StatusOpen, IssueType: types.TypeEpic, CreatedAt: time.Now()},
+		{ID: "zc-dot", Title: "Epic with dotted issue only", Status: types.StatusOpen, IssueType: types.TypeEpic, CreatedAt: time.Now()},
+		{ID: "zc-dot.1", Title: "Unlinked dotted issue", Status: types.StatusClosed, IssueType: types.TypeTask,
+			ClosedAt: ptrTime(time.Now()), CloseReason: "done", CreatedAt: time.Now()},
+	} {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+
+	check := checkEpicCompleteness(store.UnderlyingDB())
+	if check.Status != StatusOK || check.Message != "No epics eligible for closure" {
+		t.Errorf("Status = %q, Message = %q, want %q / %q (detail %q)",
+			check.Status, check.Message, StatusOK, "No epics eligible for closure", check.Detail)
+	}
+	if strings.Contains(check.Fix, "bd close") {
+		t.Errorf("Fix = %q, want no 'bd close' instruction for zero-child epics", check.Fix)
+	}
+}
+
 // TestCheckMailThreadIntegrity_ValidThreads verifies valid thread references pass
 func TestCheckMailThreadIntegrity_ValidThreads(t *testing.T) {
 	store := newTestDoltStore(t, "thread")
