@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -238,7 +241,7 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	}
 
 	// Create an isolated branch for this test
-	_, branchCleanup := testutil.StartTestBranch(t, store.db, testSharedDB)
+	branchName, branchCleanup := testutil.StartTestBranch(t, store.db, testSharedDB)
 	// This second, branch-local schema init contends with every other
 	// parallel subtest's own branch-local init for the SAME GET_LOCK name:
 	// MigrateUpWithLock's named lock is scoped to the database
@@ -252,9 +255,10 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	// initSchemaOnDB here for the branch-local pass skipped that resilience
 	// and let transient GET_LOCK timeouts (5s budget, see
 	// migrationLockAcquireTimeoutSeconds) fail the test outright under
-	// parallel load. Use the same retrying helper production uses so a
-	// contended lock wait is retried (30s budget) instead of failing fast.
-	if _, err := initSchemaOnDBWithRetry(ctx, store.db); err != nil {
+	// parallel load. Retry it the way production does, so a contended lock
+	// wait is retried (30s budget) instead of failing fast, and on this
+	// test's branch (initSchemaOnTestBranch).
+	if _, err := initSchemaOnTestBranch(ctx, store.db, branchName); err != nil {
 		branchCleanup()
 		store.Close()
 		os.RemoveAll(tmpDir)
@@ -280,8 +284,54 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 // "schema migration lock unavailable: timeout" on loaded CI runners; the
 // retrying helper retries only a contended lock or a transient connection
 // error, never a migration result, so the outcome under test is unchanged.
+// The pass runs on the branch the store's session is checked out to, and
+// leaves the session there when it fails (initSchemaOnTestBranch).
 func rerunSchemaInitOnTestStore(ctx context.Context, store *DoltStore) (int, error) {
-	return initSchemaOnDBWithRetry(ctx, store.db)
+	var branch string
+	if err := store.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); err != nil {
+		return 0, fmt.Errorf("read the test store's branch: %w", err)
+	}
+	return initSchemaOnTestBranch(ctx, store.db, branch)
+}
+
+// initSchemaOnTestBranch is initSchemaOnDBWithRetry for a setupTestStore
+// store: one initSchemaOnDBWithBootstrapHeal attempt at a time, retrying only
+// what isRetryableError retries (a contended migration lock, a transient
+// connection error) within the same budget, so the outcome under test is the
+// production one.
+//
+// It also keeps the test on its branch. setupTestStore's isolation is session
+// state: the pool's one session (MaxOpenConns: 1) is checked out to branch. A
+// failed attempt discards its session (gastownhall/beads#6504), and the next
+// session the pool opens lands on testSharedDB's default branch, main. So
+// branch is checked out again before every attempt, which keeps a retry after
+// a contended lock on this test's data, and after a failed pass, which keeps
+// the caller's reads after a refusal there too.
+func initSchemaOnTestBranch(ctx context.Context, db *sql.DB, branch string) (int, error) {
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 100 * time.Millisecond
+	bo.MaxElapsedTime = serverRetryMaxElapsed
+
+	var applied int
+	err := backoff.Retry(func() error {
+		applied = 0
+		err := checkoutBranchIfNeeded(ctx, db, branch)
+		if err != nil {
+			err = fmt.Errorf("check out test branch %q: %w", branch, err)
+		} else {
+			applied, err = initSchemaOnDBWithBootstrapHeal(ctx, db, nil, "")
+		}
+		if err != nil && !isRetryableError(err) {
+			return backoff.Permanent(err)
+		}
+		return err
+	}, backoff.WithContext(bo, ctx))
+	if err != nil {
+		if pinErr := checkoutBranchIfNeeded(ctx, db, branch); pinErr != nil {
+			return applied, errors.Join(err, fmt.Errorf("check out test branch %q after the failed pass: %w", branch, pinErr))
+		}
+	}
+	return applied, err
 }
 
 // setupConcurrentTestStore creates a test store with its own database for
