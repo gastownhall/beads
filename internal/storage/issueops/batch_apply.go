@@ -62,6 +62,7 @@ func ApplyBatchInTx(ctx context.Context, tx *sql.Tx, plan storage.ApplyBatchPlan
 		plan:   plan,
 		keys:   make(map[string]string, len(plan.KeyIndex)),
 		planes: map[string]bool{},
+		latest: BatchSnapshots{},
 		write:  BatchApplyWrite{Tables: ChangedTables{}},
 		result: publicops.ApplyBatchResult{
 			Keys:  make(map[string]string, len(plan.KeyIndex)),
@@ -183,6 +184,9 @@ type applyBatchRun struct {
 	edges  []appliedEdge
 	write  BatchApplyWrite
 	result publicops.ApplyBatchResult
+	// latest is the one snapshot per row the request has written; the items
+	// carry none until apply attaches them after the end gate.
+	latest BatchSnapshots
 }
 
 // appliedEdge is one edge the request wrote, paired with its item's index.
@@ -192,7 +196,8 @@ type appliedEdge struct {
 }
 
 // apply runs the three phases in order: the items, the metadata splice, the end
-// gate.
+// gate. Only a request the end gate admits hands its row entries their row's
+// latest snapshot.
 func (r *applyBatchRun) apply(ctx context.Context, tx *sql.Tx) error {
 	if err := coordinateApplyBatchCreatesInTx(ctx, tx, r.plan); err != nil {
 		return err
@@ -205,7 +210,11 @@ func (r *applyBatchRun) apply(ctx context.Context, tx *sql.Tx) error {
 	if err := r.spliceMetadataRefs(ctx, tx); err != nil {
 		return err
 	}
-	return r.runEndGate(ctx, tx)
+	if err := r.runEndGate(ctx, tx); err != nil {
+		return err
+	}
+	r.latest.Attach(r.result.Items)
+	return nil
 }
 
 // coordinateApplyBatchCreatesInTx takes the coordination cell of every
@@ -278,8 +287,8 @@ func (r *applyBatchRun) applyCreate(ctx context.Context, tx *sql.Tx, index int, 
 		IssueID:    created.Issue.ID,
 		Changed:    true,
 		RowVersion: created.Issue.RowVersion,
-		Issue:      created.Issue,
 	}
+	r.latest.Record(created.Issue)
 	return nil
 }
 
@@ -312,8 +321,8 @@ func (r *applyBatchRun) applyUpdate(ctx context.Context, tx *sql.Tx, index int, 
 		IssueID:    id,
 		Changed:    updated.Changed,
 		RowVersion: updated.Issue.RowVersion,
-		Issue:      updated.Issue,
 	}
+	r.latest.Record(updated.Issue)
 	return nil
 }
 
@@ -343,8 +352,8 @@ func (r *applyBatchRun) applyClose(ctx context.Context, tx *sql.Tx, index int, i
 		IssueID:    id,
 		Changed:    closed.Changed,
 		RowVersion: closed.Issue.RowVersion,
-		Issue:      closed.Issue,
 	}
+	r.latest.Record(closed.Issue)
 	return nil
 }
 
@@ -528,7 +537,8 @@ func (r *applyBatchRun) spliceMetadataRefs(ctx context.Context, tx *sql.Tx) erro
 		// The create already reported Changed; the splice re-reads the row so
 		// the snapshot the caller is handed carries the spliced metadata and the
 		// version token the splice produced, rather than the ones from before it.
-		r.result.Items[index].Issue = updated.Issue
+		// The snapshot replaces the row's latest, which every row entry shares.
+		r.latest.Record(updated.Issue)
 		r.result.Items[index].RowVersion = updated.Issue.RowVersion
 	}
 	return nil
