@@ -221,6 +221,7 @@ var doltBackupInitSchemes = []string{
 	"file://",
 	"aws://",
 	"gs://",
+	"s3://",
 	"az://",
 	"oci://",
 }
@@ -239,9 +240,10 @@ func isDoltBackupURL(raw string) bool {
 
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.
 // Filesystem paths get resolved to absolute and prefixed with file://
-// Backup URLs (https://, http://, file://, aws://, gs://, az://, oci://) are
-// returned unchanged, so every byte of the destination — including an S3
-// endpoint query such as ?endpoint=https://minio.local&region=auto — survives.
+// Backup URLs (https://, http://, file://, aws://, gs://, s3://, az://,
+// oci://) are returned unchanged, so every byte of the destination —
+// including an S3 endpoint query such as ?endpoint=https://minio.local —
+// survives.
 func resolveDoltBackupURL(raw string) string {
 	// A URL with a scheme init accepts — pass through byte-for-byte.
 	if isDoltBackupURL(raw) {

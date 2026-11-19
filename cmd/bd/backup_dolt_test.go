@@ -66,6 +66,11 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			wantExact: "oci://registry.example/tenant/beads",
 		},
 		{
+			name:      "s3:// URL with endpoint query passes through byte-for-byte",
+			input:     "s3://bucket/beads?endpoint=https://minio.local&region=auto&path-style=true",
+			wantExact: "s3://bucket/beads?endpoint=https://minio.local&region=auto&path-style=true",
+		},
+		{
 			name:      "absolute path gets file:// prefix",
 			input:     absBackup,
 			wantExact: "file://" + absBackup,
