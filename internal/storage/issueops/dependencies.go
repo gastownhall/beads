@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/gowebpki/jcs"
@@ -1385,42 +1386,146 @@ func GetIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[
 // GetDependenciesWithMetadataInTx returns issues that the given issueID depends on,
 // along with the dependency type. Works within an existing transaction.
 // Queries both dependency tables to handle cross-table dependencies.
+//
+// It returns REAL ISSUES ONLY: an edge whose far end has no row in this
+// database (a cross-repo id, an `external:` reference, a dangling wisp) is
+// left out, because there is no issue to return for it. Sync writers, tree
+// walkers and Relations rely on that and must keep calling this method. A
+// caller that has to account for every stored outgoing edge — the detail view
+// and `bd show` — reads GetDependenciesWithUnresolvableInTx instead, which
+// returns the same resolved rows plus the exact stored records of the edges
+// this method leaves out (bd-uschhs, #5850).
 func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	deps, err := anchorEdgesInTx(ctx, tx, issueID, false, true)
 	if err != nil {
 		return nil, err
 	}
+	resolved, _, err := hydrateAnchorEdgesInTx(ctx, tx, deps, "dependencies")
+	return resolved, err
+}
 
-	if len(deps) == 0 {
-		return nil, nil
+// GetDependenciesWithUnresolvableInTx reads every outgoing dependency edge of
+// issueID inside tx and splits it in two: resolved holds the issues on the far
+// end exactly as GetDependenciesWithMetadataInTx returns them (same rows, same
+// order), and unresolvable holds the STORED dependency records of the edges
+// whose far end has no row in this database.
+//
+// Unresolvable means the hydration actually missed, not that the id looks
+// foreign: a foreign-prefix id with a local row resolves, and a wisp edge whose
+// wisp is gone does not. Each record is the row as written — issue_id, the
+// coalesced target, type, created_at, created_by, metadata and thread_id — and
+// nothing is synthesized. One record per far-end id, durable plane first (the
+// precedence anchorEdgesInTx gives), sorted by DependsOnID then Type.
+//
+// Both halves come from the one transaction the caller supplies, so a
+// concurrent delete cannot make an edge look unresolvable the way a count
+// taken in another snapshot could. No record query runs when nothing missed.
+func GetDependenciesWithUnresolvableInTx(ctx context.Context, tx DBTX, issueID string) (resolved []*types.IssueWithDependencyMetadata, unresolvable []*types.Dependency, err error) {
+	deps, err := anchorEdgesInTx(ctx, tx, issueID, false, true)
+	if err != nil {
+		return nil, nil, err
 	}
+	resolved, missed, err := hydrateAnchorEdgesInTx(ctx, tx, deps, "dependencies")
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(missed) == 0 {
+		return resolved, nil, nil
+	}
+	unresolvable, err = outgoingDependencyRecordsInTx(ctx, tx, issueID, missed)
+	if err != nil {
+		return nil, nil, err
+	}
+	return resolved, unresolvable, nil
+}
 
-	// Fetch all dependency target issues.
-	ids := make([]string, len(deps))
-	for i, d := range deps {
-		ids[i] = d.farID
+// hydrateAnchorEdgesInTx resolves each edge's far end to its issue row. The
+// edges whose far end has no row come back in missed, in edge order; the
+// metadata readers drop them, the combined outgoing reader turns them into
+// stored records. verb names the direction in errors.
+func hydrateAnchorEdgesInTx(ctx context.Context, tx DBTX, edges []anchorEdge, verb string) (resolved []*types.IssueWithDependencyMetadata, missed []anchorEdge, err error) {
+	if len(edges) == 0 {
+		return nil, nil, nil
+	}
+	ids := make([]string, len(edges))
+	for i, e := range edges {
+		ids[i] = e.farID
 	}
 	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
 	if err != nil {
-		return nil, fmt.Errorf("get dependencies: fetch issues: %w", err)
+		return nil, nil, fmt.Errorf("get %s: fetch issues: %w", verb, err)
 	}
 	issueMap := make(map[string]*types.Issue, len(issues))
 	for _, iss := range issues {
 		issueMap[iss.ID] = iss
 	}
-
-	var results []*types.IssueWithDependencyMetadata
-	for _, d := range deps {
-		issue, ok := issueMap[d.farID]
+	for _, e := range edges {
+		issue, ok := issueMap[e.farID]
 		if !ok {
+			missed = append(missed, e)
 			continue
 		}
-		results = append(results, &types.IssueWithDependencyMetadata{
+		resolved = append(resolved, &types.IssueWithDependencyMetadata{
 			Issue:          *issue,
-			DependencyType: types.DependencyType(d.depType),
+			DependencyType: types.DependencyType(e.depType),
 		})
 	}
-	return results, nil
+	return resolved, missed, nil
+}
+
+// outgoingDependencyRecordsInTx reads the stored records of issueID's outgoing
+// edges onto the missed far-end ids, durable plane first and in batches. The
+// first record seen for a far-end id wins, matching anchorEdgesInTx, so the
+// records describe the same edges the hydration missed. Rows are closed before
+// the next query, so a single-connection pool (embedded Dolt) cannot deadlock.
+//
+//nolint:gosec // G201: table names are hardcoded constants; ? placeholders only
+func outgoingDependencyRecordsInTx(ctx context.Context, tx DBTX, issueID string, missed []anchorEdge) ([]*types.Dependency, error) {
+	ids := make([]string, len(missed))
+	for i, e := range missed {
+		ids[i] = e.farID
+	}
+	seen := make(map[string]struct{}, len(ids))
+	var records []*types.Dependency
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		for start := 0; start < len(ids); start += queryBatchSize {
+			end := min(start+queryBatchSize, len(ids))
+			placeholders, inArgs := buildSQLInClause(ids[start:end])
+			args := append([]any{issueID}, inArgs...)
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				`SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id FROM %s WHERE issue_id = ? AND %s IN (%s)`,
+				DepTargetExpr, depTable, DepTargetExpr, placeholders), args...)
+			if err != nil {
+				if optionalBlockedTable(depTable) && dberrors.IsMissingTable(err, depTable) {
+					break
+				}
+				return nil, fmt.Errorf("get unresolvable dependencies from %s: %w", depTable, err)
+			}
+			for rows.Next() {
+				dep, scanErr := scanDependencyRow(rows)
+				if scanErr != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("get unresolvable dependencies: %w", scanErr)
+				}
+				if _, dup := seen[dep.DependsOnID]; dup {
+					continue
+				}
+				seen[dep.DependsOnID] = struct{}{}
+				records = append(records, dep)
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("get unresolvable dependencies: rows from %s: %w", depTable, err)
+			}
+		}
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].DependsOnID != records[j].DependsOnID {
+			return records[i].DependsOnID < records[j].DependsOnID
+		}
+		return records[i].Type < records[j].Type
+	})
+	return records, nil
 }
 
 // anchorEdge is one dependency edge seen from a fixed anchor issue: the issue
@@ -1501,37 +1606,8 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string)
 	if err != nil {
 		return nil, err
 	}
-
-	if len(deps) == 0 {
-		return nil, nil
-	}
-
-	// Fetch all dependent issues.
-	ids := make([]string, len(deps))
-	for i, d := range deps {
-		ids[i] = d.farID
-	}
-	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
-	if err != nil {
-		return nil, fmt.Errorf("get dependents: fetch issues: %w", err)
-	}
-	issueMap := make(map[string]*types.Issue, len(issues))
-	for _, iss := range issues {
-		issueMap[iss.ID] = iss
-	}
-
-	var results []*types.IssueWithDependencyMetadata
-	for _, d := range deps {
-		issue, ok := issueMap[d.farID]
-		if !ok {
-			continue
-		}
-		results = append(results, &types.IssueWithDependencyMetadata{
-			Issue:          *issue,
-			DependencyType: types.DependencyType(d.depType),
-		})
-	}
-	return results, nil
+	resolved, _, err := hydrateAnchorEdgesInTx(ctx, tx, deps, "dependents")
+	return resolved, err
 }
 
 // GetDependenciesInTx returns issues that the given issueID depends on.
