@@ -183,7 +183,8 @@ var countsEntryPoints = []countsEntryPoint{
 		missing: countsMegaQueryTables,
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
 			mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false, false))
-			mock.ExpectQuery(`(?s)FROM issues i`).WillReturnRows(emptyCountsRows())
+			mock.ExpectQuery(`(?s)^SELECT id FROM issues\b`).WillReturnRows(emptyCountsRows())
+			mock.ExpectQuery(`(?s)^SELECT id FROM wisps\b`).WillReturnRows(idRows("bd-w1"))
 			mock.ExpectQuery(`(?s)FROM wisps i`).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {

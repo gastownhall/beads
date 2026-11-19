@@ -272,25 +272,30 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 		limit int
 		want  int
 	}{
-		// probe + mega-query
-		{"issues_only/limit0", readyTotalWorld{}, 0, 2},
+		// probe + (ID select + by-IDs counts hydration). GH#4370 took the
+		// unbounded arm off the predicate-form mega-query, so one family with
+		// a non-empty ready set costs two statements where the mega-query cost
+		// one - the price of aggregates bound to the page instead of the
+		// whole side tables. A family whose ready set is empty stops after
+		// the ID select and drops back under these budgets.
+		{"issues_only/limit0", readyTotalWorld{}, 0, 3},
 		// probe + (ID page with window total + counts hydration)
 		{"issues_only/limit1", readyTotalWorld{}, 1, 3},
-		// probe + mega-query per family
-		{"wisps/limit0", readyTotalWorld{wisps: true}, 0, 3},
+		// probe + (ID select + hydration) per family
+		{"wisps/limit0", readyTotalWorld{wisps: true}, 0, 5},
 		// probe + (ID page + hydration) per family
 		{"wisps/limit1", readyTotalWorld{wisps: true}, 1, 5},
 		// + one statement for every deferred-parent child leg
-		{"wisps_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true}, 0, 4},
+		{"wisps_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true}, 0, 6},
 		{"wisps_deferred_parent/limit1", readyTotalWorld{wisps: true, deferredParent: true}, 1, 6},
 		// An undated deferred parent (GH#7300) costs no more than a dated one.
-		{"wisps_undated_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, 0, 4},
+		{"wisps_undated_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, 0, 6},
 		{"wisps_undated_deferred_parent/limit1", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, 1, 6},
 		// A childless deferred leaf costs the child scan too: the probe asks
 		// whether any row is deferred, not whether a deferred row has
 		// children. These rows pin that accepted cost; a probe that learns
 		// to skip the scan only drops under them.
-		{"wisps_undated_deferred_leaf/limit0", readyTotalWorld{wisps: true, deferredLeaf: true}, 0, 4},
+		{"wisps_undated_deferred_leaf/limit0", readyTotalWorld{wisps: true, deferredLeaf: true}, 0, 6},
 		{"wisps_undated_deferred_leaf/limit1", readyTotalWorld{wisps: true, deferredLeaf: true}, 1, 6},
 		// + the overlap count, only because an ID sits in both tables
 		{"wisps_collision/limit1", readyTotalWorld{wisps: true, collision: true}, 1, 6},

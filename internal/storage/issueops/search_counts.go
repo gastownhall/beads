@@ -174,12 +174,6 @@ func hydrateCountsByIDsInTx(ctx context.Context, tx DBTX, tables FilterTables, i
 	return ordered, nil
 }
 
-//nolint:gosec // G201: SQL fragments are caller-built from hardcoded shapes
-func runSearchQueryInTx(ctx context.Context, tx DBTX, tables FilterTables, whereSQL, orderBySQL, limitSQL string, args []interface{}, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
-	searchSQL, _ := sqlbuild.SearchCountsSQL(tables, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, hyd)
-	return scanCountsRowsInTx(ctx, tx, tables.Main, searchSQL, args, hyd)
-}
-
 // scanCountsRowsInTx runs a prebuilt counts mega-query and hydrates each row
 // through ScanReadyWorkRowWithCounts, deduping by issue ID and dropping rows
 // without an issue. It is the scan/dedupe loop behind hydrateCountsByIDsInTx.
