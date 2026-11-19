@@ -1431,3 +1431,96 @@ func TestExpandStepPreservesTemplateFields(t *testing.T) {
 		t.Errorf("OnComplete = %+v, want verbatim %+v", got.OnComplete, template[1].OnComplete)
 	}
 }
+
+// TestExpandedStepConditionIsVerbatim: a template step's condition reaches
+// the expanded step untouched on every expansion path - compose.expand,
+// compose.map and inline expand - even where the expansion has values for the
+// names it uses, and the condition filter then evaluates it against the
+// enclosing formula's vars (bd-w153uq / #6433).
+func TestExpandedStepConditionIsVerbatim(t *testing.T) {
+	tmpDir := t.TempDir()
+	expansion := `{
+		"formula": "cond-exp",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.always", "title": "Always"},
+			{"id": "{target}.on", "title": "On", "condition": "{{flag}}"},
+			{"id": "{target}.off", "title": "Off", "condition": "!{{flag}}"},
+			{"id": "{target}.prod", "title": "Prod", "condition": "{{target}} == prod"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "cond-exp.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(tmpDir)
+
+	// Values the expansion could wrongly substitute into the conditions.
+	local := map[string]string{"flag": "expansion-local", "target": "expansion-local"}
+
+	paths := map[string]func(t *testing.T) []*Step{
+		"compose_expand": func(t *testing.T) []*Step {
+			steps := []*Step{{ID: "work", Title: "Work"}}
+			out, err := ApplyExpansions(steps, &ComposeRules{Expand: []*ExpandRule{{Target: "work", With: "cond-exp", Vars: local}}}, parser)
+			if err != nil {
+				t.Fatalf("ApplyExpansions: %v", err)
+			}
+			return out
+		},
+		"compose_map": func(t *testing.T) []*Step {
+			steps := []*Step{{ID: "work", Title: "Work"}}
+			out, err := ApplyExpansions(steps, &ComposeRules{Map: []*MapRule{{Select: "work", With: "cond-exp", Vars: local}}}, parser)
+			if err != nil {
+				t.Fatalf("ApplyExpansions: %v", err)
+			}
+			return out
+		},
+		"inline": func(t *testing.T) []*Step {
+			steps := []*Step{{ID: "work", Title: "Work", Expand: "cond-exp", ExpandVars: local}}
+			out, err := ApplyInlineExpansions(steps, parser)
+			if err != nil {
+				t.Fatalf("ApplyInlineExpansions: %v", err)
+			}
+			return out
+		},
+	}
+
+	wantConditions := map[string]string{
+		"work.always": "",
+		"work.on":     "{{flag}}",
+		"work.off":    "!{{flag}}",
+		"work.prod":   "{{target}} == prod",
+	}
+	for name, expand := range paths {
+		t.Run(name, func(t *testing.T) {
+			steps := expand(t)
+			got := make(map[string]string, len(steps))
+			for _, s := range steps {
+				got[s.ID] = s.Condition
+			}
+			if !reflect.DeepEqual(got, wantConditions) {
+				t.Fatalf("expanded conditions = %v, want %v", got, wantConditions)
+			}
+
+			for _, tc := range []struct {
+				vars map[string]string
+				want []string
+			}{
+				{map[string]string{"flag": "true", "target": "prod"}, []string{"work.always", "work.on", "work.prod"}},
+				{map[string]string{"flag": "false", "target": "dev"}, []string{"work.always", "work.off"}},
+			} {
+				filtered, err := FilterStepsByCondition(expand(t), tc.vars)
+				if err != nil {
+					t.Fatalf("FilterStepsByCondition(%v): %v", tc.vars, err)
+				}
+				var ids []string
+				for _, s := range filtered {
+					ids = append(ids, s.ID)
+				}
+				if !slices.Equal(ids, tc.want) {
+					t.Errorf("FilterStepsByCondition(%v) kept %v, want %v", tc.vars, ids, tc.want)
+				}
+			}
+		})
+	}
+}
