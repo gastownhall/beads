@@ -48,6 +48,13 @@ bd mol squash <wisp-id>
 bd mol burn <wisp-id>
 ```
 
+Keeping a wisp is clearing its ephemeral flag. `bd mol squash` does that as
+part of squashing, and `bd promote` copies an ephemeral wisp to the permanent
+table on its own. A no-history bead that is not ephemeral (for example, one
+created with `bd create --no-history`) is a different case: `bd promote`
+refuses it even though it lives in the wisps table, so move it with
+`bd update <id> --persistent` instead.
+
 ## Managing Wisps
 
 ```bash
