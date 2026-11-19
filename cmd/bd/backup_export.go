@@ -16,10 +16,23 @@ import (
 )
 
 // backupState tracks watermarks for backup change detection.
+//
+// Timestamp is the throttle watermark: the time of the last ATTEMPT, success
+// or failure (a failed sync still advances it, so a broken destination
+// retries once per interval, not on every command — the 2026-07 storm fix).
+// LastSuccessAt/LastError/LastErrorAt (GH#4070, bd-5mwx39) record how that
+// attempt ended, separate from the watermark, so `bd backup status` can show
+// the last successful backup and the failure that superseded it instead of
+// advertising a failed attempt as a backup. Like last_cap_warn_at they are
+// never omitted: a zero time is a value here (no success / no failure yet),
+// not an absence.
 type backupState struct {
 	LastDoltCommit string    `json:"last_dolt_commit"`
 	Timestamp      time.Time `json:"timestamp"`
 	LastCapWarnAt  time.Time `json:"last_cap_warn_at"`
+	LastSuccessAt  time.Time `json:"last_success_at"`
+	LastError      string    `json:"last_error"`
+	LastErrorAt    time.Time `json:"last_error_at"`
 }
 
 // backupDir returns the backup directory path, creating it if needed.
@@ -188,7 +201,20 @@ func runBackupExport(ctx context.Context, backend localBackupBackend, force bool
 		// shared-dolt CPU-pin incident). LastDoltCommit is deliberately
 		// left unchanged so change-detection still sees pending work and
 		// a real backup runs once the failure clears.
-		state.Timestamp = time.Now().UTC()
+		//
+		// GH#4070 (bd-5mwx39): record the failure itself too, or the
+		// throttle watermark doubles as "Last backup" in `bd backup
+		// status` and a destination that fails on every attempt reads as
+		// freshly backed up. A state written by an older bd has no
+		// failure keys but a recorded backup; carry its watermark into
+		// LastSuccessAt once, on the first failure, so the last good
+		// backup survives the transition.
+		if state.LastSuccessAt.IsZero() && state.LastError == "" && state.LastDoltCommit != "" {
+			state.LastSuccessAt = state.Timestamp
+		}
+		state.LastError = err.Error()
+		state.LastErrorAt = time.Now().UTC()
+		state.Timestamp = state.LastErrorAt
 		if saveErr := saveBackupState(dir, state); saveErr != nil {
 			debug.Logf("backup: failed to persist throttle state after error: %v\n", saveErr)
 		}
