@@ -471,3 +471,75 @@ func TestAutoStart_IdleTimeoutZeroLaunchesNoWatcher(t *testing.T) {
 		})
 	}
 }
+
+// TestIdleWatch_ExitsWhenServerGone: when the server stops or is replaced by
+// other means, the watcher notices within 5 seconds and exits without
+// stopping anything, even when its idle poll is minutes away.
+func TestIdleWatch_ExitsWhenServerGone(t *testing.T) {
+	const serverPID = 4242
+	for _, tc := range []struct {
+		name   string
+		vanish func(serverDir string, alive *bool) error
+	}{
+		{name: "server process died", vanish: func(_ string, alive *bool) error {
+			*alive = false
+			return nil
+		}},
+		{name: "stopped elsewhere, pid file removed", vanish: func(serverDir string, _ *bool) error {
+			return os.Remove(pidPath(serverDir))
+		}},
+		{name: "replaced by another server", vanish: func(serverDir string, _ *bool) error {
+			return os.WriteFile(pidPath(serverDir), []byte(fmt.Sprintf("%d\n", serverPID+1)), 0o600)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serverDir := t.TempDir()
+			if err := os.WriteFile(pidPath(serverDir), []byte(fmt.Sprintf("%d\n", serverPID)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := ensureActivityDir(serverDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(watcherPIDPath(serverDir), []byte(fmt.Sprintf("%d\n30m0s\n", os.Getpid())), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			opts := IdleWatchOpts{ServerDir: serverDir, PID: serverPID, Host: "127.0.0.1", Port: 3307, Timeout: 30 * time.Minute}
+			clock := newFakeClock()
+			var conns int64
+			w := testIdleWatcher(opts, clock, quietStatus(&conns))
+			serverAlive := true
+			w.alive = func(pid int) bool { return pid == serverPID && serverAlive }
+			stops := 0
+			w.stop = func(string) error { stops++; return nil }
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var goneAt time.Time
+			sleep := w.sleep
+			w.sleep = func(ctx context.Context, d time.Duration) error {
+				switch {
+				case goneAt.IsZero():
+					if err := tc.vanish(serverDir, &serverAlive); err != nil {
+						t.Fatal(err)
+					}
+					goneAt = clock.Now()
+				case clock.Now().Sub(goneAt) >= 5*time.Second:
+					cancel() // still watching 5s after the server went away
+				}
+				return sleep(ctx, d)
+			}
+
+			outcome, err := w.run(ctx)
+			if err != nil || outcome != IdleWatchServerGone {
+				t.Fatalf("watcher run = (%s, %v), want %s", outcome, err, IdleWatchServerGone)
+			}
+			if waited := clock.Now().Sub(goneAt); waited > 5*time.Second {
+				t.Errorf("watcher exited %s after the server went away, want within 5s", waited)
+			}
+			if stops != 0 {
+				t.Errorf("watcher called stop %d time(s) for a server it no longer owns", stops)
+			}
+		})
+	}
+}
