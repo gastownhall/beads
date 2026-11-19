@@ -1,8 +1,11 @@
 package formula
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -259,5 +262,172 @@ func TestLoopIterationMatchesTheIterationPrefix(t *testing.T) {
 		if got != want {
 			t.Errorf("loopIteration(%q) = %d, %v; want %d", id, got, ok, want)
 		}
+	}
+}
+
+// writeExpansionFormula writes an expansion formula named name whose
+// template has width top-level steps, each with the given children, into dir.
+func writeExpansionFormula(t *testing.T, dir, name string, width, children int) {
+	t.Helper()
+	var tmpl []map[string]any
+	for i := 0; i < width; i++ {
+		step := map[string]any{"id": fmt.Sprintf("{target}.%s%d", name, i), "title": "t"}
+		var kids []map[string]any
+		for c := 0; c < children; c++ {
+			kids = append(kids, map[string]any{"id": fmt.Sprintf("{target}.%s%d.c%d", name, i, c), "title": "c"})
+		}
+		if kids != nil {
+			step["children"] = kids
+		}
+		tmpl = append(tmpl, step)
+	}
+	raw, err := json.Marshal(map[string]any{"formula": name, "type": "expansion", "version": 1, "template": tmpl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// flatSteps returns n plain steps named prefix0..prefix{n-1}.
+func flatSteps(prefix string, n int) []*Step {
+	steps := make([]*Step, n)
+	for i := range steps {
+		steps[i] = &Step{ID: fmt.Sprintf("%s%d", prefix, i), Title: "s"}
+	}
+	return steps
+}
+
+// A compose.expand rule that grows a 6000-step graph by a net 5000 steps is
+// refused: the expansion is charged against the graph it grows.
+func TestApplyExpansions_NetGrowthPastLimitFails(t *testing.T) {
+	dir := t.TempDir()
+	writeExpansionFormula(t, dir, "wide", 5001, 0)
+	steps := flatSteps("s", 6000)
+	compose := &ComposeRules{Expand: []*ExpandRule{{Target: "s0", With: "wide"}}}
+	result, err := ApplyExpansions(steps, compose, NewParser(dir))
+	if err == nil {
+		t.Fatalf("ApplyExpansions grew 6000 steps to %d; want an expansion limit error", len(result))
+	}
+	for _, want := range []string{"expansion limit exceeded", `"s0"`, `"wide"`, "10000"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ApplyExpansions error = %q; want it to contain %q", err, want)
+		}
+	}
+}
+
+// Chained compose.map rules multiply a formula's steps; each is charged, so
+// two doublings of 3000 steps are refused at the second.
+func TestApplyExpansions_ChainedMapsPastLimitFail(t *testing.T) {
+	dir := t.TempDir()
+	writeExpansionFormula(t, dir, "twice", 2, 0)
+	writeExpansionFormula(t, dir, "again", 2, 0)
+	steps := flatSteps("s", 3000)
+	compose := &ComposeRules{Map: []*MapRule{
+		{Select: "s*", With: "twice"},
+		{Select: "*", With: "again"},
+	}}
+	result, err := ApplyExpansions(steps, compose, NewParser(dir))
+	if err == nil {
+		t.Fatalf("ApplyExpansions grew 3000 steps to %d; want an expansion limit error", len(result))
+	}
+	if !strings.Contains(err.Error(), "expansion limit exceeded") || !strings.Contains(err.Error(), "10000") {
+		t.Fatalf("ApplyExpansions error = %v; want an expansion limit error naming the limit", err)
+	}
+}
+
+// Loops and expansions in one resolution share a budget: 6000 loop steps
+// leave room for less than the 5000 net steps an expansion then adds, though
+// each phase alone is under the limit.
+func TestApplyExpansionsWithBudget_SharesBudgetWithLoops(t *testing.T) {
+	dir := t.TempDir()
+	writeExpansionFormula(t, dir, "wide", 5001, 0)
+	steps := []*Step{
+		{ID: "big", Loop: &LoopSpec{Count: 6000, Body: []*Step{{ID: "work"}}}},
+		{ID: "target"},
+	}
+	budget := NewExpansionBudget(steps)
+	looped, err := ApplyControlFlowWithBudget(steps, nil, budget)
+	if err != nil {
+		t.Fatalf("ApplyControlFlowWithBudget: %v", err)
+	}
+	if budget.Used() != 6001 {
+		t.Fatalf("budget holds %d steps after loops; want 6001", budget.Used())
+	}
+	compose := &ComposeRules{Expand: []*ExpandRule{{Target: "target", With: "wide"}}}
+	if _, err := ApplyExpansionsWithBudget(looped, compose, NewParser(dir), budget); !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyExpansionsWithBudget error = %v; want ErrExpansionLimit", err)
+	}
+	if budget.Used() > budget.Limit() {
+		t.Fatalf("budget holds %d steps after the refusal; the limit is %d", budget.Used(), budget.Limit())
+	}
+
+	// The same expansion fits a graph the loops left room for.
+	small := []*Step{{ID: "big", Loop: &LoopSpec{Count: 4999, Body: []*Step{{ID: "work"}}}}, {ID: "target"}}
+	budget = NewExpansionBudget(small)
+	looped, err = ApplyControlFlowWithBudget(small, nil, budget)
+	if err != nil {
+		t.Fatalf("ApplyControlFlowWithBudget: %v", err)
+	}
+	result, err := ApplyExpansionsWithBudget(looped, compose, NewParser(dir), budget)
+	if err != nil {
+		t.Fatalf("ApplyExpansionsWithBudget at exactly the limit: %v", err)
+	}
+	if got := countAllSteps(result); got != MaxExpandedSteps || budget.Used() != MaxExpandedSteps {
+		t.Fatalf("expansion = %d steps, budget %d; want %d of each", got, budget.Used(), MaxExpandedSteps)
+	}
+}
+
+// The meter tracks the graph the expansions leave, including a map whose
+// matches overlap: a child replaced along with its matching parent is not
+// released twice, whichever of the two the map expands first.
+func TestApplyExpansionsWithBudget_MeterMatchesTheGraph(t *testing.T) {
+	dir := t.TempDir()
+	writeExpansionFormula(t, dir, "one", 1, 0)
+	writeExpansionFormula(t, dir, "tree", 2, 2)
+	cases := map[string]*ComposeRules{
+		"overlapping map": {Map: []*MapRule{{Select: "p*", With: "one"}}},
+		"expand parent":   {Expand: []*ExpandRule{{Target: "p", With: "tree"}}},
+		"expand then map": {
+			Expand: []*ExpandRule{{Target: "q", With: "tree"}},
+			Map:    []*MapRule{{Select: "p*", With: "tree"}, {Select: "q.*", With: "one"}},
+		},
+	}
+	for name, compose := range cases {
+		t.Run(name, func(t *testing.T) {
+			for run := 0; run < 20; run++ { // map order is random; overlap both ways
+				steps := []*Step{
+					{ID: "p", Children: []*Step{{ID: "p.a"}, {ID: "p.b", Children: []*Step{{ID: "p.b.c"}}}}},
+					{ID: "q"},
+				}
+				budget := NewExpansionBudget(steps)
+				result, err := ApplyExpansionsWithBudget(steps, compose, NewParser(dir), budget)
+				if err != nil {
+					t.Fatalf("ApplyExpansionsWithBudget: %v", err)
+				}
+				if got := stepGraphSize(result); budget.Used() != got {
+					t.Fatalf("budget holds %d steps; the expanded graph has %d", budget.Used(), got)
+				}
+			}
+		})
+	}
+}
+
+// With a small injected limit, a map is refused at the expansion that would
+// cross it, before cloning its template, and the budget is never overdrawn.
+func TestApplyExpansionsWithBudget_MapRefusesBeforeOverdrawing(t *testing.T) {
+	dir := t.TempDir()
+	writeExpansionFormula(t, dir, "triple", 3, 0)
+	steps := flatSteps("s", 5)
+	budget := newExpansionBudget(10, steps)
+	compose := &ComposeRules{Map: []*MapRule{{Select: "s*", With: "triple"}}}
+	_, err := ApplyExpansionsWithBudget(steps, compose, NewParser(dir), budget)
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyExpansionsWithBudget error = %v; want ErrExpansionLimit", err)
+	}
+	// 5 steps, then +2 per expansion: the third (5+2+2+2 = 11) is refused.
+	if budget.Used() != 9 {
+		t.Fatalf("budget holds %d steps after the refusal; want the 9 the first two expansions left", budget.Used())
 	}
 }
