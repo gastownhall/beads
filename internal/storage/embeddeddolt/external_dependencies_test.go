@@ -140,6 +140,46 @@ func TestForeignPrefixLocalBlockerGatesEmbeddedReady(t *testing.T) {
 	}
 }
 
+// TestForeignPrefixLocalBlockerCloseUnblocksEmbeddedReady pins the other half
+// of GH#6066: closing the foreign-prefix local blocker must unblock the
+// dependent. While the edge was mis-stored as external, the dependent was
+// never blocked at all; once it gates ready like a local edge, closing the
+// blocker has to clear the dependent's blocked state and return it to ready.
+func TestForeignPrefixLocalBlockerCloseUnblocksEmbeddedReady(t *testing.T) {
+	store := openExternalDependencyStore(t, "demo")
+	ctx := t.Context()
+	blocker := &types.Issue{ID: "treehouse-lease-t5", Title: "the blocker", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	dependent := &types.Issue{ID: "firstmate-lease-unblock", Title: "the dependent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{blocker, dependent} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", issue.ID, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: dependent.ID, DependsOnID: blocker.ID, Type: types.DepBlocks}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork before close: %v", err)
+	}
+	if got := embeddedIssueIDs(ready); !slices.Equal(got, []string{blocker.ID}) {
+		t.Fatalf("ready IDs before close = %v, want only %s: the dependent must be blocked while %s is open", got, blocker.ID, blocker.ID)
+	}
+
+	if err := store.CloseIssue(ctx, blocker.ID, "done", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue(%s): %v", blocker.ID, err)
+	}
+
+	ready, err = store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork after close: %v", err)
+	}
+	if got := embeddedIssueIDs(ready); !slices.Equal(got, []string{dependent.ID}) {
+		t.Fatalf("ready IDs after close = %v, want %s: closing the blocker must unblock the dependent", got, dependent.ID)
+	}
+}
+
 func openExternalDependencyStore(t *testing.T, prefix string) *embeddeddolt.EmbeddedDoltStore {
 	t.Helper()
 	store, err := embeddeddolt.Open(t.Context(), filepath.Join(t.TempDir(), ".beads"), prefix, "main")
