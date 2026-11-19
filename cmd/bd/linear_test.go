@@ -2139,9 +2139,18 @@ func (s *linearSyncStore) AddDependency(context.Context, *types.Dependency, stri
 	return nil
 }
 
-func (s *linearSyncStore) PreviousExternalRef(context.Context, string, time.Time) (string, bool, error) {
+// The Linear overlap regression needs the history path, not the heuristic.
+var _ tracker.ExternalRefHistoryStore = (*linearSyncStore)(nil)
+
+func (s *linearSyncStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
+	refs := make(map[string]string)
 	if s.issue.ExternalRef == nil {
-		return "", false, nil
+		return refs, nil
 	}
-	return *s.issue.ExternalRef, true, nil
+	for _, id := range ids {
+		if id == s.issue.ID {
+			refs[id] = *s.issue.ExternalRef
+		}
+	}
+	return refs, nil
 }

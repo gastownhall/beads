@@ -1343,20 +1343,6 @@ func (s *EmbeddedDoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]
 	return result, err
 }
 
-// PreviousExternalRef returns the external_ref value recorded for issueID
-// as of the most recent commit at or before asOf.
-// Implements storage.ExternalRefHistoryQuerier.
-func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
-	var ref string
-	var found bool
-	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		ref, found, err = issueops.PreviousExternalRefInTx(ctx, tx, issueID, asOf)
-		return err
-	})
-	return ref, found, err
-}
-
 // PreviousExternalRefs returns, for each of ids, the external_ref value
 // recorded by the most recent commit at or before asOf. The whole batch runs
 // on one connection, so a tracker pull opens the engine once for all its

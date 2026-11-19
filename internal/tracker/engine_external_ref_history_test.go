@@ -1,7 +1,7 @@
-// Regression tests for #4549: externalRefChangedAfter's fast path must be
-// gated on the storage.ExternalRefHistoryQuerier capability, not on whether
-// the store happens to expose a raw *sql.DB. See engine.go's
-// externalRefHistoryQuerier and externalRefChangedAfter for the rationale.
+// Regression tests for #4549: prelinkVerdicts' fast path must be gated on
+// the storage.ExternalRefHistoryQuerier capability, not on whether the store
+// happens to expose a raw *sql.DB. See engine.go's externalRefHistoryQuerier
+// and prelinkVerdicts for the rationale.
 //
 // This file MUST NOT carry a `//go:build cgo` tag (see test_helpers_pure_test.go):
 // the mocks below are pure Go and exercise the capability-detection logic
@@ -12,6 +12,7 @@ package tracker
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -49,9 +50,24 @@ func (h *historyQuerierStore) Diff(_ context.Context, _, _ string) ([]*storage.D
 	return nil, nil
 }
 
-func (h *historyQuerierStore) PreviousExternalRef(_ context.Context, _ string, _ time.Time) (string, bool, error) {
+func (h *historyQuerierStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
 	h.calls++
-	return h.prevRef, h.prevFound, h.prevErr
+	return uniformHistory(ids, h.prevRef, h.prevFound, h.prevErr)
+}
+
+// uniformHistory answers a batch history request with the same (ref, found)
+// for every id, or err.
+func uniformHistory(ids []string, ref string, found bool, err error) (map[string]string, error) {
+	if err != nil {
+		return nil, err
+	}
+	refs := make(map[string]string)
+	if found {
+		for _, id := range ids {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
 }
 
 // doltLikeStore is a full storage.DoltStorage that also implements
@@ -81,9 +97,9 @@ func (d *doltLikeStore) Diff(_ context.Context, _, _ string) ([]*storage.DiffEnt
 	return nil, nil
 }
 
-func (d *doltLikeStore) PreviousExternalRef(_ context.Context, _ string, _ time.Time) (string, bool, error) {
+func (d *doltLikeStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
 	d.calls++
-	return d.prevRef, d.prevFound, nil
+	return uniformHistory(ids, d.prevRef, d.prevFound, nil)
 }
 
 // fakeStoreDecorator stands in for storage.HookFiringStore (or any other
@@ -99,6 +115,16 @@ var _ storage.DoltStorage = (*fakeStoreDecorator)(nil)
 var _ storage.Unwrapper = (*fakeStoreDecorator)(nil)
 
 func (f *fakeStoreDecorator) Unwrap() storage.DoltStorage { return f.inner }
+
+// prelinkVerdictFor decides one local the way a pull whose only linked local
+// is local would: through prelinkVerdicts, with a single candidate.
+func (e *Engine) prelinkVerdictFor(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (changed, historyUnknown bool, err error) {
+	verdicts, err := e.prelinkVerdicts(ctx, []prelinkCandidate{{local: local, ref: currentRef}}, lastSync)
+	if err != nil {
+		return false, false, err
+	}
+	return verdicts[0].changed, verdicts[0].historyUnknown, nil
+}
 
 func newTestIssue(id string, createdAt, updatedAt time.Time) *types.Issue {
 	return &types.Issue{ID: id, CreatedAt: createdAt, UpdatedAt: updatedAt}
@@ -133,19 +159,19 @@ func TestExternalRefHistoryQuerier_UnwrapsDecorator(t *testing.T) {
 	var dec storage.DoltStorage = &fakeStoreDecorator{DoltStorage: inner, inner: inner}
 
 	// Sanity check mirroring the real HookFiringStore: the decorator itself
-	// does not directly satisfy ExternalRefHistoryQuerier (PreviousExternalRef
+	// does not directly satisfy ExternalRefHistoryQuerier (PreviousExternalRefs
 	// is not part of storage.DoltStorage, so it isn't promoted).
 	if _, ok := dec.(storage.ExternalRefHistoryQuerier); ok {
-		t.Fatal("test setup invalid: decorator should not directly expose PreviousExternalRef")
+		t.Fatal("test setup invalid: decorator should not directly expose PreviousExternalRefs")
 	}
 
 	q, ok := externalRefHistoryQuerier(dec)
 	if !ok {
 		t.Fatal("expected decorator wrapping a history-capable store to be detected via UnwrapStore")
 	}
-	ref, found, err := q.PreviousExternalRef(context.Background(), "bd-1", time.Now())
-	if err != nil || !found || ref != "ref-1" {
-		t.Fatalf("PreviousExternalRef via unwrapped decorator = (%q, %v, %v), want (\"ref-1\", true, nil)", ref, found, err)
+	refs, err := q.PreviousExternalRefs(context.Background(), []string{"bd-1"}, time.Now())
+	if ref, found := refs["bd-1"]; err != nil || !found || ref != "ref-1" {
+		t.Fatalf("PreviousExternalRefs via unwrapped decorator = (%q, %v, %v), want (\"ref-1\", true, nil)", ref, found, err)
 	}
 	if inner.calls != 1 {
 		t.Fatalf("expected inner store to be called once, got %d", inner.calls)
@@ -154,7 +180,7 @@ func TestExternalRefHistoryQuerier_UnwrapsDecorator(t *testing.T) {
 
 func TestEngineExternalRefChangedAfter_NilLocalIssue(t *testing.T) {
 	e := &Engine{Store: newPureTestStore()}
-	changed, _, err := e.externalRefChangedAfter(context.Background(), nil, "ref", time.Now())
+	changed, _, err := e.prelinkVerdictFor(context.Background(), nil, "ref", time.Now())
 	if err != nil || changed {
 		t.Fatalf("externalRefChangedAfter(nil local) = (%v, %v), want (false, nil)", changed, err)
 	}
@@ -165,7 +191,7 @@ func TestEngineExternalRefChangedAfter_FastPathSameRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, _, err := e.prelinkVerdictFor(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -173,7 +199,7 @@ func TestEngineExternalRefChangedAfter_FastPathSameRef(t *testing.T) {
 		t.Error("expected changed=false when previous ref matches current ref")
 	}
 	if querier.calls != 1 {
-		t.Fatalf("expected fast path to call PreviousExternalRef once, got %d calls", querier.calls)
+		t.Fatalf("expected fast path to call PreviousExternalRefs once, got %d calls", querier.calls)
 	}
 }
 
@@ -182,7 +208,7 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-NEW", time.Now())
+	changed, _, err := e.prelinkVerdictFor(context.Background(), local, "https://tracker.test/EXT-NEW", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -190,7 +216,7 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 		t.Error("expected changed=true when previous ref differs from current ref")
 	}
 	if querier.calls != 1 {
-		t.Fatalf("expected fast path to call PreviousExternalRef once, got %d calls", querier.calls)
+		t.Fatalf("expected fast path to call PreviousExternalRefs once, got %d calls", querier.calls)
 	}
 }
 
@@ -226,7 +252,7 @@ func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
 			e := &Engine{Store: querier}
 			local := newTestIssue("bd-1", test.created, test.updated)
 
-			changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+			changed, historyUnknown, err := e.prelinkVerdictFor(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -235,7 +261,7 @@ func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
 					changed, historyUnknown, test.wantChanged, test.wantHistoryUnknown)
 			}
 			if querier.calls != 1 {
-				t.Errorf("PreviousExternalRef calls = %d, want 1", querier.calls)
+				t.Errorf("PreviousExternalRefs calls = %d, want 1", querier.calls)
 			}
 		})
 	}
@@ -271,7 +297,7 @@ func TestEngineExternalRefChangedAfter_KnownAnswersReportHistoryKnown(t *testing
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			e := &Engine{Store: test.store}
-			changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), test.local, test.currentRef, lastSync)
+			changed, historyUnknown, err := e.prelinkVerdictFor(context.Background(), test.local, test.currentRef, lastSync)
 			if !errors.Is(err, test.wantErr) {
 				t.Fatalf("error = %v, want %v", err, test.wantErr)
 			}
@@ -336,8 +362,8 @@ func TestPrelinkDecision(t *testing.T) {
 }
 
 // Locks the NULL-historical contract: a NULL external_ref column surfaces
-// from PreviousExternalRefInTx as ("", found=true) (see
-// issueops.PreviousExternalRefInTx, internal/storage/issueops/history.go),
+// from PreviousExternalRefsInTx as a present "" (see
+// issueops.PreviousExternalRefsInTx, internal/storage/issueops),
 // not as "not found". The fast path must therefore compare it against
 // currentRef like any other value, rather than treating it as an
 // unconditional "changed" the way the old inline !previousRef.Valid check did.
@@ -346,7 +372,7 @@ func TestEngineExternalRefChangedAfter_FastPathNullHistoricalRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "", time.Now())
+	changed, _, err := e.prelinkVerdictFor(context.Background(), local, "", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -361,7 +387,7 @@ func TestEngineExternalRefChangedAfter_FastPathPropagatesError(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	_, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", time.Now())
+	_, _, err := e.prelinkVerdictFor(context.Background(), local, "ref", time.Now())
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("externalRefChangedAfter error = %v, want %v", err, wantErr)
 	}
@@ -380,7 +406,7 @@ func TestEngineExternalRefChangedAfter_EmbeddedDoltTakesFastPath(t *testing.T) {
 	lastSync := time.Now()
 	local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Hour))
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+	changed, _, err := e.prelinkVerdictFor(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -401,7 +427,7 @@ func TestEngineExternalRefChangedAfter_NoHistoryCapabilityFallsBack(t *testing.T
 
 	t.Run("touched after lastSync reports changed", func(t *testing.T) {
 		local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Hour))
-		changed, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
+		changed, _, err := e.prelinkVerdictFor(context.Background(), local, "ref", lastSync)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -412,7 +438,7 @@ func TestEngineExternalRefChangedAfter_NoHistoryCapabilityFallsBack(t *testing.T
 
 	t.Run("untouched since lastSync reports unchanged", func(t *testing.T) {
 		local := newTestIssue("bd-2", lastSync.Add(-2*time.Hour), lastSync.Add(-time.Hour))
-		changed, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
+		changed, _, err := e.prelinkVerdictFor(context.Background(), local, "ref", lastSync)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -431,7 +457,7 @@ func TestEngineExternalRefChangedAfter_DecoratedDoltServerStoreUnchanged(t *test
 	e := &Engine{Store: dec}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, _, err := e.prelinkVerdictFor(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -440,5 +466,124 @@ func TestEngineExternalRefChangedAfter_DecoratedDoltServerStoreUnchanged(t *test
 	}
 	if inner.calls != 1 {
 		t.Fatalf("expected inner Dolt-server store to be queried once via unwrap, got %d calls", inner.calls)
+	}
+}
+
+// countingHistoryStore answers external_ref history from previousRefs through
+// both the batch method and a single-id PreviousExternalRef (the per-issue
+// read GH#6605 replaced), and records every call, so a test can tell which
+// one a pull used.
+type countingHistoryStore struct {
+	*missingHistoryStore
+	singleCalls int
+	batchCalls  [][]string
+	batchAsOf   []time.Time
+}
+
+var _ ExternalRefHistoryStore = (*countingHistoryStore)(nil)
+
+func (s *countingHistoryStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
+	s.singleCalls++
+	ref, ok := s.previousRefs[id]
+	return ref, ok, nil
+}
+
+func (s *countingHistoryStore) PreviousExternalRefs(_ context.Context, ids []string, asOf time.Time) (map[string]string, error) {
+	s.batchCalls = append(s.batchCalls, append([]string(nil), ids...))
+	s.batchAsOf = append(s.batchAsOf, asOf)
+	refs := make(map[string]string)
+	for _, id := range ids {
+		if ref, ok := s.previousRefs[id]; ok {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
+}
+
+// TestEnginePullAsksExternalRefHistoryOncePerPull is the GH#6605 regression:
+// an incremental pull asks a history-capable store about all its linked
+// locals in one batch at lastSync, never once per linked issue, and asks
+// nothing when no local is linked or there is no lastSync.
+func TestEnginePullAsksExternalRefHistoryOncePerPull(t *testing.T) {
+	old := overlapLastSync.Add(-24 * time.Hour)
+	before := overlapLastSync.Add(-time.Hour)
+	unlinked := func(id string) *types.Issue {
+		issue := linkedIssue(id, "", "unlinked", old, before)
+		issue.ExternalRef = nil
+		return issue
+	}
+	blank := func(id string) *types.Issue {
+		issue := linkedIssue(id, "", "blank ref", old, before)
+		ref := "   "
+		issue.ExternalRef = &ref
+		return issue
+	}
+
+	for _, test := range []struct {
+		name        string
+		locals      []*types.Issue
+		noLastSync  bool
+		wantBatchID []string
+	}{
+		{
+			name: "linked and unrelated locals",
+			locals: []*types.Issue{
+				linkedIssue("bd-a", "EXT-1", "a", old, before),
+				unlinked("bd-u"),
+				linkedIssue("bd-b", "EXT-2", "b", old, before),
+				blank("bd-blank"),
+				linkedIssue("bd-c", "EXT-3", "c", old, before),
+			},
+			wantBatchID: []string{"bd-a", "bd-b", "bd-c"},
+		},
+		{
+			name:   "no linked locals",
+			locals: []*types.Issue{unlinked("bd-u"), blank("bd-blank")},
+		},
+		{
+			name:       "no lastSync",
+			locals:     []*types.Issue{linkedIssue("bd-a", "EXT-1", "a", old, before)},
+			noLastSync: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &countingHistoryStore{missingHistoryStore: newMissingHistoryStore(test.locals...)}
+			if test.noLastSync {
+				delete(store.localMetadata, "test.last_sync")
+			}
+			for _, local := range test.locals {
+				if local.ExternalRef != nil {
+					store.previousRefs[local.ID] = *local.ExternalRef
+				}
+			}
+			mock, _ := newOverlapTracker()
+
+			if _, err := NewEngine(mock, store, "sync").Sync(context.Background(), SyncOptions{Pull: true, DryRun: true}); err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if store.singleCalls != 0 {
+				t.Errorf("single-id history calls = %d, want 0", store.singleCalls)
+			}
+			if test.wantBatchID == nil {
+				if len(store.batchCalls) != 0 {
+					t.Errorf("batch history calls = %v, want none", store.batchCalls)
+				}
+				return
+			}
+			if len(store.batchCalls) != 1 {
+				t.Fatalf("batch history calls = %d (%v), want exactly 1", len(store.batchCalls), store.batchCalls)
+			}
+			got := append([]string(nil), store.batchCalls[0]...)
+			slices.Sort(got)
+			if !slices.Equal(got, test.wantBatchID) {
+				t.Errorf("batch ids = %v, want %v", got, test.wantBatchID)
+			}
+			if !store.batchAsOf[0].Equal(overlapLastSync) {
+				t.Errorf("batch asOf = %v, want lastSync %v", store.batchAsOf[0], overlapLastSync)
+			}
+			if mock.fetchCalls != 0 {
+				t.Errorf("FetchIssue calls = %d, want 0: every link was unchanged", mock.fetchCalls)
+			}
+		})
 	}
 }

@@ -112,23 +112,6 @@ func (s *DoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]*storage
 	return result, err
 }
 
-// PreviousExternalRef returns the external_ref value recorded for issueID
-// as of the most recent commit at or before asOf.
-// Implements storage.ExternalRefHistoryQuerier.
-func (s *DoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
-	var ref string
-	var found bool
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		var err error
-		ref, found, err = issueops.PreviousExternalRefInTx(ctx, tx, issueID, asOf)
-		if err != nil {
-			return wrapQueryError("get previous external ref", err)
-		}
-		return nil
-	})
-	return ref, found, err
-}
-
 // PreviousExternalRefs returns, for each of ids, the external_ref value
 // recorded by the most recent commit at or before asOf, in one read
 // transaction and one history query per 200 unique ids. An id without such a

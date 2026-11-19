@@ -19,9 +19,23 @@ type overlapStore struct {
 	previousRefs map[string]string
 }
 
-func (s *overlapStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
-	ref, ok := s.previousRefs[id]
-	return ref, ok, nil
+// A double that lost its history method would silently test the heuristic.
+var _ ExternalRefHistoryStore = (*overlapStore)(nil)
+
+func (s *overlapStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
+	return historyFrom(s.previousRefs, ids), nil
+}
+
+// historyFrom answers a batch history request from previousRefs: an id
+// absent from it has no history row.
+func historyFrom(previousRefs map[string]string, ids []string) map[string]string {
+	refs := make(map[string]string)
+	for _, id := range ids {
+		if ref, ok := previousRefs[id]; ok {
+			refs[id] = ref
+		}
+	}
+	return refs
 }
 
 // newOverlapStore returns a store holding local (when non-nil) with

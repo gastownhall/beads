@@ -34,7 +34,7 @@ type IssueUpdater interface {
 // ExternalRefHistoryStore is an optional capability used for precise
 // relink/conflict detection.
 type ExternalRefHistoryStore interface {
-	PreviousExternalRef(context.Context, string, time.Time) (string, bool, error)
+	PreviousExternalRefs(context.Context, []string, time.Time) (map[string]string, error)
 }
 
 // NewStore adapts a classic storage.Storage to the tracker contract. Values

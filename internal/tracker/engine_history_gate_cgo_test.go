@@ -1,6 +1,6 @@
 //go:build cgo
 
-// Cgo-tagged regression tests for the externalRefChangedAfter fast-path gate
+// Cgo-tagged regression tests for the prelinkVerdicts history fast-path gate
 // (GH#4549), exercised against the real Dolt-backed stores. Pure-Go tests
 // using fakes live in engine_external_ref_history_test.go.
 
@@ -19,6 +19,13 @@ import (
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// previousExternalRef asks store's batch history read about one id.
+func previousExternalRef(ctx context.Context, store ExternalRefHistoryStore, id string, asOf time.Time) (string, bool, error) {
+	refs, err := store.PreviousExternalRefs(ctx, []string{id}, asOf)
+	ref, found := refs[id]
+	return ref, found, err
+}
 
 // TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath is a regression
 // test for GH#4549: EmbeddedDoltStore supports the dolt_history_issues query
@@ -96,9 +103,9 @@ func TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 		UpdatedAt: asOf.Add(-time.Hour),
 	}
 
-	changed, _, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
+	changed, _, err := e.prelinkVerdictFor(ctx, local, "new-ref", asOf)
 	if err != nil {
-		t.Fatalf("externalRefChangedAfter: %v", err)
+		t.Fatalf("prelinkVerdictFor: %v", err)
 	}
 	if !changed {
 		t.Fatal("expected changed=true: external_ref differs from its value as of asOf, even though local's timestamps predate asOf")
@@ -106,9 +113,9 @@ func TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 
 	// Complementary check: currentRef matching the historical value as of
 	// asOf should report unchanged.
-	changed, _, err = e.externalRefChangedAfter(ctx, local, "old-ref", asOf)
+	changed, _, err = e.prelinkVerdictFor(ctx, local, "old-ref", asOf)
 	if err != nil {
-		t.Fatalf("externalRefChangedAfter: %v", err)
+		t.Fatalf("prelinkVerdictFor: %v", err)
 	}
 	if changed {
 		t.Fatal("expected changed=false: currentRef matches the historical value as of asOf")
@@ -168,9 +175,9 @@ func TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 		UpdatedAt: asOf.Add(-time.Hour),
 	}
 
-	changed, _, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
+	changed, _, err := e.prelinkVerdictFor(ctx, local, "new-ref", asOf)
 	if err != nil {
-		t.Fatalf("externalRefChangedAfter: %v", err)
+		t.Fatalf("prelinkVerdictFor: %v", err)
 	}
 	if !changed {
 		t.Fatal("expected changed=true via the (behaviorally unchanged) Dolt server fast path")
@@ -181,7 +188,7 @@ func TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 // Dolt store. Linked issues are committed before a tracker's last_sync; one
 // is edited after it. A compaction whose boundary lies after last_sync
 // squashes the commits that held their state at last_sync into a base dated
-// after it, so PreviousExternalRef finds no row for them. The next pull with
+// after it, so PreviousExternalRefs finds no row for them. The next pull with
 // the original last_sync must not hydrate them from stale remotes: the edit
 // and the unchanged issue keep their local content, and one warning names
 // the issues changed since last_sync but not the untouched one. A pre-linked
@@ -280,8 +287,8 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 
 			// The fixture must hold the baseline before compaction, or the
 			// dates did not take.
-			if ref, found, err := store.PreviousExternalRef(ctx, edited.ID, lastSync); err != nil || !found || ref != "https://test.test/EXT-1" {
-				t.Fatalf("before compaction PreviousExternalRef(edited) = (%q, %v, %v), want the synced ref", ref, found, err)
+			if ref, found, err := previousExternalRef(ctx, store, edited.ID, lastSync); err != nil || !found || ref != "https://test.test/EXT-1" {
+				t.Fatalf("before compaction PreviousExternalRefs(edited) = (%q, %v, %v), want the synced ref", ref, found, err)
 			}
 
 			compactAt(t, ctx, store, test.boundaryDate)
@@ -290,23 +297,23 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 				id      string
 				wantRef string
 			}{{edited.ID, "https://test.test/EXT-1"}, {unchanged.ID, "https://test.test/EXT-3"}, {relinked.ID, ""}} {
-				ref, found, err := store.PreviousExternalRef(ctx, probe.id, lastSync)
+				ref, found, err := previousExternalRef(ctx, store, probe.id, lastSync)
 				if err != nil {
-					t.Fatalf("PreviousExternalRef(%s): %v", probe.id, err)
+					t.Fatalf("PreviousExternalRefs(%s): %v", probe.id, err)
 				}
 				if test.baselineRemoved && found {
-					t.Fatalf("after compaction PreviousExternalRef(%s) = (%q, found), want no row: the fixture must remove the baseline", probe.id, ref)
+					t.Fatalf("after compaction PreviousExternalRefs(%s) = (%q, found), want no row: the fixture must remove the baseline", probe.id, ref)
 				}
 				if !test.baselineRemoved && (!found || ref != probe.wantRef) {
-					t.Fatalf("after compaction PreviousExternalRef(%s) = (%q, %v), want (%q, found)", probe.id, ref, found, probe.wantRef)
+					t.Fatalf("after compaction PreviousExternalRefs(%s) = (%q, %v), want (%q, found)", probe.id, ref, found, probe.wantRef)
 				}
 			}
-			if ref, found, err := store.PreviousExternalRef(ctx, stub.ID, lastSync); err != nil || found {
-				t.Fatalf("after compaction PreviousExternalRef(%s) = (%q, %v, %v), want no row: it was created after last_sync", stub.ID, ref, found, err)
+			if ref, found, err := previousExternalRef(ctx, store, stub.ID, lastSync); err != nil || found {
+				t.Fatalf("after compaction PreviousExternalRefs(%s) = (%q, %v, %v), want no row: it was created after last_sync", stub.ID, ref, found, err)
 			}
 			for _, issue := range wispsPlane {
-				if ref, found, err := store.PreviousExternalRef(ctx, issue.ID, lastSync); err != nil || found {
-					t.Fatalf("PreviousExternalRef(%s) = (%q, %v, %v), want no row: the wisps table has no history", issue.ID, ref, found, err)
+				if ref, found, err := previousExternalRef(ctx, store, issue.ID, lastSync); err != nil || found {
+					t.Fatalf("PreviousExternalRefs(%s) = (%q, %v, %v), want no row: the wisps table has no history", issue.ID, ref, found, err)
 				}
 			}
 
