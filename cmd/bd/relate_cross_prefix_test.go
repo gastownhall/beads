@@ -158,3 +158,43 @@ func TestRelateCrossPrefixWritesEachHalfInItsSourceRig(t *testing.T) {
 		t.Errorf("rig dependency_added events for gt-target1 = %d, want 1", got)
 	}
 }
+
+// TestUnrelateCrossPrefixRemovesBothHalves (GH#4647, AC-2): bd unrelate on a
+// cross-rig pair removes each half from its source's store and records a
+// dependency_removed event in each.
+func TestUnrelateCrossPrefixRemovesBothHalves(t *testing.T) {
+	r := setupRelateRigs(t, func(ctx context.Context, rig *dolt.DoltStore) {
+		if err := rig.AddDependency(ctx, &types.Dependency{IssueID: "gt-target1", DependsOnID: "hq-src1", Type: types.DepRelatesTo}, "test"); err != nil {
+			t.Fatalf("seed rig half: %v", err)
+		}
+	})
+	if err := r.town.AddDependency(r.ctx, &types.Dependency{IssueID: "hq-src1", DependsOnID: "gt-target1", Type: types.DepRelatesTo}, "test"); err != nil {
+		t.Fatalf("seed town half: %v", err)
+	}
+
+	var runErr error
+	out := captureStdout(t, func() error {
+		runErr = runUnrelate(unrelateCmd, []string{"hq-src1", "gt-target1"})
+		return nil
+	})
+	if runErr != nil {
+		t.Fatalf("bd unrelate hq-src1 gt-target1: %v", runErr)
+	}
+	if !strings.Contains(out, "Unlinked hq-src1 ↔ gt-target1") {
+		t.Errorf("success output = %q, want the Unlinked hq-src1 ↔ gt-target1 line", out)
+	}
+
+	if hasRelatesTo(t, r.ctx, r.town, "hq-src1", "gt-target1") {
+		t.Errorf("town hq-src1 -> gt-target1 relates-to edge survived bd unrelate")
+	}
+	if got := countEvents(t, r.ctx, r.town, "hq-src1", types.EventDependencyRemoved); got != 1 {
+		t.Errorf("town dependency_removed events for hq-src1 = %d, want 1", got)
+	}
+	rig := r.openRig(t)
+	if hasRelatesTo(t, r.ctx, rig, "gt-target1", "hq-src1") {
+		t.Errorf("rig gt-target1 -> hq-src1 relates-to edge survived bd unrelate")
+	}
+	if got := countEvents(t, r.ctx, rig, "gt-target1", types.EventDependencyRemoved); got != 1 {
+		t.Errorf("rig dependency_removed events for gt-target1 = %d, want 1", got)
+	}
+}
