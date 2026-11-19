@@ -284,19 +284,31 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 	return fmt.Sprintf("  %s %s %s: %s%s %s", prefix, statusIcon, idStr, typeStr, dep.Title, priorityTag)
 }
 
+// formatUnresolvedDependencyLine formats a stored edge whose far end has no
+// issue row in this database (bd-uschhs): the direction glyph, the exact
+// stored target and a muted marker. It prints no status, title or priority,
+// because there is no issue to read them from.
+func formatUnresolvedDependencyLine(prefix string, dep *types.Dependency) string {
+	return fmt.Sprintf("  %s %s %s", prefix, dep.DependsOnID, ui.RenderMuted("(not in this database)"))
+}
+
 // printDepSection prints one dependency section: bold heading, then a line per
-// edge marked with the section's direction glyph.
+// edge marked with the section's direction glyph, the unresolved records last.
 func printDepSection(sec depSection) {
 	fmt.Printf("\n%s\n", ui.RenderBold(sec.Heading))
 	for _, dep := range sec.Deps {
 		fmt.Println(formatDependencyLine(sec.Glyph, dep))
 	}
+	for _, dep := range sec.Unresolved {
+		fmt.Println(formatUnresolvedDependencyLine(sec.Glyph, dep))
+	}
 }
 
 // printRelatedSection prints the deduplicated RELATED section that both
-// directions of the symmetric related/relates-to edges collapse into.
-func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetadata) {
-	if len(relatedSeen) == 0 {
+// directions of the symmetric related/relates-to edges collapse into, then the
+// outgoing related records whose far end has no row here (bd-uschhs).
+func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetadata, unresolved []*types.Dependency) {
+	if len(relatedSeen) == 0 && len(unresolved) == 0 {
 		return
 	}
 	fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
@@ -307,6 +319,9 @@ func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetada
 	sort.Strings(ids)
 	for _, id := range ids {
 		fmt.Println(formatDependencyLine("↔", relatedSeen[id]))
+	}
+	for _, dep := range unresolved {
+		fmt.Println(formatUnresolvedDependencyLine("↔", dep))
 	}
 }
 

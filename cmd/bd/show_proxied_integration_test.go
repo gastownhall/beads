@@ -456,14 +456,14 @@ func TestProxiedServerShow2(t *testing.T) {
 		if err != nil {
 			t.Fatalf("bd show failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-		if !strings.Contains(stderr, "no row in this database") {
-			t.Errorf("proxied bd show did not disclose the unrenderable edge:\nstderr:\n%s", stderr)
+		// bd-uschhs AC-3: same contract as the direct route. The edge renders
+		// in its DEPENDS ON section as the section's only entry, named
+		// exactly, and the outgoing count warning it replaces is gone.
+		if !strings.Contains(stdout, "DEPENDS ON") || !strings.Contains(stdout, "→ liveop-kmf (not in this database)") {
+			t.Errorf("proxied bd show did not render the unresolved edge in its section:\nstdout:\n%s", stdout)
 		}
-		// Same contract as the direct route: stdout stays byte-identical for
-		// scripts, so assert on the streams apart or this passes on a build
-		// that prints the notice in the wrong place.
-		if strings.Contains(stdout, "no row in this database") {
-			t.Errorf("the notice reached stdout, which must stay unchanged:\n%s", stdout)
+		if strings.Contains(stderr, "dependency edge(s)") || strings.Contains(stderr, "For raw edge records") {
+			t.Errorf("proxied bd show still printed the redundant outgoing warning:\nstderr:\n%s", stderr)
 		}
 	})
 
