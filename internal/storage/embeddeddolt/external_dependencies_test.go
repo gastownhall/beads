@@ -4,11 +4,13 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/types"
@@ -364,5 +366,31 @@ func TestForeignPrefixAbsentTargetStaysExternal(t *testing.T) {
 	}
 	if err := e.store.AddDependency(ctx, &types.Dependency{IssueID: dependent, DependsOnID: "demo-missing", Type: types.DepBlocks}, "tester"); err == nil {
 		t.Fatal("AddDependency to a missing same-prefix target succeeded, want a missing-target refusal")
+	}
+}
+
+// A held foreign-prefix ancestor is a local ancestor, so a blocks edge
+// from its descendant is refused by hierarchy validation and writes nothing.
+// The ancestor is a grandparent: a child's own parent already holds the
+// (child, parent) row.
+func TestForeignPrefixAncestorBlockIsRefused(t *testing.T) {
+	e := newForeignPrefixEnv(t)
+	ctx := t.Context()
+	const grandparent, parent, child = "treehouse-epic", "firstmate-parent", "firstmate-child"
+	e.create(&types.Issue{ID: grandparent, IssueType: types.TypeEpic}, &types.Issue{ID: parent, IssueType: types.TypeEpic}, &types.Issue{ID: child})
+	for _, edge := range [][2]string{{parent, grandparent}, {child, parent}} {
+		if err := e.store.AddDependency(ctx, &types.Dependency{IssueID: edge[0], DependsOnID: edge[1], Type: types.DepParentChild}, "tester"); err != nil {
+			t.Fatalf("AddDependency(parent-child %s -> %s): %v", edge[0], edge[1], err)
+		}
+	}
+	err := e.store.AddDependency(ctx, &types.Dependency{IssueID: child, DependsOnID: grandparent, Type: types.DepBlocks}, "tester")
+	var conflict *domain.DependencyHierarchyConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("AddDependency(%s blocks on ancestor %s) = %v, want *DependencyHierarchyConflictError", child, grandparent, err)
+	}
+	var edges int
+	e.queryScalar(t, ctx, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND type = 'blocks'", []any{child}, &edges)
+	if edges != 0 {
+		t.Fatalf("refused hierarchy edge left %d blocks rows for %s", edges, child)
 	}
 }
