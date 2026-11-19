@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -340,6 +341,93 @@ func TestEmbeddedReadyBlockersAndLabels(t *testing.T) {
 		// The blocked issue should not appear in ready output
 		if strings.Contains(stdout.String(), "Blocked by blocker") {
 			t.Errorf("blocked issue should not appear in ready output: %s", stdout.String())
+		}
+	})
+
+	// GH#6066: two LOCAL issues whose explicit ids carry foreign prefixes
+	// (bd create --id --force) and a blocks edge between them. The edge is a
+	// local edge like any other: it gates ready, blocked and --explain name
+	// the blocker, and closing the blocker readies the dependent.
+	t.Run("ready_excludes_foreign_prefix_local_blocker", func(t *testing.T) {
+		run := func(t *testing.T, args ...string) []byte {
+			t.Helper()
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+					strings.Join(args, " "), err, stdout.String(), stderr.String())
+			}
+			return bytes.TrimSpace(stdout.Bytes())
+		}
+		const blockerID, dependentID = "treehouse-lease-t4", "firstmate-lease-adopt"
+		run(t, "create", "--title", "the blocker", "--id", blockerID, "--force", "--silent")
+		run(t, "create", "--title", "the dependent", "--id", dependentID, "--force", "--silent")
+		run(t, "dep", "add", dependentID, blockerID)
+
+		readyHas := func(t *testing.T, id string) bool {
+			t.Helper()
+			var issues []types.IssueWithCounts
+			out := run(t, "ready", "--json", "--limit", "0")
+			if err := json.Unmarshal(out, &issues); err != nil {
+				t.Fatalf("parse ready JSON: %v\n%s", err, out)
+			}
+			for _, issue := range issues {
+				if issue.ID == id {
+					return true
+				}
+			}
+			return false
+		}
+		if readyHas(t, dependentID) {
+			t.Fatalf("bd ready offers %s while its local blocker %s is open", dependentID, blockerID)
+		}
+		if !readyHas(t, blockerID) {
+			t.Fatalf("bd ready dropped the open, unblocked blocker %s", blockerID)
+		}
+
+		var blocked []types.BlockedIssue
+		out := run(t, "blocked", "--json")
+		if err := json.Unmarshal(out, &blocked); err != nil {
+			t.Fatalf("parse blocked JSON: %v\n%s", err, out)
+		}
+		var blockedBy []string
+		for _, b := range blocked {
+			if b.ID == dependentID {
+				blockedBy = b.BlockedBy
+			}
+		}
+		if !slices.Equal(blockedBy, []string{blockerID}) {
+			t.Fatalf("bd blocked: %s blocked by %v, want [%s]\n%s", dependentID, blockedBy, blockerID, out)
+		}
+
+		var explanation types.ReadyExplanation
+		out = run(t, "ready", "--explain", "--json")
+		if err := json.Unmarshal(out, &explanation); err != nil {
+			t.Fatalf("parse ready --explain JSON: %v\n%s", err, out)
+		}
+		for _, item := range explanation.Ready {
+			if item.ID == dependentID {
+				t.Fatalf("bd ready --explain lists %s as ready (resolved %v, open %v)",
+					dependentID, item.ResolvedBlockers, item.OpenDependencies)
+			}
+		}
+		var explainedBy []string
+		for _, item := range explanation.Blocked {
+			if item.ID == dependentID {
+				for _, b := range item.BlockedBy {
+					explainedBy = append(explainedBy, b.ID)
+				}
+			}
+		}
+		if !slices.Equal(explainedBy, []string{blockerID}) {
+			t.Fatalf("bd ready --explain: %s blocked by %v, want [%s]\n%s", dependentID, explainedBy, blockerID, out)
+		}
+
+		run(t, "close", blockerID)
+		if !readyHas(t, dependentID) {
+			t.Fatalf("bd ready still withholds %s after its blocker %s closed", dependentID, blockerID)
 		}
 	})
 
