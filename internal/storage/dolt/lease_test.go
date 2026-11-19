@@ -1132,4 +1132,23 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			t.Errorf("lease_expires_at - granted_at = %v, want LeaseTTL %v", got, issueops.DefaultLeaseTTL)
 		}
 	})
+
+	// AC-3: a claim.pools alias is never leased; nobody heartbeats as a pool,
+	// so a lease would only let bd reclaim un-assign live pool work.
+	t.Run("claim handed to a pool alias", func(t *testing.T) {
+		if err := store.SetConfig(ctx, "claim.pools", "fable-crew"); err != nil {
+			t.Fatalf("set claim.pools: %v", err)
+		}
+		t.Cleanup(func() { _ = store.SetConfig(ctx, "claim.pools", "") })
+		seedOpen(t, "lease-ovr-pool")
+		claimFor(t, "lease-ovr-pool", "alice", "fable-crew")
+
+		ls := readLeaseState(t, ctx, store, "lease-ovr-pool")
+		if ls.status != "in_progress" || ls.assignee.String != "fable-crew" {
+			t.Fatalf("issue = %s/%s, want in_progress/fable-crew", ls.status, ls.assignee.String)
+		}
+		if lease := readClaimOverrideLease(t, ctx, store, "lease-ovr-pool"); lease.rows != 0 {
+			t.Errorf("lease = %+v, want no lease row for a claim.pools alias", lease)
+		}
+	})
 }

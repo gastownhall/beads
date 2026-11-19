@@ -7386,7 +7386,7 @@ bd update
   flag --await-id type=string default="" usage="Set gate await_id (e.g., GitHub run ID for gh:run gates)"
   flag --body type=string default="" hidden annotations={cobra_annotation_mutually_exclusive=["stdin body"]} usage="Alias for --description (GitHub CLI convention)"
   flag --body-file type=string default="" annotations={cobra_annotation_mutually_exclusive=["stdin body-file"]} usage="Read description from file (use - for stdin)"
-  flag --claim type=bool default="false" usage="Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too; refused while the issue has an open local blocker unless --force)"
+  flag --claim type=bool default="false" usage="Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too; an --assignee override hands the claim and its lease to that holder, and a claim.pools alias gets no lease; refused while the issue has an open local blocker unless --force)"
   flag --clear-notes type=bool default="false" annotations={cobra_annotation_mutually_exclusive=["clear-notes notes" "clear-notes append-notes"]} usage="Clear the notes field (--notes \"\" is refused: an empty value is usually a dead command substitution)"
   flag --defer type=string default="" usage="Defer until date (empty to clear). Issue hidden from bd ready until then, then auto-wakes to open"
   flag --description -d type=string default="" annotations={cobra_annotation_mutually_exclusive=["stdin description"]} usage="Issue description"

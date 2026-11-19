@@ -112,6 +112,7 @@ func claimLeaseStatus(v types.Status) *types.Status { return &v }
 func (s *testSuite) TestClaimAssigneeOverrideLease() {
 	s.Run("ClaimOverrideArmsLeaseForFinalHolder", s.claimOverrideArmsLeaseForFinalHolder)
 	s.Run("ClaimOverrideRedolesHeldLeaseFromUpdateTime", s.claimOverrideRedolesHeldLeaseFromUpdateTime)
+	s.Run("ClaimOverrideToPoolAliasLeavesNoLease", s.claimOverrideToPoolAliasLeavesNoLease)
 }
 
 // claimOverrideArmsLeaseForFinalHolder is AC-1: alice claims an open,
@@ -161,6 +162,27 @@ func (s *testSuite) claimOverrideRedolesHeldLeaseFromUpdateTime() {
 			s.Equal("bob", lease.holder)
 			s.True(lease.grantedAt.Equal(updatedAt), "granted_at = %v, want the update time %v", lease.grantedAt, updatedAt)
 			s.Equal(issueops.DefaultLeaseTTL, lease.expiresAt.Sub(lease.grantedAt), "lease_expires_at must be granted_at + LeaseTTL")
+		})
+	}
+}
+
+// claimOverrideToPoolAliasLeavesNoLease is AC-3: a claim.pools alias is a
+// shared pseudo-assignee nobody heartbeats as, so a lease for it would only
+// expire and let bd reclaim un-assign live pool work (GH#4716). Claiming on
+// the pool's behalf leaves the issue in_progress/<pool> with no lease row.
+func (s *testSuite) claimOverrideToPoolAliasLeavesNoLease() {
+	cleanup := s.setClaimPools("fable-crew")
+	defer cleanup()
+	for _, stack := range claimLeaseStacks() {
+		s.Run(stack.name, func() {
+			id := "bd-cl-pool-" + stack.name
+			s.seedOpenIssue(id)
+			s.Require().NoError(stack.apply(s, id, "alice", claimLeaseUpdate{claim: true, assignee: claimLeaseString("fable-crew")}))
+
+			got := s.readClaimLeaseIssue(id, false)
+			s.Equal(types.StatusInProgress, got.Status)
+			s.Equal("fable-crew", got.Assignee)
+			s.Equal(0, s.countClaimLeaseRows(id), "a claim handed to a claim.pools alias must hold no lease")
 		})
 	}
 }
