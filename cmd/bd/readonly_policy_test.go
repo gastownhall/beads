@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -192,6 +193,157 @@ func assertPostRunSuppressesMaintenance(t *testing.T, cmdName, who string, confi
 	if fake.closeCalls != 1 {
 		t.Fatalf("store close calls = %d, want 1", fake.closeCalls)
 	}
+}
+
+// TestPersistentPostRunDirectMaintenanceSkipsPreview (GH#8325): on the direct
+// route a --dry-run or --inspect preview gets none of the post-command
+// maintenance net. Auto-backup, auto-export and auto-push write outside the
+// store the preview opened (.beads/backup, issues.jsonl, push-state.json and
+// the Dolt remote), and on embedded the refused backup stamps the throttle
+// and starves the next real write's backup. The proxied arm already skipped
+// its backup for a preview; this pins the direct arm to the same rule. The
+// unset-flag row is the control: an ordinary write runs every step.
+//
+// Cannot be parallel: mutates PersistentPostRunE's package globals.
+func TestPersistentPostRunDirectMaintenanceSkipsPreview(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		flag    string
+		set     bool
+		want    postRunMaintenanceCounts
+	}{
+		{name: "create --dry-run", command: "create", flag: "dry-run", set: true, want: postRunMaintenanceCounts{}},
+		{name: "migrate --inspect", command: "migrate", flag: "inspect", set: true, want: postRunMaintenanceCounts{}},
+		// A classified read with a real --dry-run: export and push already
+		// skip read-only commands, but auto-backup had no such check.
+		{name: "duplicates --dry-run", command: "duplicates", flag: "dry-run", set: true, want: postRunMaintenanceCounts{}},
+		// Control: the flag is registered but unset, so this is an ordinary
+		// write and every step runs (auto-commit twice: the write, then the tip).
+		{name: "create without --dry-run", command: "create", flag: "dry-run", set: false, want: postRunMaintenanceCounts{commit: 1, tip: 1, backup: 1, export: 1, push: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, fake := runDirectPostRunForPreviewFlag(t, tt.command, tt.flag, tt.set)
+			if got != tt.want {
+				t.Fatalf("%s: maintenance (commit/tip/backup/export/push) = %+v, want %+v", tt.name, got, tt.want)
+			}
+			if fake.metadataWrites != tt.want.tip {
+				t.Fatalf("%s: tip metadata writes = %d, want %d", tt.name, fake.metadataWrites, tt.want.tip)
+			}
+			if fake.closeCalls != 1 {
+				t.Fatalf("%s: store close calls = %d, want 1", tt.name, fake.closeCalls)
+			}
+		})
+	}
+}
+
+// postRunMaintenanceCounts is how many times each maintenance step ran.
+type postRunMaintenanceCounts struct{ commit, tip, backup, export, push int }
+
+// runDirectPostRunForPreviewFlag runs the direct arm of PersistentPostRunE for
+// a cmdName invocation that wrote, showed a tip and has auto-commit on, with
+// a bool --flag registered and set to set, and returns how many times each
+// maintenance step ran. A tip auto-commit counts as tip, not commit.
+func runDirectPostRunForPreviewFlag(t *testing.T, cmdName, flag string, set bool) (postRunMaintenanceCounts, *strictReadonlyPostRunStore) {
+	t.Helper()
+	// Keep the journal prune of the non-preview rows off any real workspace.
+	t.Chdir(t.TempDir())
+	t.Setenv("BEADS_DIR", "")
+
+	originalStore := store
+	originalProvider := uowProvider
+	originalReadonly := readonlyMode
+	originalProxied := proxiedServerMode
+	originalRootCtx := rootCtx
+	originalRootCancel := rootCancel
+	originalCommandSpan := commandSpan
+	originalProfileFile := profileFile
+	originalTraceFile := traceFile
+	storeMutex.Lock()
+	originalStoreActive := storeActive
+	storeMutex.Unlock()
+	originalFreeze := commandFreeze
+	originalSkip := commandSkipsPostRunMaintenance.Load()
+	originalDoltAutoCommit := doltAutoCommit
+	originalDidWrite := commandDidWrite.Load()
+	originalDidExplicitCommit := commandDidExplicitDoltCommit
+	originalDidWriteTipMetadata := commandDidWriteTipMetadata
+	originalTipIDsShown := commandTipIDsShown
+	originalCommit := runPostRunAutoCommit
+	originalBackup := runPostRunAutoBackup
+	originalExport := runPostRunAutoExport
+	originalPush := runPostRunAutoPush
+	t.Cleanup(func() {
+		store = originalStore
+		uowProvider = originalProvider
+		readonlyMode = originalReadonly
+		proxiedServerMode = originalProxied
+		rootCtx = originalRootCtx
+		rootCancel = originalRootCancel
+		commandSpan = originalCommandSpan
+		profileFile = originalProfileFile
+		traceFile = originalTraceFile
+		storeMutex.Lock()
+		storeActive = originalStoreActive
+		storeMutex.Unlock()
+		commandFreeze = originalFreeze
+		commandSkipsPostRunMaintenance.Store(originalSkip)
+		doltAutoCommit = originalDoltAutoCommit
+		commandDidWrite.Store(originalDidWrite)
+		commandDidExplicitDoltCommit = originalDidExplicitCommit
+		commandDidWriteTipMetadata = originalDidWriteTipMetadata
+		commandTipIDsShown = originalTipIDsShown
+		runPostRunAutoCommit = originalCommit
+		runPostRunAutoBackup = originalBackup
+		runPostRunAutoExport = originalExport
+		runPostRunAutoPush = originalPush
+	})
+
+	var got postRunMaintenanceCounts
+	runPostRunAutoCommit = func(_ context.Context, p doltAutoCommitParams) error {
+		if p.Command == "tip" {
+			got.tip++
+		} else {
+			got.commit++
+		}
+		return nil
+	}
+	runPostRunAutoBackup = func(context.Context) { got.backup++ }
+	runPostRunAutoExport = func(context.Context, bool) error { got.export++; return nil }
+	runPostRunAutoPush = func(context.Context) { got.push++ }
+
+	fake := &strictReadonlyPostRunStore{}
+	store = fake
+	// The deferred gate release closes any provider still set, so one leaked
+	// by an earlier test would be closed here; this run starts without one.
+	uowProvider = nil
+	readonlyMode = false
+	proxiedServerMode = false
+	rootCtx = context.Background()
+	rootCancel = nil
+	commandSpan = nil
+	profileFile = nil
+	traceFile = nil
+	commandFreeze = migration.Result{}
+	commandSkipsPostRunMaintenance.Store(false)
+	commandDidWrite.Store(true)
+	commandDidExplicitDoltCommit = false
+	commandDidWriteTipMetadata = true
+	commandTipIDsShown = map[string]struct{}{"preview": {}}
+	doltAutoCommit = string(doltAutoCommitOn)
+
+	cmd := &cobra.Command{Use: cmdName}
+	cmd.Flags().Bool(flag, false, "")
+	if set {
+		if err := cmd.Flags().Set(flag, "true"); err != nil {
+			t.Fatalf("set --%s: %v", flag, err)
+		}
+	}
+	if err := rootCmd.PersistentPostRunE(cmd, nil); err != nil {
+		t.Fatalf("PersistentPostRunE: %v", err)
+	}
+	return got, fake
 }
 
 type readonlyTreeEntry struct {

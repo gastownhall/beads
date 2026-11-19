@@ -2593,10 +2593,10 @@ var rootCmd = &cobra.Command{
 				maybeAutoPruneEventsJournal(rootCtx, beads.FindBeadsDir())
 			}
 			// Auto-backup, through the provider this command opened. Same
-			// gate as the direct arm's maintenance net below (strict
-			// --readonly, `bd serve` and a migration freeze all skip it),
-			// plus previews: a --dry-run must not register a backup remote
-			// or write backup state. proxiedAutoBackupBackend decides the
+			// gate as the direct arm's maintenance net below: strict
+			// --readonly, `bd serve`, a preview and a migration freeze all
+			// skip it — a --dry-run must not register a backup remote or
+			// write backup state. proxiedAutoBackupBackend decides the
 			// topology, so this stays inert off managed-local.
 			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !isPreviewCommand(cmd) && !commandFreeze.Frozen() {
 				runPostRunAutoBackup(rootCtx)
@@ -2615,7 +2615,15 @@ var rootCmd = &cobra.Command{
 			// of them. Guarding the outer block keeps that promise in one
 			// place instead of six. Writes never get here at all: they were
 			// refused in PersistentPreRunE.
-			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !commandFreeze.Frozen() {
+			//
+			// A --dry-run/--inspect preview skips the net for the same reason
+			// a freeze does: it promised to mutate nothing. Backup, export and
+			// push write outside the store the preview opened (.beads/backup,
+			// issues.jsonl and export-state.json, push-state.json, the Dolt
+			// remote), and on embedded the refused backup still stamps its
+			// throttle, starving the next real write's backup (GH#8325). The
+			// proxied arm above applies the same gate.
+			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !isPreviewCommand(cmd) && !commandFreeze.Frozen() {
 				// Dolt auto-commit: after a successful write command (and after final flush),
 				// create a Dolt commit so changes don't remain only in the working set.
 				if commandDidWrite.Load() && !commandDidExplicitDoltCommit {
@@ -2633,16 +2641,18 @@ var rootCmd = &cobra.Command{
 					} else if mode == doltAutoCommitOn {
 						// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
 						//
-						// A store that refuses writes by construction — the
-						// preview open, and strict --readonly — must not turn
-						// an otherwise successful command into a non-zero exit
-						// here. This block is deliberately not gated by the
-						// read-only classification, and that has been fine
-						// because OpenForReadOnlyCommand is "otherwise a normal
-						// writable store"; the write-refusing opens break that
-						// assumption. Tip bookkeeping is incidental and
-						// recordTipShown's own contract is that it may fail
-						// silently, so skip it and carry on.
+						// This block is deliberately not gated by the
+						// read-only classification: a classified read opens
+						// OpenForReadOnlyCommand, which is "otherwise a normal
+						// writable store". The opens that refuse writes by
+						// construction (a preview's, strict --readonly's)
+						// never get here, because the outer gate above skips
+						// both. The ErrReadOnly tolerance below is defense in
+						// depth for any write-refusing store that still does:
+						// tip bookkeeping is incidental, and recordTipShown's
+						// own contract is that it may fail silently, so it
+						// must not turn an otherwise successful command into
+						// a non-zero exit. Skip it and carry on.
 						tipWritesRefused := false
 						for tipID := range commandTipIDsShown {
 							key := fmt.Sprintf("tip_%s_last_shown", tipID)

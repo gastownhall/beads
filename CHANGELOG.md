@@ -1431,6 +1431,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--dry-run` and `--inspect` previews no longer run post-command
+  auto-backup, auto-export or auto-push** (#8561, from #8325 by @scarson).
+  On the direct route a preview of a write command still took a real backup
+  and wrote `issues.jsonl`, `export-state.json` or `push-state.json`. On an
+  embedded workspace it printed `Warning: auto-backup failed: embeddeddolt:
+  store is read-only` and used up the backup interval, so the next real
+  write skipped its backup. The proxied route already skipped the backup for
+  a preview.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
