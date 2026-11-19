@@ -40,12 +40,13 @@ convergent conflict classes it always has — machine-local metadata rows,
 audit-only dependency rows, last-write-wins on issue cells. Anything past those
 halts here.)
 
-The halt message says which state the halt left behind, because it depends on
-the pull route and both are real: the SQL route aborts the conflicted merge and
-restores the working set, while the CLI/git-protocol route leaves the conflict
-rows **live** for you. A conflict that was already live when sync started — from
-an earlier halted sync or a hand-run merge — halts before the pull instead, and
-says that too.
+The halt message says which state the halt left behind, because both are real:
+every pull route settles the merge it runs in that merge's own transaction, so
+the conflicted merge this run declined is aborted and the working set restored.
+Conflict rows that are **live** in the working set were left by a merge this run
+did not run — a hand-run merge, another client, or an earlier bd release — and
+a conflict that was already live when sync started halts before the pull
+instead, and says that too.
 
 The recompute between pull and push is not bookkeeping either — `is_blocked` is
 denormalized, so a dependency edge merged in from another replica leaves

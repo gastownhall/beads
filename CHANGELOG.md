@@ -1431,6 +1431,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A declined pull conflict no longer wedges the CLI pull route's branch**
+  (#7839). The CLI/git-protocol pull route (git, ssh and credentialed
+  remotes) ran its merge on a session of its own and left a conflicted merge
+  open with the conflict rows live in the working set, so every later write,
+  pull and push failed on `dolt_merge_status.is_merging` until an operator
+  resolved the conflict by hand. The route now settles the merge in the
+  transaction that ran it, exactly as the SQL route does: the safe conflict
+  classes are resolved and foreign-key cascade violations repaired inside
+  it, an accepted merge commits, and a declined one is aborted with the
+  working set restored, its conflicts captured for `bd sync`'s halt report.
+  Federation peer pulls report such conflicts through PullFrom's conflict
+  contract instead of dropping them. The after-the-fact pool resolver that
+  ran once the pull returned is gone, and `bd sync`'s halt message now
+  attributes live conflict rows to a merge this run did not run — another
+  client, a hand-run merge, or an earlier bd release. (#7849; builds on
+  PR #8503 by rjgeng)
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

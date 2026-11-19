@@ -883,9 +883,10 @@ func TestRunSyncLoopConflictAfterPushRaceRecordsPulled(t *testing.T) {
 }
 
 // Whether the conflicted merge was aborted or left live in the working set is
-// read from WHICH detection source fired, never assumed: the SQL pull route
-// aborts and restores, while the CLI/git-protocol route deliberately leaves the
-// conflict rows in place for the operator (finishCLIPull).
+// read from WHICH detection source fired, never assumed: every pull route
+// settles the merge it runs in that merge's own transaction (GH#7839), so a
+// merge this run declined is aborted and restored — live rows are a merge
+// this run did not run.
 func TestRunSyncLoopConflictLivenessComesFromTheSource(t *testing.T) {
 	t.Run("captured-only conflicts were aborted away", func(t *testing.T) {
 		r := &syncOpsRecorder{pullConflicts: [][]string{{"issues"}}}
@@ -950,13 +951,20 @@ func TestSyncConflictMessage(t *testing.T) {
 		}
 	})
 
-	// The CLI/git-protocol route leaves the conflict rows live. Telling that
-	// operator "the working set was restored" sends them away from a database
-	// that is conflicted right now.
+	// Live conflict rows are a merge this run did not run: every pull route
+	// settles the merge it runs in that merge's own transaction (GH#7839), so
+	// the halt must attribute them to a merge someone else left open, and must
+	// not claim this pull left them, nor describe the working set as restored.
 	t.Run("live conflict is never described as restored", func(t *testing.T) {
 		got := joined(&syncOutcome{Conflicts: []string{"issues"}, ConflictsLive: true})
 		if !strings.Contains(got, "LIVE in the working set") {
 			t.Errorf("message does not report the live rows:\n%s", got)
+		}
+		if !strings.Contains(got, "merge\nthis run did not run") {
+			t.Errorf("message does not attribute the live rows to a merge this run did not run:\n%s", got)
+		}
+		if strings.Contains(got, "this pull route leaves") {
+			t.Errorf("message still claims this pull route leaves the rows live:\n%s", got)
 		}
 		if strings.Contains(got, "working set restored") {
 			t.Errorf("a live conflict must not be described as restored:\n%s", got)
