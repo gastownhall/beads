@@ -57,12 +57,16 @@ bd purge --force      # delete all closed ephemeral beads
 ```
 
 `bd mol wisp gc --closed` selects closed wisps that have not been updated
-within `--age` (default `1h`), so a molecule that just finished keeps its
-steps and notes for at least that window. Wisps are not versioned: once
-purged, a wisp cannot be recovered from history. Pass a longer `--age` (for
-example `24h`) to keep finished work longer, or `--age 0s` to purge every
-closed wisp regardless of age. Pinned wisps and configured infra types are
-never purged; squash (`bd mol squash`) anything you need to keep for good.
+within `--age` (default `1h`). A wisp updated more recently is kept, and so
+is any older closed wisp it depends on, directly or through another wisp
+kept that way, such as its molecule root and the steps before it: a chain of
+dependent steps ages out together with its newest step, while a step that
+nothing newer depends on ages out on its own.
+Wisps are not versioned: once purged, a wisp cannot be recovered from
+history. Pass a longer `--age` (for example `24h`) to keep finished work
+longer, or `--age 0s` to purge every closed wisp regardless of age. Pinned
+wisps and configured infra types are never purged; squash (`bd mol squash`)
+anything you need to keep for good.
 
 ```bash
 bd mol wisp gc --closed --force            # closed wisps idle for over 1h

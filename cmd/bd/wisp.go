@@ -634,11 +634,13 @@ if you want to preserve a summary before garbage collection.
 Use --closed to purge closed wisps that have not been updated in --age
 duration (default 1h), whatever else they carry. This is the fastest way to
 reclaim space from accumulated wisp bloat. A wisp closed more recently is
-kept, so a molecule that just finished stays readable for at least that
-window: wisps are not versioned, so a purged wisp cannot be recovered. Pass a
-longer --age (for example 24h) to keep finished work around longer, or
---age 0s to purge every closed wisp regardless of age. Safe by default:
-requires --force to actually delete.
+kept, and so is any older closed wisp it depends on, directly or through
+another wisp kept that way (its molecule root, the steps before it), so a
+chain of dependent steps ages out together with its newest step: wisps are
+not versioned, so a purged wisp cannot be recovered. Pass a longer --age
+(for example 24h) to keep finished work around longer, or --age 0s to purge
+every closed wisp regardless of age. Safe by default: requires --force to
+actually delete.
 
 --closed --force deletes in batches of 200 wisps, each committed on its own,
 so a failure keeps the batches already committed. The summary then reports
@@ -967,6 +969,10 @@ type closedWispSelection struct {
 	candidates []*types.Issue
 	pinned     int
 	infra      int
+	// heldBack counts the wisps old enough for --age that stayed because a
+	// closed wisp too new for it depends on them, directly or through other
+	// closed wisps (holdBackClosedWispDependencies).
+	heldBack   int
 	scanCapped bool
 }
 
@@ -975,6 +981,8 @@ type closedWispSelection struct {
 // candidate only once it has gone unupdated for longer than ageThreshold, the
 // same idle-time contract (wispIsAbandoned) the abandoned-wisp GC applies, so
 // a molecule that finished moments ago keeps its record for a review window.
+// An older closed wisp that such a newer one depends on stays with it, so a
+// chain of dependent steps ages out together (holdBackClosedWispDependencies).
 // ageThreshold <= 0 (--age 0s) selects every closed wisp regardless of age.
 // Pinned wisps and configured infra types stay protected at any age.
 func selectClosedWispsForPurge(ctx context.Context, r molReader, ageThreshold time.Duration, excludeTypes []types.IssueType) (closedWispSelection, error) {
@@ -1018,17 +1026,173 @@ func selectClosedWispsForPurge(ctx context.Context, r molReader, ageThreshold ti
 		}
 		sel.candidates = append(sel.candidates, issue)
 	}
+	sel.candidates, sel.heldBack, err = holdBackClosedWispDependencies(ctx, r, now, ageThreshold, sel.candidates)
+	if err != nil {
+		return closedWispSelection{}, err
+	}
 	return sel, nil
 }
 
+// holdBackClosedWispDependencies drops from candidates every wisp that a
+// closed wisp too new for ageThreshold depends on, directly or through other
+// closed wisps, and returns what is left and how many it dropped. A chain of
+// dependent steps (a molecule's root and earlier steps under a step that just
+// closed) then ages out together, after its newest member, instead of losing
+// its older steps and leaving the newer ones' edges to them dangling. It is
+// also what keeps an unforced preview working on such a chain: the deletion
+// role refuses an unforced request that any row outside it depends on, and a
+// dependent too new for --age is always outside it.
+//
+// The hold passes through every older closed wisp, not only the candidates:
+// one that the scan's 5000-row limit left out still carries a newer wisp's
+// hold down to the candidates under it (readClosedWispDependents), so a chain
+// the scan cuts through is kept whole. Only age holds a wisp back, and only
+// closed wisps pass a hold on: a candidate that live work or a durable row
+// depends on is selected as before (GH#5753), and so is one that an old
+// pinned or infra wisp depends on, unless a closed wisp too new for --age
+// depends on that wisp in turn. With --age 0s every closed wisp is a
+// candidate, so nothing is held back.
+func holdBackClosedWispDependencies(ctx context.Context, r molReader, now time.Time, ageThreshold time.Duration, candidates []*types.Issue) ([]*types.Issue, int, error) {
+	if ageThreshold <= 0 || len(candidates) == 0 {
+		return candidates, 0, nil
+	}
+	walk, err := readClosedWispDependents(ctx, r, now, ageThreshold, candidates)
+	if err != nil {
+		return nil, 0, fmt.Errorf("reading what depends on closed wisps: %w", err)
+	}
+	held := walk.held()
+	if len(held) == 0 {
+		return candidates, 0, nil
+	}
+	kept := make([]*types.Issue, 0, len(candidates))
+	for _, issue := range candidates {
+		if !held[issue.ID] {
+			kept = append(kept, issue)
+		}
+	}
+	return kept, len(candidates) - len(kept), nil
+}
+
+// closedWispDependents is the part of the dependency graph above the closed
+// selection's candidates that its hold-back reads (readClosedWispDependents).
+type closedWispDependents struct {
+	// dependsOn maps each dependent read to the walked wisps it depends on:
+	// the candidates, and the older closed wisps that depend on them.
+	dependsOn map[string][]string
+	// tooNew holds the closed wisps too new for --age found depending on a
+	// walked wisp: every hold starts at one of them.
+	tooNew []string
+}
+
+// readClosedWispDependents reads what depends on candidates, upward one
+// level per batched read. A dependent that is an older closed wisp is walked
+// in turn whether or not the scan selected it (pinned, infra, an excluded
+// type, or past the 5000-row limit); a closed wisp too new for --age ends its
+// path as a place a hold starts; anything else (live work, a durable row, a
+// row that is gone) ends it with no hold. Each id is read once, so the walk
+// ends on a dependency cycle too.
+func readClosedWispDependents(ctx context.Context, r molReader, now time.Time, ageThreshold time.Duration, candidates []*types.Issue) (closedWispDependents, error) {
+	walk := closedWispDependents{dependsOn: make(map[string][]string)}
+	seen := make(map[string]bool, len(candidates))
+	level := make([]string, len(candidates))
+	for i, issue := range candidates {
+		seen[issue.ID] = true
+		level[i] = issue.ID
+	}
+	for len(level) > 0 {
+		byTarget, err := r.GetDependentRecordsForIssues(ctx, level)
+		if err != nil {
+			return closedWispDependents{}, err
+		}
+		found := walk.addEdges(level, byTarget, seen)
+		if len(found) == 0 {
+			break
+		}
+		dependents, err := r.GetIssuesByIDs(ctx, found)
+		if err != nil {
+			return closedWispDependents{}, err
+		}
+		level = walk.sortDependents(dependents, now, ageThreshold)
+	}
+	return walk, nil
+}
+
+// addEdges records, for each wisp in level, the dependents read for it, and
+// returns the dependents no earlier level has met.
+func (w *closedWispDependents) addEdges(level []string, byTarget map[string][]*types.Dependency, seen map[string]bool) []string {
+	var found []string
+	for _, target := range level {
+		for _, dep := range byTarget[target] {
+			w.dependsOn[dep.IssueID] = append(w.dependsOn[dep.IssueID], target)
+			if !seen[dep.IssueID] {
+				seen[dep.IssueID] = true
+				found = append(found, dep.IssueID)
+			}
+		}
+	}
+	return found
+}
+
+// sortDependents files the dependents just read: a closed wisp too new for
+// --age goes to tooNew, and the older closed wisps come back as the next
+// level to walk. Live work and durable rows neither hold a wisp back nor pass
+// a hold on.
+func (w *closedWispDependents) sortDependents(dependents []*types.Issue, now time.Time, ageThreshold time.Duration) []string {
+	var next []string
+	for _, issue := range dependents {
+		if issue.Status != types.StatusClosed || !issue.Ephemeral {
+			continue
+		}
+		if closedWispTooNew(now, issue.UpdatedAt, ageThreshold) {
+			w.tooNew = append(w.tooNew, issue.ID)
+		} else {
+			next = append(next, issue.ID)
+		}
+	}
+	return next
+}
+
+// held returns every walked wisp that a closed wisp too new for --age depends
+// on, directly or through other walked wisps.
+func (w *closedWispDependents) held() map[string]bool {
+	held := make(map[string]bool)
+	queue := slices.Clone(w.tooNew)
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		for _, target := range w.dependsOn[id] {
+			if !held[target] {
+				held[target] = true
+				queue = append(queue, target)
+			}
+		}
+	}
+	return held
+}
+
+// closedWispTooNew reports whether the closed scan for a positive --age keeps
+// a closed wisp last updated at updatedAt: its SQL bound (updated_at before
+// now-age, compared at whole seconds, as sqlbuild spells it) or the strict Go
+// check (wispIsAbandoned) rules the wisp out.
+func closedWispTooNew(now, updatedAt time.Time, ageThreshold time.Duration) bool {
+	if ageThreshold <= 0 {
+		return false
+	}
+	return !updatedAt.Before(now.Add(-ageThreshold).Truncate(time.Second)) || !wispIsAbandoned(now, updatedAt, ageThreshold)
+}
+
 // printClosedWispAgeNote tells a text-mode `bd mol wisp gc --closed` run
-// which wisps its --age kept back and how to include them (GH#8202). With
-// --age 0s nothing is kept back, so there is nothing to say.
-func printClosedWispAgeNote(ageThreshold time.Duration) {
+// which wisps its --age kept back and how to include them (GH#8202): the
+// ones updated within the window, and heldBack older ones that newer ones
+// depend on. With --age 0s nothing is kept back, so there is nothing to say.
+func printClosedWispAgeNote(ageThreshold time.Duration, heldBack int) {
 	if ageThreshold <= 0 || jsonOutput {
 		return
 	}
 	fmt.Printf("Keeping closed wisps updated within the last %s (--age); use --age 0s to purge them too\n", formatWispGCAge(ageThreshold))
+	if heldBack > 0 {
+		fmt.Printf("Keeping %d older closed wisp(s) that newer ones depend on\n", heldBack)
+	}
 }
 
 // formatWispGCAge spells a --age duration without its zero tail: 1h, not
@@ -1058,7 +1222,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	if infraCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
 	}
-	printClosedWispAgeNote(ageThreshold)
+	printClosedWispAgeNote(ageThreshold, sel.heldBack)
 
 	if len(closedIssues) == 0 {
 		return renderNoClosedWisps(force && !dryRun && scanCapped)

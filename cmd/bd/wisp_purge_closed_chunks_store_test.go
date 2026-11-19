@@ -213,13 +213,28 @@ func TestWispPurgeClosedPersistsCompletedChunksOnRealStore(t *testing.T) {
 	}
 }
 
+// closedWispScanRecorder passes every read through to a real store and keeps
+// the rows each SearchIssues call returned: what the storage query itself let
+// through, ahead of the selector's own age check.
+type closedWispScanRecorder struct {
+	molReader
+	scans [][]*types.Issue
+}
+
+func (r *closedWispScanRecorder) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	rows, err := r.molReader.SearchIssues(ctx, query, filter)
+	r.scans = append(r.scans, rows)
+	return rows, err
+}
+
 // TestWispPurgeClosedRealStoreHonorsAgeInQuery is the storage-query half of
 // the GH#8202 age floor: the UpdatedBefore bound the shared selector puts in
-// the filter must reach the wisps query itself, so on a real Dolt store a
-// wisp closed moments ago is ineligible under a positive --age and eligible
-// once the clock passes the threshold. The clock is the selector's wispGCNow
-// seam; the rows carry the real clock, which is what makes the first half a
-// genuine storage-bound check rather than the fake reader's cooperation.
+// the filter must reach the wisps query itself, so on a real Dolt store the
+// scan does not even return a wisp closed moments ago under a positive --age,
+// and returns and selects it once the clock passes the threshold. The test
+// reads the rows the scan returned, not only the candidates, because the
+// selector's Go check would keep that wisp out of the candidates by itself.
+// The clock is the selector's wispGCNow seam; the rows carry the real clock.
 func TestWispPurgeClosedRealStoreHonorsAgeInQuery(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t, filepath.Join(t.TempDir(), ".beads", "beads.db"))
@@ -239,15 +254,24 @@ func TestWispPurgeClosedRealStoreHonorsAgeInQuery(t *testing.T) {
 	old := wispGCNow
 	t.Cleanup(func() { wispGCNow = old })
 
-	// Ineligible at the current time: the storage bound (updated_at <
-	// now-threshold) and the Go-side guard agree the wisp is too young.
-	sel, err := selectClosedWispsForPurge(ctx, s, threshold, nil)
+	// Ineligible at the current time, and kept out by the storage bound
+	// (updated_at < now-threshold) itself: the scan never returns it.
+	rec := &closedWispScanRecorder{molReader: s}
+	sel, err := selectClosedWispsForPurge(ctx, rec, threshold, nil)
 	if err != nil {
 		t.Fatalf("selecting at the current time: %v", err)
 	}
 	for _, issue := range sel.candidates {
 		if issue.ID == wisp.ID {
 			t.Errorf("closed wisp %s selected under the --age %v floor moments after it was written", wisp.ID, threshold)
+		}
+	}
+	if len(rec.scans) != 1 {
+		t.Fatalf("selection ran %d scans, want 1", len(rec.scans))
+	}
+	for _, issue := range rec.scans[0] {
+		if issue.ID == wisp.ID {
+			t.Errorf("the closed-wisp scan returned %s, written moments ago, under the --age %v bound: the bound did not reach the wisps query", wisp.ID, threshold)
 		}
 	}
 
