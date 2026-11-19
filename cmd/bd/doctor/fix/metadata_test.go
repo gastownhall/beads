@@ -673,6 +673,55 @@ func TestFixMissingDoltDatabase_SharedServerDeclinesUnanchoredCandidate(t *testi
 	}
 }
 
+// TestFixMissingDoltDatabase_KnownProjectIDWithoutMatchDeclines pins GH#5576:
+// a known local project_id with no eligible candidate carrying it declines in
+// either shared or non-shared mode — including when the sole candidate has no
+// identity at all: absence of identity is not a match.
+func TestFixMissingDoltDatabase_KnownProjectIDWithoutMatchDeclines(t *testing.T) {
+	for _, mode := range []struct {
+		name   string
+		shared string
+	}{
+		{"shared server mode", "1"},
+		{"non-shared server mode", ""},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			isolateDoltEnvForFallbackTest(t)
+			if mode.shared != "" {
+				t.Setenv("BEADS_DOLT_SHARED_SERVER", mode.shared)
+			}
+			port := newRefusingDoltListener(t)
+			dir, beadsDir, before := newFallbackFixWorkspace(t, port, "proj-123")
+
+			calls := stubServerMetadataCatalog(t, []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+				{Name: "legacy_db", HasSchema: true, ProjectID: ""},
+			})
+
+			err := FixMissingDoltDatabase(dir)
+
+			var skip *SkipError
+			if !errors.As(err, &skip) {
+				t.Fatalf("FixMissingDoltDatabase error = %v, want a *fix.SkipError", err)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "proj-123") {
+				t.Errorf("skip does not identify the unmatched local project_id:\n%s", msg)
+			}
+			if !strings.Contains(msg, "legacy_db") {
+				t.Errorf("skip does not name the candidates:\n%s", msg)
+			}
+			if !strings.Contains(msg, "bd dolt set database <name>") {
+				t.Errorf("skip does not give the manual remedy:\n%s", msg)
+			}
+			assertMetadataUnchanged(t, beadsDir, before)
+			if *calls != 2 {
+				t.Fatalf("catalog read %d times, want 2 (reconcile + fallback)", *calls)
+			}
+		})
+	}
+}
+
 // TestInspectServerMetadataDatabasesNamesTheDataDirectoryEscaped pins the
 // remedy printer on the data directory inspectServerMetadataDatabases names
 // when no port is resolved and the workspace's own server, stopped, would

@@ -311,7 +311,10 @@ func fallbackDatabaseEligible(db serverDatabaseMetadata) bool {
 //     conflicting project_id — the reconcile's conflict refusal. This also
 //     covers a mode-gated reconcile that did not run.
 //  3. no eligible alternatives: no rewrite.
-//  4. no local project_id, shared-server mode: skip, sole candidate or
+//  4. local project_id set but no eligible alternative carries it: skip.
+//     Absence of identity is not a match, even for a sole candidate, in
+//     either mode.
+//  5. no local project_id, shared-server mode: skip, sole candidate or
 //     several: without an anchor, adoption can redirect this workspace to
 //     another project's data. In non-shared mode nothing is selected here
 //     yet: the identity-free recovery policies land with their own ACs.
@@ -374,6 +377,14 @@ func selectFallbackDoltDatabase(localProjectID, currentDatabase string, sharedSe
 
 	if len(eligible) == 0 {
 		return nil, nil
+	}
+
+	if localProjectID != "" {
+		return nil, skipFix(fmt.Errorf(
+			"no server database with Beads schema carries project_id %s (candidates: %s); %s",
+			remedy.PrintedValue(localProjectID),
+			remedy.PrintedList(eligibleNames, ", "),
+			fallbackManualRemedy))
 	}
 
 	if sharedServerMode {

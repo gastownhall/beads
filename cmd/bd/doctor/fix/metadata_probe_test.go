@@ -486,6 +486,68 @@ func TestSelectFallbackDoltDatabase_EligibilityFilters(t *testing.T) {
 	}
 }
 
+// A known local project_id with no eligible candidate carrying it declines,
+// in either mode — including when a sole candidate has no identity at all:
+// absence of identity is not a match (downstream identity verification
+// tolerates an empty remote identity, so adopting on one is not safe).
+func TestSelectFallbackDoltDatabase_KnownProjectIDWithoutMatchDeclines(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		shared    bool
+		databases []serverDatabaseMetadata
+	}{
+		{
+			name:   "sole candidate without identity, non-shared",
+			shared: false,
+			databases: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+				{Name: "legacy_db", HasSchema: true, ProjectID: ""},
+			},
+		},
+		{
+			name:   "sole candidate without identity, shared",
+			shared: true,
+			databases: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+				{Name: "legacy_db", HasSchema: true, ProjectID: ""},
+			},
+		},
+		{
+			name:   "sole candidate with a foreign identity",
+			shared: false,
+			databases: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+				{Name: "foreign_db", HasSchema: true, ProjectID: "other-project"},
+			},
+		},
+		{
+			name:   "several candidates, none carrying the local id, listed sorted",
+			shared: false,
+			databases: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+				{Name: "zeta_db", HasSchema: true, ProjectID: "zeta"},
+				{Name: "alpha_db", HasSchema: true, ProjectID: "alpha"},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			selected, err := selectFallbackDoltDatabase("proj-123", configfile.DefaultDoltDatabase, tt.shared, tt.databases)
+			if selected != nil {
+				t.Fatalf("selected %+v, want a skip", selected)
+			}
+			selectSkipWant(t, err, []string{"proj-123"})
+			if !strings.Contains(err.Error(), "no server database with Beads schema carries project_id") {
+				t.Errorf("skip does not say why selection is unsafe:\n%s", err.Error())
+			}
+			for _, db := range tt.databases[1:] {
+				if !strings.Contains(err.Error(), db.Name) {
+					t.Errorf("skip does not name candidate %q:\n%s", db.Name, err.Error())
+				}
+			}
+		})
+	}
+}
+
 // Server-supplied names in a policy skip are spelled by remedy.PrintedValue:
 // a name carrying control characters cannot redraw the diagnostic.
 func TestSelectFallbackDoltDatabase_EscapesControlCharactersInNames(t *testing.T) {
