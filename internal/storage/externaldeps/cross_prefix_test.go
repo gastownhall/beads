@@ -230,3 +230,47 @@ func TestCrossPrefixUnroutedOrAbsentTargetDoesNotBlock(t *testing.T) {
 		})
 	}
 }
+
+// TestCrossPrefixFailedRouteBlocksEverySourceAndWarnsOnce (GH#4647, AC-8): a
+// configured route that fails — at lookup, open, or read — keeps every source
+// blocked on that prefix out of ready, and the policy warns once for the
+// prefix however many sources and queries hit it.
+func TestCrossPrefixFailedRouteBlocksEverySourceAndWarnsOnce(t *testing.T) {
+	cases := map[string]*crossPrefixRig{
+		"lookup": {store: &fakeStore{}, routeErr: errors.New("metadata.json unreadable")},
+		"open":   {store: &fakeStore{}, openErr: errors.New("server unreachable")},
+		"read":   {store: &failingIssueReads{fakeStore: &fakeStore{}}},
+	}
+	for name, rig := range cases {
+		t.Run(name, func(t *testing.T) {
+			a, b, c := issue("hq-a"), issue("hq-b"), issue("hq-c")
+			raw := &fakeStore{
+				ready: []*types.Issue{a, b, c},
+				deps: map[string][]*types.Dependency{
+					a.ID: {externalDep(a.ID, "gt-1", types.DepBlocks)},
+					b.ID: {externalDep(b.ID, "gt-2", types.DepConditionalBlocks)},
+				},
+			}
+			store, warnings := crossPrefixStore(raw, rig)
+
+			for range 2 {
+				if got := readyIDs(t, store); !slices.Equal(got, []string{c.ID}) {
+					t.Fatalf("ready = %v, want [%s]", got, c.ID)
+				}
+			}
+			if !slices.Equal(*warnings, []string{"gt-"}) {
+				t.Fatalf("route warnings = %v, want one for gt-", *warnings)
+			}
+			if name != "lookup" && rig.opens != 2 {
+				t.Fatalf("route opens = %d over two queries, want one per query", rig.opens)
+			}
+		})
+	}
+}
+
+// failingIssueReads is a routed store whose issue reads fail.
+type failingIssueReads struct{ *fakeStore }
+
+func (f *failingIssueReads) GetIssuesByIDs(context.Context, []string) ([]*types.Issue, error) {
+	return nil, errors.New("read failed")
+}
