@@ -35,14 +35,19 @@ var wispGCProxiedSuccessKeys = []string{
 	"labels_removed", "orphaned_issues", "references_updated", "schema_version",
 }
 
-// TestProxiedServerWispGCDeletesInChunks pins the proxied route's half of
-// GH#6246 for both gc modes: every deletion unit of work carries at most 200
-// selected ids (200, 200, 50 for 450), uncascaded with text references
-// rewritten, each committing on its own; the successful units are reported
-// in one aggregate object with the route's existing success keys; and when
-// the second unit fails no third is opened, and the first unit's committed
-// progress is kept and reported.
-func TestProxiedServerWispGCDeletesInChunks(t *testing.T) {
+// TestWispGCProxiedDeletesInChunks pins the proxied route's half of GH#6246
+// for both gc modes: every deletion unit of work carries at most 200 selected
+// ids (200, 200, 50 for 450), uncascaded with text references rewritten, each
+// committing on its own; the successful units are reported in one aggregate
+// object with the route's existing success keys; each committed unit's
+// deletions, and only those, are handed to post-run auto-export as the direct
+// route hands them (GH#5896, GH#8490); and when the second unit fails no third
+// is opened, and the first unit's committed progress is kept and reported.
+//
+// It runs on a stub provider, so it is named outside the TestProxiedServer*
+// pattern that enrolls a test in the proxied-server shards, as
+// TestWispPurgeClosedProxiedBoundsEachUnitOfWork is.
+func TestWispGCProxiedDeletesInChunks(t *testing.T) {
 	modes := []struct {
 		name       string
 		closedMode bool
@@ -84,6 +89,7 @@ func TestProxiedServerWispGCDeletesInChunks(t *testing.T) {
 			if len(p.deleted) != 450 {
 				t.Errorf("%d wisps deleted, want 450", len(p.deleted))
 			}
+			assertDeletionHandoff(t, p.closed, nil)
 			obj := decodeSingleJSONObject(t, stdout)
 			var keys []string
 			for k := range obj {
@@ -130,6 +136,7 @@ func TestProxiedServerWispGCDeletesInChunks(t *testing.T) {
 			if len(p.deleted) != 200 {
 				t.Errorf("%d wisps deleted, want the 200 of the first unit", len(p.deleted))
 			}
+			assertDeletionHandoff(t, units[0].params.IDs, units[1].params.IDs)
 			obj := decodeSingleJSONObject(t, stdout)
 			if got := obj["deleted_count"]; got != float64(200) {
 				t.Errorf("deleted_count = %v, want 200", got)
@@ -144,6 +151,24 @@ func TestProxiedServerWispGCDeletesInChunks(t *testing.T) {
 				t.Errorf("stderr error = %q, want the cause", msg)
 			}
 		})
+	}
+}
+
+// assertDeletionHandoff checks the ids a gc handed to post-run auto-export as
+// proven deletions: every committed id, and no id of a unit that failed.
+func assertDeletionHandoff(t *testing.T, committed, notCommitted []string) {
+	t.Helper()
+	for _, id := range committed {
+		if !commandDeletedIssueIDs.has(id) {
+			t.Errorf("committed id %s was not handed to auto-export; its orphan guard would wedge on it", id)
+			break
+		}
+	}
+	for _, id := range notCommitted {
+		if commandDeletedIssueIDs.has(id) {
+			t.Errorf("id %s of a failed unit was handed to auto-export as deleted", id)
+			break
+		}
 	}
 }
 

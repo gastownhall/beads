@@ -253,8 +253,12 @@ func TestWispGCKeepsCommittedChunksWhenALaterChunkFails(t *testing.T) {
 			t.Errorf("stderr lacks %q:\n%s", want, stderr)
 		}
 	}
-	if bytes.Contains([]byte(stderr), []byte("--closed")) {
-		t.Errorf("an age gc failure names the closed purge:\n%s", stderr)
+	// The age gc's hint may name --closed --force as a remedy; what it must
+	// not do is report itself as the closed purge.
+	for _, closedWording := range []string{"wisp gc --closed stopped", wispPurgeRerunHint} {
+		if bytes.Contains([]byte(stderr), []byte(closedWording)) {
+			t.Errorf("an age gc failure uses the closed purge's wording %q:\n%s", closedWording, stderr)
+		}
 	}
 	assertExportBookkeeping(t, rec.requests[0].IDs, rec.requests[1].IDs)
 
@@ -268,6 +272,83 @@ func TestWispGCKeepsCommittedChunksWhenALaterChunkFails(t *testing.T) {
 	}
 	if left := wispCount(t, s); left != 0 {
 		t.Errorf("%d of %d wisps remain after the rerun, want 0", left, len(wisps))
+	}
+}
+
+// TestWispGCRerunFinishesANestedMoleculeAStoppedRunLeft pins the rerun of a
+// stopped age gc over a cascade (GH#6246). The abandoned molecule is an open
+// root, a closed sub-molecule under it and 250 closed steps under that, so
+// its deletion spans two requests, and the second is refused. Without --all
+// the scan passes over closed wisps, so the steps are reached only through
+// their edges to the sub-molecule and its edge to the root, and deleting a
+// wisp drops its dependents' edges to it. The run therefore sends every step
+// before the sub-molecule and the sub-molecule before the root: the refused
+// request leaves all three joined, and the rerun reselects the root and
+// deletes the rest. Sent root first, the committed request cut those edges,
+// and the rerun found nothing to collect and left the closed wisps for good.
+func TestWispGCRerunFinishesANestedMoleculeAStoppedRunLeft(t *testing.T) {
+	ctx := context.Background()
+	s, rec := useWispGCRealStore(t)
+	now := time.Now()
+	root := &types.Issue{Title: "abandoned patrol", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic, Ephemeral: true}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("creating the root: %v", err)
+	}
+	closedUnder := func(title string, parent *types.Issue) *types.Issue {
+		return &types.Issue{
+			Title: title, Status: types.StatusClosed, ClosedAt: &now, Priority: 2, IssueType: types.TypeTask, Ephemeral: true,
+			Dependencies: []*types.Dependency{{DependsOnID: parent.ID, Type: types.DepParentChild}},
+		}
+	}
+	sub := closedUnder("finished sub-molecule", root)
+	if err := s.CreateIssues(ctx, []*types.Issue{sub}, "test"); err != nil {
+		t.Fatalf("creating the sub-molecule: %v", err)
+	}
+	steps := make([]*types.Issue, 250)
+	for i := range steps {
+		steps[i] = closedUnder(fmt.Sprintf("finished step %d", i), sub)
+	}
+	if err := s.CreateIssues(ctx, steps, "test"); err != nil {
+		t.Fatalf("creating the steps: %v", err)
+	}
+	rec.failAt = 2
+
+	stdout, stderr, err := runWispGCCommand(t, wispGCAgeFlags)
+	if err == nil {
+		t.Fatalf("gc succeeded, want the injected refusal\nstdout:\n%s", stdout)
+	}
+	if got, want := rec.requestSizes(), []int{200, 52}; !slices.Equal(got, want) {
+		t.Fatalf("deletion request sizes = %v, want %v\nstderr:\n%s", got, want, stderr)
+	}
+	var sent []string
+	for _, req := range rec.requests {
+		sent = append(sent, req.IDs...)
+	}
+	if subAt, rootAt := slices.Index(sent, sub.ID), slices.Index(sent, root.ID); subAt != len(sent)-2 || rootAt != len(sent)-1 {
+		t.Errorf("sub-molecule sent at %d and root at %d of %d, want every step before the sub-molecule and the root last",
+			subAt, rootAt, len(sent))
+	}
+	if left := wispCount(t, s); left != 52 {
+		t.Errorf("%d wisps remain after the stopped run, want the refused request's 52", left)
+	}
+
+	rec.failAt, rec.requests = 0, nil
+	stdout, stderr, err = runWispGCCommand(t, wispGCAgeFlags)
+	if err != nil {
+		t.Fatalf("rerun: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if got, want := rec.requestSizes(), []int{52}; !slices.Equal(got, want) {
+		t.Errorf("rerun request sizes = %v, want %v\nstdout:\n%s", got, want, stdout)
+	}
+	var survivors []string
+	for _, issue := range append([]*types.Issue{root, sub}, steps...) {
+		if _, err := s.GetIssue(ctx, issue.ID); err == nil {
+			survivors = append(survivors, issue.ID)
+		}
+	}
+	if len(survivors) > 0 {
+		t.Errorf("%d of the molecule's 252 wisps survived the rerun (first %s); the stopped run left them where no rerun selects them",
+			len(survivors), survivors[0])
 	}
 }
 

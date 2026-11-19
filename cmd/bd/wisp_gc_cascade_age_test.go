@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +18,10 @@ type cascadeAgeReader struct {
 	molReader
 	issues   []*types.Issue
 	children map[string]bool
+	// deps is each wisp's own dependency records; depsErr, when set, fails
+	// the read of them.
+	deps    map[string][]*types.Dependency
+	depsErr error
 }
 
 func (r *cascadeAgeReader) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
@@ -33,6 +40,19 @@ func (r *cascadeAgeReader) IsInfraTypeCtx(context.Context, types.IssueType) bool
 
 func (r *cascadeAgeReader) FindWispDependentsRecursive(context.Context, []string) (map[string]bool, error) {
 	return r.children, nil
+}
+
+func (r *cascadeAgeReader) GetDependencyRecordsForIssues(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	if r.depsErr != nil {
+		return nil, r.depsErr
+	}
+	out := make(map[string][]*types.Dependency, len(ids))
+	for _, id := range ids {
+		if deps := r.deps[id]; len(deps) > 0 {
+			out[id] = deps
+		}
+	}
+	return out, nil
 }
 
 func (r *cascadeAgeReader) GetIssuesByIDs(_ context.Context, ids []string) ([]*types.Issue, error) {
@@ -216,4 +236,104 @@ func TestWispGCCascadeChildAgesAtStoragePrecision(t *testing.T) {
 				tc.threshold, tc.now.Format("15:04:05.000"), collected[step.ID], tc.wantStep)
 		}
 	}
+}
+
+// TestFindAbandonedWispsOrdersDependentsForDeletion pins the order an age gc
+// deletes its selection in (GH#6246): the dependents the cascade adds come
+// first, the most edges away from an abandoned wisp first and ties in id
+// order, then the abandoned wisps in scan order. Deleting a wisp drops its
+// dependents' edges to it, and without --all a closed wisp is selected only
+// through those edges, so in any other order a gc that a failed batch stops
+// can leave closed wisps no rerun selects again.
+//
+// Depth counts edges through every wisp the cascade walked, including one it
+// does not delete (a step too young to collect), and a wisp on a cycle takes
+// its shortest way back. A dependent the edge read cannot place (its edge
+// changed after the cascade walked it) goes first. If the edges cannot be
+// read at all, the selection is still whole, dependents first, and the error
+// comes back for the caller's warning.
+func TestFindAbandonedWispsOrdersDependentsForDeletion(t *testing.T) {
+	now := time.Now()
+	stale, fresh := now.Add(-48*time.Hour), now.Add(-2*time.Second)
+	wisp := func(id string, status types.Status, updated time.Time) *types.Issue {
+		return &types.Issue{ID: id, Status: status, UpdatedAt: updated}
+	}
+	under := func(ids ...string) []*types.Dependency {
+		deps := make([]*types.Dependency, len(ids))
+		for i, id := range ids {
+			deps[i] = &types.Dependency{DependsOnID: id, Type: types.DepParentChild}
+		}
+		return deps
+	}
+	closed, open := types.StatusClosed, types.StatusOpen
+	issues := []*types.Issue{
+		// Scan order puts root-b before root-a.
+		wisp("gc-root-b", open, stale),
+		wisp("gc-root-a", open, stale),
+		wisp("gc-sub", closed, stale),
+		wisp("gc-step-1", closed, stale),
+		wisp("gc-step-2", closed, stale),
+		wisp("gc-grand", closed, stale),
+		wisp("gc-step-3", closed, stale),
+		wisp("gc-young", open, fresh),
+		wisp("gc-under-young", closed, stale),
+		wisp("gc-cyc-y", closed, stale),
+		wisp("gc-cyc-x", closed, stale),
+		wisp("gc-unplaced", closed, stale),
+	}
+	deps := map[string][]*types.Dependency{
+		"gc-sub":         under("gc-root-a"),          // 1
+		"gc-step-1":      under("gc-sub"),             // 2
+		"gc-step-2":      under("gc-sub"),             // 2
+		"gc-grand":       under("gc-step-1"),          // 3
+		"gc-step-3":      under("gc-root-b"),          // 1
+		"gc-young":       under("gc-root-b"),          // 1, too young to collect
+		"gc-under-young": under("gc-young"),           // 2
+		"gc-cyc-y":       under("gc-sub", "gc-cyc-x"), // 2
+		"gc-cyc-x":       under("gc-cyc-y"),           // 3
+	}
+	children := map[string]bool{}
+	for _, issue := range issues[2:] {
+		children[issue.ID] = true
+	}
+	ids := func(t *testing.T, r *cascadeAgeReader) ([]string, error) {
+		t.Helper()
+		got, err := findAbandonedWisps(context.Background(), r, false, time.Hour, nil)
+		out := make([]string, len(got))
+		for i, issue := range got {
+			out[i] = issue.ID
+		}
+		return out, err
+	}
+
+	t.Run("farthest dependents first, abandoned wisps last", func(t *testing.T) {
+		got, err := ids(t, &cascadeAgeReader{issues: issues, children: children, deps: deps})
+		if err != nil {
+			t.Fatalf("findAbandonedWisps: %v", err)
+		}
+		want := []string{
+			"gc-unplaced",
+			"gc-cyc-x", "gc-grand",
+			"gc-cyc-y", "gc-step-1", "gc-step-2", "gc-under-young",
+			"gc-step-3", "gc-sub",
+			"gc-root-b", "gc-root-a",
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("deletion order\n got %v\nwant %v", got, want)
+		}
+	})
+
+	t.Run("edge read fails", func(t *testing.T) {
+		boom := errors.New("injected edge read failure")
+		got, err := ids(t, &cascadeAgeReader{issues: issues, children: children, depsErr: boom})
+		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "order their deletion") {
+			t.Errorf("err = %v, want the edge read failure, named as ordering the deletion", err)
+		}
+		if len(got) != 11 {
+			t.Fatalf("selected %d wisps %v, want all 11", len(got), got)
+		}
+		if tail := got[len(got)-2:]; !slices.Equal(tail, []string{"gc-root-b", "gc-root-a"}) {
+			t.Errorf("selection ends %v, want the abandoned wisps last in scan order", tail)
+		}
+	})
 }

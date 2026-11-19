@@ -202,6 +202,10 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 		if err != nil {
 			return wispPurgeChunk{}, err
 		}
+		// The handoff deleteSelectedWispsDirect makes per committed chunk,
+		// so a proxied auto-export (GH#8490) takes these ids as proven
+		// deletions rather than a torn store (GH#5896).
+		commandDeletedIssueIDs.add(res.DeletedIDs...)
 		return wispPurgeChunkFromDomain(res), nil
 	})
 	return renderWispPurgeOutcome(outcome, wispGCAbandonedReport)
@@ -323,6 +327,8 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		if err != nil {
 			return wispPurgeChunk{}, err
 		}
+		// The same handoff as the age gc's units above.
+		commandDeletedIssueIDs.add(res.DeletedIDs...)
 		return wispPurgeChunkFromDomain(res), nil
 	})
 	report := wispPurgeClosedReport

@@ -621,7 +621,11 @@ func (s wispPurgeProxiedIssues) DeleteIssues(_ context.Context, params domain.De
 			return domain.DeleteIssuesResult{}, err
 		}
 	}
+	deleted := slices.Clone(params.IDs)
+	slices.Sort(deleted)
 	return domain.DeleteIssuesResult{
+		// In ascending order, as the deletion role names them.
+		DeletedIDs:        deleted,
 		DeletedCount:      len(params.IDs),
 		DependenciesCount: len(params.IDs),
 		LabelsCount:       2 * len(params.IDs),
@@ -648,7 +652,9 @@ func useWispPurgeProxied(t *testing.T, n int) *wispPurgeProxiedProvider {
 	oldProvider, oldJSON, oldQuiet, oldActor := uowProvider, jsonOutput, quietFlag, actor
 	t.Cleanup(func() {
 		uowProvider, jsonOutput, quietFlag, actor = oldProvider, oldJSON, oldQuiet, oldActor
+		commandDeletedIssueIDs.reset()
 	})
+	commandDeletedIssueIDs.reset()
 	p := &wispPurgeProxiedProvider{closed: wispPurgeIDs(n), deleted: map[string]bool{}}
 	uowProvider, jsonOutput, quietFlag, actor = p, false, false, "test"
 	return p

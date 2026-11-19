@@ -4,6 +4,8 @@ package main
 
 import (
 	"encoding/json"
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -318,6 +320,56 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 		if count != 1 {
 			t.Errorf("expected fresh child %s to remain in wisps table", freshChild.ID)
+		}
+	})
+
+	// The proxied route reads the cascade's edges through its unit of work
+	// to order the deletion (GH#6246): a closed sub-step is reached only
+	// through the closed step it hangs from, and the step only through the
+	// root, so the sub-step goes first and the root last. A failed edge read
+	// would print a warning and fall back to id order.
+	t.Run("cascade_deletes_dependents_before_what_they_depend_on", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgo")
+		root := bdProxiedCreate(t, bd, p.dir, "Abandoned molecule", "--ephemeral")
+		step := bdProxiedCreate(t, bd, p.dir, "Finished step", "--ephemeral")
+		subStep := bdProxiedCreate(t, bd, p.dir, "Finished sub-step", "--ephemeral")
+		for _, id := range []string{step.ID, subStep.ID} {
+			if out, err := bdProxiedRun(t, bd, p.dir, "close", id); err != nil {
+				t.Fatalf("bd close %s: %v\n%s", id, err, out)
+			}
+		}
+
+		db := openProxiedDB(t, p)
+		for _, edge := range [][2]string{{step.ID, root.ID}, {subStep.ID, step.ID}} {
+			if _, err := db.Exec(
+				"INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, NOW(), 'test')",
+				edge[0], edge[1], "parent-child"); err != nil {
+				t.Fatalf("plant %s -> %s wisp edge: %v", edge[0], edge[1], err)
+			}
+		}
+		if _, err := db.Exec("UPDATE wisps SET updated_at = ? WHERE id IN (?, ?, ?)",
+			time.Now().UTC().Add(-2*time.Hour), root.ID, step.ID, subStep.ID); err != nil {
+			t.Fatalf("backdate wisps: %v", err)
+		}
+
+		cmd := exec.Command(bd, "mol", "wisp", "gc", "--age", "1h", "--json")
+		cmd.Dir, cmd.Env = p.dir, bdProxiedEnv(p.dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --age 1h --json: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stderr.String(), "Warning") {
+			t.Errorf("gc warned:\n%s", stderr.String())
+		}
+		var got struct {
+			Deleted []string `json:"deleted"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, stdout.String())
+		}
+		if want := []string{subStep.ID, step.ID, root.ID}; !slices.Equal(got.Deleted, want) {
+			t.Errorf("deleted %v, want %v: the sub-step, then the step, then the root", got.Deleted, want)
 		}
 	})
 
