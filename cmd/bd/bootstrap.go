@@ -315,7 +315,14 @@ Examples:
 			// sanitizeURL passes through a URL net/url cannot parse (a
 			// password with an unencoded "#" or "?"), and Dolt's "invalid
 			// remote url:" repeats it. Scrub it where it is printed.
-			return HandleError("Bootstrap failed: %s", scrubURLCredentials(err.Error()))
+			exit := HandleError("Bootstrap failed: %s", scrubURLCredentials(err.Error()))
+			// A Git usage refusal inside the clone is an invocation problem
+			// (GH#6472), not a bootstrap or credentials one. Say so after the
+			// error, the way push/pull/sync do; JSON runs keep stderr clean.
+			if isGitUsageRefusalErr(err) && !jsonOutput {
+				printGitUsageRefusalGuidance(os.Stderr)
+			}
+			return exit
 		}
 		return nil
 	},
@@ -973,6 +980,16 @@ func printBootstrapPlan(plan BootstrapPlan) {
 				// into the command through the remedy printer: one shell word,
 				// or a <url> placeholder with the URL named escaped beside it.
 				url, note := remedy.CommandArg(runtime.GOOS, gitRemoteURLForLsRemote(plan.BlockedRemote), "<url>")
+				if isGitUsageRefusalErr(errors.New(plan.Reason)) {
+					// The probe passes "--" before the URL — the separator an
+					// old git rejects — so the reproduction must too, or it
+					// runs where the probe could not. Git refused the
+					// invocation, not the remote, so the access and
+					// point-it-elsewhere remedies below do not apply.
+					fmt.Fprintf(os.Stderr, "  Reproduce: git ls-remote -- %s refs/dolt/data%s\n", url, note)
+					printGitUsageRefusalGuidance(os.Stderr)
+					return
+				}
 				fmt.Fprintf(os.Stderr, "  Reproduce: git ls-remote %s refs/dolt/data%s\n", url, note)
 				fmt.Fprintf(os.Stderr, "  If the remote is right, fix access (credentials, network, VPN) and re-run 'bd bootstrap'.\n")
 				fmt.Fprintf(os.Stderr, "  If it is wrong, point sync.remote at the Dolt remote: bd dolt remote add origin <url>\n")
