@@ -131,6 +131,7 @@ go_library(
         "dolt_drop_database.go",
         "dolt_drop_database_proxied_server.go",
         "dolt_host_refusal.go",
+        "dolt_idle_watch.go",
         "dolt_local_only.go",
         "dolt_proxied_lifecycle.go",
         "dolt_remote_adopt.go",

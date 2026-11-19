@@ -1556,9 +1556,16 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 			"  To check status: bd dolt status", cfg.Port)
 	}
 
+	// The pre-start config says whether bd chose the port, which decides
+	// whether this server is bd's alone to stop when idle.
+	preCfg := DefaultConfig(serverDir)
 	s, err := startLocked(serverDir)
 	if err != nil {
 		return 0, false, err
+	}
+	clearIdleWatchRecords(serverDir)
+	if timeout := DefaultIdleTimeout; idleWatchEligible(preCfg, mode, IsSharedServerMode(), timeout) {
+		launchIdleWatcherLocked(serverDir, s, preCfg.Host, timeout)
 	}
 	return s.Port, true, nil
 }

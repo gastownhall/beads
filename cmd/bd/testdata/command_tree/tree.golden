@@ -2326,6 +2326,21 @@ bd dolt test
     |
     | Use this before switching to server mode to ensure the server is running.
 
+bd dolt-idle-watch
+  use: "dolt-idle-watch"
+  short: "Internal: stop an auto-started dolt sql-server once it is idle"
+  hidden: true
+  runnable: true
+  long:
+    | dolt-idle-watch watches one dolt sql-server that bd auto-started and stops
+    | it once it has had no client for --timeout (dolt.idle-timeout). bd launches it
+    | beside each auto-started server; it is not intended to be invoked directly.
+  flag --host type=string default="" usage="host the server listens on"
+  flag --pid type=int default="0" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="PID of the dolt sql-server to watch"
+  flag --port type=int default="0" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="SQL port of the server"
+  flag --server-dir type=string default="" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="server directory holding dolt-server.pid"
+  flag --timeout type=duration default="0s" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="idle window before the server is stopped"
+
 bd duplicate
   use: "duplicate <id> --of <canonical>"
   short: "Mark an issue as a duplicate of another"
