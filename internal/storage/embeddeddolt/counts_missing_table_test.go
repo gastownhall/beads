@@ -51,8 +51,11 @@ func TestCountsWithMissingWispPlaneTables(t *testing.T) {
 
 	// wisp_labels is not a wisp-plane table a database may legitimately lack:
 	// a store that has wisps but no wisp_labels is broken, and every count
-	// below reads it -- the counts mega-query hydrates labels, and grouping by
-	// label queries it directly.
+	// below reads it -- the counted reads hydrate the selected wisp's labels,
+	// and grouping by label queries it directly. A counted read selects its
+	// ids first and hydrates only those (GH#4370), so each read here is one
+	// whose answer holds the wisp: ready work admits it only under
+	// IncludeEphemeral.
 	t.Run("missing_wisp_labels_is_an_error", func(t *testing.T) {
 		te := newTestEnv(t, "cwl")
 		seedCountsPlane(t, te, "cwl")
@@ -62,7 +65,7 @@ func TestCountsWithMissingWispPlaneTables(t *testing.T) {
 		if got, err := te.store.SearchIssuesWithCounts(t.Context(), "", types.IssueFilter{}); err == nil {
 			t.Errorf("SearchIssuesWithCounts hid a broken wisp plane, returning %d rows", len(got))
 		}
-		if got, err := te.store.GetReadyWorkWithCounts(t.Context(), types.WorkFilter{IncludeDeferred: true}); err == nil {
+		if got, err := te.store.GetReadyWorkWithCounts(t.Context(), types.WorkFilter{IncludeDeferred: true, IncludeEphemeral: true}); err == nil {
 			t.Errorf("GetReadyWorkWithCounts hid a broken wisp plane, returning %d rows", len(got))
 		}
 		if got, err := te.store.CountIssuesByGroup(t.Context(), types.IssueFilter{}, "label"); err == nil {
