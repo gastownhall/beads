@@ -268,3 +268,44 @@ func TestWispGCKeepsCommittedChunksWhenALaterChunkFails(t *testing.T) {
 		t.Errorf("%d of %d wisps remain after the rerun, want 0", left, len(wisps))
 	}
 }
+
+// TestWispGCReportsPartialFailureAsOneAggregateAndOneError pins the --json
+// half of a stopped gc: stdout is exactly one aggregate object counting only
+// the committed chunk, with unconfirmed_count (selected ids no committed
+// chunk confirmed: the refused chunk and any never sent); stderr is exactly
+// one error object naming the cause; the exit is already reported, so the
+// caller prints nothing more; and the command's write and export bookkeeping
+// holds the confirmed deletions even though the command fails.
+func TestWispGCReportsPartialFailureAsOneAggregateAndOneError(t *testing.T) {
+	s, rec := useWispGCRealStore(t)
+	seedWisps(t, s, 450, types.StatusOpen)
+	rec.failAt = 2
+	jsonOutput = true
+
+	stdout, stderr, err := runWispGCCommand(t, wispGCAgeFlags)
+	if err == nil {
+		t.Fatalf("gc succeeded, want the injected refusal\nstdout:\n%s", stdout)
+	}
+	if !isReportedExit(err) {
+		t.Errorf("error = %v, want an already-reported exit (the caller must not print it again)", err)
+	}
+	obj := decodeSingleJSONObject(t, stdout)
+	if got := obj["deleted_count"]; got != float64(200) {
+		t.Errorf("deleted_count = %v, want 200", got)
+	}
+	if got, _ := obj["deleted_ids"].([]interface{}); len(got) != 200 {
+		t.Errorf("deleted_ids names %d ids, want 200", len(got))
+	}
+	if got := obj["unconfirmed_count"]; got != float64(250) {
+		t.Errorf("unconfirmed_count = %v, want 250", got)
+	}
+	errObj := decodeSingleJSONObject(t, stderr)
+	if msg, _ := errObj["error"].(string); !bytes.Contains([]byte(msg), []byte(errWispGCInjected.Error())) ||
+		!bytes.Contains([]byte(msg), []byte("250 not confirmed deleted")) {
+		t.Errorf("stderr error = %q, want the cause and the unconfirmed count", msg)
+	}
+	if left := wispCount(t, s); left != 250 {
+		t.Errorf("%d wisps remain, want 250", left)
+	}
+	assertExportBookkeeping(t, rec.requests[0].IDs, rec.requests[1].IDs)
+}

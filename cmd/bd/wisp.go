@@ -1296,7 +1296,12 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, report wispGCReport) error {
 			answer["deleted_ids"] = out.deletedIDs
 		}
 		if out.err != nil {
+			// unconfirmed_count is the same number as remaining_count, named
+			// for what it is: selected ids no committed chunk confirmed (the
+			// failed chunk and any never sent), not a count of rows known to
+			// be left.
 			answer["remaining_count"] = out.remaining()
+			answer["unconfirmed_count"] = out.remaining()
 			answer["error"] = out.err.Error()
 			answer["hint"] = report.rerunHint
 		}
@@ -1304,7 +1309,9 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, report wispGCReport) error {
 			return err
 		}
 		if out.err != nil {
-			return SilentExit()
+			// The one error object for the failure, on stderr where every
+			// --json failure goes; its exit is already reported.
+			return outputJSONError(errors.New(wispGCStoppedMessage(out, report)), "")
 		}
 		return nil
 	}
@@ -1328,10 +1335,16 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, report wispGCReport) error {
 		// The counts above are what committed chunks confirmed. The failed
 		// chunk is not claimed either way: an error at a commit boundary does
 		// not prove nothing was written, which is why the hint reselects.
-		return HandleErrorWithHint(fmt.Sprintf("%s stopped after deleting %d of %d selected wisp(s); %d not confirmed deleted: %v",
-			report.command, len(out.confirmed), out.selected, out.remaining(), out.err), report.rerunHint)
+		return HandleErrorWithHint(wispGCStoppedMessage(out, report), report.rerunHint)
 	}
 	return nil
+}
+
+// wispGCStoppedMessage is a stopped gc's error: what committed chunks
+// confirmed, how many selected ids none confirmed, and the cause.
+func wispGCStoppedMessage(out wispPurgeOutcome, report wispGCReport) string {
+	return fmt.Sprintf("%s stopped after deleting %d of %d selected wisp(s); %d not confirmed deleted: %v",
+		report.command, len(out.confirmed), out.selected, out.remaining(), out.err)
 }
 
 func init() {
