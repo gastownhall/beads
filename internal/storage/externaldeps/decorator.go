@@ -747,20 +747,12 @@ func (s *Store) IsBlocked(ctx context.Context, issueID string) (bool, []string, 
 	if err != nil {
 		return false, nil, err
 	}
-	refs := make([]reference, 0)
-	for _, dep := range deps[issueID] {
-		if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
-			refs = append(refs, parseReference(dep.DependsOnID))
-		}
-	}
-	satisfied, err := s.resolveReferences(ctx, refs)
+	unsatisfied, err := s.policyBlockersFor(ctx, deps)
 	if err != nil {
 		return false, nil, err
 	}
-	for _, ref := range refs {
-		if !satisfied[ref.raw] {
-			blockers = appendUnique(blockers, ref.raw)
-		}
+	for _, target := range unsatisfied[issueID] {
+		blockers = appendUnique(blockers, target)
 	}
 	return blocked || len(blockers) > 0, blockers, nil
 }
@@ -795,24 +787,14 @@ func (s *Store) blockedStates(ctx context.Context, ids []string) (map[string]blo
 	if err != nil {
 		return nil, err
 	}
-	refs := make([]reference, 0)
-	for _, id := range distinct {
-		for _, dep := range deps[id] {
-			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
-				refs = append(refs, parseReference(dep.DependsOnID))
-			}
-		}
-	}
-	satisfied, err := s.resolveReferences(ctx, refs)
+	unsatisfied, err := s.policyBlockersFor(ctx, deps)
 	if err != nil {
 		return nil, err
 	}
 	for _, id := range distinct {
 		state := states[id]
-		for _, dep := range deps[id] {
-			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) && !satisfied[dep.DependsOnID] {
-				state.blockers = appendUnique(state.blockers, dep.DependsOnID)
-			}
+		for _, target := range unsatisfied[id] {
+			state.blockers = appendUnique(state.blockers, target)
 		}
 		state.blocked = state.blocked || len(state.blockers) > 0
 		states[id] = state
@@ -866,23 +848,13 @@ func (s *Store) IsBlockedBatch(ctx context.Context, issueIDs []string) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	refs := make([]reference, 0)
-	for _, issueDeps := range deps {
-		for _, dep := range issueDeps {
-			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
-				refs = append(refs, parseReference(dep.DependsOnID))
-			}
-		}
-	}
-	satisfied, err := s.resolveReferences(ctx, refs)
+	unsatisfied, err := s.policyBlockersFor(ctx, deps)
 	if err != nil {
 		return nil, err
 	}
-	for issueID, issueDeps := range deps {
-		for _, dep := range issueDeps {
-			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) && !satisfied[dep.DependsOnID] {
-				blocked[issueID] = true
-			}
+	for issueID := range deps {
+		if len(unsatisfied[issueID]) > 0 {
+			blocked[issueID] = true
 		}
 	}
 	return blocked, nil

@@ -2,11 +2,13 @@ package externaldeps
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // fakeIssueRouter is the IssueRouter stand-in: it answers from a seeded map
@@ -141,6 +143,90 @@ func TestCrossPrefixBlockerExcludesReadyUntilItsTargetCloses(t *testing.T) {
 		if iss.IsBlocked {
 			t.Errorf("%s was written by the policy; the read-time exclusion must not touch the source row", iss.ID)
 		}
+	}
+}
+
+// TestCrossPrefixBlockerIsNamedByInspectionAndGuardsMutations pins AC-5
+// (GH#4647): the blocked inspection names a resolved open cross-prefix
+// blocker, IsBlocked and its batch twin report it, the guarded close refuses
+// without --force naming the blocker, and --force (or the target closing)
+// lets the close through.
+func TestCrossPrefixBlockerIsNamedByInspectionAndGuardsMutations(t *testing.T) {
+	a := issue("be-a")
+	raw := &fakeStore{
+		ready: []*types.Issue{a},
+		deps: map[string][]*types.Dependency{
+			"be-a": {crossPrefixDep("be-a", "gt-target", types.DepBlocks)},
+		},
+	}
+	router := &fakeIssueRouter{statuses: map[string]RoutedIssue{
+		"gt-target": {Verdict: IssueRouteFound, Status: types.StatusOpen},
+	}}
+	store := testStoreWithRouter(raw, router)
+
+	// Inspection: the blocked listing names the routed blocker.
+	rows, err := store.GetBlockedIssues(t.Context(), types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues: %v", err)
+	}
+	if got := blockedIssueIDs(rows); !slices.Equal(got, []string{"be-a"}) {
+		t.Fatalf("blocked listing = %v, want [be-a]", got)
+	}
+	if len(rows) != 1 || !slices.Contains(rows[0].BlockedBy, "gt-target") {
+		t.Fatalf("blocked row blockers = %v, want gt-target among them", rows)
+	}
+
+	// IsBlocked reports the routed blocker by name, alone and in batch.
+	blocked, blockers, err := store.IsBlocked(t.Context(), "be-a")
+	if err != nil {
+		t.Fatalf("IsBlocked: %v", err)
+	}
+	if !blocked || !slices.Contains(blockers, "gt-target") {
+		t.Fatalf("IsBlocked = (%v, %v), want blocked with gt-target named", blocked, blockers)
+	}
+	batch, err := store.IsBlockedBatch(t.Context(), []string{"be-a"})
+	if err != nil {
+		t.Fatalf("IsBlockedBatch: %v", err)
+	}
+	if !batch["be-a"] {
+		t.Fatalf("IsBlockedBatch = %v, want be-a blocked", batch)
+	}
+
+	// The guarded close refuses without force, naming the routed blocker.
+	_, err = store.CloseIssueChecked(t.Context(), "be-a", "closer", storage.CloseIssueOptions{})
+	if !errors.Is(err, publicops.ErrCloseBlocked) {
+		t.Fatalf("close without force over a routed blocker = %v, want ErrCloseBlocked", err)
+	}
+	var blockedErr *publicops.BlockedError
+	if !errors.As(err, &blockedErr) {
+		t.Fatalf("close refusal = %v, want a BlockedError", err)
+	}
+	if !slices.ContainsFunc(blockedErr.Blockers, func(b publicops.Blocker) bool { return b.ID == "gt-target" }) {
+		t.Fatalf("close refusal blockers = %v, want gt-target among them", blockedErr.Blockers)
+	}
+	if slices.Contains(raw.closed, "be-a") {
+		t.Fatal("the blocked issue was closed by the refused call")
+	}
+
+	// Force closes it anyway.
+	if _, err := store.CloseIssueChecked(t.Context(), "be-a", "closer", storage.CloseIssueOptions{Force: true}); err != nil {
+		t.Fatalf("close --force over a routed blocker: %v", err)
+	}
+	if !slices.Contains(raw.closed, "be-a") {
+		t.Fatal("close --force did not reach the inner store")
+	}
+
+	// Once the routed target closes, the same guarded close goes through
+	// without force on a fresh open source.
+	a.Status = types.StatusOpen
+	router.statuses["gt-target"] = RoutedIssue{Verdict: IssueRouteFound, Status: types.StatusClosed}
+	if blocked, _, err := store.IsBlocked(t.Context(), "be-a"); err != nil {
+		t.Fatalf("IsBlocked after the target closed: %v", err)
+	} else if blocked {
+		t.Fatal("a closed routed target still blocks")
+	}
+	if _, err := store.CloseIssueChecked(t.Context(), "be-a", "closer", storage.CloseIssueOptions{}); err != nil {
+		t.Fatalf("close without force after the target closed: %v", err)
 	}
 }
 
