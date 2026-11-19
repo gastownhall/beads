@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,9 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // pullMergeMessageMarker is the stand-in for a token in the remote URL. A
@@ -328,13 +332,14 @@ func execAllOn(t *testing.T, ctx context.Context, db *sql.DB, who string, querie
 // fetchAndMergeAsCLIPull runs the CLI pull route after its subprocess: `dolt
 // fetch origin main` forwards to the server's DOLT_FETCH, which advances the
 // tracking ref every session of the database reads, so CALL DOLT_FETCH stands
-// in for it. Then come the route's own merge and finishCLIPull's resolver.
+// in for it. Then comes the route's own merge, which settles in its own
+// transaction (mergeTrackingRefAfterCLIFetch).
 func fetchAndMergeAsCLIPull(t *testing.T, ctx context.Context, store *DoltStore) error {
 	t.Helper()
 	if _, err := store.db.ExecContext(ctx, "CALL DOLT_FETCH('origin', 'main')"); err != nil {
 		t.Fatalf("fetch origin main: %v", err)
 	}
-	return store.finishCLIPull(ctx, store.mergeTrackingRefAfterCLIFetch(ctx, "origin/main"))
+	return store.mergeTrackingRefAfterCLIFetch(ctx, "origin/main")
 }
 
 // cliMergeSessionWithAutocommitOff makes the CLI pull route's merge
@@ -421,14 +426,13 @@ func settleMetadataConflictOnCLIRoute(t *testing.T) {
 
 // TestCLIPullMergeSettlesOnRealDolt runs the CLI pull route's merge against a
 // real Dolt server (bd-e2q8zs). mergeTrackingRefAfterCLIFetch merges
-// origin/main on a long-timeout session of its own and commits the merge in
-// its own transaction, and finishCLIPull's resolver settles on a pool
-// connection; they meet on the working set of the store's branch. A clean
-// merge must land there with a message that names the tracking ref and not
-// the remote URL, a conflict the resolver accepts (GH#2466's metadata class)
-// must settle, also when the merge session runs with autocommit off, and one
-// it declines must fail the pull with nothing committed. What is left of a
-// declined merge is not pinned (GH#7839).
+// origin/main on a long-timeout session of its own and settles the merge in
+// the transaction that ran it (the SQL route's settleMergeInTx, GH#7839): a
+// clean merge must land on the store's branch with a message that names the
+// tracking ref and not the remote URL, a conflict the resolver accepts
+// (GH#2466's metadata class) must settle — also when the merge session runs
+// with autocommit off — and one it declines must fail the pull with the merge
+// rolled back: nothing committed, no conflict rows left, no merge open.
 //
 // The fixture's store sits on the database's default branch, where a fresh
 // session starts too, so this test cannot tell the branch pin
@@ -475,8 +479,74 @@ func TestCLIPullMergeSettlesOnRealDolt(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "merge origin/main: conflicts found") {
 			t.Fatalf("CLI-route merge with a declined conflict = %v, want the merge's conflicts error", err)
 		}
+		// The declined conflict is captured into a MergeConflictsError before
+		// the rollback (bd-578h9.15), naming the table — the same contract the
+		// SQL route's pull and PullFrom already implement.
+		var mce *versioncontrolops.MergeConflictsError
+		if !errors.As(err, &mce) {
+			t.Fatalf("CLI-route declined conflict = %v, want a *versioncontrolops.MergeConflictsError", err)
+		}
+		if !conflictsNameTable(mce.Conflicts, "pull_msg_marker") {
+			t.Errorf("declined conflicts = %+v, want pull_msg_marker", mce.Conflicts)
+		}
+		// The merge rolled back: no merge open, no conflict rows, HEAD and the
+		// local row as they were (GH#7839).
+		db := fx.store.db
+		var merging, conflicts int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_merge_status WHERE is_merging").Scan(&merging); err != nil {
+			t.Fatalf("read dolt_merge_status: %v", err)
+		}
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
+			t.Fatalf("count dolt_conflicts: %v", err)
+		}
+		if merging != 0 || conflicts != 0 {
+			t.Errorf("declined merge left state behind (is_merging rows = %d, conflicted tables = %d); want it rolled back", merging, conflicts)
+		}
 		if head, headErr := fx.store.GetCurrentCommit(ctx); headErr != nil || head != preHead {
 			t.Errorf("HEAD moved from %s to %s (%v); a declined merge must not be committed", preHead, head, headErr)
 		}
+		var local string
+		if err := db.QueryRowContext(ctx, "SELECT v FROM pull_msg_marker WHERE id = 1").Scan(&local); err != nil || local != "local" {
+			t.Errorf("local row = %q (%v) after the declined merge, want %q", local, err, "local")
+		}
 	})
+}
+
+// conflictsNameTable reports whether conflicts names table.
+func conflictsNameTable(conflicts []storage.Conflict, table string) bool {
+	for _, c := range conflicts {
+		if c.Field == table {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCLIPullDeclinedConflictLeavesNoOpenMerge reproduces GH#7839 (bd-2ypu02):
+// when finishCLIPull's resolver declines a conflict, the CLI route must abort
+// the merge it opened, as the SQL route does, instead of leaving
+// dolt_merge_status.is_merging set so every later write and pull fails.
+func TestCLIPullDeclinedConflictLeavesNoOpenMerge(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	fx := newPullFixture(t, ctx, "origin", false, false)
+	execAllOn(t, ctx, fx.store.db, "local",
+		"INSERT INTO pull_msg_marker VALUES (1, 'local')",
+		"CALL DOLT_COMMIT('-Am', 'local: conflicting row')")
+
+	err := fetchAndMergeAsCLIPull(t, ctx, fx.store)
+	if err == nil || !strings.Contains(err.Error(), "merge origin/main: conflicts found") {
+		t.Fatalf("CLI-route merge with a declined conflict = %v, want the merge's conflicts error", err)
+	}
+	db := fx.store.db
+	var merging, conflicts int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_merge_status WHERE is_merging").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
+		t.Fatalf("count dolt_conflicts: %v", err)
+	}
+	if merging != 0 || conflicts != 0 {
+		t.Errorf("declined CLI-route merge left the merge open (is_merging rows = %d, conflicted tables = %d); want it aborted", merging, conflicts)
+	}
 }
