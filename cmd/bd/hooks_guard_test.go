@@ -961,4 +961,36 @@ func TestInstallHooks_NonShell(t *testing.T) {
 			require.Equal(t, before, readNonShellHookForTest(t, src), "the source hook is not modified by preservation")
 		})
 	})
+
+	t.Run("AC5_shell_and_plain_text_hooks_keep_injection", func(t *testing.T) {
+		cases := []struct{ name, content string }{
+			{"sh", "#!/bin/sh\necho user\n"},
+			{"bash_env", "#!/usr/bin/env bash\necho user\n"},
+			{"env_S_bash", "#!/usr/bin/env -S bash -e\necho user\n"},
+			{"busybox_sh", "#!/bin/busybox sh\necho user\n"},
+			{"zsh_crlf", "#!/usr/bin/zsh\r\necho user\r\n"},
+			{"no_shebang", "echo user\n"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				repoDir := setupGuardTestRepo(t)
+				hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+				writeNonShellHookForTest(t, hookPath, tc.content)
+
+				stderr := installHooksCapturingStderr(t, false)
+				got := readNonShellHookForTest(t, hookPath)
+				require.Contains(t, got, hookSectionBeginPrefix)
+				require.Contains(t, got, "echo user")
+				require.Equal(t, tc.content, readNonShellHookForTest(t, hookPath+".backup"), "backup holds the original")
+				require.NotContains(t, stderr, "Warning")
+
+				// Refresh: a stale section version is replaced in place.
+				stale := strings.Replace(got, hookSectionBeginLine(), hookSectionBeginPrefix+" v0.0.1 ---", 1)
+				writeNonShellHookForTest(t, hookPath, stale)
+				stderr = installHooksCapturingStderr(t, false)
+				require.Equal(t, got, readNonShellHookForTest(t, hookPath))
+				require.NotContains(t, stderr, "Warning")
+			})
+		}
+	})
 }
