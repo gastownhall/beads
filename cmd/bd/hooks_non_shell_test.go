@@ -73,6 +73,96 @@ func TestInstallHooks_NonShell(t *testing.T) {
 		}
 	})
 
+	// AC-4: an older bd version already appended its shell section to a
+	// python hook. The first install removes the section — byte-exact, no
+	// re-injection, no stale-backup restore — and warns; a second install
+	// changes nothing.
+	t.Run("AC-4 install removes a complete stale bd section and warns", func(t *testing.T) {
+		repoDir := setupGuardTestRepo(t)
+		hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+		corrupted := pythonPrePushFixture + "\n" + generateHookSection("pre-push")
+		writeHookFile(t, hookPath, corrupted)
+
+		// A stale one-time backup from the original install: restoring it
+		// would discard every edit made since, so it must be left alone.
+		backupPath := hookPath + ".backup"
+		staleBackup := "#!/usr/bin/env python3\nprint('ancient snapshot')\n"
+		if err := os.WriteFile(backupPath, []byte(staleBackup), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		var installErr error
+		stderr := captureStderr(t, func() {
+			installErr = installHooksWithOptions(managedHookNames, false, false, false, false)
+		})
+		if installErr != nil {
+			t.Fatalf("install failed: %v", installErr)
+		}
+
+		got, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != pythonPrePushFixture {
+			t.Fatalf("stale section not removed byte-exact:\n%s", got)
+		}
+		if !strings.Contains(stderr, "removed the stale section") {
+			t.Fatalf("stderr must warn about the removal, got:\n%s", stderr)
+		}
+
+		backupAfter, err := os.ReadFile(backupPath)
+		if err != nil {
+			t.Fatalf("stale .backup sidecar must survive the repair: %v", err)
+		}
+		if string(backupAfter) != staleBackup {
+			t.Fatalf("stale .backup sidecar must be left untouched, got:\n%s", backupAfter)
+		}
+
+		// Second install run: the hook is clean now — nothing changes.
+		var secondErr error
+		stderr2 := captureStderr(t, func() {
+			secondErr = installHooksWithOptions(managedHookNames, false, false, false, false)
+		})
+		if secondErr != nil {
+			t.Fatalf("second install failed: %v", secondErr)
+		}
+		got2, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got2) != pythonPrePushFixture {
+			t.Fatalf("second install must not rewrite the repaired hook:\n%s", got2)
+		}
+		if strings.Contains(stderr2, "removed the stale section") {
+			t.Fatalf("second install must report no repair:\n%s", stderr2)
+		}
+	})
+
+	t.Run("AC-4 install removes multiple complete stale bd sections", func(t *testing.T) {
+		repoDir := setupGuardTestRepo(t)
+		hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+		corrupted := pythonPrePushFixture + "\n" + generateHookSection("pre-push") +
+			"\nimport os\n" + generateHookSection("pre-push")
+		writeHookFile(t, hookPath, corrupted)
+
+		stderr := captureStderr(t, func() {
+			if err := installHooksWithOptions(managedHookNames, false, false, false, false); err != nil {
+				t.Fatalf("install failed: %v", err)
+			}
+		})
+		got, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := pythonPrePushFixture + "\nimport os\n"
+		if string(got) != want {
+			t.Fatalf("both stale sections must be removed, want:\n%q\ngot:\n%q", want, got)
+		}
+		if !strings.Contains(stderr, "removed the stale section") {
+			t.Fatalf("stderr must warn about the removal, got:\n%s", stderr)
+		}
+	})
+
 	t.Run("AC-1 external integration non-shell hook is skipped silently", func(t *testing.T) {
 		repoDir := setupGuardTestRepo(t)
 		hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
