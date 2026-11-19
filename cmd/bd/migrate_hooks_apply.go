@@ -205,6 +205,23 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 			continue
 		}
 
+		// A non-shell sidecar becomes the active hook as it is (less any
+		// complete bd sections), without bd's shell section. Both sidecars
+		// stay in place: the restored script is the user's, and a retired
+		// sidecar would hide where it came from (GH#6348).
+		if hook.SourceInterpreter != "" && sourceKind != hookMigrationWriteFromTemplate {
+			execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
+				HookName:    hook.Name,
+				HookPath:    hook.HookPath,
+				State:       hook.State,
+				SourceKind:  sourceKind,
+				SourcePath:  sourcePath,
+				NonShell:    true,
+				Interpreter: hook.SourceInterpreter,
+			})
+			continue
+		}
+
 		execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
 			HookName:   hook.Name,
 			HookPath:   hook.HookPath,
