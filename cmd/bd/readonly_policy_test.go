@@ -214,6 +214,7 @@ func TestPersistentPostRunDirectMaintenanceSkipsPreview(t *testing.T) {
 		want    postRunMaintenanceCounts
 	}{
 		{name: "create --dry-run", command: "create", flag: "dry-run", set: true, want: postRunMaintenanceCounts{}},
+		{name: "migrate --inspect", command: "migrate", flag: "inspect", set: true, want: postRunMaintenanceCounts{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
