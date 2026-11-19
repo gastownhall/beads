@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -52,6 +53,54 @@ func validateCreateArgs(cmd *cobra.Command, args []string) error {
 	}
 	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
 	return err
+}
+
+// createPreviewNeedsVocabulary reports whether validating a preview needs a
+// store's custom vocabulary: a built-in type and status validate without one.
+func createPreviewNeedsVocabulary(issue *types.Issue) bool {
+	return !issue.IssueType.IsBuiltIn() || !issue.Status.IsValid()
+}
+
+// loadCreatePreviewVocabulary reads the custom statuses and types a create
+// into s validates against — the same composition `bd types` lists. With no
+// store open, the config.yaml layer is the only one available.
+func loadCreatePreviewVocabulary(ctx context.Context, s storage.DoltStorage) (customStatuses, customTypes []string, err error) {
+	if s == nil {
+		return nil, storeissueops.ComposeCustomTypes(nil, "", config.GetCustomTypesFromYAML()), nil
+	}
+	customTypes, err = s.GetCustomTypes(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading custom types: %w", err)
+	}
+	customStatuses, err = s.GetCustomStatuses(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading custom statuses: %w", err)
+	}
+	return customStatuses, customTypes, nil
+}
+
+// validateCreatePreview runs the insert validation a create runs
+// (issueops.PrepareIssueForInsert: metadata, field and vocabulary rules) on a
+// copy of a dry-run preview, so a preview fails exactly where the create it
+// previews would (GH#5787). The copy is discarded: the preview shows the
+// issue as the command built it. It is field validation only; the create's
+// transactional checks (ids, dependencies) are not previewed.
+func validateCreatePreview(issue *types.Issue, customStatuses, customTypes []string) error {
+	probe := *issue
+	if err := storeissueops.PrepareIssueForInsert(&probe, customStatuses, customTypes); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+	return nil
+}
+
+// handleDryRunTargetStoreError reports a dry-run's failure to open its routed
+// target read-only, naming the target's .beads directory for a local path.
+func handleDryRunTargetStoreError(repoPath string, err error) error {
+	targetPath := repoPath
+	if !remotecache.IsRemoteURL(repoPath) {
+		targetPath = filepath.Join(routing.ExpandPath(repoPath), ".beads")
+	}
+	return handleCreateTargetStoreError(err, targetPath, "%v")
 }
 
 // createTypeShorthandHint explains a missing title when --type carries a
@@ -361,7 +410,12 @@ var createCmd = &cobra.Command{
 			repoPath = routing.DetermineTargetRepo(routingConfig, userRole, ".")
 		}
 
-		renderDryRun := func() error {
+		// renderDryRun previews the issue after the insert validation the
+		// create runs (GH#5787). vocabulary names the store whose custom
+		// types and statuses the create would validate against — the
+		// destination's, not the source's — and is consulted only when the
+		// preview asks for a value outside the built-in vocabulary.
+		renderDryRun := func(vocabulary func() (storage.DoltStorage, error)) error {
 			previewIssue := buildCreateIssue(createIssueParams{
 				ID:                 explicitID,
 				Title:              title,
@@ -393,6 +447,21 @@ var createCmd = &cobra.Command{
 				Payload:            eventPayload,
 			})
 
+			var customStatuses, customTypes []string
+			if createPreviewNeedsVocabulary(previewIssue) {
+				vocabStore, err := vocabulary()
+				if err != nil {
+					return err
+				}
+				customStatuses, customTypes, err = loadCreatePreviewVocabulary(rootCtx, vocabStore)
+				if err != nil {
+					return HandleErrorRespectJSON("%v", err)
+				}
+			}
+			if err := validateCreatePreview(previewIssue, customStatuses, customTypes); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+
 			if jsonOutput {
 				return outputJSON(previewIssue)
 			}
@@ -413,7 +482,28 @@ var createCmd = &cobra.Command{
 			if targetBeadsDir, err := checkRepoTargetInitializable(repoPath, allowCreate); err != nil {
 				return handleRepoTargetInitError(targetBeadsDir, err)
 			}
-			return renderDryRun()
+			if repoPath == "." {
+				return renderDryRun(func() (storage.DoltStorage, error) { return store, nil })
+			}
+			// A routed preview validates against the destination's
+			// vocabulary, never the source's. It opens the target (read-only,
+			// as the --parent lookup below does) only when a non-built-in
+			// value needs that vocabulary, so a built-in preview of a target
+			// that does not exist yet still opens and creates nothing.
+			var previewTarget storage.DoltStorage
+			defer func() {
+				if previewTarget != nil {
+					_ = previewTarget.Close()
+				}
+			}()
+			return renderDryRun(func() (storage.DoltStorage, error) {
+				targetStore, err := openDryRunTargetStore(rootCtx, repoPath)
+				if err != nil {
+					return nil, handleDryRunTargetStoreError(repoPath, err)
+				}
+				previewTarget = targetStore
+				return targetStore, nil
+			})
 		}
 
 		var targetStore storage.DoltStorage
@@ -477,11 +567,7 @@ var createCmd = &cobra.Command{
 			var err error
 			parentLookupStore, err = openDryRunTargetStore(rootCtx, repoPath)
 			if err != nil {
-				targetPath := repoPath
-				if !remotecache.IsRemoteURL(repoPath) {
-					targetPath = filepath.Join(routing.ExpandPath(repoPath), ".beads")
-				}
-				return handleCreateTargetStoreError(err, targetPath, "%v")
+				return handleDryRunTargetStoreError(repoPath, err)
 			}
 			defer func() { _ = parentLookupStore.Close() }()
 		}
@@ -513,7 +599,7 @@ var createCmd = &cobra.Command{
 				}
 				labels = mergeCreateLabels(labels, inherited)
 			}
-			return renderDryRun()
+			return renderDryRun(func() (storage.DoltStorage, error) { return parentLookupStore, nil })
 		}
 
 		// Parse every requested dependency edge BEFORE reserving a child ID

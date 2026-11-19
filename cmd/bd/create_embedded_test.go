@@ -1685,3 +1685,60 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedCreateDryRunValidatesIssue pins GH#5787's dry-run defect: a
+// single-issue preview runs the insert validation the create it previews
+// runs, so a type the real create refuses fails the preview too, in text and
+// JSON mode, with no preview printed and nothing written.
+func TestEmbeddedCreateDryRunValidatesIssue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dpv")
+	const badType = "a long human title with spaces"
+
+	for _, mode := range []struct {
+		name string
+		args []string
+	}{
+		{"text", nil},
+		{"json", []string{"--json"}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			before := readEmbeddedStoreSnapshot(t, beadsDir, "dpv")
+			args := append([]string{"create", "--title", "PROBE", "--type", badType, "--dry-run"}, mode.args...)
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			out := stdout.String() + stderr.String()
+			if err == nil {
+				t.Fatalf("dry-run accepted a type the real create refuses:\n%s", out)
+			}
+			if !strings.Contains(out, "invalid issue type") || !strings.Contains(out, badType) {
+				t.Fatalf("dry-run error should name the invalid type; got:\n%s", out)
+			}
+			if strings.Contains(out, "DRY RUN") || strings.Contains(stdout.String(), `"title"`) {
+				t.Fatalf("a refused dry-run must print no preview; got:\n%s", out)
+			}
+			if after := readEmbeddedStoreSnapshot(t, beadsDir, "dpv"); after != before {
+				t.Fatalf("dry-run changed the store: before %+v, after %+v", before, after)
+			}
+		})
+	}
+
+	// A valid issue still previews.
+	cmd := exec.Command(bd, "create", "--title", "PROBE", "--type", "bug", "--dry-run", "--json")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("valid dry-run failed: %v\n%s%s", err, stdout.String(), stderr.String())
+	}
+	if preview := parseIssueJSON(t, stdout.Bytes()); preview.Title != "PROBE" || preview.IssueType != types.TypeBug {
+		t.Fatalf("valid dry-run preview = %+v", preview)
+	}
+}

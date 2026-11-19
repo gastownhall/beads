@@ -1431,6 +1431,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd create --dry-run` validates the issue it previews.** A single-issue
+  dry run printed a preview for an issue the real create would refuse, such as
+  an unknown `--type`. It now runs the same insert validation first, against
+  the destination's own types and statuses (the routed repository's for
+  `--repo` or a routed prefix, the database's custom types on a proxied
+  server), and fails with the create's error and no preview, in text and
+  `--json` mode. The dry run still writes nothing and still does not
+  initialize or migrate a routed target. (#5787)
+
 - **`bd create -t "a title"` now says that `-t` is `--type`.** `-t` is the
   shorthand for `--type`, not `--title`, so `bd create --type=bug -t "fix the
   login page"` set the type to the title text and failed with only
