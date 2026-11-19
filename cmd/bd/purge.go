@@ -62,6 +62,9 @@ Deletes: issues, dependencies, labels, events, and comments for matching beads.
 Skips: pinned beads, and closed beads a live bead still depends on through a
 parent-child, tracks or blocks edge (a closed molecule root whose step is open,
 a closed bead a live convoy tracks). Live means any status that is not done.
+The chain is followed through closed beads this purge does not select, so an
+open grandchild keeps its closed grandparent even when the closed parent
+between them falls outside --older-than or --pattern.
 Without --retain-ids it also skips beads whose type the workspace's
 types.retained setting names (their ids are idempotency keys); --json reports
 them as retention_required.

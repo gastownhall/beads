@@ -141,9 +141,19 @@ type SweepRequest struct {
 	// hooked) plus every configured custom status whose category is not
 	// "done", with the same REQUIRED read of the custom statuses.
 	//
-	// Unlike ProtectReferenced it is a stored-edge lookup, not a text scan, so
-	// it costs one read of the edges pointing at the candidates and one of
-	// their sources. `bd purge` always asks for it; `bd prune` does not.
+	// THE CHAIN IS TRANSITIVE and may pass through rows this sweep did not
+	// select: a closed row the cutoff, the pattern, the plane, pinning or the
+	// retained types left out still carries a live dependent's protection to
+	// the candidate it depends on, so an open grandchild keeps its closed
+	// grandparent even when the closed parent between them is no candidate.
+	// Only candidates are counted in SweepSkips.LiveDependent; the row in the
+	// middle keeps whatever skip its own selection gave it.
+	//
+	// Unlike ProtectReferenced it is a stored-edge lookup, not a text scan. It
+	// reads the edges pointing at the candidates and their sources' statuses,
+	// then again for each further level of non-live sources it reaches: one
+	// batched read per level, each row read at most once, no depth cap.
+	// `bd purge` always asks for it; `bd prune` does not.
 	ProtectLiveDependents bool
 	// Limit, when positive, caps how many rows ONE sweep deletes, taking the
 	// OLDEST-CLOSED first (closed_at ascending, then id). The rest are left

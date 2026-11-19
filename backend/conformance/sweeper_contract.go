@@ -790,6 +790,66 @@ func RunSweeperProtectsTransitiveLiveDependents(t *testing.T, ctx context.Contex
 	sweeperAssertWispRows(t, ctx, fixture, 3, root, middle, leaf)
 }
 
+// RunSweeperProtectsLiveDependentsThroughUnselectedRows pins that the
+// live-dependent protection follows a chain through a closed row the sweep did
+// NOT select (GH#7043): root ← middle ← open leaf, where the middle row closed
+// after the cutoff and so is no candidate. Reading only the candidates' edges
+// sees middle → root, finds middle not live, and deletes the root, cutting the
+// live leaf's hierarchy loose. The root must be held back and counted once,
+// on a dry run and on the real sweep, on both tiers `bd purge` reaches.
+func RunSweeperProtectsLiveDependentsThroughUnselectedRows(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	if fixture.AddDependencies == nil {
+		t.Skip("fixture has no AddDependencies hook; cannot wire the hierarchy this case needs")
+	}
+	for _, tier := range []struct {
+		tag  string
+		tier publicops.SweepTier
+	}{
+		{"unsel-eph", publicops.SweepEphemeral},
+		{"unsel-plane", publicops.SweepWispsPlane},
+	} {
+		t.Run(tier.tag, func(t *testing.T) {
+			root := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, tier.tag, "root", true), nil)
+			middle := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, tier.tag, "middle", true), func(issue *types.Issue) {
+				after := sweeperCutoff.Add(24 * time.Hour)
+				issue.ClosedAt = &after
+			})
+			leaf := sweeperSeedOpen(t, ctx, fixture, sweeperIssue(fixture, tier.tag, "leaf", true))
+			sweeperWire(t, ctx, fixture,
+				publicops.DependencyEdge{IssueID: middle, DependsOnID: root, Type: publicops.DepParentChild},
+				publicops.DependencyEdge{IssueID: leaf, DependsOnID: middle, Type: publicops.DepParentChild},
+			)
+
+			request := publicops.SweepRequest{
+				Tier:         tier.tier,
+				IDPattern:    sweeperPattern(fixture, tier.tag),
+				ClosedBefore: &sweeperCutoff,
+			}
+			unprotected := sweeperSweep(t, ctx, fixture, sweeperAsDryRun(request))
+			if unprotected.Swept != 1 {
+				t.Fatalf("unprotected dry run: Swept = %d, want 1 — the root alone is a candidate", unprotected.Swept)
+			}
+
+			request.ProtectLiveDependents = true
+			want := publicops.SweepSkips{LiveDependent: 1}
+			preview := sweeperSweep(t, ctx, fixture, sweeperAsDryRun(request))
+			if preview.Swept != 0 || preview.Skipped != want {
+				t.Errorf("dry run: Swept = %d, Skipped = %+v; want 0 and %+v — the open leaf under the "+
+					"unselected middle row must keep the closed root", preview.Swept, preview.Skipped, want)
+			}
+			sweeperAssertWispRows(t, ctx, fixture, 3, root, middle, leaf)
+
+			result := sweeperSweep(t, ctx, fixture, request)
+			if result.Swept != 0 || result.Skipped != want {
+				t.Errorf("sweep: Swept = %d, Skipped = %+v; want 0 and %+v — the open leaf under the "+
+					"unselected middle row must keep the closed root", result.Swept, result.Skipped, want)
+			}
+			sweeperAssertWispRows(t, ctx, fixture, 3, root, middle, leaf)
+		})
+	}
+}
+
 // RunSweeperProtectsLiveDependentsAcrossPlanes pins that the live-dependent
 // protection reads BOTH dependency tables: a closed wisp that a live DURABLE
 // (issues-table) bead depends on through parent-child, tracks or blocks is
@@ -934,6 +994,15 @@ func sweeperSeedOpen(t *testing.T, ctx context.Context, fixture SweeperFixture, 
 	issue.Status = types.StatusOpen
 	issue.ClosedAt = nil
 	return sweeperSeed(t, ctx, fixture, issue, nil)
+}
+
+// sweeperWire adds the edges between seeded rows through the fixture's
+// AddDependencies hook.
+func sweeperWire(t *testing.T, ctx context.Context, fixture SweeperFixture, edges ...publicops.DependencyEdge) {
+	t.Helper()
+	if err := fixture.AddDependencies(ctx, publicops.AddDependenciesRequest{Actor: "sweeper-seed", Edges: edges}); err != nil {
+		t.Fatalf("wiring dependencies %+v: %v", edges, err)
+	}
 }
 
 func sweeperAsDryRun(request publicops.SweepRequest) publicops.SweepRequest {
