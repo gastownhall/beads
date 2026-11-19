@@ -395,3 +395,79 @@ func TestStart_ExplicitStartLaunchesNoIdleWatcher(t *testing.T) {
 		})
 	}
 }
+
+// TestIdleTimeoutResolution pins where the idle window comes from:
+// BEADS_DOLT_IDLE_TIMEOUT, then dolt.idle-timeout in config.yaml, then 30m.
+func TestIdleTimeoutResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, yaml string
+		want            time.Duration
+		warn            bool
+	}{
+		{name: "unset gives the default", want: DefaultIdleTimeout},
+		{name: "env 0 turns it off", env: "0", want: 0},
+		{name: "env duration", env: "45m", want: 45 * time.Minute},
+		{name: "env wins over config", env: "10m", yaml: "dolt:\n  idle-timeout: 2h\n", want: 10 * time.Minute},
+		{name: "config 0 turns it off", yaml: "dolt:\n  idle-timeout: 0\n", want: 0},
+		{name: "config duration", yaml: "dolt:\n  idle-timeout: 2h\n", want: 2 * time.Hour},
+		{name: "invalid env warns and keeps the default", env: "soon", want: DefaultIdleTimeout, warn: true},
+		{name: "negative config warns and keeps the default", yaml: "dolt:\n  idle-timeout: -5m\n", want: DefaultIdleTimeout, warn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateUserConfig(t)
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if tc.yaml != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(tc.yaml), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(IdleTimeoutEnv, tc.env)
+			var got time.Duration
+			stderr := captureStderr(t, func() { got = ResolveIdleTimeout(beadsDir) })
+			if got != tc.want {
+				t.Errorf("ResolveIdleTimeout = %s, want %s", got, tc.want)
+			}
+			if warned := strings.Contains(stderr, "Warning:"); warned != tc.warn {
+				t.Errorf("warning printed = %v, want %v (stderr %q)", warned, tc.warn, stderr)
+			}
+		})
+	}
+}
+
+// TestAutoStart_IdleTimeoutZeroLaunchesNoWatcher: with the idle window set to
+// 0, through the environment or config.yaml, an auto-start launches no
+// watcher, and an unset window launches one with the 30m default.
+func TestAutoStart_IdleTimeoutZeroLaunchesNoWatcher(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, yaml string
+		wantSpawns      int
+	}{
+		{name: "env 0", env: "0"},
+		{name: "config.yaml 0", yaml: "dolt:\n  idle-timeout: 0\n"},
+		{name: "unset", wantSpawns: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, _ := fakeStartWorkspace(t)
+			if tc.yaml != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(tc.yaml), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(IdleTimeoutEnv, tc.env)
+			calls := stubIdleWatchSpawner(t)
+			autoStartForTest(t, beadsDir)
+			if len(*calls) != tc.wantSpawns {
+				t.Fatalf("auto-start launched %d watcher(s), want %d", len(*calls), tc.wantSpawns)
+			}
+			if tc.wantSpawns == 1 && (*calls)[0].Timeout != DefaultIdleTimeout {
+				t.Errorf("watcher timeout = %s, want %s", (*calls)[0].Timeout, DefaultIdleTimeout)
+			}
+			if _, err := os.Stat(watcherPIDPath(beadsDir)); (tc.wantSpawns == 0) != os.IsNotExist(err) {
+				t.Errorf("watcher.pid presence wrong for %d spawn(s) (stat err %v)", tc.wantSpawns, err)
+			}
+		})
+	}
+}

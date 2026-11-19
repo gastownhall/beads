@@ -1564,7 +1564,7 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		return 0, false, err
 	}
 	clearIdleWatchRecords(serverDir)
-	if timeout := DefaultIdleTimeout; idleWatchEligible(preCfg, mode, IsSharedServerMode(), timeout) {
+	if timeout := ResolveIdleTimeout(beadsDir); idleWatchEligible(preCfg, mode, IsSharedServerMode(), timeout) {
 		launchIdleWatcherLocked(serverDir, s, preCfg.Host, timeout)
 	}
 	return s.Port, true, nil

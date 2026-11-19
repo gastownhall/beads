@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -44,6 +45,10 @@ import (
 //	client-<pid>-<id>  a client lease: a bd store is open on this server
 
 const (
+	// IdleTimeoutEnv overrides dolt.idle-timeout.
+	IdleTimeoutEnv = "BEADS_DOLT_IDLE_TIMEOUT"
+	// IdleTimeoutConfigKey is the config.yaml key for the idle window.
+	IdleTimeoutConfigKey = "dolt.idle-timeout"
 	// DefaultIdleTimeout is the idle window when none is configured.
 	DefaultIdleTimeout = 30 * time.Minute
 
@@ -99,6 +104,47 @@ type IdleWatchOpts struct {
 // server's lifecycle lock held; the watcher waits for that lock before it
 // starts watching, so the watcher.pid record is in place by then.
 var IdleWatchSpawner func(opts IdleWatchOpts) (pid int, err error)
+
+// ResolveIdleTimeout returns the idle window for beadsDir's auto-started
+// server: BEADS_DOLT_IDLE_TIMEOUT, else dolt.idle-timeout from the active
+// config (or beadsDir's config.yaml when no config is loaded), else 30m. 0
+// turns idle stop off. An unparsable value prints one warning and the
+// default applies.
+func ResolveIdleTimeout(beadsDir string) time.Duration {
+	source := IdleTimeoutEnv
+	raw := strings.TrimSpace(os.Getenv(IdleTimeoutEnv))
+	if raw == "" {
+		source = IdleTimeoutConfigKey
+		raw = strings.TrimSpace(config.GetString(IdleTimeoutConfigKey))
+		if raw == "" && beadsDir != "" {
+			raw = strings.TrimSpace(config.GetStringFromDir(beadsDir, IdleTimeoutConfigKey))
+		}
+	}
+	if raw == "" {
+		return DefaultIdleTimeout
+	}
+	d, err := parseIdleTimeout(raw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %s=%q is not a duration (e.g. 30m, 2h, or 0 to turn idle stop off); using %s\n",
+			source, raw, DefaultIdleTimeout)
+		return DefaultIdleTimeout
+	}
+	return d
+}
+
+func parseIdleTimeout(raw string) (time.Duration, error) {
+	if raw == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, err
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("negative duration %s", raw)
+	}
+	return d, nil
+}
 
 // idleWatchEligible reports whether an auto-start of serverDir's server, with
 // the pre-start config cfg, launches an idle watcher. Only a server bd fully
