@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -464,6 +465,80 @@ func TestWispGCReportsOneAggregateResult(t *testing.T) {
 	for _, o := range orphans {
 		if !survivorSet[o] {
 			t.Errorf("orphaned_issues names %s, which this run deleted", o)
+		}
+	}
+}
+
+// TestWispGCPreviewsWriteNothing pins that chunking reaches only a gc that
+// deletes: an age --dry-run, a closed preview without --force and a closed
+// --dry-run send no deleting request, leave every wisp in place, and keep
+// their existing answers.
+func TestWispGCPreviewsWriteNothing(t *testing.T) {
+	previews := []struct {
+		name   string
+		status types.Status
+		flags  map[string]string
+		// keys is the preview's existing --json answer.
+		keys []string
+		text string
+	}{
+		{"age dry run", types.StatusOpen, map[string]string{"age": "0s", "dry-run": "true"},
+			[]string{"candidates", "cleaned_count", "cleaned_ids", "dry_run", "schema_version"},
+			"Dry run: would clean 450 abandoned wisp(s)"},
+		{"closed without force", types.StatusClosed, map[string]string{"closed": "true"},
+			[]string{"candidates", "dry_run", "schema_version"},
+			"Use --force to proceed"},
+		{"closed dry run", types.StatusClosed, map[string]string{"closed": "true", "dry-run": "true"},
+			nil, "DRY RUN - no changes will be made"},
+	}
+	for _, preview := range previews {
+		for _, asJSON := range []bool{false, true} {
+			name := preview.name + "/text"
+			if asJSON {
+				name = preview.name + "/json"
+			}
+			t.Run(name, func(t *testing.T) {
+				s, rec := useWispGCRealStore(t)
+				seedWisps(t, s, 450, preview.status)
+				jsonOutput = asJSON
+
+				stdout, stderr, err := runWispGCCommand(t, preview.flags)
+				if err != nil {
+					t.Fatalf("preview: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+				}
+				for i, req := range rec.requests {
+					if !req.DryRun {
+						t.Errorf("request %d of a preview is a real delete", i+1)
+					}
+				}
+				if left := wispCount(t, s); left != 450 {
+					t.Errorf("%d wisps remain after a preview, want 450", left)
+				}
+				if commandDidWrite.Load() {
+					t.Error("a preview marked the command as a write")
+				}
+				if !asJSON {
+					if !strings.Contains(stdout, preview.text) {
+						t.Errorf("stdout lacks %q:\n%s", preview.text, stdout)
+					}
+					return
+				}
+				if preview.keys == nil {
+					return
+				}
+				obj := decodeSingleJSONObject(t, stdout)
+				var keys []string
+				for k := range obj {
+					keys = append(keys, k)
+				}
+				slices.Sort(keys)
+				if !slices.Equal(keys, preview.keys) {
+					t.Errorf("preview keys = %v, want the existing %v", keys, preview.keys)
+				}
+				if got := obj["candidates"]; got != float64(450) {
+					t.Errorf("candidates = %v, want 450", got)
+				}
+			})
 		}
 	}
 }
