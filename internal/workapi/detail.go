@@ -123,28 +123,22 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 
 	// Aggregate counts - O(1) queries, no row materialization.
 	//
-	// THE COUNTS ARE READ BEFORE THE ROW LISTS, and the order is load-bearing
-	// wherever the source is not snapshot-consistent. The UOW source runs the
-	// whole build inside one read transaction and is immune; the store-backed
-	// source issues a connection per call, so a concurrent write can land
-	// between the two reads and skew the delta below. Counting first puts that
-	// skew on the safe side: an edge ADDED in the window leaves the count
-	// stale-LOW, so the delta goes negative and is suppressed, where the
-	// reverse order would have announced a fresh local edge as unresolvable.
-	// A concurrent DELETE still produces a spurious report, which is the
-	// residual and is why this is an ordering mitigation rather than a fix —
-	// only a shared snapshot or a direct count of unresolvable edges closes
-	// it (be-lpi).
+	// The outgoing unresolvable report no longer derives from these: it comes
+	// from the combined read alone (bd-uschhs), so a write landing between the
+	// count and the listing on the store-backed source can skew
+	// dependency_count but never invent an unresolvable edge. The inbound
+	// delta below still subtracts, and reads the count first so an edge added
+	// in the window leaves it stale-LOW and suppressed (be-lpi).
 	dependentCount, dependentCountErr := src.CountDependents(ctx, id, isWisp)
 	details.DependentCount = &dependentCount
-	dependencyCount, dependencyCountErr := src.CountDependencies(ctx, id, isWisp)
+	dependencyCount, _ := src.CountDependencies(ctx, id, isWisp)
 	details.DependencyCount = &dependencyCount
 	commentCount, _ := src.CountComments(ctx, id, isWisp)
 	details.CommentCount = &commentCount
 
-	// depsErr is kept rather than discarded: it is what separates "the edge
-	// list came back short" from "the edge list never came back", and the
-	// unresolvable-edge delta below is only meaningful in the first case.
+	// depsErr is kept rather than discarded: it is what separates "the read
+	// named no unresolvable edge" from "the read never came back", and only
+	// the first may publish anything.
 	deps, unresolvable, depsErr := src.Dependencies(ctx, id, isWisp)
 	details.Dependencies = deps
 
@@ -158,22 +152,17 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	// rewrites the slice.
 	details.GatedBy = types.GateRefs(types.GatesHolding(issue, details.Dependencies))
 
-	// The count counts edge ROWS; the slice carries the issues on the far
-	// end, and drops any whose id has no row in this database. The two
-	// therefore disagree by exactly the cross-repo and `external:` edges,
-	// which is real stored data rather than a phantom count (be-lpi).
-	// Publish the difference instead of leaving the caller to infer it.
-	//
-	// bd-uschhs: a combined read that returned the stored records names
-	// them, and the count is their number, both from the read's own snapshot.
+	// The slice carries the issues on the far end; the combined read returns
+	// the stored record of every edge whose far end has no row in this
+	// database (the cross-repo and `external:` edges, be-lpi) from the same
+	// snapshot. Publish those records and their number. No count delta: an
+	// aggregate count read before the listing goes stale-HIGH under a
+	// concurrent delete, and the read that named no record is the authority
+	// (bd-uschhs).
 	if depsErr == nil && len(unresolvable) > 0 {
 		details.UnresolvableDependencyEdges = unresolvable
 		n := int64(len(unresolvable))
 		details.UnresolvableDependencies = &n
-	} else if depsErr == nil && dependencyCountErr == nil {
-		if n := dependencyCount - int64(len(details.Dependencies)); n > 0 {
-			details.UnresolvableDependencies = &n
-		}
 	}
 
 	if opts.IncludeDependents {
