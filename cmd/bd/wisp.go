@@ -775,7 +775,7 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	}
 
 	if closedMode {
-		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes)
+		return runWispPurgeClosed(ctx, dryRun, force, ageThreshold, excludeTypes)
 	}
 
 	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
@@ -954,7 +954,26 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	return abandoned, cascadeErr
 }
 
-func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
+// closedWispPurgeSelection is what one closed-mode wisp GC scan found: the
+// purge candidates, plus the protections and scan cap of the scan that
+// produced them, for the route's reporting.
+type closedWispPurgeSelection struct {
+	candidates []*types.Issue
+	pinned     int
+	infra      int
+	scanCapped bool
+}
+
+// selectClosedWispPurgeCandidates is the closed-mode GC selection shared by the
+// direct and proxied routes (GH#8202): the closed ephemeral wisps this run may
+// delete, with pinned and configured infra wisps protected and excluded types
+// excluded — and, for a positive --age threshold, only wisps that have been
+// idle that long. Before the age floor, --closed selected every closed wisp
+// regardless of age, so a patrol report closed seconds ago — and every wisp
+// plane row, which Dolt does not version — was hard-deleted minutes after the
+// molecule finished. --age 0s (or any non-positive threshold) omits the age
+// bound entirely and keeps the documented purge-all escape hatch.
+func selectClosedWispPurgeCandidates(ctx context.Context, r molReader, ageThreshold time.Duration, excludeTypes []types.IssueType) (closedWispPurgeSelection, error) {
 	statusClosed := types.StatusClosed
 	ephemeralTrue := true
 	filter := types.IssueFilter{
@@ -964,38 +983,73 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		Limit:        wispPurgeScanLimit,
 	}
 
-	closedIssues, err := store.SearchIssues(ctx, "", filter)
+	now := wispGCNow()
+	// A positive --age bounds the scan itself (updated_at < now-age), not a
+	// Go-side post-filter: 5000 recently updated rows would otherwise fill the
+	// scan window and starve older purgeable rows of their turn. The strict <
+	// matches wispIsAbandoned's strict >, so a wisp exactly at the cutoff
+	// stays, the same comparison abandoned-wisp GC makes.
+	if ageThreshold > 0 {
+		cutoff := now.Add(-ageThreshold)
+		filter.UpdatedBefore = &cutoff
+	}
+
+	scan, err := r.SearchIssues(ctx, "", filter)
+	if err != nil {
+		return closedWispPurgeSelection{}, err
+	}
+	sel := closedWispPurgeSelection{scanCapped: len(scan) >= wispPurgeScanLimit}
+	for _, issue := range scan {
+		if issue.Pinned {
+			sel.pinned++
+			continue
+		}
+		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
+			sel.infra++
+			continue
+		}
+		// Defense in depth for readers that do not enforce UpdatedBefore: the
+		// same idle-time check the abandoned-wisp scan applies. It also covers
+		// Dolt's DATETIME(0) half-up rounding (#7236), which can read a just-
+		// written updated_at fractionally in the future.
+		if !wispIsAbandoned(now, issue.UpdatedAt, ageThreshold) {
+			continue
+		}
+		sel.candidates = append(sel.candidates, issue)
+	}
+	return sel, nil
+}
+
+// wispPurgeZeroAgeHint is how a closed GC run that honored a positive --age
+// floor points at the escape hatch: --age 0s selects every closed wisp
+// regardless of age, the behavior --closed had before the floor (GH#8202).
+const wispPurgeZeroAgeHint = "Use --age 0s to purge all closed wisps regardless of age"
+
+// wispPurgeClosedFoundLine names a preview's selection size; a positive
+// threshold says which rows those are, so a caller can see the floor is on.
+func wispPurgeClosedFoundLine(count int, ageThreshold time.Duration) string {
+	if ageThreshold <= 0 {
+		return fmt.Sprintf("Found %d closed wisp(s)", count)
+	}
+	return fmt.Sprintf("Found %d closed wisp(s) not updated in the last %v", count, ageThreshold)
+}
+
+func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, ageThreshold time.Duration, excludeTypes []types.IssueType) error {
+	sel, err := selectClosedWispPurgeCandidates(ctx, store, ageThreshold, excludeTypes)
 	if err != nil {
 		return HandleError("listing closed wisps: %v", err)
 	}
-	scanCapped := len(closedIssues) >= wispPurgeScanLimit
+	closedIssues := sel.candidates
 
-	// Filter out pinned and infra issues (protected from cleanup)
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if store.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
+	if sel.pinned > 0 && !jsonOutput {
+		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", sel.pinned)
 	}
-	closedIssues = filtered
-
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
-	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
+	if sel.infra > 0 && !jsonOutput {
+		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", sel.infra)
 	}
 
 	if len(closedIssues) == 0 {
-		return renderNoClosedWisps(force && !dryRun && scanCapped)
+		return renderNoClosedWisps(force && !dryRun && sel.scanCapped, ageThreshold)
 	}
 
 	ids := make([]string, len(closedIssues))
@@ -1005,18 +1059,21 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 
 	if !force && !dryRun {
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"candidates": len(ids),
-				"dry_run":    true,
-			})
+			return outputJSON(wispPurgeClosedPreviewJSON(len(ids), ageThreshold))
 		}
-		fmt.Printf("Found %d closed wisp(s) to delete\n", len(ids))
+		fmt.Printf("%s to delete\n", wispPurgeClosedFoundLine(len(ids), ageThreshold))
+		if ageThreshold > 0 {
+			fmt.Printf("%s\n", wispPurgeZeroAgeHint)
+		}
 		fmt.Printf("\nUse --force to proceed, or --dry-run for detailed preview.\n")
 		return nil
 	}
 
 	if !jsonOutput {
-		fmt.Printf("Found %d closed wisp(s)\n", len(ids))
+		fmt.Printf("%s\n", wispPurgeClosedFoundLine(len(ids), ageThreshold))
+		if ageThreshold > 0 {
+			fmt.Printf("%s\n", wispPurgeZeroAgeHint)
+		}
 		if dryRun {
 			fmt.Println(ui.RenderWarn("DRY RUN - no changes will be made"))
 		}
@@ -1043,7 +1100,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	if err := renderWispPurgeOutcome(outcome, scanCapped, true); err != nil {
+	if err := renderWispPurgeOutcome(outcome, sel.scanCapped, true); err != nil {
 		return err
 	}
 	if !jsonOutput {
@@ -1062,14 +1119,39 @@ const wispPurgeScanLimit = 5000
 // a rerun cannot promise to get past a window that protected rows fill.
 var wispPurgeCappedHint = fmt.Sprintf("candidate scan reached the %d-wisp limit; more closed wisps may remain", wispPurgeScanLimit)
 
+// wispPurgeClosedPreviewJSON is the --json preview answer of a closed-GC run
+// that has not deleted anything: the candidate count, dry_run true, and — when
+// the run honored a positive --age floor — the threshold and the zero-age
+// escape hatch (GH#8202). The candidates and dry_run keys keep the shape these
+// routes have always printed.
+func wispPurgeClosedPreviewJSON(candidates int, ageThreshold time.Duration) map[string]interface{} {
+	answer := map[string]interface{}{
+		"candidates": candidates,
+		"dry_run":    true,
+	}
+	if ageThreshold > 0 {
+		answer["age_threshold"] = ageThreshold.String()
+		answer["hint"] = wispPurgeZeroAgeHint
+	}
+	return answer
+}
+
 // renderNoClosedWisps prints the empty-selection answer. capped is set only
 // for a forced run whose full scan held nothing deletable (every row pinned or
-// infra), which is not the same as nothing being left.
-func renderNoClosedWisps(capped bool) error {
+// infra), which is not the same as nothing being left. A positive ageThreshold
+// says why the selection is empty and how to reach every closed wisp anyway.
+func renderNoClosedWisps(capped bool, ageThreshold time.Duration) error {
 	if jsonOutput {
 		answer := map[string]interface{}{
 			"deleted_count": 0,
 			"message":       "No closed wisps to delete",
+		}
+		if ageThreshold > 0 {
+			answer["message"] = fmt.Sprintf("No closed wisps to delete (none idle for more than %v)", ageThreshold)
+			answer["age_threshold"] = ageThreshold.String()
+			if !capped {
+				answer["hint"] = wispPurgeZeroAgeHint
+			}
 		}
 		if capped {
 			answer["candidates_capped"] = true
@@ -1078,6 +1160,9 @@ func renderNoClosedWisps(capped bool) error {
 		return outputJSON(answer)
 	}
 	fmt.Println("No closed wisps to delete")
+	if ageThreshold > 0 {
+		fmt.Printf("None idle for more than %v. %s\n", ageThreshold, wispPurgeZeroAgeHint)
+	}
 	if capped {
 		fmt.Printf("Note: %s.\n", wispPurgeCappedHint)
 	}

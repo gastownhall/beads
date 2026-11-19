@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -69,9 +70,10 @@ func TestEmbeddedWispGCPurgeClosedDoesNotCascadeIntoLiveSteps(t *testing.T) {
 
 	// Patrol cycle: the completed first step is closed, then the formula's GC
 	// step purges closed wisps. The other 25 steps are live work (open) and
-	// must survive the purge.
+	// must survive the purge. --age 0s keeps this test on the purge-all
+	// selection: the steps closed moments ago are inside the default floor.
 	bdClose(t, bd, dir, stepIDs[0])
-	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--age", "0s")
 
 	// The closed step itself is gone.
 	bdShowFail(t, bd, dir, stepIDs[0])
@@ -94,6 +96,7 @@ func TestEmbeddedWispGCPurgeClosedDoesNotCascadeIntoLiveSteps(t *testing.T) {
 // TestEmbeddedWispGCPurgeClosedStillPurgesFullyClosedMolecules guards the other side
 // of the fix: when EVERY step is closed, gc --closed --force must still remove
 // the whole molecule. Restricting cascade must not break complete cleanup.
+// --age 0s keeps the just-closed steps inside the purge-all selection.
 func TestEmbeddedWispGCPurgeClosedStillPurgesFullyClosedMolecules(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -118,9 +121,67 @@ func TestEmbeddedWispGCPurgeClosedStillPurgesFullyClosedMolecules(t *testing.T) 
 		bdClose(t, bd, dir, id)
 	}
 
-	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--age", "0s")
 
 	for _, id := range stepIDs {
 		bdShowFail(t, bd, dir, id)
 	}
+}
+
+// TestEmbeddedWispGCPurgeClosedSparesFreshAuditBearingWisp asserts the
+// behaviour GH#8202 expects: `bd mol wisp gc --closed --force` must not
+// hard-delete a wisp that closed moments ago and carries a report in its
+// notes. The wisps table is Dolt-ignored, so the delete is unrecoverable.
+func TestEmbeddedWispGCPurgeClosedSparesFreshAuditBearingWisp(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pc3")
+
+	report := bdCreate(t, bd, dir, "patrol report step", "--ephemeral").ID
+	bdUpdate(t, bd, dir, report, "--notes", "patrol report: 0 reaped / 0 purged / 0 anomalies")
+	bdClose(t, bd, dir, report)
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+
+	if !bdShowSucceeds(t, bd, dir, report) {
+		t.Errorf("gc --closed --force hard-deleted wisp %s seconds after it closed, along with its report notes", report)
+	}
+}
+
+// TestEmbeddedWispGCPurgeClosedKeepsRecentlyClosedWisps is the GH#8202
+// regression for the closed-GC age floor: `--closed` now honors the same
+// --age threshold as abandoned-wisp GC (default 1h), so a wisp closed moments
+// ago survives the default purge — and the escape hatch still works, because
+// `--age 0s` selects every closed wisp regardless of age.
+func TestEmbeddedWispGCPurgeClosedKeepsRecentlyClosedWisps(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pc4")
+
+	fresh := bdCreate(t, bd, dir, "finished moments ago", "--ephemeral").ID
+	bdClose(t, bd, dir, fresh)
+
+	// Default run: --age defaults to 1h, so a wisp closed seconds ago stays,
+	// and the output names the threshold and the zero-age escape hatch.
+	out := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+	if !bdShowSucceeds(t, bd, dir, fresh) {
+		t.Errorf("default gc --closed --force hard-deleted wisp %s seconds after it closed", fresh)
+	}
+	for _, want := range []string{"1h", "--age 0s"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("gc --closed --force output does not explain the %q contract:\n%s", want, out)
+		}
+	}
+
+	// Escape hatch: --age 0s keeps the legacy purge-all behavior.
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--age", "0s")
+	bdShowFail(t, bd, dir, fresh)
 }

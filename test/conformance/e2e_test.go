@@ -247,14 +247,16 @@ var corpus = []scenario{
 		{"show", "cf-ro2", "--json"},
 	}},
 
-	// bd mol wisp list / gc --closed --force: wisps-table routing (Ephemeral=true) +
-	// closed-wisp cascade delete. First list shows cf-wg1; gc deletes exactly cf-wg1;
-	// final list --all is empty. --closed --force avoids the time-dependent age path.
+	// bd mol wisp list / gc --closed --force --age 0s: wisps-table routing
+	// (Ephemeral=true) + closed-wisp delete. First list shows cf-wg1; gc deletes
+	// exactly cf-wg1; final list --all is empty. --age 0s keeps the scenario on
+	// the purge-all selection: closed GC now honors --age (default 1h, GH#8202),
+	// and cf-wg1 closed moments ago is inside that floor.
 	{name: "wisp-list-gc-closed", steps: [][]string{
 		{"create", "w", "--id", "cf-wg1", "-t", "task", "--ephemeral"},
 		{"mol", "wisp", "list", "--json"},
 		{"close", "cf-wg1"},
-		{"mol", "wisp", "gc", "--closed", "--force", "--json"},
+		{"mol", "wisp", "gc", "--closed", "--force", "--age", "0s", "--json"},
 		{"mol", "wisp", "list", "--all", "--json"},
 	}},
 

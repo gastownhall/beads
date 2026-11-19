@@ -274,7 +274,7 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	}
 
 	if len(closedIssues) == 0 {
-		return renderNoClosedWisps(force && !dryRun && scanCapped)
+		return renderNoClosedWisps(force && !dryRun && scanCapped, 0)
 	}
 
 	ids := make([]string, len(closedIssues))
