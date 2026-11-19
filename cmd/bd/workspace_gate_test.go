@@ -1323,3 +1323,34 @@ func TestAcquireInitMutationGateSharedServerResidentHolder(t *testing.T) {
 		})
 	}
 }
+
+// AC-2: while ordinary shared-server init holds its complete gate set,
+// another project's ordinary command acquires its own gates and proceeds.
+func TestAcquireInitMutationGateSharedServerOtherCommandProceeds(t *testing.T) {
+	f := newSharedServerGateFixture(t)
+	t.Cleanup(releaseWorkspaceGates)
+	t.Setenv(sharedGateWaitEnv, "300ms")
+	beadsDir := newProjectBeadsDir(t, false)
+
+	initHold, err := acquireInitMutationGate(context.Background(), beadsDir, f.sharedRoot, nil)
+	if err != nil {
+		t.Fatalf("init gate: %v", err)
+	}
+	t.Cleanup(func() { _ = initHold.Release() })
+
+	var cmdErr error
+	stderr := captureStderr(t, func() {
+		cmdErr = acquireCommandWorkspaceGates(context.Background(), &cobra.Command{Use: "list"}, f.otherBeadsDir)
+	})
+	if cmdErr != nil {
+		t.Fatalf("other project's command blocked by an ordinary init: %v\nstderr: %s", cmdErr, stderr)
+	}
+	if workspaceGateHandle == nil || workspaceGateHandle.Empty() {
+		t.Fatal("other project's command proceeded without holding its gates")
+	}
+	ws, err := workspacegate.ForWorkspace(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertGateBusy(t, ws, workspacegate.Shared, "init's workspace while the other command runs")
+}
