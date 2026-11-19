@@ -1701,3 +1701,117 @@ func TestApplyLoops_LoopStepNeedsCarriedThroughExpansion(t *testing.T) {
 		t.Errorf("land needs = %v; want the last expanded step %q", land.Needs, "round.iter2.work")
 	}
 }
+
+// bd-xx3ma9 (#7882): a formula whose loop expands past the 10000-step budget
+// must fail fast instead of materializing every iteration.
+func TestApplyLoops_CountOverExpansionLimitFails(t *testing.T) {
+	steps := []*Step{{
+		ID:    "big",
+		Title: "Big loop",
+		Loop: &LoopSpec{
+			Count: 10001,
+			Body:  []*Step{{ID: "work", Title: "Work"}},
+		},
+	}}
+
+	result, err := ApplyLoops(steps)
+	if err == nil {
+		t.Fatalf("ApplyLoops expanded a 10001-iteration loop into %d steps; want an expansion limit error", len(result))
+	}
+	if !strings.Contains(err.Error(), "expansion limit exceeded") {
+		t.Fatalf("ApplyLoops error = %v; want an expansion limit error", err)
+	}
+}
+
+// bd-xx3ma9 (#7882): the expansion limit is a typed sentinel the cook
+// boundaries can tell apart from a malformed formula, and the refusal names
+// the offending loop and the limit.
+func TestApplyLoops_ExpansionLimitErrorIsMatchable(t *testing.T) {
+	steps := []*Step{{
+		ID: "big",
+		Loop: &LoopSpec{
+			Count: 10001,
+			Body:  []*Step{{ID: "work", Title: "Work"}},
+		},
+	}}
+
+	result, err := ApplyLoops(steps)
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyLoops error = %v; want one wrapping ErrExpansionLimit", err)
+	}
+	if result != nil {
+		t.Errorf("ApplyLoops result = %d steps; want no materialization of an over-limit loop", len(result))
+	}
+	for _, want := range []string{"expansion limit exceeded", "10000"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ApplyLoops error = %v; want it to name %q", err, want)
+		}
+	}
+}
+
+// bd-xx3ma9 (#7882): a range loop is bounded by the same budget, and a range
+// too wide to ever fit is refused before the first iteration is built.
+func TestApplyLoops_RangeOverExpansionLimitFails(t *testing.T) {
+	steps := []*Step{{
+		ID: "wide",
+		Loop: &LoopSpec{
+			Range: "1..10001",
+			Body:  []*Step{{ID: "work", Title: "Work"}},
+		},
+	}}
+
+	result, err := ApplyLoops(steps)
+	if err == nil {
+		t.Fatalf("ApplyLoops expanded a 10001-value range into %d steps; want an expansion limit error", len(result))
+	}
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyLoops error = %v; want one wrapping ErrExpansionLimit", err)
+	}
+}
+
+// bd-xx3ma9 (#7882): a huge range is refused before any iteration is cloned,
+// rather than materializing steps until the budget notices.
+func TestApplyLoops_HugeRangeFailsBeforeIterating(t *testing.T) {
+	steps := []*Step{{
+		ID: "huge",
+		Loop: &LoopSpec{
+			Range: "1..1000000000",
+			Body:  []*Step{{ID: "work", Title: "Work"}},
+		},
+	}}
+
+	result, err := ApplyLoops(steps)
+	if err == nil {
+		t.Fatalf("ApplyLoops expanded a billion-value range into %d steps; want an expansion limit error", len(result))
+	}
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyLoops error = %v; want one wrapping ErrExpansionLimit", err)
+	}
+}
+
+// bd-xx3ma9 (#7882): nested loops share the one budget, so 101-by-100 cannot
+// hide 10100 fresh steps behind each nesting level; the inner loop's clones
+// are charged once and stop counting when they expand.
+func TestApplyLoops_NestedLoopsShareTheBudget(t *testing.T) {
+	over := []*Step{{
+		ID: "outer",
+		Loop: &LoopSpec{
+			Count: 101,
+			Body: []*Step{{
+				ID: "inner",
+				Loop: &LoopSpec{
+					Count: 100,
+					Body:  []*Step{{ID: "leaf", Title: "Leaf"}},
+				},
+			}},
+		},
+	}}
+
+	result, err := ApplyLoops(over)
+	if err == nil {
+		t.Fatalf("ApplyLoops expanded a 101-by-100 loop into %d steps; want an expansion limit error", len(result))
+	}
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyLoops error = %v; want one wrapping ErrExpansionLimit", err)
+	}
+}

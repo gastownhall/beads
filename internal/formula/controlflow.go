@@ -21,9 +21,24 @@ import (
 // A reference to a loop step, which no longer exists after expansion, is
 // retargeted to the loop's ends, so it waits for the whole loop (GH#7636).
 // Returns a new steps slice with loops expanded.
+//
+// The expansion is bounded: one loop (or a whole graph, once the budget is
+// shared with the other cook transformations) may not expand past
+// MaxExpandedSteps steps, and the refusal wraps ErrExpansionLimit.
 func ApplyLoops(steps []*Step) ([]*Step, error) {
+	budget := NewStepBudget()
+	if err := budget.Seed(steps); err != nil {
+		return nil, err
+	}
+	return ApplyLoopsWithBudget(steps, budget)
+}
+
+// ApplyLoopsWithBudget is ApplyLoops on a budget shared with the rest of one
+// resolution (see StepBudget). It does not re-seed; the caller already charged
+// the input graph.
+func ApplyLoopsWithBudget(steps []*Step, budget *StepBudget) ([]*Step, error) {
 	ends := make(map[string][]string)
-	result, err := applyLoops(steps, ends)
+	result, err := applyLoops(steps, ends, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -33,15 +48,16 @@ func ApplyLoops(steps []*Step) ([]*Step, error) {
 
 // applyLoops expands loops like ApplyLoops and records each expanded loop's
 // ends (loopEnds) in ends, keyed by the loop step's ID, without retargeting.
-func applyLoops(steps []*Step, ends map[string][]string) ([]*Step, error) {
+func applyLoops(steps []*Step, ends map[string][]string, budget *StepBudget) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps))
 
 	for _, step := range steps {
 		if step.Loop == nil {
-			// No loop - recursively process children
+			// No loop - recursively process children. Cloning is same-size
+			// copying: no charge.
 			clone := cloneStep(step)
 			if len(step.Children) > 0 {
-				children, err := applyLoops(step.Children, ends)
+				children, err := applyLoops(step.Children, ends, budget)
 				if err != nil {
 					return nil, err
 				}
@@ -57,7 +73,7 @@ func applyLoops(steps []*Step, ends map[string][]string) ([]*Step, error) {
 		}
 
 		// Expand the loop
-		expanded, err := expandLoop(step, ends)
+		expanded, err := expandLoop(step, ends, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -122,19 +138,40 @@ func validateLoopSpec(loop *LoopSpec, stepID string) error {
 }
 
 // expandLoop expands a loop step into its constituent steps.
-func expandLoop(step *Step, ends map[string][]string) ([]*Step, error) {
-	return expandLoopWithVars(step, nil, ends)
+func expandLoop(step *Step, ends map[string][]string, budget *StepBudget) ([]*Step, error) {
+	return expandLoopWithVars(step, nil, ends, budget)
 }
 
 // expandLoopWithVars expands a loop step using the given variable context.
 // The vars map is used to resolve range expressions with variables.
 // The loop's ends, and those of nested loops, are recorded in ends.
-func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]string) ([]*Step, error) {
+func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]string, budget *StepBudget) ([]*Step, error) {
 	var result []*Step
+
+	// The loop's marker and its unexpanded body leave the graph as the
+	// iterations take their place; release their charge first so a
+	// replacement that stays under the limit fits even when the loop's own
+	// subtree was large.
+	budget.Release(countStepGraph(step))
+	// Every iteration clones the whole body, nested loop bodies included
+	// (they are cloned before they expand, and stop counting here once they
+	// do) — so one iteration costs what countStepGraph charges the body.
+	iterCost := countGraphSteps(step.Loop.Body)
+	// A loop whose iteration count alone cannot fit is refused before the
+	// first clone: every iteration costs at least one step.
+	overBudget := func(what string) error {
+		return fmt.Errorf("%w: loop %q %s", ErrExpansionLimit, step.ID, what)
+	}
+	if iterations, ok := budgetedLoopIterations(step, vars); ok && iterations > budget.Remaining() {
+		return nil, overBudget(fmt.Sprintf("would expand past %d steps", budget.Limit()))
+	}
 
 	if step.Loop.Count > 0 {
 		// Fixed-count loop: expand body N times
 		for i := 1; i <= step.Loop.Count; i++ {
+			if err := budget.Reserve(iterCost, fmt.Sprintf("loop %q iteration %d", step.ID, i)); err != nil {
+				return nil, err
+			}
 			iterSteps, err := expandLoopIteration(step, i, nil)
 			if err != nil {
 				return nil, err
@@ -144,7 +181,7 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 
 		// Recursively expand any nested loops FIRST
 		var err error
-		result, err = applyLoops(result, ends)
+		result, err = applyLoops(result, ends, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -167,15 +204,23 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 				step.ID, rangeSpec.End, rangeSpec.Start)
 		}
 
-		// Expand body for each value in range
+		// Expand body for each value in range. The span has already passed the
+		// pre-check above, so it fits the budget and counting it cannot
+		// overflow; stepping val itself to End would increment past the
+		// endpoint (and, at the top of the range, wrap around into a second
+		// lap), so the loop runs by count instead.
 		count := rangeSpec.End - rangeSpec.Start + 1
 		iterNum := 0
-		for val := rangeSpec.Start; val <= rangeSpec.End; val++ {
+		for i := 0; i < count; i++ {
+			val := rangeSpec.Start + i
 			iterNum++
 			// Build iteration vars: include the loop variable if specified
 			iterVars := make(map[string]string)
 			if step.Loop.Var != "" {
 				iterVars[step.Loop.Var] = fmt.Sprintf("%d", val)
+			}
+			if err := budget.Reserve(iterCost, fmt.Sprintf("loop %q iteration %d", step.ID, iterNum)); err != nil {
+				return nil, err
 			}
 			iterSteps, err := expandLoopIteration(step, iterNum, iterVars)
 			if err != nil {
@@ -185,7 +230,7 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 		}
 
 		// Recursively expand any nested loops FIRST
-		result, err = applyLoops(result, ends)
+		result, err = applyLoops(result, ends, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -197,6 +242,9 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 	} else {
 		// Conditional loop: expand once with loop metadata
 		// The runtime executor will re-run until condition is met or max reached
+		if err := budget.Reserve(iterCost, fmt.Sprintf("loop %q iteration 1", step.ID)); err != nil {
+			return nil, err
+		}
 		iterSteps, err := expandLoopIteration(step, 1, nil)
 		if err != nil {
 			return nil, err
@@ -215,7 +263,7 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 		}
 
 		// Recursively expand any nested loops
-		result, err = applyLoops(iterSteps, ends)
+		result, err = applyLoops(iterSteps, ends, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -235,6 +283,42 @@ func expandLoopWithVars(step *Step, vars map[string]string, ends map[string][]st
 		ends[step.ID] = loopEnds(result)
 	}
 	return result, nil
+}
+
+// budgetedLoopIterations returns the loop's iteration count when a sound,
+// overflow-safe lower bound on it is known: the fixed count, or the count of a
+// range whose subtraction does not wrap. ok is false for a conditional loop and
+// for a range that does not resolve here, where the per-iteration reservation
+// below is the only bound; each iteration costs at least one step, so a count
+// above what remains cannot fit regardless of the body's size.
+func budgetedLoopIterations(step *Step, vars map[string]string) (int, bool) {
+	if step.Loop == nil {
+		return 0, false
+	}
+	if step.Loop.Count > 0 {
+		return step.Loop.Count, true
+	}
+	if step.Loop.Range == "" {
+		// Conditional loop: one cooked iteration; the reservation covers it.
+		return 0, false
+	}
+	rangeSpec, err := ParseRange(step.Loop.Range, vars)
+	if err != nil || rangeSpec.End < rangeSpec.Start {
+		// The range branch reports the malformed range itself; no bound here.
+		return 0, false
+	}
+	span := rangeSpec.End - rangeSpec.Start
+	if span < 0 {
+		// The subtraction wrapped: the span is wider than the machine can
+		// count, which is wider than any budget.
+		return int(^uint(0) >> 1), true
+	}
+	if span == int(^uint(0)>>1) {
+		// span+1 would overflow; span alone still proves the pre-check's
+		// point.
+		return span, true
+	}
+	return span + 1, true
 }
 
 // loopEnds returns the steps a reference to a loop waits for: the top-level
@@ -746,11 +830,23 @@ func applyGatesWithMap(stepMap map[string]*Step, compose *ComposeRules) error {
 // 3. Gates (add condition labels)
 //
 // Returns a new steps slice. The original steps slice is not modified.
+//
+// Loop expansion is bounded by MaxExpandedSteps (see ApplyLoops).
 func ApplyControlFlow(steps []*Step, compose *ComposeRules) ([]*Step, error) {
+	budget := NewStepBudget()
+	if err := budget.Seed(steps); err != nil {
+		return nil, fmt.Errorf("applying loops: %w", err)
+	}
+	return ApplyControlFlowWithBudget(steps, compose, budget)
+}
+
+// ApplyControlFlowWithBudget is ApplyControlFlow on a budget shared with the
+// rest of one resolution (see StepBudget). It does not re-seed.
+func ApplyControlFlowWithBudget(steps []*Step, compose *ComposeRules, budget *StepBudget) ([]*Step, error) {
 	var err error
 
 	// Apply loops first (expands steps) - ApplyLoops already returns new slice
-	steps, err = ApplyLoops(steps)
+	steps, err = ApplyLoopsWithBudget(steps, budget)
 	if err != nil {
 		return nil, fmt.Errorf("applying loops: %w", err)
 	}

@@ -4,6 +4,7 @@ go_library(
     name = "formula",
     srcs = [
         "advice.go",
+        "budget.go",
         "condition.go",
         "controlflow.go",
         "expand.go",
