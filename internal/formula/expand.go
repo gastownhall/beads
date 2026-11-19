@@ -33,7 +33,28 @@ const DefaultMaxExpansionDepth = 5
 //
 // The parser is used to load referenced expansion formulas by name.
 // If parser is nil, no expansions are applied.
+//
+// Expansion is bounded: the replaced step's charge is released and the
+// replacement's is reserved from one budget shared with the rest of the
+// resolution, so chained rules cannot multiply the graph past
+// MaxExpandedSteps (see StepBudget).
 func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*Step, error) {
+	if compose == nil || parser == nil {
+		return steps, nil
+	}
+	if len(compose.Expand) == 0 && len(compose.Map) == 0 {
+		return steps, nil
+	}
+	budget := NewStepBudget()
+	if err := budget.Seed(steps); err != nil {
+		return nil, err
+	}
+	return ApplyExpansionsWithBudget(steps, compose, parser, budget)
+}
+
+// ApplyExpansionsWithBudget is ApplyExpansions on a budget shared with the
+// rest of one resolution (see StepBudget). It does not re-seed.
+func ApplyExpansionsWithBudget(steps []*Step, compose *ComposeRules, parser *Parser, budget *StepBudget) ([]*Step, error) {
 	if compose == nil || parser == nil {
 		return steps, nil
 	}
@@ -76,6 +97,14 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 		// Merge formula default vars with rule overrides
 		vars := mergeVars(expFormula, rule.Vars)
+
+		// The target's subtree leaves the graph; the template that replaces
+		// it is reserved BEFORE it is cloned, so an over-limit expansion is
+		// refused before the allocation that would have proven the point.
+		budget.Release(countStepGraph(targetStep))
+		if err := budget.Reserve(countGraphSteps(expFormula.Template), fmt.Sprintf("expand rule %q on %q", rule.With, rule.Target)); err != nil {
+			return nil, err
+		}
 
 		// Expand the target step (start at depth 0)
 		expandedSteps, err := expandStep(targetStep, expFormula.Template, vars)
@@ -134,6 +163,29 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 		// Expand each matching step
 		for _, targetStep := range toExpand {
+			// Re-fetch by ID: an earlier expansion in this same pass may have
+			// replaced a subtree that held this step (stale — skip), or cloned
+			// the whole slice it lives in via UpdateDependenciesForExpansion
+			// (same-size copying — the clone IS the live step now). Pointer
+			// identity cannot tell those apart; stepMap always can.
+			live, ok := stepMap[targetStep.ID]
+			if !ok {
+				// Stale match: an earlier expansion replaced a subtree that
+				// held this step, so it is no longer in the graph — its charge
+				// left with that subtree, and releasing anything here would
+				// count steps that are not in it. The pre-existing behavior for
+				// a stale match was to build the expansion and drop it;
+				// skipping the build keeps the budget from paying for output
+				// nobody receives.
+				continue
+			}
+			targetStep = live
+			// Same ordering as the expand rules above: release what leaves,
+			// reserve what replaces it, before the clone.
+			budget.Release(countStepGraph(targetStep))
+			if err := budget.Reserve(countGraphSteps(expFormula.Template), fmt.Sprintf("map rule %q on %q", rule.Select, targetStep.ID)); err != nil {
+				return nil, err
+			}
 			expandedSteps, err := expandStep(targetStep, expFormula.Template, vars)
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)

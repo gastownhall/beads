@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1327,4 +1328,139 @@ func TestExpansionVarRefs(t *testing.T) {
 			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
+}
+
+// bigTemplate builds an expansion template n steps wide, for budget tests that
+// need growth a real formula would never spell out by hand.
+func bigTemplate(t *testing.T, name string, n int) []*Step {
+	t.Helper()
+	steps := make([]*Step, 0, n)
+	for i := 0; i < n; i++ {
+		steps = append(steps, &Step{ID: fmt.Sprintf("%s.step%d", name, i), Title: name})
+	}
+	return steps
+}
+
+// expansionTestParser returns a parser whose cache already holds an expansion
+// formula, the way a formula loaded from a search path would be.
+func expansionTestParser(t *testing.T, f *Formula) *Parser {
+	t.Helper()
+	parser := NewParser(t.TempDir())
+	parser.cache[f.Formula] = f
+	return parser
+}
+
+// bd-xx3ma9 (#7882): chained expand rules share one budget, so two rules that
+// each fit on their own cannot multiply the graph past the limit together.
+func TestApplyExpansionsWithBudget_ChainedRulesOverLimit(t *testing.T) {
+	parser := expansionTestParser(t, &Formula{
+		Formula:  "wide",
+		Type:     TypeExpansion,
+		Template: bigTemplate(t, "wide", 6000),
+	})
+	steps := []*Step{{ID: "a", Title: "A"}, {ID: "b", Title: "B"}}
+	compose := &ComposeRules{Expand: []*ExpandRule{
+		{Target: "a", With: "wide"},
+		{Target: "b", With: "wide"},
+	}}
+
+	result, err := ApplyExpansions(steps, compose, parser)
+	if err == nil {
+		t.Fatalf("ApplyExpansions chained two 6000-step rules into %d steps; want an expansion limit error", len(result))
+	}
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyExpansions error = %v; want one wrapping ErrExpansionLimit", err)
+	}
+	if !strings.Contains(err.Error(), `"wide"`) {
+		t.Errorf("ApplyExpansions error = %v; want it to name the rule's formula", err)
+	}
+}
+
+// bd-xx3ma9 (#7882): the budget is one per resolution, so compose growth is
+// charged against what the loops already expanded: 6000 loop steps plus a
+// 5000-step expansion cannot fit where either alone could.
+func TestApplyExpansionsWithBudget_SharesBudgetWithLoops(t *testing.T) {
+	parser := expansionTestParser(t, &Formula{
+		Formula:  "tail",
+		Type:     TypeExpansion,
+		Template: bigTemplate(t, "tail", 5000),
+	})
+	steps := []*Step{
+		{ID: "round", Loop: &LoopSpec{Count: 6000, Body: []*Step{{ID: "work", Title: "Work"}}}},
+		{ID: "tail", Title: "Tail"},
+	}
+
+	budget := NewStepBudget()
+	if err := budget.Seed(steps); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	expanded, err := ApplyControlFlowWithBudget(steps, nil, budget)
+	if err != nil {
+		t.Fatalf("ApplyControlFlowWithBudget: %v", err)
+	}
+	result, err := ApplyExpansionsWithBudget(expanded, &ComposeRules{
+		Expand: []*ExpandRule{{Target: "tail", With: "tail"}},
+	}, parser, budget)
+	if err == nil {
+		t.Fatalf("6000 loop steps plus a 5000-step expansion produced %d steps; want an expansion limit error", len(result))
+	}
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyExpansionsWithBudget error = %v; want one wrapping ErrExpansionLimit", err)
+	}
+}
+
+// bd-xx3ma9 (#7882): a map rule matching many steps pays the budget once per
+// match, not once per rule.
+func TestApplyExpansionsWithBudget_MapOverLimit(t *testing.T) {
+	parser := expansionTestParser(t, &Formula{
+		Formula:  "fan",
+		Type:     TypeExpansion,
+		Template: bigTemplate(t, "fan", 4000),
+	})
+	steps := []*Step{
+		{ID: "t1", Title: "T"},
+		{ID: "t2", Title: "T"},
+		{ID: "t3", Title: "T"},
+	}
+	compose := &ComposeRules{Map: []*MapRule{{Select: "t*", With: "fan"}}}
+
+	result, err := ApplyExpansions(steps, compose, parser)
+	if err == nil {
+		t.Fatalf("ApplyExpansions mapped three 4000-step templates into %d steps; want an expansion limit error", len(result))
+	}
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyExpansions error = %v; want one wrapping ErrExpansionLimit", err)
+	}
+}
+
+// bd-xx3ma9 (#7882): a map rule can match a parent and a child in one pass;
+// when the parent's expansion removes the child, the stale match must not
+// release a subtree that is no longer in the graph (the release would hand
+// later rules headroom the graph does not have) and must not count its
+// dropped output.
+func TestApplyExpansionsWithBudget_OverlappingMatchesDoNotUnderflow(t *testing.T) {
+	parser := expansionTestParser(t, &Formula{
+		Formula:  "swap",
+		Type:     TypeExpansion,
+		Template: []*Step{{ID: "x", Title: "X"}, {ID: "y", Title: "Y"}},
+	})
+	steps := []*Step{
+		{ID: "p", Title: "P", Children: []*Step{{ID: "p.c", Title: "C"}}},
+		{ID: "keep", Title: "Keep"},
+	}
+	compose := &ComposeRules{Map: []*MapRule{{Select: "p*", With: "swap"}}}
+
+	result, err := ApplyExpansions(steps, compose, parser)
+	if err != nil {
+		t.Fatalf("ApplyExpansions refused a map whose matches overlap: %v", err)
+	}
+	var ids []string
+	for _, s := range result {
+		ids = append(ids, s.ID)
+	}
+	// The parent's replacement landed; the child — which lived inside the
+	// parent's subtree and left with it — contributed nothing.
+	if fmt.Sprint(ids) != "[x y keep]" {
+		t.Fatalf("result IDs = %v; want the parent's replacement and the untouched sibling only", ids)
+	}
 }
