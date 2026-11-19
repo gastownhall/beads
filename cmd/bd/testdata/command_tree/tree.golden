@@ -6150,6 +6150,14 @@ bd ready
     | Use --claim to atomically claim the first ready issue matching the filters:
     |   bd ready --claim --json
     |
+    | Use --exclude-parents to hide parents while their children are still open:
+    |   bd ready --exclude-parents   # Same listing, minus every parent the close gate
+    |                              # still counts open children for
+    |
+    | The exclusion follows the close gate's open-children rule (both table families,
+    | pinned children included), so what it hides is exactly what bd close still
+    | refuses — a parent whose children are all closed stays an ordinary ready row.
+    |
     | This is useful for agents executing molecules to see which steps can run next.
   flag --assignee -a type=string default="" usage="Filter by assignee"
   flag --brief type=bool default="false" usage="Omit the free-form text (description, design, acceptance criteria, notes, payload, waiters) from each row. Filters that read those fields still select on them. An omitted field is indistinguishable from an empty one; fetch a whole issue with bd show. Requires --json, and cannot be combined with --claim, --gated, --mol or --explain."

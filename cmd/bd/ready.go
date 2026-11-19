@@ -41,6 +41,14 @@ Use --gated to find molecules ready for gate-resume dispatch:
 Use --claim to atomically claim the first ready issue matching the filters:
   bd ready --claim --json
 
+Use --exclude-parents to hide parents while their children are still open:
+  bd ready --exclude-parents   # Same listing, minus every parent the close gate
+                             # still counts open children for
+
+The exclusion follows the close gate's open-children rule (both table families,
+pinned children included), so what it hides is exactly what bd close still
+refuses — a parent whose children are all closed stays an ordinary ready row.
+
 This is useful for agents executing molecules to see which steps can run next.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,

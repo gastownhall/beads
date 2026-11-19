@@ -172,6 +172,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd ready --exclude-parents`: hide parents while their children are open.**
+  The ready listing gains an opt-in filter that drops every parent the close
+  gate still counts open children for — both child table families, pinned
+  children included, the child's own readiness or visibility irrelevant — so
+  what the flag hides is exactly what `bd close` still refuses, and a parent
+  whose children are all closed stays an ordinary ready row. The flag applies
+  to the listing, the `--json` totals, and `bd ready --claim` (the claim
+  takes the first eligible member of the excluded pool), and refuses the
+  special modes (`--gated`, `--mol`, `--explain`) with a usage error naming
+  both flags. The current `bd serve` HTTP transport does not carry the
+  filter: a proxied `bd ready --exclude-parents` fails with a typed
+  unsupported error before any wider request is answered. The
+  hierarchy-conflict advice for blocking your own descendant now names the
+  two tools instead of `bd gate`: create the follow-up as its own issue
+  with `bd create --waits-for <parent>`, or hide the parent from ready work
+  while its children are open with the new flag. (GH#6817)
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,

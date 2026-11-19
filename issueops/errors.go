@@ -533,11 +533,20 @@ type DependencyHierarchyConflictError struct {
 // subtree no longer darkens it, and the sentence described a deadlock that no
 // longer happens. The refusal itself stands — a blocks edge is not the way to
 // say "I close after my children" — so the reason has to say what is.
+//
+// The ADVICE it hands out is the vocabulary the two real goals spell with
+// (GH#6817): a follow-up that should wait for the subtree's close is its own
+// issue (`bd create --waits-for <the parent>`, the fanout gate), and an issue
+// that should stay OUT of ready work while its children are open is hidden by
+// `bd ready --exclude-parents` — the same close-gate open-children rule that
+// refuses the close, never a blocks edge from below. The ancestor branch
+// keeps its own advice, which is about the deadlock shape itself and names
+// no tool.
 func (e *DependencyHierarchyConflictError) Error() string {
 	if e.BlockerIsAncestor {
 		return fmt.Sprintf("%s cannot be blocked by its ancestor %s: %s cannot close until its descendants finish, so the gate would never clear",
 			e.IssueID, e.BlockerID, e.BlockerID)
 	}
-	return fmt.Sprintf("%s cannot be blocked by its descendant %s: waiting on your own subtree is a close gate, not a blocks edge — use a waits-for gate over the children (bd gate)",
-		e.IssueID, e.BlockerID)
+	return fmt.Sprintf("%s cannot be blocked by its descendant %s: waiting on your own subtree is a close gate, not a blocks edge — a follow-up that waits for %s's subtree is its own issue (bd create --waits-for %s), and if the goal is to keep %s out of ready work while its children are open, that is bd ready --exclude-parents",
+		e.IssueID, e.BlockerID, e.IssueID, e.IssueID, e.IssueID)
 }
