@@ -5,14 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -180,51 +178,47 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 		ids[i] = issue.ID
 	}
 
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
-		// Cascade must stay OFF: findAbandonedWisps already expanded dependents
-		// and kept only unprotected ones that meet --age; a cascade here
-		// re-expands to ALL transitive dependents, bypassing that protection
-		// (GH#4394) and sweeping fresh children past the --age filter.
-		// Mirrors runWispGC in wisp.go.
-		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
-			IDs:                  ids,
-			Cascade:              false,
-			UpdateTextReferences: true,
-		}, currentActor())
+	// One unit of work per chunk of the selection (GH#6246), as the closed
+	// purge below and the direct route do: one unit for the whole selection
+	// was one transaction whose blocked-state recompute grew with it. A
+	// chunk's counts join the outcome only once its unit of work committed.
+	outcome := runWispPurgeChunks(ctx, ids, func(ctx context.Context, chunk []string) (wispPurgeChunk, error) {
+		res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
+			// Cascade must stay OFF: findAbandonedWisps already expanded
+			// dependents and kept only unprotected ones that meet --age; a
+			// cascade here re-expands to ALL transitive dependents, bypassing
+			// that protection (GH#4394) and sweeping fresh children past the
+			// --age filter. Mirrors runWispGCAbandoned in wisp.go.
+			res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
+				IDs:                  chunk,
+				Cascade:              false,
+				UpdateTextReferences: true,
+			}, currentActor())
+			if err != nil {
+				return domain.DeleteIssuesResult{}, "", err
+			}
+			return res, fmt.Sprintf("bd: wisp gc %d", res.DeletedCount), nil
+		})
 		if err != nil {
-			return domain.DeleteIssuesResult{}, "", err
+			return wispPurgeChunk{}, err
 		}
-		return res, fmt.Sprintf("bd: wisp gc %d", res.DeletedCount), nil
+		return wispPurgeChunkFromDomain(res), nil
 	})
-	if err != nil {
-		return HandleError("%v", err)
-	}
-
-	return renderWispGCDeleteResult(ids, res)
+	return renderWispPurgeOutcome(outcome, wispGCAbandonedReport)
 }
 
-func renderWispGCDeleteResult(ids []string, res domain.DeleteIssuesResult) error {
-	if jsonOutput {
-		return outputJSON(map[string]interface{}{
-			"deleted":              ids,
-			"deleted_count":        res.DeletedCount,
-			"dependencies_removed": res.DependenciesCount,
-			"labels_removed":       res.LabelsCount,
-			"events_removed":       res.EventsCount,
-			"references_updated":   res.ReferencesUpdated,
-			"orphaned_issues":      res.OrphanedIssues,
-		})
+// wispPurgeChunkFromDomain is what one committed proxied deletion unit
+// reported.
+func wispPurgeChunkFromDomain(res domain.DeleteIssuesResult) wispPurgeChunk {
+	return wispPurgeChunk{
+		deletedIDs:        res.DeletedIDs,
+		deleted:           res.DeletedCount,
+		dependencies:      res.DependenciesCount,
+		labels:            res.LabelsCount,
+		events:            res.EventsCount,
+		referencesUpdated: res.ReferencesUpdated,
+		orphaned:          res.OrphanedIssues,
 	}
-	fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), res.DeletedCount)
-	fmt.Printf("  Removed %d dependency link(s)\n", res.DependenciesCount)
-	fmt.Printf("  Removed %d label(s)\n", res.LabelsCount)
-	fmt.Printf("  Removed %d event(s)\n", res.EventsCount)
-	fmt.Printf("  Updated text references in %d issue(s)\n", res.ReferencesUpdated)
-	if len(res.OrphanedIssues) > 0 {
-		fmt.Printf("  %s Orphaned %d issue(s): %s\n",
-			ui.RenderWarn("⚠"), len(res.OrphanedIssues), strings.Join(res.OrphanedIssues, ", "))
-	}
-	return nil
 }
 
 func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, excludeTypes []types.IssueType) error {
@@ -329,15 +323,7 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		if err != nil {
 			return wispPurgeChunk{}, err
 		}
-		return wispPurgeChunk{
-			deletedIDs:        res.DeletedIDs,
-			deleted:           res.DeletedCount,
-			dependencies:      res.DependenciesCount,
-			labels:            res.LabelsCount,
-			events:            res.EventsCount,
-			referencesUpdated: res.ReferencesUpdated,
-			orphaned:          res.OrphanedIssues,
-		}, nil
+		return wispPurgeChunkFromDomain(res), nil
 	})
 	return renderWispPurgeOutcome(outcome, wispGCReport{withScanCapped: true, scanCapped: scanCapped})
 }
