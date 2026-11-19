@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/workspacegate"
@@ -420,7 +421,7 @@ func TestAcquireCommandWorkspaceGatesQueuesBehindWaitingInit(t *testing.T) {
 	initDone := make(chan error, 1)
 	var initHandle atomic.Pointer[workspacegate.MultiHandle]
 	go func() {
-		h, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, nil)
+		h, err := acquireInitMutationGate(context.Background(), initGateTestRequest(beadsDir, physicalRoot, nil))
 		initHandle.Store(h)
 		initDone <- err
 	}()
@@ -599,11 +600,11 @@ func TestAcquireInitMutationGateKeepsReplacementExclusiveDuringPreflight(t *test
 	}
 	firstResult := make(chan result, 1)
 	go func() {
-		h, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, func() error {
+		h, err := acquireInitMutationGate(context.Background(), initGateTestRequest(beadsDir, physicalRoot, func() error {
 			close(firstPreflightEntered)
 			<-allowFirstPreflight
 			return nil
-		})
+		}))
 		firstResult <- result{h: h, err: err}
 	}()
 	<-firstPreflightEntered
@@ -611,10 +612,10 @@ func TestAcquireInitMutationGateKeepsReplacementExclusiveDuringPreflight(t *test
 	secondPreflightEntered := make(chan struct{})
 	secondResult := make(chan result, 1)
 	go func() {
-		h, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, func() error {
+		h, err := acquireInitMutationGate(context.Background(), initGateTestRequest(beadsDir, physicalRoot, func() error {
 			close(secondPreflightEntered)
 			return nil
-		})
+		}))
 		secondResult <- result{h: h, err: err}
 	}()
 
@@ -655,6 +656,20 @@ func holdInitGatesFor(t *testing.T, beadsDir, physicalRoot string) *workspacegat
 	return h
 }
 
+// initGateTestRequest builds the ordinary init gate request the classic
+// (pre-shared-root-hold) tests model: non-destructive, non-shared-server,
+// per-project physical root. Shared-server and destructive variants fill
+// the fields themselves.
+func initGateTestRequest(beadsDir, physicalRoot string, preflight func() error) initGateRequest {
+	return initGateRequest{
+		beadsDir:     beadsDir,
+		physicalRoot: physicalRoot,
+		reinitLocal:  false,
+		sharedServer: false,
+		preflight:    preflight,
+	}
+}
+
 // A holder that outlasts the generic 5s exclusive budget but releases within
 // init's bound (a concurrent init takes ~8s on a shared server): init waits,
 // prints exactly one notice, then proceeds.
@@ -674,7 +689,7 @@ func TestAcquireInitMutationGateWaitsPastGenericBudget(t *testing.T) {
 	t.Cleanup(func() { released.Stop(); _ = holder.Release() })
 
 	start := time.Now()
-	h, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, nil)
+	h, err := acquireInitMutationGate(context.Background(), initGateTestRequest(beadsDir, physicalRoot, nil))
 	if err != nil {
 		t.Fatalf("init gate with holder released after %s: %v", holdFor, err)
 	}
@@ -704,10 +719,10 @@ func TestAcquireInitMutationGateFailsClearlyPastBound(t *testing.T) {
 
 	preflightRan := false
 	start := time.Now()
-	_, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, func() error {
+	_, err := acquireInitMutationGate(context.Background(), initGateTestRequest(beadsDir, physicalRoot, func() error {
 		preflightRan = true
 		return nil
-	})
+	}))
 	if err == nil {
 		t.Fatal("init gate acquired while a foreign holder kept it past the bound")
 	}
@@ -743,7 +758,7 @@ func TestAcquireInitMutationGateHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := acquireInitMutationGate(ctx, beadsDir, physicalRoot, nil)
+	_, err := acquireInitMutationGate(ctx, initGateTestRequest(beadsDir, physicalRoot, nil))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %v, want context.DeadlineExceeded", err)
 	}
@@ -783,14 +798,14 @@ func TestAcquireInitMutationGateReleasesOnPreflightError(t *testing.T) {
 	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
 	refusal := errors.New("destroy token rejected")
 
-	_, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, func() error {
+	_, err := acquireInitMutationGate(context.Background(), initGateTestRequest(beadsDir, physicalRoot, func() error {
 		return refusal
-	})
+	}))
 	if !errors.Is(err, refusal) {
 		t.Fatalf("init mutation gate error = %v, want preflight refusal", err)
 	}
 
-	h, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, nil)
+	h, err := acquireInitMutationGate(context.Background(), initGateTestRequest(beadsDir, physicalRoot, nil))
 	if err != nil {
 		t.Fatalf("init mutation gate remained held after refusal: %v", err)
 	}
@@ -1135,5 +1150,86 @@ func TestStrictReadonlyCommandCreatesNoGateFiles(t *testing.T) {
 	}
 	if len(gateFiles) != 0 {
 		t.Fatalf("bd --readonly created gate files %v\noutput: %s", gateFiles, out)
+	}
+}
+
+// bd-xicgb8 (GH#7122): in shared-server mode another project's long-running
+// `bd serve` holds its command gate set SHARED, which includes the shared
+// physical root. Initialising a NEW project only creates a new database on
+// that server, so ordinary init — which still holds its own workspace gate
+// EXCLUSIVELY — must not be refused by that unrelated resident holder.
+// The same plan applies with or without --external: external mode changes
+// who manages the server, not which directory init's maintenance exclusion
+// point is.
+func TestAcquireInitMutationGateNewSharedServerProjectNotBlockedByOtherProjectServe(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		prepBeads bool
+	}{
+		{name: "fresh workspace", prepBeads: false},
+		{name: "existing .beads", prepBeads: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetGateTestEnv(t)
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+			t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+			t.Setenv(initGateTimeoutEnv, "500ms")
+
+			// Project B: an existing shared-server workspace whose `bd serve`
+			// holds the chokepoint gate set SHARED for its whole lifetime.
+			otherBeadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(otherBeadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			meta := `{"backend":"dolt","database":"other","dolt_mode":"server","dolt_database":"other"}`
+			if err := os.WriteFile(filepath.Join(otherBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sharedRoot := doltserver.DoltDirPath(otherBeadsDir)
+			if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			serveGates, err := buildWorkspaceGateSet(otherBeadsDir)
+			if err != nil {
+				t.Fatalf("build other project's gate set: %v", err)
+			}
+			serveHold, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{}, serveGates...)
+			if err != nil {
+				t.Fatalf("other project's serve shared hold: %v", err)
+			}
+			t.Cleanup(func() { _ = serveHold.Release() })
+
+			// Project A: a repo running `bd init --shared-server` (with or
+			// without --external); the planned DB path is the shared dolt
+			// dir, exactly as init.go computes it. The existing-.beads
+			// variant models the resolver branch that re-resolves the same
+			// shared root from metadata.
+			newBeadsDir := filepath.Join(t.TempDir(), ".beads")
+			if tc.prepBeads {
+				if err := os.MkdirAll(newBeadsDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(newBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			planned := doltserver.DoltDirPath(newBeadsDir)
+			if planned != sharedRoot {
+				t.Fatalf("planned init root %q, want shared root %q", planned, sharedRoot)
+			}
+
+			h, err := acquireInitMutationGate(context.Background(), initGateRequest{
+				beadsDir:     newBeadsDir,
+				physicalRoot: planned,
+				reinitLocal:  false,
+				sharedServer: true,
+			})
+			if err != nil {
+				t.Fatalf("bd init for a new shared-server project refused while another project's bd serve runs: %v", err)
+			}
+			if err := h.Release(); err != nil {
+				t.Fatalf("release init gate: %v", err)
+			}
+		})
 	}
 }

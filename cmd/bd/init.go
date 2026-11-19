@@ -1273,7 +1273,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Workspace operation gate: bd init REPLACES/creates workspace state,
 		// so it holds the workspace gate (plus any resolvable physical-root
 		// gates, e.g. a shared-server dolt dir) EXCLUSIVELY for the rest of
-		// init. init is in noDbCommands, so the PersistentPreRunE chokepoint
+		// init — with ONE exception (GH#7122): an ordinary shared-server
+		// init takes the machine-global shared physical root SHARED, so
+		// another project's resident `bd serve` (which holds that root
+		// shared for its lifetime) cannot starve a new project's
+		// initialization. Destructive reinit keeps the whole set exclusive.
+		// init is in noDbCommands, so the PersistentPreRunE chokepoint
 		// never covers it — this is its own acquisition site. The workspace
 		// gate file lives BESIDE .beads (<parent>/.beads.gate.lock), so it
 		// works before .beads exists; the acquisition must come before any
@@ -1292,8 +1297,20 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if fi, statErr := os.Stat(plannedDBPathAbs); statErr == nil && !fi.IsDir() {
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
-		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, initGateRequest{
+			beadsDir:     beadsDirAbs,
+			physicalRoot: plannedDBPathAbs,
+			// reinitLocal is the resolved destructive flag here — the
+			// --force alias was folded into it above — and sharedServer is
+			// the resolved shared-server mode: every source (--shared-server
+			// was exported to BEADS_DOLT_SHARED_SERVER above, the env vars
+			// and config.yaml resolve the same way) that made
+			// doltserver.DoltDirPath plan physicalRoot as the shared root.
+			reinitLocal:  reinitLocal,
+			sharedServer: doltserver.IsSharedServerMode(),
+			preflight: func() error {
+				return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+			},
 		})
 		if gateErr != nil {
 			return gateErr

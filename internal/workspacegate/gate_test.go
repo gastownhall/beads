@@ -1544,3 +1544,280 @@ func TestInheritedHoldThroughSubprocess(t *testing.T) {
 		t.Errorf("unrelated child: inherited=%v waited=%s, want false and a full deferral", inh, waited)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// AcquireAllMixed — per-gate modes
+// ---------------------------------------------------------------------------
+
+// AcquireAllMixed takes each gate in its requested mode: a SHARED-requested
+// gate coexists with another shared holder, an EXCLUSIVE-requested one does
+// not. This is bd init's shape (GH#7122): workspace EXCLUSIVE beside a
+// shared physical root SHARED.
+func TestAcquireAllMixedTakesEachGateInItsRequestedMode(t *testing.T) {
+	ga, _ := testGate(t)
+	gb, _ := testGate(t)
+
+	m, err := AcquireAllMixed(context.Background(), Options{},
+		Request{Gate: ga, Mode: Shared},
+		Request{Gate: gb, Mode: Exclusive},
+	)
+	if err != nil {
+		t.Fatalf("AcquireAllMixed: %v", err)
+	}
+	defer m.Release()
+
+	// The SHARED-requested gate admits another shared holder...
+	other, err := ga.Acquire(context.Background(), Shared, Options{})
+	if err != nil {
+		t.Fatalf("shared co-holder on the SHARED-requested gate: %v", err)
+	}
+	_ = other.Release()
+	// ...and excludes an exclusive one.
+	if _, err := ga.Acquire(context.Background(), Exclusive, Options{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("exclusive on the SHARED-requested gate under AcquireAllMixed: err = %v, want ErrBusy", err)
+	}
+	// The EXCLUSIVE-requested gate excludes everyone else.
+	if _, err := gb.Acquire(context.Background(), Shared, Options{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("shared on the EXCLUSIVE-requested gate under AcquireAllMixed: err = %v, want ErrBusy", err)
+	}
+}
+
+// One gate named twice — directly, or through a workspace/physical-root
+// alias — is acquired ONCE, EXCLUSIVELY, whichever order the requests
+// arrived in. A caller that must retain a gate EXCLUSIVELY never loses it
+// to a coincidental SHARED request for the same file.
+func TestAcquireAllMixedExclusiveDuplicatePrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		requests []Request
+	}{
+		{"shared then exclusive", []Request{{Mode: Shared}, {Mode: Exclusive}}},
+		{"exclusive then shared", []Request{{Mode: Exclusive}, {Mode: Shared}}},
+		{"exclusive twice", []Request{{Mode: Exclusive}, {Mode: Exclusive}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, _ := testGate(t)
+			for i := range tc.requests {
+				tc.requests[i].Gate = g
+			}
+			m, err := AcquireAllMixed(context.Background(), Options{}, tc.requests...)
+			if err != nil {
+				t.Fatalf("AcquireAllMixed: %v", err)
+			}
+			defer m.Release()
+			if len(m.handles) != 1 {
+				t.Fatalf("dedupe failed: %d handles, want 1", len(m.handles))
+			}
+			// EXCLUSIVELY, arrival order independent: a shared co-holder
+			// is refused.
+			if _, err := g.Acquire(context.Background(), Shared, Options{}); !errors.Is(err, ErrBusy) {
+				t.Fatalf("duplicate gate not held EXCLUSIVELY: err = %v, want ErrBusy", err)
+			}
+		})
+	}
+	// Same-mode duplicates keep their mode: SHARED twice stays SHARED.
+	g, _ := testGate(t)
+	m, err := AcquireAllMixed(context.Background(), Options{},
+		Request{Gate: g, Mode: Shared}, Request{Gate: g, Mode: Shared})
+	if err != nil {
+		t.Fatalf("AcquireAllMixed shared twice: %v", err)
+	}
+	defer m.Release()
+	other, err := g.Acquire(context.Background(), Shared, Options{})
+	if err != nil {
+		t.Fatalf("shared twice must stay SHARED: %v", err)
+	}
+	_ = other.Release()
+}
+
+// A zero Gate in any request fails the whole call before a single lock is
+// taken, so a caller cannot half-gate its workspace because one request was
+// built from an unvalidated path.
+func TestAcquireAllMixedRejectsZeroGateBeforeAcquiring(t *testing.T) {
+	ga, _ := testGate(t)
+	gb, _ := testGate(t)
+	if _, err := AcquireAllMixed(context.Background(), Options{},
+		Request{Gate: ga, Mode: Shared},
+		Request{Gate: Gate{}, Mode: Exclusive},
+		Request{Gate: gb, Mode: Exclusive},
+	); err == nil {
+		t.Fatal("a zero Gate request must fail AcquireAllMixed")
+	}
+	// Nothing was acquired on the way out: an exclusive acquirer gets both.
+	for _, g := range []Gate{ga, gb} {
+		h, err := g.Acquire(context.Background(), Exclusive, Options{})
+		if err != nil {
+			t.Fatalf("gate %s leaked from the rejected call: %v", g.Path(), err)
+		}
+		_ = h.Release()
+	}
+}
+
+// Zero requests is the empty set, exactly as AcquireAll treats zero gates:
+// an empty handle, no error.
+func TestAcquireAllMixedZeroRequests(t *testing.T) {
+	m, err := AcquireAllMixed(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("AcquireAllMixed with no requests: %v", err)
+	}
+	if !m.Empty() {
+		t.Fatal("AcquireAllMixed with no requests must hold nothing")
+	}
+}
+
+// Mixed and same-mode callers share one sorted total order, so two
+// overlapping mixed sets cannot deadlock against each other: each takes its
+// gates in canonical order, one waits for the other, both complete.
+func TestAcquireAllMixedOverlappingSetsDoNotDeadlock(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name string) Gate {
+		g, err := ForPhysicalRoot(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	ga, gb := mk("aroot"), mk("broot")
+
+	// P1: {a SHARED, b EXCLUSIVE}; P2: {b SHARED, a EXCLUSIVE}. Naive
+	// arrival-order acquisition deadlocks (each holds the other's exclusive
+	// blocker); the canonical order serializes them.
+	p1 := make(chan error, 1)
+	go func() {
+		m, err := AcquireAllMixed(context.Background(), Options{Wait: 5 * time.Second, PollInterval: 20 * time.Millisecond},
+			Request{Gate: ga, Mode: Shared}, Request{Gate: gb, Mode: Exclusive})
+		if err == nil {
+			_ = m.Release()
+		}
+		p1 <- err
+	}()
+	p2 := make(chan error, 1)
+	go func() {
+		m, err := AcquireAllMixed(context.Background(), Options{Wait: 5 * time.Second, PollInterval: 20 * time.Millisecond},
+			Request{Gate: gb, Mode: Shared}, Request{Gate: ga, Mode: Exclusive})
+		if err == nil {
+			_ = m.Release()
+		}
+		p2 <- err
+	}()
+	for i, ch := range []chan error{p1, p2} {
+		select {
+		case err := <-ch:
+			if err != nil {
+				t.Fatalf("mixed caller %d: %v (overlapping sets deadlocked or starved)", i, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("mixed caller %d never completed (overlapping sets deadlocked)", i)
+		}
+	}
+}
+
+// AcquireAllMixed keeps AcquireAll's budget and notification contract: the
+// Wait is one total budget across the set, and OnWait fires at most once.
+func TestAcquireAllMixedTotalWaitBudgetAndSingleOnWait(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name string) Gate {
+		g, err := ForPhysicalRoot(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	ga, gb, gc := mk("aroot"), mk("broot"), mk("croot")
+	block := mustAcquire(t, gb, Exclusive, Options{})
+	defer block.Release()
+
+	calls := 0
+	start := time.Now()
+	_, err := AcquireAllMixed(context.Background(), Options{
+		Wait:         300 * time.Millisecond,
+		PollInterval: 50 * time.Millisecond,
+		OnWait:       func(string) { calls++ },
+	}, Request{Gate: ga, Mode: Exclusive}, Request{Gate: gb, Mode: Shared}, Request{Gate: gc, Mode: Exclusive})
+	elapsed := time.Since(start)
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("err = %v, want ErrBusy", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("AcquireAllMixed over 3 gates took %v with a 300ms total budget (per-gate budgets?)", elapsed)
+	}
+	if calls != 1 {
+		t.Fatalf("OnWait fired %d times across the set, want exactly 1", calls)
+	}
+}
+
+// A failed mixed acquisition releases what it already took, in reverse
+// order, so the next caller finds every gate free.
+func TestAcquireAllMixedCleansUpOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name string) Gate {
+		g, err := ForPhysicalRoot(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	ga, gb, gc := mk("aroot"), mk("broot"), mk("croot")
+
+	block := mustAcquire(t, gb, Exclusive, Options{})
+	if _, err := AcquireAllMixed(context.Background(), Options{},
+		Request{Gate: ga, Mode: Exclusive}, Request{Gate: gb, Mode: Shared}, Request{Gate: gc, Mode: Exclusive}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("AcquireAllMixed with blocked middle gate: err = %v, want ErrBusy", err)
+	}
+	_ = block.Release()
+	m2, err := AcquireAllMixed(context.Background(), Options{},
+		Request{Gate: ga, Mode: Exclusive}, Request{Gate: gb, Mode: Shared}, Request{Gate: gc, Mode: Exclusive})
+	if err != nil {
+		t.Fatalf("AcquireAllMixed after cleanup: %v (first gate leaked from failed attempt?)", err)
+	}
+	_ = m2.Release()
+}
+
+// Cancellation aborts a waiting mixed acquisition with the context error,
+// exactly as it aborts AcquireAll.
+func TestAcquireAllMixedHonorsCancellation(t *testing.T) {
+	ga, _ := testGate(t)
+	gb, _ := testGate(t)
+	block := mustAcquire(t, ga, Exclusive, Options{})
+	defer block.Release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := AcquireAllMixed(ctx, Options{Wait: 30 * time.Second, PollInterval: 20 * time.Millisecond},
+		Request{Gate: ga, Mode: Shared}, Request{Gate: gb, Mode: Exclusive})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("canceled mixed acquisition kept waiting for %s", elapsed)
+	}
+}
+
+// SameAs is the identity test AcquireAllMixed dedupes with: same path is
+// same gate, differently-cased spellings agree on case-insensitive-capable
+// platforms, and a zero gate is same as nothing.
+func TestGateSameAs(t *testing.T) {
+	dir := t.TempDir()
+	g1, err := ForWorkspace(filepath.Join(dir, ".beads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g2, err := ForWorkspace(filepath.Join(dir, ".beads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g1.SameAs(g2) {
+		t.Fatal("two constructions of one workspace gate must be SameAs")
+	}
+	if g1.SameAs(Gate{}) || (Gate{}).SameAs(g1) {
+		t.Fatal("a zero Gate must not be SameAs a real gate")
+	}
+	gOther, err := ForPhysicalRoot(filepath.Join(dir, "dolt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g1.SameAs(gOther) {
+		t.Fatal("the workspace gate and a sibling physical-root gate must not be SameAs")
+	}
+}

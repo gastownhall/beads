@@ -518,7 +518,7 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 // never reach the chokepoint. It takes the workspace gate plus the resolved
 // physical roots (when .beads exists — bd init on a fresh directory has
 // nothing to resolve yet) plus any extraRoots, all EXCLUSIVE in ONE
-// AcquireAll (never nested — that is a workspacegate invariant). Failures
+// acquisition (never nested — that is a workspacegate invariant). Failures
 // are returned, not softened: maintenance refuses rather than pretends.
 //
 // Lock ordering (normative for the callers): workspace gate(s) →
@@ -552,6 +552,29 @@ func acquireExclusiveWorkspaceGatesWithOptions(ctx context.Context, beadsDir str
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	gates, err := buildMaintenanceGateSet(beadsDir, extraRoots...)
+	if err != nil {
+		return nil, err
+	}
+	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive, opts, gates...)
+}
+
+// buildMaintenanceGateSet is the gate-list construction behind every
+// maintenance acquisition (init, migrate, restore): the workspace gate for
+// beadsDir plus the physical-root gates for whatever an open path would
+// actually open, appending any extraRoots (init's planned database
+// directory; migrate's destination root). .beads exists → resolve through
+// the normal gate-set builder; absent (bd init creating it) → the workspace
+// gate alone plus out-of-.beads extraRoots whose parent exists: the
+// workspace gate file lives BESIDE .beads, so it works before .beads
+// exists, while in-.beads roots have no gate-file parent yet and are
+// already excluded by the workspace's exclusivity. Roots whose parent
+// directory does not exist are skipped in both branches: workspacegate
+// needs the gate file's parent, and a root whose parent is absent cannot
+// be holding data anyone could clobber — and, deliberately, nothing is
+// created here to make a root gateable (bd init must not materialize the
+// shared-server directories before its destructive preflight has passed).
+func buildMaintenanceGateSet(beadsDir string, extraRoots ...string) ([]workspacegate.Gate, error) {
 	var gates []workspacegate.Gate
 	if _, err := os.Stat(beadsDir); err == nil {
 		var gerr error
@@ -559,42 +582,111 @@ func acquireExclusiveWorkspaceGatesWithOptions(ctx context.Context, beadsDir str
 		if gerr != nil {
 			return nil, gerr
 		}
-	} else {
-		// .beads does not exist yet (bd init creating it): the workspace
-		// gate still works because its file lives BESIDE .beads in the
-		// project directory, which does exist. Physical-root gates for
-		// in-.beads roots are impossible (no parent) and unnecessary —
-		// exclusivity on the workspace gate already excludes every gated
-		// opener. Out-of-.beads extraRoots are still gated when their
-		// parent exists.
-		wsGate, werr := workspacegate.ForWorkspace(beadsDir)
-		if werr != nil {
-			return nil, werr
-		}
-		gates = []workspacegate.Gate{wsGate}
-		for _, root := range extraRoots {
-			if _, serr := os.Stat(filepath.Dir(root)); serr != nil {
-				continue
-			}
-			g, gerr := workspacegate.ForPhysicalRoot(root)
-			if gerr != nil {
-				return nil, gerr
-			}
-			gates = append(gates, g)
-		}
+		return gates, nil
 	}
-	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive, opts, gates...)
+	// .beads does not exist yet (bd init creating it): the workspace gate
+	// still works because its file lives BESIDE .beads in the project
+	// directory, which does exist. Physical-root gates for in-.beads roots
+	// are impossible (no parent) and unnecessary — exclusivity on the
+	// workspace gate already excludes every gated opener. Out-of-.beads
+	// extraRoots are still gated when their parent exists.
+	wsGate, werr := workspacegate.ForWorkspace(beadsDir)
+	if werr != nil {
+		return nil, werr
+	}
+	gates = []workspacegate.Gate{wsGate}
+	for _, root := range extraRoots {
+		if _, serr := os.Stat(filepath.Dir(root)); serr != nil {
+			continue
+		}
+		g, gerr := workspacegate.ForPhysicalRoot(root)
+		if gerr != nil {
+			return nil, gerr
+		}
+		gates = append(gates, g)
+	}
+	return gates, nil
 }
 
-// acquireInitMutationGate holds init's complete exclusive gate set while its
-// destructive preflight runs. A refusal or preflight error releases the gates;
-// a successful caller owns the returned handle through replacement.
+// initGateRequest describes bd init's workspace-gate plan: which workspace
+// and planned physical root to gate, and the classification that decides
+// per-gate modes.
+type initGateRequest struct {
+	// beadsDir is the absolute workspace .beads path (may not exist yet).
+	beadsDir string
+	// physicalRoot is the absolute planned physical root directory (the
+	// planned database path, normalized to a directory).
+	physicalRoot string
+	// reinitLocal is init's resolved destructive flag: --reinit-local or
+	// its deprecated --force alias. Destructive reinitialization keeps the
+	// whole gate set EXCLUSIVE.
+	reinitLocal bool
+	// sharedServer is init's resolved shared-server mode (the --shared-server
+	// flag is exported to BEADS_DOLT_SHARED_SERVER before gate planning, and
+	// the env/config sources resolve the same way DoltDirPath did when init
+	// planned physicalRoot).
+	sharedServer bool
+	// preflight, when non-nil, runs while the complete gate set is held; a
+	// preflight error releases the set.
+	preflight func() error
+}
+
+// sharedRootHold reports whether an ORDINARY shared-server init takes its
+// planned physical root SHARED rather than EXCLUSIVE (GH#7122): on a shared
+// server the planned root is the machine-global shared dolt dir, which every
+// project's resident `bd serve` holds SHARED for its whole lifetime, and a
+// new database there creates state no other project's serve is protecting —
+// while shared-root maintenance still excludes init, because SHARED and
+// EXCLUSIVE conflict in both directions. Destructive reinit, non-shared
+// init (an explicit --db root, a per-project dolt dir) and unresolvable
+// shared roots keep the EXCLUSIVE hold.
+func (r initGateRequest) sharedRootHold() workspacegate.Mode {
+	if !r.sharedServer || r.reinitLocal {
+		return workspacegate.Exclusive
+	}
+	shared, err := doltserver.SharedDoltPath()
+	if err != nil {
+		return workspacegate.Exclusive
+	}
+	rootAbs, err := filepath.Abs(r.physicalRoot)
+	if err != nil {
+		return workspacegate.Exclusive
+	}
+	sharedAbs, err := filepath.Abs(shared)
+	if err != nil {
+		return workspacegate.Exclusive
+	}
+	if filepath.Clean(rootAbs) != filepath.Clean(sharedAbs) {
+		return workspacegate.Exclusive
+	}
+	return workspacegate.Shared
+}
+
+// acquireInitMutationGate holds init's complete gate set while its
+// destructive preflight runs: every gate EXCLUSIVE except, for an ordinary
+// shared-server init, the machine-global shared physical root, which is
+// held SHARED so another project's resident `bd serve` cannot starve a new
+// project's initialization (GH#7122). A refusal or preflight error releases
+// the gates; a successful caller owns the returned handle through
+// replacement.
 //
 // Contention waits up to initGateWait() (not the generic exclusiveGateWait),
 // honoring ctx cancellation, and prints one notice if the wait outlasts
-// gateWaitNoticeDelay. Exclusivity is unchanged; past the bound init fails
-// with the same refusal, naming the budget and the knob that raises it.
-func acquireInitMutationGate(ctx context.Context, beadsDir, physicalRoot string, preflight func() error) (*workspacegate.MultiHandle, error) {
+// gateWaitNoticeDelay. Past the bound init fails with the same refusal,
+// naming the budget and the knob that raises it.
+func acquireInitMutationGate(ctx context.Context, req initGateRequest) (*workspacegate.MultiHandle, error) {
+	// Defense against callers that computed no workspace (bootstrap plans
+	// are the untrusted case): gating "" would resolve against the CWD and
+	// fence an arbitrary directory.
+	if strings.TrimSpace(req.beadsDir) == "" {
+		return nil, errors.New("workspace gate: empty beads directory")
+	}
+	// Normalize a nil context (tests call this directly, before the
+	// process-level signal context exists); the workspacegate package also
+	// defends, but do not rely on callees.
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	wait := initGateWait()
 	onWait, stopNotice := delayedGateNotice()
 	opts := workspacegate.Options{
@@ -602,7 +694,38 @@ func acquireInitMutationGate(ctx context.Context, beadsDir, physicalRoot string,
 		Reason: "bd init",
 		OnWait: onWait,
 	}
-	h, err := acquireExclusiveWorkspaceGatesWithOptions(ctx, beadsDir, opts, physicalRoot)
+	gates, err := buildMaintenanceGateSet(req.beadsDir, req.physicalRoot)
+	if err != nil {
+		stopNotice()
+		return nil, err
+	}
+	// Per-gate mode plan: everything EXCLUSIVE; the shared root SHARED only
+	// when the plan says so. Comparing gate identity (not list position)
+	// covers both entries that can name the shared root — the planned root
+	// init passes, and the resolver's own root when .beads already exists —
+	// and dedupe inside AcquireAllMixed keeps any workspace/physical-root
+	// alias EXCLUSIVE by precedence.
+	rootMode := req.sharedRootHold()
+	var sharedRoot workspacegate.Gate
+	if rootMode == workspacegate.Shared {
+		sharedRoot, err = workspacegate.ForPhysicalRoot(req.physicalRoot)
+		if err != nil {
+			// The gate file's parent (the shared-server dir) does not
+			// exist: buildMaintenanceGateSet skipped this root for the same
+			// reason, so no gate in the set names it and the SHARED plan
+			// has nothing to apply to. Nothing is created to force it.
+			sharedRoot = workspacegate.Gate{}
+		}
+	}
+	requests := make([]workspacegate.Request, 0, len(gates))
+	for _, g := range gates {
+		mode := workspacegate.Exclusive
+		if sharedRoot.Path() != "" && g.SameAs(sharedRoot) {
+			mode = workspacegate.Shared
+		}
+		requests = append(requests, workspacegate.Request{Gate: g, Mode: mode})
+	}
+	h, err := workspacegate.AcquireAllMixed(ctx, opts, requests...)
 	stopNotice()
 	if err != nil {
 		if errors.Is(err, workspacegate.ErrBusy) {
@@ -610,8 +733,8 @@ func acquireInitMutationGate(ctx context.Context, beadsDir, physicalRoot string,
 		}
 		return nil, fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", err)
 	}
-	if preflight != nil {
-		if err := preflight(); err != nil {
+	if req.preflight != nil {
+		if err := req.preflight(); err != nil {
 			return nil, errors.Join(err, h.Release())
 		}
 	}
