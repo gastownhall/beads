@@ -330,7 +330,7 @@ var showCmd = &cobra.Command{
 			// The combined read (bd-uschhs) also names the outgoing edges whose
 			// far end has no row here; they render in their own sections.
 			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
-			depsWithMeta, unresolvedDeps, depsErr := issueStore.GetDependenciesWithUnresolvable(ctx, issue.ID)
+			depsWithMeta, unresolvedDeps, depsNamed, depsErr := readOutgoingDeps(ctx, issueStore, issue.ID)
 			gates := types.GatesHolding(issue, depsWithMeta)
 
 			if idx > 0 {
@@ -397,7 +397,7 @@ var showCmd = &cobra.Command{
 			// outgoing side named its records and rendered them above, so it
 			// needs no warning (bd-uschhs).
 			warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-				depListing{rows: len(depsWithMeta), err: depsErr, named: true},
+				depListing{rows: len(depsWithMeta), err: depsErr, named: depsNamed},
 				depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
 			printRelatedSection(relatedSeen, relatedUnresolved)

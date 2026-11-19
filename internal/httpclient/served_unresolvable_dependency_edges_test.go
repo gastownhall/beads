@@ -74,3 +74,22 @@ func TestServedDetailCarriesUnresolvableDependencyEdges(t *testing.T) {
 		assertSameJSON(t, side.name+" unresolvable_dependency_edges", wantEdges, details.UnresolvableDependencyEdges)
 	}
 }
+
+// AC-7 (bd-uschhs, #5850): over a current server the http combined read
+// equals the reference store's own.
+func TestServedGetDependenciesWithUnresolvableMatchesReference(t *testing.T) {
+	e := newServedEnv(t, "ude")
+	ctx := t.Context()
+	seedUnresolvableEdgeFixture(t, e)
+
+	wantDeps, wantEdges, err := e.reference.GetDependenciesWithUnresolvable(ctx, "ude-root")
+	if err != nil {
+		t.Fatalf("reference GetDependenciesWithUnresolvable: %v", err)
+	}
+	gotDeps, gotEdges, err := e.subject.GetDependenciesWithUnresolvable(ctx, "ude-root")
+	if err != nil {
+		t.Fatalf("http GetDependenciesWithUnresolvable: %v", err)
+	}
+	assertSameJSON(t, "resolved", wantDeps, gotDeps)
+	assertSameJSON(t, "unresolvable", wantEdges, gotEdges)
+}
