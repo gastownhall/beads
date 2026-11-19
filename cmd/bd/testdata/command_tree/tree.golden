@@ -2316,6 +2316,14 @@ bd dolt stop
     | workspace. In that recovery path, force still refuses to signal a process
     | whose executable identity cannot be matched to bd or dolt, or whose workspace
     | scope cannot be established.
+    |
+    | With --all, bd instead stops every dolt sql-server it itself manages on this
+    | machine — the ones a workspace's pid file names — through the same stop path,
+    | reporting each one. Servers bd did not start are left running and reported,
+    | so --all never signals a process bd's own state files do not name. --all
+    | runs from any directory, not just the active workspace's.
+    |
+  flag --all type=bool default="false" usage="Stop every dolt sql-server bd itself manages on this machine, from any directory; servers bd did not start are left running and reported"
   flag --force type=bool default="false" usage="Force stop (proxied recovery still requires a bd/dolt executable match)"
 
 bd dolt test

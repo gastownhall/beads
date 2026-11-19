@@ -1196,8 +1196,19 @@ process records (both the proxy and its backend) only after each live process
 executable is matched to bd or dolt and its command line ties it to this
 workspace. In that recovery path, force still refuses to signal a process
 whose executable identity cannot be matched to bd or dolt, or whose workspace
-scope cannot be established.`,
+scope cannot be established.
+
+With --all, bd instead stops every dolt sql-server it itself manages on this
+machine — the ones a workspace's pid file names — through the same stop path,
+reporting each one. Servers bd did not start are left running and reported,
+so --all never signals a process bd's own state files do not name. --all
+runs from any directory, not just the active workspace's.
+`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if all, _ := cmd.Flags().GetBool("all"); all {
+			force, _ := cmd.Flags().GetBool("force")
+			return runDoltStopAll(force)
+		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
@@ -2345,6 +2356,7 @@ func init() {
 	doltStartCmd.Flags().Bool("force", false, "Start even when dolt.auto-start is off and this would create a new, empty Dolt database")
 	doltStatusCmd.Flags().Bool("all", false, "List every dolt sql-server on this machine (bd-owned ones with workspace, PID, port, uptime and idle-stop state) from any directory, not just the active workspace's")
 	doltStopCmd.Flags().Bool("force", false, "Force stop (proxied recovery still requires a bd/dolt executable match)")
+	doltStopCmd.Flags().Bool("all", false, "Stop every dolt sql-server bd itself manages on this machine, from any directory; servers bd did not start are left running and reported")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
 	doltPushCmd.Flags().BoolP("yes", "y", false, "Consent to adopting a Dolt remote derived from git origin when none is configured")
