@@ -2184,11 +2184,11 @@ func RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *testing.T,
 // seedReaderListBatch seeds sqlbuild.QueryBatchSize+5 rows under one scoping
 // label for the two List cases below, and returns the label and the ids in
 // the "created" display order (created_at DESC): row j is created j seconds
-// before row 0. The two rows that straddle the hydration boundary carry
-// distinct nonzero cardinalities — the last row of the first batch one comment
-// and one reverse blocker, the first row of the second batch one blocks edge —
-// so a batch that was dropped, overwritten or merged back out of order fails on
-// a row rather than on a length. The blocker and the dependent sit outside the
+// before row 0. The two rows that straddle the batch boundary carry distinct
+// nonzero cardinalities — the last row of the first batch one comment and one
+// reverse blocker, the first row of the second batch one blocks edge — so a
+// page that hydrated the wrong ids, or put them back out of order, fails on a
+// row rather than on a length. The blocker and the dependent sit outside the
 // label, so neither is a member of the listing.
 func seedReaderListBatch(t *testing.T, ctx context.Context, fixture ReaderFixture, caseTag string) (string, []string) {
 	t.Helper()
@@ -2267,19 +2267,20 @@ func assertReaderWindowWithItsCounts(t *testing.T, what string, page, unbounded 
 }
 
 // RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts drives a List
-// result set wider than one hydration batch (GH#4370). Both seams now select a
-// page's ordered ids first and hydrate exactly those ids in batches of
-// sqlbuild.QueryBatchSize, so the window the caller asked for is decided
-// before the counts are read and the batches are stitched back in the
-// window's order. None of that may show: bounded, keyset, capped and
-// unlimited requests answer the same items, has-more verdicts and cap
-// refusals they did when the counts query filtered the whole plane.
+// result set wider than one by-IDs hydration batch (GH#4370). Both seams
+// answer a counted page that reaches no deeper than one batch
+// (sqlbuild.QueryBatchSize rows, its probe row included) ids-first: they
+// select the page's ordered ids and hydrate exactly those ids. A deeper page,
+// and an unbounded read whose matches overflow that bound, keep the predicate
+// form, which counts the whole plane (#7635). None of that may show: bounded,
+// keyset, capped and unlimited requests on either side of the switch answer
+// the same items, has-more verdicts and cap refusals.
 //
 // WHAT THIS FIXTURE MAKES OBSERVABLE: seedReaderListBatch's boundary rows
 // carry distinct counts, the 201-row bound lands one row into the second
 // batch, and the keyset page starts two rows before the boundary and ends one
-// row past it, so a window that was hydrated by batch rather than by the ids
-// the window kept fails on a row.
+// row past it, so a page whose rows or counts came from the wrong ids fails on
+// a row.
 //
 // Offset, and a bounded request under a cap (whose boundary is Limit+Offset),
 // are their own case below, because the served wire publishes no list offset
@@ -2306,7 +2307,7 @@ func RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts(t *testing.T, 
 	}
 
 	// Keyset: one bounded page across the boundary, and an unlimited walk
-	// from near the top that hydrates across it.
+	// from near the top that runs past it.
 	for _, test := range []struct {
 		after, limit int
 	}{
@@ -2368,12 +2369,12 @@ func RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts(t *testing.T, 
 
 // RunReaderListOffsetPastTheHydrationBatchKeepsItsWindow is the Offset half
 // of RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts (GH#4370):
-// the rows an offset skips are skipped once, on the ids, before the window is
-// hydrated, whatever batch they fall in. The windows start inside the first
-// batch and end inside the second, start past the last row, and run unlimited
-// behind an offset; the cap still counts the skipped rows (Limit+Offset), on
-// both sides of that boundary, and with no offset a page exactly at the cap
-// is a page with more behind it while one row more fires.
+// the rows an offset skips are skipped once, whichever counts form answers the
+// page; an offset counts toward the depth that decides it. The windows start
+// inside the first batch and end inside the second, start past the last row,
+// and run unlimited behind an offset; the cap still counts the skipped rows
+// (Limit+Offset), on both sides of that boundary, and with no offset a page
+// exactly at the cap is a page with more behind it while one row more fires.
 func RunReaderListOffsetPastTheHydrationBatchKeepsItsWindow(t *testing.T, ctx context.Context, fixture ReaderFixture) {
 	t.Helper()
 	scope, order := seedReaderListBatch(t, ctx, fixture, "lsbatchoff")

@@ -14,12 +14,13 @@ import (
 )
 
 // TestEmbeddedListAcrossAHydrationBatchKeepsItsLimitPolicy (AC-7, GH#4370):
-// `bd list` now selects a page's ids and hydrates them in batches of
-// sqlbuild.QueryBatchSize. Over more rows than one batch, the CLI's limit
-// policy and output are what they were: piped stdout lists every row, an
-// explicit --limit and a configured BD_LIST_LIMIT bound the page, --limit 0
-// lifts a configured limit, --json is still a bare array, and the opt-in
-// --max-rows cap fires one row past the result set and not at it.
+// `bd list` now answers a page of up to sqlbuild.QueryBatchSize rows by
+// selecting its ids first and hydrating only those, and keeps the predicate
+// form past that (#7635). Over more rows than one batch, on both sides of that
+// switch, the CLI's limit policy and output are what they were: piped stdout
+// lists every row, an explicit --limit and a configured BD_LIST_LIMIT bound the
+// page, --limit 0 lifts a configured limit, --json is still a bare array, and
+// the opt-in --max-rows cap fires one row past the result set and not at it.
 func TestEmbeddedListAcrossAHydrationBatchKeepsItsLimitPolicy(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")

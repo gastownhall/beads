@@ -14,7 +14,7 @@ import (
 //
 // Semantics: the by-IDs form splits the COALESCE(depends_on_issue_id,
 // depends_on_wisp_id, depends_on_external) target into three disjoint UNION ALL
-// legs per dependency table. Over a graph whose blocks edges reach issue, wisp
+// legs per dependency table (sqlbuild.reverseBlockersByIDs, #7635). Over a graph whose blocks edges reach issue, wisp
 // and external targets from both dependencies and wisp_dependencies, every
 // by-IDs row (rdep_count included) must equal the predicate form's row, whose
 // rc join still keys on the COALESCE.

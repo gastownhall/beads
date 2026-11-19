@@ -100,7 +100,7 @@ func TestSearchIssueIDsInTx_GoSideSortScansUnboundedThenOrdersAndTrims(t *testin
 // copy of the leg-shape assertion — the seam bd query '<expr>' --sort id
 // actually reaches on the store-shaped backends (storequerier →
 // SearchIssuesWithCounts), where BuildQueryPlan always pushes a bound. Under a
-// Go-side sort, neither the issues nor the wisps counts ID selection may carry a
+// Go-side sort, neither the issues nor the wisps counts query may carry a
 // LIMIT (no ORDER BY is rendered for this key, and a bound without an order is
 // n rows, not the first n); runFilterSearchQueryInTx orders and bounds the leg
 // in Go instead (goSideSortAndTrim).
@@ -112,11 +112,11 @@ func TestSearchIssuesWithCountsInTx_GoSideSortDropsTheLegBound(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)^SELECT issues\.id FROM issues\b`).
+	mock.ExpectQuery(`(?s)FROM issues i`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)^SELECT wisps\.id FROM wisps\b`).
+	mock.ExpectQuery(`(?s)FROM wisps i`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	txSQL, ok := tx.(*sql.Tx)

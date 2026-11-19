@@ -276,21 +276,15 @@ bd compact --force
 
 ### Listing Large Workspaces
 
-`bd list` reads the issues it shows plus their labels, dependencies and
-counts. It first picks the IDs of the rows on the page, in order, and then
-loads labels, dependencies and counts for those IDs only, 200 at a time. A
-bounded page therefore costs about the same however many issues the
-workspace holds, and an unlimited listing reads its rows in batches rather
-than all at once.
-
-The fastest list is the smallest one. Narrow it with filters and a limit
-before you reach for anything else:
+`bd list` loads every row it shows together with its labels, dependencies
+and counts, so the fastest list is the smallest one. Narrow it with filters
+and a limit before you reach for anything else:
 
 ```bash
 # Filter at the source: status, type, label, assignee, parent
 bd list --status open,in_progress --type bug --label backend
 
-# Bound the page (default 50; 0 lists every match)
+# Bound the page (default 50, or 20 for an agent at a terminal; 0 lists every match)
 bd list --limit 20
 bd list --limit 0
 

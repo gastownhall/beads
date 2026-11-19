@@ -22,8 +22,14 @@ import (
 // the old WHERE/ORDER BY/LIMIT, the Go-side id sort and trim, the
 // wisp-preferring merge, and the terminal sort, Limit trim and MaxRows cap.
 //
-// The fixture holds more than sqlbuild.QueryBatchSize matching rows, so the
-// unlimited and 201-row cases hydrate across a batch boundary.
+// The matrix reaches every route the counted search takes (#7635): bounded
+// pages within one by-IDs batch go ids-first; an unbounded or above-ceiling
+// read probes for at most one batch of ids past it and goes ids-first when the
+// probe holds every match (the label, ids and text filters); a probe that
+// overflows (the fixture holds more than sqlbuild.QueryBatchSize matching
+// rows), a Go-side id sort and a label filter with an empty entry keep the
+// predicate form. One row carries a stored empty label, so an empty filter
+// entry that the id scan's label JOINs dropped would change the answer.
 func TestSearchIssuesWithCountsMatchesThePredicateFormOracle(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -75,6 +81,11 @@ func TestSearchIssuesWithCountsMatchesThePredicateFormOracle(t *testing.T) {
 			t.Fatalf("AddComment %s: %v", id, err)
 		}
 	}
+	// A stored empty label, which the predicate form's `label = ?` bound to ""
+	// matches and the id scan's label JOINs would drop.
+	if _, err := store.db.ExecContext(ctx, "INSERT INTO labels (issue_id, label) VALUES (?, '')", "test-o015"); err != nil {
+		t.Fatalf("seed an empty label: %v", err)
+	}
 
 	type variant struct {
 		name  string
@@ -87,6 +98,8 @@ func TestSearchIssuesWithCountsMatchesThePredicateFormOracle(t *testing.T) {
 		{"label", "", func(f *types.IssueFilter) { f.Labels = []string{"alpha"} }},
 		{"text", "oracle row 1", func(*types.IssueFilter) {}},
 		{"labels-any", "", func(f *types.IssueFilter) { f.LabelsAny = []string{"alpha", "nonexistent"} }},
+		{"labels-empty-entry", "", func(f *types.IssueFilter) { f.Labels = []string{"alpha", ""} }},
+		{"labels-any-empty-entry", "", func(f *types.IssueFilter) { f.LabelsAny = []string{"alpha", ""} }},
 		{"exclude-label", "", func(f *types.IssueFilter) { f.ExcludeLabels = []string{"alpha"} }},
 		{"ids", "", func(f *types.IssueFilter) { f.IDs = []string{"test-o000", "test-o007", "test-o201", "test-ow1"} }},
 		{"id-prefix", "", func(f *types.IssueFilter) { f.IDPrefix = "test-o1" }},
@@ -115,7 +128,7 @@ func TestSearchIssuesWithCountsMatchesThePredicateFormOracle(t *testing.T) {
 		{"lite", "", func(f *types.IssueFilter) { f.Lite = true }},
 	}
 
-	crossedBatch := false
+	pastBatch := false
 	n := 0
 	for _, fv := range filters {
 		for _, ov := range orders {
@@ -141,7 +154,7 @@ func TestSearchIssuesWithCountsMatchesThePredicateFormOracle(t *testing.T) {
 						continue
 					}
 					if len(want) > sqlbuild.QueryBatchSize {
-						crossedBatch = true
+						pastBatch = true
 					}
 					gotRows := make([]countsRow, 0, len(got))
 					for _, iwc := range got {
@@ -159,8 +172,8 @@ func TestSearchIssuesWithCountsMatchesThePredicateFormOracle(t *testing.T) {
 			}
 		}
 	}
-	if !crossedBatch {
-		t.Fatalf("no case returned more than %d rows; the matrix never crossed a hydration batch", sqlbuild.QueryBatchSize)
+	if !pastBatch {
+		t.Fatalf("no case returned more than %d rows; the matrix never overflowed the ids-first probe", sqlbuild.QueryBatchSize)
 	}
 }
 

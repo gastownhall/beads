@@ -22,8 +22,13 @@ import (
 // window (cap, offset, page trim, has-more). Membership, order, counts,
 // parent, labels, dependencies, HasMore and the MaxRows verdict are compared.
 //
-// The durable fixture holds more than sqlbuild.QueryBatchSize matching rows,
-// so the unlimited and 201-row windows hydrate across a batch boundary.
+// The matrix reaches both sides of the routes' ceiling
+// (countsWindowGoesIDsFirst): the one-row, offset and capped windows go
+// ids-first, while the unlimited and 201-row windows, the Go-side id sort and
+// the label filters with an empty entry keep the predicate form. The durable
+// fixture holds more than sqlbuild.QueryBatchSize matching rows, and one row
+// carries a stored empty label, so an empty filter entry that the id scan's
+// label JOINs dropped would change the answer.
 func (s *testSuite) TestSearchCountsSinglePlaneMatchesThePredicateFormOracle() {
 	const prefix = "bd-sco-"
 	const durable = 210
@@ -49,6 +54,10 @@ func (s *testSuite) TestSearchCountsSinglePlaneMatchesThePredicateFormOracle() {
 		s.Require().NoError(labelRepo.Insert(s.Ctx(), fmt.Sprintf("%s%03d", prefix, i), "alpha", "tester", domain.LabelOpts{}))
 	}
 	s.Require().NoError(labelRepo.Insert(s.Ctx(), prefix+"w1", "alpha", "tester", domain.LabelOpts{UseWispsTable: true}))
+	// A stored empty label, which the predicate form's `label = ?` bound to
+	// "" matches and the id scan's label JOINs would drop.
+	_, err := s.Runner().ExecContext(s.Ctx(), "INSERT INTO labels (issue_id, label) VALUES (?, '')", prefix+"015")
+	s.Require().NoError(err)
 	for _, d := range [][3]string{
 		{"001", "000", string(types.DepBlocks)},
 		{"002", "000", string(types.DepBlocks)},
@@ -77,6 +86,8 @@ func (s *testSuite) TestSearchCountsSinglePlaneMatchesThePredicateFormOracle() {
 		{"open", "", func(f *types.IssueFilter) { f.Statuses = []types.Status{types.StatusOpen} }},
 		{"label", "", func(f *types.IssueFilter) { f.Labels = []string{"alpha"} }},
 		{"text", "oracle row 1", func(*types.IssueFilter) {}},
+		{"labels-empty-entry", "", func(f *types.IssueFilter) { f.Labels = []string{"alpha", ""} }},
+		{"labels-any-empty-entry", "", func(f *types.IssueFilter) { f.LabelsAny = []string{"alpha", ""} }},
 	}
 	orders := []variant{
 		{"default", "", func(*types.IssueFilter) {}},
@@ -106,7 +117,7 @@ func (s *testSuite) TestSearchCountsSinglePlaneMatchesThePredicateFormOracle() {
 	}
 
 	impl := &issueSQLRepositoryImpl{runner: s.Runner()}
-	crossedBatch := false
+	idsFirst, predicate, pastBatch := 0, 0, false
 	n := 0
 	for _, rv := range routes {
 		for _, fv := range filters {
@@ -133,8 +144,13 @@ func (s *testSuite) TestSearchCountsSinglePlaneMatchesThePredicateFormOracle() {
 					if wantErr != nil {
 						continue
 					}
+					if countsWindowGoesIDsFirst(filter, searchWindowForFilter(filter)) {
+						idsFirst++
+					} else {
+						predicate++
+					}
 					if len(want.Items) > sqlbuild.QueryBatchSize {
-						crossedBatch = true
+						pastBatch = true
 					}
 					s.Require().Equal(flattenCountsPage(want), flattenCountsPage(got), name)
 					s.Require().Equal(want.HasMore, got.HasMore, "%s: HasMore", name)
@@ -142,7 +158,9 @@ func (s *testSuite) TestSearchCountsSinglePlaneMatchesThePredicateFormOracle() {
 			}
 		}
 	}
-	s.Require().True(crossedBatch, "no case returned more than %d rows; the matrix never crossed a hydration batch", sqlbuild.QueryBatchSize)
+	s.Require().Positive(idsFirst, "no case went ids-first")
+	s.Require().Positive(predicate, "no case kept the predicate form")
+	s.Require().True(pastBatch, "no case returned more than %d rows; the matrix never reached past one by-IDs batch", sqlbuild.QueryBatchSize)
 }
 
 // oracleSearchCountsPage replays the pre-GH#4370 single-plane route:
