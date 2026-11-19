@@ -84,7 +84,10 @@ type OpenOpts struct {
 	// it so it never execs its own binary; returning an error wrapping
 	// ErrNoProxyExecutable makes the open fail at once rather than poll.
 	// It is consulted only on the spawn path, so adopting a running proxy
-	// never needs it.
+	// never needs it. Setting it also marks the opener as a host that is
+	// not bd: it never stops a proxy started by a bd older than the
+	// request-MAC control handshake, and gets ErrPreUpgradeProxyRunning
+	// instead.
 	ResolveExecutable func() (string, error)
 }
 
@@ -93,6 +96,13 @@ type OpenOpts struct {
 // terminal: GetCreateDatabaseProxyServerEndpoint returns it without waiting
 // out the open deadline.
 var ErrNoProxyExecutable = errors.New("no executable available to start the proxy")
+
+// ErrPreUpgradeProxyRunning reports that the root is held by a live proxy
+// started by a bd older than the request-MAC control handshake (bd 1.3.x
+// and earlier), which this process cannot use, and that the opener set
+// OpenOpts.ResolveExecutable, so it does not stop that proxy (see
+// replacePreMACProxy). It is terminal, like ErrNoProxyExecutable.
+var ErrPreUpgradeProxyRunning = errors.New("a proxy started by an older bd is running for this root")
 
 const (
 	openDeadline          = 15 * time.Second
@@ -317,7 +327,7 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 				recordPath,
 			)
 		case isPreMACIdentRefusal(discovery):
-			if stopErr := stopVerifiedPreMACProxy(rootDir, discovery.pidfile); stopErr != nil {
+			if stopErr := replacePreMACProxy(rootDir, opts, discovery.pidfile); stopErr != nil {
 				return Endpoint{}, stopErr
 			}
 		}
@@ -356,6 +366,22 @@ func adoptedEndpoint(rootDir, want string, discovery adoptionResult) (Endpoint, 
 		}
 	}
 	return discovery.endpoint, nil
+}
+
+// replacePreMACProxy makes way for a fresh proxy when a pre-upgrade proxy
+// holds the root. The bd CLI stops it (stopVerifiedPreMACProxy), and the next
+// discovery round finds proxy.lock free and starts a proxy from the CLI's own
+// executable. A host that is not bd (opts.ResolveExecutable is set, as in the
+// Go SDK) is refused before anything is touched. The old proxy serves every
+// bd 1.3.x process on the workspace, and the host cannot know whether the
+// binary it would start can replace it: a bd on PATH as old as the proxy
+// cannot. Stopping the proxy could leave the workspace with none.
+func replacePreMACProxy(rootDir string, opts OpenOpts, pf *pidfile.PidFile) error {
+	if opts.ResolveExecutable != nil {
+		return fmt.Errorf("%w: pid %d (record %s) predates the authenticated control handshake of bd 1.4, so this process cannot use it, and a host that is not bd leaves it running; upgrade the bd on PATH and run a bd command such as `bd list` in the workspace, which replaces the old proxy, or wait for its idle exit, then retry",
+			ErrPreUpgradeProxyRunning, pf.Pid, pidfile.Path(rootDir, PIDFileName))
+	}
+	return stopVerifiedPreMACProxy(rootDir, pf)
 }
 
 func stopVerifiedPreMACProxy(rootDir string, pf *pidfile.PidFile) error {

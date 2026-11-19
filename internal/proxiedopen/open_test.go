@@ -171,3 +171,26 @@ func TestBDExecutableOnPathResolvesBDOrFailsTerminally(t *testing.T) {
 		t.Fatalf("bd on PATH: got (%q, %v), want (%q, nil)", got, err, bd)
 	}
 }
+
+// TestPreUpgradeProxyRefusalIsProxyUnavailable pins that a library host's
+// refusal of a proxy started by a bd older than 1.4 (raised in package proxy,
+// which cannot import this one) reaches the embedder as ErrProxyUnavailable
+// too, still matching the proxy's own sentinel, while every other error
+// passes through unchanged.
+func TestPreUpgradeProxyRefusalIsProxyUnavailable(t *testing.T) {
+	refusal := fmt.Errorf("uow: get proxy endpoint: %w", fmt.Errorf("%w: pid 42", proxy.ErrPreUpgradeProxyRunning))
+	got := asProxyUnavailable(refusal)
+	if !errors.Is(got, ErrProxyUnavailable) || !errors.Is(got, proxy.ErrPreUpgradeProxyRunning) {
+		t.Fatalf("asProxyUnavailable(%v) = %v, want ErrProxyUnavailable and proxy.ErrPreUpgradeProxyRunning", refusal, got)
+	}
+	if again := asProxyUnavailable(got); again != got {
+		t.Errorf("asProxyUnavailable wrapped an error that already matches ErrProxyUnavailable: %v", again)
+	}
+	other := errors.New("dial failed")
+	if got := asProxyUnavailable(other); got != other {
+		t.Errorf("asProxyUnavailable(%v) = %v, want it unchanged", other, got)
+	}
+	if got := asProxyUnavailable(nil); got != nil {
+		t.Errorf("asProxyUnavailable(nil) = %v, want nil", got)
+	}
+}

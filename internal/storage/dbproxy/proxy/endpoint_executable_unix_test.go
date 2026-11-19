@@ -3,14 +3,19 @@
 package proxy
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/stretchr/testify/assert"
@@ -113,4 +118,91 @@ func TestUnresolvableExecutableLeavesRecordsAlone(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoProxyExecutable)
 	assert.FileExists(t, record, "the record must not be quarantined when no proxy can be spawned")
 	assert.Empty(t, quarantines(t, root, PIDFileName))
+}
+
+// startPreUpgradeProxyFixture models a live proxy started by a bd older than
+// 1.4: a schema-v2 proxy.pid with no ControlProto naming a live process, a
+// control listener that closes the request-MAC IDENT unanswered (a 1.3.x
+// proxy compares the raw secret), and proxy.lock held, as such a proxy holds
+// it for its whole life. The caller releases the returned lock.
+func startPreUpgradeProxyFixture(t *testing.T, root string) (helperProcess, *util.Lock) {
+	t.Helper()
+	helper := startHelperProcess(t)
+	_, err := identity.WriteSecret(root)
+	require.NoError(t, err)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = bufio.NewReader(conn).ReadString('\n')
+			_ = conn.Close()
+		}
+	}()
+	pf := v2Record(t, root, pidfile.KindProxy, helper)
+	pf.ControlPort = ln.Addr().(*net.TCPAddr).Port
+	require.NoError(t, pidfile.Write(root, PIDFileName, pf))
+	lock, err := util.TryLock(filepath.Join(root, LockFileName))
+	require.NoError(t, err)
+	require.True(t, isPreMACIdentRefusal(readAndDial(root)), "the fixture must read as a pre-upgrade proxy refusing the IDENT")
+	return helper, lock
+}
+
+// TestLibraryHostLeavesPreUpgradeProxyRunning pins that a host that is not bd
+// (OpenOpts.ResolveExecutable set) never stops a live proxy a bd 1.3.x
+// started. The open fails at once with ErrPreUpgradeProxyRunning and leaves
+// the process and its record alone, without consulting the resolver. Before
+// the fix it killed the proxy every bd 1.3.x process on the workspace
+// shares, and then could start no replacement.
+func TestLibraryHostLeavesPreUpgradeProxyRunning(t *testing.T) {
+	root := t.TempDir()
+	defaultCalled := stubPackageExecutable(t)
+	helper, lock := startPreUpgradeProxyFixture(t, root)
+	defer lock.Unlock()
+
+	resolverCalled := false
+	opts := externalOpenOpts(root)
+	opts.ResolveExecutable = func() (string, error) {
+		resolverCalled = true
+		return "", fmt.Errorf("bd not on PATH: %w", ErrNoProxyExecutable)
+	}
+	start := time.Now()
+	_, err := GetCreateDatabaseProxyServerEndpoint(root, opts)
+	require.ErrorIs(t, err, ErrPreUpgradeProxyRunning)
+	assert.Contains(t, err.Error(), "pid "+strconv.Itoa(helper.cmd.Process.Pid))
+	assert.Less(t, time.Since(start), openDeadline/2, "the refusal must be terminal, not polled until the open deadline")
+	assertHelperAlive(t, helper)
+	assert.FileExists(t, pidfile.Path(root, PIDFileName))
+	assert.Empty(t, quarantines(t, root, PIDFileName))
+	assert.False(t, resolverCalled, "a refused open must not reach the spawn path")
+	assert.False(t, *defaultCalled)
+}
+
+// TestCLIStopsPreUpgradeProxy is the same fixture on the CLI's path, and the
+// control for the test above: with OpenOpts.ResolveExecutable nil the open
+// still stops the pre-upgrade proxy (the upgrade to 1.4), then reaches the
+// spawn path once proxy.lock is free.
+func TestCLIStopsPreUpgradeProxy(t *testing.T) {
+	root := t.TempDir()
+	previous := ResolveExecutable
+	ResolveExecutable = func() (string, error) { return "", fmt.Errorf("spawn reached: %w", ErrNoProxyExecutable) }
+	t.Cleanup(func() { ResolveExecutable = previous })
+	helper, lock := startPreUpgradeProxyFixture(t, root)
+	// A real proxy's lock is released when it dies; the fixture's is
+	// released when the helper exits, or once the open returns.
+	var once sync.Once
+	release := func() { once.Do(lock.Unlock) }
+	go func() {
+		<-helper.done
+		release()
+	}()
+
+	_, err := GetCreateDatabaseProxyServerEndpoint(root, externalOpenOpts(root))
+	release()
+	require.ErrorContains(t, err, "spawn reached")
+	assertHelperExited(t, helper)
 }

@@ -219,10 +219,13 @@ func (t *txAdapter) DeleteIssue(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	// storage.Transaction.DeleteIssue (and the flat DeleteIssue, which runs
+	// this) carries no actor, so the journal rows record none, as on
+	// DoltStore.
 	if isWisp {
-		_, err = t.uw.IssueUseCase().DeleteWisp(ctx, id, "")
+		_, err = t.uw.IssueUseCase().DeleteWisp(ctx, id, issueops.NoRequestActor)
 	} else {
-		_, err = t.uw.IssueUseCase().DeleteIssue(ctx, id, "")
+		_, err = t.uw.IssueUseCase().DeleteIssue(ctx, id, issueops.NoRequestActor)
 	}
 	if err == nil {
 		delete(t.planes, id)

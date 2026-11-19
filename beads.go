@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -89,12 +90,17 @@ var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
 
 // ErrProxyUnavailable is returned by OpenBestAvailable and
 // OpenBestAvailableWith for a proxied-server workspace (dolt_mode
-// "proxied-server") when no bd proxy is running for its server root and no
-// `bd` executable is on PATH to start one. The refused open creates no
-// embedded store and starts no proxy (it may still create the server root
-// directory and write the proxied sql-server config). Run any bd command in
-// the workspace, or put bd on PATH, and retry. The library never starts the
-// proxy from the host executable. Match it with errors.Is.
+// "proxied-server") when no bd proxy the library can use is running for its
+// server root and none can be started: either none is running and no `bd`
+// executable is on PATH to start one (run any bd command in the workspace,
+// or put bd on PATH, and retry), or the running proxy was started by a bd
+// older than 1.4, which the library cannot talk to and does not stop, since
+// every older bd on the workspace shares it (upgrade the bd on PATH and run
+// a bd command in the workspace, which replaces it, or wait for its idle
+// exit, and retry). The refused open creates no embedded store and starts or
+// stops no proxy (it may still create the server root directory and write
+// the proxied sql-server config). The library never starts the proxy from
+// the host executable. Match it with errors.Is.
 var ErrProxyUnavailable = proxiedopen.ErrProxyUnavailable
 
 // SchemaSkewError reports a database whose schema is newer than this
@@ -145,6 +151,33 @@ func openProxiedServer(ctx context.Context, beadsDir string) (Storage, error) {
 		return nil, err
 	}
 	return st, nil
+}
+
+// routesThroughProxy reports whether OpenBestAvailableWith opens cfg's
+// workspace through its bd proxy (openProxiedServer): a proxied-server
+// workspace, unless the environment forces server mode and names the port
+// to dial. On a proxied workspace only BEADS_DOLT_SERVER_MODE or
+// BEADS_DOLT_SHARED_SERVER makes IsDoltServerMode true (host inference
+// exempts the mode). Such an open keeps the server arm when
+// BEADS_DOLT_SERVER_PORT names a port, parsed as dolt.ResolveServerPort
+// parses it, because that port outranks every other source the server arm
+// reads; this is the named-port exemption approved on #8476. Gas City's
+// proxied-native lane opens that way against a bd 1.3.x proxy, whose data
+// port still answers a plain MySQL client, and its env also pins what the
+// proxied arm ignores: no auto-start, the commit author, the pool bound.
+// The legacy BEADS_DOLT_PORT does not count, because a port persisted in
+// config.yaml or metadata.json outranks it. Without a named port the server
+// arm would dial a port bd resolves itself, never the proxy's data port, so
+// that open goes through the proxy.
+func routesThroughProxy(cfg *configfile.Config) bool {
+	if !cfg.IsDoltProxiedServerMode() {
+		return false
+	}
+	if !cfg.IsDoltServerMode() {
+		return true
+	}
+	port, err := strconv.Atoi(os.Getenv("BEADS_DOLT_SERVER_PORT"))
+	return err != nil || port <= 0
 }
 
 // configuredBackendUnavailable is the public open path's fail-closed refusal for

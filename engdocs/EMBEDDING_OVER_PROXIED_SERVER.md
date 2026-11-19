@@ -653,11 +653,22 @@ handles all but embedded Dolt and returns an error for that.
 **Routing.** Both copies have a proxied-server arm (GH#8323). It is checked
 after a registered extension backend and the per-open option refusals, and
 before the server and embedded arms. It reads `cfg.IsDoltProxiedServerMode()`,
-which looks only at `dolt_mode` in `metadata.json`; `BEADS_DOLT_SERVER_MODE`,
-`BEADS_DOLT_SHARED_SERVER` and `BEADS_DOLT_SERVER_PORT` can force
-`IsDoltServerMode()` true but do not change the route, and the server port is
-never dialed. Both builds share the arm (`openProxiedServer` in `beads.go`),
-so a `CGO_ENABLED=0` embedder opens a proxied workspace as well as a cgo one.
+which looks only at `dolt_mode` in `metadata.json`. Both builds share the arm
+(`openProxiedServer` in `beads.go`), so a `CGO_ENABLED=0` embedder opens a
+proxied workspace as well as a cgo one.
+
+One open keeps the server arm: an environment that forces server mode
+(`BEADS_DOLT_SERVER_MODE=1` or `BEADS_DOLT_SHARED_SERVER`) and names the port
+to dial in `BEADS_DOLT_SERVER_PORT` (a positive port, parsed as the server
+store parses it). That open dials the named port as a plain MySQL client, as
+it did before this arm existed (`routesThroughProxy` in `beads.go`; the
+named-port exemption #8476 approved). Gas City's proxied-native lane opens
+that way against bd 1.3.x proxies, whose data port still answers a plain
+MySQL client, and its environment also pins what the proxied arm would ignore:
+no auto-start, the commit author and the pool bound. Without a named port,
+forced server mode would dial a port bd resolves itself, never the proxy's
+data port, so that open takes the proxied arm. The legacy `BEADS_DOLT_PORT`
+does not count as a named port.
 
 Before this arm existed, a proxied workspace fell through to the embedded arm
 (cgo), which created and migrated a second, unrelated database at
@@ -678,6 +689,14 @@ construction the bd CLI uses, with a root bd command's posture:
   orphaned backend alone. It may still create the server root directory and
   write the proxied sql-server config. The library never starts the proxy
   from the host executable, because the host is not bd.
+- A proxy started by a bd older than 1.4 (before the authenticated control
+  handshake) cannot answer the library, and the library does not stop it:
+  every older bd on the workspace shares that proxy, and the `bd` on `PATH`
+  may be too old to replace it. The open fails at once with
+  `beads.ErrProxyUnavailable` and leaves the proxy, its record and its
+  backend alone. Upgrading the `bd` on `PATH` and running a bd command in the
+  workspace replaces the old proxy, as does waiting for its idle exit. The
+  bd CLI itself stops such a proxy and starts its own.
 - A managed-local workspace (no external upstream in the sidecar) probes the
   `dolt` binary before it looks for a proxy, so it needs `dolt` on `PATH`
   even to adopt a running proxy. Without it the open fails with the dolt
@@ -695,6 +714,11 @@ construction the bd CLI uses, with a root bd command's posture:
 The returned `Storage` (`internal/storage/uowstore`) runs each call as one
 unit of work over the proxy. Its `Close` releases this handle's connections and
 leaves the shared proxy running, as a bd command's exit does.
+
+**Reads.** The flat `GetIssue` resolves the issue on either plane and fills
+its `Labels`, and the flat `GetIssuesByIDs` reads both planes with their
+labels through the same batch read `DoltStore` uses, leaving out an id that
+names no row. As on `DoltStore`, the transaction's `GetIssue` fills no labels.
 
 **Creates.** `CreateIssue`, `CreateIssues` and the transaction creates go
 through the same domain create use case as the proxied `bd create`, and add
@@ -748,6 +772,11 @@ Divergences an embedder may notice:
     with a type-conflict error. One of the same type with changed metadata or
     thread is rewritten, where `DoltStore` leaves it untouched.
 - Dependencies on an external reference are not resolved through routes.
+- Dolt commits carry no `--author`: they are attributed to the proxy's SQL
+  user, where `DoltStore` takes the author from `GIT_AUTHOR_NAME` and
+  `GIT_AUTHOR_EMAIL` or the bd config. An embedder that needs its own author
+  on each commit keeps using the server arm until the proxied arm carries
+  one.
 - `ErrCircuitOpen` (§9) is never produced on this arm. The circuit breaker
   belongs to the direct server store.
 - `UnderlyingDB()` and `DB()` return the proxy's connection pool as raw-SQL
@@ -756,12 +785,14 @@ Divergences an embedder may notice:
   after `Close`: role calls return an error and the accessors return `nil`.
   None of them panic, and `Close` is safe to race with them.
 
-**Embedders that projected a server endpoint.** An embedder that steered a
-proxied workspace onto the server arm by setting `BEADS_DOLT_SERVER_*` gets
-no effect from that projection now: the proxied arm runs first. An embedder
-that fenced proxied handles read-only should keep the fence until it runs a
-beads release that carries the create contract, the failed-create ID reset
-and the quiet dependency writes described above.
+**Embedders that projected a server endpoint.** An embedder that steers a
+proxied workspace onto the server arm by forcing server mode and naming the
+port (`BEADS_DOLT_SERVER_MODE=1` with `BEADS_DOLT_SERVER_PORT`) keeps that
+route. Forcing server mode without naming a port now takes the proxied arm.
+An embedder that moves to the proxied arm should keep any read-only fence on
+proxied handles until it runs a beads release that carries the create
+contract, the failed-create ID reset and the quiet dependency writes
+described above, and should check the commit-author divergence.
 
 **The other public opens are unchanged.** `Open`, `OpenFromConfig` and
 `OpenGated` still construct the direct server store. On a proxied workspace

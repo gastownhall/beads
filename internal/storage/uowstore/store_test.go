@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/journalops"
 )
 
@@ -210,9 +211,46 @@ func (f *fakeIssues) CloseWisp(_ context.Context, id string, _ domain.CloseIssue
 	return domain.CloseIssueResult{}, nil
 }
 
+// GetMany answers from both planes in the request's order and records each
+// request. Like the shared body it refuses a request over
+// publicops.MaxGetManyIDs or holding an empty id.
+func (f *fakeIssues) GetMany(_ context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	f.calls = append(f.calls, fmt.Sprintf("GetMany %d", len(request.IDs)))
+	if len(request.IDs) > publicops.MaxGetManyIDs {
+		return publicops.GetManyResult{}, &publicops.TooManyIDsError{Requested: len(request.IDs), Cap: publicops.MaxGetManyIDs}
+	}
+	result := publicops.GetManyResult{Issues: []*types.Issue{}, Missing: []string{}}
+	for _, id := range request.IDs {
+		if id == "" {
+			return publicops.GetManyResult{}, fmt.Errorf("%w: empty id", storage.ErrValidation)
+		}
+		if is, ok := f.issues[id]; ok {
+			result.Issues = append(result.Issues, is)
+		} else if is, ok := f.wisps[id]; ok {
+			result.Issues = append(result.Issues, is)
+		} else {
+			result.Missing = append(result.Missing, id)
+		}
+	}
+	return result, nil
+}
+
 type fakeLabels struct {
 	domain.LabelUseCase
 	calls []string
+	// issueLabels and wispLabels answer GetLabels and GetWispLabels.
+	issueLabels map[string][]string
+	wispLabels  map[string][]string
+}
+
+func (f *fakeLabels) GetLabels(_ context.Context, id string) ([]string, error) {
+	f.calls = append(f.calls, "GetLabels "+id)
+	return f.issueLabels[id], nil
+}
+
+func (f *fakeLabels) GetWispLabels(_ context.Context, id string) ([]string, error) {
+	f.calls = append(f.calls, "GetWispLabels "+id)
+	return f.wispLabels[id], nil
 }
 
 func (f *fakeLabels) AddLabel(_ context.Context, id, label, _ string) error {
@@ -472,4 +510,66 @@ func TestFlatCreateIssueMintsAndCommitsWithItsID(t *testing.T) {
 	require.NoError(t, s.CreateIssue(context.Background(), issue, "a"))
 	assert.Equal(t, "bd-1", issue.ID)
 	assert.Equal(t, []string{"bd: create bd-1"}, p.uw.commits)
+}
+
+// TestFlatGetIssueFillsLabelsFromItsPlane pins that the flat GetIssue
+// returns the issue's labels, read from the plane the issue lives in, in the
+// one unit of work, as DoltStore's GetIssue does (the transaction's GetIssue
+// reads none, as DoltStore's transaction does not).
+func TestFlatGetIssueFillsLabelsFromItsPlane(t *testing.T) {
+	s, p := newFakeStore(t)
+	issues := newFakeIssues()
+	labels := &fakeLabels{
+		issueLabels: map[string][]string{"bd-1": {"kept"}},
+		wispLabels:  map[string][]string{"wisp-1": {"ephemeral"}},
+	}
+	p.uw.issues, p.uw.labels = issues, labels
+	issues.issues["bd-1"] = &types.Issue{ID: "bd-1"}
+	issues.wisps["wisp-1"] = &types.Issue{ID: "wisp-1", Ephemeral: true}
+
+	got, err := s.GetIssue(context.Background(), "bd-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"kept"}, got.Labels)
+	got, err = s.GetIssue(context.Background(), "wisp-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ephemeral"}, got.Labels)
+	assert.Equal(t, []string{"GetLabels bd-1", "GetWispLabels wisp-1"}, labels.calls)
+	assert.Equal(t, 2, p.newUOWCalls, "each GetIssue is one unit of work")
+
+	_, err = s.GetIssue(context.Background(), "bd-404")
+	require.ErrorIs(t, err, storage.ErrNotFound)
+}
+
+// TestFlatGetIssuesByIDsReadsBothPlanesInChunks pins that the flat
+// GetIssuesByIDs goes through the both-plane batch read (GetMany) in one unit
+// of work, and accepts what DoltStore's accepts: more ids than one GetMany
+// request may carry are read in chunks, and an empty id is skipped rather
+// than refused. Duplicates collapse to the first mention, and an id that
+// names no row is left out.
+func TestFlatGetIssuesByIDsReadsBothPlanesInChunks(t *testing.T) {
+	s, p := newFakeStore(t)
+	issues := newFakeIssues()
+	p.uw.issues = issues
+	issues.wisps["wisp-1"] = &types.Issue{ID: "wisp-1", Ephemeral: true}
+	ids := []string{"wisp-1", ""}
+	for i := 0; i <= publicops.MaxGetManyIDs; i++ {
+		id := fmt.Sprintf("bd-%d", i)
+		issues.issues[id] = &types.Issue{ID: id}
+		ids = append(ids, id)
+	}
+	ids = append(ids, "bd-missing", "wisp-1", "bd-0")
+
+	got, err := s.GetIssuesByIDs(context.Background(), ids)
+	require.NoError(t, err)
+	assert.Equal(t, []string{fmt.Sprintf("GetMany %d", publicops.MaxGetManyIDs), "GetMany 3"}, issues.calls)
+	assert.Equal(t, 1, p.newUOWCalls, "every chunk is read in the one unit of work")
+	require.Len(t, got, publicops.MaxGetManyIDs+2)
+	assert.Equal(t, "wisp-1", got[0].ID)
+	assert.Equal(t, "bd-0", got[1].ID)
+	assert.Equal(t, fmt.Sprintf("bd-%d", publicops.MaxGetManyIDs), got[len(got)-1].ID)
+
+	got, err = s.GetIssuesByIDs(context.Background(), []string{"", ""})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 1, p.newUOWCalls, "nothing to read opens no unit of work")
 }

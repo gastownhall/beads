@@ -118,10 +118,14 @@ func OpenTopology(ctx context.Context, beadsDir string, topology Topology, o Opt
 	if o.ProxyExecutable != nil {
 		o.ProviderOptions = append(append([]uow.ProviderOption{}, o.ProviderOptions...), uow.WithProxyExecutable(o.ProxyExecutable))
 	}
+	var p uow.UnitOfWorkProvider
+	var err error
 	if topology.External != nil {
-		return newExternalProxiedServerUOWProvider(ctx, beadsDir, topology, o.ProviderOptions...)
+		p, err = newExternalProxiedServerUOWProvider(ctx, beadsDir, topology, o.ProviderOptions...)
+	} else {
+		p, err = newManagedProxiedServerUOWProvider(ctx, beadsDir, topology, o.Advisory, o.ProviderOptions...)
 	}
-	return newManagedProxiedServerUOWProvider(ctx, beadsDir, topology, o.Advisory, o.ProviderOptions...)
+	return p, asProxyUnavailable(err)
 }
 
 // newExternalProxiedServerUOWProvider fronts a Dolt SQL server this process

@@ -194,15 +194,19 @@ func TestOpenBestAvailableProxiedRefusesPerOpenOptions(t *testing.T) {
 	}
 }
 
-// TestOpenBestAvailableProxiedIgnoresServerPortEnv pins that the env which
-// forces server mode ahead of dolt_mode (BEADS_DOLT_SERVER_MODE,
-// BEADS_DOLT_SHARED_SERVER), even with BEADS_DOLT_SERVER_PORT naming a port,
-// no longer steers a proxied workspace onto the server arm: since #7885 the
-// proxy refuses a plain MySQL client, so that arm could only dial around it.
-// The open still reaches the proxy arm, which reports ErrProxyUnavailable,
-// rather than the server arm's dial failure at the named port.
-func TestOpenBestAvailableProxiedIgnoresServerPortEnv(t *testing.T) {
-	for _, env := range []string{"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER"} {
+// envForcedServerModes are the two env settings that make IsDoltServerMode
+// true ahead of dolt_mode on a proxied-server workspace.
+var envForcedServerModes = []string{"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER"}
+
+// TestOpenBestAvailableProxiedAtNamedServerPortKeepsServerArm pins the #8476
+// named-port exemption: an env that forces server mode and names the port in
+// BEADS_DOLT_SERVER_PORT, as Gas City's proxied-native lane does against a bd
+// 1.3.x proxy, still takes the Dolt server arm and dials that port, ahead of
+// the proxied arm. The named port is closed and is not the port 1 the
+// isolated env otherwise names, so a dial failure there shows the server arm
+// dialed the port the env named. The open never reaches the proxy.
+func TestOpenBestAvailableProxiedAtNamedServerPortKeepsServerArm(t *testing.T) {
+	for _, env := range envForcedServerModes {
 		for name, open := range proxiedBestAvailableOpens {
 			t.Run(env+"/"+name, func(t *testing.T) {
 				isolateProxiedOpenEnv(t)
@@ -211,14 +215,58 @@ func TestOpenBestAvailableProxiedIgnoresServerPortEnv(t *testing.T) {
 				t.Setenv("BEADS_DOLT_SERVER_PORT", port)
 				_, beadsDir := writeProxiedWorkspace(t, "metadata.json", "proxied-server", true)
 				err := openProxiedClosing(t, open, beadsDir)
-				if !errors.Is(err, beads.ErrProxyUnavailable) {
-					t.Fatalf("%s with %s=1 and BEADS_DOLT_SERVER_PORT=%s: error = %v, want errors.Is ErrProxyUnavailable", name, env, port, err)
+				if errors.Is(err, beads.ErrProxyUnavailable) {
+					t.Fatalf("%s with %s=1 and BEADS_DOLT_SERVER_PORT=%s: error = %v, want the server arm's error, not the proxied arm's", name, env, port, err)
 				}
-				if strings.Contains(err.Error(), "127.0.0.1:"+port) {
-					t.Fatalf("%s dialed the server-arm port %s: %v", name, port, err)
+				if err == nil || !strings.Contains(err.Error(), "unreachable at 127.0.0.1:"+port+":") {
+					t.Fatalf("%s with %s=1 and BEADS_DOLT_SERVER_PORT=%s: error = %v, want the server arm's dial failure at that port", name, env, port, err)
 				}
 				requireNoEmbeddedStore(t, beadsDir, name)
 			})
+		}
+	}
+}
+
+// TestOpenBestAvailableProxiedEnvForcedWithoutNamedPortUsesProxy pins the
+// other side of the exemption: forced server mode without a positive
+// BEADS_DOLT_SERVER_PORT would dial a port bd resolves itself, never the
+// proxy's, so the open goes through the proxy arm (ErrProxyUnavailable here)
+// and dials nothing. Neither a BEADS_DOLT_SERVER_PORT that is not a positive
+// port nor the legacy BEADS_DOLT_PORT names one.
+func TestOpenBestAvailableProxiedEnvForcedWithoutNamedPortUsesProxy(t *testing.T) {
+	ports := []struct {
+		name       string
+		serverPort string
+		legacyPort bool
+	}{
+		{name: "no-port", serverPort: ""},
+		{name: "server-port-zero", serverPort: "0"},
+		{name: "server-port-not-a-port", serverPort: "not-a-port"},
+		{name: "legacy-port-only", serverPort: "", legacyPort: true},
+	}
+	for _, env := range envForcedServerModes {
+		for _, port := range ports {
+			for name, open := range proxiedBestAvailableOpens {
+				t.Run(env+"/"+port.name+"/"+name, func(t *testing.T) {
+					isolateProxiedOpenEnv(t)
+					t.Setenv(env, "1")
+					t.Setenv("BEADS_DOLT_SERVER_PORT", port.serverPort)
+					legacy := ""
+					if port.legacyPort {
+						legacy = strconv.Itoa(closedProxiedLoopbackPort(t))
+					}
+					t.Setenv("BEADS_DOLT_PORT", legacy)
+					_, beadsDir := writeProxiedWorkspace(t, "metadata.json", "proxied-server", true)
+					err := openProxiedClosing(t, open, beadsDir)
+					if !errors.Is(err, beads.ErrProxyUnavailable) {
+						t.Fatalf("%s with %s=1 (%s): error = %v, want errors.Is ErrProxyUnavailable", name, env, port.name, err)
+					}
+					if strings.Contains(err.Error(), "unreachable at") {
+						t.Fatalf("%s with %s=1 (%s) dialed a server-arm port: %v", name, env, port.name, err)
+					}
+					requireNoEmbeddedStore(t, beadsDir, name)
+				})
+			}
 		}
 	}
 }

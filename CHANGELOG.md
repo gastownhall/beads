@@ -1455,19 +1455,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   embedded-requires-CGO error. Both builds now open the workspace through the
   bd proxy, as `bd` does, with the same identity check, fresh-store refusal,
   events journal and versioned history. A running proxy is adopted; with
-  none, one is started from `bd` on `PATH`; with no `bd` there the open fails
-  with the new `beads.ErrProxyUnavailable`, having created no embedded store
-  and started no proxy. A managed-local workspace also needs `dolt` on `PATH`,
-  even to adopt a running proxy. `Close` leaves the shared proxy running. The
-  store serves the common issue, label, dependency, comment, config,
-  ready-work and claim methods and `RunInTransaction` (whose callback runs
-  once); the rest return a typed `beads.ErrUnsupported`. `BEADS_DOLT_SERVER_MODE`,
-  `BEADS_DOLT_SHARED_SERVER` and `BEADS_DOLT_SERVER_PORT` no longer divert a
-  proxied workspace to a direct server dial. Schema refusals are matchable
-  with the newly exported `beads.SchemaSkewError`,
-  `beads.RemoteMigrateGateError` and `beads.MigrateConsentError`. `Open`,
-  `OpenFromConfig` and `OpenGated` are unchanged. See
-  `engdocs/EMBEDDING_OVER_PROXIED_SERVER.md` §8.
+  none, one is started from `bd` on `PATH`. With no `bd` there, or with a
+  running proxy that a bd older than 1.4 started (which the library leaves
+  running rather than stopping it under the older bd processes that share
+  it), the open fails with the new `beads.ErrProxyUnavailable`, having
+  created no embedded store and started or stopped no proxy. A managed-local
+  workspace also needs `dolt` on `PATH`, even to adopt a running proxy.
+  `Close` leaves the shared proxy running. The store serves the common issue,
+  label, dependency, comment, config, ready-work and claim methods and
+  `RunInTransaction` (whose callback runs once); the rest return a typed
+  `beads.ErrUnsupported`. Its Dolt commits carry no `--author`, unlike
+  `DoltStore`'s. An environment that forces server mode
+  (`BEADS_DOLT_SERVER_MODE` or `BEADS_DOLT_SHARED_SERVER`) and names the port
+  in `BEADS_DOLT_SERVER_PORT` still opens a proxied workspace on the direct
+  server arm, at that port; forced server mode without a named port now goes
+  through the proxy. Schema refusals are matchable with the newly exported
+  `beads.SchemaSkewError`, `beads.RemoteMigrateGateError` and
+  `beads.MigrateConsentError`. `Open`, `OpenFromConfig` and `OpenGated` are
+  unchanged. See `engdocs/EMBEDDING_OVER_PROXIED_SERVER.md` §8.
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that

@@ -9,14 +9,17 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/workapi"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // Flat storage.Storage methods.
 //
 // RULE: a flat method is supported exactly when it is ONE call to a use case
 // the proxied CLI already drives through the same unit of work, so it adds no
-// SQL and inherits that use case's tested behavior. Reads run in one unit of
+// SQL and inherits that use case's tested behavior. The exceptions add calls
+// to such use cases, still no SQL, only where one call returns less than
+// DoltStore's method does: GetIssue also reads the issue's labels, and
+// GetIssuesByIDs reads in chunks that GetMany accepts. Reads run in one unit of
 // work (uow.RunTxRead). Writes run in one unit of work committed with a
 // DoltStore-style message through uow.RunTx, which replays the whole unit of
 // work on a serialization failure exactly as every proxied CLI write does;
@@ -76,17 +79,56 @@ func (u classifyingUOW) Commit(ctx context.Context, message string) error {
 
 // --- issues ---
 
-// GetIssue resolves id against issues, then wisps, as DoltStore does.
+// GetIssue resolves id against issues, then wisps, and fills Labels from the
+// plane it lives in, in the same unit of work, as DoltStore's GetIssue does
+// (issueops.GetIssueInTx). The transaction's GetIssue leaves Labels empty,
+// as DoltStore's transaction does.
 func (s *Store) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
 	return read(ctx, s, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, error) {
-		issue, _, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
-		return issue, err
+		t := newTxAdapter(uw)
+		issue, err := t.GetIssue(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if issue.Labels, err = t.GetLabels(ctx, id); err != nil {
+			return nil, err
+		}
+		return issue, nil
 	})
 }
 
+// GetIssuesByIDs reads ids from both planes with their labels, as DoltStore
+// does. It goes through the domain GetMany, whose body
+// (issueops.ExecuteGetMany) runs the same batch read DoltStore's
+// GetIssuesByIDs runs (issueops.GetIssuesByIDsInTx). GetMany refuses more
+// than publicops.MaxGetManyIDs ids and refuses an empty id, and DoltStore
+// does neither, so ids are read in chunks of that size inside one read unit
+// of work, and an empty id, which names no row, is skipped. An id that
+// names no row is left out, as on DoltStore. Rows come back in the order of
+// each id's first mention.
 func (s *Store) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
+	wanted := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			wanted = append(wanted, id)
+		}
+	}
+	if len(wanted) == 0 {
+		return nil, nil
+	}
 	return read(ctx, s, func(ctx context.Context, uw uow.UnitOfWork) ([]*types.Issue, error) {
-		return uw.IssueUseCase().GetIssuesByIDs(ctx, ids)
+		out := make([]*types.Issue, 0, len(wanted))
+		for start := 0; start < len(wanted); start += publicops.MaxGetManyIDs {
+			chunk := wanted[start:min(start+publicops.MaxGetManyIDs, len(wanted))]
+			got, err := uw.IssueUseCase().GetMany(ctx, publicops.GetManyRequest{IDs: chunk})
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, got.Issues...)
+		}
+		return out, nil
 	})
 }
 

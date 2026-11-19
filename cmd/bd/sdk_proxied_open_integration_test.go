@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads"
@@ -181,6 +182,42 @@ func TestProxiedServerSDKOpenBestAvailable(t *testing.T) {
 		wisps, issues := countIn("wisps", c.issue.ID), countIn("issues", c.issue.ID)
 		if c.wisp && (wisps != 1 || issues != 0) || !c.wisp && (wisps != 0 || issues != 1) {
 			t.Errorf("%q (%s): wisps=%d issues=%d, want it only in the %s table", c.issue.Title, c.issue.ID, wisps, issues, map[bool]string{true: "wisps", false: "issues"}[c.wisp])
+		}
+	}
+
+	// The flat reads answer as DoltStore's do: GetIssue carries the issue's
+	// labels from either plane, and GetIssuesByIDs reads both planes with
+	// their labels, collapsing a repeated id and leaving out one that names
+	// no row.
+	if err := store.AddLabel(ctx, flatNoHistory.ID, "sdk-wisp-label", actor); err != nil {
+		t.Fatalf("AddLabel on the NoHistory issue: %v", err)
+	}
+	wantLabels := map[string][]string{a.ID: {"sdk-kept"}, flatNoHistory.ID: {"sdk-wisp-label"}, txNoHistory.ID: nil}
+	for _, id := range []string{a.ID, flatNoHistory.ID} {
+		got, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", id, err)
+		}
+		if !slices.Equal(got.Labels, wantLabels[id]) {
+			t.Errorf("GetIssue(%s).Labels = %v, want %v", id, got.Labels, wantLabels[id])
+		}
+	}
+	batch, err := store.GetIssuesByIDs(ctx, []string{a.ID, flatNoHistory.ID, txNoHistory.ID, "sdk-no-such-id", a.ID})
+	if err != nil {
+		t.Fatalf("GetIssuesByIDs: %v", err)
+	}
+	batchLabels := map[string][]string{}
+	for _, issue := range batch {
+		batchLabels[issue.ID] = issue.Labels
+	}
+	if len(batch) != len(wantLabels) {
+		t.Errorf("GetIssuesByIDs returned %d rows (%v), want %d", len(batch), batchLabels, len(wantLabels))
+	}
+	for id, want := range wantLabels {
+		if got, ok := batchLabels[id]; !ok {
+			t.Errorf("GetIssuesByIDs left out %s", id)
+		} else if !slices.Equal(got, want) {
+			t.Errorf("GetIssuesByIDs: %s labels = %v, want %v", id, got, want)
 		}
 	}
 
