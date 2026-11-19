@@ -43,6 +43,10 @@ comments. The original ID is preserved so all links keep working.
 
 A comment is added recording the promotion and optional reason.
 
+For a no-history bead that is not ephemeral (for example, one created with
+--no-history), use bd update <id> --persistent to make it durable. bd promote
+refuses that bead even though it may be stored in the wisps table.
+
 Examples:
   bd promote bd-wisp-abc123
   bd promote bd-wisp-abc123 --reason "Worth tracking long-term"`,
