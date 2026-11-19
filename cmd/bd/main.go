@@ -3109,6 +3109,9 @@ func validateWorkspaceIdentity(ctx context.Context, s storage.DoltStorage, beads
 
 func main() {
 	initprocs.Done()
+	// Auto-started dolt servers get an idle watcher (a re-exec of this
+	// binary). Set here rather than in init so test binaries never spawn one.
+	doltserver.IdleWatchSpawner = spawnDoltIdleWatcher
 	// BD_NAME overrides the binary name in help text (e.g. BD_NAME=ops makes
 	// "ops --help" show "ops" instead of "bd"). Useful for multi-instance
 	// setups where wrapper scripts set BEADS_DIR for routing.

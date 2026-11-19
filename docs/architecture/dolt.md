@@ -392,6 +392,24 @@ Switch to server mode when you need:
 - Orchestrator multi-rig setups
 - Federation with remote peers
 
+#### Idle stop for auto-started servers
+
+When a bd command needs the server and none is running, bd starts one in the
+background (auto-start). That server is stopped again once it has been idle
+for 30 minutes: bd launches a small watcher process beside each server it
+auto-starts, and the watcher stops the server the way `bd dolt stop` does
+(working set flushed, `dolt-server.pid` and `dolt-server.port` removed). The
+next bd command starts it again, so idle stop costs only that start.
+
+The server counts as idle only while it has accepted no new SQL connection
+and holds no open one apart from the watcher's own check. When it is stopped,
+`dolt-server.log` gets a line saying so. The watcher's own files live in
+`.beads/dolt-server.activity/`.
+
+Idle stop applies only to a server bd started on a port it chose itself. It
+never applies to an external server, a shared server, a server on a pinned
+port, or a server with a remotesapi listener.
+
 ### Shared Server Mode
 
 On machines with multiple beads projects, each project normally starts its own Dolt server.

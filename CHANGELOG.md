@@ -172,6 +172,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Auto-started Dolt servers stop when idle.** A `dolt sql-server` that bd
+  auto-started for a workspace used to run until reboot, so every workspace a
+  user had touched kept a server (about 2 GB each in the report). bd now
+  launches a watcher beside each server it auto-starts, and the watcher stops
+  the server once it has had no client for 30 minutes; the next bd command
+  starts it again. Servers on a pinned port, shared, external and remotesapi
+  servers are never stopped.
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,
