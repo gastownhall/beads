@@ -16,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/workspacegate"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -102,6 +104,26 @@ func TestSharedServerConcurrent(t *testing.T) {
 		t.Fatalf("write port file: %v", err)
 	}
 
+	// A RESIDENT SHARED HOLDER of the shared root (GH#7122): in production
+	// every project with a `bd serve` running holds the machine-global
+	// shared dolt dir SHARED for that serve's whole lifetime, and this
+	// smoke must model it — the test process plays the holder through the
+	// same gate file, WITHOUT advertising an inherited hold (this is not
+	// a child of a bd command). Ordinary shared-server init takes that
+	// root SHARED (AC-1/AC-7), so every init and every client command
+	// below must proceed beside it; at base, where init took the root
+	// EXCLUSIVELY, this holder refuses the very first init.
+	rootGate, gerr := workspacegate.ForPhysicalRoot(filepath.Join(sharedDir, "dolt"))
+	if gerr != nil {
+		t.Fatalf("shared root gate: %v", gerr)
+	}
+	residentHold, gerr := rootGate.Acquire(context.Background(), workspacegate.Shared,
+		workspacegate.Options{Reason: "resident bd serve (test holder)"})
+	if gerr != nil {
+		t.Fatalf("resident shared hold of the shared root: %v", gerr)
+	}
+	t.Cleanup(func() { _ = residentHold.Release() })
+
 	// Base environment for every bd subprocess.
 	baseEnv := []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -131,19 +153,13 @@ func TestSharedServerConcurrent(t *testing.T) {
 
 	// ── Init project directories ────────────────────────────────────────
 	// All at once: in shared-server mode every project's physical root is
-	// the one shared dolt dir, and bd init holds that root's gate
-	// EXCLUSIVELY (acquireInitMutationGate), so concurrent inits of
-	// different projects serialize on it. Each waits up to
-	// initGateWaitDefault (60s) for the others, which covers the lane's
-	// small BEADS_TEST_SS_DIRS at ~8s per init. Larger manual runs queue
-	// numDirs inits behind one gate, so raise the bound to match rather
-	// than reintroduce client-side serialization.
+	// the one shared dolt dir, and an ORDINARY init holds that root SHARED
+	// (GH#7122: init only creates a new database on the shared server;
+	// destructive reinit is the plan that still takes it exclusively), so
+	// concurrent inits of different projects no longer serialize on the
+	// root gate at all — and no raised BEADS_INIT_GATE_TIMEOUT is needed
+	// for larger runs.
 	initEnv := baseEnv
-	if perInit := 15 * time.Second; time.Duration(numDirs)*perInit > initGateWaitDefault {
-		bound := time.Duration(numDirs) * perInit
-		initEnv = append(append([]string{}, baseEnv...), initGateTimeoutEnv+"="+bound.String())
-		t.Logf("init: %d concurrent inits; %s=%s", numDirs, initGateTimeoutEnv, bound)
-	}
 	phase = time.Now()
 	type project struct {
 		dir, prefix string
@@ -179,15 +195,15 @@ func TestSharedServerConcurrent(t *testing.T) {
 
 	// ── Fan out client workloads ────────────────────────────────────────
 	// Plus one late `bd init` of a fresh project that starts while the
-	// workloads are running. It holds the shared physical root's gate
-	// EXCLUSIVELY for its whole run, so this exercises both directions of
-	// the gate wait: every client command that lands during the init waits
-	// for it (BEADS_GATE_WAIT_TIMEOUT, default 30s) instead of failing, and
-	// the init gets the gate despite the steady stream of short client
-	// commands (workspacegate writer fairness: once the init is queued, new
-	// shared acquirers wait behind it). Its bound is pinned to 30s, half the
-	// 60s default, rather than initEnv's raised one: a generous bound would
-	// mask a fairness regression.
+	// workloads are running. Since GH#7122 the late init holds the shared
+	// physical root SHARED, so the steady stream of client commands neither
+	// waits for it nor is waited out by it — what the late init still proves
+	// is that a fresh project initializes DURING live cross-project traffic
+	// on the same server (and, once any regression reintroduces an
+	// exclusive root hold, writer fairness both ways: clients queue behind
+	// the init, BEADS_GATE_WAIT_TIMEOUT, and the init gets the gate despite
+	// the stream). Its bound stays pinned to 30s, half the 60s default: a
+	// generous bound would mask a fairness regression.
 	phase = time.Now()
 	eg, egCtx = errgroup.WithContext(ctx)
 	eg.SetLimit(maxProcs + 1) // +1: the late init below must not take a client's slot
@@ -694,4 +710,293 @@ func buildSharedServerTestBinary(t *testing.T) string {
 		t.Fatalf("build bd: %v", sharedServerBuildErr)
 	}
 	return sharedServerBdBinary
+}
+
+// ---------------------------------------------------------------------------
+// bd-xicgb8 (GH#7122): shared-server init beside a resident shared holder
+// ---------------------------------------------------------------------------
+
+// ssMetadataJSON loads a project's metadata.json as a generic object, or
+// fails the test when the file is absent or unparseable.
+func ssMetadataJSON(t *testing.T, projectDir string) map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(projectDir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("read %s/.beads/metadata.json: %v", projectDir, err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("parse metadata.json in %s: %v\nraw: %s", projectDir, err, raw)
+	}
+	return m
+}
+
+// TestSharedServerInitManagedResidentHolder pins GH#7122 end to end: with a
+// RESIDENT SHARED HOLDER of the machine-global shared root — the test
+// process plays another project's `bd serve`, which holds that root SHARED
+// for its whole lifetime — different NEW projects on the same shared
+// server still initialize successfully (AC-1/AC-7), end up with usable
+// identities of their own, and share the provisioned global database
+// (beads_global) every --global command reads. At base, where init took
+// the shared root EXCLUSIVELY, this holder refuses the very first init.
+func TestSharedServerInitManagedResidentHolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("not supported on Windows")
+	}
+
+	bdBinary := buildSharedServerTestBinary(t)
+
+	cp, err := testutil.NewContainerProvider()
+	if err != nil {
+		if os.Getenv(testutil.EnvRequireDoltContainer) == "1" {
+			t.Fatalf("cannot start Dolt server, but %s=1: %v", testutil.EnvRequireDoltContainer, err)
+		}
+		t.Skipf("cannot start Dolt container: %v", err)
+	}
+	t.Cleanup(func() { _ = cp.Stop() })
+	containerPort := cp.Port()
+
+	sharedDir := t.TempDir()
+	if err := cp.WritePortFile(sharedDir); err != nil {
+		t.Fatalf("write port file: %v", err)
+	}
+
+	// The resident shared holder (see TestSharedServerConcurrent's, which
+	// holds through the workload phase too).
+	rootGate, gerr := workspacegate.ForPhysicalRoot(filepath.Join(sharedDir, "dolt"))
+	if gerr != nil {
+		t.Fatalf("shared root gate: %v", gerr)
+	}
+	residentHold, gerr := rootGate.Acquire(context.Background(), workspacegate.Shared,
+		workspacegate.Options{Reason: "resident bd serve (test holder)"})
+	if gerr != nil {
+		t.Fatalf("resident shared hold of the shared root: %v", gerr)
+	}
+	t.Cleanup(func() { _ = residentHold.Release() })
+
+	baseEnv := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"GOPATH=" + os.Getenv("GOPATH"),
+		"GOROOT=" + os.Getenv("GOROOT"),
+		"BEADS_SHARED_SERVER_DIR=" + sharedDir,
+		"BEADS_DOLT_SHARED_SERVER=1",
+		"BEADS_DOLT_SERVER_PORT=" + strconv.Itoa(containerPort),
+		"BEADS_DOLT_AUTO_START=0",
+		"BEADS_TEST_MODE=1",
+		"BD_DISABLE_METRICS=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=",
+		"SSH_ASKPASS=",
+		"GT_ROOT=",
+	}
+
+	ctx := context.Background()
+	if dl, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, dl)
+		defer cancel()
+	}
+
+	ids := make(map[string]bool)
+	for _, proj := range []struct{ name, prefix string }{
+		{name: "holderA", prefix: "holda"},
+		{name: "holderB", prefix: "holdb"},
+	} {
+		dir := filepath.Join(t.TempDir(), proj.name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := gitInit(ctx, dir); err != nil {
+			t.Fatalf("git init %s: %v", dir, err)
+		}
+		out, err := ssExec(ctx, bdBinary, dir, baseEnv,
+			"init", "--shared-server", "--external", "--prefix", proj.prefix, "--quiet", "--non-interactive")
+		if err != nil {
+			t.Fatalf("bd init for %s under the resident shared holder: %s: %v", proj.name, out, err)
+		}
+		meta := ssMetadataJSON(t, dir)
+		id, _ := meta["project_id"].(string)
+		if id == "" {
+			t.Errorf("%s initialized without a project identity", proj.name)
+		}
+		if ids[id] {
+			t.Errorf("%s reused another project's identity %s", proj.name, id)
+		}
+		ids[id] = true
+		global, _ := meta["global_dolt_database"].(string)
+		if global != doltserver.GlobalDatabaseName {
+			t.Errorf("%s metadata names global database %q, want %q", proj.name, global, doltserver.GlobalDatabaseName)
+		}
+		// A usable identity: ordinary commands work in the new workspace.
+		if out, err := ssExec(ctx, bdBinary, dir, baseEnv, "list", "--json", "--flat"); err != nil {
+			t.Errorf("bd list in %s: %s: %v", proj.name, out, err)
+		}
+		// The shared global config is provisioned and shared: every
+		// --global command in either project reads the same beads_global.
+		if out, err := ssExec(ctx, bdBinary, dir, baseEnv, "--global", "list", "--json", "--flat"); err != nil {
+			t.Errorf("bd --global list in %s: %s: %v", proj.name, out, err)
+		}
+	}
+}
+
+// TestSharedServerInitIdentityRace pins the identity half of GH#7122
+// (AC-6/AC-7): two initializers racing onto ONE unidentified database on
+// the shared server — both with the same explicit --database, so they
+// cannot end up on different ones. The race has one winner: the loser's
+// Bootstrap is refused (ErrAlreadyIdentified, decided transactionally by
+// the role) and the loser fails WITHOUT publishing its freshly minted
+// local identity — no metadata.json carrying an id the database never
+// accepted. Re-running the loser's init with the same --database then
+// ADOPTS the winner's identity, which is how a lost race must recover.
+//
+// The resident shared holder stays in place throughout, so this is also
+// the AC-1/AC-7 shape: at base the holder refuses both inits before the
+// race even starts.
+func TestSharedServerInitIdentityRace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("not supported on Windows")
+	}
+
+	bdBinary := buildSharedServerTestBinary(t)
+
+	cp, err := testutil.NewContainerProvider()
+	if err != nil {
+		if os.Getenv(testutil.EnvRequireDoltContainer) == "1" {
+			t.Fatalf("cannot start Dolt server, but %s=1: %v", testutil.EnvRequireDoltContainer, err)
+		}
+		t.Skipf("cannot start Dolt container: %v", err)
+	}
+	t.Cleanup(func() { _ = cp.Stop() })
+	containerPort := cp.Port()
+
+	sharedDir := t.TempDir()
+	if err := cp.WritePortFile(sharedDir); err != nil {
+		t.Fatalf("write port file: %v", err)
+	}
+
+	rootGate, gerr := workspacegate.ForPhysicalRoot(filepath.Join(sharedDir, "dolt"))
+	if gerr != nil {
+		t.Fatalf("shared root gate: %v", gerr)
+	}
+	residentHold, gerr := rootGate.Acquire(context.Background(), workspacegate.Shared,
+		workspacegate.Options{Reason: "resident bd serve (test holder)"})
+	if gerr != nil {
+		t.Fatalf("resident shared hold of the shared root: %v", gerr)
+	}
+	t.Cleanup(func() { _ = residentHold.Release() })
+
+	baseEnv := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"GOPATH=" + os.Getenv("GOPATH"),
+		"GOROOT=" + os.Getenv("GOROOT"),
+		"BEADS_SHARED_SERVER_DIR=" + sharedDir,
+		"BEADS_DOLT_SHARED_SERVER=1",
+		"BEADS_DOLT_SERVER_PORT=" + strconv.Itoa(containerPort),
+		"BEADS_DOLT_AUTO_START=0",
+		"BEADS_TEST_MODE=1",
+		"BD_DISABLE_METRICS=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=",
+		"SSH_ASKPASS=",
+		"GT_ROOT=",
+		// Both racers take the shared root SHARED (they contend on the
+		// database identity, not on the gate), so the bound only ever
+		// matters for a regression that reintroduces exclusive waiting.
+		"BEADS_INIT_GATE_TIMEOUT=15s",
+	}
+
+	ctx := context.Background()
+	if dl, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, dl)
+		defer cancel()
+	}
+
+	type racer struct {
+		name, prefix string
+		dir          string
+		out          string
+		ranErr       error
+	}
+	racers := []*racer{{name: "raceA", prefix: "racea"}, {name: "raceB", prefix: "raceb"}}
+	for _, r := range racers {
+		r.dir = filepath.Join(t.TempDir(), r.name)
+		if err := os.MkdirAll(r.dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", r.dir, err)
+		}
+		if err := gitInit(ctx, r.dir); err != nil {
+			t.Fatalf("git init %s: %v", r.dir, err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for _, r := range racers {
+		wg.Add(1)
+		go func(r *racer) {
+			defer wg.Done()
+			r.out, r.ranErr = ssExec(ctx, bdBinary, r.dir, baseEnv,
+				"init", "--shared-server", "--external", "--database", "ssracetest",
+				"--prefix", r.prefix, "--quiet", "--non-interactive")
+		}(r)
+	}
+	wg.Wait()
+
+	// One winner is enough; both may succeed (a racer whose identity read
+	// landed after the winner's commit adopts instead of racing).
+	sharedID := ""
+	for _, r := range racers {
+		if r.ranErr == nil {
+			id, _ := ssMetadataJSON(t, r.dir)["project_id"].(string)
+			if id == "" {
+				t.Fatalf("%s won the race without recording an identity", r.name)
+			}
+			if sharedID == "" {
+				sharedID = id
+			} else if id != sharedID {
+				t.Errorf("%s recorded identity %s, want the one identity %s (one database)", r.name, id, sharedID)
+			}
+		}
+	}
+	if sharedID == "" {
+		for _, r := range racers {
+			t.Errorf("%s init: %s: %v", r.name, r.out, r.ranErr)
+		}
+		t.Fatal("both racing initializers failed; one must win")
+	}
+
+	for _, r := range racers {
+		if r.ranErr == nil {
+			continue
+		}
+		// The loser did not publish its freshly minted identity: either no
+		// metadata.json at all, or one without a project id.
+		if raw, rerr := os.ReadFile(filepath.Join(r.dir, ".beads", "metadata.json")); rerr == nil {
+			var m map[string]any
+			if jerr := json.Unmarshal(raw, &m); jerr != nil {
+				t.Fatalf("parse %s metadata.json: %v\nraw: %s", r.name, jerr, raw)
+			}
+			if id, _ := m["project_id"].(string); id != "" && id != sharedID {
+				t.Errorf("%s lost the race but published its minted identity %s anyway", r.name, id)
+			}
+		}
+		// The recovery: re-running the loser's init with the same
+		// --database adopts the winner's identity.
+		out, err := ssExec(ctx, bdBinary, r.dir, baseEnv,
+			"init", "--shared-server", "--external", "--database", "ssracetest",
+			"--prefix", r.prefix, "--quiet", "--non-interactive")
+		if err != nil {
+			t.Fatalf("%s init after losing the identity race: %s: %v", r.name, out, err)
+		}
+		id, _ := ssMetadataJSON(t, r.dir)["project_id"].(string)
+		if id != sharedID {
+			t.Errorf("%s re-init recorded identity %s, want the adopted winner identity %s", r.name, id, sharedID)
+		}
+		if out, err := ssExec(ctx, bdBinary, r.dir, baseEnv, "list", "--json", "--flat"); err != nil {
+			t.Errorf("bd list in %s after adopting: %s: %v", r.name, out, err)
+		}
+	}
 }
