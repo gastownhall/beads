@@ -249,12 +249,13 @@ var corpus = []scenario{
 
 	// bd mol wisp list / gc --closed --force: wisps-table routing (Ephemeral=true) +
 	// closed-wisp cascade delete. First list shows cf-wg1; gc deletes exactly cf-wg1;
-	// final list --all is empty. --closed --force avoids the time-dependent age path.
+	// final list --all is empty. --age 0s keeps the purge independent of the
+	// clock: closed GC otherwise keeps wisps updated within --age (GH#8202).
 	{name: "wisp-list-gc-closed", steps: [][]string{
 		{"create", "w", "--id", "cf-wg1", "-t", "task", "--ephemeral"},
 		{"mol", "wisp", "list", "--json"},
 		{"close", "cf-wg1"},
-		{"mol", "wisp", "gc", "--closed", "--force", "--json"},
+		{"mol", "wisp", "gc", "--closed", "--force", "--age", "0s", "--json"},
 		{"mol", "wisp", "list", "--all", "--json"},
 	}},
 
