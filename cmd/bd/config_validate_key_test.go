@@ -171,3 +171,16 @@ func TestAuditConfigRecognition(t *testing.T) {
 		}
 	}
 }
+
+// TestAuditConfigHelp pins GH#5787 issue 4's help half: config help lists the
+// audit namespace, and audit help names both ways to enable the sidecar.
+func TestAuditConfigHelp(t *testing.T) {
+	if !strings.Contains(configCmd.Long, "  - audit.*") {
+		t.Errorf("config help does not list the audit.* namespace:\n%s", configCmd.Long)
+	}
+	for _, want := range []string{"bd config set audit.enabled true", "BD_AUDIT_ENABLED=1"} {
+		if !strings.Contains(auditCmd.Long, want) {
+			t.Errorf("audit help missing %q:\n%s", want, auditCmd.Long)
+		}
+	}
+}

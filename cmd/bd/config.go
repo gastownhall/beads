@@ -49,6 +49,7 @@ Common namespaces:
   - claim.*           Claim arbitration settings (pool-aware claiming)
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
   - lint.*            Additional per-type lint sections (stored in config.yaml)
+  - audit.*           Interaction audit sidecar, e.g. audit.enabled (stored in config.yaml)
 
 Auto-Export (config.yaml):
   Optional JSONL export to .beads/issues.jsonl after write commands (throttled).
