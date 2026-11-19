@@ -113,6 +113,8 @@ Install with `uv tool install git+https://github.com/jklenk/thread`. Built by [@
 
 - **[BeadHub](https://github.com/beadhub/beadhub)** - Open-source coordination server for AI agent teams running beads. The `bdh` CLI is a transparent wrapper over `bd` that adds work claiming, file reservation, presence awareness, and inter-agent messaging (async mail and sync chat). Includes a web dashboard. Free hosted at beadhub.ai for open-source projects. Built by [@juanre](https://github.com/juanre). (Python/TypeScript)
 
+- **[board-beads](https://github.com/andrew-bierman/board-beads)** - Runs [Vercel Board](https://github.com/vercel/board) on a beads tracker: a Board `Backend` where messages, tasks, and the event feed are ordinary beads issues through the `bd` CLI. Early (0.x). Built by [@andrew-bierman](https://github.com/andrew-bierman). (TypeScript)
+
 ## Historical / Stale
 
 - **[bdui](https://github.com/assimelha/bdui)** - Real-time terminal UI with tree view, dependency graph, and vim-style navigation. Built by [@assimelha](https://github.com/assimelha). (Node.js)
