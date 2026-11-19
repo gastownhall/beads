@@ -905,11 +905,12 @@ func applyRef(param string, encoded json.RawMessage) (issueops.Ref, *Result) {
 
 // applyBatchResponse projects the role's result onto the LEAN wire result.
 //
-// ItemResult.Issue is deliberately dropped. The Go contract carries a post-item
-// snapshot because the completion hooks over this role hand a script the row it
-// is being told about — and hooks never fire on this surface, so the snapshot
-// has no consumer here and a hundred hydrated issues would be a response an
-// order of magnitude larger than the request that produced it. See
+// ItemResult.Issue is deliberately dropped. The Go contract carries the row's
+// latest snapshot because the completion hooks over this role hand a script the
+// row it is being told about — and hooks never fire on this surface, so the
+// snapshot has no consumer here and a hundred hydrated issues would be a
+// response an order of magnitude larger than the request that produced it.
+// Each item's revision is its own RowVersion, never the shared snapshot's. See
 // issueops.ItemResult.Issue.
 func applyBatchResponse(result issueops.ApplyBatchResult) apigen.ApplyBatchResponse {
 	// Allocated rather than passed through: `keys` is a required member and a
