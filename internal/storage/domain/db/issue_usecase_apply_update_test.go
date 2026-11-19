@@ -32,6 +32,7 @@ func (s *testSuite) TestIssueUseCase_ApplyUpdate() {
 	s.Run("ClaimAssigneeOverrideOnLiveClaimReArmsForNewHolder", s.iucApplyUpdateClaimOverrideOnLiveClaimReArms)
 	s.Run("ClaimAssigneeOverridePoolAliasStaysLeaseless", s.iucApplyUpdateClaimOverridePoolAliasStaysLeaseless)
 	s.Run("ClaimOverrideEndingClaimStillDeletesLease", s.iucApplyUpdateClaimOverrideEndingClaimStillDeletesLease)
+	s.Run("ClaimAssigneeOverrideOnWispNeverLeases", s.iucApplyUpdateClaimOverrideOnWispNeverLeases)
 	s.Run("AddRemoveLabelPaths", s.iucApplyUpdateAddRemoveLabels)
 	s.Run("SetLabelsDiffsAgainstCurrent", s.iucApplyUpdateSetLabels)
 	s.Run("SetLabelsThenAddsThenRemoves", s.iucApplyUpdateSetLabelsThenAddRemove)
@@ -257,6 +258,26 @@ func (s *testSuite) iucApplyUpdateClaimOverrideEndingClaimStillDeletesLease() {
 			s.Equal(0, count, "patch ending the claim must leave no lease row")
 		})
 	}
+}
+
+// iucApplyUpdateClaimOverrideOnWispNeverLeases pins AC-5 of bd-zprbhg on the
+// proxied/domain stack: a wisp claimed with an assignee override lands
+// in_progress under the override target but never gets a lease row — wisps
+// are not reclaimable work and are never leased.
+func (s *testSuite) iucApplyUpdateClaimOverrideOnWispNeverLeases() {
+	s.seedOpenWisp("bd-iuc-au-cao5")
+	updated, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-cao5", domain.UpdateSpec{
+		Claim:  true,
+		Fields: map[string]any{"assignee": "bob"},
+	}, "alice")
+	s.Require().NoError(err)
+	s.Equal(types.StatusInProgress, updated.Status)
+	s.Equal("bob", updated.Assignee)
+
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM leases WHERE issue_id = ?", "bd-iuc-au-cao5").Scan(&count))
+	s.Equal(0, count, "wisps must never get a lease row, even via claim+override")
 }
 
 func (s *testSuite) iucApplyUpdateAddRemoveLabels() {

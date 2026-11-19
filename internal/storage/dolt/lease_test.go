@@ -1240,6 +1240,51 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("AC5 wisp claim with override never gets a lease", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		wisp := &types.Issue{
+			ID: "bd-lease-cao-5", Title: "wisp claim override", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask, Ephemeral: true,
+		}
+		if err := store.CreateIssue(ctx, wisp, "seeder"); err != nil {
+			t.Fatalf("seed wisp: %v", err)
+		}
+
+		ops, err := store.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("lifecycle: %v", err)
+		}
+		if _, err := ops.Update(ctx, publicops.UpdateRequest{
+			Actor: "alice", IssueID: "bd-lease-cao-5", Claim: true,
+			Patch: publicops.IssuePatch{Assignee: setAssignee("bob")},
+		}); err != nil {
+			t.Fatalf("wisp claim with override: %v", err)
+		}
+
+		var wispStatus string
+		var wispAssignee sql.NullString
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT status, assignee FROM wisps WHERE id = ?", "bd-lease-cao-5").
+			Scan(&wispStatus, &wispAssignee); err != nil {
+			t.Fatalf("read wisp row: %v", err)
+		}
+		if wispStatus != "in_progress" || wispAssignee.String != "bob" {
+			t.Fatalf("wisp row = %s/%s, want in_progress/bob", wispStatus, wispAssignee.String)
+		}
+		var leaseCount int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM leases WHERE issue_id = ?", "bd-lease-cao-5").Scan(&leaseCount); err != nil {
+			t.Fatalf("count wisp leases: %v", err)
+		}
+		if leaseCount != 0 {
+			t.Fatalf("wisps are never leased, even by a claim with an override: %d rows", leaseCount)
+		}
+	})
 }
 
 // setAssignee and setStatus build the patch fields of a claim-override update.
