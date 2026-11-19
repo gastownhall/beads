@@ -279,3 +279,26 @@ func TestForeignPrefixLocalBlockerIsALocalEdge(t *testing.T) {
 		})
 	}
 }
+
+// Closing the local foreign-prefix blocker readies the dependent.
+func TestForeignPrefixLocalBlockerCloseReadiesDependent(t *testing.T) {
+	e := newForeignPrefixEnv(t)
+	ctx := t.Context()
+	const blocker, dependent = "treehouse-lease-t4", "firstmate-lease-adopt"
+	e.create(&types.Issue{ID: blocker}, &types.Issue{ID: dependent})
+	if err := e.store.AddDependency(ctx, &types.Dependency{IssueID: dependent, DependsOnID: blocker, Type: types.DepBlocks}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	if got := e.readyIDs(); slices.Contains(got, dependent) {
+		t.Fatalf("ready = %v before close, want %s withheld", got, dependent)
+	}
+	if err := e.store.CloseIssue(ctx, blocker, "done", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
+	}
+	if got := e.readyIDs(); !slices.Equal(got, []string{dependent}) {
+		t.Fatalf("ready = %v after closing %s, want [%s]", got, blocker, dependent)
+	}
+	if got := e.blockedBy(dependent); len(got) != 0 {
+		t.Fatalf("blocked: %s still blocked by %v after its blocker closed", dependent, got)
+	}
+}
