@@ -413,3 +413,184 @@ func waitForIdleReapedPortClosed(t *testing.T, port string, timeout time.Duratio
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+// TestE2E_DoltStatusAllAndStopAll walks GH#4282's machine-wide surface
+// through the real bd binary: two auto-started workspace servers and one
+// dolt sql-server bd never started, seen together by `bd dolt status --all`
+// (text and --json) from a directory that is no workspace, bd's own listed
+// with workspace, PID, port, uptime and idle-stop state and the foreign one
+// as not managed by bd.
+func TestE2E_DoltStatusAllAndStopAll(t *testing.T) {
+	// Every bd here is a subprocess on workspaces initialized with
+	// --server, so this process's own storage mode (embedded by default)
+	// does not matter; the subprocess needs the dolt binary.
+	testutil.RequireDoltBinary(t)
+	if runtime.GOOS == windowsOS {
+		t.Skip("repo-local dolt lifecycle integration test not supported on windows")
+	}
+
+	bdBinary := buildLifecycleTestBinary(t)
+	env := append(append([]string{}, os.Environ()...), append(idleLifecycleBaseEnv(), "BEADS_DOLT_IDLE_TIMEOUT=")...)
+
+	// Two workspaces, each with an auto-started server of its own.
+	type wsFixture struct {
+		dir      string
+		beadsDir string
+		pid      int
+		port     string
+	}
+	var workspaces [2]wsFixture
+	for i := range workspaces {
+		// bd names a workspace by the path it runs in; resolve the temp
+		// dir's symlinks so the listing can be compared with it.
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		beadsDir := filepath.Join(dir, ".beads")
+		stopDoltServerCleanup(t, beadsDir)
+		if err := runCommandInDir(dir, "git", "init"); err != nil {
+			t.Fatalf("git init failed: %v", err)
+		}
+		_ = runCommandInDir(dir, "git", "config", "user.email", "test@example.com")
+		_ = runCommandInDir(dir, "git", "config", "user.name", "Test User")
+		_ = runCommandInDir(dir, "git", "config", "remote.origin.url", "https://github.com/test/repo.git")
+		if out, err := runBDExecWithBinary(t, bdBinary, dir, env, "init", "--backend", "dolt", "--server", "--prefix", "all", "--quiet"); err != nil {
+			t.Skipf("dolt backend not available: %s", out)
+		}
+		if out, err := runBDExecWithBinary(t, bdBinary, dir, env, "list"); err != nil {
+			t.Fatalf("bd list in workspace %d failed: %v\n%s", i, err, out)
+		}
+		pidBytes, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.pid"))
+		if err != nil {
+			t.Fatalf("read workspace %d pid file: %v", i, err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+		if err != nil {
+			t.Fatalf("parse workspace %d pid file: %v", i, err)
+		}
+		portBytes, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port"))
+		if err != nil {
+			t.Fatalf("read workspace %d port file: %v", i, err)
+		}
+		workspaces[i] = wsFixture{dir: dir, beadsDir: beadsDir, pid: pid, port: strings.TrimSpace(string(portBytes))}
+	}
+
+	// A dolt sql-server bd never started, in a directory bd would never
+	// attribute to itself: no --config, a cwd that is no server's.
+	foreignDir := t.TempDir()
+	if err := runCommandInDir(foreignDir, "dolt", "init"); err != nil {
+		t.Fatalf("dolt init for the foreign server: %v", err)
+	}
+	foreignPort := strconv.Itoa(reserveFreePort(t))
+	foreign := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", foreignPort)
+	foreign.Dir = foreignDir
+	if err := foreign.Start(); err != nil {
+		t.Fatalf("start the foreign dolt sql-server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = foreign.Process.Kill()
+		_, _ = foreign.Process.Wait()
+	})
+	waitForPortAccepting(t, foreignPort, 30*time.Second)
+	foreignPID := foreign.Process.Pid
+
+	// --all lists everything from a directory that is no workspace.
+	outside := t.TempDir()
+	allOut, allErr := runBDExecWithBinary(t, bdBinary, outside, env, "dolt", "status", "--all")
+	if allErr != nil {
+		t.Fatalf("bd dolt status --all from a non-workspace directory failed: %v\n%s", allErr, allOut)
+	}
+	for i, ws := range workspaces {
+		want := fmt.Sprintf("● %s\n      PID %d  Port %s  Uptime ", ws.dir, ws.pid, ws.port)
+		if !strings.Contains(allOut, want) {
+			t.Errorf("bd dolt status --all does not list workspace %d's server (%q):\n%s", i, want, allOut)
+			continue
+		}
+		line := allOut[strings.Index(allOut, want)+len(want):]
+		if nl := strings.Index(line, "\n"); nl >= 0 {
+			line = line[:nl]
+		}
+		if !strings.Contains(line, "Idle stop: after 30m") {
+			t.Errorf("workspace %d's server line lacks its idle-stop state: %q", i, line)
+		}
+	}
+	for _, want := range []string{
+		"Other Dolt servers (not managed by bd):",
+		fmt.Sprintf("○ PID %d  ", foreignPID),
+	} {
+		if !strings.Contains(allOut, want) {
+			t.Errorf("bd dolt status --all does not list the foreign server (%q):\n%s", want, allOut)
+		}
+	}
+
+	// --all --json reports the same facts for agents.
+	jsonOut, jsonErr := runBDExecWithBinary(t, bdBinary, outside, env, "dolt", "status", "--all", "--json")
+	if jsonErr != nil {
+		t.Fatalf("bd dolt status --all --json failed: %v\n%s", jsonErr, jsonOut)
+	}
+	type listedServer struct {
+		PID           int    `json:"pid"`
+		Managed       bool   `json:"managed"`
+		Workspace     string `json:"workspace"`
+		Port          int    `json:"port"`
+		UptimeSeconds int64  `json:"uptime_seconds"`
+		StartedAt     string `json:"started_at"`
+		IdleStop      string `json:"idle_stop"`
+	}
+	var listed struct {
+		Servers []listedServer `json:"servers"`
+	}
+	jsonStart := strings.Index(jsonOut, "{")
+	if jsonStart < 0 {
+		t.Fatalf("bd dolt status --all --json printed no JSON object:\n%s", jsonOut)
+	}
+	if err := json.Unmarshal([]byte(jsonOut[jsonStart:]), &listed); err != nil {
+		t.Fatalf("parse --all json: %v\n%s", err, jsonOut)
+	}
+	byPID := map[int]listedServer{}
+	for _, s := range listed.Servers {
+		byPID[s.PID] = s
+	}
+	for i, ws := range workspaces {
+		s, ok := byPID[ws.pid]
+		if !ok || !s.Managed || s.Workspace != ws.dir || strconv.Itoa(s.Port) != ws.port ||
+			s.StartedAt == "" || s.IdleStop != "after 30m" {
+			t.Errorf("workspace %d's server in --all json = %+v (found %t), want managed at %s on port %s, idle stop after 30m",
+				i, s, ok, ws.dir, ws.port)
+		}
+	}
+	if s, ok := byPID[foreignPID]; !ok || s.Managed || s.Workspace != "" {
+		t.Errorf("the foreign server in --all json = %+v (found %t), want not managed by bd", s, ok)
+	}
+}
+
+// reserveFreePort reserves an ephemeral TCP port for a test server.
+func reserveFreePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	_ = listener.Close()
+	return port
+}
+
+// waitForPortAccepting fails the test unless 127.0.0.1:port accepts a
+// connection within timeout.
+func waitForPortAccepting(t *testing.T, port string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 500*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing accepts connections on port %s after %s: %v", port, timeout, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
