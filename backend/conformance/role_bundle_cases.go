@@ -780,6 +780,7 @@ var roleContractCases = []roleContract{
 		RunSweeperProtectsTransitiveLiveDependents,
 		RunSweeperProtectsLiveDependentsThroughUnselectedRows,
 		RunSweeperProtectsLiveDependentsThroughExcludedIntermediaries,
+		RunSweeperProtectsLiveDependentsThroughUnselectedChains,
 		RunSweeperProtectsLiveDependentsAcrossPlanes,
 		RunSweeperLimitTakesTheOldestClosedFirst,
 	),
