@@ -134,3 +134,119 @@ func TestInstallHooks_NonShellClassifierUsedByInstall(t *testing.T) {
 		t.Fatal("python fixture must classify as non-shell")
 	}
 }
+
+func TestInstallHooksBeads_NonShell(t *testing.T) {
+	t.Run("AC-2 python pre-push preserved byte-identically into .beads/hooks", func(t *testing.T) {
+		repoDir := newGitRepo(t)
+		runInDir(t, repoDir, func() {
+			hooksDir := filepath.Join(repoDir, ".git", "hooks")
+			writeHookFile(t, filepath.Join(hooksDir, "pre-push"), pythonPrePushFixture)
+
+			// Unset the local core.hooksPath that newGitRepo sets so git falls
+			// back to .git/hooks/ — the previously effective directory.
+			gitCommand("config", "--unset", "core.hooksPath").Run()
+
+			beadsDir := setupBeadsDir(t, repoDir)
+
+			var installErr error
+			_ = captureStderr(t, func() {
+				installErr = installHooksWithOptions(managedHookNames, false, false, false, true)
+			})
+			if installErr != nil {
+				t.Fatalf("beads-mode install failed: %v", installErr)
+			}
+
+			target := filepath.Join(beadsDir, "hooks", "pre-push")
+			got, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatalf("python pre-push not preserved into %s: %v", target, err)
+			}
+			if string(got) != pythonPrePushFixture {
+				t.Fatalf("preserved python hook not byte-identical:\n%s", got)
+			}
+
+			// Remaining managed hooks are installed normally.
+			for _, hookName := range []string{"pre-commit", "post-merge", "post-checkout", "prepare-commit-msg"} {
+				content, err := os.ReadFile(filepath.Join(beadsDir, "hooks", hookName))
+				if err != nil {
+					t.Fatalf("%s not installed: %v", hookName, err)
+				}
+				if !strings.Contains(string(content), hookSectionBeginPrefix) {
+					t.Fatalf("%s missing bd section", hookName)
+				}
+			}
+
+			// core.hooksPath selects the target directory.
+			out, err := gitCommand("config", "--get", "core.hooksPath").CombinedOutput()
+			if err != nil {
+				t.Fatalf("core.hooksPath not set: %v", err)
+			}
+			if got, want := filepath.Clean(strings.TrimSpace(string(out))), filepath.Clean(filepath.Join(repoDir, ".beads", "hooks")); got != want {
+				t.Fatalf("core.hooksPath = %q, want %q", got, want)
+			}
+		})
+	})
+
+	t.Run("AC-2 husky-source python hook is preserved without husky sanitization", func(t *testing.T) {
+		repoDir := newGitRepo(t)
+		runInDir(t, repoDir, func() {
+			huskyDir := filepath.Join(repoDir, ".husky")
+			pyHook := "#!/usr/bin/env python3\n. \"$(dirname -- \"$0\")/_/husky.sh\"\nimport sys\nprint('hi')\n"
+			writeHookFile(t, filepath.Join(huskyDir, "pre-commit"), pyHook)
+			if out, err := gitCommand("config", "core.hooksPath", ".husky").CombinedOutput(); err != nil {
+				t.Fatalf("set core.hooksPath: %v (%s)", err, out)
+			}
+
+			beadsDir := setupBeadsDir(t, repoDir)
+
+			var installErr error
+			_ = captureStderr(t, func() {
+				installErr = installHooksWithOptions(managedHookNames, false, false, false, true)
+			})
+			if installErr != nil {
+				t.Fatalf("beads-mode install failed: %v", installErr)
+			}
+
+			got, err := os.ReadFile(filepath.Join(beadsDir, "hooks", "pre-commit"))
+			if err != nil {
+				t.Fatalf("python husky hook not preserved: %v", err)
+			}
+			if string(got) != pyHook {
+				t.Fatalf("non-shell husky hook was rewritten instead of preserved byte-identically:\n%s", got)
+			}
+		})
+	})
+
+	t.Run("AC-2 python hook with stale bd section preserved with the section repaired", func(t *testing.T) {
+		repoDir := newGitRepo(t)
+		runInDir(t, repoDir, func() {
+			hooksDir := filepath.Join(repoDir, ".git", "hooks")
+			// The corruption an older bd version left: a sh section appended
+			// after sys.exit(main()).
+			corrupted := pythonPrePushFixture + "\n" + generateHookSection("pre-push")
+			writeHookFile(t, filepath.Join(hooksDir, "pre-push"), corrupted)
+
+			gitCommand("config", "--unset", "core.hooksPath").Run()
+			beadsDir := setupBeadsDir(t, repoDir)
+
+			var installErr error
+			stderr := captureStderr(t, func() {
+				installErr = installHooksWithOptions(managedHookNames, false, false, false, true)
+			})
+			if installErr != nil {
+				t.Fatalf("beads-mode install failed: %v", installErr)
+			}
+
+			got, err := os.ReadFile(filepath.Join(beadsDir, "hooks", "pre-push"))
+			if err != nil {
+				t.Fatalf("python pre-push not preserved: %v", err)
+			}
+			if string(got) != pythonPrePushFixture {
+				t.Fatalf("preserved python hook must have the stale bd section removed and nothing else:\n%s", got)
+			}
+			if !strings.Contains(stderr, "removed a stale bd shell section") {
+				t.Fatalf("stderr must report the repair, got:\n%s", stderr)
+			}
+		})
+	})
+}

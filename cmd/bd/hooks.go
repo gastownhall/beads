@@ -480,6 +480,37 @@ func removeHookSection(content string) (string, bool) {
 	return result, true
 }
 
+// maxSectionStrips bounds the repair loop over disjoint bd sections.
+const maxSectionStrips = 10
+
+// stripBdSectionPairsValidated removes whole-line, complete, ordered,
+// non-nested BEADS INTEGRATION sections from content (GH#6348 non-shell
+// repair). Every removal re-validates the marker state before reusing the
+// existing remover (removeHookSection), which handles the separator blank
+// line the injector wrote above a section; the loop is bounded and stops at
+// the first iteration that makes no progress. ok is false when markers
+// remain that do not validate as pairs — the caller must then leave the
+// file untouched rather than write a partial strip.
+func stripBdSectionPairsValidated(content string) (string, bool) {
+	for i := 0; i < maxSectionStrips; i++ {
+		switch doctor.InspectBdSectionMarkers(content) {
+		case doctor.BdSectionMarkersNone:
+			return content, true
+		case doctor.BdSectionMarkersPaired:
+			stripped, found := removeHookSection(content)
+			if !found || stripped == content {
+				// No progress on supposedly-paired markers: do not keep
+				// looping, and do not let a partial state stand.
+				return content, false
+			}
+			content = stripped
+		default:
+			return content, false
+		}
+	}
+	return content, false
+}
+
 // isOnlyShebangOrEmpty reports whether the given hook content consists of
 // nothing meaningful — only an optional shebang line plus blank lines and
 // comments. Used by shouldPreserveHookContent to decide, after stripping a
@@ -511,6 +542,12 @@ func isOnlyShebangOrEmpty(content string) bool {
 // Decision rules (GH#3536):
 //   - inlineHookMarker (the "# bd (beads)" tag from GH#1120) marks files
 //     that were always wholly bd-owned one-liners — skip.
+//   - Non-shell scripts (GH#6348) are preserved byte-identical and are
+//     never husky-sanitized, marker-stripped by the shell heuristics, or
+//     newline-normalized: those rewrites all assume shell syntax. A
+//     complete bd section left in one by an older injector is removed by
+//     the validated pair stripper; ambiguous markers are preserved
+//     untouched for manual inspection.
 //   - hookSectionBeginPrefix marks files that were *user-owned* with bd's
 //     block injected into them (the v0.49+ section-marker model). Strip
 //     the bd block and preserve the remaining user content. If only a
@@ -521,13 +558,26 @@ func isOnlyShebangOrEmpty(content string) bool {
 //
 // The function is pure: no I/O, no global state.
 func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
+	newContent, keep, _ := shouldPreserveHookContentWithNote(content, fromHusky)
+	return newContent, keep
+}
+
+// shouldPreserveHookContentWithNote is shouldPreserveHookContent plus a
+// human-readable note describing the non-shell decision it made, for the
+// caller's diagnostics ("removed a stale bd shell section", "ambiguous bd
+// markers; preserved for manual inspection"). Empty for ordinary shell
+// preservation, which needs no note.
+func shouldPreserveHookContentWithNote(content string, fromHusky bool) (string, bool, string) {
 	if strings.Contains(content, inlineHookMarker) {
-		return "", false
+		return "", false, ""
+	}
+	if lang := doctor.ClassifyHookLanguage([]byte(content)); lang.Kind != doctor.HookLanguageShell {
+		return preserveNonShellHookContent(lang, content)
 	}
 	if strings.Contains(content, hookSectionBeginPrefix) {
 		stripped, _ := removeHookSection(content)
 		if isOnlyShebangOrEmpty(stripped) {
-			return "", false
+			return "", false, ""
 		}
 		// Normalize CRLF → LF on the preserved-and-stripped content so
 		// Windows / autocrlf=true repos don't end up with `\r\n` line
@@ -538,7 +588,35 @@ func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
 	if fromHusky {
 		content = sanitizeHuskyHook(content)
 	}
-	return content, true
+	return content, true, ""
+}
+
+// preserveNonShellHookContent is the non-shell half of preservation
+// (GH#6348). The script cannot run bd's sh section, so it is preserved
+// byte-identical — never husky-sanitized or newline-normalized — with a
+// stale, completely paired bd section removed (the same repair install
+// performs) and ambiguous markers left in place for manual inspection.
+// Binary content is never rewritten at all.
+func preserveNonShellHookContent(lang doctor.HookLanguage, content string) (string, bool, string) {
+	if lang.Kind == doctor.HookLanguageBinary {
+		return content, true, "binary content; preserved untouched"
+	}
+	switch doctor.InspectBdSectionMarkers(content) {
+	case doctor.BdSectionMarkersPaired:
+		stripped, ok := stripBdSectionPairsValidated(content)
+		if !ok {
+			// The remover made no progress on supposedly-paired markers;
+			// never write a partial strip.
+			return content, true, "ambiguous bd markers; preserved for manual inspection"
+		}
+		if stripped == content {
+			return content, true, ""
+		}
+		return stripped, true, "removed a stale bd shell section"
+	case doctor.BdSectionMarkersAmbiguous:
+		return content, true, "has ambiguous bd markers; preserved for manual inspection"
+	}
+	return content, true, ""
 }
 
 // HookStatus represents the status of a single git hook
@@ -1424,9 +1502,12 @@ func preservePreexistingHooksAt(targetDir, currentDir string, mainRoot func() st
 			continue
 		}
 
-		newContent, keep := shouldPreserveHookContent(string(content), fromHusky)
+		newContent, keep, note := shouldPreserveHookContentWithNote(string(content), fromHusky)
 		if !keep {
 			continue
+		}
+		if note != "" {
+			fmt.Fprintf(os.Stderr, "beads: hook '%s' preserved from %s: %s\n", entry.Name(), currentDir, note)
 		}
 		contentStr := newContent
 
