@@ -2641,16 +2641,18 @@ var rootCmd = &cobra.Command{
 					} else if mode == doltAutoCommitOn {
 						// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
 						//
-						// A store that refuses writes by construction — the
-						// preview open, and strict --readonly — must not turn
-						// an otherwise successful command into a non-zero exit
-						// here. This block is deliberately not gated by the
-						// read-only classification, and that has been fine
-						// because OpenForReadOnlyCommand is "otherwise a normal
-						// writable store"; the write-refusing opens break that
-						// assumption. Tip bookkeeping is incidental and
-						// recordTipShown's own contract is that it may fail
-						// silently, so skip it and carry on.
+						// This block is deliberately not gated by the
+						// read-only classification: a classified read opens
+						// OpenForReadOnlyCommand, which is "otherwise a normal
+						// writable store". The opens that refuse writes by
+						// construction (a preview's, strict --readonly's)
+						// never get here, because the outer gate above skips
+						// both. The ErrReadOnly tolerance below is defense in
+						// depth for any write-refusing store that still does:
+						// tip bookkeeping is incidental, and recordTipShown's
+						// own contract is that it may fail silently, so it
+						// must not turn an otherwise successful command into
+						// a non-zero exit. Skip it and carry on.
 						tipWritesRefused := false
 						for tipID := range commandTipIDsShown {
 							key := fmt.Sprintf("tip_%s_last_shown", tipID)

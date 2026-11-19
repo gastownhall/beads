@@ -252,6 +252,7 @@ func runDirectPostRunForPreviewFlag(t *testing.T, cmdName, flag string, set bool
 	t.Setenv("BEADS_DIR", "")
 
 	originalStore := store
+	originalProvider := uowProvider
 	originalReadonly := readonlyMode
 	originalProxied := proxiedServerMode
 	originalRootCtx := rootCtx
@@ -275,6 +276,7 @@ func runDirectPostRunForPreviewFlag(t *testing.T, cmdName, flag string, set bool
 	originalPush := runPostRunAutoPush
 	t.Cleanup(func() {
 		store = originalStore
+		uowProvider = originalProvider
 		readonlyMode = originalReadonly
 		proxiedServerMode = originalProxied
 		rootCtx = originalRootCtx
@@ -313,6 +315,9 @@ func runDirectPostRunForPreviewFlag(t *testing.T, cmdName, flag string, set bool
 
 	fake := &strictReadonlyPostRunStore{}
 	store = fake
+	// The deferred gate release closes any provider still set, so one leaked
+	// by an earlier test would be closed here; this run starts without one.
+	uowProvider = nil
 	readonlyMode = false
 	proxiedServerMode = false
 	rootCtx = context.Background()
