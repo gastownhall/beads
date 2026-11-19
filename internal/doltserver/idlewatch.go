@@ -60,8 +60,9 @@ const (
 	clientLeasePrefix  = "client-"
 
 	// idleWatchLivenessEvery bounds how long a watcher outlives its server
-	// when something else stops it.
-	idleWatchLivenessEvery = 5 * time.Second
+	// when something else stops it. The promise is 5s; checking every
+	// second keeps it with room for a slow check on a loaded machine.
+	idleWatchLivenessEvery = time.Second
 	minIdlePollEvery       = time.Second
 	maxIdlePollEvery       = 5 * time.Minute
 )
@@ -551,7 +552,7 @@ func (w *idleWatcher) run(ctx context.Context) (IdleWatchOutcome, error) {
 	releaseLifecycleLock(lockF)
 
 	w.tracker = newIdleTracker(w.opts.Timeout, w.now())
-	// Liveness is checked every few seconds, the status poll only every
+	// Liveness is checked every second, the status poll only every
 	// pollEvery, so a server stopped some other way is noticed quickly.
 	var lastPoll time.Time
 	for {
