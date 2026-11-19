@@ -173,6 +173,11 @@ func sweepCandidatesInUOW(ctx context.Context, uw UnitOfWork, req publicops.Swee
 // wisp_dependencies and an issue's in dependencies, and the source of an edge
 // pointing at a candidate can be either. The sources' statuses are then read
 // across both planes by SearchIssues.
+//
+// The reads run through workapi.ResolveSweepLiveDependents, in batches on this
+// unit of work: a live source can sit beyond a closed row the selection did
+// not pick up (#7043), so the edge read follows the frontier of newly
+// discovered sources rather than stopping at the candidates.
 func sweepLiveDependentsInUOW(ctx context.Context, uw UnitOfWork, candidates []*types.Issue) (map[string]bool, error) {
 	if len(candidates) == 0 {
 		return nil, nil
@@ -181,42 +186,51 @@ func sweepLiveDependentsInUOW(ctx context.Context, uw UnitOfWork, candidates []*
 	for i, issue := range candidates {
 		ids[i] = issue.ID
 	}
-	edges := domain.DepListFilter{Types: publicops.SweepLiveDependentEdgeTypes, Direction: domain.DepDirectionIn}
-	durable, err := uw.DependencyUseCase().ListByIssueIDs(ctx, ids, edges)
-	if err != nil {
-		return nil, fmt.Errorf("reading dependents for live-dependent protection: %w", err)
-	}
-	wisp, err := uw.DependencyUseCase().ListByWispIDs(ctx, ids, edges)
-	if err != nil && !dberrors.IsTableNotExist(err) {
-		return nil, fmt.Errorf("reading wisp dependents for live-dependent protection: %w", err)
-	}
-	incoming := make(map[string][]*types.Dependency, len(durable.Incoming)+len(wisp.Incoming))
-	for target, deps := range durable.Incoming {
-		incoming[target] = append(incoming[target], deps...)
-	}
-	for target, deps := range wisp.Incoming {
-		incoming[target] = append(incoming[target], deps...)
-	}
-
-	sources := workapi.SweepLiveDependentSources(incoming)
-	if len(sources) == 0 {
-		return nil, nil
-	}
-	custom, err := uw.ConfigUseCase().GetCustomStatuses(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("reading custom statuses for live-dependent protection: %w", err)
-	}
-	page, err := uw.IssueUseCase().SearchIssues(ctx, "", workapi.BuildSweepLiveDependentScanFilter(sources, custom))
-	if err != nil {
-		return nil, fmt.Errorf("reading dependent statuses for live-dependent protection: %w", err)
-	}
-	live := make(map[string]bool, len(page.Items))
-	for _, issue := range page.Items {
-		if issue != nil {
-			live[issue.ID] = true
+	var (
+		custom       []types.CustomStatus
+		customLoaded bool
+	)
+	fetch := func(ctx context.Context, batch []string) (map[string][]*types.Dependency, error) {
+		edges := domain.DepListFilter{Types: publicops.SweepLiveDependentEdgeTypes, Direction: domain.DepDirectionIn}
+		durable, err := uw.DependencyUseCase().ListByIssueIDs(ctx, batch, edges)
+		if err != nil {
+			return nil, fmt.Errorf("reading dependents for live-dependent protection: %w", err)
 		}
+		wisp, err := uw.DependencyUseCase().ListByWispIDs(ctx, batch, edges)
+		if err != nil && !dberrors.IsTableNotExist(err) {
+			return nil, fmt.Errorf("reading wisp dependents for live-dependent protection: %w", err)
+		}
+		incoming := make(map[string][]*types.Dependency, len(durable.Incoming)+len(wisp.Incoming))
+		for target, deps := range durable.Incoming {
+			incoming[target] = append(incoming[target], deps...)
+		}
+		for target, deps := range wisp.Incoming {
+			incoming[target] = append(incoming[target], deps...)
+		}
+		return incoming, nil
 	}
-	return workapi.SweepLiveDependentTargets(incoming, live), nil
+	scan := func(ctx context.Context, batch []string) (map[string]bool, error) {
+		if !customLoaded {
+			var err error
+			custom, err = uw.ConfigUseCase().GetCustomStatuses(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("reading custom statuses for live-dependent protection: %w", err)
+			}
+			customLoaded = true
+		}
+		page, err := uw.IssueUseCase().SearchIssues(ctx, "", workapi.BuildSweepLiveDependentScanFilter(batch, custom))
+		if err != nil {
+			return nil, fmt.Errorf("reading dependent statuses for live-dependent protection: %w", err)
+		}
+		live := make(map[string]bool, len(page.Items))
+		for _, issue := range page.Items {
+			if issue != nil {
+				live[issue.ID] = true
+			}
+		}
+		return live, nil
+	}
+	return workapi.ResolveSweepLiveDependents(ctx, ids, fetch, scan)
 }
 
 // sweepReferencedInUOW returns which of the candidates a not-done row cites,

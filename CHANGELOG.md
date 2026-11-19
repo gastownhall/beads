@@ -1431,6 +1431,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd purge`'s live-dependent protection follows a chain through closed
+  beads the selection passed over** (#7043). The protection read the
+  incoming edges of the sweep's own candidates only, so an open bead
+  reached only through a closed intermediary that was NOT a candidate —
+  one closed after `--older-than`, or left out by `--pattern`, pinning, a
+  storage plane or a retained type — could not protect its root, and the
+  sweep deleted the root of a live hierarchy. Discovery now follows the
+  frontier: batched reads of incoming edges and source liveness, on the
+  sweep's own transaction, until no unexplored source remains, so a live
+  bead keeps its whole hierarchy's roots however deep the unselected
+  chain runs; a chain with no live row still protects nothing, and a
+  read failure aborts the sweep rather than deleting on partial
+  protection knowledge.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

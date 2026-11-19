@@ -172,8 +172,15 @@ func sweepRetiredIDsInTx(ctx context.Context, tx DBTX, kept []*types.Issue) (wis
 // on the SAME transaction the candidates came off. Edges are read from both
 // dependency tables, and the sources' statuses from both planes.
 //
+// The reads run through workapi.ResolveSweepLiveDependents, in batches on this
+// transaction: a live source can sit beyond a closed row the selection did
+// not pick up (#7043), so the edge read follows the frontier of newly
+// discovered sources rather than stopping at the candidates.
+//
 // Reading the custom statuses is required for the reason sweepReferencedInTx
-// gives: a missed custom active status would under-protect.
+// gives: a missed custom active status would under-protect. They are read
+// lazily, on the first liveness scan — a sweep whose candidates have no
+// sources at all never needs them.
 func sweepLiveDependentsInTx(ctx context.Context, tx *sql.Tx, candidates []*types.Issue) (map[string]bool, error) {
 	if len(candidates) == 0 {
 		return nil, nil
@@ -182,29 +189,39 @@ func sweepLiveDependentsInTx(ctx context.Context, tx *sql.Tx, candidates []*type
 	for i, issue := range candidates {
 		ids[i] = issue.ID
 	}
-	incoming, err := GetDependentRecordsForIssuesInTx(ctx, tx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("reading dependents for live-dependent protection: %w", err)
-	}
-	sources := workapi.SweepLiveDependentSources(incoming)
-	if len(sources) == 0 {
-		return nil, nil
-	}
-	custom, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
-	if err != nil {
-		return nil, fmt.Errorf("reading custom statuses for live-dependent protection: %w", err)
-	}
-	liveRows, err := SearchIssuesInTx(ctx, tx, "", workapi.BuildSweepLiveDependentScanFilter(sources, custom))
-	if err != nil {
-		return nil, fmt.Errorf("reading dependent statuses for live-dependent protection: %w", err)
-	}
-	live := make(map[string]bool, len(liveRows))
-	for _, issue := range liveRows {
-		if issue != nil {
-			live[issue.ID] = true
+	var (
+		custom       []types.CustomStatus
+		customLoaded bool
+	)
+	fetch := func(ctx context.Context, batch []string) (map[string][]*types.Dependency, error) {
+		incoming, err := GetDependentRecordsForIssuesInTx(ctx, tx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("reading dependents for live-dependent protection: %w", err)
 		}
+		return incoming, nil
 	}
-	return workapi.SweepLiveDependentTargets(incoming, live), nil
+	scan := func(ctx context.Context, batch []string) (map[string]bool, error) {
+		if !customLoaded {
+			var err error
+			custom, err = ResolveCustomStatusesDetailedInTx(ctx, tx)
+			if err != nil {
+				return nil, fmt.Errorf("reading custom statuses for live-dependent protection: %w", err)
+			}
+			customLoaded = true
+		}
+		liveRows, err := SearchIssuesInTx(ctx, tx, "", workapi.BuildSweepLiveDependentScanFilter(batch, custom))
+		if err != nil {
+			return nil, fmt.Errorf("reading dependent statuses for live-dependent protection: %w", err)
+		}
+		live := make(map[string]bool, len(liveRows))
+		for _, issue := range liveRows {
+			if issue != nil {
+				live[issue.ID] = true
+			}
+		}
+		return live, nil
+	}
+	return workapi.ResolveSweepLiveDependents(ctx, ids, fetch, scan)
 }
 
 // sweepReferencedInTx returns which of the candidates are cited by a row that

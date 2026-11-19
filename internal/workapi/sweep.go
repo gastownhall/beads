@@ -1,6 +1,7 @@
 package workapi
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -391,10 +392,13 @@ func BuildSweepLiveDependentScanFilter(dependentIDs []string, custom []types.Cus
 	return types.IssueFilter{IDs: dependentIDs, Statuses: NotDoneStatusesForSweep(custom)}
 }
 
-// SweepLiveDependentSources returns the ids of the rows that depend on a
-// candidate through a protecting edge (issueops.SweepLiveDependentEdgeTypes),
-// given the edges pointing at the candidates keyed by target. The result is
-// sorted and de-duplicated, so the follow-up status read is deterministic.
+// SweepLiveDependentSources returns the ids of the rows that depend on the
+// SUPPLIED nodes through a protecting edge (issueops.SweepLiveDependentEdgeTypes),
+// given the edges pointing at those nodes keyed by target. The supplied nodes
+// are whatever the caller fetched edges for — candidates in a one-read sweep,
+// arbitrary frontier nodes under ResolveSweepLiveDependents — and the sources
+// need not be candidates themselves. The result is sorted and de-duplicated,
+// so the follow-up status read is deterministic.
 func SweepLiveDependentSources(incoming map[string][]*types.Dependency) []string {
 	seen := make(map[string]bool)
 	for _, deps := range incoming {
@@ -412,10 +416,117 @@ func SweepLiveDependentSources(incoming map[string][]*types.Dependency) []string
 	return ids
 }
 
-// SweepLiveDependentTargets returns the candidates a live row depends on,
-// directly or through other candidates. A protected closed candidate must act
-// as live for the next edge up the chain; otherwise an open grandchild keeps
-// its closed parent while the same sweep deletes the closed grandparent.
+// FetchSweepIncomingEdges reads the edges pointing at ids, keyed by target id —
+// the shape both storage bodies already produce for the live-dependent
+// protection. ResolveSweepLiveDependents calls it once per frontier, on the
+// SAME transaction or unit of work the candidates came off.
+type FetchSweepIncomingEdges func(ctx context.Context, ids []string) (map[string][]*types.Dependency, error)
+
+// ScanSweepLiveRows reports which of ids are live rows — the not-done set, on
+// both storage planes. ResolveSweepLiveDependents calls it once per round of
+// newly discovered sources, never for the candidates themselves (the sweep
+// selected those as closed in the same transaction).
+type ScanSweepLiveRows func(ctx context.Context, ids []string) (map[string]bool, error)
+
+// ResolveSweepLiveDependents returns which of candidateIDs a live row depends
+// on through a protecting edge, directly or through ANY rows the selection did
+// not pick up — the closed rows a cutoff, a pattern, pinning, a storage plane
+// or a retained type held out of the candidate set (#7043). The edge read
+// follows that frontier: a sweep that read only the candidates' incoming edges
+// could not see an open bead beyond an unselected closed intermediary, and
+// deleted the root of a live hierarchy.
+//
+// The traversal: fetch the frontier's incoming edges and merge them into the
+// accumulated graph; take the sources reached through protecting edges;
+// the sources not already known are scanned for liveness, and the ones that
+// are not live become the next frontier. Live sources need no expansion —
+// their already discovered paths protect regardless of what depends on them —
+// and the known set bounds the traversal, so each id enters an edge-read
+// batch at most once and a finite cycle terminates the rounds. There is no
+// depth cap: a chain as deep as the graph is the shape the fix exists for.
+//
+// One callback invocation handles one frontier, with whatever batching the
+// storage seam applies underneath; this is not a promise of one query or one
+// round trip per level. A read error, or a canceled context, returns a nil
+// result: a sweep that could not finish reading the protection graph must not
+// delete on partial knowledge. The candidates need no liveness scan — both
+// callers selected closed rows in the same read — and the returned map holds
+// only candidate ids.
+func ResolveSweepLiveDependents(ctx context.Context, candidateIDs []string,
+	fetch FetchSweepIncomingEdges, scan ScanSweepLiveRows) (map[string]bool, error) {
+	if len(candidateIDs) == 0 {
+		return nil, nil
+	}
+	known := make(map[string]bool, len(candidateIDs))
+	candidates := make(map[string]bool, len(candidateIDs))
+	frontier := make([]string, 0, len(candidateIDs))
+	for _, id := range candidateIDs {
+		if id == "" || known[id] {
+			continue
+		}
+		known[id] = true
+		candidates[id] = true
+		frontier = append(frontier, id)
+	}
+	sort.Strings(frontier)
+
+	incoming := make(map[string][]*types.Dependency)
+	live := make(map[string]bool)
+
+	for len(frontier) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		batch, err := fetch(ctx, frontier)
+		if err != nil {
+			return nil, err
+		}
+		for target, deps := range batch {
+			incoming[target] = append(incoming[target], deps...)
+		}
+		fresh := make([]string, 0)
+		for _, source := range SweepLiveDependentSources(batch) {
+			if source != "" && !known[source] {
+				known[source] = true
+				fresh = append(fresh, source)
+			}
+		}
+		if len(fresh) == 0 {
+			break
+		}
+		liveBatch, err := scan(ctx, fresh)
+		if err != nil {
+			return nil, err
+		}
+		next := make([]string, 0, len(fresh))
+		for _, id := range fresh {
+			if liveBatch[id] {
+				live[id] = true
+			} else {
+				next = append(next, id)
+			}
+		}
+		frontier = next
+	}
+
+	protected := SweepLiveDependentTargets(incoming, live)
+	result := make(map[string]bool, len(protected))
+	for id := range candidates {
+		if protected[id] {
+			result[id] = true
+		}
+	}
+	return result, nil
+}
+
+// SweepLiveDependentTargets returns the nodes a live row depends on, directly
+// or through other nodes of the SUPPLIED graph. A protected node must act as
+// live for the next edge up the chain; otherwise an open grandchild keeps its
+// closed parent while the same sweep deletes the closed grandparent. The
+// result can contain non-candidates — which of it matters is the caller's
+// business, and ResolveSweepLiveDependents keeps only the candidates; the
+// graph it is handed must already reach past the candidates, which is what
+// the resolver's discovery rounds exist to build.
 func SweepLiveDependentTargets(incoming map[string][]*types.Dependency, live map[string]bool) map[string]bool {
 	targetsBySource := make(map[string][]string)
 	for target, deps := range incoming {

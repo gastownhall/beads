@@ -141,9 +141,21 @@ type SweepRequest struct {
 	// hooked) plus every configured custom status whose category is not
 	// "done", with the same REQUIRED read of the custom statuses.
 	//
+	// THE CHAIN MAY RUN THROUGH ROWS THE SELECTION DID NOT PICK UP (#7043): a
+	// live row protects its root through closed intermediaries that the
+	// cutoff, the pattern, pinning, the storage plane or a retained type held
+	// out of the candidate set. Discovery follows that frontier — batched
+	// reads of incoming edges and source liveness, on the sweep's own
+	// transaction, until no unexplored source remains — so an open bead deep
+	// under the candidates still holds its hierarchy's roots. A candidate is
+	// retained exactly when some live source reaches it; a chain with no live
+	// row protects nothing.
+	//
 	// Unlike ProtectReferenced it is a stored-edge lookup, not a text scan, so
-	// it costs one read of the edges pointing at the candidates and one of
-	// their sources. `bd purge` always asks for it; `bd prune` does not.
+	// it costs one round of edge and liveness reads per level of chain it
+	// follows, not a scan of every not-done row. A read that fails aborts the
+	// sweep: partial protection knowledge must not authorize a deletion.
+	// `bd purge` always asks for it; `bd prune` does not.
 	ProtectLiveDependents bool
 	// Limit, when positive, caps how many rows ONE sweep deletes, taking the
 	// OLDEST-CLOSED first (closed_at ascending, then id). The rest are left

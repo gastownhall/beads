@@ -778,6 +778,7 @@ var roleContractCases = []roleContract{
 		RunSweeperWispsPlaneRequiresAFilter,
 		RunSweeperProtectsLiveDependents,
 		RunSweeperProtectsTransitiveLiveDependents,
+		RunSweeperProtectsLiveDependentsThroughANonCandidate,
 		RunSweeperProtectsLiveDependentsAcrossPlanes,
 		RunSweeperLimitTakesTheOldestClosedFirst,
 	),

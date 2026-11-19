@@ -5979,7 +5979,10 @@ bd purge
     | Deletes: issues, dependencies, labels, events, and comments for matching beads.
     | Skips: pinned beads, and closed beads a live bead still depends on through a
     | parent-child, tracks or blocks edge (a closed molecule root whose step is open,
-    | a closed bead a live convoy tracks). Live means any status that is not done.
+    | a closed bead a live convoy tracks), counting only the beads this run selected.
+    | The chain is followed through closed beads the selection itself passed over —
+    | one closed after --older-than, or left out by --pattern — so a live bead keeps
+    | its whole hierarchy's roots. Live means any status that is not done.
     | Without --retain-ids it also skips beads whose type the workspace's
     | types.retained setting names (their ids are idempotency keys); --json reports
     | them as retention_required.
