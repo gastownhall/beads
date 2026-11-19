@@ -85,7 +85,7 @@ func init() {
 	jiraSyncCmd.Flags().Bool("dry-run", false, "Preview sync without making changes")
 	jiraSyncCmd.Flags().Bool("prefer-local", false, "Prefer local version on conflicts")
 	jiraSyncCmd.Flags().Bool("prefer-jira", false, "Prefer Jira version on conflicts")
-	jiraSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing")
+	jiraSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing (push only)")
 	jiraSyncCmd.Flags().String("state", "all", "Issue state to sync: open, closed, all")
 	jiraSyncCmd.Flags().StringSlice("project", nil, "Project key(s) to sync (overrides configured project/projects)")
 	registerSelectiveSyncFlags(jiraSyncCmd)
@@ -110,6 +110,10 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 	preferJira, _ := cmd.Flags().GetBool("prefer-jira")
 	createOnly, _ := cmd.Flags().GetBool("create-only")
 	state, _ := cmd.Flags().GetString("state")
+
+	if err := createOnlyDirectionError("Jira", createOnly, pull && !push); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
 
 	if !dryRun {
 		CheckReadonly("jira sync")

@@ -227,3 +227,24 @@ func TestEngineBatchFallThroughDryRunCountsEachIssueOnce(t *testing.T) {
 		})
 	}
 }
+
+// TestEngineCreateOnlyDoesNotLimitPull pins the engine contract the tracker
+// CLIs rely on (gastownhall/beads#8507): CreateOnly limits only the push, so
+// a bidirectional --create-only sync still pulls remote edits into a linked
+// bead while its push leaves that linked issue alone. A pull-only
+// --create-only sync is refused in cmd/bd for exactly this reason.
+func TestEngineCreateOnlyDoesNotLimitPull(t *testing.T) {
+	f := newPushHashFixture()
+	f.editRemote("remote edit")
+
+	result := runSync(t, f.engine, SyncOptions{Pull: true, Push: true, CreateOnly: true})
+	if f.local.Title != "remote edit" {
+		t.Errorf("linked bead title = %q, want %q: the pull half of a --create-only sync must still update linked beads", f.local.Title, "remote edit")
+	}
+	if result.PullStats.Updated != 1 {
+		t.Errorf("PullStats.Updated = %d, want 1", result.PullStats.Updated)
+	}
+	if len(f.mock.updated) != 0 {
+		t.Errorf("tracker received %d updates, want 0: --create-only must not push to a linked issue", len(f.mock.updated))
+	}
+}

@@ -4068,7 +4068,7 @@ bd jira sync
     |   bd jira sync --push --create-only  # Push new issues only
     |   bd jira sync --dry-run             # Preview without changes
     |   bd jira sync --prefer-local        # Bidirectional, local wins
-  flag --create-only type=bool default="false" usage="Only create new issues, don't update existing"
+  flag --create-only type=bool default="false" usage="Only create new issues, don't update existing (push only)"
   flag --dry-run type=bool default="false" usage="Preview sync without making changes"
   flag --issues type=string default="" usage="Comma-separated bead IDs to sync selectively (e.g., bd-abc,bd-def). Mutually exclusive with --parent."
   flag --parent type=string default="" usage="Limit push to this bead and its descendants (push only). Mutually exclusive with --issues."
@@ -4379,7 +4379,7 @@ bd linear sync
     |   bd linear sync --push --parent=bd-abc123      # Push one ticket tree
     |   bd linear sync --dry-run                      # Preview without changes
     |   bd linear sync --prefer-local                 # Bidirectional, local wins
-  flag --create-only type=bool default="false" usage="Only create new issues, don't update existing"
+  flag --create-only type=bool default="false" usage="Only create new issues, don't update existing (push only)"
   flag --dry-run type=bool default="false" usage="Preview sync without making changes"
   flag --exclude-type type=stringSlice default="[]" usage="Exclude issues of these types (can be repeated)"
   flag --include-ephemeral type=bool default="false" usage="Include ephemeral issues (wisps, etc.) when pushing to Linear"
