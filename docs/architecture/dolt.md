@@ -443,7 +443,9 @@ City city's) as not managed by bd. A server counts as bd's when the
 
 `bd dolt stop --all` stops every server `bd dolt status --all` lists as
 bd's, the way `bd dolt stop` does, reports each, and leaves the others
-running; it exits non-zero if any stop fails. Servers started by a bd
+running; it exits non-zero if any stop fails. A server that stopped before
+its turn (its idle watcher reaped it first) is reported as already stopped
+and is no failure. Servers started by a bd
 version without idle stop have no watcher and stay up until stopped: run
 `bd dolt stop --all` once after upgrading, and the next bd command in each
 workspace restarts its server with a watcher.

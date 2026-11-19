@@ -169,3 +169,47 @@ func TestDoltStopAll_StopsOnlyBdManagedServers(t *testing.T) {
 		}
 	})
 }
+
+// TestDoltStopAll_ServerGoneBeforeTheStopIsStillSuccess pins the race with a
+// server that stops between discovery and the stop, its own idle watcher
+// included: the stop path reports ErrServerNotRunning after cleaning up the
+// state files, so stop --all reports the server as already stopped and
+// succeeds. A cleanup failure joined to that sentinel still fails it.
+func TestDoltStopAll_ServerGoneBeforeTheStopIsStillSuccess(t *testing.T) {
+	t.Run("gone", func(t *testing.T) {
+		out, err := runDoltStopAllForTest(t, threeDoltServers(), func(serverDir string, force bool) error {
+			if serverDir == "/home/u/proj-a/.beads" {
+				return doltserver.ErrServerNotRunning
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("stop --all with a server already gone = %v, want success\n%s", err, out)
+		}
+		for _, want := range []string{
+			"✓ Dolt server for /home/u/proj-a (PID 1001) had already stopped",
+			"✓ Stopped Dolt server for /home/u/proj-b (PID 2002)",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output lacks %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "Could not stop") {
+			t.Errorf("a server already gone is reported as a failed stop:\n%s", out)
+		}
+	})
+	t.Run("gone but cleanup failed", func(t *testing.T) {
+		out, err := runDoltStopAllForTest(t, threeDoltServers(), func(serverDir string, force bool) error {
+			if serverDir == "/home/u/proj-a/.beads" {
+				return errors.Join(doltserver.ErrServerNotRunning, errors.New("removing pid file: permission denied"))
+			}
+			return nil
+		})
+		if err == nil {
+			t.Fatalf("stop --all = success, want failure when a state-file cleanup failed\n%s", out)
+		}
+		if !strings.Contains(out, "✗ Could not stop Dolt server for /home/u/proj-a (PID 1001): removing pid file: permission denied") {
+			t.Errorf("output does not report the failed cleanup:\n%s", out)
+		}
+	})
+}

@@ -419,7 +419,8 @@ func waitForIdleReapedPortClosed(t *testing.T, port string, timeout time.Duratio
 // dolt sql-server bd never started, seen together by `bd dolt status --all`
 // (text and --json) from a directory that is no workspace, bd's own listed
 // with workspace, PID, port, uptime and idle-stop state and the foreign one
-// as not managed by bd.
+// as not managed by bd; then `bd dolt stop --all` stops and reports both bd
+// servers and leaves the foreign one running.
 func TestE2E_DoltStatusAllAndStopAll(t *testing.T) {
 	// Every bd here is a subprocess on workspaces initialized with
 	// --server, so this process's own storage mode (embedded by default)
@@ -563,6 +564,71 @@ func TestE2E_DoltStatusAllAndStopAll(t *testing.T) {
 	if s, ok := byPID[foreignPID]; !ok || s.Managed || s.Workspace != "" {
 		t.Errorf("the foreign server in --all json = %+v (found %t), want not managed by bd", s, ok)
 	}
+
+	// stop --all stops every server bd manages on the machine. On a shared
+	// host that includes other projects' servers, so bd runs here behind a
+	// `ps` that lists only this test's three dolt processes (bd discovers
+	// servers through `ps` on PATH and nothing else), and the listing under
+	// that shim is checked before anything is stopped.
+	ownPIDs := []int{workspaces[0].pid, workspaces[1].pid, foreignPID}
+	stopEnv := append(append([]string{}, env...), "PATH="+scopedPSDir(t, ownPIDs)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	scopedOut, scopedErr := runBDExecWithBinary(t, bdBinary, outside, stopEnv, "dolt", "status", "--all", "--json")
+	if scopedErr != nil {
+		t.Fatalf("bd dolt status --all --json behind the scoped ps failed: %v\n%s", scopedErr, scopedOut)
+	}
+	var scoped struct {
+		Servers []listedServer `json:"servers"`
+	}
+	if i := strings.Index(scopedOut, "{"); i < 0 || json.Unmarshal([]byte(scopedOut[i:]), &scoped) != nil {
+		t.Fatalf("parse scoped --all json:\n%s", scopedOut)
+	}
+	seen := map[int]bool{}
+	for _, s := range scoped.Servers {
+		seen[s.PID] = true
+	}
+	if len(scoped.Servers) != len(ownPIDs) || !seen[ownPIDs[0]] || !seen[ownPIDs[1]] || !seen[ownPIDs[2]] {
+		t.Fatalf("the scoped ps lists %+v, want exactly PIDs %v; not running stop --all", scoped.Servers, ownPIDs)
+	}
+
+	stopOut, stopErr := runBDExecWithBinary(t, bdBinary, outside, stopEnv, "dolt", "stop", "--all")
+	if stopErr != nil {
+		t.Fatalf("bd dolt stop --all failed: %v\n%s", stopErr, stopOut)
+	}
+	for i, ws := range workspaces {
+		if want := fmt.Sprintf("✓ Stopped Dolt server for %s (PID %d)", ws.dir, ws.pid); !strings.Contains(stopOut, want) {
+			t.Errorf("bd dolt stop --all does not report workspace %d's stop (%q):\n%s", i, want, stopOut)
+		}
+		if _, err := os.Stat(filepath.Join(ws.beadsDir, "dolt-server.pid")); err == nil {
+			t.Errorf("workspace %d's pid file survived stop --all", i)
+		}
+		waitForIdleReapedPortClosed(t, ws.port, 10*time.Second)
+	}
+	if want := fmt.Sprintf("Left running 1 Dolt server not managed by bd (PID %d)", foreignPID); !strings.Contains(stopOut, want) {
+		t.Errorf("bd dolt stop --all does not report the foreign server left running (%q):\n%s", want, stopOut)
+	}
+	waitForPortAccepting(t, foreignPort, 2*time.Second)
+}
+
+// scopedPSDir returns a directory holding a `ps` that runs the real one and
+// keeps only the rows of pids, so a bd run with it first on PATH discovers
+// no dolt server but those.
+func scopedPSDir(t *testing.T, pids []int) string {
+	t.Helper()
+	realPS, err := exec.LookPath("ps")
+	if err != nil {
+		t.Skipf("no ps on PATH: %v", err)
+	}
+	keep := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		keep = append(keep, strconv.Itoa(pid))
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\n%s \"$@\" | awk -v keep=' %s ' 'index(keep, \" \" $1 \" \") > 0'\n",
+		strconv.Quote(realPS), strings.Join(keep, " "))
+	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: the shim must be executable
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // reserveFreePort reserves an ephemeral TCP port for a test server.

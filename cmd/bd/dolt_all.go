@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -126,7 +127,11 @@ type doltStopAllEntry struct {
 	Workspace string `json:"workspace"`
 	ServerDir string `json:"server_dir"`
 	Stopped   bool   `json:"stopped"`
-	Error     string `json:"error,omitempty"`
+	// AlreadyStopped is a server that was gone by the time bd stopped it
+	// (its idle watcher reaped it, or another stop got there first); the
+	// stop path cleaned up its state files, so it counts as stopped.
+	AlreadyStopped bool   `json:"already_stopped,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 // runDoltStopAll is `bd dolt stop --all`: stop every server bd manages on
@@ -147,7 +152,14 @@ func runDoltStopAll(force bool) error {
 			continue
 		}
 		r := doltStopAllEntry{PID: e.PID, Workspace: e.Workspace, ServerDir: e.ServerDir, Stopped: true}
-		if stopErr := stopDoltServerDir(e.ServerDir, force); stopErr != nil {
+		stopErr := stopDoltServerDir(e.ServerDir, force)
+		if stopErr != nil && errors.Is(stopErr, doltserver.ErrServerNotRunning) {
+			// Gone between discovery and the stop. Only a failed state-file
+			// cleanup, joined to the sentinel, still fails it.
+			r.AlreadyStopped = true
+			stopErr = doltserver.IgnoreNotRunning(stopErr)
+		}
+		if stopErr != nil {
 			r.Stopped, r.Error = false, stopErr.Error()
 			failed++
 		}
@@ -167,7 +179,9 @@ func runDoltStopAll(force bool) error {
 		fmt.Println("No Dolt servers managed by bd are running.")
 	}
 	for _, r := range results {
-		if r.Stopped {
+		if r.Stopped && r.AlreadyStopped {
+			fmt.Println(ui.RenderPass(fmt.Sprintf("✓ Dolt server for %s (PID %d) had already stopped", r.Workspace, r.PID)))
+		} else if r.Stopped {
 			fmt.Println(ui.RenderPass(fmt.Sprintf("✓ Stopped Dolt server for %s (PID %d)", r.Workspace, r.PID)))
 		} else {
 			fmt.Println(ui.RenderFail(fmt.Sprintf("✗ Could not stop Dolt server for %s (PID %d): %s", r.Workspace, r.PID, r.Error)))
