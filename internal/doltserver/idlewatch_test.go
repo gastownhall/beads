@@ -318,3 +318,80 @@ func TestAcquireClientLease_WaitsForInFlightReap(t *testing.T) {
 		t.Error("lease kept after release")
 	}
 }
+
+// TestStart_ExplicitStartLaunchesNoIdleWatcher: `bd dolt start` and
+// `bd dolt restart` launch no watcher, and a start that adopts an
+// auto-started server cancels its watcher, which then exits without
+// stopping the server however long it stays idle.
+func TestStart_ExplicitStartLaunchesNoIdleWatcher(t *testing.T) {
+	t.Run("fresh start", func(t *testing.T) {
+		beadsDir, _ := fakeStartWorkspace(t)
+		calls := stubIdleWatchSpawner(t)
+		if _, err := startForTest(t, beadsDir); err != nil {
+			t.Fatal(err)
+		}
+		if len(*calls) != 0 {
+			t.Errorf("Start launched %d watcher(s), want none", len(*calls))
+		}
+		if _, err := os.Stat(watcherPIDPath(beadsDir)); !os.IsNotExist(err) {
+			t.Errorf("watcher.pid recorded for an explicit start (stat err %v)", err)
+		}
+	})
+
+	for _, explicit := range []struct {
+		name string
+		run  func(string) (*State, error)
+	}{
+		{name: "start adopts an auto-started server", run: Start},
+		{name: "restart replaces an auto-started server", run: Restart},
+	} {
+		t.Run(explicit.name, func(t *testing.T) {
+			beadsDir, _ := fakeStartWorkspace(t)
+			calls := stubIdleWatchSpawner(t)
+			autoStartForTest(t, beadsDir)
+			opts := (*calls)[0]
+
+			state, err := explicit.run(beadsDir)
+			if state != nil && state.PID > 0 {
+				pid := state.PID
+				t.Cleanup(func() {
+					if p, findErr := os.FindProcess(pid); findErr == nil {
+						_ = p.Kill()
+					}
+				})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(*calls) != 1 {
+				t.Errorf("explicit start launched a watcher (%d spawns)", len(*calls))
+			}
+			if _, err := os.Stat(watcherPIDPath(beadsDir)); !os.IsNotExist(err) {
+				t.Errorf("watcher.pid kept after the explicit start (stat err %v)", err)
+			}
+
+			// The auto-start's watcher, still running, must leave the
+			// explicitly started server alone.
+			opts.PID, opts.Port, opts.Timeout = state.PID, state.Port, time.Minute
+			clock := newFakeClock()
+			var conns int64
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			w := testIdleWatcher(opts, clock, quietStatus(&conns))
+			sleep := w.sleep
+			w.sleep = func(ctx context.Context, d time.Duration) error {
+				if clock.Now().Sub(newFakeClock().Now()) > time.Hour {
+					cancel()
+				}
+				return sleep(ctx, d)
+			}
+			outcome, err := w.run(ctx)
+			if err != nil || outcome == IdleWatchReaped {
+				t.Errorf("watcher run = (%s, %v), want it to leave the server alone", outcome, err)
+			}
+			if !isProcessAlive(state.PID) {
+				t.Errorf("explicitly started server PID %d was stopped", state.PID)
+			}
+		})
+	}
+}

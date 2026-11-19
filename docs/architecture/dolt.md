@@ -413,6 +413,11 @@ Idle stop applies only to a server bd started on a port it chose itself. It
 never applies to an external server, a shared server, a server on a pinned
 port, or a server with a remotesapi listener.
 
+A server started with `bd dolt start` or `bd dolt restart` is never stopped
+for idleness. Running `bd dolt start` while an auto-started server is up
+adopts that server and cancels its watcher, so this is also how to keep an
+auto-started server running.
+
 ### Shared Server Mode
 
 On machines with multiple beads projects, each project normally starts its own Dolt server.
