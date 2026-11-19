@@ -231,9 +231,9 @@ func TestResolveProxiedServerUOWTopology_AbsentFilesResolveDefaults(t *testing.T
 
 	topology, err := resolveProxiedServerUOWTopology(beadsDir, "", assertWorkspaceIdentity)
 	require.NoError(t, err, "absent metadata.json and sidecar must not be an error")
-	assert.Equal(t, configfile.DefaultDoltDatabase, topology.database)
-	assert.False(t, topology.teamServer)
-	assert.Nil(t, topology.external)
+	assert.Equal(t, configfile.DefaultDoltDatabase, topology.Database)
+	assert.False(t, topology.TeamServer)
+	assert.Nil(t, topology.External)
 }
 
 func TestNewExternalProxiedServerUOWProvider_CreatesRootDir(t *testing.T) {
@@ -241,8 +241,8 @@ func TestNewExternalProxiedServerUOWProvider_CreatesRootDir(t *testing.T) {
 	external := &configfile.ExternalDoltConfig{Host: "db.invalid"}
 
 	_, err := newExternalProxiedServerUOWProvider(context.Background(), beadsDir, sqlServerUOWTopology{
-		database: "beads_test",
-		external: external,
+		Database: "beads_test",
+		External: external,
 	})
 	require.Error(t, err, "invalid external config must surface a validation error")
 
@@ -368,13 +368,13 @@ func TestNewProxiedServerUOWProvider_TeamServerEmptyRootNamesNoInitRemedy(t *tes
 }
 
 func TestProxiedFreshStoreRefusal(t *testing.T) {
-	managed := sqlServerUOWTopology{database: configfile.DefaultDoltDatabase}
+	managed := sqlServerUOWTopology{Database: configfile.DefaultDoltDatabase}
 
 	t.Run("external topology never creates a store and is exempt", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		external := sqlServerUOWTopology{
-			database: configfile.DefaultDoltDatabase,
-			external: &configfile.ExternalDoltConfig{Host: "db.invalid", Port: 3306},
+			Database: configfile.DefaultDoltDatabase,
+			External: &configfile.ExternalDoltConfig{Host: "db.invalid", Port: 3306},
 		}
 		assert.NoError(t, proxiedFreshStoreRefusal(beadsDir, external))
 	})
@@ -512,7 +512,7 @@ func TestProxiedFreshStoreRefusal(t *testing.T) {
 	// clone's way back is its sidecar.
 	t.Run("a team-server workspace is offered no init remedy", func(t *testing.T) {
 		beadsDir := t.TempDir()
-		teamServer := sqlServerUOWTopology{database: configfile.DefaultDoltDatabase, teamServer: true}
+		teamServer := sqlServerUOWTopology{Database: configfile.DefaultDoltDatabase, TeamServer: true}
 		err := proxiedFreshStoreRefusal(beadsDir, teamServer)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "refusing to start a proxied Dolt server")
