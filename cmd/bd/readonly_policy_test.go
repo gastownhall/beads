@@ -294,6 +294,13 @@ func TestPersistentPostRunDirectMaintenanceSkipsPreview(t *testing.T) {
 			wantPushes:         0,
 		},
 		{
+			// AC-2: --inspect is the other preview flag.
+			name:        "migrate --inspect",
+			cmd:         previewRowCmd("migrate", "inspect", true),
+			wantCommits: -1, wantMetadataWrites: -1,
+			wantBackups: 0, wantExports: 0, wantPushes: 0,
+		},
+		{
 			// Edge: a classified read with a real --dry-run flag. Export
 			// and push already exclude reads; backup is the hole.
 			name:               "duplicates --dry-run",
