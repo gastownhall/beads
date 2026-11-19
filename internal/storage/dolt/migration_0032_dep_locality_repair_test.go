@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -245,5 +246,61 @@ func TestMigration0032DepLocalityRepairRollsBackOnDoltBackend(t *testing.T) {
 	}
 	if !depLocalityCursorHas(t, ctx, store) {
 		t.Fatalf("ignored cursor does not record %d after the retry", depLocalityMarkerVersion)
+	}
+}
+
+// TestMigration0032DepLocalityRepairRefusesDirtyGraphOnDoltBackend is AC-8 on
+// the server backend: with the repair needed and a pre-existing dirty issues
+// table, the schema pass refuses BEFORE any repair write with
+// *schema.DirtyTablesError naming the table, leaves the marker pending and
+// the rows untouched; after the documented reconcile commit the pass
+// succeeds.
+func TestMigration0032DepLocalityRepairRefusesDirtyGraphOnDoltBackend(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	blocker, dependent, depID := depLocalityDoltSeed(t, ctx, store)
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE issues SET title = 'user edit in flight' WHERE id = ?", dependent); err != nil {
+		t.Fatalf("dirty the issues table: %v", err)
+	}
+	depLocalityReopenMarker(t, ctx, store)
+
+	_, migrateErr := rerunSchemaInitOnTestStore(ctx, store)
+	if migrateErr == nil {
+		t.Fatal("schema init over the dirty graph = nil, want the typed refusal")
+	}
+	var dirtyErr *schema.DirtyTablesError
+	if !errors.As(migrateErr, &dirtyErr) {
+		t.Fatalf("schema init error = %T (%v), want *schema.DirtyTablesError so the reconcile opens can skip and let the commit through", migrateErr, migrateErr)
+	}
+	if len(dirtyErr.Tables) != 1 || dirtyErr.Tables[0] != "issues" {
+		t.Fatalf("DirtyTablesError.Tables = %v, want [issues]: only the dirty graph must be named", dirtyErr.Tables)
+	}
+	depLocalityRequireExternal(t, ctx, store, depID, blocker)
+	if blocked := depLocalityBlocked(t, ctx, store, dependent); blocked != 0 {
+		t.Fatalf("dependent %s is_blocked = %d after the refused pass, want 0: no repair write may land", dependent, blocked)
+	}
+	if depLocalityCursorHas(t, ctx, store) {
+		t.Fatalf("the refused repair recorded marker %d; it must stay pending", depLocalityMarkerVersion)
+	}
+
+	// The documented reconcile: commit the working set at the current schema,
+	// then the pass goes through.
+	if err := store.doltAddAndCommit(ctx, []string{"issues"}, "test: reconcile the dirty graph"); err != nil {
+		t.Fatalf("reconcile commit: %v", err)
+	}
+	if _, err := rerunSchemaInitOnTestStore(ctx, store); err != nil {
+		t.Fatalf("migration after the reconcile: %v", err)
+	}
+	depLocalityRequireTyped(t, ctx, store, depID, blocker)
+	if blocked := depLocalityBlocked(t, ctx, store, dependent); blocked != 1 {
+		t.Fatalf("dependent %s is_blocked = %d after the reconcile pass, want 1", dependent, blocked)
+	}
+	if !depLocalityCursorHas(t, ctx, store) {
+		t.Fatalf("ignored cursor does not record %d after the reconcile pass", depLocalityMarkerVersion)
 	}
 }
