@@ -4,6 +4,7 @@ go_library(
     name = "dberrors",
     srcs = [
         "errors.go",
+        "gitusagerefusal.go",
         "mergerefusal.go",
         "pushrefusal.go",
     ],
@@ -16,6 +17,7 @@ go_test(
     name = "dberrors_test",
     srcs = [
         "errors_test.go",
+        "gitusagerefusal_test.go",
         "mergerefusal_test.go",
         "pushrefusal_test.go",
     ],
