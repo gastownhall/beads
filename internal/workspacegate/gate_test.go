@@ -1544,3 +1544,165 @@ func TestInheritedHoldThroughSubprocess(t *testing.T) {
 		t.Errorf("unrelated child: inherited=%v waited=%s, want false and a full deferral", inh, waited)
 	}
 }
+
+// mixedTestGates builds physical-root gates in one temp dir for the
+// AcquireAllMixed tests.
+func mixedTestGates(t *testing.T, names ...string) []Gate {
+	t.Helper()
+	dir := t.TempDir()
+	gates := make([]Gate, len(names))
+	for i, name := range names {
+		g, err := ForPhysicalRoot(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("ForPhysicalRoot(%s): %v", name, err)
+		}
+		gates[i] = g
+	}
+	return gates
+}
+
+// Each request is held in its own mode: a SHARED request coexists with an
+// outside SHARED holder, an EXCLUSIVE one excludes it.
+func TestAcquireAllMixedModes(t *testing.T) {
+	gs := mixedTestGates(t, "aroot", "broot")
+	ga, gb := gs[0], gs[1]
+
+	m, err := AcquireAllMixed(context.Background(), Options{},
+		Request{Gate: ga, Mode: Exclusive}, Request{Gate: gb, Mode: Shared})
+	if err != nil {
+		t.Fatalf("AcquireAllMixed: %v", err)
+	}
+	defer m.Release()
+	if len(m.handles) != 2 || m.handles[0].Mode() != Exclusive || m.handles[1].Mode() != Shared {
+		t.Fatalf("handles = %+v, want [exclusive aroot, shared broot]", m.handles)
+	}
+
+	if h, err := gb.Acquire(context.Background(), Shared, Options{}); err != nil {
+		t.Fatalf("outside SHARED on the SHARED-requested gate: %v", err)
+	} else {
+		_ = h.Release()
+	}
+	if _, err := gb.Acquire(context.Background(), Exclusive, Options{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("outside EXCLUSIVE on the SHARED-requested gate: err = %v, want ErrBusy", err)
+	}
+	if _, err := ga.Acquire(context.Background(), Shared, Options{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("outside SHARED on the EXCLUSIVE-requested gate: err = %v, want ErrBusy", err)
+	}
+}
+
+// Duplicates collapse to one acquisition, and EXCLUSIVE wins whichever
+// order the duplicates arrive in.
+func TestAcquireAllMixedDuplicateExclusiveWins(t *testing.T) {
+	for _, order := range []string{"shared-first", "exclusive-first"} {
+		t.Run(order, func(t *testing.T) {
+			g := mixedTestGates(t, "root")[0]
+			reqs := []Request{{Gate: g, Mode: Shared}, {Gate: g, Mode: Exclusive}}
+			if order == "exclusive-first" {
+				reqs[0], reqs[1] = reqs[1], reqs[0]
+			}
+			m, err := AcquireAllMixed(context.Background(), Options{}, reqs...)
+			if err != nil {
+				t.Fatalf("AcquireAllMixed: %v", err)
+			}
+			defer m.Release()
+			if len(m.handles) != 1 || m.handles[0].Mode() != Exclusive {
+				t.Fatalf("handles = %d (mode %v), want one EXCLUSIVE", len(m.handles), m.handles[0].Mode())
+			}
+			if _, err := g.Acquire(context.Background(), Shared, Options{}); !errors.Is(err, ErrBusy) {
+				t.Fatalf("outside SHARED: err = %v, want ErrBusy (duplicate weakened to SHARED)", err)
+			}
+		})
+	}
+}
+
+// Invalid requests are refused before any gate is touched: no gate file is
+// created and nothing stays locked.
+func TestAcquireAllMixedValidatesBeforeAcquiring(t *testing.T) {
+	gs := mixedTestGates(t, "aroot", "broot")
+	for name, reqs := range map[string][]Request{
+		"zero gate":    {{Gate: gs[0], Mode: Exclusive}, {Mode: Shared}},
+		"invalid mode": {{Gate: gs[0], Mode: Exclusive}, {Gate: gs[1], Mode: Mode(7)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := AcquireAllMixed(context.Background(), Options{}, reqs...); err == nil || errors.Is(err, ErrBusy) {
+				t.Fatalf("err = %v, want a validation error", err)
+			}
+			for _, g := range gs {
+				if _, err := os.Stat(g.Path()); !os.IsNotExist(err) {
+					t.Fatalf("gate file %s exists after a refused request (stat err %v)", g.Path(), err)
+				}
+			}
+		})
+	}
+	if m, err := AcquireAllMixed(context.Background(), Options{}); err != nil || !m.Empty() {
+		t.Fatalf("empty request set: m.Empty()=%v err=%v, want an empty handle", m.Empty(), err)
+	}
+}
+
+// The set is taken in canonical sorted order regardless of request order or
+// mode, the wait budget is total, OnWait fires once, and a failure releases
+// what was taken.
+func TestAcquireAllMixedOrderBudgetAndCleanup(t *testing.T) {
+	gs := mixedTestGates(t, "aroot", "broot", "croot")
+	ga, gb, gc := gs[0], gs[1], gs[2]
+
+	m, err := AcquireAllMixed(context.Background(), Options{},
+		Request{Gate: gc, Mode: Shared}, Request{Gate: ga, Mode: Exclusive}, Request{Gate: gb, Mode: Shared})
+	if err != nil {
+		t.Fatalf("AcquireAllMixed: %v", err)
+	}
+	for i := 1; i < len(m.handles); i++ {
+		if m.handles[i-1].gate.path >= m.handles[i].gate.path {
+			t.Fatalf("gates not acquired in sorted order: %s then %s", m.handles[i-1].gate.path, m.handles[i].gate.path)
+		}
+	}
+	_ = m.Release()
+
+	block := mustAcquire(t, gc, Exclusive, Options{})
+	calls := 0
+	start := time.Now()
+	_, err = AcquireAllMixed(context.Background(), Options{
+		Wait:         300 * time.Millisecond,
+		PollInterval: 50 * time.Millisecond,
+		OnWait:       func(string) { calls++ },
+	}, Request{Gate: ga, Mode: Exclusive}, Request{Gate: gb, Mode: Shared}, Request{Gate: gc, Mode: Shared})
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("err = %v, want ErrBusy", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("took %v with a 300ms total budget", elapsed)
+	}
+	if calls != 1 {
+		t.Fatalf("OnWait fired %d times, want 1", calls)
+	}
+	_ = block.Release()
+	// Reverse cleanup: the EXCLUSIVE gate taken before the failure is free.
+	h := mustAcquire(t, ga, Exclusive, Options{})
+	_ = h.Release()
+}
+
+func TestAcquireAllMixedHonorsCancellation(t *testing.T) {
+	gs := mixedTestGates(t, "aroot", "broot")
+	block := mustAcquire(t, gs[1], Exclusive, Options{})
+	defer block.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, err := AcquireAllMixed(ctx, Options{Wait: 10 * time.Second},
+		Request{Gate: gs[0], Mode: Exclusive}, Request{Gate: gs[1], Mode: Shared})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+	h := mustAcquire(t, gs[0], Exclusive, Options{})
+	_ = h.Release()
+}
+
+func TestGateSameGate(t *testing.T) {
+	gs := mixedTestGates(t, "aroot", "broot")
+	again, err := ForPhysicalRoot(filepath.Join(filepath.Dir(gs[0].Path()), "aroot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gs[0].SameGate(again) || gs[0].SameGate(gs[1]) || gs[0].SameGate(Gate{}) {
+		t.Fatal("SameGate disagrees with gate identity")
+	}
+}

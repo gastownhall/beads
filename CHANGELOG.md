@@ -1431,6 +1431,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd init` on a shared server no longer waits on other projects' live
+  commands** (#7122). In shared-server mode every project shares one server
+  root, and `bd init` (including `bd init --external`) asked for that root's
+  gate exclusively, so a `bd serve` or any long-running command of another
+  project on the same server made it wait out `BEADS_INIT_GATE_TIMEOUT` and
+  refuse, for as long as that command ran. An ordinary `bd init` now holds
+  its own workspace exclusively and the shared server root shared, the way
+  other commands do: it runs alongside other projects' commands and still
+  waits for, and keeps out, maintenance (another project's
+  `bd init --reinit-local`, backup restore, migrate or bootstrap) on the
+  shared server. `bd init --reinit-local` (and `--force`) on a shared server,
+  an init whose `--db` names another root, and every init outside
+  shared-server mode keep the exclusive gate; a refused reinit now says it
+  needs the shared server free of other projects' commands, such as
+  `bd serve`. Two inits that pick the same database name now settle it in
+  the database: the one that loses writes no `metadata.json` (and leaves an
+  existing one unchanged), so rerun it with another `--database`.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
