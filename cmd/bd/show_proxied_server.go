@@ -172,25 +172,21 @@ func proxiedListDeps(ctx context.Context, uw uow.UnitOfWork, id string, isWisp b
 	return uw.DependencyUseCase().ListWithIssueMetadata(ctx, id, filter)
 }
 
-// proxiedDepCounter adapts the detail source's dependency aggregates onto
+// proxiedDepCounter adapts the detail source's dependents aggregate onto
 // unresolvableDepCounter, which the direct route satisfies with the store and
 // which therefore carries no isWisp flag: the store seam resolves that routing
 // internally, while the domain use cases behind a proxied unit of work are
 // per-table and have to be told which side to read.
 //
-// The two queries are the same arithmetic either way — CountDependencyEdgesInTx
+// The query is the same arithmetic either way — CountDependencyEdgesInTx
 // counts `dependencies` plus `wisp_dependencies` with no join to `issues`,
 // while the listing behind proxiedListDeps runs the very
-// GetDependenciesWithMetadataInTx / GetDependentsWithMetadataInTx the direct
-// route runs, so it drops the same unrenderable far ends. The difference
-// therefore means here exactly what it means there.
+// GetDependentsWithMetadataInTx the direct route runs, so it drops the same
+// unrenderable far ends. The difference therefore means here exactly what it
+// means there.
 type proxiedDepCounter struct {
 	src    workapi.DetailSource
 	isWisp bool
-}
-
-func (c proxiedDepCounter) CountDependencies(ctx context.Context, id string) (int64, error) {
-	return c.src.CountDependencies(ctx, id, c.isWisp)
 }
 
 func (c proxiedDepCounter) CountDependents(ctx context.Context, id string) (int64, error) {
@@ -288,7 +284,7 @@ func runShowProxiedRefs(ctx context.Context, uw uow.UnitOfWork, in *showProxiedI
 			continue
 		}
 		fmt.Printf("\n%s References to %s:\n", ui.RenderAccent("📎"), id)
-		for _, sec := range groupDepSections(refs, false, nil) {
+		for _, sec := range groupDepSections(refs, nil, false, nil) {
 			displayRefGroup(sec)
 		}
 		fmt.Println()
@@ -544,12 +540,16 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	// proxied text route renders a plain OPEN header for a bead whose own
 	// --json already publishes gated_by. Best effort, as it always was.
 	//
-	// Counts first — see readDepCounts for why the order matters. The
-	// listing's error is KEPT, not discarded: rendering stays best effort,
-	// but a FAILED listing and a SHORT one both leave the slice empty, and
-	// only the second is an unresolvable edge.
-	depCountsSnapshot := readDepCounts(ctx, proxiedDepCounter{src: workapi.NewUOWDetailSource(uw), isWisp: isWisp}, issue.ID)
-	depsWithMeta, depsErr := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
+	// The dependent count comes first — see readDependentCount for why the
+	// order matters. The outgoing edges come from the combined read (the
+	// detail source's Dependencies is the UOW's ListWithUnresolvable /
+	// ListWispWithUnresolvable, whose resolved half is the same
+	// GetDependenciesWithMetadataInTx the direct route reads), so their
+	// unrenderable far ends print in their relation sections (GH#5850)
+	// instead of vanishing.
+	detailSrc := workapi.NewUOWDetailSource(uw)
+	dependentsCount := readDependentCount(ctx, proxiedDepCounter{src: detailSrc, isWisp: isWisp}, issue.ID)
+	depsWithMeta, missingEdges, _ := detailSrc.Dependencies(ctx, issue.ID, isWisp)
 	gates := types.GatesHolding(issue, depsWithMeta)
 
 	if idx > 0 {
@@ -601,12 +601,12 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
 	// (read above, with the header's gate decoration).
-	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+	for _, sec := range groupDepSections(depsWithMeta, missingEdges, true, relatedSeen) {
 		printDepSection(sec)
 	}
 
 	dependentsWithMeta, dependentsErr := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionIn})
-	for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
+	for _, sec := range groupDepSections(dependentsWithMeta, nil, false, relatedSeen) {
 		printDepSection(sec)
 		if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
 			printEpicChildProgress(sec.Deps)
@@ -618,14 +618,16 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	// direct-path code, and runShowProxiedDefault binds the shared
 	// issueops.Reader — hence BuildIssueDetails, hence
 	// unresolvable_dependencies — only `if jsonOutput && !in.shortMode`, so
-	// plain text falls through to here. Without this call a proxied
-	// `bd show <id>` still renders a cross-repo or `external:` dependency as
+	// plain text falls through to here. Without this render a proxied
+	// `bd show <id>` still showed a cross-repo or `external:` dependency as
 	// no dependency at all: the exact symptom this change exists to remove,
-	// surviving on the route a server-backed repo actually uses. The
-	// precedent this design follows covers both of its own routes the same
-	// way — warnDroppedDepEdges at dep.go:1148 and dep_proxied_server.go:457.
-	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-		depListing{rows: len(depsWithMeta), err: depsErr},
+	// surviving on the route a server-backed repo actually uses. The outbound
+	// edges now print in their relation sections from the combined read
+	// above; this notice covers the INBOUND gap, which has no combined read
+	// yet. The precedent this design follows covers both of its own routes
+	// the same way — warnDroppedDepEdges at dep.go:1148 and
+	// dep_proxied_server.go:457.
+	warnUnresolvableDependentEdges(issue.ID, dependentsCount,
 		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
 	printRelatedSection(relatedSeen)

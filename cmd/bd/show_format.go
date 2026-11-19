@@ -284,12 +284,31 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 	return fmt.Sprintf("  %s %s %s: %s%s %s", prefix, statusIcon, idStr, typeStr, dep.Title, priorityTag)
 }
 
+// formatMissingDepEdgeLine renders one edge whose far end has no row in this
+// database (GH#5850): the section's direction glyph, the id exactly as
+// stored, and the fact itself. Muted throughout — the row a status color
+// would decorate does not exist — and no invented status, type tag, or
+// title: every field beyond the id would be a guess about a record this
+// database does not have.
+func formatMissingDepEdgeLine(prefix, id string) string {
+	return fmt.Sprintf("  %s %s %s", prefix, ui.RenderMuted(id), ui.RenderMuted("(not in this database)"))
+}
+
 // printDepSection prints one dependency section: bold heading, then a line per
-// edge marked with the section's direction glyph.
+// edge marked with the section's direction glyph. The section's missing far
+// ends (GH#5850) print after its hydrated rows, under the same heading and
+// glyph, so an edge whose target has no local row lands in the relation
+// section it belongs to instead of vanishing.
 func printDepSection(sec depSection) {
+	if len(sec.Deps) == 0 && len(sec.Missing) == 0 {
+		return
+	}
 	fmt.Printf("\n%s\n", ui.RenderBold(sec.Heading))
 	for _, dep := range sec.Deps {
 		fmt.Println(formatDependencyLine(sec.Glyph, dep))
+	}
+	for _, id := range sec.Missing {
+		fmt.Println(formatMissingDepEdgeLine(sec.Glyph, id))
 	}
 }
 

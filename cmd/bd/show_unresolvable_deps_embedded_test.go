@@ -21,7 +21,10 @@ import (
 // listing path drops it (issueops.GetDependenciesWithMetadataInTx) while every
 // count keeps it. Before the fix that left `dependency_count: 1` beside
 // `dependencies: null` with nothing saying why, and `bd show` in text mode
-// rendered no dependency section at all.
+// rendered no dependency section at all. Since GH#5850 the text render shows
+// the far end in its relation section with "(not in this database)" — the
+// exact edge, visible where the reader is looking, instead of a stderr count
+// of edges they cannot see.
 func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -83,18 +86,49 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 					edges[0], tc.target)
 			}
 
-			// Text mode: the notice goes to stderr, so stdout stays
-			// byte-identical for scripts. Assert on stderr alone, or
-			// this passes on a build that prints nothing anywhere.
+			// Text mode: the far end renders in its relation section on
+			// stdout (GH#5850 AC-3), so the reader sees the edge where
+			// the local ones print. The old stderr count-only warning is
+			// GONE for the outbound direction — asserting that too, or a
+			// regression that restores the warning alongside the render
+			// passes every check above.
 			stdout, stderr := runShowSplit(t, bd, dir, subject.ID)
-			if !strings.Contains(stderr, "no row in this database") {
-				t.Errorf("bd show stderr did not disclose the unrenderable edge:\nstderr:\n%s", stderr)
+			if !strings.Contains(stdout, tc.target+" (not in this database)") {
+				t.Errorf("bd show stdout did not render the far end in its relation section:\nstdout:\n%s", stdout)
+			}
+			// The section for the edge's own type printed — this is the
+			// lone-section-entry case: without the fix there was no
+			// dependency section at all.
+			heading := map[string]string{"tracks": "TRACKS", "blocks": "DEPENDS ON"}[tc.depTyp]
+			if !strings.Contains(stdout, heading) {
+				t.Errorf("bd show stdout did not print the %s section:\nstdout:\n%s", heading, stdout)
+			}
+			if strings.Contains(stderr, "edge(s) whose far end") {
+				t.Errorf("the redundant outbound stderr warning survived the render:\nstderr:\n%s", stderr)
 			}
 			if strings.Contains(stdout, "no row in this database") {
-				t.Errorf("the notice reached stdout, which must stay unchanged:\n%s", stdout)
+				t.Errorf("the legacy warning text reached stdout:\n%s", stdout)
 			}
 		})
 	}
+
+	// The watch route is the second of the three text renders
+	// (displayShowIssueReturn in show_display.go). It reads the same combined
+	// store query as the direct route, so the far end must appear there too
+	// — or --watch silently regressed to dropping the edge while plain
+	// `bd show` kept the fix.
+	t.Run("watch_route_renders_far_end", func(t *testing.T) {
+		subject := bdCreate(t, bd, dir, "Watched subject", "--type", "task")
+		bdDep(t, bd, dir, "add", subject.ID, "liveop-kmf", "--type", "blocks")
+
+		out := runShowWatchOnce(t, bd, dir, bdEnv(dir), subject.ID, "--watch")
+		if !strings.Contains(out, "liveop-kmf (not in this database)") {
+			t.Errorf("bd show --watch did not render the far end in its relation section:\n%s", out)
+		}
+		if !strings.Contains(out, "DEPENDS ON") {
+			t.Errorf("bd show --watch did not print the relation section:\n%s", out)
+		}
+	})
 
 	// NEGATIVE CONTROL, and it is the load-bearing half: a fully local edge
 	// must leave the field unset and stderr silent. Without it every
@@ -115,9 +149,12 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 			t.Errorf("dependencies = %v, want the one local edge", details["dependencies"])
 		}
 
-		_, stderr := runShowSplit(t, bd, dir, anchor.ID)
+		stdout, stderr := runShowSplit(t, bd, dir, anchor.ID)
 		if strings.Contains(stderr, "no row in this database") {
 			t.Errorf("bd show warned about a fully local edge:\nstderr:\n%s", stderr)
+		}
+		if strings.Contains(stdout, "(not in this database)") {
+			t.Errorf("bd show marked a fully local edge as missing:\nstdout:\n%s", stdout)
 		}
 	})
 }

@@ -87,12 +87,6 @@ func TestStoreReadCommandHintsQuoteIDs(t *testing.T) {
 			})
 			return out, bdLine(t, out, "older")
 		}},
-		{"bd show raw-edge pointer", "bd dep list", func(t *testing.T, id string) (string, string) {
-			out := captureStderr(t, func() {
-				warnUnresolvableDepEdges(id, depCounts{deps: depCount{n: 1}}, depListing{rows: 0}, depListing{})
-			})
-			return out, bdLine(t, out, "bd dep list")
-		}},
 		{"bd dep list raw-edge pointer", "bd dep list", func(t *testing.T, id string) (string, string) {
 			reader := fakeAnchorEdgeReader{edges: []*types.Dependency{
 				{IssueID: id, DependsOnID: id + "-far", Type: types.DepBlocks},

@@ -320,14 +320,16 @@ var showCmd = &cobra.Command{
 			// marker (wy-j2upyy) is the gate-typed subset of this very set,
 			// so hoisting the read decorates the header and the meta block
 			// without a second query. Best effort, as it always was: a failed
-			// read renders the issue undecorated rather than not at all.
+			// read renders the issue undecorated rather than not at all — and,
+			// as on the JSON side, a read that never ran says nothing about
+			// unresolvable edges.
 			//
-			// Counts first — see readDepCounts for why the order matters. The
-			// listing's error is KEPT, not discarded: rendering stays best
-			// effort, but a FAILED listing and a SHORT one both leave the
-			// slice empty, and only the second is an unresolvable edge.
-			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
-			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
+			// The dependent count comes first — see readDependentCount for
+			// why the order matters. The outgoing edges come from the combined
+			// read, so their unrenderable far ends print in their relation
+			// sections (GH#5850) instead of vanishing.
+			dependentsCount := readDependentCount(ctx, issueStore, issue.ID)
+			depsWithMeta, missingEdges, _ := issueStore.GetDependenciesWithUnresolvable(ctx, issue.ID)
 			gates := types.GatesHolding(issue, depsWithMeta)
 
 			if idx > 0 {
@@ -374,27 +376,29 @@ var showCmd = &cobra.Command{
 
 			// Show dependencies - grouped by dependency type for clarity
 			// (read above, with the header's gate decoration).
-			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+			for _, sec := range groupDepSections(depsWithMeta, missingEdges, true, relatedSeen) {
 				printDepSection(sec)
 			}
 
 			// Show dependents - grouped by dependency type for clarity
 			dependentsWithMeta, dependentsErr := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
-			for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
+			for _, sec := range groupDepSections(dependentsWithMeta, nil, false, relatedSeen) {
 				printDepSection(sec)
 				if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
 					printEpicChildProgress(sec.Deps)
 				}
 			}
 
-			// Both listings above drop every edge whose far end has no row in
-			// this database, so a cross-repo or `external:` dependency renders
-			// as no dependency at all — indistinguishable from having none
-			// (be-lpi). --json says so in unresolvable_dependencies; say it
-			// here too, or `bd dep add x liveop-y` reports success and then
-			// `bd show x` shows nothing.
-			warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-				depListing{rows: len(depsWithMeta), err: depsErr},
+			// The outbound listing used to drop every edge whose far end had
+			// no row in this database, so a cross-repo or `external:`
+			// dependency rendered as no dependency at all —
+			// indistinguishable from having none (be-lpi). Since GH#5850
+			// those edges print in their relation sections, and this notice
+			// covers the INBOUND gap alone: dependents whose far end has no
+			// row still cannot be rendered (no combined inbound read
+			// exists), so they warn on stderr exactly as --json says via
+			// unresolvable_dependents.
+			warnUnresolvableDependentEdges(issue.ID, dependentsCount,
 				depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
 			printRelatedSection(relatedSeen)

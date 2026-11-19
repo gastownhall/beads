@@ -441,11 +441,14 @@ func TestProxiedServerShow2(t *testing.T) {
 	// one a server-backed repo actually takes: usesProxiedServer() returns at
 	// show.go:45 before any of the direct path, and the shared issueops.Reader
 	// that carries unresolvable_dependencies is bound only for --json, so
-	// without an explicit call in proxiedRenderIssue plain text renders a
+	// without the combined read in proxiedRenderIssue plain text renders a
 	// cross-repo edge as no dependency at all — the exact symptom the change
 	// exists to remove, surviving on the route most exposed to it. The
 	// precedent this design follows, warnDroppedDepEdges, covers both of its
-	// own routes (dep.go:1148 and dep_proxied_server.go:457).
+	// own routes (dep.go:1148 and dep_proxied_server.go:457). Since GH#5850
+	// the far end renders in its relation section on stdout (AC-3); the old
+	// stderr warning is asserted GONE, or a regression that restores it
+	// beside the render passes every check above.
 	t.Run("show_discloses_unresolvable_dep_edges", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sud")
@@ -456,20 +459,22 @@ func TestProxiedServerShow2(t *testing.T) {
 		if err != nil {
 			t.Fatalf("bd show failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-		if !strings.Contains(stderr, "no row in this database") {
-			t.Errorf("proxied bd show did not disclose the unrenderable edge:\nstderr:\n%s", stderr)
+		if !strings.Contains(stdout, "liveop-kmf (not in this database)") {
+			t.Errorf("proxied bd show did not render the far end in its relation section:\nstdout:\n%s", stdout)
 		}
-		// Same contract as the direct route: stdout stays byte-identical for
-		// scripts, so assert on the streams apart or this passes on a build
-		// that prints the notice in the wrong place.
-		if strings.Contains(stdout, "no row in this database") {
-			t.Errorf("the notice reached stdout, which must stay unchanged:\n%s", stdout)
+		// The edge is a blocks edge and the only one: the DEPENDS ON section
+		// must print with it — the lone-section-entry case.
+		if !strings.Contains(stdout, "DEPENDS ON") {
+			t.Errorf("proxied bd show did not print the relation section:\nstdout:\n%s", stdout)
+		}
+		if strings.Contains(stderr, "edge(s) whose far end") {
+			t.Errorf("the redundant outbound stderr warning survived the render:\nstderr:\n%s", stderr)
 		}
 	})
 
 	// The negative control for the case above, and the load-bearing half:
-	// without it every assertion there is satisfied by a build that warns
-	// unconditionally.
+	// without it every assertion there is satisfied by a build that marks
+	// every edge as missing unconditionally.
 	t.Run("show_stays_silent_on_a_fully_local_edge", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sul")
@@ -483,6 +488,9 @@ func TestProxiedServerShow2(t *testing.T) {
 		}
 		if strings.Contains(stderr, "no row in this database") {
 			t.Errorf("proxied bd show warned about a fully local edge:\nstderr:\n%s", stderr)
+		}
+		if strings.Contains(stdout, "(not in this database)") {
+			t.Errorf("proxied bd show marked a fully local edge as missing:\nstdout:\n%s", stdout)
 		}
 		if !strings.Contains(stdout, blocker.ID) {
 			t.Errorf("expected the local dependency rendered on stdout:\n%s", stdout)

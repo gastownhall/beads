@@ -88,18 +88,35 @@ type depSection struct {
 	Heading string
 	Glyph   string
 	Deps    []*types.IssueWithDependencyMetadata
+	// Missing carries the far-end ids of this section's edges whose other
+	// end has no row in this database (GH#5850): a cross-repo id or an
+	// `external:` reference, resolved for the direction being printed by
+	// groupDepSections. They render beside the hydrated rows rather than
+	// being dropped — the section may hold ONLY missing entries, which is
+	// the lone-section case the count-minus-rows warning used to paper
+	// over.
+	Missing []string
 }
 
 // groupDepSections splits one direction's edges into printable sections, in
 // display order. outgoing means issue is the edges' source (dependencies.
-// issue_id).
+// issue_id). missing carries the stored records of this direction's edges
+// whose far end has no row in this database (nil for a caller that has none to
+// render); each renders in the section for its own type, after that type's
+// hydrated rows.
 //
 // A non-nil relatedSeen diverts the symmetric related edges into it, keyed by
 // issue ID, so a caller that passes the same map for both directions ends up
 // with one RELATED section instead of two halves. A caller reading a single
 // direction passes nil and gets RELATED as an ordinary trailing section; either
 // way the two spellings share one section, because they read the same.
-func groupDepSections(deps []*types.IssueWithDependencyMetadata, outgoing bool, relatedSeen map[string]*types.IssueWithDependencyMetadata) []depSection {
+//
+// A MISSING related edge is never diverted into relatedSeen: the map holds
+// hydrated issues and this far end has none, and collapsing a half-edge into a
+// dedup keyed on ids the database cannot resolve would drop it again — the
+// exact symptom GH#5850 exists to remove. It renders in the RELATED section
+// with the missing marker instead.
+func groupDepSections(deps []*types.IssueWithDependencyMetadata, missing []*types.Dependency, outgoing bool, relatedSeen map[string]*types.IssueWithDependencyMetadata) []depSection {
 	byType := make(map[types.DependencyType][]*types.IssueWithDependencyMetadata)
 	for _, dep := range deps {
 		switch dep.DependencyType {
@@ -114,27 +131,47 @@ func groupDepSections(deps []*types.IssueWithDependencyMetadata, outgoing bool, 
 		}
 	}
 
-	sections := make([]depSection, 0, len(byType))
+	// The far end of a stored edge depends on the direction: the anchor is
+	// the source when outgoing, the target when not.
+	missingByType := make(map[types.DependencyType][]string)
+	for _, edge := range missing {
+		far := edge.DependsOnID
+		if !outgoing {
+			far = edge.IssueID
+		}
+		missingByType[edge.Type] = append(missingByType[edge.Type], far)
+	}
+
+	sections := make([]depSection, 0, len(byType)+len(missingByType))
 	emit := func(t types.DependencyType) {
 		group, ok := byType[t]
-		if !ok {
+		gone, goneOK := missingByType[t]
+		if !ok && !goneOK {
 			return
 		}
 		delete(byType, t)
+		delete(missingByType, t)
 		rel := depRelationFor(t)
 		heading, glyph := rel.outHeading, rel.outGlyph
 		if !outgoing {
 			heading, glyph = rel.inHeading, rel.inGlyph
 		}
-		sections = append(sections, depSection{Type: t, Heading: heading, Glyph: glyph, Deps: group})
+		sections = append(sections, depSection{Type: t, Heading: heading, Glyph: glyph, Deps: group, Missing: gone})
 	}
 	for _, t := range depSectionOrder {
 		emit(t)
 	}
 	// Custom types trail the built-ins, sorted by name so output is stable.
-	custom := make([]types.DependencyType, 0, len(byType))
+	// A type emitted above is gone from both maps, so the leftovers of the
+	// two are disjoint and one dedup pass suffices.
+	custom := make([]types.DependencyType, 0, len(byType)+len(missingByType))
 	for t := range byType {
 		custom = append(custom, t)
+	}
+	for t := range missingByType {
+		if _, ok := byType[t]; !ok {
+			custom = append(custom, t)
+		}
 	}
 	slices.Sort(custom)
 	for _, t := range custom {

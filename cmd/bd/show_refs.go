@@ -68,7 +68,7 @@ func showIssueRefs(ctx context.Context, args []string, jsonOut bool) error {
 		// from this issue's end. The bare type name would read from the other
 		// end for the types whose name runs source-first: a (dup, canonical)
 		// edge under a "duplicates" heading says the canonical is the copy.
-		for _, sec := range groupDepSections(refs, false, nil) {
+		for _, sec := range groupDepSections(refs, nil, false, nil) {
 			displayRefGroup(sec)
 		}
 		fmt.Println()
