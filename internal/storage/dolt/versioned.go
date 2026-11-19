@@ -112,21 +112,44 @@ func (s *DoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]*storage
 	return result, err
 }
 
-// PreviousExternalRef returns the external_ref value recorded for issueID
-// as of the most recent commit at or before asOf.
+// PreviousExternalRefs returns, for each of ids, the external_ref value
+// recorded by the most recent commit at or before asOf, in one read
+// transaction and one history query per 200 unique ids. An id without such a
+// row is absent from the map. Nothing is cached: each call reads the history
+// reachable when its transaction starts.
+//
+// Uses withReadTxLongTimeout for the same reason History does: it scans
+// dolt_history_issues, which can outlast the shared pool's ReadTimeout.
 // Implements storage.ExternalRefHistoryQuerier.
-func (s *DoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
-	var ref string
-	var found bool
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+func (s *DoltStore) PreviousExternalRefs(ctx context.Context, ids []string, asOf time.Time) (map[string]string, error) {
+	if !hasNonEmptyID(ids) {
+		return map[string]string{}, nil
+	}
+	var refs map[string]string
+	err := s.withReadTxLongTimeout(ctx, func(tx *sql.Tx) error {
 		var err error
-		ref, found, err = issueops.PreviousExternalRefInTx(ctx, tx, issueID, asOf)
+		refs, err = issueops.PreviousExternalRefsInTx(ctx, tx, ids, asOf)
 		if err != nil {
-			return wrapQueryError("get previous external ref", err)
+			refs = nil
+			return wrapQueryError("get previous external refs", err)
 		}
 		return nil
 	})
-	return ref, found, err
+	if err != nil {
+		return nil, err
+	}
+	return refs, nil
+}
+
+// hasNonEmptyID reports whether ids holds an id worth asking history about,
+// so an empty request opens no transaction.
+func hasNonEmptyID(ids []string) bool {
+	for _, id := range ids {
+		if id != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ChangedIssueIDs returns the set of issue IDs whose data differs between

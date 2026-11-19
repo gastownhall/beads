@@ -1431,6 +1431,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tracker pulls read external_ref history once per pull, not once per
+  linked issue** (#6605). Since #4734 an incremental pull (`bd github sync
+  --pull-only`, and every other tracker's pull) asked the store, for each
+  linked local issue, which external_ref it held at the last sync. Each ask
+  scanned `dolt_history_issues`, and on embedded Dolt also reopened the
+  engine, so the cost grew with issues times commits: one reported
+  3.8k-issue tracker's pull went from about a minute to about 35, holding
+  the embedded store's single-holder lock throughout. The pull now asks once
+  for all linked issues, which both Dolt stores answer in one read with one
+  history query per 200 issues. Answers are unchanged, including for issues
+  deleted or created after the last sync, and nothing is cached between
+  pulls. Reported by ak2k.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
