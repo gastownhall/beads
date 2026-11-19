@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -236,5 +237,43 @@ func TestEpicCommandInit(t *testing.T) {
 
 	if !hasStatusCmd {
 		t.Error("epic command should have status subcommand")
+	}
+}
+
+// TestEpicStatusListsEveryOpenEpic pins GH#5720 (bd-ufmqco): `bd epic status`
+// shows the status of every open epic, not only the epics that have
+// parent-child edge children. A childless epic and an epic whose only child
+// is a dotted-ID child without a parent-child edge must both be listed.
+func TestEpicStatusListsEveryOpenEpic(t *testing.T) {
+	h := newEpicTestHelper(t)
+
+	withEdge := &types.Issue{ID: "test-ufm-edge", Title: "epic with edge child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	childless := &types.Issue{ID: "test-ufm-none", Title: "epic childless", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	dottedOnly := &types.Issue{ID: "test-ufm-dot", Title: "epic dotted child only", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	for _, e := range []*types.Issue{withEdge, childless, dottedOnly} {
+		h.createIssue(t, e)
+	}
+	realChild := &types.Issue{Title: "real child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	h.createIssue(t, realChild)
+	h.addDependency(t, &types.Dependency{IssueID: realChild.ID, DependsOnID: withEdge.ID, Type: types.DepParentChild})
+	h.createIssue(t, &types.Issue{ID: "test-ufm-dot.1", Title: "dotted child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask})
+
+	oldStore, oldCtx, oldJSON := store, rootCtx, jsonOutput
+	store, rootCtx, jsonOutput = h.s, h.ctx, true
+	t.Cleanup(func() { store, rootCtx, jsonOutput = oldStore, oldCtx, oldJSON })
+
+	out := captureStdout(t, func() error { return epicStatusCmd.RunE(epicStatusCmd, nil) })
+	var epics []*types.EpicStatus
+	if err := json.Unmarshal([]byte(out), &epics); err != nil {
+		t.Fatalf("parse epic status JSON: %v\n%s", err, out)
+	}
+	got := map[string]bool{}
+	for _, e := range epics {
+		got[e.Epic.ID] = true
+	}
+	for _, id := range []string{withEdge.ID, childless.ID, dottedOnly.ID} {
+		if !got[id] {
+			t.Errorf("bd epic status omitted open epic %s; listed %v", id, got)
+		}
 	}
 }
