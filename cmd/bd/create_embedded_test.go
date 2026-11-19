@@ -1742,3 +1742,84 @@ func TestEmbeddedCreateDryRunValidatesIssue(t *testing.T) {
 		t.Fatalf("valid dry-run preview = %+v", preview)
 	}
 }
+
+// TestEmbeddedCreateDryRunUsesDestinationTypes pins the vocabulary a
+// validated preview (GH#5787) reads: a type registered only in the database
+// previews without writing anything, and a routed preview validates against
+// the destination's types — with or without --parent — never the source's.
+func TestEmbeddedCreateDryRunUsesDestinationTypes(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dvs")
+	targetDir := filepath.Join(dir, "target-repo")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	runBDInit(t, bd, targetDir, "--prefix", "dvt")
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+
+	run := func(t *testing.T, cwd string, args ...string) (string, string, error) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = cwd
+		cmd.Env = bdEnv(cwd)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		return stdout.String(), stderr.String(), err
+	}
+	mustRun := func(t *testing.T, cwd string, args ...string) string {
+		t.Helper()
+		stdout, stderr, err := run(t, cwd, args...)
+		if err != nil {
+			t.Fatalf("bd %v failed: %v\n%s%s", args, err, stdout, stderr)
+		}
+		return stdout
+	}
+	// Each vocabulary lives only in its database (config set writes the DB).
+	mustRun(t, dir, "config", "set", "types.custom", "srconly")
+	mustRun(t, targetDir, "config", "set", "types.custom", "incident")
+	parent := bdCreate(t, bd, dir, "Target parent", "-t", "epic", "--repo", targetDir)
+
+	t.Run("local database type", func(t *testing.T) {
+		before := readEmbeddedStoreSnapshot(t, beadsDir, "dvs")
+		preview := parseIssueJSON(t, []byte(mustRun(t, dir, "create", "--title", "Local", "--type", "srconly", "--dry-run", "--json")))
+		if preview.IssueType != "srconly" {
+			t.Fatalf("preview type = %q, want srconly", preview.IssueType)
+		}
+		if after := readEmbeddedStoreSnapshot(t, beadsDir, "dvs"); after != before {
+			t.Fatalf("dry-run changed the store: before %+v, after %+v", before, after)
+		}
+	})
+
+	for _, withParent := range []bool{false, true} {
+		name := "routed"
+		extra := []string{}
+		if withParent {
+			name = "routed with parent"
+			extra = []string{"--parent", parent.ID}
+		}
+		t.Run(name, func(t *testing.T) {
+			before := readEmbeddedStoreSnapshot(t, targetBeadsDir, "dvt")
+			args := append([]string{"create", "--title", "Routed", "--type", "incident", "--repo", targetDir, "--dry-run", "--json"}, extra...)
+			if preview := parseIssueJSON(t, []byte(mustRun(t, dir, args...))); preview.IssueType != "incident" {
+				t.Fatalf("preview type = %q, want the destination's incident", preview.IssueType)
+			}
+
+			args = append([]string{"create", "--title", "Routed", "--type", "srconly", "--repo", targetDir, "--dry-run"}, extra...)
+			stdout, stderr, err := run(t, dir, args...)
+			if err == nil {
+				t.Fatalf("routed preview accepted a type only the source registers:\n%s%s", stdout, stderr)
+			}
+			if !strings.Contains(stdout+stderr, "invalid issue type") {
+				t.Fatalf("routed preview should name the invalid type; got:\n%s%s", stdout, stderr)
+			}
+			if after := readEmbeddedStoreSnapshot(t, targetBeadsDir, "dvt"); after != before {
+				t.Fatalf("routed dry-run changed the target: before %+v, after %+v", before, after)
+			}
+		})
+	}
+}
