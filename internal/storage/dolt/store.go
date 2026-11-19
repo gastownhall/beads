@@ -186,8 +186,10 @@ func isProductionPort(cfg *Config) bool {
 // drops to zero, the server is stopped. This prevents test-started servers
 // from leaking (GH#2542) while allowing multiple stores to share one server.
 // Normal repo-local auto-starts are intentionally not tracked here: those
-// servers should stay up like an explicit `bd dolt start`, rather than being
-// torn down at the end of each command.
+// servers outlive each command, and their idle watcher (doltserver idle
+// stop) stops them once no store or client has used them for
+// dolt.idle-timeout; each open store holds a client lease that keeps the
+// watcher off.
 var autoStartRefs struct {
 	mu sync.Mutex
 	m  map[string]int
@@ -394,6 +396,12 @@ type DoltStore struct {
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
+
+	// releaseClientLease removes this store's client lease on its server
+	// (doltserver.AcquireClientLease), which keeps the server's idle watcher
+	// from stopping it while the store is open. Nil when the open could not
+	// auto-start a server.
+	releaseClientLease func()
 
 	// createdDatabase reports whether this store's open created its database
 	// (serverConnFacts.created); see CreatedDatabase.
@@ -2272,6 +2280,24 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 	serverDir := doltserver.ResolveServerDir(resolvedBeadsDir)
 
+	// An open that may auto-start the server holds a client lease on it for
+	// as long as the store is open, so the server's idle watcher does not
+	// stop it under a store that holds no SQL connection for a while. It is
+	// taken before the first dial: a reap in flight finishes first, and the
+	// dial below then auto-starts a fresh server.
+	var releaseClientLease func()
+	if serverOpenCanAutoStart(cfg) {
+		if release, leaseErr := doltserver.AcquireClientLease(serverDir); leaseErr == nil {
+			releaseClientLease = release
+		}
+	}
+	clientLeaseKept := false
+	defer func() {
+		if !clientLeaseKept && releaseClientLease != nil {
+			releaseClientLease()
+		}
+	}()
+
 	// Socket-first / TCP-fallback (gt-28itz): a configured unix socket that
 	// isn't currently connectable must not block operations when the server is
 	// reachable over TCP. Normalizing here means the fail-fast dial below and
@@ -2539,6 +2565,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		readOnly:               cfg.ReadOnly,
 		classifiedRead:         cfg.ClassifiedRead,
 		autoStartedServerDir:   autoStartedDir,
+		releaseClientLease:     releaseClientLease,
 		createdDatabase:        dbFacts.created,
 	}
 
@@ -2644,6 +2671,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// Ownership of db transfers to the returned store; suppress the deferred
 	// close above. Must be the last thing before the success return.
 	storeReady = true
+	clientLeaseKept = true
 	return store, nil
 }
 
@@ -3896,6 +3924,10 @@ func (s *DoltStore) Close() error {
 			fmt.Fprintf(os.Stderr, "Warning: failed to stop auto-started dolt server: %v\n", stopErr)
 		}
 		s.autoStartedServerDir = ""
+	}
+	if s.releaseClientLease != nil {
+		s.releaseClientLease()
+		s.releaseClientLease = nil
 	}
 
 	// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
