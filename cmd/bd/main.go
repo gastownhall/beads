@@ -3156,14 +3156,28 @@ func main() {
 // (GH#8113). A `bd metrics off` saved in that file must hold on the very run
 // that moves it, so neither metrics.Init nor the first-run notice may use the
 // value read before the file existed.
+//
+// On macOS, when bd cannot create the user config at all it never looks at the
+// legacy file, so it cannot know whether the user opted out there: metrics are
+// then off for this run, and metricsConsentUnknownForRun keeps the first-run
+// notice from showing.
 func prepareRunMetrics(cmdName string) bool {
+	metricsConsentUnknownForRun = false
 	if cmdName != metrics.SendMetricsSubcommand && resolveMetricsEnabled() {
 		if err := metrics.EnsureUserConfigDefaults(); err != nil {
 			debug.Logf("warning: ensure user config defaults failed: %v", err)
+			if errors.Is(err, config.ErrUserConfigConsentUnknown) {
+				metricsConsentUnknownForRun = true
+				return false
+			}
 		}
 	}
 	return resolveMetricsEnabled()
 }
+
+// metricsConsentUnknownForRun is set by prepareRunMetrics when this run could
+// not establish the user's metrics consent (see config.ErrUserConfigConsentUnknown).
+var metricsConsentUnknownForRun bool
 
 func resolveMetricsEnabled() bool {
 	if v, ok := os.LookupEnv(metrics.EnvDisableMetrics); ok {
