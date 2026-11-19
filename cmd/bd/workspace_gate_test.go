@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -1640,4 +1641,216 @@ func TestSharedServerInitWaitsOutSharedRootMaintenanceThenProceeds(t *testing.T)
 	if err := h.Release(); err != nil {
 		t.Fatalf("release init gate set: %v", err)
 	}
+}
+
+// bd-xicgb8 (GH#7122) AC-5: a SHARED holder of a gate that init's plan must
+// retain EXCLUSIVE still refuses init within its bounded wait, preflight
+// never running: destructive reinit in shared-server mode (whose whole set
+// stays EXCLUSIVE by design — the documented residual), and a non-shared
+// init whose per-project root a resident serve holds SHARED. The contrast
+// half — the ordinary shared-server init that now takes that root SHARED —
+// proceeds under the same resident holder (red at base, GH#7122).
+func TestSharedHolderStillRefusesInitsExclusivePlans(t *testing.T) {
+	t.Run("destructive reinit-local keeps the shared root exclusive", func(t *testing.T) {
+		resetGateTestEnv(t)
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+		t.Setenv(initGateTimeoutEnv, "300ms")
+
+		otherBeadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(otherBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		meta := `{"backend":"dolt","database":"other","dolt_mode":"server","dolt_database":"other"}`
+		if err := os.WriteFile(filepath.Join(otherBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sharedRoot := doltserver.DoltDirPath(otherBeadsDir)
+		if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		serveGates, err := buildWorkspaceGateSet(otherBeadsDir)
+		if err != nil {
+			t.Fatalf("build other project's gate set: %v", err)
+		}
+		serveHold, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{Reason: "bd serve"}, serveGates...)
+		if err != nil {
+			t.Fatalf("other project's serve shared hold: %v", err)
+		}
+		t.Cleanup(func() { _ = serveHold.Release() })
+
+		preflightRan := false
+		start := time.Now()
+		_, err = acquireInitMutationGate(context.Background(), initGateRequest{
+			beadsDir:     filepath.Join(t.TempDir(), ".beads"),
+			physicalRoot: sharedRoot,
+			reinitLocal:  true,
+			sharedServer: true,
+			preflight:    func() error { preflightRan = true; return nil },
+		})
+		waited := time.Since(start)
+		if !errors.Is(err, workspacegate.ErrBusy) {
+			t.Fatalf("destructive reinit under a resident serve: err = %v, want ErrBusy", err)
+		}
+		if waited < 250*time.Millisecond || waited > 3*time.Second {
+			t.Fatalf("destructive reinit gave up after %s, want about the 300ms bound", waited)
+		}
+		if preflightRan {
+			t.Error("preflight ran although the gate was never acquired")
+		}
+	})
+
+	t.Run("non-shared init keeps a shared-held per-project root exclusive", func(t *testing.T) {
+		resetGateTestEnv(t)
+		t.Setenv(initGateTimeoutEnv, "300ms")
+
+		// Project X, no shared server: its resident serve holds its own
+		// per-project dolt dir (and its workspace gate) SHARED.
+		beadsDir := newGateTestServerWorkspace(t)
+		physicalRoot := doltserver.DoltDirPath(beadsDir)
+		if err := os.MkdirAll(physicalRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		serveGates, err := buildWorkspaceGateSet(beadsDir)
+		if err != nil {
+			t.Fatalf("build project X's gate set: %v", err)
+		}
+		serveHold, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{Reason: "bd serve"}, serveGates...)
+		if err != nil {
+			t.Fatalf("project X's serve shared hold: %v", err)
+		}
+		t.Cleanup(func() { _ = serveHold.Release() })
+
+		preflightRan := false
+		_, err = acquireInitMutationGate(context.Background(), initGateRequest{
+			beadsDir:     beadsDir,
+			physicalRoot: physicalRoot,
+			preflight:    func() error { preflightRan = true; return nil },
+		})
+		if !errors.Is(err, workspacegate.ErrBusy) {
+			t.Fatalf("non-shared init under a resident serve: err = %v, want ErrBusy", err)
+		}
+		if preflightRan {
+			t.Error("preflight ran although the gate was never acquired")
+		}
+		// The resident serve is exactly what init must wait out here:
+		// release it, and the same non-shared plan proceeds.
+		_ = serveHold.Release()
+		h, err := acquireInitMutationGate(context.Background(), initGateRequest{
+			beadsDir:     beadsDir,
+			physicalRoot: physicalRoot,
+			preflight:    func() error { return nil },
+		})
+		if err != nil {
+			t.Fatalf("non-shared init after the serve released: %v", err)
+		}
+		if err := h.Release(); err != nil {
+			t.Fatalf("release init gate set: %v", err)
+		}
+	})
+
+	t.Run("the deprecated --force alias keeps the exclusive plan", func(t *testing.T) {
+		resetGateTestEnv(t)
+		sharedDir := t.TempDir()
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+
+		// Another project's resident serve holds the shared root SHARED for
+		// the real `bd init` subprocess to contend with.
+		otherBeadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(otherBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		meta := `{"backend":"dolt","database":"other","dolt_mode":"server","dolt_database":"other"}`
+		if err := os.WriteFile(filepath.Join(otherBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sharedRoot := doltserver.DoltDirPath(otherBeadsDir)
+		if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		serveGates, err := buildWorkspaceGateSet(otherBeadsDir)
+		if err != nil {
+			t.Fatalf("build other project's gate set: %v", err)
+		}
+		serveHold, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{Reason: "bd serve"}, serveGates...)
+		if err != nil {
+			t.Fatalf("other project's serve shared hold: %v", err)
+		}
+		t.Cleanup(func() { _ = serveHold.Release() })
+
+		bdBin := buildBDForInitTests(t)
+		workDir := t.TempDir()
+		cmd := exec.Command(bdBin, "init", "--shared-server", "--force", "--prefix", "bd",
+			"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+		cmd.Dir = workDir
+		cmd.Env = hermeticInitEnv(t.TempDir(),
+			"BEADS_SHARED_SERVER_DIR="+sharedDir,
+			"BEADS_INIT_GATE_TIMEOUT=300ms",
+			"BEADS_DOLT_AUTO_START=0")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatal("bd init --force completed while another project's serve held the shared root")
+		}
+		out := stderr.String()
+		for _, want := range []string{"bd init refuses", "in this workspace or its shared server", initGateTimeoutEnv} {
+			if !strings.Contains(out, want) {
+				t.Errorf("init --force refusal %q missing %q", out, want)
+			}
+		}
+		// The refusal happens at the gate, before any directory writes.
+		if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
+			t.Errorf("refused init left .beads behind (stat err = %v)", err)
+		}
+	})
+
+	t.Run("the ordinary shared-server init proceeds under the same holder", func(t *testing.T) {
+		resetGateTestEnv(t)
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+		t.Setenv(initGateTimeoutEnv, "500ms")
+
+		otherBeadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(otherBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		meta := `{"backend":"dolt","database":"other","dolt_mode":"server","dolt_database":"other"}`
+		if err := os.WriteFile(filepath.Join(otherBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sharedRoot := doltserver.DoltDirPath(otherBeadsDir)
+		if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		serveGates, err := buildWorkspaceGateSet(otherBeadsDir)
+		if err != nil {
+			t.Fatalf("build other project's gate set: %v", err)
+		}
+		serveHold, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{Reason: "bd serve"}, serveGates...)
+		if err != nil {
+			t.Fatalf("other project's serve shared hold: %v", err)
+		}
+		t.Cleanup(func() { _ = serveHold.Release() })
+
+		// The contrast half: while the destructive plans above refuse, the
+		// ordinary plan takes the shared root SHARED and proceeds (red at
+		// base, where it is refused — GH#7122).
+		preflightRan := false
+		h, err := acquireInitMutationGate(context.Background(), initGateRequest{
+			beadsDir:     filepath.Join(t.TempDir(), ".beads"),
+			physicalRoot: sharedRoot,
+			sharedServer: true,
+			preflight:    func() error { preflightRan = true; return nil },
+		})
+		if err != nil {
+			t.Fatalf("ordinary init under the resident serve: %v", err)
+		}
+		if !preflightRan {
+			t.Error("init's preflight did not run under the held gates")
+		}
+		if err := h.Release(); err != nil {
+			t.Fatalf("release init gate set: %v", err)
+		}
+	})
 }
