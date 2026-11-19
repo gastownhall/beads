@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/tracker"
 )
 
@@ -136,6 +137,37 @@ func TestLevenshteinDistance(t *testing.T) {
 		got := levenshteinDistance(tt.a, tt.b)
 		if got != tt.want {
 			t.Errorf("levenshteinDistance(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+// TestAuditConfigRecognition pins GH#5787 issue 4: a key config.yaml stores
+// (config.IsYamlOnlyKey) is one bd reads, so the CLI recognizer must not warn
+// on it — `bd audit --help` prescribes `bd config set audit.enabled true`.
+func TestAuditConfigRecognition(t *testing.T) {
+	for key := range config.YamlOnlyKeys {
+		if _, protected := rejectProtectedConfigKey(key); protected {
+			// no-db: obsolete and refused (TestRejectProtectedConfigKeyNoDB).
+			continue
+		}
+		if !isRecognizedConfigKey(key) {
+			t.Errorf("isRecognizedConfigKey(%q) = false for a config.YamlOnlyKeys key", key)
+		}
+	}
+	for _, key := range []string{
+		"audit.enabled", "list.limit", "mail.delegate", "routing.mode",
+		"hierarchy.max-depth", "storage-class.default", "federation.peer",
+	} {
+		if !config.IsYamlOnlyKey(key) {
+			t.Fatalf("config.IsYamlOnlyKey(%q) = false; pick a key it accepts", key)
+		}
+		if !isRecognizedConfigKey(key) {
+			t.Errorf("isRecognizedConfigKey(%q) = false, want true (config.IsYamlOnlyKey accepts it)", key)
+		}
+	}
+	for _, key := range []string{"totally.bogus", "audits.enabled", "mail.other", "no-db"} {
+		if isRecognizedConfigKey(key) {
+			t.Errorf("isRecognizedConfigKey(%q) = true, want false", key)
 		}
 	}
 }
