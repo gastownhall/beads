@@ -824,6 +824,58 @@ func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
 	}
 }
 
+// TestEmbeddedPreviewDoesNotConsumeBackupInterval (GH#8325): a --dry-run
+// preview opens a write-refusing store, so a post-command auto-backup from it
+// can only fail — and the failure still stamps the backup throttle, so the
+// next real write skipped its backup until the interval passed. The preview
+// must not run the backup at all: no warning, no state file, and the real
+// write that follows backs up.
+func TestEmbeddedPreviewDoesNotConsumeBackupInterval(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	// bdEnv strips BD_*, so init takes no backup.
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pvb")
+	statePath := filepath.Join(beadsDir, "backup", "backup_state.json")
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s exists before the preview (err=%v)", statePath, err)
+	}
+	env := append(bdEnv(dir), "BD_BACKUP_ENABLED=true")
+
+	preview := exec.Command(bd, "create", "Preview only", "--dry-run")
+	preview.Dir = dir
+	preview.Env = env
+	stdout, stderr, err := runCommandBuffers(t, preview)
+	if err != nil {
+		t.Fatalf("bd create --dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "auto-backup") {
+		t.Errorf("preview ran auto-backup; stderr:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("preview wrote %s (err=%v); it would throttle the next real write's backup", statePath, err)
+	}
+
+	write := exec.Command(bd, "create", "Real write")
+	write.Dir = dir
+	write.Env = env
+	stdout, stderr, err = runCommandBuffers(t, write)
+	if err != nil {
+		t.Fatalf("bd create failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("real write after a preview made no backup: read %s: %v\nstderr:\n%s", statePath, err, stderr.String())
+	}
+	var state struct {
+		LastDoltCommit string `json:"last_dolt_commit"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("parse %s: %v\n%s", statePath, err, raw)
+	}
+	if state.LastDoltCommit == "" {
+		t.Fatalf("real write after a preview made no backup: last_dolt_commit is empty\nstate:\n%s\nstderr:\n%s", raw, stderr.String())
+	}
+}
+
 func TestEmbeddedChangeDirOverridesInheritedBeadsDir(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	callerDir, callerBeadsDir, _ := bdInit(t, bd, "--prefix", "caller")
