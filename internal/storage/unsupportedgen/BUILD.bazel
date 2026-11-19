@@ -17,7 +17,10 @@ go_binary(
 go_test(
     name = "unsupportedgen_test",
     srcs = ["main_test.go"],
-    data = ["//internal/httpclient:go_srcs"],
+    data = [
+        "//internal/httpclient:go_srcs",
+        "//internal/storage/uowstore:go_srcs",
+    ],
     embed = [":unsupportedgen_lib"],
 )
 

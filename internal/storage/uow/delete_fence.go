@@ -109,7 +109,11 @@ func deleteFenceLockName(databaseName, id string) string {
 // (the abandoned winner's caller got an error, or no answer at all); the
 // history carries one delete too many.
 func withDeleteFence(ctx context.Context, p *doltSQLProvider, id string, fn func() error) error {
-	conn, err := p.db.Conn(ctx)
+	db, err := p.pool()
+	if err != nil {
+		return fmt.Errorf("delete fence: %w", err)
+	}
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("delete fence: acquire connection: %w", err)
 	}
