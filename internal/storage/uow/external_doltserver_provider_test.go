@@ -289,6 +289,122 @@ func TestNewExternalDoltServerUOWProvider_FreshInitSelfHealsAfterMidPassFailure(
 	require.NoError(t, statusRows.Err())
 }
 
+// TestOpenAndInitSchemaDiscardsSessionOfFailedAttempt is the live-server
+// repro for gastownhall/beads#6504: a retried initSchemaAttempt must never
+// hand its poisoned pinned session back to the pool the open then serves
+// ordinary queries from (wy-s8ytnw).
+//
+// The database is PRE-CREATED (empty) so the open takes the wy-s8ytnw fast
+// path: the probe connects straight to it and initSchema runs on the very pool
+// that is handed to the provider. That is the crux of the bug — a fresh
+// database falls through to the no-database init pool, which a failed open
+// closes wholesale, but the fast-path pool is kept.
+//
+// The first attempt is failed deterministically mid-script: right after the
+// LAST main migration step commits, the per-step fault hook records the
+// session's CONNECTION_ID(), clears FOREIGN_KEY_CHECKS — the exact state a
+// migration leaves behind between its FK-clearing SET and the restoring one —
+// and kills the attempt with a retryable MySQL 1205. The main track is then
+// fully applied, so the retry only has the ignored series left and converges.
+// What the retry pins, and what the pool serves afterward, is the assertion:
+// every retained idle session must be a DIFFERENT connection than the failed
+// one, with FOREIGN_KEY_CHECKS back at its default.
+func TestOpenAndInitSchemaDiscardsSessionOfFailedAttempt(t *testing.T) {
+	port := testutil.StartIsolatedDoltContainer(t)
+	portInt, err := strconv.Atoi(port)
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	verifiedShutdownCleanup(t, storeRootDir)
+	logPath := filepath.Join(t.TempDir(), "server.log")
+
+	// Pre-create the database, empty, so the open takes the fast path whose
+	// pool is the one handed to the provider. A database with no schema is
+	// consent for its migration, so the gate lets the first attempt migrate
+	// it; the main track is then fully applied, and the retry — with nothing
+	// pending on the main track — passes the gate again and finishes the
+	// ignored series.
+	admin, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(127.0.0.1:%d)/?parseTime=true", portInt))
+	require.NoError(t, err)
+	defer admin.Close()
+	_, err = admin.Exec("CREATE DATABASE IF NOT EXISTS beads_discard_retry")
+	require.NoError(t, err)
+
+	fired := false
+	var failedConnID int64
+	restore := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != schema.LatestVersion() || fired {
+			return nil
+		}
+		fired = true
+		if err := db.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&failedConnID); err != nil {
+			return fmt.Errorf("recording the failed session's identity: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+			return fmt.Errorf("clearing FOREIGN_KEY_CHECKS on the failing session: %w", err)
+		}
+		return &mysql.MySQLError{Number: 1205, Message: "test-injected lock wait timeout (mid-script session death)"}
+	})
+	t.Cleanup(restore)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	provider, err := NewExternalDoltServerUOWProvider(
+		ctx,
+		storeRootDir,
+		"beads_discard_retry",
+		logPath,
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: portInt},
+		"root",
+		"",
+		0,
+		0,
+		false,
+		"",
+	)
+	require.NoError(t, err, "the retry must converge and the open must succeed after the retryable mid-script failure")
+	require.NotNil(t, provider)
+	t.Cleanup(func() { _ = provider.Close(context.Background()) })
+	require.True(t, fired, "fault hook never fired; test no longer exercises the mid-script failure path")
+
+	sqlProv, ok := provider.(*doltSQLProvider)
+	require.True(t, ok, "expected *doltSQLProvider, got %T", provider)
+
+	// Pin every idle session the finished open retained, all at once so
+	// releasing one does not feed the loop. The successful attempt's session
+	// must be among them (the open must not pay for a connection per
+	// attempt), and NONE of them may be the failed attempt's session, whatever
+	// its FOREIGN_KEY_CHECKS state.
+	idle := sqlProv.db.Stats().Idle
+	require.Greater(t, idle, 0, "no idle session retained after the open; the successful attempt's session must be reusable")
+	pinned := make([]*sql.Conn, 0, idle)
+	for i := 0; i < idle; i++ {
+		conn, err := sqlProv.db.Conn(ctx)
+		require.NoError(t, err)
+		pinned = append(pinned, conn)
+	}
+	for _, conn := range pinned {
+		var id int64
+		var fk int
+		require.NoError(t, conn.QueryRowContext(ctx, "SELECT CONNECTION_ID(), @@FOREIGN_KEY_CHECKS").Scan(&id, &fk))
+		require.NotEqual(t, failedConnID, id,
+			"the failed attempt's session (id %d, FOREIGN_KEY_CHECKS cleared mid-script) is being served from the pool", failedConnID)
+		require.Equal(t, 1, fk, "an idle session carries FOREIGN_KEY_CHECKS = %d, want the server default 1", fk)
+	}
+	for _, conn := range pinned {
+		require.NoError(t, conn.Close())
+	}
+}
+
 // TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed is
 // the ownership-negative counterpart of the fresh-init self-heal: an
 // initializer that did NOT create the database (its bare CREATE DATABASE loses
