@@ -53,7 +53,7 @@ This project uses bd (beads) for issue tracking.
 
 - Run `bd prime` for workflow context and command guidance.
 - Use `bd ready`, `bd show <id>`, `bd update <id> --claim`, and `bd close <id>`.
-- Use `bd remember "insight"` for durable project facts; keep per-operator preferences in your harness's own memory.
+- Use `bd remember "a project insight"` for durable project facts; keep per-operator preferences in your harness's own memory.
 - Do not use markdown TODO lists for task tracking.
 ```
 
@@ -76,7 +76,8 @@ This project uses bd (beads) for issue tracking.
 | `bd dep add <child> <parent>` | Link tasks (blocks, related, parent-child). |
 | `bd show <id>` | View task details and audit trail. |
 | `bd prime` | Print agent workflow context and persistent memories. |
-| `bd remember "insight"` | Store project memory that `bd prime` injects later. |
+| `bd remember "a project insight"` | Store project memory that `bd prime` injects later. |
+| `bd remember some-key` | Recall an exact key, including long and dotted ones like `api.v2`; a missing key fails without storing anything. Use `--key some-key` to write single-word content, and `bd recall` for keys with other characters. |
 
 ## 🔗 Hierarchy & Workflow
 
@@ -85,6 +86,14 @@ Beads supports hierarchical IDs for epics:
 * `bd-a3f8` (Epic)
 * `bd-a3f8.1` (Task)
 * `bd-a3f8.1.1` (Sub-task)
+
+Deferring a parent hides its direct children from `bd ready` too, whether it
+was deferred to a date (`bd defer --until`) or indefinitely (plain `bd defer`).
+`bd ready --include-deferred` lists those children again; the deferred parent
+itself still stays out of the listing. Once a dated deferral's date passes, the
+next `bd ready` returns the parent to open, and its children with it. A read
+that cannot write that change, such as `bd --readonly ready`, keeps the
+children hidden until a writable read has woken the parent.
 
 **Stealth Mode:** Run `bd init --stealth` to use Beads locally without committing files to the main repo. Perfect for personal use on shared projects. See [Git-Free Usage](#-git-free-usage) below.
 

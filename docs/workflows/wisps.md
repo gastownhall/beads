@@ -56,6 +56,13 @@ bd mol wisp gc        # garbage collect old/abandoned wisps
 bd purge --force      # delete all closed ephemeral beads
 ```
 
+`bd mol wisp gc --closed --force` deletes closed wisps in batches of 200, each
+committed on its own. If a batch fails, the batches before it stay deleted:
+the summary counts only committed deletions, `--json` adds `remaining_count`,
+`error` and `hint`, and the command exits nonzero. Rerun it to delete the
+rest. One run scans at most 5000 closed wisps; when the scan reaches that
+limit the output says more may remain (`candidates_capped` in `--json`).
+
 ### Retiring ids with `--retain-ids`
 
 By default a purged or pruned id is free again: a later `bd create --id`
@@ -83,6 +90,23 @@ stale-closed-issues `bd doctor --fix`, and `bd sql` — leaves deleted ids
 reusable; `types.retained` (below) keeps the retention commands away from the
 types whose ids must stay retired. Over HTTP, the server must advertise `issues.sweep.retainIds`;
 without it, bd refuses the sweep before sending anything.
+
+In releases after v1.3.4, reusable does not mean re-minted. A generated
+child id never repeats a suffix its parent already used: after `bd-a3f8.3`
+is deleted, renamed away, or swept by a plain `bd purge`/`bd prune`, the
+next child of `bd-a3f8` is `bd-a3f8.4`. That is only a counter on the
+parent, not a tombstone, so `bd create --id bd-a3f8.3` still succeeds.
+
+The counter only protects a parent that survives. Deleting and recreating
+the parent drops its counter with it, raw SQL deletes bypass the
+reservation, and a rebuild from `issues.jsonl` loses the counter because
+the export format carries no counter state. Suffix history already lost
+before the upgrade (from a counter that was missing or behind) is not
+recovered. On clones synced with `bd dolt pull`, a delete or rename that
+raises a parent's missing or lagging counter can conflict with a child
+another clone created under the same parent: the pull fails on a conflict
+in that parent's counter row, as parallel child creates already do
+([#4796](https://github.com/gastownhall/beads/issues/4796)).
 
 ### Keeping key-bearing types out of plain sweeps
 

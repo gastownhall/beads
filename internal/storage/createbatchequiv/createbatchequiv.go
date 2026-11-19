@@ -163,7 +163,10 @@ func largeScenarios() []scenario {
 // added: three issues, two wisps, four dependency rows, and the journal,
 // event and version rows of its close. Every row the old dump held is in the
 // new one unchanged, and each earlier step line reads as it did apart from
-// listing K's rows.
+// listing K's rows. Its wisp_events digest was recorded again when main
+// changed what an update event stores in old_value (gastownhall/beads#8024),
+// from main at 2549ece6e with step K added: main's thirteen rows, which hash
+// to main's digest on their own, and K's three.
 //
 // settled.json is younger than the rest: it was recorded from the code before
 // the blocked-state settled-row shortcut (fd54802bc8), on the embedded and the

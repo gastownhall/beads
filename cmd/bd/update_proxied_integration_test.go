@@ -183,6 +183,112 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	// A claim of a locally blocked issue is a per-id failure on the proxied
+	// route too: the blocked id names its blocker and the --force override and
+	// stays untouched, the unblocked id in the same batch is still claimed, and
+	// the batch exits 1.
+	t.Run("claim_blocked_delegated_guard", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucbg")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Claim blocker", "--type", "task")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked claim", "--type", "task")
+		free := bdProxiedCreate(t, bd, p.dir, "Unblocked claim", "--type", "task")
+		bdProxiedDep(t, bd, p.dir, "add", blocked.ID, blocker.ID)
+		revision := bdProxiedShowRevision(t, bd, p.dir, blocked.ID)
+
+		out, code := bdProxiedUpdateFailCode(t, bd, p.dir, blocked.ID, free.ID, "--claim", "--actor", "blocked-worker")
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1\n%s", code, out)
+		}
+		want := "cannot claim blocked issue: " + blocked.ID + " is blocked by [" + blocker.ID + "] (use --force to override)"
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q, got: %s", want, out)
+		}
+		if strings.Contains(out, free.ID+" is blocked") {
+			t.Errorf("unblocked %s reported blocked: %s", free.ID, out)
+		}
+
+		got := bdProxiedShow(t, bd, p.dir, blocked.ID)
+		if got.Status != types.StatusOpen || got.Assignee != "" {
+			t.Errorf("refused claim changed issue: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+		if after := bdProxiedShowRevision(t, bd, p.dir, blocked.ID); after != revision {
+			t.Errorf("refused claim moved %s's revision %d -> %d", blocked.ID, revision, after)
+		}
+		gotFree := bdProxiedShow(t, bd, p.dir, free.ID)
+		if gotFree.Status != types.StatusInProgress || gotFree.Assignee != "blocked-worker" {
+			t.Errorf("unblocked claim in the same batch did not land: status=%q assignee=%q", gotFree.Status, gotFree.Assignee)
+		}
+	})
+
+	// A refused claim on the proxied route writes none of a claim's
+	// bookkeeping either: no lease, event, journal or version row for the
+	// issue and no Dolt commit, for a bare claim, a claim with a patch and a
+	// wisp claim.
+	t.Run("claim_blocked_writes_no_bookkeeping", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucbk")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Claim blocker", "--type", "task")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked claim", "--type", "task")
+		blockedWisp := bdProxiedCreate(t, bd, p.dir, "Blocked wisp claim", "--type", "task", "--ephemeral")
+		bdProxiedDep(t, bd, p.dir, "add", blocked.ID, blocker.ID)
+		bdProxiedDep(t, bd, p.dir, "add", blockedWisp.ID, blocker.ID)
+		db := openProxiedDB(t, p)
+
+		for _, tc := range []struct {
+			name string
+			id   string
+			args []string
+		}{
+			{name: "bare claim", id: blocked.ID},
+			{name: "claim with a patch", id: blocked.ID, args: []string{"--title", "Patched by a refused claim", "--notes", "refused notes"}},
+			{name: "wisp claim", id: blockedWisp.ID},
+		} {
+			before := bdProxiedShow(t, bd, p.dir, tc.id)
+			books := readClaimBookkeeping(t, db, tc.id)
+			args := append([]string{tc.id, "--claim", "--actor", "blocked-worker"}, tc.args...)
+			out, code := bdProxiedUpdateFailCode(t, bd, p.dir, args...)
+			if code != 1 {
+				t.Errorf("%s: exit code = %d, want 1\n%s", tc.name, code, out)
+			}
+			if !strings.Contains(out, "cannot claim blocked issue") {
+				t.Errorf("%s: refusal missing the blocked-claim text:\n%s", tc.name, out)
+			}
+			got := bdProxiedShow(t, bd, p.dir, tc.id)
+			if got.Status != types.StatusOpen || got.Assignee != "" || got.Title != before.Title || got.Notes != before.Notes {
+				t.Errorf("%s: refused claim changed %s: status=%q assignee=%q title=%q notes=%q",
+					tc.name, tc.id, got.Status, got.Assignee, got.Title, got.Notes)
+			}
+			if after := readClaimBookkeeping(t, db, tc.id); after != books {
+				t.Errorf("%s: refused claim wrote claim bookkeeping for %s: %+v -> %+v", tc.name, tc.id, books, after)
+			}
+		}
+	})
+
+	t.Run("claim_blocked_force_overrides", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucbf")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Forced claim blocker", "--type", "task")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Forced blocked claim", "--type", "task")
+		bdProxiedDep(t, bd, p.dir, "add", blocked.ID, blocker.ID)
+
+		bdProxiedUpdateOne(t, bd, p.dir, blocked.ID, "--claim", "--actor", "forced-worker", "--force")
+		got := bdProxiedShow(t, bd, p.dir, blocked.ID)
+		if got.Status != types.StatusInProgress || got.Assignee != "forced-worker" {
+			t.Errorf("forced claim did not land: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+		if gotBlocker := bdProxiedShow(t, bd, p.dir, blocker.ID); gotBlocker.Status != types.StatusOpen {
+			t.Errorf("forced claim moved blocker %s to %q, want open", blocker.ID, gotBlocker.Status)
+		}
+		if deps := bdProxiedDep(t, bd, p.dir, "list", blocked.ID); !strings.Contains(deps, blocker.ID) {
+			t.Errorf("forced claim dropped %s's edge to %s:\n%s", blocked.ID, blocker.ID, deps)
+		}
+		// The override claims; it does not clear the block.
+		if !readIsBlocked(t, openProxiedDB(t, p), blocked.ID) {
+			t.Errorf("forced claim cleared %s's is_blocked flag, want the block left standing", blocked.ID)
+		}
+	})
+
 	// Parity with the non-proxied update_claim_batch_partial_loss_exits_nonzero:
 	// a batch where one claim is lost and another is won must exit non-zero so
 	// the lost claim is not hidden from exit-code automation (beads audit

@@ -756,7 +756,8 @@ func RunDeleterCollapsesDuplicateIDs(t *testing.T, ctx context.Context, fixture 
 // RunDeleterRewritesReferencesInNeighbors pins the rewrite
 // (issueops/deleter.go, Deleter.Delete: "WHICH ROWS GET REWRITTEN"): every
 // occurrence of a deleted id in a graph neighbor's four long text fields
-// becomes `[deleted:<id>]`, matched at word boundaries.
+// becomes `[deleted:<id>]`, matched at word boundaries, including citations
+// that sit next to each other with one separator between them.
 //
 // The NEGATIVE half is the half worth having. A neighbor also cites an id that
 // merely has the deleted one as a PREFIX, and that citation must survive: a
@@ -770,9 +771,11 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	lookalike := deleterSeedIssue(t, ctx, fixture, "refs", "targetx")
 
 	neighbor := deleterIssue(fixture, "refs", "neighbor", false)
-	neighbor.Description = "blocked by " + target + "."
-	neighbor.Notes = "see " + target + " and " + lookalike
-	neighbor.Design = "(" + target + ")"
+	// Adjacent citations share one separator: a rewrite that consumed it as
+	// the first citation's trailing boundary had none left for the second.
+	neighbor.Description = "blocked by " + target + ". " + target + " first"
+	neighbor.Notes = "see " + target + " and " + lookalike + "; " + target + " " + target
+	neighbor.Design = "(" + target + ")," + target + "...\n" + target
 	neighbor.AcceptanceCriteria = target + " closes"
 	deleterSeed(t, ctx, fixture, neighbor)
 	deleterAddEdge(t, ctx, fixture, neighbor.ID, target)
@@ -793,10 +796,18 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	}
 
 	marker := "[deleted:" + target + "]"
+	// Exact bytes: every complete citation is marked and every separator
+	// around it survives.
+	wantText := map[string]string{
+		"description":         "blocked by " + marker + ". " + marker + " first",
+		"notes":               "see " + marker + " and " + lookalike + "; " + marker + " " + marker,
+		"design":              "(" + marker + ")," + marker + "...\n" + marker,
+		"acceptance_criteria": marker + " closes",
+	}
 	for _, field := range []string{"description", "notes", "design", "acceptance_criteria"} {
 		got := deleterText(t, ctx, fixture, neighbor.ID, field)
-		if !strings.Contains(got, marker) {
-			t.Errorf("neighbor %s = %q, want it to contain %q", field, got, marker)
+		if got != wantText[field] {
+			t.Errorf("neighbor %s = %q, want %q", field, got, wantText[field])
 		}
 		if strings.Contains(got, "[deleted:"+lookalike+"]") {
 			t.Errorf("neighbor %s = %q: the lookalike id was rewritten too", field, got)
@@ -808,6 +819,203 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	if got := deleterText(t, ctx, fixture, fixture.IssuePrefix+"-refs-stranger", "description"); strings.Contains(got, marker) {
 		t.Errorf("a row with no edge to the deleted id was rewritten: %q", got)
 	}
+}
+
+// RunDeleterRewritesOnlyTheDeletedIDInAHierarchy pins what a "complete
+// citation" means once ids nest (issueops/deleter.go, Deleter.Delete: "WHICH
+// ROWS GET REWRITTEN"). A hierarchical child's id is its parent's id plus
+// `.<n>` (types.GenerateChildID), so a rule that took `.` for a word boundary
+// found a deleted parent's id INSIDE every descendant's id: deleting R.1 turned
+// "step R.1.2 failed" into "step [deleted:R.1].2 failed" while R.1.2 was still
+// live, and a descendant deleted first came back as a nested marker.
+//
+// Every scenario seeds its own root, child and grandchild under its own tag,
+// parent first, and gives the citing row an explicit edge to a deleted row:
+// the rewrite is scoped to graph neighbors, and a dotted id alone makes no
+// edge. Expectations are exact bytes, not "contains a marker".
+func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+
+	t.Run("DeletingAChildLeavesTheGrandchildCitationAlone", func(t *testing.T) {
+		h := deleterSeedHierarchy(t, ctx, fixture, "hchild")
+		neighbor := deleterSeedCitingNeighbor(t, ctx, fixture, "hchild",
+			"step "+h.grandchild+" failed", h.child)
+
+		result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+			IDs:   []string{h.child},
+			Force: true,
+			Actor: "deleter-contract",
+		})
+		deleterAssertIssueRows(t, ctx, fixture, 0, h.child)
+		deleterAssertIssueRows(t, ctx, fixture, 1, h.grandchild)
+		deleterAssertIssueRows(t, ctx, fixture, 1, neighbor)
+		if got, want := deleterText(t, ctx, fixture, neighbor, "description"), "step "+h.grandchild+" failed"; got != want {
+			t.Errorf("neighbor description = %q, want %q unchanged: %s is live and only its PARENT was deleted",
+				got, want, h.grandchild)
+		}
+		if result.ReferencesUpdated != 0 {
+			t.Errorf("ReferencesUpdated = %d, want 0 — no neighbor cites the deleted id", result.ReferencesUpdated)
+		}
+	})
+
+	// Either request order, because neither body may depend on rewrite order
+	// to keep a hierarchical id whole: rewriting the descendant first used to
+	// nest the ancestor's marker inside the descendant's.
+	for _, order := range []struct {
+		tag             string
+		descendantFirst bool
+	}{
+		{"hpairup", false},
+		{"hpairdown", true},
+	} {
+		t.Run("DeletingAChildAndGrandchildMarksEachOnce/"+order.tag, func(t *testing.T) {
+			h := deleterSeedHierarchy(t, ctx, fixture, order.tag)
+			neighbor := deleterSeedCitingNeighbor(t, ctx, fixture, order.tag,
+				"step "+h.grandchild+" failed; parent "+h.child+" is gone", h.child)
+			ids := []string{h.child, h.grandchild}
+			if order.descendantFirst {
+				ids = []string{h.grandchild, h.child}
+			}
+
+			result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+				IDs:   ids,
+				Force: true,
+				Actor: "deleter-contract",
+			})
+			deleterAssertIssueRows(t, ctx, fixture, 0, h.child, h.grandchild)
+			want := "step [deleted:" + h.grandchild + "] failed; parent [deleted:" + h.child + "] is gone"
+			if got := deleterText(t, ctx, fixture, neighbor, "description"); got != want {
+				t.Errorf("deleting %v: neighbor description = %q, want %q", ids, got, want)
+			}
+			if result.ReferencesUpdated != 1 {
+				t.Errorf("ReferencesUpdated = %d, want 1 — one neighbor row changed", result.ReferencesUpdated)
+			}
+		})
+	}
+
+	// A cascade hands the rewrite every id in the closure, the ancestor
+	// before its descendants; the ancestor's pass must not claim the
+	// grandchild's citation before the grandchild's own pass reaches it.
+	t.Run("CascadeMarksTheGrandchildCitationWhole", func(t *testing.T) {
+		h := deleterSeedHierarchy(t, ctx, fixture, "hcasc")
+		deleterAddParentChildEdge(t, ctx, fixture, h.child, h.root)
+		deleterAddParentChildEdge(t, ctx, fixture, h.grandchild, h.child)
+		blocker := deleterIssue(fixture, "hcasc", "blocker", false)
+		blocker.Description = "unblocks " + h.grandchild + " when done"
+		deleterSeed(t, ctx, fixture, blocker)
+		deleterAddEdge(t, ctx, fixture, h.grandchild, blocker.ID)
+
+		result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+			IDs:     []string{h.root},
+			Cascade: true,
+			Actor:   "deleter-contract",
+		})
+		deleterAssertIssueRows(t, ctx, fixture, 0, h.root, h.child, h.grandchild)
+		deleterAssertIssueRows(t, ctx, fixture, 1, blocker.ID)
+		want := "unblocks [deleted:" + h.grandchild + "] when done"
+		if got := deleterText(t, ctx, fixture, blocker.ID, "description"); got != want {
+			t.Errorf("blocker description = %q, want %q", got, want)
+		}
+		if result.ReferencesUpdated != 1 {
+			t.Errorf("ReferencesUpdated = %d, want 1 — the blocker is the one surviving row with text to change", result.ReferencesUpdated)
+		}
+	})
+
+	// Two distinct top-level ids joined by a dot are ONE dotted run, not a
+	// citation of either; the standalone citations after it are. Both
+	// request orders must agree.
+	for _, order := range []struct {
+		tag         string
+		reverseThem bool
+	}{
+		{"hdotab", false},
+		{"hdotba", true},
+	} {
+		t.Run("ADottedRunOfTwoIDsCitesNeither/"+order.tag, func(t *testing.T) {
+			first := deleterSeedIssue(t, ctx, fixture, order.tag, "one")
+			second := deleterSeedIssue(t, ctx, fixture, order.tag, "two")
+			neighbor := deleterSeedCitingNeighbor(t, ctx, fixture, order.tag,
+				first+"."+second+" and "+second+", "+first, first)
+			ids := []string{first, second}
+			if order.reverseThem {
+				ids = []string{second, first}
+			}
+
+			deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+				IDs:   ids,
+				Force: true,
+				Actor: "deleter-contract",
+			})
+			want := first + "." + second + " and [deleted:" + second + "], [deleted:" + first + "]"
+			if got := deleterText(t, ctx, fixture, neighbor, "description"); got != want {
+				t.Errorf("deleting %v: neighbor description = %q, want %q", ids, got, want)
+			}
+		})
+	}
+
+	// A marker an earlier delete left is text like any other: deleting the
+	// ancestor later must not find its id inside the descendant's marker. The
+	// marker comes from a real delete of the grandchild, not seeded text, and
+	// the neighbor depends on both rows so each delete reaches it.
+	t.Run("AnEarlierDescendantMarkerSurvivesTheAncestorsDelete", func(t *testing.T) {
+		h := deleterSeedHierarchy(t, ctx, fixture, "hmark")
+		neighbor := deleterSeedCitingNeighbor(t, ctx, fixture, "hmark", "done via "+h.grandchild, h.child)
+		deleterAddEdge(t, ctx, fixture, neighbor, h.grandchild)
+
+		deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+			IDs:   []string{h.grandchild},
+			Force: true,
+			Actor: "deleter-contract",
+		})
+		text := "done via [deleted:" + h.grandchild + "]"
+		if got := deleterText(t, ctx, fixture, neighbor, "description"); got != text {
+			t.Fatalf("setup: deleting %s left the neighbor description %q, want %q before the ancestor's delete",
+				h.grandchild, got, text)
+		}
+
+		result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+			IDs:   []string{h.child},
+			Force: true,
+			Actor: "deleter-contract",
+		})
+		if got := deleterText(t, ctx, fixture, neighbor, "description"); got != text {
+			t.Errorf("neighbor description = %q, want the earlier marker %q unchanged", got, text)
+		}
+		if result.ReferencesUpdated != 0 {
+			t.Errorf("ReferencesUpdated = %d, want 0", result.ReferencesUpdated)
+		}
+	})
+}
+
+// deleterHierarchy is one root, its child and its grandchild, with dotted ids.
+type deleterHierarchy struct {
+	root, child, grandchild string
+}
+
+// deleterSeedHierarchy seeds R, R.1 and R.1.2 parent first, with no edges: the
+// cases that need containment add it themselves.
+func deleterSeedHierarchy(t *testing.T, ctx context.Context, fixture DeleterFixture, tag string) deleterHierarchy {
+	t.Helper()
+	root := deleterIssue(fixture, tag, "root", false)
+	deleterSeed(t, ctx, fixture, root)
+	child := deleterIssue(fixture, tag, "child", false)
+	child.ID = root.ID + ".1"
+	deleterSeed(t, ctx, fixture, child)
+	grandchild := deleterIssue(fixture, tag, "grandchild", false)
+	grandchild.ID = child.ID + ".2"
+	deleterSeed(t, ctx, fixture, grandchild)
+	return deleterHierarchy{root: root.ID, child: child.ID, grandchild: grandchild.ID}
+}
+
+// deleterSeedCitingNeighbor seeds a surviving row whose description is text
+// and makes it depend on blocker, so the deletion reaches it.
+func deleterSeedCitingNeighbor(t *testing.T, ctx context.Context, fixture DeleterFixture, tag, text, blocker string) string {
+	t.Helper()
+	neighbor := deleterIssue(fixture, tag, "neighbor", false)
+	neighbor.Description = text
+	deleterSeed(t, ctx, fixture, neighbor)
+	deleterAddEdge(t, ctx, fixture, neighbor.ID, blocker)
+	return neighbor.ID
 }
 
 // RunDeleterAttributesTheRewriteToTheActor pins the one place a deletion's

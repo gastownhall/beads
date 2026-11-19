@@ -866,7 +866,7 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 		"issues.close.autoCloseMolecule", "issues.list.search",
 		"issues.list.noAssignee", "issues.list.title", "issues.list.ids", "issues.update.persistence", "dependencies.blocking.isBlocked", "issues.update.claim",
 		"issues.create.gates", "issues.update.gates", "issues.list.filters", "issues.arrivalSeq",
-		"issues.delete.containmentCascade")
+		"issues.delete.containmentCascade", "issues.update.forceClaimBlocked")
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("capabilities = %v, want %v", got, want)

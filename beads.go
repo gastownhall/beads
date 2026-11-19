@@ -659,6 +659,7 @@ var (
 	ErrAlreadyClaimed  = storage.ErrAlreadyClaimed
 	ErrNotClaimable    = storage.ErrNotClaimable
 	ErrCloseBlocked    = storage.ErrCloseBlocked
+	ErrClaimBlocked    = storage.ErrClaimBlocked
 	ErrVersionMismatch = storage.ErrVersionMismatch
 	// ErrIdempotencyExpired matches a create refused because a retaining
 	// retention sweep retired its id: the create that used the id already

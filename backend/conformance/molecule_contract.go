@@ -478,3 +478,40 @@ func RunMoleculeStepperClaimsAWispStep(t *testing.T, ctx context.Context, fixtur
 		t.Errorf("wisp step %s = %s/%q, want in_progress assigned to %s", last, status, assignee, moleculeActor)
 	}
 }
+
+// RunMoleculeStepperClaimsAStepBlockedFromOutsideTheMolecule pins the one
+// readiness rule both planes share: a step whose only blocker is an open issue
+// outside the molecule is ready by the molecule's own rule, and the advance
+// claims it for the actor whether the molecule is durable (the Claimer's claim)
+// or a wisp (Lifecycle.Update's claim, which waives its live-local-blocker
+// refusal for the stepper). The outside blocker is left as it was.
+func RunMoleculeStepperClaimsAStepBlockedFromOutsideTheMolecule(t *testing.T, ctx context.Context, fixture MoleculeFixture) {
+	t.Helper()
+	s := moleculeSeed{t, ctx, fixture}
+	for _, plane := range []struct {
+		name      string
+		ephemeral bool
+	}{
+		{"outside", false},
+		{"outsidewisp", true},
+	} {
+		root, done, last := s.molecule(plane.name, types.TypeMolecule, plane.ephemeral)
+		blocker := root + "-blocker"
+		s.issue(blocker, types.TypeTask, types.StatusOpen, plane.ephemeral)
+		s.edge(last, blocker, types.DepBlocks)
+
+		res, err := fixture.Stepper.Advance(ctx, publicops.AdvanceRequest{Actor: moleculeActor, ClosedStepID: done, AutoClaim: true})
+		if err != nil {
+			t.Fatalf("Advance over %s, whose next step is blocked from outside: %v, want the step claimed", root, err)
+		}
+		if res.MoleculeID != root || !res.Claimed || res.NextStep == nil || res.NextStep.ID != last {
+			t.Fatalf("Advance over %s = %+v, want %s claimed", root, res, last)
+		}
+		if status, assignee := s.row(last); status != string(types.StatusInProgress) || assignee != moleculeActor {
+			t.Errorf("step %s = %s/%q, want in_progress assigned to %s", last, status, assignee, moleculeActor)
+		}
+		if status, assignee := s.row(blocker); status != string(types.StatusOpen) || assignee != "" {
+			t.Errorf("outside blocker %s = %s/%q, want untouched (open, unassigned)", blocker, status, assignee)
+		}
+	}
+}

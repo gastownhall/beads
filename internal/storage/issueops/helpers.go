@@ -273,22 +273,26 @@ func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eve
 	})
 }
 
-// maxRetiredCounterSkips bounds how many retired counter values one
-// counter-mode create walks past before giving up with an error rather than
-// looping on a counter that a sweep retired a long run of.
-const maxRetiredCounterSkips = 1000
+// maxCounterSkips bounds how many held counter values one counter-mode create
+// walks past one probe at a time. A counter that lags a longer run of
+// explicit, imported or retired ids skips the rest of the run in one read
+// (AdvanceCounterPastHeldIDsTx) and walks on, at most this many again, before
+// giving up with an error rather than looping.
+const maxCounterSkips = 1000
 
 // GenerateIssueIDInTable generates an ID for an issue bound for table that
-// claimed does not name and no tombstone retired. Supports counter mode for
-// non-ephemeral issues. Only hash mode also probes for live rows, in both
-// planes (IDTakenInTx); counter mode takes the counter's next value on trust.
+// claimed does not name, no live row of either plane holds and no tombstone
+// retired. Supports counter mode for non-ephemeral issues. Both modes ask the
+// same one-statement probe, IDTakenInTx, per candidate.
 //
-// A RETIRED ID IS TAKEN: a candidate a retaining sweep retired (either
-// tombstone table) is skipped exactly like one a live row holds, so a fresh
-// create is never refused with *IdempotencyExpiredError for an id it did not
-// choose. Hash mode folds the tombstone check into the one collision read it
-// already made; counter mode walks past retired values, at most
-// maxRetiredCounterSkips of them.
+// A HELD ID IS TAKEN, IN EITHER MODE: a candidate a live row of either plane
+// holds, or a retaining sweep retired (either tombstone table), is passed
+// over, so a fresh create is never handed an id it would overwrite, be refused
+// as ErrAlreadyExists, or be refused with *IdempotencyExpiredError for. Counter
+// mode needs this as much as hash mode: the counter only advances on its own
+// mints, so an explicit --id, an import or a wisp can sit ahead of it
+// (GH#8456). Counter mode walks past held values one probe at a time, and
+// past maxCounterSkips of them skips the rest of the held run in one read.
 //
 // CLAIMED IS THE CALLER'S OWN BATCH: the ids it will write but has not yet,
 // explicit and minted. The probe reads rows, so a caller that assigns every
@@ -304,7 +308,7 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 			return "", err
 		}
 		if counterMode {
-			return nextUnretiredCounterIDTx(ctx, tx, prefix, claimed)
+			return nextFreeCounterIDTx(ctx, tx, prefix, claimed)
 		}
 	}
 
@@ -338,28 +342,137 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 	return "", fmt.Errorf("failed to generate unique ID after trying lengths %d-%d with 10 nonces each", baseLength, maxLength)
 }
 
-// nextUnretiredCounterIDTx is NextCounterIDTx skipping counter values a
-// retaining sweep retired or the caller's batch claimed. The counter only ever
-// advances, so a skipped value is never offered again.
-func nextUnretiredCounterIDTx(ctx context.Context, tx DBTX, prefix string, claimed map[string]bool) (string, error) {
-	for skips := 0; ; skips++ {
+// nextFreeCounterIDTx is NextCounterIDTx skipping counter values a live row
+// of either plane holds, a retaining sweep retired, or the caller's batch
+// claimed. The counter only ever advances, so a skipped value is never offered
+// again.
+//
+// A HELD RUN LONGER THAN ONE WALK IS SKIPPED IN ONE READ. A bulk import or a
+// script of explicit ids can put more than maxCounterSkips held values in a
+// row ahead of an existing counter. Giving up there would fail every auto
+// create for good: the failed create rolls its bumps back with it, so the next
+// one walks the same run again. Past the bound, AdvanceCounterPastHeldIDsTx
+// moves the counter to the end of the run and the walk goes on from there.
+func nextFreeCounterIDTx(ctx context.Context, tx DBTX, prefix string, claimed map[string]bool) (string, error) {
+	if id, err := walkCounterTx(ctx, tx, prefix, claimed); id != "" || err != nil {
+		return id, err
+	}
+	if err := AdvanceCounterPastHeldIDsTx(ctx, tx, prefix, claimed); err != nil {
+		return "", err
+	}
+	if id, err := walkCounterTx(ctx, tx, prefix, claimed); id != "" || err != nil {
+		return id, err
+	}
+	return "", fmt.Errorf("issue counter for prefix %q walked past %d taken or claimed ids without finding a free one", prefix, maxCounterSkips)
+}
+
+// walkCounterTx bumps prefix's counter at most maxCounterSkips+1 times and
+// returns the first value nothing holds: claimed does not name it and
+// IDTakenInTx reports it free. It returns "" when every value it reached was
+// held; the bumps stay, so a later walk starts past them.
+func walkCounterTx(ctx context.Context, tx DBTX, prefix string, claimed map[string]bool) (string, error) {
+	for range maxCounterSkips + 1 {
 		candidate, err := NextCounterIDTx(ctx, tx, prefix)
 		if err != nil {
 			return "", err
 		}
-		if !claimed[candidate] {
-			retired, err := IDRetiredInTx(ctx, tx, candidate)
-			if err != nil {
-				return "", err
-			}
-			if !retired {
-				return candidate, nil
-			}
+		if claimed[candidate] {
+			continue
 		}
-		if skips >= maxRetiredCounterSkips {
-			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
+		taken, err := IDTakenInTx(ctx, tx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !taken {
+			return candidate, nil
 		}
 	}
+	return "", nil
+}
+
+// heldCounterIDsSQL reads, in one statement, every id under a prefix from each
+// place IDTakenInTx asks about: both row tables and both tombstone tables.
+// Each leg takes the prefix once. One statement for idOccupancySQL's reason.
+const heldCounterIDsSQL = `SELECT id FROM issues WHERE id LIKE CONCAT(?, '-%')
+UNION ALL SELECT id FROM wisps WHERE id LIKE CONCAT(?, '-%')
+UNION ALL SELECT id FROM id_tombstones WHERE id LIKE CONCAT(?, '-%')
+UNION ALL SELECT id FROM wisp_id_tombstones WHERE id LIKE CONCAT(?, '-%')`
+
+// AdvanceCounterPastHeldIDsTx moves prefix's issue counter over the run of
+// held values right above it. Afterwards its next value is the first number
+// above the current one that no live row of either plane holds, no tombstone
+// retired and claimed does not name. That is the value a walk probing one
+// candidate at a time would reach, found in one read however long the run.
+//
+// It never moves past a free number. A max+1 jump would let one far-ahead id
+// (an explicit prefix-20261113) drag the counter after it, past every free
+// number below, or past what the INT counter column holds. Only ids of the
+// form the counter mints, prefix-N, hold a value: a child id (prefix-N.M) or a
+// zero-padded prefix-0N does not.
+func AdvanceCounterPastHeldIDsTx(ctx context.Context, tx DBTX, prefix string, claimed map[string]bool) error {
+	var lastID int
+	if err := tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID); err != nil {
+		return fmt.Errorf("read issue counter for prefix %q: %w", prefix, err)
+	}
+	held, err := heldCounterValuesAboveTx(ctx, tx, prefix, lastID)
+	if err != nil {
+		return err
+	}
+	for id := range claimed {
+		if n, ok := counterValue(prefix, id); ok && n > lastID {
+			held[n] = true
+		}
+	}
+	next := lastID
+	for held[next+1] {
+		next++
+	}
+	if next == lastID {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = ? WHERE prefix = ?", next, prefix); err != nil {
+		return fmt.Errorf("advance issue counter for prefix %q to %d: %w", prefix, next, err)
+	}
+	return nil
+}
+
+// heldCounterValuesAboveTx returns the counter values above floor that a row
+// or a tombstone holds for prefix (heldCounterIDsSQL).
+func heldCounterValuesAboveTx(ctx context.Context, tx DBTX, prefix string, floor int) (map[int]bool, error) {
+	rows, err := tx.QueryContext(ctx, heldCounterIDsSQL, prefix, prefix, prefix, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("read held ids for prefix %q: %w", prefix, err)
+	}
+	defer rows.Close()
+	held := map[int]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("read held ids for prefix %q: %w", prefix, err)
+		}
+		if n, ok := counterValue(prefix, id); ok && n > floor {
+			held[n] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read held ids for prefix %q: %w", prefix, err)
+	}
+	return held, nil
+}
+
+// counterValue returns N when id is exactly the id the counter mints for N,
+// prefix-N: a child id or a non-canonical number (prefix-007, prefix-+7) is
+// a different string and holds no counter value.
+func counterValue(prefix, id string) (int, bool) {
+	suffix, ok := strings.CutPrefix(id, prefix+"-")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(suffix)
+	if err != nil || strconv.Itoa(n) != suffix {
+		return 0, false
+	}
+	return n, true
 }
 
 // IsCounterModeTx checks whether issue_id_mode=counter is configured.

@@ -11,7 +11,7 @@ bd
     | Issues chained together like beads. A lightweight issue tracker with first-class dependency support.
   persistent-flag --actor type=string default="" usage="Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)"
   persistent-flag --cpu-profile type=bool default="false" usage="Generate CPU profile for performance analysis"
-  persistent-flag --database type=string default="" usage="Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only)"
+  persistent-flag --database type=string default="" usage="Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only). Refused when it holds another beads project; a database with no beads project identity is allowed; set BEADS_SKIP_IDENTITY_CHECK=1 to override. Team-server workspaces always check identity"
   persistent-flag --db type=string default="" usage="Database path (default: auto-discover .beads/*.db). In proxied-server mode, a value that isn't an existing path is treated as a database name override (see --database)"
   persistent-flag --directory -C type=string default="" usage="Change to this directory before running the command (like git -C)"
   persistent-flag --dolt-auto-commit type=string default="" usage="Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then (a live batch-mode bd process also flushes on SIGTERM/SIGHUP, except in proxied-server mode, where bd dolt commit is the only flush point). In proxied-server mode the deferral covers the writes the CLI makes on that route, including config and version metadata; explicit commit points (bd batch, bd mol bond/pour/squash, bd mol wisp create, and the wisp half of bd mol burn) still commit, and a bd serve process on the same database is unaffected. Default: on. Override via config key dolt.auto-commit"
@@ -282,7 +282,7 @@ bd assign
     |
     | Examples:
     |   bd assign bd-123 alice
-    |   bd assign bd-123 ""      # unassign
+    |   bd assign bd-123 ""      # unassign ("-" or whitespace-only text also unassigns)
   flag --force type=bool default="false" usage="Allow overwriting another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)"
   flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
 
@@ -304,6 +304,29 @@ bd audit
     | - dataset generation (SFT/RL fine-tuning)
     |
     | Entries are append-only. Labeling creates a new "label" entry that references a parent entry.
+    |
+    | While enabled, some commands also append entries on their own:
+    | - "field_change" (extra: field, old_value, new_value, optional reason): the
+    |   status, assignee and priority changes bd update makes, including the status
+    |   and assignee a --claim sets, and status changes from bd close and a few
+    |   other lifecycle commands. The old value comes from a read taken just before
+    |   the write, not from the write itself, so it is advisory under concurrency:
+    |   it is not the mutation's transactional pre-image.
+    | - "claimed" (extra: status, assignee): bd ready --claim and
+    |   bd close --claim-next. Those claims return no prior state, so the entry
+    |   records only the claimed issue's status and assignee after the claim. It
+    |   says a claim was returned, not that this command changed the row: through
+    |   an older bd serve, a claim of an issue the actor already holds is returned
+    |   the same way.
+    |
+    | Consumers should skip kinds they do not know, but a consumer that reads only
+    | field_change will not see these claims until it handles claimed. These
+    | entries are best-effort: a failed sidecar write never fails the command, and
+    | many writes (bd create, bd comment, labels, dependencies and others) append
+    | nothing, so the sidecar is not a replayable history. To replay every
+    | committed mutation in order, enable the transactional events journal
+    | (bd config set events-journal true) and read it with bd events tail;
+    | bd events --help covers its retention and per-replica scope.
 
 bd audit label
   use: "label <entry-id>"
@@ -471,6 +494,7 @@ bd batch
     |   #comment  (blank lines and '# ...' comments are ignored)
     |
     | Supported 'update' keys: status, priority, title, assignee, force
+    | 'assignee=', 'assignee=-' and a whitespace-only assignee clear the assignee.
     | Supported dependency types: see 'bd dep add --help' (default: blocks)
     |
     | 'force' is not a field. An update whose status moves the issue into closed
@@ -1750,8 +1774,9 @@ bd doctor
     | Storage Availability:
     |   Full diagnostics, --perf, --deep, --server, --migration, and
     |   --check=validate currently require Dolt server mode. Embedded Dolt
-    |   supports --check=artifacts, --check=conventions, and
-    |   --check=pollution. --check-health has a limited hook-health fallback.
+    |   supports --check=artifacts, --check=conventions,
+    |   --check=export, and --check=pollution. --check-health has a limited
+    |   hook-health fallback.
     |   Unsupported combinations return a notice without changing storage.
     |
     | Performance Mode (--perf):
@@ -1768,9 +1793,14 @@ bd doctor
     | Specific Check Mode (--check):
     |   Run a specific check in detail. Available checks:
     |   - artifacts: Detect and optionally clean beads classic artifacts
-    |     (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
+    |     (SQLite files, cruft .beads dirs). Use with --clean. Does not
+    |     check export coverage - see the export check.
     |   - conventions: Check for convention drift (lint warnings, stale
     |     issues, orphaned issues). Advisory only - warns, never blocks.
+    |   - export: Compare in-scope store issue IDs against the passive export
+    |     file's IDs (coverage only, not content equality). Reports missing
+    |     IDs as a warning; read-only even with --fix/--clean. Refresh
+    |     manually with: bd export -o <resolved-path>
     |   - pollution: Detect and optionally clean test issues from database
     |   - validate: Run focused data-integrity checks (duplicates, orphaned
     |     deps, test pollution, git conflicts). Use with --fix to auto-repair.
@@ -1838,6 +1868,7 @@ bd doctor
     |   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
     |   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
     |   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+    |   bd doctor --check=export             # Warn when the export file is missing store IDs
     |   bd doctor --check=pollution          # Show potential test issues
     |   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
     |   bd doctor --check=validate         # Data-integrity checks only
@@ -1985,6 +2016,29 @@ bd dolt commit
     |
     | For more options (--stdin, custom messages), see: bd vc commit
   flag --message -m type=string default="" usage="Commit message (default: auto-generated)"
+
+bd dolt drop-database
+  use: "drop-database <name>"
+  short: "Drop one named database from the Dolt server (recoverable via DOLT_UNDROP)"
+  hidden: false
+  runnable: true
+  long:
+    | Drop one named database from the Dolt server this workspace uses.
+    |
+    | Deleting a workspace's .beads directory does not drop its database on a
+    | shared Dolt server; this command does, for one database you name.
+    |
+    | DROP DATABASE only marks the database as dropped: it stays recoverable with
+    | CALL DOLT_UNDROP('<name>') until the server's dropped databases are purged.
+    | This command never purges. 'bd dolt clean-databases --purge-dropped' reclaims
+    | the disk, for every dropped database on the server at once.
+    |
+    | Asks for confirmation; pass --yes in scripts and agents.
+    |
+    | Examples:
+    |   bd dolt drop-database old_project          # prompts for confirmation
+    |   bd dolt drop-database old_project --yes    # no prompt
+  flag --yes -y type=bool default="false" usage="Skip the confirmation prompt (required in non-interactive use)"
 
 bd dolt killall
   use: "killall"
@@ -3634,6 +3688,11 @@ bd import
     | --allow-stale is the single deliberate-overwrite opt-in, and
     | updated_issues is where to look for what an import rewrote.
     |
+    | Comments merge additively. A comment whose id is already stored on the
+    | same issue keeps its stored text, author and time, also under
+    | --allow-stale; a comment id stored on a different issue fails the
+    | import with an error naming the comment and both issues.
+    |
     | Large imports are written in bounded transactions (a few hundred issues
     | each, with a short pause between commits) with progress on stderr, so
     | concurrent bd commands keep working while the import runs instead of
@@ -3718,12 +3777,19 @@ bd init
     | Cross-machine sync and backups use Dolt remotes/backups, not JSONL import/export.
     | To enable: bd config set export.auto true
     |
+    | Git origin with Dolt history: when no --remote or sync.remote is set and git
+    | origin has Dolt history (refs/dolt/data), adopting it imports that remote's
+    | issue history and identity. bd init asks once before adopting it; --yes
+    | consents ahead of time. Without --yes, non-interactive and --json runs refuse.
+    | --no-adopt (or BD_NO_REMOTE_ADOPT=1) never derives a remote from git origin.
+    |
     | Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
     |   Skips all interactive prompts, using sensible defaults:
     |   • Role defaults to "maintainer" (override with --role)
     |   • Fork exclude auto-configured when fork detected
     |   • Auto-export left at default (disabled)
     |   • --contributor and --team flags are rejected (wizards require interaction)
+    |   • Never consents to adopting git origin's Dolt history (pass --yes)
     |   Also auto-detected when stdin is not a terminal or CI=true is set.
   flag --agents-file type=string default="" usage="Custom filename for agent instructions (default: AGENTS.md)"
   flag --agents-profile type=string default="" usage="AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)"
@@ -3739,6 +3805,7 @@ bd init
   flag --init-if-missing type=bool default="false" usage="If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)"
   flag --mysql-database type=string default="" hidden usage="Legacy MySQL database (removed backend compatibility only)"
   flag --mysql-url type=string default="" hidden usage="Legacy MySQL connection URL (removed backend compatibility only)"
+  flag --no-adopt type=bool default="false" usage="Never derive a Dolt remote from git origin: no probe, no clone, no remote wiring (also BD_NO_REMOTE_ADOPT=1)"
   flag --non-interactive type=bool default="false" usage="Skip all interactive prompts (auto-detected in CI or non-TTY environments)"
   flag --pg-schema type=string default="" hidden usage="Legacy PostgreSQL schema (removed backend compatibility only)"
   flag --pg-url type=string default="" hidden usage="Legacy PostgreSQL connection URL (removed backend compatibility only)"
@@ -3779,6 +3846,7 @@ bd init
   flag --stealth type=bool default="false" usage="Enable stealth mode: keep beads files out of git via .git/info/exclude (sets no-git-ops)"
   flag --team type=bool default="false" usage="Run team workflow setup wizard"
   flag --team-server type=bool default="false" usage="[EXPERIMENTAL] The shared database's schema is managed by beads-team-server (bts): bd never creates the database or runs schema migrations, only verifies the schema version (proxied-server mode only). Not related to --team."
+  flag --yes -y type=bool default="false" usage="Consent to adopting the Dolt history of a remote derived from git origin (never implied by --non-interactive or --json)"
 
 bd init-safety
   use: "init-safety"
@@ -3795,7 +3863,19 @@ bd init-safety
     | FLAG SURFACE
     |
     |   bd init                       Mint a new identity. Bootstraps from
-    |                                 origin if it has refs/dolt/data.
+    |                                 --remote or sync.remote if it has
+    |                                 refs/dolt/data. A remote derived from git
+    |                                 origin with refs/dolt/data is adopted only
+    |                                 with consent: bd init asks once, and
+    |                                 refuses (exit 1) when it cannot ask.
+    |
+    |   bd init --yes                 Consent to adopting git origin's Dolt
+    |                                 history. --non-interactive and --json are
+    |                                 never consent.
+    |
+    |   bd init --no-adopt            Never derive a remote from git origin: no
+    |                                 probe, no clone, no remote wiring. Also
+    |                                 BD_NO_REMOTE_ADOPT=1. Wins over --yes.
     |
     |   bd init --reinit-local        Re-initialize local .beads/ over existing
     |                                 local data. Does NOT authorize discarding
@@ -3841,7 +3921,8 @@ bd init-safety
     |
     |       bd bootstrap
     |
-    |   bd init will automatically suggest this when a remote is detected.
+    |   or, for git origin, bd init --yes. bd init will automatically suggest
+    |   these when a remote is detected.
     |
     | DESTROY-TOKEN (non-interactive only)
     |
@@ -3863,6 +3944,8 @@ bd init-safety
     |
     | EXIT CODES
     |
+    |   1     refused: git origin has Dolt history and adoption was declined,
+    |         or not consented to with --yes where bd init cannot ask
     |   10    refused: remote has Dolt history and you selected local history
     |         without --discard-remote
     |   11    refused: existing local data and you declined the destroy confirm
@@ -4387,7 +4470,7 @@ bd list
   group: "issues"
   hidden: false
   runnable: true
-  flag --all type=bool default="false" usage="Show all issues including closed (overrides default filter)"
+  flag --all type=bool default="false" usage="Lift default status and pinned exclusions and the default limit (type and plane suppressions still apply; see --include-all-types)"
   flag --assignee -a type=string default="" usage="Filter by assignee"
   flag --brief type=bool default="false" usage="Omit the free-form text (description, design, acceptance criteria, notes, payload, waiters) from each row. Filters that read those fields, such as --desc-contains, still select on them. An omitted field is indistinguishable from an empty one in --json; fetch a whole issue with bd show."
   flag --closed-after type=string default="" usage="Filter issues closed after date (YYYY-MM-DD or RFC3339)"
@@ -4411,6 +4494,7 @@ bd list
   flag --format type=string default="" usage="Export the dependency graph of the listed issues: 'digraph' (edge list for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or a Go template rendered once per edge over .IssueID, .DependsOnID, .Type, .Issue, .Dependency. 'json' is the exception and does not export the graph: it is equivalent to --json, which also wins when both flags are given. 'digraph' and templates print nothing when no listed issue depends on another; 'dot' still prints the nodes"
   flag --has-metadata-key type=string default="" usage="Filter issues that have this metadata key set"
   flag --id type=string default="" usage="Filter by specific issue IDs (comma-separated or repeated, e.g., bd-1,bd-5,bd-10)"
+  flag --include-all-types type=bool default="false" usage="Include all issue types and the ephemeral wisp plane (default status and pinned exclusions still apply; see --all)"
   flag --include-comments type=bool default="false" usage="Populate each row's comments field with full comment bodies in JSON output (--json only; costs one query per row that has comments). Without it, a row with comments carries comments_omitted=true, so an absent comments field is never mistaken for having none. Text output is unaffected either way."
   flag --include-ephemeral type=bool default="false" usage="Include ephemeral wisp-plane rows in output (normally hidden)"
   flag --include-gates type=bool default="false" usage="Include gate issues in output (normally hidden)"
@@ -4800,13 +4884,26 @@ bd migrate schema
     | designated migrator. Migrating is one-way: bd releases built for an older
     | schema refuse the migrated database.
     |
-    | On an up-to-date database this is a no-op, so it is safe to run in CI,
-    | release gates, and recovery scenarios.
+    | On a proxied-server workspace it is refused unless you pass --force:
+    | there, opening the store applies the migration, which changes the schema
+    | underneath every library client connected to the proxy's backend, and the
+    | proxy does not track those clients. Stop them, run
+    | "bd migrate schema --force", then restart them. BD_ALLOW_REMOTE_MIGRATE=1
+    | does not get past that refusal. If the database has a Dolt remote, that
+    | --force is also the designated-migrator confirmation above, so the gate's
+    | adopt and pull-first stops do not run: run a read command such as "bd list"
+    | first, and if it prints one of those stops, follow it instead of forcing.
+    | On a team-server workspace the team server owns the schema, so even --force
+    | only verifies it.
+    |
+    | Outside proxied-server mode, on an up-to-date database this is a no-op, so
+    | it is safe to run in CI, release gates, and recovery scenarios. In
+    | proxied-server mode the bare command is refused, so it is not a CI check.
     |
     | Example:
     |   bd migrate schema
     |   bd migrate schema --json
-  flag --force type=bool default="false" usage="Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)"
+  flag --force type=bool default="false" usage="Bypass the remote-migrate gate as the single designated migrator, as BD_ALLOW_REMOTE_MIGRATE=1 does; in proxied-server mode, also the opt-in past this command's refusal, which BD_ALLOW_REMOTE_MIGRATE=1 does not give"
 
 bd migrate sync
   use: "sync <branch>"
@@ -5408,6 +5505,14 @@ bd mol wisp gc
     | Use --closed to purge ALL closed wisps (regardless of age). This is the
     | fastest way to reclaim space from accumulated wisp bloat. Safe by default:
     | requires --force to actually delete.
+    |
+    | --closed --force deletes in batches of 200 wisps, each committed on its own,
+    | so a failure keeps the batches already committed. The summary then reports
+    | only the deletions that committed, plus remaining_count, error and hint in
+    | --json output, and the command exits nonzero; rerun it to delete the rest.
+    | A scan reads at most 5000 closed wisps: when it reaches that limit the output
+    | says more may remain (candidates_capped in --json), even if every wisp it
+    | read was excluded.
     |
     | Note: This uses time-based cleanup, appropriate for ephemeral wisps.
     | For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
@@ -6271,15 +6376,33 @@ bd rename-prefix
     | Multiple prefix detection and repair:
     | If issues have multiple prefixes (corrupted database), use --repair to consolidate them.
     | The --repair flag will rename all issues with incorrect prefixes to the new prefix,
-    | preserving issues that already have the correct prefix.
+    | preserving issues that already have the correct prefix. Each renamed issue keeps
+    | its suffix (taxdb-u6ch -> mtg-u6ch, cre-db-c2a.3 -> mtg-c2a.3); source IDs are
+    | split by issue_prefix, allowed_prefixes and the prefixes found on the rows. When
+    | a family's root is already live, claimed by another family or retired, the whole
+    | family moves to one new hash root (mtg-<8 hex>) and the move is reported.
+    | Text references are rewritten only inside the renamed issues. Dependencies
+    | follow the renames. An edge between two prefixes is re-pointed by removing
+    | and re-adding it, so it records the repair's actor and time; one that storage
+    | refuses to re-add is left as it was and reported.
+    |
+    | Changing the prefix for new issues only:
+    | --mint-only makes new issues use the new prefix and leaves every existing ID
+    | and text reference as it is. The old prefix is added to allowed_prefixes, so
+    | explicit --id values and children of existing issues keep working. A
+    | dependency between an old-prefix and a new-prefix issue does not block: it is
+    | stored as a reference to another repository, which bd ready ignores. A later
+    | --repair consolidates the prefixes and re-points those dependencies.
     |
     | EXAMPLES:
     |   bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'
     |   bd rename-prefix mtg- --repair      # Consolidate multiple prefixes into 'mtg-'
     |   bd rename-prefix team- --dry-run    # Preview changes without applying
+    |   bd rename-prefix kb- --mint-only    # New issues get 'kb-'; existing IDs stay
     |
     | NOTE: This is a rare operation. Most users never need this command.
   flag --dry-run type=bool default="false" usage="Preview changes without applying them"
+  flag --mint-only type=bool default="false" usage="Mint new issues under the new prefix; keep existing IDs and accept the old prefix"
   flag --repair type=bool default="false" usage="Repair database with multiple prefixes by consolidating them"
 
 bd reopen
@@ -6775,7 +6898,12 @@ bd sql
     | In proxied-server mode, multiple statements separated by ';' run as a single
     | committed batch and report "OK", and --database runs the query against a
     | different server database (equivalent to a session USE) without changing the
-    | project's configured database.
+    | project's configured database. A --database that holds another beads project
+    | is refused with PROJECT IDENTITY MISMATCH before any statement runs; a database
+    | with no beads project identity (such as a non-beads database) is allowed. Set
+    | BEADS_SKIP_IDENTITY_CHECK=1 to reach another beads project deliberately.
+    | Team-server workspaces always check identity, and the variable does not relax
+    | that check.
     |
     | WARNING: Direct database access bypasses the storage layer. Use with caution.
   flag --csv type=bool default="false" usage="Output results in CSV format"
@@ -7254,11 +7382,11 @@ bd update
   flag --add-label -l type=stringSlice default="[]" usage="Add labels (repeatable); -l matches bd create -l"
   flag --allow-empty-description type=bool default="false" usage="Allow empty description replacement when reading from stdin or file"
   flag --append-notes type=string default="" annotations={cobra_annotation_mutually_exclusive=["clear-notes append-notes"]} usage="Append to existing notes (with newline separator)"
-  flag --assignee -a type=string default="" usage="Assignee"
+  flag --assignee -a type=string default="" usage="Assignee ('', '-' or whitespace-only text unassigns)"
   flag --await-id type=string default="" usage="Set gate await_id (e.g., GitHub run ID for gh:run gates)"
   flag --body type=string default="" hidden annotations={cobra_annotation_mutually_exclusive=["stdin body"]} usage="Alias for --description (GitHub CLI convention)"
   flag --body-file type=string default="" annotations={cobra_annotation_mutually_exclusive=["stdin body-file"]} usage="Read description from file (use - for stdin)"
-  flag --claim type=bool default="false" usage="Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)"
+  flag --claim type=bool default="false" usage="Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too; refused while the issue has an open local blocker unless --force)"
   flag --clear-notes type=bool default="false" annotations={cobra_annotation_mutually_exclusive=["clear-notes notes" "clear-notes append-notes"]} usage="Clear the notes field (--notes \"\" is refused: an empty value is usually a dead command substitution)"
   flag --defer type=string default="" usage="Defer until date (empty to clear). Issue hidden from bd ready until then, then auto-wakes to open"
   flag --description -d type=string default="" annotations={cobra_annotation_mutually_exclusive=["stdin description"]} usage="Issue description"
@@ -7269,7 +7397,7 @@ bd update
   flag --ephemeral type=bool default="false" usage="Mark issue as ephemeral (wisp) - not exported to JSONL"
   flag --estimate -e type=int default="0" usage="Time estimate in minutes (e.g., 60 for 1 hour)"
   flag --external-ref type=string default="" usage="External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)"
-  flag --force type=bool default="false" usage="Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), and let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead)"
+  flag --force type=bool default="false" usage="Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead), and let --claim take an issue that still has an open local blocker (an unresolved external dependency still refuses the claim)"
   flag --history type=bool default="false" usage="Clear no-history flag (re-enable Dolt commit history)"
   flag --if-assignee type=string default="" usage="Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim"
   flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures). Composes with --if-assignee/--if-status: all guards present must hold."

@@ -39,6 +39,7 @@ var metadataFactoryReferences = map[string]string{
 	"foreign_workspace.go:openForeignStore":            "the foreign opener: admits the workspace first (admitForeignWorkspace)",
 	"main.go:var rootCmd":                              "own workspace: the root pre-run's identity preview of the workspace admission admitted",
 	"direct_mode.go:ensureStoreActiveWithContext":      "own workspace: the discovered workspace, after admission",
+	"doctor_export.go:openExportCheckStore":            "own workspace: the one bd selected for bd doctor --check=export, opened read-only",
 	"store_reopen.go:openReadOnlyStoreForDBPath":       "own workspace: reopens the command's own database path",
 	"init.go:countExistingIssues":                      "own workspace: the workspace bd init runs in",
 	"init_contributor.go:autoConfigureForkContributor": "a planning .beads bd init just created, empty",

@@ -273,6 +273,82 @@ func TestInitSchemaProxiedDataBehind(t *testing.T) {
 			t.Fatalf("unmet SQL expectations: %v", err)
 		}
 	})
+
+	t.Run("read-only open on a schema its reads cannot query fails with the pull-first stop", func(t *testing.T) {
+		// gastownhall/beads#6656: the proxied front door refuses the bare
+		// `bd migrate schema`, and its refusal sends the operator to a read
+		// command to see this stop before forcing. On a schema without a
+		// projected column (arrival_seq, every 1.3.4 database) the read cannot
+		// run, and it must fail with the stop, not with a drift error alone.
+		p, mock := newProxiedProvider(t)
+		p.readOnly = true
+
+		lockName := expectBehindDatabaseThroughPreparation(mock, "beads", dataBehindCurrent)
+		expectSharedGateProbe(mock, dataBehindCurrent, 1)
+		expectSmartGateDataBehindRoute(mock, 1, 2)
+		expectLockRelease(mock, lockName)
+		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		expectIssuesProjection(mock, dataBehindCurrent, "arrival_seq")
+
+		var initErr error
+		stderr := captureStderr(t, func() {
+			initErr = p.initSchema(context.Background(), "beads")
+		})
+		var gateErr *schema.RemoteMigrateGateError
+		if !errors.As(initErr, &gateErr) || !gateErr.IsDataBehind() || !gateErr.Proxied {
+			t.Fatalf("initSchema() error = %v, want the proxied data-behind stop", initErr)
+		}
+		if !schema.IsSchemaBehindError(initErr) {
+			t.Errorf("initSchema() error = %v, want the drift kept in the chain", initErr)
+		}
+		if strings.Contains(stderr, "continuing on schema") {
+			t.Errorf("the refused read still announced that it carries on:\n%s", stderr)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("read-only open on a level clone names the forced route, not the bare verb", func(t *testing.T) {
+		// The blunt shared-store stop, which a level remote-backed clone
+		// reaches, reads through with the template. On this proxied workspace
+		// the front door refuses the bare verb (gastownhall/beads#6656), so
+		// the template names the forced one.
+		p, mock := newProxiedProvider(t)
+		p.readOnly = true
+
+		lockName := expectBehindDatabaseThroughPreparation(mock, "beads", dataBehindCurrent)
+		expectSharedGateProbe(mock, dataBehindCurrent, 1)
+		expectSmartGateDataBehindRoute(mock, 0, 0)
+		expectLockRelease(mock, lockName)
+		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		expectIssuesProjection(mock, dataBehindCurrent, "")
+
+		var initErr error
+		stderr := captureStderr(t, func() {
+			initErr = p.initSchema(context.Background(), "beads")
+		})
+		if initErr != nil {
+			t.Fatalf("initSchema() error = %v, want nil: reads keep working on the old schema", initErr)
+		}
+		for _, want := range []string{
+			"Read-only command", "without migrating",
+			"'" + schema.SharedConsentCommandForced + "'", "library client", "bd dolt push",
+		} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("read-through warning missing %q:\n%s", want, stderr)
+			}
+		}
+		scrubbed := strings.ReplaceAll(stderr, schema.SharedConsentCommandForced, "")
+		if strings.Contains(scrubbed, schema.SharedConsentCommand) {
+			t.Errorf("read-through prescribes the bare consent verb the front door refuses:\n%s", stderr)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
 }
 
 // TestDataBehindAdopterWiring pins the shape of the injected adopter, not just
