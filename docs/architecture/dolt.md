@@ -392,6 +392,40 @@ Switch to server mode when you need:
 - Orchestrator multi-rig setups
 - Federation with remote peers
 
+### Auto-started servers stop when idle
+
+A server bd auto-starts is a background daemon — and on a laptop left idle,
+it must not stay one. bd runs an idle watcher next to every auto-started
+per-project server and stops that server once no client has used it for
+`dolt.idle-timeout` (default `30m`; `0` in `.beads/config.yaml` or
+`BEADS_DOLT_IDLE_TIMEOUT=0` disables idle stops). The stop flushes the
+working set first — a crash-free `dolt sql` commit, exactly what
+`bd dolt stop` does — then ends the process and removes its state files, so
+`bd dolt status` reports the workspace without a stale server.
+
+Clients that count as activity: an open SQL connection, a connection since
+the last poll, or a bd store open on the workspace (tracked with a lease
+under `.beads/dolt-server.activity/`, pruned when its process dies). A
+command like `bd list` takes its lease for its own lifetime only, so
+walking away from a project really does stop its server about one window
+later.
+
+A server started with an explicit `bd dolt start` — including one that
+adopts an already auto-started server — is never idle-stopped: you asked
+for it, it stays until you stop it. Shared-server and externally-managed
+workspaces have no watcher either. The cost of an idle stop is the next
+bd command's auto-start, a few seconds.
+
+To see every dolt sql-server on the machine — bd's own, with workspace,
+PID, port, uptime and idle-stop state, and any server started outside bd
+reported as not managed by bd — run `bd dolt status --all` (or
+`--json`) from any directory. `bd dolt stop --all` stops every server bd
+itself manages on the machine the same way, reporting each stop; servers
+bd did not start are left running and reported. After upgrading bd on a
+machine that accumulated orphaned auto-started servers from earlier
+releases, `bd dolt status --all` finds them (they will not stop on their
+own: no watcher runs for them) and one `bd dolt stop --all` ends them.
+
 ### Shared Server Mode
 
 On machines with multiple beads projects, each project normally starts its own Dolt server.

@@ -186,8 +186,10 @@ func isProductionPort(cfg *Config) bool {
 // drops to zero, the server is stopped. This prevents test-started servers
 // from leaking (GH#2542) while allowing multiple stores to share one server.
 // Normal repo-local auto-starts are intentionally not tracked here: those
-// servers should stay up like an explicit `bd dolt start`, rather than being
-// torn down at the end of each command.
+// servers are instead reaped by the idle watcher once no client has used
+// them for dolt.idle-timeout (GH#4282), and a store open on the workspace
+// holds a doltserver client lease for its lifetime (idleLeaseRelease), so
+// the watcher counts it as activity even with no SQL connection open.
 var autoStartRefs struct {
 	mu sync.Mutex
 	m  map[string]int

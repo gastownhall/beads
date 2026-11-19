@@ -172,6 +172,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Idle bd auto-started Dolt servers stop themselves; `bd dolt status
+  --all` and `bd dolt stop --all` see every server on the machine.** A
+  per-project server bd auto-starts is reaped by an idle watcher once no
+  client has used it for `dolt.idle-timeout` (default `30m`;
+  `BEADS_DOLT_IDLE_TIMEOUT` overrides, `0` disables). The stop flushes the
+  working set first, exactly like `bd dolt stop`, then ends the process and
+  removes its state files. A bd store open on the workspace counts as
+  activity through a client lease, so an idle stop never lands on a
+  project in use. Explicitly started servers (`bd dolt start`), shared
+  servers and externally-managed ones are exempt. `bd dolt status --all`
+  (with `--json`) lists every dolt sql-server on the machine from any
+  directory — bd's own with workspace, PID, port, uptime and idle-stop
+  state, and servers started outside bd reported as not managed by bd —
+  and `bd dolt stop --all` stops every bd-managed one through the same
+  stop path, reporting each stop and leaving servers bd did not start
+  running. Servers orphaned by releases before this one have no watcher:
+  `bd dolt stop --all` reaps them once. (#4282)
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,
