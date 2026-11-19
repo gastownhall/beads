@@ -242,6 +242,32 @@ func TestProxiedServerCreate2B(t *testing.T) {
 		}
 	})
 
+	// A type registered only in the database previews: the preview validates
+	// against the create context's vocabulary and writes nothing.
+	t.Run("dry_run_database_type", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dt")
+		if out, err := bdProxiedRun(t, bd, p.dir, "config", "set", "types.custom", "incident"); err != nil {
+			t.Fatalf("config set types.custom: %v\n%s", err, out)
+		}
+		out, err := bdProxiedRun(t, bd, p.dir, "create", "--title", "PROBE", "--type", "incident", "--dry-run", "--json")
+		if err != nil {
+			t.Fatalf("dry-run with a database-registered type failed: %v\n%s", err, out)
+		}
+		var preview types.Issue
+		if err := json.Unmarshal(out, &preview); err != nil || preview.IssueType != "incident" {
+			t.Fatalf("preview = %+v (err %v), want type incident:\n%s", preview, err, out)
+		}
+		db := openProxiedDB(t, p)
+		var count int
+		if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+			t.Fatalf("query issues: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("expected dry-run to persist nothing, found %d issues", count)
+		}
+	})
+
 	t.Run("skills_and_context", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sc")
