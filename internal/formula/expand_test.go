@@ -1755,3 +1755,85 @@ func TestExpandStepClearsInlineExpand(t *testing.T) {
 		t.Errorf("ApplyInlineExpansions = %+v, want the single cleared step work.nested", out)
 	}
 }
+
+// expandStepNotCarried names the exported Step fields an expansion
+// deliberately does not carry onto the expanded step, with the reason.
+// Every other field must survive; see TestExpandStepFieldGuard.
+var expandStepNotCarried = map[string]string{
+	"Loop":       "rejected: control flow runs before expansions, so a template loop would never be expanded (TestExpandStepRejectsTemplateLoop)",
+	"Expand":     "cleared: nested template expansion directives are disabled (TestExpandStepClearsInlineExpand)",
+	"ExpandVars": "cleared together with Expand",
+}
+
+// TestExpandStepFieldGuard fails when a Step field is added that the
+// expansion drops: every exported field must be set in the fixture below and
+// come through an expansion unchanged (no placeholders, so substitution is the
+// identity), unless expandStepNotCarried names it (bd-w153uq / #6433).
+func TestExpandStepFieldGuard(t *testing.T) {
+	prio := 2
+	fixture := &Step{
+		ID:             "step",
+		Title:          "Title",
+		Description:    "Description",
+		Notes:          "Notes",
+		Type:           "bug",
+		Priority:       &prio,
+		Labels:         []string{"label"},
+		Metadata:       map[string]interface{}{"key": "value", "n": int64(1)},
+		DependsOn:      []string{"dep"},
+		Needs:          []string{"need"},
+		WaitsFor:       "all-children",
+		Assignee:       "assignee",
+		Expand:         "nested-expansion",
+		ExpandVars:     map[string]string{"k": "v"},
+		Condition:      "{{flag}}",
+		Children:       []*Step{{ID: "child", Title: "Child"}},
+		Gate:           &Gate{Type: "human", Timeout: "1h"},
+		OnComplete:     &OnCompleteSpec{ForEach: "output.items", Bond: "mol", Vars: map[string]string{"k": "{item}"}},
+		SourceFormula:  "source",
+		SourceLocation: "template[0]",
+	}
+
+	stepType := reflect.TypeOf(Step{})
+	in := reflect.ValueOf(fixture).Elem()
+	for name := range expandStepNotCarried {
+		if _, ok := stepType.FieldByName(name); !ok {
+			t.Errorf("expandStepNotCarried names %q, which is not a Step field", name)
+		}
+	}
+	for i := 0; i < stepType.NumField(); i++ {
+		f := stepType.Field(i)
+		// A template loop is an error (TestExpandStepRejectsTemplateLoop),
+		// so the fixture cannot carry one.
+		if !f.IsExported() || f.Name == "Loop" {
+			continue
+		}
+		if in.Field(i).IsZero() {
+			t.Errorf("Step.%s is zero in the guard fixture: set it, and make expandStep carry it or list it in expandStepNotCarried with a reason", f.Name)
+		}
+	}
+
+	result, err := expandStep(&Step{ID: "target", Title: "Target"}, []*Step{fixture}, nil)
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("got %d steps, want 1", len(result))
+	}
+	out := reflect.ValueOf(result[0]).Elem()
+	for i := 0; i < stepType.NumField(); i++ {
+		f := stepType.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		if _, skip := expandStepNotCarried[f.Name]; skip {
+			if !out.Field(i).IsZero() {
+				t.Errorf("Step.%s is listed as not carried but survived expansion: %#v", f.Name, out.Field(i).Interface())
+			}
+			continue
+		}
+		if !reflect.DeepEqual(out.Field(i).Interface(), in.Field(i).Interface()) {
+			t.Errorf("Step.%s did not survive expansion: got %#v, want %#v", f.Name, out.Field(i).Interface(), in.Field(i).Interface())
+		}
+	}
+}
