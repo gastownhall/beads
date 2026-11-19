@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -802,6 +803,82 @@ func TestFixMissingDoltDatabase_DeclinesAmbiguousCandidates(t *testing.T) {
 	}
 	ws.assertUnchanged(t)
 	ws.assertFallbackRead(t)
+}
+
+// TestFixMissingDoltDatabase_AdoptsSoleLegacyCandidate keeps the GH#2160
+// recovery: on a server of its own, a workspace with neither dolt_database
+// nor project_id adopts the only eligible schema database (a test database
+// beside it is not a candidate, and keeps the authoritative reconcile from
+// adopting it first), taking the database's project_id when it has one.
+func TestFixMissingDoltDatabase_AdoptsSoleLegacyCandidate(t *testing.T) {
+	for _, candidateID := range []string{"", "legacy-proj-id"} {
+		t.Run(fmt.Sprintf("project_id=%q", candidateID), func(t *testing.T) {
+			ws := newFallbackWorkspace(t, false, "", []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase},
+				{Name: "doctortest_leftover", HasSchema: true},
+				{Name: "my-legacy-project", HasSchema: true, ProjectID: candidateID},
+			})
+			if err := FixMissingDoltDatabase(ws.dir); err != nil {
+				t.Fatalf("FixMissingDoltDatabase = %v, want nil", err)
+			}
+			ws.assertFallbackRead(t)
+			cfg, err := configfile.Load(ws.beadsDir)
+			if err != nil || cfg == nil {
+				t.Fatalf("reload metadata.json: %v", err)
+			}
+			if cfg.DoltDatabase != "my-legacy-project" {
+				t.Errorf("dolt_database = %q, want %q", cfg.DoltDatabase, "my-legacy-project")
+			}
+			if cfg.ProjectID != candidateID {
+				t.Errorf("project_id = %q, want %q", cfg.ProjectID, candidateID)
+			}
+		})
+	}
+}
+
+// TestFixMissingDoltDatabase_SaveErrorPropagates pins that a selection the
+// fallback cannot save is returned as an error, with no success line.
+func TestFixMissingDoltDatabase_SaveErrorPropagates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not stop a write on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	ws := newFallbackWorkspace(t, false, "", []serverDatabaseMetadata{
+		{Name: configfile.DefaultDoltDatabase},
+		{Name: "my-legacy-project", HasSchema: true, ProjectID: "legacy-proj-id"},
+		{Name: "doctortest_leftover", HasSchema: true},
+	})
+	if err := os.Chmod(ws.beadsDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ws.beadsDir, 0o750) })
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = w
+	fixErr := FixMissingDoltDatabase(ws.dir)
+	os.Stdout = stdout
+	_ = w.Close()
+	printed, _ := io.ReadAll(r)
+	_ = r.Close()
+
+	if fixErr == nil || !strings.Contains(fixErr.Error(), "failed to save metadata.json") {
+		t.Fatalf("FixMissingDoltDatabase = %v, want the save error", fixErr)
+	}
+	var skip *SkipError
+	if errors.As(fixErr, &skip) {
+		t.Fatalf("FixMissingDoltDatabase = %v, a save failure is no skip", fixErr)
+	}
+	if strings.Contains(string(printed), "Fixed") || strings.Contains(string(printed), "Backfilled") {
+		t.Fatalf("printed a success line for an unsaved repair: %q", printed)
+	}
+	ws.assertFallbackRead(t)
+	ws.assertUnchanged(t)
 }
 
 // fallbackCase is one row of TestSelectFallbackDoltDatabase.

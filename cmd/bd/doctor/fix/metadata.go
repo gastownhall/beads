@@ -241,14 +241,25 @@ func FixMissingDoltDatabase(path string) error {
 		return nil // No applicable repair
 	}
 
-	// Backfill dolt_database in metadata.json
+	// Backfill dolt_database in metadata.json, and the selected database's
+	// project_id when the workspace has none (as the authoritative sole-
+	// candidate repair does). A known local project_id is never replaced.
 	cfg.DoltDatabase = selected.Name
+	backfilledID := ""
+	if cfg.ProjectID == "" && selected.ProjectID != "" {
+		cfg.ProjectID = selected.ProjectID
+		backfilledID = selected.ProjectID
+	}
 	if err := cfg.Save(beadsDir); err != nil {
 		return fmt.Errorf("failed to save metadata.json: %w", err)
 	}
 
 	fmt.Printf("  Fixed dolt_database: set to %s in metadata.json (was using %s)\n",
 		remedy.PrintedValue(selected.Name), remedy.PrintedValue(current))
+	if backfilledID != "" {
+		fmt.Printf("  Backfilled project_id %s from database %s\n",
+			remedy.PrintedValue(backfilledID), remedy.PrintedValue(selected.Name))
+	}
 	return nil
 }
 
