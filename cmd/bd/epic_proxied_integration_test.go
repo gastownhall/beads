@@ -219,6 +219,63 @@ func TestProxiedServerEpic(t *testing.T) {
 		}
 	})
 
+	t.Run("close_eligible_never_selects_zero_child_epics", func(t *testing.T) {
+		// GH#5720 (bd-ufmqco) AC-3: close the dotted child with a completing
+		// reason first, so the dotted-only epic looks "done" to anyone
+		// counting dotted children. Without a parent-child edge it has zero
+		// linked children and must never be selected — dry-run or write.
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", dottedChild.ID); err != nil {
+			t.Fatalf("close dotted child: %v\n%s", err, out)
+		}
+
+		out, err := bdProxiedRun(t, bd, p.dir, "epic", "close-eligible", "--dry-run", "--json")
+		if err != nil {
+			t.Fatalf("close-eligible --dry-run: %v\n%s", err, out)
+		}
+		var eligible []*types.EpicStatus
+		if err := json.Unmarshal(out, &eligible); err != nil {
+			// With nothing eligible the command prints the empty result
+			// object ({closed:[],count:0,reason:…}), which itself proves
+			// the zero-child epics were not selected; anything else is a
+			// parsing failure.
+			var obj map[string]interface{}
+			if err2 := json.Unmarshal(out, &obj); err2 != nil {
+				t.Fatalf("unmarshal dry-run output: %v / %v\n%s", err, err2, out)
+			}
+			if _, ok := obj["closed"]; !ok {
+				t.Fatalf("unexpected dry-run JSON shape:\n%s", out)
+			}
+			eligible = nil
+		}
+		for _, es := range eligible {
+			if es.Epic.ID == childlessEpic.ID || es.Epic.ID == dottedEpic.ID {
+				t.Errorf("zero-linked-child epic %s must not be listed as close-eligible", es.Epic.ID)
+			}
+		}
+
+		out, err = bdProxiedRun(t, bd, p.dir, "epic", "close-eligible", "--json")
+		if err != nil {
+			t.Fatalf("close-eligible: %v\n%s", err, out)
+		}
+		var res struct {
+			Closed []string `json:"closed"`
+		}
+		if err := json.Unmarshal(out, &res); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		for _, id := range res.Closed {
+			if id == childlessEpic.ID || id == dottedEpic.ID {
+				t.Errorf("zero-linked-child epic %s was closed by close-eligible", id)
+			}
+		}
+		for _, id := range []string{childlessEpic.ID, dottedEpic.ID} {
+			show := bdProxiedShow(t, bd, p.dir, id)
+			if show.Status != types.StatusOpen {
+				t.Errorf("epic %s must remain open, got %s (close_reason %q)", id, show.Status, show.CloseReason)
+			}
+		}
+	})
+
 	t.Run("write_closes_with_reason", func(t *testing.T) {
 		p2 := newSharedProxiedProject(t, bd, "epr")
 		e2 := bdProxiedCreate(t, bd, p2.dir, "Reason epic", "--type", "epic")

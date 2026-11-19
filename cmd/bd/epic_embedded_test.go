@@ -203,6 +203,14 @@ func TestEmbeddedEpicCloseEligibleNotEligible(t *testing.T) {
 	// c2, c2b still open — epic1 is NOT eligible
 	_ = c2b
 
+	// GH#5720 (bd-ufmqco) AC-3: a childless epic and an epic whose only
+	// child is an unlinked dotted-ID issue, closed with a completing reason.
+	// Neither may be selected or closed by close-eligible in any mode.
+	childlessEpic := bdCreate(t, bd, dir, "Childless epic", "--type", "epic")
+	dottedEpic := bdCreate(t, bd, dir, "Dotted child only epic", "--type", "epic")
+	dottedChild := bdCreate(t, bd, dir, "Unlinked dotted child", "--type", "task", "--id", dottedEpic.ID+".1")
+	bdClose(t, bd, dir, dottedChild.ID)
+
 	// ===== epic close-eligible =====
 
 	t.Run("close_eligible_dry_run", func(t *testing.T) {
@@ -211,6 +219,11 @@ func TestEmbeddedEpicCloseEligibleNotEligible(t *testing.T) {
 		if strings.Contains(out, epic1.ID) {
 			t.Errorf("epic1 (not eligible) should not appear in dry-run: %s", out)
 		}
+		for _, id := range []string{childlessEpic.ID, dottedEpic.ID} {
+			if strings.Contains(out, id) {
+				t.Errorf("zero-linked-child epic %s must not appear in dry-run: %s", id, out)
+			}
+		}
 	})
 
 	t.Run("close_eligible_none", func(t *testing.T) {
@@ -218,6 +231,15 @@ func TestEmbeddedEpicCloseEligibleNotEligible(t *testing.T) {
 		out := bdEpic(t, bd, dir, "close-eligible")
 		if strings.Contains(out, epic1.ID) {
 			t.Errorf("epic1 should not be closed: %s", out)
+		}
+		for _, id := range []string{childlessEpic.ID, dottedEpic.ID} {
+			if strings.Contains(out, id) {
+				t.Errorf("zero-linked-child epic %s must not be closed: %s", id, out)
+			}
+			got := bdShow(t, bd, dir, id)
+			if got.Status != types.StatusOpen {
+				t.Errorf("epic %s must remain open, got %s", id, got.Status)
+			}
 		}
 	})
 }
