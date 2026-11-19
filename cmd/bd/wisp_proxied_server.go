@@ -248,6 +248,7 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	if infraCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
 	}
+	printClosedWispAgeNote(ageThreshold)
 
 	if len(closedIssues) == 0 {
 		return renderNoClosedWisps(force && !dryRun && scanCapped)
