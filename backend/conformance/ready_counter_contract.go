@@ -189,6 +189,46 @@ func RunReadyCounterCountsTheBlockerAwareSet(t *testing.T, ctx context.Context, 
 	}
 }
 
+// RunReadyCounterCountsTheExcludedSetTheListingLists pins the exclusion's half
+// of this role's identity (GH#6817, AC-4): a flagged request's Total describes
+// the SET THE FLAG DEFINES — the ordinary ready set minus its parents with
+// open children — on both surfaces at once. `bd ready --exclude-parents`
+// prints "showing N of M" on the cheap COUNT(*) paths this role's two bodies
+// assemble away from the listing's merge, which is exactly where a total that
+// described the unfiltered set could still agree with a page that did not.
+//
+// The parent is the ONLY excluded row and an ordinary ready row unflagged, so
+// the two assertions bound the count from both sides: 4 with the parent, 3
+// without it, and never 3 from a listing that kept the parent or 4 from a
+// count that dropped it.
+func RunReadyCounterCountsTheExcludedSetTheListingLists(t *testing.T, ctx context.Context, fixture ReadyCounterFixture) {
+	t.Helper()
+	label := fixture.IssuePrefix + "-rcexp"
+	parent := fixture.IssuePrefix + "-rcexp-parent"
+	child := fixture.IssuePrefix + "-rcexp-child"
+	for i, id := range readyCounterIDs(fixture, "rcexp", 3) {
+		seedReadyCounterIssue(t, ctx, fixture, readyCounterIssue(id, i%4, label))
+	}
+	seedReadyCounterIssue(t, ctx, fixture, readyCounterIssue(parent, 1, label))
+	// The child takes no part in any answer's scoping: it exists to make the
+	// parent excluded, and nothing else.
+	seedReadyCounterIssue(t, ctx, fixture, readyCounterIssue(child, 1, label+"-child"))
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the parent-child edge: %v", err)
+	}
+
+	unflagged := publicops.ReadyRequest{Labels: []string{label}, Sort: readyCounterSort}
+	assertReadyCounterAgreesWithTheListing(t, ctx, fixture, unflagged, 4,
+		"unflagged, the parent is an ordinary ready row")
+
+	flagged := unflagged
+	flagged.ExcludeParentsWithOpenChildren = true
+	assertReadyCounterAgreesWithTheListing(t, ctx, fixture, flagged, 3,
+		"the flagged total describes the parent-excluded set")
+}
+
 // RunReadyCounterEphemeralGateMatchesTheListing pins the wisp half of the
 // identity (issueops/readycounter.go:68-70): a request that admits ephemeral
 // rows counts them exactly as the listing lists them, and one that does not

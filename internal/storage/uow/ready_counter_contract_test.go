@@ -29,6 +29,9 @@ func TestReadyCounterContract(t *testing.T) {
 	t.Run("CountsTheBlockerAwareSet", func(t *testing.T) {
 		conformance.RunReadyCounterCountsTheBlockerAwareSet(t, ctx, fixture)
 	})
+	t.Run("CountsTheExcludedSetTheListingLists", func(t *testing.T) {
+		conformance.RunReadyCounterCountsTheExcludedSetTheListingLists(t, ctx, fixture)
+	})
 	t.Run("EphemeralGateMatchesTheListing", func(t *testing.T) {
 		conformance.RunReadyCounterEphemeralGateMatchesTheListing(t, ctx, fixture)
 	})
