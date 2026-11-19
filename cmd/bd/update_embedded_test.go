@@ -1230,3 +1230,69 @@ func TestEmbeddedUpdateClaimPassesStaleBlockedFlag(t *testing.T) {
 			got.Status, got.Assignee)
 	}
 }
+
+// TestEmbeddedUpdateCloseGuardWarning pins GH#5787 issue 3 on the direct
+// route: `bd update --status closed` keeps closing an issue another actor is
+// assigned (exit 0, stdout unchanged) but says on stderr, once, that bd close
+// would refuse the observed pre-update state. Silent for the assignee, under
+// --force, and in JSON mode the warning never reaches stdout.
+func TestEmbeddedUpdateCloseGuardWarning(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cw")
+	warning := func(id string) string {
+		return fmt.Sprintf(`update closed %s; bd close would refuse the observed pre-update state: assignee is "alice", actor is "bob"`, id)
+	}
+
+	t.Run("another actor closes", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Close guard warning", "--type", "task", "--assignee", "alice")
+		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--status", "closed", "--actor", "bob")
+		if got := strings.Count(stderr, warning(issue.ID)); got != 1 {
+			t.Errorf("stderr carries the close-guard warning %d times, want 1:\n%s", got, stderr)
+		}
+		if strings.Contains(stdout, "bd close would refuse") {
+			t.Errorf("warning leaked to stdout:\n%s", stdout)
+		}
+		if strings.Contains(stderr, "--force") {
+			t.Errorf("warning recommends --force:\n%s", stderr)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Status != types.StatusClosed {
+			t.Errorf("status = %q, want closed", got.Status)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Close guard warning json", "--type", "task", "--assignee", "alice")
+		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--status", "closed", "--actor", "bob", "--json")
+		if got := strings.Count(stderr, warning(issue.ID)); got != 1 {
+			t.Errorf("stderr carries the close-guard warning %d times, want 1:\n%s", got, stderr)
+		}
+		var updated []types.Issue
+		if err := json.Unmarshal([]byte(stdout), &updated); err != nil || len(updated) != 1 || updated[0].Status != types.StatusClosed {
+			t.Errorf("stdout is not the one closed issue (err %v):\n%s", err, stdout)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"assignee closes", []string{"--status", "closed", "--actor", "alice"}},
+		{"forced", []string{"--status", "closed", "--actor", "bob", "--force"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := bdCreate(t, bd, dir, "Close guard silent", "--type", "task", "--assignee", "alice")
+			_, stderr := bdUpdateCapture(t, bd, dir, append([]string{issue.ID}, tc.args...)...)
+			if strings.Contains(stderr, "bd close would refuse") {
+				t.Errorf("unexpected close-guard warning:\n%s", stderr)
+			}
+			if got := bdShow(t, bd, dir, issue.ID); got.Status != types.StatusClosed {
+				t.Errorf("status = %q, want closed", got.Status)
+			}
+		})
+	}
+}

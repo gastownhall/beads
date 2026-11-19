@@ -455,6 +455,7 @@ pointless).`,
 		}
 		mutatedStores := map[storage.DoltStorage][]string{}
 		notesOverwriteWarnings := map[storage.DoltStorage][]string{}
+		closeGuardWarnings := map[storage.DoltStorage][]string{}
 		mutatedResults := map[*RoutedResult]bool{}
 		pendingCloseResults := []*RoutedResult{}
 		trackMutation := func(result *RoutedResult) {
@@ -634,6 +635,9 @@ pointless).`,
 			if notesOverwritten {
 				notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
 			}
+			if msg := updateCloseGuardWarning(result.ResolvedID, issue, patch, currentActor(), forceFlag); msg != "" {
+				closeGuardWarnings[issueStore] = append(closeGuardWarnings[issueStore], msg)
+			}
 			// Audit log key field changes (survives Dolt GC flatten), a
 			// --claim's implied status and assignee included (GH#6146).
 			logUpdateAuditChanges(result.ResolvedID, currentActor(),
@@ -679,6 +683,9 @@ pointless).`,
 				}
 				for _, id := range notesOverwriteWarnings[s] {
 					warnNotesReplacement(id)
+				}
+				for _, msg := range closeGuardWarnings[s] {
+					warnUpdateCloseGuard(msg)
 				}
 			}
 		}
@@ -910,6 +917,50 @@ func claimBlockedRefusal(err error) (error, bool) {
 // happened rather than a repeat of the refusal's advice.
 func warnNotesReplacement(id string) {
 	fmt.Fprintf(os.Stderr, "warning: %s: --force replaced existing notes (--append-notes preserves history)\n", id) //nolint:gosec // G705: stderr, not a browser context
+}
+
+// updateCloseGuardWarning is GH#5787's advisory for a close bd update admits
+// but bd close would refuse. bd update deliberately enforces close policy
+// without close's pin and assignee guards (storageissueops.CheckClosable), so
+// after an unforced update moves an observed non-closed pre-image to closed,
+// this names the guard bd close would have tripped: the pin first, then the
+// assignee. It returns "" when bd close would agree, for a closed restatement,
+// any other status edit, a template (the update refused it) or no pre-image.
+//
+// The pre-image is the command's earlier advisory read, not the mutation's
+// transactional row, so the line reports what was observed; it never
+// recommends --force, which also bypasses close policy.
+func updateCloseGuardWarning(id string, before *types.Issue, patch issueops.IssuePatch, actor string, force bool) string {
+	if force || before == nil || before.Status == types.StatusClosed ||
+		!patch.Status.Set || patch.Status.Value != types.StatusClosed {
+		return ""
+	}
+	var reasons []string
+	err := storageissueops.CheckClosable(id, before, actor, false)
+	var pinned *issueops.PinnedError
+	if errors.As(err, &pinned) {
+		reasons = append(reasons, "the issue is pinned")
+		// CheckClosable stops at the pin; ask again without it so a pinned
+		// issue assigned to someone else names both guards.
+		unpinned := *before
+		unpinned.Pinned = false
+		unpinned.Status = types.StatusOpen
+		err = storageissueops.CheckClosable(id, &unpinned, actor, false)
+	}
+	var notAssignee *issueops.CloseNotAssigneeError
+	if errors.As(err, &notAssignee) {
+		reasons = append(reasons, fmt.Sprintf("assignee is %q, actor is %q", notAssignee.Assignee, notAssignee.Actor))
+	}
+	if len(reasons) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("update closed %s; bd close would refuse the observed pre-update state: %s", id, strings.Join(reasons, "; "))
+}
+
+// warnUpdateCloseGuard prints an updateCloseGuardWarning line to stderr,
+// after the update it describes has landed.
+func warnUpdateCloseGuard(msg string) {
+	fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), msg) //nolint:gosec // G705: stderr, not a browser context
 }
 
 // ExitGuardMismatch is the exit code when a `bd update` run failed solely

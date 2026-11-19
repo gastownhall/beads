@@ -853,6 +853,35 @@ func TestProxiedServerUpdate2B(t *testing.T) {
 		}
 	})
 
+	// GH#5787 issue 3 on the proxied route: the close lands as before, and
+	// stderr says once that bd close would refuse the observed pre-image.
+	t.Run("update_close_guard_warning", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucw")
+		warned := bdProxiedCreate(t, bd, p.dir, "Close guard warning", "--assignee", "alice")
+		stdout, stderr, err := bdProxiedRunEnv(t, bd, p.dir, nil, "update", warned.ID, "--status", "closed", "--actor", "bob", "--json")
+		if err != nil {
+			t.Fatalf("bd update --status closed failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		want := fmt.Sprintf(`update closed %s; bd close would refuse the observed pre-update state: assignee is "alice", actor is "bob"`, warned.ID)
+		if got := strings.Count(stderr, want); got != 1 {
+			t.Errorf("stderr carries the close-guard warning %d times, want 1:\n%s", got, stderr)
+		}
+		var updated []types.Issue
+		if err := json.Unmarshal([]byte(stdout), &updated); err != nil || len(updated) != 1 || updated[0].Status != types.StatusClosed {
+			t.Errorf("stdout is not the one closed issue (err %v):\n%s", err, stdout)
+		}
+
+		forced := bdProxiedCreate(t, bd, p.dir, "Close guard forced", "--assignee", "alice")
+		stdout, stderr, err = bdProxiedRunEnv(t, bd, p.dir, nil, "update", forced.ID, "--status", "closed", "--actor", "bob", "--force")
+		if err != nil {
+			t.Fatalf("bd update --status closed --force failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if strings.Contains(stderr, "bd close would refuse") {
+			t.Errorf("forced close warned:\n%s", stderr)
+		}
+	})
+
 	t.Run("update_nonexistent_id", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "unx")
