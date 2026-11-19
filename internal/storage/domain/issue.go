@@ -104,6 +104,13 @@ type IssueSQLRepository interface {
 	// of an id against a retaining delete of it. A retaining delete takes it
 	// before it deletes anything.
 	CoordinateCreates(ctx context.Context, ids []string) error
+	// CountForPrefix returns the population adaptive hash-ID sizing uses for
+	// a new ID under prefix in the plane opts names
+	// (issueops.AdaptiveIDCountInTx): that table's rows under prefix-,
+	// excluding dotted children, plus the other table's rows in prefix's
+	// exact namespace (prefix-<suffix>, no further '-' or '.'). Issues and
+	// wisps share one ID space, so a promoted wisp still counts for a wisp
+	// mint.
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
 	NextCounterID(ctx context.Context, prefix string) (int, error)
 	// AdvanceCounterPastHeld moves prefix's issue counter over the run of held

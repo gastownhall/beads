@@ -691,6 +691,7 @@
 40 39 TestReclaimRefusesForeignReplicaLease
 40 39 TestWorkspaceConfigContract
 
+40 40 TestAdaptiveIDLengthSpansBothPlanes
 40 40 TestArrivalSeq_EmbeddedHealRaisesTheCounterPastTheStamps
 40 40 TestCountsWithMissingWispPlaneTables
 40 40 TestEmbeddedBatchCloserDoesNotMutateTheCallerRequest

@@ -11,7 +11,13 @@ P(collision) ≈ 1 - e^(-n²/2N)
 ```
 
 Where:
-- **n** = number of issues in database
+- **n** = number of IDs already under the prefix: the destination table's
+  rows under `<prefix>-` (issues or wisps, excluding dotted children) plus the
+  sibling table's rows in the prefix's exact namespace (`<prefix>-<suffix>`
+  with no further `-` or `.`). The two terms use different rules on purpose:
+  the destination term is unchanged from before wisps were counted, so no new
+  ID gets shorter, and the sibling term counts only rows that could equal a
+  new hash ID (`issueops.AdaptiveIDCountInTx`)
 - **N** = total possible IDs = 36^length (lowercase alphanumeric: `[a-z0-9]`)
 
 ## Collision Probability Table

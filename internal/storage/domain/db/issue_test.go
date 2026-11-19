@@ -84,6 +84,11 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("ExcludesChildIDs", s.issueCountForPrefixExcludesChildren)
 		s.Run("RoutedToWisps", s.issueCountForPrefixWispRouting)
 		s.Run("EmptyPrefixReturnsError", s.issueCountForPrefixEmptyPrefix)
+		s.Run("CountsPromotedWispsInIssues", s.issueCountForPrefixCountsPromotedWisps)
+		s.Run("CountsBaseNamespaceHeldInWisps", s.issueCountForPrefixCountsBaseNamespaceInWisps)
+		s.Run("HyphenatedPrefixCountsExactSiblingNamespace", s.issueCountForPrefixHyphenatedPrefix)
+		s.Run("LiveWispsDoNotCountForBasePrefix", s.issueCountForPrefixLiveWispsDoNotCountForBase)
+		s.Run("DestinationSubprefixRowsStillCount", s.issueCountForPrefixDestinationSubprefixRowsStillCount)
 	})
 	s.Run("NextCounterID", func() {
 		s.Run("FreshDBInsertsAtOne", s.issueNextCounterIDFresh)
@@ -638,7 +643,89 @@ func (s *testSuite) issueCountForPrefixWispRouting() {
 	s.Equal(1, got)
 	got, err = r.CountForPrefix(s.Ctx(), "cfpWisp", domain.IssueTableOpts{})
 	s.Require().NoError(err)
-	s.Equal(0, got, "issues table should not see wisp rows")
+	// Issues and wisps share one ID space: cfpWisp-c1 sits in cfpWisp's
+	// exact namespace, so an issues-side mint counts it too (bd-u9cfx0).
+	s.Equal(1, got, "issues-side count should include the wisp in the exact namespace")
+}
+
+// adaptiveTestCfg is the adaptive config the two-plane sizing tests use: at
+// max_collision_prob=0.001, 10 rows cross the 3->4 length boundary.
+var adaptiveTestCfg = domain.AdaptiveIDConfig{MaxCollisionProbability: 0.001, MinLength: 3, MaxLength: 8}
+
+// insertCountRows inserts one row per id, into wisps when wisps is set.
+func (s *testSuite) insertCountRows(ids []string, wisps bool) {
+	r := s.issueRepo()
+	for _, id := range ids {
+		row := newTestIssue(id, "count "+id)
+		row.Ephemeral = wisps
+		s.Require().NoError(r.Insert(s.Ctx(), row, "tester", domain.InsertIssueOpts{UseWispsTable: wisps}), "insert %s", id)
+	}
+}
+
+// assertTwoPlaneCount checks CountForPrefix and the starting length the
+// proxied minter computes from it (bd-u9cfx0).
+func (s *testSuite) assertTwoPlaneCount(prefix string, wisps bool, wantCount, wantLength int) {
+	got, err := s.issueRepo().CountForPrefix(s.Ctx(), prefix, domain.IssueTableOpts{UseWispsTable: wisps})
+	s.Require().NoError(err)
+	s.Equal(wantCount, got, "CountForPrefix(%s, wisps=%v)", prefix, wisps)
+	s.Equal(wantLength, domain.ComputeAdaptiveLength(got, adaptiveTestCfg), "starting length for %s", prefix)
+}
+
+// issueCountForPrefixCountsPromotedWisps: a promoted wisp keeps its
+// <prefix>-wisp-* ID in issues, so a wisp mint's count includes it. Only the
+// exact namespace counts from the sibling table: its dotted children and
+// deeper sub-prefixes do not.
+func (s *testSuite) issueCountForPrefixCountsPromotedWisps() {
+	s.insertCountRows([]string{"cfpPw-wisp-a0", "cfpPw-wisp-a1", "cfpPw-wisp-a2", "cfpPw-wisp-a3", "cfpPw-wisp-a4"}, true)
+	s.insertCountRows([]string{"cfpPw-wisp-b0", "cfpPw-wisp-b1", "cfpPw-wisp-b2", "cfpPw-wisp-b3", "cfpPw-wisp-b4"}, false)
+	// Sibling rows outside the exact namespace: a dotted child and a deeper
+	// sub-prefix.
+	s.insertCountRows([]string{"cfpPw-wisp-b0.1", "cfpPw-wisp-mol-c0"}, false)
+
+	s.assertTwoPlaneCount("cfpPw-wisp", true, 10, 4)
+}
+
+// issueCountForPrefixCountsBaseNamespaceInWisps: a durable mint's count
+// includes base-namespace rows held in wisps (a demoted issue keeps its ID).
+// Sibling rows in another namespace (a -wisp- one, a lookalike prefix, a
+// dotted child) do not count.
+func (s *testSuite) issueCountForPrefixCountsBaseNamespaceInWisps() {
+	s.insertCountRows([]string{"cfpBn-a0", "cfpBn-a1", "cfpBn-a2", "cfpBn-a3", "cfpBn-a4"}, false)
+	s.insertCountRows([]string{"cfpBn-b0", "cfpBn-b1", "cfpBn-b2", "cfpBn-b3", "cfpBn-b4"}, true)
+	s.insertCountRows([]string{"cfpBn-b0.1", "cfpBnX-b0"}, true)
+
+	s.assertTwoPlaneCount("cfpBn", false, 10, 4)
+}
+
+// issueCountForPrefixHyphenatedPrefix: the exact-namespace rule reads the
+// suffix after prefix plus its separator, so a prefix that itself holds a
+// hyphen still counts its sibling rows, and only those.
+func (s *testSuite) issueCountForPrefixHyphenatedPrefix() {
+	s.insertCountRows([]string{"cfp-hy-a0", "cfp-hy-a1"}, false)
+	s.insertCountRows([]string{"cfp-hy-b0", "cfp-hy-b1", "cfp-hy-wisp-c0", "cfp-hy-mol-c1"}, true)
+
+	got, err := s.issueRepo().CountForPrefix(s.Ctx(), "cfp-hy", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(4, got, "2 issues plus the 2 exact-namespace wisps")
+}
+
+// issueCountForPrefixLiveWispsDoNotCountForBase: the sibling term is exact,
+// so 12 wisps outside cfpLw's namespace (-wisp-, -mol-, a dotted child) do
+// not lengthen base IDs. A plain sum would give 15 and length 4.
+func (s *testSuite) issueCountForPrefixLiveWispsDoNotCountForBase() {
+	s.insertCountRows([]string{"cfpLw-a0", "cfpLw-a1", "cfpLw-a2"}, false)
+	s.insertCountRows(append([]string{"cfpLw-mol-c0", "cfpLw-a0.1"}, mintIDs("cfpLw-wisp-b", 10)...), true)
+
+	s.assertTwoPlaneCount("cfpLw", false, 3, 3)
+}
+
+// issueCountForPrefixDestinationSubprefixRowsStillCount: the destination
+// table's own prefix-% rule is unchanged, so its sub-prefixed rows still count
+// and no new base ID gets shorter (bd-u9cfx0).
+func (s *testSuite) issueCountForPrefixDestinationSubprefixRowsStillCount() {
+	s.insertCountRows(mintIDs("cfpSp-mol-a", 10), false)
+
+	s.assertTwoPlaneCount("cfpSp", false, 10, 4)
 }
 
 func (s *testSuite) issueCountForPrefixEmptyPrefix() {

@@ -24,7 +24,11 @@ P(collision) ≈ 1 - e^(-n²/2N)
 ```
 
 Where:
-- `n` = number of issues in database
+- `n` = number of IDs already under the prefix: rows of the table the new ID
+  goes into (issues or wisps) under the prefix, excluding child IDs, plus rows
+  of the other table in the prefix's exact namespace (`<prefix>-<hash>`, with
+  no further `-` or `.`). Issues and wisps share one ID space, so a promoted
+  wisp, which keeps its `<prefix>-wisp-*` ID, still counts toward new wisp IDs
 - `N` = total possible IDs (36^length for lowercase alphanumeric)
 
 ### Default Thresholds (25% max collision)
