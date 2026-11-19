@@ -80,10 +80,13 @@ migrations here clear `FOREIGN_KEY_CHECKS` and restore it (0041, 0043, 0047,
 provider for live queries, so a system session variable still changed when a
 script reports success leaks into ordinary queries. Pairing the SETs inside one
 script is what makes that safe — `initSchemaAttempt` pins one session per
-attempt, so both statements land on the same session, and an attempt that dies
-between them returns its connection to the pool, which is why the restore
-cannot be the caller's job. User variables (`SET @sql`, `SET @needs_add`) are
-exempt: nothing outside these scripts reads one, and each assigns before it
+attempt, so both statements land on the same session. The restore cannot be the
+caller's job: a FAILED attempt now discards its session instead of returning it
+(gastownhall/beads#6504), so a script that dies between the two SETs poisons
+nothing — but the paired SET is still required, because a SUCCESSFUL attempt
+keeps its session and hands it to the provider, and only the script itself
+knows which variables it set. User variables (`SET @sql`, `SET @needs_add`)
+are exempt: nothing outside these scripts reads one, and each assigns before it
 reads.
 
 **The `dolt` CLI is not a safe harness for guarded migrations, twice over.**

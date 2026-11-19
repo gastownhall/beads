@@ -1252,15 +1252,17 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 	//     can report success, and a leftover user variable is inert: nothing
 	//     outside these scripts reads one, and each script assigns before it
 	//     reads;
-	//   - every initSchema failure below closes this whole pool, so a script
-	//     that died between the two SETs never hands its session back.
+	//   - a FAILED attempt discards its session instead of returning it
+	//     (gastownhall/beads#6504 — a retry or a later query must never be
+	//     served a session left mid-script), and every initSchema failure
+	//     below still closes this whole pool besides.
 	// That is a convention where it used to be structural: before this fast
 	// path the schema-init pool was always discarded, so a migration could
 	// leak session state with impunity. Now a migration that leaves a system
 	// session variable changed on the success path would leak it into live
-	// query sessions — and an attempt that dies mid-script returns its
-	// connection to the pool, so the restore has to be part of the script,
-	// not of the caller. See internal/storage/schema/migrations/README.md.
+	// query sessions — a SUCCESSFUL attempt keeps its session and hands it to
+	// the provider, so the restore has to be part of the script, not of the
+	// caller. See internal/storage/schema/migrations/README.md.
 	//
 	// Any connect failure — the database does not exist yet (1049), the
 	// server is down, bad credentials — falls through to the historical
