@@ -31,6 +31,7 @@ go_test(
         "spawn_test.go",
         "spawn_throttle_test.go",
         "userconfig_carryover_test.go",
+        "userconfig_failclosed_test.go",
         "userconfig_test.go",
     ],
     embed = [":metrics"],
