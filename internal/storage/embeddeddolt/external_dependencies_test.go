@@ -7,6 +7,7 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -366,6 +367,33 @@ func TestForeignPrefixAbsentTargetStaysExternal(t *testing.T) {
 	}
 	if err := e.store.AddDependency(ctx, &types.Dependency{IssueID: dependent, DependsOnID: "demo-missing", Type: types.DepBlocks}, "tester"); err == nil {
 		t.Fatal("AddDependency to a missing same-prefix target succeeded, want a missing-target refusal")
+	}
+
+	// The unresolved-target warning path is unchanged: a batch whose edge
+	// names a missing target skips that edge and reports it, storing nothing.
+	// (A same-prefix target: an absent cross-prefix target is external, not
+	// unresolved, and is covered by the edges stored above.)
+	var skipped []string
+	batchDep := &types.Issue{ID: "demo-preserve-batch", Title: "batch preservation", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{{DependsOnID: "demo-unresolved-target", Type: types.DepBlocks}},
+	}
+	if err := e.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{batchDep}, "tester", storage.BatchCreateOptions{
+		SkipPrefixValidation: true,
+		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
+			skipped = append(skipped, issueID+" -> "+dependsOnID+": "+reason)
+		},
+	}); err != nil {
+		t.Fatalf("CreateIssuesWithFullOptions: %v", err)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "demo-unresolved-target") || !strings.Contains(skipped[0], "target not found") {
+		t.Fatalf("skipped = %#v, want the unresolved-target skip report", skipped)
+	}
+	records, err := e.store.GetDependencyRecords(ctx, batchDep.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(batch): %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("batch dependency records = %v, want none: the skipped edge must not be stored", records)
 	}
 }
 
