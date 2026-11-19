@@ -148,6 +148,15 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 
 	var result issueops.CreateIssuesResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		// The closure contract on withRetryTx: re-derive captured state on
+		// EVERY attempt (GH#7289). resetMintedIDs clears the create-time IDs
+		// the rolled-back attempt minted — issue IDs, defaulted dependency
+		// sources, derived comment IDs, exactly the fields the caller left
+		// empty — so the replay mints afresh instead of upserting the
+		// stale IDs over the concurrent writer that took them, or failing
+		// prefix validation on an override-minted one. Caller-supplied IDs
+		// are never captured and never cleared.
+		resetMintedIDs()
 		var err error
 		result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 		return err
