@@ -405,7 +405,20 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 // connection and fans out to the team-server, preview, or migrating open path.
 // Each path returns a bare error for a serialization retry and backoff.Permanent
 // for a terminal failure.
-func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string, preparer *bootstrapPreparer) error {
+//
+// A FAILED attempt never hands its pinned session back to the pool: the failing
+// statement may have left it mid-script (a migration between its
+// FOREIGN_KEY_CHECKS-clearing SET and the restoring one, or a statement that
+// failed at all on Dolt, which pins the session to its pre-statement catalog
+// snapshot for the rest of its pooled life, be-bv7x). Since wy-s8ytnw the pool
+// this attempt pinned from is the very pool openAndInitSchema hands the
+// provider for live queries, so a returned poisoned session is served to
+// ordinary queries. The deferred discard below makes that structurally
+// impossible: database/sql drops (and closes) a driver connection whose Raw
+// callback returns driver.ErrBadConn, rather than pooling it. A successful
+// attempt keeps its session — the converged steady state pays for nothing more
+// than one session per open. See internal/storage/schema/migrations/README.md.
+func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string, preparer *bootstrapPreparer) (err error) {
 	conn, err := p.db.Conn(ctx)
 	if err != nil {
 		if isSerializationError(err) {
@@ -413,7 +426,18 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		}
 		return backoff.Permanent(fmt.Errorf("uow: pin connection: %w", err))
 	}
-	defer conn.Close()
+	// The named result is the attempt's final verdict, assigned by every
+	// return below before this closure runs, so the discard never replaces
+	// or masks it. A failure path that already discarded the session — the
+	// migration lock's own release-failure cleanup does — answers Raw and
+	// Close with sql.ErrConnDone; those cleanup results are ignored on
+	// purpose, so the original error stays exactly what the attempt decided.
+	defer func() {
+		if err != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
 
 	if p.teamServer {
 		return p.verifyTeamServerSchema(ctx, conn, database)

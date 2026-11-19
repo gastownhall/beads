@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"regexp"
 	"strings"
@@ -214,6 +215,274 @@ func TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("the convergence probe must reach the schema predicates on a session with no database selected: %v", err)
+	}
+}
+
+// expectFreshBootstrapThroughFirstMigrationStatement scripts a single
+// initSchemaAttempt against a database this attempt is creating: the pre-lock
+// convergence probe (no session database, database absent), the lock, the
+// locked preparation (bare CREATE wins, then USE, then the heal-capture reads),
+// the consented MigrateUp's cursor probe on a database with no schema yet, and
+// MigrateUp's first statement — the dolt_ignore seed INSERT — as the failure
+// point. (The shared-store gate is skipped on this path: the CREATE-winning
+// preparation captured fresh-bootstrap heal authority, which is consent.)
+// Returns the lock name. Mirrors
+// TestInitSchemaAcquiresMigrationLockBeforeBootstrapDDL's sequence, which this
+// file keeps honest.
+func expectFreshBootstrapThroughFirstMigrationStatement(mock sqlmock.Sqlmock, database string, firstErr error) string {
+	lockName := schema.MigrationLockName(database)
+	expectNoSessionDatabase(mock)
+	expectDatabaseExistsProbe(mock, database, false)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, 5).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `" + database + "`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("USE `" + database + "`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE(), @@server_uuid, DOLT_HASHOF('HEAD')")).
+		WillReturnRows(sqlmock.NewRows([]string{"database", "server_uuid", "head"}).AddRow(database, "server-uuid", "initial-head"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_log")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// The consented MigrateUp's cursor read on a database with no schema yet:
+	// the cursor table does not exist, so migration starts from step 1.
+	expectCursorProbe(mock, "schema_migrations", false)
+	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnError(firstErr)
+	return lockName
+}
+
+// assertDiscardedPool asserts the failed attempt's session never reached the
+// pool: the discard must have closed the driver connection, and no connection
+// may remain open or idle.
+func assertDiscardedPool(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if stats := db.Stats(); stats.Idle != 0 || stats.OpenConnections != 0 {
+		t.Fatalf("after a failed attempt the pool holds %d open / %d idle sessions, want 0: "+
+			"the failed attempt's session went back to the pool the fast path reuses for live queries",
+			stats.OpenConnections, stats.Idle)
+	}
+}
+
+// TestInitSchemaAttemptRetryableFailureDiscardsPinnedSession is the bd-yui097
+// (gastownhall/beads#6504) repro: a retryable initSchemaAttempt failure (here a
+// 1205 on the first migration statement) must not hand its pinned session back
+// to the pool, because since wy-s8ytnw the fast path reuses that pool for live
+// queries and the session may be mid-script (FOREIGN_KEY_CHECKS cleared) or
+// catalog-pinned by the failed statement (be-bv7x).
+func TestInitSchemaAttemptRetryableFailureDiscardsPinnedSession(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	expectFreshBootstrapThroughFirstMigrationStatement(mock, "beads",
+		&mysql.MySQLError{Number: 1205, Message: "Lock wait timeout exceeded"})
+	expectLockRelease(mock, schema.MigrationLockName("beads"))
+	// The discard physically closes the failed attempt's driver connection.
+	mock.ExpectClose()
+
+	p := &doltSQLProvider{
+		defaultBranch:  defaultBranch,
+		db:             db,
+		serverEndpoint: "tcp:127.0.0.1:3306",
+	}
+	preparer := &bootstrapPreparer{provider: p, database: "beads"}
+	err = p.initSchemaAttempt(context.Background(), "beads", preparer)
+	var permanentErr *backoff.PermanentError
+	if err == nil || errors.As(err, &permanentErr) {
+		t.Fatalf("initSchemaAttempt() error = %v, want a retryable 1205 failure", err)
+	}
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) || mysqlErr.Number != 1205 {
+		t.Fatalf("initSchemaAttempt() error = %v, want the original 1205 error preserved", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("attempt SQL expectations: %v", err)
+	}
+	assertDiscardedPool(t, db)
+}
+
+// TestInitSchemaAttemptDiscardsSessionOnFailure walks every open path
+// initSchemaAttempt fans out to and pins the one lifetime property each of
+// them owes (gastownhall/beads#6504): a session pinned by a FAILED attempt is
+// never returned to the pool, whatever the verdict — retryable or permanent —
+// and whatever the failure point: migration, lock release, team-server
+// verification, preview attach, or the gate's read-through.
+//
+// The attempt is called directly (not through initSchema's backoff loop)
+// because sqlmock cannot serve the fresh driver connection a retry needs once
+// the failed one is discarded; the loop-level retry is covered against a real
+// server by TestOpenAndInitSchemaDiscardsSessionOfFailedAttempt.
+func TestInitSchemaAttemptDiscardsSessionOnFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider
+		// check asserts the attempt's verdict and error identity — the
+		// discard must not have replaced or masked either.
+		check func(t *testing.T, err error)
+	}{
+		{
+			name: "permanent migration failure",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				firstErr := errors.New("first migration statement failed")
+				expectFreshBootstrapThroughFirstMigrationStatement(mock, "beads", firstErr)
+				expectLockRelease(mock, schema.MigrationLockName("beads"))
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306"}
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				var permanentErr *backoff.PermanentError
+				if !errors.As(err, &permanentErr) {
+					t.Fatalf("initSchemaAttempt() error = %T (%v), want permanent", err, err)
+				}
+				if !strings.Contains(err.Error(), "first migration statement failed") {
+					t.Fatalf("initSchemaAttempt() error = %v, want the migration sentinel preserved", err)
+				}
+			},
+		},
+		{
+			name: "lock release failure does not double-close or mask the retryable verdict",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				expectFreshBootstrapThroughFirstMigrationStatement(mock, "beads",
+					&mysql.MySQLError{Number: 1205, Message: "Lock wait timeout exceeded"})
+				// The release fails; schema's own cleanup discards the
+				// session FIRST (schema.discardConn), so the attempt's
+				// deferred Raw/Close answer sql.ErrConnDone and must be
+				// ignored. Exactly one driver close may happen.
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+					WithArgs(schema.MigrationLockName("beads")).
+					WillReturnError(errors.New("connection reset during release"))
+				mock.ExpectClose()
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306"}
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				var permanentErr *backoff.PermanentError
+				if err == nil || errors.As(err, &permanentErr) {
+					t.Fatalf("initSchemaAttempt() error = %v, want the retryable verdict kept (a lock-release failure does not make a 1205 permanent)", err)
+				}
+				var mysqlErr *mysql.MySQLError
+				if !errors.As(err, &mysqlErr) || mysqlErr.Number != 1205 {
+					t.Fatalf("initSchemaAttempt() error = %v, want the 1205 preserved", err)
+				}
+				if !errors.Is(err, schema.ErrMigrationLockRelease) {
+					t.Fatalf("initSchemaAttempt() error = %v, want the lock-release failure kept reachable", err)
+				}
+			},
+		},
+		{
+			name: "team-server USE is denied",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+					WillReturnError(&mysql.MySQLError{Number: 1044, Message: "Access denied for user 'u'@'%' to database 'beads'"})
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", teamServer: true}
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				var permanentErr *backoff.PermanentError
+				if !errors.As(err, &permanentErr) {
+					t.Fatalf("initSchemaAttempt() error = %T (%v), want permanent", err, err)
+				}
+				if !strings.Contains(err.Error(), "was denied") {
+					t.Fatalf("initSchemaAttempt() error = %v, want the access-denied classification preserved", err)
+				}
+			},
+		},
+		{
+			name: "team-server schema verification refuses a v0 database",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE()")).
+					WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("beads"))
+				expectVersionQuery(mock, 0)
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", teamServer: true}
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				var permanentErr *backoff.PermanentError
+				if !errors.As(err, &permanentErr) {
+					t.Fatalf("initSchemaAttempt() error = %T (%v), want permanent", err, err)
+				}
+				if !strings.Contains(err.Error(), "bts init") {
+					t.Fatalf("initSchemaAttempt() error = %v, want the bts-init refusal preserved", err)
+				}
+			},
+		},
+		{
+			name: "preview attach finds no database",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+					WillReturnError(&mysql.MySQLError{Number: 1049, Message: "Unknown database 'beads'"})
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", preview: true}
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				var permanentErr *backoff.PermanentError
+				if !errors.As(err, &permanentErr) {
+					t.Fatalf("initSchemaAttempt() error = %T (%v), want permanent", err, err)
+				}
+				if !strings.Contains(err.Error(), previewRemedyText) {
+					t.Fatalf("initSchemaAttempt() error = %v, want the preview remedy preserved", err)
+				}
+			},
+		},
+		{
+			// The gate refuses a shared database without consent; the
+			// read-only read-through then finds a schema this binary's
+			// reads cannot query, and the open stops there. Both halves
+			// fail on the still-owned session, which must be discarded.
+			name: "gate refusal with an unreadable schema stops the read-through",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+				behind := schema.LatestVersion() - 1
+				lockName := expectBehindDatabaseThroughPreparation(mock, "beads", behind)
+				expectSharedGateProbe(mock, behind, 0)
+				expectLockRelease(mock, lockName)
+				mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				expectIssuesProjection(mock, behind, "arrival_seq")
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", readOnly: true}
+			},
+			check: func(t *testing.T, err error) {
+				t.Helper()
+				var permanentErr *backoff.PermanentError
+				if !errors.As(err, &permanentErr) {
+					t.Fatalf("initSchemaAttempt() error = %T (%v), want permanent", err, err)
+				}
+				var behindErr *schema.SchemaBehindError
+				if !errors.As(err, &behindErr) {
+					t.Fatalf("initSchemaAttempt() error = %v, want *schema.SchemaBehindError from the stopped read-through", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema.SetSharedMigrateConsent(false)
+			t.Cleanup(func() {
+				schema.SetSharedMigrateConsent(false)
+				schema.SetForceAllowRemoteMigrate(false)
+			})
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+
+			p := tc.setup(t, db, mock)
+			attemptErr := p.initSchemaAttempt(context.Background(), "beads", &bootstrapPreparer{provider: p, database: "beads"})
+			tc.check(t, attemptErr)
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("attempt SQL expectations: %v", err)
+			}
+			assertDiscardedPool(t, db)
+		})
 	}
 }
 

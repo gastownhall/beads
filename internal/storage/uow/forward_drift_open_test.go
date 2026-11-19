@@ -364,7 +364,11 @@ func TestInitSchemaRefusesForwardDrift(t *testing.T) {
 	}
 
 	// A serialization failure on the added version read keeps the provider's
-	// ordinary retry; the next attempt reads a valid version and opens.
+	// ordinary retry; the next attempt reads a valid version and opens. The
+	// first attempt's session is discarded on its failure (#6504) — the discard
+	// physically closes the mock's driver connection, and sqlmock unregisters
+	// a mock whose last connection closed — so hold a second pinned connection
+	// for the test's lifetime to keep the mock dialable for the retry.
 	t.Run("serialization failure on the drift read is retried", func(t *testing.T) {
 		t.Setenv("BD_IGNORE_SCHEMA_SKEW", "")
 		calls := stubConvergedMigrateUp(t)
@@ -373,6 +377,11 @@ func TestInitSchemaRefusesForwardDrift(t *testing.T) {
 			t.Fatalf("create sql mock: %v", err)
 		}
 		defer db.Close()
+		held, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("pin a held connection so the mock survives the first attempt's discard: %v", err)
+		}
+		defer held.Close()
 
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
 			WillReturnError(&mysql.MySQLError{Number: 1213, Message: "serialization failure"})
