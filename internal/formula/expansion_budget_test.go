@@ -2,6 +2,7 @@ package formula
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -155,5 +156,108 @@ func TestApplyLoops_NestedLoopBodyNotChargedTwice(t *testing.T) {
 	}
 	if budget.Used() != 12 {
 		t.Fatalf("budget holds %d steps; want the 12 the expansion output", budget.Used())
+	}
+}
+
+// A flat loop of exactly MaxExpandedSteps steps cooks, with every iteration
+// chained to the one before it.
+func TestApplyLoops_FlatLoopAtLimitCooks(t *testing.T) {
+	steps := []*Step{{ID: "big", Loop: &LoopSpec{Count: MaxExpandedSteps, Body: []*Step{{ID: "work"}}}}}
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops at exactly the limit: %v", err)
+	}
+	if len(result) != MaxExpandedSteps {
+		t.Fatalf("ApplyLoops = %d steps; want %d", len(result), MaxExpandedSteps)
+	}
+	for i, s := range result {
+		if want := fmt.Sprintf("big.iter%d.work", i+1); s.ID != want {
+			t.Fatalf("step %d = %q; want %q", i, s.ID, want)
+		}
+		if i == 0 {
+			if len(s.Needs) != 0 {
+				t.Fatalf("first step needs %v; want nothing", s.Needs)
+			}
+			continue
+		}
+		if prev := result[i-1].ID; !slicesContains(s.Needs, prev) {
+			t.Fatalf("step %q needs %v; want it chained to %q", s.ID, s.Needs, prev)
+		}
+	}
+}
+
+// Nested 100-by-100 one-leaf loops reach exactly MaxExpandedSteps steps and
+// keep both chains: inner iterations within an outer iteration, and each
+// outer iteration's first leaf after the previous one's last.
+func TestApplyLoops_NestedLoopsAtLimitCook(t *testing.T) {
+	steps := []*Step{{ID: "outer", Loop: &LoopSpec{Count: 100, Body: []*Step{
+		{ID: "inner", Loop: &LoopSpec{Count: 100, Body: []*Step{{ID: "leaf"}}}},
+	}}}}
+	budget := NewExpansionBudget(steps)
+	result, err := ApplyLoopsWithBudget(steps, budget)
+	if err != nil {
+		t.Fatalf("ApplyLoopsWithBudget at exactly the limit: %v", err)
+	}
+	if len(result) != MaxExpandedSteps || budget.Used() != MaxExpandedSteps {
+		t.Fatalf("ApplyLoopsWithBudget = %d steps, budget %d; want %d of each", len(result), budget.Used(), MaxExpandedSteps)
+	}
+	byID := make(map[string]*Step, len(result))
+	for _, s := range result {
+		byID[s.ID] = s
+	}
+	leaf := func(o, i int) string { return fmt.Sprintf("outer.iter%d.inner.iter%d.leaf", o, i) }
+	for o := 1; o <= 100; o++ {
+		for i := 1; i <= 100; i++ {
+			s := byID[leaf(o, i)]
+			if s == nil {
+				t.Fatalf("missing %s", leaf(o, i))
+			}
+			var want string
+			switch {
+			case i > 1:
+				want = leaf(o, i-1)
+			case o > 1:
+				want = leaf(o-1, 100)
+			default:
+				continue
+			}
+			if !slicesContains(s.Needs, want) {
+				t.Fatalf("%s needs %v; want %q", s.ID, s.Needs, want)
+			}
+		}
+	}
+}
+
+func slicesContains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// loopIteration finds exactly the iterations the old per-iteration prefix
+// probe did: "{loop}.iter{N}." with N as %d writes it, within 1..count.
+func TestLoopIterationMatchesTheIterationPrefix(t *testing.T) {
+	const count = 20
+	for _, id := range []string{
+		"L.iter1.a", "L.iter12.a", "L.iter20.a.b", "L.iter01.a", "L.iter21.a", "L.iter0.a",
+		"L.iter1", "L.iter.a", "L.iterx.a", "L.iter-1.a", "L.iter+1.a", "Lx.iter1.a", "M.iter1.a", "L.iter1x.a",
+	} {
+		want := 0
+		for iter := 1; iter <= count; iter++ {
+			if strings.HasPrefix(id, fmt.Sprintf("L.iter%d.", iter)) {
+				want = iter
+				break
+			}
+		}
+		got, ok := loopIteration(id, "L", count)
+		if !ok {
+			got = 0
+		}
+		if got != want {
+			t.Errorf("loopIteration(%q) = %d, %v; want %d", id, got, ok, want)
+		}
 	}
 }
