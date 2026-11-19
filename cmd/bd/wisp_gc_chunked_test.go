@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -462,6 +464,256 @@ func TestWispGCReportsOneAggregateResult(t *testing.T) {
 		t.Errorf("dependencies_removed missing from the partial-failure object: %v", obj)
 	}
 	assertExportBookkeeping(t, wispPurgeIDs(200), wispPurgeIDs(450)[200:])
+}
+
+// wispGCAgeProxiedProvider is the proxied route's unit-of-work provider for
+// the age GC: every NewUOW opens a unit of work, the abandoned-wisp scan
+// reads through one, and each bounded deletion chunk is one more. Only a unit
+// of work that commits applies its deletions.
+type wispGCAgeProxiedProvider struct {
+	wisps   []*types.Issue
+	deleted map[string]bool
+	// units is every unit of work opened, in order.
+	units []*wispGCAgeProxiedUOW
+	// fail, when it returns an error, refuses a DeleteIssues call.
+	fail func(ids []string) error
+}
+
+func (p *wispGCAgeProxiedProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
+	u := &wispGCAgeProxiedUOW{p: p}
+	p.units = append(p.units, u)
+	return u, nil
+}
+
+func (p *wispGCAgeProxiedProvider) Close(context.Context) error { return nil }
+
+// deletionUnits is the units of work that asked to delete, in order.
+func (p *wispGCAgeProxiedProvider) deletionUnits() []*wispGCAgeProxiedUOW {
+	var out []*wispGCAgeProxiedUOW
+	for _, u := range p.units {
+		if u.params != nil {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+type wispGCAgeProxiedUOW struct {
+	uow.UnitOfWork
+	p         *wispGCAgeProxiedProvider
+	params    *domain.DeleteIssuesParams
+	committed bool
+}
+
+func (u *wispGCAgeProxiedUOW) Close(context.Context) {}
+
+func (u *wispGCAgeProxiedUOW) Commit(_ context.Context, _ string) error {
+	u.committed = true
+	if u.params != nil {
+		for _, id := range u.params.IDs {
+			u.p.deleted[id] = true
+		}
+	}
+	return nil
+}
+
+func (u *wispGCAgeProxiedUOW) IssueUseCase() domain.IssueUseCase {
+	return wispGCAgeProxiedIssues{u: u}
+}
+
+func (u *wispGCAgeProxiedUOW) ConfigUseCase() domain.ConfigUseCase {
+	return wispGCAgeProxiedConfig{}
+}
+
+type wispGCAgeProxiedIssues struct {
+	domain.IssueUseCase
+	u *wispGCAgeProxiedUOW
+}
+
+func (s wispGCAgeProxiedIssues) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) (domain.SearchPage, error) {
+	var page domain.SearchPage
+	for _, w := range s.u.p.wisps {
+		if s.u.p.deleted[w.ID] {
+			continue
+		}
+		if filter.Limit > 0 && len(page.Items) == filter.Limit {
+			page.HasMore = true
+			break
+		}
+		page.Items = append(page.Items, w)
+	}
+	return page, nil
+}
+
+func (wispGCAgeProxiedIssues) GetBlockedIssues(context.Context, types.WorkFilter) ([]*types.BlockedIssue, error) {
+	return nil, nil
+}
+
+func (wispGCAgeProxiedIssues) FindWispDependentsRecursive(context.Context, []string) (map[string]bool, error) {
+	return nil, nil
+}
+
+func (s wispGCAgeProxiedIssues) GetIssuesByIDs(_ context.Context, ids []string) ([]*types.Issue, error) {
+	var out []*types.Issue
+	for _, id := range ids {
+		for _, w := range s.u.p.wisps {
+			if w.ID == id && !s.u.p.deleted[id] {
+				out = append(out, w)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s wispGCAgeProxiedIssues) DeleteIssues(_ context.Context, params domain.DeleteIssuesParams, _ string) (domain.DeleteIssuesResult, error) {
+	s.u.params = &params
+	if s.u.p.fail != nil {
+		if err := s.u.p.fail(params.IDs); err != nil {
+			return domain.DeleteIssuesResult{}, err
+		}
+	}
+	return domain.DeleteIssuesResult{
+		DeletedCount:      len(params.IDs),
+		DependenciesCount: len(params.IDs),
+		LabelsCount:       2 * len(params.IDs),
+		EventsCount:       3 * len(params.IDs),
+		ReferencesUpdated: 1,
+		DeletedIDs:        slices.Clone(params.IDs),
+	}, nil
+}
+
+type wispGCAgeProxiedConfig struct {
+	domain.ConfigUseCase
+}
+
+func (wispGCAgeProxiedConfig) IsInfraTypeCtx(context.Context, types.IssueType) (bool, error) {
+	return false, nil
+}
+
+func (wispGCAgeProxiedConfig) GetCustomStatuses(context.Context) ([]types.CustomStatus, error) {
+	return nil, nil
+}
+
+// useWispGCAgeProxied installs a proxied provider holding n open ephemeral
+// wisps, all abandoned under --age 0.
+func useWispGCAgeProxied(t *testing.T, n int) *wispGCAgeProxiedProvider {
+	t.Helper()
+	ensureCleanGlobalState(t)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BEADS_DIR", t.TempDir())
+
+	oldProvider, oldJSON, oldQuiet, oldActor := uowProvider, jsonOutput, quietFlag, actor
+	t.Cleanup(func() {
+		uowProvider, jsonOutput, quietFlag, actor = oldProvider, oldJSON, oldQuiet, oldActor
+	})
+	ids := wispPurgeIDs(n)
+	wisps := make([]*types.Issue, n)
+	for i := range wisps {
+		wisps[i] = &types.Issue{
+			ID:        ids[i],
+			Title:     "abandoned proxied wisp",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+			UpdatedAt: time.Now().Add(-2 * time.Hour),
+		}
+	}
+	p := &wispGCAgeProxiedProvider{wisps: wisps, deleted: map[string]bool{}}
+	uowProvider, jsonOutput, quietFlag, actor = p, false, false, "test"
+	return p
+}
+
+// TestWispGCAgeProxiedBoundsEachUnitOfWork pins the proxied half of the age
+// GC's bounded transactions (GH#6246): every deletion unit of work carries at
+// most 200 of the selected ids, uncascaded, with reference rewriting on, and
+// a deterministic second-unit failure stops further units while the first
+// unit's confirmed progress stays deleted and stays counted in the one JSON
+// answer, under the keys the proxied route has always printed.
+func TestWispGCAgeProxiedBoundsEachUnitOfWork(t *testing.T) {
+	runForced := func() error {
+		return runWispGCAgeProxiedServer(context.Background(), false, 0, false, nil)
+	}
+
+	t.Run("success", func(t *testing.T) {
+		p := useWispGCAgeProxied(t, 450)
+		jsonOutput = true
+
+		stdout, stderr, err := captureWispGC(t, runForced)
+		if err != nil {
+			t.Fatalf("runWispGCAgeProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		units := p.deletionUnits()
+		var sizes []int
+		var sent []string
+		for i, u := range units {
+			sizes = append(sizes, len(u.params.IDs))
+			sent = append(sent, u.params.IDs...)
+			if u.params.Cascade || !u.params.UpdateTextReferences || !u.committed {
+				t.Errorf("unit %d: Cascade %v UpdateTextReferences %v committed %v, want uncascaded, rewriting references, committed",
+					i, u.params.Cascade, u.params.UpdateTextReferences, u.committed)
+			}
+		}
+		if want := []int{200, 200, 50}; !slices.Equal(sizes, want) {
+			t.Fatalf("deletion unit sizes = %v, want %v (one 450-id unit of work is one transaction)", sizes, want)
+		}
+		if !slices.Equal(sent, wispPurgeIDs(450)) {
+			t.Error("deletion units did not carry the selection once each in selection order")
+		}
+		if len(p.deleted) != 450 {
+			t.Errorf("%d wisps deleted, want 450", len(p.deleted))
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if got := obj["deleted_count"]; got != float64(450) {
+			t.Errorf("deleted_count = %v, want 450", got)
+		}
+		if got := obj["references_updated"]; got != float64(3) {
+			t.Errorf("references_updated = %v, want 3 (one per unit, summed)", got)
+		}
+		if _, ok := obj["deleted_ids"]; ok {
+			t.Error("proxied answer gained deleted_ids, which that route has never printed")
+		}
+	})
+
+	t.Run("second unit fails", func(t *testing.T) {
+		p := useWispGCAgeProxied(t, 450)
+		jsonOutput = true
+		boom := fmt.Errorf("injected proxied deletion failure")
+		p.fail = func(ids []string) error {
+			if slices.Contains(ids, wispPurgeIDs(450)[250]) {
+				return boom
+			}
+			return nil
+		}
+
+		stdout, _, err := captureWispGC(t, runForced)
+		if err == nil || !isReportedExit(err) {
+			t.Fatalf("error = %v, want an already-reported nonzero exit\nstdout:\n%s", err, stdout)
+		}
+		units := p.deletionUnits()
+		if len(units) != 2 {
+			t.Fatalf("opened %d deletion units, want 2 (none after the failed one)", len(units))
+		}
+		if units[1].committed {
+			t.Error("the failed unit of work committed")
+		}
+		if len(p.deleted) != 200 {
+			t.Errorf("%d wisps deleted, want the first unit's 200", len(p.deleted))
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if got := obj["deleted_count"]; got != float64(200) {
+			t.Errorf("deleted_count = %v, want 200 (the failed unit's counts are not published)", got)
+		}
+		if got := obj["unconfirmed_count"]; got != float64(250) {
+			t.Errorf("unconfirmed_count = %v, want 250", got)
+		}
+		if got, _ := obj["error"].(string); !containsAll(got, boom.Error()) {
+			t.Errorf("error = %q, want the cause", got)
+		}
+		if _, ok := obj["deleted_ids"]; ok {
+			t.Error("proxied answer gained deleted_ids, which that route has never printed")
+		}
+	})
 }
 
 // containsAll reports whether s contains every want as a substring.
