@@ -32,6 +32,10 @@ import (
 // the idle window, the watcher stops it through the `bd dolt stop` path, and
 // the next bd command auto-starts it as before.
 //
+// A server started explicitly (`bd dolt start`, `bd dolt restart`) gets no
+// watcher, and Start cancels the watcher of an auto-started server it adopts,
+// so an explicitly started server stays up as it always has.
+//
 // All watcher state lives under <serverDir>/dolt-server.activity/, a name the
 // shipped .gitignore template already ignores:
 //
@@ -146,6 +150,24 @@ func clearIdleWatchRecords(serverDir string) {
 			debug.Logf("idle watch: removing %s: %v", p, err)
 		}
 	}
+}
+
+// readWatcherRecord parses watcher.pid. ok is false when it is missing or
+// unreadable.
+func readWatcherRecord(serverDir string) (pid int, timeout time.Duration, ok bool) {
+	b, err := os.ReadFile(watcherPIDPath(serverDir)) //nolint:gosec // G304: path under bd's own server dir
+	if err != nil {
+		return 0, 0, false
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	pid, err = strconv.Atoi(strings.TrimSpace(lines[0]))
+	if err != nil || pid <= 0 {
+		return 0, 0, false
+	}
+	if len(lines) > 1 {
+		timeout, _ = time.ParseDuration(strings.TrimSpace(lines[1]))
+	}
+	return pid, timeout, true
 }
 
 // readPIDFile returns the PID dolt-server.pid names, or 0.
@@ -307,6 +329,9 @@ const (
 	// IdleWatchServerGone: the server stopped, or another server replaced
 	// it, by other means.
 	IdleWatchServerGone
+	// IdleWatchSuperseded: watcher.pid no longer names this watcher (an
+	// explicit start adopted the server, or a newer watcher took over).
+	IdleWatchSuperseded
 )
 
 func (o IdleWatchOutcome) String() string {
@@ -315,6 +340,8 @@ func (o IdleWatchOutcome) String() string {
 		return "reaped"
 	case IdleWatchServerGone:
 		return "server-gone"
+	case IdleWatchSuperseded:
+		return "superseded"
 	default:
 		return "canceled"
 	}
@@ -324,6 +351,7 @@ func (o IdleWatchOutcome) String() string {
 // fields so tests can drive it without waiting.
 type idleWatcher struct {
 	opts       IdleWatchOpts
+	self       int
 	now        func() time.Time
 	sleep      func(context.Context, time.Duration) error
 	readStatus func(ctx context.Context, host string, port int) (serverStatus, error)
@@ -344,6 +372,7 @@ func newIdleWatcher(opts IdleWatchOpts) *idleWatcher {
 	}
 	return &idleWatcher{
 		opts:       opts,
+		self:       os.Getpid(),
 		now:        time.Now,
 		sleep:      sleepCtx,
 		readStatus: readServerStatus,
@@ -365,7 +394,9 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // RunIdleWatch watches the auto-started server opts names and stops it once
-// it has been idle for opts.Timeout.
+// it has been idle for opts.Timeout. It returns without acting once an
+// explicit start cancels the watcher (watcher.pid no longer names this
+// process).
 func RunIdleWatch(ctx context.Context, opts IdleWatchOpts) (IdleWatchOutcome, error) {
 	if opts.ServerDir == "" || opts.PID <= 0 || opts.Port <= 0 || opts.Timeout <= 0 {
 		return IdleWatchCanceled, fmt.Errorf("idle watch: server dir, PID, port and a positive timeout are required")
@@ -384,6 +415,9 @@ func (w *idleWatcher) run(ctx context.Context) (IdleWatchOutcome, error) {
 
 	w.tracker = newIdleTracker(w.opts.Timeout, w.now())
 	for {
+		if w.superseded() {
+			return IdleWatchSuperseded, nil
+		}
 		now := w.now()
 		w.tracker.observe(now, w.sample(ctx))
 		if w.tracker.idle(now) {
@@ -396,6 +430,12 @@ func (w *idleWatcher) run(ctx context.Context) (IdleWatchOutcome, error) {
 			return IdleWatchCanceled, nil
 		}
 	}
+}
+
+// superseded reports whether watcher.pid no longer names this watcher.
+func (w *idleWatcher) superseded() bool {
+	pid, _, ok := readWatcherRecord(w.opts.ServerDir)
+	return !ok || pid != w.self
 }
 
 // serverGone reports whether the watched server stopped or was replaced.
@@ -424,6 +464,9 @@ func (w *idleWatcher) reap(ctx context.Context) (outcome IdleWatchOutcome, done 
 
 	if w.serverGone() {
 		return IdleWatchServerGone, true, nil
+	}
+	if w.superseded() {
+		return IdleWatchSuperseded, true, nil
 	}
 	if err := ensureActivityDir(serverDir); err != nil {
 		return IdleWatchCanceled, true, err

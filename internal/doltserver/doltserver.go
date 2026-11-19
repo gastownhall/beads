@@ -1876,7 +1876,13 @@ func Start(beadsDir string) (*State, error) {
 		return nil, err
 	}
 	defer releaseLifecycleLock(lockF)
-	return startLocked(beadsDir)
+	state, err := startLocked(beadsDir)
+	if err == nil {
+		// An explicitly started server is never stopped for idleness: cancel
+		// the watcher of an auto-started server this start adopted.
+		clearIdleWatchRecords(beadsDir)
+	}
+	return state, err
 }
 
 func startLocked(beadsDir string) (*State, error) {
@@ -2384,6 +2390,7 @@ func Restart(beadsDir string) (*State, error) {
 		}
 		return nil, restartErr
 	}
+	clearIdleWatchRecords(beadsDir)
 	return state, nil
 }
 
