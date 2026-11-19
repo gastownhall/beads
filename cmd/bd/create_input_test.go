@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -268,6 +269,106 @@ func TestIsAmbiguousRepoTarget(t *testing.T) {
 			got := isAmbiguousRepoTarget(tt.flagChanged, tt.repoOverride)
 			if got != tt.wantAmbiguous {
 				t.Errorf("isAmbiguousRepoTarget(%v, %q) = %v, want %v", tt.flagChanged, tt.repoOverride, got, tt.wantAmbiguous)
+			}
+		})
+	}
+}
+
+// newCreateTypeHintCommand clones the flags validateCreateArgs reads, keeping
+// --type's -t shorthand: the mistake the hint names is typed as -t.
+func newCreateTypeHintCommand(t *testing.T, args ...string) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "create [title]"}
+	for _, name := range []string{"title", "file", "graph", "type"} {
+		f := createCmd.Flags().Lookup(name)
+		if f == nil {
+			t.Fatalf("create does not register --%s", name)
+		}
+		cmd.Flags().StringP(f.Name, f.Shorthand, f.DefValue, f.Usage)
+	}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("parse %v: %v", args, err)
+	}
+	return cmd
+}
+
+// TestCreateTypeHint pins GH#5787 issue 1: -t is --type's shorthand, so
+// `--type=bug -t "<title>"` overrides the type with the title text and leaves
+// no title. The Args-time refusal keeps its missing-title line and names the
+// parsed type value, the shorthand and where a title goes — before any store
+// opens, so it cannot say whether a non-built-in value is a custom type.
+func TestCreateTypeHint(t *testing.T) {
+	if f := createCmd.Flags().ShorthandLookup("t"); f == nil || f.Name != "type" {
+		t.Fatalf("-t no longer binds --type (got %v); revisit the hint", f)
+	}
+	const mistaken = "a long human title with spaces"
+
+	validate := func(t *testing.T, positional []string, flags ...string) (string, error) {
+		t.Helper()
+		cmd := newCreateTypeHintCommand(t, flags...)
+		var err error
+		stderr := captureStderr(t, func() { err = validateCreateArgs(cmd, positional) })
+		return stderr, err
+	}
+
+	hinted := []struct {
+		name  string
+		flags []string
+	}{
+		{"repeated type", []string{"--type=bug", "-t", mistaken}},
+		{"single short type", []string{"-t", mistaken}},
+		{"custom-looking name", []string{"--type", "incident"}},
+	}
+	for _, tc := range hinted {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr, err := validate(t, nil, tc.flags...)
+			if err == nil {
+				t.Fatalf("validateCreateArgs accepted %v with no title", tc.flags)
+			}
+			value := tc.flags[len(tc.flags)-1]
+			for _, want := range []string{
+				"title required",
+				fmt.Sprintf("--type is %q", value),
+				"-t is short for --type, not --title",
+				"--title",
+			} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr)
+				}
+			}
+			if strings.Contains(stderr, "invalid issue type") {
+				t.Errorf("Args-time hint must not declare the type invalid (custom types are unknowable before the store opens):\n%s", stderr)
+			}
+		})
+	}
+
+	unhinted := []struct {
+		name       string
+		positional []string
+		flags      []string
+		wantErr    string
+	}{
+		{"default type", nil, nil, "title required"},
+		{"built-in type", nil, []string{"--type", "bug"}, "title required"},
+		{"alias type", nil, []string{"-t", "feat"}, "title required"},
+		{"whitespace title", nil, []string{"--title", "   ", "-t", mistaken}, "title cannot be empty"},
+		{"flag title", nil, []string{"--title", "real", "-t", mistaken}, ""},
+		{"positional title", []string{"real"}, []string{"-t", mistaken}, ""},
+		{"file", nil, []string{"--file", "x.md", "-t", mistaken}, ""},
+		{"graph", nil, []string{"--graph", "x.json", "-t", mistaken}, ""},
+	}
+	for _, tc := range unhinted {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr, err := validate(t, tc.positional, tc.flags...)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateCreateArgs refused %v %v: %v\n%s", tc.positional, tc.flags, err, stderr)
+				}
+			} else if err == nil || !strings.Contains(stderr, tc.wantErr) {
+				t.Fatalf("want %q refusal, got err=%v stderr=%q", tc.wantErr, err, stderr)
+			}
+			if strings.Contains(stderr, "short for --type") {
+				t.Errorf("unexpected -t hint:\n%s", stderr)
 			}
 		})
 	}
