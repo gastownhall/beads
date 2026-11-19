@@ -408,6 +408,8 @@ for the watcher; a lease whose process has died does not count). When it is
 stopped,
 `dolt-server.log` gets a line saying so. The watcher's own files live in
 `.beads/dolt-server.activity/`.
+When the server stops some other way (`bd dolt stop`, a crash, a restart that
+replaces it), the watcher notices within 5 seconds and exits without acting.
 
 Idle stop applies only to a server bd started on a port it chose itself. It
 never applies to an external server, a shared server, a server on a pinned

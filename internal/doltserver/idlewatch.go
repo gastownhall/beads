@@ -57,8 +57,11 @@ const (
 	reapingMarkerName  = "reaping"
 	clientLeasePrefix  = "client-"
 
-	minIdlePollEvery = time.Second
-	maxIdlePollEvery = 5 * time.Minute
+	// idleWatchLivenessEvery bounds how long a watcher outlives its server
+	// when something else stops it.
+	idleWatchLivenessEvery = 5 * time.Second
+	minIdlePollEvery       = time.Second
+	maxIdlePollEvery       = 5 * time.Minute
 )
 
 func activityDir(serverDir string) string { return filepath.Join(serverDir, activityDirName) }
@@ -404,8 +407,9 @@ type idleWatcher struct {
 	alive      func(int) bool
 	stop       func(serverDir string) error
 
-	pollEvery time.Duration
-	tracker   *idleTracker
+	livenessEvery time.Duration
+	pollEvery     time.Duration
+	tracker       *idleTracker
 }
 
 func newIdleWatcher(opts IdleWatchOpts) *idleWatcher {
@@ -416,15 +420,20 @@ func newIdleWatcher(opts IdleWatchOpts) *idleWatcher {
 	if poll > maxIdlePollEvery {
 		poll = maxIdlePollEvery
 	}
+	liveness := idleWatchLivenessEvery
+	if poll < liveness {
+		liveness = poll
+	}
 	return &idleWatcher{
-		opts:       opts,
-		self:       os.Getpid(),
-		now:        time.Now,
-		sleep:      sleepCtx,
-		readStatus: readServerStatus,
-		alive:      isProcessAlive,
-		stop:       stopLocked,
-		pollEvery:  poll,
+		opts:          opts,
+		self:          os.Getpid(),
+		now:           time.Now,
+		sleep:         sleepCtx,
+		readStatus:    readServerStatus,
+		alive:         isProcessAlive,
+		stop:          stopLocked,
+		livenessEvery: liveness,
+		pollEvery:     poll,
 	}
 }
 
@@ -440,9 +449,9 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // RunIdleWatch watches the auto-started server opts names and stops it once
-// it has been idle for opts.Timeout. It returns without acting once an
-// explicit start cancels the watcher (watcher.pid no longer names this
-// process).
+// it has been idle for opts.Timeout. It returns without acting as soon as
+// the server stops or is replaced by other means, or an explicit start
+// cancels the watcher (watcher.pid no longer names this process).
 func RunIdleWatch(ctx context.Context, opts IdleWatchOpts) (IdleWatchOutcome, error) {
 	if opts.ServerDir == "" || opts.PID <= 0 || opts.Port <= 0 || opts.Timeout <= 0 {
 		return IdleWatchCanceled, fmt.Errorf("idle watch: server dir, PID, port and a positive timeout are required")
@@ -460,22 +469,40 @@ func (w *idleWatcher) run(ctx context.Context) (IdleWatchOutcome, error) {
 	releaseLifecycleLock(lockF)
 
 	w.tracker = newIdleTracker(w.opts.Timeout, w.now())
+	// Liveness is checked every few seconds, the status poll only every
+	// pollEvery, so a server stopped some other way is noticed quickly.
+	var lastPoll time.Time
 	for {
-		if w.superseded() {
-			return IdleWatchSuperseded, nil
+		if outcome, done := w.liveness(); done {
+			return outcome, nil
 		}
 		now := w.now()
-		w.tracker.observe(now, w.sample(ctx))
-		if w.tracker.idle(now) {
-			outcome, done, err := w.reap(ctx)
-			if done || err != nil {
-				return outcome, err
+		if lastPoll.IsZero() || now.Sub(lastPoll) >= w.pollEvery {
+			lastPoll = now
+			w.tracker.observe(now, w.sample(ctx))
+			if w.tracker.idle(now) {
+				outcome, done, err := w.reap(ctx)
+				if done || err != nil {
+					return outcome, err
+				}
 			}
 		}
-		if err := w.sleep(ctx, w.pollEvery); err != nil {
+		if err := w.sleep(ctx, w.livenessEvery); err != nil {
 			return IdleWatchCanceled, nil
 		}
 	}
+}
+
+// liveness reports whether the watcher should exit without acting: its
+// server stopped or was replaced, or watcher.pid no longer names it.
+func (w *idleWatcher) liveness() (IdleWatchOutcome, bool) {
+	if w.serverGone() {
+		return IdleWatchServerGone, true
+	}
+	if w.superseded() {
+		return IdleWatchSuperseded, true
+	}
+	return 0, false
 }
 
 // superseded reports whether watcher.pid no longer names this watcher.
@@ -508,11 +535,8 @@ func (w *idleWatcher) reap(ctx context.Context) (outcome IdleWatchOutcome, done 
 	}
 	defer releaseLifecycleLock(lockF)
 
-	if w.serverGone() {
-		return IdleWatchServerGone, true, nil
-	}
-	if w.superseded() {
-		return IdleWatchSuperseded, true, nil
+	if outcome, gone := w.liveness(); gone {
+		return outcome, true, nil
 	}
 	if err := ensureActivityDir(serverDir); err != nil {
 		return IdleWatchCanceled, true, err
