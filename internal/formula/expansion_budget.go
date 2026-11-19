@@ -17,8 +17,19 @@ import (
 // resolution allocates: long titles or descriptions are not counted.
 const MaxExpandedSteps = 10000
 
-// ErrExpansionLimit is wrapped by every refusal of an ExpansionBudget.
+// ErrExpansionLimit is wrapped by every refusal of an ExpansionBudget. A
+// refusal wraps ErrValidation too: the formula exists but cannot be resolved
+// as written, so callers that fall back to other lookups for a missing
+// formula report it instead.
 var ErrExpansionLimit = errors.New("formula expansion limit exceeded")
+
+// expansionLimitError is a budget refusal; it matches both ErrExpansionLimit
+// and ErrValidation.
+type expansionLimitError struct{ msg string }
+
+func (e *expansionLimitError) Error() string { return e.msg }
+
+func (e *expansionLimitError) Unwrap() []error { return []error{ErrExpansionLimit, ErrValidation} }
 
 // ExpansionBudget meters the steps of one formula resolution against
 // MaxExpandedSteps. It counts the current logical graph: every step, its
@@ -63,8 +74,8 @@ func (b *ExpansionBudget) remaining() int {
 
 // limitError names what would have crossed the limit.
 func (b *ExpansionBudget) limitError(what string) error {
-	return fmt.Errorf("%w: %s would grow the formula past the %d-step limit; split it into smaller formulas",
-		ErrExpansionLimit, what, b.limit)
+	return &expansionLimitError{msg: fmt.Sprintf("%s: %s would grow the formula past the %d-step limit; split it into smaller formulas",
+		ErrExpansionLimit, what, b.limit)}
 }
 
 // reserve charges n steps, or refuses without charging when they do not fit.
