@@ -292,7 +292,19 @@ func isFallbackCandidate(db serverDatabaseMetadata) bool {
 // effective database is current, from the server catalog databases. It
 // returns the selected database, nil and nil when there is no repair to
 // make, or an error (a SkipError when selection is unsafe) explaining why it
-// will not choose. It never chooses by enumeration order.
+// will not choose. It never chooses by enumeration order. In order:
+//
+//   - a local project_id carried by one candidate selects it, unless the
+//     current database has schema and another identity (an error); carried
+//     by several, it is an error;
+//   - a current database with Beads schema is kept (no repair);
+//   - with no candidates there is no repair;
+//   - a local project_id no candidate carries is a skip;
+//   - with no local project_id: a skip in shared-server mode, the sole
+//     candidate on the workspace's own server (GH#2160), else a skip.
+//
+// Candidates are the databases other than current that pass
+// isFallbackCandidate.
 func selectFallbackDoltDatabase(localID, current string, shared bool, databases []serverDatabaseMetadata) (*serverDatabaseMetadata, error) {
 	var currentDB *serverDatabaseMetadata
 	var candidates []serverDatabaseMetadata
@@ -354,6 +366,12 @@ func selectFallbackDoltDatabase(localID, current string, shared bool, databases 
 		}
 	}
 
+	// The database bd opens today already has Beads schema: whatever else
+	// is wrong with it, another schema database is no reason to move the
+	// workspace. Only an exact project_id match (above) outranks it.
+	if currentDB != nil && currentDB.HasSchema {
+		return nil, nil
+	}
 	if len(candidates) == 0 {
 		return nil, nil
 	}

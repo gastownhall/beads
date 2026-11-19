@@ -881,6 +881,22 @@ func TestFixMissingDoltDatabase_SaveErrorPropagates(t *testing.T) {
 	ws.assertUnchanged(t)
 }
 
+// TestFixMissingDoltDatabase_KeepsCurrentSchemaDatabase pins that the
+// fallback never moves a workspace off a database that already has Beads
+// schema: with dolt_database unset, the default database is the one bd
+// opens, and another schema database on the server is no reason to leave it.
+func TestFixMissingDoltDatabase_KeepsCurrentSchemaDatabase(t *testing.T) {
+	ws := newFallbackWorkspace(t, false, "", []serverDatabaseMetadata{
+		{Name: configfile.DefaultDoltDatabase, HasSchema: true},
+		{Name: "other_project", HasSchema: true, ProjectID: "other-proj-id"},
+	})
+	if err := FixMissingDoltDatabase(ws.dir); err != nil {
+		t.Fatalf("FixMissingDoltDatabase = %v, want nil", err)
+	}
+	ws.assertUnchanged(t)
+	ws.assertFallbackRead(t)
+}
+
 // fallbackCase is one row of TestSelectFallbackDoltDatabase.
 type fallbackCase struct {
 	name      string
@@ -973,6 +989,34 @@ var fallbackCases = []fallbackCase{
 		wantSkip: true,
 		wantErr:  []string{"alpha, zeta"},
 		notInErr: []string{"doctest_1"},
+	},
+	{
+		name:    "current database with schema and no identity is kept",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads", HasSchema: true},
+			{Name: "other", HasSchema: true, ProjectID: "other-id"},
+		},
+	},
+	{
+		name:    "current database with schema is kept over unmatched candidates",
+		localID: "proj-id",
+		current: "beads",
+		shared:  true,
+		databases: []serverDatabaseMetadata{
+			{Name: "beads", HasSchema: true},
+			{Name: "other", HasSchema: true, ProjectID: "other-id"},
+		},
+	},
+	{
+		name:    "exact match outranks a current schema database without identity",
+		localID: "proj-id",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads", HasSchema: true},
+			{Name: "mine", HasSchema: true, ProjectID: "proj-id"},
+		},
+		wantName: "mine",
 	},
 	{
 		name:    "current database chosen by the environment is not a candidate",
