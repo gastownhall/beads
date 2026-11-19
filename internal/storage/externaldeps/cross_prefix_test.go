@@ -2,11 +2,13 @@ package externaldeps
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // crossPrefixRig is a routed rig for the GH#4647 tests: the store a fake
@@ -105,5 +107,64 @@ func TestCrossPrefixBlockerExcludesSourceUntilTargetClosedOrPinned(t *testing.T)
 				t.Fatalf("source store writes: closed %v, claimed %v; want only the one claim", raw.closed, raw.claimed)
 			}
 		})
+	}
+}
+
+// TestCrossPrefixBlockerBlocksInspectionCloseAndClaim (GH#4647, AC-5): an
+// open routed cross-prefix blocker is named by blocked inspection and refuses
+// an unforced close or claim of its source; a forced close goes through.
+func TestCrossPrefixBlockerBlocksInspectionCloseAndClaim(t *testing.T) {
+	src := issue("hq-src")
+	target := issue("gt-target")
+	lifecycle := &fakeLifecycle{}
+	raw := &fakeStore{
+		ready:     []*types.Issue{src},
+		lifecycle: lifecycle,
+		deps:      map[string][]*types.Dependency{src.ID: {externalDep(src.ID, target.ID, types.DepBlocks)}},
+	}
+	rig := &crossPrefixRig{store: &fakeStore{ready: []*types.Issue{target}}}
+	store, _ := crossPrefixStore(raw, rig)
+
+	blocked, blockers, err := store.IsBlocked(t.Context(), src.ID)
+	if err != nil || !blocked || !slices.Equal(blockers, []string{target.ID}) {
+		t.Fatalf("IsBlocked = %v, %v, %v; want true, [%s]", blocked, blockers, err, target.ID)
+	}
+	batch, err := store.IsBlockedBatch(t.Context(), []string{src.ID})
+	if err != nil || !batch[src.ID] {
+		t.Fatalf("IsBlockedBatch = %v, %v; want %s blocked", batch, err, src.ID)
+	}
+	listed, err := store.GetBlockedIssues(t.Context(), types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != src.ID || !slices.Equal(listed[0].BlockedBy, []string{target.ID}) {
+		t.Fatalf("GetBlockedIssues = %+v, want %s blocked by [%s]", listed, src.ID, target.ID)
+	}
+
+	if _, err := store.CloseIssueChecked(t.Context(), src.ID, "tester", storage.CloseIssueOptions{}); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("CloseIssueChecked error = %v, want ErrCloseBlocked", err)
+	}
+	ops, err := store.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle: %v", err)
+	}
+	if _, err := ops.Close(t.Context(), publicops.CloseRequest{IssueID: src.ID}); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("lifecycle Close error = %v, want ErrCloseBlocked", err)
+	}
+	if _, err := ops.Update(t.Context(), publicops.UpdateRequest{IssueID: src.ID, Claim: true}); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("lifecycle claim error = %v, want ErrCloseBlocked", err)
+	}
+	if lifecycle.closed != 0 || lifecycle.updated != 0 || len(raw.closed) != 0 {
+		t.Fatalf("unforced writes reached the store: lifecycle close %d update %d, raw close %v", lifecycle.closed, lifecycle.updated, raw.closed)
+	}
+
+	if _, err := ops.Close(t.Context(), publicops.CloseRequest{IssueID: src.ID, Force: true}); err != nil {
+		t.Fatalf("forced lifecycle Close: %v", err)
+	}
+	if _, err := store.CloseIssueChecked(t.Context(), src.ID, "tester", storage.CloseIssueOptions{Force: true}); err != nil {
+		t.Fatalf("forced CloseIssueChecked: %v", err)
+	}
+	if lifecycle.closed != 1 || !slices.Equal(raw.closed, []string{src.ID}) {
+		t.Fatalf("forced closes: lifecycle %d, raw %v; want one each", lifecycle.closed, raw.closed)
 	}
 }
