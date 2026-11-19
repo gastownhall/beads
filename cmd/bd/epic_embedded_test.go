@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -52,6 +53,85 @@ func bdEpicJSON(t *testing.T, bd, dir string, args ...string) interface{} {
 	return result
 }
 
+// epicStatusBlocks splits human `bd epic status` output into one block per
+// epic, keyed by the epic ID on the block's header line. It fails the test if
+// an ID heads more than one block.
+func epicStatusBlocks(t *testing.T, out string, ids ...string) map[string]string {
+	t.Helper()
+	blocks := map[string]string{}
+	for _, block := range strings.Split(strings.TrimSpace(out), "\n\n") {
+		header, _, _ := strings.Cut(strings.TrimSpace(block), "\n")
+		for _, id := range ids {
+			if !strings.Contains(" "+header+" ", " "+id+" ") {
+				continue
+			}
+			if _, dup := blocks[id]; dup {
+				t.Errorf("epic %s listed more than once:\n%s", id, out)
+			}
+			blocks[id] = block
+		}
+	}
+	return blocks
+}
+
+// epicStatusByID indexes `bd epic status --json` rows by epic ID and fails
+// the test if an epic appears more than once.
+func epicStatusByID(t *testing.T, rows []*types.EpicStatus) map[string]*types.EpicStatus {
+	t.Helper()
+	byID := map[string]*types.EpicStatus{}
+	for _, es := range rows {
+		if es == nil || es.Epic == nil {
+			t.Errorf("epic status row without an epic: %+v", es)
+			continue
+		}
+		if _, dup := byID[es.Epic.ID]; dup {
+			t.Errorf("epic %s listed more than once", es.Epic.ID)
+		}
+		byID[es.Epic.ID] = es
+	}
+	return byID
+}
+
+// assertEpicRow checks one epic's counts and eligibility verdict.
+func assertEpicRow(t *testing.T, byID map[string]*types.EpicStatus, id string, total, closed int, eligible bool) {
+	t.Helper()
+	es := byID[id]
+	if es == nil {
+		t.Errorf("epic %s missing from epic status; listed %v", id, epicRowIDs(byID))
+		return
+	}
+	if es.TotalChildren != total || es.ClosedChildren != closed || es.EligibleForClose != eligible {
+		t.Errorf("epic %s = {Total:%d Closed:%d Eligible:%v}, want {%d %d %v}",
+			id, es.TotalChildren, es.ClosedChildren, es.EligibleForClose, total, closed, eligible)
+	}
+}
+
+func epicRowIDs(byID map[string]*types.EpicStatus) []string {
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// assertZeroChildEpicBlock checks the human rendering of an epic with no
+// linked children: a 0/0 (0%) progress line and no eligibility marker.
+func assertZeroChildEpicBlock(t *testing.T, blocks map[string]string, id string) {
+	t.Helper()
+	block, ok := blocks[id]
+	if !ok {
+		t.Errorf("epic %s missing from human epic status", id)
+		return
+	}
+	if !strings.Contains(block, "Progress: 0/0 children closed (0%)") {
+		t.Errorf("epic %s block = %q, want a 0/0 children closed (0%%) progress line", id, block)
+	}
+	if strings.Contains(block, "Eligible for closure") || strings.Contains(block, "✓") {
+		t.Errorf("epic %s block = %q, want no eligibility marker", id, block)
+	}
+}
+
 // TestEmbeddedEpicStatus was split from TestEmbeddedEpic (originally ~362s,
 // measured under --config=embedded) into 3 top-level tests over disjoint
 // subtest groups, for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
@@ -78,7 +158,81 @@ func TestEmbeddedEpicStatus(t *testing.T) {
 	// c2, c2b still open — epic1 is NOT eligible
 	_ = c2b
 
+	// GH#5720 repro, in a workspace of its own: an epic with an open linked
+	// child, a childless epic, and an epic whose only "child" is a dotted-ID
+	// issue created with --id and no parent-child edge.
+	dirAll, _, _ := bdInit(t, bd, "--prefix", "epa")
+	linked := bdCreate(t, bd, dirAll, "Epic with linked child", "--type", "epic")
+	bdCreate(t, bd, dirAll, "Linked child", "--type", "task", "--parent", linked.ID)
+	childless := bdCreate(t, bd, dirAll, "Childless epic", "--type", "epic")
+	dotted := bdCreate(t, bd, dirAll, "Epic with dotted issue only", "--type", "epic")
+	dottedIssue := bdCreate(t, bd, dirAll, "Unlinked dotted issue", "--type", "task", "--id", dotted.ID+".1")
+
+	epicStatusJSON := func(t *testing.T, dir string, args ...string) map[string]*types.EpicStatus {
+		t.Helper()
+		out := bdEpic(t, bd, dir, append([]string{"status", "--json"}, args...)...)
+		var rows []*types.EpicStatus
+		if err := json.Unmarshal([]byte(out), &rows); err != nil {
+			t.Fatalf("parse epic status JSON: %v\n%s", err, out)
+		}
+		return epicStatusByID(t, rows)
+	}
+
 	// ===== epic status =====
+
+	t.Run("status_lists_every_open_epic", func(t *testing.T) {
+		byID := epicStatusJSON(t, dirAll)
+		if len(byID) != 3 {
+			t.Errorf("epic status listed %v, want exactly the 3 open epics", epicRowIDs(byID))
+		}
+		assertEpicRow(t, byID, linked.ID, 1, 0, false)
+		assertEpicRow(t, byID, childless.ID, 0, 0, false)
+		assertEpicRow(t, byID, dotted.ID, 0, 0, false)
+
+		out := bdEpic(t, bd, dirAll, "status")
+		blocks := epicStatusBlocks(t, out, linked.ID, childless.ID, dotted.ID)
+		if !strings.Contains(blocks[linked.ID], "Progress: 0/1 children closed (0%)") {
+			t.Errorf("linked epic block = %q, want 0/1 progress", blocks[linked.ID])
+		}
+		assertZeroChildEpicBlock(t, blocks, childless.ID)
+		assertZeroChildEpicBlock(t, blocks, dotted.ID)
+
+		// Closing the unlinked dotted issue changes nothing: it is not a
+		// child, so it is neither counted nor makes its epic eligible.
+		bdClose(t, bd, dirAll, dottedIssue.ID)
+		byID = epicStatusJSON(t, dirAll)
+		assertEpicRow(t, byID, dotted.ID, 0, 0, false)
+		assertEpicRow(t, byID, childless.ID, 0, 0, false)
+		assertZeroChildEpicBlock(t, epicStatusBlocks(t, bdEpic(t, bd, dirAll, "status"), dotted.ID), dotted.ID)
+	})
+
+	t.Run("status_eligible_only_lists_only_complete_epics", func(t *testing.T) {
+		// Beside the zero-child epics above: a partial epic (1 of 2 linked
+		// children closed) and a complete one (its only child closed).
+		partial := bdCreate(t, bd, dirAll, "Partial epic", "--type", "epic")
+		p1 := bdCreate(t, bd, dirAll, "Partial child one", "--type", "task", "--parent", partial.ID)
+		bdCreate(t, bd, dirAll, "Partial child two", "--type", "task", "--parent", partial.ID)
+		bdClose(t, bd, dirAll, p1.ID)
+		done := bdCreate(t, bd, dirAll, "Complete epic", "--type", "epic")
+		doneChild := bdCreate(t, bd, dirAll, "Done child", "--type", "task", "--parent", done.ID)
+		bdClose(t, bd, dirAll, doneChild.ID)
+
+		byID := epicStatusJSON(t, dirAll, "--eligible-only")
+		if ids := epicRowIDs(byID); len(ids) != 1 || ids[0] != done.ID {
+			t.Errorf("--eligible-only listed %v, want only %s", ids, done.ID)
+		}
+		assertEpicRow(t, byID, done.ID, 1, 1, true)
+
+		out := bdEpic(t, bd, dirAll, "status", "--eligible-only")
+		if !strings.Contains(out, done.ID) {
+			t.Errorf("--eligible-only should show complete epic %s: %s", done.ID, out)
+		}
+		for _, id := range []string{childless.ID, dotted.ID, partial.ID, linked.ID} {
+			if strings.Contains(out, id+" ") {
+				t.Errorf("--eligible-only must not show %s: %s", id, out)
+			}
+		}
+	})
 
 	t.Run("status_shows_progress", func(t *testing.T) {
 		out := bdEpic(t, bd, dir, "status")
@@ -164,6 +318,66 @@ func TestEmbeddedEpicCloseEligibleNotEligible(t *testing.T) {
 		out := bdEpic(t, bd, dir, "close-eligible")
 		if strings.Contains(out, epic1.ID) {
 			t.Errorf("epic1 should not be closed: %s", out)
+		}
+	})
+
+	// GH#5720: bd epic status now lists epics with no linked children, but
+	// they are never eligible, so close-eligible must neither select nor
+	// close a childless epic or an epic whose only dotted-ID issue (no
+	// parent-child edge) was closed for a completing reason. A complete
+	// epic in the same workspace proves the command does act.
+	t.Run("close_eligible_skips_zero_child_epics", func(t *testing.T) {
+		dirZ, _, _ := bdInit(t, bd, "--prefix", "epz")
+		childless := bdCreate(t, bd, dirZ, "Childless epic", "--type", "epic")
+		dotted := bdCreate(t, bd, dirZ, "Epic with dotted issue only", "--type", "epic")
+		dottedIssue := bdCreate(t, bd, dirZ, "Unlinked dotted issue", "--type", "task", "--id", dotted.ID+".1")
+		bdClose(t, bd, dirZ, dottedIssue.ID)
+		done := bdCreate(t, bd, dirZ, "Complete epic", "--type", "epic")
+		doneChild := bdCreate(t, bd, dirZ, "Done child", "--type", "task", "--parent", done.ID)
+		bdClose(t, bd, dirZ, doneChild.ID)
+
+		out := bdEpic(t, bd, dirZ, "close-eligible", "--dry-run")
+		if !strings.Contains(out, done.ID) {
+			t.Errorf("dry-run should list complete epic %s: %s", done.ID, out)
+		}
+		for _, id := range []string{childless.ID, dotted.ID} {
+			if strings.Contains(out, id+":") {
+				t.Errorf("dry-run must not select zero-child epic %s: %s", id, out)
+			}
+		}
+
+		result := bdEpicJSON(t, bd, dirZ, "close-eligible", "--dry-run")
+		rows, ok := result.([]interface{})
+		if !ok {
+			t.Fatalf("dry-run --json: expected array, got %T", result)
+		}
+		var selected []string
+		for _, row := range rows {
+			epic, _ := row.(map[string]interface{})["epic"].(map[string]interface{})
+			id, _ := epic["id"].(string)
+			selected = append(selected, id)
+		}
+		if len(selected) != 1 || selected[0] != done.ID {
+			t.Errorf("dry-run --json selected %v, want only %s", selected, done.ID)
+		}
+
+		result = bdEpicJSON(t, bd, dirZ, "close-eligible")
+		obj, ok := result.(map[string]interface{})
+		if !ok {
+			t.Fatalf("close-eligible --json: expected object, got %T", result)
+		}
+		closed, _ := obj["closed"].([]interface{})
+		if len(closed) != 1 || closed[0] != done.ID {
+			t.Errorf("close-eligible closed %v, want only %s", closed, done.ID)
+		}
+
+		for _, id := range []string{childless.ID, dotted.ID} {
+			if got := bdShow(t, bd, dirZ, id); got.Status != types.StatusOpen {
+				t.Errorf("zero-child epic %s status = %s, want open", id, got.Status)
+			}
+		}
+		if got := bdShow(t, bd, dirZ, done.ID); got.Status != types.StatusClosed {
+			t.Errorf("complete epic %s status = %s, want closed", done.ID, got.Status)
 		}
 	})
 }

@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -18,8 +19,8 @@ import (
 // Grounded in: sqlbuild/counts.go (the counts mega-query), issueops/count.go
 // (COALESCE(col,'') + P-prefix / (unassigned) / (no labels) normalization),
 // issueops/statistics.go (blocked count + Ready clamp), issueops/stale.go
-// (status override + ephemeral exclusion), issueops/epic_closure.go (zero-child
-// skip), issueops/bulk_ops.go (wisp_labels union), and sqlbuild/sort.go
+// (status override + ephemeral exclusion), issueops/epic_closure.go (one row per
+// non-closed epic, zero-child rows never eligible), issueops/bulk_ops.go (wisp_labels union), and sqlbuild/sort.go
 // (priority/created_at/id and NULLS-last-on-DESC ordering).
 
 // RunAudit_search_counts_stats runs every store case in this slice.
@@ -652,10 +653,15 @@ func testAuditStaleStatusOverride(t *testing.T, f Factory) {
 	}
 }
 
-// Epics with ZERO children are silently skipped; epics WITH children are returned
-// with Total/Closed counts and EligibleForClose = (Total == completing-closed).
-// A child closed for a non-completing reason (duplicate/wontfix/superseded/…)
-// counts toward Closed but not toward eligibility (GH#5026).
+// Every non-closed durable epic is returned exactly once (GH#5720): an epic
+// with ZERO parent-child children is a {0, 0, false} row, never skipped and
+// never eligible. Children are the parent-child dependents only (in both
+// dependency tables), so an issue that merely carries a dotted ID under the
+// epic (ee-5.1, ee-6.1) with no parent-child edge is not counted. Epics WITH
+// children report Total/Closed counts and EligibleForClose =
+// (Total > 0 && Total == completing-closed). A child closed for a
+// non-completing reason (duplicate/wontfix/superseded/…) counts toward Closed
+// but not toward eligibility (GH#5026). Closed epics are not returned.
 func testAuditEpicsEligiblePartial(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
@@ -671,14 +677,38 @@ func testAuditEpicsEligiblePartial(t *testing.T, f Factory) {
 	must(t, s.AddDependency(c, &types.Dependency{IssueID: "ee-1b", DependsOnID: "ee-1", Type: types.DepParentChild}, "a"))
 	must(t, s.AddDependency(c, &types.Dependency{IssueID: "ee-2a", DependsOnID: "ee-2", Type: types.DepParentChild}, "a"))
 	must(t, s.AddDependency(c, &types.Dependency{IssueID: "ee-4a", DependsOnID: "ee-4", Type: types.DepParentChild}, "a"))
+	// GH#5720: epics whose only "children" are unlinked dotted-ID issues (no
+	// parent-child edge), open and completing-closed.
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-5", Title: "E5", IssueType: types.TypeEpic, Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-5.1", Title: "dotted open", Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-6", Title: "E6", IssueType: types.TypeEpic, Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-6.1", Title: "dotted closed", Status: types.StatusClosed}), "a"))
+	// Every non-closed status is in scope, childless or not.
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-7", Title: "E7", IssueType: types.TypeEpic, Status: types.StatusInProgress}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-8", Title: "E8", IssueType: types.TypeEpic, Status: types.StatusBlocked}), "a"))
+	// A closed epic stays out, children or not.
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-9", Title: "E9", IssueType: types.TypeEpic, Status: types.StatusClosed}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-9a", Title: "c", Status: types.StatusClosed}), "a"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: "ee-9a", DependsOnID: "ee-9", Type: types.DepParentChild}, "a"))
+	// A linked wisp child still counts (bd-w2w).
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-10", Title: "E10", IssueType: types.TypeEpic, Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-10w", Title: "wisp c", Status: types.StatusClosed, Ephemeral: true}), "a"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: "ee-10w", DependsOnID: "ee-10", Type: types.DepParentChild}, "a"))
 
 	epics, err := s.GetEpicsEligibleForClosure(c)
 	must(t, err)
 	byID := make(map[string]*types.EpicStatus, len(epics))
+	var got []string
 	for _, e := range epics {
 		if e != nil && e.Epic != nil {
 			byID[e.Epic.ID] = e
+			got = append(got, e.Epic.ID)
 		}
+	}
+	sort.Strings(got)
+	want := []string{"ee-1", "ee-10", "ee-2", "ee-3", "ee-4", "ee-5", "ee-6", "ee-7", "ee-8"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("epic rows = %v, want one row per non-closed epic %v", got, want)
 	}
 
 	e1 := byID["ee-1"]
@@ -697,8 +727,24 @@ func testAuditEpicsEligiblePartial(t *testing.T, f Factory) {
 		t.Errorf("ee-2 = {Total:%d Closed:%d Eligible:%v}, want {1 1 true}", e2.TotalChildren, e2.ClosedChildren, e2.EligibleForClose)
 	}
 
-	if _, present := byID["ee-3"]; present {
-		t.Error("ee-3 (zero children) must be ABSENT (silent skip)")
+	// GH#5720: zero linked children is a visible {0 0 false} row. Unlinked
+	// dotted-ID issues (ee-5.1 open, ee-6.1 completing-closed) are not
+	// children, so they neither count nor make their epic eligible.
+	for _, id := range []string{"ee-3", "ee-5", "ee-6", "ee-7", "ee-8"} {
+		e := byID[id]
+		if e == nil {
+			t.Errorf("%s missing (non-closed epic with no linked children must be returned)", id)
+			continue
+		}
+		if e.TotalChildren != 0 || e.ClosedChildren != 0 || e.EligibleForClose {
+			t.Errorf("%s = {Total:%d Closed:%d Eligible:%v}, want {0 0 false}", id, e.TotalChildren, e.ClosedChildren, e.EligibleForClose)
+		}
+	}
+
+	if e10 := byID["ee-10"]; e10 == nil {
+		t.Error("ee-10 missing (linked wisp child, must be returned)")
+	} else if e10.TotalChildren != 1 || e10.ClosedChildren != 1 || !e10.EligibleForClose {
+		t.Errorf("ee-10 = {Total:%d Closed:%d Eligible:%v}, want {1 1 true} (linked wisp child counts)", e10.TotalChildren, e10.ClosedChildren, e10.EligibleForClose)
 	}
 
 	// dcr-tf2 / GH#5026: a single child closed as a duplicate still counts as

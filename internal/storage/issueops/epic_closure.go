@@ -7,8 +7,20 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// GetEpicsEligibleForClosureInTx returns open epics whose children are all closed
-// with completing close reasons (not duplicate/wontfix/superseded).
+// GetEpicsEligibleForClosureInTx returns one EpicStatus per non-closed durable
+// epic, with its child counts and its close-eligibility verdict. Despite the
+// name it enumerates every such epic (GH#5720), eligible or not: `bd epic
+// status` lists them all, and callers that act on the result (close-eligible,
+// mol stale, doctor) must filter on EligibleForClose.
+//
+// Children are the issues that depend on the epic through a parent-child
+// dependency, in either dependency table (bd-w2w). An issue whose ID merely
+// sits under the epic's ID (e.g. <epic>.1 created with --id) and has no
+// parent-child edge is not a child here. An epic with no children is a
+// {TotalChildren: 0, ClosedChildren: 0, EligibleForClose: false} row: it is
+// never eligible, because eligibility requires at least one child and every
+// child closed with a completing close reason (not duplicate/wontfix/
+// superseded, GH#5026).
 // nolint:gosec // G201: table names are hardcoded, placeholders contain only ? markers
 func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.EpicStatus, error) {
 	// Step 1: Get open epic IDs (single-table scan)
@@ -122,14 +134,8 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.Epic
 		}
 	}
 
-	// Step 4: Batch-fetch all epic issues
-	epicsWithChildren := make([]string, 0)
-	for _, epicID := range epicIDs {
-		if len(epicChildMap[epicID]) > 0 {
-			epicsWithChildren = append(epicsWithChildren, epicID)
-		}
-	}
-	epicIssues, err := GetIssuesByIDsInTx(ctx, tx, epicsWithChildren, nil)
+	// Step 4: Batch-fetch all epic issues, childless ones included (GH#5720).
+	epicIssues, err := GetIssuesByIDsInTx(ctx, tx, epicIDs, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to batch-fetch epic issues: %w", err)
 	}
@@ -142,9 +148,6 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.Epic
 	var results []*types.EpicStatus
 	for _, epicID := range epicIDs {
 		children := epicChildMap[epicID]
-		if len(children) == 0 {
-			continue
-		}
 
 		issue, ok := epicIssueMap[epicID]
 		if !ok || issue == nil {
@@ -165,9 +168,11 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.Epic
 			}
 		}
 
-		// Eligible only when every child is closed AND every close is a completing
-		// one (finished work). Duplicate/wontfix/superseded closes leave the
-		// epic's real scope unfinished (GH#5026).
+		// Eligible only when the epic has at least one child, every child is
+		// closed AND every close is a completing one (finished work). A
+		// childless epic is listed but never eligible (GH#5720).
+		// Duplicate/wontfix/superseded closes leave the epic's real scope
+		// unfinished (GH#5026).
 		results = append(results, &types.EpicStatus{
 			Epic:             issue,
 			TotalChildren:    totalChildren,

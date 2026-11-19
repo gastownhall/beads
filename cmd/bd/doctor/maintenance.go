@@ -213,6 +213,14 @@ func CheckStaleMolecules(path string) DoctorCheck {
 		}
 	}
 
+	return checkStaleMoleculesForEpics(epicStatuses)
+}
+
+// checkStaleMoleculesForEpics is CheckStaleMolecules' verdict over the rows of
+// GetEpicsEligibleForClosure, which holds a row for every non-closed epic,
+// childless ones included (GH#5720): only an eligible epic with at least one
+// child is a stale molecule.
+func checkStaleMoleculesForEpics(epicStatuses []*types.EpicStatus) DoctorCheck {
 	// Count stale molecules (eligible for close with at least 1 child)
 	var staleCount int
 	var staleIDs []string

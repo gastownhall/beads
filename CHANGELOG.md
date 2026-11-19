@@ -1431,6 +1431,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd epic status` lists every open epic** (#5720). It showed only epics
+  with at least one parent-child child, so an epic with no linked children
+  was silently missing, including one whose only issues were created with
+  `--id <epic>.1` and never linked. Each non-closed epic now appears once;
+  one with no linked children shows `0/0 children closed (0%)` and is never
+  eligible for closure. Counts still come from parent-child dependencies
+  only (`bd children` also lists dotted-ID issues by their ID, so the two can
+  differ); link a child with `bd create --parent` or `bd dep add <child>
+  <epic> --type parent-child`. `bd epic close-eligible`, `bd mol stale` and
+  `bd doctor` still act only on eligible epics. Library callers:
+  `GetEpicsEligibleForClosure` now returns a `{0, 0, false}` row for each
+  childless open epic as well, on both backends; code that treated every row
+  as closeable must filter on `EligibleForClose`.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
