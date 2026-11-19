@@ -71,6 +71,7 @@ go_test(
         "fdleak_integration_test.go",
         "gc_config_test.go",
         "host_ownership_test.go",
+        "idlewatch_explicitstart_test.go",
         "idlewatch_integration_test.go",
         "idlewatch_test.go",
         "lifecycle_integration_test.go",
