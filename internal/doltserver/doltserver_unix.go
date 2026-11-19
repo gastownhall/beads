@@ -213,3 +213,28 @@ func killProcessGroup(pgid int) {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	}
 }
+
+// readDoltProcessRows lists every dolt sql-server row of the process table
+// with its uptime, for DiscoverServers (see discover.go).
+func readDoltProcessRows() ([]doltProcessRow, error) {
+	out, err := exec.Command("ps", "-axo", "pid=,state=,etime=,command=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("listing processes: %w", err)
+	}
+	return parseDoltProcessRows(out), nil
+}
+
+// readProcessCwd resolves a live process's working directory via lsof, the
+// same lookup isProcessInDir uses, for server attribution (see discover.go).
+func readProcessCwd(pid int) string {
+	out, err := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output() //nolint:gosec // G204: pid is an int this process listed
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "n") {
+			return strings.TrimSpace(line[1:])
+		}
+	}
+	return ""
+}

@@ -1442,11 +1442,21 @@ dolt_server_port or BEADS_DOLT_SERVER_MODE=1 declares externally managed.
 The probe logs in as the configured user; it does not present a credential
 command's token.
 
+With --all, no workspace is needed and the listing covers the whole
+machine instead: every running dolt sql-server, each bd-owned one with its
+workspace, PID, port, uptime and idle-stop state, and every other one as
+not managed by bd.
+
 In proxied-server mode, reports the proxy (the endpoint every bd command
 connects through) and the dolt backend behind it separately, read from the
 proxy's own process records. Reporting starts nothing: a quiesced workspace
 is shown as not running, and the next bd command launches it.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// --all is a machine-wide listing: no workspace is needed, so it
+		// runs before the workspace lookup that everything else needs.
+		if all, _ := cmd.Flags().GetBool("all"); all {
+			return runDoltStatusAll()
+		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
@@ -1571,6 +1581,11 @@ func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
 	fmt.Printf("  Port: %d\n", state.Port)
 	fmt.Printf("  Data: %s\n", state.DataDir)
 	fmt.Printf("  Logs: %s\n", doltserver.LogPath(serverDir))
+	// The idle watch serves this workspace only outside shared-server
+	// mode, which never gets a watcher.
+	if !doltserver.IsSharedServerMode() {
+		fmt.Printf("  Idle stop: %s\n", doltserver.DescribeIdleWatch(serverDir))
+	}
 	if doltserver.IsSharedServerMode() {
 		fmt.Println("  Mode: shared server")
 	}
@@ -2328,6 +2343,7 @@ func isTimeoutError(err error) bool {
 func init() {
 	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
 	doltStartCmd.Flags().Bool("force", false, "Start even when dolt.auto-start is off and this would create a new, empty Dolt database")
+	doltStatusCmd.Flags().Bool("all", false, "List every dolt sql-server on this machine (bd-owned ones with workspace, PID, port, uptime and idle-stop state) from any directory, not just the active workspace's")
 	doltStopCmd.Flags().Bool("force", false, "Force stop (proxied recovery still requires a bd/dolt executable match)")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")

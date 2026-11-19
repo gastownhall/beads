@@ -2288,10 +2288,16 @@ bd dolt status
     | The probe logs in as the configured user; it does not present a credential
     | command's token.
     |
+    | With --all, no workspace is needed and the listing covers the whole
+    | machine instead: every running dolt sql-server, each bd-owned one with its
+    | workspace, PID, port, uptime and idle-stop state, and every other one as
+    | not managed by bd.
+    |
     | In proxied-server mode, reports the proxy (the endpoint every bd command
     | connects through) and the dolt backend behind it separately, read from the
     | proxy's own process records. Reporting starts nothing: a quiesced workspace
     | is shown as not running, and the next bd command launches it.
+  flag --all type=bool default="false" usage="List every dolt sql-server on this machine (bd-owned ones with workspace, PID, port, uptime and idle-stop state) from any directory, not just the active workspace's"
 
 bd dolt stop
   use: "stop"

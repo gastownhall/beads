@@ -151,3 +151,60 @@ func gracefulStop(pid int, timeout time.Duration) error {
 
 // killProcessGroup is a no-op on Windows; killAndWait kills the child itself.
 func killProcessGroup(int) {}
+
+// readDoltProcessRows lists every dolt.exe sql-server process with its
+// uptime (from CreationDate), for DiscoverServers (see discover.go).
+func readDoltProcessRows() ([]doltProcessRow, error) {
+	// [char]9 is the field separator: a tab cannot be spelled in a Go raw
+	// string (PowerShell's escape character is the backtick itself).
+	script := "Get-CimInstance Win32_Process -Filter \"Name='dolt.exe'\" | " +
+		"Where-Object { $_.CommandLine -match 'sql-server' } | " +
+		"ForEach-Object { \"$($_.ProcessId)\" + [char]9 + \"$($_.CreationDate)\" + [char]9 + \"$($_.CommandLine)\" }"
+	out, err := exec.Command("powershell.exe", "-NoProfile", "-Command", script).Output()
+	if err != nil {
+		return nil, fmt.Errorf("listing processes: %w", err)
+	}
+	var rows []doltProcessRow
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Split(strings.TrimSpace(line), "\t")
+		if len(fields) != 3 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		rows = append(rows, doltProcessRow{
+			PID:     pid,
+			Command: fields[2],
+			Uptime:  uptimeSinceWmiDate(fields[1]),
+		})
+	}
+	return rows, nil
+}
+
+// uptimeSinceWmiDate parses PowerShell's CreationDate into an elapsed time.
+// The CIM cmdlet prints a DateTime in the system locale; only the parts
+// every locale spells with digits are read.
+func uptimeSinceWmiDate(wmi string) time.Duration {
+	for _, layout := range []string{
+		time.RFC3339,
+		"20060102150405.000000-0700",
+		"01/02/2006 15:04:05",
+	} {
+		if start, err := time.ParseInLocation(layout, strings.TrimSpace(wmi), time.Local); err == nil {
+			if elapsed := time.Since(start); elapsed > 0 {
+				return elapsed
+			}
+			return 0
+		}
+	}
+	return 0
+}
+
+// readProcessCwd returns "" on Windows: the platform does not expose a
+// process's working directory through standard APIs (see isProcessInDir), so
+// a sql-server there is attributed only by its --config argument.
+func readProcessCwd(int) string {
+	return ""
+}
