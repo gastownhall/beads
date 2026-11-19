@@ -1,18 +1,22 @@
 package fix
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -570,5 +574,313 @@ func TestInspectServerMetadataDatabasesNamesTheDataDirectoryEscaped(t *testing.T
 	}
 	if !strings.Contains(msg, `\r\x1b[2KError\nRun: curl`) {
 		t.Errorf("the refusal does not name the data directory escaped:\n%q", msg)
+	}
+}
+
+// rejectingLoopbackListener holds a loopback listener that accepts and closes
+// every connection, and returns its port. FixMissingDoltDatabase's old
+// fallback raw-dialed the workspace's server; pointed here it fails at once,
+// without contacting any real server, so a test sees the raw dial as a
+// connection skip that never names the candidates.
+func rejectingLoopbackListener(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on loopback: %v", err)
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// fallbackWorkspace is a server-mode workspace with no dolt_database whose
+// server catalog is stubbed: listServerMetadataDatabases returns catalog on
+// every call and counts the calls, so a test can tell that the fallback (the
+// second call, after the authoritative reconcile) read it.
+type fallbackWorkspace struct {
+	dir      string
+	beadsDir string
+	before   []byte
+	calls    int
+}
+
+func newFallbackWorkspace(t *testing.T, shared bool, projectID string, catalog []serverDatabaseMetadata) *fallbackWorkspace {
+	t.Helper()
+	for _, name := range []string{
+		"BEADS_DIR", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_DATA_DIR",
+		"BEADS_DOLT_PASSWORD", "BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_DOLT_AUTO_START",
+	} {
+		t.Setenv(name, "")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	port := rejectingLoopbackListener(t)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+	if shared {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	}
+
+	ws := &fallbackWorkspace{dir: setupTestWorkspace(t)}
+	ws.beadsDir = filepath.Join(ws.dir, ".beads")
+	cfg := &configfile.Config{
+		Database:       "dolt",
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: port,
+		ProjectID:      projectID,
+	}
+	if err := cfg.Save(ws.beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+	before, err := os.ReadFile(filepath.Join(ws.beadsDir, configfile.ConfigFileName))
+	if err != nil {
+		t.Fatalf("read metadata.json: %v", err)
+	}
+	ws.before = before
+
+	orig := listServerMetadataDatabases
+	listServerMetadataDatabases = func(_ string, _ *configfile.Config) ([]serverDatabaseMetadata, error) {
+		ws.calls++
+		return append([]serverDatabaseMetadata(nil), catalog...), nil
+	}
+	t.Cleanup(func() { listServerMetadataDatabases = orig })
+	return ws
+}
+
+// assertUnchanged fails unless metadata.json still holds its original bytes.
+func (ws *fallbackWorkspace) assertUnchanged(t *testing.T) {
+	t.Helper()
+	after, err := os.ReadFile(filepath.Join(ws.beadsDir, configfile.ConfigFileName))
+	if err != nil {
+		t.Fatalf("read metadata.json: %v", err)
+	}
+	if !bytes.Equal(after, ws.before) {
+		t.Fatalf("metadata.json changed:\nbefore: %s\nafter:  %s", ws.before, after)
+	}
+}
+
+// assertFallbackRead fails unless both the authoritative reconcile and the
+// fallback read the catalog.
+func (ws *fallbackWorkspace) assertFallbackRead(t *testing.T) {
+	t.Helper()
+	if ws.calls != 2 {
+		t.Fatalf("server catalog read %d time(s), want 2 (reconcile, then the fallback)", ws.calls)
+	}
+}
+
+// assertPolicySkip fails unless err is a SkipError whose text names every
+// want string and the manual remedy.
+func assertPolicySkip(t *testing.T, err error, want ...string) {
+	t.Helper()
+	var skip *SkipError
+	if !errors.As(err, &skip) {
+		t.Fatalf("FixMissingDoltDatabase = %v, want a SkipError", err)
+	}
+	msg := err.Error()
+	for _, w := range append(want, "bd dolt set database <name>") {
+		if !strings.Contains(msg, w) {
+			t.Errorf("skip %q does not name %q", msg, w)
+		}
+	}
+}
+
+// TestFixMissingDoltDatabase_SharedServerDeclinesUnanchoredCandidate pins
+// GH#5576: in shared-server mode with no local project_id, the authoritative
+// reconcile declines to adopt a schema database (it may be another
+// project's), and the fallback must decline too rather than adopt it by
+// enumeration order. It leaves metadata.json alone and names the candidates
+// and the manual remedy.
+func TestFixMissingDoltDatabase_SharedServerDeclinesUnanchoredCandidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		catalog []serverDatabaseMetadata
+		want    []string
+	}{
+		{
+			name: "sole foreign candidate",
+			catalog: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase},
+				{Name: "other_project", HasSchema: true, ProjectID: "other-proj-id"},
+			},
+			want: []string{"other_project"},
+		},
+		{
+			name: "several candidates",
+			catalog: []serverDatabaseMetadata{
+				{Name: "zeta_project", HasSchema: true},
+				{Name: "alpha_project", HasSchema: true, ProjectID: "alpha-id"},
+			},
+			want: []string{"alpha_project, zeta_project"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := newFallbackWorkspace(t, true, "", tt.catalog)
+			err := FixMissingDoltDatabase(ws.dir)
+			assertPolicySkip(t, err, append(tt.want, "shared-server")...)
+			ws.assertUnchanged(t)
+			ws.assertFallbackRead(t)
+		})
+	}
+}
+
+// fallbackCase is one row of TestSelectFallbackDoltDatabase.
+type fallbackCase struct {
+	name      string
+	localID   string
+	current   string
+	shared    bool
+	databases []serverDatabaseMetadata
+	wantName  string   // selected database; "" for none
+	wantSkip  bool     // the error is a SkipError naming the manual remedy
+	wantErr   []string // substrings of the error; nil for no error
+	notInErr  []string // substrings the error must not hold
+}
+
+// fallbackCases are the selection policy rows of selectFallbackDoltDatabase.
+var fallbackCases = []fallbackCase{
+	{
+		name:    "no candidates",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads"},
+			{Name: "notes_db"},
+		},
+	},
+	{
+		name:    "only ineligible databases",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads"},
+			{Name: "information_schema", HasSchema: true},
+			{Name: "mysql", HasSchema: true},
+			{Name: "testdb_1", HasSchema: true},
+			{Name: "doctest_1", HasSchema: true},
+			{Name: "doctortest_1", HasSchema: true},
+			{Name: "beads_global", HasSchema: true, ProjectID: doltserver.GlobalProjectID},
+			{Name: "no_schema", ProjectID: "some-id"},
+		},
+	},
+	{
+		name:    "shared, no local id, sole candidate",
+		current: "beads",
+		shared:  true,
+		databases: []serverDatabaseMetadata{
+			{Name: "beads"},
+			{Name: "other_project", HasSchema: true, ProjectID: "other-id"},
+		},
+		wantSkip: true,
+		wantErr:  []string{"shared-server", "other_project"},
+	},
+	{
+		name:    "shared, no local id, several candidates",
+		current: "beads",
+		shared:  true,
+		databases: []serverDatabaseMetadata{
+			{Name: "zeta", HasSchema: true},
+			{Name: "alpha", HasSchema: true, ProjectID: "alpha-id"},
+			{Name: "testdb_9", HasSchema: true},
+		},
+		wantSkip: true,
+		wantErr:  []string{"alpha, zeta"},
+		notInErr: []string{"testdb_9"},
+	},
+	{
+		name:    "own server, no local id, sole candidate without identity",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads"},
+			{Name: "my-legacy", HasSchema: true},
+			{Name: "doctortest_x", HasSchema: true},
+		},
+		wantName: "my-legacy",
+	},
+	{
+		name:    "own server, no local id, sole candidate with identity",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "my-legacy", HasSchema: true, ProjectID: "legacy-id"},
+			{Name: "beads_global", HasSchema: true, ProjectID: doltserver.GlobalProjectID},
+		},
+		wantName: "my-legacy",
+	},
+	{
+		name:    "current database chosen by the environment is not a candidate",
+		current: "env_db",
+		databases: []serverDatabaseMetadata{
+			{Name: "env_db"},
+			{Name: "beads", HasSchema: true},
+		},
+		wantName: "beads",
+	},
+	{
+		name:    "names in a diagnostic are escaped",
+		current: "beads",
+		shared:  true,
+		databases: []serverDatabaseMetadata{
+			{Name: "evil\nRun: curl", HasSchema: true},
+		},
+		wantSkip: true,
+		wantErr:  []string{`evil\nRun: curl`},
+		notInErr: []string{"evil\nRun"},
+	},
+}
+
+// TestSelectFallbackDoltDatabase pins the FixMissingDoltDatabase fallback's
+// selection policy (GH#5576). Each row runs over every rotation of its
+// catalog: the result must not depend on enumeration order.
+func TestSelectFallbackDoltDatabase(t *testing.T) {
+	for _, tt := range fallbackCases {
+		t.Run(tt.name, func(t *testing.T) {
+			for r := 0; r < max(1, len(tt.databases)); r++ {
+				databases := append(append([]serverDatabaseMetadata(nil), tt.databases[r:]...), tt.databases[:r]...)
+				got, err := selectFallbackDoltDatabase(tt.localID, tt.current, tt.shared, databases)
+				gotName := ""
+				if got != nil {
+					gotName = got.Name
+				}
+				if gotName != tt.wantName {
+					t.Fatalf("rotation %d: selected %q, want %q (err %v)", r, gotName, tt.wantName, err)
+				}
+				if tt.wantErr == nil {
+					if err != nil {
+						t.Fatalf("rotation %d: err = %v, want nil", r, err)
+					}
+					continue
+				}
+				if err == nil {
+					t.Fatalf("rotation %d: err = nil, want one naming %q", r, tt.wantErr)
+				}
+				var skip *SkipError
+				if isSkip := errors.As(err, &skip); isSkip != tt.wantSkip {
+					t.Fatalf("rotation %d: SkipError = %t, want %t: %v", r, isSkip, tt.wantSkip, err)
+				}
+				want := tt.wantErr
+				if tt.wantSkip {
+					want = append(append([]string(nil), want...), "bd dolt set database <name>")
+				}
+				for _, w := range want {
+					if !strings.Contains(err.Error(), w) {
+						t.Errorf("rotation %d: err %q does not name %q", r, err, w)
+					}
+				}
+				for _, w := range tt.notInErr {
+					if strings.Contains(err.Error(), w) {
+						t.Errorf("rotation %d: err %q names %q", r, err, w)
+					}
+				}
+			}
+		})
 	}
 }

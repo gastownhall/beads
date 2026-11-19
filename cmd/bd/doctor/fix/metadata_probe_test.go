@@ -1,81 +1,26 @@
 package fix
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-
-	"github.com/steveyegge/beads/internal/configfile"
+	mysql "github.com/go-sql-driver/mysql"
 )
-
-// TestProbeForCorrectDoltDatabaseQuotesIdentifier pins the call site, not just
-// the escape helper. probeForCorrectDoltDatabase is the `bd doctor --fix` half
-// of the GH#2160 wrong-database repair; its twin in package doctor
-// (probeForCorrectDatabase) emits the "run bd doctor --fix" instruction. While
-// this probe interpolated the SHOW DATABASES name raw, a backtick-bearing name
-// made the SELECT error, so the repair returned "" and did nothing at all —
-// no fix, no error, no output — for exactly the names the check had just told
-// the user to repair. Expectations are exact strings, so reverting to raw
-// interpolation fails this test rather than silently regressing.
-func TestProbeForCorrectDoltDatabaseQuotesIdentifier(t *testing.T) {
-	tests := []struct {
-		name      string
-		dbName    string
-		wantQuery string
-	}{
-		{
-			name:      "plain name is unchanged",
-			dbName:    "beads_x",
-			wantQuery: "SELECT COUNT(*) FROM `beads_x`.issues LIMIT 1",
-		},
-		{
-			name:      "backtick cannot break out of the identifier",
-			dbName:    "evil`; DROP TABLE x",
-			wantQuery: "SELECT COUNT(*) FROM `evil``; DROP TABLE x`.issues LIMIT 1",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			db, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatalf("sqlmock.New: %v", err)
-			}
-			defer db.Close()
-
-			mock.ExpectQuery("SHOW DATABASES").
-				WillReturnRows(sqlmock.NewRows([]string{"Database"}).AddRow(tt.dbName))
-			mock.ExpectQuery(regexp.QuoteMeta(tt.wantQuery)).
-				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-
-			if got := probeForCorrectDoltDatabase(db, "beads"); got != tt.dbName {
-				t.Errorf("probeForCorrectDoltDatabase() = %q, want %q", got, tt.dbName)
-			}
-			if err := mock.ExpectationsWereMet(); err != nil {
-				t.Errorf("unmet expectations: %v", err)
-			}
-		})
-	}
-}
 
 // newRecordingMock wraps sqlmock with a matcher that appends each actual query
 // to a recorded list before delegating to the default regexp matcher. The
 // recorded list pins the ordered set of queries that reached expectation
-// matching; it does not capture queries sqlmock rejects before matching (an
-// unexpected query surfaces as an error the probe's `err == nil` path
-// swallows), so the assertions pair DeepEqual on the recording with
-// ExpectationsWereMet, which together bound mid-sequence drift; a query issued
-// after the last expectation is fulfilled is caught by neither. In ordered mode
-// sqlmock's query() skips fulfilled expectations and returns "all expectations
-// were already fulfilled" before it reaches the matcher, so a trailing surplus
-// query is never recorded, and ExpectationsWereMet reports only unfulfilled
-// expectations, never surplus calls. sqlmock v1.5.2 offers no clean trailing
-// sentinel: an extra never-matching expectation would fail
-// ExpectationsWereMet unconditionally.
+// matching; paired with ExpectationsWereMet it bounds mid-sequence drift. In
+// ordered mode sqlmock returns "all expectations were already fulfilled"
+// before it reaches the matcher, so a trailing surplus query is never
+// recorded; the reader turns that error into a returned error, which the
+// tests below would see.
 func newRecordingMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *[]string) {
 	t.Helper()
 	var recorded []string
@@ -92,84 +37,145 @@ func newRecordingMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *[]string) {
 	return db, mock, &recorded
 }
 
-// probeForCorrectDoltDatabase interpolates candidate database names into a
-// backtick-quoted query. Two properties must hold together:
+var errMissingTable = &mysql.MySQLError{Number: 1146, Message: "table not found"}
+
+// TestReadServerMetadataDatabasesQuotesIdentifiers pins the catalog read the
+// FixMissingDoltDatabase fallback selects from (it replaced the first-match
+// probeForCorrectDoltDatabase, GH#5576). Two properties hold on both the
+// issues and the _project_id query:
 //
-//  1. Every candidate is probed with backtick-doubling (the complete escape
-//     for a backtick-quoted identifier), so a hostile name on a shared server
-//     stays inert inside the quoting — the probe merely errors and the
-//     candidate is skipped.
-//  2. Legal names that are not unquoted-charset-safe still probe verbatim.
-//     Legacy databases were named from raw prefixes before GH#2142
-//     (`my-project`-style, hyphens included) and this probe is the doctor's
-//     mechanism for finding them.
-func TestProbeForCorrectDoltDatabaseEscapesHostileNames(t *testing.T) {
+//  1. Every database name is backtick-doubled, the complete escape for a
+//     backtick-quoted identifier, so a hostile name on a shared server stays
+//     inert inside the quoting.
+//  2. Legal names that are not unquoted-charset-safe read verbatim: legacy
+//     databases were named from raw prefixes before GH#2142 (`my-project`,
+//     hyphens included) and are what the GH#2160 repair looks for.
+//
+// Expectations are exact strings, so raw interpolation fails this test.
+func TestReadServerMetadataDatabasesQuotesIdentifiers(t *testing.T) {
 	db, mock, recorded := newRecordingMock(t)
 
-	databases := sqlmock.NewRows([]string{"Database"}).
+	mock.ExpectQuery("SHOW DATABASES").WillReturnRows(sqlmock.NewRows([]string{"Database"}).
+		AddRow("information_schema").
 		AddRow("x`; DROP TABLE issues; --").
-		AddRow("my-project")
-	mock.ExpectQuery("SHOW DATABASES").WillReturnRows(databases)
-
-	escapedHostile := regexp.QuoteMeta("SELECT COUNT(*) FROM `x``; DROP TABLE issues; --`.issues LIMIT 1")
-	mock.ExpectQuery(escapedHostile).WillReturnError(errors.New("table not found"))
-
-	legacyHyphen := regexp.QuoteMeta("SELECT COUNT(*) FROM `my-project`.issues LIMIT 1")
-	mock.ExpectQuery(legacyHyphen).
+		AddRow("my-project"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `x``; DROP TABLE issues; --`.issues LIMIT 1")).
+		WillReturnError(errMissingTable)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM `x``; DROP TABLE issues; --`.metadata WHERE `key` = '_project_id' LIMIT 1")).
+		WillReturnError(errMissingTable)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `my-project`.issues LIMIT 1")).
 		WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(3))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM `my-project`.metadata WHERE `key` = '_project_id' LIMIT 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("proj-123"))
 
-	if got := probeForCorrectDoltDatabase(db, ""); got != "my-project" {
-		t.Fatalf("probeForCorrectDoltDatabase = %q, want %q", got, "my-project")
+	got, err := readServerMetadataDatabases(context.Background(), db)
+	if err != nil {
+		t.Fatalf("readServerMetadataDatabases: %v", err)
+	}
+	want := []serverDatabaseMetadata{
+		{Name: "x`; DROP TABLE issues; --"},
+		{Name: "my-project", HasSchema: true, ProjectID: "proj-123"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("readServerMetadataDatabases = %+v, want %+v", got, want)
 	}
 
-	want := []string{
+	wantQueries := []string{
 		"SHOW DATABASES",
 		"SELECT COUNT(*) FROM `x``; DROP TABLE issues; --`.issues LIMIT 1",
+		"SELECT value FROM `x``; DROP TABLE issues; --`.metadata WHERE `key` = '_project_id' LIMIT 1",
 		"SELECT COUNT(*) FROM `my-project`.issues LIMIT 1",
+		"SELECT value FROM `my-project`.metadata WHERE `key` = '_project_id' LIMIT 1",
 	}
-	if !reflect.DeepEqual(*recorded, want) {
-		t.Fatalf("executed queries = %q, want %q", *recorded, want)
+	if !reflect.DeepEqual(*recorded, wantQueries) {
+		t.Fatalf("executed queries = %q, want %q", *recorded, wantQueries)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unexpected queries: %v", err)
+		t.Fatalf("unmet expectations: %v", err)
 	}
 }
 
-// The winner is a neutral name rather than configfile.DefaultDoltDatabase: the
-// sole production caller passes that default as skipDB (metadata.go:232), so it
-// is filtered on every real call and can never be the returned winner. This
-// test passes it as skipDB with a matching SHOW DATABASES row, which both keeps
-// the production argument shape and makes the filter observable — no expectation
-// is registered for it, so the recorded list below is the proof it was never
-// probed.
-func TestProbeForCorrectDoltDatabasePrefersFirstProbeableCandidate(t *testing.T) {
-	db, mock, recorded := newRecordingMock(t)
+// TestReadServerMetadataDatabasesToleratesUnreadablePeers keeps GH#4931: a
+// peer database this user may not read is listed with neither schema nor
+// identity rather than aborting the read.
+func TestReadServerMetadataDatabasesToleratesUnreadablePeers(t *testing.T) {
+	db, mock, _ := newRecordingMock(t)
 
-	databases := sqlmock.NewRows([]string{"Database"}).
-		AddRow(configfile.DefaultDoltDatabase).
-		AddRow("stale-db").
-		AddRow("project-db")
-	mock.ExpectQuery("SHOW DATABASES").WillReturnRows(databases)
-	// The first surviving candidate's probe fails (no issues table): it is
-	// probed, not skipped, and the scan continues to the next candidate.
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `stale-db`.issues LIMIT 1")).
-		WillReturnError(errors.New("table not found"))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `project-db`.issues LIMIT 1")).
-		WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(1))
+	mock.ExpectQuery("SHOW DATABASES").WillReturnRows(sqlmock.NewRows([]string{"Database"}).AddRow("private_db"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `private_db`.issues LIMIT 1")).
+		WillReturnError(&mysql.MySQLError{Number: 1142, Message: "Access denied for user to table 'issues'"})
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM `private_db`.metadata WHERE `key` = '_project_id' LIMIT 1")).
+		WillReturnError(&mysql.MySQLError{Number: 1044, Message: "Access denied for user to database"})
 
-	if got := probeForCorrectDoltDatabase(db, configfile.DefaultDoltDatabase); got != "project-db" {
-		t.Fatalf("probeForCorrectDoltDatabase = %q, want %q", got, "project-db")
+	got, err := readServerMetadataDatabases(context.Background(), db)
+	if err != nil {
+		t.Fatalf("readServerMetadataDatabases: %v", err)
 	}
-
-	want := []string{
-		"SHOW DATABASES",
-		"SELECT COUNT(*) FROM `stale-db`.issues LIMIT 1",
-		"SELECT COUNT(*) FROM `project-db`.issues LIMIT 1",
-	}
-	if !reflect.DeepEqual(*recorded, want) {
-		t.Fatalf("executed queries = %q, want %q", *recorded, want)
+	if want := []serverDatabaseMetadata{{Name: "private_db"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("readServerMetadataDatabases = %+v, want %+v", got, want)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unexpected queries: %v", err)
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// TestReadServerMetadataDatabasesPropagatesReadErrors pins that only the
+// expected probe errors read as "absent": any other failure of the schema or
+// identity query, or of the database listing itself, is returned, so the
+// fallback skips instead of selecting from a partial catalog.
+func TestReadServerMetadataDatabasesPropagatesReadErrors(t *testing.T) {
+	connReset := errors.New("connection reset")
+	tests := []struct {
+		name   string
+		expect func(sqlmock.Sqlmock)
+		want   string
+	}{
+		{
+			name: "listing fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SHOW DATABASES").WillReturnError(connReset)
+			},
+			want: "connection reset",
+		},
+		{
+			name: "listing row fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SHOW DATABASES").WillReturnRows(sqlmock.NewRows([]string{"Database"}).
+					AddRow("a_db").RowError(0, connReset))
+			},
+			want: "connection reset",
+		},
+		{
+			name: "schema query fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SHOW DATABASES").WillReturnRows(sqlmock.NewRows([]string{"Database"}).AddRow("a_db"))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `a_db`.issues LIMIT 1")).WillReturnError(connReset)
+			},
+			want: `probing database "a_db" for schema: connection reset`,
+		},
+		{
+			name: "identity query fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SHOW DATABASES").WillReturnRows(sqlmock.NewRows([]string{"Database"}).AddRow("a_db"))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM `a_db`.issues LIMIT 1")).
+					WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(1))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM `a_db`.metadata WHERE `key` = '_project_id' LIMIT 1")).
+					WillReturnError(connReset)
+			},
+			want: `probing database "a_db" for project_id: connection reset`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, _ := newRecordingMock(t)
+			tt.expect(mock)
+			got, err := readServerMetadataDatabases(context.Background(), db)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("readServerMetadataDatabases = %+v, %v; want error containing %q", got, err, tt.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet expectations: %v", err)
+			}
+		})
 	}
 }
