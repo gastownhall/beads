@@ -67,6 +67,12 @@ delete the rest. One run scans at most 5000 closed wisps; when the scan
 reaches that limit the output says more may remain (`candidates_capped` in
 `--json`).
 
+A single batch can still be slow on a large database, because each
+transaction recomputes `is_blocked` for everything the deletion touched. If a
+batch times out against the server, the pool read timeout can be raised for
+the run with `BEADS_DOLT_POOL_READ_TIMEOUT` (`dolt.pool-read-timeout` in
+`config.yaml`); see [configuration](../reference/configuration.md).
+
 ### Retiring ids with `--retain-ids`
 
 By default a purged or pruned id is free again: a later `bd create --id`

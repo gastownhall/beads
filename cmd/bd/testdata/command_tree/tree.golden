@@ -5512,7 +5512,10 @@ bd mol wisp gc
     | committed; --json adds unconfirmed_count (selected wisps no committed batch
     | confirmed, the failed batch included), remaining_count (the same number),
     | error and hint, and writes one error object to stderr. The command exits
-    | nonzero; rerun it to reselect and delete the rest.
+    | nonzero; rerun it to reselect and delete the rest. One batch can still be
+    | slow on a large database; if it times out, BEADS_DOLT_POOL_READ_TIMEOUT
+    | (dolt.pool-read-timeout in config.yaml) raises the pool read timeout for the
+    | run.
     | A scan reads at most 5000 closed wisps: when it reaches that limit the output
     | says more may remain (candidates_capped in --json), even if every wisp it
     | read was excluded.
