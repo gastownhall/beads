@@ -36,7 +36,10 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags origin refs/heads/dc-use
-          test "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)"
+          git merge-base --is-ancestor HEAD FETCH_HEAD || {
+            echo "::error::$GITHUB_REF_NAME ($(git rev-parse HEAD)) is not on dc-use; fork releases are cut from the integration lane only"
+            exit 1
+          }
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

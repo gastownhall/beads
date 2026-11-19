@@ -37,7 +37,7 @@ func runListProxiedServer(cmd *cobra.Command, ctx context.Context, out io.Writer
 	case in.watchMode:
 		return runListProxiedWatch(cmd, ctx, in)
 	case !in.ReadyFlag && in.prettyFormat && in.ParentID != "":
-		return runListProxiedTree(out, ctx, in)
+		return runListProxiedTree(ctx, out, in)
 	default:
 		// The --ready arm is not a case of its own any more: it is
 		// ListRequest.ReadyFlag, and choosing the ready query from it is the
@@ -61,7 +61,7 @@ func openProxiedListUOW(ctx context.Context) (uow.UnitOfWork, error) {
 // hierarchical --parent walk under pretty output. It consumes the FILTER as a
 // value, re-parenting a copy of it at every level, and it reaches no page
 // epilogue on either route.
-func runListProxiedTree(out io.Writer, ctx context.Context, in listInput) error {
+func runListProxiedTree(ctx context.Context, out io.Writer, in listInput) error {
 	uw, filter, err := openAndPrepare(ctx, in)
 	if err != nil {
 		return err
@@ -71,7 +71,7 @@ func runListProxiedTree(out io.Writer, ctx context.Context, in listInput) error 
 	if in.Offset > 0 {
 		return fmt.Errorf("--offset is not supported with hierarchical --parent + pretty/tree")
 	}
-	return runListProxiedHierarchicalParent(out, ctx, uw, in, filter)
+	return runListProxiedHierarchicalParent(ctx, out, uw, in, filter)
 }
 
 // runListProxiedPage is the proxied twin of the direct route's two flips, and
@@ -262,7 +262,7 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 		displayPrettyListWithDepsMode(out, issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse,
 			proxiedGatedIssueIDs(ctx, uw, issues, depsByIssueID))
 		printTruncationHint(truncated, in.effectiveLimit)
-		printSkipLabelsFooter(in.SkipLabels)
+		printSkipLabelsFooter(out, in.SkipLabels)
 		return nil
 	}
 

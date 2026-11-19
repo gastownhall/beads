@@ -132,12 +132,14 @@ const blacksmithWindowsLabel = "blacksmith-4vcpu-windows-2025"
 const platformsMatrixRunsOn = "${{ matrix.runner }}"
 
 // platformsMatrixRunners: each mixed-OS matrix leg's `os` (which keeps the
-// check names stable) -> its Blacksmith label.
+// check names stable) -> its runner: the Blacksmith label in gastownhall/beads,
+// the GitHub-hosted image in a fork repository.
 //
 // Runner-size A/B (#7381, 2026-10-08): pr-preflight-platforms' Windows leg on
 // blacksmith-8vcpu-windows-2025 restored the 4 vCPU saver's cache fine, but
 // waited 63s for an 8 vCPU Windows runner and finished at 144s against 129s
-// on 4 vCPU, so it stays on blacksmithWindowsLabel.
+// on 4 vCPU, so it stays on blacksmithWindowsLabel (blacksmithWindows4vcpuRunsOn,
+// GitHub-hosted windows-2025 in a fork repository).
 var platformsMatrixRunners = map[string]string{
 	"macos-latest":   "${{ github.repository == 'gastownhall/beads' && '" + blacksmithMacOSLabel + "' || 'macos-26' }}",
 	"windows-latest": blacksmithWindows4vcpuRunsOn,

@@ -337,7 +337,7 @@ func TestDisplayWatchedIssueListReadsTheShownIssuesEdges(t *testing.T) {
 		return strings.Join(lines, "\n")
 	}
 	got := stripClock(captureStdout(t, func() error {
-		displayWatchedIssueList(os.Stdout, context.Background(), src, page, false, false, "", "", false)
+		displayWatchedIssueList(context.Background(), os.Stdout, src, page, false, false, "", "", false)
 		return nil
 	}))
 	want := stripClock(captureStdout(t, func() error {

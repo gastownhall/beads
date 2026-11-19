@@ -435,7 +435,7 @@ func TestDisplayWatchedIssueList_UsesDependencyHierarchy(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		displayWatchedIssueList(os.Stdout, context.Background(), store, []*types.Issue{child, parent}, false, false, "", "", false)
+		displayWatchedIssueList(context.Background(), os.Stdout, store, []*types.Issue{child, parent}, false, false, "", "", false)
 		return nil
 	})
 
