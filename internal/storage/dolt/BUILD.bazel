@@ -209,6 +209,7 @@ go_test(
         "dependencies_merge_test.go",
         "dependencies_rename_rekey_test.go",
         "dependencies_type_conflict_test.go",
+        "dependencies_unresolvable_test.go",
         "dependency_commit_boundary_test.go",
         "dependency_coordination_test.go",
         "dependency_editor_contract_test.go",

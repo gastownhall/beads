@@ -74,6 +74,23 @@ func (s *EmbeddedDoltStore) GetDependenciesWithMetadata(ctx context.Context, iss
 	return result, err
 }
 
+// GetDependenciesWithUnresolvable is the combined outgoing read (GH#5850):
+// resolved carries the hydrated far-end issues, unresolvable the exact stored
+// edge records whose far end has no row in this database. Both halves come
+// from one connection's read transaction — the embedded store serves
+// MaxOpenConns=1 pools, which is exactly why the reader closes its rows
+// before each nested fetch.
+func (s *EmbeddedDoltStore) GetDependenciesWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	var resolved []*types.IssueWithDependencyMetadata
+	var unresolvable []*types.Dependency
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		resolved, unresolvable, err = issueops.GetDependenciesWithUnresolvableInTx(ctx, tx, issueID)
+		return err
+	})
+	return resolved, unresolvable, err
+}
+
 // GetDependentsWithMetadata returns issues that depend on the given issue,
 // along with the dependency type.
 func (s *EmbeddedDoltStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {

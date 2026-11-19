@@ -148,6 +148,7 @@ go_test(
         "cycle_detector_contract_test.go",
         "deleter_contract_test.go",
         "dependencies_test.go",
+        "dependencies_unresolvable_test.go",
         "dependency_editor_contract_test.go",
         "dependency_editor_version_history_test.go",
         "dependents_records_test.go",
