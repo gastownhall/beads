@@ -214,41 +214,63 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 	result := make([]*Step, 0, len(template))
 
 	for _, tmpl := range template {
-		expanded := &Step{
-			ID:             subst(substituteTargetPlaceholders(tmpl.ID, target)),
-			Title:          subst(substituteTargetPlaceholders(tmpl.Title, target)),
-			Description:    subst(substituteTargetPlaceholders(tmpl.Description, target)),
-			Type:           tmpl.Type,
-			Priority:       tmpl.Priority,
-			Assignee:       subst(tmpl.Assignee),
-			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template
-			SourceLocation: tmpl.SourceLocation, // Preserve source location
-		}
+		// Start from a copy of the template step so that every field carries
+		// through by default - a field added to Step later included - and
+		// then rewrite the fields the expansion transforms. Anything that
+		// holds mutable state is rebuilt below, so no expanded step shares
+		// it with the template or with another expansion of it.
+		expanded := *tmpl
 
-		// Substitute placeholders in labels
-		if len(tmpl.Labels) > 0 {
-			expanded.Labels = make([]string, len(tmpl.Labels))
-			for i, l := range tmpl.Labels {
-				expanded.Labels[i] = subst(substituteTargetPlaceholders(l, target))
-			}
+		// Text fields: {target} placeholders first, then {var} substitution.
+		expandText := func(s string) string {
+			return subst(substituteTargetPlaceholders(s, target))
 		}
+		expanded.ID = expandText(tmpl.ID)
+		expanded.Title = expandText(tmpl.Title)
+		expanded.Description = expandText(tmpl.Description)
+		expanded.Notes = expandText(tmpl.Notes)
+		expanded.Assignee = subst(tmpl.Assignee)
+		// waits_for can name its spawner (children-of({target}.spawn)), so it
+		// resolves like needs; the bare all-children/any-children values
+		// carry no placeholder and pass through unchanged.
+		expanded.WaitsFor = expandText(tmpl.WaitsFor)
 
-		// Substitute placeholders in dependencies
-		if len(tmpl.DependsOn) > 0 {
-			expanded.DependsOn = make([]string, len(tmpl.DependsOn))
-			for i, d := range tmpl.DependsOn {
-				expanded.DependsOn[i] = subst(substituteTargetPlaceholders(d, target))
-			}
-		}
+		expanded.Labels = expandStrings(tmpl.Labels, expandText)
+		expanded.DependsOn = expandStrings(tmpl.DependsOn, expandText)
+		expanded.Needs = expandStrings(tmpl.Needs, expandText)
+		expanded.generatedNeeds = expandStrings(tmpl.generatedNeeds, expandText)
 
-		if len(tmpl.Needs) > 0 {
-			expanded.Needs = make([]string, len(tmpl.Needs))
-			for i, n := range tmpl.Needs {
-				expanded.Needs[i] = subst(substituteTargetPlaceholders(n, target))
-			}
+		metadata, err := expandMetadata(tmpl.Metadata, expandText)
+		if err != nil {
+			return nil, fmt.Errorf("template step %q: %w", tmpl.ID, err)
 		}
+		expanded.Metadata = metadata
+
+		// The condition is carried verbatim: it is a {{var}} expression the
+		// condition filter evaluates against the enclosing formula's vars
+		// after expansion, and {target}/{var} substitution would rewrite the
+		// names inside its double braces.
+		//
+		// The gate and on_complete are carried verbatim too, in their own
+		// copies: the gate's fields get the cook's {{var}} substitution
+		// later, and on_complete's {item}/{index} placeholders are bound at
+		// runtime.
+		if tmpl.Gate != nil {
+			gate := *tmpl.Gate
+			expanded.Gate = &gate
+		}
+		expanded.OnComplete = cloneOnComplete(tmpl.OnComplete)
+
+		// Nested template directives are deliberately not carried: an
+		// expansion template step that itself names an expansion (expand,
+		// expand_vars) is not expanded again, and its loop is not
+		// expanded either, since control flow has already run.
+		expanded.Expand = ""
+		expanded.ExpandVars = nil
+		expanded.Loop = nil
 
 		// Handle children recursively with depth tracking
+		expanded.Children = nil
 		if len(tmpl.Children) > 0 {
 			children, err := expandStepWith(target, tmpl.Children, depth+1, subst)
 			if err != nil {
@@ -257,10 +279,92 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 			expanded.Children = children
 		}
 
-		result = append(result, expanded)
+		result = append(result, &expanded)
 	}
 
 	return result, nil
+}
+
+// expandStrings returns a new slice holding expand applied to each element
+// of ss, or nil when ss is empty.
+func expandStrings(ss []string, expand func(string) string) []string {
+	if len(ss) == 0 {
+		return nil
+	}
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = expand(s)
+	}
+	return out
+}
+
+// expandMetadata returns a copy of a template step's decoded metadata with
+// expand applied to every string leaf. Keys and non-string scalars are kept
+// as they are, and every map and list is a new one, so the result shares no
+// mutable state with the template. Nesting is bounded like metadataStrings
+// (the root map is depth zero): a value at maxMetadataScanDepth or deeper is
+// an error rather than being dropped or shared.
+func expandMetadata(m map[string]interface{}, expand func(string) string) (map[string]interface{}, error) {
+	if m == nil {
+		return nil, nil
+	}
+	out, err := expandMetadataValue(m, expand, 0)
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]interface{}), nil
+}
+
+func expandMetadataValue(v interface{}, expand func(string) string, depth int) (interface{}, error) {
+	if depth >= maxMetadataScanDepth {
+		return nil, fmt.Errorf("metadata is nested deeper than %d levels", maxMetadataScanDepth)
+	}
+	switch val := v.(type) {
+	case string:
+		return expand(val), nil
+	case map[string]interface{}:
+		if val == nil {
+			return val, nil
+		}
+		out := make(map[string]interface{}, len(val))
+		for k, elem := range val {
+			e, err := expandMetadataValue(elem, expand, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = e
+		}
+		return out, nil
+	case []interface{}:
+		if val == nil {
+			return val, nil
+		}
+		out := make([]interface{}, len(val))
+		for i, elem := range val {
+			e, err := expandMetadataValue(elem, expand, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = e
+		}
+		return out, nil
+	case []map[string]interface{}:
+		// The TOML decoder's shape for an array of tables.
+		if val == nil {
+			return val, nil
+		}
+		out := make([]map[string]interface{}, len(val))
+		for i, elem := range val {
+			e, err := expandMetadataValue(elem, expand, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[i], _ = e.(map[string]interface{})
+		}
+		return out, nil
+	default:
+		return v, nil
+	}
 }
 
 // substituteTargetPlaceholders replaces {target} and {target.*} placeholders.
