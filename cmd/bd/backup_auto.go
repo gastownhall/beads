@@ -269,6 +269,10 @@ func maybeAutoBackup(ctx context.Context) {
 	if _, err := runBackupExport(ctx, backend, true); err != nil {
 		if !isQuiet() && !jsonOutput {
 			fmt.Fprintf(os.Stderr, "Warning: auto-backup failed: %v\n", err)
+			// GH#4070 (bd-5mwx39): name the directory and where its state
+			// is recorded, so the warning is actionable even though it is
+			// the only per-command signal a --json/--quiet caller gets.
+			fmt.Fprintf(os.Stderr, "  Backup directory: %s. Run 'bd backup status' for the last successful backup and recovery steps.\n", dir)
 		}
 		debug.Logf("backup: error: %v\n", err)
 		return

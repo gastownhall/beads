@@ -3,7 +3,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // bdBackup runs "bd backup" with extra args. Returns combined output.
@@ -416,5 +419,149 @@ func TestEmbeddedBackupRestoreStrictReadonly(t *testing.T) {
 				t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
 			}
 		})
+	}
+}
+
+// bdRunBuffersWithBDEnv runs the embedded bd binary with extra environment
+// layered on the hermetic bdEnv (which strips ambient BD_*/BEADS_*), and
+// returns stdout, stderr and the exit code. Only a failure to launch the
+// process fails the test; nonzero exits are the caller's to assert.
+func bdRunBuffersWithBDEnv(t *testing.T, bd, dir string, extraEnv []string, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), extraEnv...)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	if err == nil {
+		return outBuf.String(), errBuf.String(), 0
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("bd %v did not run: %v", args, err)
+	}
+	return outBuf.String(), errBuf.String(), ee.ExitCode()
+}
+
+// embeddedBackupState is .beads/backup/backup_state.json decoded as raw JSON,
+// so these tests assert the file on disk — the wire an older bd also reads —
+// not the in-process struct.
+type embeddedBackupState struct {
+	LastDoltCommit string    `json:"last_dolt_commit"`
+	Timestamp      time.Time `json:"timestamp"`
+	LastSuccessAt  time.Time `json:"last_success_at"`
+	LastError      string    `json:"last_error"`
+	LastErrorAt    time.Time `json:"last_error_at"`
+}
+
+func readEmbeddedBackupState(t *testing.T, dir string) embeddedBackupState {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "backup_state.json"))
+	if err != nil {
+		t.Fatalf("read backup_state.json in %s: %v", dir, err)
+	}
+	var s embeddedBackupState
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatalf("parse backup_state.json (%s): %v", data, err)
+	}
+	return s
+}
+
+// damageBackupDest removes every regular file from a Dolt backup directory
+// except its manifest, Dolt's LOCK, and bd's backup_state.json: the state the
+// GH#4070 report found, a manifest that names table files which are no longer
+// on disk. It does not parse the manifest (the storage boundary stays closed
+// in test fixtures too): everything that is not bookkeeping goes.
+func damageBackupDest(t *testing.T, dir string) {
+	t.Helper()
+	if info, err := os.Stat(filepath.Join(dir, "manifest")); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("no regular manifest in backup dir %s: %v", dir, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read backup dir %s: %v", dir, err)
+	}
+	removed := 0
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		switch e.Name() {
+		case "manifest", "LOCK", "backup_state.json":
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			t.Fatalf("remove %s from %s: %v", e.Name(), dir, err)
+		}
+		removed++
+	}
+	if removed == 0 {
+		t.Fatalf("damage removed nothing from %s: the directory holds no table files", dir)
+	}
+	t.Logf("damaged backup dir %s: removed %d regular file(s) its manifest may name", dir, removed)
+}
+
+// TestEmbeddedAutoBackupDamagedDestination is the embedded repro of GH#4070
+// (bd-5mwx39): when auto-backup's destination has lost the table files its
+// manifest names, a write command must still exit 0, warn on stderr naming the
+// backup directory and pointing at 'bd backup status', and leave status --json
+// reporting the failure with the last good backup intact.
+func TestEmbeddedAutoBackupDamagedDestination(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "bkdmgauto")
+	backup := filepath.Join(dir, ".beads", "backup")
+	autoEnv := []string{"BD_BACKUP_ENABLED=true", "BD_BACKUP_INTERVAL=1ms"}
+
+	// One write makes auto-backup record a real success first.
+	_, stderr, code := bdRunBuffersWithBDEnv(t, bd, dir, autoEnv, "create", "--silent", "damaged destination A")
+	if code != 0 {
+		t.Fatalf("bd create A exited %d\nstderr:\n%s", code, stderr)
+	}
+	good := readEmbeddedBackupState(t, backup)
+	if good.LastSuccessAt.IsZero() || good.LastDoltCommit == "" {
+		t.Fatalf("first auto-backup recorded no success: %+v", good)
+	}
+
+	// The reported state: the manifest names table files that are gone.
+	damageBackupDest(t, backup)
+
+	stdout, stderr, code := bdRunBuffersWithBDEnv(t, bd, dir, autoEnv, "create", "--silent", "damaged destination B")
+	if code != 0 {
+		t.Fatalf("write command exited %d while auto-backup was broken\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "Warning: auto-backup failed:") {
+		t.Errorf("stderr missing the auto-backup failure warning:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, backup) {
+		t.Errorf("the warning does not name the backup directory %s:\n%s", backup, stderr)
+	}
+	if !strings.Contains(stderr, "bd backup status") {
+		t.Errorf("the warning does not point at 'bd backup status':\n%s", stderr)
+	}
+
+	statusJSON, _, code := bdRunBuffersWithBDEnv(t, bd, dir, nil, "backup", "status", "--json")
+	if code != 0 {
+		t.Fatalf("bd backup status --json exited %d:\n%s", code, statusJSON)
+	}
+	var status struct {
+		Backup embeddedBackupState `json:"backup"`
+	}
+	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+		t.Fatalf("parse backup status JSON (%v):\n%s", err, statusJSON)
+	}
+	if status.Backup.LastError == "" {
+		t.Errorf("status --json reports no last_error after a failed auto-backup:\n%s", statusJSON)
+	} else if !strings.Contains(status.Backup.LastError, "table file not found") {
+		t.Errorf("last_error %q does not name the missing table file", status.Backup.LastError)
+	}
+	if !status.Backup.LastSuccessAt.Equal(good.LastSuccessAt) {
+		t.Errorf("last_success_at %v moved from the last good backup %v", status.Backup.LastSuccessAt, good.LastSuccessAt)
 	}
 }
