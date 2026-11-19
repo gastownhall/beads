@@ -301,6 +301,18 @@ func TestPersistentPostRunDirectMaintenanceSkipsPreview(t *testing.T) {
 			wantBackups: 0, wantExports: 0, wantPushes: 0,
 		},
 		{
+			// AC-3: control. Registering --dry-run is not previewing;
+			// every step still runs: write commit + tip commit, one tip
+			// metadata value, one backup, one export, one push.
+			name:               "create without preview",
+			cmd:                previewRowCmd("create", "dry-run", false),
+			wantCommits:        2,
+			wantMetadataWrites: 1,
+			wantBackups:        1,
+			wantExports:        1,
+			wantPushes:         1,
+		},
+		{
 			// Edge: a classified read with a real --dry-run flag. Export
 			// and push already exclude reads; backup is the hole.
 			name:               "duplicates --dry-run",
