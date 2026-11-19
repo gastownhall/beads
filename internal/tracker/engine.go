@@ -1251,6 +1251,11 @@ func externalRefHistoryQuerier(store Store) (ExternalRefHistoryStore, bool) {
 	return nil, false
 }
 
+// Both interfaces are batch-only (#6605): a store implementing one side
+// but not the other fails here, at compile time, instead of silently
+// losing the history fast path at runtime.
+var _ ExternalRefHistoryStore = (storage.ExternalRefHistoryQuerier)(nil)
+
 func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {
 	current, err := tx.GetLabels(ctx, issueID)
 	if err != nil {
