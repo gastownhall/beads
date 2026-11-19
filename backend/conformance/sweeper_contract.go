@@ -838,6 +838,130 @@ func RunSweeperProtectsLiveDependentsThroughANonCandidate(t *testing.T, ctx cont
 	sweeperAssertWispRows(t, ctx, fixture, 3, root, middle, leaf)
 }
 
+// RunSweeperProtectsLiveDependentsThroughEachExclusion pins that protection
+// discovery crosses an intermediary the sweep's own selection rules held out
+// — the ID pattern, the pinned flag, the storage plane and the retained-type
+// partition — because none of those changes whether a LIVE row still reaches
+// the root (#7043). The intermediary keeps the selection treatment it already
+// had: silently outside the pattern, counted as pinned, invisible to the
+// wisps-plane tier, counted as retention-required.
+func RunSweeperProtectsLiveDependentsThroughEachExclusion(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	if fixture.AddDependencies == nil {
+		t.Skip("fixture has no AddDependencies hook; cannot wire the hierarchies this case needs")
+	}
+	// seedEnds writes one variant's closed root (the candidate) and open
+	// leaf; the subtest seeds and wires the middle whose exclusion is the
+	// variant's own business.
+	seedEnds := func(tag string) (root, leaf string) {
+		t.Helper()
+		root = sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, tag, "root", true), nil)
+		leafIssue := sweeperIssue(fixture, tag, "leaf", true)
+		leafIssue.Status = types.StatusOpen
+		leafIssue.ClosedAt = nil
+		leaf = sweeperSeed(t, ctx, fixture, leafIssue, nil)
+		return root, leaf
+	}
+	wire := func(tag, middle, root, leaf string) {
+		t.Helper()
+		if err := fixture.AddDependencies(ctx, publicops.AddDependenciesRequest{
+			Actor: "sweeper-seed",
+			Edges: []publicops.DependencyEdge{
+				{IssueID: middle, DependsOnID: root, Type: publicops.DepParentChild},
+				{IssueID: leaf, DependsOnID: middle, Type: publicops.DepParentChild},
+			},
+		}); err != nil {
+			t.Fatalf("wiring the %s hierarchy: %v", tag, err)
+		}
+	}
+	request := func(tag string) publicops.SweepRequest {
+		return publicops.SweepRequest{
+			Tier:                  publicops.SweepWispsPlane,
+			IDPattern:             sweeperPattern(fixture, tag),
+			ClosedBefore:          &sweeperCutoff,
+			ProtectLiveDependents: true,
+		}
+	}
+
+	t.Run("pattern", func(t *testing.T) {
+		root, leaf := seedEnds("exclpat")
+		// The middle is OUTSIDE the pattern: same closed_at as the root, so
+		// the pattern is the only thing that keeps it from being a candidate.
+		middleIssue := sweeperIssue(fixture, "exclpat", "middle", true)
+		middleIssue.ID = fixture.IssuePrefix + "-heldout-exclpat-middle"
+		middle := sweeperSeed(t, ctx, fixture, middleIssue, nil)
+		wire("exclpat", middle, root, leaf)
+
+		result := sweeperSweep(t, ctx, fixture, request("exclpat"))
+		if result.Swept != 0 || result.Skipped.LiveDependent != 1 {
+			t.Errorf("Swept = %d, LiveDependent = %d; want 0 and 1 — the open leaf past a "+
+				"middle the pattern held out must still keep the root", result.Swept, result.Skipped.LiveDependent)
+		}
+		sweeperAssertWispRows(t, ctx, fixture, 3, root, middle, leaf)
+	})
+
+	t.Run("pinned", func(t *testing.T) {
+		root, leaf := seedEnds("exclpin")
+		middle := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "exclpin", "middle", true), func(issue *types.Issue) {
+			issue.Pinned = true
+		})
+		wire("exclpin", middle, root, leaf)
+
+		result := sweeperSweep(t, ctx, fixture, request("exclpin"))
+		if result.Swept != 0 || result.Skipped.LiveDependent != 1 {
+			t.Errorf("Swept = %d, LiveDependent = %d; want 0 and 1 — the open leaf past a "+
+				"pinned middle must still keep the root", result.Swept, result.Skipped.LiveDependent)
+		}
+		if result.Skipped.Pinned != 1 {
+			t.Errorf("Skipped.Pinned = %d, want 1 — the pinned middle keeps its own skip "+
+				"treatment and is not double-counted as live-dependent", result.Skipped.Pinned)
+		}
+		sweeperAssertWispRows(t, ctx, fixture, 3, root, middle, leaf)
+	})
+
+	t.Run("plane", func(t *testing.T) {
+		root, leaf := seedEnds("exclplane")
+		// The middle lives in the ISSUES plane, which a wisps-plane sweep
+		// never selects from — the storage plane itself is the exclusion.
+		middle := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "exclplane", "middle", false), nil)
+		wire("exclplane", middle, root, leaf)
+
+		result := sweeperSweep(t, ctx, fixture, request("exclplane"))
+		if result.Swept != 0 || result.Skipped.LiveDependent != 1 {
+			t.Errorf("Swept = %d, LiveDependent = %d; want 0 and 1 — the open leaf past a "+
+				"durable middle must still keep the wisps-plane root", result.Swept, result.Skipped.LiveDependent)
+		}
+		sweeperAssertWispRows(t, ctx, fixture, 2, root, leaf)
+		sweeperAssertIssueRows(t, ctx, fixture, 1, middle)
+	})
+
+	t.Run("retained-type", func(t *testing.T) {
+		if fixture.Exec == nil {
+			t.Skip("backend cannot seed raw rows (no Exec hook)")
+		}
+		root, leaf := seedEnds("exclret")
+		middle := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "exclret", "middle", true), nil)
+		wire("exclret", middle, root, leaf)
+		if err := fixture.Exec(ctx, []SQLStatement{
+			{Query: "INSERT INTO config (`key`, value) VALUES ('types.retained', 'molecule')"},
+			{Query: "UPDATE wisps SET issue_type = 'molecule' WHERE id = ?", Args: []any{middle}},
+		}); err != nil {
+			t.Fatalf("retaining the middle's type: %v", err)
+		}
+
+		result := sweeperSweep(t, ctx, fixture, request("exclret"))
+		if result.Swept != 0 || result.Skipped.LiveDependent != 1 {
+			t.Errorf("Swept = %d, LiveDependent = %d; want 0 and 1 — the open leaf past a "+
+				"retained-type middle must still keep the root", result.Swept, result.Skipped.LiveDependent)
+		}
+		if result.Skipped.RetentionRequired != 1 {
+			t.Errorf("Skipped.RetentionRequired = %d, want 1 — the retained middle keeps its "+
+				"own skip treatment and is not double-counted as live-dependent", result.Skipped.RetentionRequired)
+		}
+		sweeperAssertWispRows(t, ctx, fixture, 3, root, middle, leaf)
+	})
+}
+
 // RunSweeperProtectsLiveDependentsAcrossPlanes pins that the live-dependent
 // protection reads BOTH dependency tables: a closed wisp that a live DURABLE
 // (issues-table) bead depends on through parent-child, tracks or blocks is

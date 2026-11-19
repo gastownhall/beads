@@ -162,6 +162,10 @@ func TestServedSweeperProtectsLiveDependentsThroughANonCandidate(t *testing.T) {
 	conformance.RunSweeperProtectsLiveDependentsThroughANonCandidate(t, t.Context(), newServedSweeperFixture(t, "hs19"))
 }
 
+func TestServedSweeperProtectsLiveDependentsThroughEachExclusion(t *testing.T) {
+	conformance.RunSweeperProtectsLiveDependentsThroughEachExclusion(t, t.Context(), newServedSweeperFixture(t, "hs20"))
+}
+
 func TestServedSweeperProtectsLiveDependentsAcrossPlanes(t *testing.T) {
 	conformance.RunSweeperProtectsLiveDependentsAcrossPlanes(t, t.Context(), newServedSweeperFixture(t, "hs17"))
 }
