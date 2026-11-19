@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -140,5 +142,46 @@ func TestReadyAdmitsUnroutedAndAbsentCrossPrefixTargets(t *testing.T) {
 	}
 	if strings.Contains(stderr, "unavailable through their route") {
 		t.Fatalf("an unrouted or absent target printed a route warning:\n%s", stderr)
+	}
+}
+
+// TestReadyExcludesSourcesBehindAFailingConfiguredRouteWithOneWarning (GH#4647,
+// AC-8) runs the real CLI router end to end: yy- is routed to a .beads
+// directory that holds no database, so the route is configured but cannot
+// answer. Both town sources blocked on yy-blocker stay out of ready across two
+// evaluations, and the policy warns about yy- once, on the first.
+func TestReadyExcludesSourcesBehindAFailingConfiguredRouteWithOneWarning(t *testing.T) {
+	r := setupRelateRigs(t, nil)
+	townRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "deadrig", ".beads"), 0o755); err != nil {
+		t.Fatalf("create dead rig .beads: %v", err)
+	}
+	routes := "{\"prefix\":\"gt-\",\"path\":\"rig\"}\n{\"prefix\":\"yy-\",\"path\":\"deadrig\"}\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+	seedIssue(t, r.ctx, r.town, "hq-src2")
+	for _, source := range []string{"hq-src1", "hq-src2"} {
+		if err := r.town.AddDependency(r.ctx, &types.Dependency{IssueID: source, DependsOnID: "yy-blocker", Type: types.DepBlocks}, "test"); err != nil {
+			t.Fatalf("add %s blocks on yy-blocker: %v", source, err)
+		}
+	}
+	policy := wireStorageDecorators(r.town, nil, true, crossPrefixBlockerRouting())
+	const warning = `Warning: issues with prefix "yy-" are unavailable through their route`
+
+	for i, wantWarnings := range []int{1, 0} {
+		var got []string
+		stderr := captureStderrForBackupLockTest(t, func() {
+			got = crossPrefixReadyIDs(t, r.ctx, policy)
+		})
+		if slices.Contains(got, "hq-src1") || slices.Contains(got, "hq-src2") {
+			t.Fatalf("evaluation %d: ready = %v behind a failing configured route; want hq-src1 and hq-src2 excluded", i+1, got)
+		}
+		if n := strings.Count(stderr, warning); n != wantWarnings {
+			t.Fatalf("evaluation %d printed %d yy- route warnings, want %d:\n%s", i+1, n, wantWarnings, stderr)
+		}
 	}
 }
