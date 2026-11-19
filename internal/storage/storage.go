@@ -551,6 +551,14 @@ type Storage interface {
 	// `bd ready --limit N` print "Showing N of M" without a second pass.
 	GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error)
 	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
+	// GetEpicsEligibleForClosure returns one EpicStatus per non-closed epic,
+	// eligible or not (GH#5720): callers that close or report epics as done
+	// must filter on EligibleForClose. Child counts come from parent-child
+	// dependencies only; an issue whose ID merely extends the epic's ID
+	// (<epic>.1) without that edge is not a child. An epic with no children is
+	// {TotalChildren: 0, ClosedChildren: 0, EligibleForClose: false}: it is
+	// eligible only with at least one child and every child closed with a
+	// completing reason (not duplicate/wontfix/superseded).
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 
 	// Wisp queries

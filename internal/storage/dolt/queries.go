@@ -223,7 +223,9 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 	return result, err
 }
 
-// GetEpicsEligibleForClosure returns epics whose children are all closed
+// GetEpicsEligibleForClosure returns one EpicStatus per non-closed epic,
+// childless ones included ({0, 0, false}); filter on EligibleForClose to find
+// the epics that can be closed. See issueops.GetEpicsEligibleForClosureInTx.
 func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error) {
 	var result []*types.EpicStatus
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
