@@ -1431,6 +1431,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd create -t "a title"` now says that `-t` is `--type`.** `-t` is the
+  shorthand for `--type`, not `--title`, so `bd create --type=bug -t "fix the
+  login page"` set the type to the title text and failed with only
+  `title required`. When a create has no title and its `--type` value is not a
+  built-in type, the error keeps that first line and adds the parsed value,
+  `-t is short for --type, not --title`, and how to give the title. A custom
+  type is not called invalid here, since the database's types are not known
+  before the store opens. (#5787)
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

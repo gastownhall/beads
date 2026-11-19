@@ -45,8 +45,31 @@ func validateCreateArgs(cmd *cobra.Command, args []string) error {
 	graphFile, _ := cmd.Flags().GetString("graph")
 	titleFlag, _ := cmd.Flags().GetString("title")
 
+	if len(args) == 0 && titleFlag == "" && markdownFile == "" && graphFile == "" {
+		if hint := createTypeShorthandHint(cmd); hint != "" {
+			return HandleError("title required (or use --file to create from markdown)\n%s", hint)
+		}
+	}
 	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
 	return err
+}
+
+// createTypeShorthandHint explains a missing title when --type carries a
+// value that is not a built-in type (GH#5787): -t is --type's shorthand, so
+// `bd create --type=bug -t "<title>"` overrides the type with the title text
+// and leaves no title. It runs before the store opens, so it cannot tell a
+// registered custom type from a mistake and never calls the value invalid; it
+// says what was parsed and where a title goes.
+func createTypeShorthandHint(cmd *cobra.Command) string {
+	if !cmd.Flags().Changed("type") {
+		return ""
+	}
+	issueType, _ := cmd.Flags().GetString("type")
+	if types.IssueType(issueType).Normalize().IsBuiltIn() {
+		return ""
+	}
+	return fmt.Sprintf("  --type is %q: -t is short for --type, not --title\n"+
+		"  Give the title as a positional argument or with --title: bd create \"<title>\" --type <type>", issueType)
 }
 
 var createCmd = &cobra.Command{
