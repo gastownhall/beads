@@ -650,3 +650,41 @@ func TestEmbeddedAutoBackupDamagedDestinationRecoversAfterMoveAside(t *testing.T
 		t.Errorf("restored database holds %d issues, want the 3 the backup captured: %v", len(got), got)
 	}
 }
+
+// TestEmbeddedBackupSyncDamagedDestination pins the GH#4070 (bd-5mwx39) sync
+// misreport: a `bd backup init` filesystem destination that lost the table
+// files its manifest names is configured but damaged, so `bd backup sync` must
+// fail with Dolt's error naming the destination — not advise 'bd backup init',
+// which would re-register the same broken directory.
+func TestEmbeddedBackupSyncDamagedDestination(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "bkdmgsync")
+	bdCreateSilent(t, bd, dir, "sync damaged destination issue")
+
+	dest := filepath.Join(t.TempDir(), "dolt-backup-damaged")
+	bdBackup(t, bd, dir, "init", "file://"+dest)
+	bdBackup(t, bd, dir, "sync")
+	damageBackupDest(t, dest)
+
+	bdCreateSilent(t, bd, dir, "created after the destination was damaged")
+
+	stdout, stderr, code := bdRunBuffersWithBDEnv(t, bd, dir, nil, "backup", "sync")
+	if code == 0 {
+		t.Fatalf("bd backup sync succeeded against a damaged destination\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	out := stdout + stderr
+	if strings.Contains(out, "no backup destination configured") {
+		t.Errorf("sync misreports a damaged destination as not configured:\n%s", out)
+	}
+	if !strings.Contains(out, dest) {
+		t.Errorf("sync error does not name the destination %s:\n%s", dest, out)
+	}
+	if !strings.Contains(out, "table file not found") {
+		t.Errorf("sync error does not carry Dolt's missing-table-file text:\n%s", out)
+	}
+}

@@ -182,8 +182,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 
 		// Sync to the configured backup
 		if err := bs.BackupSync(ctx, defaultDoltBackupName); err != nil {
-			if strings.Contains(err.Error(), "no backup") ||
-				strings.Contains(err.Error(), "not found") {
+			if backupSyncErrNotConfigured(err, defaultDoltBackupName) {
 				return fmt.Errorf("no backup destination configured. Run 'bd backup init <path>' first")
 			}
 			return fmt.Errorf("backup sync failed: %w", err)
@@ -206,6 +205,20 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
 		return nil
 	},
+}
+
+// backupSyncErrNotConfigured reports whether a sync error means the workspace
+// has no backup remote configured: Dolt's ErrBackupNotFound —
+// "backup '<name>' not found", wrapped by versioncontrolops as
+// "sync backup <name>: ..." — or a "no backup" text. It deliberately does not
+// match every "not found": a configured-but-damaged filesystem destination
+// fails with "table file not found" (GH#4070, bd-5mwx39), which must reach the
+// user as Dolt's own error naming the directory, not as an instruction to
+// re-run 'bd backup init' over the same broken directory.
+func backupSyncErrNotConfigured(err error, name string) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "no backup") ||
+		strings.Contains(msg, fmt.Sprintf("backup '%s' not found", name))
 }
 
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.

@@ -212,7 +212,7 @@ func runBackupSyncProxied(ctx context.Context) error {
 		return versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName)
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "no backup") || strings.Contains(err.Error(), "not found") {
+		if backupSyncErrNotConfigured(err, proxiedBackupTargetName) {
 			return HandleErrorRespectJSON("no backup destination configured. Run 'bd backup init <path>' first")
 		}
 		return HandleErrorRespectJSON("backup sync failed: %v", err)
