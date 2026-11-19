@@ -225,3 +225,30 @@ func TestEnsureUserConfigDefaults_UnsafeRootsFailBeforeMutation(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureUserConfigDefaults_DanglingSymlinkReportsError: a dangling
+// symlink at the user config path must produce a prompt, descriptive error
+// from the bootstrap instead of recursing between the not-exist read and
+// the EEXIST create until the stack runs out (GH#8113 latent bug, all
+// platforms).
+func TestEnsureUserConfigDefaults_DanglingSymlinkReportsError(t *testing.T) {
+	home := setupUserConfigHome(t)
+	path := userConfigPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(home, "nowhere"), path); err != nil {
+		t.Fatalf("plant dangling symlink: %v", err)
+	}
+
+	err := EnsureUserConfigDefaults()
+	if err == nil {
+		t.Fatal("expected an error for a dangling symlink at the user config path")
+	}
+	if !strings.Contains(err.Error(), "dangling symlink") {
+		t.Errorf("error %q does not describe the dangling symlink", err)
+	}
+	if _, serr := os.Lstat(filepath.Join(home, "nowhere")); !os.IsNotExist(serr) {
+		t.Errorf("the dangling symlink's target was materialized: %v", serr)
+	}
+}

@@ -30,10 +30,12 @@ go_test(
         "spawn_reap_test.go",
         "spawn_test.go",
         "spawn_throttle_test.go",
+        "userconfig_carryover_test.go",
         "userconfig_test.go",
     ],
     embed = [":metrics"],
     deps = [
+        "//internal/config",
         "//internal/testutil/bazeltest",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],

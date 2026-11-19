@@ -745,7 +745,13 @@ func SetUserYamlConfig(key, value string) error {
 		return fmt.Errorf("failed to create user config directory: %w", err)
 	}
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		if err := os.WriteFile(configPath, []byte{}, 0o600); err != nil {
+		// GH#8113: creation goes through CreateUserConfigYaml, which on
+		// darwin/ios carries over the legacy macOS config verbatim at this
+		// one creation moment (the metrics bootstrap does the same). A
+		// create race (another process published it, or a dangling symlink)
+		// falls through to setYamlConfigAtPath, which surfaces the read
+		// error instead of retrying the create.
+		if err := CreateUserConfigYaml(configPath, nil); err != nil && !errors.Is(err, ErrUserConfigAlreadyExists) {
 			return fmt.Errorf("failed to create user config.yaml: %w", err)
 		}
 	} else if err != nil {

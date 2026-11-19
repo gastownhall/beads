@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -30,6 +29,15 @@ func EnsureUserConfigDefaults() error {
 		return fmt.Errorf("ensure user config: read %s: %w", path, err)
 	}
 
+	return ensureExistingUserConfig(path, data)
+}
+
+// ensureExistingUserConfig is the existing-file half of
+// EnsureUserConfigDefaults: honor a commented "metrics:" block, then fill
+// missing metrics.disabled / metrics.endpoint leaves. It is also where the
+// create-race re-read lands (see writeUserConfigBootstrap), so a peer's
+// freshly published file gets exactly the same treatment as a file bd found.
+func ensureExistingUserConfig(path string, data []byte) error {
 	if commentedMetricsRe.Match(data) {
 		return nil
 	}
@@ -59,23 +67,33 @@ func EnsureUserConfigDefaults() error {
 	return nil
 }
 
+// writeUserConfigBootstrap creates the missing user config and seeds the
+// metrics block. Creation goes through config.CreateUserConfigYaml so the
+// one-time macOS legacy carry-over (GH#8113) runs on the darwin create.
+//
+// The create-race bound: when the create reports "already exists", re-read
+// once and treat the file as existing. A dangling symlink at the config path
+// makes both the not-exist observation and the create's EEXIST true forever;
+// the historical recursion into EnsureUserConfigDefaults from the EEXIST
+// branch therefore recursed until the stack ran out. The re-read detects it
+// (still not-exist) and reports it instead.
 func writeUserConfigBootstrap(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("ensure user config: mkdir %s: %w", filepath.Dir(path), err)
-	}
 	body := []byte("metrics:\n  disabled: false\n  endpoint: " + DefaultEndpoint + "\n")
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // path is from config.UserConfigYamlPath
-	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return EnsureUserConfigDefaults()
+	err := config.CreateUserConfigYaml(path, body)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, config.ErrUserConfigAlreadyExists) {
+		data, rerr := os.ReadFile(path) //nolint:gosec // path is from config.UserConfigYamlPath
+		if errors.Is(rerr, fs.ErrNotExist) {
+			return fmt.Errorf("ensure user config: %s is a dangling symlink", path)
 		}
-		return fmt.Errorf("ensure user config: create %s: %w", path, err)
+		if rerr != nil {
+			return fmt.Errorf("ensure user config: read %s: %w", path, rerr)
+		}
+		return ensureExistingUserConfig(path, data)
 	}
-	defer f.Close()
-	if _, err := f.Write(body); err != nil {
-		return fmt.Errorf("ensure user config: write %s: %w", path, err)
-	}
-	return nil
+	return fmt.Errorf("ensure user config: %w", err)
 }
 
 func userConfigHasLeaf(root *yaml.Node, parts ...string) bool {
