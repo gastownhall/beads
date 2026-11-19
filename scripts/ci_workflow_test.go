@@ -930,7 +930,8 @@ func TestRepositoryTextEOLPolicyWorkflow(t *testing.T) {
 		"windows-latest": "windows",
 	}
 	// Each host's include tuple names its Blacksmith label in "runner"
-	// (platformsMatrixRunsOn), for every PR, forks included.
+	// (platformsMatrixRunsOn) in gastownhall/beads and the GitHub-hosted
+	// image in a fork repository, which has no Blacksmith.
 	wantRunnerMarker := platformsMatrixRunners
 	if len(job.Strategy.Matrix.OS) != 0 {
 		t.Errorf("check-doc-freshness-platforms retains an unbound os-list matrix: %v", job.Strategy.Matrix.OS)

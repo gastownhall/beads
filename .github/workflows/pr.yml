@@ -479,7 +479,8 @@ jobs:
   # The macOS and Windows legs stay here, on Blacksmith for every PR, forks
   # and Dependabot included (ga-96smfk.22), and every push to main (a merge
   # group skips them: the scope job's platforms switch). Each leg's
-  # `include` entry names its Blacksmith label in `runner` (`os` keeps the
+  # `include` entry names its Blacksmith label in `runner`, GitHub-hosted in
+  # a fork repository, which has no Blacksmith (`os` keeps the
   # check names stable and selects the Windows-only steps). Every leg
   # restores a non-race Go build cache seeded by main.yml's push-to-main
   # savers on the exact same label (S2 below): test-windows for Windows,
@@ -502,7 +503,7 @@ jobs:
             runner: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-6vcpu-macos-26' || 'macos-26' }}
           - os: windows-latest
             expected_goos: windows
-            runner: blacksmith-4vcpu-windows-2025
+            runner: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-4vcpu-windows-2025' || 'windows-2025' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -586,7 +587,7 @@ jobs:
             runner: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-6vcpu-macos-26' || 'macos-26' }}
           - os: windows-latest
             expected_goos: windows
-            runner: blacksmith-4vcpu-windows-2025
+            runner: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-4vcpu-windows-2025' || 'windows-2025' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 

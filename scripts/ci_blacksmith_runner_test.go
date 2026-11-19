@@ -140,7 +140,7 @@ const platformsMatrixRunsOn = "${{ matrix.runner }}"
 // on 4 vCPU, so it stays on blacksmithWindowsLabel.
 var platformsMatrixRunners = map[string]string{
 	"macos-latest":   "${{ github.repository == 'gastownhall/beads' && '" + blacksmithMacOSLabel + "' || 'macos-26' }}",
-	"windows-latest": blacksmithWindowsLabel,
+	"windows-latest": blacksmithWindows4vcpuRunsOn,
 }
 
 // --- a minimal GitHub Actions expression evaluator -------------------------
