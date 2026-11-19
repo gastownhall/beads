@@ -1431,6 +1431,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd config --help` lists the `audit.*` namespace, and `bd audit --help`
+  names `BD_AUDIT_ENABLED=1`** beside `bd config set audit.enabled true` as
+  the per-process way to turn the interactions sidecar on. (#5787)
+
 - **`bd config set audit.enabled true` no longer warns that the key is not
   recognized.** The key `bd audit --help` prescribes, like every other key
   bd keeps in `config.yaml` (`list.*`, `mail.delegate`, `routing.*`,
