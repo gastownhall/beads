@@ -178,7 +178,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launches a watcher beside each server it auto-starts, and the watcher stops
   the server once it has had no client for 30 minutes; the next bd command
   starts it again. Servers on a pinned port, shared, external and remotesapi
-  servers are never stopped.
+  servers are never stopped, nor is one started with `bd dolt start`. Set the
+  window with `dolt.idle-timeout` or `BEADS_DOLT_IDLE_TIMEOUT` (`0` turns it
+  off). `bd dolt status --all` lists every Dolt server on the machine, bd's and
+  others', from any directory, and `bd dolt stop --all` stops bd's; run it once
+  after upgrading to stop servers an older bd left running (GH#4282).
 
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
