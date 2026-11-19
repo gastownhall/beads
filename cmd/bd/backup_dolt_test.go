@@ -600,3 +600,82 @@ func TestValidateBackupInitTarget(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateBackupInitTargetKeepsAcceptedInputs is the guard on the other
+// side of the refusal: every accepted URL form and every filesystem input,
+// including one-letter Windows drives (C://backups has a one-character
+// "scheme") and a URL-looking local directory spelled ./name://path, still
+// passes validation and keeps its old resolution.
+func TestValidateBackupInitTargetKeepsAcceptedInputs(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{
+		"https://doltremoteapi.dolthub.com/user/repo",
+		"http://localhost:50051/repo",
+		"file:///tmp/backup",
+		"aws://[table:bucket]/beads",
+		"gs://bucket/beads",
+		"s3://bucket/beads?endpoint=https://minio.local",
+		"az://account.blob.core.windows.net/container/beads",
+		"oci://registry.example/tenant/beads",
+		"",
+		"my-backup",
+		filepath.Join(t.TempDir(), "beads-backup"),
+		"~/backups/beads",
+		"./odd://name",
+		`C:\backups`,
+		"C:/backups",
+		"C://backups",
+	} {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			if err := validateBackupInitTarget(input); err != nil {
+				t.Fatalf("validateBackupInitTarget(%q) = %v, want nil", input, err)
+			}
+		})
+	}
+}
+
+// TestResolveDoltBackupURL_PathLikeInputsStayLocal pins that the inputs the
+// refusal deliberately lets through as paths are still resolved the
+// platform-native filesystem way, not passed through as URLs.
+func TestResolveDoltBackupURL_PathLikeInputsStayLocal(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{"./odd://name", `C:\backups`, "C:/backups", "C://backups"} {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			abs, err := filepath.Abs(input)
+			if err != nil {
+				t.Fatalf("filepath.Abs(%q): %v", input, err)
+			}
+			if got, want := resolveDoltBackupURL(input), "file://"+abs; got != want {
+				t.Errorf("resolveDoltBackupURL(%q) = %q, want %q", input, got, want)
+			}
+		})
+	}
+}
+
+// TestBackupInitRegistersDriveLikePathLocally drives a one-letter drive
+// through the whole command: the refusal must not catch it, and it is
+// registered as the same file:// path it always was.
+//
+// Cannot be parallel: mutates store, rootCtx, jsonOutput and stdio.
+func TestBackupInitRegistersDriveLikePathLocally(t *testing.T) {
+	beadsDir := prepareBackupInitTest(t, false)
+	fake := &recordingInitBackupStore{}
+	store = fake
+	const input = "C://backups"
+	abs, err := filepath.Abs(input)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%q): %v", input, err)
+	}
+	want := "file://" + abs
+
+	stdout, stderr, err := runBackupInitForTest(t, input)
+	if err != nil {
+		t.Fatalf("backup init %s: %v\nstderr: %s", input, err, stderr)
+	}
+	if wantAdds := []backupAddCall{{name: defaultDoltBackupName, url: want}}; !slices.Equal(fake.adds, wantAdds) {
+		t.Errorf("BackupAdd calls = %+v, want %+v", fake.adds, wantAdds)
+	}
+	assertBackupInitConfigured(t, beadsDir, want, false, stdout)
+}
