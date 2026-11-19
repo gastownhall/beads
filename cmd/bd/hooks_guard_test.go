@@ -809,4 +809,33 @@ func TestInstallHooks_NonShell(t *testing.T) {
 		require.Contains(t, readNonShellHookForTest(t, filepath.Join(hooksDir, "pre-commit")), hookSectionBeginPrefix,
 			"the other hooks are still installed")
 	})
+
+	t.Run("AC2_beads_mode_preserves_python_and_configures_hooks_path", func(t *testing.T) {
+		_, repo := setupSymlinkedHooksDirRepo(t)
+		writeNonShellHookForTest(t, filepath.Join(repo, ".git", "hooks", "pre-push"), nonShellPythonPrePush)
+
+		stderr := installHooksCapturingStderr(t, true)
+
+		target := filepath.Join(repo, ".beads", "hooks")
+		require.Equal(t, nonShellPythonPrePush, readNonShellHookForTest(t, filepath.Join(target, "pre-push")),
+			"the preserved python pre-push must stay byte-identical")
+		require.Contains(t, stderr, "python3")
+		for _, name := range managedHookNames {
+			if name == "pre-push" {
+				continue
+			}
+			require.Contains(t, readNonShellHookForTest(t, filepath.Join(target, name)), hookSectionBeginPrefix, "%s installed", name)
+		}
+		out, err := exec.Command("git", "-C", repo, "config", "--get", "core.hooksPath").Output()
+		require.NoError(t, err)
+		configured := strings.TrimSpace(string(out))
+		if !filepath.IsAbs(configured) {
+			configured = filepath.Join(repo, configured)
+		}
+		wantDir, err := filepath.EvalSymlinks(target)
+		require.NoError(t, err)
+		gotDir, err := filepath.EvalSymlinks(configured)
+		require.NoError(t, err)
+		require.Equal(t, wantDir, gotDir, "core.hooksPath selects the beads hooks directory")
+	})
 }
