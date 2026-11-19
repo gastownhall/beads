@@ -34,6 +34,13 @@ func TestProxiedServerEpic(t *testing.T) {
 		t.Fatalf("close partial child: %v\n%s", err, out)
 	}
 
+	// A childless epic and an epic whose only child is an unlinked dotted-ID
+	// child (GH#5720's two omissions): both must appear in epic status as
+	// 0/0 (0%), and neither may ever be close-eligible.
+	childlessEpic := bdProxiedCreate(t, bd, p.dir, "Childless epic", "--type", "epic")
+	dottedEpic := bdProxiedCreate(t, bd, p.dir, "Dotted child only epic", "--type", "epic")
+	dottedChild := bdProxiedCreate(t, bd, p.dir, "Unlinked dotted child", "--type", "task", "--id", dottedEpic.ID+".1")
+
 	epicStatus := func(t *testing.T, args ...string) []*types.EpicStatus {
 		t.Helper()
 		out, err := bdProxiedRun(t, bd, p.dir, append([]string{"epic", "status", "--json"}, args...)...)
@@ -65,6 +72,39 @@ func TestProxiedServerEpic(t *testing.T) {
 		got := epicStatus(t)
 		if len(got) < 1 {
 			t.Errorf("expected at least 1 epic in status, got %d", len(got))
+		}
+	})
+
+	t.Run("status_lists_childless_and_dotted_only_epics", func(t *testing.T) {
+		// GH#5720 (bd-ufmqco): both omitted epics must appear once, as
+		// {0, 0, false}.
+		byID := map[string]*types.EpicStatus{}
+		for _, es := range epicStatus(t) {
+			byID[es.Epic.ID] = es
+		}
+		for _, id := range []string{childlessEpic.ID, dottedEpic.ID} {
+			es := byID[id]
+			if es == nil {
+				t.Errorf("open epic %s missing from status; got %+v", id, byID)
+				continue
+			}
+			if es.TotalChildren != 0 || es.ClosedChildren != 0 || es.EligibleForClose {
+				t.Errorf("%s = {Total:%d Closed:%d Eligible:%v}, want {0 0 false}", id, es.TotalChildren, es.ClosedChildren, es.EligibleForClose)
+			}
+		}
+
+		out, err := bdProxiedRun(t, bd, p.dir, "epic", "status")
+		if err != nil {
+			t.Fatalf("epic status: %v\n%s", err, out)
+		}
+		s := string(out)
+		for _, id := range []string{childlessEpic.ID, dottedEpic.ID} {
+			if !strings.Contains(s, id) {
+				t.Errorf("open epic %s missing from human status output:\n%s", id, s)
+			}
+		}
+		if n := strings.Count(s, "0/0 children closed (0%)"); n != 2 {
+			t.Errorf("expected two 0/0 (0%%) rows, got %d:\n%s", n, s)
 		}
 	})
 

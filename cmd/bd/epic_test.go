@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,4 +239,92 @@ func TestEpicCommandInit(t *testing.T) {
 	if !hasStatusCmd {
 		t.Error("epic command should have status subcommand")
 	}
+}
+
+// TestEpicStatusListsEveryOpenEpic pins GH#5720 (bd-ufmqco): `bd epic status`
+// shows the status of every open epic, not only the epics that have
+// parent-child edge children. A childless epic and an epic whose only child
+// is a dotted-ID child without a parent-child edge must both be listed
+// (GH#5720's repro: three open epics, `bd epic status` printing one row).
+func TestEpicStatusListsEveryOpenEpic(t *testing.T) {
+	h := newEpicTestHelper(t)
+
+	withEdge := &types.Issue{ID: "test-ufm-edge", Title: "epic with edge child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic, CreatedAt: time.Now()}
+	childless := &types.Issue{ID: "test-ufm-none", Title: "epic childless", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic, CreatedAt: time.Now()}
+	dottedOnly := &types.Issue{ID: "test-ufm-dot", Title: "epic dotted child only", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic, CreatedAt: time.Now()}
+	for _, e := range []*types.Issue{withEdge, childless, dottedOnly} {
+		h.createIssue(t, e)
+	}
+	realChild := &types.Issue{Title: "real child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: time.Now()}
+	h.createIssue(t, realChild)
+	h.addDependency(t, &types.Dependency{IssueID: realChild.ID, DependsOnID: withEdge.ID, Type: types.DepParentChild, CreatedAt: time.Now(), CreatedBy: "test"})
+	// Dotted ID only: no parent-child edge, so the child does not count for
+	// epic status (linking it would take `bd create --parent` or
+	// `bd dep add ... --type parent-child`).
+	h.createIssue(t, &types.Issue{ID: "test-ufm-dot.1", Title: "dotted child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: time.Now()})
+
+	oldStore, oldCtx, oldJSON := store, rootCtx, jsonOutput
+	store, rootCtx, jsonOutput = h.s, h.ctx, true
+	t.Cleanup(func() { store, rootCtx, jsonOutput = oldStore, oldCtx, oldJSON })
+
+	runStatus := func() string {
+		return captureStdout(t, func() error { return epicStatusCmd.RunE(epicStatusCmd, nil) })
+	}
+
+	// JSON mode: all three epics, each exactly once, with the right counts.
+	out := runStatus()
+	var epics []*types.EpicStatus
+	if err := json.Unmarshal([]byte(out), &epics); err != nil {
+		t.Fatalf("parse epic status JSON: %v\n%s", err, out)
+	}
+	seen := make(map[string]*types.EpicStatus)
+	for _, e := range epics {
+		seen[e.Epic.ID] = e
+	}
+	for _, id := range []string{withEdge.ID, childless.ID, dottedOnly.ID} {
+		if seen[id] == nil {
+			t.Errorf("bd epic status omitted open epic %s; got %v", id, epicStatusIDsForTest(epics))
+		}
+	}
+	if e := seen[withEdge.ID]; e != nil {
+		if e.TotalChildren != 1 || e.ClosedChildren != 0 || e.EligibleForClose {
+			t.Errorf("%s = {Total:%d Closed:%d Eligible:%v}, want {1 0 false}", withEdge.ID, e.TotalChildren, e.ClosedChildren, e.EligibleForClose)
+		}
+	}
+	for _, id := range []string{childless.ID, dottedOnly.ID} {
+		if e := seen[id]; e != nil {
+			if e.TotalChildren != 0 || e.ClosedChildren != 0 || e.EligibleForClose {
+				t.Errorf("%s = {Total:%d Closed:%d Eligible:%v}, want {0 0 false}", id, e.TotalChildren, e.ClosedChildren, e.EligibleForClose)
+			}
+		}
+	}
+
+	// Human mode: the row rendering for a zero-child epic is 0/0 (0%) with
+	// no eligibility marker.
+	jsonOutput = false
+	out = runStatus()
+	for _, id := range []string{withEdge.ID, childless.ID, dottedOnly.ID} {
+		if !strings.Contains(out, id) {
+			t.Errorf("bd epic status (human) omitted open epic %s:\n%s", id, out)
+		}
+	}
+	if n := strings.Count(out, "0/0 children closed (0%)"); n != 2 {
+		t.Errorf("expected two 0/0 (0%%) rows (childless + dotted-only), got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, "0/1 children closed (0%)") {
+		t.Errorf("expected one 0/1 (0%%) row for the edge-child epic:\n%s", out)
+	}
+	if strings.Contains(out, "Eligible for closure") {
+		t.Errorf("no epic in this fixture is eligible; eligibility marker printed anyway:\n%s", out)
+	}
+}
+
+func epicStatusIDsForTest(epics []*types.EpicStatus) string {
+	ids := make([]string, 0, len(epics))
+	for _, e := range epics {
+		if e != nil && e.Epic != nil {
+			ids = append(ids, e.Epic.ID)
+		}
+	}
+	return "[" + strings.Join(ids, " ") + "]"
 }

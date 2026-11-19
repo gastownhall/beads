@@ -78,6 +78,13 @@ func TestEmbeddedEpicStatus(t *testing.T) {
 	// c2, c2b still open — epic1 is NOT eligible
 	_ = c2b
 
+	// GH#5720 (bd-ufmqco): a childless epic and an epic whose only child is
+	// an unlinked dotted-ID issue. Both must be listed by epic status as
+	// 0/0 (0%) and never move close-eligible.
+	childlessEpic := bdCreate(t, bd, dir, "Childless epic", "--type", "epic")
+	dottedEpic := bdCreate(t, bd, dir, "Dotted child only epic", "--type", "epic")
+	bdCreate(t, bd, dir, "Unlinked dotted child", "--type", "task", "--id", dottedEpic.ID+".1")
+
 	// ===== epic status =====
 
 	t.Run("status_shows_progress", func(t *testing.T) {
@@ -87,6 +94,53 @@ func TestEmbeddedEpicStatus(t *testing.T) {
 		}
 		if !strings.Contains(out, "children closed") || !strings.Contains(out, "/") {
 			t.Errorf("expected progress fraction in output: %s", out)
+		}
+	})
+
+	t.Run("status_lists_childless_and_dotted_only_epics", func(t *testing.T) {
+		out := bdEpic(t, bd, dir, "status")
+		for _, id := range []string{childlessEpic.ID, dottedEpic.ID} {
+			if !strings.Contains(out, id) {
+				t.Errorf("open epic %s missing from status output:\n%s", id, out)
+			}
+		}
+		if n := strings.Count(out, "0/0 children closed (0%)"); n != 2 {
+			t.Errorf("expected two 0/0 (0%%) rows, got %d:\n%s", n, out)
+		}
+		if strings.Contains(out, "Eligible for closure") {
+			t.Errorf("no epic here is eligible; eligibility marker printed:\n%s", out)
+		}
+
+		result := bdEpicJSON(t, bd, dir, "status")
+		arr, ok := result.([]interface{})
+		if !ok {
+			t.Fatalf("expected JSON array, got %T", result)
+		}
+		byID := map[string]map[string]interface{}{}
+		for _, item := range arr {
+			obj, ok := item.(map[string]interface{})
+			if !ok {
+				t.Fatalf("expected JSON object, got %T", item)
+			}
+			epic, _ := obj["epic"].(map[string]interface{})
+			if epic == nil {
+				continue
+			}
+			id, _ := epic["id"].(string)
+			byID[id] = obj
+		}
+		for _, id := range []string{childlessEpic.ID, dottedEpic.ID} {
+			obj := byID[id]
+			if obj == nil {
+				t.Errorf("open epic %s missing from JSON status: %v", id, byID)
+				continue
+			}
+			total, _ := obj["total_children"].(float64)
+			closed, _ := obj["closed_children"].(float64)
+			eligible, _ := obj["eligible_for_close"].(bool)
+			if total != 0 || closed != 0 || eligible {
+				t.Errorf("%s = {total:%d closed:%d eligible:%v}, want {0 0 false}", id, int(total), int(closed), eligible)
+			}
 		}
 	})
 
