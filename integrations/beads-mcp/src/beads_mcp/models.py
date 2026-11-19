@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Type aliases for issue statuses, types, and dependencies
 #
@@ -55,6 +55,9 @@ class IssueMinimal(BaseModel):
     labels: list[str] = Field(default_factory=list)
     dependency_count: int = 0
     dependent_count: int = 0
+    # Comment completeness without the bodies; None means unknown.
+    comment_count: int | None = None
+    comments_omitted: bool | None = None
 
     @field_validator("priority")
     @classmethod
@@ -158,11 +161,46 @@ class LinkedIssue(IssueBase):
     dependency_type: DependencyType | None = None
 
 
+class Comment(BaseModel):
+    """A comment on an issue (matches `bd comments <id> --json`)."""
+
+    # bd before v1.0 sent integer ids; Go's Comment.UnmarshalJSON still reads both.
+    id: str = Field(coerce_numbers_to_str=True)
+    issue_id: str
+    author: str | None = None
+    text: str
+    created_at: datetime
+
+
 class Issue(IssueBase):
-    """Issue model matching bd JSON output."""
+    """Issue model matching bd JSON output.
+
+    Comment completeness mirrors the CLI: ``comment_count`` and
+    ``comments_omitted`` say how many comments exist and whether their bodies
+    were left out; ``comments`` holds the bodies only when the CLI supplied them
+    (``bd show --include-comments``). ``None`` means unknown/unavailable, never
+    "no comments".
+    """
 
     dependencies: list[LinkedIssue] = Field(default_factory=list)
     dependents: list[LinkedIssue] = Field(default_factory=list)
+    comments: list[Comment] | None = None
+    comment_count: int | None = None
+    comments_omitted: bool | None = None
+
+    @model_validator(mode="after")
+    def derive_comment_completeness(self) -> "Issue":
+        """Fill in completeness the CLI left out, never overriding what it said.
+
+        Older bd binaries send bodies without a count; list/ready rows send a
+        count without the marker. Bodies give the count, and a known count gives
+        the marker. With neither, both stay None (unknown).
+        """
+        if self.comment_count is None and self.comments is not None:
+            self.comment_count = len(self.comments)
+        if self.comments_omitted is None and self.comment_count is not None:
+            self.comments_omitted = self.comment_count > len(self.comments or [])
+        return self
 
 
 class Dependency(BaseModel):
@@ -271,6 +309,7 @@ class ShowIssueParams(BaseModel):
     """Parameters for showing issue details."""
 
     issue_id: str
+    include_comments: bool = False  # bd show --include-comments: return comment bodies
 
 
 class StatsSummary(BaseModel):
@@ -332,16 +371,6 @@ class InitResult(BaseModel):
 # =============================================================================
 # COMMENTS & NOTES
 # =============================================================================
-
-
-class Comment(BaseModel):
-    """A comment on an issue (matches `bd comments <id> --json`)."""
-
-    id: str
-    issue_id: str
-    author: str | None = None
-    text: str
-    created_at: datetime
 
 
 class AddCommentParams(BaseModel):

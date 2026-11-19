@@ -551,3 +551,93 @@ func writeProxiedMetadata(t *testing.T, beadsDir string, fields map[string]strin
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(configfile.ConfigPath(beadsDir), data, 0o644))
 }
+
+// writePlainProxiedWorkspace writes a plain (non-team-server) proxied-server
+// metadata.json whose configured database is "beads_mine".
+func writePlainProxiedWorkspace(t *testing.T, projectID string) string {
+	t.Helper()
+	beadsDir := t.TempDir()
+	metadata := fmt.Sprintf(`{"backend": "dolt", "dolt_mode": "proxied-server", "dolt_database": "beads_mine", "project_id": %q}`, projectID)
+	require.NoError(t, os.WriteFile(configfile.ConfigPath(beadsDir), []byte(metadata), 0o644))
+	return beadsDir
+}
+
+// gastownhall/beads#5572 scopes the plain-mode identity guard to an explicit
+// excursion. Opening the configured database — with no override, or an
+// override naming it in another case — must carry no expected identity, so a
+// plain workspace whose local ID is stale (plain init does not persist an
+// adopted ID) keeps opening exactly as before.
+func TestResolveProxiedServerUOWTopology_ExcursionIdentity_ConfiguredDatabaseAssertsNothing(t *testing.T) {
+	t.Setenv("BEADS_SKIP_IDENTITY_CHECK", "")
+	beadsDir := writePlainProxiedWorkspace(t, "proj-stale-local")
+
+	for _, override := range []string{"", "beads_mine", "BEADS_Mine"} {
+		topology, err := resolveProxiedServerUOWTopology(beadsDir, override, assertWorkspaceIdentity)
+		require.NoError(t, err)
+		assert.Empty(t, topology.expectedProjectID,
+			"override %q opens the configured database: no identity comparison", override)
+		want := "beads_mine"
+		if override != "" {
+			want = override
+		}
+		assert.Equal(t, want, topology.database, "the resolved database itself is unchanged")
+		assert.False(t, topology.teamServer)
+	}
+
+	// Positive control: the clearing is scoped, not blanket. An excursion to
+	// a different database keeps the identity for the open to assert.
+	topology, err := resolveProxiedServerUOWTopology(beadsDir, "beads_theirs", assertWorkspaceIdentity)
+	require.NoError(t, err)
+	assert.Equal(t, "proj-stale-local", topology.expectedProjectID)
+	assert.Equal(t, "beads_theirs", topology.database)
+}
+
+// BEADS_SKIP_IDENTITY_CHECK=1 is the deliberate hatch for a plain cross-project
+// excursion. It must not reach the team-server guard, which stays strict.
+func TestResolveProxiedServerUOWTopology_ExcursionIdentity_SkipEnvBypassesPlainOnly(t *testing.T) {
+	t.Setenv("BEADS_SKIP_IDENTITY_CHECK", "1")
+
+	plain := writePlainProxiedWorkspace(t, "proj-mine")
+	topology, err := resolveProxiedServerUOWTopology(plain, "beads_theirs", assertWorkspaceIdentity)
+	require.NoError(t, err)
+	assert.Empty(t, topology.expectedProjectID, "the plain excursion is deliberately unchecked")
+	assert.Equal(t, "beads_theirs", topology.database)
+
+	team := t.TempDir()
+	require.NoError(t, os.WriteFile(configfile.ConfigPath(team), []byte(
+		`{"backend": "dolt", "dolt_mode": "proxied-server", "dolt_database": "team", "project_id": "proj-team", "dolt_team_server": true}`), 0o644))
+	topology, err = resolveProxiedServerUOWTopology(team, "team_other", assertWorkspaceIdentity)
+	require.NoError(t, err)
+	assert.True(t, topology.teamServer)
+	assert.Equal(t, "proj-team", topology.expectedProjectID, "team-server keeps asserting under the env var")
+
+	noID := t.TempDir()
+	require.NoError(t, os.WriteFile(configfile.ConfigPath(noID), []byte(
+		`{"backend": "dolt", "dolt_mode": "proxied-server", "dolt_database": "team", "dolt_team_server": true}`), 0o644))
+	_, err = resolveProxiedServerUOWTopology(noID, "team_other", assertWorkspaceIdentity)
+	require.Error(t, err, "a team-server workspace with no local identity is still refused")
+	assert.Contains(t, err.Error(), "no project identity")
+}
+
+// The help for --database and `bd sql` must describe the plain excursion
+// identity guard (gastownhall/beads#5572), its explicit environment hatch,
+// and that the hatch does not reach team-server workspaces.
+func TestDatabaseOverrideHelpDescribesExcursionIdentityGuard(t *testing.T) {
+	flag := rootCmd.PersistentFlags().Lookup("database")
+	require.NotNil(t, flag)
+	for name, text := range map[string]string{
+		"--database usage": flag.Usage,
+		"bd sql Long":      sqlCmd.Long,
+	} {
+		for _, want := range []string{
+			"another beads project",
+			"BEADS_SKIP_IDENTITY_CHECK=1",
+			"no beads project identity",
+			"Team-server workspaces",
+		} {
+			assert.Contains(t, text, want, "%s must mention %q", name, want)
+		}
+		assert.NotRegexp(t, `(?i)team-server[^.]*(skip|bypass)ed by`, text,
+			"%s must not suggest the environment hatch bypasses team-server", name)
+	}
+}

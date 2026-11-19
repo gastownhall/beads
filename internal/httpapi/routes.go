@@ -15,7 +15,7 @@ const (
 	// matched, so the two halves of the one path exception cannot drift apart.
 	customMethodPathValue = "idop"
 	// customMethodPattern is that one registration. Every row carrying a
-	// customMethod declares it, and s.handler collapses them into a single
+	// customMethod declares it, and s.mounts collapses them into a single
 	// ServeMux entry.
 	customMethodPattern = "/v0/beads/issues/{" + customMethodPathValue + "}"
 	// customMethodIDValue is where the dispatcher leaves the id it split out,
@@ -333,6 +333,22 @@ const CapIssuesUpdatePersistence = "issues.update.persistence"
 // covers both planes: no server has served `claim` on one plane only.
 const CapIssuesUpdateClaim = "issues.update.claim"
 
+// CapIssuesUpdateForceClaimBlocked is the behavior capability that advertises
+// UpdateIssueRequest's `force_claim_blocked` member (update.go): updateIssue
+// refuses a claim of an issue with a live local blocker — the same refusal
+// `bd close` gives a close, on the claim — answering `409 not_claimable`
+// naming `claim` with the blockers in the problem's `blockers` member, and
+// `force_claim_blocked` is that refusal's bypass, honored inside the update's
+// own transaction. It is a token of its own rather than riding
+// CapIssuesUpdateClaim because the refusal is newer than the member that
+// earns it: an older server accepts a claim of a blocked issue silently, so
+// a client that does not see the token cannot know whether its unforced
+// claim was refused for a reason it can override, and must refuse a
+// `force_claim_blocked` before the dial rather than send a member the server
+// would reject as unknown. The token covers the refusal and the bypass
+// together: no server refuses the claim without also honoring the member.
+const CapIssuesUpdateForceClaimBlocked = "issues.update.forceClaimBlocked"
+
 // CapIssuesCreateDefaultPriority is the behavior capability that advertises
 // that issues.create, issues.batchCreate and issues.batchApply's create items
 // store the create default priority (P2) for a request whose `priority` member
@@ -437,7 +453,7 @@ func customMethodTarget(rows []route, segment string) (route, string, *Result) {
 // route is one row of the surface: an operation, where it lives in the
 // document, where it lives in the router, and what the request lifecycle owes
 // it. TestSpecRouteParity compares this table against the spec's paths, and
-// s.handler builds the router from it, so "the routes" and "the document" are
+// s.mounts builds the router from it, so "the routes" and "the document" are
 // the same statement made twice.
 type route struct {
 	// op is the spec's operationId. It also names the operation in the
@@ -1191,7 +1207,7 @@ var behaviorCapabilities = []string{
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
-	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade,
+	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade, CapIssuesUpdateForceClaimBlocked,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

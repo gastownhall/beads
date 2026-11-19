@@ -53,7 +53,7 @@ This project uses bd (beads) for issue tracking.
 
 - Run `bd prime` for workflow context and command guidance.
 - Use `bd ready`, `bd show <id>`, `bd update <id> --claim`, and `bd close <id>`.
-- Use `bd remember "insight"` for durable project facts; keep per-operator preferences in your harness's own memory.
+- Use `bd remember "a project insight"` for durable project facts; keep per-operator preferences in your harness's own memory.
 - Do not use markdown TODO lists for task tracking.
 ```
 
@@ -76,7 +76,8 @@ This project uses bd (beads) for issue tracking.
 | `bd dep add <child> <parent>` | Link tasks (blocks, related, parent-child). |
 | `bd show <id>` | View task details and audit trail. |
 | `bd prime` | Print agent workflow context and persistent memories. |
-| `bd remember "insight"` | Store project memory that `bd prime` injects later. |
+| `bd remember "a project insight"` | Store project memory that `bd prime` injects later. |
+| `bd remember some-key` | Recall an exact key, including long and dotted ones like `api.v2`; a missing key fails without storing anything. Use `--key some-key` to write single-word content, and `bd recall` for keys with other characters. |
 
 ## 🔗 Hierarchy & Workflow
 
@@ -85,6 +86,14 @@ Beads supports hierarchical IDs for epics:
 * `bd-a3f8` (Epic)
 * `bd-a3f8.1` (Task)
 * `bd-a3f8.1.1` (Sub-task)
+
+Deferring a parent hides its direct children from `bd ready` too, whether it
+was deferred to a date (`bd defer --until`) or indefinitely (plain `bd defer`).
+`bd ready --include-deferred` lists those children again; the deferred parent
+itself still stays out of the listing. Once a dated deferral's date passes, the
+next `bd ready` returns the parent to open, and its children with it. A read
+that cannot write that change, such as `bd --readonly ready`, keeps the
+children hidden until a writable read has woken the parent.
 
 **Stealth Mode:** Run `bd init --stealth` to use Beads locally without committing files to the main repo. Perfect for personal use on shared projects. See [Git-Free Usage](#-git-free-usage) below.
 
@@ -193,7 +202,11 @@ schema version mismatch: database is at v45, binary knows up to v42 (3 migration
 **When this fires:** only when the database schema is *ahead* of the binary
 (a newer binary migrated the database; this binary doesn't know those
 migrations). Normal upgrades, where the binary migrates the database forward,
-are unaffected.
+are unaffected. The check runs whenever a store opens: embedded, server mode,
+a proxied-server workspace, and `bd serve` at startup. A `bd serve` that was
+already running when a newer `bd` migrated the database keeps serving until it
+is restarted, and proxied `--dry-run`/`--inspect` previews don't check, so
+restart long-running servers after migrating with a newer `bd`.
 
 **Escape hatch:** `BD_IGNORE_SCHEMA_SKEW=1` (or `--ignore-schema-skew`) bypasses
 the guard with a warning on stderr. Use this only if you know the forward
@@ -377,10 +390,19 @@ names the config holds: GitHub redirects a former name to the repository, and
 sync asks GitHub which repository each other name your beads link under
 belongs to now (one request per name), so beads linked under the old name and
 under the new one stay matched to their issues, and a pull relinks them to the
-current URL. If that request fails, or the old name now belongs to another
-repository, beads still linked under it count as another repository's: relink
-them (`bd update <id> --external-ref <new-url>`), or the next pull imports
-their issues again as new beads.
+current URL. If the old name now belongs to another repository, beads still
+linked under it count as another repository's: relink them
+(`bd update <id> --external-ref <new-url>`), or the next pull imports their
+issues again as new beads. If GitHub gives no answer to one of these requests
+(any failure but a 404: an outage, a dropped connection, a rate limit, a
+refused token), the command stops with an error that names the repository,
+instead of syncing without knowing which beads are the configured
+repository's: a sync that skipped them would move its cursor past their edits,
+and a later sync could overwrite those edits with no conflict. If the failure
+is temporary, run the command again. If the error names another repository
+your beads link to and GitHub refuses the token for it (a 403), give the token
+read access to it. If the name is a former name of the configured repository,
+relinking those beads to their issues' current URLs also ends the lookup.
 
 ## 🌐 Community Tools
 

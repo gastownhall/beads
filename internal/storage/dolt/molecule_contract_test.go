@@ -35,6 +35,7 @@ func TestMoleculeContract(t *testing.T) {
 		{"StepperNeverTakesAStepAnotherActorHolds", conformance.RunMoleculeStepperNeverTakesAStepAnotherActorHolds},
 		{"StepperAnswersCompleteAndOutsideAMolecule", conformance.RunMoleculeStepperAnswersCompleteAndOutsideAMolecule},
 		{"StepperClaimsAWispStep", conformance.RunMoleculeStepperClaimsAWispStep},
+		{"StepperClaimsAStepBlockedFromOutsideTheMolecule", conformance.RunMoleculeStepperClaimsAStepBlockedFromOutsideTheMolecule},
 	} {
 		t.Run(test.name, func(t *testing.T) { test.run(t, ctx, fixture) })
 	}

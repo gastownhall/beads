@@ -32,11 +32,20 @@ var (
 	// ErrExec indicates a database exec (INSERT/UPDATE/DELETE) failure.
 	ErrExec = errors.New("exec error")
 
-	// ErrDanglingReference indicates that the pre-push integrity check detected
-	// missing chunks in the local Dolt noms store. The push was aborted to
+	// ErrDanglingReference indicates that the pre-push integrity check (dolt
+	// fsck) reported a finding in the local Dolt noms store: corrupt chunks,
+	// commit errors or a corrupted chunk journal. The push was aborted to
 	// prevent propagating the corruption to the remote. Run bd dolt verify
 	// to diagnose and recover.
 	ErrDanglingReference = errors.New("dangling chunk reference")
+
+	// ErrFSCKFailed indicates that the pre-push integrity check (dolt fsck)
+	// failed without reporting a finding, a timeout or an interruption: for
+	// example dolt could not start, printed only a warning, or was killed. The
+	// push was aborted without a verdict on chunk integrity — the store is not
+	// necessarily corrupt; running `dolt fsck` in the database directory shows
+	// its full report.
+	ErrFSCKFailed = errors.New("pre-push integrity check failed")
 
 	// ErrFSCKTimeout indicates that the pre-push integrity check (dolt fsck) did
 	// not complete within the configured timeout. The push was aborted without
@@ -57,15 +66,6 @@ var (
 // (timeouts, connection failures, corrupt data).
 func isTableNotExistError(err error) bool {
 	return dberrors.IsTableNotExist(err)
-}
-
-// isBranchTrackingError returns true if the error indicates that DOLT_PULL
-// failed because upstream branch tracking is not configured. This happens
-// when a remote was added via DOLT_REMOTE('add') or bd dolt remote add
-// rather than via dolt clone / bd bootstrap, leaving repo_state.json with
-// an empty "branches" map (GH#3144).
-func isBranchTrackingError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "did not specify a branch")
 }
 
 // isSerializationError returns true if the error is a Dolt/MySQL serialization

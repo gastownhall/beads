@@ -47,10 +47,17 @@ func showDeferState(t *testing.T, bd, dir, id string) (string, interface{}) {
 // wakeReadyIDs runs bd ready --json (plus extra args) and returns the listed ids.
 func wakeReadyIDs(t *testing.T, bd, dir string, args ...string) map[string]bool {
 	t.Helper()
+	return wakeReadyIDsWithEnv(t, bd, dir, nil, args...)
+}
+
+// wakeReadyIDsWithEnv is wakeReadyIDs with extra environment variables for
+// this one invocation.
+func wakeReadyIDsWithEnv(t *testing.T, bd, dir string, extraEnv []string, args ...string) map[string]bool {
+	t.Helper()
 	fullArgs := append([]string{"ready", "--json"}, args...)
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
+	cmd.Env = append(bdEnv(dir), extraEnv...)
 	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
 		t.Fatalf("bd ready --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -54,8 +53,9 @@ type commandUpdateMutation struct {
 // runCommandUpdateMutation maps a command update into its lifecycle request and
 // returns the lifecycle result unchanged. It is the ONE place the command's
 // flag semantics become a request — in particular the one --force that means
-// three overrides, whose assignee half only applies to an assignee edit and
-// whose notes half only applies to a notes edit. The assignee half is never
+// four overrides, whose assignee half only applies to an assignee edit, whose
+// notes half only applies to a notes edit, and whose blocked-claim half only
+// applies to a claim. The assignee half is never
 // set alongside --if-assignee (ExpectedAssignee): the contract rejects that
 // combination outright. The notes half carries no such restriction — it is
 // deliberately independent of ExpectedAssignee — so --force paired with
@@ -69,6 +69,7 @@ func runCommandUpdateMutation(ctx context.Context, updater commandIssueUpdater, 
 		ForceAssigneeTransfer: mutation.force && mutation.patch.Assignee.Set && mutation.expectedAssignee == nil,
 		ForceClosePolicy:      mutation.force,
 		ForceNotesOverwrite:   mutation.force && mutation.patch.Notes.Set,
+		ForceClaimBlocked:     mutation.force && mutation.claim,
 		ExpectedAssignee:      mutation.expectedAssignee,
 		ExpectedStatus:        mutation.expectedStatus,
 		ExpectedVersion:       mutation.expectedVersion,
@@ -202,7 +203,7 @@ pointless).`,
 		}
 		if cmd.Flags().Changed("assignee") {
 			assignee, _ := cmd.Flags().GetString("assignee")
-			updates["assignee"] = assignee
+			updates["assignee"] = normalizeAssigneeInput(assignee)
 		}
 		description, descChanged, err := getDescriptionFlag(cmd)
 		if err != nil {
@@ -573,7 +574,7 @@ pointless).`,
 			// Guards ride the operation itself: a stale assignee/status refuses
 			// atomically with a typed mismatch error and MUST surface as a
 			// non-zero exit — never collapse it to success (finding #10).
-			// One --force, two overrides. The assignee half only applies to an
+			// One --force, several overrides. The assignee half only applies to an
 			// assignee edit — asserting it without one is an invalid request,
 			// which is why it is conditioned here rather than passed straight
 			// through: `--force -s closed` is now a legitimate way to ask for
@@ -607,6 +608,9 @@ pointless).`,
 				if refusal, ok := templateReadOnlyRefusal(id, updateErr); ok {
 					failureText = refusal.Error()
 					fmt.Fprintf(os.Stderr, "%s\n", refusal)
+				} else if refusal, ok := claimBlockedRefusal(updateErr); ok {
+					failureText = refusal.Error()
+					fmt.Fprintf(os.Stderr, "%s\n", refusal)
 				} else if errors.Is(updateErr, issueops.ErrNotesOverwrite) {
 					// The contract's AuthorizeNotesOverwrite fence refused
 					// inside the mutation transaction. Print the advice, not
@@ -630,16 +634,10 @@ pointless).`,
 			if notesOverwritten {
 				notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
 			}
-			// Audit log key field changes (survives Dolt GC flatten)
-			if patch.Status.Set {
-				audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), string(patch.Status.Value), currentActor(), "")
-			}
-			if patch.Assignee.Set {
-				audit.LogFieldChange(result.ResolvedID, "assignee", issue.Assignee, patch.Assignee.Value, currentActor(), "")
-			}
-			if patch.Priority.Set {
-				audit.LogFieldChange(result.ResolvedID, "priority", fmt.Sprintf("%d", issue.Priority), fmt.Sprintf("%d", patch.Priority.Value), currentActor(), "")
-			}
+			// Audit log key field changes (survives Dolt GC flatten), a
+			// --claim's implied status and assignee included (GH#6146).
+			logUpdateAuditChanges(result.ResolvedID, currentActor(),
+				updateAuditChanges(patch, claimFlag, updateResult.Changed, issue, updatedIssue))
 
 			// The operation's own post-state snapshot replaces the re-read.
 			// Dependency records are dropped from it because `bd update` has
@@ -887,6 +885,25 @@ func errNotesOverwriteRefusal(id string) error {
 	return fmt.Errorf("%s: --notes would replace existing notes; use --force to overwrite (or --append-notes to preserve history)", id)
 }
 
+// claimBlockedRefusal is the user-facing refusal both `bd update` routes print
+// when the lifecycle refuses a claim because the issue still has a live local
+// blocker (issueops.ErrClaimBlocked): the engine's own "<sentinel>: <id> is
+// blocked by [<blockers>]" plus the --force hint, which that refusal honors.
+// The external-dependency guard's claim refusal wraps ErrCloseBlocked instead
+// and is not matched here: --force cannot waive it, so it gets no hint.
+func claimBlockedRefusal(err error) (error, bool) {
+	if !errors.Is(err, issueops.ErrClaimBlocked) {
+		return nil, false
+	}
+	// Print the typed refusal itself when it is there, so a route that wrapped
+	// it with context still reads the same as one that did not.
+	var blocked *issueops.BlockedError
+	if errors.As(err, &blocked) {
+		err = blocked
+	}
+	return fmt.Errorf("%w (use --force to override)", err), true
+}
+
 // warnNotesReplacement fires only after a successful overwrite, which since
 // the fence means the caller passed --force: it is the audit trail for a
 // habitual --force that never saw the refusal, worded as a statement of what
@@ -1073,6 +1090,7 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
 	registerCommonIssueFlags(updateCmd)
+	updateCmd.Flags().Lookup("assignee").Usage = "Assignee ('', '-' or whitespace-only text unassigns)"
 	updateCmd.Flags().Lookup("notes").Usage = "Replace the notes field (requires --force over existing non-empty notes; --clear-notes clears; --append-notes appends instead)"
 	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
 	updateCmd.Flags().Bool("clear-notes", false, "Clear the notes field (--notes \"\" is refused: an empty value is usually a dead command substitution)")
@@ -1104,9 +1122,10 @@ func init() {
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
-	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
-	// Overrides the live-claim reassign fence (bd-98s5c) and close policy.
-	updateCmd.Flags().Bool("force", false, "Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), and let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead)")
+	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too; refused while the issue has an open local blocker unless --force)")
+	// Overrides the live-claim reassign fence (bd-98s5c), close policy and the
+	// blocked-claim refusal.
+	updateCmd.Flags().Bool("force", false, "Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead), and let --claim take an issue that still has an open local blocker (an unresolved external dependency still refuses the claim)")
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")

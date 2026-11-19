@@ -31,9 +31,11 @@ go_test(
     timeout = "long",
     srcs = [
         "attach_test.go",
+        "connect_front_door_test.go",
         "e2e_blocked_flags_test.go",
         "e2e_blocked_test.go",
         "e2e_cli_test.go",
+        "e2e_connect_front_door_test.go",
         "e2e_export_test.go",
         "e2e_gates_test.go",
         "e2e_heartbeat_test.go",
@@ -55,7 +57,13 @@ go_test(
     ],
     # The e2e files exec the real bd (bazeltest.PrebuiltBD); they run under
     # BEADS_TEST_EMBEDDED_DOLT=1 and skip otherwise.
-    data = ["//cmd/bd:bd_for_tests"],
+    # TestConnectFrontDoorClassifiesEveryCommand reads its matrix and cmd/bd's
+    # command tree golden as data.
+    data = [
+        "testdata/connect_front_door.yaml",
+        "//cmd/bd:bd_for_tests",
+        "//cmd/bd:testdata/command_tree/tree.golden",
+    ],
     env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
     deps = [
         ":http",
@@ -63,6 +71,7 @@ go_test(
         "//internal/configfile",
         "//internal/httpapi",
         "//internal/httpclient",
+        "//internal/httpclient/encode",
         "//internal/storage",
         "//internal/storage/backends",
         "//internal/storage/domain",
@@ -70,6 +79,8 @@ go_test(
         "//internal/storage/issueops",
         "//internal/testutil/bazeltest",
         "//internal/testutil/legacyworkspace",
+        "//internal/types",
+        "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
 
@@ -106,6 +117,13 @@ go_test(
 #       --record-measured --tests-in backend/http \
 #       --write backend/http/served_pinned_shards.txt \
 #       $(tools/bazel/fetch_served_testxml.sh 30 "$(mktemp -d)")
+#
+# The bd connect front-door matrix, TestE2E_ConnectFrontDoorMatrixPart1..4
+# (e2e_connect_front_door_test.go), is not measured yet: its four parts are
+# declared consecutively, so the round-robin deals them to four different
+# round-robin shards. Once CI has measured them, regenerate the manifest with
+# --shards 14 (not 10, which would bin-pack the ~100s parts onto shards
+# already near the longest) and raise shard_count to 18.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,

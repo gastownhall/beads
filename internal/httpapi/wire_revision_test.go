@@ -129,11 +129,19 @@ func TestWireRevisionBelowFloorRefusesEveryEnforcedRoute(t *testing.T) {
 	ts := wireRevisionReadServer(t, func(s *Server) { s.minClientWireRevision = floor })
 	below := strconv.Itoa(floor - 1)
 
-	for _, path := range []string{"/v0/beads/ready", "/v0/beads/context"} {
-		t.Run(path, func(t *testing.T) {
-			resp := ts.wireRevisioned(t, http.MethodGet, path, below)
+	enforced := 0
+	for _, e := range mountEndpoints(t, ts.mounts()) {
+		if e.row == nil || e.row.wireRevisionExempt {
+			continue
+		}
+		enforced++
+		t.Run(e.row.op, func(t *testing.T) {
+			resp := ts.wireRevisioned(t, e.method, e.path, below)
 			assertWireRevisionUnsupported(t, resp, floor)
 		})
+	}
+	if enforced == 0 {
+		t.Fatal("no mount answers an operation the floor applies to")
 	}
 
 	// Attributable, like every other middleware refusal.
@@ -206,7 +214,7 @@ func TestContextAdvertisesWireRevision(t *testing.T) {
 // list — see wireRevisionExempt's doc comment for why the two diverge.
 func TestWireRevisionExemptRoutesAreExactlyHealth(t *testing.T) {
 	var exempt []string
-	for _, rt := range routeTable {
+	for _, rt := range defaultRows(t) {
 		if rt.wireRevisionExempt {
 			exempt = append(exempt, rt.op)
 		}

@@ -158,6 +158,9 @@ func TestProxiedDualsExemptTheirExplicitCommitPoints(t *testing.T) {
 	cases := []struct {
 		name string
 		call func(context.Context)
+		// probe, when set, serves the dual's read phase; the default serves
+		// none.
+		probe func() *exemptionProbeProvider
 	}{
 		{
 			name: "batch",
@@ -169,6 +172,15 @@ func TestProxiedDualsExemptTheirExplicitCommitPoints(t *testing.T) {
 			name: "mol bond",
 			call: func(ctx context.Context) {
 				_ = runMolBondProxiedServer(ctx, molBondInput{argA: "bd-a", argB: "bd-b"})
+			},
+			// bd mol bond plans read-only first: one read per operand, so
+			// the probe's refusal lands on the write transaction rather than
+			// the planner's first read.
+			probe: func() *exemptionProbeProvider {
+				return &exemptionProbeProvider{
+					reads:   2,
+					readUOW: newExemptionProbeUOW(&types.Issue{ID: "bd-a"}, &types.Issue{ID: "bd-b"}),
+				}
 			},
 		},
 		{
@@ -182,6 +194,9 @@ func TestProxiedDualsExemptTheirExplicitCommitPoints(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			probe := &exemptionProbeProvider{}
+			if tc.probe != nil {
+				probe = tc.probe()
+			}
 			installExemptionProbe(t, probe)
 
 			tc.call(deferredRouteContext())

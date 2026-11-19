@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -135,11 +136,13 @@ func resolveAndProbeDolt(ctx context.Context, errPrefix string, quiet bool) (dol
 type sqlServerUOWTopology struct {
 	database   string
 	teamServer bool
-	// expectedProjectID is the workspace identity a team-server open asserts
-	// against the shared database. Empty means nothing to assert: either the
-	// caller adopts (see newProxiedServerUOWProviderAdopting), or the workspace
-	// is not team-server managed. Server mode never sets teamServer, so it
-	// leaves this empty too.
+	// expectedProjectID is the workspace identity the open asserts against
+	// the selected database: always for a team-server workspace, and for a
+	// plain proxied workspace only on a --database/--db excursion to a
+	// database other than the configured one (see
+	// resolveProxiedServerUOWTopology). Empty means nothing to assert: the
+	// caller adopts (see newProxiedServerUOWProviderAdopting), or a plain
+	// workspace opens its configured database. Server mode never sets it.
 	expectedProjectID string
 	proxyPort         int
 	proxyIdle         time.Duration
@@ -336,6 +339,21 @@ func resolveProxiedServerUOWTopology(beadsDir, databaseOverride string, posture 
 					configfile.ConfigFileName)
 			}
 		}
+	}
+	// A plain (non-team-server) workspace asserts its identity only on an
+	// explicit excursion: a --database/--db override naming a database other
+	// than the configured one (gastownhall/beads#5572). Opening the configured
+	// database compares nothing, because plain init does not persist an
+	// identity it adopted from an existing database, so a co-tenant
+	// workspace's local ID can be stale; asserting it there would refuse
+	// workspaces that work today. Schema names compare case-insensitively,
+	// matching MySQL. BEADS_SKIP_IDENTITY_CHECK=1 is the deliberate
+	// cross-project hatch, as on the pre-open check in main.go; it never
+	// reaches the team-server guard, which stays strict.
+	if !topology.teamServer && (databaseOverride == "" ||
+		strings.EqualFold(databaseOverride, topology.database) ||
+		os.Getenv("BEADS_SKIP_IDENTITY_CHECK") == "1") {
+		topology.expectedProjectID = ""
 	}
 	if databaseOverride != "" {
 		topology.database = databaseOverride

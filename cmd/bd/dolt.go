@@ -197,12 +197,20 @@ Use this before switching to server mode to ensure the server is running.`,
 // error. This typically happens when the remote was added via `dolt remote add`
 // (filesystem config) but not via `bd dolt remote add` (which also registers it
 // in the SQL server's dolt_remotes table).
+//
+// The fetch+merge pull route (bd-e2q8zs) also surfaces dolt's
+// ErrUnknownRemote — "unknown remote; '<name>' does not appear to be a dolt
+// database. ..." — because DOLT_FETCH/DOLT_MERGE reject an unconfigured remote
+// in that wording, and `dolt fetch <remote> <branch>` likewise fails there.
+// Without accepting it, the "Remote <name> is not configured" hint never
+// fired and the benign no-remote case looked like an opaque sync failure.
 func isRemoteNotFoundErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "remote") && strings.Contains(msg, "not found")
+	return (strings.Contains(msg, "remote") && strings.Contains(msg, "not found")) ||
+		strings.Contains(msg, "unknown remote")
 }
 
 // remoteLister is the narrow store surface needed to confirm the structured
@@ -219,19 +227,26 @@ type persistedRemoteProber interface {
 }
 
 // isConfirmedNoRemote reports whether a push/pull failure is the benign
-// "no remote configured" case that may exit 0. isRemoteNotFoundErr alone is a
-// loose string match that also fires on deleted/renamed remote-side repos,
-// missing remote branches, and typoed remote names — real sync failures that
-// must keep a non-zero exit so agents and CI notice (bd-6dnrw.7). Only an
-// actually-empty dolt_remotes table makes the skip safe; if the remotes can't
-// be listed, treat the failure as real. An empty table alone is still not
-// proof in server mode: a freshly auto-started sql-server can report empty
-// dolt_remotes at cold start even though remotes are persisted on disk
-// (GH#2118) — the same reason the remote-migrate gate reads repo_state.json
-// directly — so the on-disk probe must agree before the skip fires
-// (bd-578h9.10).
+// "no remote configured" case that may exit 0. isNoRemoteConfiguredErr (the
+// sync classifier, itself a superset of isRemoteNotFoundErr) is only a loose
+// string match that also fires on
+// deleted/renamed remote-side repos, missing remote branches, and typoed
+// remote names — real sync failures that must keep a non-zero exit so agents
+// and CI notice (bd-6dnrw.7). Only an actually-empty dolt_remotes table makes
+// the skip safe; if the remotes can't be listed, treat the failure as real.
+// An empty table alone is still not proof in server mode: a freshly
+// auto-started sql-server can report empty dolt_remotes at cold start even
+// though remotes are persisted on disk (GH#2118) — the same reason the
+// remote-migrate gate reads repo_state.json directly — so the on-disk probe
+// must agree before the skip fires (bd-578h9.10). Using the wider classifier
+// (bd-e2q8zs) keeps the `bd dolt pull` exit-0 gate in step with the
+// fetch+merge route's error wordings, including the bare `no remote` error
+// DOLT_FETCH produces for a default remote that was never configured.
+// Embedded mode's pull has always fetched first and failed with that bare
+// error, so an embedded `bd dolt pull` with no remote now exits 0 as well,
+// where it used to exit 1.
 func isConfirmedNoRemote(ctx context.Context, st remoteLister, err error) bool {
-	if !isRemoteNotFoundErr(err) {
+	if !isNoRemoteConfiguredErr(err) {
 		return false
 	}
 	return hasNoRemoteConfigured(ctx, st)
@@ -2926,34 +2941,59 @@ func testHTTPConnectivity(url string) bool {
 // does not connect through here: it stays usable against such a server so
 // it can still diagnose and repair (see doctor/fix.openFixDB).
 func openDoltServerConnection() (*sql.DB, func(), error) {
+	db, _, cleanup, err := openDoltServerConnectionAt()
+	return db, cleanup, err
+}
+
+// openDoltServerConnectionAt is openDoltServerConnection, and also names the
+// server it reached for a message: unix:<socket> when it dialed the
+// workspace's socket, else host:port, through the remedy printer.
+//
+// It dials over the store's transport: a live unix socket first, else TCP at
+// host:port (doltserver.SocketTransport). Beside a live socket, TCP alone
+// would reach whatever listens at the port, which can be another server
+// holding a database of the same name: a drop there removes the wrong
+// project's data. A socket is an address of its own, so a workspace whose
+// server only a socket names is dialed there rather than refused for want of
+// a port.
+func openDoltServerConnectionAt() (*sql.DB, string, func(), error) {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
-		return nil, nil, HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		return nil, "", nil, HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := loadDoltBackendConfig(beadsDir)
 	if err != nil {
-		return nil, nil, HandleError("%v", err)
+		return nil, "", nil, HandleError("%v", err)
 	}
 
 	host := cfg.GetDoltServerHost()
 	dc := doltserver.DialConfig(beadsDir)
 	port := dc.Port
-	if advice := unresolvedServerPortAdvice(host, port); advice != "" {
-		fmt.Fprintf(os.Stderr, "Error: no Dolt server port configured; %s\n", advice)
-		return nil, nil, SilentExit()
+	configuredSocket := cfg.GetDoltServerSocket()
+	if configuredSocket == "" {
+		if advice := unresolvedServerPortAdvice(host, port); advice != "" {
+			fmt.Fprintf(os.Stderr, "Error: no Dolt server port configured; %s\n", advice)
+			return nil, "", nil, SilentExit()
+		}
 	}
 	user := cfg.GetDoltServerUser()
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
 	if password != "" {
 		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host the
 		// workspace never pinned, as the store's open does (GH#7886).
-		if err := doltserver.CheckEndpointTrust(beadsDir, cfg, host, port, cfg.GetDoltServerSocket()); err != nil {
-			return nil, nil, HandleError("%v", err)
+		if err := doltserver.CheckEndpointTrust(beadsDir, cfg, host, port, configuredSocket); err != nil {
+			return nil, "", nil, HandleError("%v", err)
 		}
 	}
 
+	socket := doltserver.SocketTransport(configuredSocket, host, port, 500*time.Millisecond)
+	location := doltutil.PrintedServerAddr(host, port)
+	if socket != "" {
+		location = remedy.PrintedValue("unix:" + socket)
+	}
 	connStr := doltutil.ServerDSN{
+		Socket:   socket,
 		Host:     host,
 		Port:     port,
 		User:     user,
@@ -2963,7 +3003,7 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
-		return nil, nil, HandleError("connecting to Dolt server: %v", err)
+		return nil, "", nil, HandleError("connecting to Dolt server: %v", err)
 	}
 
 	db.SetMaxOpenConns(2)
@@ -2975,21 +3015,25 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		fmt.Fprintf(os.Stderr, "Error: cannot reach Dolt server at %s: %v\n", doltutil.PrintedServerAddr(host, port), remedy.PrintedError(err))
-		fmt.Fprintln(os.Stderr, unreachableServerAdvice(beadsDir, host, dc))
-		return nil, nil, SilentExit()
+		fmt.Fprintf(os.Stderr, "Error: cannot reach Dolt server at %s: %v\n", location, remedy.PrintedError(err))
+		if socket != "" {
+			fmt.Fprintln(os.Stderr, "Verify the Dolt server is running and listening on that unix socket.")
+		} else {
+			fmt.Fprintln(os.Stderr, unreachableServerAdvice(beadsDir, host, dc))
+		}
+		return nil, "", nil, SilentExit()
 	}
 
-	subject := "dolt sql-server at " + doltutil.PrintedServerAddr(host, port)
+	subject := "dolt sql-server at " + location
 	if err := doltversion.CheckServer(ctx, db, subject, func(err error) {
 		debug.Logf("dolt: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
 			subject, doltversion.RequiredMin, remedy.PrintedError(err))
 	}); err != nil {
 		_ = db.Close()
-		return nil, nil, HandleError("%s", err.Error())
+		return nil, "", nil, HandleError("%s", err.Error())
 	}
 
-	return db, func() { _ = db.Close() }, nil
+	return db, location, func() { _ = db.Close() }, nil
 }
 
 // unreachableServerAdvice is what to do about a Dolt server at host and dc's

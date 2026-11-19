@@ -334,7 +334,7 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 	if aerr != nil {
 		return fmt.Errorf("affected by demote for %s: %w", id, aerr)
 	}
-	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps, actor); err != nil {
 		return fmt.Errorf("recompute is_blocked after demote for %s: %w", id, err)
 	}
 

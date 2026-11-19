@@ -182,6 +182,8 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	var claimedNextIssue *types.Issue
 	if result.ClaimedNext != nil {
 		claimedNextIssue = result.ClaimedNext.Issue
+		// After the close rows above, as on the direct route (GH#6146).
+		audit.LogClaimed(claimedNextIssue.ID, currentActor(), string(claimedNextIssue.Status), claimedNextIssue.Assignee)
 	}
 
 	for _, o := range outcomes {

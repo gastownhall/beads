@@ -6,9 +6,10 @@
 //
 // It is its own package rather than a file in internal/workapi because nothing
 // in it is issue-shaped, and it is deliberately importable by cmd/bd: the
-// `bd remember` front door needs DeriveKey to spot the bare-slug desire path
-// BEFORE it decides which role method to call, exactly as the twenty-odd cmd/bd
-// files that import workapi need the builders. What a front door must not
+// `bd remember` front door needs DeriveKey to name the derived key a refused
+// bare slug may have meant (it spots the bare slug itself by shape, not by
+// derivation), exactly as the twenty-odd cmd/bd files that import workapi
+// need the builders. What a front door must not
 // reach is a role CONSTRUCTOR, and there is none here — these are meaning
 // functions, not bodies.
 //

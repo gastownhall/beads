@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -895,6 +896,32 @@ func IgnoredMigrationSQL(name string) (string, error) {
 	return string(data), nil
 }
 
+// PlannedMigrationSQL returns the SQL the runner executes for a main-source
+// migration file: its frozen bytes, or those bytes with the file's registered
+// execution plan applied (migration_body_plans.go). For tests outside this
+// package that compare the executed body with the frozen one.
+func PlannedMigrationSQL(name string) (string, error) {
+	return mainSource.plannedMigrationSQL(name)
+}
+
+// PlannedIgnoredMigrationSQL is PlannedMigrationSQL's ignored-lane
+// counterpart.
+func PlannedIgnoredMigrationSQL(name string) (string, error) {
+	return ignoredSource.plannedMigrationSQL(name)
+}
+
+func (m migrationSource) plannedMigrationSQL(name string) (string, error) {
+	data, err := m.files.ReadFile(m.dir + "/" + name)
+	if err != nil {
+		return "", err
+	}
+	version, err := parseVersion(name)
+	if err != nil {
+		return "", fmt.Errorf("parsing version of %s: %w", name, err)
+	}
+	return m.plannedMigrationBody(version, name, data)
+}
+
 func parseVersion(name string) (int, error) {
 	parts := strings.SplitN(name, "_", 2)
 	if len(parts) == 0 {
@@ -912,6 +939,15 @@ func parseVersion(name string) (int, error) {
 // it half-upgraded by design.
 func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 	applied, _, err := mainSource.migrate(ctx, db, maxVersion)
+	return applied, err
+}
+
+// MigrateIgnoredUpTo is MigrateUpTo for the dolt-ignored source: it applies
+// ignored-source migrations up to and including maxVersion and nothing else.
+// Test support only, for reconstructing a historical clone-local schema;
+// production code must use MigrateUp.
+func MigrateIgnoredUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
+	applied, _, err := ignoredSource.migrate(ctx, db, maxVersion)
 	return applied, err
 }
 
@@ -1083,8 +1119,32 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	if err != nil {
 		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
 	}
-	if len(touchedDirtyTables) > 0 {
-		return 0, &DirtyTablesError{Tables: touchedDirtyTables}
+	// The ignored series is checked here too, before any numbered migration
+	// or rekey runs, so its refusal applies none of them (the seed and
+	// cursor-heal preparations above may already have run) and can be the
+	// same *DirtyTablesError the working-set-reconcile opens tolerate
+	// (gastownhall/beads#5816). The ignored cursor is read before the main
+	// series runs; no main migration advances it, but a sentinel table that
+	// goes missing mid-pass can leave more ignored migrations pending, so a
+	// plain-error backstop re-checks just before ignoredSource.migrate
+	// (gastownhall/beads#5168). It reads the same committable set: rows in
+	// dolt-ignored tables (wisps, wisp_comments, ...) are clone-local
+	// working-set data that stageSchemaTables never stages and
+	// unstageIgnoredTables keeps out of the migration commit, so the
+	// ignored migrations may alter them in place. Committable tables the
+	// ignored series touches (0002 deletes child_counters rows) still refuse.
+	touchedIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
+	// A failed ignored read must not mask a main-series refusal: that typed
+	// error is what the reconcile opens recover from, and the open after the
+	// recovery reads the ignored series again. So the read error returns only
+	// when the main series has nothing to refuse.
+	if err != nil && len(touchedDirtyTables) == 0 {
+		return 0, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
+	}
+	if len(touchedDirtyTables) > 0 || len(touchedIgnoredDirtyTables) > 0 {
+		tables := append(touchedDirtyTables, touchedIgnoredDirtyTables...)
+		sort.Strings(tables)
+		return 0, &DirtyTablesError{Tables: slices.Compact(tables)}
 	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
@@ -1150,22 +1210,22 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 	backfilled = backfilled || auxRekeyed
 
-	touchedIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBeforeAll)
+	// Backstop for the ignored-series check before the migrations: that read
+	// came before the main series ran, and the ignored cursor is clamped by
+	// sentinel tables, so anything that removes one mid-pass (a main step, a
+	// rekey, a concurrent writer) can leave ignored migrations newly pending
+	// that touch a dirty committable table. Refuse before they apply. This is
+	// deliberately a plain error, not *DirtyTablesError: main steps have
+	// already committed, and the working-set-reconcile opens that tolerate
+	// that type must not let a commit checkpoint a half-applied pass. The
+	// next open re-reads the ignored cursor before migrating and so returns
+	// the typed, recoverable refusal (gastownhall/beads#5168).
+	lateIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
 	if err != nil {
 		return applied, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
 	}
-	if len(touchedIgnoredDirtyTables) > 0 {
-		// Deliberately a plain, untyped error (unlike the main-source guard
-		// above, which returns *DirtyTablesError): this check fires mid-pass,
-		// after the main-source migrations have already applied. A lenient
-		// caller (embeddeddolt's openReadOnlyCommand / openWorkingSetReconcile
-		// intents) skipping this and returning as if the open succeeded would
-		// let a reconcile commit checkpoint a half-applied migration pass.
-		// The ignored source also tracks bd-internal state (dolt_ignore'd
-		// tables like ignored_schema_migrations), not expected user data, so
-		// there is no dirty-commit recovery story to support here the way
-		// there is for the main-source guard (#4566 scope).
-		return applied, fmt.Errorf("pending ignored schema migrations alter pre-existing dirty tables: %s", strings.Join(touchedIgnoredDirtyTables, ", "))
+	if len(lateIgnoredDirtyTables) > 0 {
+		return applied, fmt.Errorf("ignored schema migrations that became pending during the migration pass alter pre-existing dirty tables: %s (the main migrations already applied; re-run the open to refuse before any migration runs)", strings.Join(lateIgnoredDirtyTables, ", "))
 	}
 
 	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)
@@ -2184,8 +2244,10 @@ func scanRowByColumn(rows *sql.Rows) (CallRow, error) {
 // consumed; all other migrations keep the unchanged ExecContext path.
 //
 // sqlText is always a compile-time embedded migration body (go:embed above;
-// frozen once merged per scripts/check-migration-hygiene.sh) — never runtime
-// or user input. Executing it verbatim is the migration contract, so SAST
+// frozen once merged per scripts/check-migration-hygiene.sh), or that body
+// with a compile-time, hash-gated execution plan applied
+// (migration_body_plans.go) — never runtime or user input. Executing it
+// unaltered apart from those plans is the migration contract, so SAST
 // "SQL injection" findings on this call are accepted by design.
 func execMigrationBody(ctx context.Context, db DBConn, sqlText string) error {
 	if !procedureCallRe.MatchString(sqlText) {
@@ -2259,7 +2321,22 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 // its commitMigrationStep still leaves that one step's debris in the working
 // set for the dirty-table guard to refuse. The window shrinks from the whole
 // pass tail to one step; it does not close entirely.
-func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersion, upTo int, commitEachStep bool) (int, error) {
+//
+// An error returned while a numbered step is selected, from its snapshots,
+// pre-repair, body, updated_at restore, cursor row or step commit, that carries
+// a schema-encoding-drift signature comes back as a *SchemaEncodingDriftError
+// naming that step (gastownhall/beads#5699). The pass still stops where it did:
+// nothing is skipped, retried or rolled back, and a raw panic is not caught.
+func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersion, upTo int, commitEachStep bool) (count int, err error) {
+	// selected is the numbered step in progress, nil outside one, so a drift
+	// error is never attributed to a step it did not come from.
+	var selected *migrationFile
+	defer func() {
+		if selected != nil {
+			err = classifyMigrationDrift(err, src, *selected)
+		}
+	}()
+
 	if upTo == 0 {
 		upTo = src.latest()
 	}
@@ -2280,14 +2357,22 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		emitLargeRigNotice(stderr, rowCount, rowCountErr)
 	}
 
-	count := 0
 	for _, mf := range src.list() {
 		if mf.version <= minVersion || mf.version > upTo {
 			continue
 		}
+		selected = &mf
 		data, err := src.files.ReadFile(src.dir + "/" + mf.name)
 		if err != nil {
 			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
+		}
+		// Resolve the executed body before anything of this step runs, so a
+		// plan that no longer matches its frozen file fails the step before
+		// its repair, body or cursor row (#6520). The cursor below still
+		// hashes data, the frozen bytes.
+		body, err := src.plannedMigrationBody(mf.version, mf.name, data)
+		if err != nil {
+			return count, fmt.Errorf("planning migration %s: %w", mf.name, err)
 		}
 
 		// Snapshot the working set BEFORE the pre-migration repair runs, not
@@ -2346,7 +2431,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		// should carry. So a wedge inside the per-step commit is still silent;
 		// CHANGELOG.md scopes the user-facing promise to match.
 		if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
-			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
+			func(ctx context.Context) error { return execMigrationBody(ctx, db, body) },
 		); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
@@ -2375,6 +2460,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			}
 		}
 		fmt.Fprintf(stderr, "  done (%.1fs)\n", time.Since(start).Seconds())
+		selected = nil
 
 		if migrateStepFaultHook != nil {
 			if err := migrateStepFaultHook(ctx, db, mf.version); err != nil {

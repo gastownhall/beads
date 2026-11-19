@@ -847,15 +847,17 @@ In mode `remote`, `bazel.yml`'s `bazel-dolt-race` job (check name
 `Bazel / dolt-race`) runs the dolt-server and proxied-server tiers in one
 `bazel test //... --config=dolt-race`, in place of the `bazel-doltserver`
 (`dolt-server lane`) and `bazel-proxied` (`proxied-server tier`) jobs.
-`--config=dolt-race` is exactly the union of `--config=doltserver` and
-`--config=doltserver-proxied`, with one tag filter for both tiers, so every
-member target's test action is unchanged (`bazel aquery` at the cutover: the
-27 + 35 = 62 `TestRunner` actions were byte-identical under the member
-configs and the union; there are 27 + 37 = 64 since
-`//cmd/bd:bd_managed_local_test` runs as 3 shards, and all must fit the
-union's `--jobs=64` at once, `scripts/bazel_dolt_race_test.go`, which leaves
-no headroom: another test action in either tier needs a `--jobs` or
-shard-count change first). One client
+`--config=dolt-race` is the union of `--config=doltserver` and
+`--config=doltserver-proxied`, with one tag filter for both tiers, plus one
+line of its own, `test:dolt-race --jobs=70` (`bazelDoltRaceJobs`); `--jobs` is
+in no action key, so every member target's test action is unchanged (`bazel
+aquery` at the cutover: the 27 + 35 = 62 `TestRunner` actions were
+byte-identical under the member configs and the union; there were 27 + 37 =
+64 once `//cmd/bd:bd_managed_local_test` ran as 3 shards, and 33 + 37 = 70
+since `//internal/httpclient:httpclient_served_provider_test`'s 6 shards
+joined the dolt-server tier). All must fit the union's `--jobs=70` at once
+(`scripts/bazel_dolt_race_test.go`), which leaves no headroom: another test
+action in either tier needs a `--jobs` or shard-count change first. One client
 waits on rbe-west for both tiers at once, so the job ends with the slower
 tier and the other tier's runner is saved.
 
@@ -1685,6 +1687,7 @@ changes. They gate through `BAZEL_TEST`; pinned by
 | --- | --- |
 | fast-checks: `check-build-tags.sh` | `//scripts/repochecks:build_tags_test` |
 | fast-checks: `check-go-install-guidance.sh` | `//scripts/repochecks:go_install_guidance_test` |
+| (new, GH#3059) `check-legacy-repo-refs.sh` | `//scripts/repochecks:legacy_repo_refs_test` |
 | fast-checks: `check-winget-portable-alias.sh` | `//scripts/repochecks:winget_portable_alias_test` |
 | fast-checks: `check-versions.sh` | `//internal/versioncheck:versioncheck_test` (same `versioncheck.Check` over the release metadata) |
 | fast-checks: migration hygiene checks A and B | `//scripts/repochecks:migration_hygiene_test` (`MIGRATION_HYGIENE_SCOPE=tree`) |
@@ -1789,7 +1792,7 @@ lane runs `//internal/storage/dolt:dolt_server_full_test` (16 shards) and
 runs `//internal/storage/versioncontrolops:versioncontrolops_dolt_test`, that
 package's tests against a hermetic dolt sql-server, which no PR Risk job ran.
 It is like the dolt-server lane's targets, but that lane's union with the
-proxied tier (`dolt-race`) already fills `--jobs=64`.
+proxied tier (`dolt-race`) already fills its `--jobs`.
 
 - `.github/scripts/server-storage-test-shard.sh` discovers top-level
   `Test*` functions from `internal/storage/dolt/*_test.go` (excluding

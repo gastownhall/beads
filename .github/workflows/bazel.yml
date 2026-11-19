@@ -2484,12 +2484,12 @@ jobs:
 
   # Item 5 (scripts/bazel_dolt_race_test.go): the dolt-server and
   # proxied-server tiers in one `bazel test --config=dolt-race` (.bazelrc:
-  # exactly the union of --config=doltserver's and
-  # --config=doltserver-proxied's lines, one tag filter for both), mode
+  # the union of --config=doltserver's and --config=doltserver-proxied's
+  # lines, one tag filter for both, plus its own --jobs=70), mode
   # remote only, in place of bazel-doltserver and bazel-proxied, which run
   # in every other mode. One client waits on rbe-west for both tiers'
-  # shards at once (27 + 37 = 64 test actions, exactly the remote-exec
-  # config's 64 jobs: no headroom, TestBazelDoltRaceFitsTheJobsBudget), so
+  # shards at once (33 + 37 = 70 test actions, exactly the union's own
+  # --jobs=70: no headroom, TestBazelDoltRaceFitsTheJobsBudget), so
   # the job ends with the slower tier and saves the other's runner. Each
   # member target's test action key is unchanged (aquery-verified), so
   # cached results carry over both ways, and a revert of the
@@ -2563,8 +2563,8 @@ jobs:
             exit 1
           fi
 
-      # Both tiers' shards at once: 27 dolt-server + 37 proxied test actions,
-      # exactly the remote-exec config's 64 jobs. No --config=sole-run: its one
+      # Both tiers' shards at once: 33 dolt-server + 37 proxied test actions,
+      # exactly the union's own --jobs=70. No --config=sole-run: its one
       # line (no retry on a remote cache eviction) is already in the union.
       # Shards are expected around 55-95s on rbe-west (see bazel-proxied's
       # test step), the proxied tier's 1200s cap included. The step timeout is

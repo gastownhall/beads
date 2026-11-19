@@ -70,7 +70,7 @@ func TestRecomputeIsBlockedInTxWithResult(t *testing.T) {
 		expectBlockedStatePass(mock, "issues", "i", sqlmock.NewResult(0, 1), sqlmock.NewResult(0, 0))
 		expectBlockedStatePass(mock, "issues", "i", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 0))
 
-		result, err := RecomputeIsBlockedInTxWithResult(context.Background(), db, []string{"issue-1"}, nil)
+		result, err := RecomputeIsBlockedInTxWithResult(context.Background(), db, []string{"issue-1"}, nil, NoRequestActor)
 		if err != nil {
 			t.Fatalf("RecomputeIsBlockedInTxWithResult: %v", err)
 		}
@@ -84,7 +84,7 @@ func TestRecomputeIsBlockedInTxWithResult(t *testing.T) {
 		expectBlockedStatePass(mock, "wisps", "w", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 1))
 		expectBlockedStatePass(mock, "wisps", "w", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 0))
 
-		result, err := RecomputeIsBlockedInTxWithResult(context.Background(), db, nil, []string{"wisp-1"})
+		result, err := RecomputeIsBlockedInTxWithResult(context.Background(), db, nil, []string{"wisp-1"}, NoRequestActor)
 		if err != nil {
 			t.Fatalf("RecomputeIsBlockedInTxWithResult: %v", err)
 		}
@@ -99,7 +99,7 @@ func TestRecomputeIsBlockedInTxWithResult(t *testing.T) {
 		expectBlockedStatePass(mock, "wisps", "w", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 0))
 
 		result, err := RecomputeIsBlockedInTxWithResult(
-			context.Background(), db, []string{"issue-1"}, []string{"wisp-1"},
+			context.Background(), db, []string{"issue-1"}, []string{"wisp-1"}, NoRequestActor,
 		)
 		if err != nil {
 			t.Fatalf("RecomputeIsBlockedInTxWithResult: %v", err)
@@ -163,7 +163,7 @@ func TestRecomputeIsBlockedSkipsUnionForIDsWithoutEdges(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE issues i SET i.is_blocked = 0")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	result, err := recomputeIsBlockedInTxWithResult(context.Background(), db, []string{"issue-1", "issue-2", "issue-3"}, nil, recomputeOptions{splitEdgeless: true})
+	result, err := recomputeIsBlockedInTxWithResult(context.Background(), db, []string{"issue-1", "issue-2", "issue-3"}, nil, NoRequestActor, recomputeOptions{splitEdgeless: true})
 	if err != nil {
 		t.Fatalf("RecomputeIsBlockedInTxWithResult: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestRecomputeIsBlockedSettlesClosedRowWithoutUnion(t *testing.T) {
 			WithArgs("wisp-1").
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
-		result, err := recomputeIsBlockedInTxWithResult(context.Background(), db, nil, []string{"wisp-1"}, settledRowRecompute("wisp-1", true))
+		result, err := recomputeIsBlockedInTxWithResult(context.Background(), db, nil, []string{"wisp-1"}, NoRequestActor, settledRowRecompute("wisp-1", true))
 		if err != nil {
 			t.Fatalf("recomputeIsBlockedInTxWithResult: %v", err)
 		}
@@ -214,7 +214,7 @@ func TestRecomputeIsBlockedSettlesClosedRowWithoutUnion(t *testing.T) {
 			WillReturnResult(sqlmock.NewResult(0, 0))
 
 		result, err := recomputeIsBlockedInTxWithResult(context.Background(), db,
-			[]string{"issue-waiter", "issue-closed"}, nil, settledRowRecompute("issue-closed", false))
+			[]string{"issue-waiter", "issue-closed"}, nil, NoRequestActor, settledRowRecompute("issue-closed", false))
 		if err != nil {
 			t.Fatalf("recomputeIsBlockedInTxWithResult: %v", err)
 		}
@@ -230,7 +230,7 @@ func TestRecomputeIsBlockedSettlesClosedRowWithoutUnion(t *testing.T) {
 		expectBlockedStatePass(mock, "issues", "i", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 0))
 
 		if _, err := recomputeIsBlockedInTxWithResult(context.Background(), db,
-			[]string{"shared-1"}, nil, settledRowRecompute("shared-1", true)); err != nil {
+			[]string{"shared-1"}, nil, NoRequestActor, settledRowRecompute("shared-1", true)); err != nil {
 			t.Fatalf("recomputeIsBlockedInTxWithResult: %v", err)
 		}
 	})
@@ -246,7 +246,7 @@ func TestRecomputeSettledShortcutHonorsFastPathSwitch(t *testing.T) {
 	expectBlockedStatePass(mock, "wisps", "w", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 0))
 
 	if _, err := recomputeIsBlockedInTxWithResult(context.Background(), db,
-		nil, []string{"wisp-1"}, settledRowRecompute("wisp-1", true)); err != nil {
+		nil, []string{"wisp-1"}, NoRequestActor, settledRowRecompute("wisp-1", true)); err != nil {
 		t.Fatalf("recomputeIsBlockedInTxWithResult: %v", err)
 	}
 }

@@ -110,7 +110,11 @@ type PushHooks struct {
 	// its fingerprint to the pulled content, which is what the remote then
 	// holds. A pull by an engine without ContentHash (or one that returns "" for
 	// the pulled content) clears a stored fingerprint instead, so a later push
-	// never trusts the last push.
+	// never trusts the last push. While the stored fingerprint shows that the
+	// remote's labels have not changed since the last push or pull, a pull keeps
+	// the labels changed locally since then and still writes the remote's other
+	// fields. The fingerprint it refreshes holds the remote's labels, so the
+	// next push sends the kept ones.
 	ContentHash func(local *types.Issue) string
 
 	// TargetScope returns the canonical remote namespace in which external issue
@@ -155,6 +159,10 @@ type Engine struct {
 
 	// warnings collects warning messages during a Sync() call for inclusion in SyncResult.
 	warnings []string
+
+	// pushesAfterPull is set by Sync: whether this run pushes once its pull
+	// ends, so a pull warning can say whether its advice comes before a push.
+	pushesAfterPull bool
 }
 
 // NewEngine creates a new sync engine for the given tracker and storage.
@@ -194,6 +202,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		opts.Pull = true
 		opts.Push = true
 	}
+	e.pushesAfterPull = opts.Push && !opts.DryRun
 
 	// Track IDs to skip/force during push based on conflict resolution
 	skipPushIDs := make(map[string]bool)
@@ -533,11 +542,22 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			dryRunIssues = append(dryRunIssues, &dryRunIssue)
 		}
 
+		// A label edit moves no updated_at, so the conflict guard above lets
+		// the issue through. While the remote's labels are still those of the
+		// last push or pull, the pull keeps the labels changed locally since
+		// then, so the push sends them. The push hash keeps fingerprinting the
+		// remote, which holds the pulled labels.
+		pulledLabels := conv.Issue.Labels
+		keepLocalLabels := e.pullKeepsLocalLabels(ctx, existing, conv.Issue, ref)
+		if keepLocalLabels {
+			conv.Issue.Labels = existing.Labels
+		}
+
 		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
 			if !opts.DryRun {
 				// Both sides can reach this content without a push, which
 				// leaves the hash of the last push stale.
-				e.refreshPushHashAfterPull(ctx, existing, conv.Issue, ref)
+				e.refreshPushHashAfterPull(ctx, existing, withLabels(conv.Issue, pulledLabels), ref)
 			}
 			stats.Skipped++
 			continue
@@ -569,7 +589,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				stats.Errors++
 				continue
 			}
-			if err := updater.ApplyIssueUpdate(ctx, existing.ID, updates, conv.Issue.Labels, e.Actor); err != nil {
+			labels := conv.Issue.Labels
+			if keepLocalLabels {
+				labels = nil // ApplyIssueUpdate leaves the labels alone
+			}
+			if err := updater.ApplyIssueUpdate(ctx, existing.ID, updates, labels, e.Actor); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
 				stats.Errors++
 				if pulledIDs != nil {
@@ -578,10 +602,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Updated++
+			e.refreshPushHashAfterPull(ctx, existing, withLabels(conv.Issue, pulledLabels), ref)
+			if keepLocalLabels {
+				// The push must send the kept labels.
+				continue
+			}
 			if pulledIDs != nil {
 				pulledIDs[existing.ID] = true
 			}
-			e.refreshPushHashAfterPull(ctx, existing, conv.Issue, ref)
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
@@ -945,6 +973,11 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 	}
 
 	var hydrated []TrackerIssue
+	// unverified collects the issues whose links this pull could not check
+	// against history, for one warning after the loop. Each issue is still
+	// decided on its own history: one missing row says nothing about the
+	// next issue's.
+	unverified := unverifiedLinks{lastSync: *lastSync}
 	for _, local := range localIssues {
 		if local == nil || local.ExternalRef == nil {
 			continue
@@ -953,11 +986,15 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if ref == "" || !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		changedAfterLastSync, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+		changedAfterLastSync, historyUnknown, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
 		if err != nil {
 			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
 		}
+		unverified.note(local, historyUnknown)
 		if !changedAfterLastSync {
+			// An issue whose history at lastSync is missing is not hydrated:
+			// hydration exempts it from the conflict and overlap guards,
+			// which would let a stale remote overwrite unpushed local edits.
 			continue
 		}
 		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
@@ -995,14 +1032,65 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		seen[identifier] = struct{}{}
 		seen[strings.ToLower(identifier)] = struct{}{}
 	}
+	e.warnUnverifiedLinks(unverified)
 	return hydrated, hydratedLocalIDs, nil
+}
+
+// maxListedUnverifiedLinks caps how many issue IDs the missing-history
+// warning names.
+const maxListedUnverifiedLinks = 5
+
+// unverifiedLinks collects, over one pull, the linked issues whose history
+// at lastSync is missing (prelinkDecision reported historyUnknown) and that
+// changed locally after lastSync. Only those can have been linked to
+// another remote issue since that sync: every update stamps updated_at, so
+// an issue untouched since lastSync still holds the link it had then.
+type unverifiedLinks struct {
+	lastSync time.Time
+	ids      []string
+}
+
+// note records local when its link could not be verified and it changed
+// after lastSync.
+func (u *unverifiedLinks) note(local *types.Issue, historyUnknown bool) {
+	if historyUnknown && local.UpdatedAt.After(u.lastSync) {
+		u.ids = append(u.ids, local.ID)
+	}
+}
+
+// warnUnverifiedLinks prints one warning for the issues u collected, naming
+// up to maxListedUnverifiedLinks of them. The pull did not hydrate them as
+// newly linked, so the conflict checks decided their content, and a push
+// writes their local content to the remote issue each one is linked to now;
+// for an issue linked to another remote issue since lastSync, that
+// overwrites the remote. The advice says whether this run's own push
+// follows the pull.
+func (e *Engine) warnUnverifiedLinks(u unverifiedLinks) {
+	if len(u.ids) == 0 {
+		return
+	}
+	listed := u.ids
+	if len(listed) > maxListedUnverifiedLinks {
+		listed = listed[:maxListedUnverifiedLinks]
+	}
+	names := strings.Join(listed, ", ")
+	if more := len(u.ids) - len(listed); more > 0 {
+		names += fmt.Sprintf(" and %d more", more)
+	}
+	advice := "a push writes its local content to that remote issue: check their links before a sync that pushes"
+	if e.pushesAfterPull {
+		advice = "this sync's push may write its local content to that remote issue: check their links"
+	}
+	e.warn("%s: cannot verify the links of %d issue(s) changed since the last sync (%s): %s. Their history at that sync is missing (bd compact or bd flatten rewrote it, an issue was renamed, or changes were committed after that sync), so the pull did not treat them as newly linked, and the conflict checks decided their content. If one of them was linked to another remote issue since that sync, %s.",
+		e.Tracker.DisplayName(), len(u.ids), u.lastSync.UTC().Format(time.RFC3339), names, advice)
 }
 
 // externalRefChangedAfter reports whether local's external_ref differed
 // from currentRef as of lastSync. When the backing store can answer this
 // precisely (storage.ExternalRefHistoryQuerier — Dolt-shaped stores that
-// expose dolt_history_issues), it does; otherwise it falls back to a
-// coarser timestamp heuristic.
+// expose dolt_history_issues), it does, and prelinkDecision decides from
+// the history it returns; otherwise it falls back to a coarser timestamp
+// heuristic.
 //
 // The fast path is gated on the ExternalRefHistoryQuerier capability, not on
 // whether the store happens to expose a raw *sql.DB: some Dolt-shaped
@@ -1010,23 +1098,72 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 // dolt_history_issues query without a pooled *sql.DB, and a non-Dolt SQL
 // backend could expose *sql.DB without having that Dolt system table at
 // all. Gating on the capability keeps this correct in both directions.
-func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (bool, error) {
+//
+// A store without the history capability keeps the timestamp heuristic and
+// never reports historyUnknown.
+func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (changed, historyUnknown bool, err error) {
 	if local == nil {
-		return false, nil
+		return false, false, nil
 	}
 	querier, ok := externalRefHistoryQuerier(e.Store)
 	if !ok {
-		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), nil
+		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), false, nil
 	}
 
 	previousRef, found, err := querier.PreviousExternalRef(ctx, local.ID, lastSync)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	if !found {
-		return true, nil
+	changed, historyUnknown = prelinkDecision(local, currentRef, previousRef, found, lastSync)
+	return changed, historyUnknown, nil
+}
+
+// prelinkDecision decides, from the history a store holds for the linked
+// local issue at lastSync, whether pre-link detection treats the issue as
+// linked after lastSync (changed: hydrate it from its remote) or cannot
+// tell (historyUnknown). previousRef and found are what
+// storage.ExternalRefHistoryQuerier.PreviousExternalRef returned for the
+// issue at lastSync, and currentRef is its ref now. A path that reads this
+// history for many issues at once must decide each issue here as well, so
+// every path keeps the same rule (#7294).
+//
+// With a history row, the issue changed when its ref then differs from
+// currentRef (a NULL ref reads as ""). Without one, the issue may be newer
+// than lastSync, or the history that held its baseline was compacted,
+// flattened or otherwise rewritten. An issue created at or after lastSync
+// is reported changed, so a new pre-linked stub is still hydrated: last_sync
+// is a whole second and created_at is rounded to one, so a stub created
+// within half a second after the sync's stamp carries a created_at equal to
+// it. This assumes an issue a pull created carries the remote's creation
+// time, as the GitHub, GitLab, Linear and Notion mappers set it. The Jira
+// and ADO mappers leave it to the store's clock, so an issue such a pull
+// created in its last half second carries the stamp too, and reads as a new
+// stub once its history at lastSync is missing. An older issue, or one with
+// no creation time, reports historyUnknown instead: it is not hydrated, so
+// the pull's conflict and overlap guards keep its local edits. UpdatedAt
+// never decides this case, because a local edit after lastSync is exactly
+// what those guards protect.
+//
+// An older wisps-plane issue (Ephemeral or NoHistory) is not hydrated
+// either, and it does not report historyUnknown: Dolt does not version the
+// wisps table that holds it, so it never has a history row, and the missing
+// row is no sign of a rewritten history. No warning names it, and as for a
+// compacted issue, nothing shows whether it was linked to another remote
+// issue since lastSync.
+func prelinkDecision(local *types.Issue, currentRef, previousRef string, found bool, lastSync time.Time) (changed, historyUnknown bool) {
+	if local == nil {
+		return false, false
 	}
-	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), nil
+	if found {
+		return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), false
+	}
+	if !local.CreatedAt.Before(lastSync) {
+		return true, false
+	}
+	if local.Ephemeral || local.NoHistory {
+		return false, false
+	}
+	return false, true
 }
 
 // externalRefHistoryQuerier type-asserts store to storage.ExternalRefHistoryQuerier,
@@ -1195,13 +1332,14 @@ func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue, externa
 
 // refreshPushHashAfterPull keeps the stored push hash of a pulled issue in
 // step with the remote. After a pull the remote holds the pulled content, not
-// the content of the last push. The hash fingerprints row, the local issue the
-// pull wrote or found equal, as the pull leaves it: the pulled content under
-// row's ID (a GenerateID hook may have given pulled a fresh ID), with row's own
-// labels when pulled.Labels is nil, because ApplyIssueUpdate leaves the labels
-// alone for a nil set. Without a fingerprint, a stored hash is cleared so the
-// next push fetches and compares instead of trusting the last push. The entry
-// is written only when it changes, so a pull of unchanged issues writes none.
+// the content of the last push. The hash fingerprints that content under the
+// ID of row, the local issue the pull wrote or found equal (a GenerateID hook
+// may have given pulled a fresh ID), with row's own labels when pulled.Labels
+// is nil, because ApplyIssueUpdate leaves the labels alone for a nil set. A
+// pull that keeps local labels passes the pulled ones, so the next push sends
+// the kept labels. Without a fingerprint, a stored hash is cleared so the next
+// push fetches and compares instead of trusting the last push. The entry is
+// written only when it changes, so a pull of unchanged issues writes none.
 func (e *Engine) refreshPushHashAfterPull(ctx context.Context, row, pulled *types.Issue, ref string) {
 	if row == nil || row.ID == "" || pulled == nil {
 		return
@@ -1220,6 +1358,53 @@ func (e *Engine) refreshPushHashAfterPull(ctx context.Context, row, pulled *type
 	if err := e.Store.SetLocalMetadata(ctx, key, value); err != nil {
 		e.warn("Failed to refresh push hash for %s: %v", row.ID, err)
 	}
+}
+
+// pullKeepsLocalLabels reports whether a pull must leave the labels of
+// existing alone instead of writing pulled's. bd label add and remove move no
+// updated_at, so the conflict guard cannot see such an edit. The stored push
+// hash fingerprints the issue as the remote held it after the last push or
+// pull. The labels that differ were changed locally since then, and the
+// remote's labels were not, when the stored hash matches either the pulled
+// content (the remote is unchanged) or the local issue with the pulled labels
+// (the remote changed fields other than its labels, and the local issue
+// changed only its labels). The labels are kept only when the hash tells them
+// apart from the pulled ones, so that the next push sends them. With no stored
+// hash, or when the remote's labels changed too, the pull writes the remote's
+// labels.
+func (e *Engine) pullKeepsLocalLabels(ctx context.Context, existing, pulled *types.Issue, ref string) bool {
+	if existing == nil || pulled == nil || pulled.Labels == nil || equalNormalizedStrings(existing.Labels, pulled.Labels) {
+		return false
+	}
+	hashed := *pulled
+	hashed.ID = existing.ID
+	hashed.ExternalRef = strPtr(ref)
+	remote := e.pushCacheValue(&hashed, ref)
+	if remote == "" {
+		return false
+	}
+	hashed.Labels = existing.Labels
+	if e.pushCacheValue(&hashed, ref) == remote {
+		return false
+	}
+	stored, err := e.Store.GetLocalMetadata(ctx, e.pushHashKey(existing.ID))
+	if err != nil || stored == "" {
+		return false
+	}
+	if stored == remote {
+		return true
+	}
+	local := *existing
+	local.ExternalRef = strPtr(ref)
+	local.Labels = pulled.Labels
+	return e.pushCacheValue(&local, ref) == stored
+}
+
+// withLabels returns a copy of issue that carries labels.
+func withLabels(issue *types.Issue, labels []string) *types.Issue {
+	copied := *issue
+	copied.Labels = labels
+	return &copied
 }
 
 func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs map[string]bool) (*PushStats, error) {

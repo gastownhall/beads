@@ -46,6 +46,7 @@ go_library(
         "lifecycle_close_reopen_contract.go",
         "lifecycle_create_contract.go",
         "lifecycle_create_gate_contract.go",
+        "lifecycle_update_claim_policy_contract.go",
         "lifecycle_update_contract.go",
         "lifecycle_update_gate_contract.go",
         "memories_contract.go",
