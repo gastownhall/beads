@@ -50,6 +50,14 @@ func TestReaderListMaxRowsIsHonored(t *testing.T) {
 // The cap's boundary along the OFFSET axis. It is the composition this body
 // reaches in two steps — widen the filter, then size the probe row — that the
 // case checks, and no request without an offset can see it go wrong.
+// GH#4370's AC-4: a List page wider than the hydration batch keeps the page
+// contract (items, order, HasMore, offset, cap) on the store-backed body.
+func TestReaderListPageCrossesTheHydrationBatchBoundary(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListPageCrossesTheHydrationBatchBoundary(t, ctx, fixture)
+}
+
 func TestReaderListMaxRowsBoundaryIsLimitPlusOffset(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()

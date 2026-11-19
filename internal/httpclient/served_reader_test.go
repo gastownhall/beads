@@ -99,6 +99,15 @@ func TestServedReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *tes
 	conformance.RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// TestServedReaderListPageCrossesTheHydrationBatchBoundary is the LIST twin of
+// the Ready batch leg above (GH#4370 AC-4): a served listing page wider than
+// sqlbuild.QueryBatchSize keeps the served contract — items, order, the
+// has-more verdict, an offset past a whole batch, the --max-rows refusal —
+// while the hydration batching straddles the answer.
+func TestServedReaderListPageCrossesTheHydrationBatchBoundary(t *testing.T) {
+	conformance.RunReaderListPageCrossesTheHydrationBatchBoundary(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
 // TestServedReaderReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary is the
 // merged-plane half: alternating durable and ephemeral rows, every Limit from
 // inside the first run to past the end, and the cuts that land between a wisp

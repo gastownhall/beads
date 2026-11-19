@@ -197,6 +197,15 @@ func TestEmbeddedReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *t
 	conformance.RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+// GH#4370's AC-4, on the embedded engine: a List page wider than the hydration
+// batch keeps the page contract (items, order, HasMore, offset, cap), and the
+// by-IDs counts hydration straddles the batch split on this engine too.
+func TestEmbeddedReaderListPageCrossesTheHydrationBatchBoundary(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListPageCrossesTheHydrationBatchBoundary(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 func TestEmbeddedReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

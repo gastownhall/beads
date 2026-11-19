@@ -2181,6 +2181,125 @@ func RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *testing.T,
 	}
 }
 
+// RunReaderListPageCrossesTheHydrationBatchBoundary is the LIST twin of
+// RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix. GH#4370
+// rewrote the store seam under this role to select the page of ids first and
+// hydrate exactly those ids in sqlbuild.QueryBatchSize chunks (the by-IDs
+// counts form), so a page WIDER than a batch is now the shape that crosses a
+// boundary mid-page, on every wiring: the store-backed body chunks twice at
+// limit 201, the unit-of-work body hands the widened window to its own seam,
+// and the served HTTP body drives whichever of those its workspace routes to.
+//
+// WHAT THIS LEG PINS — the contracts are UNCHANGED, which is the point: items
+// and their order (sizes 1, 201, unlimited over 205 rows), the HasMore probe
+// at each size, an offset that skips past a whole batch, the MaxRows refusal,
+// and the relational content (labels, comment count) surviving the batch
+// split. The zero-padded ids and one-second createdAt spread make every
+// order here deterministic. Keyset resume, per-field filter mapping, and the
+// cap's limit+offset boundary composition are owned by their own legs and are
+// deliberately not restated here (see the file doc's duplicate-scenario note).
+//
+// ON THE RED-BEFORE CLAIM: this contract is a REGRESSION pin, not a bug repro.
+// A page wider than a batch already (since the ready seam's by-IDs rewrite)
+// worked on the uow and ready arms; what GH#4370 added is the list/store seam
+// joining them, and the leg runs one workspace read per size on every wiring so
+// the joining cannot quietly change an answer. Evidence per AC: it passes on
+// the base tree and must keep passing.
+func RunReaderListPageCrossesTheHydrationBatchBoundary(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+
+	scope := readerLabel(fixture, "lstbatch")
+	total := sqlbuild.QueryBatchSize + 5
+	// The two rows that straddle the boundary: the last of the first batch and
+	// the first of the second.
+	lastOfFirst, firstOfSecond := sqlbuild.QueryBatchSize-1, sqlbuild.QueryBatchSize
+
+	base := time.Now().UTC().Truncate(time.Second).Add(-24 * time.Hour)
+	order := make([]string, 0, total)
+	for i := range total {
+		// Zero-padded so the id tiebreak agrees with the seeded order.
+		member := readerID(fixture, "lstbatch", fmt.Sprintf("%04d", i))
+		order = append(order, member)
+		issue := readerIssue(member, types.TypeTask, scope)
+		at := base.Add(time.Duration(i) * time.Second)
+		issue.CreatedAt = at
+		issue.UpdatedAt = at
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	// Relational content that has to survive the batch split: a comment on the
+	// LAST row of the first batch, so its count is hydrated by the same batch
+	// that hydrates the page's final row, and an edge from the first row of the
+	// second batch, so its cardinals hydrate in the next chunk.
+	if err := fixture.AddComment(ctx, order[lastOfFirst], "seed", "the last row of the first batch"); err != nil {
+		t.Fatalf("seed the comment on the last row of the first batch: %v", err)
+	}
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: order[lastOfFirst], DependsOnID: order[firstOfSecond], Type: types.DepBlocks,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the blocks edge across the batch boundary: %v", err)
+	}
+
+	request := func(limit int) publicops.ListRequest {
+		// Reverse inverts the created-at default, so the seeded order (oldest
+		// first) is the page order.
+		return publicops.ListRequest{Labels: []string{scope}, SortBy: "created", Reverse: true, Limit: readerLimit(limit)}
+	}
+
+	unbounded, err := fixture.Reader.List(ctx, request(0))
+	if err != nil {
+		t.Fatalf("List unlimited over %d rows: %v", total, err)
+	}
+	assertReaderPageIDs(t, "List unlimited", unbounded, order)
+	if unbounded.HasMore {
+		t.Error("List unlimited reported has_more; an unbounded page IS the set")
+	}
+	// Relational content at the straddle: the comment and dependency set
+	// hydrated with the rows that carry them.
+	assertReaderRowCounts(t, "List unlimited", unbounded,
+		readerCounts{id: order[lastOfFirst], comments: 1, dependencies: 1})
+
+	for _, limit := range []int{1, firstOfSecond + 1, total} {
+		page, pageErr := fixture.Reader.List(ctx, request(limit))
+		if pageErr != nil {
+			t.Errorf("List --limit %d: %v", limit, pageErr)
+			continue
+		}
+		assertReaderPageIDs(t, fmt.Sprintf("List --limit %d", limit), page, order[:min(limit, total)])
+		wantMore := limit > 0 && limit < total
+		if page.HasMore != wantMore {
+			t.Errorf("List --limit %d reported has_more=%v, want %v", limit, page.HasMore, wantMore)
+		}
+	}
+
+	// OFFSET AND KEYSET ARE NOT RESTATED HERE, deliberately: Offset's own leg
+	// (RunReaderOffsetSkipsTheRowsBeforeThePage) drives the store and unit-of-
+	// work wirings, and the served HTTP wiring documents a non-zero Offset as
+	// inexpressible on its v0 wire (the portable page is the keyset position,
+	// which RunReaderListKeysetPositionResumesTheCreatedDescIDAscOrder pins);
+	// re-driving either inside a 205-row fixture is the duplicate-scenario
+	// anti-pattern this file's doc names.
+
+	// The cap is a refusal, not a truncation, and it fires on the rows the
+	// query TOUCHED however wide the page asked to be.
+	// Limit 0 is an EXPLICIT unlimited page: without it the role's default
+	// page size (50) applies and the cap can never be reached.
+	capped, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		Labels: []string{scope}, SortBy: "created", Reverse: true,
+		Limit: readerLimit(0), MaxRows: sqlbuild.QueryBatchSize - 1, MaxRowsSource: "--max-rows",
+	})
+	var tooMany *storageops.ErrTooManyRows
+	if err == nil {
+		t.Fatalf("List under a cap of %d over %d rows returned %d rows: the cap was silently ignored",
+			sqlbuild.QueryBatchSize-1, total, len(readerPageIDs(capped)))
+	}
+	if !errors.As(err, &tooMany) {
+		t.Fatalf("List over a small cap failed with %v, want a classifiable *ErrTooManyRows", err)
+	}
+	if tooMany.Source != "--max-rows" {
+		t.Errorf("the cap error reports Source = %q, want the --max-rows the request supplied", tooMany.Source)
+	}
+}
+
 // RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge pins the exact
 // cardinalities on BOTH read planes at once, and with them the fact that the
 // two planes count different things.

@@ -53,6 +53,11 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ListMaxRowsBoundaryIsLimitPlusOffset", func(t *testing.T) {
 		conformance.RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t, ctx, fixture)
 	})
+	// GH#4370's AC-4: a List page wider than the hydration batch keeps the
+	// page contract on this genuinely separate body too.
+	t.Run("ListPageCrossesTheHydrationBatchBoundary", func(t *testing.T) {
+		conformance.RunReaderListPageCrossesTheHydrationBatchBoundary(t, ctx, fixture)
+	})
 	t.Run("ListSkipCountsDropsTheCardinalitiesAndNothingElse", func(t *testing.T) {
 		conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, ctx, fixture)
 	})
