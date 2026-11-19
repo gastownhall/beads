@@ -111,6 +111,7 @@ func claimLeaseStatus(v types.Status) *types.Status { return &v }
 
 func (s *testSuite) TestClaimAssigneeOverrideLease() {
 	s.Run("ClaimOverrideArmsLeaseForFinalHolder", s.claimOverrideArmsLeaseForFinalHolder)
+	s.Run("ClaimOverrideRedolesHeldLeaseFromUpdateTime", s.claimOverrideRedolesHeldLeaseFromUpdateTime)
 }
 
 // claimOverrideArmsLeaseForFinalHolder is AC-1: alice claims an open,
@@ -132,6 +133,34 @@ func (s *testSuite) claimOverrideArmsLeaseForFinalHolder() {
 			s.Require().True(lease.ok)
 			s.Equal("bob", lease.holder, "the lease belongs to the final assignee, not the claiming actor")
 			s.True(lease.expiresAt.After(time.Now().UTC()), "lease_expires_at = %v, want a future time", lease.expiresAt)
+		})
+	}
+}
+
+// claimOverrideRedolesHeldLeaseFromUpdateTime is AC-2: alice already holds the
+// issue under a live lease and re-doles it to bob with --claim. The lease row
+// is bob's, granted at the update's own time (the updated_at it wrote) and
+// expiring LeaseTTL after it, not the remainder of alice's lease.
+func (s *testSuite) claimOverrideRedolesHeldLeaseFromUpdateTime() {
+	for _, stack := range claimLeaseStacks() {
+		s.Run(stack.name, func() {
+			id := "bd-cl-redole-" + stack.name
+			s.seedOpenIssue(id)
+			_, err := s.issueUseCase().ClaimIssue(s.Ctx(), id, "alice")
+			s.Require().NoError(err)
+			s.Require().Equal("alice", s.readClaimLeaseRow(id).holder, "seed claim must arm alice's lease")
+
+			s.Require().NoError(stack.apply(s, id, "alice", claimLeaseUpdate{claim: true, assignee: claimLeaseString("bob")}))
+
+			var updatedAt time.Time
+			s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+				"SELECT updated_at FROM issues WHERE id = ?", id).Scan(&updatedAt))
+			s.Equal(1, s.countClaimLeaseRows(id))
+			lease := s.readClaimLeaseRow(id)
+			s.Require().True(lease.ok, "a re-dole with --claim must stay leased")
+			s.Equal("bob", lease.holder)
+			s.True(lease.grantedAt.Equal(updatedAt), "granted_at = %v, want the update time %v", lease.grantedAt, updatedAt)
+			s.Equal(issueops.DefaultLeaseTTL, lease.expiresAt.Sub(lease.grantedAt), "lease_expires_at must be granted_at + LeaseTTL")
 		})
 	}
 }
