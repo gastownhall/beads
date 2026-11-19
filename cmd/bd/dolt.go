@@ -1191,6 +1191,11 @@ var doltStopCmd = &cobra.Command{
 This sends a graceful shutdown signal. The server will restart automatically
 on the next bd command unless auto-start is disabled.
 
+With --all, stops every Dolt server bd manages on this machine, from any
+directory, and reports each one; dolt sql-servers bd does not manage are
+left running (see bd dolt status --all). It exits non-zero if any stop
+fails.
+
 For a managed proxied server, --force can recover unverifiable or legacy
 process records (both the proxy and its backend) only after each live process
 executable is matched to bd or dolt and its command line ties it to this
@@ -1198,6 +1203,10 @@ workspace. In that recovery path, force still refuses to signal a process
 whose executable identity cannot be matched to bd or dolt, or whose workspace
 scope cannot be established.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if all, _ := cmd.Flags().GetBool("all"); all {
+			force, _ := cmd.Flags().GetBool("force")
+			return runDoltStopAll(force)
+		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
@@ -2338,6 +2347,7 @@ func init() {
 	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
 	doltStartCmd.Flags().Bool("force", false, "Start even when dolt.auto-start is off and this would create a new, empty Dolt database")
 	doltStopCmd.Flags().Bool("force", false, "Force stop (proxied recovery still requires a bd/dolt executable match)")
+	doltStopCmd.Flags().Bool("all", false, "Stop every Dolt server bd manages on this machine (needs no workspace)")
 	doltStatusCmd.Flags().Bool("all", false, "List every Dolt server on this machine, managed by bd or not (needs no workspace)")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")

@@ -441,6 +441,13 @@ workspace, PID, port, uptime and idle-stop setting (`after 30m`,
 City city's) as not managed by bd. A server counts as bd's when the
 `dolt-server.pid` in the directory it was started from names it.
 
+`bd dolt stop --all` stops every server `bd dolt status --all` lists as
+bd's, the way `bd dolt stop` does, reports each, and leaves the others
+running; it exits non-zero if any stop fails. Servers started by a bd
+version without idle stop have no watcher and stay up until stopped: run
+`bd dolt stop --all` once after upgrading, and the next bd command in each
+workspace restarts its server with a watcher.
+
 ### Shared Server Mode
 
 On machines with multiple beads projects, each project normally starts its own Dolt server.
