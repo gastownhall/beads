@@ -27,10 +27,22 @@ import (
 // keeps every moved row's id depid-consistent — no id changes, which is
 // exactly the preservation the repair promises.
 //
-// Both tables are planned before either is written, so a failure leaves no
-// half-repaired table behind. A plan with no candidate rows is a no-op: the
-// repair must not refuse (or write) on databases with nothing to fix, or the
-// marker would wedge every future open of a dirty database.
+// Both tables are planned before either is written, so a failure or refusal
+// leaves no half-repaired table behind. A plan with no candidate rows is a
+// no-op: the repair must not refuse (or write) on databases with nothing to
+// fix, or the marker would wedge every future open of a dirty database.
+//
+// If the repair is needed and the issues or dependencies table already has
+// uncommitted changes, it refuses BEFORE any write with *DirtyTablesError:
+// the marker stays pending, and the documented commit-and-retry recovery
+// stays reachable because the working-set-reconcile opens skip the migration
+// when they see this error type via errors.As. Refusing is also what keeps
+// MigrateUp's changedDirtyTableSignatures guard from turning the repair's
+// writes into a plain error after the main series has committed, and what
+// keeps the terminal staging from committing the repair's rows together with
+// pre-existing user changes in the same table. Dolt-ignored tables (wisps,
+// wisp_dependencies) are clone-local and exempt, exactly as in the re-key and
+// the recompute; the dirty set read here excludes them.
 func repairDepLocalityExternalRows(ctx context.Context, db DBConn) error {
 	moves, err := planDepLocalityMoves(ctx, db)
 	if err != nil {
@@ -38,6 +50,20 @@ func repairDepLocalityExternalRows(ctx context.Context, db DBConn) error {
 	}
 	if len(moves) == 0 {
 		return nil
+	}
+	dirty, err := committableDirtyTables(ctx, db)
+	if err != nil {
+		return fmt.Errorf("dep locality repair: reading dirty tables: %w", err)
+	}
+	var refuse []string
+	for _, table := range []string{"issues", "dependencies"} {
+		if _, ok := dirty[table]; ok {
+			refuse = append(refuse, table)
+		}
+	}
+	if len(refuse) > 0 {
+		sort.Strings(refuse)
+		return &DirtyTablesError{Tables: refuse}
 	}
 	return applyDepLocalityMoves(ctx, db, moves)
 }

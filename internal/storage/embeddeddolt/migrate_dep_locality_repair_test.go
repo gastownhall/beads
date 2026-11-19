@@ -362,3 +362,58 @@ func TestEmbeddedDepLocalityRepairRollsBackMovesAndRecomputeTogether(t *testing.
 	}
 	requireDepLocalityRepairedShape(t, ctx, conn)
 }
+
+// TestEmbeddedDepLocalityRepairRefusesDirtyGraphThenRecovers is AC-8: with
+// the repair needed and a pre-existing dirty issues table, the migration
+// refuses BEFORE any repair write with *schema.DirtyTablesError naming the
+// table, leaves the marker pending and the rows untouched; after the
+// documented reconcile commit the migration succeeds, and ordinary
+// clone-local wisp dirt never blocks it.
+func TestEmbeddedDepLocalityRepairRefusesDirtyGraphThenRecovers(t *testing.T) {
+	requireEmbedded(t)
+
+	ctx := t.Context()
+	dataDir := seedMainSchemaAt(t, ctx, schema.LatestVersion())
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("initial MigrateUp: %v", err)
+	}
+	seedDepLocalityRows(t, ctx, conn)
+	// A user edit in flight on the issues table — the dirty graph the repair
+	// must not entangle its writes with.
+	mustExecOn(t, ctx, conn, "UPDATE issues SET title = 'user edit in flight' WHERE id = ?", depLocDependent)
+	reopenDepLocalityMarker(t, ctx, conn)
+
+	_, migrateErr := schema.MigrateUp(ctx, conn)
+	if migrateErr == nil {
+		t.Fatal("MigrateUp over the dirty graph = nil, want the typed refusal")
+	}
+	var dirtyErr *schema.DirtyTablesError
+	if !errors.As(migrateErr, &dirtyErr) {
+		t.Fatalf("MigrateUp error = %T (%v), want *schema.DirtyTablesError so the reconcile opens can skip and let the commit through", migrateErr, migrateErr)
+	}
+	if len(dirtyErr.Tables) != 1 || dirtyErr.Tables[0] != "issues" {
+		t.Fatalf("DirtyTablesError.Tables = %v, want [issues]: only the dirty graph must be named", dirtyErr.Tables)
+	}
+	if !strings.Contains(migrateErr.Error(), "bd dolt commit") {
+		t.Fatalf("refusal = %q, want the documented commit-and-retry recovery text", migrateErr.Error())
+	}
+	requireDepLocalityLegacyShape(t, ctx, conn)
+	if ignoredCursorHas(t, ctx, conn, depLocalityMarkerVersion) {
+		t.Fatal("the refused repair recorded its marker; it must stay pending for the post-reconcile pass")
+	}
+
+	// The reconcile: an ordinary clone-local wisp edit that must never block
+	// the repair, then the working-set commit `bd dolt commit` performs.
+	mustExecOn(t, ctx, conn, "UPDATE wisps SET title = 'wisp edit in flight' WHERE id = ?", depLocWispSource)
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: reconcile the dirty graph')")
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("migration after the reconcile: %v", err)
+	}
+	requireDepLocalityRepairedShape(t, ctx, conn)
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM wisps WHERE id = ? AND title = ?", depLocWispSource, "wisp edit in flight"); got != 1 {
+		t.Fatalf("wisp edit rows = %d, want 1: ordinary clone-local wisp dirt is exempt and must survive the pass", got)
+	}
+}
