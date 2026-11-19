@@ -16,7 +16,7 @@ import (
 // bd connect, the httpclient store under the uow decorator). The lane's
 // disclosure work must not move a ghost edge into the blocked flag, the
 // listing or the ready set on this route either.
-func TestProxiedReadyBlockedUnresolvableOutcomesUnchanged(t *testing.T) {
+func TestProxiedServerReadyBlockedUnresolvableOutcomesUnchanged(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)

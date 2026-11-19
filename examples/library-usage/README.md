@@ -114,7 +114,7 @@ The `beads.Storage` interface provides:
   stored records of the edges whose target has no issue row in this database
   (`external:` refs, other-prefix ids). `GetDependenciesWithMetadata` returns
   only the first list. A custom `storage.Storage` implementation must add this
-  method; one that cannot supply the records returns `*storage.ErrUnsupported`
+  method and return the records, or an error when it cannot read them back
 - `GetDependencyTree(ctx, issueID, maxDepth, showAllPaths)` - Visualize tree
 
 ### Labels

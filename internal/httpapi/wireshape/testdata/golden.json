@@ -3010,6 +3010,12 @@
     },
     {
       "schema": "IssueDetails",
+      "member": "dependencies_unavailable",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
       "member": "dependency_count",
       "type": "integer",
       "format": "int64",

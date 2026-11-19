@@ -1468,10 +1468,11 @@ func hydrateAnchorEdgesInTx(ctx context.Context, tx DBTX, verb string, deps []an
 //
 // Missed edges are fetched durable-plane-first in the same transaction, one
 // record per far-end ID with durable precedence, sorted by DependsOnID then
-// Type. A wisp_dependencies table that is missing mid-read (a dolt-ignored
-// table dropped by a server working-set reset) is tolerated the way the anchor
-// read tolerates it; the edge the anchor saw still comes back from the
-// anchor's own far-id and type, with no invented stamps.
+// Type. A missing wisp_dependencies table (a dolt-ignored table dropped by a
+// server working-set reset) is tolerated the way the anchor read tolerates
+// it, but every record returned is a stored row read back: an edge the anchor
+// saw whose record cannot be read back fails the read instead of coming back
+// partial, with no stamps.
 func GetDependenciesWithUnresolvableInTx(ctx context.Context, tx DBTX, issueID string) (resolved []*types.IssueWithDependencyMetadata, unresolvable []*types.Dependency, err error) {
 	deps, err := anchorEdgesInTx(ctx, tx, issueID, false, true)
 	if err != nil {
@@ -1498,12 +1499,14 @@ func GetDependenciesWithUnresolvableInTx(ctx context.Context, tx DBTX, issueID s
 // row's type and stamps beat a wisp copy of the same edge. Sorted by
 // DependsOnID then Type so the display order of unresolved targets is stable.
 //
-// A far end the anchor saw but neither record query returned (possible only
-// for wisp-plane edges when the optional wisp_dependencies table vanished
-// between the two reads) still comes back, built from the anchor edge's own
-// far id and type with no stamps: the alternative is re-introducing the silent
-// drop this function exists to remove, for the exact table-drop its absence
-// already has to tolerate (bd-cif6y4, #3445).
+// A far end the anchor saw but neither record query returned is an error,
+// never a record built from the anchor edge's far id and type: the caller
+// publishes these as exact stored records, and a zero created_at, created_by,
+// metadata and thread_id would be read as stored values. One read
+// transaction sees the same rows twice, so this takes a table or row that
+// vanished between the two reads. A missing optional wisp_dependencies table
+// is still tolerated (bd-cif6y4, #3445): when the anchor read also found it
+// missing, the durable plane holds every missed record and the read succeeds.
 func outgoingEdgeRecordsInTx(ctx context.Context, tx DBTX, issueID string, missed []anchorEdge) ([]*types.Dependency, error) {
 	byFar := make(map[string]*types.Dependency, len(missed))
 	missedIDs := make([]string, len(missed))
@@ -1532,7 +1535,7 @@ func outgoingEdgeRecordsInTx(ctx context.Context, tx DBTX, issueID string, misse
 				DepTargetExpr, depTable, DepTargetExpr, strings.Join(placeholders, ",")), args...)
 			if err != nil {
 				if optionalBlockedTable(depTable) && dberrors.IsMissingTable(err, depTable) {
-					return finishOutgoingEdgeRecords(byFar, issueID, missed), nil
+					return finishOutgoingEdgeRecords(byFar, issueID, missed)
 				}
 				return nil, fmt.Errorf("get unresolved dependency records from %s: %w", depTable, err)
 			}
@@ -1553,24 +1556,26 @@ func outgoingEdgeRecordsInTx(ctx context.Context, tx DBTX, issueID string, misse
 			}
 		}
 	}
-	return finishOutgoingEdgeRecords(byFar, issueID, missed), nil
+	return finishOutgoingEdgeRecords(byFar, issueID, missed)
 }
 
-// finishOutgoingEdgeRecords orders the recovered records and backfills the
-// anchor-only fallbacks, returning a stable result: sorted by DependsOnID
-// then Type.
-func finishOutgoingEdgeRecords(byFar map[string]*types.Dependency, issueID string, missed []anchorEdge) []*types.Dependency {
+// finishOutgoingEdgeRecords returns the recovered record of every missed far
+// end, sorted by DependsOnID then Type, or an error naming the far ends no
+// record query returned: the result holds stored rows only.
+func finishOutgoingEdgeRecords(byFar map[string]*types.Dependency, issueID string, missed []anchorEdge) ([]*types.Dependency, error) {
 	out := make([]*types.Dependency, 0, len(missed))
+	var lost []string
 	for _, e := range missed {
-		if dep, ok := byFar[e.farID]; ok {
-			out = append(out, dep)
+		dep, ok := byFar[e.farID]
+		if !ok {
+			lost = append(lost, e.farID)
 			continue
 		}
-		out = append(out, &types.Dependency{
-			IssueID:     issueID,
-			DependsOnID: e.farID,
-			Type:        types.DependencyType(e.depType),
-		})
+		out = append(out, dep)
+	}
+	if len(lost) > 0 {
+		return nil, fmt.Errorf("get unresolved dependency records: %d of %d edge(s) from %s have no stored record to return (first: %s)",
+			len(lost), len(missed), issueID, lost[0])
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].DependsOnID != out[j].DependsOnID {
@@ -1578,7 +1583,7 @@ func finishOutgoingEdgeRecords(byFar map[string]*types.Dependency, issueID strin
 		}
 		return out[i].Type < out[j].Type
 	})
-	return out
+	return out, nil
 }
 
 // anchorEdge is one dependency edge seen from a fixed anchor issue: the issue

@@ -172,6 +172,11 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 			case tc.want != nil && *details.UnresolvableDependencies != *tc.want:
 				t.Errorf("UnresolvableDependencies = %d, want %d", *details.UnresolvableDependencies, *tc.want)
 			}
+			// Only the failed read is flagged: a short read, an empty one
+			// and a failed COUNT all read the edges (bd-uschhs).
+			if got, want := details.DependenciesUnavailable != nil && *details.DependenciesUnavailable, tc.src.depsErr != nil; got != want {
+				t.Errorf("DependenciesUnavailable = %v, want %v", details.DependenciesUnavailable, want)
+			}
 		})
 	}
 }
@@ -396,6 +401,29 @@ func TestBuildIssueDetails_UnresolvableDependencyEdges(t *testing.T) {
 		}
 		if details.UnresolvableDependencyEdges != nil || details.UnresolvableDependencies != nil {
 			t.Errorf("got edges=%+v count=%v, want both unset", details.UnresolvableDependencyEdges, details.UnresolvableDependencies)
+		}
+		// Best effort still answers, but says the edges were never read, so
+		// the absent members cannot pass for "no edges" (bd-uschhs).
+		if details.DependenciesUnavailable == nil || !*details.DependenciesUnavailable {
+			t.Errorf("DependenciesUnavailable = %v, want true after a failed dependency read", details.DependenciesUnavailable)
+		}
+		if details.Dependencies != nil {
+			t.Errorf("Dependencies = %+v, want none published from a failed read", details.Dependencies)
+		}
+	})
+
+	t.Run("successful reads are never flagged", func(t *testing.T) {
+		for name, ok := range map[string]skewSource{
+			"no outgoing edges": {issue: issue},
+			"records named":     src,
+		} {
+			details, err := BuildIssueDetails(ctx, ok, issue, false, DetailOptions{})
+			if err != nil {
+				t.Fatalf("%s: BuildIssueDetails: %v", name, err)
+			}
+			if details.DependenciesUnavailable != nil {
+				t.Errorf("%s: DependenciesUnavailable = %v, want unset after a successful read", name, *details.DependenciesUnavailable)
+			}
 		}
 	})
 }

@@ -109,7 +109,9 @@ func GetIssueOrWisp(ctx context.Context, src DetailSource, id string) (*types.Is
 //
 // Labels, dependencies, and counts are best effort, matching what both CLI
 // paths have always shipped: a detail view missing an edge list still beats
-// refusing to show the issue. The opt-in row streams are not best effort,
+// refusing to show the issue. A failed dependency read is flagged
+// (DependenciesUnavailable) rather than left to look like an issue with no
+// edges. The opt-in row streams are not best effort,
 // because a caller that asked for the rows gets a truthful answer or an
 // error rather than a silently short list.
 func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue, isWisp bool, opts DetailOptions) (*types.IssueDetails, error) {
@@ -138,9 +140,16 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 
 	// depsErr is kept rather than discarded: it is what separates "the read
 	// named no unresolvable edge" from "the read never came back", and only
-	// the first may publish anything.
+	// the first may publish anything. The second is published as
+	// dependencies_unavailable, so a client of the wire cannot read the
+	// absent edge members as "no edges" (bd-uschhs).
 	deps, unresolvable, depsErr := src.Dependencies(ctx, id, isWisp)
-	details.Dependencies = deps
+	if depsErr != nil {
+		unavailable := true
+		details.DependenciesUnavailable = &unavailable
+	} else {
+		details.Dependencies = deps
+	}
 
 	// The gates blocking this issue are the gate-typed subset of the
 	// dependencies JUST read (types.GatesHolding, the one predicate the

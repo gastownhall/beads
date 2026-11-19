@@ -309,23 +309,37 @@ func TestGetDependenciesWithUnresolvableInTxDurablePrecedenceForDuplicateFarEnd(
 	}
 }
 
+// missingWispDependencyTable is the error a read of a dropped
+// wisp_dependencies table answers with (dolt-ignored, so a server working-set
+// reset can drop it mid-session, bd-cif6y4).
+var missingWispDependencyTable = errors.New("Error 1146: Table 'db.wisp_dependencies' doesn't exist")
+
 // TestGetDependenciesWithUnresolvableInTxToleratesMissingWispDependencyTable:
-// the wisp_dependencies table can vanish mid-session (dolt-ignored, dropped
-// by a server working-set reset, bd-cif6y4). A wisp-plane edge the anchor saw
-// still comes back — built from the anchor edge's own far id and type, with
-// no invented stamps.
+// with the wisp_dependencies table gone at both reads, the durable plane
+// holds every edge the anchor saw, and each comes back as its exact stored
+// record.
 func TestGetDependenciesWithUnresolvableInTxToleratesMissingWispDependencyTable(t *testing.T) {
 	t.Parallel()
 
 	const anchor = "ud-1"
 	const far = "liveop-kmf"
+	stored := &types.Dependency{
+		IssueID: anchor, DependsOnID: far, Type: types.DepBlocks,
+		CreatedAt: time.Unix(1700000000, 0).UTC(), CreatedBy: "porter",
+		Metadata: `{"why":"convoy"}`, ThreadID: "thread-1",
+	}
 
 	_, mock, tx := beginMockTx(t)
-	expectOutgoingAnchorEdges(mock, anchor, nil, []anchorEdgeRow{{far, "blocks"}})
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + DepTargetExpr + " AS depends_on_id, type FROM dependencies WHERE issue_id = ?")).
+		WithArgs(anchor).
+		WillReturnRows(anchorRows([]anchorEdgeRow{{far, "blocks"}}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + DepTargetExpr + " AS depends_on_id, type FROM wisp_dependencies WHERE issue_id = ?")).
+		WithArgs(anchor).
+		WillReturnError(missingWispDependencyTable)
 	expectEdgeHydration(mock, []string{far}, nil)
 	expectUnresolvedRecordBatches(mock, anchor, []string{far},
-		unresolvedRecordPlan{},
-		unresolvedRecordPlan{queryErr: errors.New("Error 1146: Table 'db.wisp_dependencies' doesn't exist")})
+		unresolvedRecordPlan{recs: map[string]*types.Dependency{far: stored}},
+		unresolvedRecordPlan{queryErr: missingWispDependencyTable})
 
 	resolved, unresolvable, err := GetDependenciesWithUnresolvableInTx(context.Background(), tx, anchor)
 	if err != nil {
@@ -337,15 +351,53 @@ func TestGetDependenciesWithUnresolvableInTxToleratesMissingWispDependencyTable(
 	if len(resolved) != 0 {
 		t.Fatalf("resolved = %+v, want none", resolved)
 	}
-	if len(unresolvable) != 1 {
-		t.Fatalf("unresolvable = %+v, want the anchor-seen edge to survive the table drop", unresolvable)
+	if len(unresolvable) != 1 || !reflect.DeepEqual(unresolvable[0], stored) {
+		t.Fatalf("unresolvable = %+v, want exactly the stored durable record %+v", unresolvable, stored)
 	}
-	got := unresolvable[0]
-	if got.DependsOnID != far || got.Type != types.DepBlocks || got.IssueID != anchor {
-		t.Fatalf("record = %+v, want the anchor edge {far:%q type:%q}", got, far, types.DepBlocks)
-	}
-	if !got.CreatedAt.IsZero() || got.CreatedBy != "" || got.Metadata != "" || got.ThreadID != "" {
-		t.Fatalf("record = %+v, want no synthesized stamps", got)
+}
+
+// TestGetDependenciesWithUnresolvableInTxRefusesAnUnrecoverableRecord: an
+// edge the anchor saw whose stored record no record query returns fails the
+// read. It never comes back as a record built from the anchor's far id and
+// type with a zero created_at, created_by, metadata and thread_id, which a
+// caller would publish as the stored values (bd-uschhs review).
+func TestGetDependenciesWithUnresolvableInTxRefusesAnUnrecoverableRecord(t *testing.T) {
+	t.Parallel()
+
+	const anchor = "ud-1"
+	const far = "liveop-kmf"
+
+	for _, tc := range []struct {
+		name string
+		wisp unresolvedRecordPlan
+	}{
+		// The wisp table the anchor read the edge from is gone at the record
+		// read.
+		{"wisp table dropped between the reads", unresolvedRecordPlan{queryErr: missingWispDependencyTable}},
+		// Both record queries answer, and neither has the row.
+		{"no record query returns the row", unresolvedRecordPlan{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, mock, tx := beginMockTx(t)
+			expectOutgoingAnchorEdges(mock, anchor, nil, []anchorEdgeRow{{far, "blocks"}})
+			expectEdgeHydration(mock, []string{far}, nil)
+			expectUnresolvedRecordBatches(mock, anchor, []string{far}, unresolvedRecordPlan{}, tc.wisp)
+
+			resolved, unresolvable, err := GetDependenciesWithUnresolvableInTx(context.Background(), tx, anchor)
+			if err == nil {
+				t.Fatalf("got (%+v, %+v, nil), want an error: no stored record of %q was read back", resolved, unresolvable, far)
+			}
+			if !strings.Contains(err.Error(), far) {
+				t.Errorf("error %q does not name the far end %q", err, far)
+			}
+			if resolved != nil || unresolvable != nil {
+				t.Errorf("a failed read carried data: (%+v, %+v)", resolved, unresolvable)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
 	}
 }
 
@@ -386,13 +438,18 @@ func TestGetDependenciesWithUnresolvableInTxBatchesMissedIDs(t *testing.T) {
 
 	_, mock, tx := beginMockTx(t)
 	anchorEdges := make([]anchorEdgeRow, n)
+	stored := make(map[string]*types.Dependency, n)
 	for i, id := range farIDs {
 		anchorEdges[i] = anchorEdgeRow{farID: id, depType: "blocks"}
+		stored[id] = &types.Dependency{
+			IssueID: anchor, DependsOnID: id, Type: types.DepBlocks,
+			CreatedAt: time.Unix(1700000000+int64(i), 0).UTC(), CreatedBy: "porter",
+		}
 	}
 	expectOutgoingAnchorEdges(mock, anchor, anchorEdges, nil)
 	expectEdgeHydration(mock, farIDs, nil)
 	expectUnresolvedRecordBatches(mock, anchor, farIDs,
-		unresolvedRecordPlan{}, unresolvedRecordPlan{})
+		unresolvedRecordPlan{recs: stored}, unresolvedRecordPlan{})
 
 	resolved, unresolvable, err := GetDependenciesWithUnresolvableInTx(context.Background(), tx, anchor)
 	if err != nil {
@@ -408,8 +465,8 @@ func TestGetDependenciesWithUnresolvableInTxBatchesMissedIDs(t *testing.T) {
 		t.Fatalf("unresolvable count = %d, want %d (one per missed far id)", len(unresolvable), n)
 	}
 	for i, rec := range unresolvable {
-		if rec.DependsOnID != farIDs[i] || rec.Type != types.DepBlocks || rec.IssueID != anchor {
-			t.Fatalf("unresolvable[%d] = %+v, want {far:%q type:%q}", i, rec, farIDs[i], types.DepBlocks)
+		if !reflect.DeepEqual(rec, stored[farIDs[i]]) {
+			t.Fatalf("unresolvable[%d] = %+v, want the stored record %+v", i, rec, stored[farIDs[i]])
 		}
 	}
 }

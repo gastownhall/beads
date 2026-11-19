@@ -213,6 +213,7 @@ func TestRecordingDependencyUseCaseCoversItsSurface(t *testing.T) {
 			"IterWithIssueMetadata":                reads,
 			"ListByIssueIDs":                       reads,
 			"ListByWispIDs":                        reads,
+			"ListOutgoingWithUnresolvable":         reads,
 			"ListWispWithIssueMetadata":            reads,
 			"ListWithIssueMetadata":                reads,
 			"WalkDependencyTree":                   reads,

@@ -99,6 +99,11 @@ func (s *Store) GetDependenciesWithMetadata(ctx context.Context, id string) ([]*
 // resolved half and unresolvable_dependency_edges the stored records of edges
 // whose far end has no row on the server.
 //
+// The detail view is best effort, so a server whose own dependency read failed
+// still answers it, with no edge members and dependencies_unavailable set. That
+// answer is an error here, as the same failed read is on a local backend: an
+// empty success would say the issue has no outgoing edges.
+//
 // A server older than that member publishes only the unresolvable_dependencies
 // count. A positive count with no records means the server could not name its
 // edges, so the read refuses with a typed *ErrUnsupported rather than answer a
@@ -107,6 +112,9 @@ func (s *Store) GetDependenciesWithUnresolvable(ctx context.Context, id string) 
 	details, err := s.getIssueDetails(ctx, id, url.Values{})
 	if err != nil || details == nil {
 		return nil, nil, err
+	}
+	if details.DependenciesUnavailable != nil && *details.DependenciesUnavailable {
+		return nil, nil, fmt.Errorf("get dependencies of %s: the server could not read them (dependencies_unavailable)", id)
 	}
 	if len(details.UnresolvableDependencyEdges) == 0 && details.UnresolvableDependencies != nil && *details.UnresolvableDependencies > 0 {
 		return nil, nil, &issueops.ErrUnsupported{Op: "GetDependenciesWithUnresolvable", Backend: "http"}

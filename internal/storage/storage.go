@@ -529,8 +529,11 @@ type Storage interface {
 	// leaves out, one per far-end id (durable plane first), sorted by
 	// DependsOnID then Type. A caller that must account for every stored
 	// outgoing edge (the detail view, `bd show`) reads this one (bd-uschhs).
-	// A backend that cannot supply the exact records refuses with
-	// *ErrUnsupported rather than answer an empty, falsely complete list.
+	// A backend returns the exact records or an error, never an empty,
+	// falsely complete list. The detail view and the conformance suite treat
+	// any error as a failed read. Only the http client also refuses with
+	// *ErrUnsupported, against a server that predates the records; `bd show`
+	// alone falls back to the issue-only read on that refusal.
 	GetDependenciesWithUnresolvable(ctx context.Context, issueID string) (resolved []*types.IssueWithDependencyMetadata, unresolvable []*types.Dependency, err error)
 	GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
 	GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error)

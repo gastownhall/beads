@@ -8465,6 +8465,19 @@ components:
             server older than this member omits it even when its
             `unresolvable_dependencies` is positive: such a count names no
             edge, and a client must not read the absence as "no edges".
+        dependencies_unavailable:
+          type: boolean
+          description: >-
+            Present, and true, only when the server's outgoing dependency read
+            failed. The detail is best effort and still answers, but then
+            `dependencies`, `unresolvable_dependency_edges`,
+            `unresolvable_dependencies`, `gated_by` and `parent` are absent
+            because they were never read, not because there are none.
+
+
+            ABSENT AFTER EVERY SUCCESSFUL READ, so an issue with no outgoing
+            edges stays plain omission. A server older than this member never
+            sends it.
         epic_total_children:
           type: integer
         epic_closed_children:
