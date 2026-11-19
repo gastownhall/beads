@@ -265,3 +265,151 @@ func runNestedServerInit(t *testing.T, bdBinary string, userPort int) {
 		t.Errorf("the town lists the rig's issue:\n%s", listOut)
 	}
 }
+
+// TestE2E_AutoStartedServerIsReapedAfterIdleWindow is GH#4282's acceptance,
+// end to end through the real bd binary: an auto-started repo-local server
+// whose idle window is 3s stops itself once no bd command holds it, its
+// state files go, and the next bd command auto-starts a fresh server.
+func TestE2E_AutoStartedServerIsReapedAfterIdleWindow(t *testing.T) {
+	// Every bd here is a subprocess on a workspace initialized with
+	// --server, so this process's own storage mode (embedded by default)
+	// does not matter; the subprocess needs the dolt binary.
+	testutil.RequireDoltBinary(t)
+	if runtime.GOOS == windowsOS {
+		t.Skip("repo-local dolt lifecycle integration test not supported on windows")
+	}
+
+	bdBinary := buildLifecycleTestBinary(t)
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	// Stops the auto-started repo-local server if an assertion fails before
+	// the test's own final stop.
+	stopDoltServerCleanup(t, beadsDir)
+	if err := runCommandInDir(tmpDir, "git", "init"); err != nil {
+		t.Fatalf("git init failed: %v", err)
+	}
+	_ = runCommandInDir(tmpDir, "git", "config", "user.email", "test@example.com")
+	_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test User")
+	_ = runCommandInDir(tmpDir, "git", "config", "remote.origin.url", "https://github.com/test/repo.git")
+
+	baseEnv := idleLifecycleBaseEnv()
+	// The server this test starts watches with a 3s window so the reap is
+	// observable; the post-reap commands run without the override so the
+	// replacement server a later bd command starts keeps the 30m default
+	// and survives the test's remaining steps.
+	envIdle := append(append([]string{}, os.Environ()...), append(baseEnv, "BEADS_DOLT_IDLE_TIMEOUT=3s")...)
+	envCalm := append(append([]string{}, os.Environ()...), append(baseEnv, "BEADS_DOLT_IDLE_TIMEOUT=")...)
+
+	initOut, initErr := runBDExecWithBinary(t, bdBinary, tmpDir, envIdle, "init", "--backend", "dolt", "--server", "--prefix", "reap", "--quiet")
+	if initErr != nil {
+		lower := strings.ToLower(initOut)
+		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
+			t.Skipf("dolt backend not available: %s", initOut)
+		}
+		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
+	}
+
+	listOut, listErr := runBDExecWithBinary(t, bdBinary, tmpDir, envIdle, "list")
+	if listErr != nil {
+		t.Fatalf("bd list failed: %v\n%s", listErr, listOut)
+	}
+
+	pidFile := filepath.Join(beadsDir, "dolt-server.pid")
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read the auto-started server's pid file: %v", err)
+	}
+	firstPID, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("parse pid file %q: %v", pidBytes, err)
+	}
+	portBytes, err := os.ReadFile(filepath.Join(beadsDir, "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("read the auto-started server's port file: %v", err)
+	}
+	firstPort := strings.TrimSpace(string(portBytes))
+
+	// The bd commands have exited, so nothing holds the server: the watcher
+	// stops it within the 3s window plus a poll. 20s is generous.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(pidFile); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			statusOut, _ := runBDExecWithBinary(t, bdBinary, tmpDir, envCalm, "dolt", "status")
+			t.Fatalf("auto-started server still running 20s after its idle window; status:\n%s", statusOut)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	waitForIdleReapedPortClosed(t, firstPort, 10*time.Second)
+
+	// The reap removed the server's state files and the watcher's record.
+	// The activity directory itself stays: it may hold live client leases.
+	for name, path := range map[string]string{
+		"pid file":    pidFile,
+		"port file":   filepath.Join(beadsDir, "dolt-server.port"),
+		"watcher.pid": filepath.Join(beadsDir, "dolt-server.activity", "watcher.pid"),
+	} {
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("%s still exists after the idle reap", name)
+		}
+	}
+
+	// The next bd command auto-starts a fresh server and succeeds.
+	secondOut, secondErr := runBDExecWithBinary(t, bdBinary, tmpDir, envCalm, "list")
+	if secondErr != nil {
+		t.Fatalf("bd list after the idle reap failed: %v\n%s", secondErr, secondOut)
+	}
+	pidBytes, err = os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read the re-started server's pid file: %v", err)
+	}
+	secondPID, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("parse pid file %q: %v", pidBytes, err)
+	}
+	if secondPID == firstPID {
+		t.Errorf("bd list after the reap reused the reaped server's PID %d", secondPID)
+	}
+
+	stopOut, stopErr := runBDExecWithBinary(t, bdBinary, tmpDir, envCalm, "dolt", "stop")
+	if stopErr != nil {
+		t.Fatalf("bd dolt stop cleanup failed: %v\n%s", stopErr, stopOut)
+	}
+}
+
+// idleLifecycleBaseEnv clears the environment that would pin the port,
+// share a server or override the idle window for the bd subprocesses of the
+// idle-stop end-to-end tests.
+func idleLifecycleBaseEnv() []string {
+	return []string{
+		"BEADS_TEST_MODE=",
+		"GT_ROOT=",
+		"BEADS_DOLT_AUTO_START=",
+		"BEADS_DOLT_SERVER_PORT=",
+		"BEADS_DOLT_PORT=",
+		"BEADS_DOLT_SHARED_SERVER=",
+		"GIT_TERMINAL_PROMPT=0",
+		"SSH_ASKPASS=",
+		"GIT_ASKPASS=",
+	}
+}
+
+// waitForIdleReapedPortClosed fails the test unless nothing accepts
+// connections on 127.0.0.1:port within timeout: the reaped server is gone.
+func waitForIdleReapedPortClosed(t *testing.T, port string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 500*time.Millisecond)
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+		if time.Now().After(deadline) {
+			t.Fatalf("the reaped server's port %s still accepts connections %s after its state files were removed", port, timeout)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

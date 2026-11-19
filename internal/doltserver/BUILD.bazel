@@ -74,6 +74,7 @@ go_test(
         "gc_config_test.go",
         "host_ownership_test.go",
         "idlewatch_integration_test.go",
+        "idlewatch_lifecycle_integration_test.go",
         "idlewatch_test.go",
         "lifecycle_integration_test.go",
         "listenerowner_darwin_test.go",
