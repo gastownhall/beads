@@ -405,7 +405,18 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 // connection and fans out to the team-server, preview, or migrating open path.
 // Each path returns a bare error for a serialization retry and backoff.Permanent
 // for a terminal failure.
-func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string, preparer *bootstrapPreparer) error {
+//
+// A failed attempt discards its pinned session instead of returning it to the
+// pool (gastownhall/beads#6504). The failure may have left that session
+// mid-script — a migration that died between `SET FOREIGN_KEY_CHECKS = 0` and
+// its paired restore — or pinned to its pre-statement catalog snapshot by the
+// failing statement (be-bv7x). The retry runs on this same pool, and on success
+// openAndInitSchema hands the pool to live queries, so neither may reuse it.
+// database/sql drops a driver connection only when it reports
+// driver.ErrBadConn, so the attempt reports exactly that through conn.Raw.
+// A successful attempt keeps its session: initialization must not force a
+// fresh connection on every open.
+func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string, preparer *bootstrapPreparer) (err error) {
 	conn, err := p.db.Conn(ctx)
 	if err != nil {
 		if isSerializationError(err) {
@@ -413,7 +424,15 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		}
 		return backoff.Permanent(fmt.Errorf("uow: pin connection: %w", err))
 	}
-	defer conn.Close()
+	defer func() {
+		if err != nil {
+			// The cleanup results are ignored: the attempt's verdict is err,
+			// and a session the lock release already discarded answers
+			// sql.ErrConnDone here, which changes nothing.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
 
 	if p.teamServer {
 		return p.verifyTeamServerSchema(ctx, conn, database)

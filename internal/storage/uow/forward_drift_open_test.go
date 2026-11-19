@@ -373,6 +373,15 @@ func TestInitSchemaRefusesForwardDrift(t *testing.T) {
 			t.Fatalf("create sql mock: %v", err)
 		}
 		defer db.Close()
+		// The failed attempt discards its session (gastownhall/beads#6504),
+		// so the retry opens a new driver connection. sqlmock forgets its DSN
+		// once its last connection closes; holding a second session keeps the
+		// mock reachable for that reopen. It issues no statement.
+		hold, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("hold a mock session: %v", err)
+		}
+		defer hold.Close()
 
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
 			WillReturnError(&mysql.MySQLError{Number: 1213, Message: "serialization failure"})
