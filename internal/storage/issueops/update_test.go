@@ -137,6 +137,46 @@ func TestLeaseOutcomeOnUpdate(t *testing.T) {
 			wantResult: LeaseArm,
 			wantHolder: "gastown.alice",
 		},
+		{
+			name:       "claim whose patch reopens the issue clears",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"status": types.StatusOpen, "assignee": "bob"},
+			claim:      true,
+			wantResult: LeaseClear,
+		},
+		{
+			name:       "claim whose patch blocks the issue clears",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"status": types.StatusBlocked},
+			claim:      true,
+			wantResult: LeaseClear,
+		},
+		{
+			name:       "claim whose patch moves to a custom status clears",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"status": "triaged"},
+			claim:      true,
+			wantResult: LeaseClear,
+		},
+		{
+			name:       "claim whose patch unassigns clears",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"assignee": ""},
+			claim:      true,
+			wantResult: LeaseClear,
+		},
+		{
+			name:       "claim whose patch nils the assignee clears",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"assignee": nil},
+			claim:      true,
+			wantResult: LeaseClear,
+		},
 	}
 
 	for _, tt := range tests {
