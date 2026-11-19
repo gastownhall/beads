@@ -62,6 +62,13 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			wantExact: "gs://bucket/path",
 		},
 		{
+			// s3:// used to go through filepath.Abs, which also collapsed the
+			// "//" inside the endpoint query.
+			name:      "s3:// URL with endpoint query passes through byte-for-byte",
+			input:     "s3://bucket/beads?endpoint=https://minio.local&region=auto&path-style=true",
+			wantExact: "s3://bucket/beads?endpoint=https://minio.local&region=auto&path-style=true",
+		},
+		{
 			// #6227: used to become file://$PWD/az:/container/beads.
 			name:      "az:// URL passes through",
 			input:     "az://account.blob.core.windows.net/container/beads",
