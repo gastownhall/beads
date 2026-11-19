@@ -573,6 +573,8 @@ func TestEmbeddedAutoBackupDamagedDestination(t *testing.T) {
 	failed := readAutoBackupStatus(t, bd, dir)
 	if failed.LastError == "" {
 		t.Errorf("status reports no last_error after a failed auto-backup: %+v", failed)
+	} else if !strings.Contains(failed.LastError, "table file not found") {
+		t.Errorf("last_error %q does not name the missing table file", failed.LastError)
 	}
 	if !failed.LastSuccessAt.Equal(good.Timestamp) {
 		t.Errorf("last_success_at = %v, want the last good backup %v", failed.LastSuccessAt, good.Timestamp)
