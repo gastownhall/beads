@@ -5431,7 +5431,8 @@ var openCLIMergeDB = (*DoltStore).openLongTimeoutConn
 
 // mergeTrackingRefAfterCLIFetch merges ref, a tracking ref a CLI fetch just
 // advanced, into the store's branch with CALL DOLT_MERGE, whose default
-// message names only the ref (bd-e2q8zs).
+// message names only the ref (bd-e2q8zs), and settles the merge in the same
+// transaction, as the SQL route does (settleMergeInTx).
 //
 // The merge runs on a dedicated long-timeout session (openLongTimeoutConn),
 // as the SQL route's merge does, not on a pool connection. `dolt pull` merged
@@ -5439,19 +5440,20 @@ var openCLIMergeDB = (*DoltStore).openLongTimeoutConn
 // (10s by default, see Config.PoolReadTimeout) is short enough that a
 // three-way merge of a large divergence, or one stalled behind a server
 // auto_gc pause, would fail on every retry. The session is pinned to the
-// store's branch (pinStoreBranch), the branch finishCLIPull's resolver
-// settles on its pool connection.
+// store's branch (pinStoreBranch), so the merge lands on the branch the
+// store reads.
 //
-// @@dolt_force_transaction_commit is set, and the merge runs in an explicit
-// transaction that is committed, as `dolt pull` set the variable and sent
-// COMMIT, so a conflicted merge commits to the working set with its
-// conflicts, where finishCLIPull's resolver settles what it can. Without the
-// explicit COMMIT, a server started with --no-auto-commit would discard the
-// conflicted merge when the session closes, and the resolver would never see
-// it. A merge the resolver declines stays open there, as a declined `dolt
-// pull` left it: that is GH#7839, which #7849 fixes by merging and settling in
-// bd's own transaction. The session is discarded after the merge, so the
-// variable never reaches another caller.
+// @@dolt_allow_commit_conflicts and @@dolt_force_transaction_commit are set,
+// as settleMergeInTx requires, so a conflicted or FK-violating merge stays in
+// the transaction long enough to be inspected. settleMergeInTx then resolves
+// the conflict classes the resolver accepts, repairs FK cascade violations
+// and commits the concluded merge; a conflict it declines is captured into a
+// *versioncontrolops.MergeConflictsError and the transaction rolls back, so
+// the declined merge is never published and no merge is left open in the
+// working set (GH#7839). The explicit transaction also keeps a server started
+// with --no-auto-commit from discarding a settled merge when the session
+// closes. The session is discarded after the merge, so neither variable
+// reaches another caller.
 func (s *DoltStore) mergeTrackingRefAfterCLIFetch(ctx context.Context, ref string) error {
 	db, err := openCLIMergeDB(s)
 	if err != nil {
@@ -5470,6 +5472,9 @@ func (s *DoltStore) mergeTrackingRefAfterCLIFetch(ctx context.Context, ref strin
 	if err := s.pinStoreBranch(ctx, conn); err != nil {
 		return fmt.Errorf("merge %s: %w", ref, err)
 	}
+	if _, err := conn.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
+		return fmt.Errorf("merge %s: set dolt_allow_commit_conflicts: %w", ref, err)
+	}
 	if _, err := conn.ExecContext(ctx, "SET @@dolt_force_transaction_commit = 1"); err != nil {
 		return fmt.Errorf("merge %s: set dolt_force_transaction_commit: %w", ref, err)
 	}
@@ -5477,24 +5482,21 @@ func (s *DoltStore) mergeTrackingRefAfterCLIFetch(ctx context.Context, ref strin
 	if err != nil {
 		return fmt.Errorf("merge %s: begin transaction: %w", ref, err)
 	}
-	mergeRow, mergeErr := schema.CallReturningRow(ctx, tx, "CALL DOLT_MERGE(?)", ref)
-	if mergeErr != nil {
-		_ = tx.Rollback()
-		// As in fetchAndMergeTrackingRefInTx: the ordinary no-op arrives as a
-		// message, and only the squash path's "Already up to date." as an error.
-		if strings.Contains(mergeErr.Error(), "up to date") {
-			return nil
+	_, mergeErr := schema.CallReturningRow(ctx, tx, "CALL DOLT_MERGE(?)", ref)
+	// As in fetchAndMergeTrackingRefInTx: the ordinary no-op arrives as a
+	// message, and only the squash path's "Already up to date." as an error.
+	if mergeErr != nil && strings.Contains(mergeErr.Error(), "up to date") {
+		mergeErr = nil
+	}
+	if err := s.settleMergeInTx(ctx, tx, mergeErr); err != nil {
+		// A declined conflict fails the pull, as a conflicted `dolt pull` did;
+		// the wrapped MergeConflictsError carries the conflicted tables for
+		// bd sync and PullFrom.
+		var mce *versioncontrolops.MergeConflictsError
+		if errors.As(err, &mce) {
+			return fmt.Errorf("merge %s: conflicts found: %w", ref, err)
 		}
-		return fmt.Errorf("merge %s: %w", ref, mergeErr)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("merge %s: commit: %w", ref, err)
-	}
-	// A conflicted merge committed its conflicts to the working set. Fail, as a
-	// conflicted `dolt pull` did, so finishCLIPull reports the pull as failed
-	// unless its resolver settles every conflict.
-	if parseMergeReport(mergeRow).Conflicted {
-		return fmt.Errorf("merge %s: conflicts found", ref)
+		return fmt.Errorf("merge %s: %w", ref, err)
 	}
 	return nil
 }
@@ -5955,25 +5957,26 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		// The CLI route's merge leaves any conflicts in the working set; run the
-		// auto-resolver so git-protocol remotes get the same audit-only
-		// dependency / metadata repair as the SQL route (#4259).
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		// The CLI route's merge settles in its own transaction
+		// (mergeTrackingRefAfterCLIFetch), so git-protocol remotes get the same
+		// audit-only dependency / metadata repair as the SQL route (#4259), and
+		// a declined conflict rolls back instead of staying open (GH#7839).
+		return pullReport{}, s.doltCLIPull(ctx, remote, creds)
 	}
-	// Credential CLI routing: mirrors git-protocol path, including post-pull
-	// auto-resolution.
+	// Credential CLI routing: mirrors git-protocol path, including the merge
+	// settlement.
 	if useCLI, err := s.prepareCLIRouteForCredentials(ctx, remote, creds); err != nil {
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.doltCLIPull(ctx, remote, creds)
 	}
-	// Cloud auth CLI routing (GH#6), including post-pull auto-resolution.
+	// Cloud auth CLI routing (GH#6), including the merge settlement.
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.doltCLIPull(ctx, remote, creds)
 	}
 	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
 	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
@@ -6411,140 +6414,6 @@ func (s *DoltStore) markBlockedRecomputePending(ctx context.Context, fromCommit 
 		return
 	}
 	_ = tx.Commit()
-}
-
-// finishCLIPull runs the merge-conflict auto-resolver after a CLI-based pull
-// (git-protocol, credentialed, or cloud-auth remotes). The CLI route's merge
-// (mergeTrackingRefAfterCLIFetch, which replaced a `dolt pull` subprocess,
-// bd-e2q8zs) commits any merge conflicts into the shared working set but,
-// unlike the SQL route, leaves no transaction we can inspect — so these
-// remotes historically skipped the resolver entirely. With deterministic
-// dependency ids (#4259) a
-// same-edge conflict that differs only in audit columns is safe to auto-resolve, and
-// the git remote topology in #4259 is exactly this CLI path; route it through the
-// same resolver as the SQL path. pullErr is what doltCLIPull returned: a pull that
-// fails *because* of conflicts is recoverable once they resolve, so we inspect the
-// working set regardless and only surface pullErr when nothing was resolved.
-func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
-	if s.readOnly {
-		// A read-only store cannot resolve or commit; surface the pull result as-is.
-		return pullErr
-	}
-	resolved, resolveErr := s.autoResolveConflictsAfterCLIPull(ctx)
-	if resolveErr != nil {
-		if pullErr != nil {
-			return pullErr
-		}
-		return resolveErr
-	}
-	if pullErr != nil && !resolved {
-		// #7839: a conflict the resolver declined must not stay open. The SQL
-		// route aborts it ("merge aborted and working set restored"); do the same
-		// here, or every later write and pull fails on the open merge.
-		if abortErr := s.abortOpenMergeAfterCLIPull(ctx); abortErr != nil {
-			return fmt.Errorf("%w; %v", pullErr, abortErr)
-		}
-		return pullErr
-	}
-	return nil
-}
-
-// abortOpenMergeAfterCLIPull aborts a merge the CLI route left open in the
-// working set (dolt_merge_status.is_merging = 1), so the store is not wedged
-// on an unresolved merge after a declined conflict (#7839). It is a no-op when
-// no merge is open. It runs on a pooled connection from s.db, which is on the
-// store's branch (see autoResolveConflictsAfterCLIPull).
-func (s *DoltStore) abortOpenMergeAfterCLIPull(ctx context.Context) error {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to acquire connection: %w", err)
-	}
-	defer conn.Close()
-	var merging bool
-	if err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
-		return fmt.Errorf("failed to read dolt_merge_status: %w", err)
-	}
-	if !merging {
-		return nil
-	}
-	if err := schema.DrainCall(ctx, conn, "CALL DOLT_MERGE('--abort')"); err != nil {
-		return fmt.Errorf("failed to abort declined merge: %w", err)
-	}
-	return nil
-}
-
-// autoResolveConflictsAfterCLIPull inspects the working set and auto-resolves the
-// conflict classes that are safe without operator input (#4259 audit-only dependency
-// edges, GH#2466 metadata, GH#4698 issues-table LWW). It runs on a connection from
-// the store pool (s.db) on
-// purpose: those connections are on the store's branch, which the CLI route's merge
-// session was pinned to (pinStoreBranch), whereas a separately opened connection would
-// default to the base branch and never see the conflicts. The pull's
-// network transfer already completed in the subprocess, so no long-timeout connection
-// is needed for the local resolve. Returns (true, nil) only if all conflicts were
-// resolved and committed; (false, nil) when there is nothing to resolve or a conflict
-// needs the operator, leaving the working set untouched for manual resolution.
-func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool, error) {
-	// Pin a single connection: @@dolt_allow_commit_conflicts is session-scoped,
-	// and setting it through a pooled transaction leaks it to whichever caller
-	// drains that connection next. Reset it before releasing the connection; if
-	// the reset cannot run, discard the connection rather than return it dirty.
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return false, fmt.Errorf("failed to acquire connection: %w", err)
-	}
-	varSet := false
-	defer func() {
-		if varSet {
-			if _, err := conn.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 0"); err != nil {
-				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-			}
-		}
-		_ = conn.Close()
-	}()
-	// Allow committing while conflicts exist so we can inspect and resolve them.
-	if _, err := conn.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
-		return false, fmt.Errorf("failed to set dolt_allow_commit_conflicts: %w", err)
-	}
-	varSet = true
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return false, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	resolved, err := s.tryAutoResolveMergeConflicts(ctx, tx)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, err
-	}
-	// bd-6dnrw.4: a CLI pull can also leave FK cascade violations in the
-	// shared working set (child rows whose parent issue was deleted on the
-	// other clone). Repair them like the SQL route does; unrepaired
-	// violations roll back untouched for the operator.
-	repairedViol, hadViol, violErr := s.tryRepairFKCascadeViolations(ctx, tx)
-	if violErr != nil {
-		_ = tx.Rollback()
-		return false, violErr
-	}
-	if hadViol && !repairedViol {
-		_ = tx.Rollback()
-		return false, nil
-	}
-	if !resolved && !repairedViol {
-		_ = tx.Rollback()
-		return false, nil
-	}
-	// Conclude the merge only now, after the FK repair: DOLT_COMMIT refuses a
-	// violated working set, so a merge carrying both classes could never
-	// settle when the resolver committed first (bd-578h9.14). A merge the
-	// repair alone settled is concluded too, as in settleMergeInTx (GH#7811).
-	if err := versioncontrolops.CommitSettledMerge(ctx, tx, resolved, repairedViol); err != nil {
-		_ = tx.Rollback()
-		return false, err
-	}
-	if err := s.commitSQLTx(ctx, "commit resolved CLI pull conflicts", tx); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // tryAutoResolveMergeConflicts auto-resolves merge conflicts that are safe to

@@ -883,9 +883,10 @@ func TestRunSyncLoopConflictAfterPushRaceRecordsPulled(t *testing.T) {
 }
 
 // Whether the conflicted merge was aborted or left live in the working set is
-// read from WHICH detection source fired, never assumed: the SQL pull route
-// aborts and restores, while the CLI/git-protocol route deliberately leaves the
-// conflict rows in place for the operator (finishCLIPull).
+// read from WHICH detection source fired, never assumed: every pull route
+// aborts a declined merge and restores the working set (GH#7839), while a
+// merge already open in the working set (another client, a hand-run merge, or
+// an older bd) leaves its conflict rows live.
 func TestRunSyncLoopConflictLivenessComesFromTheSource(t *testing.T) {
 	t.Run("captured-only conflicts were aborted away", func(t *testing.T) {
 		r := &syncOpsRecorder{pullConflicts: [][]string{{"issues"}}}
@@ -950,7 +951,7 @@ func TestSyncConflictMessage(t *testing.T) {
 		}
 	})
 
-	// The CLI/git-protocol route leaves the conflict rows live. Telling that
+	// Live conflict rows are in the working set right now. Telling that
 	// operator "the working set was restored" sends them away from a database
 	// that is conflicted right now.
 	t.Run("live conflict is never described as restored", func(t *testing.T) {
@@ -960,6 +961,19 @@ func TestSyncConflictMessage(t *testing.T) {
 		}
 		if strings.Contains(got, "working set restored") {
 			t.Errorf("a live conflict must not be described as restored:\n%s", got)
+		}
+	})
+
+	// No pull route leaves a declined merge open any more (GH#7839): live
+	// rows come from a merge already open in the working set, which the
+	// message must not blame on this pull.
+	t.Run("live conflict is attributed to a merge already open", func(t *testing.T) {
+		got := joined(&syncOutcome{Conflicts: []string{"issues"}, ConflictsLive: true})
+		if !strings.Contains(got, "merge already open in the working set") {
+			t.Errorf("message does not attribute the live rows to an open merge:\n%s", got)
+		}
+		if strings.Contains(got, "this pull route leaves them") {
+			t.Errorf("message still says this pull route leaves the conflict live:\n%s", got)
 		}
 	})
 
