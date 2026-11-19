@@ -221,6 +221,12 @@ func TestReaderReadyExcludeParentsWithOpenChildren(t *testing.T) {
 	conformance.RunReaderReadyExcludeParentsWithOpenChildren(t, ctx, fixture)
 }
 
+func TestReaderReadyExcludeParentsCountsChildrenTheQueryCannotSee(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyExcludeParentsCountsChildrenTheQueryCannotSee(t, ctx, fixture)
+}
+
 func TestReaderListParentReachesEveryDescendantAndOnlyItsOwn(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()

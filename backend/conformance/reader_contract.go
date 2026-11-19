@@ -2421,6 +2421,111 @@ func RunReaderReadyExcludeParentsWithOpenChildren(t *testing.T, ctx context.Cont
 	assertReaderPageIDSet(t, "Ready --exclude-parents", page, []string{leaf, epic, doneParent})
 }
 
+// RunReaderReadyExcludeParentsCountsChildrenTheQueryCannotSee pins the
+// DEFINITION the flagged read's parent set is cut from (GH#6817, AC-3): a
+// parent is excluded exactly when the CLOSE GATE counts a recorded non-closed
+// child for it — never by anything the ready query itself can see. Every arm
+// here is a child that is invisible to the parent's own ready listing, so a
+// body that derived the set from the ready predicate (or from the id prefix,
+// which is not a recorded edge at all) answers differently.
+//
+// THE INVISIBLE CHILDREN, one parent each:
+//   - DURABLE-PARENT/WISP-CHILD crosses BOTH planes at once — the edge lives
+//     in wisp_dependencies against a durable id — so the durable parent is
+//     excluded by a child the plain (non-ephemeral) ready read cannot list
+//     under any flag.
+//   - WISP-PARENT/DURABLE-CHILD and WISP-PARENT/WISP-CHILD are the mirror
+//     legs on the wisp plane: the parents are ready only under
+//     IncludeEphemeral, and each is excluded by a child recorded in the other
+//     table family — the legs unioned in sqlbuild.OpenChildParentIDsSQL.
+//   - PINNED-CHILD is a durable child the ready listing hides by its own
+//     pinned clause, the one invisibility that is NOT about planes: the close
+//     gate counts pinned children, so the flag's help text ("including
+//     pinned children") is a promise this arm makes observable.
+//   - DOTTED-ONLY is the control in the other direction: a row whose ID sits
+//     under the parent's prefix with NO recorded edge excludes nothing,
+//     because the close gate counts recorded children and the flag promises
+//     the same definition, not "looks like a child".
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the scoping label (every parent
+// carries it; no child does, so each child is doubly invisible), and
+// IncludeEphemeral, without which the wisp-plane parents could not be listed
+// at all.
+func RunReaderReadyExcludeParentsCountsChildrenTheQueryCannotSee(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope := readerLabel(fixture, "rdyxpl")
+	durableParent := readerID(fixture, "rdyxpl", "durable-parent")
+	wispChild := readerID(fixture, "rdyxpl", "wisp-child")
+	wispParent := readerID(fixture, "rdyxpl", "wisp-parent")
+	durableChild := readerID(fixture, "rdyxpl", "durable-child")
+	wispParent2 := readerID(fixture, "rdyxpl", "wisp-parent-2")
+	wispChild2 := readerID(fixture, "rdyxpl", "wisp-child-2")
+	pinnedParent := readerID(fixture, "rdyxpl", "pinned-parent")
+	pinnedChild := readerID(fixture, "rdyxpl", "pinned-child")
+	leaf := readerID(fixture, "rdyxpl", "leaf")
+	dottedParent := readerID(fixture, "rdyxpl", "dotted-parent")
+	dottedOnly := dottedParent + ".1"
+
+	seedReaderIssue(t, ctx, fixture, readerIssue(durableParent, types.TypeTask, scope))
+	wispChildIssue := readerIssue(wispChild, types.TypeTask, "")
+	wispChildIssue.Ephemeral = true
+	seedReaderWisp(t, ctx, fixture, wispChildIssue)
+
+	wispParentIssue := readerIssue(wispParent, types.TypeTask, scope)
+	wispParentIssue.Ephemeral = true
+	seedReaderWisp(t, ctx, fixture, wispParentIssue)
+	seedReaderIssue(t, ctx, fixture, readerIssue(durableChild, types.TypeTask, ""))
+
+	wispParent2Issue := readerIssue(wispParent2, types.TypeTask, scope)
+	wispParent2Issue.Ephemeral = true
+	seedReaderWisp(t, ctx, fixture, wispParent2Issue)
+	wispChild2Issue := readerIssue(wispChild2, types.TypeTask, "")
+	wispChild2Issue.Ephemeral = true
+	seedReaderWisp(t, ctx, fixture, wispChild2Issue)
+
+	seedReaderIssue(t, ctx, fixture, readerIssue(pinnedParent, types.TypeTask, scope))
+	pinnedChildIssue := readerIssue(pinnedChild, types.TypeTask, "")
+	pinnedChildIssue.Pinned = true
+	seedReaderIssue(t, ctx, fixture, pinnedChildIssue)
+
+	seedReaderIssue(t, ctx, fixture, readerIssue(leaf, types.TypeTask, scope))
+	seedReaderIssue(t, ctx, fixture, readerIssue(dottedParent, types.TypeTask, scope))
+	seedReaderIssue(t, ctx, fixture, readerIssue(dottedOnly, types.TypeTask, scope))
+
+	for _, edge := range []*types.Dependency{
+		{IssueID: wispChild, DependsOnID: durableParent, Type: types.DepParentChild},
+		{IssueID: durableChild, DependsOnID: wispParent, Type: types.DepParentChild},
+		{IssueID: wispChild2, DependsOnID: wispParent2, Type: types.DepParentChild},
+		{IssueID: pinnedChild, DependsOnID: pinnedParent, Type: types.DepParentChild},
+	} {
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s: %v", edge.IssueID, edge.DependsOnID, err)
+		}
+	}
+
+	// The unflagged control first, with the wisp plane admitted: every scoped
+	// parent is an ordinary ready row, and the dotted pseudo-child lists
+	// beside its prefix-mate because nothing recorded says it is one.
+	unflagged := publicops.ReadyRequest{Labels: []string{scope}, IncludeEphemeral: true, Sort: "oldest"}
+	page, err := fixture.Reader.Ready(ctx, unflagged)
+	if err != nil {
+		t.Fatalf("Ready (unflagged, ephemeral): %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready without the flag",
+		page, []string{durableParent, wispParent, wispParent2, pinnedParent, leaf, dottedParent, dottedOnly})
+
+	// Flagged: every parent with a recorded non-closed child drops — across
+	// both planes, whether the child was pinned, ephemeral, labelless or all
+	// three — and the prefix alone still excludes nothing.
+	flagged := unflagged
+	flagged.ExcludeParentsWithOpenChildren = true
+	page, err = fixture.Reader.Ready(ctx, flagged)
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents (ephemeral): %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready --exclude-parents", page, []string{leaf, dottedParent, dottedOnly})
+}
+
 // RunReaderListParentReachesEveryDescendantAndOnlyItsOwn is the same field on
 // the listing plane (reader.go:213), where it is rendered differently: one
 // clause with a parent-child subquery ORed against the id prefix

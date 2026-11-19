@@ -143,6 +143,11 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ReadyExcludeParentsWithOpenChildren", func(t *testing.T) {
 		conformance.RunReaderReadyExcludeParentsWithOpenChildren(t, ctx, fixture)
 	})
+	// The cross-plane and invisible-child arms: this seam's own per-family
+	// set resolution (domain/db buildReadyWorkPredicates) votes on them too.
+	t.Run("ReadyExcludeParentsCountsChildrenTheQueryCannotSee", func(t *testing.T) {
+		conformance.RunReaderReadyExcludeParentsCountsChildrenTheQueryCannotSee(t, ctx, fixture)
+	})
 	t.Run("ListParentReachesEveryDescendantAndOnlyItsOwn", func(t *testing.T) {
 		conformance.RunReaderListParentReachesEveryDescendantAndOnlyItsOwn(t, ctx, fixture)
 	})
