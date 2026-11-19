@@ -84,6 +84,32 @@ link's target. Replace the symlink with a real directory and re-run. A symlink
 higher up the path, such as a `.beads` directory that links to external
 storage, is still supported.
 
+#### Hooks written in another language
+
+The section `bd` adds is POSIX shell, so it only goes into shell hooks. A hook
+whose shebang names another interpreter (for example a pre-commit or prek
+`#!/usr/bin/env python3` pre-push hook, or a Node, Ruby, or fish script) is
+left byte-for-byte as it is, with no `.backup`, and `bd hooks install` names it
+in a warning on stderr. The other hooks install as usual, and the command
+reports the skipped hook in its output (`skipped_hooks` with `--json`). Hooks
+with no shebang, and shell shebangs such as `sh`, `bash`, `zsh`,
+`env -S bash -e` or `busybox sh`, keep the shell section.
+
+To run `bd` from such a hook, have the hook call
+`bd hooks run <hook-name>` itself, passing it the hook's arguments and stdin.
+A hook that already does this is left alone without a warning.
+
+If an earlier install appended `bd`'s section to a non-shell hook, the next
+`bd hooks install`, `bd migrate hooks --apply` or `bd doctor --fix` removes
+complete, well-formed sections and keeps every other byte. It never restores
+an old `.backup` over the hook and never retires its `.old`/`.backup`
+sidecars. When the markers are incomplete, out of order, nested or not on
+lines of their own, or the hook is a binary, `bd` changes nothing: install
+warns, and migration stops with a blocking error that asks you to remove the
+section by hand. A legacy `bd` shim whose saved `.old` or `.backup` hook is a
+non-shell script gets that script back as the active hook, without the shell
+section.
+
 ### Status
 
 ```bash

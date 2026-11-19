@@ -993,4 +993,36 @@ func TestInstallHooks_NonShell(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("AC8_ambiguous_markers_and_binary_are_not_rewritten", func(t *testing.T) {
+		section := generateHookSection("pre-push")
+		begin, end := hookSectionBeginLine()+"\n", hookSectionEndLine()+"\n"
+		cases := []struct{ name, content, why string }{
+			{"orphan_begin", nonShellPythonPrePush + "\n" + begin + "x = 1\n\nprint('user')\n", "manual inspection"},
+			{"orphan_end", nonShellPythonPrePush + end + "print('user')\n", "manual inspection"},
+			{"reversed", nonShellPythonPrePush + end + "x = 1\n" + begin, "manual inspection"},
+			{"nested", nonShellPythonPrePush + begin + section + end, "manual inspection"},
+			{"marker_inside_a_line", nonShellPythonPrePush + "print('" + strings.TrimSuffix(begin, "\n") + "')\n", "manual inspection"},
+			// Whole-line, paired markers: only the binary rule keeps it.
+			{"binary", "\x7fELF\x02\x01\x01\x00\x00\n" + section, "binary content, which bd never rewrites"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				repoDir := setupGuardTestRepo(t)
+				hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+				writeNonShellHookForTest(t, hookPath, tc.content)
+
+				stderr := installHooksCapturingStderr(t, false)
+				require.Equal(t, tc.content, readNonShellHookForTest(t, hookPath), "hook must not be rewritten")
+				_, err := os.Lstat(hookPath + ".backup")
+				require.True(t, os.IsNotExist(err), "no backup for an untouched hook: %v", err)
+				require.Contains(t, stderr, tc.why)
+				require.NotContains(t, stderr, "removed")
+
+				got, keep := shouldPreserveHookContent(tc.content, false)
+				require.True(t, keep, "preservation keeps the hook")
+				require.Equal(t, tc.content, got, "preservation copies it unchanged")
+			})
+		}
+	})
 }

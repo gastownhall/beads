@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -217,5 +218,74 @@ func forceRepoHooksPath(t *testing.T, repoPath string) {
 	cmd.Dir = repoPath
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to set core.hooksPath for test repo: %v", err)
+	}
+}
+
+// TestPlanHookMigration_NonShell pins the plan states for hooks run by a
+// non-shell interpreter (GH#6348).
+func TestPlanHookMigration_NonShell(t *testing.T) {
+	const python = "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n"
+	section := "# --- BEGIN BEADS INTEGRATION v0.56.1 ---\nif command -v bd >/dev/null 2>&1; then\n  bd hooks run pre-push \"$@\"\nfi\n# --- END BEADS INTEGRATION v0.56.1 ---\n"
+	const shim = "#!/bin/sh\n# bd-shim v2\n# bd-hooks-version: 0.56.1\nexec bd hooks run pre-push \"$@\"\n"
+
+	cases := []struct {
+		name           string
+		files          map[string]string
+		wantState      string
+		wantNeeds      bool
+		wantProblem    bool
+		wantInterp     string
+		wantSourceInt  string
+		wantPendingOne bool
+	}{
+		{name: "clean python", files: map[string]string{"pre-push": python}, wantState: HookStateNonShellCustom, wantInterp: "python3"},
+		{name: "python with sidecars", files: map[string]string{"pre-push": python, "pre-push.old": "#!/bin/sh\n", "pre-push.backup": "#!/bin/sh\n"}, wantState: HookStateNonShellCustom, wantInterp: "python3"},
+		{name: "python with paired section", files: map[string]string{"pre-push": python + "\n" + section}, wantState: HookStateNonShellRepair, wantNeeds: true, wantInterp: "python3", wantPendingOne: true},
+		{name: "python with orphan begin", files: map[string]string{"pre-push": python + "# --- BEGIN BEADS INTEGRATION v0.56.1 ---\n"}, wantState: HookStateNonShellManual, wantNeeds: true, wantProblem: true, wantInterp: "python3", wantPendingOne: true},
+		{name: "binary with markers", files: map[string]string{"pre-push": "\x7fELF\x00" + section}, wantState: HookStateNonShellManual, wantNeeds: true, wantProblem: true, wantInterp: "binary content", wantPendingOne: true},
+		{name: "legacy shim with python old", files: map[string]string{"pre-push": shim, "pre-push.old": python}, wantState: "legacy_with_old_sidecar", wantNeeds: true, wantSourceInt: "python3", wantPendingOne: true},
+		{name: "missing hook with python backup", files: map[string]string{"pre-push.backup": python}, wantState: "missing_with_backup_sidecar", wantNeeds: true, wantSourceInt: "python3", wantPendingOne: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			setupGitRepoInDir(t, tmpDir)
+			forceRepoHooksPath(t, tmpDir)
+			if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			_, hooksDir, err := resolveGitHooksDir(tmpDir)
+			if err != nil {
+				t.Fatalf("resolveGitHooksDir failed: %v", err)
+			}
+			for name, content := range tc.files {
+				writeHookFile(t, filepath.Join(hooksDir, name), content)
+			}
+
+			plan, err := PlanHookMigration(tmpDir)
+			if err != nil {
+				t.Fatalf("PlanHookMigration returned error: %v", err)
+			}
+			hook, ok := findHookPlan(plan, "pre-push")
+			if !ok {
+				t.Fatal("pre-push hook not found in plan")
+			}
+			if hook.State != tc.wantState || hook.NeedsMigration != tc.wantNeeds {
+				t.Fatalf("state=%q needs=%v, want %q needs=%v (%+v)", hook.State, hook.NeedsMigration, tc.wantState, tc.wantNeeds, hook)
+			}
+			if (hook.MarkerProblem != "") != tc.wantProblem {
+				t.Fatalf("marker problem = %q, want present=%v", hook.MarkerProblem, tc.wantProblem)
+			}
+			if hook.Interpreter != tc.wantInterp || hook.SourceInterpreter != tc.wantSourceInt {
+				t.Fatalf("interpreter=%q source=%q, want %q/%q", hook.Interpreter, hook.SourceInterpreter, tc.wantInterp, tc.wantSourceInt)
+			}
+			if tc.wantSourceInt != "" && !strings.Contains(hook.SuggestedAction, tc.wantSourceInt) {
+				t.Fatalf("suggested action must name the source interpreter: %q", hook.SuggestedAction)
+			}
+			if got := len(DetectPendingMigrations(tmpDir)); (got == 1) != tc.wantPendingOne {
+				t.Fatalf("pending migrations = %d, want one=%v", got, tc.wantPendingOne)
+			}
+		})
 	}
 }

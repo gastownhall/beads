@@ -42,6 +42,9 @@ type HookMigrationHookPlan struct {
 	// Interpreter names the non-shell interpreter of the active hook, or
 	// "binary content"; empty for shell hooks (GH#6348).
 	Interpreter string `json:"interpreter,omitempty"`
+	// MarkerProblem explains why the bd markers in a non-shell hook (or in
+	// its selected sidecar) cannot be removed automatically.
+	MarkerProblem string `json:"marker_problem,omitempty"`
 	// SourceInterpreter names the non-shell interpreter of the sidecar a
 	// legacy or missing hook would be restored from; empty for shell.
 	SourceInterpreter string `json:"source_interpreter,omitempty"`
@@ -55,6 +58,9 @@ const (
 	// HookStateNonShellRepair is a non-shell hook holding complete bd
 	// sections an earlier install appended; migration removes them.
 	HookStateNonShellRepair = "non_shell_marker_repair"
+	// HookStateNonShellManual is a non-shell hook whose bd markers are
+	// ambiguous, or binary content holding marker text: not rewritten.
+	HookStateNonShellManual = "non_shell_manual_repair"
 )
 
 // HookMigrationPlan summarizes migration state for all managed hooks.
@@ -128,6 +134,7 @@ func inspectHookMigration(hooksDir, hookName string) HookMigrationHookPlan {
 		plan.LegacyBDHook = isLegacyBDHook(contentStr)
 		if interp, nonShell := NonShellHookInterpreter(contentStr); nonShell {
 			plan.Interpreter = interp
+			plan.MarkerProblem = nonShellMarkerProblem(interp, contentStr)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		plan.ReadError = err.Error()
@@ -142,6 +149,19 @@ func inspectHookMigration(hooksDir, hookName string) HookMigrationHookPlan {
 
 	classifyHookMigration(&plan)
 	return plan
+}
+
+// nonShellMarkerProblem returns why the bd markers in non-shell content cannot
+// be removed automatically, or "" when there are none or they pair cleanly.
+func nonShellMarkerProblem(interp, content string) string {
+	if !strings.Contains(content, hookMarkerBeginTag) && !strings.Contains(content, hookMarkerEndTag) {
+		return ""
+	}
+	if interp == "binary content" {
+		return "binary content holds bd marker text, and bd never rewrites binary content"
+	}
+	_, problem := NonShellHookSectionPairs(content)
+	return problem
 }
 
 // inspectHookMigrationSource classifies the sidecar a legacy or missing hook
@@ -164,6 +184,7 @@ func inspectHookMigrationSource(plan *HookMigrationHookPlan) {
 	}
 	if interp, nonShell := NonShellHookInterpreter(string(content)); nonShell {
 		plan.SourceInterpreter = interp
+		plan.MarkerProblem = nonShellMarkerProblem(interp, string(content))
 	}
 }
 
@@ -176,6 +197,12 @@ func classifyHookMigration(hook *HookMigrationHookPlan) {
 	// marker or legacy handling: those assume a shell script (GH#6348).
 	if hook.Interpreter != "" {
 		switch {
+		case hook.MarkerProblem != "":
+			hook.State = HookStateNonShellManual
+			hook.NeedsMigration = true
+			hook.SuggestedAction = fmt.Sprintf("The %s hook runs under %s and its bd markers need manual inspection (%s); "+
+				"bd will not rewrite it. Remove bd's shell section by hand, then rerun hook migration.",
+				hook.Name, hook.Interpreter, hook.MarkerProblem)
 		case hook.MarkerState != hookMarkerStateNone:
 			hook.State = HookStateNonShellRepair
 			hook.NeedsMigration = true
@@ -254,6 +281,11 @@ func classifyHookMigration(hook *HookMigrationHookPlan) {
 // active hook without bd's shell section, and the sidecars are kept.
 func describeNonShellSource(hook *HookMigrationHookPlan) {
 	if hook.SourceInterpreter == "" || !hook.NeedsMigration {
+		return
+	}
+	if hook.MarkerProblem != "" {
+		hook.SuggestedAction = fmt.Sprintf("The sidecar to restore runs under %s and its bd markers need manual inspection (%s); "+
+			"bd will not restore it. Repair it by hand, then rerun hook migration.", hook.SourceInterpreter, hook.MarkerProblem)
 		return
 	}
 	hook.SuggestedAction = fmt.Sprintf("Restore the %s script from the sidecar as the active hook without bd's shell section; "+

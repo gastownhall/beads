@@ -154,7 +154,9 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 		case "marker_managed", "unmanaged_custom", "missing_no_artifacts":
 			execPlan.NoopHooks = append(execPlan.NoopHooks, hook.Name)
 			continue
-		case "read_error":
+		case "read_error", doctor.HookStateNonShellManual:
+			// A non-shell hook with ambiguous markers is never rewritten:
+			// its suggested action explains what to inspect (GH#6348).
 			execPlan.BlockingErrors = append(execPlan.BlockingErrors, formatHookMigrationBlockingError(hook))
 			continue
 		case doctor.HookStateNonShellCustom:
@@ -210,6 +212,10 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 		// stay in place: the restored script is the user's, and a retired
 		// sidecar would hide where it came from (GH#6348).
 		if hook.SourceInterpreter != "" && sourceKind != hookMigrationWriteFromTemplate {
+			if hook.MarkerProblem != "" {
+				execPlan.BlockingErrors = append(execPlan.BlockingErrors, formatHookMigrationBlockingError(hook))
+				continue
+			}
 			execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
 				HookName:    hook.Name,
 				HookPath:    hook.HookPath,
