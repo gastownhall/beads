@@ -9,10 +9,10 @@ import (
 // be converted through FromGitURL.
 //
 // This list is deliberately narrower than remotecache.remoteSchemes, the repo's
-// fuller scheme authority: az:// and oci:// are absent here. For az:// that gap
-// is tracked in #6227, which also covers dolt.IsBackupURL - the site where the
-// gap actually changes behavior - so completing this list on its own would
-// close only half of it.
+// fuller scheme authority: oci:// is absent here — remote recognition is not
+// the same policy as `bd backup init`'s destination list, which accepts
+// oci:// (cmd/bd/backup_dolt.go). az:// is present since #6227 closed the
+// gap that once left it deliberately unlisted.
 //
 // Membership is not load-bearing either way. Every entry contains "://", which
 // isSCPStyleGitURL rejects outright, so Normalize's closing "return url"
@@ -24,6 +24,7 @@ var NativeSchemes = []string{
 	"aws://",
 	"gs://",
 	"s3://",
+	"az://",
 	"git+https://",
 	"git+ssh://",
 	"git+http://",

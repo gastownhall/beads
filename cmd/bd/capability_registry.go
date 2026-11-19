@@ -238,9 +238,10 @@ func permitted(path string) capabilityRow {
 // prefix, with the reason appended.
 //
 // The message leads with SERVER-GLOBAL STATE rather than with the filesystem,
-// because only the filesystem half is scheme-specific. `bd backup init` accepts
-// https/aws/gs as well as file:// (resolveDoltBackupURL) and the help text
-// recommends DoltHub; for those a server-side push over the network with the
+// because only the filesystem half is scheme-specific. `bd backup init`
+// accepts https://, http://, file://, aws://, gs://, s3://, az://, and oci://
+// (resolveDoltBackupURL) and the help text recommends DoltHub; for those a
+// server-side push over the network with the
 // server's own credentials is a coherent thing to ask for, and "the destination
 // is on the server's disk" says nothing about it. What is true of every scheme
 // is that `CALL DOLT_BACKUP('add', …)` registers the remote ON THE SERVER,

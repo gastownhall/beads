@@ -1431,6 +1431,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd backup init` keeps cloud destination URLs and refuses unlisted
+  schemes instead of silently backing up to a local path.** The resolver
+  passed only https/http/file/aws/gs URLs through, so `bd backup init
+  az://container/beads` (advertised by the remote-scheme validator and the
+  credential map) registered `file://<cwd>/az:/container/beads` — a local
+  backup that reported success — and an `s3://` destination with an endpoint
+  query was corrupted the same way (`https://` inside the query collapsed to
+  `https:/`). az://, s3:// and oci:// destinations now reach Dolt
+  byte-for-byte, and a URL-shaped argument with any other scheme is refused
+  before registration with `unsupported backup URL scheme "<scheme>";
+  accepted forms: https://, http://, file://, aws://, gs://, s3://, az://,
+  oci://` — naming only the scheme, never credentials embedded in the URL.
+  Matching is case-sensitive, filesystem paths (including Windows
+  drive-like `C://backups`) keep their existing behavior, and `az://` is now
+  listed in the doltremote native-scheme declarations. Remote backup
+  *restore* still reads local directories only; that limitation is
+  unchanged. (#6227)
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

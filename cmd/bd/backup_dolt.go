@@ -35,8 +35,17 @@ var backupInitCmd = &cobra.Command{
 	Long: `Configure a filesystem path or URL as a backup destination.
 
 The path can be a local directory (external drive, NAS, Dropbox folder) or a
-DoltHub remote URL. If the destination was previously configured, it is
+backup URL. If the destination was previously configured, it is
 updated to the new path.
+
+Accepted backup URL forms: https://, http://, file://, aws://, gs://, s3://, az://, oci://.
+
+Scheme matching is case-sensitive, and a URL-shaped argument with an
+unlisted scheme is refused rather than resolved as a local path. A local
+directory that happens to look like a URL can be named with a ./ prefix
+(./name://path). A one-letter prefix before :// (C://backups) is a Windows
+drive path, not a URL scheme. Every other argument is treated as a
+filesystem path and stored under file:// as an absolute path.
 
 Filesystem examples:
   bd backup add /mnt/usb/beads-backup
@@ -44,6 +53,13 @@ Filesystem examples:
 
 DoltHub (recommended for cloud backup):
   bd backup add https://doltremoteapi.dolthub.com/myuser/beads-backup
+
+Azure and S3 (with a custom endpoint) examples:
+  bd backup add az://account.blob.core.windows.net/container/beads-backup
+  bd backup add s3://bucket/beads-backup?endpoint=https://minio.local&region=auto&path-style=true
+
+Credentials are read by the Dolt process from its environment: AWS_* for
+S3 and aws:// destinations, AZURE_STORAGE_* for az://.
 
 After adding, run 'bd backup sync' to push your data.`,
 	Args: cobra.ExactArgs(1),
