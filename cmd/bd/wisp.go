@@ -981,6 +981,14 @@ func selectClosedWispsForPurge(ctx context.Context, r molReader, ageThreshold ti
 		Limit:        wispPurgeScanLimit,
 	}
 	now := wispGCNow()
+	// The age bound goes into the scan itself, ahead of its 5000-row limit:
+	// filtered only after the read, a full page of recently closed wisps
+	// would crowd every older, purgeable one out of the selection. The Go
+	// check below still guards against a reader that does not apply it.
+	if ageThreshold > 0 {
+		cutoff := now.Add(-ageThreshold)
+		filter.UpdatedBefore = &cutoff
+	}
 
 	closedIssues, err := r.SearchIssues(ctx, "", filter)
 	if err != nil {
