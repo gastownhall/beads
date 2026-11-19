@@ -402,3 +402,61 @@ func TestClassifyPatrolIssue(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckStaleMolecules_ZeroLinkedChildrenNotStale pins GH#5720: the
+// epic rows the check reads now include epics with no parent-child
+// children, a childless epic and one whose only dotted-ID issue (no
+// parent-child edge) is closed, and neither is a stale molecule. A complete
+// epic added afterwards is reported, so the check is not vacuous.
+func TestCheckStaleMolecules_ZeroLinkedChildrenNotStale(t *testing.T) {
+	store := newTestDoltStore(t, "zc")
+	ctx := context.Background()
+
+	for _, issue := range []*types.Issue{
+		{ID: "zc-none", Title: "Childless epic", Status: types.StatusOpen, IssueType: types.TypeEpic},
+		{ID: "zc-dot", Title: "Epic with dotted issue only", Status: types.StatusOpen, IssueType: types.TypeEpic},
+		{ID: "zc-dot.1", Title: "Unlinked dotted issue", Status: types.StatusOpen, IssueType: types.TypeTask},
+	} {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+	if err := store.CloseIssue(ctx, "zc-dot.1", "done", "test", ""); err != nil {
+		t.Fatalf("close zc-dot.1: %v", err)
+	}
+
+	epicStatuses, err := store.GetEpicsEligibleForClosure(ctx)
+	if err != nil {
+		t.Fatalf("GetEpicsEligibleForClosure: %v", err)
+	}
+	check := checkStaleMoleculesForEpics(epicStatuses)
+	if check.Status != StatusOK || check.Message != "No stale molecules" {
+		t.Errorf("zero-child epics: Status = %q, Message = %q, want %q / %q (detail %q)",
+			check.Status, check.Message, StatusOK, "No stale molecules", check.Detail)
+	}
+
+	// Positive control: a complete epic is a stale molecule.
+	for _, issue := range []*types.Issue{
+		{ID: "zc-done", Title: "Complete epic", Status: types.StatusOpen, IssueType: types.TypeEpic},
+		{ID: "zc-done-child", Title: "Done child", Status: types.StatusOpen, IssueType: types.TypeTask},
+	} {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: "zc-done-child", DependsOnID: "zc-done", Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("add parent-child dep: %v", err)
+	}
+	if err := store.CloseIssue(ctx, "zc-done-child", "done", "test", ""); err != nil {
+		t.Fatalf("close zc-done-child: %v", err)
+	}
+	epicStatuses, err = store.GetEpicsEligibleForClosure(ctx)
+	if err != nil {
+		t.Fatalf("GetEpicsEligibleForClosure: %v", err)
+	}
+	check = checkStaleMoleculesForEpics(epicStatuses)
+	if check.Status != StatusWarning || !strings.Contains(check.Detail, "zc-done") ||
+		strings.Contains(check.Detail, "zc-none") || strings.Contains(check.Detail, "zc-dot") {
+		t.Errorf("with a complete epic: Status = %q, Detail = %q, want a warning naming only zc-done", check.Status, check.Detail)
+	}
+}
