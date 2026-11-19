@@ -195,6 +195,36 @@ func TestRunBackupExport_RecordsSyncFailure(t *testing.T) {
 		}
 	})
 
+	t.Run("success_after_failure_clears_error", func(t *testing.T) {
+		dir := backupExportTestDir(t)
+		fake := &failingBackupStore{commit: "c1", backupErr: errors.New(boom)}
+		if _, err := runBackupExport(context.Background(), directLocalBackup{store: fake}, true); err == nil {
+			t.Fatal("first backup: want the sync error, got nil")
+		}
+		if st := readWireBackupState(t, dir); st.LastError != boom {
+			t.Fatalf("precondition: last_error = %q, want %q", st.LastError, boom)
+		}
+
+		fake.commit = "c2"
+		fake.backupErr = nil
+		if _, err := runBackupExport(context.Background(), directLocalBackup{store: fake}, true); err != nil {
+			t.Fatalf("second backup: %v", err)
+		}
+		st := readWireBackupState(t, dir)
+		if st.LastError != "" {
+			t.Errorf("last_error = %q after a successful backup, want empty", st.LastError)
+		}
+		if !st.LastErrorAt.IsZero() {
+			t.Errorf("last_error_at = %v after a successful backup, want zero", st.LastErrorAt)
+		}
+		if st.Timestamp.IsZero() || !st.LastSuccessAt.Equal(st.Timestamp) {
+			t.Errorf("last_success_at = %v, want the new timestamp %v", st.LastSuccessAt, st.Timestamp)
+		}
+		if st.LastDoltCommit != "c2" {
+			t.Errorf("last_dolt_commit = %q, want %q", st.LastDoltCommit, "c2")
+		}
+	})
+
 	t.Run("legacy_state_carries_timestamp_into_last_success", func(t *testing.T) {
 		dir := backupExportTestDir(t)
 		t0 := time.Date(2026, 5, 5, 18, 31, 51, 0, time.UTC)
