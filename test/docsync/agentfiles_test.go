@@ -147,17 +147,6 @@ func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(root, ref)); err == nil {
 				continue
 			}
-			// Governance rules are canonical in the agent home, not the
-			// repository; the projection references them by their agent-home
-			// path. A missing canonical rule still fails.
-			if home, err := os.UserHomeDir(); err == nil {
-				if _, err := os.Stat(filepath.Join(home, "agents", ref)); err == nil {
-					continue
-				}
-				if _, err := os.Stat(filepath.Join(home, ".agents", ref)); err == nil {
-					continue
-				}
-			}
 			broken = append(broken, rel+" -> `"+m[1]+"`")
 		}
 		for _, m := range backtickRepoPathRE.FindAllStringSubmatch(content, -1) {
@@ -168,19 +157,7 @@ func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 			// "file.go:Symbol" cites a symbol inside a file; check the file.
 			ref, _, _ = strings.Cut(ref, ":")
 			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(ref))); err != nil {
-				home, homeErr := os.UserHomeDir()
-				resolved := false
-				if homeErr == nil {
-					for _, agentHome := range []string{"agents", ".agents"} {
-						if _, err := os.Stat(filepath.Join(home, agentHome, filepath.FromSlash(ref))); err == nil {
-							resolved = true
-							break
-						}
-					}
-				}
-				if !resolved {
-					broken = append(broken, rel+" -> `"+m[1]+"`")
-				}
+				broken = append(broken, rel+" -> `"+m[1]+"`")
 			}
 		}
 		for _, m := range backtickTestRE.FindAllStringSubmatch(content, -1) {

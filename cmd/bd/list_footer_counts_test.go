@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -166,7 +167,7 @@ func TestDisplayWatchedIssueListReadyFooterDisclosesFilter(t *testing.T) {
 	// for; the footer is what is under test, and this keeps the file free of
 	// the cgo-tagged stub so it still compiles under CGO_ENABLED=0.
 	out := captureStdout(t, func() error {
-		displayWatchedIssueList(context.Background(), nil, issues, false, true, "", "", false)
+		displayWatchedIssueList(os.Stdout, context.Background(), nil, issues, false, true, "", "", false)
 		return nil
 	})
 
@@ -186,7 +187,7 @@ func TestDisplayPrettyListWithDepsReadyFooterDisclosesFilter(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		displayPrettyListWithDeps(issues, false, nil, false, true, "")
+		displayPrettyListWithDeps(os.Stdout, issues, false, nil, false, true, "")
 		return nil
 	})
 	if strings.Contains(out, "in progress)") {
@@ -199,7 +200,7 @@ func TestDisplayPrettyListWithDepsReadyFooterDisclosesFilter(t *testing.T) {
 	// The other half: without --ready the same wrapper must keep the breakdown,
 	// so the fix cannot be "never print counts".
 	plain := captureStdout(t, func() error {
-		displayPrettyListWithDeps(issues, false, nil, false, false, "")
+		displayPrettyListWithDeps(os.Stdout, issues, false, nil, false, false, "")
 		return nil
 	})
 	if !strings.Contains(plain, "in progress)") {
@@ -246,7 +247,7 @@ func TestDisplayPrettyListWithDepsReadyExplicitStatusFooter(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		displayPrettyListWithDeps(issues, false, nil, false, true, "in_progress")
+		displayPrettyListWithDeps(os.Stdout, issues, false, nil, false, true, "in_progress")
 		return nil
 	})
 	if strings.Contains(out, "open only") || strings.Contains(out, "excludes in_progress") {
@@ -257,7 +258,7 @@ func TestDisplayPrettyListWithDepsReadyExplicitStatusFooter(t *testing.T) {
 	}
 
 	depsOut := captureStdout(t, func() error {
-		displayPrettyListWithDepsMode(issues, false, nil, "scheduling", false, true, "in_progress", "", false, nil)
+		displayPrettyListWithDepsMode(os.Stdout, issues, false, nil, "scheduling", false, true, "in_progress", "", false, nil)
 		return nil
 	})
 	if strings.Contains(depsOut, "open only") || strings.Contains(depsOut, "excludes in_progress") {
@@ -273,7 +274,7 @@ func TestDisplayWatchedIssueListReadyExplicitStatusFooter(t *testing.T) {
 		{ID: "bd-1", Title: "A", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeTask},
 	}
 	out := captureStdout(t, func() error {
-		displayWatchedIssueList(context.Background(), nil, issues, false, true, "in_progress", "", false)
+		displayWatchedIssueList(os.Stdout, context.Background(), nil, issues, false, true, "in_progress", "", false)
 		return nil
 	})
 	if strings.Contains(out, "open only") || strings.Contains(out, "excludes in_progress") {

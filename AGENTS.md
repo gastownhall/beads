@@ -15,7 +15,7 @@
 8. Divergence: FF push rejected → integrate by cooperation: `git merge --no-ff` the integration base into your lane, resolve conflicts, revalidate, land. Never rebase or force-push an authorized change or integration branch; adopt all current worktree state and fix it forward.
 9. Escalation: impossible rule → exact error. Rule conflict → present both with numbers. Unclear → one targeted question. Never guess.
 10. Precedence: NEWEST > OLDEST. USER REQUEST > BEADS > ADRs > SKILLs > DOCS > default. Adjust lower/older to higher/newer. Doubt → ASK USER FIRST.
-11. Workspaces: follow `skills/gc-rigs/SKILL.md`. Every manual task uses a dedicated Git worktree, branch, and physical `.venv`, never the primary checkout. Gas City suspension keeps orchestration inactive. Worktrees and staging stay on the destination filesystem, never `/tmp`; no borrowed environment, backup, or archive. Retire worktrees after verified integration.
+11. Workspaces: follow the city operating contract in the Gas City checkout. Every manual task uses a dedicated Git worktree, branch, and physical `.venv`, never the primary checkout. Gas City suspension keeps orchestration inactive. Worktrees and staging stay on the destination filesystem, never `/tmp`; no borrowed environment, backup, or archive. Retire worktrees after verified integration.
 12. Phase closure: keep the phase active through check repair, review resolution,
     independent approval, merge into the configured integration branch, and
     post-merge proof. Only then, with its Bead closed with evidence, is it DONE.
@@ -26,7 +26,7 @@
 13. Root Make only: diagnostics, validation, generation, tests, Waza,
     publication, and deployment run only through selector-free verbs in the
     repository root Makefile; bare verbs perform their declared operation. Test
-    verbs: `rules/workflow/canonical-commands.md`.
+    verbs: the canonical-commands rule in the agents repository.
 14. Red means red: a warning, skip, empty output, missing tool, missing report,
     zero collection, caught exception, retry, or normalized failure is RED. The
     only acceptable zero-execution test result is a typed `make test` cache hit
@@ -83,8 +83,7 @@ This fork integrates on `dc-use` (rig `beads` in the Gas City at `~/gc`). Every 
 uses a dedicated worktree and a change branch cut from `origin/dc-use`, published with
 `git push -u origin <branch>` (the fresh branch's upstream starts as `dc-use`, so a
 bare `git push` is refused under `push.default=simple`), a PR against
-`dc-use`, and `merge --no-ff`; never rebase or force-push (`~/agents` ADR-0036 and
-`docs/adr/ADR-0036-flext-gascity-rules-of-engagement.md`). Code here is idiomatic Go
+`dc-use`, and `merge --no-ff`; never rebase or force-push (see the agents repository’s ADR-0036 and the city operating contract). Code here is idiomatic Go
 validated by this repository's root Makefile; no flext/Python facade rule applies.
 
 

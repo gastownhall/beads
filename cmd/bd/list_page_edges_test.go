@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -243,14 +244,14 @@ func renderListTextOutputs(t *testing.T, hydrate gateHydrator, issues []*types.I
 					name += " reverse"
 				}
 				out[name] = captureStdout(t, func() error {
-					displayPrettyListWithDepsMode(issues, false, deps, mode, truncated, false, "", sort.by, sort.reverse, gated)
+					displayPrettyListWithDepsMode(os.Stdout, issues, false, deps, mode, truncated, false, "", sort.by, sort.reverse, gated)
 					return nil
 				})
 			}
 		}
 	}
 	out["tree ready"] = captureStdout(t, func() error {
-		displayPrettyListWithDepsMode(issues, false, deps, "scheduling", false, true, "open", "", false, gated)
+		displayPrettyListWithDepsMode(os.Stdout, issues, false, deps, "scheduling", false, true, "open", "", false, gated)
 		return nil
 	})
 	for _, format := range []string{"dot", "digraph", "{{.IssueID}} {{.Type}} {{.DependsOnID}} {{.Dependency.CreatedBy}} {{.Issue.Title}}"} {
@@ -336,11 +337,11 @@ func TestDisplayWatchedIssueListReadsTheShownIssuesEdges(t *testing.T) {
 		return strings.Join(lines, "\n")
 	}
 	got := stripClock(captureStdout(t, func() error {
-		displayWatchedIssueList(context.Background(), src, page, false, false, "", "", false)
+		displayWatchedIssueList(os.Stdout, context.Background(), src, page, false, false, "", "", false)
 		return nil
 	}))
 	want := stripClock(captureStdout(t, func() error {
-		displayPrettyListWithDepsMode(page, true, f.all, "", false, false, "", "", false, nil)
+		displayPrettyListWithDepsMode(os.Stdout, page, true, f.all, "", false, false, "", "", false, nil)
 		return nil
 	}))
 	if got != want {

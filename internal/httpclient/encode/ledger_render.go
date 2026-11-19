@@ -138,7 +138,7 @@ func RenderLedgerMarkdown() string {
 			leftover)
 	}
 
-	return b.String()
+	return strings.TrimRight(b.String(), "\n") + "\n"
 }
 
 // fieldFlag renders the Go request field and the user's flag spelling a row

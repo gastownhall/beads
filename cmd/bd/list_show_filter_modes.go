@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -162,7 +163,7 @@ func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter ty
 // The tree reads only the displayed issues' edges (listDependencyRecords), the
 // read the proxied watch makes too, so a redraw does not reload every edge in
 // the store.
-func displayWatchedIssueList(ctx context.Context, store listEdgeSource, issues []*types.Issue, truncated, readyFiltered bool, statusSelector, sortBy string, reverse bool) {
+func displayWatchedIssueList(out io.Writer, ctx context.Context, store listEdgeSource, issues []*types.Issue, truncated, readyFiltered bool, statusSelector, sortBy string, reverse bool) {
 	var allDeps map[string][]*types.Dependency
 	if store != nil {
 		deps, err := listDependencyRecords(ctx, store, issues)
@@ -172,7 +173,7 @@ func displayWatchedIssueList(ctx context.Context, store listEdgeSource, issues [
 	}
 	// No gate decoration (the nil gated map): --watch deliberately renders a
 	// gated bead undecorated, on both routes; see runListProxiedWatch.
-	displayPrettyListWithDepsMode(issues, true, allDeps, "", truncated, readyFiltered, statusSelector, sortBy, reverse, nil)
+	displayPrettyListWithDepsMode(out, issues, true, allDeps, "", truncated, readyFiltered, statusSelector, sortBy, reverse, nil)
 }
 
 // watchIssues polls for changes and re-displays (GH#654)
@@ -186,7 +187,7 @@ func displayWatchedIssueList(ctx context.Context, store listEdgeSource, issues [
 // runListCore route a MaxRows cap violation through handleMaxRowsError for
 // exit-code-2 semantics instead of watchIssues swallowing it and exiting 0
 // (be-x42v.4 follow-up, review MUST-FIX 5).
-func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool, effectiveLimit int, statusSelector string) error {
+func watchIssues(out io.Writer, ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool, effectiveLimit int, statusSelector string) error {
 	// Initial display
 	issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
 	if err != nil {
@@ -196,7 +197,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 	// below depends on; what is left is the cut and its verdict, and those are
 	// the shared epilogue's on every other listing this command has.
 	issues, truncated := workapi.FinishPage(issues, "", false, effectiveLimit, false)
-	displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
+	displayWatchedIssueList(out, ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
 	printTruncationHint(truncated, effectiveLimit)
 	lastSnapshot := issueSnapshot(issues)
 
@@ -217,7 +218,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 			return issues, truncated, nil
 		},
 		func(issues []*types.Issue, truncated bool) {
-			displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
+			displayWatchedIssueList(out, ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
 			printTruncationHint(truncated, effectiveLimit)
 		})
 	return nil
@@ -280,7 +281,7 @@ func openAndPrepare(ctx context.Context, in listInput) (uow.UnitOfWork, types.Is
 	return uw, filter, nil
 }
 
-func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in listInput, filter types.IssueFilter) error {
+func runListProxiedHierarchicalParent(out io.Writer, ctx context.Context, uw uow.UnitOfWork, in listInput, filter types.IssueFilter) error {
 	treeIssues, err := gatherProxiedHierarchical(ctx, uw, in.ParentID, filter)
 	if err != nil {
 		return err
@@ -296,7 +297,7 @@ func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in
 	}
 
 	// Hierarchical --parent walks use an unlimited per-level query; never page-truncated.
-	displayPrettyListWithDepsMode(treeIssues, false, depsByIssueID, in.depsMode, false, in.ReadyFlag, in.Status, in.SortBy, in.Reverse,
+	displayPrettyListWithDepsMode(out, treeIssues, false, depsByIssueID, in.depsMode, false, in.ReadyFlag, in.Status, in.SortBy, in.Reverse,
 		proxiedGatedIssueIDs(ctx, uw, treeIssues, depsByIssueID))
 	printSkipLabelsFooter(in.SkipLabels)
 	return nil

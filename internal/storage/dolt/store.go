@@ -2449,7 +2449,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			recordDialFailure(breaker, dialErr)
 			autoStartDisabled, err := doltserver.IsAutoStartDisabled(resolvedBeadsDir)
 			if err != nil {
-				return nil, fmt.Errorf("Dolt server unreachable at %s: %w", remedy.PrintedValue(addr), errors.Join(dialErr, err))
+				return nil, fmt.Errorf("Dolt server unreachable at %s: %w", remedy.PrintedValue(addr), errors.Join(dialErr, remedy.PrintedError(err)))
 			}
 			var hint string
 			if cfg.ServerSocket != "" {

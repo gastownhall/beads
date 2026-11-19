@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 
@@ -141,7 +142,7 @@ func orderSiblingsByDeps(siblings []*types.Issue, allDeps map[string][]*types.De
 // annotationsFor prints the dependency-edge annotation rows for a node, indented
 // to childPrefix so they align with (and sit just above) the node's children.
 // No-op when the receiver is nil (--deps off).
-func (dr *depRender) annotationsFor(nodeID, childPrefix string) {
+func (dr *depRender) annotationsFor(out io.Writer, nodeID, childPrefix string) {
 	if dr == nil {
 		return
 	}
@@ -182,7 +183,7 @@ func (dr *depRender) annotationsFor(nodeID, childPrefix string) {
 	})
 	for _, r := range inView {
 		tag := ui.RenderMuted(fmt.Sprintf("%s %-20s", depGlyph, "["+r.label+"]"))
-		fmt.Println(childPrefix + tag + " " + r.target + " " + r.title) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+		fmt.Fprintln(out, childPrefix+tag+" "+r.target+" "+r.title)
 	}
 
 	// Out-of-view edges: collapse to a single summary line so a filtered view
@@ -198,6 +199,6 @@ func (dr *depRender) annotationsFor(nodeID, childPrefix string) {
 		}
 		summary := fmt.Sprintf("%s ↗ %d outside this view: %s%s",
 			depGlyph, len(outView), strings.Join(named, ", "), suffix)
-		fmt.Println(childPrefix + ui.RenderMuted(summary)) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+		fmt.Fprintln(out, childPrefix+ui.RenderMuted(summary))
 	}
 }

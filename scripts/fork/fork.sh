@@ -73,6 +73,12 @@ cmd_sync() {
 	local main_root lane worktree
 	main_root=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
 	lane="lane/${integration}-${upstream_branch}-${short}"
+	local existing_pr
+	existing_pr=$(gh pr list -R "$self" --base "$integration" --head "$lane" --state open --limit 1 --json url --jq '.[0].url // empty')
+	if [[ -n "$existing_pr" ]]; then
+		echo "fork.sh: existing integration PR: $existing_pr"
+		return 0
+	fi
 	worktree="$(dirname "$main_root")/worktrees/$(basename "$main_root")/lane-${integration}-${upstream_branch}-${short}"
 
 	git worktree add -b "$lane" "$worktree" "$target"

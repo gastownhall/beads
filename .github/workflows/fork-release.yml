@@ -32,6 +32,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify release source
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/heads/dc-use
+          test "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)"
+
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

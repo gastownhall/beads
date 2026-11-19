@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -172,7 +173,7 @@ func TestAnnotationsFor_InViewRowsAndOutOfViewSummary(t *testing.T) {
 	}}
 	dr := &depRender{mode: "scheduling", allDeps: deps, inView: inView}
 
-	out := captureStdout(t, func() error { dr.annotationsFor("pa-x", ""); return nil })
+	out := captureStdout(t, func() error { dr.annotationsFor(os.Stdout, "pa-x", ""); return nil })
 
 	if !strings.Contains(out, "pa-a") || !strings.Contains(out, "Alpha") {
 		t.Errorf("expected in-view row for pa-a Alpha, got:\n%s", out)
@@ -199,7 +200,7 @@ func TestAnnotationsFor_ModeFiltersKnowledgeGraph(t *testing.T) {
 	}}
 
 	sched := captureStdout(t, func() error {
-		(&depRender{mode: "scheduling", allDeps: deps, inView: inView}).annotationsFor("pa-x", "")
+		(&depRender{mode: "scheduling", allDeps: deps, inView: inView}).annotationsFor(os.Stdout, "pa-x", "")
 		return nil
 	})
 	if strings.Contains(sched, "pa-r") {
@@ -207,7 +208,7 @@ func TestAnnotationsFor_ModeFiltersKnowledgeGraph(t *testing.T) {
 	}
 
 	all := captureStdout(t, func() error {
-		(&depRender{mode: "all", allDeps: deps, inView: inView}).annotationsFor("pa-x", "")
+		(&depRender{mode: "all", allDeps: deps, inView: inView}).annotationsFor(os.Stdout, "pa-x", "")
 		return nil
 	})
 	if !strings.Contains(all, "related") || !strings.Contains(all, "pa-r") {
@@ -217,7 +218,7 @@ func TestAnnotationsFor_ModeFiltersKnowledgeGraph(t *testing.T) {
 
 func TestAnnotationsFor_NilReceiverIsNoOp(t *testing.T) {
 	var dr *depRender
-	out := captureStdout(t, func() error { dr.annotationsFor("pa-x", ""); return nil })
+	out := captureStdout(t, func() error { dr.annotationsFor(os.Stdout, "pa-x", ""); return nil })
 	if out != "" {
 		t.Errorf("nil depRender must print nothing, got:\n%s", out)
 	}
@@ -236,6 +237,21 @@ func newListInputTestCmd() *cobra.Command {
 	f.Bool("tree", false, "")
 	f.Bool("pretty", false, "")
 	return cmd
+}
+
+func TestPrettyTreeWritesDependencyAnnotationsToCommandWriter(t *testing.T) {
+	parent := &types.Issue{ID: "bd-parent", Title: "Parent", IssueType: types.TypeEpic}
+	child := &types.Issue{ID: "bd-child", Title: "Child"}
+	var out strings.Builder
+	displayPrettyListWithDepsMode(&out, []*types.Issue{parent, child}, false,
+		map[string][]*types.Dependency{
+			child.ID: {{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepBlocks}},
+		}, "scheduling", false, false, "", "", false, nil)
+	for _, want := range []string{parent.ID, child.ID, "depends-on"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("command writer is missing %q: %s", want, out.String())
+		}
+	}
 }
 
 // TestGatherListInput_DepsRejectsNonTreeOutputs guards the accept-and-ignore
