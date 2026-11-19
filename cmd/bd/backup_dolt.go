@@ -250,8 +250,10 @@ func isDoltBackupURL(raw string) bool {
 
 // backupURLShapePattern matches an init argument shaped like a URL: a scheme
 // token followed by "://". Only the scheme prefix matches, so the validator's
-// error can name the scheme without repeating the rest of the URL.
-var backupURLShapePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+// error can name the scheme without repeating the rest of the URL. The token
+// must be at least two characters: a single letter before "://" is a Windows
+// drive-like input ("C://backups"), which keeps its filesystem handling.
+var backupURLShapePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]+://`)
 
 // validateBackupInitTarget rejects a URL-shaped backup init argument whose
 // scheme bd does not accept, before any dispatch, registration, or config

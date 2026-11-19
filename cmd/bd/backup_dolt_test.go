@@ -430,6 +430,12 @@ func TestValidateBackupInitTarget(t *testing.T) {
 		{name: "absolute path", raw: "/mnt/usb/beads-backup"},
 		{name: "tilde path", raw: "~/Dropbox/beads-backup"},
 		{name: "dot-prefixed scheme-like directory", raw: "./odd://name"},
+		// One-letter drive-like inputs are filesystem paths, not URLs: the
+		// shape gate requires at least two scheme characters, so a Windows
+		// drive letter keeps its existing path handling (AC-4).
+		{name: "windows drive backslash", raw: `C:\backups`},
+		{name: "windows drive slash", raw: "C:/backups"},
+		{name: "windows drive doubled slash", raw: "C://backups"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -577,4 +583,78 @@ func TestBackupInitRefusesUnsupportedSchemeBeforeRegistering(t *testing.T) {
 		}
 		assertNothingHappened(t, fake)
 	})
+}
+
+// TestBackupInitKeepsPreviouslyAcceptedInputs pins AC-4: the validator and
+// resolver changes must not alter what a previously accepted URL or
+// filesystem input — including a Windows drive-like input — becomes.
+// Every case here worked at base; it must keep working byte-identically.
+//
+// Not parallel: it swaps the global store and root context.
+func TestBackupInitKeepsPreviouslyAcceptedInputs(t *testing.T) {
+	absBackup := filepath.Join(t.TempDir(), "beads-backup")
+	tests := []struct {
+		name string
+		raw  string
+		// wantExact is the URL that must reach BackupAdd; wantPrefix is used
+		// where the platform decides the bytes after the prefix.
+		wantExact  string
+		wantPrefix string
+	}{
+		{
+			name:      "https URL still passes through byte-for-byte",
+			raw:       "https://doltremoteapi.dolthub.com/user/beads-backup",
+			wantExact: "https://doltremoteapi.dolthub.com/user/beads-backup",
+		},
+		{
+			name:      "absolute path still becomes a file:// URL",
+			raw:       absBackup,
+			wantExact: "file://" + absBackup,
+		},
+		{
+			name:       "relative path still resolves to a file:// URL",
+			raw:        "my-backup",
+			wantPrefix: "file://",
+		},
+		{
+			// A drive letter is one character: not a URL scheme. It keeps
+			// the platform-native filesystem conversion it always had.
+			name:       "windows drive-like input keeps path handling",
+			raw:        "C://backups",
+			wantPrefix: "file://",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prepareBackupStatusTest(t)
+			beads.ResetCaches()
+			t.Cleanup(beads.ResetCaches)
+
+			fake := &recordingBackupInitStore{}
+			oldStore, oldCtx, oldWrote := store, rootCtx, commandDidWrite.Load()
+			store, rootCtx = fake, context.Background()
+			t.Cleanup(func() {
+				store, rootCtx = oldStore, oldCtx
+				commandDidWrite.Store(oldWrote)
+			})
+
+			stdout := captureStdout(t, func() error {
+				return backupInitCmd.RunE(backupInitCmd, []string{tc.raw})
+			})
+
+			if len(fake.adds) != 1 {
+				t.Fatalf("BackupAdd called %d times, want 1 (%v)", len(fake.adds), fake.adds)
+			}
+			registered := fake.adds[0].url
+			if tc.wantExact != "" && registered != tc.wantExact {
+				t.Errorf("registered %q, want %q", registered, tc.wantExact)
+			}
+			if tc.wantPrefix != "" && !strings.HasPrefix(registered, tc.wantPrefix) {
+				t.Errorf("registered %q, want a %q URL", registered, tc.wantPrefix)
+			}
+			if !strings.Contains(stdout, "Backup destination configured: "+registered) {
+				t.Errorf("output does not echo the registered destination: %q", stdout)
+			}
+		})
+	}
 }
