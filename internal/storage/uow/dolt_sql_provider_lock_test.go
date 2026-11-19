@@ -486,6 +486,104 @@ func TestInitSchemaAttemptDiscardsSessionOnFailure(t *testing.T) {
 	}
 }
 
+// assertKeptPool asserts a SUCCESSFUL attempt's session went back to the pool:
+// still open, idle, and ready — the converged steady state must not pay for a
+// second connection per open, and the #6504 discard must never fire on success.
+func assertKeptPool(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if stats := db.Stats(); stats.Idle != 1 || stats.OpenConnections != 1 {
+		t.Fatalf("after a successful attempt the pool holds %d open / %d idle sessions, want 1/1: "+
+			"the converged steady state pays for nothing more than one session per open",
+			stats.OpenConnections, stats.Idle)
+	}
+}
+
+// TestInitSchemaAttemptKeepsSessionOnSuccess is the preservation half of
+// gastownhall/beads#6504: the failed-attempt discard (AC-1) must never fire on
+// a SUCCESSFUL attempt. Every success shape — preview attach, the converged
+// fast path, a read-only read-through the gate shaped — returns its usable
+// session to the pool, so the next query is served without a new connection.
+// The base already satisfies this; the test exists to keep the fix honest.
+func TestInitSchemaAttemptKeepsSessionOnSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider
+	}{
+		{
+			name: "preview attach keeps its session",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", preview: true}
+			},
+		},
+		{
+			name: "converged fast path keeps its session",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				calls := stubConvergedMigrateUp(t)
+				t.Cleanup(func() {
+					if *calls != 1 {
+						t.Errorf("MigrateUpWithLock called %d times, want 1", *calls)
+					}
+				})
+				// The drift check after the converged fast path: one version
+				// read, at latest, on the pinned session.
+				expectVersionQuery(mock, schema.LatestVersion())
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306"}
+			},
+		},
+		{
+			name: "read-only read-through keeps its session",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+				behind := schema.LatestVersion() - 1
+				lockName := expectBehindDatabaseThroughPreparation(mock, "beads", behind)
+				expectSharedGateProbe(mock, behind, 0)
+				expectLockRelease(mock, lockName)
+				mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				expectIssuesProjection(mock, behind, "")
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", readOnly: true}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema.SetSharedMigrateConsent(false)
+			t.Cleanup(func() {
+				schema.SetSharedMigrateConsent(false)
+				schema.SetForceAllowRemoteMigrate(false)
+			})
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+
+			p := tc.setup(t, db, mock)
+			var attemptErr error
+			if p.readOnly {
+				stderr := captureStderr(t, func() {
+					attemptErr = p.initSchemaAttempt(context.Background(), "beads", &bootstrapPreparer{provider: p, database: "beads"})
+				})
+				for _, want := range []string{"Read-only command", "without migrating"} {
+					if !strings.Contains(stderr, want) {
+						t.Errorf("warning missing %q:\n%s", want, stderr)
+					}
+				}
+			} else {
+				attemptErr = p.initSchemaAttempt(context.Background(), "beads", &bootstrapPreparer{provider: p, database: "beads"})
+			}
+			if attemptErr != nil {
+				t.Fatalf("initSchemaAttempt() error = %v, want nil", attemptErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("attempt SQL expectations: %v", err)
+			}
+			assertKeptPool(t, db)
+		})
+	}
+}
+
 // TestSelectProbeDatabaseIssuesPreparationsUse pins the two properties the
 // convergence probe borrows from this injection site and cannot check for
 // itself: the statement is the DDL repository's own UseDatabase (identical to
