@@ -216,13 +216,16 @@ func cloneStep(s *Step) *Step {
 	return &clone
 }
 
-// cloneOnComplete creates a deep copy of an OnCompleteSpec.
+// cloneOnComplete creates a deep copy of an OnCompleteSpec. Vars detaches
+// whenever it is non-nil, including when empty: a shared empty map is as
+// mutable as a full one, and a clone the caller can write to must never
+// write into the original.
 func cloneOnComplete(oc *OnCompleteSpec) *OnCompleteSpec {
 	if oc == nil {
 		return nil
 	}
 	clone := *oc
-	if len(oc.Vars) > 0 {
+	if oc.Vars != nil {
 		clone.Vars = make(map[string]string, len(oc.Vars))
 		for k, v := range oc.Vars {
 			clone.Vars[k] = v

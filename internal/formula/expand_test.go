@@ -1570,3 +1570,150 @@ func TestExpandedStepConditionIsVerbatim(t *testing.T) {
 		t.Errorf("flag=false, target=prod kept %v, want the negated and targeted steps", got)
 	}
 }
+
+// TestExpandStepTemplateIsolation: expanding a template must leave the
+// template - and every sibling expansion of it - untouched (#6433). The
+// results may carry mutable state downstream (cooking, pouring, transforms),
+// so none of it may alias the template's fields.
+func TestExpandStepTemplateIsolation(t *testing.T) {
+	priority := 1
+	deepLeaf := func(depth int) map[string]interface{} {
+		// depth nested maps around a substituted string leaf.
+		var v interface{} = "{owner}"
+		for i := 0; i < depth; i++ {
+			v = map[string]interface{}{"in": v}
+		}
+		return v.(map[string]interface{})
+	}
+
+	tmpl := &Step{
+		ID:          "{target}.revise",
+		Title:       "Revise",
+		Notes:       "notes",
+		Labels:      []string{},
+		DependsOn:   []string{"design"},
+		Needs:       []string{"design"},
+		WaitsFor:    "all-children",
+		Assignee:    "qa",
+		Priority:    &priority,
+		Condition:   "{{flag}}",
+		Metadata:    map[string]interface{}{},
+		Gate:        &Gate{Type: "human", ID: "approval", AwaitID: "await-1", Timeout: "1h", Repo: "octo/app"},
+		OnComplete:  &OnCompleteSpec{ForEach: "output.items", Bond: "item-mol", Vars: map[string]string{}},
+		Children:    []*Step{{ID: "{target}.child", Title: "Child", Labels: []string{}}},
+		SourceFormula: "iso",
+	}
+	tmpl.Metadata["nested"] = map[string]interface{}{"lead": "{owner}", "list": []interface{}{"{owner}"}}
+	tmpl.generatedNeeds = []string{"gen"}
+
+	target := &Step{ID: "implement", Title: "Implement"}
+	vars := map[string]string{"owner": "qa"}
+
+	first, err := expandStep(target, []*Step{tmpl}, vars)
+	if err != nil {
+		t.Fatalf("first expansion failed: %v", err)
+	}
+	second, err := expandStep(target, []*Step{tmpl}, vars)
+	if err != nil {
+		t.Fatalf("second expansion failed: %v", err)
+	}
+	r1, r2 := first[0], second[0]
+
+	// Mutate every mutable thing on the first result.
+	r1.Labels = append(r1.Labels, "added")
+	r1.DependsOn = append(r1.DependsOn, "added")
+	r1.Needs = append(r1.Needs, "added")
+	*r1.Priority = 4
+	r1.Gate.Type = "timer"
+	r1.Gate.Repo = "other/app"
+	r1.WaitsFor = "any-children"
+	r1.Condition = "{{changed}}"
+	r1.Notes = "changed"
+	r1.Title = "changed"
+	r1.OnComplete.Vars["runtime"] = "binding"
+	r1.OnComplete.Parallel = true
+	r1.Metadata["added"] = "key"
+	r1.Metadata["nested"].(map[string]interface{})["lead"] = "changed"
+	r1.Metadata["nested"].(map[string]interface{})["list"] = append(
+		r1.Metadata["nested"].(map[string]interface{})["list"].([]interface{}), "added")
+	r1.Children[0].Title = "changed"
+	r1.Children[0].Labels = append(r1.Children[0].Labels, "added")
+	r1.Children = append(r1.Children, &Step{ID: "extra", Title: "Extra"})
+
+	// The template and the sibling expansion are both unchanged.
+	if len(tmpl.Labels) != 0 {
+		t.Errorf("template Labels mutated: %v", tmpl.Labels)
+	}
+	if len(r2.Labels) != 0 {
+		t.Errorf("sibling Labels mutated: %v", r2.Labels)
+	}
+	if got, want := tmpl.DependsOn, []string{"design"}; !slices.Equal(got, want) {
+		t.Errorf("template DependsOn mutated: %v", got)
+	}
+	if got, want := tmpl.Needs, []string{"design"}; !slices.Equal(got, want) {
+		t.Errorf("template Needs mutated: %v", got)
+	}
+	if *tmpl.Priority != 1 || *r2.Priority != 1 {
+		t.Errorf("Priority aliased: template=%d sibling=%d", *tmpl.Priority, *r2.Priority)
+	}
+	if tmpl.Gate.Type != "human" || tmpl.Gate.Repo != "octo/app" {
+		t.Errorf("template Gate mutated: %+v", tmpl.Gate)
+	}
+	if r2.Gate == tmpl.Gate {
+		t.Error("sibling shares the template's Gate pointer")
+	}
+	if tmpl.WaitsFor != "all-children" || tmpl.Condition != "{{flag}}" || tmpl.Title != "Revise" || tmpl.Notes != "notes" {
+		t.Errorf("template string fields mutated: %+v", tmpl)
+	}
+	if len(tmpl.OnComplete.Vars) != 0 {
+		t.Errorf("template OnComplete.Vars mutated: %v", tmpl.OnComplete.Vars)
+	}
+	if len(r2.OnComplete.Vars) != 0 {
+		t.Errorf("sibling OnComplete.Vars mutated: %v", r2.OnComplete.Vars)
+	}
+	if tmpl.OnComplete.Parallel {
+		t.Error("template OnComplete.Parallel mutated")
+	}
+	if _, exists := tmpl.Metadata["added"]; exists {
+		t.Errorf("template Metadata gained a key: %v", tmpl.Metadata)
+	}
+	if nested := tmpl.Metadata["nested"].(map[string]interface{}); nested["lead"] != "{owner}" {
+		t.Errorf("template nested metadata leaf mutated: %v", nested["lead"])
+	} else if len(nested["list"].([]interface{})) != 1 {
+		t.Errorf("template nested metadata list mutated: %v", nested["list"])
+	}
+	if len(tmpl.Children) != 1 || tmpl.Children[0].Title != "Child" || len(tmpl.Children[0].Labels) != 0 {
+		t.Errorf("template Children mutated: %+v", tmpl.Children)
+	}
+	if len(r2.Children) != 1 || r2.Children[0].Title != "Child" {
+		t.Errorf("sibling Children mutated: %+v", r2.Children)
+	}
+
+	// A subtree at the deepest depth the metadata scan allows still comes
+	// back substituted and detached.
+	atBound := &Step{ID: "deep", Title: "Deep", Metadata: map[string]interface{}{"deep": deepLeaf(30)}}
+	deepResults, err := expandStep(target, []*Step{atBound}, vars)
+	if err != nil {
+		t.Fatalf("at-bound metadata expansion failed: %v", err)
+	}
+	leaf := deepResults[0].Metadata["deep"]
+	for i := 0; i < 30; i++ {
+		leaf = leaf.(map[string]interface{})["in"]
+	}
+	if leaf != "qa" {
+		t.Errorf("at-bound leaf = %v, want the substituted value", leaf)
+	}
+	deepResults[0].Metadata["deep"].(map[string]interface{})["in"] = "changed"
+	if inner := atBound.Metadata["deep"].(map[string]interface{})["in"]; inner == "changed" {
+		t.Error("at-bound metadata shares a map with the template")
+	}
+
+	// One level deeper is an error naming the step, not a shared or
+	// truncated copy.
+	beyondBound := &Step{ID: "too-deep", Title: "Too Deep", Metadata: map[string]interface{}{"deep": deepLeaf(32)}}
+	if _, err := expandStep(target, []*Step{beyondBound}, vars); err == nil {
+		t.Fatal("beyond-bound metadata expansion succeeded")
+	} else if !strings.Contains(err.Error(), "too-deep") || !strings.Contains(err.Error(), "nested deeper") {
+		t.Errorf("beyond-bound error is not contextual: %v", err)
+	}
+}
