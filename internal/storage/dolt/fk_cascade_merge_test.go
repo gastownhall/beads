@@ -221,6 +221,13 @@ func TestFKCascadeViolationRepairOnCLIPull(t *testing.T) {
 	if err := store.mergeTrackingRefAfterCLIFetch(ctx, peerBranch); err != nil {
 		t.Fatalf("CLI-route merge with an FK cascade violation: %v", err)
 	}
+	var merging int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_merge_status WHERE is_merging").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
+	}
+	if merging != 0 {
+		t.Error("the CLI-route merge left a merge open after repairing it")
+	}
 
 	var orphans int
 	if err := db.QueryRowContext(ctx, fmt.Sprintf(tc.orphanQuery, tc.name)).Scan(&orphans); err != nil {

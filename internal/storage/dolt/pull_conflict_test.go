@@ -208,6 +208,19 @@ func TestCLIPullMergeSettlesDependencyAuditOnlyConflict(t *testing.T) {
 	if err := store.mergeTrackingRefAfterCLIFetch(ctx, peerBranch); err != nil {
 		t.Fatalf("CLI-route merge with an audit-only dependency conflict: %v", err)
 	}
+	var merging, dirty int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_merge_status WHERE is_merging").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
+	}
+	if merging != 0 {
+		t.Error("the CLI-route merge left a merge open after resolving it")
+	}
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("count dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Errorf("%d table(s) left uncommitted after the CLI-route merge settled", dirty)
+	}
 
 	var count int
 	if err := db.QueryRowContext(ctx,
