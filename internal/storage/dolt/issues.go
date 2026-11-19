@@ -43,9 +43,16 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 	// upserting a rolled-back ID a peer may now own (GH#8457). The reset wraps
 	// only the SQL transaction: after it commits, the row exists and the ID
 	// stays even if the Dolt commit below fails.
+	//
+	// withRetryTx replays the body on a commit conflict, and the same rule
+	// holds between attempts: each attempt starts from the struct as the
+	// caller passed it. Otherwise a replay reads the rolled-back attempt's
+	// minted ID as caller-supplied, skips generation against the new
+	// snapshot, and upserts over the concurrent winner's row (GH#7289).
 	resetMintedIDs := issueops.SnapshotUnsetCreateIDs([]*types.Issue{issue})
 	var result issueops.CreateIssueResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		resetMintedIDs()
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{

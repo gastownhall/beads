@@ -1479,10 +1479,28 @@ func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn
 	if err := fn(tx); err != nil {
 		return issueops.BlockedRecheck{}, errors.Join(err, tx.Rollback())
 	}
+	if hook := preCommitHookFrom(ctx); hook != nil {
+		if err := hook(ctx); err != nil {
+			return issueops.BlockedRecheck{}, errors.Join(err, tx.Rollback())
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return issueops.BlockedRecheck{}, wrapSQLCommitError("commit write tx", err)
 	}
 	return issueops.TakeBlockedRecheck(tx), nil
+}
+
+// preCommitHookKey scopes a test-only callback to one write's context. When
+// set, commitWriteTxOn calls it after the transaction body succeeded and
+// before tx.Commit, with the transaction still open, so a test can commit a
+// conflicting write in exactly that window and force a real replay of the
+// body (GH#7289). Production contexts never carry it; a hook error rolls the
+// transaction back and returns through the usual error path.
+type preCommitHookKey struct{}
+
+func preCommitHookFrom(ctx context.Context) func(context.Context) error {
+	hook, _ := ctx.Value(preCommitHookKey{}).(func(context.Context) error)
+	return hook
 }
 
 // recheckBlockedAfterCommit recomputes the blocked state of the dependents a
