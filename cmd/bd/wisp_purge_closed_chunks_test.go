@@ -283,7 +283,7 @@ func TestWispPurgeClosedForceCommitsInBoundedBatches(t *testing.T) {
 	s := useWispPurgeStub(t, 401)
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 	})
 	if err != nil {
 		t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -317,7 +317,7 @@ func TestWispPurgeClosedSubmitsBoundedChunks(t *testing.T) {
 	s := useWispPurgeStub(t, 450)
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 	})
 	if err != nil {
 		t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -358,7 +358,7 @@ func TestWispPurgeClosedReportsDeletedIDsAscending(t *testing.T) {
 	jsonOutput = true
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 	})
 	if err != nil {
 		t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -386,7 +386,7 @@ func TestWispPurgeClosedSkipsPerIDResolution(t *testing.T) {
 	s := useWispPurgeStub(t, 450)
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 	})
 	if err != nil {
 		t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -420,7 +420,7 @@ func TestWispPurgeClosedCommitsBoundedChunks(t *testing.T) {
 	s.deleter.fail = failRequestContaining(s.closed[449], context.DeadlineExceeded)
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 	})
 	if err == nil {
 		t.Fatalf("runWispPurgeClosed succeeded, want a nonzero exit\nstdout:\n%s", stdout)
@@ -460,7 +460,7 @@ func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
 		jsonOutput = true
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, true, nil)
+			return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 		})
 		if err == nil {
 			t.Fatalf("runWispPurgeClosed succeeded, want a nonzero exit\nstdout:\n%s", stdout)
@@ -503,7 +503,7 @@ func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
 		jsonOutput = true
 
 		stdout, _, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, true, nil)
+			return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 		})
 		if err == nil {
 			t.Fatalf("a missing-id refusal exited nil\nstdout:\n%s", stdout)
@@ -752,7 +752,7 @@ func TestWispPurgeClosedOrphanReportDropsLaterChunkDeletions(t *testing.T) {
 		s.deleter.dependents[s.closed[420]] = []string{live}
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, true, nil)
+			return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -771,7 +771,7 @@ func TestWispPurgeClosedOrphanReportDropsLaterChunkDeletions(t *testing.T) {
 		s.deleter.fail = failRequestContaining(s.closed[449], context.Canceled)
 
 		stdout, _, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, true, nil)
+			return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 		})
 		if err == nil {
 			t.Fatalf("runWispPurgeClosed succeeded, want the injected failure\nstdout:\n%s", stdout)
@@ -803,7 +803,7 @@ func TestWispPurgeClosedStopsOnCancellationBetweenChunks(t *testing.T) {
 		s.deleter.committed = func(issueops.DeleteRequest) { cancel() }
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(ctx, false, true, nil)
+			return runWispPurgeClosed(ctx, false, true, nil, 0)
 		})
 		if err == nil {
 			t.Fatalf("runWispPurgeClosed succeeded after cancellation\nstdout:\n%s", stdout)
@@ -829,7 +829,7 @@ func TestWispPurgeClosedStopsOnCancellationBetweenChunks(t *testing.T) {
 		cancel()
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(ctx, false, true, nil)
+			return runWispPurgeClosed(ctx, false, true, nil, 0)
 		})
 		if err == nil {
 			t.Fatalf("a purge canceled before its first chunk exited nil\nstdout:\n%s", stdout)
@@ -871,7 +871,7 @@ func TestWispPurgeClosedReportsCappedScan(t *testing.T) {
 		t.Helper()
 		jsonOutput = asJSON
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, true, nil)
+			return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -1025,7 +1025,7 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 		s := useWispPurgeStub(t, 450)
 		jsonOutput = true
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, false, nil)
+			return runWispPurgeClosed(context.Background(), false, false, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosed: %v\nstderr:\n%s", err, stderr)
@@ -1040,7 +1040,7 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 		s := useWispPurgeStub(t, 450)
 		jsonOutput = true
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), true, true, nil)
+			return runWispPurgeClosed(context.Background(), true, true, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
