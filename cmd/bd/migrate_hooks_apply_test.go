@@ -564,4 +564,59 @@ func TestApplyHookMigration_NonShell(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("AC8_ambiguous_markers_block", func(t *testing.T) {
+		begin := hookSectionBeginLine() + "\n"
+		cases := []struct {
+			name           string
+			active, old    string
+			wantInBlocking string
+		}{
+			{name: "orphan_begin_in_hook", active: nonShellMigrationPython + begin + "print('x')\n", wantInBlocking: "manual inspection"},
+			{name: "binary_with_markers", active: "\x7fELF\x00\x01\n" + section, wantInBlocking: "binary"},
+			{name: "ambiguous_old_sidecar", active: nonShellMigrationLegacyShim, old: nonShellMigrationPython + begin, wantInBlocking: "manual inspection"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				repoDir, hooksDir := setupHookMigrationRepo(t)
+				hookPath := filepath.Join(hooksDir, "pre-push")
+				writeHookMigrationFile(t, hookPath, tc.active)
+				if tc.old != "" {
+					writeHookMigrationFile(t, hookPath+".old", tc.old)
+				}
+				plan, err := doctor.PlanHookMigration(repoDir)
+				if err != nil {
+					t.Fatalf("PlanHookMigration failed: %v", err)
+				}
+				execPlan := buildHookMigrationExecutionPlan(plan)
+				blocking := strings.Join(execPlan.BlockingErrors, "\n")
+				if !strings.Contains(blocking, "pre-push") || !strings.Contains(blocking, tc.wantInBlocking) {
+					t.Fatalf("expected a pre-push blocking error naming %q, got: %v", tc.wantInBlocking, execPlan.BlockingErrors)
+				}
+				for _, op := range execPlan.WriteOps {
+					if op.HookName == "pre-push" {
+						t.Fatalf("no write op for a blocked hook: %+v", op)
+					}
+				}
+				if mustReadHookMigrationFile(t, hookPath) != tc.active {
+					t.Fatal("hook must be unchanged")
+				}
+			})
+		}
+
+		t.Run("user_modified_legacy_still_blocks", func(t *testing.T) {
+			repoDir, hooksDir := setupHookMigrationRepo(t)
+			hookPath := filepath.Join(hooksDir, "pre-push")
+			writeHookMigrationFile(t, hookPath, nonShellMigrationLegacyShim+"\n./my-linter.sh\n")
+			writeHookMigrationFile(t, hookPath+".old", nonShellMigrationPython)
+			plan, err := doctor.PlanHookMigration(repoDir)
+			if err != nil {
+				t.Fatalf("PlanHookMigration failed: %v", err)
+			}
+			blocking := strings.Join(buildHookMigrationExecutionPlan(plan).BlockingErrors, "\n")
+			if !strings.Contains(blocking, "user-modified") {
+				t.Fatalf("expected the user-modified legacy block, got: %s", blocking)
+			}
+		})
+	})
 }

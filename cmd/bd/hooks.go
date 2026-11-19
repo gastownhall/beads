@@ -496,7 +496,7 @@ type nonShellHookInstall struct {
 // A clean non-shell hook stays byte-identical. One that already calls
 // `bd hooks run` is a recognized integration and stays untouched and silent.
 // Complete bd sections an earlier install appended are removed; ambiguous
-// markers are left for a person to inspect. bd never
+// markers and binary content are left for a person to inspect. bd never
 // restores a .backup over the hook: it may predate the user's later edits.
 func planNonShellHookInstall(hookName, hookPath, content string) (out nonShellHookInstall, nonShell bool) {
 	interp, nonShell := doctor.NonShellHookInterpreter(content)
@@ -504,6 +504,11 @@ func planNonShellHookInstall(hookName, hookPath, content string) (out nonShellHo
 		return out, false
 	}
 	advice := fmt.Sprintf("To integrate bd, have the hook call \"bd hooks run %s\", passing it the hook's arguments and stdin.", hookName)
+	if interp == "binary content" {
+		out.warning = fmt.Sprintf("Warning: left the %s hook at %s unchanged: it is binary content, which bd never rewrites; inspect it by hand. %s",
+			hookName, hookPath, advice)
+		return out, true
+	}
 	if !hookContentHasMarkers(content) {
 		if doctor.IsBdHookContent(content) {
 			return out, true // recognized integration: nothing to add, nothing to report
@@ -595,7 +600,7 @@ func isOnlyShebangOrEmpty(content string) bool {
 //     decided first, before any stripping, empty-content filtering or husky
 //     rewrite, all of which assume shell: it is preserved with only its
 //     complete bd sections removed, and unchanged when its markers are
-//     ambiguous.
+//     ambiguous or it is binary content.
 //
 // The function is pure: no I/O, no global state.
 func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
@@ -607,8 +612,8 @@ func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
 // number of bd sections removed from a non-shell hook, for the caller to
 // report.
 func preserveHookContent(content string, fromHusky bool) (preserved string, keep bool, nonShellRemoved int) {
-	if _, nonShell := doctor.NonShellHookInterpreter(content); nonShell {
-		if !hookContentHasMarkers(content) {
+	if interp, nonShell := doctor.NonShellHookInterpreter(content); nonShell {
+		if interp == "binary content" || !hookContentHasMarkers(content) {
 			return content, true, 0
 		}
 		repaired, removed, problem := removeNonShellHookSections(content)
