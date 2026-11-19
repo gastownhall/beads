@@ -718,6 +718,15 @@ marker — no pre-v1 `bd` could have written one — so `bd` warns and continues
 rather than refusing every command. A *missing* witness stays ambiguous and is
 still refused.
 
+A successful `bd init` records the current version in `.local_version` of any
+workspace directory that already exists, including an explicit `BEADS_DIR`
+whose Dolt data directory is configured elsewhere or spelled through a
+symlink, so a server workspace it initialized is not later refused when its
+local `.beads/dolt/` root fills. It does not create a missing `BEADS_DIR` just
+to hold the witness, and it does not admit a workspace whose `.beads/dolt/`
+root already held data without a witness: `bd init` refuses that shape too, and
+it still needs the explicit migration below.
+
 Current `bd` refuses recognized historical SQLite and legacy Dolt layouts before
 opening storage or rewriting metadata. This is intentional: preserve the source
 and complete the matching explicit migration below.
