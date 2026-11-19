@@ -370,6 +370,50 @@ func TestWispGCDeletesInBoundedTransactions(t *testing.T) {
 	})
 }
 
+// TestWispGCKeepsCommittedChunksWhenALaterChunkFails pins the age route's
+// retained-progress contract (GH#6246): a request that fails after earlier
+// ones committed stops the GC without discarding them, no further request is
+// sent, the command exits nonzero naming the confirmed deletions and the
+// unconfirmed rest, and a rerun without the fault deletes the rest.
+func TestWispGCKeepsCommittedChunksWhenALaterChunkFails(t *testing.T) {
+	s := useWispGCAgeStub(t, 450)
+	// The second request (ids 200..399) is refused before it deletes
+	// anything, as a server-side timeout refuses a transaction.
+	s.deleter.fail = failRequestContaining(s.wisps[250].ID, context.DeadlineExceeded)
+
+	stdout, stderr, err := captureWispGC(t, runWispGCAgeForced)
+	if err == nil {
+		t.Fatalf("runWispGCAge succeeded, want a nonzero exit\nstdout:\n%s", stdout)
+	}
+	if code, ok := exitCodeFromError(err); !ok || code == 0 {
+		t.Errorf("error = %v, want an already-reported nonzero exit", err)
+	}
+	if got, want := requestSizes(s.deleter.requests), []int{200, 200}; !slices.Equal(got, want) {
+		t.Errorf("request sizes = %v, want %v (no request after the failed one)", got, want)
+	}
+	if len(s.deleter.deleted) != 200 {
+		t.Errorf("deleted %d wisps, want the first chunk's 200", len(s.deleter.deleted))
+	}
+	if !containsAll(stderr, "200", "250", "context deadline exceeded", "Rerun the same command") {
+		t.Errorf("stderr does not name the 200 confirmed, the 250 unconfirmed, the cause and the rerun hint:\n%s", stderr)
+	}
+	if !containsAll(stdout, "Deleted 200 issue(s)") {
+		t.Errorf("stdout does not report the 200 confirmed deletions:\n%s", stdout)
+	}
+	assertExportBookkeeping(t, wispPurgeIDs(200), wispPurgeIDs(450)[200:])
+
+	// Rerun without the fault: the store reselects the 250 still there and
+	// deletes them.
+	s.deleter.fail = nil
+	stdout, stderr, err = captureWispGC(t, runWispGCAgeForced)
+	if err != nil {
+		t.Fatalf("rerun: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if len(s.deleter.deleted) != 450 {
+		t.Errorf("after the rerun %d of 450 wisps are deleted, want all", len(s.deleter.deleted))
+	}
+}
+
 // containsAll reports whether s contains every want as a substring.
 func containsAll(s string, want ...string) bool {
 	for _, w := range want {
