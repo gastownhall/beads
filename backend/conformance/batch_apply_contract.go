@@ -2892,3 +2892,75 @@ func RunBatchApplyRowEntriesShareTheLatestSnapshot(t *testing.T, ctx context.Con
 		t.Errorf("shared snapshot of %s = %+v, want the renamed row", other, got)
 	}
 }
+
+// RunBatchApplyPersistenceMovesThenSpliceShareThePostSpliceSnapshot pins the
+// latest-snapshot contract across the two passes that rewrite a row after its
+// item ran: persistence moves (wisp to durable and back) and then the
+// metadata splice that finishes the row's create. Every row entry shares the
+// one snapshot the splice hydrated — it carries the spliced metadata, the
+// last move's plane and the splice's version token — and a dep_add after the
+// last row verb carries none (bd-xx3ma9).
+func RunBatchApplyPersistenceMovesThenSpliceShareThePostSpliceSnapshot(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	moved := fixture.IssuePrefix + "-movesplice-moved"
+	partner := fixture.IssuePrefix + "-movesplice-partner"
+	// The edge joins two durable rows: one the request did not create, so the
+	// request's cross-plane refusal for rows it created as wisps stays out.
+	seeded := fixture.IssuePrefix + "-movesplice-seeded"
+	batchApplySeedIssue(t, ctx, fixture, seeded, types.StatusOpen)
+
+	wisp := batchApplyIssue(moved, "moves between planes")
+	wisp.Ephemeral = true
+	create := batchApplyCreate("moved", wisp)
+	create.Create.MetadataRefs = map[string]publicops.Ref{"gc.partner": {Key: "partner"}}
+	move := func(mode publicops.PersistenceMode) publicops.ApplyItem {
+		return batchApplyUpdate(publicops.Ref{Key: "moved"}, publicops.IssuePatch{
+			Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: mode},
+		})
+	}
+	result := batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer", ForceIDPrefix: true,
+		Items: []publicops.ApplyItem{
+			create,
+			move(publicops.PersistenceModePersistent),
+			move(publicops.PersistenceModeEphemeral),
+			move(publicops.PersistenceModePersistent),
+			batchApplyCreate("partner", batchApplyIssue(partner, "named by the splice")),
+			batchApplyDepAdd(publicops.Ref{Key: "partner"}, publicops.Ref{ID: seeded}, publicops.DepBlocks, ""),
+		},
+	})
+	if len(result.Items) != 6 {
+		t.Fatalf("result has %d items, want 6", len(result.Items))
+	}
+
+	shared := result.Items[0].Issue
+	if shared == nil {
+		t.Fatalf("create of %s carries no snapshot", moved)
+	}
+	for i := 1; i <= 3; i++ {
+		if got := result.Items[i]; got.Issue != shared {
+			t.Errorf("item %d (move of %s) Issue = %p, want the shared post-splice snapshot %p", i, moved, got.Issue, shared)
+		}
+		if !result.Items[i].Changed {
+			t.Errorf("item %d (persistence move) Changed = false, want true", i)
+		}
+	}
+	if dep := result.Items[5]; dep.Issue != nil {
+		t.Errorf("dep_add Issue = %p, want nil", dep.Issue)
+	}
+
+	var spliced string
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(shared.Metadata, &meta); err != nil || json.Unmarshal(meta["gc.partner"], &spliced) != nil || spliced != partner {
+		t.Errorf("shared snapshot metadata = %s, want gc.partner = %q from the splice", shared.Metadata, partner)
+	}
+	if shared.Ephemeral {
+		t.Errorf("shared snapshot of %s is ephemeral; the last move made it persistent", moved)
+	}
+	if result.Items[0].RowVersion != shared.RowVersion {
+		t.Errorf("create RowVersion %d != shared snapshot RowVersion %d; the create item carries the splice's token", result.Items[0].RowVersion, shared.RowVersion)
+	}
+	if result.Items[3].RowVersion == shared.RowVersion {
+		t.Errorf("last move RowVersion %d equals the splice token; each item keeps the token its own write produced", result.Items[3].RowVersion)
+	}
+}
