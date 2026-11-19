@@ -432,6 +432,110 @@ func TestApplyExpansionsWithBudget_MapRefusesBeforeOverdrawing(t *testing.T) {
 	}
 }
 
+// writeConstantIDFormula writes an expansion formula named name whose one
+// template step has the fixed id, so every inline of it mints that same ID.
+func writeConstantIDFormula(t *testing.T, dir, name, id string) {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"formula": name, "type": "expansion", "version": 1,
+		"template": []map[string]any{{"id": id, "title": "t"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A compose rule on a repeated ID is charged for every step it replaces,
+// since replaceStep puts the template at each one. Inlining a template whose
+// step id has no {target} repeats that ID, so 500 inlines and then a rule on
+// the ID with a 2000-step template would build a million steps behind a meter
+// that charged one copy. The rule is refused before the template is built,
+// with the limit error rather than the later duplicate-ID one.
+func TestApplyExpansionsWithBudget_ChargesEveryRepeatOfTheTarget(t *testing.T) {
+	dir := t.TempDir()
+	writeConstantIDFormula(t, dir, "constant", "fixed")
+	writeExpansionFormula(t, dir, "wide", 2000, 0)
+	parser := NewParser(dir)
+	rules := map[string]*ComposeRules{
+		"expand": {Expand: []*ExpandRule{{Target: "fixed", With: "wide"}}},
+		"map":    {Map: []*MapRule{{Select: "fix*", With: "wide"}}},
+	}
+	for name, compose := range rules {
+		t.Run(name, func(t *testing.T) {
+			steps := flatSteps("s", 500)
+			for _, s := range steps {
+				s.Expand = "constant"
+			}
+			// The cook sequence: inline expansions, then compose rules, on one budget.
+			budget := NewExpansionBudget(steps)
+			inlined, err := ApplyInlineExpansionsWithBudget(steps, parser, budget)
+			if err != nil {
+				t.Fatalf("ApplyInlineExpansionsWithBudget: %v", err)
+			}
+			if dups := findDuplicateStepIDs(inlined); len(inlined) != 500 || len(dups) != 1 || budget.Used() != 500 {
+				t.Fatalf("inlining left %d steps with repeated IDs %v, %d metered; want 500 steps all %q", len(inlined), dups, budget.Used(), "fixed")
+			}
+			result, err := ApplyExpansionsWithBudget(inlined, compose, parser, budget)
+			if !errors.Is(err, ErrExpansionLimit) {
+				t.Fatalf("ApplyExpansionsWithBudget built %d steps, error %.200v; want ErrExpansionLimit", stepGraphSize(result), err)
+			}
+			if !strings.Contains(err.Error(), "all 500 steps with that ID") {
+				t.Errorf("error = %q; want it to name the 500 steps with the repeated ID", err)
+			}
+			if budget.Used() != 500 {
+				t.Errorf("budget holds %d steps after the refusal; want it unchanged at 500", budget.Used())
+			}
+		})
+	}
+}
+
+// The repeats are charged exactly, nested ones included: four steps with the
+// target's ID, each replaced by a three-step template, take a five-step graph
+// to 13. Room for 12 refuses the rule; room for 13 admits it, and the graph
+// then fails only the duplicate-ID check its identical copies trip, with the
+// meter holding the 13 steps the rule built.
+func TestApplyExpansionsWithBudget_ChargesTheRepeatsExactly(t *testing.T) {
+	dir := t.TempDir()
+	writeExpansionFormula(t, dir, "triple", 3, 0)
+	compose := &ComposeRules{Expand: []*ExpandRule{{Target: "dup", With: "triple"}}}
+	for _, limit := range []int{12, 13} {
+		steps := []*Step{{ID: "dup"}, {ID: "dup"}, {ID: "dup"}, {ID: "other", Children: []*Step{{ID: "dup"}}}}
+		budget := newExpansionBudget(limit, steps)
+		_, err := ApplyExpansionsWithBudget(steps, compose, NewParser(dir), budget)
+		if limit == 12 {
+			if !errors.Is(err, ErrExpansionLimit) || budget.Used() != 5 {
+				t.Errorf("limit 12: error %v, budget %d; want ErrExpansionLimit with the 5 steps left as they were", err, budget.Used())
+			}
+			continue
+		}
+		if err == nil || errors.Is(err, ErrExpansionLimit) || !strings.Contains(err.Error(), "duplicate step IDs") {
+			t.Errorf("limit 13: error %v; want the duplicate-ID error, not a refusal", err)
+		}
+		if budget.Used() != 13 {
+			t.Errorf("limit 13: budget holds %d steps; want the 13 the rule built", budget.Used())
+		}
+	}
+}
+
+// A target nested inside a step with its own ID goes when that step is
+// replaced, because replaceStep does not look inside a step it replaces: it
+// is released with that step's subtree and not charged a copy of its own.
+func TestApplyExpansionsWithBudget_NestedRepeatGoesWithItsParent(t *testing.T) {
+	dir := t.TempDir()
+	writeExpansionFormula(t, dir, "pair", 2, 0)
+	steps := []*Step{{ID: "x", Children: []*Step{{ID: "x"}, {ID: "y"}}}, {ID: "z"}}
+	budget := NewExpansionBudget(steps)
+	compose := &ComposeRules{Expand: []*ExpandRule{{Target: "x", With: "pair"}}}
+	result, err := ApplyExpansionsWithBudget(steps, compose, NewParser(dir), budget)
+	if err != nil {
+		t.Fatalf("ApplyExpansionsWithBudget: %v", err)
+	}
+	if got := stepGraphSize(result); got != 3 || budget.Used() != got {
+		t.Fatalf("expanded graph = %d steps, budget %d; want 3 of each", got, budget.Used())
+	}
+}
+
 // Inline expansions are charged like compose rules: 4000 steps that each
 // inline a 3-step template would grow to 12000.
 func TestApplyInlineExpansions_PastLimitFails(t *testing.T) {

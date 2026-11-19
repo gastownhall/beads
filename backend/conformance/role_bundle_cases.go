@@ -63,6 +63,8 @@ var roleContractCases = []roleContract{
 		RunBatchApplyCloseItemsAnswerToTheCloseGuards,
 		RunBatchApplyRefusesADottedChildGatedOnItsOwnParent,
 		RunBatchApplyAppliesTheDefaultPriority,
+		RunBatchApplyRowEntriesShareTheLatestSnapshot,
+		RunBatchApplyPersistenceMovesThenSpliceShareThePostSpliceSnapshot,
 		RunBatchApplyCarriesTheGateMembers,
 	),
 

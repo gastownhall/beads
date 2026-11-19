@@ -115,8 +115,15 @@ func (b *ExpansionBudget) release(n int) {
 // replace releases a removed subtree of removed steps and reserves added
 // steps for what replaces it. On refusal the budget is left as it was.
 func (b *ExpansionBudget) replace(removed, added int, what string) error {
+	return b.replaceCopies(removed, 1, added, what)
+}
+
+// replaceCopies releases removed steps and reserves copies of a perCopy-step
+// replacement for them, without overflow however many copies there are. On
+// refusal the budget is left as it was.
+func (b *ExpansionBudget) replaceCopies(removed int, copies uint64, perCopy int, what string) error {
 	b.release(removed)
-	if err := b.reserve(added, what); err != nil {
+	if err := b.reserveCopies(copies, perCopy, what); err != nil {
 		b.used += removed
 		return err
 	}

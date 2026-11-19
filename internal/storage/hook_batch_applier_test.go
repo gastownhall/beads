@@ -262,8 +262,12 @@ func (r *recordingBatchApplyRowHooks) CompleteIssueOperationClose(issue *types.I
 // TestHookBatchApplierHandsEveryRowHookTheSharedSnapshot pins the hook side of
 // a batch whose rows share one latest snapshot (bd-xx3ma9): a row created,
 // updated and closed in one request hands the create, update and close hooks
-// the SAME issue value, which is the row as the batch left it. Firing count,
-// order and Changed gating are what they were with a snapshot per item.
+// the SAME issue value, which is the row as the batch left it. The calls this
+// decorator makes, their order and their Changed gating are what they were
+// with a snapshot per item. The scripts those calls run are not always:
+// HookFiringStore fans a create out into one on_update per label of the
+// snapshot it is handed (createHookEvents), so a label a later item of the
+// request added now fires there too.
 func TestHookBatchApplierHandsEveryRowHookTheSharedSnapshot(t *testing.T) {
 	row := &types.Issue{ID: "bd-1", Title: "after the last verb", Status: types.StatusClosed}
 	other := &types.Issue{ID: "bd-2", Title: "other row"}

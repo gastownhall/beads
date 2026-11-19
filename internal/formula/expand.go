@@ -92,7 +92,7 @@ func ApplyExpansionsWithBudget(steps []*Step, compose *ComposeRules, parser *Par
 
 		// Swap the target's charge for the template's before cloning it.
 		what := fmt.Sprintf("expand rule on %q (with %q)", rule.Target, rule.With)
-		if err := budget.replace(stepGraphSize([]*Step{targetStep}), templateSize(expFormula.Template), what); err != nil {
+		if _, err := chargeReplacement(budget, result, rule.Target, expFormula.Template, what); err != nil {
 			return nil, err
 		}
 
@@ -154,17 +154,12 @@ func ApplyExpansionsWithBudget(steps []*Step, compose *ComposeRules, parser *Par
 		// Expand each matching step
 		for _, targetStep := range toExpand {
 			// A match can be stale: expanding a parent that also matched
-			// replaced this step along with it. Only a step still in the
-			// graph releases a charge; a stale one is charged for the
+			// replaced this step along with it. Only steps still in the
+			// graph release a charge; a stale match is charged for the
 			// template it clones and refunded once nothing inserted it.
-			current, present := stepMap[targetStep.ID]
-			removed := 0
-			if present {
-				removed = stepGraphSize([]*Step{current})
-			}
-			added := templateSize(expFormula.Template)
 			what := fmt.Sprintf("map rule %q (with %q) on %q", rule.Select, rule.With, targetStep.ID)
-			if err := budget.replace(removed, added, what); err != nil {
+			occurrences, err := chargeReplacement(budget, result, targetStep.ID, expFormula.Template, what)
+			if err != nil {
 				return nil, err
 			}
 
@@ -178,8 +173,8 @@ func ApplyExpansionsWithBudget(steps []*Step, compose *ComposeRules, parser *Par
 
 			result = replaceStep(result, targetStep.ID, expandedSteps)
 			expanded[targetStep.ID] = true
-			if !present {
-				budget.release(added)
+			if occurrences == 0 {
+				budget.release(templateSize(expFormula.Template))
 			}
 
 			// Update dependencies: any step that depended on the target should now
@@ -352,6 +347,44 @@ func buildStepMap(steps []*Step) map[string]*Step {
 		}
 	}
 	return result
+}
+
+// chargeReplacement charges budget, before template is built, for the
+// replacement replaceStep makes of id in steps, and returns how many steps
+// that replaces. replaceStep replaces EVERY step carrying the ID, and an ID
+// can repeat until the duplicate check after the last rule (a template step
+// whose id has no {target} is copied verbatim each time it is inlined), so
+// each occurrence's subtree is released and each is charged its own copy of
+// the template: charging one would let a repeated ID multiply the graph past
+// the meter. A stale match, with no occurrence left, is charged for the one
+// copy its expansion builds; the caller refunds it once nothing inserted it.
+func chargeReplacement(budget *ExpansionBudget, steps []*Step, id string, template []*Step, what string) (int, error) {
+	occurrences, removed := replacedSubtrees(steps, id)
+	if occurrences > 1 {
+		what = fmt.Sprintf("%s at all %d steps with that ID", what, occurrences)
+	}
+	return occurrences, budget.replaceCopies(removed, uint64(max(occurrences, 1)), templateSize(template), what)
+}
+
+// replacedSubtrees counts the steps replaceStep replaces for id: each step
+// with that ID that is not inside another one, since replaceStep does not
+// look inside a step it replaces. It also returns the size of the subtrees
+// they take with them.
+func replacedSubtrees(steps []*Step, id string) (count, size int) {
+	for _, s := range steps {
+		if s == nil {
+			continue
+		}
+		if s.ID == id {
+			count++
+			size += stepGraphSize([]*Step{s})
+			continue
+		}
+		c, n := replacedSubtrees(s.Children, id)
+		count += c
+		size += n
+	}
+	return count, size
 }
 
 // replaceStep replaces a step with the given ID with a slice of new steps.
