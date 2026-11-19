@@ -1,9 +1,11 @@
 package formula
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1270,10 +1272,15 @@ func TestExpansionVarRefs(t *testing.T) {
 					Labels:      []string{"team:{team}"},
 					DependsOn:   []string{"{target}.prep-{stage}"},
 					Needs:       []string{"{target.id}.gate-{gate}"},
-					// Neither field is carried into the expanded step, so
-					// nothing in them is ever substituted.
-					Notes:     "{notes_only}",
-					Condition: "{{condition_only}}",
+					Notes:       "{note}",
+					Metadata:    map[string]interface{}{"{key_only}": map[string]interface{}{"leaf": []interface{}{"{meta}"}}},
+					WaitsFor:    "children-of({target}.spawn-{spawner})",
+					// The condition, gate and on_complete are carried
+					// verbatim: later stages own them, so nothing in them
+					// is substituted here.
+					Condition:  "{{condition_only}}",
+					Gate:       &Gate{Type: "gh:run", ID: "{gate_only}"},
+					OnComplete: &OnCompleteSpec{Bond: "{bond_only}", Vars: map[string]string{"v": "{item}"}},
 					Children: []*Step{
 						{ID: "{target}.child", Title: "Work on {{feature}}"},
 					},
@@ -1285,10 +1292,18 @@ func TestExpansionVarRefs(t *testing.T) {
 		// variable is, so none of them is a name; {target.description} pulls
 		// in the formula's description, whose {release} IS substituted. The
 		// single-brace pattern also matches inside {{feature}}, so a
-		// --var feature=x is consumed there too.
+		// --var feature=x is consumed there too. Metadata keys are never
+		// rewritten, so {key_only} is not a name.
+		before, err := json.Marshal(f.Template)
+		if err != nil {
+			t.Fatal(err)
+		}
 		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
-		if want := "component env feature gate owner release stage team"; got != want {
+		if want := "component env feature gate meta note owner release spawner stage team"; got != want {
 			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
+		}
+		if after, _ := json.Marshal(f.Template); string(after) != string(before) {
+			t.Errorf("ExpansionVarRefs changed the template:\nbefore %s\nafter  %s", before, after)
 		}
 		if f.Steps != nil {
 			t.Errorf("ExpansionVarRefs materialized the formula: Steps = %v", f.Steps)
@@ -1327,4 +1342,92 @@ func TestExpansionVarRefs(t *testing.T) {
 			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
+}
+
+// TestExpandStepPreservesTemplateFields: an expansion template step's notes,
+// metadata, waits_for, gate and on_complete survive the expansion
+// (bd-w153uq / #6433). Notes, metadata string leaves and waits_for get the
+// same {target} and {var} substitution as the description; the gate and
+// on_complete are carried verbatim, even where they hold a {name} that the
+// expansion has a value for.
+func TestExpandStepPreservesTemplateFields(t *testing.T) {
+	target := &Step{ID: "implement", Title: "Implement"}
+	template := []*Step{
+		{ID: "{target}.spawn", Title: "Spawn"},
+		{
+			ID:    "{target}.collect",
+			Title: "Collect",
+			Notes: "review {target.title} for {owner}",
+			Metadata: map[string]interface{}{
+				"owner":   "{owner}",
+				"count":   int64(3),
+				"enabled": true,
+				"{owner}": "key is never rewritten",
+				"nested": map[string]interface{}{
+					"step": "{target}.spawn",
+					"list": []interface{}{"{owner}", 1.5, nil},
+				},
+			},
+			Needs:    []string{"{target}.spawn"},
+			WaitsFor: "children-of({target}.spawn)",
+			Gate: &Gate{
+				Type:    "gh:run",
+				ID:      "{owner}-ci",
+				AwaitID: "{{run_id}}",
+				Timeout: "1h",
+				Repo:    "{owner}/repo",
+			},
+			OnComplete: &OnCompleteSpec{
+				ForEach:    "output.items",
+				Bond:       "mol-{owner}",
+				Vars:       map[string]string{"name": "{item.name}", "owner": "{owner}", "at": "{index}"},
+				Sequential: true,
+			},
+		},
+		{ID: "{target}.wait", Title: "Wait", Needs: []string{"{target}.spawn"}, WaitsFor: "all-children"},
+	}
+
+	result, err := expandStep(target, template, map[string]string{"owner": "alice"})
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	if len(result) != 3 {
+		t.Fatalf("got %d steps, want 3", len(result))
+	}
+	got := result[1]
+
+	if want := "review Implement for alice"; got.Notes != want {
+		t.Errorf("Notes = %q, want %q", got.Notes, want)
+	}
+
+	wantMeta := map[string]interface{}{
+		"owner":   "alice",
+		"count":   int64(3),
+		"enabled": true,
+		"{owner}": "key is never rewritten",
+		"nested": map[string]interface{}{
+			"step": "implement.spawn",
+			"list": []interface{}{"alice", 1.5, nil},
+		},
+	}
+	if !reflect.DeepEqual(got.Metadata, wantMeta) {
+		t.Errorf("Metadata = %#v, want %#v", got.Metadata, wantMeta)
+	}
+
+	if want := "children-of(implement.spawn)"; got.WaitsFor != want {
+		t.Errorf("WaitsFor = %q, want %q", got.WaitsFor, want)
+	}
+	if spec := ParseWaitsFor(got.WaitsFor); spec == nil || spec.SpawnerID != "implement.spawn" {
+		t.Errorf("ParseWaitsFor(%q) = %+v, want spawner implement.spawn", got.WaitsFor, spec)
+	}
+	if want := "all-children"; result[2].WaitsFor != want {
+		t.Errorf("literal WaitsFor = %q, want %q", result[2].WaitsFor, want)
+	}
+
+	if got.Gate == nil || !reflect.DeepEqual(*got.Gate, *template[1].Gate) {
+		t.Errorf("Gate = %+v, want verbatim %+v", got.Gate, template[1].Gate)
+	}
+	if got.OnComplete == nil || !reflect.DeepEqual(*got.OnComplete, *template[1].OnComplete) {
+		t.Errorf("OnComplete = %+v, want verbatim %+v", got.OnComplete, template[1].OnComplete)
+	}
 }
