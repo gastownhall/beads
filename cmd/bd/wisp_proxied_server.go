@@ -339,5 +339,7 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 			orphaned:          res.OrphanedIssues,
 		}, nil
 	})
-	return renderWispPurgeOutcome(outcome, wispGCReport{withScanCapped: true, scanCapped: scanCapped})
+	report := wispPurgeClosedReport
+	report.scanCapped = scanCapped
+	return renderWispPurgeOutcome(outcome, report)
 }
