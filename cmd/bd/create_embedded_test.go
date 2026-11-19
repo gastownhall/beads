@@ -868,6 +868,66 @@ func TestEmbeddedChangeDirOverridesInheritedBeadsDir(t *testing.T) {
 	}
 }
 
+// TestEmbeddedPreviewDoesNotConsumeBackupInterval (GH#8325) is the embedded
+// symptom of a preview running the direct arm's maintenance net: with
+// backup.enabled, `bd create x --dry-run` reached auto-backup against a store
+// the preview opened read-only, printed
+// "Warning: auto-backup failed: embeddeddolt: store is read-only" and — the
+// part users feel — stamped the throttle window, so the next real write was
+// skipped and never backed up. After the fix the preview creates nothing and
+// the real write's backup runs.
+func TestEmbeddedPreviewDoesNotConsumeBackupInterval(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pbk")
+
+	// bdInit's env strips BD_*, so no backup is taken during setup; both
+	// invocations below opt in explicitly.
+	backupEnv := append(bdEnv(dir), "BD_BACKUP_ENABLED=true")
+	statePath := filepath.Join(beadsDir, "backup", "backup_state.json")
+
+	// Invocation 1: a preview. Plain output, not --json — the failure this
+	// guards against printed a warning on stderr.
+	preview := exec.Command(bd, "create", "--dry-run", "Preview only")
+	preview.Dir = dir
+	preview.Env = backupEnv
+	stdout, stderr, err := runCommandBuffers(t, preview)
+	if err != nil {
+		t.Fatalf("bd create --dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if s := stderr.String(); strings.Contains(s, "auto-backup") {
+		t.Errorf("preview printed auto-backup output:\n%s", s)
+	}
+	if _, statErr := os.Stat(statePath); statErr == nil {
+		raw, readErr := os.ReadFile(statePath)
+		t.Fatalf("preview left %s:\n%s (read: %v)", statePath, raw, readErr)
+	} else if !os.IsNotExist(statErr) {
+		t.Fatalf("stat %s: %v", statePath, statErr)
+	}
+
+	// Invocation 2: the real write. Its backup must actually run, which the
+	// non-empty last_dolt_commit watermark proves (a failed attempt stamps
+	// only the timestamp).
+	real := exec.Command(bd, "create", "Real write")
+	real.Dir = dir
+	real.Env = backupEnv
+	stdout, stderr, err = runCommandBuffers(t, real)
+	if err != nil {
+		t.Fatalf("bd create failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("real write left no backup state (%s): %v", statePath, err)
+	}
+	var state backupState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("parse %s: %v\n%s", statePath, err, raw)
+	}
+	if state.LastDoltCommit == "" {
+		t.Errorf("backup state after the real write has an empty last_dolt_commit (timestamp %s):\n%s",
+			state.Timestamp.Format(time.RFC3339), raw)
+	}
+}
+
 // TestEmbeddedCreateCommitPending verifies that CommitPending works on EmbeddedDoltStore:
 // no-op when clean, commits when there are pending changes.
 func TestEmbeddedCreateCommitPending(t *testing.T) {
