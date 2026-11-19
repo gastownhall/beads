@@ -1,0 +1,24 @@
+-- Ignored migration 0032: clone-local marker for the one-time repair of
+-- dependency edges stored as external although this database holds their
+-- target (gastownhall/beads#6066).
+--
+-- Before this fix every dependency writer classified a target by its id
+-- prefix, so an edge onto a local issue or wisp whose id carries a foreign
+-- prefix (an explicit --id created with --force, or a row imported from
+-- another rig) was written to depends_on_external. Blocked computation never
+-- reads that column, so the dependent showed as ready while its blocker was
+-- open. Writers now classify by presence.
+--
+-- The work is the pre-migration repair registered for this version,
+-- repairLocalExternalDepTargets (local_external_dep_repair.go): it moves each
+-- such edge to depends_on_wisp_id or depends_on_issue_id, leaves explicit
+-- "external:" refs and targets this database does not hold alone, and
+-- recomputes blocked state for the affected rows, all in one transaction. It
+-- refuses with DirtyTablesError, leaving this version pending, when the tables
+-- it would write already carry uncommitted changes.
+--
+-- The cursor table is dolt-ignored, so every clone runs the repair once; the
+-- rules are a deterministic function of table content.
+--
+-- The marker itself changes nothing.
+SELECT 1;

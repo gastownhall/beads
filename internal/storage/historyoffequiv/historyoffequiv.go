@@ -208,6 +208,15 @@ var schemaAdditions = []schemaAddition{{
 	Migrations: map[string][]string{
 		"ignored_schema_migrations": {"31"},
 	},
+}, {
+	By: "the local external dependency target repair marker (#6066)",
+	// Ignored/0032 adds no schema. Its pre-migration repair moves external
+	// dependency edges whose target the database holds, and the scenario
+	// writes every edge after its store has migrated, so the repair moves
+	// nothing and the marker adds only its bookkeeping row.
+	Migrations: map[string][]string{
+		"ignored_schema_migrations": {"32"},
+	},
 }}
 
 // runWindow widens the span of the run on each side to bound the wall-clock

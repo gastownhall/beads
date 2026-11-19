@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
@@ -108,18 +109,22 @@ func (l *depBatchLookups) isWisp(ctx context.Context, tx DBTX, id string) bool {
 	return ok
 }
 
-// classify is ClassifyDepTarget using the batch routing read.
-func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
+// classify is ResolveDepTargetKindInTx answered from the batch reads: the
+// wisps set and the issues presence set cover every target in the batch.
+func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency) (DepTargetKind, error) {
 	if l == nil {
-		return ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
+		return ResolveDepTargetKindInTx(ctx, tx, dep.IssueID, dep.DependsOnID)
 	}
-	if isCrossPrefix || IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
-		return DepTargetExternal
+	if strings.HasPrefix(dep.DependsOnID, "external:") {
+		return DepTargetExternal, nil
 	}
 	if l.isWisp(ctx, tx, dep.DependsOnID) {
-		return DepTargetWisp
+		return DepTargetWisp, nil
 	}
-	return DepTargetIssue
+	if types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) || l.issuesExists[dep.DependsOnID] {
+		return DepTargetIssue, nil
+	}
+	return DepTargetExternal, nil
 }
 
 // targetExists is the per-edge `SELECT 1 FROM <issues|wisps> WHERE id = ?`.

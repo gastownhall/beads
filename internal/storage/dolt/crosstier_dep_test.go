@@ -374,3 +374,42 @@ func TestRunInTransactionCrossTierNonSchedulingEdgeIsNotGated(t *testing.T) {
 	assertDepEdge(ctx, t, store, wisp.ID, regular.ID)
 	assertDepEdge(ctx, t, store, regular.ID, wisp.ID)
 }
+
+// A same-prefix target the database does not hold is still refused inside a
+// server-mode transaction (GH#6066): presence classification resolves the
+// target on the owning session, and only a cross-prefix miss becomes an
+// external reference, so a missing same-prefix target keeps its not-found
+// refusal instead of landing in depends_on_external.
+func TestRunInTransactionAddDependencyMissingSamePrefixTargetIsRefused(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	source := crossTierRegularIssue("test-xtier-missing-source", "source of an edge to a missing target")
+	if err := store.CreateIssue(ctx, source, "tester"); err != nil {
+		t.Fatalf("CreateIssue source: %v", err)
+	}
+
+	const missing = "test-xtier-missing-target"
+	err := store.RunInTransaction(ctx, "test: blocks edge to a missing same-prefix target", func(tx storage.Transaction) error {
+		return tx.AddDependency(ctx, &types.Dependency{
+			IssueID:     source.ID,
+			DependsOnID: missing,
+			Type:        types.DepBlocks,
+		}, "tester")
+	})
+	if err == nil {
+		t.Fatalf("RunInTransaction AddDependency(%s -> %s) succeeded, want a missing-target refusal", source.ID, missing)
+	}
+
+	var edges int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", source.ID).Scan(&edges); err != nil {
+		t.Fatalf("count dependencies for %s: %v", source.ID, err)
+	}
+	if edges != 0 {
+		t.Fatalf("refused edge left %d dependency rows for %s", edges, source.ID)
+	}
+}
