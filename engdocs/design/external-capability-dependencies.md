@@ -19,8 +19,14 @@ seams. This keeps direct, routed, and proxied-server commands on one policy.
 
 The decorator:
 
-- parses only `external:<project>:<capability>` references; cross-prefix issue
-  IDs remain a separate concern;
+- parses `external:<project>:<capability>` references, and — since GH#4647 —
+  bare cross-prefix issue ids too: an id whose prefix names another repository
+  shares `depends_on_external` storage with explicit refs, but is a real issue
+  somewhere, so the same policy classifies it by edge type (`blocks` and
+  `conditional-blocks` only, mirroring `types.IsGateEdge`; a bare
+  cross-prefix `waits-for` or `relates-to` edge never gates) and resolves it
+  through an injected `IssueRouter` (see below) rather than a project
+  configuration;
 - groups references by project and opens each configured foreign store once,
   read-only, per operation;
 - considers a capability satisfied only when the foreign store contains a
@@ -58,6 +64,46 @@ decorator resolves a foreign snapshot, then passes the exclusions into the
 existing atomic local `ClaimReadyIssue` operation. A concurrent foreign change
 may therefore take effect on the next query, matching the historical SQLite
 behavior without weakening local ready-selection or claim safety.
+
+## Cross-prefix issue targets (GH#4647)
+
+A bare cross-prefix target is routed, not configured: no `external_projects`
+entry names it, so the decorator takes an optional `IssueRouter`
+(`externaldeps.WithIssueRouter`) that resolves ids to a verdict. `cmd/bd`
+injects its direct-CLI router — the same read-only sequence a routed command's
+read uses (`lookupPrefixRoute` → `admitForeignWorkspace` → `loadDoltDatabase`
+→ `openRoutedTargetStore(false)`), grouping ids by matched destination and
+opening each destination once per evaluation. `bd serve` and the proxied
+unit-of-work provider deliberately get NO router: `openRoutedTargetStore`
+swaps a process-global environment variable, unsafe under concurrent
+requests.
+
+Resolution order: the inner store answers by exact id first (a multi-prefix
+database holds rows for prefixes that are not its own, no route needed); a
+read failure there is an error. Whatever remains goes to the router once.
+Verdicts:
+
+- `Found`: satisfied iff the target is closed or pinned; any other status
+  keeps the blocker standing.
+- `Absent` (the owning store answered, holds no such row): satisfied, the
+  same way the local missing-target join treats a dangling row.
+- `Unrouted` (no route reaches the id, or a proxied-server workspace a direct
+  store cannot open): satisfied, for compatibility with the pre-fix behavior.
+- `Unavailable` (a CONFIGURED route could not answer): fail closed — every
+  affected source stays excluded, with one stderr warning per prefix per
+  policy instance, kept separate from the capability warnings.
+
+A policy instance with no router treats every id it cannot resolve locally as
+unrouted (satisfied): such an instance cannot observe a configured route's
+failure, and compatibility demands it not strand work on an unverifiable edge.
+
+The classification is one shared function
+(`externaldeps.policyBlockersFor`), so the workspace-wide blocking state
+(ready list/count/claim), `IsBlocked`, its batch twins, the blocked listing,
+the checked-close guard and the claim guard cannot drift about what a bare
+cross-prefix target is or when one is satisfied. `is_blocked` stays local: a
+foreign close admits the source on the next query, with no write to the source
+row and no descendant propagation.
 
 Direct batch closes pass an immutable external-blocker snapshot through an
 internal policy-aware batch accessor. Hooks and telemetry forward that policy
