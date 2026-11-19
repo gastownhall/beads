@@ -199,7 +199,9 @@ func ManageStartedAt(oldIssue *types.Issue, updates map[string]interface{}, setC
 //   - the update changes who holds the claim (assignee transfer, or a fresh
 //     transition into in_progress): the previous owner's lease must not count
 //     down against the new holder — clear it. The new holder gets a lease only
-//     via the claim verb; a real worker's next heartbeat re-arms one.
+//     via the claim verb; a real worker's next heartbeat re-arms one. A claim
+//     whose patch hands the claim on arms the final holder through
+//     LeaseOutcomeOnUpdate (see the UpsertLeaseInTx invariant).
 //   - the update leaves the same claim in place (already in_progress, same
 //     assignee): leave the lease untouched, so a worker's live lease survives
 //     unrelated edits to its issue.
@@ -207,10 +209,21 @@ func ManageStartedAt(oldIssue *types.Issue, updates map[string]interface{}, setC
 // Returns true when the update ends/transfers the claim and the issue's lease
 // row must be deleted (DeleteLeaseInTx) after the row update.
 func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) bool {
+	_, _, transfers := claimTransitionOnUpdate(oldIssue, updates)
+	return transfers
+}
+
+// claimTransitionOnUpdate derives the status and assignee an update leaves on
+// the row and reports whether it ends or transfers the claim the row held.
+// ManageLeaseOnUpdate and LeaseOutcomeOnUpdate both read it, so the clear-only
+// generic-update rule and the claim verb's arm rule cannot drift apart.
+// changes is false when the update touches neither key, or names a status of
+// a type it cannot read; finalStatus and finalAssignee are then meaningless.
+func claimTransitionOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) (finalStatus, finalAssignee string, changes bool) {
 	rawStatus, hasStatus := updates["status"]
 	rawAssignee, hasAssignee := updates["assignee"]
 	if !hasStatus && !hasAssignee {
-		return false
+		return "", "", false
 	}
 
 	newStatus := string(oldIssue.Status)
@@ -221,7 +234,7 @@ func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) 
 		case types.Status:
 			newStatus = string(v)
 		default:
-			return false
+			return "", "", false
 		}
 	}
 
@@ -244,9 +257,67 @@ func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) 
 	// transfer would) is defensible rather than a false positive — it costs
 	// the holder's live lease, but HeartbeatIssueInTx's fallback re-arms one
 	// under the caller's current spelling on the next beat, so it self-heals.
+	// A claim verb re-arms at once under the respelled bytes
+	// (LeaseOutcomeOnUpdate).
 	sameClaim := newStatus == string(types.StatusInProgress) && newAssignee != "" &&
 		oldIssue.Status == types.StatusInProgress && newAssignee == oldIssue.Assignee
-	return !sameClaim
+	return newStatus, newAssignee, !sameClaim
+}
+
+// LeaseOutcome is what an update does to its issue's lease row.
+type LeaseOutcome int
+
+const (
+	// LeaseKeep leaves the lease row as it is.
+	LeaseKeep LeaseOutcome = iota
+	// LeaseClear deletes the lease row: the update ended or transferred the
+	// claim.
+	LeaseClear
+	// LeaseArm grants the lease to the holder LeaseOutcomeOnUpdate returns:
+	// the update is the fields half of a claim and leaves a live claim.
+	LeaseArm
+)
+
+// LeaseOutcomeOnUpdate decides what an update does to the issue's lease row.
+// oldIssue is the row the update reads (for a claim, the row after the claim
+// leg), claim says whether the update is the fields half of a claim verb
+// (bd update --claim), and isWisp whether the row is a wisp.
+//
+// Without claim it is ManageLeaseOnUpdate: keep or clear, never arm, so a
+// hand-dole stays durable and unleased (bd-9hpgf, GH#4716).
+//
+// With claim, a patch that hands the claim on (bd update --claim
+// --assignee=bob) would otherwise delete the lease the claim leg just armed and
+// leave a live claim that bd reclaim can never see. So when ManageLeaseOnUpdate
+// would clear and the final row is still a live claim (in_progress, non-empty
+// assignee, not a wisp), the outcome is LeaseArm for the final assignee,
+// verbatim, keeping the holder == assignee invariant (see UpsertLeaseInTx). A
+// claim whose patch ends the claim still clears.
+func LeaseOutcomeOnUpdate(oldIssue *types.Issue, updates map[string]interface{}, claim, isWisp bool) (LeaseOutcome, string) {
+	finalStatus, finalAssignee, changes := claimTransitionOnUpdate(oldIssue, updates)
+	if !changes {
+		return LeaseKeep, ""
+	}
+	if claim && !isWisp && finalStatus == string(types.StatusInProgress) && finalAssignee != "" {
+		return LeaseArm, finalAssignee
+	}
+	return LeaseClear, ""
+}
+
+// ApplyLeaseOutcomeInTx carries out LeaseOutcomeOnUpdate's decision for issue
+// id inside the update's transaction, after the row UPDATE (which rewrote
+// row_lock, so a concurrent reclaim or close still collides on that cell).
+// LeaseArm grants holder a fresh lease from now for LeaseTTL(ctx); the upsert
+// replaces the claimant's row rather than adding a second one.
+func ApplyLeaseOutcomeInTx(ctx context.Context, tx DBTX, id string, outcome LeaseOutcome, holder string, now time.Time) error {
+	switch outcome {
+	case LeaseClear:
+		return DeleteLeaseInTx(ctx, tx, id)
+	case LeaseArm:
+		return UpsertLeaseInTx(ctx, tx, id, holder, now, LeaseTTL(ctx))
+	default:
+		return nil
+	}
 }
 
 // DetermineEventType returns the appropriate event type for an update.
@@ -335,14 +406,14 @@ type UpdateResult struct {
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func UpdateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, true, true)
+	return updateIssueInTx(ctx, tx, id, updates, actor, false, true, true)
 }
 
 // UpdateIssueWithoutEventInTx applies normal update semantics without recording
 // an intermediate event. Demotion uses this to preserve the historical event
 // stream: create/update history is copied, then a single demotion event is added.
 func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, false, true)
+	return updateIssueInTx(ctx, tx, id, updates, actor, false, false, true)
 }
 
 // updateIssueInTx is the body behind both exported update entry points.
@@ -351,8 +422,10 @@ func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, update
 // points always do, while ExecuteUpdate — which applies label, parent and
 // persistence patches AFTER the row write in the same call — passes false and
 // mints once after the last patch, so the version's durable_state carries the
-// patched labels and edges rather than the pre-patch row.
-func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool, mintVersion bool) (*UpdateResult, error) {
+// patched labels and edges rather than the pre-patch row. claim says the update
+// is the fields half of a claim verb, which LeaseOutcomeOnUpdate lets arm a
+// lease for the final holder; both exported entry points pass false.
+func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, claim bool, recordEvent bool, mintVersion bool) (*UpdateResult, error) {
 	updates = cloneUpdateFields(updates)
 	// Pop the override before anything reads the map as a set of columns. It
 	// has to come out ahead of the no-op filter too: the filter keeps every key
@@ -432,8 +505,9 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 
 	// Build SET clauses.
+	now := time.Now().UTC()
 	setClauses := []string{"updated_at = ?"}
-	args := []interface{}{time.Now().UTC()}
+	args := []interface{}{now}
 
 	for key, value := range updates {
 		if !IsAllowedUpdateField(key) {
@@ -484,9 +558,10 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// Auto-manage started_at (set on transition to in_progress). (GH#2796)
 	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)
 
-	// Auto-manage leases when direct updates change status or assignee.
-	// Clears stale leases only; arming is reserved for claim/heartbeat.
-	clearLease := ManageLeaseOnUpdate(oldIssue, updates)
+	// Auto-manage leases when direct updates change status or assignee. A
+	// generic update only clears stale leases; only the fields half of a claim
+	// arms one, for the holder it leaves (LeaseOutcomeOnUpdate).
+	leaseOutcome, leaseHolder := LeaseOutcomeOnUpdate(oldIssue, updates, claim, isWisp)
 
 	// Rewrite row_lock on every update so a concurrent status/ownership
 	// mutation (reclaim/close) collides on this shared cell and is forced to
@@ -504,10 +579,8 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		return nil, fmt.Errorf("failed to update issue: %w", err)
 	}
 
-	if clearLease {
-		if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
-			return nil, err
-		}
+	if err := ApplyLeaseOutcomeInTx(ctx, tx, id, leaseOutcome, leaseHolder, now); err != nil {
+		return nil, err
 	}
 
 	if recordEvent {

@@ -86,3 +86,66 @@ func TestManageLeaseOnUpdate(t *testing.T) {
 		})
 	}
 }
+
+// TestLeaseOutcomeOnUpdate pins the lease decision both update bodies share
+// (bd-zprbhg). Without claim it is ManageLeaseOnUpdate and never arms. With
+// claim (the fields half of `bd update --claim`), a patch that hands the claim
+// on arms a lease for the holder it leaves, so the claim stays recoverable.
+// oldIssue is the row the fields leg reads, i.e. the row after the claim leg.
+func TestLeaseOutcomeOnUpdate(t *testing.T) {
+	tests := []struct {
+		name       string
+		oldStatus  types.Status
+		oldOwner   string
+		updates    map[string]interface{}
+		claim      bool
+		wisp       bool
+		wantResult LeaseOutcome
+		wantHolder string
+	}{
+		{
+			name:       "claim with an assignee override arms for the override",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"assignee": "bob"},
+			claim:      true,
+			wantResult: LeaseArm,
+			wantHolder: "bob",
+		},
+		{
+			name:       "claim re-asserting its own status and assignee keeps the claim leg's lease",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"status": types.StatusInProgress, "assignee": "alice"},
+			claim:      true,
+			wantResult: LeaseKeep,
+		},
+		{
+			name:       "claim with no status or assignee keeps the claim leg's lease",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "alice",
+			updates:    map[string]interface{}{"priority": 1},
+			claim:      true,
+			wantResult: LeaseKeep,
+		},
+		{
+			name:       "claim with a respelled self-assignee arms for the respelled bytes",
+			oldStatus:  types.StatusInProgress,
+			oldOwner:   "gastown/alice",
+			updates:    map[string]interface{}{"assignee": "gastown.alice"},
+			claim:      true,
+			wantResult: LeaseArm,
+			wantHolder: "gastown.alice",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldIssue := &types.Issue{Status: tt.oldStatus, Assignee: tt.oldOwner}
+			got, holder := LeaseOutcomeOnUpdate(oldIssue, tt.updates, tt.claim, tt.wisp)
+			if got != tt.wantResult || holder != tt.wantHolder {
+				t.Errorf("LeaseOutcomeOnUpdate = (%v, %q), want (%v, %q)", got, holder, tt.wantResult, tt.wantHolder)
+			}
+		})
+	}
+}

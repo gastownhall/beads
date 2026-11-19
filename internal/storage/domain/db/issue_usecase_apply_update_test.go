@@ -25,6 +25,7 @@ func (s *testSuite) TestIssueUseCase_ApplyUpdate() {
 	s.Run("EmptyIDReturnsError", s.iucApplyUpdateEmptyID)
 	s.Run("FieldsOnlyAppliesAndReFetches", s.iucApplyUpdateFieldsOnly)
 	s.Run("ClaimAndFieldsRunTogether", s.iucApplyUpdateClaimPlusFields)
+	s.Run("ClaimAssigneeOverrideArmsLease", s.iucApplyUpdateClaimAssigneeOverrideArmsLease)
 	s.Run("AddRemoveLabelPaths", s.iucApplyUpdateAddRemoveLabels)
 	s.Run("SetLabelsDiffsAgainstCurrent", s.iucApplyUpdateSetLabels)
 	s.Run("SetLabelsThenAddsThenRemoves", s.iucApplyUpdateSetLabelsThenAddRemove)
@@ -84,7 +85,7 @@ func (s *testSuite) iucClaimOpenAssignedCopy() {
 	s.seedOpenIssue("bd-iuc-cl-openassigned")
 	r := s.issueRepo()
 	s.Require().NoError(r.Update(s.Ctx(), "bd-iuc-cl-openassigned",
-		map[string]any{"assignee": "alice"}, "seeder", domain.IssueTableOpts{}))
+		map[string]any{"assignee": "alice"}, "seeder", domain.IssueTableOpts{}, false))
 
 	_, err := s.issueUseCase().ClaimIssue(s.Ctx(), "bd-iuc-cl-openassigned", "bob")
 	s.Require().Error(err)
@@ -139,6 +140,27 @@ func (s *testSuite) iucApplyUpdateClaimPlusFields() {
 	s.Equal("alice", updated.Assignee)
 	s.Equal(types.StatusInProgress, updated.Status)
 	s.Equal(1, updated.Priority)
+}
+
+// iucApplyUpdateClaimAssigneeOverrideArmsLease pins bd-zprbhg: a claim that
+// also overrides the assignee leaves a live in_progress claim, so it must
+// keep a lease held by the final assignee instead of deleting the lease it
+// just armed.
+func (s *testSuite) iucApplyUpdateClaimAssigneeOverrideArmsLease() {
+	s.seedOpenIssue("bd-iuc-au-cao")
+	updated, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-cao", domain.UpdateSpec{
+		Claim:  true,
+		Fields: map[string]any{"assignee": "bob"},
+	}, "alice")
+	s.Require().NoError(err)
+	s.Equal(types.StatusInProgress, updated.Status)
+	s.Equal("bob", updated.Assignee)
+
+	var holder string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT holder FROM leases WHERE issue_id = ?", "bd-iuc-au-cao").Scan(&holder),
+		"claim with an assignee override must leave a lease row")
+	s.Equal("bob", holder)
 }
 
 func (s *testSuite) iucApplyUpdateAddRemoveLabels() {
