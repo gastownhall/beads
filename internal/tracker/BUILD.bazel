@@ -46,6 +46,7 @@ go_test(
         "engine_selective_test.go",
         "engine_test.go",
         "multiproject_test.go",
+        "previous_external_refs_cgo_test.go",
         "registry_test.go",
         "store_test.go",
         "test_helpers_pure_test.go",
