@@ -39,7 +39,20 @@ type HookMigrationHookPlan struct {
 	NeedsMigration   bool   `json:"needs_migration"`
 	SuggestedAction  string `json:"suggested_action,omitempty"`
 	ReadError        string `json:"read_error,omitempty"`
+	// Interpreter names the non-shell interpreter of the active hook, or
+	// "binary content"; empty for shell hooks (GH#6348).
+	Interpreter string `json:"interpreter,omitempty"`
 }
+
+// Hook migration states for hooks run by a non-shell interpreter (GH#6348).
+const (
+	// HookStateNonShellCustom is a non-shell hook with no bd markers: bd
+	// cannot add its shell section, so there is nothing to migrate.
+	HookStateNonShellCustom = "non_shell_custom"
+	// HookStateNonShellRepair is a non-shell hook holding complete bd
+	// sections an earlier install appended; migration removes them.
+	HookStateNonShellRepair = "non_shell_marker_repair"
+)
 
 // HookMigrationPlan summarizes migration state for all managed hooks.
 type HookMigrationPlan struct {
@@ -110,6 +123,9 @@ func inspectHookMigration(hooksDir, hookName string) HookMigrationHookPlan {
 		contentStr := string(content)
 		plan.MarkerState = detectHookMarkerState(contentStr)
 		plan.LegacyBDHook = isLegacyBDHook(contentStr)
+		if interp, nonShell := NonShellHookInterpreter(contentStr); nonShell {
+			plan.Interpreter = interp
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		plan.ReadError = err.Error()
 		plan.State = "read_error"
@@ -123,6 +139,21 @@ func inspectHookMigration(hooksDir, hookName string) HookMigrationHookPlan {
 
 func classifyHookMigration(hook *HookMigrationHookPlan) {
 	if hook.ReadError != "" {
+		return
+	}
+
+	// A non-shell active hook is classified by its interpreter before any
+	// marker or legacy handling: those assume a shell script (GH#6348).
+	if hook.Interpreter != "" {
+		switch {
+		case hook.MarkerState != hookMarkerStateNone:
+			hook.State = HookStateNonShellRepair
+			hook.NeedsMigration = true
+			hook.SuggestedAction = fmt.Sprintf("Remove bd's shell section from the %s hook, which runs under %s; "+
+				"keep the script and its sidecars; bd integration stays skipped.", hook.Name, hook.Interpreter)
+		default:
+			hook.State = HookStateNonShellCustom
+		}
 		return
 	}
 
