@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
@@ -108,18 +109,28 @@ func (l *depBatchLookups) isWisp(ctx context.Context, tx DBTX, id string) bool {
 	return ok
 }
 
-// classify is ClassifyDepTarget using the batch routing read.
-func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
+// classify is the presence-based ClassifyDepTarget rule using the batch
+// routing read (GH#6066): explicit external references and cross-prefix ids
+// with no local row are external; a foreign-prefix id the batch wrote or the
+// store already holds is a local issue or wisp like any other. Same-prefix
+// ids are never probed — the missing-target refusal names them.
+func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency) (DepTargetKind, error) {
 	if l == nil {
-		return ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
+		return ClassifyDepTarget(ctx, tx, dep.IssueID, dep.DependsOnID)
 	}
-	if isCrossPrefix || IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
-		return DepTargetExternal
+	if strings.HasPrefix(dep.DependsOnID, "external:") {
+		return DepTargetExternal, nil
 	}
 	if l.isWisp(ctx, tx, dep.DependsOnID) {
-		return DepTargetWisp
+		return DepTargetWisp, nil
 	}
-	return DepTargetIssue
+	if types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) {
+		return DepTargetIssue, nil
+	}
+	if l.issuesExists[dep.DependsOnID] {
+		return DepTargetIssue, nil
+	}
+	return DepTargetExternal, nil
 }
 
 // targetExists is the per-edge `SELECT 1 FROM <issues|wisps> WHERE id = ?`.

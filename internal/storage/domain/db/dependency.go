@@ -43,15 +43,16 @@ func pickDepTable(useWisps bool) string {
 	return "dependencies"
 }
 
-// pickDepTargetColumn classifies an edge's target the same way the in-tx store
-// bodies do, through issueops.IsExternalDepTarget: a target this database
-// cannot hold — an "external:" reference or an issue belonging to another
-// repository — goes to depends_on_external, which carries no foreign key.
-// Only a target that could plausibly be local is probed against wisps and
-// otherwise treated as a local issue, where fk_dep_issue_target still refuses
-// an id that is genuinely missing.
+// pickDepTargetColumn classifies an edge's target by local presence, the same
+// rule the in-tx store bodies apply through issueops.ClassifyDepTarget
+// (GH#6066): an explicit "external:" reference, or a cross-prefix id this
+// database holds no row for, goes to depends_on_external, which carries no
+// foreign key. A foreign-prefix id that IS a local row (created with
+// --id --force) is a local issue like any other. Same-prefix ids are not
+// probed against issues: fk_dep_issue_target refuses an id that is genuinely
+// missing with the missing-target refusal instead of a silent external edge.
 func (r *dependencySQLRepositoryImpl) pickDepTargetColumn(ctx context.Context, issueID, dependsOnID string) (string, error) {
-	if issueops.IsExternalDepTarget(issueID, dependsOnID) {
+	if strings.HasPrefix(dependsOnID, "external:") {
 		return "depends_on_external", nil
 	}
 	var probe int
@@ -59,13 +60,21 @@ func (r *dependencySQLRepositoryImpl) pickDepTargetColumn(ctx context.Context, i
 	switch {
 	case err == nil:
 		return "depends_on_wisp_id", nil
-	case errors.Is(err, sql.ErrNoRows):
-		return "depends_on_issue_id", nil
-	case dberrors.IsTableNotExist(err):
-		return "depends_on_issue_id", nil
+	case errors.Is(err, sql.ErrNoRows), dberrors.IsTableNotExist(err):
 	default:
 		return "", fmt.Errorf("classify dep target %s: %w", dependsOnID, err)
 	}
+	if types.ExtractPrefix(issueID) == types.ExtractPrefix(dependsOnID) {
+		return "depends_on_issue_id", nil
+	}
+	targetExists, err := r.rowExists(ctx, "issues", dependsOnID)
+	if err != nil {
+		return "", fmt.Errorf("classify dep target %s: %w", dependsOnID, err)
+	}
+	if targetExists {
+		return "depends_on_issue_id", nil
+	}
+	return "depends_on_external", nil
 }
 
 func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dependency, actor string, opts domain.DepInsertOpts) error {
@@ -319,11 +328,19 @@ func (r *dependencySQLRepositoryImpl) rowExists(ctx context.Context, table, id s
 	}
 }
 
+// ValidateBlockingHierarchy skips only targets that are genuinely external by
+// presence (explicit "external:" reference or a cross-prefix id with no local
+// row, GH#6066), so a foreign-prefix local issue is hierarchy-checked like any
+// other local target.
 func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error {
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	if issueops.IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+	kind, err := issueops.ClassifyDepTarget(ctx, r.runner, dep.IssueID, dep.DependsOnID)
+	if err != nil {
+		return fmt.Errorf("db: DependencySQLRepository.ValidateBlockingHierarchy: %w", err)
+	}
+	if kind == issueops.DepTargetExternal {
 		return nil
 	}
 	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)

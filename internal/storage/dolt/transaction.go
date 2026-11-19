@@ -88,6 +88,16 @@ func (t *doltTransaction) isActiveWisp(ctx context.Context, id string) bool {
 	return err == nil
 }
 
+// issueRowExists reports whether id is a durable issue on the regular session,
+// including rows created earlier in this same logical transaction. It is the
+// issues-plane counterpart of isActiveWisp and feeds presence-based dep target
+// classification (GH#6066).
+func (t *doltTransaction) issueRowExists(ctx context.Context, id string) bool {
+	var exists int
+	err := t.regularTx.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ? LIMIT 1", id).Scan(&exists)
+	return err == nil
+}
+
 // CreateIssueImport is the import-friendly issue creation hook.
 // Dolt does not enforce prefix validation at the storage layer, so this delegates to CreateIssue.
 func (t *doltTransaction) CreateIssueImport(ctx context.Context, issue *types.Issue, actor string, skipPrefixValidation bool) error {
@@ -990,24 +1000,26 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		eventTable = "wisp_events"
 	}
 
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
+	// Resolve the target kind by local presence, not by prefix alone
+	// (GH#6066): a foreign-prefix id this database holds is a local issue. The
+	// wisp probe reads the ignored session and the issues probe the regular
+	// session, so classification sees targets created earlier in this same
+	// logical transaction.
 	targetTable := "issues"
 	kind := issueops.DepTargetIssue
 	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
+	case strings.HasPrefix(dep.DependsOnID, "external:"):
 		kind = issueops.DepTargetExternal
-	default:
-		if t.isActiveWisp(ctx, dep.DependsOnID) {
-			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
-		}
+	case t.isActiveWisp(ctx, dep.DependsOnID):
+		targetTable = "wisps"
+		kind = issueops.DepTargetWisp
+	case !t.issueRowExists(ctx, dep.DependsOnID):
+		kind = issueops.DepTargetExternal
 	}
 
 	opts := issueops.AddDependencyOpts{
 		SourceTable:    sourceTable,
-		TargetTable:    targetTable,
 		WriteTable:     table,
-		IsCrossPrefix:  isCrossPrefix,
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		TargetKind:     &kind,
 		EmitEvent:      addOpts.EmitEvent,

@@ -402,7 +402,6 @@ func TestAddDependencyInTxReadsNullStoredMetadataAsEmptyObject(t *testing.T) {
 	dep := &types.Dependency{IssueID: "dep-a", DependsOnID: "dep-b", Type: types.DepRelated}
 	created, err := AddDependencyInTx(context.Background(), tx, dep, "writer", AddDependencyOpts{
 		SourceTable:      "issues",
-		TargetTable:      "issues",
 		WriteTable:       "dependencies",
 		SkipCycleCheck:   true,
 		TargetKind:       &kind,

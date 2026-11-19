@@ -432,6 +432,41 @@ func TestEmbeddedReadyBlockersAndLabels(t *testing.T) {
 			t.Fatalf("--claim --label-any on an empty lane claimed %v, want nothing: %s", ids, raw)
 		}
 	})
+
+	// GH#6066: issues created with a foreign-prefix explicit id (--id --force)
+	// are local rows; a blocks edge between two of them must gate ready like
+	// any local edge instead of being silently parked as "external".
+	t.Run("ready_excludes_blocked_by_foreign_prefix_local", func(t *testing.T) {
+		foreignBlocker := bdCreate(t, bd, dir, "Foreign-prefix local blocker", "--type", "task",
+			"--id", "other-fp-blocker", "--force")
+		foreignDependent := bdCreate(t, bd, dir, "Foreign-prefix local dependent", "--type", "task",
+			"--id", "other-fp-dependent", "--force")
+
+		cmd := exec.Command(bd, "dep", "add", foreignDependent.ID, foreignBlocker.ID)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("dep add %s %s failed: %v\n%s", foreignDependent.ID, foreignBlocker.ID, err, out)
+		}
+
+		ids, raw := readyIDs(t, "ready", "--json")
+
+		for _, id := range ids {
+			if id == foreignDependent.ID {
+				t.Fatalf("ready listed %s, but it is blocked by open local issue %s: %s",
+					foreignDependent.ID, foreignBlocker.ID, raw)
+			}
+		}
+		found := false
+		for _, id := range ids {
+			if id == foreignBlocker.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("ready did not list unblocked local issue %s: %s", foreignBlocker.ID, raw)
+		}
+	})
 }
 
 func TestEmbeddedReadyConcurrent(t *testing.T) {

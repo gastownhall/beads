@@ -112,6 +112,34 @@ func TestExternalCapabilityBlocksEmbeddedReadyAndAppearsInTree(t *testing.T) {
 	}
 }
 
+// TestForeignPrefixLocalBlockerGatesEmbeddedReady pins GH#6066: a blocks edge
+// between two LOCAL issues whose ids carry foreign prefixes (created with
+// --id --force) must gate ready like any local edge. Prefix-only
+// classification used to route such an edge into depends_on_external, where
+// blocked/ready computation cannot see it, so the dependent showed up as
+// ready while an open local blocker sat in front of it.
+func TestForeignPrefixLocalBlockerGatesEmbeddedReady(t *testing.T) {
+	store := openExternalDependencyStore(t, "demo")
+	ctx := t.Context()
+	blocker := &types.Issue{ID: "treehouse-lease-t4", Title: "the blocker", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	dependent := &types.Issue{ID: "firstmate-lease-adopt", Title: "the dependent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{blocker, dependent} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", issue.ID, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: dependent.ID, DependsOnID: blocker.ID, Type: types.DepBlocks}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	if got := embeddedIssueIDs(ready); !slices.Equal(got, []string{blocker.ID}) {
+		t.Fatalf("ready IDs = %v, want only %s: open local blocker %s must gate %s", got, blocker.ID, blocker.ID, dependent.ID)
+	}
+}
+
 func openExternalDependencyStore(t *testing.T, prefix string) *embeddeddolt.EmbeddedDoltStore {
 	t.Helper()
 	store, err := embeddeddolt.Open(t.Context(), filepath.Join(t.TempDir(), ".beads"), prefix, "main")

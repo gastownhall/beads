@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -604,7 +605,12 @@ func (r *uowApplyRun) runEndGate(ctx context.Context) error {
 		return domain.NewCycleError("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
 	}
 	for _, applied := range r.edges {
-		if storageissueops.IsExternalDepTarget(applied.dep.IssueID, applied.dep.DependsOnID) {
+		// An explicit "external:" reference has no local hierarchy to conflict
+		// with; the per-edge path filters it for the same reason. Any other
+		// target is checked: a foreign-prefix id this database holds is local
+		// (#6066), and an absent one matches no parent-child edge, so the walk
+		// is a no-op rather than a false refusal.
+		if strings.HasPrefix(applied.dep.DependsOnID, "external:") {
 			continue
 		}
 		if err := r.uw.DependencyUseCase().ValidateBlockingHierarchy(ctx, applied.dep); err != nil {
