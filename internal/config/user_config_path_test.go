@@ -23,10 +23,10 @@ func TestUserConfigYamlPathNamesNativeEnvironmentSource(t *testing.T) {
 		switch runtime.GOOS {
 		case "windows":
 			wantSource = "APPDATA"
-		case "darwin", "ios":
-			wantSource = "HOME"
 		case "plan9":
 			wantSource = "home"
+			// darwin/ios default to the XDG rule below (GH#8113): the
+			// native root is resolved the same way as on Linux.
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", xdg)

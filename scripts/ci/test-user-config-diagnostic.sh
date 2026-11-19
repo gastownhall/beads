@@ -28,12 +28,16 @@ host_info="$("$go_executable" env GOHOSTOS GOOS)"
     echo "Expected native $expected_os Go host and target" >&2; exit 1;
 }
 parent=TestUserConfigYamlPathNamesNativeEnvironmentSource
-expected=("$parent" "$parent/XDG_configured" "$parent/XDG_absent")
+# GH#8113: TestUserConfigDir pins the darwin/ios XDG rule (and the exact
+# os.UserConfigDir passthrough elsewhere) that keeps the native config root
+# off ~/Library/Application Support.
+secondary=TestUserConfigDir
+expected=("$parent" "$parent/XDG_configured" "$parent/XDG_absent" "$secondary")
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 status=0
 "$go_executable" test -tags "$BEADS_BUILD_TAGS" -v -count=1 -timeout 3m \
-    -run "^$parent$" ./internal/config >"$log" 2>&1 || status=$?
+    -run "^(${parent}|${secondary})$" ./internal/config >"$log" 2>&1 || status=$?
 cat "$log"
 [[ $status -eq 0 ]] || exit "$status"
 if grep -Eq -- '^[[:space:]]*--- (FAIL|SKIP):' "$log"; then

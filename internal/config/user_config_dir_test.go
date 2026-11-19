@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,4 +185,97 @@ func TestUserConfigDirDarwinDedupWithDocumentedFile(t *testing.T) {
 	if got := GetUserYamlConfig("actor"); got != "documented-user" {
 		t.Errorf("GetUserYamlConfig(actor) = %q, want %q (selected file, not the merged view)", got, "documented-user")
 	}
+}
+
+// TestUserConfigDir covers the resolver contract platform by platform
+// (GH#8113): darwin/ios apply the Unix XDG rule with os.UserConfigDir's error
+// text; every other GOOS returns os.UserConfigDir() exactly, value and error.
+// The platform under test is the seam, so this runs on every host.
+func TestUserConfigDir(t *testing.T) {
+	for _, goos := range []string{"darwin", "ios"} {
+		t.Run(goos, func(t *testing.T) {
+			t.Run("XDG absolute: returns that directory", func(t *testing.T) {
+				home, _ := darwinSeamForTest(t)
+				xdg := filepath.Join(home, "xdg-root")
+				t.Setenv("XDG_CONFIG_HOME", xdg)
+				got, err := UserConfigDir()
+				if err != nil || got != xdg {
+					t.Fatalf("UserConfigDir() = %q, %v; want %q, nil", got, err, xdg)
+				}
+			})
+			t.Run("XDG unset: returns HOME/.config", func(t *testing.T) {
+				home, _ := darwinSeamForTest(t)
+				got, err := UserConfigDir()
+				want := filepath.Join(home, ".config")
+				if err != nil || got != want {
+					t.Fatalf("UserConfigDir() = %q, %v; want %q, nil", got, err, want)
+				}
+			})
+			t.Run("XDG relative: errors naming XDG_CONFIG_HOME, documented file still used", func(t *testing.T) {
+				home, _ := darwinSeamForTest(t)
+				t.Setenv("XDG_CONFIG_HOME", "relative-xdg")
+				got, err := UserConfigDir()
+				if err == nil || got != "" {
+					t.Fatalf("UserConfigDir() = %q, %v; want \"\", error", got, err)
+				}
+				if !strings.Contains(err.Error(), "XDG_CONFIG_HOME") {
+					t.Errorf("error %q does not name XDG_CONFIG_HOME", err)
+				}
+				// The failed native candidate falls back to the documented
+				// path, exactly as on Linux.
+				path, err := UserConfigYamlPath()
+				if err != nil {
+					t.Fatalf("UserConfigYamlPath: %v", err)
+				}
+				if want := filepath.Join(home, ".config", "bd", "config.yaml"); path != want {
+					t.Errorf("UserConfigYamlPath() = %q, want the documented %q", path, want)
+				}
+			})
+			t.Run("HOME empty and XDG unset: errors naming both", func(t *testing.T) {
+				platformSeamForTest(t, goos, "", nil)
+				t.Setenv("HOME", "")
+				t.Setenv("USERPROFILE", "")
+				t.Setenv("XDG_CONFIG_HOME", "")
+				got, err := UserConfigDir()
+				if err == nil || got != "" {
+					t.Fatalf("UserConfigDir() = %q, %v; want \"\", error", got, err)
+				}
+				if !strings.Contains(err.Error(), "neither $XDG_CONFIG_HOME nor $HOME are defined") {
+					t.Errorf("error %q does not match the os.UserConfigDir Unix text", err)
+				}
+			})
+		})
+	}
+
+	t.Run("other GOOS returns os.UserConfigDir exactly", func(t *testing.T) {
+		// Value passthrough, including a value the candidate builder would
+		// otherwise reject (a relative one): the resolver must not clean,
+		// validate or rewrite it for non-darwin/ios.
+		platformSeamForTest(t, "windows", `C:\Users\u\AppData\Roaming`, nil)
+		t.Setenv("APPDATA", "")
+		got, err := UserConfigDir()
+		if err != nil || got != `C:\Users\u\AppData\Roaming` {
+			t.Fatalf("UserConfigDir() = %q, %v; want the native value unchanged", got, err)
+		}
+		sentinel := errors.New("native resolver diagnostic")
+		platformSeamForTest(t, "linux", "", sentinel)
+		got, err = UserConfigDir()
+		if !errors.Is(err, sentinel) || got != "" {
+			t.Fatalf("UserConfigDir() = %q, %v; want the native error unchanged", got, err)
+		}
+		// The exported seam agrees with the in-package one.
+		restore := SetUserConfigPlatformForTest("plan9", func() (string, error) { return "/plan9", nil })
+		defer restore()
+		got, err = UserConfigDir()
+		if err != nil || got != "/plan9" {
+			t.Fatalf("UserConfigDir() after SetUserConfigPlatformForTest = %q, %v", got, err)
+		}
+		restore()
+		got, err = UserConfigDir()
+		// restore() must put back what SetUserConfigPlatformForTest found:
+		// the linux/sentinel seam from platformSeamForTest above.
+		if !errors.Is(err, sentinel) || got != "" {
+			t.Fatalf("after restore: UserConfigDir() = %q, %v; want the pre-seam sentinel error", got, err)
+		}
+	})
 }
