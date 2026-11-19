@@ -139,3 +139,106 @@ func TestExternalServerWorkspaceRecoversMissingWitness(t *testing.T) {
 	}
 	assertCurrentVersionWitness(t, beadsDir)
 }
+
+// aliasRepoThroughParent returns a path that reaches repoDir through a symlink
+// in a separate temporary parent, so a data directory spelled beneath it names
+// repoDir's physical layout without sharing its textual prefix. The
+// useLocalBeads comparison in bd init cleans paths but does not resolve
+// symlinks, so only this spelling difference turns it false while the data
+// still physically lives under the workspace (GH#5682).
+func aliasRepoThroughParent(t *testing.T, repoDir string) string {
+	t.Helper()
+	alias := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(repoDir, alias); err != nil {
+		t.Skipf("symlinks are unsupported here, skipping aliased-path coverage: %v", err)
+	}
+	return alias
+}
+
+// provisionExplicitServerWorkspace creates an explicit BEADS_DIR holding a
+// config.yaml that selects server mode, the shape a provisioner like gc sets
+// up before handing the workspace to bd, with no metadata.json and no local
+// dolt root.
+func provisionExplicitServerWorkspace(t *testing.T, repoDir string) string {
+	t.Helper()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(beadsDir, "config.yaml"), []byte("dolt.mode: server\n"))
+	return beadsDir
+}
+
+// TestServerInitWithExplicitBeadsDirAndExternalDataDirWritesWitness pins the
+// writer/guard contract from GH#5682 (bd-xaq3hv): `bd init --server` must leave
+// a .local_version witness on every server-mode workspace it provisions, not
+// only when the Dolt data directory sits directly under .beads (init's
+// useLocalBeads predicate). With BEADS_DIR set explicitly and the data
+// directory elsewhere, init used to succeed without a witness, and once a
+// .beads/dolt root holds anything the legacy guard refuses every later command
+// as a "legacy Dolt server workspace". The workspace directory must already
+// exist: init never creates a provisioner-owned BEADS_DIR just to hold a
+// witness (see TestExternalServerInitLeavesAbsentBeadsDirUntouched).
+func TestServerInitWithExplicitBeadsDirAndExternalDataDirWritesWitness(t *testing.T) {
+	skipIfNoDolt(t)
+	env := externalServerTestEnv(t)
+
+	repoDir := t.TempDir()
+	initGitRepo(t, repoDir)
+	beadsDir := provisionExplicitServerWorkspace(t, repoDir)
+	dataDir := filepath.Join(t.TempDir(), "dolt-data")
+	env = append(env, "BEADS_DIR="+beadsDir, "BEADS_DOLT_DATA_DIR="+dataDir)
+
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	out, err := runExternalServerBD(t, repoDir, env, externalServerInitArgs(database)...)
+	if err != nil {
+		t.Fatalf("bd init --server --external with explicit BEADS_DIR failed: %v\n%s", err, out)
+	}
+	assertCurrentVersionWitness(t, beadsDir)
+	// The witness is the layout change init owes this workspace; it must not
+	// also start owning the provisioner's metadata layout.
+	if _, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json")); statErr == nil {
+		t.Fatalf("bd init created metadata.json in a provisioner-owned explicit workspace")
+	}
+}
+
+// TestExternalServerInitWritesWitnessWhenDataDirSpelledOutsideBeadsDir covers
+// the aliased spelling from GH#5682: the data directory physically resolves to
+// .beads/dolt but is spelled through a symlinked parent, so useLocalBeads is
+// false and the witness write used to be skipped while init still admitted the
+// workspace and created the physical root. The reopen subtest shows the
+// consequence the witness prevents: a local root that later holds anything
+// makes an ordinary command refuse the workspace as legacy.
+func TestExternalServerInitWritesWitnessWhenDataDirSpelledOutsideBeadsDir(t *testing.T) {
+	skipIfNoDolt(t)
+	env := externalServerTestEnv(t)
+
+	repoDir := t.TempDir()
+	initGitRepo(t, repoDir)
+	beadsDir := provisionExplicitServerWorkspace(t, repoDir)
+	alias := aliasRepoThroughParent(t, repoDir)
+	dataDir := filepath.Join(alias, ".beads", "dolt")
+	env = append(env, "BEADS_DIR="+beadsDir, "BEADS_DOLT_DATA_DIR="+dataDir)
+
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	out, err := runExternalServerBD(t, repoDir, env, externalServerInitArgs(database)...)
+	if err != nil {
+		t.Fatalf("bd init --server --external through an aliased data directory failed: %v\n%s", err, out)
+	}
+
+	t.Run("witness", func(t *testing.T) {
+		assertCurrentVersionWitness(t, beadsDir)
+		// The physical root exists, created through the alias; the witness
+		// beside it is what keeps a later non-empty root admissible.
+		if _, statErr := os.Stat(filepath.Join(beadsDir, "dolt")); statErr != nil {
+			t.Errorf("expected the aliased data directory to create the physical dolt root: %v", statErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json")); statErr == nil {
+			t.Errorf("bd init created metadata.json in a provisioner-owned explicit workspace")
+		}
+	})
+}

@@ -2430,8 +2430,20 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Initialize version tracking: create .local_version file during bd init
 		// instead of deferring it to the first bd command.
 		// This ensures no "Version Tracking" warning from bd doctor after init.
-		if useLocalBeads {
-			localVersionPath := filepath.Join(beadsDir, ".local_version")
+		//
+		// Layout ownership does not decide witness provenance (GH#5682): the
+		// legacy guard requires a current-era witness for any server workspace
+		// with a local dolt root, including one whose data directory lives
+		// outside .beads or reaches it through an aliased path, so gating this
+		// write on useLocalBeads left exactly those workspaces without the
+		// witness and refused to every later command. This same invocation has
+		// already admitted the workspace through guardLegacyUpgradeWorkspaceForInit,
+		// so recording the running version here keeps the witness's
+		// provenance rule. A provisioner-owned BEADS_DIR that does not exist
+		// stays absent: init never creates a workspace directory just to hold
+		// a witness.
+		if info, statErr := os.Stat(beadsDir); statErr == nil && info.IsDir() {
+			localVersionPath := filepath.Join(beadsDir, localVersionFile)
 			if err := writeLocalVersion(localVersionPath, Version); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", err)
 				// Non-fatal - initialization still succeeded
