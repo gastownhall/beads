@@ -941,3 +941,99 @@ func TestResolveSweepLiveDependentsBatchesByFrontier(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveSweepLiveDependentsReadFailures(t *testing.T) {
+	graph := func() *scriptedSweepGraph {
+		return &scriptedSweepGraph{
+			incoming: map[string][]*types.Dependency{
+				"r":  {sweepDep("s1", "r")},
+				"s1": {sweepDep("s2", "s1")},
+			},
+			live: map[string]bool{"s2": true},
+		}
+	}
+	for _, test := range []struct {
+		name string
+		// failFetchOn / failScanOn are 1-based call numbers; 0 never fails.
+		failFetchOn int
+		failScanOn  int
+	}{
+		{"first fetch fails", 1, 0},
+		{"second fetch fails", 2, 0},
+		{"first scan fails", 0, 1},
+		{"second scan fails", 0, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			g := graph()
+			innerFetch := g.fetch
+			fetch := innerFetch
+			if test.failFetchOn > 0 {
+				fetch = func(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+					if len(g.fetches) == test.failFetchOn-1 {
+						g.fetches = append(g.fetches, ids)
+						return nil, errors.New("scripted fetch failure")
+					}
+					return innerFetch(ctx, ids)
+				}
+			}
+			innerScan := g.scan
+			scan := innerScan
+			if test.failScanOn > 0 {
+				scan = func(ctx context.Context, ids []string) (map[string]bool, error) {
+					if len(g.scans) == test.failScanOn-1 {
+						g.scans = append(g.scans, ids)
+						return nil, errors.New("scripted scan failure")
+					}
+					return innerScan(ctx, ids)
+				}
+			}
+			protected, err := ResolveSweepLiveDependents(context.Background(), []string{"r"}, fetch, scan)
+			if err == nil {
+				t.Fatalf("ResolveSweepLiveDependents succeeded with protected = %v; "+
+					"want the read failure to fail the whole resolution", protected)
+			}
+			if len(protected) != 0 {
+				t.Errorf("protected = %v; a failed read must return a nil result, "+
+					"not the partial answer read so far", protected)
+			}
+		})
+	}
+
+	t.Run("a canceled context reads nothing", func(t *testing.T) {
+		g := graph()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		protected, err := ResolveSweepLiveDependents(ctx, []string{"r"}, g.fetch, g.scan)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ResolveSweepLiveDependents error = %v; want context.Canceled", err)
+		}
+		if len(protected) != 0 {
+			t.Errorf("protected = %v; want empty", protected)
+		}
+		if len(g.fetches) != 0 || len(g.scans) != 0 {
+			t.Errorf("fetches = %v, scans = %v; a canceled context must read nothing",
+				g.fetches, g.scans)
+		}
+	})
+
+	t.Run("cancellation between rounds returns no partial result", func(t *testing.T) {
+		g := graph()
+		ctx, cancel := context.WithCancel(context.Background())
+		// Cancel after the first round's liveness scan: discovery knows about
+		// s1 but has not yet seen the live s2, exactly the partial state that
+		// must not authorize a deletion.
+		scan := func(c context.Context, ids []string) (map[string]bool, error) {
+			out, err := g.scan(c, ids)
+			cancel()
+			return out, err
+		}
+		protected, err := ResolveSweepLiveDependents(ctx, []string{"r"}, g.fetch, scan)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ResolveSweepLiveDependents error = %v; want context.Canceled before "+
+				"the next round", err)
+		}
+		if len(protected) != 0 {
+			t.Errorf("protected = %v; want empty — s1 was found but the live s2 was not", protected)
+		}
+	})
+}
