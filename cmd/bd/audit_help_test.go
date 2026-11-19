@@ -11,6 +11,11 @@ import (
 func TestAuditHelpDescribesSidecarCoverage(t *testing.T) {
 	t.Parallel()
 	for _, want := range []string{
+		// Both enablement spellings are documented (GH#5787): the config key
+		// its own `bd config set` prescribes, and the env alternative the
+		// gate reads first.
+		"bd config set audit.enabled true",
+		"BD_AUDIT_ENABLED=1",
 		`"field_change" (extra: field, old_value, new_value`,
 		`"claimed" (extra: status, assignee)`,
 		"advisory under concurrency",

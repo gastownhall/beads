@@ -294,9 +294,10 @@ bd audit
   long:
     | Record explicit agent/tool interaction audit entries in .beads/interactions.jsonl.
     |
-    | This optional JSONL sidecar is disabled by default. Enable it with:
+    | This optional JSONL sidecar is disabled by default. Enable it with either:
     |
     |   bd config set audit.enabled true
+    |   BD_AUDIT_ENABLED=1 bd <command> ...
     |
     | Issue history is always recorded in the database and is visible with
     | bd history <id> --events. The JSONL sidecar is for explicit interaction capture:
@@ -925,6 +926,7 @@ bd config
     |   - claim.*           Claim arbitration settings (pool-aware claiming)
     |   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
     |   - lint.*            Additional per-type lint sections (stored in config.yaml)
+    |   - audit.*           Interaction sidecar settings (stored in config.yaml)
     |
     | Auto-Export (config.yaml):
     |   Optional JSONL export to .beads/issues.jsonl after write commands (throttled).
