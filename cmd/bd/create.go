@@ -45,6 +45,22 @@ func validateCreateArgs(cmd *cobra.Command, args []string) error {
 	graphFile, _ := cmd.Flags().GetString("graph")
 	titleFlag, _ := cmd.Flags().GetString("title")
 
+	// GH#5787: `-t` is the short flag for --type, so `bd create --type=bug
+	// -t "a long human title with spaces"` silently rebinds the type to the
+	// intended title and then reports the wrong problem — a missing title.
+	// When the type flag was set to a value that is not a type and no title
+	// was supplied, name the invalid type and where the value went. A
+	// built-in or alias type keeps the plain missing-title error below.
+	if markdownFile == "" && graphFile == "" && titleFlag == "" && len(args) == 0 && cmd.Flags().Changed("type") {
+		typeFlag, _ := cmd.Flags().GetString("type")
+		if !types.IssueType(typeFlag).Normalize().IsBuiltIn() {
+			return HandleError("invalid issue type: %q\n"+
+				"  -t is the short flag for --type, not --title; the value above went to --type\n"+
+				"  a title is missing; pass it positionally or with --title (or use --file to create from markdown)",
+				typeFlag)
+		}
+	}
+
 	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
 	return err
 }

@@ -714,6 +714,7 @@ go_test(
         "create_routing_test.go",
         "create_test.go",
         "create_timestamp_precision_embedded_test.go",
+        "create_type_hint_test.go",
         "critical_paths_test.go",
         "cross_mode_parity_harness_test.go",
         "cursor_hook_test.go",
