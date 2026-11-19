@@ -11,7 +11,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -226,47 +225,56 @@ func runUnrelate(cmd *cobra.Command, args []string) error {
 		return runUnrelateProxiedServer(ctx, args)
 	}
 
-	// Resolve partial IDs
-	var id1, id2 string
-	var err error
-	id1, err = utils.ResolvePartialID(ctx, store, args[0])
+	id1, id2, store1, store2, cleanup, err := resolveRelateEndpoints(ctx, args)
 	if err != nil {
-		return fmt.Errorf("failed to resolve %s: %w", args[0], err)
+		return err
 	}
-	id2, err = utils.ResolvePartialID(ctx, store, args[1])
+	defer cleanup()
+
+	opsCtx, err := issueOpsContext(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to resolve %s: %w", args[1], err)
+		return fmt.Errorf("%w", err)
 	}
 
-	// Get both issues
-	var issue1, issue2 *types.Issue
-	issue1, err = store.GetIssue(ctx, id1)
-	if err != nil {
-		return fmt.Errorf("failed to get issue %s: %w", id1, err)
-	}
-	issue2, err = store.GetIssue(ctx, id2)
-	if err != nil {
-		return fmt.Errorf("failed to get issue %s: %w", id2, err)
+	// Same destination-deduplication as relate: one destination keeps the
+	// single-store remove behavior.
+	oneDestination := dependencyStoreKey(store1) == dependencyStoreKey(store2)
+
+	edge1 := relateHalf{from: id1, to: id2, st: store1}
+	edge2 := relateHalf{from: id2, to: id1, st: store1}
+	if !oneDestination {
+		edge2.st = store2
 	}
 
-	if issue1 == nil {
-		return fmt.Errorf("issue not found: %s", id1)
-	}
-	if issue2 == nil {
-		return fmt.Errorf("issue not found: %s", id2)
-	}
-
-	// Remove relates-to dependency in both directions
-	// Per Decision 004, relates-to links are now stored in dependencies table.
-	// bd unrelate is an explicit dependency verb, so it records history
-	// (EmitEvent) like bd dep remove; only structural teardown stays silent.
-	// Remove id1 -> id2
-	if err := store.RemoveDependencyWithOptions(ctx, id1, id2, currentActor(), storage.DependencyRemoveOptions{EmitEvent: true}); err != nil {
+	// Remove id1 -> id2, in id1's store.
+	if err := edge1.remove(opsCtx); err != nil {
 		return fmt.Errorf("failed to remove relates-to %s -> %s: %w", id1, id2, err)
 	}
-	// Remove id2 -> id1 (bidirectional)
-	if err := store.RemoveDependencyWithOptions(ctx, id2, id1, currentActor(), storage.DependencyRemoveOptions{EmitEvent: true}); err != nil {
+
+	if !oneDestination && edge2.st != store1 {
+		if err := commitPendingIfEmbedded(ctx, store1, currentActor(), doltAutoCommitParams{
+			Command:  "unrelate",
+			IssueIDs: []string{id1, id2},
+		}); err != nil {
+			return fmt.Errorf("failed to commit removal of relates-to %s -> %s; the reverse edge %s -> %s was not removed — rerun `bd unrelate %s %s` to retry: %w",
+				id1, id2, id2, id1, args[0], args[1], err)
+		}
+	}
+
+	// Remove id2 -> id1, in id2's store.
+	if err := edge2.remove(opsCtx); err != nil {
+		if !oneDestination {
+			return fmt.Errorf("relates-to %s -> %s was removed in its source store, but removing the reverse edge %s -> %s failed — rerun `bd unrelate %s %s` to retry: %w",
+				id1, id2, id2, id1, args[0], args[1], err)
+		}
 		return fmt.Errorf("failed to remove relates-to %s -> %s: %w", id2, id1, err)
+	}
+
+	if err := commitPendingIfEmbedded(ctx, edge2.st, currentActor(), doltAutoCommitParams{
+		Command:  "unrelate",
+		IssueIDs: []string{id1, id2},
+	}); err != nil {
+		return fmt.Errorf("failed to commit: %v", err)
 	}
 
 	if jsonOutput {

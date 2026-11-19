@@ -467,3 +467,60 @@ func TestRelateCrossPrefixWritesEachHalfInItsSourceRig(t *testing.T) {
 	assertRelatesToEdge(t, e.ctx, rigRO, "gt-target1", "hq-src1")
 	assertDependencyEvent(t, e.ctx, rigRO, "gt-target1", types.EventDependencyAdded)
 }
+
+// TestUnrelateCrossPrefixRemovesBothHalves pins AC-2: unrelating a cross-rig
+// linked pair removes BOTH stores' halves and records a dependency_removed
+// event per source. The pair is seeded through the raw dependency verbs (not
+// bd relate) so this test fails on the base for its own reason — the
+// unresolvable-to-base removal — rather than inheriting relate's.
+//
+// This test uses os.Chdir and assigns the CLI globals, so it cannot run in
+// parallel with other tests.
+func TestUnrelateCrossPrefixRemovesBothHalves(t *testing.T) {
+	e := setupCrossPrefixRelateEnv(t)
+
+	// Seed both halves before the rig store is released to routing. The
+	// fixture already closed the rig store, so reopen it read-write through
+	// the same store factory just long enough to write the edge.
+	rigRW := openRigWritable(t, e.rigBeadsDir)
+	seedRelatesToEdge(t, e.ctx, e.townStore, "hq-src1", "gt-target1")
+	seedRelatesToEdge(t, e.ctx, rigRW, "gt-target1", "hq-src1")
+	rigRW.Close()
+
+	if err := runUnrelate(unrelateCmd, []string{"hq-src1", "gt-target1"}); err != nil {
+		t.Fatalf("bd unrelate hq-src1 gt-target1: %v", err)
+	}
+
+	townRO := e.reopenTownReadonly(t)
+	assertNoRelatesToEdge(t, e.ctx, townRO, "hq-src1", "gt-target1")
+	assertDependencyEvent(t, e.ctx, townRO, "hq-src1", types.EventDependencyRemoved)
+
+	rigRO := e.openRigReadonly(t, "gt-target1")
+	assertNoRelatesToEdge(t, e.ctx, rigRO, "gt-target1", "hq-src1")
+	assertDependencyEvent(t, e.ctx, rigRO, "gt-target1", types.EventDependencyRemoved)
+}
+
+// openRigWritable opens the rig's .beads directory for a seeded write. The
+// production relate background is the writable prefix-route open; the seeded
+// test uses the same factory so it never routes.
+func openRigWritable(t *testing.T, rigBeadsDir string) storage.DoltStorage {
+	t.Helper()
+	st, err := openForeignStore(context.Background(), rigBeadsDir, foreignWrite)
+	if err != nil {
+		t.Fatalf("open rig store writable: %v", err)
+	}
+	return st
+}
+
+// seedRelatesToEdge stores a relates-to edge through the raw dependency verb,
+// recording its dependency_added event like the explicit verbs do.
+func seedRelatesToEdge(t *testing.T, ctx context.Context, st storage.DoltStorage, from, to string) {
+	t.Helper()
+	if err := st.AddDependencyWithOptions(ctx, &types.Dependency{
+		IssueID:     from,
+		DependsOnID: to,
+		Type:        types.DepRelatesTo,
+	}, "seed", storage.DependencyAddOptions{EmitEvent: true}); err != nil {
+		t.Fatalf("seed relates-to %s -> %s: %v", from, to, err)
+	}
+}
