@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -354,7 +355,7 @@ var createCmd = &cobra.Command{
 			repoPath = routing.DetermineTargetRepo(routingConfig, userRole, ".")
 		}
 
-		renderDryRun := func() error {
+		renderDryRun := func(vocab createPreviewVocabulary) error {
 			previewIssue := buildCreateIssue(createIssueParams{
 				ID:                 explicitID,
 				Title:              title,
@@ -386,6 +387,13 @@ var createCmd = &cobra.Command{
 				Payload:            eventPayload,
 			})
 
+			// The preview passes the insert validation the real create runs,
+			// against the destination's vocabulary: a dry run never shows an
+			// issue the create would refuse (GH#5787 issue 2).
+			if err := validateCreatePreviewIssue(previewIssue, vocab); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+
 			if jsonOutput {
 				return outputJSON(previewIssue)
 			}
@@ -406,7 +414,14 @@ var createCmd = &cobra.Command{
 			if targetBeadsDir, err := checkRepoTargetInitializable(repoPath, allowCreate); err != nil {
 				return handleRepoTargetInitError(targetBeadsDir, err)
 			}
-			return renderDryRun()
+			vocab, openedVocabStore, err := resolveCreatePreviewVocabulary(rootCtx, repoPath, issueType, statusFlag, nil)
+			if err != nil {
+				return handleDryRunVocabError(err, repoPath)
+			}
+			if openedVocabStore != nil {
+				defer func() { _ = openedVocabStore.Close() }()
+			}
+			return renderDryRun(vocab)
 		}
 
 		var targetStore storage.DoltStorage
@@ -506,7 +521,11 @@ var createCmd = &cobra.Command{
 				}
 				labels = mergeCreateLabels(labels, inherited)
 			}
-			return renderDryRun()
+			vocab, _, err := resolveCreatePreviewVocabulary(rootCtx, repoPath, issueType, statusFlag, parentLookupStore)
+			if err != nil {
+				return handleDryRunVocabError(err, repoPath)
+			}
+			return renderDryRun(vocab)
 		}
 
 		// Parse every requested dependency edge BEFORE reserving a child ID
@@ -1004,6 +1023,22 @@ func init() {
 	rootCmd.AddCommand(createCmd)
 }
 
+// handleDryRunVocabError reports a preview-vocabulary resolution failure the
+// way its route already reports target failures: a local preview's lookup is
+// its own workspace's and renders plainly, a routed preview's names the
+// target it could not read (or refuses to initialize) the way its other
+// target errors do.
+func handleDryRunVocabError(err error, repoPath string) error {
+	if repoPath == "." {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	targetPath := repoPath
+	if !remotecache.IsRemoteURL(repoPath) {
+		targetPath = filepath.Join(routing.ExpandPath(repoPath), ".beads")
+	}
+	return handleCreateTargetStoreError(err, targetPath, "%v")
+}
+
 // handleCreateTargetStoreError preserves the existing text path for ordinary
 // store failures while rendering capability refusals as typed JSON when asked,
 // and a target bd's admission refuses as a legacy layout, or that
@@ -1040,6 +1075,91 @@ func formatTimeForRPC(t *time.Time) string {
 		return ""
 	}
 	return t.Format(time.RFC3339)
+}
+
+// createPreviewVocabulary is the type/status vocabulary a single-issue
+// dry-run preview validates against: the destination's, never the source
+// workspace's.
+type createPreviewVocabulary struct {
+	customTypes    []string
+	customStatuses []string
+}
+
+// validateCreatePreviewIssue runs the insert validation the real create runs
+// on a shallow copy of the preview issue, so a dry run never previews an
+// issue the create would refuse — the same type/status/metadata/field rules,
+// without the transactional ID or dependency checks the real create owns.
+// The copy keeps the caller's issue untouched: a preview renders, it does
+// not normalize. (PrepareIssueForInsert replaces pointer fields on the copy
+// rather than mutating through them, so a shallow copy is enough.)
+func validateCreatePreviewIssue(issue *types.Issue, vocab createPreviewVocabulary) error {
+	previewCopy := *issue
+	return storageissueops.PrepareIssueForInsert(&previewCopy, vocab.customStatuses, vocab.customTypes)
+}
+
+// previewNeedsDestinationVocabulary reports whether a routed preview's
+// requested type or status can only be judged by the destination's
+// vocabulary: a value that is not built-in may be a custom type or status
+// registered there. Built-in values need no lookup, which keeps built-in
+// no-parent previews of uninitialized targets store-free.
+func previewNeedsDestinationVocabulary(typeFlag, statusFlag string) bool {
+	if !types.IssueType(typeFlag).Normalize().IsBuiltIn() {
+		return true
+	}
+	return statusFlag != "" && !types.Status(statusFlag).IsValid()
+}
+
+// resolveCreatePreviewVocabulary resolves the vocabulary a single-issue
+// dry-run preview validates against. A local preview uses its own
+// workspace: the same type composition `bd types` reports (YAML fallback when
+// no store is open) and the same store-only custom statuses single-issue
+// create enforces. A routed preview uses the destination's: it reuses an
+// already-open parent-lookup store when the caller supplies one, and opens
+// the non-mutating preview store (openDryRunTargetStore) only when a
+// non-built-in type or status needs the destination's vocabulary. The
+// returned opened store, when non-nil, was opened here and the caller must
+// close it; lookup failures are returned, never warn-and-accepted.
+func resolveCreatePreviewVocabulary(ctx context.Context, repoPath, typeFlag, statusFlag string, routedLookupStore storage.DoltStorage) (createPreviewVocabulary, storage.DoltStorage, error) {
+	if repoPath == "." {
+		customTypes, err := resolveWorkspaceCustomTypes(ctx)
+		if err != nil {
+			return createPreviewVocabulary{}, nil, err
+		}
+		return createPreviewVocabulary{customTypes: customTypes, customStatuses: loadEmbeddedCustomStatuses()}, nil, nil
+	}
+
+	lookupStore := routedLookupStore
+	opened := false
+	if lookupStore == nil {
+		if !previewNeedsDestinationVocabulary(typeFlag, statusFlag) {
+			return createPreviewVocabulary{}, nil, nil
+		}
+		var err error
+		lookupStore, err = openDryRunTargetStore(ctx, repoPath)
+		if err != nil {
+			return createPreviewVocabulary{}, nil, err
+		}
+		opened = true
+	}
+	customTypes, err := lookupStore.GetCustomTypes(ctx)
+	if err != nil {
+		if opened {
+			_ = lookupStore.Close()
+		}
+		return createPreviewVocabulary{}, nil, fmt.Errorf("reading target custom types: %w", err)
+	}
+	customStatuses, err := lookupStore.GetCustomStatuses(ctx)
+	if err != nil {
+		if opened {
+			_ = lookupStore.Close()
+		}
+		return createPreviewVocabulary{}, nil, fmt.Errorf("reading target custom statuses: %w", err)
+	}
+	var openedStore storage.DoltStorage
+	if opened {
+		openedStore = lookupStore
+	}
+	return createPreviewVocabulary{customTypes: customTypes, customStatuses: customStatuses}, openedStore, nil
 }
 
 // openDryRunTargetStore opens the store a `create --dry-run --repo <other>`

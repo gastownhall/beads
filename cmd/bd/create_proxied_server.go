@@ -60,12 +60,16 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		if uowProvider == nil {
 			return HandleError("proxied-server UOW provider not initialized")
 		}
+		// One read-only unit of work answers everything the preview needs —
+		// the create context's vocabulary, the parent lookup and the labels
+		// the real create would inherit — the same dry UOW pattern the graph
+		// preview uses (below). It is closed without commit on every path.
+		dryUW, err := uowProvider.NewUOW(ctx)
+		if err != nil {
+			return HandleError("open unit of work: %v", err)
+		}
 		previewLabels := in.labels
 		if in.parentID != "" {
-			dryUW, err := uowProvider.NewUOW(ctx)
-			if err != nil {
-				return HandleError("open unit of work: %v", err)
-			}
 			if _, err := dryUW.IssueUseCase().GetIssue(ctx, in.parentID); err != nil {
 				dryUW.Close(ctx)
 				return HandleError("parent issue %s not found: %v", in.parentID, err)
@@ -85,9 +89,24 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 				}
 				previewLabels = mergeCreateLabels(in.labels, inherited)
 			}
+		}
+		cctx, cerr := dryUW.ConfigUseCase().LoadCreateContext(ctx)
+		if cerr != nil {
 			dryUW.Close(ctx)
+			return HandleError("load create context: %v", cerr)
 		}
 		previewIssue := buildCreateIssueFromInput(in)
+		// The preview passes the insert validation the real create runs,
+		// against the create context's vocabulary (GH#5787 issue 2). Statuses
+		// stay store-only, the same rule validateProxiedGraphPlan applies.
+		if verr := validateCreatePreviewIssue(previewIssue, createPreviewVocabulary{
+			customTypes:    cctx.CustomTypes,
+			customStatuses: types.CustomStatusNames(cctx.CustomStatuses),
+		}); verr != nil {
+			dryUW.Close(ctx)
+			return HandleErrorRespectJSON("%v", verr)
+		}
+		dryUW.Close(ctx)
 		if in.jsonOutput {
 			if err := outputJSON(previewIssue); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)

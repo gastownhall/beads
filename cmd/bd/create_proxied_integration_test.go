@@ -212,6 +212,36 @@ func TestProxiedServerCreate2B(t *testing.T) {
 		}
 	})
 
+	t.Run("dry_run_rejects_invalid_type", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dt")
+		for _, mode := range []string{"text", "json"} {
+			args := []string{"create", "--dry-run", "--title", "PROBE", "--type", "a long human title with spaces"}
+			if mode == "json" {
+				args = append(args, "--json")
+			}
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			if err == nil {
+				t.Fatalf("%s dry-run accepted a type the real create rejects; stdout:\n%s stderr:\n%s", mode, stdout, stderr)
+			}
+			combined := stdout + stderr
+			if !strings.Contains(combined, "invalid issue type") {
+				t.Fatalf("%s dry-run error should name the invalid type; got:\n%s", mode, combined)
+			}
+			if strings.Contains(combined, "Would create issue") || strings.Contains(combined, "PROBE") {
+				t.Fatalf("%s dry-run must emit no preview; got:\n%s", mode, combined)
+			}
+		}
+		db := openProxiedDB(t, p)
+		var count int
+		if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+			t.Fatalf("query issues: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("expected the refused dry-run to persist nothing, found %d issues", count)
+		}
+	})
+
 	t.Run("skills_and_context", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sc")
