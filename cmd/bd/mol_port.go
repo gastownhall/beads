@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -28,6 +29,10 @@ type molReader interface {
 	GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
 	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	// GetDependentRecordsForIssues is the target-keyed mirror of
+	// GetDependencyRecordsForIssues: each target's inbound edges (the rows
+	// that depend on it), from both dependency planes.
+	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error)
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error)
@@ -148,6 +153,15 @@ func (r uowMolReader) GetIssuesByIDs(ctx context.Context, ids []string) ([]*type
 
 	wisps, err := r.uw.IssueUseCase().GetWispsByIDs(ctx, ids)
 	if err != nil {
+		// Only a missing wisps table means no wisps, as in
+		// GetDependentRecordsForIssues below. Any other failure is returned,
+		// as the direct route's by-id read returns it: `bd mol wisp gc
+		// --closed` reads the newer wisps that hold older ones back through
+		// this port, and a failure taken for "no such wisp" would drop the
+		// hold and let --force delete what they depend on.
+		if !dberrors.IsTableNotExist(err) {
+			return nil, fmt.Errorf("loading wisps by id: %w", err)
+		}
 		wisps = nil //nolint:staticcheck // wisps table may not exist; issues result still valid
 	}
 	if len(wisps) > 0 {
@@ -197,6 +211,37 @@ func (r uowMolReader) GetDependencyRecords(ctx context.Context, issueID string) 
 
 func (r uowMolReader) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
 	return r.uw.DependencyUseCase().GetForIssueIDs(ctx, issueIDs)
+}
+
+// GetDependentRecordsForIssues reads both planes whatever plane a target is
+// in: an edge lives in its SOURCE's table, so a wisp's dependents are rows in
+// dependencies (durable sources) and in wisp_dependencies (wisp sources). A
+// rig without the wisp tables has no wisp dependents, as GetForIssueIDs
+// reads it.
+func (r uowMolReader) GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
+	out := make(map[string][]*types.Dependency)
+	if len(targetIDs) == 0 {
+		return out, nil
+	}
+	inbound := domain.DepListFilter{Direction: domain.DepDirectionIn}
+	durable, err := r.uw.DependencyUseCase().ListByIssueIDs(ctx, targetIDs, inbound)
+	if err != nil {
+		return nil, err
+	}
+	for id, deps := range durable.Incoming {
+		out[id] = append(out[id], deps...)
+	}
+	wisp, err := r.uw.DependencyUseCase().ListByWispIDs(ctx, targetIDs, inbound)
+	if err != nil {
+		if dberrors.IsTableNotExist(err) {
+			return out, nil
+		}
+		return nil, err
+	}
+	for id, deps := range wisp.Incoming {
+		out[id] = append(out[id], deps...)
+	}
+	return out, nil
 }
 
 func (r uowMolReader) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {

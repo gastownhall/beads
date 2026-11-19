@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -358,35 +359,146 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 	})
 
-	t.Run("closed_force_purges_regardless_of_age", func(t *testing.T) {
+	// GH#8202: closed GC honors --age (default 1h). A wisp closed moments
+	// ago survives the default run, one idle past the threshold goes, and
+	// --age 0s purges the just-closed one too.
+	t.Run("closed_force_honors_age", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "wgcl")
 		closedWisp := bdProxiedCreate(t, bd, p.dir, "Just-closed wisp", "--ephemeral")
-		if out, err := bdProxiedRun(t, bd, p.dir, "close", closedWisp.ID); err != nil {
-			t.Fatalf("bd close: %v\n%s", err, out)
+		agedWisp := bdProxiedCreate(t, bd, p.dir, "Long-closed wisp", "--ephemeral")
+		for _, id := range []string{closedWisp.ID, agedWisp.ID} {
+			if out, err := bdProxiedRun(t, bd, p.dir, "close", id); err != nil {
+				t.Fatalf("bd close %s: %v\n%s", id, err, out)
+			}
+		}
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec("UPDATE wisps SET updated_at = ? WHERE id = ?", time.Now().UTC().Add(-2*time.Hour), agedWisp.ID); err != nil {
+			t.Fatalf("backdate wisp: %v", err)
+		}
+		wispRows := func(id string) int {
+			t.Helper()
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&count); err != nil {
+				t.Fatalf("query wisps: %v", err)
+			}
+			return count
+		}
+		gcDeleted := func(args ...string) int {
+			t.Helper()
+			args = append([]string{"mol", "wisp", "gc", "--closed", "--force", "--json"}, args...)
+			out, err := bdProxiedRun(t, bd, p.dir, args...)
+			if err != nil {
+				t.Fatalf("bd %v: %v\n%s", args, err, out)
+			}
+			var got struct {
+				DeletedCount int `json:"deleted_count"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("unmarshal: %v\n%s", err, out)
+			}
+			return got.DeletedCount
 		}
 
-		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
+		if got := gcDeleted(); got != 1 {
+			t.Errorf("default run deleted_count = %d, want 1 (only the wisp idle past 1h)", got)
+		}
+		if wispRows(agedWisp.ID) != 0 {
+			t.Errorf("expected long-closed wisp %s purged", agedWisp.ID)
+		}
+		if wispRows(closedWisp.ID) != 1 {
+			t.Fatalf("default run purged wisp %s closed moments ago", closedWisp.ID)
+		}
+
+		if got := gcDeleted("--age", "0s"); got != 1 {
+			t.Errorf("--age 0s deleted_count = %d, want 1", got)
+		}
+		if wispRows(closedWisp.ID) != 0 {
+			t.Errorf("expected --age 0s to purge just-closed wisp %s", closedWisp.ID)
+		}
+	})
+
+	// GH#8202: a closed wisp that a kept, newer one depends on stays with it.
+	// The first step closed hours ago and the second, which depends on it,
+	// moments ago: the preview counts only an unrelated idle wisp, --force
+	// deletes only that one, and once the second step ages out too the two
+	// go together.
+	t.Run("closed_keeps_what_newer_wisps_depend_on", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgch")
+		first := bdProxiedCreate(t, bd, p.dir, "First step", "--ephemeral")
+		second := bdProxiedCreate(t, bd, p.dir, "Second step", "--ephemeral")
+		idle := bdProxiedCreate(t, bd, p.dir, "Unrelated idle wisp", "--ephemeral")
+		for _, id := range []string{first.ID, second.ID, idle.ID} {
+			if out, err := bdProxiedRun(t, bd, p.dir, "close", id); err != nil {
+				t.Fatalf("bd close %s: %v\n%s", id, err, out)
+			}
+		}
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec(
+			"INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, NOW(), 'test')",
+			second.ID, first.ID, "blocks"); err != nil {
+			t.Fatalf("plant second->first wisp edge: %v", err)
+		}
+		backdate := func(ids ...string) {
+			t.Helper()
+			for _, id := range ids {
+				if _, err := db.Exec("UPDATE wisps SET updated_at = ? WHERE id = ?", time.Now().UTC().Add(-2*time.Hour), id); err != nil {
+					t.Fatalf("backdate wisp %s: %v", id, err)
+				}
+			}
+		}
+		wispRows := func(id string) int {
+			t.Helper()
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&count); err != nil {
+				t.Fatalf("query wisps: %v", err)
+			}
+			return count
+		}
+		gcForceDeleted := func() []string {
+			t.Helper()
+			out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
+			if err != nil {
+				t.Fatalf("bd mol wisp gc --closed --force --json: %v\n%s", err, out)
+			}
+			var got struct {
+				Deleted []string `json:"deleted"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("unmarshal: %v\n%s", err, out)
+			}
+			slices.Sort(got.Deleted)
+			return got.Deleted
+		}
+		backdate(first.ID, idle.ID)
+
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--dry-run", "--json")
 		if err != nil {
-			t.Fatalf("bd mol wisp gc --closed --force --json: %v\n%s", err, out)
+			t.Fatalf("bd mol wisp gc --closed --dry-run --json: %v\n%s", err, out)
 		}
-		var got struct {
-			DeletedCount int `json:"deleted_count"`
+		var preview struct {
+			Candidates int `json:"candidates"`
 		}
-		if err := json.Unmarshal(out, &got); err != nil {
+		if err := json.Unmarshal(out, &preview); err != nil {
 			t.Fatalf("unmarshal: %v\n%s", err, out)
 		}
-		if got.DeletedCount != 1 {
-			t.Errorf("deleted_count = %d, want 1", got.DeletedCount)
+		if preview.Candidates != 1 {
+			t.Errorf("dry run candidates = %d, want 1 (the idle wisp alone)\n%s", preview.Candidates, out)
 		}
 
-		db := openProxiedDB(t, p)
-		var count int
-		if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", closedWisp.ID).Scan(&count); err != nil {
-			t.Fatalf("query wisps: %v", err)
+		if got := gcForceDeleted(); !slices.Equal(got, []string{idle.ID}) {
+			t.Errorf("--force deleted %v, want only the idle wisp %s", got, idle.ID)
 		}
-		if count != 0 {
-			t.Errorf("expected closed wisp %s purged", closedWisp.ID)
+		if wispRows(first.ID) != 1 || wispRows(second.ID) != 1 {
+			t.Fatalf("--force purged a step of a molecule whose second step closed moments ago")
+		}
+
+		backdate(second.ID)
+		want := []string{first.ID, second.ID}
+		slices.Sort(want)
+		if got := gcForceDeleted(); !slices.Equal(got, want) {
+			t.Errorf("--force after the second step aged out deleted %v, want %v", got, want)
 		}
 	})
 }

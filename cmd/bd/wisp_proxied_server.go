@@ -133,7 +133,7 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 	}
 
 	if closedMode {
-		return runWispPurgeClosedProxiedServer(ctx, dryRun, force, excludeTypes)
+		return runWispPurgeClosedProxiedServer(ctx, dryRun, force, excludeTypes, ageThreshold)
 	}
 
 	uw, err := proxiedOpenReadUOW(ctx)
@@ -227,44 +227,20 @@ func renderWispGCDeleteResult(ids []string, res domain.DeleteIssuesResult) error
 	return nil
 }
 
-func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, excludeTypes []types.IssueType) error {
+func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, excludeTypes []types.IssueType, ageThreshold time.Duration) error {
 	uw, err := proxiedOpenReadUOW(ctx)
 	if err != nil {
 		return err
 	}
-	r := uowMolReader{uw: uw}
-
-	statusClosed := types.StatusClosed
-	ephemeralTrue := true
-	filter := types.IssueFilter{
-		Status:       &statusClosed,
-		Ephemeral:    &ephemeralTrue,
-		ExcludeTypes: excludeTypes,
-		Limit:        wispPurgeScanLimit,
-	}
-	closedIssues, err := r.SearchIssues(ctx, "", filter)
+	// The same selection as the direct route (selectClosedWispsForPurge):
+	// one age bound, one pinned and infra protection, on either route.
+	sel, err := selectClosedWispsForPurge(ctx, uowMolReader{uw: uw}, ageThreshold, excludeTypes)
+	uw.Close(ctx)
 	if err != nil {
-		uw.Close(ctx)
 		return HandleError("listing closed wisps: %v", err)
 	}
-	scanCapped := len(closedIssues) >= wispPurgeScanLimit
-
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	closedIssues = filtered
-	uw.Close(ctx)
+	closedIssues, scanCapped := sel.candidates, sel.scanCapped
+	pinnedCount, infraCount := sel.pinned, sel.infra
 
 	if pinnedCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
@@ -272,6 +248,7 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	if infraCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
 	}
+	printClosedWispAgeNote(ageThreshold, sel.heldBack)
 
 	if len(closedIssues) == 0 {
 		return renderNoClosedWisps(force && !dryRun && scanCapped)
