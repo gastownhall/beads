@@ -61,6 +61,12 @@ Formulas are high-level workflow templates that support:
   - Composition rules for bonding formulas together
   - Inheritance via extends
 
+Cooked formulas are bounded: one resolution may not expand past
+10000 steps, counted across every transformation together (loop
+iterations, advice insertions, inline and compose expansions). A
+formula that legitimately needs more steps has to be split into
+several formulas.
+
 The --persist flag enables the legacy behavior of writing the proto
 to the database. This is useful when you want to reuse the same
 proto multiple times without re-cooking.
@@ -174,34 +180,43 @@ func loadAndResolveFormula(formulaPath string, searchPaths []string) (*formula.F
 		return nil, fmt.Errorf("resolving formula: %w", err)
 	}
 
+	// One budget bounds every transformation of this resolution together:
+	// loops, advice, inline and compose expansions share the same
+	// formula.MaxExpandedSteps limit, so none of them can multiply the
+	// graph past it on its own (bd-xx3ma9).
+	budget := formula.NewStepBudget()
+	if err := budget.Seed(resolved.Steps); err != nil {
+		return nil, fmt.Errorf("formula %q: %w", resolved.Formula, err)
+	}
+
 	// Apply control flow operators - loops, branches, gates
-	controlFlowSteps, err := formula.ApplyControlFlow(resolved.Steps, resolved.Compose)
+	controlFlowSteps, err := formula.ApplyControlFlowWithBudget(resolved.Steps, resolved.Compose, budget)
 	if err != nil {
-		return nil, fmt.Errorf("applying control flow: %w", err)
+		return nil, fmt.Errorf("applying control flow to %q: %w", resolved.Formula, err)
 	}
 	resolved.Steps = controlFlowSteps
 
 	// Apply advice transformations
 	if len(resolved.Advice) > 0 {
-		advisedSteps, err := formula.ApplyAdvice(resolved.Steps, resolved.Advice)
+		advisedSteps, err := formula.ApplyAdviceWithBudget(resolved.Steps, resolved.Advice, budget)
 		if err != nil {
-			return nil, fmt.Errorf("applying advice: %w", err)
+			return nil, fmt.Errorf("applying advice to %q: %w", resolved.Formula, err)
 		}
 		resolved.Steps = advisedSteps
 	}
 
 	// Apply inline step expansions
-	inlineExpandedSteps, err := formula.ApplyInlineExpansions(resolved.Steps, parser)
+	inlineExpandedSteps, err := formula.ApplyInlineExpansionsWithBudget(resolved.Steps, parser, budget)
 	if err != nil {
-		return nil, fmt.Errorf("applying inline expansions: %w", err)
+		return nil, fmt.Errorf("applying inline expansions to %q: %w", resolved.Formula, err)
 	}
 	resolved.Steps = inlineExpandedSteps
 
 	// Apply expansion operators
 	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
-		expandedSteps, err := formula.ApplyExpansions(resolved.Steps, resolved.Compose, parser)
+		expandedSteps, err := formula.ApplyExpansionsWithBudget(resolved.Steps, resolved.Compose, parser, budget)
 		if err != nil {
-			return nil, fmt.Errorf("applying expansions: %w", err)
+			return nil, fmt.Errorf("applying expansions to %q: %w", resolved.Formula, err)
 		}
 		resolved.Steps = expandedSteps
 	}
@@ -217,9 +232,9 @@ func loadAndResolveFormula(formulaPath string, searchPaths []string) (*formula.F
 				return nil, fmt.Errorf("%q is not an aspect formula (type=%s)", aspectName, aspectFormula.Type)
 			}
 			if len(aspectFormula.Advice) > 0 {
-				advisedSteps, err := formula.ApplyAdvice(resolved.Steps, aspectFormula.Advice)
+				advisedSteps, err := formula.ApplyAdviceWithBudget(resolved.Steps, aspectFormula.Advice, budget)
 				if err != nil {
-					return nil, fmt.Errorf("applying aspect %q advice: %w", aspectName, err)
+					return nil, fmt.Errorf("applying aspect %q advice to %q: %w", aspectName, resolved.Formula, err)
 				}
 				resolved.Steps = advisedSteps
 			}
@@ -779,8 +794,18 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 		}
 	}
 
+	// One budget bounds every transformation of this pour together: loops,
+	// advice, inline and compose expansions, and the standalone template
+	// materialization below share the same formula.MaxExpandedSteps limit,
+	// so none of them can multiply the graph past it on its own
+	// (bd-xx3ma9).
+	budget := formula.NewStepBudget()
+	if err := budget.Seed(resolved.Steps); err != nil {
+		return nil, fmt.Errorf("formula %q: %w", formulaName, err)
+	}
+
 	// Apply control flow operators - loops, branches, gates
-	controlFlowSteps, err := formula.ApplyControlFlow(resolved.Steps, resolved.Compose)
+	controlFlowSteps, err := formula.ApplyControlFlowWithBudget(resolved.Steps, resolved.Compose, budget)
 	if err != nil {
 		return nil, fmt.Errorf("applying control flow to %q: %w", formulaName, err)
 	}
@@ -788,15 +813,15 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 
 	// Apply advice transformations
 	if len(resolved.Advice) > 0 {
-		advisedSteps, err := formula.ApplyAdvice(resolved.Steps, resolved.Advice)
+		advisedSteps, err := formula.ApplyAdviceWithBudget(resolved.Steps, resolved.Advice, budget)
 		if err != nil {
-			return nil, fmt.Errorf("applying advice: %w", err)
+			return nil, fmt.Errorf("applying advice to %q: %w", formulaName, err)
 		}
 		resolved.Steps = advisedSteps
 	}
 
 	// Apply inline step expansions
-	inlineExpandedSteps, err := formula.ApplyInlineExpansions(resolved.Steps, parser)
+	inlineExpandedSteps, err := formula.ApplyInlineExpansionsWithBudget(resolved.Steps, parser, budget)
 	if err != nil {
 		return nil, fmt.Errorf("applying inline expansions to %q: %w", formulaName, err)
 	}
@@ -804,7 +829,7 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 
 	// Apply expansion operators
 	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
-		expandedSteps, err := formula.ApplyExpansions(resolved.Steps, resolved.Compose, parser)
+		expandedSteps, err := formula.ApplyExpansionsWithBudget(resolved.Steps, resolved.Compose, parser, budget)
 		if err != nil {
 			return nil, fmt.Errorf("applying expansions to %q: %w", formulaName, err)
 		}
@@ -822,9 +847,9 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 				return nil, fmt.Errorf("%q is not an aspect formula (type=%s)", aspectName, aspectFormula.Type)
 			}
 			if len(aspectFormula.Advice) > 0 {
-				advisedSteps, err := formula.ApplyAdvice(resolved.Steps, aspectFormula.Advice)
+				advisedSteps, err := formula.ApplyAdviceWithBudget(resolved.Steps, aspectFormula.Advice, budget)
 				if err != nil {
-					return nil, fmt.Errorf("applying aspect %q advice: %w", aspectName, err)
+					return nil, fmt.Errorf("applying aspect %q advice to %q: %w", aspectName, resolved.Formula, err)
 				}
 				resolved.Steps = advisedSteps
 			}
@@ -863,6 +888,10 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 		if err != nil {
 			return nil, fmt.Errorf("filtering steps by condition: %w", err)
 		}
+		// The filter only removes steps this pour no longer stands for;
+		// release what left so the materialization below is charged against
+		// what remains, not against steps already gone.
+		budget.Release(formula.CountGraphSteps(resolved.Steps) - formula.CountGraphSteps(filteredSteps))
 		resolved.Steps = filteredSteps
 	}
 
@@ -882,7 +911,7 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 				expansionVars[k] = v
 			}
 		}
-		if err := formula.MaterializeExpansion(resolved, expansionTarget, expansionVars); err != nil {
+		if err := formula.MaterializeExpansionWithBudget(resolved, expansionTarget, expansionVars, budget); err != nil {
 			return nil, fmt.Errorf("standalone expansion %q: %w", formulaName, err)
 		}
 	}

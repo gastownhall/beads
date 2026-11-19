@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2209,4 +2210,110 @@ gate = { type = "human" }
 			t.Errorf("land blocks edges = %v, want %v (the loop's exit-gate task and its companion)", got, want)
 		}
 	})
+}
+
+// bd-xx3ma9 (#7882): both cook boundaries refuse a formula whose loops expand
+// past the step limit with an error that names the formula, before the
+// subgraph — the issues a pour or wisp would create rows from — is built.
+func TestCookRefusesFormulaPastExpansionLimit(t *testing.T) {
+	const name = "over-limit-loop"
+	src := `formula = "` + name + `"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "round"
+title = "Rounds"
+
+[steps.loop]
+count = 10001
+
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+`
+	dir := writePipelineFormula(t, name, src)
+
+	t.Run("resolve", func(t *testing.T) {
+		f, err := loadAndResolveFormula(filepath.Join(dir, name+".formula.toml"), []string{dir})
+		if err == nil {
+			t.Fatalf("loadAndResolveFormula cooked %d steps; want refusal", formula.CountGraphSteps(f.Steps))
+		}
+		if !errors.Is(err, formula.ErrExpansionLimit) {
+			t.Fatalf("loadAndResolveFormula error = %v, want ErrExpansionLimit", err)
+		}
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("refusal should name the formula: %v", err)
+		}
+	})
+
+	t.Run("resolve for pour and wisp", func(t *testing.T) {
+		sg, err := resolveAndCookFormulaWithVars(name, []string{dir}, nil)
+		if err == nil {
+			t.Fatalf("resolveAndCookFormulaWithVars cooked %d issues; want refusal", len(sg.Issues))
+		}
+		if !errors.Is(err, formula.ErrExpansionLimit) {
+			t.Fatalf("resolveAndCookFormulaWithVars error = %v, want ErrExpansionLimit", err)
+		}
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("refusal should name the formula: %v", err)
+		}
+		if sg != nil {
+			t.Errorf("cooked a subgraph with %d issues alongside the refusal; the limit must precede issue creation", len(sg.Issues))
+		}
+	})
+}
+
+// bd-xx3ma9 (#7882): the limit is one budget across the whole cook, not one
+// per stage: a 6000-iteration loop plus a 5000-step compose expansion each fit
+// a fresh per-stage budget, but the pour path refuses them together.
+func TestCookSharesTheExpansionBudgetAcrossStages(t *testing.T) {
+	const name = "over-budget-combo"
+	var big strings.Builder
+	big.WriteString("formula = \"big-expander\"\nversion = 1\ntype = \"expansion\"\n")
+	for i := 0; i < 5000; i++ {
+		big.WriteString("\n[[template]]\nid = \"e" + strconv.Itoa(i) + "\"\ntitle = \"E\"\n")
+	}
+	dir := writePipelineFormula(t, "big-expander", big.String())
+	src := `formula = "` + name + `"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "round"
+title = "Rounds"
+
+[steps.loop]
+count = 6000
+
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+
+[[steps]]
+id = "tail"
+title = "Tail"
+
+[compose]
+[[compose.expand]]
+target = "tail"
+with = "big-expander"
+`
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(src), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	sg, err := resolveAndCookFormulaWithVars(name, []string{dir}, nil)
+	if err == nil {
+		t.Fatalf("cooked %d issues; want refusal", len(sg.Issues))
+	}
+	if !errors.Is(err, formula.ErrExpansionLimit) {
+		t.Fatalf("resolveAndCookFormulaWithVars error = %v, want ErrExpansionLimit", err)
+	}
+	if !strings.Contains(err.Error(), name) {
+		t.Errorf("refusal should name the formula: %v", err)
+	}
+	if sg != nil {
+		t.Errorf("cooked a subgraph with %d issues alongside the refusal; the limit must precede issue creation", len(sg.Issues))
+	}
 }
