@@ -183,6 +183,32 @@ func TestRunBackupExport_RecordsSyncFailure(t *testing.T) {
 		}
 	})
 
+	t.Run("success_after_failure_clears_the_error", func(t *testing.T) {
+		dir := backupExportTestDir(t)
+		fake := &failingBackupStore{commit: "c1", backupErr: errors.New("sync to backup: boom")}
+		if _, err := runBackupExport(context.Background(), directLocalBackup{store: fake}, true); err == nil {
+			t.Fatal("expected the first runBackupExport to fail")
+		}
+		if failed := readRawBackupState(t, dir); failed.LastError == "" {
+			t.Fatal("precondition: the failed attempt recorded no last_error")
+		}
+
+		fake.backupErr = nil
+		if _, err := runBackupExport(context.Background(), directLocalBackup{store: fake}, true); err != nil {
+			t.Fatalf("runBackupExport after the failure cleared: %v", err)
+		}
+		after := readRawBackupState(t, dir)
+		if after.LastError != "" {
+			t.Errorf("last_error = %q after a successful sync, want empty", after.LastError)
+		}
+		if !after.LastErrorAt.IsZero() {
+			t.Errorf("last_error_at = %v after a successful sync, want zero", after.LastErrorAt)
+		}
+		if !after.LastSuccessAt.Equal(after.Timestamp) {
+			t.Errorf("last_success_at = %v, want the new successful attempt's time %v", after.LastSuccessAt, after.Timestamp)
+		}
+	})
+
 	t.Run("legacy_state_carries_timestamp_into_last_success_at", func(t *testing.T) {
 		dir := backupExportTestDir(t)
 		// A state file written by an older bd: no failure keys, but a

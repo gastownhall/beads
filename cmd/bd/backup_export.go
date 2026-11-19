@@ -223,8 +223,14 @@ func runBackupExport(ctx context.Context, backend localBackupBackend, force bool
 
 	// The pre-sync commit is the newest commit this backup is guaranteed to
 	// contain. If HEAD moved during the sync, the next backup must see it.
+	// A success is also the moment a recorded failure (bd-5mwx39) stops
+	// being true: clear it, so `bd backup status` shows a healthy backup
+	// rather than a stale failure.
 	state.LastDoltCommit = currentCommit
 	state.Timestamp = time.Now().UTC()
+	state.LastSuccessAt = state.Timestamp
+	state.LastError = ""
+	state.LastErrorAt = time.Time{}
 
 	if err := saveBackupState(dir, state); err != nil {
 		return nil, err
