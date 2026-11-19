@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -171,6 +172,49 @@ func requireOnlyComment(t *testing.T, ctx context.Context, store *DoltStore, p r
 	}
 }
 
+// replayDepTargets lists the targets of issueID's edges in p, whichever of
+// the split target columns (issue, wisp, external) holds each one.
+func replayDepTargets(t *testing.T, ctx context.Context, store *DoltStore, p replayPlane, issueID string) []string {
+	t.Helper()
+	//nolint:gosec // G201: table is a test-chosen constant
+	rows, err := store.db.QueryContext(ctx, fmt.Sprintf("SELECT COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS target FROM %s WHERE issue_id = ? ORDER BY target", p.deps), issueID)
+	if err != nil {
+		t.Fatalf("read %s for %s: %v", p.deps, issueID, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var target string
+		if err := rows.Scan(&target); err != nil {
+			t.Fatalf("scan %s: %v", p.deps, err)
+		}
+		out = append(out, target)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate %s: %v", p.deps, err)
+	}
+	return out
+}
+
+func requireDepTargets(t *testing.T, ctx context.Context, store *DoltStore, p replayPlane, issueID string, want ...string) {
+	t.Helper()
+	got := replayDepTargets(t, ctx, store, p, issueID)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("%s edges from %s = %v, want %v", p.deps, issueID, got, want)
+	}
+}
+
+// createReplayWinner creates the conflicting winner: an ID-less issue with
+// the shared hash inputs, its own notes and one comment of its own.
+func createReplayWinner(store *DoltStore, title string) (*types.Issue, func(context.Context) (string, error)) {
+	w := replayIssue(title, "winner")
+	w.Comments = []*types.Comment{{Author: "winner", Text: "winner comment", CreatedAt: replayFixedCreatedAt}}
+	return w, func(ctx context.Context) (string, error) {
+		err := store.CreateIssue(ctx, w, replayActor)
+		return w.ID, err
+	}
+}
+
 // TestCreateIssueReplayRemintsGeneratedIdentifiers (AC-1): a single
 // CreateIssue whose generated ID a concurrent winner commits first must, on
 // replay, mint a fresh ID; both rows keep their own content and each has one
@@ -250,4 +294,83 @@ func TestCreateIssueReplayRemintsGeneratedIdentifiers(t *testing.T) {
 		}
 		run(t, "replay-single-counter", false)
 	})
+}
+
+// TestCreateBatchReplayRemintsGeneratedIdentifiers (AC-2): a replayed batch
+// re-mints its issue ID and re-derives the dependency source and comment ID
+// from it, leaving the winner's row and records unchanged.
+func TestCreateBatchReplayRemintsGeneratedIdentifiers(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	target := &types.Issue{Title: "replay-batch-target", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, target, "tester"); err != nil {
+		t.Fatalf("create dependency target: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		create func(ctx context.Context, issues []*types.Issue) error
+		extra  bool // add a second, non-colliding generated issue (exercises the batch cache)
+	}{
+		{name: "CreateIssues", create: func(ctx context.Context, issues []*types.Issue) error {
+			return store.CreateIssues(ctx, issues, replayActor)
+		}},
+		{name: "CreateIssuesWithFullOptions", create: func(ctx context.Context, issues []*types.Issue) error {
+			return store.CreateIssuesWithFullOptions(ctx, issues, replayActor, storage.BatchCreateOptions{})
+		}},
+		{name: "cached_batch", extra: true, create: func(ctx context.Context, issues []*types.Issue) error {
+			return store.CreateIssues(ctx, issues, replayActor)
+		}},
+		{name: "CreateOnly", create: func(ctx context.Context, issues []*types.Issue) error {
+			return store.CreateIssuesWithFullOptions(ctx, issues, replayActor, storage.BatchCreateOptions{CreateOnly: true})
+		}},
+		{name: "ConflictSkip", create: func(ctx context.Context, issues []*types.Issue) error {
+			return store.CreateIssuesWithFullOptions(ctx, issues, replayActor, storage.BatchCreateOptions{ConflictSkip: true})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			title := "replay-batch-" + tc.name
+			loser := replayIssue(title, "loser")
+			loser.Dependencies = []*types.Dependency{{DependsOnID: target.ID, Type: types.DepBlocks}}
+			loser.Comments = []*types.Comment{{Author: "loser", Text: "loser comment", CreatedAt: replayFixedCreatedAt}}
+			batch := []*types.Issue{loser}
+			var other *types.Issue
+			if tc.extra {
+				other = replayIssue(title+"-other", "other")
+				batch = append(batch, other)
+			}
+			winner, runWinner := createReplayWinner(store, title)
+
+			loserCtx, f := withForcedReplay(ctx, ctx, func() string { return loser.ID }, runWinner)
+			if err := tc.create(loserCtx, batch); err != nil {
+				t.Fatalf("loser batch create: %v", err)
+			}
+			f.requireReplayed(t)
+
+			if loser.ID == winner.ID {
+				t.Fatalf("batch replay reused the winner's ID %q", loser.ID)
+			}
+			requireReplayRow(t, ctx, store, durablePlane, loser.ID, "loser")
+			if got := loser.Dependencies[0].IssueID; got != loser.ID {
+				t.Fatalf("loser dependency IssueID = %q, want the fresh issue ID %q", got, loser.ID)
+			}
+			requireDepTargets(t, ctx, store, durablePlane, loser.ID, target.ID)
+			requireOnlyComment(t, ctx, store, durablePlane, loser.ID, loser.Comments[0].ID, "loser comment")
+
+			requireReplayRow(t, ctx, store, durablePlane, winner.ID, "winner")
+			requireDepTargets(t, ctx, store, durablePlane, winner.ID)
+			requireOnlyComment(t, ctx, store, durablePlane, winner.ID, winner.Comments[0].ID, "winner comment")
+
+			if other != nil {
+				if other.ID == "" || other.ID == loser.ID || other.ID == winner.ID {
+					t.Fatalf("second batch issue ID = %q (loser %q, winner %q), want its own", other.ID, loser.ID, winner.ID)
+				}
+				requireReplayRow(t, ctx, store, durablePlane, other.ID, "other")
+			}
+		})
+	}
 }

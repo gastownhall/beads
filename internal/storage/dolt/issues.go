@@ -117,7 +117,10 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 	// As in createIssue: a batch that rolls back empties the ID fields the
-	// caller left empty (GH#8457); one that committed keeps them.
+	// caller left empty (GH#8457); one that committed keeps them. Both
+	// retry closures below also reset them at the top of every attempt, so
+	// a replay re-mints issue IDs and re-derives dependency sources and
+	// comment IDs instead of reusing the rolled-back attempt's (GH#7289).
 	resetMintedIDs := issueops.SnapshotUnsetCreateIDs(issues)
 
 	// All-wisps fast path: one SQL transaction, no Dolt versioning.
@@ -145,6 +148,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 
 	var result issueops.CreateIssuesResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		resetMintedIDs()
 		var err error
 		result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 		return err
