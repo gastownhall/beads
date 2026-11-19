@@ -32,6 +32,9 @@ const (
 	// fakeDoltVersionEnv is the version `dolt version` reports, 2.6.0 when
 	// unset.
 	fakeDoltVersionEnv = "BEADS_TEST_FAKE_DOLT_VERSION"
+	// fakeDoltRejectConfigEnv makes a sql-server launched with --config
+	// fail the way dolt's strict YAML decode does on a key it does not know.
+	fakeDoltRejectConfigEnv = "BEADS_TEST_FAKE_DOLT_REJECT_CONFIG"
 )
 
 var fakeDoltConfigPortRe = regexp.MustCompile(`(?m)^\s+port:\s*(\d+)`)
@@ -66,10 +69,11 @@ func fakeDolt(args []string) int {
 	default:
 		return 2
 	}
-	host, port := "127.0.0.1", 0
+	host, port, configPath := "127.0.0.1", 0, ""
 	for i := 1; i+1 < len(args); i++ {
 		switch args[i] {
 		case "--config":
+			configPath = args[i+1]
 			b, err := os.ReadFile(args[i+1])
 			if err != nil {
 				fmt.Println(err)
@@ -93,6 +97,11 @@ func fakeDolt(args []string) int {
 			_, _ = fmt.Fprintf(f, "%d\n", port)
 			_ = f.Close()
 		}
+	}
+	if configPath != "" && os.Getenv(fakeDoltRejectConfigEnv) != "" {
+		fmt.Printf("Failed to parse yaml file '%s'. Error: yaml: unmarshal errors:\n"+
+			"  line 9: field archive_level not found in type servercfg.AutoGCBehaviorYAMLConfig\n", configPath)
+		return 1
 	}
 	if d, err := time.ParseDuration(os.Getenv(fakeDoltDelayEnv)); err == nil {
 		time.Sleep(d)

@@ -48,6 +48,22 @@ func doltPortInUseTexts(port int) [][]byte {
 	}
 }
 
+// errConfigRejected reports that a dolt sql-server bd launched exited before
+// it was ready and its output names its config as the reason.
+var errConfigRejected = errors.New("dolt sql-server rejected its generated config")
+
+// doltConfigRejectedTexts are, in lower case, the ways a dolt sql-server says
+// it cannot decode its --config file, such as a strict YAML decode of a key
+// the binary does not know ("Failed to parse yaml file ... yaml: unmarshal
+// errors: ... field X not found in type ...").
+var doltConfigRejectedTexts = [][]byte{
+	[]byte("unknown field"),
+	[]byte("unmarshal"),
+	[]byte("yaml:"),
+	[]byte("decoding config"),
+	[]byte("invalid config"),
+}
+
 // LogLevelEmitsReadyLine reports whether dolt logs DoltReadyLine (an info
 // message) at level.
 func LogLevelEmitsReadyLine(level servercfg.LogLevel) bool {
@@ -130,4 +146,18 @@ func (w *StartupWatch) SawPortInUse() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.portInUse
+}
+
+// sawConfigRejected reports whether the recent output of a server that is not
+// ready yet names its config as the failure.
+func (w *StartupWatch) sawConfigRejected() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	lower := bytes.ToLower(w.tail)
+	for _, text := range doltConfigRejectedTexts {
+		if bytes.Contains(lower, text) {
+			return true
+		}
+	}
+	return false
 }

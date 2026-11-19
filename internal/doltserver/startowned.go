@@ -242,7 +242,8 @@ const (
 // ends at once with ErrPortInUse. Where neither proof is available the
 // greeting decides, as before, unless the log level promises a ready line.
 // Either way a child that exits, or says its port is taken, ends the wait,
-// with ErrPortInUse in the latter case.
+// with ErrPortInUse in the latter case, and with errConfigRejected when the
+// child exited saying it could not decode its config.
 func awaitOwnedListener(srv *startedServer, p startupProbe) error {
 	addr := net.JoinHostPort(p.host, strconv.Itoa(p.port))
 	owner := p.owner
@@ -319,7 +320,11 @@ func childStartupFailure(srv *startedServer, tail *logTail, watch *StartupWatch,
 		return fmt.Errorf("%w: dolt sql-server (PID %d) could not bind %s", ErrPortInUse, srv.pid, addr)
 	}
 	if exited {
-		return errors.New("dolt sql-server (PID " + strconv.Itoa(srv.pid) + ") exited before accepting connections")
+		exit := "dolt sql-server (PID " + strconv.Itoa(srv.pid) + ") exited before accepting connections"
+		if watch.sawConfigRejected() {
+			return fmt.Errorf("%w: %s", errConfigRejected, exit)
+		}
+		return errors.New(exit)
 	}
 	return nil
 }

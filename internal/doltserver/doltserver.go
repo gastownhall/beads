@@ -2069,7 +2069,7 @@ func startLocked(beadsDir string) (*State, error) {
 			attempts = maxEphemeralPortAttempts
 		}
 
-		for i := range attempts {
+		for i := 0; i < attempts; i++ {
 			if !explicitPort || i > 0 {
 				p, allocErr := allocateEphemeralPort(cfg.Host)
 				if allocErr != nil {
@@ -2168,6 +2168,19 @@ func startLocked(beadsDir string) (*State, error) {
 			if waitErr != nil {
 				srv.killAndWait()
 				removeServerStateFiles(beadsDir)
+				if useArchiveLevelConfig && errors.Is(waitErr, errConfigRejected) {
+					// The binary passed the version gate but refused the
+					// generated config: its own verdict outranks the gate.
+					// Relaunch once with the CLI flags the config stands for;
+					// the relaunch does not count as a port attempt.
+					useArchiveLevelConfig = false
+					fmt.Fprintf(os.Stderr,
+						"Warning: dolt at %s rejected the generated sql-server config; relaunching with CLI flags. "+
+							"This managed server's background auto-GC may still produce zstd archives.\nCheck logs: %s\n",
+						doltBin, logPath(beadsDir))
+					i--
+					continue
+				}
 				if errors.Is(waitErr, ErrPortInUse) {
 					if movable {
 						lastErr = fmt.Errorf("%w (attempt %d/%d)", waitErr, i+1, attempts)

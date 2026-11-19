@@ -72,6 +72,29 @@ func TestStartupWatch(t *testing.T) {
 	}
 }
 
+// TestStartupWatchConfigRejected: only output in which dolt names its config
+// as the failure counts as a rejected config.
+func TestStartupWatchConfigRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{name: "strict YAML decode of an unknown key", want: true, out: "Failed to parse yaml file '/x/dolt-server-config.yaml'. Error: yaml: unmarshal errors:\n  line 9: field archive_level not found in type servercfg.AutoGCBehaviorYAMLConfig\n"},
+		{name: "unknown field", want: true, out: "Fatal: unknown field auto_gc_behavior\n"},
+		{name: "port in use", out: "Port 3306 already in use.\n"},
+		{name: "database lock", out: "database \"beads\" is locked by another dolt process\n"},
+		{name: "no output"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _ := writeChunks(t, 3306, tc.out, 7)
+			if got := w.sawConfigRejected(); got != tc.want {
+				t.Errorf("sawConfigRejected = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestStartupWatchNilLog(t *testing.T) {
 	w := NewStartupWatch(nil, 3306)
 	n, err := w.Write([]byte("Server ready. Accepting connections.\n"))

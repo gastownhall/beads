@@ -27,6 +27,7 @@ const (
 	testFakeDoltReadyEnv    = "BEADS_TEST_FAKE_DOLT_READY"
 	testFakeDoltLaunchesEnv = "BEADS_TEST_FAKE_DOLT_LAUNCHES"
 	testFakeDoltVersionEnv  = "BEADS_TEST_FAKE_DOLT_VERSION"
+	testFakeDoltRejectEnv   = "BEADS_TEST_FAKE_DOLT_REJECT_CONFIG"
 	// testFakeDoltDelay is the fake dolt's startup time. It is longer than
 	// the 200ms "did it exit immediately?" check Start used to rely on, which
 	// is the window that let a foreign listener's greeting pass as ready.
@@ -513,6 +514,49 @@ func TestStart_RemovesStateFilesAfterFailedStart(t *testing.T) {
 		t.Error("state files never appeared during the failed attempt")
 	}
 	assertNoStateFiles(t, beadsDir)
+}
+
+// TestStart_DegradesToCLIFlagsWhenGeneratedConfigIsRejected: a dolt that
+// passes the version gate but strict-decodes the generated YAML config and
+// exits is relaunched once with the equivalent CLI flags, and the start
+// succeeds. A pinned port gets the relaunch too, on the same port, although
+// it has a single port attempt; the child's own verdict stays in the log.
+func TestStart_DegradesToCLIFlagsWhenGeneratedConfigIsRejected(t *testing.T) {
+	for _, pinned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pinned=%v", pinned), func(t *testing.T) {
+			beadsDir, launches := fakeStartWorkspace(t)
+			t.Setenv(testFakeDoltRejectEnv, "1")
+			port := freeLoopbackPort(t)
+			if pinned {
+				t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprint(port))
+			}
+
+			state, err := startForTest(t, beadsDir)
+			if err != nil {
+				t.Fatalf("Start = %v, want the CLI-flag relaunch to succeed", err)
+			}
+			got := launchedPorts(t, launches)
+			if len(got) != 2 {
+				t.Fatalf("launches = %v, want two: the rejected config and the CLI-flag relaunch", got)
+			}
+			if got[1] != fmt.Sprint(state.Port) {
+				t.Errorf("relaunch on port %s, but Start reports port %d", got[1], state.Port)
+			}
+			if pinned && (got[0] != fmt.Sprint(port) || got[1] != fmt.Sprint(port)) {
+				t.Errorf("launches = %v, want both on the pinned port %d", got, port)
+			}
+			if b, _ := os.ReadFile(pidPath(beadsDir)); strings.TrimSpace(string(b)) != fmt.Sprint(state.PID) {
+				t.Errorf("PID file = %q, want the relaunched server %d", b, state.PID)
+			}
+			logData, err := os.ReadFile(logPath(beadsDir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(logData), "field archive_level not found") {
+				t.Errorf("server log is missing the child's rejected-key output:\n%s", logData)
+			}
+		})
+	}
 }
 
 // TestStart_PinnedPortIsNotMoved: an operator-configured port that another
