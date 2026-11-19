@@ -34,9 +34,16 @@ import (
 //
 // Only the target column changes: the row keeps its id (depid derives it from
 // the source and the target string, not the column), type, metadata, thread,
-// created_at and created_by. A moved edge that would conflict with the parent
-// hierarchy is kept as it is; the repair heals storage, it does not police
-// graphs a previous binary accepted.
+// created_at and created_by.
+//
+// A blocking edge (blocks, conditional-blocks) between an issue and its own
+// ancestor or descendant is not moved. The write path refuses that shape for a
+// local target (issueops.CheckBlockingHierarchyInTx), but before this fix it
+// never checked a cross-prefix edge, so a legacy database can hold one in
+// depends_on_external. Moving it would turn an inert row into a live blocker the
+// current binary would never have written, flipping readiness for a graph the
+// user built; the repair heals storage, it does not police graphs a previous
+// binary accepted, so such an edge stays external, with a log line.
 
 // localExternalDepTables are the two edge tables the repair scans, in the order
 // it plans them. Both names are hardcoded constants, never user input.
