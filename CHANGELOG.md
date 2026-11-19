@@ -1431,6 +1431,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd doctor --fix` missing-database repair respects project identity**
+  (#5576). When `dolt_database` is missing from metadata.json,
+  `FixMissingDoltDatabase` fell back to a raw probe that adopted the first
+  server database with an `issues` table — with no `_project_id` comparison,
+  undoing the refusal the safer authoritative repair had just made, so on a
+  shared Dolt server `bd doctor --fix` could silently point a workspace at
+  another project's database. The fallback now selects from the same
+  identity-aware server catalog: it adopts only a database whose project_id
+  matches the local one (keeping the authoritative repair's conflict and
+  ambiguity refusals), never moves a current database that already has Beads
+  schema, and declines unsafe or ambiguous selection — shared-server mode
+  without a local project_id, a known local project_id no candidate carries,
+  or several candidates with nothing to disambiguate them — with a skip that
+  lists the candidates and points at `bd dolt set database <name>` for the
+  manual choice. The legacy recovery is retained: on a non-shared server with
+  no local project_id, a sole candidate (test-fixture and global databases
+  excluded) is still adopted, backfilling the project_id from its identity.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
