@@ -226,6 +226,121 @@ func TestInstallHooks_NonShellClassifierUsedByInstall(t *testing.T) {
 	}
 }
 
+// AC-5: the non-shell policy must not change what happens to hooks a shell
+// runs — injection, the one-time .backup sidecar, and marker refresh all
+// keep working, and no skip warnings appear.
+func TestInstallHooks_ShellHooksUnaffected(t *testing.T) {
+	t.Run("AC-5 shell and no-shebang hooks keep injection and backup behavior", func(t *testing.T) {
+		for _, tc := range []struct{ name, content string }{
+			{"sh", "#!/bin/sh\necho custom-hook\n"},
+			{"bash", "#!/usr/bin/env bash\necho custom-hook\n"},
+			{"zsh", "#!/usr/bin/env zsh\necho custom-hook\n"},
+			{"dash", "#!/usr/bin/env dash\necho custom-hook\n"},
+			{"busybox sh", "#!/bin/busybox sh\necho custom-hook\n"},
+			{"no shebang plain text", "echo custom-hook\n"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				repoDir := setupGuardTestRepo(t)
+				hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+				writeHookFile(t, hookPath, tc.content)
+
+				var installErr error
+				stderr := captureStderr(t, func() {
+					installErr = installHooksWithOptions(managedHookNames, false, false, false, false)
+				})
+				if installErr != nil {
+					t.Fatalf("install failed: %v", installErr)
+				}
+
+				got, err := os.ReadFile(hookPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(got), "echo custom-hook") {
+					t.Fatalf("user content not preserved:\n%s", got)
+				}
+				if !strings.Contains(string(got), hookSectionBeginPrefix) {
+					t.Fatalf("bd section not injected:\n%s", got)
+				}
+
+				// The one-time .backup sidecar still snapshots the user content.
+				backup, err := os.ReadFile(hookPath + ".backup")
+				if err != nil {
+					t.Fatalf(".backup sidecar missing: %v", err)
+				}
+				if string(backup) != tc.content {
+					t.Fatalf(".backup must snapshot the original content, got:\n%s", backup)
+				}
+
+				if strings.Contains(stderr, "cannot execute") ||
+					strings.Contains(stderr, "left untouched") ||
+					strings.Contains(stderr, "manual inspection") {
+					t.Fatalf("shell hook must not produce skip warnings, got:\n%s", stderr)
+				}
+			})
+		}
+	})
+
+	t.Run("AC-5 shell hook with existing markers is refreshed, not skipped", func(t *testing.T) {
+		repoDir := setupGuardTestRepo(t)
+		hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+		// A shell hook carrying an old-version bd section plus user content on
+		// both sides of it.
+		stale := "#!/bin/sh\necho before\n" +
+			"# --- BEGIN BEADS INTEGRATION v0.0.1 ---\nold section body\n" +
+			"# --- END BEADS INTEGRATION v0.0.1 ---\necho after\n"
+		writeHookFile(t, hookPath, stale)
+
+		var installErr error
+		stderr := captureStderr(t, func() {
+			installErr = installHooksWithOptions(managedHookNames, false, false, false, false)
+		})
+		if installErr != nil {
+			t.Fatalf("install failed: %v", installErr)
+		}
+
+		got, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(got)
+		if !strings.Contains(content, "echo before") || !strings.Contains(content, "echo after") {
+			t.Fatalf("user content outside markers not preserved:\n%s", content)
+		}
+		if !strings.Contains(content, hookSectionBeginLine()) {
+			t.Fatalf("section not refreshed to the current version:\n%s", content)
+		}
+		if strings.Contains(content, "old section body") {
+			t.Fatalf("stale section body not replaced:\n%s", content)
+		}
+		if strings.Contains(stderr, "cannot execute") || strings.Contains(stderr, "left untouched") {
+			t.Fatalf("marker refresh must not warn like a skip, got:\n%s", stderr)
+		}
+	})
+
+	t.Run("AC-5 standalone install reports no skipped hooks for a shell repo", func(t *testing.T) {
+		repoDir := newGitRepo(t)
+		runInDir(t, repoDir, func() {
+			writeHookFile(t, filepath.Join(repoDir, ".git", "hooks", "pre-push"), "#!/bin/sh\necho custom-hook\n")
+
+			var skipped []string
+			var installErr error
+			stderr := captureStderr(t, func() {
+				skipped, installErr = installStandaloneHooks(managedHookNames, false, false, false, false)
+			})
+			if installErr != nil {
+				t.Fatalf("install failed: %v", installErr)
+			}
+			if len(skipped) != 0 {
+				t.Fatalf("skipped = %v, want empty", skipped)
+			}
+			if strings.Contains(stderr, "cannot execute") {
+				t.Fatalf("shell repo must not produce skip diagnostics, got:\n%s", stderr)
+			}
+		})
+	})
+}
+
 func TestInstallHooksBeads_NonShell(t *testing.T) {
 	t.Run("AC-2 python pre-push preserved byte-identically into .beads/hooks", func(t *testing.T) {
 		repoDir := newGitRepo(t)
