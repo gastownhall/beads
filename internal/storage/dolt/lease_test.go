@@ -1081,4 +1081,60 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			t.Fatalf("lease holders = %v, want exactly [bob]", holders)
 		}
 	})
+
+	t.Run("AC2 holder re-doling their own claim re-arms for the new holder", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		// Alice already holds the issue with a live lease: her claim leg is the
+		// idempotent AlreadyClaimed path, so the fields leg is the only writer
+		// and the re-arm must come from it.
+		seedClaimedIssue(t, ctx, store, "bd-lease-cao-2", "alice", time.Hour)
+		before := readLeaseState(t, ctx, store, "bd-lease-cao-2")
+		if !before.leaseExpires.Valid {
+			t.Fatalf("seed claim did not arm a lease: %+v", before)
+		}
+
+		ops, err := store.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("lifecycle: %v", err)
+		}
+		updateStart := time.Now().UTC()
+		if _, err := ops.Update(ctx, publicops.UpdateRequest{
+			Actor: "alice", IssueID: "bd-lease-cao-2", Claim: true,
+			Patch: publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "bob"}},
+		}); err != nil {
+			t.Fatalf("claim with assignee override on own claim: %v", err)
+		}
+		updateEnd := time.Now().UTC()
+
+		ls := readLeaseState(t, ctx, store, "bd-lease-cao-2")
+		if ls.assignee.String != "bob" || ls.status != "in_progress" {
+			t.Fatalf("row = %s/%s, want in_progress/bob", ls.status, ls.assignee.String)
+		}
+		if !ls.leaseExpires.Valid {
+			t.Fatalf("re-dole deleted the lease instead of re-arming it: %+v", ls)
+		}
+
+		var holder string
+		var grantedAt, expiresAt time.Time
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT holder, granted_at, lease_expires_at FROM leases WHERE issue_id = ?",
+			"bd-lease-cao-2").Scan(&holder, &grantedAt, &expiresAt); err != nil {
+			t.Fatalf("read lease row: %v", err)
+		}
+		if holder != "bob" {
+			t.Errorf("holder = %q, want bob", holder)
+		}
+		// DATETIME is second-granular; allow one second of rounding either way.
+		if grantedAt.Before(updateStart.Add(-time.Second)) || grantedAt.After(updateEnd.Add(time.Second)) {
+			t.Errorf("granted_at = %v, want the update time (between %v and %v)", grantedAt, updateStart, updateEnd)
+		}
+		wantExpiry := grantedAt.Add(issueops.DefaultLeaseTTL)
+		if expiresAt.Sub(wantExpiry) > time.Second || wantExpiry.Sub(expiresAt) > time.Second {
+			t.Errorf("lease_expires_at = %v, want granted_at + DefaultLeaseTTL = %v", expiresAt, wantExpiry)
+		}
+	})
 }

@@ -4,9 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -26,6 +28,7 @@ func (s *testSuite) TestIssueUseCase_ApplyUpdate() {
 	s.Run("FieldsOnlyAppliesAndReFetches", s.iucApplyUpdateFieldsOnly)
 	s.Run("ClaimAndFieldsRunTogether", s.iucApplyUpdateClaimPlusFields)
 	s.Run("ClaimAssigneeOverrideArmsLease", s.iucApplyUpdateClaimAssigneeOverrideArmsLease)
+	s.Run("ClaimAssigneeOverrideOnLiveClaimReArmsForNewHolder", s.iucApplyUpdateClaimOverrideOnLiveClaimReArms)
 	s.Run("AddRemoveLabelPaths", s.iucApplyUpdateAddRemoveLabels)
 	s.Run("SetLabelsDiffsAgainstCurrent", s.iucApplyUpdateSetLabels)
 	s.Run("SetLabelsThenAddsThenRemoves", s.iucApplyUpdateSetLabelsThenAddRemove)
@@ -161,6 +164,41 @@ func (s *testSuite) iucApplyUpdateClaimAssigneeOverrideArmsLease() {
 		"SELECT holder FROM leases WHERE issue_id = ?", "bd-iuc-au-cao").Scan(&holder),
 		"claim with an assignee override must leave a lease row")
 	s.Equal("bob", holder)
+}
+
+// iucApplyUpdateClaimOverrideOnLiveClaimReArms pins AC-2 of bd-zprbhg on the
+// proxied/domain stack: the current holder re-doling their own claim with an
+// assignee override (the claim leg's idempotent AlreadyClaimed path) re-arms
+// the lease for the final assignee with a fresh grant at the update time.
+func (s *testSuite) iucApplyUpdateClaimOverrideOnLiveClaimReArms() {
+	s.seedOpenIssue("bd-iuc-au-cao2")
+	uc := s.issueUseCase()
+	_, err := uc.ClaimIssue(s.Ctx(), "bd-iuc-au-cao2", "alice")
+	s.Require().NoError(err)
+
+	updateStart := time.Now().UTC()
+	updated, err := uc.ApplyUpdate(s.Ctx(), "bd-iuc-au-cao2", domain.UpdateSpec{
+		Claim:  true,
+		Fields: map[string]any{"assignee": "bob"},
+	}, "alice")
+	s.Require().NoError(err)
+	updateEnd := time.Now().UTC()
+	s.Equal(types.StatusInProgress, updated.Status)
+	s.Equal("bob", updated.Assignee)
+
+	var holder string
+	var grantedAt, expiresAt time.Time
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT holder, granted_at, lease_expires_at FROM leases WHERE issue_id = ?",
+		"bd-iuc-au-cao2").Scan(&holder, &grantedAt, &expiresAt),
+		"claim+override on a live claim must re-arm the lease")
+	s.Equal("bob", holder)
+	// DATETIME is second-granular; allow one second of rounding either way.
+	s.False(grantedAt.Before(updateStart.Add(-time.Second)), "granted_at %v before update %v", grantedAt, updateStart)
+	s.False(grantedAt.After(updateEnd.Add(time.Second)), "granted_at %v after update %v", grantedAt, updateEnd)
+	wantExpiry := grantedAt.Add(issueops.DefaultLeaseTTL)
+	s.LessOrEqual(expiresAt.Sub(wantExpiry).Abs(), time.Second,
+		"lease_expires_at %v, want granted_at + DefaultLeaseTTL %v", expiresAt, wantExpiry)
 }
 
 func (s *testSuite) iucApplyUpdateAddRemoveLabels() {
