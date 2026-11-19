@@ -33,6 +33,7 @@ func (s *testSuite) TestIssueUseCase_ApplyUpdate() {
 	s.Run("ClaimAssigneeOverridePoolAliasStaysLeaseless", s.iucApplyUpdateClaimOverridePoolAliasStaysLeaseless)
 	s.Run("ClaimOverrideEndingClaimStillDeletesLease", s.iucApplyUpdateClaimOverrideEndingClaimStillDeletesLease)
 	s.Run("ClaimAssigneeOverrideOnWispNeverLeases", s.iucApplyUpdateClaimOverrideOnWispNeverLeases)
+	s.Run("PlainUpdatesDeleteLeaseAndArmNone", s.iucApplyUpdatePlainUpdatesDeleteLeaseAndArmNone)
 	s.Run("AddRemoveLabelPaths", s.iucApplyUpdateAddRemoveLabels)
 	s.Run("SetLabelsDiffsAgainstCurrent", s.iucApplyUpdateSetLabels)
 	s.Run("SetLabelsThenAddsThenRemoves", s.iucApplyUpdateSetLabelsThenAddRemove)
@@ -278,6 +279,47 @@ func (s *testSuite) iucApplyUpdateClaimOverrideOnWispNeverLeases() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM leases WHERE issue_id = ?", "bd-iuc-au-cao5").Scan(&count))
 	s.Equal(0, count, "wisps must never get a lease row, even via claim+override")
+}
+
+// iucApplyUpdatePlainUpdatesDeleteLeaseAndArmNone pins AC-6 of bd-zprbhg on
+// the proxied/domain stack: updates without Claim stay clear-only. A bare
+// status+assignee hand-dole arms nothing (GH#4716: nobody heartbeats an
+// interactive claim, so a lease would be reclaim-bait), and a plain assignee
+// transfer deletes the previous holder's lease without arming one for the
+// new holder.
+func (s *testSuite) iucApplyUpdatePlainUpdatesDeleteLeaseAndArmNone() {
+	s.Run("HandDoleArmsNothing", func() {
+		s.seedOpenIssue("bd-iuc-au-cao6a")
+		updated, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-cao6a", domain.UpdateSpec{
+			Fields: map[string]any{"assignee": "crow", "status": types.StatusInProgress},
+		}, "crow")
+		s.Require().NoError(err)
+		s.Equal(types.StatusInProgress, updated.Status)
+		s.Equal("crow", updated.Assignee)
+
+		var count int
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT COUNT(*) FROM leases WHERE issue_id = ?", "bd-iuc-au-cao6a").Scan(&count))
+		s.Equal(0, count, "a plain update must not arm a lease")
+	})
+
+	s.Run("TransferDeletesHoldersLease", func() {
+		s.seedOpenIssue("bd-iuc-au-cao6b")
+		uc := s.issueUseCase()
+		_, err := uc.ClaimIssue(s.Ctx(), "bd-iuc-au-cao6b", "alice")
+		s.Require().NoError(err)
+
+		updated, err := uc.ApplyUpdate(s.Ctx(), "bd-iuc-au-cao6b", domain.UpdateSpec{
+			Fields: map[string]any{"assignee": "bob"},
+		}, "alice")
+		s.Require().NoError(err)
+		s.Equal("bob", updated.Assignee)
+
+		var count int
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT COUNT(*) FROM leases WHERE issue_id = ?", "bd-iuc-au-cao6b").Scan(&count))
+		s.Equal(0, count, "a plain transfer must delete the holder's lease and arm none")
+	})
 }
 
 func (s *testSuite) iucApplyUpdateAddRemoveLabels() {

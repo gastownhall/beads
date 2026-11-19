@@ -1285,6 +1285,77 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			t.Fatalf("wisps are never leased, even by a claim with an override: %d rows", leaseCount)
 		}
 	})
+
+	// AC6: updates WITHOUT the claim verb stay clear-only. A bare
+	// status+assignee hand-dole arms nothing (GH#4716), and a plain assignee
+	// transfer still deletes the previous holder's lease.
+	t.Run("AC6 plain updates delete and never arm", func(t *testing.T) {
+		t.Run("hand-dole arms nothing", func(t *testing.T) {
+			store, cleanup := setupConcurrentTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			if err := store.CreateIssue(ctx, &types.Issue{
+				ID: "bd-lease-cao-6a", Title: "hand-dole", Status: types.StatusOpen,
+				Priority: 2, IssueType: types.TypeTask,
+			}, "seeder"); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			ops, err := store.IssueLifecycle()
+			if err != nil {
+				t.Fatalf("lifecycle: %v", err)
+			}
+			if _, err := ops.Update(ctx, publicops.UpdateRequest{
+				Actor: "crow", IssueID: "bd-lease-cao-6a",
+				Patch: publicops.IssuePatch{
+					Assignee: setAssignee("crow"),
+					Status:   setStatus(types.StatusInProgress),
+				},
+			}); err != nil {
+				t.Fatalf("bare hand-dole: %v", err)
+			}
+
+			ls := readLeaseState(t, ctx, store, "bd-lease-cao-6a")
+			if ls.status != "in_progress" || ls.assignee.String != "crow" {
+				t.Fatalf("row = %s/%s, want in_progress/crow", ls.status, ls.assignee.String)
+			}
+			if ls.leaseExpires.Valid || ls.heartbeatAt.Valid {
+				t.Fatalf("a plain update must not arm a lease: %+v", ls)
+			}
+		})
+
+		t.Run("transfer deletes the holder's lease", func(t *testing.T) {
+			store, cleanup := setupConcurrentTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			seedClaimedIssue(t, ctx, store, "bd-lease-cao-6b", "alice", time.Hour)
+			before := readLeaseState(t, ctx, store, "bd-lease-cao-6b")
+			if !before.leaseExpires.Valid {
+				t.Fatalf("seed claim did not arm a lease: %+v", before)
+			}
+			ops, err := store.IssueLifecycle()
+			if err != nil {
+				t.Fatalf("lifecycle: %v", err)
+			}
+			if _, err := ops.Update(ctx, publicops.UpdateRequest{
+				Actor: "alice", IssueID: "bd-lease-cao-6b",
+				Patch: publicops.IssuePatch{Assignee: setAssignee("bob")},
+			}); err != nil {
+				t.Fatalf("plain transfer: %v", err)
+			}
+
+			after := readLeaseState(t, ctx, store, "bd-lease-cao-6b")
+			if after.assignee.String != "bob" {
+				t.Fatalf("assignee = %q, want bob", after.assignee.String)
+			}
+			if after.leaseExpires.Valid || after.heartbeatAt.Valid {
+				t.Fatalf("a plain transfer must delete the holder's lease and arm none: %+v", after)
+			}
+		})
+	})
 }
 
 // setAssignee and setStatus build the patch fields of a claim-override update.
