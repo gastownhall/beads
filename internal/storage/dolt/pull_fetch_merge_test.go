@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // TestSQLFetchCallPassesUserFlag pins the fetch half of the server-mode SQL
@@ -164,32 +166,27 @@ func cliPullStore(t *testing.T, mock sqlmock.Sqlmock, db *sql.DB, beadsDir, remo
 // expectCLIMerge expects the SQL merge the CLI pull route runs after its
 // fetch, on the session cliMergeSession installed: pinStoreBranch reads the
 // store's branch (main) from the pool and moves the session, which starts on
-// the default branch, onto it; the session then sets the force variable and
-// merges ref in a transaction it commits, answering with a row whose
-// conflicts flag is conflicts, and is closed. The pool runs no merge
-// statement.
+// the default branch, onto it; the session then sets the allow-conflicts and
+// force variables and merges ref in a transaction, answering with a row whose
+// conflicts flag is conflicts, settles the merge there (settleMergeInTx), and
+// is closed. A clean merge's settlement commits; a conflicted one (in
+// pull_msg_marker, a table the resolver declines) is captured and rolled back.
+// The pool runs no merge or resolver statement.
 func expectCLIMerge(pool, session sqlmock.Sqlmock, ref string, conflicts int) {
 	pool.ExpectQuery("SELECT active_branch()").WillReturnRows(activeBranchRow("main"))
 	session.ExpectQuery("SELECT active_branch()").WillReturnRows(activeBranchRow("default"))
 	session.ExpectExec("CALL DOLT_CHECKOUT(?)").WithArgs("main").WillReturnResult(sqlmock.NewResult(0, 0))
+	session.ExpectExec("SET @@dolt_allow_commit_conflicts = 1").WillReturnResult(sqlmock.NewResult(0, 0))
 	session.ExpectExec("SET @@dolt_force_transaction_commit = 1").WillReturnResult(sqlmock.NewResult(0, 0))
 	session.ExpectBegin()
 	session.ExpectQuery("CALL DOLT_MERGE(?)").WithArgs(ref).WillReturnRows(doltMergeRow(conflicts))
-	session.ExpectCommit()
+	if conflicts == 0 {
+		expectCleanSettleReads(session)
+		session.ExpectCommit()
+	} else {
+		expectDeclinedSettle(session, "pull_msg_marker")
+	}
 	session.ExpectClose()
-}
-
-// expectCleanCLIResolve expects finishCLIPull's resolver to find nothing to
-// resolve or repair.
-func expectCleanCLIResolve(mock sqlmock.Sqlmock) {
-	mock.ExpectExec("SET @@dolt_allow_commit_conflicts = 1").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT `table`, num_conflicts FROM dolt_conflicts").
-		WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}))
-	mock.ExpectQuery("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0").
-		WillReturnRows(sqlmock.NewRows([]string{"table"}))
-	mock.ExpectRollback()
-	mock.ExpectExec("SET @@dolt_allow_commit_conflicts = 0").WillReturnResult(sqlmock.NewResult(0, 0))
 }
 
 func readCallLog(t *testing.T, callLog string) string {
@@ -207,8 +204,8 @@ func readCallLog(t *testing.T, callLog string) string {
 // git-protocol and credential routes now run `dolt fetch [--user u] <remote>
 // <branch>` with the same credential environment, then merge
 // <remote>/<branch> themselves with CALL DOLT_MERGE on the merge's own
-// session (see TestCLIPullMergeRunsOnAPinnedLongTimeoutSession), and
-// finishCLIPull's resolver runs on the pool.
+// session (see TestCLIPullMergeRunsOnAPinnedLongTimeoutSession), which also
+// settles the merge; no resolver runs on the pool.
 func TestCLIPullRoutesFetchThenMergeTrackingRef(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell fake")
@@ -258,7 +255,6 @@ func TestCLIPullRoutesFetchThenMergeTrackingRef(t *testing.T) {
 			store.remotePassword = tc.password
 			session := cliMergeSession(t)
 			expectCLIMerge(mock, session, "origin/main", 0)
-			expectCleanCLIResolve(mock)
 
 			if _, err := store.pullTransportReporting(context.Background(), "origin"); err != nil {
 				t.Fatalf("pull: %v", err)
@@ -359,12 +355,12 @@ func TestCLIPeerPullFetchesThenMergesTrackingRef(t *testing.T) {
 }
 
 // TestCLIPullMergeConflictFailsThePull pins that a conflicted CLI-route merge
-// fails the pull (bd-e2q8zs): when DOLT_MERGE reports conflicts the resolver
-// does not settle, finishCLIPull returns the merge's conflicts error, as a
-// conflicted `dolt pull` failed. Without it, finishCLIPull would report a pull
-// that merged nothing as a success. What becomes of the declined merge is not
-// pinned here: it stays open in the working set, as `dolt pull` left it, which
-// is GH#7839, and #7849 rolls it back instead.
+// fails the pull (bd-e2q8zs) and is never published (GH#7839): when DOLT_MERGE
+// reports conflicts the resolver declines, the merge's own transaction
+// captures them into the returned MergeConflictsError and rolls back, as the
+// SQL route does, instead of committing the conflicted merge to the working
+// set, where it stayed open and made Dolt refuse every later write and pull.
+// No resolver runs on the pool afterwards.
 func TestCLIPullMergeConflictFailsThePull(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	if err != nil {
@@ -373,17 +369,18 @@ func TestCLIPullMergeConflictFailsThePull(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	session := cliMergeSession(t)
 	expectCLIMerge(mock, session, "origin/main", 1)
-	// The resolver finds nothing it may settle, so it rolls back untouched.
-	expectCleanCLIResolve(mock)
 
 	store := &DoltStore{db: db, branch: "main"}
-	ctx := context.Background()
-	err = store.finishCLIPull(ctx, store.mergeTrackingRefAfterCLIFetch(ctx, "origin/main"))
+	err = store.mergeTrackingRefAfterCLIFetch(context.Background(), "origin/main")
 	if err == nil || !strings.Contains(err.Error(), "merge origin/main: conflicts found") {
-		t.Fatalf("finishCLIPull after a conflicted merge = %v, want the merge's conflicts error", err)
+		t.Fatalf("CLI-route merge with a declined conflict = %v, want the merge's conflicts error", err)
+	}
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(err, &mce) || len(mce.Conflicts) != 1 || mce.Conflicts[0].Field != "pull_msg_marker" {
+		t.Fatalf("CLI-route merge error = %v, want a MergeConflictsError naming pull_msg_marker", err)
 	}
 	if err := session.ExpectationsWereMet(); err != nil {
-		t.Fatalf("merge session statements: %v", err)
+		t.Fatalf("merge session statements (the declined merge must roll back, not commit): %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("pool statements: %v", err)
