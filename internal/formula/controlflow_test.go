@@ -1815,3 +1815,82 @@ func TestApplyLoops_NestedLoopsShareTheBudget(t *testing.T) {
 		t.Fatalf("ApplyLoops error = %v; want one wrapping ErrExpansionLimit", err)
 	}
 }
+
+// bd-xx3ma9 (#7882): a formula that expands to exactly the limit cooks: the
+// budget refuses the step PAST MaxExpandedSteps, not the one at it, and the
+// iterations keep their dependency chains.
+func TestApplyLoops_ExactlyAtTheLimitStillCooks(t *testing.T) {
+	steps := []*Step{{
+		ID: "flat",
+		Loop: &LoopSpec{
+			Count: 10000,
+			Body:  []*Step{{ID: "work", Title: "Work"}},
+		},
+	}}
+
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops refused a loop that expands to exactly %d steps: %v", MaxExpandedSteps, err)
+	}
+	if len(result) != MaxExpandedSteps {
+		t.Fatalf("ApplyLoops produced %d steps; want exactly %d", len(result), MaxExpandedSteps)
+	}
+	// The iteration chain survived: each iteration's first (and here only)
+	// step needs the previous iteration's last step.
+	for i := 1; i < len(result); i++ {
+		prev := fmt.Sprintf("flat.iter%d.work", i)
+		if !slices.Contains(result[i].Needs, prev) {
+			t.Fatalf("step %s needs = %v; want the previous iteration's step %q", result[i].ID, result[i].Needs, prev)
+		}
+	}
+}
+
+// bd-xx3ma9 (#7882): nested 100-by-100 one-leaf loops reach the limit through
+// two levels and still cook, with both chains intact: the inner loop's
+// leaves chain within their iteration, and each outer iteration chains onto
+// the previous one's last leaf.
+func TestApplyLoops_NestedAtTheLimitStillCooks(t *testing.T) {
+	steps := []*Step{{
+		ID: "outer",
+		Loop: &LoopSpec{
+			Count: 100,
+			Body: []*Step{{
+				ID: "inner",
+				Loop: &LoopSpec{
+					Count: 100,
+					Body:  []*Step{{ID: "leaf", Title: "Leaf"}},
+				},
+			}},
+		},
+	}}
+
+	result, err := ApplyLoops(steps)
+	if err != nil {
+		t.Fatalf("ApplyLoops refused nested 100-by-100 loops that expand to exactly %d steps: %v", MaxExpandedSteps, err)
+	}
+	if len(result) != MaxExpandedSteps {
+		t.Fatalf("ApplyLoops produced %d steps; want exactly %d", len(result), MaxExpandedSteps)
+	}
+	byID := make(map[string]*Step, len(result))
+	for _, s := range result {
+		byID[s.ID] = s
+	}
+	// Inner chain: leaf j of iteration K needs leaf j-1 of the same iteration.
+	for k := 1; k <= 100; k++ {
+		for j := 2; j <= 100; j++ {
+			id := fmt.Sprintf("outer.iter%d.inner.iter%d.leaf", k, j)
+			prev := fmt.Sprintf("outer.iter%d.inner.iter%d.leaf", k, j-1)
+			if !slices.Contains(byID[id].Needs, prev) {
+				t.Fatalf("%s needs = %v; want the inner chain onto %q", id, byID[id].Needs, prev)
+			}
+		}
+	}
+	// Outer chain: iteration K+1's first leaf needs iteration K's last leaf.
+	for k := 2; k <= 100; k++ {
+		first := fmt.Sprintf("outer.iter%d.inner.iter1.leaf", k)
+		prev := fmt.Sprintf("outer.iter%d.inner.iter100.leaf", k-1)
+		if !slices.Contains(byID[first].Needs, prev) {
+			t.Fatalf("%s needs = %v; want the outer chain onto %q", first, byID[first].Needs, prev)
+		}
+	}
+}
