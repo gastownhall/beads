@@ -316,8 +316,9 @@ func fallbackDatabaseEligible(db serverDatabaseMetadata) bool {
 //     either mode.
 //  5. no local project_id, shared-server mode: skip, sole candidate or
 //     several: without an anchor, adoption can redirect this workspace to
-//     another project's data. In non-shared mode nothing is selected here
-//     yet: the identity-free recovery policies land with their own ACs.
+//     another project's data.
+//  6. no local project_id, non-shared mode, several eligible alternatives:
+//     skip; never choose by enumeration order.
 //
 // Every skip says why selection is unsafe, lists the eligible alternatives in
 // sorted order, and names the manual remedy. Server-supplied names and IDs are
@@ -390,6 +391,13 @@ func selectFallbackDoltDatabase(localProjectID, currentDatabase string, sharedSe
 	if sharedServerMode {
 		return nil, skipFix(fmt.Errorf(
 			"shared Dolt server and no local project_id to anchor selection (candidates: %s); adopting one can redirect this workspace to another project's data; %s",
+			remedy.PrintedList(eligibleNames, ", "),
+			fallbackManualRemedy))
+	}
+
+	if len(eligible) > 1 {
+		return nil, skipFix(fmt.Errorf(
+			"multiple server databases have Beads schema and no local project_id disambiguates them (candidates: %s); %s",
 			remedy.PrintedList(eligibleNames, ", "),
 			fallbackManualRemedy))
 	}

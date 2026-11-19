@@ -548,6 +548,41 @@ func TestSelectFallbackDoltDatabase_KnownProjectIDWithoutMatchDeclines(t *testin
 	}
 }
 
+// With no local project_id on a non-shared server and several eligible
+// candidates, selection never goes by enumeration order: the result is the
+// same skip — same sorted candidate list — whatever order SHOW DATABASES
+// returned.
+func TestSelectFallbackDoltDatabase_MultipleCandidatesWithoutIdentityDeclinePermutationInvariant(t *testing.T) {
+	orders := [][]serverDatabaseMetadata{
+		{
+			{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+			{Name: "zeta_db", HasSchema: true, ProjectID: "zeta"},
+			{Name: "alpha_db", HasSchema: true, ProjectID: "alpha"},
+		},
+		{
+			{Name: "alpha_db", HasSchema: true, ProjectID: "alpha"},
+			{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+			{Name: "zeta_db", HasSchema: true, ProjectID: "zeta"},
+		},
+	}
+	var first string
+	for i, databases := range orders {
+		selected, err := selectFallbackDoltDatabase("", configfile.DefaultDoltDatabase, false, databases)
+		if selected != nil {
+			t.Fatalf("order %d: selected %+v by enumeration order", i, selected)
+		}
+		selectSkipWant(t, err, []string{"alpha_db, zeta_db"})
+		if !strings.Contains(err.Error(), "multiple server databases have Beads schema") {
+			t.Errorf("order %d: skip does not say why selection is unsafe:\n%s", i, err.Error())
+		}
+		if i == 0 {
+			first = err.Error()
+		} else if err.Error() != first {
+			t.Fatalf("order changed the skip:\nfirst: %s\nthen:  %s", first, err.Error())
+		}
+	}
+}
+
 // Server-supplied names in a policy skip are spelled by remedy.PrintedValue:
 // a name carrying control characters cannot redraw the diagnostic.
 func TestSelectFallbackDoltDatabase_EscapesControlCharactersInNames(t *testing.T) {

@@ -722,6 +722,41 @@ func TestFixMissingDoltDatabase_KnownProjectIDWithoutMatchDeclines(t *testing.T)
 	}
 }
 
+// TestFixMissingDoltDatabase_MultipleCandidatesWithoutIdentityDeclinesSorted
+// pins GH#5576: with no local project_id on a non-shared server and several
+// eligible candidates, the fallback never chooses by enumeration order. It
+// declines with a skip listing the candidates sorted, plus the manual remedy,
+// and metadata.json stays unchanged.
+func TestFixMissingDoltDatabase_MultipleCandidatesWithoutIdentityDeclinesSorted(t *testing.T) {
+	isolateDoltEnvForFallbackTest(t)
+	port := newRefusingDoltListener(t)
+	dir, beadsDir, before := newFallbackFixWorkspace(t, port, "")
+
+	calls := stubServerMetadataCatalog(t, []serverDatabaseMetadata{
+		{Name: configfile.DefaultDoltDatabase, HasSchema: false},
+		{Name: "zeta_db", HasSchema: true, ProjectID: "zeta"},
+		{Name: "alpha_db", HasSchema: true, ProjectID: "alpha"},
+	})
+
+	err := FixMissingDoltDatabase(dir)
+
+	var skip *SkipError
+	if !errors.As(err, &skip) {
+		t.Fatalf("FixMissingDoltDatabase error = %v, want a *fix.SkipError", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "alpha_db, zeta_db") {
+		t.Errorf("skip does not list the candidates in sorted order:\n%s", msg)
+	}
+	if !strings.Contains(msg, "bd dolt set database <name>") {
+		t.Errorf("skip does not give the manual remedy:\n%s", msg)
+	}
+	assertMetadataUnchanged(t, beadsDir, before)
+	if *calls != 2 {
+		t.Fatalf("catalog read %d times, want 2 (reconcile + fallback)", *calls)
+	}
+}
+
 // TestInspectServerMetadataDatabasesNamesTheDataDirectoryEscaped pins the
 // remedy printer on the data directory inspectServerMetadataDatabases names
 // when no port is resolved and the workspace's own server, stopped, would
