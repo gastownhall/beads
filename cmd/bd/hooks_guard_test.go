@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -787,6 +788,46 @@ func installHooksCapturingStderr(t *testing.T, beadsHooks bool) string {
 	return stderr
 }
 
+// runHooksInstallCommandForTest runs bd hooks install's RunE and returns its
+// stdout and stderr separately.
+func runHooksInstallCommandForTest(t *testing.T, asJSON bool) (stdout, stderr string) {
+	t.Helper()
+	oldJSON := jsonOutput
+	jsonOutput = asJSON
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	outR, outW, err := os.Pipe()
+	require.NoError(t, err)
+	errR, errW, err := os.Pipe()
+	require.NoError(t, err)
+	outC, errC := make(chan string, 1), make(chan string, 1)
+	drain := func(r *os.File, c chan<- string) {
+		var b strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := r.Read(buf)
+			b.Write(buf[:n])
+			if rerr != nil {
+				break
+			}
+		}
+		c <- b.String()
+	}
+	go drain(outR, outC)
+	go drain(errR, errC)
+	os.Stdout, os.Stderr = outW, errW
+	runErr := hooksInstallCmd.RunE(hooksInstallCmd, nil)
+	os.Stdout, os.Stderr = oldOut, oldErr
+	_ = outW.Close()
+	_ = errW.Close()
+	stdout, stderr = <-outC, <-errC
+	require.NoError(t, runErr, "stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	return stdout, stderr
+}
+
 // TestInstallHooks_NonShell pins GH#6348: an install never splices bd's
 // POSIX-sh section into a hook run by another interpreter, repairs complete
 // sections an earlier install appended, leaves ambiguous markers and binary
@@ -837,5 +878,30 @@ func TestInstallHooks_NonShell(t *testing.T) {
 		gotDir, err := filepath.EvalSymlinks(configured)
 		require.NoError(t, err)
 		require.Equal(t, wantDir, gotDir, "core.hooksPath selects the beads hooks directory")
+	})
+
+	t.Run("AC3_human_and_json_report_the_skip", func(t *testing.T) {
+		repoDir := setupGuardTestRepo(t)
+		writeNonShellHookForTest(t, filepath.Join(repoDir, ".git", "hooks", "pre-push"), nonShellPythonPrePush)
+
+		stdout, stderr := runHooksInstallCommandForTest(t, false)
+		installed, rest, ok := strings.Cut(stdout, "Installed hooks:\n")
+		require.True(t, ok, "human output lists installed hooks:\n%s", stdout)
+		_ = installed
+		installedList, skippedPart, _ := strings.Cut(rest, "\n\n")
+		require.NotContains(t, installedList, "- pre-push", "pre-push is not an installed hook")
+		require.Contains(t, installedList, "- pre-commit")
+		require.Contains(t, skippedPart, "Skipped hooks")
+		require.Contains(t, skippedPart, "- pre-push")
+		require.Contains(t, stderr, "python3")
+
+		stdout, stderr = runHooksInstallCommandForTest(t, true)
+		var result map[string]any
+		require.NoError(t, json.Unmarshal([]byte(stdout), &result), "stdout must be pure JSON:\n%s", stdout)
+		require.Equal(t, true, result["success"])
+		require.Equal(t, []any{"pre-push"}, result["skipped_hooks"])
+		require.NotContains(t, stdout, "Warning")
+		require.Contains(t, stderr, "pre-push")
+		require.Contains(t, stderr, "python3")
 	})
 }

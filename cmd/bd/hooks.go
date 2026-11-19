@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -812,7 +813,8 @@ Installed hooks:
 		chain, _ := cmd.Flags().GetBool("chain")
 		beadsHooks, _ := cmd.Flags().GetBool("beads")
 
-		if err := installStandaloneHooks(managedHookNames, force, shared, chain, beadsHooks); err != nil {
+		skipped, err := installStandaloneHooks(managedHookNames, force, shared, chain, beadsHooks)
+		if err != nil {
 			return HandleErrorRespectJSON("installing hooks: %v", err)
 		}
 
@@ -823,6 +825,10 @@ Installed hooks:
 				"shared":     shared,
 				"chained":    chain,
 				"beadsHooks": beadsHooks,
+			}
+			if len(skipped) > 0 {
+				// The reasons were printed on stderr as the hooks were skipped.
+				output["skipped_hooks"] = skipped
 			}
 			jsonBytes, _ := json.MarshalIndent(output, "", "  ")
 			fmt.Println(string(jsonBytes))
@@ -842,7 +848,16 @@ Installed hooks:
 			}
 			fmt.Println("Installed hooks:")
 			for _, hookName := range managedHookNames {
-				fmt.Printf("  - %s\n", hookName)
+				if !slices.Contains(skipped, hookName) {
+					fmt.Printf("  - %s\n", hookName)
+				}
+			}
+			if len(skipped) > 0 {
+				fmt.Println()
+				fmt.Println("Skipped hooks (not a shell script; see the warnings above):")
+				for _, hookName := range skipped {
+					fmt.Printf("  - %s\n", hookName)
+				}
 			}
 		}
 		return nil
@@ -1139,14 +1154,17 @@ func resolveStandaloneHooksContext() (*initHooksContext, error) {
 	return &initHooksContext{workDir: paths.RepoRoot, paths: paths, env: clean, inheritedEnv: inherited}, nil
 }
 
-func installStandaloneHooks(hookNames []string, force, shared, chain, beadsHooks bool) error {
+// installStandaloneHooks installs the hooks for bd hooks install and returns
+// the names of the hooks it left without bd integration because they run under
+// a non-shell interpreter (GH#6348).
+func installStandaloneHooks(hookNames []string, force, shared, chain, beadsHooks bool) ([]string, error) {
 	selected, err := resolveStandaloneHooksContext()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if shared || beadsHooks {
 		if selected.paths.CommonDir == "" {
-			return fmt.Errorf("shared or beads hooks require a working Git repository")
+			return nil, fmt.Errorf("shared or beads hooks require a working Git repository")
 		}
 		if beadsHooks {
 			selected.beadsDir = beads.FindBeadsDir()
@@ -1160,17 +1178,22 @@ func installHooksWithContext(hookNames []string, force, shared, chain, beadsHook
 	if selected != nil && shared {
 		return fmt.Errorf("shared hooks mode is not supported by selected init")
 	}
-	return installHooksAt(hookNames, force, shared, chain, beadsHooks, selected)
+	// Skipped non-shell hooks are already reported on stderr.
+	_, err := installHooksAt(hookNames, force, shared, chain, beadsHooks, selected)
+	return err
 }
 
+// installHooksAt installs the managed hooks and returns the names of the hooks
+// it skipped because they run under a non-shell interpreter (GH#6348).
+//
 //nolint:unparam // force and chain remain accepted compatibility no-ops
-func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) error {
+func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) (skipped []string, err error) {
 	var hooksDir string
 	if selected != nil {
 		hooksDir = selected.paths.HooksDir
 		if beadsHooks {
 			if selected.beadsDir == "" {
-				return fmt.Errorf("%s", activeWorkspaceNotFoundError())
+				return nil, fmt.Errorf("%s", activeWorkspaceNotFoundError())
 			}
 			hooksDir = filepath.Join(selected.beadsDir, "hooks")
 		} else if shared {
@@ -1180,7 +1203,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		// Use .beads/hooks/ directory (preferred for Dolt backend)
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
-			return fmt.Errorf("%s", activeWorkspaceNotFoundError())
+			return nil, fmt.Errorf("%s", activeWorkspaceNotFoundError())
 		}
 		hooksDir = filepath.Join(beadsDir, "hooks")
 	} else if shared {
@@ -1192,17 +1215,16 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		}
 	} else {
 		// Use common git directory for hooks (shared across worktrees)
-		var err error
 		hooksDir, err = git.GetGitHooksDir()
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	// Check the destination itself before creating, preserving into, or
 	// writing any hook in it, and before configuring Git to use it.
 	if err := refuseSymlinkedHooksDir(hooksDir); err != nil {
-		return fmt.Errorf("refusing to install hooks: %w", err)
+		return nil, fmt.Errorf("refusing to install hooks: %w", err)
 	}
 
 	// Create hooks directory if it doesn't exist.
@@ -1213,7 +1235,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		hooksDirPerm = config.BeadsDirPerm
 	}
 	if err := os.MkdirAll(hooksDir, hooksDirPerm); err != nil {
-		return fmt.Errorf("failed to create hooks directory: %w", err)
+		return nil, fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
 	// When setting a local core.hooksPath (beads or shared mode), preserve any
@@ -1238,7 +1260,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 	// stopping midway through the loop would leave hooks half-installed.
 	for _, hookName := range hookNames {
 		if err := guardHookWritePathWithProbe(filepath.Join(hooksDir, hookName), shared, tracked); err != nil {
-			return fmt.Errorf("refusing to install %s hook: %w", hookName, err)
+			return nil, fmt.Errorf("refusing to install %s hook: %w", hookName, err)
 		}
 	}
 
@@ -1254,7 +1276,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		existing, readErr := os.ReadFile(hookPath)
 
 		if readErr != nil && !os.IsNotExist(readErr) {
-			return fmt.Errorf("failed to read %s: %w", hookName, readErr)
+			return nil, fmt.Errorf("failed to read %s: %w", hookName, readErr)
 		}
 
 		// A hook run by a non-shell interpreter (a pre-commit/prek Python
@@ -1267,6 +1289,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 			if outcome, nonShell := planNonShellHookInstall(hookName, hookPath, string(existing)); nonShell {
 				if outcome.warning != "" {
 					fmt.Fprintln(os.Stderr, outcome.warning)
+					skipped = append(skipped, hookName)
 				}
 				continue
 			}
@@ -1296,7 +1319,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 					if _, statErr := os.Lstat(backupPath); os.IsNotExist(statErr) {
 						// #nosec G306 -- keep executable so a rename restores a working hook
 						if backupErr := os.WriteFile(backupPath, existing, 0755); backupErr != nil {
-							return fmt.Errorf("failed to back up %s before injecting bd section: %w", hookName, backupErr)
+							return nil, fmt.Errorf("failed to back up %s before injecting bd section: %w", hookName, backupErr)
 						}
 					}
 					// Inject section, preserving existing content
@@ -1311,26 +1334,26 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		// Write hook file
 		// #nosec G306 -- git hooks must be executable for Git to run them
 		if err := os.WriteFile(hookPath, []byte(newContent), 0755); err != nil {
-			return fmt.Errorf("failed to write %s: %w", hookName, err)
+			return nil, fmt.Errorf("failed to write %s: %w", hookName, err)
 		}
 	}
 
 	// Configure git to use the hooks directory after writing, as in ordinary installs.
 	if selected != nil && (beadsHooks || shared) {
 		if err := selected.configureHooksPath(hooksDir); err != nil {
-			return fmt.Errorf("failed to configure git hooks path: %w", err)
+			return nil, fmt.Errorf("failed to configure git hooks path: %w", err)
 		}
 	} else if beadsHooks {
 		if err := configureBeadsHooksPath(); err != nil {
-			return fmt.Errorf("failed to configure git hooks path: %w", err)
+			return nil, fmt.Errorf("failed to configure git hooks path: %w", err)
 		}
 	} else if shared {
 		if err := configureSharedHooksPath(); err != nil {
-			return fmt.Errorf("failed to configure git hooks path: %w", err)
+			return nil, fmt.Errorf("failed to configure git hooks path: %w", err)
 		}
 	}
 
-	return nil
+	return skipped, nil
 }
 
 // preservePreexistingHooks copies non-beads hooks from the currently effective
