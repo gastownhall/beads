@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -522,5 +523,47 @@ func seedRelatesToEdge(t *testing.T, ctx context.Context, st storage.DoltStorage
 		Type:        types.DepRelatesTo,
 	}, "seed", storage.DependencyAddOptions{EmitEvent: true}); err != nil {
 		t.Fatalf("seed relates-to %s -> %s: %v", from, to, err)
+	}
+}
+
+// TestRelateUnresolvedEndpointNamesItAndWritesNothing pins AC-3: an endpoint
+// that resolves in NO store (neither locally nor through routing) fails the
+// command naming THAT endpoint, before any edge or event is written — while a
+// cross-prefix endpoint earlier in the argument list resolves in its own rig
+// and must not be misreported as the missing one.
+//
+// This test uses os.Chdir and assigns the CLI globals, so it cannot run in
+// parallel with other tests.
+func TestRelateUnresolvedEndpointNamesItAndWritesNothing(t *testing.T) {
+	e := setupCrossPrefixRelateEnv(t)
+
+	err := runRelate(relateCmd, []string{"gt-target1", "hq-nonexistent"})
+	if err == nil {
+		t.Fatal("bd relate with an endpoint that resolves nowhere succeeded")
+	}
+	if !strings.Contains(err.Error(), "hq-nonexistent") {
+		t.Errorf("error names the wrong endpoint (want hq-nonexistent named): %v", err)
+	}
+	// The first endpoint routed fine; the failure must be about the second.
+	if strings.Contains(err.Error(), "failed to add relates-to") || strings.Contains(err.Error(), "Linked") {
+		t.Errorf("error reports a write that never happened: %v", err)
+	}
+
+	// Nothing was written, in either store: no half of the pair exists.
+	townRO := e.reopenTownReadonly(t)
+	deps, derr := townRO.GetDependencyRecords(e.ctx, "hq-src1")
+	if derr != nil {
+		t.Fatalf("town GetDependencyRecords: %v", derr)
+	}
+	if len(deps) != 0 {
+		t.Errorf("town issue hq-src1 gained edges from a failed relate: %+v", deps)
+	}
+	rigRO := e.openRigReadonly(t, "gt-target1")
+	rdeps, rerr := rigRO.GetDependencyRecords(e.ctx, "gt-target1")
+	if rerr != nil {
+		t.Fatalf("rig GetDependencyRecords: %v", rerr)
+	}
+	if len(rdeps) != 0 {
+		t.Errorf("rig issue gt-target1 gained edges from a failed relate: %+v", rdeps)
 	}
 }
