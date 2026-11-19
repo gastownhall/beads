@@ -53,7 +53,7 @@ type IssueSQLRepository interface {
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
 	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode, actor string) (changed bool, err error)
 	PromoteFromEphemeral(ctx context.Context, id, actor string) error
-	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts) error
+	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts, isClaim bool) error
 	// CompareAndSetMetadataKey runs the SHARED compare-and-set body on this
 	// repository's transaction, which is how the unit-of-work provider reaches
 	// the same function the two store backends wrap. It takes no table option:
@@ -620,11 +620,11 @@ func (u *issueUseCaseImpl) getByIDs(ctx context.Context, ids []string, useWisp b
 }
 
 func (u *issueUseCaseImpl) UpdateIssue(ctx context.Context, id string, updates map[string]any, actor string) error {
-	return u.update(ctx, id, updates, actor, false)
+	return u.update(ctx, id, updates, actor, false, false)
 }
 
 func (u *issueUseCaseImpl) UpdateWisp(ctx context.Context, id string, updates map[string]any, actor string) error {
-	return u.update(ctx, id, updates, actor, true)
+	return u.update(ctx, id, updates, actor, true, false)
 }
 
 // CompareAndSetMetadataKey passes the plan straight through.
@@ -647,7 +647,12 @@ func (u *issueUseCaseImpl) ReleaseIssue(ctx context.Context, req publicops.Relea
 	return u.issueRepo.ReleaseIssue(ctx, req)
 }
 
-func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[string]any, actor string, useWisp bool) error {
+// update is the body of UpdateIssue and UpdateWisp. isClaim says the write is
+// the fields leg of a claim (ApplyUpdate's spec.Claim), which lets the
+// repository's lease decision re-arm the lease for the final assignee instead
+// of deleting the one the claim leg just armed (bd-zprbhg); every plain
+// update passes false and keeps the clear-only lease contract.
+func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[string]any, actor string, useWisp, isClaim bool) error {
 	if id == "" {
 		return fmt.Errorf("update: id must not be empty")
 	}
@@ -660,7 +665,7 @@ func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[st
 	if err := u.validateIssueTypeUpdate(ctx, updates); err != nil {
 		return err
 	}
-	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp})
+	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp}, isClaim)
 }
 
 // validateIssueTypeUpdate rejects an issue_type the configuration does not
@@ -875,14 +880,11 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	}
 
 	if len(spec.Fields) > 0 {
-		if useWisp {
-			if err := u.UpdateWisp(ctx, id, spec.Fields, actor); err != nil {
-				return nil, err
-			}
-		} else {
-			if err := u.UpdateIssue(ctx, id, spec.Fields, actor); err != nil {
-				return nil, err
-			}
+		// spec.Claim rides the fields leg so the repository's lease decision
+		// can re-arm the lease for a final assignee the override names
+		// (bd-zprbhg); for wisps the claim never arms a lease either way.
+		if err := u.update(ctx, id, spec.Fields, actor, useWisp, spec.Claim); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1310,7 +1312,7 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: %w", node.Key, err)
 		}
 		updates := map[string]any{"metadata": metaJSON}
-		if err := u.issueRepo.Update(ctx, keyToID[node.Key], updates, actor, IssueTableOpts{UseWispsTable: useWisp}); err != nil {
+		if err := u.issueRepo.Update(ctx, keyToID[node.Key], updates, actor, IssueTableOpts{UseWispsTable: useWisp}, false); err != nil {
 			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: updating metadata refs: %w", node.Key, err)
 		}
 	}
@@ -1457,7 +1459,7 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 			continue
 		}
 		id := keyToID[plan.Nodes[i].Key]
-		if err := u.issueRepo.Update(ctx, id, map[string]any{"assignee": assignee}, actor, IssueTableOpts{UseWispsTable: useWisp}); err != nil {
+		if err := u.issueRepo.Update(ctx, id, map[string]any{"assignee": assignee}, actor, IssueTableOpts{UseWispsTable: useWisp}, false); err != nil {
 			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: defer assignee: %w", plan.Nodes[i].Key, err)
 		}
 	}

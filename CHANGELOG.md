@@ -1431,6 +1431,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd update <id> --claim --assignee=<other>` no longer deletes the lease
+  it just armed.** On both storage backends the claim leg armed a lease for
+  the claiming actor and the fields leg then treated the assignee override
+  as a transfer and deleted that lease in the same mutation, leaving a live
+  in_progress claim with no lease row. Since `bd reclaim` selects candidates
+  from the leases table, such a claim was permanently unreclaimable. The
+  update now re-arms the lease for the FINAL assignee (the override target,
+  not the claiming actor), so the hold is TTL-bounded: if the new holder
+  never heartbeats, `bd reclaim` reverts the assignment after the lease TTL
+  plus grace instead of never. A claim whose patch ends the claim (reverting
+  the status, a custom active status, or clearing the assignee) still ends
+  leaseless, a `claim.pools` alias as the override gets no lease (nothing
+  heartbeats as an alias; members reach the issue through the claim CAS),
+  and wisps stay unleased. Plain updates without `--claim` are unchanged:
+  they remain clear-only, so interactive hand-doles stay durable
+  (GH#4716). (#6501)
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

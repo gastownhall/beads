@@ -222,7 +222,13 @@ func (r *issueSQLRepositoryImpl) MovePersistence(ctx context.Context, id string,
 	return result.Changed, nil
 }
 
-func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates map[string]any, actor string, opts domain.IssueTableOpts) error {
+// Update writes the filtered column updates onto the row. isClaim says the
+// write is the fields leg of a claim, which lets the lease decision
+// (issueops.LeaseOutcomeOnUpdate) re-arm the lease for the final assignee an
+// override names instead of deleting the lease the claim leg just armed
+// (bd-zprbhg); every plain update passes false and keeps the clear-only lease
+// contract (GH#4716).
+func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates map[string]any, actor string, opts domain.IssueTableOpts, isClaim bool) error {
 	if id == "" {
 		return errors.New("db: Update: id must not be empty")
 	}
@@ -347,7 +353,12 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		setClauses, args = issueops.ManageClosedAt(oldIssue, updates, setClauses, args)
 		setClauses, args = issueops.ManageStartedAt(oldIssue, updates, setClauses, args)
 	}
-	clearLease := issueops.ManageLeaseOnUpdate(oldIssue, updates)
+	// Lease parity with issueops.updateIssueInTx: generic updates only ever
+	// clear; a write that is the fields leg of a claim re-arms the lease for
+	// the final assignee (bd-zprbhg). The outcome is applied after the UPDATE
+	// below, which rewrites row_lock, so a concurrent reclaim or close still
+	// collides on that cell.
+	leaseOutcome, leaseHolder := issueops.LeaseOutcomeOnUpdate(oldIssue, updates, isClaim, opts.UseWispsTable)
 
 	// Rewrite row_lock on every generic update, mirroring the classic
 	// issueops.updateIssueInTx invariant (update.go): a concurrent
@@ -374,10 +385,8 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	if rows == 0 {
 		return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
 	}
-	if clearLease && !opts.UseWispsTable {
-		if err := issueops.DeleteLeaseInTx(ctx, r.runner, id); err != nil {
-			return fmt.Errorf("db: Update %s: clear lease: %w", id, err)
-		}
+	if err := issueops.ApplyLeaseOutcomeInTx(ctx, r.runner, id, leaseOutcome, leaseHolder, time.Now().UTC()); err != nil {
+		return fmt.Errorf("db: Update %s: apply lease outcome: %w", id, err)
 	}
 
 	// Event-type parity: embedded records EventClosed / EventReopened /

@@ -1122,7 +1122,7 @@ func init() {
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
-	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too; refused while the issue has an open local blocker unless --force)")
+	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; with --assignee the claim and its lease go to that holder instead; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too, but a claim.pools alias as the --assignee override gets no lease; refused while the issue has an open local blocker unless --force)")
 	// Overrides the live-claim reassign fence (bd-98s5c), close policy and the
 	// blocked-claim refusal.
 	updateCmd.Flags().Bool("force", false, "Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead), and let --claim take an issue that still has an open local blocker (an unresolved external dependency still refuses the claim)")

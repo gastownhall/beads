@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // leaseState reads an issue's claim state plus its lease-row overlay (the
@@ -1021,4 +1022,63 @@ func TestConcurrentReapersAreBenign(t *testing.T) {
 	if live := readLeaseState(t, ctx, store, "reapers-live"); live.status != "in_progress" || live.assignee.String != "live-worker" {
 		t.Errorf("live issue disturbed: %+v", live)
 	}
+}
+
+// claimOverrideLease is the holder-level assertion battery for
+// TestClaimAssigneeOverrideLeasesTheFinalHolder (bd-zprbhg): a guarded update
+// that claims with an assignee override must leave a lease held by the FINAL
+// assignee, not delete the lease the claim leg just armed. Both stacks
+// (classic issueops and the proxied/domain repository) go through
+// issueops.LeaseOutcomeOnUpdate, so this test pins the classic half; the
+// domain half is pinned in internal/storage/domain/db.
+func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
+	t.Run("AC1 open issue claimed with override gets one lease held by the override target", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		issue := &types.Issue{
+			ID: "bd-lease-cao-1", Title: "claim with override", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "seeder"); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+
+		ops, err := store.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("lifecycle: %v", err)
+		}
+		if _, err := ops.Update(ctx, publicops.UpdateRequest{
+			Actor: "alice", IssueID: "bd-lease-cao-1", Claim: true,
+			Patch: publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "bob"}},
+		}); err != nil {
+			t.Fatalf("claim with assignee override: %v", err)
+		}
+
+		ls := readLeaseState(t, ctx, store, "bd-lease-cao-1")
+		if ls.status != "in_progress" || ls.assignee.String != "bob" {
+			t.Fatalf("row = %s/%s, want in_progress/bob", ls.status, ls.assignee.String)
+		}
+		if !ls.leaseExpires.Valid || !ls.leaseExpires.Time.After(time.Now()) {
+			t.Fatalf("claim+override left no live lease: %+v", ls)
+		}
+		var holders []string
+		rows, err := store.db.QueryContext(ctx, "SELECT holder FROM leases WHERE issue_id = ?", "bd-lease-cao-1")
+		if err != nil {
+			t.Fatalf("read lease rows: %v", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var holder string
+			if err := rows.Scan(&holder); err != nil {
+				t.Fatalf("scan holder: %v", err)
+			}
+			holders = append(holders, holder)
+		}
+		if len(holders) != 1 || holders[0] != "bob" {
+			t.Fatalf("lease holders = %v, want exactly [bob]", holders)
+		}
+	})
 }
