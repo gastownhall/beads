@@ -25,17 +25,30 @@ func startIdleWatchedServerForTest(t *testing.T, beadsDir string) (port int, spa
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
+	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var launches []doltserver.IdleWatchOpts
 	doltserver.SetIdleWatchSpawner(func(opts doltserver.IdleWatchOpts) {
 		mu.Lock()
 		launches = append(launches, opts)
 		mu.Unlock()
-		go doltserver.RunIdleWatch(ctx, opts)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			doltserver.RunIdleWatch(ctx, opts)
+		}()
 	})
-	t.Cleanup(func() { doltserver.SetIdleWatchSpawner(nil) })
+	// One cleanup, in the order it needs: cancel first (so the watchers'
+	// sleeps return), then wait for the goroutines to actually finish (a
+	// watcher can still be inside its reap when the test body ends, and its
+	// stopLocked reads the config the setup cleanup resets), then remove
+	// the hook. Cleanups run LIFO, so this runs before setupLifecycleTestDir's
+	// config.ResetForTesting.
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+		doltserver.SetIdleWatchSpawner(nil)
+	})
 
 	port, startedByUs, err := doltserver.EnsureRunningDetailed(beadsDir)
 	if err != nil {
@@ -164,4 +177,62 @@ func pidFromFile(t *testing.T, beadsDir string) int {
 		t.Fatalf("parsing pid file %q: %v", data, err)
 	}
 	return pid
+}
+
+// TestLifecycle_IdleWatchKeepsServerWithShortLivedClients pins the two
+// client shapes that must never be reaped (GH#4282): connections that open
+// and close between the watcher's polls (visible only as a Connections
+// delta), and one connection held open across several windows (visible only
+// as Threads_connected). Only the quiet that follows is reaped.
+func TestLifecycle_IdleWatchKeepsServerWithShortLivedClients(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	t.Setenv("BEADS_DOLT_IDLE_TIMEOUT", "5s")
+	port, _, pid := startIdleWatchedServerForTest(t, beadsDir)
+	if p, err := os.FindProcess(pid); err == nil {
+		reg.Register(p)
+	}
+	running := func() bool {
+		data, err := os.ReadFile(filepath.Join(beadsDir, doltserver.PIDFileName))
+		if err != nil {
+			return false
+		}
+		return strings.TrimSpace(string(data)) == fmt.Sprint(pid)
+	}
+
+	// Short-lived clients: an open and close every 200ms for 8s — several
+	// per 1s poll, each gone before the next poll reads the counters.
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		db := connectMySQL(t, port)
+		if err := db.Ping(); err != nil {
+			t.Fatalf("churn client: %v", err)
+		}
+		_ = db.Close()
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !running() {
+		t.Fatal("server was reaped while short-lived clients kept connecting")
+	}
+
+	// One held connection across more than two 5s windows: no new
+	// connections, only Threads_connected above the watcher's own dial.
+	held := connectMySQL(t, port)
+	defer held.Close()
+	if err := held.Ping(); err != nil {
+		t.Fatalf("held client: %v", err)
+	}
+	time.Sleep(11 * time.Second)
+	if !running() {
+		t.Fatal("server was reaped while a client held its connection open")
+	}
+
+	// Quiet at last: the same window that spared the clients reaps the
+	// server once nothing touches it.
+	_ = held.Close()
+	waitForIdleReap(t, beadsDir, port, 30*time.Second)
+	_ = doltserver.IgnoreNotRunning(doltserver.Stop(beadsDir))
 }
