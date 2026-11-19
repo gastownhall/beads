@@ -29,6 +29,7 @@ func (s *testSuite) TestIssueUseCase_ApplyUpdate() {
 	s.Run("ClaimAndFieldsRunTogether", s.iucApplyUpdateClaimPlusFields)
 	s.Run("ClaimAssigneeOverrideArmsLease", s.iucApplyUpdateClaimAssigneeOverrideArmsLease)
 	s.Run("ClaimAssigneeOverrideOnLiveClaimReArmsForNewHolder", s.iucApplyUpdateClaimOverrideOnLiveClaimReArms)
+	s.Run("ClaimAssigneeOverridePoolAliasStaysLeaseless", s.iucApplyUpdateClaimOverridePoolAliasStaysLeaseless)
 	s.Run("AddRemoveLabelPaths", s.iucApplyUpdateAddRemoveLabels)
 	s.Run("SetLabelsDiffsAgainstCurrent", s.iucApplyUpdateSetLabels)
 	s.Run("SetLabelsThenAddsThenRemoves", s.iucApplyUpdateSetLabelsThenAddRemove)
@@ -199,6 +200,31 @@ func (s *testSuite) iucApplyUpdateClaimOverrideOnLiveClaimReArms() {
 	wantExpiry := grantedAt.Add(issueops.DefaultLeaseTTL)
 	s.LessOrEqual(expiresAt.Sub(wantExpiry).Abs(), time.Second,
 		"lease_expires_at %v, want granted_at + DefaultLeaseTTL %v", expiresAt, wantExpiry)
+}
+
+// iucApplyUpdateClaimOverridePoolAliasStaysLeaseless pins AC-3 of bd-zprbhg
+// on the proxied/domain stack: a claim whose assignee override names a
+// claim.pools alias leaves the issue in_progress under the alias with NO
+// lease row. Nothing heartbeats as an alias, so an armed lease would be
+// certain reclaim-bait (GH#4716); pool members reach the issue through the
+// claim CAS.
+func (s *testSuite) iucApplyUpdateClaimOverridePoolAliasStaysLeaseless() {
+	cleanup := s.setClaimPools("fable-crew")
+	defer cleanup()
+
+	s.seedOpenIssue("bd-iuc-au-cao3")
+	updated, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-cao3", domain.UpdateSpec{
+		Claim:  true,
+		Fields: map[string]any{"assignee": "fable-crew"},
+	}, "alice")
+	s.Require().NoError(err)
+	s.Equal(types.StatusInProgress, updated.Status)
+	s.Equal("fable-crew", updated.Assignee)
+
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM leases WHERE issue_id = ?", "bd-iuc-au-cao3").Scan(&count))
+	s.Equal(0, count, "a claim.pools alias must not hold a lease row")
 }
 
 func (s *testSuite) iucApplyUpdateAddRemoveLabels() {

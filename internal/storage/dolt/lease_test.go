@@ -1137,4 +1137,41 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			t.Errorf("lease_expires_at = %v, want granted_at + DefaultLeaseTTL = %v", expiresAt, wantExpiry)
 		}
 	})
+
+	t.Run("AC3 claim.pools alias as the override stays leaseless", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		if err := store.SetConfig(ctx, "claim.pools", "fable-crew"); err != nil {
+			t.Fatalf("set claim.pools: %v", err)
+		}
+		issue := &types.Issue{
+			ID: "bd-lease-cao-3", Title: "pool override", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "seeder"); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+
+		ops, err := store.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("lifecycle: %v", err)
+		}
+		if _, err := ops.Update(ctx, publicops.UpdateRequest{
+			Actor: "alice", IssueID: "bd-lease-cao-3", Claim: true,
+			Patch: publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "fable-crew"}},
+		}); err != nil {
+			t.Fatalf("claim with pool-alias override: %v", err)
+		}
+
+		ls := readLeaseState(t, ctx, store, "bd-lease-cao-3")
+		if ls.status != "in_progress" || ls.assignee.String != "fable-crew" {
+			t.Fatalf("row = %s/%s, want in_progress/fable-crew", ls.status, ls.assignee.String)
+		}
+		if ls.leaseExpires.Valid || ls.heartbeatAt.Valid {
+			t.Fatalf("pool-alias override must not hold a lease (nothing heartbeats as an alias): %+v", ls)
+		}
+	})
 }
