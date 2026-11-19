@@ -19,6 +19,20 @@ import (
 // separator-bearing ls-remote bd's probe and Dolt's remote transport run.
 const cmdBdOldGitUsageBanner = "usage: git ls-remote [--heads] [--tags] [-u <exec> | --upload-pack <exec>] [<repository> [<refs>...]]"
 
+// gitProbeUsageGuidancePhrases are what the probe guidance pins: that git
+// refused the arguments of bd's own ls-remote, the old-git-on-PATH checks and
+// the troubleshooting entry.
+var gitProbeUsageGuidancePhrases = []string{
+	"Git rejected the arguments of the git ls-remote bd ran to check the\nremote",
+	"git --version",
+	"which -a git",
+	"sync-setup.md#usage-git-banner-on-push-pull-or-bootstrap",
+}
+
+// gitTransportOnlyPhrases belong to the guidance for Dolt's transport alone:
+// bd's own probe carries no Dolt credential hints and runs no server's git.
+var gitTransportOnlyPhrases = []string{"Dolt's wrapper", "Dolt's remote transport", "server mode", "bd dolt stop"}
+
 // writeProbeOldGitShim installs a `git` first on PATH that rejects the
 // separator-bearing ls-remote bd's probe runs (git 2.6.1 rejected the
 // separator with usage(), GH#6472), printing a trace line ahead of the banner,
@@ -118,7 +132,8 @@ exit 128
 // TestBootstrapPlanOldGitRefusal: a configured sync.remote whose probe an old
 // git on PATH refuses blocks the plan (never clones), names the invocation
 // problem, reproduces with the separator the actual probe passes, and prints
-// the argument-refusal guidance instead of the credentials/network advice.
+// the probe's argument-refusal guidance (bd's own git, so no Dolt hints or
+// server PATH) instead of the credentials/network advice.
 func TestBootstrapPlanOldGitRefusal(t *testing.T) {
 	writeProbeOldGitShim(t, t.TempDir())
 	beadsDir := newForgeSyncRemoteWorkspace(t, "https://user:secret-token@github.com/org/repo.git")
@@ -161,11 +176,17 @@ func TestBootstrapPlanOldGitRefusal(t *testing.T) {
 	if got := strings.Count(stderr, "Git rejected the arguments"); got != 1 {
 		t.Errorf("guidance appears %d times, want exactly once:\n%s", got, stderr)
 	}
-	for _, want := range gitUsageGuidancePhrases {
+	for _, want := range gitProbeUsageGuidancePhrases {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr lacks %q:\n%s", want, stderr)
 		}
 	}
+	for _, unwanted := range gitTransportOnlyPhrases {
+		if strings.Contains(stderr, unwanted) {
+			t.Errorf("probe guidance has the transport-only %q:\n%s", unwanted, stderr)
+		}
+	}
+	requireGitTraceRecipe(t, stderr, "bd bootstrap")
 	if strings.Contains(stderr, "secret-token") {
 		t.Errorf("stderr leaks credentials:\n%s", stderr)
 	}
@@ -199,6 +220,9 @@ func TestBootstrapCloneGitUsageGuidance(t *testing.T) {
 				t.Fatalf("set --%s: %v", name, err)
 			}
 		}
+		// bootstrapCmd is shared: put --yes back, as the sibling bootstrap
+		// tests do, so no later test inherits the confirmation.
+		t.Cleanup(func() { _ = bootstrapCmd.Flags().Set("yes", "false") })
 
 		var runErr error
 		_, stderr := captureStdio(t, func() { runErr = bootstrapCmd.RunE(bootstrapCmd, nil) })
@@ -222,6 +246,7 @@ func TestBootstrapCloneGitUsageGuidance(t *testing.T) {
 				t.Errorf("stderr lacks %q:\n%s", want, stderr)
 			}
 		}
+		requireGitTraceRecipe(t, stderr, "bd bootstrap")
 	})
 
 	t.Run("other clone failure keeps its bare error", func(t *testing.T) {

@@ -986,7 +986,7 @@ func printSyncErrorGuidance(ctx context.Context, st storage.DoltStorage, remote 
 	case isRemoteDanglingReferenceErr(err):
 		printRemoteDanglingReferenceGuidance(ctx, st, remote)
 	case isGitUsageRefusalErr(err):
-		printGitUsageRefusalGuidance(os.Stderr)
+		printGitUsageRefusalGuidance(os.Stderr, "bd sync", remote)
 	case remote != "" && isRemoteNotFoundErr(err):
 		fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
 		fmt.Fprintln(os.Stderr, "Use 'bd dolt remote add <name> <url>' to add it.")

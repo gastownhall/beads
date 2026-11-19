@@ -25,14 +25,14 @@ func TestSyncGitUsageGuidance(t *testing.T) {
 		pushErr := fmt.Errorf("failed to push to origin/main: %w", sqlErr)
 		stderr, err := runFailingSync(t, pushErr, "")
 		requireSilentExit(t, err, stderr)
-		requireGitUsageGuidance(t, stderr, "Error: sync failed: push: "+pushErr.Error()+"\n")
+		requireGitUsageGuidance(t, stderr, "Error: sync failed: push: "+pushErr.Error()+"\n", "bd sync")
 	})
 
 	t.Run("named remote, cli route", func(t *testing.T) {
 		pushErr := fmt.Errorf("dolt push failed: %s: %w", cliGitUsageLease, errors.New("exit status 129"))
 		stderr, err := runFailingSync(t, pushErr, "backup")
 		requireSilentExit(t, err, stderr)
-		requireGitUsageGuidance(t, stderr, "Error: sync failed: push: "+pushErr.Error()+"\n")
+		requireGitUsageGuidance(t, stderr, "Error: sync failed: push: "+pushErr.Error()+"\n", "bd sync --remote backup")
 	})
 
 	t.Run("json output keeps stderr guidance suppressed", func(t *testing.T) {
@@ -59,7 +59,7 @@ func TestAutoPushGitUsageGuidance(t *testing.T) {
 		sqlErr := &mysql.MySQLError{Number: 1105, SQLState: [5]byte{'H', 'Y', '0', '0', '0'}, Message: sqlGitUsageHints}
 		pushErr := fmt.Errorf("failed to push to origin/main: %w", sqlErr)
 		stderr := runFailingAutoPush(t, pushErr)
-		requireGitUsageGuidance(t, stderr, "Warning: dolt auto-push failed: "+pushErr.Error()+"\n")
+		requireGitUsageGuidance(t, stderr, "Warning: dolt auto-push failed: "+pushErr.Error()+"\n", "bd dolt push")
 	})
 
 	t.Run("quiet suppresses the warning and guidance", func(t *testing.T) {

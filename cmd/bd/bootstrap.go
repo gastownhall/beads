@@ -320,7 +320,7 @@ Examples:
 			// (GH#6472), not a bootstrap or credentials one. Say so after the
 			// error, the way push/pull/sync do; JSON runs keep stderr clean.
 			if isGitUsageRefusalErr(err) && !jsonOutput {
-				printGitUsageRefusalGuidance(os.Stderr)
+				printGitUsageRefusalGuidance(os.Stderr, "bd bootstrap", "")
 			}
 			return exit
 		}
@@ -987,7 +987,7 @@ func printBootstrapPlan(plan BootstrapPlan) {
 					// invocation, not the remote, so the access and
 					// point-it-elsewhere remedies below do not apply.
 					fmt.Fprintf(os.Stderr, "  Reproduce: git ls-remote -- %s refs/dolt/data%s\n", url, note)
-					printGitUsageRefusalGuidance(os.Stderr)
+					printGitProbeUsageRefusalGuidance(os.Stderr)
 					return
 				}
 				fmt.Fprintf(os.Stderr, "  Reproduce: git ls-remote %s refs/dolt/data%s\n", url, note)

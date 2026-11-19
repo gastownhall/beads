@@ -200,7 +200,7 @@ func maybeAutoPush(ctx context.Context) {
 			} else if isRemoteDanglingReferenceErr(err) {
 				printRemoteDanglingReferenceGuidance(ctx, st, "")
 			} else if isGitUsageRefusalErr(err) {
-				printGitUsageRefusalGuidance(os.Stderr)
+				printGitUsageRefusalGuidance(os.Stderr, "bd dolt push", "")
 			}
 		}
 		debug.Logf("dolt auto-push: push error: %v\n", err)

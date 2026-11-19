@@ -6,11 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -31,25 +33,53 @@ const sqlGitUsageHints = "usage: git ls-remote [--heads] [--tags] [-u <exec> | -
 const cliGitUsageLease = "cannot parse expected object name ''\n" +
 	"usage: git push [--all | --mirror | --tags] [--receive-pack=<git-receive-pack>] [<repository> [<refspec>...]]"
 
-// gitUsageGuidancePhrases are what the shared guidance pins: that git refused
-// the arguments, that the appended credential hints are Dolt's wrapper and not
-// an authentication finding, the executable checks for old-git-on-PATH, the
-// server-mode environment note, and the trace capture.
+// gitUsageGuidancePhrases are what the transport guidance pins: that git
+// refused the arguments of a command Dolt ran, that the appended credential
+// hints are Dolt's wrapper and not an authentication finding, the executable
+// checks for old-git-on-PATH, the server-mode PATH and restart note, and the
+// file-target trace capture.
 var gitUsageGuidancePhrases = []string{
-	"Git rejected the arguments",
+	"Git rejected the arguments of a git command Dolt's remote transport ran",
 	"they do not establish an\nauthentication problem.",
 	"git --version",
 	"which -a git",
-	"server process's PATH",
-	"GIT_TRACE=1",
+	"the Dolt server runs git with the PATH it started with",
+	"bd dolt stop; the next bd command starts it again",
+	"bd removes GIT_TRACE=1 before Dolt runs git",
 	"sync-setup.md#usage-git-banner-on-push-pull-or-bootstrap",
 }
 
-// requireGitUsageGuidance checks that stderr carries the shared guidance
-// exactly once, with the unchanged Error/warning line in front of it and none
-// of the other recovery guidance (which names remedies this failure does not
-// have).
-func requireGitUsageGuidance(t *testing.T, stderr, lead string) {
+// gitTraceRecipeLine is the guidance's Unix trace recipe: GIT_TRACE's value,
+// then the bd command it re-runs.
+var gitTraceRecipeLine = regexp.MustCompile(`(?m)^  GIT_TRACE=(\S+) (.+)$`)
+
+// requireGitTraceRecipe checks that the guidance re-runs the command that
+// failed (rerun) with GIT_TRACE set to a value bd hands to the git that
+// failed: gittraceenv removes the stderr forms (GIT_TRACE=1) around every
+// remote call Dolt makes, so a recipe relying on them traces nothing.
+func requireGitTraceRecipe(t *testing.T, stderr, rerun string) {
+	t.Helper()
+	m := gitTraceRecipeLine.FindStringSubmatch(stderr)
+	if m == nil {
+		t.Errorf("stderr has no GIT_TRACE recipe line:\n%s", stderr)
+		return
+	}
+	if m[2] != rerun {
+		t.Errorf("trace recipe re-runs %q, want %q:\n%s", m[2], rerun, stderr)
+	}
+	if kept := gittraceenv.ScrubEnv([]string{"GIT_TRACE=" + m[1]}); len(kept) != 1 {
+		t.Errorf("trace recipe sets GIT_TRACE=%s, which bd removes before git runs:\n%s", m[1], stderr)
+	}
+	if want := `PowerShell: $env:GIT_TRACE="$env:TEMP\bd-git-trace.log"; ` + rerun + "\n"; !strings.Contains(stderr, want) {
+		t.Errorf("stderr lacks the PowerShell recipe %q:\n%s", want, stderr)
+	}
+}
+
+// requireGitUsageGuidance checks that stderr carries the transport guidance
+// exactly once, with the unchanged Error/warning line in front of it, a trace
+// recipe that re-runs rerun, and none of the other recovery guidance (which
+// names remedies this failure does not have).
+func requireGitUsageGuidance(t *testing.T, stderr, lead, rerun string) {
 	t.Helper()
 	for _, want := range gitUsageGuidancePhrases {
 		if !strings.Contains(stderr, want) {
@@ -62,6 +92,7 @@ func requireGitUsageGuidance(t *testing.T, stderr, lead string) {
 	if !strings.HasPrefix(stderr, lead) {
 		t.Errorf("stderr does not start with the unchanged %q:\n%s", lead, stderr)
 	}
+	requireGitTraceRecipe(t, stderr, rerun)
 	for _, unwanted := range []string{
 		"histories have diverged",
 		"different primary keys",
@@ -84,14 +115,14 @@ func TestDoltPushGitUsageGuidance(t *testing.T) {
 		pushErr := fmt.Errorf("failed to push to origin/main: %w", sqlErr)
 		stderr, err := runFailingDoltPush(t, pushErr, "")
 		requireSilentExit(t, err, stderr)
-		requireGitUsageGuidance(t, stderr, "Error: "+pushErr.Error()+"\n")
+		requireGitUsageGuidance(t, stderr, "Error: "+pushErr.Error()+"\n", "bd dolt push")
 	})
 
 	t.Run("named remote, cli route", func(t *testing.T) {
 		pushErr := fmt.Errorf("dolt push failed: %s: %w", cliGitUsageLease, errors.New("exit status 129"))
 		stderr, err := runFailingDoltPush(t, pushErr, "backup")
 		requireSilentExit(t, err, stderr)
-		requireGitUsageGuidance(t, stderr, "Error: "+pushErr.Error()+"\n")
+		requireGitUsageGuidance(t, stderr, "Error: "+pushErr.Error()+"\n", "bd dolt push --remote backup")
 		if unwanted := `Remote "backup" is not configured.`; strings.Contains(stderr, unwanted) {
 			t.Errorf("stderr has %q:\n%s", unwanted, stderr)
 		}
@@ -140,13 +171,13 @@ func TestDoltPullGitUsageGuidance(t *testing.T) {
 		pullErr := fmt.Errorf("failed to pull from origin/main: %w", sqlErr)
 		stderr, err := runDoltPull(t, &failingPullStore{pullErr: pullErr}, "backup")
 		requireSilentExit(t, err, stderr)
-		requireGitUsageGuidance(t, stderr, "Error: "+pullErr.Error()+"\n")
+		requireGitUsageGuidance(t, stderr, "Error: "+pullErr.Error()+"\n", "bd dolt pull --remote backup")
 	})
 
 	t.Run("default remote", func(t *testing.T) {
 		pullErr := errors.New("fetch failed: " + sqlGitUsageHints)
 		stderr, err := runDoltPull(t, &failingPullStore{pullErr: pullErr}, "")
 		requireSilentExit(t, err, stderr)
-		requireGitUsageGuidance(t, stderr, "Error: "+pullErr.Error()+"\n")
+		requireGitUsageGuidance(t, stderr, "Error: "+pullErr.Error()+"\n", "bd dolt pull")
 	})
 }

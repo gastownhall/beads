@@ -73,10 +73,11 @@ func TestGitSSHRemotePushOverSSHTransport(t *testing.T) {
 // git emits ahead of it and the exit code usage() exits with (129).
 const oldGitUsageBanner = "usage: git ls-remote [--heads] [--tags] [-u <exec> | --upload-pack <exec>] [<repository> [<refs>...]]"
 
-// writeOldGitShim installs a `git` on PATH that plays the part of a git too
+// writeOldGitShim installs a `git` in dir that plays the part of a git too
 // old for the `--` separator Dolt's remote transport passes (git 2.6.1
 // rejected it with usage(); GH#6472), delegating every other invocation to the
-// real git binary it returns.
+// real git binary. Each refusal appends the GIT_TRACE value the refused git
+// saw ("GIT_TRACE=<unset>" when it had none) to the log whose path it returns.
 func writeOldGitShim(t *testing.T, dir string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -86,6 +87,7 @@ func writeOldGitShim(t *testing.T, dir string) string {
 	if err != nil {
 		t.Skip("git not on PATH")
 	}
+	traceLog := filepath.Join(t.TempDir(), "refused-git-trace-env")
 	shim := `#!/bin/sh
 # fake old git: reject the separator-bearing ls-remote Dolt's remote runs
 # (git 2.6.1 rejected the -- separator with usage()), pass everything else
@@ -96,6 +98,7 @@ for a in "$@"; do
     seen=1
   fi
   if [ "$a" = "--" ] && [ "$seen" = 1 ]; then
+    printf 'GIT_TRACE=%s\n' "${GIT_TRACE-<unset>}" >> "` + traceLog + `"
     echo "trace: built-in: git ls-remote" >&2
     echo "` + oldGitUsageBanner + `" >&2
     exit 129
@@ -106,7 +109,7 @@ exec "` + realGit + `" "$@"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(shim), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return realGit
+	return traceLog
 }
 
 // TestGitSSHRemoteOldGitUsageRefusal pins the classification against the real
@@ -115,10 +118,16 @@ exec "` + realGit + `" "$@"
 // surfaces — git's usage banner wearing Dolt's appended credential hints —
 // reads as a Git invocation refusal, not as an authentication problem
 // (GH#6472).
+//
+// It also pins, at the git Dolt's transport runs, the trace recipe bd gives
+// for this failure (cmd/bd/git_usage_refusal.go,
+// docs/getting-started/sync-setup.md): GIT_TRACE=1 never reaches that git,
+// because bd removes stderr-directed tracing around remote calls
+// (internal/gittraceenv), and GIT_TRACE=<absolute file> does.
 func TestGitSSHRemoteOldGitUsageRefusal(t *testing.T) {
 	ctx := t.Context()
 	shimDir := t.TempDir()
-	writeOldGitShim(t, shimDir)
+	traceLog := writeOldGitShim(t, shimDir)
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// The remote names a host that does not resolve; the shim must fail the
@@ -132,24 +141,44 @@ func TestGitSSHRemoteOldGitUsageRefusal(t *testing.T) {
 	if err := store.Commit(ctx, "bd init"); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
-
-	var pushErr error
 	if err := store.AddRemote(ctx, defaultRemote, remote); err != nil {
-		pushErr = err
-	} else {
-		pushErr = store.Push(ctx)
+		t.Fatalf("AddRemote: %v", err)
 	}
-	if pushErr == nil {
-		t.Fatal("push to a git+ssh:// remote with an old git on PATH unexpectedly succeeded")
-	}
-	if !dberrors.IsGitUsageRefusal(pushErr) {
-		t.Fatalf("IsGitUsageRefusal(push error) = false; the wrapped refusal does not classify:\n%v", pushErr)
-	}
-	msg := pushErr.Error()
-	if !strings.Contains(msg, oldGitUsageBanner) {
-		t.Errorf("push error does not carry git's usage banner:\n%s", msg)
-	}
-	if !strings.Contains(msg, "dolt does not support interactive credential prompts") {
-		t.Errorf("push error does not carry the credential hints Dolt appends (they are what make the refusal misleading):\n%s", msg)
+
+	traceFile := filepath.Join(t.TempDir(), "bd-git-trace.log")
+	for _, tc := range []struct{ gitTrace, refusedGitSaw string }{
+		{gitTrace: "1", refusedGitSaw: "<unset>"},
+		{gitTrace: traceFile, refusedGitSaw: traceFile},
+	} {
+		t.Setenv("GIT_TRACE", tc.gitTrace)
+		if err := os.Remove(traceLog); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+
+		pushErr := store.Push(ctx)
+		if pushErr == nil {
+			t.Fatalf("GIT_TRACE=%s: push to a git+ssh:// remote with an old git on PATH unexpectedly succeeded", tc.gitTrace)
+		}
+		if !dberrors.IsGitUsageRefusal(pushErr) {
+			t.Fatalf("GIT_TRACE=%s: IsGitUsageRefusal(push error) = false; the wrapped refusal does not classify:\n%v", tc.gitTrace, pushErr)
+		}
+		msg := pushErr.Error()
+		if !strings.Contains(msg, oldGitUsageBanner) {
+			t.Errorf("GIT_TRACE=%s: push error does not carry git's usage banner:\n%s", tc.gitTrace, msg)
+		}
+		if !strings.Contains(msg, "dolt does not support interactive credential prompts") {
+			t.Errorf("GIT_TRACE=%s: push error does not carry the credential hints Dolt appends (they are what make the refusal misleading):\n%s", tc.gitTrace, msg)
+		}
+
+		seen, err := os.ReadFile(traceLog)
+		if err != nil {
+			t.Fatalf("GIT_TRACE=%s: the refusing git never ran, so the trace check proves nothing: %v", tc.gitTrace, err)
+		}
+		want := "GIT_TRACE=" + tc.refusedGitSaw
+		for _, line := range strings.Split(strings.TrimSpace(string(seen)), "\n") {
+			if line != want {
+				t.Errorf("GIT_TRACE=%s: the git Dolt's transport ran saw %q, want %q", tc.gitTrace, line, want)
+			}
+		}
 	}
 }

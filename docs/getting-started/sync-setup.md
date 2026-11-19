@@ -260,8 +260,11 @@ The banner is Git refusing the *arguments* — the `--` separator before the
 URL in the ls-remote probe, or `--force-with-lease=<ref>:<hash>` on push —
 before any authentication ran. The `hint:` lines around it are added by
 Dolt's wrapper to every git failure; they are not evidence of an
-authentication problem. In our measurement these banners stop at Git 2.10 —
-an observed floor, not a supported-version matrix.
+authentication problem. `bd bootstrap` also checks a configured
+`sync.remote` with its own `git ls-remote -- <url> refs/dolt/data`, which an
+old Git refuses the same way, without the `hint:` lines. In our measurement
+these banners stop at Git 2.10 — an observed floor, not a supported-version
+matrix.
 
 Check which Git actually runs:
 
@@ -277,18 +280,41 @@ The remote URL is not the problem: keep GitHub remotes in their
 `git+ssh://` form — Dolt uses it to route them over the git transport
 (a plain `ssh://` URL goes to Dolt's remotesapi client instead).
 
-If a current Git still fails, capture a trace:
+In server mode the Dolt server runs the transport with the environment it
+started with, so the Git that runs is the one on the **server process's
+PATH** — check that environment, not your shell's — and a fixed PATH reaches
+it only after a restart. For a server bd manages, `bd dolt stop` is enough:
+the next bd command starts it again, unless `dolt.auto-start` is off.
+
+If a current Git still fails, trace git to a file and re-run the command
+that failed:
 
 ```bash
-GIT_TRACE=1 bd dolt push            # Unix
-$env:GIT_TRACE='1'; bd dolt push    # PowerShell
+# Unix
+GIT_TRACE=/tmp/bd-git-trace.log GIT_TRACE2_EVENT=/tmp/bd-git-trace2.json bd dolt push
 ```
 
-The trace lines name the binary that ran. bd and Dolt pass `GIT_TRACE`,
-`GIT_SSH_COMMAND` and `SSH_AUTH_SOCK` through to the transport, so your ssh
-agent and ssh config apply as usual. In server mode the transport runs the
-Git on the **server process's PATH** — check that environment, not your
-shell's.
+```powershell
+# PowerShell
+$env:GIT_TRACE="$env:TEMP\bd-git-trace.log"
+$env:GIT_TRACE2_EVENT="$env:TEMP\bd-git-trace2.json"
+bd dolt push
+Remove-Item Env:GIT_TRACE, Env:GIT_TRACE2_EVENT
+```
+
+The `GIT_TRACE` file lists each git command that ran, with its arguments.
+The `version` event in the `GIT_TRACE2_EVENT` file records the version of
+the Git that ran (`"exe":"2.56.1"`). Git older than 2.22 writes no trace2
+events at all, so a file that stays empty points at an old Git. In server
+mode, run `bd dolt stop` first so the server restarts with these variables
+set, and again once they are unset, so it stops tracing.
+
+A trace variable set to an absolute file path reaches the transport. bd
+removes the values that make git write to stderr or an inherited file
+descriptor — `1`, `true`, `2` to `9`, or a relative path — because those
+lines corrupt the git output Dolt parses, so `GIT_TRACE=1` traces nothing
+here. `GIT_SSH_COMMAND` and `SSH_AUTH_SOCK` do pass through to the
+transport, so your ssh agent and ssh config apply as usual.
 
 ### "no common ancestor" on push
 

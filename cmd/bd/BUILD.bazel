@@ -1488,6 +1488,7 @@ go_test(
         "//internal/githooksenv",
         "//internal/github",
         "//internal/gitlab",
+        "//internal/gittraceenv",
         "//internal/hooks",
         "//internal/httpapi",
         "//internal/httpapi/apigen",
