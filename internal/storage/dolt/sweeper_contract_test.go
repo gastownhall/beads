@@ -50,6 +50,9 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("ProtectsLiveDependentsThroughUnselectedRows", func(t *testing.T) {
 		conformance.RunSweeperProtectsLiveDependentsThroughUnselectedRows(t, ctx, fixture)
 	})
+	t.Run("ProtectsLiveDependentsThroughExcludedIntermediaries", func(t *testing.T) {
+		conformance.RunSweeperProtectsLiveDependentsThroughExcludedIntermediaries(t, ctx, fixture)
+	})
 	t.Run("ProtectsLiveDependentsAcrossPlanes", func(t *testing.T) {
 		conformance.RunSweeperProtectsLiveDependentsAcrossPlanes(t, ctx, fixture)
 	})
