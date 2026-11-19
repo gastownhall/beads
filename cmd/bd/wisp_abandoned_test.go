@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -135,4 +137,105 @@ func TestFindAbandonedWispsAgesAtStoragePrecision(t *testing.T) {
 				tc.threshold, tc.now.Format("15:04:05.000"), len(got), tc.want)
 		}
 	}
+}
+
+// closedWispScanReader serves selectClosedWispsForPurge a fixed list of closed
+// wisps and records every filter the scan sends. With honorFilter it applies
+// UpdatedBefore and then Limit the way the SQL scan does (predicate first,
+// limit second); without it, it returns every row, so the Go-side guard is
+// all that keeps a recent row out. Infra means the "agent" type.
+type closedWispScanReader struct {
+	molReader
+	rows        []*types.Issue
+	honorFilter bool
+	filters     *[]types.IssueFilter
+}
+
+func (r closedWispScanReader) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
+	*r.filters = append(*r.filters, filter)
+	if !r.honorFilter {
+		return r.rows, nil
+	}
+	var out []*types.Issue
+	for _, issue := range r.rows {
+		if filter.UpdatedBefore != nil && !issue.UpdatedAt.Before(*filter.UpdatedBefore) {
+			continue
+		}
+		if filter.Limit > 0 && len(out) == filter.Limit {
+			break
+		}
+		out = append(out, issue)
+	}
+	return out, nil
+}
+
+func (closedWispScanReader) IsInfraTypeCtx(_ context.Context, t types.IssueType) bool {
+	return t == "agent"
+}
+
+func closedWispAt(id string, updated time.Time) *types.Issue {
+	return &types.Issue{ID: id, Status: types.StatusClosed, Ephemeral: true, IssueType: types.TypeTask, UpdatedAt: updated}
+}
+
+func closedWispIDs(issues []*types.Issue) []string {
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+	return ids
+}
+
+// TestWispGCClosedSelectorHonorsAge pins GH#8202's closed-GC age floor: the
+// scan sends now-age as UpdatedBefore with the 5000-row limit, so a full page
+// of recently closed wisps cannot crowd out an old one, and the Go-side guard
+// keeps out a recent row from a reader that ignores the bound. A row exactly
+// at the cutoff is kept, matching the strict comparison of wispIsAbandoned.
+func TestWispGCClosedSelectorHonorsAge(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	old := wispGCNow
+	t.Cleanup(func() { wispGCNow = old })
+	wispGCNow = func() time.Time { return now }
+
+	t.Run("bound applies before the scan limit", func(t *testing.T) {
+		var rows []*types.Issue
+		for i := 0; i < wispPurgeScanLimit; i++ {
+			rows = append(rows, closedWispAt(fmt.Sprintf("gc-recent-%d", i), now.Add(-time.Minute)))
+		}
+		rows = append(rows, closedWispAt("gc-old", now.Add(-2*time.Hour)))
+		var filters []types.IssueFilter
+		sel, err := selectClosedWispsForPurge(context.Background(), closedWispScanReader{rows: rows, honorFilter: true, filters: &filters}, time.Hour, nil)
+		if err != nil {
+			t.Fatalf("selectClosedWispsForPurge: %v", err)
+		}
+		if got := closedWispIDs(sel.candidates); !slices.Equal(got, []string{"gc-old"}) {
+			t.Errorf("candidates = %d rows (first %v), want only gc-old: recent rows filled the 5000-row scan", len(got), got[:min(len(got), 3)])
+		}
+		if len(filters) != 1 {
+			t.Fatalf("scan sent %d queries, want 1", len(filters))
+		}
+		f := filters[0]
+		if f.UpdatedBefore == nil || !f.UpdatedBefore.Equal(now.Add(-time.Hour)) {
+			t.Errorf("UpdatedBefore = %v, want %v", f.UpdatedBefore, now.Add(-time.Hour))
+		}
+		if f.Limit != wispPurgeScanLimit || f.Status == nil || *f.Status != types.StatusClosed || f.Ephemeral == nil || !*f.Ephemeral {
+			t.Errorf("scan filter = Limit %d Status %v Ephemeral %v, want 5000 closed ephemeral", f.Limit, f.Status, f.Ephemeral)
+		}
+	})
+
+	t.Run("go-side guard", func(t *testing.T) {
+		rows := []*types.Issue{
+			closedWispAt("gc-old", now.Add(-2*time.Hour)),
+			closedWispAt("gc-recent", now.Add(-10*time.Minute)),
+			closedWispAt("gc-at-cutoff", now.Add(-time.Hour)),
+			closedWispAt("gc-just-past", now.Add(-time.Hour-time.Second)),
+		}
+		var filters []types.IssueFilter
+		sel, err := selectClosedWispsForPurge(context.Background(), closedWispScanReader{rows: rows, filters: &filters}, time.Hour, nil)
+		if err != nil {
+			t.Fatalf("selectClosedWispsForPurge: %v", err)
+		}
+		if got, want := closedWispIDs(sel.candidates), []string{"gc-old", "gc-just-past"}; !slices.Equal(got, want) {
+			t.Errorf("candidates = %v, want %v", got, want)
+		}
+	})
 }
