@@ -990,24 +990,22 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		eventTable = "wisp_events"
 	}
 
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
+	// Resolve the target by presence, each probe on the session that owns its
+	// table, so a target created earlier in this logical transaction is seen.
+	// A held foreign-prefix id is a local issue (GH#6066).
+	kind, err := issueops.ResolveDepTargetKindAcrossInTx(ctx, t.txFor("wisps"), t.txFor("issues"), dep.IssueID, dep.DependsOnID)
+	if err != nil {
+		return err
+	}
 	targetTable := "issues"
-	kind := issueops.DepTargetIssue
-	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
-		kind = issueops.DepTargetExternal
-	default:
-		if t.isActiveWisp(ctx, dep.DependsOnID) {
-			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
-		}
+	if kind == issueops.DepTargetWisp {
+		targetTable = "wisps"
 	}
 
 	opts := issueops.AddDependencyOpts{
 		SourceTable:    sourceTable,
 		TargetTable:    targetTable,
 		WriteTable:     table,
-		IsCrossPrefix:  isCrossPrefix,
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		TargetKind:     &kind,
 		EmitEvent:      addOpts.EmitEvent,
