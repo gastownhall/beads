@@ -367,14 +367,48 @@ func seedInitWorkspaceIdentity(
 
 	bootstrapper, err := store.Bootstrapper()
 	if err != nil {
-		return fmt.Errorf("failed to reach the workspace identity: %v", err)
+		return fmt.Errorf("failed to reach the workspace identity: %w", err)
 	}
 	_, err = bootstrapper.Bootstrap(ctx, issueops.BootstrapRequest{
 		Prefix:    prefix,
 		ProjectID: projectID,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to record the workspace identity: %v", err)
+		return fmt.Errorf("failed to record the workspace identity: %w", err)
+	}
+	return nil
+}
+
+// publishInitWorkspaceIdentity seeds (or adopts) the database identity and
+// only then publishes the local metadata.json init composed.
+//
+// PUBLICATION FOLLOWS THE BOOTSTRAP. Two initializers can both read an
+// unidentified database and each choose a project id; the transactional
+// Bootstrapper lets exactly one record it and refuses the other. Saving
+// metadata.json first would leave the loser's newly chosen id on disk,
+// disagreeing with the database. So a refused or failed seed returns before
+// anything local is written: new metadata stays absent and existing metadata
+// keeps its bytes. The loser can rerun init (with --database to adopt the
+// winner's database). cfg is nil when init composed no metadata.json; seed is
+// false in gateway mode, where the identity is server-authoritative.
+func publishInitWorkspaceIdentity(
+	ctx context.Context,
+	store storage.DoltStorage,
+	found issueops.VerifyIdentityResult,
+	prefix, projectID, beadsDir string,
+	cfg *configfile.Config,
+	seed bool,
+) error {
+	if seed {
+		if err := seedInitWorkspaceIdentity(ctx, store, found, prefix, projectID, beadsDir); err != nil {
+			return err
+		}
+	}
+	if cfg != nil {
+		if err := cfg.Save(beadsDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
+			// Non-fatal - continue anyway
+		}
 	}
 	return nil
 }
@@ -1977,7 +2011,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// workspace's own metadata.json.
 		bootstrapProjectID := ""
 
-		// Create or preserve metadata.json for database metadata (bd-zai fix)
+		// localCfg is the metadata.json this init composes. It is composed in
+		// memory here and published (saved) only after the database identity
+		// is seeded or adopted, by publishInitWorkspaceIdentity below: a
+		// losing concurrent initializer must not leave the identity it minted
+		// on disk.
+		var localCfg *configfile.Config
+
+		// Compose or preserve metadata.json for database metadata (bd-zai fix)
 		if useLocalBeads {
 			// First, check if metadata.json already exists
 			existingCfg, err := configfile.Load(beadsDir)
@@ -2112,15 +2153,23 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 			}
 
-			if err := cfg.Save(beadsDir); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create metadata.json: %v\n", err)
-				// Non-fatal - continue anyway
-			}
-
 			// The write itself happens once, below this block, through
 			// seedInitWorkspaceIdentity; this is where its id is decided.
 			bootstrapProjectID = cfg.ProjectID
+			localCfg = cfg
+		}
 
+		// Seed the workspace's identity, through issueops.Bootstrapper, in the
+		// one place this route writes it, and only then publish metadata.json.
+		// Gateway mode skips the seed: the identity is server-authoritative
+		// and the credential may be read-only, so bd adopts what it verified
+		// rather than writing it back.
+		if err := publishInitWorkspaceIdentity(ctx, store, dbIdentity, issuePrefix, bootstrapProjectID, beadsDir, localCfg, shouldWriteInitStateToDB(doltCfg.Gateway)); err != nil {
+			_ = store.Close()
+			return err
+		}
+
+		if useLocalBeads {
 			// Create config.yaml template (prefix is stored in DB, not config.yaml)
 			if err := createConfigYaml(beadsDir); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
@@ -2177,17 +2226,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			if err := createReadme(beadsDir); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create README.md: %v\n", err)
 				// Non-fatal - continue anyway
-			}
-		}
-
-		// Seed the workspace's identity, through issueops.Bootstrapper, in the
-		// one place this route writes it. Gateway mode skips it: the identity
-		// is server-authoritative and the credential may be read-only, so bd
-		// adopts what it verified rather than writing it back.
-		if shouldWriteInitStateToDB(doltCfg.Gateway) {
-			if err := seedInitWorkspaceIdentity(ctx, store, dbIdentity, issuePrefix, bootstrapProjectID, beadsDir); err != nil {
-				_ = store.Close()
-				return err
 			}
 		}
 

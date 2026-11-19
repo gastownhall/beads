@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +10,9 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestRunInitRemoteClone(t *testing.T) {
@@ -251,4 +256,164 @@ func TestRunInitRemoteCloneReceivesRoutedURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// initIdentityStore is a store whose Bootstrapper is a spy, for the identity
+// publication tests: nothing else on it is reachable.
+type initIdentityStore struct {
+	storage.DoltStorage
+	boot *spyInitBootstrapper
+}
+
+func (s *initIdentityStore) Bootstrapper() (issueops.Bootstrapper, error) { return s.boot, nil }
+
+type spyInitBootstrapper struct {
+	err   error
+	calls int
+	got   issueops.BootstrapRequest
+	// metadataAtBootstrap records whether metadata.json existed when
+	// Bootstrap ran, proving publication follows the seed.
+	beadsDir            string
+	metadataAtBootstrap bool
+}
+
+func (b *spyInitBootstrapper) Bootstrap(_ context.Context, req issueops.BootstrapRequest) (issueops.BootstrapResult, error) {
+	b.calls++
+	b.got = req
+	if _, err := os.Stat(filepath.Join(b.beadsDir, "metadata.json")); err == nil {
+		b.metadataAtBootstrap = true
+	}
+	if b.err != nil {
+		return issueops.BootstrapResult{}, b.err
+	}
+	return issueops.BootstrapResult{Prefix: req.Prefix, ProjectID: req.ProjectID}, nil
+}
+
+// initIdentityFixture is a .beads with an optional existing metadata.json and
+// the metadata init composed in memory with a freshly chosen project id.
+func initIdentityFixture(t *testing.T, existing []byte) (beadsDir string, cfg *configfile.Config) {
+	t.Helper()
+	beadsDir = filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if existing != nil {
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), existing, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg = configfile.DefaultConfig()
+	cfg.ProjectID = configfile.GenerateProjectID()
+	cfg.DoltDatabase = "newproj"
+	return beadsDir, cfg
+}
+
+// AC-6: two initializers both read an unidentified database; the loser's
+// bootstrap is refused (or fails). It must return the failure without
+// publishing the identity it chose: new metadata stays absent, existing
+// metadata keeps its bytes.
+func TestInitIdentityPublicationLoserPublishesNothing(t *testing.T) {
+	winner := &issueops.AlreadyIdentifiedError{Prefix: "winner", ProjectID: "proj-winner"}
+	other := errors.New("connection reset")
+	existingBytes := []byte(`{"backend":"dolt","database":"dolt","dolt_database":"keep"}` + "\n")
+	for _, c := range []struct {
+		name     string
+		bootErr  error
+		existing []byte
+		wantIs   error
+	}{
+		{"refused-new-metadata", winner, nil, issueops.ErrAlreadyIdentified},
+		{"refused-existing-metadata", winner, existingBytes, issueops.ErrAlreadyIdentified},
+		{"failed-new-metadata", other, nil, other},
+		{"failed-existing-metadata", other, existingBytes, other},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			beadsDir, cfg := initIdentityFixture(t, c.existing)
+			boot := &spyInitBootstrapper{err: c.bootErr, beadsDir: beadsDir}
+			store := &initIdentityStore{boot: boot}
+
+			err := publishInitWorkspaceIdentity(context.Background(), store, issueops.VerifyIdentityResult{}, "newproj", cfg.ProjectID, beadsDir, cfg, true)
+			if !errors.Is(err, c.wantIs) {
+				t.Fatalf("err = %v, want it to wrap %v", err, c.wantIs)
+			}
+			if boot.calls != 1 {
+				t.Fatalf("Bootstrap calls = %d, want 1", boot.calls)
+			}
+			got, readErr := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+			if c.existing == nil {
+				if !os.IsNotExist(readErr) {
+					t.Fatalf("losing init published metadata.json (read err %v): %s", readErr, got)
+				}
+				return
+			}
+			if readErr != nil || !bytes.Equal(got, c.existing) {
+				t.Fatalf("losing init changed metadata.json:\n got %s\nwant %s (err %v)", got, c.existing, readErr)
+			}
+		})
+	}
+}
+
+// AC-6: on the paths that succeed, metadata.json is published after the
+// seed (never before), the seed runs at most once, and the adoption, gateway
+// and no-local-metadata paths keep their behavior.
+func TestInitIdentityPublicationOrder(t *testing.T) {
+	t.Run("bootstrap-then-save", func(t *testing.T) {
+		beadsDir, cfg := initIdentityFixture(t, nil)
+		boot := &spyInitBootstrapper{beadsDir: beadsDir}
+		if err := publishInitWorkspaceIdentity(context.Background(), &initIdentityStore{boot: boot}, issueops.VerifyIdentityResult{}, "newproj", cfg.ProjectID, beadsDir, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+		if boot.calls != 1 || boot.metadataAtBootstrap {
+			t.Fatalf("Bootstrap calls=%d, metadata existed at bootstrap=%v; want 1 call before publication", boot.calls, boot.metadataAtBootstrap)
+		}
+		if boot.got.ProjectID != cfg.ProjectID || boot.got.Prefix != "newproj" {
+			t.Fatalf("bootstrapped %+v, want prefix newproj and the composed project id %s", boot.got, cfg.ProjectID)
+		}
+		saved, err := configfile.Load(beadsDir)
+		if err != nil || saved == nil || saved.ProjectID != cfg.ProjectID {
+			t.Fatalf("published metadata = %+v (err %v), want project id %s", saved, err, cfg.ProjectID)
+		}
+	})
+	t.Run("adopt-existing-identity", func(t *testing.T) {
+		beadsDir, cfg := initIdentityFixture(t, nil)
+		cfg.ProjectID = "proj-adopted"
+		boot := &spyInitBootstrapper{beadsDir: beadsDir}
+		found := issueops.VerifyIdentityResult{Prefix: "winner", ProjectID: "proj-adopted"}
+		if err := publishInitWorkspaceIdentity(context.Background(), &initIdentityStore{boot: boot}, found, "winner", cfg.ProjectID, beadsDir, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+		if boot.calls != 0 {
+			t.Fatalf("Bootstrap ran %d times over an identified database, want adoption", boot.calls)
+		}
+		if saved, err := configfile.Load(beadsDir); err != nil || saved == nil || saved.ProjectID != "proj-adopted" {
+			t.Fatalf("adoption did not publish metadata: %+v (err %v)", saved, err)
+		}
+	})
+	t.Run("gateway-skips-seed", func(t *testing.T) {
+		beadsDir, cfg := initIdentityFixture(t, nil)
+		boot := &spyInitBootstrapper{beadsDir: beadsDir}
+		if err := publishInitWorkspaceIdentity(context.Background(), &initIdentityStore{boot: boot}, issueops.VerifyIdentityResult{}, "p", cfg.ProjectID, beadsDir, cfg, false); err != nil {
+			t.Fatal(err)
+		}
+		if boot.calls != 0 {
+			t.Fatalf("gateway path seeded %d times, want 0", boot.calls)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); err != nil {
+			t.Fatalf("gateway path did not publish metadata: %v", err)
+		}
+	})
+	t.Run("no-local-metadata", func(t *testing.T) {
+		existing := []byte(`{"backend":"dolt","database":"dolt","project_id":"proj-file"}` + "\n")
+		beadsDir, _ := initIdentityFixture(t, existing)
+		boot := &spyInitBootstrapper{beadsDir: beadsDir}
+		if err := publishInitWorkspaceIdentity(context.Background(), &initIdentityStore{boot: boot}, issueops.VerifyIdentityResult{}, "p", "", beadsDir, nil, true); err != nil {
+			t.Fatal(err)
+		}
+		if boot.calls != 1 || boot.got.ProjectID != "proj-file" {
+			t.Fatalf("Bootstrap calls=%d request=%+v, want one seed with the file's project id", boot.calls, boot.got)
+		}
+		if got, _ := os.ReadFile(filepath.Join(beadsDir, "metadata.json")); !bytes.Equal(got, existing) {
+			t.Fatalf("no-local-metadata path rewrote metadata.json: %s", got)
+		}
+	})
 }
