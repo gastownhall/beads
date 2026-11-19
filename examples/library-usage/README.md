@@ -120,7 +120,7 @@ The `beads.Storage` interface provides:
 ### Ready Work & Blocking
 - `GetReadyWork(ctx, filter)` - Find issues with no blockers
 - `GetBlockedIssues(ctx)` - Find blocked issues with blocker info
-- `GetEpicsEligibleForClosure(ctx)` - Find completable epics
+- `GetEpicsEligibleForClosure(ctx)` - One status row per non-closed epic, including zero-child epics (reported `{0, 0, false}`); children are parent-child dependency links, and `EligibleForClose` requires at least one linked child closed completingly
 
 ### Comments & Events
 - `AddIssueComment(ctx, issueID, author, text)` - Add comment

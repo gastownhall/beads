@@ -21,8 +21,19 @@ var epicCmd = &cobra.Command{
 	Short:   "Epic management commands",
 }
 var epicStatusCmd = &cobra.Command{
-	Use:           "status",
-	Short:         "Show epic completion status",
+	Use:   "status",
+	Short: "Show epic completion status",
+	Long: `Show a progress row for every epic that is not closed, including epics
+with no children at all: they list as 0/0 children closed (0%). A row's
+counts cover only children linked by a parent-child dependency (for
+example created with ` + "`bd create --parent`" + ` or linked with
+` + "`bd dep add <child> <epic> --type parent-child`" + `). An issue whose ID merely
+carries the epic's prefix (` + "`<epic-id>.1`" + `) is NOT a child here even though
+` + "`bd children`" + ` lists it, so ` + "`--id <epic>.1`" + ` alone does not link one:
+add a parent-child dependency instead. Rows with no linked children (0/0)
+print no closure-eligibility marker; an epic becomes eligible for closure
+only when it has at least one linked child and every one of them is
+closed for a completing reason (never duplicate, wontfix or superseded).`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
