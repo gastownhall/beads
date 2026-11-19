@@ -211,7 +211,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 // backupInitURLSchemes are the URL prefixes `bd backup init` hands to Dolt
 // unchanged. It is init's policy, not Dolt's exhaustive transport list: each
 // entry is a destination Beads advertises and the pinned Dolt registers a
-// remote factory for (DoltHub/HTTP(S), file, AWS, GCS, Azure, OCI). Matching
+// remote factory for (DoltHub/HTTP(S), file, AWS, GCS, S3, Azure, OCI). Matching
 // is case-sensitive, like Dolt's own scheme lookup.
 var backupInitURLSchemes = []string{
 	"https://",
@@ -219,6 +219,7 @@ var backupInitURLSchemes = []string{
 	"file://",
 	"aws://",
 	"gs://",
+	"s3://",
 	"az://",
 	"oci://",
 }
