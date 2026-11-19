@@ -418,6 +418,18 @@ for idleness. Running `bd dolt start` while an auto-started server is up
 adopts that server and cancels its watcher, so this is also how to keep an
 auto-started server running.
 
+Set the idle window with `dolt.idle-timeout` in `config.yaml` or the
+`BEADS_DOLT_IDLE_TIMEOUT` environment variable, which wins (a Go duration such
+as `10m` or `2h`). `0` turns idle stop off: auto-started servers then keep
+running, as they did before idle stop existed. A value that is not a duration
+prints a warning and the 30-minute default applies. The window is read when
+the server is auto-started, so a change applies from the next auto-start.
+
+```yaml
+dolt:
+  idle-timeout: 2h   # or 0 to keep auto-started servers running
+```
+
 ### Shared Server Mode
 
 On machines with multiple beads projects, each project normally starts its own Dolt server.
