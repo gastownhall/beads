@@ -1,12 +1,16 @@
 package metrics
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 func setupUserConfigHome(t *testing.T) string {
@@ -247,5 +251,76 @@ func TestEnsureUserConfigDefaults_DanglingSymlinkFailsWithoutRecursing(t *testin
 	}
 	if _, statErr := os.Lstat(target); !os.IsNotExist(statErr) {
 		t.Fatalf("bootstrap created the symlink target: %v", statErr)
+	}
+}
+
+// TestEnsureUserConfigDefaults_UnusablePathConsentUnknownOnlyOnDarwin: on
+// macOS, when the user config path can be neither read nor created (a
+// symlink to a missing file, a ~/.config that is a file), the bootstrap
+// reports config.ErrUserConfigConsentUnknown so the launch keeps metrics off,
+// and it never probes the legacy Application Support config for a file it
+// cannot publish. writeUserConfigBootstrap reports the sentinel itself rather
+// than swallowing it with the existing-file case. On Linux the same shapes
+// fail as they always did, without the sentinel.
+func TestEnsureUserConfigDefaults_UnusablePathConsentUnknownOnlyOnDarwin(t *testing.T) {
+	type shape struct {
+		name  string
+		plant func(t *testing.T, home string)
+	}
+	shapes := []shape{
+		{"dangling symlink", func(t *testing.T, home string) {
+			path := userConfigPath(home)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.Symlink(filepath.Join(home, "dotfiles", "missing.yaml"), path); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		}},
+		{"config dir is a file", func(t *testing.T, home string) {
+			if err := os.WriteFile(filepath.Join(home, ".config"), []byte("not a directory"), 0o600); err != nil {
+				t.Fatalf("seed blocker: %v", err)
+			}
+		}},
+	}
+	for _, goos := range []string{"darwin", "linux"} {
+		for _, sh := range shapes {
+			t.Run(goos+"/"+sh.name, func(t *testing.T) {
+				home := setupUserConfigHome(t)
+				t.Setenv("XDG_CONFIG_HOME", "")
+				native := filepath.Join(home, ".config") // Linux: the XDG rule
+				if goos == "darwin" {
+					native = filepath.Join(home, "Library", "Application Support")
+				}
+				t.Cleanup(config.SetUserConfigPlatformForTest(goos, func() (string, error) { return native, nil }))
+				probes := 0
+				t.Cleanup(config.SetLegacyUserConfigStatForTest(func(name string) (fs.FileInfo, error) {
+					probes++
+					return os.Stat(name)
+				}))
+				sh.plant(t, home)
+				wantSentinel := goos == "darwin"
+
+				err := EnsureUserConfigDefaults()
+				if err == nil {
+					t.Fatal("EnsureUserConfigDefaults returned nil for an unusable user config path")
+				}
+				if got := errors.Is(err, config.ErrUserConfigConsentUnknown); got != wantSentinel {
+					t.Errorf("EnsureUserConfigDefaults = %v; consent-unknown sentinel = %v, want %v", err, got, wantSentinel)
+				}
+				if sh.name == "dangling symlink" {
+					err := writeUserConfigBootstrap(userConfigPath(home))
+					if got := errors.Is(err, config.ErrUserConfigConsentUnknown); got != wantSentinel {
+						t.Errorf("writeUserConfigBootstrap = %v; consent-unknown sentinel = %v, want %v", err, got, wantSentinel)
+					}
+					if !wantSentinel && err != nil {
+						t.Errorf("writeUserConfigBootstrap = %v; on %s an occupied path is left to the re-read", err, goos)
+					}
+				}
+				if probes != 0 {
+					t.Errorf("legacy config probed %d times for a user config bd cannot create", probes)
+				}
+			})
+		}
 	}
 }

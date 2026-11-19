@@ -33,7 +33,7 @@ func EnsureUserConfigDefaults() error {
 		// symlink) cannot loop.
 		data, err = os.ReadFile(path) //nolint:gosec // path is a validated absolute user config path
 		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("ensure user config: %s is a dangling symlink", path)
+			return config.UserConfigReadError(path, fmt.Errorf("ensure user config: %s is a dangling symlink", path))
 		}
 		// On macOS the new file may carry an opt-out over from the legacy
 		// Application Support config (GH#8113). bd only bootstraps metrics
@@ -44,7 +44,9 @@ func EnsureUserConfigDefaults() error {
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("ensure user config: read %s: %w", path, err)
+		// On macOS a path that names no file at all (~/.config is a file, say)
+		// leaves metrics consent unknown; see config.UserConfigReadError.
+		return config.UserConfigReadError(path, fmt.Errorf("ensure user config: read %s: %w", path, err))
 	}
 
 	if commentedMetricsRe.Match(data) {
@@ -79,11 +81,16 @@ func EnsureUserConfigDefaults() error {
 // writeUserConfigBootstrap creates the missing user config with metrics on and
 // the default endpoint. A file that appeared since the caller's read (another
 // bd process, or a dangling symlink) is left alone and reported as success:
-// the caller re-reads the path once.
+// the caller re-reads the path once. A create that leaves metrics consent
+// unknown is reported even when something occupies the path (on macOS, a
+// dangling symlink), so the run keeps metrics off.
 func writeUserConfigBootstrap(path string) error {
 	body := []byte("metrics:\n  disabled: false\n  endpoint: " + DefaultEndpoint + "\n")
 	err := config.CreateUserConfigYaml(path, body)
-	if err == nil || errors.Is(err, config.ErrUserConfigExists) {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, config.ErrUserConfigExists) && !errors.Is(err, config.ErrUserConfigConsentUnknown) {
 		return nil
 	}
 	return fmt.Errorf("ensure user config: %w", err)

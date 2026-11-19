@@ -34,6 +34,7 @@ go_test(
     ],
     embed = [":metrics"],
     deps = [
+        "//internal/config",
         "//internal/testutil/bazeltest",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],

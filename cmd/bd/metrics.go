@@ -173,12 +173,22 @@ func warnIfMetricsEnvOverride(cmd *cobra.Command, wantDisabled bool) {
 
 func runMetricsStatus(cmd *cobra.Command) {
 	out := cmd.OutOrStdout()
-	effective := resolveMetricsEnabled()
+	// prepareRunMetrics turned metrics off for every run because bd can
+	// neither read nor create the user config on macOS: report what bd does,
+	// not a saved setting it cannot read.
+	consentUnknown := metricsConsentUnknownForRun
+	effective := !consentUnknown && resolveMetricsEnabled()
 	state := "OFF"
 	if effective {
 		state = "ON"
 	}
 	fmt.Fprintf(out, "Anonymous usage metrics: %s\n\n", state)
+	if consentUnknown {
+		fmt.Fprintf(out, "bd cannot create or read its user config (%s),\n", config.UserConfigYamlDisplayPath())
+		fmt.Fprintln(out, "so it cannot tell whether you turned metrics off in an earlier release.")
+		fmt.Fprintln(out, "Metrics stay off until bd can create that file.")
+		fmt.Fprintln(out)
+	}
 	fmt.Fprintln(out, "What we collect: the name of each bd command you run, plus the bd version")
 	fmt.Fprintln(out, "and OS platform, keyed by a machine-derived, HMAC-protected ID. We never")
 	fmt.Fprintln(out, "collect your issues, paths, remotes, identity, or any text you type. Seeing")
@@ -186,9 +196,12 @@ func runMetricsStatus(cmd *cobra.Command) {
 	fmt.Fprintln(out, "helping make bd better.")
 	fmt.Fprintf(out, "\nWhere it goes: %s\n", resolveMetricsEndpoint())
 	fmt.Fprintln(out, "\n  See real examples:  bd metrics example")
-	if effective {
+	switch {
+	case consentUnknown:
+		// `bd metrics on|off` write the file bd cannot create: no hint.
+	case effective:
 		fmt.Fprintln(out, "  Turn off:           bd metrics off")
-	} else {
+	default:
 		fmt.Fprintln(out, "  Turn on:            bd metrics on")
 	}
 

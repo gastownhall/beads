@@ -3157,10 +3157,12 @@ func main() {
 // that moves it, so neither metrics.Init nor the first-run notice may use the
 // value read before the file existed.
 //
-// On macOS, when bd cannot create the user config at all it never looks at the
-// legacy file, so it cannot know whether the user opted out there: metrics are
-// then off for this run, and metricsConsentUnknownForRun keeps the first-run
-// notice from showing.
+// On macOS, when bd can neither read nor create the user config (an
+// uncreatable directory, a ~/.config that is a file, a symlink to a missing
+// file), no legacy setting reaches it, so bd cannot know whether the user
+// opted out there: metrics are then off for this run, and
+// metricsConsentUnknownForRun keeps the first-run notice from showing and
+// `bd metrics` from reporting them on.
 func prepareRunMetrics(cmdName string) bool {
 	metricsConsentUnknownForRun = false
 	if cmdName != metrics.SendMetricsSubcommand && resolveMetricsEnabled() {

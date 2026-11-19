@@ -15,11 +15,14 @@ import (
 // path once instead of retrying the create, so a dangling symlink cannot loop.
 var ErrUserConfigExists = errors.New("user config.yaml already exists")
 
-// ErrUserConfigConsentUnknown reports that on darwin/ios bd could not create
-// the user config at all (its directory or a staging file in it could not be
-// made), so it never looked at the legacy Application Support config and
-// cannot know whether the user opted out of metrics there. Callers treat
-// metrics as off for the run and show no first-run notice.
+// ErrUserConfigConsentUnknown reports that on darwin/ios bd could neither read
+// the user config nor create it: its directory or a staging file in it could
+// not be made, the path is a symlink to a missing file, nothing at the path
+// can be read (see UserConfigReadError), or the file could not be published
+// after the legacy Application Support config was read. Either way no legacy
+// setting reached the user config, so bd cannot know whether the user opted
+// out of metrics there. Callers treat metrics as off for the run and show no
+// first-run notice.
 var ErrUserConfigConsentUnknown = errors.New("user config.yaml cannot be created, so metrics consent is unknown")
 
 // statLegacyUserConfig is os.Stat for the legacy macOS config; a seam so tests
@@ -53,6 +56,13 @@ const legacyUserConfigReadCap = 64 << 10
 // link, so a concurrent bd process sees either no file or the carried one,
 // never an empty file it could fill with metrics defaults.
 //
+// The probe runs only once path is free and a file is staged beside it:
+// anything already at path returns ErrUserConfigExists without a probe. When
+// bd can neither publish at path nor read through it (a symlink to a missing
+// file), or fails to publish after the probe, the error also wraps
+// ErrUserConfigConsentUnknown, because no legacy setting reached the user
+// config.
+//
 // Every other GOOS writes seed with the O_CREATE|O_EXCL create bd has always
 // used and never names a legacy path.
 func CreateUserConfigYaml(path string, seed []byte) error {
@@ -68,6 +78,13 @@ func CreateUserConfigYaml(path string, seed []byte) error {
 		return createExclusive(path, seed)
 	}
 
+	// A dangling symlink at path reads as missing, but neither the link
+	// below nor O_EXCL can publish over it: without this check every launch
+	// would probe the legacy path and then lose what it read.
+	if err := darwinUserConfigPathFree(path); err != nil {
+		return err
+	}
+
 	// Stage the file before probing, so a directory bd cannot write to never
 	// turns into a probe of the legacy path on every launch.
 	tmp, err := os.CreateTemp(dir, ".config.yaml.*")
@@ -77,17 +94,19 @@ func CreateUserConfigYaml(path string, seed []byte) error {
 	tmpPath := tmp.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
 
+	// From here on bd has read the legacy config, so a failure to publish it
+	// leaves consent unknown: a legacy opt-out must not turn into metrics on.
 	content := darwinUserConfigContent(seed)
 	if _, err := tmp.Write(content); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("write %s: %w", tmpPath, err)
+		return fmt.Errorf("write %s: %w (%w)", tmpPath, err, ErrUserConfigConsentUnknown)
 	}
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("chmod %s: %w", tmpPath, err)
+		return fmt.Errorf("chmod %s: %w (%w)", tmpPath, err, ErrUserConfigConsentUnknown)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("write %s: %w", tmpPath, err)
+		return fmt.Errorf("write %s: %w (%w)", tmpPath, err, ErrUserConfigConsentUnknown)
 	}
 	if err := os.Link(tmpPath, path); err != nil {
 		if errors.Is(err, fs.ErrExist) {
@@ -95,9 +114,57 @@ func CreateUserConfigYaml(path string, seed []byte) error {
 		}
 		// A filesystem without hard links: publish the same bytes with the
 		// exclusive create instead.
-		return createExclusive(path, content)
+		err = createExclusive(path, content)
+		if err != nil && !errors.Is(err, ErrUserConfigExists) {
+			return fmt.Errorf("%w (%w)", err, ErrUserConfigConsentUnknown)
+		}
+		return err
 	}
 	return nil
+}
+
+// darwinUserConfigPathFree reports whether bd can create the user config at
+// path: nil when nothing is there. Anything already at path (a file another
+// bd process published since the caller's read, a symlink) returns an error
+// wrapping ErrUserConfigExists, and the caller re-reads path instead. A
+// symlink bd cannot read through also wraps ErrUserConfigConsentUnknown,
+// and so does a path bd cannot even look at.
+func darwinUserConfigPathFree(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("create %s: %w (%w)", path, err, ErrUserConfigConsentUnknown)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		if _, err := os.Stat(path); err != nil {
+			return fmt.Errorf("create %s: it is a dangling symlink: %w (%w; %w)",
+				path, err, ErrUserConfigExists, ErrUserConfigConsentUnknown)
+		}
+	}
+	return fmt.Errorf("create %s: %w", path, ErrUserConfigExists)
+}
+
+// UserConfigReadError returns err, a failure to read the user config.yaml at
+// path (from UserConfigYamlPath) that creating the file did not resolve.
+//
+// On darwin/ios, when path names no file at all (its parent is a file, a
+// directory on the way cannot be searched, a symlink cannot be followed),
+// bd can neither read the user config nor create it, so the legacy
+// Application Support config never reaches it and bd cannot know whether the
+// user opted out of metrics there: the error then also wraps
+// ErrUserConfigConsentUnknown. A file that exists but cannot be read is the
+// user's own config and keeps today's behavior. Every other GOOS returns err
+// unchanged.
+func UserConfigReadError(path string, err error) error {
+	if !isDarwinUserConfigPlatform() {
+		return err
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		return err
+	}
+	return fmt.Errorf("%w (%w)", err, ErrUserConfigConsentUnknown)
 }
 
 func isDarwinUserConfigPlatform() bool {

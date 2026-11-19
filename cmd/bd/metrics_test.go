@@ -547,6 +547,7 @@ func darwinMetricsRunFixture(t *testing.T, legacyBody string) (home string, nati
 	}))
 	config.ResetForTesting()
 	t.Cleanup(config.ResetForTesting)
+	t.Cleanup(func() { metricsConsentUnknownForRun = false })
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
 	}
@@ -682,5 +683,78 @@ func TestDarwinUncreatableUserConfigDirLeavesMetricsOffForTheRun(t *testing.T) {
 	}
 	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
 		t.Fatalf("symlink target was created: %v", err)
+	}
+}
+
+// TestDarwinUnusableUserConfigPathLeavesMetricsOffForTheRun: when bd can
+// neither read nor create ~/.config/bd/config.yaml, a `bd metrics off` saved
+// in the legacy Application Support config cannot be carried over. Metrics
+// then stay off on every run with no notice, Application Support is never
+// probed, and `bd metrics` reports them off and why (GH#8113). Before the
+// move bd read the legacy file directly in both setups and honored the
+// opt-out, so turning metrics on here would be a silent opt-in.
+func TestDarwinUnusableUserConfigPathLeavesMetricsOffForTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// plant makes ~/.config/bd/config.yaml unusable and returns a path
+		// that must still not exist afterwards ("" for none).
+		plant func(t *testing.T, home string) (mustNotExist string)
+	}{
+		{"config.yaml is a dangling symlink", func(t *testing.T, home string) string {
+			dir := filepath.Join(home, ".config", "bd")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			target := filepath.Join(home, "dotfiles", "bd", "config.yaml") // never created
+			if err := os.Symlink(target, filepath.Join(dir, "config.yaml")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			return target
+		}},
+		{"~/.config is a regular file", func(t *testing.T, home string) string {
+			if err := os.WriteFile(filepath.Join(home, ".config"), []byte("not a directory\n"), 0o600); err != nil {
+				t.Fatalf("plant ~/.config file: %v", err)
+			}
+			return ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, nativeCalls := darwinMetricsRunFixture(t, "metrics:\n  disabled: true\n")
+			mustNotExist := tc.plant(t, home)
+			stats := 0
+			t.Cleanup(config.SetLegacyUserConfigStatForTest(func(name string) (fs.FileInfo, error) {
+				stats++
+				return os.Stat(name)
+			}))
+
+			for run := 1; run <= 2; run++ {
+				enabled, stderr := runMetricsLaunch(t)
+				if enabled || strings.Contains(stderr, "Thanks for using bd") {
+					t.Fatalf("run %d: enabled=%v stderr=%q; want metrics off and no notice over the legacy opt-out", run, enabled, stderr)
+				}
+			}
+			if *nativeCalls != 0 || stats != 0 {
+				t.Fatalf("Application Support probed for a user config bd cannot create: native=%d stat=%d", *nativeCalls, stats)
+			}
+			if mustNotExist != "" {
+				if _, err := os.Lstat(mustNotExist); !os.IsNotExist(err) {
+					t.Fatalf("symlink target was created: %v", err)
+				}
+			}
+
+			var out bytes.Buffer
+			status := &cobra.Command{Use: "metrics"}
+			status.SetOut(&out)
+			status.SetErr(&out)
+			runMetricsStatus(status)
+			got := out.String()
+			want := filepath.Join(home, ".config", "bd", "config.yaml")
+			if !strings.Contains(got, "Anonymous usage metrics: OFF") || !strings.Contains(got, want) {
+				t.Fatalf("`bd metrics` must report OFF and name %s:\n%s", want, got)
+			}
+			if strings.Contains(got, "Turn off:") || strings.Contains(got, "Turn on:") {
+				t.Fatalf("`bd metrics` suggests a toggle that cannot write the config:\n%s", got)
+			}
+		})
 	}
 }
