@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -1195,6 +1196,112 @@ func TestWispPurgeClosedRoutesShareAgeSelection(t *testing.T) {
 			}
 			if !slices.Equal(got, tc.wantDelete) {
 				t.Errorf("proxied --age %s deleted %v, want %v", tc.age, got, tc.wantDelete)
+			}
+		})
+	}
+}
+
+// TestWispPurgeClosedPreviewMatchesForceUnderAge pins GH#8202's preview side
+// on both routes: with a positive --age, the preview (no --force), --dry-run
+// and --force runs all count the same age-eligible wisp, every text run says
+// which threshold kept the recent ones and that --age 0s purges them too, a
+// run that finds nothing old enough says so, and the JSON preview keeps its
+// candidates and dry_run keys.
+func TestWispPurgeClosedPreviewMatchesForceUnderAge(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	oldNow := wispGCNow
+	t.Cleanup(func() { wispGCNow = oldNow })
+	wispGCNow = func() time.Time { return now }
+
+	ids := wispPurgeIDs(3)
+	idle := ids[0]
+	updated := map[string]time.Time{
+		ids[0]: now.Add(-3 * time.Hour),
+		ids[1]: now.Add(-time.Minute),
+		ids[2]: now.Add(-time.Hour),
+	}
+	allRecent := map[string]time.Time{ids[0]: now, ids[1]: now, ids[2]: now}
+
+	type route struct {
+		name string
+		// run installs a stub holding the three wisps updated at the given
+		// times, runs the purge, and returns what it printed and the ids it
+		// deleted.
+		run func(t *testing.T, updated map[string]time.Time, dryRun, force, asJSON bool) (string, []string)
+	}
+	routes := []route{
+		{"direct", func(t *testing.T, updated map[string]time.Time, dryRun, force, asJSON bool) (string, []string) {
+			s := useWispPurgeStub(t, 3)
+			s.updated = updated
+			jsonOutput = asJSON
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosed(context.Background(), dryRun, force, nil, 2*time.Hour)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			var deleted []string
+			for _, req := range s.deleter.requests {
+				if !req.DryRun {
+					deleted = append(deleted, req.IDs...)
+				}
+			}
+			return stdout, deleted
+		}},
+		{"proxied", func(t *testing.T, updated map[string]time.Time, dryRun, force, asJSON bool) (string, []string) {
+			p := useWispPurgeProxied(t, 3)
+			p.updated = updated
+			jsonOutput = asJSON
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosedProxiedServer(context.Background(), dryRun, force, nil, 2*time.Hour)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			var deleted []string
+			for _, u := range p.deletionUnits() {
+				deleted = append(deleted, u.params.IDs...)
+			}
+			return stdout, deleted
+		}},
+	}
+
+	note := func(t *testing.T, out string) {
+		t.Helper()
+		if !strings.Contains(out, "within the last 2h") || !strings.Contains(out, "--age 0s") {
+			t.Errorf("output does not explain the 2h threshold and the --age 0s escape hatch:\n%s", out)
+		}
+	}
+	for _, r := range routes {
+		t.Run(r.name, func(t *testing.T) {
+			out, deleted := r.run(t, updated, false, false, false)
+			if !strings.Contains(out, "Found 1 closed wisp(s) to delete") || len(deleted) != 0 {
+				t.Errorf("preview: want 1 candidate and no deletion, deleted %v:\n%s", deleted, out)
+			}
+			note(t, out)
+
+			out, deleted = r.run(t, updated, true, true, false)
+			if !strings.Contains(out, "Found 1 closed wisp(s)") || len(deleted) != 0 {
+				t.Errorf("dry run: want 1 candidate and no deletion, deleted %v:\n%s", deleted, out)
+			}
+			note(t, out)
+
+			out, deleted = r.run(t, updated, false, true, false)
+			if !slices.Equal(deleted, []string{idle}) {
+				t.Errorf("force deleted %v, want the preview's one candidate %s", deleted, idle)
+			}
+			note(t, out)
+
+			out, deleted = r.run(t, allRecent, false, true, false)
+			if !strings.Contains(out, "No closed wisps to delete") || len(deleted) != 0 {
+				t.Errorf("nothing old enough: deleted %v:\n%s", deleted, out)
+			}
+			note(t, out)
+
+			out, _ = r.run(t, updated, false, false, true)
+			obj := decodeSingleJSONObject(t, out)
+			if obj["candidates"] != float64(1) || obj["dry_run"] != true {
+				t.Errorf("JSON preview = %v, want candidates 1 and dry_run true", obj)
 			}
 		})
 	}

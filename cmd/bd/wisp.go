@@ -1015,6 +1015,29 @@ func selectClosedWispsForPurge(ctx context.Context, r molReader, ageThreshold ti
 	return sel, nil
 }
 
+// printClosedWispAgeNote tells a text-mode `bd mol wisp gc --closed` run
+// which wisps its --age kept back and how to include them (GH#8202). With
+// --age 0s nothing is kept back, so there is nothing to say.
+func printClosedWispAgeNote(ageThreshold time.Duration) {
+	if ageThreshold <= 0 || jsonOutput {
+		return
+	}
+	fmt.Printf("Keeping closed wisps updated within the last %s (--age); use --age 0s to purge them too\n", formatWispGCAge(ageThreshold))
+}
+
+// formatWispGCAge spells a --age duration without its zero tail: 1h, not
+// 1h0m0s.
+func formatWispGCAge(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
+
 func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType, ageThreshold time.Duration) error {
 	sel, err := selectClosedWispsForPurge(ctx, store, ageThreshold, excludeTypes)
 	if err != nil {
@@ -1029,6 +1052,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	if infraCount > 0 && !jsonOutput {
 		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
 	}
+	printClosedWispAgeNote(ageThreshold)
 
 	if len(closedIssues) == 0 {
 		return renderNoClosedWisps(force && !dryRun && scanCapped)
