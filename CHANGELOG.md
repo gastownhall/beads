@@ -1438,8 +1438,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported to raise a privacy prompt each time. On macOS bd's native user
   config directory now follows the Linux rule: `$XDG_CONFIG_HOME` when set,
   otherwise `~/.config`. The merge order (`~/.beads` < native <
-  `~/.config/bd` < project) is unchanged, and so are Linux and Windows. A
-  global `PRIME.md` must move:
+  `~/.config/bd` < project) is unchanged, and so are Linux and Windows.
+  When bd creates `~/.config/bd/config.yaml` on macOS, it first copies the
+  old Application Support file into it once, so a saved `bd metrics off` or
+  `node_id` carries over and holds on that same run; that one-time copy is
+  the only time bd opens the old file. If `~/.config/bd/config.yaml` already
+  exists, nothing is copied: merge any settings from the old file by hand.
+  A global `PRIME.md` must move:
   `mkdir -p ~/.config/beads && mv ~/Library/Application\ Support/beads/PRIME.md ~/.config/beads/`.
 
 - **A dangling symlink at the user config path no longer crashes bd.** When

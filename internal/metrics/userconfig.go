@@ -35,6 +35,13 @@ func EnsureUserConfigDefaults() error {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("ensure user config: %s is a dangling symlink", path)
 		}
+		// On macOS the new file may carry an opt-out over from the legacy
+		// Application Support config (GH#8113). bd only bootstraps metrics
+		// defaults for a user whose consent reads as enabled, so leave a
+		// carried opt-out file exactly as it was carried.
+		if err == nil && config.MetricsDisabledByUserConfig() {
+			return nil
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("ensure user config: read %s: %w", path, err)

@@ -34,6 +34,29 @@ A `config.local.yaml` next to the project `config.yaml` is also merged in last f
 
 Earlier releases also read `~/Library/Application Support/bd/config.yaml` on macOS, and looked for a global `PRIME.md` in `~/Library/Application Support/beads/`. Accessing that folder on every launch can raise a macOS privacy prompt (GH#8113), so bd no longer reads either location when it starts.
 
+The old config file is copied once instead. When bd needs `~/.config/bd/config.yaml` (or `$XDG_CONFIG_HOME/bd/config.yaml`) and it does not exist yet, bd creates it with the old file's contents, unchanged. A `bd metrics off` or `node_id` saved there therefore carries over, and a saved opt-out applies on that same run. That copy is the only time bd opens the old file, and macOS may show its privacy prompt for it once.
+
+bd creates that file on its own only while metrics are enabled. If you run bd with `BD_DISABLE_METRICS` or `DO_NOT_TRACK` set, other settings in the old file (such as `actor`) stop applying until you copy it yourself:
+
+```bash
+mkdir -p ~/.config/bd
+cp -n ~/Library/Application\ Support/bd/config.yaml ~/.config/bd/config.yaml
+```
+
+If `~/.config/bd/config.yaml` already exists, bd copies nothing. Compare the two files and move any settings you still want by hand:
+
+```bash
+cat ~/Library/Application\ Support/bd/config.yaml
+"$EDITOR" ~/.config/bd/config.yaml
+```
+
+A global `PRIME.md` is not copied. Move it to the documented location:
+
+```bash
+mkdir -p ~/.config/beads
+mv ~/Library/Application\ Support/beads/PRIME.md ~/.config/beads/
+```
+
 ### Missing `metadata.json`
 
 `.beads/metadata.json` names the workspace's Dolt database. Your issues live in that database; `.beads/issues.jsonl` is only an export of them and never stands in for it. If `metadata.json` is missing from an embedded workspace, bd does not fall back to a new, empty database beside the ones the workspace already holds:

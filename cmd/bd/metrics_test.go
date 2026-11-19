@@ -510,3 +510,101 @@ func TestWarnIfMetricsEnvOverrideNamesActiveVar(t *testing.T) {
 		}
 	})
 }
+
+// darwinMetricsRunFixture is a macOS home after an upgrade: a legacy
+// ~/Library/Application Support/bd/config.yaml, no ~/.config/bd/config.yaml,
+// XDG_CONFIG_HOME and the metrics env overrides unset. It returns the home
+// and a pointer to the number of times os.UserConfigDir (Application Support)
+// was consulted.
+func darwinMetricsRunFixture(t *testing.T, legacyBody string) (home string, nativeCalls *int) {
+	t.Helper()
+	home = t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	for _, key := range []string{metrics.EnvDisableMetrics, metrics.EnvDoNotTrack} {
+		if orig, ok := os.LookupEnv(key); ok {
+			_ = os.Unsetenv(key)
+			t.Cleanup(func() { _ = os.Setenv(key, orig) })
+		}
+	}
+	appSupport := filepath.Join(home, "Library", "Application Support")
+	if legacyBody != "" {
+		legacy := filepath.Join(appSupport, "bd", "config.yaml")
+		if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(legacy, []byte(legacyBody), 0o600); err != nil {
+			t.Fatalf("write legacy config: %v", err)
+		}
+	}
+	calls := 0
+	t.Cleanup(config.SetUserConfigPlatformForTest("darwin", func() (string, error) {
+		calls++
+		return appSupport, nil
+	}))
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	return home, &calls
+}
+
+// runMetricsLaunch drives the metrics part of a bd launch the way
+// PersistentPreRunE and PersistentPostRun do, and reports whether metrics
+// were enabled for the run and what reached stderr.
+func runMetricsLaunch(t *testing.T) (enabled bool, stderr string) {
+	t.Helper()
+	cmd := &cobra.Command{Use: "ready"}
+	stderr = captureStderr(t, func() {
+		enabled = prepareRunMetrics(cmd.Name())
+		maybeShowMetricsFirstRunNotice(cmd)
+	})
+	return enabled, stderr
+}
+
+// TestDarwinFirstRunCarriesLegacyMetricsOptOut: the first bd run on macOS
+// after the move to ~/.config creates ~/.config/bd/config.yaml from the
+// legacy Application Support file, so a saved `bd metrics off` holds on that
+// very run (no send, no notice) and every later run reads only the new file
+// (GH#8113).
+func TestDarwinFirstRunCarriesLegacyMetricsOptOut(t *testing.T) {
+	const legacyBody = "metrics:\n  disabled: true\nnode_id: n1\n"
+	home, nativeCalls := darwinMetricsRunFixture(t, legacyBody)
+	newPath := filepath.Join(home, ".config", "bd", "config.yaml")
+
+	enabled, stderr := runMetricsLaunch(t)
+	if enabled {
+		t.Fatal("first run enabled metrics over the legacy `bd metrics off`")
+	}
+	if strings.Contains(stderr, "Thanks for using bd") {
+		t.Fatalf("first run showed the metrics notice to an opted-out user:\n%s", stderr)
+	}
+	got, err := os.ReadFile(newPath)
+	if err != nil {
+		t.Fatalf("first run did not create %s: %v", newPath, err)
+	}
+	if string(got) != legacyBody {
+		t.Fatalf("new user config = %q, want the legacy bytes %q", got, legacyBody)
+	}
+	if info, err := os.Stat(newPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("new user config mode = %v, %v; want 0600", info.Mode().Perm(), err)
+	}
+	if *nativeCalls != 1 {
+		t.Fatalf("Application Support consulted %d times on the creating run, want 1", *nativeCalls)
+	}
+
+	*nativeCalls = 0
+	enabled, stderr = runMetricsLaunch(t)
+	if enabled || strings.Contains(stderr, "Thanks for using bd") {
+		t.Fatalf("second run: enabled=%v stderr=%q; want metrics off and no notice", enabled, stderr)
+	}
+	if *nativeCalls != 0 {
+		t.Fatalf("Application Support consulted %d times once ~/.config/bd/config.yaml exists", *nativeCalls)
+	}
+	if got, _ := os.ReadFile(newPath); string(got) != legacyBody {
+		t.Fatalf("second run rewrote the user config: %q", got)
+	}
+}
