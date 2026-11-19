@@ -2593,10 +2593,10 @@ var rootCmd = &cobra.Command{
 				maybeAutoPruneEventsJournal(rootCtx, beads.FindBeadsDir())
 			}
 			// Auto-backup, through the provider this command opened. Same
-			// gate as the direct arm's maintenance net below (strict
-			// --readonly, `bd serve` and a migration freeze all skip it),
-			// plus previews: a --dry-run must not register a backup remote
-			// or write backup state. proxiedAutoBackupBackend decides the
+			// gate as the direct arm's maintenance net below: strict
+			// --readonly, `bd serve`, a preview and a migration freeze all
+			// skip it — a --dry-run must not register a backup remote or
+			// write backup state. proxiedAutoBackupBackend decides the
 			// topology, so this stays inert off managed-local.
 			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !isPreviewCommand(cmd) && !commandFreeze.Frozen() {
 				runPostRunAutoBackup(rootCtx)
@@ -2615,7 +2615,15 @@ var rootCmd = &cobra.Command{
 			// of them. Guarding the outer block keeps that promise in one
 			// place instead of six. Writes never get here at all: they were
 			// refused in PersistentPreRunE.
-			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !commandFreeze.Frozen() {
+			//
+			// A --dry-run/--inspect preview skips the net for the same reason
+			// a freeze does: it promised to mutate nothing. Backup, export and
+			// push write outside the store the preview opened (.beads/backup,
+			// issues.jsonl and export-state.json, push-state.json, the Dolt
+			// remote), and on embedded the refused backup still stamps its
+			// throttle, starving the next real write's backup (GH#8325). The
+			// proxied arm above applies the same gate.
+			if runsPostCommandMaintenance(cmd.Name(), readonlyMode) && !isPreviewCommand(cmd) && !commandFreeze.Frozen() {
 				// Dolt auto-commit: after a successful write command (and after final flush),
 				// create a Dolt commit so changes don't remain only in the working set.
 				if commandDidWrite.Load() && !commandDidExplicitDoltCommit {
