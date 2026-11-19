@@ -665,7 +665,21 @@ func acquireInitMutationGateFor(ctx context.Context, beadsDir, physicalRoot stri
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	refusal := "bd init refuses to run over live bd activity on this workspace"
+	cmdName := "bd init"
+	if reinitLocal {
+		cmdName = "bd init --reinit-local"
+	}
+	where := "this workspace"
+	if doltserver.IsSharedServerMode() {
+		where = "this workspace or its shared server"
+	}
+	refusal := fmt.Sprintf("%s refuses to run over live bd activity on %s", cmdName, where)
+	if reinitLocal && doltserver.IsSharedServerMode() {
+		// Known limitation: destructive reinit takes the shared root
+		// EXCLUSIVE, so any other project's resident bd command (bd serve)
+		// on the shared server blocks it until that command exits.
+		refusal += " (reinitializing needs the shared server free of other projects' bd commands, such as bd serve)"
+	}
 
 	gates, err := maintenanceGateSet(beadsDir, physicalRoot)
 	if err != nil {
@@ -676,11 +690,15 @@ func acquireInitMutationGateFor(ctx context.Context, beadsDir, physicalRoot stri
 		return nil, fmt.Errorf("%s: %w", refusal, err)
 	}
 
+	// The holder sidecar (and, while a destructive reinit waits behind a
+	// resident shared holder, the queued-writer intent sidecar) records why
+	// this process holds the gate, so waiters can tell a destructive reinit
+	// from an ordinary init.
 	wait := initGateWait()
 	onWait, stopNotice := delayedGateNotice()
 	opts := workspacegate.Options{
 		Wait:   wait,
-		Reason: "bd init",
+		Reason: cmdName,
 		OnWait: onWait,
 	}
 	h, err := workspacegate.AcquireAllMixed(ctx, opts, reqs...)

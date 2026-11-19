@@ -1548,7 +1548,10 @@ func TestAcquireInitMutationGateForceAliasKeepsExclusivePlan(t *testing.T) {
 		t.Fatal("bd init --force completed while another project's serve held the shared root")
 	}
 	out := stderr.String()
-	for _, want := range []string{"refuses to run over live bd activity on this workspace", "waited 300ms", initGateTimeoutEnv} {
+	for _, want := range []string{
+		"bd init --reinit-local refuses to run over live bd activity on this workspace or its shared server",
+		"waited 300ms", initGateTimeoutEnv,
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("init --force refusal %q missing %q", out, want)
 		}
@@ -1557,4 +1560,79 @@ func TestAcquireInitMutationGateForceAliasKeepsExclusivePlan(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
 		t.Errorf("refused init left .beads behind (stat err = %v)", err)
 	}
+}
+
+// AC-8: a shared-server init that times out on a gate keeps ErrBusy, the
+// gate path and mode, the wait budget and its knob, and says the contention
+// may be in the workspace or its shared server; reinit names itself.
+func TestAcquireInitMutationGateSharedServerRefusalText(t *testing.T) {
+	t.Run("ordinary-vs-maintenance", func(t *testing.T) {
+		f := newSharedServerGateFixture(t)
+		t.Setenv(initGateTimeoutEnv, "300ms")
+		f.holdOtherProjectMaintenance(t)
+		_, err := acquireInitMutationGate(context.Background(), newProjectBeadsDir(t, false), f.sharedRoot, nil)
+		if !errors.Is(err, workspacegate.ErrBusy) {
+			t.Fatalf("err = %v, want ErrBusy", err)
+		}
+		for _, want := range []string{
+			"bd init refuses to run over live bd activity on this workspace or its shared server",
+			"waited 300ms", initGateTimeoutEnv, f.rootGate(t).Path(), "test maintenance",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+	})
+	t.Run("reinit-vs-resident-serve", func(t *testing.T) {
+		f := newSharedServerGateFixture(t)
+		t.Setenv(initGateTimeoutEnv, "300ms")
+		f.holdOtherProjectServe(t)
+		_, err := acquireInitMutationGateFor(context.Background(), newProjectBeadsDir(t, true), f.sharedRoot, true, nil)
+		if !errors.Is(err, workspacegate.ErrBusy) {
+			t.Fatalf("err = %v, want ErrBusy", err)
+		}
+		for _, want := range []string{
+			"bd init --reinit-local refuses to run over live bd activity on this workspace or its shared server",
+			"other projects' bd commands",
+			"waited 300ms", initGateTimeoutEnv, f.rootGate(t).Path(), "exclusive mode",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+	})
+	t.Run("reinit-queued-intent-names-itself", func(t *testing.T) {
+		f := newSharedServerGateFixture(t)
+		t.Setenv(initGateTimeoutEnv, "300ms")
+		f.holdOtherProjectServe(t)
+		// While the destructive reinit waits behind the resident serve, its
+		// queued-writer intent sidecar names --reinit-local, so a waiter (or
+		// a human reading the sidecar) can tell it from an ordinary init.
+		done := make(chan error, 1)
+		go func() {
+			_, gerr := acquireInitMutationGateFor(context.Background(), newProjectBeadsDir(t, false), f.sharedRoot, true, nil)
+			done <- gerr
+		}()
+		intentPath := f.rootGate(t).Path() + ".intent.info"
+		var intentReason string
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if info, rerr := os.ReadFile(intentPath); rerr == nil && len(info) > 0 {
+				intentReason = string(info)
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		select {
+		case gerr := <-done:
+			if !errors.Is(gerr, workspacegate.ErrBusy) {
+				t.Fatalf("err = %v, want ErrBusy", gerr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("destructive reinit did not return within its bound")
+		}
+		if !strings.Contains(intentReason, "bd init --reinit-local") {
+			t.Errorf("queued-writer intent sidecar %q does not name %q", intentReason, "bd init --reinit-local")
+		}
+	})
 }
