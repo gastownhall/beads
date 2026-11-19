@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/gowebpki/jcs"
@@ -1385,42 +1386,199 @@ func GetIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[
 // GetDependenciesWithMetadataInTx returns issues that the given issueID depends on,
 // along with the dependency type. Works within an existing transaction.
 // Queries both dependency tables to handle cross-table dependencies.
+//
+// The result is ISSUE-ONLY by contract: an edge whose far end has no row in
+// this database (a cross-repo or `external:` target) is dropped rather than
+// returned as a placeholder, because every consumer of this reader — sync
+// writers, traversal, Relations — acts on the far-end issue and must never
+// act on a stub. The combined read that also reports those edges as exact
+// stored records is GetDependenciesWithUnresolvableInTx (GH#5850).
 func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	deps, err := anchorEdgesInTx(ctx, tx, issueID, false, true)
 	if err != nil {
 		return nil, err
 	}
+	resolved, missed, err := hydrateAnchorEdgesInTx(ctx, tx, "dependencies", deps)
+	if err != nil {
+		return nil, err
+	}
+	_ = missed // issue-only contract: drops are the caller's to opt out of
+	return resolved, nil
+}
 
+// hydrateAnchorEdgesInTx resolves the far ends of deps against the local
+// issues/wisps rows in the same transaction and splits them: the far ends
+// that hydrated pair with their edge type (resolved), and the edges whose far
+// end has no local row come back as misses. Both metadata readers share it,
+// so the two directions cannot disagree about what a hydration miss is.
+//
+// This is where the silent drop lived before GH#5850: the readers discarded
+// the misses outright. The old readers still do — their issue-only contract
+// is load-bearing for sync and traversal — but now through one shared seam,
+// and GetDependenciesWithUnresolvableInTx turns the misses into records.
+func hydrateAnchorEdgesInTx(ctx context.Context, tx DBTX, verb string, deps []anchorEdge) (resolved []*types.IssueWithDependencyMetadata, missed []anchorEdge, err error) {
 	if len(deps) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	// Fetch all dependency target issues.
+	// Fetch all far-end issues in one batch. GetIssuesByIDsInTx closes its
+	// own rows before its nested queries, so a MaxOpenConns=1 pool cannot
+	// deadlock here.
 	ids := make([]string, len(deps))
 	for i, d := range deps {
 		ids[i] = d.farID
 	}
 	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
 	if err != nil {
-		return nil, fmt.Errorf("get dependencies: fetch issues: %w", err)
+		return nil, nil, fmt.Errorf("get %s: fetch issues: %w", verb, err)
 	}
 	issueMap := make(map[string]*types.Issue, len(issues))
 	for _, iss := range issues {
 		issueMap[iss.ID] = iss
 	}
 
-	var results []*types.IssueWithDependencyMetadata
 	for _, d := range deps {
 		issue, ok := issueMap[d.farID]
 		if !ok {
+			missed = append(missed, d)
 			continue
 		}
-		results = append(results, &types.IssueWithDependencyMetadata{
+		resolved = append(resolved, &types.IssueWithDependencyMetadata{
 			Issue:          *issue,
 			DependencyType: types.DependencyType(d.depType),
 		})
 	}
-	return results, nil
+	return resolved, missed, nil
+}
+
+// GetDependenciesWithUnresolvableInTx is the combined outgoing read (GH#5850):
+// the issues issueID depends on, split by whether this database can resolve
+// the edge's far end. resolved is exactly what GetDependenciesWithMetadataInTx
+// returns for the same anchor in the same transaction — real issue rows, one
+// per far-end ID, hydrated with labels and carrying the edge type. unresolvable
+// holds the stored edge records whose far end has no local row (a cross-repo
+// id or an `external:` target): the exact issue_id, coalesced target, type,
+// created_at, created_by, metadata and thread_id as stored, never synthesized.
+//
+// Both lists are nil when the anchor has no outgoing edges, and unresolvable
+// is nil when every far end resolved. Callers that act on far ends (sync,
+// traversal, Relations) must keep the issue-only readers instead; this method
+// exists so display paths can show a missing target instead of silently
+// dropping the edge.
+//
+// Missed edges are fetched durable-plane-first in the same transaction, one
+// record per far-end ID with durable precedence, sorted by DependsOnID then
+// Type. A wisp_dependencies table that is missing mid-read (a dolt-ignored
+// table dropped by a server working-set reset) is tolerated the way the anchor
+// read tolerates it; the edge the anchor saw still comes back from the
+// anchor's own far-id and type, with no invented stamps.
+func GetDependenciesWithUnresolvableInTx(ctx context.Context, tx DBTX, issueID string) (resolved []*types.IssueWithDependencyMetadata, unresolvable []*types.Dependency, err error) {
+	deps, err := anchorEdgesInTx(ctx, tx, issueID, false, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	resolved, missed, err := hydrateAnchorEdgesInTx(ctx, tx, "dependencies", deps)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(missed) == 0 {
+		return resolved, nil, nil
+	}
+	unresolvable, err = outgoingEdgeRecordsInTx(ctx, tx, issueID, missed)
+	if err != nil {
+		return nil, nil, err
+	}
+	return resolved, unresolvable, nil
+}
+
+// outgoingEdgeRecordsInTx reads the stored edge records for the far ends the
+// hydration could not resolve, from the durable table first and then the wisp
+// table, keeping one record per far-end ID with durable precedence — the same
+// precedence anchorEdgesInTx applies to the edges themselves, so a durable
+// row's type and stamps beat a wisp copy of the same edge. Sorted by
+// DependsOnID then Type so the display order of unresolved targets is stable.
+//
+// A far end the anchor saw but neither record query returned (possible only
+// for wisp-plane edges when the optional wisp_dependencies table vanished
+// between the two reads) still comes back, built from the anchor edge's own
+// far id and type with no stamps: the alternative is re-introducing the silent
+// drop this function exists to remove, for the exact table-drop its absence
+// already has to tolerate (bd-cif6y4, #3445).
+func outgoingEdgeRecordsInTx(ctx context.Context, tx DBTX, issueID string, missed []anchorEdge) ([]*types.Dependency, error) {
+	byFar := make(map[string]*types.Dependency, len(missed))
+	missedIDs := make([]string, len(missed))
+	for i, e := range missed {
+		missedIDs[i] = e.farID
+	}
+
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		for start := 0; start < len(missedIDs); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(missedIDs) {
+				end = len(missedIDs)
+			}
+			batch := missedIDs[start:end]
+			placeholders := make([]string, len(batch))
+			args := make([]any, 0, len(batch)+1)
+			args = append(args, issueID)
+			for i, id := range batch {
+				placeholders[i] = "?"
+				args = append(args, id)
+			}
+			//nolint:gosec // G201: depTable is a hardcoded constant; ? placeholders only.
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				`SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
+				FROM %s WHERE issue_id = ? AND %s IN (%s)`,
+				DepTargetExpr, depTable, DepTargetExpr, strings.Join(placeholders, ",")), args...)
+			if err != nil {
+				if optionalBlockedTable(depTable) && dberrors.IsMissingTable(err, depTable) {
+					return finishOutgoingEdgeRecords(byFar, issueID, missed), nil
+				}
+				return nil, fmt.Errorf("get unresolved dependency records from %s: %w", depTable, err)
+			}
+			for rows.Next() {
+				dep, scanErr := scanDependencyRow(rows)
+				if scanErr != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("get unresolved dependency records: scan: %w", scanErr)
+				}
+				if _, dup := byFar[dep.DependsOnID]; dup {
+					continue
+				}
+				byFar[dep.DependsOnID] = dep
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("get unresolved dependency records: rows from %s: %w", depTable, err)
+			}
+		}
+	}
+	return finishOutgoingEdgeRecords(byFar, issueID, missed), nil
+}
+
+// finishOutgoingEdgeRecords orders the recovered records and backfills the
+// anchor-only fallbacks, returning a stable result: sorted by DependsOnID
+// then Type.
+func finishOutgoingEdgeRecords(byFar map[string]*types.Dependency, issueID string, missed []anchorEdge) []*types.Dependency {
+	out := make([]*types.Dependency, 0, len(missed))
+	for _, e := range missed {
+		if dep, ok := byFar[e.farID]; ok {
+			out = append(out, dep)
+			continue
+		}
+		out = append(out, &types.Dependency{
+			IssueID:     issueID,
+			DependsOnID: e.farID,
+			Type:        types.DependencyType(e.depType),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].DependsOnID != out[j].DependsOnID {
+			return out[i].DependsOnID < out[j].DependsOnID
+		}
+		return out[i].Type < out[j].Type
+	})
+	return out
 }
 
 // anchorEdge is one dependency edge seen from a fixed anchor issue: the issue
@@ -1496,42 +1654,22 @@ func anchorEdgesInTx(ctx context.Context, tx DBTX, anchor string, inbound, withT
 
 // GetDependentsWithMetadataInTx returns issues that depend on the given issueID
 // along with the dependency type. Works within an existing transaction.
+//
+// Issue-only like GetDependenciesWithMetadataInTx: an inbound edge whose
+// source has no local row is dropped. The combined read exists only for the
+// outgoing direction (GH#5850); exact inbound records remain a separate
+// contract.
 func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	deps, err := anchorEdgesInTx(ctx, tx, issueID, true, true)
 	if err != nil {
 		return nil, err
 	}
-
-	if len(deps) == 0 {
-		return nil, nil
-	}
-
-	// Fetch all dependent issues.
-	ids := make([]string, len(deps))
-	for i, d := range deps {
-		ids[i] = d.farID
-	}
-	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
+	resolved, missed, err := hydrateAnchorEdgesInTx(ctx, tx, "dependents", deps)
 	if err != nil {
-		return nil, fmt.Errorf("get dependents: fetch issues: %w", err)
+		return nil, err
 	}
-	issueMap := make(map[string]*types.Issue, len(issues))
-	for _, iss := range issues {
-		issueMap[iss.ID] = iss
-	}
-
-	var results []*types.IssueWithDependencyMetadata
-	for _, d := range deps {
-		issue, ok := issueMap[d.farID]
-		if !ok {
-			continue
-		}
-		results = append(results, &types.IssueWithDependencyMetadata{
-			Issue:          *issue,
-			DependencyType: types.DependencyType(d.depType),
-		})
-	}
-	return results, nil
+	_ = missed // issue-only contract: the combined read is outgoing-only
+	return resolved, nil
 }
 
 // GetDependenciesInTx returns issues that the given issueID depends on.
