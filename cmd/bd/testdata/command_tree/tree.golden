@@ -2292,6 +2292,12 @@ bd dolt status
     | connects through) and the dolt backend behind it separately, read from the
     | proxy's own process records. Reporting starts nothing: a quiesced workspace
     | is shown as not running, and the next bd command launches it.
+    |
+    | With --all, lists every dolt sql-server on this machine instead, from any
+    | directory: for each server bd manages, its workspace, PID, port, uptime and
+    | idle-stop setting; every other dolt sql-server (another tool's, such as a
+    | Gas City city's) is listed as not managed by bd.
+  flag --all type=bool default="false" usage="List every Dolt server on this machine, managed by bd or not (needs no workspace)"
 
 bd dolt stop
   use: "stop"

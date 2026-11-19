@@ -1445,8 +1445,16 @@ command's token.
 In proxied-server mode, reports the proxy (the endpoint every bd command
 connects through) and the dolt backend behind it separately, read from the
 proxy's own process records. Reporting starts nothing: a quiesced workspace
-is shown as not running, and the next bd command launches it.`,
+is shown as not running, and the next bd command launches it.
+
+With --all, lists every dolt sql-server on this machine instead, from any
+directory: for each server bd manages, its workspace, PID, port, uptime and
+idle-stop setting; every other dolt sql-server (another tool's, such as a
+Gas City city's) is listed as not managed by bd.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if all, _ := cmd.Flags().GetBool("all"); all {
+			return runDoltStatusAll()
+		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
@@ -1571,6 +1579,7 @@ func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
 	fmt.Printf("  Port: %d\n", state.Port)
 	fmt.Printf("  Data: %s\n", state.DataDir)
 	fmt.Printf("  Logs: %s\n", doltserver.LogPath(serverDir))
+	fmt.Printf("  Idle stop: %s\n", doltserver.ReadIdleStopState(serverDir))
 	if doltserver.IsSharedServerMode() {
 		fmt.Println("  Mode: shared server")
 	}
@@ -2329,6 +2338,7 @@ func init() {
 	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
 	doltStartCmd.Flags().Bool("force", false, "Start even when dolt.auto-start is off and this would create a new, empty Dolt database")
 	doltStopCmd.Flags().Bool("force", false, "Force stop (proxied recovery still requires a bd/dolt executable match)")
+	doltStatusCmd.Flags().Bool("all", false, "List every Dolt server on this machine, managed by bd or not (needs no workspace)")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
 	doltPushCmd.Flags().BoolP("yes", "y", false, "Consent to adopting a Dolt remote derived from git origin when none is configured")

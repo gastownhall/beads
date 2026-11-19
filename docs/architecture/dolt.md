@@ -432,6 +432,15 @@ dolt:
   idle-timeout: 2h   # or 0 to keep auto-started servers running
 ```
 
+`bd dolt status` shows a running server's idle-stop setting. To see every
+Dolt server on the machine, from any directory, run `bd dolt status --all`
+(add `--json` for scripts). It lists each server bd manages with its
+workspace, PID, port, uptime and idle-stop setting (`after 30m`,
+`off: started with bd dolt start`, `off: no watcher (started by an older bd)`,
+...), and lists any other `dolt sql-server` (another tool's, such as a Gas
+City city's) as not managed by bd. A server counts as bd's when the
+`dolt-server.pid` in the directory it was started from names it.
+
 ### Shared Server Mode
 
 On machines with multiple beads projects, each project normally starts its own Dolt server.
