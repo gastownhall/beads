@@ -239,12 +239,19 @@ func (s *Store) resolveCrossPrefixIssueIDs(ctx context.Context, ids []string) (m
 		return nil, fmt.Errorf("external dependencies: route cross-prefix blockers: %w", err)
 	}
 	for _, id := range remaining {
+		routedIssue := routed[id]
+		// A CONFIGURED route that could not answer is the one fail-closed
+		// verdict: its sources stay excluded, and the policy warning for the
+		// affected prefix fires (once per prefix per policy instance).
+		if routedIssue.Verdict == IssueRouteUnavailable {
+			s.warnRoutedPrefixUnavailable(types.ExtractPrefix(id))
+		}
 		// A router answer that names no entry for an id is treated as
 		// unrouted — the benign verdict — rather than as a silent blocker:
 		// the unhappy paths all HAVE an explicit verdict, so a missing entry
 		// is a router bug or an id the router never saw, neither of which
 		// should strand work.
-		satisfied[id] = routedIssueSatisfiesBlocker(routed[id])
+		satisfied[id] = routedIssueSatisfiesBlocker(routedIssue)
 	}
 	return satisfied, nil
 }

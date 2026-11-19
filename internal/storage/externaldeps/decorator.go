@@ -29,6 +29,11 @@ type Store struct {
 	warnProject func(ProjectName)
 	warnMu      sync.Mutex
 	warned      map[ProjectName]struct{}
+	// warnRoute is the sink for the unavailable-ROUTE warning (GH#4647 AC-8):
+	// one per prefix per policy instance, kept deliberately separate from the
+	// capability warnings above. The default prints to stderr.
+	warnRoute      func(prefix string)
+	warnedPrefixes map[string]struct{}
 }
 
 // New constructs an external-capability-aware storage decorator. The options
@@ -36,12 +41,14 @@ type Store struct {
 // (WithIssueRouter).
 func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener, opts ...Option) *Store {
 	s := &Store{
-		DoltStorage:   inner,
-		inner:         inner,
-		locateProject: locateProject,
-		openProject:   openProject,
-		warnProject:   defaultProjectWarning,
-		warned:        make(map[ProjectName]struct{}),
+		DoltStorage:    inner,
+		inner:          inner,
+		locateProject:  locateProject,
+		openProject:    openProject,
+		warnProject:    defaultProjectWarning,
+		warned:         make(map[ProjectName]struct{}),
+		warnRoute:      defaultRouteWarning,
+		warnedPrefixes: make(map[string]struct{}),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -146,6 +153,25 @@ func (s *Store) warnUnresolvedProject(project ProjectName) {
 	s.warned[project] = struct{}{}
 	if s.warnProject != nil {
 		s.warnProject(project)
+	}
+}
+
+// warnRoutedPrefixUnavailable reports one unavailable route: the configured
+// routes.jsonl entry for prefix cannot answer, so every source the prefix
+// blocks stays excluded. Once per prefix per policy instance, however many
+// sources share it and however many evaluations run (GH#4647 AC-8).
+func (s *Store) warnRoutedPrefixUnavailable(prefix string) {
+	if prefix == "" {
+		return
+	}
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
+	if _, warned := s.warnedPrefixes[prefix]; warned {
+		return
+	}
+	s.warnedPrefixes[prefix] = struct{}{}
+	if s.warnRoute != nil {
+		s.warnRoute(prefix)
 	}
 }
 

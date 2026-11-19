@@ -17,6 +17,13 @@ func defaultProjectWarning(project ProjectName) {
 	fmt.Fprintf(os.Stderr, "Warning: external project %q is unavailable; its capability dependencies remain blocking\n", project)
 }
 
+// defaultRouteWarning is the stderr sink for an unavailable prefix route
+// (GH#4647 AC-8): the configured routes.jsonl entry cannot answer, so the
+// cross-prefix blockers it owns remain blocking.
+func defaultRouteWarning(prefix string) {
+	fmt.Fprintf(os.Stderr, "Warning: route for prefix %q is unavailable; cross-prefix blockers from it remain blocking\n", prefix)
+}
+
 // ProjectName is the configured name in external_projects.
 type ProjectName string
 

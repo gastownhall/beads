@@ -1442,10 +1442,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only (the same route resolution `bd dep add` uses) before every
   ready evaluation: an open target excludes its source, and the next
   query admits the source once the target closes or pins, with no write
-  to the source row. A server (`bd serve`) and the proxied-server chain
-  keep their existing external behavior for now; targets with no route,
-  absent targets, and proxied-server workspaces do not yet have their
-  final compatibility verdicts.
+  to the source row. Only `blocks` and `conditional-blocks` edges block:
+  a bare cross-prefix `waits-for` or `relates-to` edge never excludes its
+  source. A target no route reaches, and one the owning rig answers but
+  does not hold, is a compatibility non-blocker, exactly as the local
+  missing-target join treats a dangling row; a CONFIGURED route that
+  cannot answer keeps every source it affects excluded with one warning
+  that names the prefix. A server (`bd serve`) and the proxied-server
+  chain are not given the router, and treat targets they cannot resolve
+  locally as non-blocking, matching their pre-fix behavior.
 
 - **`bd relate` and `bd unrelate` resolve cross-prefix endpoints through
   routing** (#4647). `bd dep add` and `bd dep remove` route a cross-prefix

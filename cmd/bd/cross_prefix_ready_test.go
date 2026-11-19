@@ -4,7 +4,10 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -138,6 +141,78 @@ func crossPrefixReadyIDs(t *testing.T, ctx context.Context, st storage.DoltStora
 	}
 	slices.Sort(ids)
 	return ids
+}
+
+// TestReadyExcludesSourcesBehindAFailingConfiguredRouteWithOneWarning pins
+// AC-8 (GH#4647) end to end: a CONFIGURED route whose workspace cannot answer
+// (here: a .beads directory with no dolt database) keeps every source it
+// affects out of the ready selection, and the policy prints one warning that
+// names the prefix — once, not once per source or per evaluation.
+//
+// This test uses os.Chdir and assigns the CLI globals, so it cannot run in
+// parallel.
+func TestReadyExcludesSourcesBehindAFailingConfiguredRouteWithOneWarning(t *testing.T) {
+	e := setupCrossPrefixRelateEnv(t)
+	ctx := e.ctx
+
+	// A second configured route, yy-, whose workspace exists but has no dolt
+	// database: the route answers nothing.
+	deadBeadsDir := filepath.Join(e.townRoot, "deadrig", ".beads")
+	if err := os.MkdirAll(deadBeadsDir, 0755); err != nil {
+		t.Fatalf("create dead rig beads dir: %v", err)
+	}
+	routesPath := filepath.Join(e.townBeadsDir, "routes.jsonl")
+	if err := os.WriteFile(routesPath, []byte("{\"prefix\":\"gt-\",\"path\":\"rig\"}\n{\"prefix\":\"yy-\",\"path\":\"deadrig\"}\n"), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	// Two sources behind the failing route, seeded through the town store.
+	if err := e.townStore.CreateIssue(ctx, &types.Issue{
+		ID:        "hq-src2",
+		Title:     "Second source behind the dead route",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+	}, "test"); err != nil {
+		t.Fatalf("create hq-src2: %v", err)
+	}
+	for _, source := range []string{"hq-src1", "hq-src2"} {
+		if err := e.townStore.AddDependencyWithOptions(ctx, &types.Dependency{
+			IssueID:     source,
+			DependsOnID: "yy-blocker",
+			Type:        types.DepBlocks,
+		}, "seed", storage.DependencyAddOptions{}); err != nil {
+			t.Fatalf("seed blocks edge %s -> yy-blocker: %v", source, err)
+		}
+	}
+
+	wired := wireExternalDependencyPolicy(e.townStore, cliIssueRouter{})
+
+	// The first ready evaluation excludes both sources and warns once.
+	var got []string
+	stderr := captureStderrForBackupLockTest(t, func() {
+		got = crossPrefixReadyIDs(t, ctx, wired)
+	})
+	for _, source := range []string{"hq-src1", "hq-src2"} {
+		if slices.Contains(got, source) {
+			t.Fatalf("ready IDs behind a failing configured route = %v, want %s excluded", got, source)
+		}
+	}
+	if n := strings.Count(stderr, "yy-"); n != 1 {
+		t.Fatalf("route warning printed %d yy- mentions, want exactly one:\n%s", n, stderr)
+	}
+
+	// The next evaluation excludes them again and stays silent.
+	var repeat []string
+	stderr2 := captureStderrForBackupLockTest(t, func() {
+		repeat = crossPrefixReadyIDs(t, ctx, wired)
+	})
+	if slices.Contains(repeat, "hq-src1") || slices.Contains(repeat, "hq-src2") {
+		t.Fatalf("second ready evaluation = %v, want the sources still excluded", repeat)
+	}
+	if strings.Contains(stderr2, "yy-") {
+		t.Fatalf("second evaluation re-warned:\n%s", stderr2)
+	}
 }
 
 // TestReadyAdmitsUnroutedAndAbsentCrossPrefixTargets pins AC-7 (GH#4647) end

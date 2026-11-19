@@ -307,6 +307,59 @@ func TestCrossPrefixUnroutedAndAbsentTargetsDoNotExclude(t *testing.T) {
 	}
 }
 
+// TestCrossPrefixUnavailableRouteExcludesSourcesWithOnePrefixWarning pins
+// AC-8 (GH#4647): a CONFIGURED route that cannot answer keeps every source it
+// affects excluded — the fail-closed verdict, the one case a bare
+// cross-prefix edge blocks after AC-7 — and the policy warns once per PREFIX
+// per instance, however many sources share the prefix and however many
+// evaluations run.
+func TestCrossPrefixUnavailableRouteExcludesSourcesWithOnePrefixWarning(t *testing.T) {
+	a, b, c := issue("be-a"), issue("be-b"), issue("be-c")
+	raw := &fakeStore{
+		ready: []*types.Issue{a, b, c},
+		deps: map[string][]*types.Dependency{
+			// Two sources share the failing gt- route: both stay excluded.
+			"be-a": {crossPrefixDep("be-a", "gt-x", types.DepBlocks)},
+			"be-b": {crossPrefixDep("be-b", "gt-y", types.DepConditionalBlocks)},
+			// A second failing prefix, to pin one warning PER prefix.
+			"be-c": {crossPrefixDep("be-c", "yy-broken", types.DepBlocks)},
+		},
+	}
+	router := &fakeIssueRouter{statuses: map[string]RoutedIssue{
+		"gt-x":      {Verdict: IssueRouteUnavailable},
+		"gt-y":      {Verdict: IssueRouteUnavailable},
+		"yy-broken": {Verdict: IssueRouteUnavailable},
+	}}
+	store := testStoreWithRouter(raw, router)
+	var warned []string
+	store.warnRoute = func(prefix string) { warned = append(warned, prefix) }
+
+	if got := readyIDList(t, store, types.WorkFilter{}); len(got) != 0 {
+		t.Fatalf("ready IDs with two unavailable routes = %v, want none (every affected source is excluded)", got)
+	}
+	if n, err := store.CountReadyWork(t.Context(), types.WorkFilter{}); err != nil {
+		t.Fatalf("CountReadyWork: %v", err)
+	} else if n != 0 {
+		t.Fatalf("ready count with two unavailable routes = %d, want 0", n)
+	}
+	sorted := slices.Clone(warned)
+	slices.Sort(sorted)
+	if !slices.Equal(sorted, []string{"gt-", "yy-"}) {
+		t.Fatalf("prefix warnings after one evaluation = %v, want exactly one gt- and one yy-", warned)
+	}
+
+	// The blocker is still named where naming matters, and no further
+	// evaluation re-warns either prefix.
+	if blocked, blockers, err := store.IsBlocked(t.Context(), "be-a"); err != nil {
+		t.Fatalf("IsBlocked: %v", err)
+	} else if !blocked || !slices.Contains(blockers, "gt-x") {
+		t.Fatalf("IsBlocked over an unavailable route = (%v, %v), want blocked naming gt-x", blocked, blockers)
+	}
+	if len(warned) != 2 {
+		t.Fatalf("prefix warnings after a second evaluation = %v, want no repeats", warned)
+	}
+}
+
 // TestRouterlessPolicyInstanceHasCrossPrefixCompatBehavior pins the
 // routerless half of AC-7's compatibility verdict: a policy instance with NO
 // router (a serve chain, the proxied provider) cannot verify a bare
