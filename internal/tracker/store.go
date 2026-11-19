@@ -34,12 +34,10 @@ type IssueUpdater interface {
 // ExternalRefHistoryStore is an optional capability used for precise
 // relink/conflict detection.
 type ExternalRefHistoryStore interface {
-	PreviousExternalRef(context.Context, string, time.Time) (string, bool, error)
-
-	// PreviousExternalRefs is the batch form: the previous external_ref of
-	// every id, as of the most recent commit at or before the cutoff, in
-	// one call. See storage.ExternalRefHistoryQuerier for the map's
-	// presence contract.
+	// PreviousExternalRefs resolves the previous external_ref of every id,
+	// as of the most recent commit at or before the cutoff, in one call.
+	// See storage.ExternalRefHistoryQuerier for the map's presence
+	// contract.
 	PreviousExternalRefs(context.Context, []string, time.Time) (map[string]string, error)
 }
 

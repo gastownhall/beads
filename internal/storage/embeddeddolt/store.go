@@ -1343,26 +1343,12 @@ func (s *EmbeddedDoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]
 	return result, err
 }
 
-// PreviousExternalRef returns the external_ref value recorded for issueID
-// as of the most recent commit at or before asOf.
-// Implements storage.ExternalRefHistoryQuerier.
-func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
-	var ref string
-	var found bool
-	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		ref, found, err = issueops.PreviousExternalRefInTx(ctx, tx, issueID, asOf)
-		return err
-	})
-	return ref, found, err
-}
-
-// PreviousExternalRefs is the batch form of PreviousExternalRef: the
-// external_ref recorded for every id in ids as of the most recent commit at
-// or before asOf, resolved in one connection. Each of this store's
-// transactions opens a fresh OpenSQL handle (see withConn), so the per-issue
-// calls a pull used to make reopened the embedded engine for every linked
-// issue (#6605); the batch resolves them all inside one handle.
+// PreviousExternalRefs resolves the external_ref recorded for every id in
+// ids as of the most recent commit at or before asOf, in one connection.
+// Each of this store's transactions opens a fresh OpenSQL handle (see
+// withConn), so the per-issue calls a pull used to make reopened the
+// embedded engine for every linked issue (#6605); the batch resolves them
+// all inside one handle.
 // Implements storage.ExternalRefHistoryQuerier.
 func (s *EmbeddedDoltStore) PreviousExternalRefs(ctx context.Context, ids []string, asOf time.Time) (map[string]string, error) {
 	var refs map[string]string

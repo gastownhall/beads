@@ -1132,6 +1132,12 @@ func (e *Engine) resolvePrelinkVerdicts(ctx context.Context, candidates []prelin
 	if !ok {
 		for i, candidate := range candidates {
 			local := candidate.local
+			if local == nil {
+				// A nil candidate carries nothing to decide; keep its
+				// zero verdict, the answer the per-issue form gave a nil
+				// local.
+				continue
+			}
 			verdicts[i] = prelinkVerdict{
 				changed: local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync),
 			}
@@ -1145,7 +1151,7 @@ func (e *Engine) resolvePrelinkVerdicts(ctx context.Context, candidates []prelin
 	ids := make([]string, 0, len(candidates))
 	idSet := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
-		if candidate.local.ID == "" {
+		if candidate.local == nil || candidate.local.ID == "" {
 			continue
 		}
 		if _, dup := idSet[candidate.local.ID]; dup {
@@ -1159,6 +1165,11 @@ func (e *Engine) resolvePrelinkVerdicts(ctx context.Context, candidates []prelin
 		return nil, err
 	}
 	for i, candidate := range candidates {
+		if candidate.local == nil {
+			// A nil candidate carries nothing to decide; keep its zero
+			// verdict, the answer the per-issue form gave a nil local.
+			continue
+		}
 		previousRef, found := previousRefs[candidate.local.ID]
 		changed, historyUnknown := prelinkDecision(candidate.local, candidate.ref, previousRef, found, lastSync)
 		verdicts[i] = prelinkVerdict{changed: changed, historyUnknown: historyUnknown}
@@ -1166,47 +1177,15 @@ func (e *Engine) resolvePrelinkVerdicts(ctx context.Context, candidates []prelin
 	return verdicts, nil
 }
 
-// externalRefChangedAfter reports whether local's external_ref differed
-// from currentRef as of lastSync. When the backing store can answer this
-// precisely (storage.ExternalRefHistoryQuerier — Dolt-shaped stores that
-// expose dolt_history_issues), it does, and prelinkDecision decides from
-// the history it returns; otherwise it falls back to a coarser timestamp
-// heuristic.
-//
-// The fast path is gated on the ExternalRefHistoryQuerier capability, not on
-// whether the store happens to expose a raw *sql.DB: some Dolt-shaped
-// backends (e.g. embeddeddolt.EmbeddedDoltStore) support the
-// dolt_history_issues query without a pooled *sql.DB, and a non-Dolt SQL
-// backend could expose *sql.DB without having that Dolt system table at
-// all. Gating on the capability keeps this correct in both directions.
-//
-// A store without the history capability keeps the timestamp heuristic and
-// never reports historyUnknown.
-func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (changed, historyUnknown bool, err error) {
-	if local == nil {
-		return false, false, nil
-	}
-	querier, ok := externalRefHistoryQuerier(e.Store)
-	if !ok {
-		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), false, nil
-	}
-
-	previousRef, found, err := querier.PreviousExternalRef(ctx, local.ID, lastSync)
-	if err != nil {
-		return false, false, err
-	}
-	changed, historyUnknown = prelinkDecision(local, currentRef, previousRef, found, lastSync)
-	return changed, historyUnknown, nil
-}
-
 // prelinkDecision decides, from the history a store holds for the linked
 // local issue at lastSync, whether pre-link detection treats the issue as
 // linked after lastSync (changed: hydrate it from its remote) or cannot
-// tell (historyUnknown). previousRef and found are what
-// storage.ExternalRefHistoryQuerier.PreviousExternalRef returned for the
-// issue at lastSync, and currentRef is its ref now. A path that reads this
-// history for many issues at once must decide each issue here as well, so
-// every path keeps the same rule (#7294).
+// tell (historyUnknown). previousRef and found are the store's batched
+// history answer for the issue at lastSync — the value of its entry in
+// the PreviousExternalRefs result map, and whether it had one at all —
+// and currentRef is its ref now. A path that reads this history for many
+// issues at once must decide each issue here as well, so every path keeps
+// the same rule (#7294).
 //
 // With a history row, the issue changed when its ref then differs from
 // currentRef (a NULL ref reads as ""). Without one, the issue may be newer
@@ -1278,6 +1257,12 @@ func externalRefHistoryQuerier(store Store) (ExternalRefHistoryStore, bool) {
 	}
 	return nil, false
 }
+
+// The storage capability must satisfy the engine's history-store contract.
+// Both interfaces are batch-only (#6605): a store implementing one side
+// but not the other fails here, at compile time, instead of silently
+// losing the history fast path at runtime.
+var _ ExternalRefHistoryStore = (storage.ExternalRefHistoryQuerier)(nil)
 
 func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {
 	current, err := tx.GetLabels(ctx, issueID)

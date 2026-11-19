@@ -1,8 +1,9 @@
 //go:build cgo
 
-// Cgo-tagged regression tests for the externalRefChangedAfter fast-path gate
-// (GH#4549), exercised against the real Dolt-backed stores. Pure-Go tests
-// using fakes live in engine_external_ref_history_test.go.
+// Cgo-tagged regression tests for the pre-link history fast-path gate
+// (GH#4549), exercised through resolvePrelinkVerdicts against the real
+// Dolt-backed stores. Pure-Go tests using fakes live in
+// engine_external_ref_history_test.go.
 
 package tracker
 
@@ -20,7 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath is a regression
+// TestEmbeddedDoltResolvePrelinkVerdictsUsesHistoryFastPath is a regression
 // test for GH#4549: EmbeddedDoltStore supports the dolt_history_issues query
 // (it implements storage.HistoryViewer) but does not expose a raw *sql.DB,
 // so the old dbProvider{DB() *sql.DB}-gated fast path never engaged for it —
@@ -29,7 +30,7 @@ import (
 // case where the two heuristics disagree (local's timestamps predate asOf,
 // so the fallback would wrongly say "unchanged") and asserts the fast,
 // correct answer is produced instead.
-func TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
+func TestEmbeddedDoltResolvePrelinkVerdictsUsesHistoryFastPath(t *testing.T) {
 	ctx := context.Background()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	store, err := embeddeddolt.Open(ctx, beadsDir, "gh4549", "main")
@@ -96,9 +97,9 @@ func TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 		UpdatedAt: asOf.Add(-time.Hour),
 	}
 
-	changed, _, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
+	changed, _, err := resolveOne(t, e, local, "new-ref", asOf)
 	if err != nil {
-		t.Fatalf("externalRefChangedAfter: %v", err)
+		t.Fatalf("resolvePrelinkVerdicts: %v", err)
 	}
 	if !changed {
 		t.Fatal("expected changed=true: external_ref differs from its value as of asOf, even though local's timestamps predate asOf")
@@ -106,21 +107,21 @@ func TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 
 	// Complementary check: currentRef matching the historical value as of
 	// asOf should report unchanged.
-	changed, _, err = e.externalRefChangedAfter(ctx, local, "old-ref", asOf)
+	changed, _, err = resolveOne(t, e, local, "old-ref", asOf)
 	if err != nil {
-		t.Fatalf("externalRefChangedAfter: %v", err)
+		t.Fatalf("resolvePrelinkVerdicts: %v", err)
 	}
 	if changed {
 		t.Fatal("expected changed=false: currentRef matches the historical value as of asOf")
 	}
 }
 
-// TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath confirms the
+// TestDoltStoreResolvePrelinkVerdictsUsesHistoryFastPath confirms the
 // GH#4549 fix leaves the Dolt server store's fast-path behavior unchanged:
 // DoltStore already implements storage.ExternalRefHistoryQuerier (it always
 // had DB() access), so this should behave exactly as the old dbProvider gate
 // did for this backend.
-func TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
+func TestDoltStoreResolvePrelinkVerdictsUsesHistoryFastPath(t *testing.T) {
 	store := newTestStore(t) // skips if the shared test Dolt server isn't available
 	defer store.Close()
 
@@ -168,13 +169,26 @@ func TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 		UpdatedAt: asOf.Add(-time.Hour),
 	}
 
-	changed, _, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
+	changed, _, err := resolveOne(t, e, local, "new-ref", asOf)
 	if err != nil {
-		t.Fatalf("externalRefChangedAfter: %v", err)
+		t.Fatalf("resolvePrelinkVerdicts: %v", err)
 	}
 	if !changed {
 		t.Fatal("expected changed=true via the (behaviorally unchanged) Dolt server fast path")
 	}
+}
+
+// probePreviousRef resolves one id's previous ref through the store's batch
+// history capability, the way the engine reads history now (#6605): a
+// present entry is the ref as of the cutoff, an absent one no history row.
+func probePreviousRef(ctx context.Context, t *testing.T, querier ExternalRefHistoryStore, id string, asOf time.Time) (string, bool) {
+	t.Helper()
+	refs, err := querier.PreviousExternalRefs(ctx, []string{id}, asOf)
+	if err != nil {
+		t.Fatalf("PreviousExternalRefs(%s): %v", id, err)
+	}
+	ref, found := refs[id]
+	return ref, found
 }
 
 // TestDoltStoreCompactPullPreservesLocalEdits pins AC-6 of #7294 on a real
@@ -280,8 +294,8 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 
 			// The fixture must hold the baseline before compaction, or the
 			// dates did not take.
-			if ref, found, err := store.PreviousExternalRef(ctx, edited.ID, lastSync); err != nil || !found || ref != "https://test.test/EXT-1" {
-				t.Fatalf("before compaction PreviousExternalRef(edited) = (%q, %v, %v), want the synced ref", ref, found, err)
+			if ref, found := probePreviousRef(ctx, t, store, edited.ID, lastSync); !found || ref != "https://test.test/EXT-1" {
+				t.Fatalf("before compaction PreviousExternalRefs(edited) = (%q, %v), want the synced ref", ref, found)
 			}
 
 			compactAt(t, ctx, store, test.boundaryDate)
@@ -290,23 +304,20 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 				id      string
 				wantRef string
 			}{{edited.ID, "https://test.test/EXT-1"}, {unchanged.ID, "https://test.test/EXT-3"}, {relinked.ID, ""}} {
-				ref, found, err := store.PreviousExternalRef(ctx, probe.id, lastSync)
-				if err != nil {
-					t.Fatalf("PreviousExternalRef(%s): %v", probe.id, err)
-				}
+				ref, found := probePreviousRef(ctx, t, store, probe.id, lastSync)
 				if test.baselineRemoved && found {
-					t.Fatalf("after compaction PreviousExternalRef(%s) = (%q, found), want no row: the fixture must remove the baseline", probe.id, ref)
+					t.Fatalf("after compaction PreviousExternalRefs(%s) = (%q, found), want no row: the fixture must remove the baseline", probe.id, ref)
 				}
 				if !test.baselineRemoved && (!found || ref != probe.wantRef) {
-					t.Fatalf("after compaction PreviousExternalRef(%s) = (%q, %v), want (%q, found)", probe.id, ref, found, probe.wantRef)
+					t.Fatalf("after compaction PreviousExternalRefs(%s) = (%q, %v), want (%q, found)", probe.id, ref, found, probe.wantRef)
 				}
 			}
-			if ref, found, err := store.PreviousExternalRef(ctx, stub.ID, lastSync); err != nil || found {
-				t.Fatalf("after compaction PreviousExternalRef(%s) = (%q, %v, %v), want no row: it was created after last_sync", stub.ID, ref, found, err)
+			if ref, found := probePreviousRef(ctx, t, store, stub.ID, lastSync); found {
+				t.Fatalf("after compaction PreviousExternalRefs(%s) = (%q, found), want no row: it was created after last_sync", stub.ID, ref)
 			}
 			for _, issue := range wispsPlane {
-				if ref, found, err := store.PreviousExternalRef(ctx, issue.ID, lastSync); err != nil || found {
-					t.Fatalf("PreviousExternalRef(%s) = (%q, %v, %v), want no row: the wisps table has no history", issue.ID, ref, found, err)
+				if ref, found := probePreviousRef(ctx, t, store, issue.ID, lastSync); found {
+					t.Fatalf("PreviousExternalRefs(%s) = (%q, found), want no row: the wisps table has no history", issue.ID, ref)
 				}
 			}
 

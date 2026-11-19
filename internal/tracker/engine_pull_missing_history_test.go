@@ -39,11 +39,6 @@ func newMissingHistoryStore(issues ...*types.Issue) *missingHistoryStore {
 	}
 }
 
-func (s *missingHistoryStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
-	ref, ok := s.previousRefs[id]
-	return ref, ok, nil
-}
-
 func (s *missingHistoryStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
 	refs := make(map[string]string, len(ids))
 	for _, id := range ids {

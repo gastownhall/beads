@@ -19,11 +19,6 @@ type overlapStore struct {
 	previousRefs map[string]string
 }
 
-func (s *overlapStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
-	ref, ok := s.previousRefs[id]
-	return ref, ok, nil
-}
-
 func (s *overlapStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
 	refs := make(map[string]string, len(ids))
 	for _, id := range ids {

@@ -1,7 +1,9 @@
-// Regression tests for #4549: externalRefChangedAfter's fast path must be
-// gated on the storage.ExternalRefHistoryQuerier capability, not on whether
-// the store happens to expose a raw *sql.DB. See engine.go's
-// externalRefHistoryQuerier and externalRefChangedAfter for the rationale.
+// Regression tests for #4549 and #6605: the pre-link history fast path must
+// be gated on the storage.ExternalRefHistoryQuerier capability, not on
+// whether the store happens to expose a raw *sql.DB, and a pull must resolve
+// every linked local's history through one batched PreviousExternalRefs call
+// rather than one history query per issue. See engine.go's
+// externalRefHistoryQuerier and resolvePrelinkVerdicts for the rationale.
 //
 // This file MUST NOT carry a `//go:build cgo` tag (see test_helpers_pure_test.go):
 // the mocks below are pure Go and exercise the capability-detection logic
@@ -24,9 +26,11 @@ import (
 // historyQuerierStore implements storage.ExternalRefHistoryQuerier directly,
 // with no DB() method at all -- mirroring embeddeddolt.EmbeddedDoltStore,
 // which executes SQL through a transaction-scoped connection helper rather
-// than exposing a pooled *sql.DB. Embeds storage.Storage (nil) purely so the
-// type satisfies storage.Storage for assignment to Engine.Store; tests never
-// call the promoted methods.
+// than exposing a pooled *sql.DB. It is batch-only: a store that can resolve
+// many issues' refs in one PreviousExternalRefs call needs no per-issue
+// form. Embeds storage.Storage (nil) purely so the type satisfies
+// storage.Storage for assignment to Engine.Store; tests never call the
+// promoted methods.
 type historyQuerierStore struct {
 	storage.Storage
 	storage.IssueLifecycleStore
@@ -49,11 +53,6 @@ func (h *historyQuerierStore) AsOf(_ context.Context, _ string, _ string) (*type
 
 func (h *historyQuerierStore) Diff(_ context.Context, _, _ string) ([]*storage.DiffEntry, error) {
 	return nil, nil
-}
-
-func (h *historyQuerierStore) PreviousExternalRef(_ context.Context, _ string, _ time.Time) (string, bool, error) {
-	h.calls++
-	return h.prevRef, h.prevFound, h.prevErr
 }
 
 func (h *historyQuerierStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
@@ -97,11 +96,6 @@ func (d *doltLikeStore) Diff(_ context.Context, _, _ string) ([]*storage.DiffEnt
 	return nil, nil
 }
 
-func (d *doltLikeStore) PreviousExternalRef(_ context.Context, _ string, _ time.Time) (string, bool, error) {
-	d.calls++
-	return d.prevRef, d.prevFound, nil
-}
-
 func (d *doltLikeStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
 	d.calls++
 	refs := make(map[string]string, len(ids))
@@ -131,8 +125,27 @@ func newTestIssue(id string, createdAt, updatedAt time.Time) *types.Issue {
 	return &types.Issue{ID: id, CreatedAt: createdAt, UpdatedAt: updatedAt}
 }
 
+// resolveOne runs one candidate through the engine's batched pre-link
+// resolution — the same path a pull uses for all of its candidates — and
+// returns that candidate's verdict.
+func resolveOne(t *testing.T, e *Engine, local *types.Issue, currentRef string, lastSync time.Time) (changed, historyUnknown bool, err error) {
+	t.Helper()
+	verdicts, err := e.resolvePrelinkVerdicts(context.Background(), []prelinkCandidate{{local: local, ref: currentRef}}, lastSync)
+	if err != nil {
+		return false, false, err
+	}
+	if len(verdicts) != 1 {
+		t.Fatalf("resolvePrelinkVerdicts returned %d verdicts for 1 candidate, want 1", len(verdicts))
+	}
+	return verdicts[0].changed, verdicts[0].historyUnknown, nil
+}
+
 // (a) Embedded-Dolt-shaped store: takes the history fast path even though it
-// has no DB() method, because it satisfies ExternalRefHistoryQuerier directly.
+// has no DB() method, because it satisfies ExternalRefHistoryQuerier
+// directly. The double is batch-only, so this also pins that capability
+// detection requires only the batch method (#6605): a store that resolves
+// refs in one PreviousExternalRefs call and has no per-issue form still
+// takes the history fast path.
 func TestExternalRefHistoryQuerier_DirectCapability(t *testing.T) {
 	store := &historyQuerierStore{}
 	q, ok := externalRefHistoryQuerier(store)
@@ -160,39 +173,43 @@ func TestExternalRefHistoryQuerier_UnwrapsDecorator(t *testing.T) {
 	var dec storage.DoltStorage = &fakeStoreDecorator{DoltStorage: inner, inner: inner}
 
 	// Sanity check mirroring the real HookFiringStore: the decorator itself
-	// does not directly satisfy ExternalRefHistoryQuerier (PreviousExternalRef
-	// is not part of storage.DoltStorage, so it isn't promoted).
+	// does not directly satisfy ExternalRefHistoryQuerier
+	// (PreviousExternalRefs is not part of storage.DoltStorage, so it isn't
+	// promoted).
 	if _, ok := dec.(storage.ExternalRefHistoryQuerier); ok {
-		t.Fatal("test setup invalid: decorator should not directly expose PreviousExternalRef")
+		t.Fatal("test setup invalid: decorator should not directly expose PreviousExternalRefs")
 	}
 
 	q, ok := externalRefHistoryQuerier(dec)
 	if !ok {
 		t.Fatal("expected decorator wrapping a history-capable store to be detected via UnwrapStore")
 	}
-	ref, found, err := q.PreviousExternalRef(context.Background(), "bd-1", time.Now())
-	if err != nil || !found || ref != "ref-1" {
-		t.Fatalf("PreviousExternalRef via unwrapped decorator = (%q, %v, %v), want (\"ref-1\", true, nil)", ref, found, err)
+	refs, err := q.PreviousExternalRefs(context.Background(), []string{"bd-1"}, time.Now())
+	if err != nil {
+		t.Fatalf("PreviousExternalRefs via unwrapped decorator: %v", err)
+	}
+	if ref, ok := refs["bd-1"]; !ok || ref != "ref-1" {
+		t.Fatalf("PreviousExternalRefs via unwrapped decorator = %q (present %v), want \"ref-1\"", ref, ok)
 	}
 	if inner.calls != 1 {
-		t.Fatalf("expected inner store to be called once, got %d", inner.calls)
+		t.Fatalf("expected inner store to be called once, got %d calls", inner.calls)
 	}
 }
 
-func TestEngineExternalRefChangedAfter_NilLocalIssue(t *testing.T) {
+func TestEngineResolvePrelinkVerdicts_NilLocalIssue(t *testing.T) {
 	e := &Engine{Store: newPureTestStore()}
-	changed, _, err := e.externalRefChangedAfter(context.Background(), nil, "ref", time.Now())
-	if err != nil || changed {
-		t.Fatalf("externalRefChangedAfter(nil local) = (%v, %v), want (false, nil)", changed, err)
+	changed, historyUnknown, err := resolveOne(t, e, nil, "ref", time.Now())
+	if err != nil || changed || historyUnknown {
+		t.Fatalf("resolvePrelinkVerdicts(nil local) = (changed %v, historyUnknown %v, err %v), want (false, false, nil)", changed, historyUnknown, err)
 	}
 }
 
-func TestEngineExternalRefChangedAfter_FastPathSameRef(t *testing.T) {
+func TestEngineResolvePrelinkVerdicts_FastPathSameRef(t *testing.T) {
 	querier := &historyQuerierStore{prevRef: "https://tracker.test/EXT-1", prevFound: true}
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, _, err := resolveOne(t, e, local, "https://tracker.test/EXT-1", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -200,16 +217,16 @@ func TestEngineExternalRefChangedAfter_FastPathSameRef(t *testing.T) {
 		t.Error("expected changed=false when previous ref matches current ref")
 	}
 	if querier.calls != 1 {
-		t.Fatalf("expected fast path to call PreviousExternalRef once, got %d calls", querier.calls)
+		t.Fatalf("expected fast path to call PreviousExternalRefs once, got %d calls", querier.calls)
 	}
 }
 
-func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
+func TestEngineResolvePrelinkVerdicts_FastPathDifferentRef(t *testing.T) {
 	querier := &historyQuerierStore{prevRef: "https://tracker.test/EXT-OLD", prevFound: true}
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-NEW", time.Now())
+	changed, _, err := resolveOne(t, e, local, "https://tracker.test/EXT-NEW", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -217,11 +234,11 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 		t.Error("expected changed=true when previous ref differs from current ref")
 	}
 	if querier.calls != 1 {
-		t.Fatalf("expected fast path to call PreviousExternalRef once, got %d calls", querier.calls)
+		t.Fatalf("expected fast path to call PreviousExternalRefs once, got %d calls", querier.calls)
 	}
 }
 
-// TestEngineExternalRefChangedAfter_FastPathNotFound pins the missing-row
+// TestEngineResolvePrelinkVerdicts_FastPathNotFound pins the missing-row
 // decision (#7294): no history entry at or before lastSync reports changed
 // only for an issue created at or after lastSync (a new pre-linked stub to
 // hydrate). created_at is stored rounded to a whole second and last_sync is
@@ -230,7 +247,7 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 // time, reports historyUnknown instead, whatever its UpdatedAt says: the
 // row may be missing because history was compacted or rewritten, and a
 // local edit after lastSync is what the pull's guards must keep.
-func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
+func TestEngineResolvePrelinkVerdicts_FastPathNotFound(t *testing.T) {
 	lastSync := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
 	plus5 := time.FixedZone("UTC+5", 5*60*60)
 	for _, test := range []struct {
@@ -253,27 +270,27 @@ func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
 			e := &Engine{Store: querier}
 			local := newTestIssue("bd-1", test.created, test.updated)
 
-			changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+			changed, historyUnknown, err := resolveOne(t, e, local, "https://tracker.test/EXT-1", lastSync)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if changed != test.wantChanged || historyUnknown != test.wantHistoryUnknown {
-				t.Errorf("externalRefChangedAfter = (changed %v, historyUnknown %v), want (%v, %v)",
+				t.Errorf("resolvePrelinkVerdicts = (changed %v, historyUnknown %v), want (%v, %v)",
 					changed, historyUnknown, test.wantChanged, test.wantHistoryUnknown)
 			}
 			if querier.calls != 1 {
-				t.Errorf("PreviousExternalRef calls = %d, want 1", querier.calls)
+				t.Errorf("PreviousExternalRefs calls = %d, want 1", querier.calls)
 			}
 		})
 	}
 }
 
-// TestEngineExternalRefChangedAfter_KnownAnswersReportHistoryKnown pins that
+// TestEngineResolvePrelinkVerdicts_KnownAnswersReportHistoryKnown pins that
 // every case other than a missing history row keeps its prior answer and
 // never reports historyUnknown: exact history (same, different and NULL
 // refs), a propagated error, a decorated store and the no-capability
 // heuristic.
-func TestEngineExternalRefChangedAfter_KnownAnswersReportHistoryKnown(t *testing.T) {
+func TestEngineResolvePrelinkVerdicts_KnownAnswersReportHistoryKnown(t *testing.T) {
 	lastSync := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
 	old := newTestIssue("bd-1", lastSync.Add(-24*time.Hour), lastSync.Add(time.Hour))
 	boom := errors.New("boom")
@@ -298,30 +315,28 @@ func TestEngineExternalRefChangedAfter_KnownAnswersReportHistoryKnown(t *testing
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			e := &Engine{Store: test.store}
-			changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), test.local, test.currentRef, lastSync)
+			changed, historyUnknown, err := resolveOne(t, e, test.local, test.currentRef, lastSync)
 			if !errors.Is(err, test.wantErr) {
 				t.Fatalf("error = %v, want %v", err, test.wantErr)
 			}
 			if changed != test.wantChanged || historyUnknown {
-				t.Errorf("externalRefChangedAfter = (changed %v, historyUnknown %v), want (%v, false)", changed, historyUnknown, test.wantChanged)
+				t.Errorf("resolvePrelinkVerdicts = (changed %v, historyUnknown %v), want (%v, false)", changed, historyUnknown, test.wantChanged)
 			}
 		})
 	}
 }
 
 // countingHistoryStore is a pull-capable pure store that answers
-// external-ref history from a fixed map and counts the single-id and batch
-// history calls a pull makes. The batch capability must answer a whole pull
-// in one call (#6605); the single-id method is only there so the double
-// compiles before the migration and can prove the engine stops calling it.
+// external-ref history from a fixed map and counts the batch history calls a
+// pull makes. The batch capability must answer a whole pull in one call
+// (#6605).
 type countingHistoryStore struct {
 	*pullFailureStore
 	previousRefs map[string]string
 
-	singleCalls int
-	batchCalls  int
-	batchIDs    []string
-	batchAsOf   time.Time
+	batchCalls int
+	batchIDs   []string
+	batchAsOf  time.Time
 }
 
 func newCountingHistoryStore(issues ...*types.Issue) *countingHistoryStore {
@@ -331,12 +346,6 @@ func newCountingHistoryStore(issues ...*types.Issue) *countingHistoryStore {
 		pullFailureStore: &pullFailureStore{pureTestStore: pure, tx: &pullTestTransaction{issue: &types.Issue{}}},
 		previousRefs:     make(map[string]string),
 	}
-}
-
-func (s *countingHistoryStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
-	s.singleCalls++
-	ref, ok := s.previousRefs[id]
-	return ref, ok, nil
 }
 
 func (s *countingHistoryStore) PreviousExternalRefs(_ context.Context, ids []string, asOf time.Time) (map[string]string, error) {
@@ -355,12 +364,12 @@ func (s *countingHistoryStore) PreviousExternalRefs(_ context.Context, ids []str
 // TestEnginePullAsksExternalRefHistoryOncePerPull is the #6605 regression:
 // an incremental pull asks the history-capable store about every linked
 // local at the same lastSync instant, so it must resolve them in one batch
-// call rather than one single-id history call per issue — on the embedded
-// backend each of those reopened the SQL engine and scanned
-// dolt_history_issues again (GH#6605). Three linked locals and two
-// unrelated ones (no ref, whitespace-only ref) must produce exactly one
-// batch call carrying the three unique linked ids at lastSync, no
-// single-id calls, and no hydration, since every linked ref is unchanged.
+// call rather than one history query per issue — on the embedded backend
+// each of those reopened the SQL engine and scanned dolt_history_issues
+// again (GH#6605). Three linked locals and two unrelated ones (no ref,
+// whitespace-only ref) must produce exactly one batch call carrying the
+// three unique linked ids at lastSync, and no hydration, since every linked
+// ref is unchanged.
 func TestEnginePullAsksExternalRefHistoryOncePerPull(t *testing.T) {
 	ctx := context.Background()
 	created := overlapLastSync.Add(-24 * time.Hour)
@@ -387,9 +396,6 @@ func TestEnginePullAsksExternalRefHistoryOncePerPull(t *testing.T) {
 	}
 	if store.batchCalls != 1 {
 		t.Fatalf("batch history calls = %d, want exactly 1 for the whole pull", store.batchCalls)
-	}
-	if store.singleCalls != 0 {
-		t.Fatalf("single-id history calls = %d, want 0: the pull must not query history per issue", store.singleCalls)
 	}
 	gotIDs := append([]string(nil), store.batchIDs...)
 	sort.Strings(gotIDs)
@@ -462,41 +468,42 @@ func TestPrelinkDecision(t *testing.T) {
 }
 
 // Locks the NULL-historical contract: a NULL external_ref column surfaces
-// from PreviousExternalRefInTx as ("", found=true) (see
+// from the store's history answer as a present entry holding the empty
+// string (see issueops.PreviousExternalRefsInTx and
 // issueops.PreviousExternalRefInTx, internal/storage/issueops/history.go),
-// not as "not found". The fast path must therefore compare it against
+// not as an absence. The fast path must therefore compare it against
 // currentRef like any other value, rather than treating it as an
 // unconditional "changed" the way the old inline !previousRef.Valid check did.
-func TestEngineExternalRefChangedAfter_FastPathNullHistoricalRef(t *testing.T) {
+func TestEngineResolvePrelinkVerdicts_FastPathNullHistoricalRef(t *testing.T) {
 	querier := &historyQuerierStore{prevRef: "", prevFound: true}
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "", time.Now())
+	changed, _, err := resolveOne(t, e, local, "", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if changed {
-		t.Error("expected changed=false: NULL historical ref (\"\", found=true) compared equal to an empty currentRef")
+		t.Error("expected changed=false: NULL historical ref (present, \"\") compared equal to an empty currentRef")
 	}
 }
 
-func TestEngineExternalRefChangedAfter_FastPathPropagatesError(t *testing.T) {
+func TestEngineResolvePrelinkVerdicts_FastPathPropagatesError(t *testing.T) {
 	wantErr := errors.New("boom")
 	querier := &historyQuerierStore{prevErr: wantErr}
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	_, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", time.Now())
+	_, _, err := resolveOne(t, e, local, "ref", time.Now())
 	if !errors.Is(err, wantErr) {
-		t.Fatalf("externalRefChangedAfter error = %v, want %v", err, wantErr)
+		t.Fatalf("resolvePrelinkVerdicts error = %v, want %v", err, wantErr)
 	}
 }
 
 // This is the core regression: before the fix, an embedded-Dolt store (which
 // has no DB() method) fell through to the coarse timestamp heuristic even
 // though it is fully capable of answering the history query precisely.
-func TestEngineExternalRefChangedAfter_EmbeddedDoltTakesFastPath(t *testing.T) {
+func TestEngineResolvePrelinkVerdicts_EmbeddedDoltTakesFastPath(t *testing.T) {
 	querier := &historyQuerierStore{prevRef: "https://tracker.test/EXT-1", prevFound: true}
 	e := &Engine{Store: querier}
 
@@ -506,7 +513,7 @@ func TestEngineExternalRefChangedAfter_EmbeddedDoltTakesFastPath(t *testing.T) {
 	lastSync := time.Now()
 	local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Hour))
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+	changed, _, err := resolveOne(t, e, local, "https://tracker.test/EXT-1", lastSync)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -520,14 +527,14 @@ func TestEngineExternalRefChangedAfter_EmbeddedDoltTakesFastPath(t *testing.T) {
 
 // (b) A store with no history capability (e.g. a plain non-Dolt backend)
 // must fall back to the timestamp heuristic safely -- no panic, correct result.
-func TestEngineExternalRefChangedAfter_NoHistoryCapabilityFallsBack(t *testing.T) {
+func TestEngineResolvePrelinkVerdicts_NoHistoryCapabilityFallsBack(t *testing.T) {
 	store := newPureTestStore()
 	e := &Engine{Store: store}
 	lastSync := time.Now()
 
 	t.Run("touched after lastSync reports changed", func(t *testing.T) {
 		local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Hour))
-		changed, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
+		changed, _, err := resolveOne(t, e, local, "ref", lastSync)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -538,7 +545,7 @@ func TestEngineExternalRefChangedAfter_NoHistoryCapabilityFallsBack(t *testing.T
 
 	t.Run("untouched since lastSync reports unchanged", func(t *testing.T) {
 		local := newTestIssue("bd-2", lastSync.Add(-2*time.Hour), lastSync.Add(-time.Hour))
-		changed, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
+		changed, _, err := resolveOne(t, e, local, "ref", lastSync)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -551,13 +558,13 @@ func TestEngineExternalRefChangedAfter_NoHistoryCapabilityFallsBack(t *testing.T
 // (c) A Dolt-server store wrapped in a decorator (e.g. HookFiringStore)
 // behaves exactly as an undecorated Dolt-server store would: fast path,
 // unchanged via UnwrapStore.
-func TestEngineExternalRefChangedAfter_DecoratedDoltServerStoreUnchanged(t *testing.T) {
+func TestEngineResolvePrelinkVerdicts_DecoratedDoltServerStoreUnchanged(t *testing.T) {
 	inner := &doltLikeStore{prevRef: "https://tracker.test/EXT-1", prevFound: true}
 	dec := &fakeStoreDecorator{DoltStorage: inner, inner: inner}
 	e := &Engine{Store: dec}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, _, err := resolveOne(t, e, local, "https://tracker.test/EXT-1", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

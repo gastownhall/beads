@@ -2139,13 +2139,6 @@ func (s *linearSyncStore) AddDependency(context.Context, *types.Dependency, stri
 	return nil
 }
 
-func (s *linearSyncStore) PreviousExternalRef(context.Context, string, time.Time) (string, bool, error) {
-	if s.issue.ExternalRef == nil {
-		return "", false, nil
-	}
-	return *s.issue.ExternalRef, true, nil
-}
-
 func (s *linearSyncStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
 	refs := make(map[string]string, len(ids))
 	if s.issue.ExternalRef != nil {
