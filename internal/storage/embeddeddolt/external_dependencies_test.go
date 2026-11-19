@@ -342,3 +342,27 @@ func TestForeignPrefixCreateDependenciesAreLocal(t *testing.T) {
 		})
 	}
 }
+
+// A cross-prefix target this database does not hold, and an explicit
+// external: ref, keep their external storage and leave raw ready alone; a
+// same-prefix target that is missing is still refused.
+func TestForeignPrefixAbsentTargetStaysExternal(t *testing.T) {
+	e := newForeignPrefixEnv(t)
+	ctx := t.Context()
+	const dependent = "demo-dependent"
+	e.create(&types.Issue{ID: dependent})
+	for _, target := range []string{"otherrig-abc", "external:otherrig:payments"} {
+		if err := e.store.AddDependency(ctx, &types.Dependency{IssueID: dependent, DependsOnID: target, Type: types.DepBlocks}, "tester"); err != nil {
+			t.Fatalf("AddDependency(%s): %v", target, err)
+		}
+		if got := e.targetColumn("dependencies", dependent, target); got != "depends_on_external" {
+			t.Fatalf("edge -> %s stored in %s, want depends_on_external", target, got)
+		}
+	}
+	if got := e.readyIDs(); !slices.Equal(got, []string{dependent}) {
+		t.Fatalf("raw ready = %v, want [%s]: external edges are the decorator's policy", got, dependent)
+	}
+	if err := e.store.AddDependency(ctx, &types.Dependency{IssueID: dependent, DependsOnID: "demo-missing", Type: types.DepBlocks}, "tester"); err == nil {
+		t.Fatal("AddDependency to a missing same-prefix target succeeded, want a missing-target refusal")
+	}
+}
