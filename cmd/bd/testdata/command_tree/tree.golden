@@ -5516,8 +5516,8 @@ bd mol wisp gc
     | only the deletions that committed, plus remaining_count, error and hint in
     | --json output, and the command exits nonzero; rerun it to delete the rest.
     | A scan reads at most 5000 closed wisps old enough for --age: when it reaches
-    | that limit the output says more may remain (candidates_capped in --json), even if every wisp it
-    | read was excluded.
+    | that limit the output says more may remain (candidates_capped in --json),
+    | even if every wisp it read was excluded.
     |
     | Note: This uses time-based cleanup, appropriate for ephemeral wisps.
     | For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
