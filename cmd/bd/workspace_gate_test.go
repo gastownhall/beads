@@ -1354,3 +1354,56 @@ func TestAcquireInitMutationGateSharedServerOtherCommandProceeds(t *testing.T) {
 	}
 	assertGateBusy(t, ws, workspacegate.Shared, "init's workspace while the other command runs")
 }
+
+// AC-3: shared-root maintenance requesting EXCLUSIVE access waits while an
+// ordinary shared-server init holds its gate set, and enters only after init
+// releases.
+func TestAcquireInitMutationGateSharedServerExcludesMaintenance(t *testing.T) {
+	f := newSharedServerGateFixture(t)
+	beadsDir := newProjectBeadsDir(t, false)
+
+	initHold, err := acquireInitMutationGate(context.Background(), beadsDir, f.sharedRoot, nil)
+	if err != nil {
+		t.Fatalf("init gate: %v", err)
+	}
+	t.Cleanup(func() { _ = initHold.Release() })
+
+	waiting := make(chan struct{})
+	var once sync.Once
+	entered := make(chan error, 1)
+	go func() {
+		h, err := acquireExclusiveWorkspaceGatesWithOptions(context.Background(), f.otherBeadsDir, workspacegate.Options{
+			Wait:   10 * time.Second,
+			Reason: "test maintenance",
+			OnWait: func(string) { once.Do(func() { close(waiting) }) },
+		})
+		if err == nil {
+			_ = h.Release()
+		}
+		entered <- err
+	}()
+
+	select {
+	case <-waiting:
+	case err := <-entered:
+		t.Fatalf("maintenance entered while init held the shared root (err %v)", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("maintenance never reported waiting")
+	}
+	select {
+	case err := <-entered:
+		t.Fatalf("maintenance entered while init held the shared root (err %v)", err)
+	default:
+	}
+	if err := initHold.Release(); err != nil {
+		t.Fatalf("release init: %v", err)
+	}
+	select {
+	case err := <-entered:
+		if err != nil {
+			t.Fatalf("maintenance after init released: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("maintenance did not enter after init released")
+	}
+}
