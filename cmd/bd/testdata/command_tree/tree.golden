@@ -5505,11 +5505,13 @@ bd mol wisp gc
     | Use --closed to purge closed wisps that have not been updated in --age
     | duration (default 1h), whatever else they carry. This is the fastest way to
     | reclaim space from accumulated wisp bloat. A wisp closed more recently is
-    | kept, so a molecule that just finished stays readable for at least that
-    | window: wisps are not versioned, so a purged wisp cannot be recovered. Pass a
-    | longer --age (for example 24h) to keep finished work around longer, or
-    | --age 0s to purge every closed wisp regardless of age. Safe by default:
-    | requires --force to actually delete.
+    | kept, and so is any older closed wisp it depends on, directly or through
+    | another wisp kept that way (its molecule root, the steps before it), so a
+    | chain of dependent steps ages out together with its newest step: wisps are
+    | not versioned, so a purged wisp cannot be recovered. Pass a longer --age
+    | (for example 24h) to keep finished work around longer, or --age 0s to purge
+    | every closed wisp regardless of age. Safe by default: requires --force to
+    | actually delete.
     |
     | --closed --force deletes in batches of 200 wisps, each committed on its own,
     | so a failure keeps the batches already committed. The summary then reports

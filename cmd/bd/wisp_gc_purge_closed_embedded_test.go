@@ -3,11 +3,18 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdShowSucceeds reports whether "bd show <id> --json" succeeds. Non-fatal
@@ -129,33 +136,11 @@ func TestEmbeddedWispGCPurgeClosedStillPurgesFullyClosedMolecules(t *testing.T) 
 	}
 }
 
-// TestEmbeddedWispGCPurgeClosedSparesFreshAuditBearingWisp asserts the
-// behaviour GH#8202 expects: `bd mol wisp gc --closed --force` must not
-// hard-delete a wisp that closed moments ago and carries a report in its
-// notes. The wisps table is Dolt-ignored, so the delete is unrecoverable.
-func TestEmbeddedWispGCPurgeClosedSparesFreshAuditBearingWisp(t *testing.T) {
-	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
-		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
-	}
-	t.Parallel()
-
-	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "pc3")
-
-	report := bdCreate(t, bd, dir, "patrol report step", "--ephemeral").ID
-	bdUpdate(t, bd, dir, report, "--notes", "patrol report: 0 reaped / 0 purged / 0 anomalies")
-	bdClose(t, bd, dir, report)
-
-	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
-
-	if !bdShowSucceeds(t, bd, dir, report) {
-		t.Errorf("gc --closed --force hard-deleted wisp %s seconds after it closed, along with its report notes", report)
-	}
-}
-
 // TestEmbeddedWispGCPurgeClosedKeepsRecentlyClosedWisps pins GH#8202 end to
-// end: closed GC honors --age (default 1h), so a wisp closed moments ago is
-// neither deleted nor counted, and --age 0s still purges it at once.
+// end: closed GC honors --age (default 1h), so a wisp closed moments ago, here
+// a patrol step carrying its report in its notes, is neither deleted nor
+// counted, and --age 0s still purges it at once. Wisps are Dolt-ignored, so
+// that deletion cannot be recovered.
 func TestEmbeddedWispGCPurgeClosedKeepsRecentlyClosedWisps(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -165,7 +150,8 @@ func TestEmbeddedWispGCPurgeClosedKeepsRecentlyClosedWisps(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	dir, _, _ := bdInit(t, bd, "--prefix", "pc4")
 
-	fresh := bdCreate(t, bd, dir, "just finished step", "--ephemeral").ID
+	fresh := bdCreate(t, bd, dir, "patrol report step", "--ephemeral").ID
+	bdUpdate(t, bd, dir, fresh, "--notes", "patrol report: 0 reaped / 0 purged / 0 anomalies")
 	bdClose(t, bd, dir, fresh)
 
 	out := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
@@ -173,12 +159,123 @@ func TestEmbeddedWispGCPurgeClosedKeepsRecentlyClosedWisps(t *testing.T) {
 		t.Errorf("default gc --closed --force counted a wisp closed moments ago as deleted:\n%s", out)
 	}
 	if !bdShowSucceeds(t, bd, dir, fresh) {
-		t.Fatalf("default gc --closed --force deleted wisp %s moments after it closed", fresh)
+		t.Fatalf("default gc --closed --force deleted wisp %s, and its report notes, moments after it closed", fresh)
 	}
 
 	// --age 0s is the explicit purge-all escape hatch.
 	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--age", "0s")
 	bdShowFail(t, bd, dir, fresh)
+}
+
+// TestEmbeddedWispGCPurgeClosedKeepsWhatNewerWispsDependOn pins the closed
+// GC's hold-back end to end on the direct route (GH#8202). A two-step
+// molecule whose first step closed hours ago, and whose second step, which
+// depends on it, closed moments ago, straddles --age. The unforced --dry-run
+// previews only an unrelated idle wisp and exits 0: selecting the first step
+// alone made the deletion role's dependents guard refuse the whole preview.
+// --force deletes only the idle wisp, and once the second step ages out too
+// the two go together. A chain whose middle step the scan leaves out
+// (--exclude-type here, the 5000-wisp scan limit in a backlog) keeps its
+// first step while its last step is too new.
+func TestEmbeddedWispGCPurgeClosedKeepsWhatNewerWispsDependOn(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pc6")
+
+	first := bdCreate(t, bd, dir, "first step", "--ephemeral").ID
+	second := bdCreate(t, bd, dir, "second step", "--ephemeral").ID
+	bdDepAdd(t, bd, dir, second, first) // the second step depends on the first
+	idle := bdCreate(t, bd, dir, "unrelated idle wisp", "--ephemeral").ID
+	for _, id := range []string{first, second, idle} {
+		bdClose(t, bd, dir, id)
+	}
+	backdateEmbeddedWisps(t, beadsDir, first, idle)
+
+	out := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--dry-run", "--json")
+	start := strings.Index(out, "{")
+	if start < 0 {
+		t.Fatalf("gc --closed --dry-run --json printed no JSON object:\n%s", out)
+	}
+	var preview struct {
+		WouldDeleteIDs []string `json:"would_delete_ids"`
+	}
+	if err := json.NewDecoder(strings.NewReader(out[start:])).Decode(&preview); err != nil {
+		t.Fatalf("parse gc --closed --dry-run --json: %v\n%s", err, out)
+	}
+	if !slices.Equal(preview.WouldDeleteIDs, []string{idle}) {
+		t.Errorf("dry run would delete %v, want only the idle wisp %s:\n%s", preview.WouldDeleteIDs, idle, out)
+	}
+	out = bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--dry-run")
+	if !strings.Contains(out, "Keeping 1 older closed wisp(s) that newer ones depend on") {
+		t.Errorf("dry run does not say it kept the first step for the second:\n%s", out)
+	}
+
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+	bdShowFail(t, bd, dir, idle)
+	for _, id := range []string{first, second} {
+		if !bdShowSucceeds(t, bd, dir, id) {
+			t.Fatalf("gc --closed --force deleted %s, a step of a molecule whose last step closed moments ago", id)
+		}
+	}
+
+	backdateEmbeddedWisps(t, beadsDir, second)
+	bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force")
+	bdShowFail(t, bd, dir, first)
+	bdShowFail(t, bd, dir, second)
+
+	// A step the scan leaves out (here by --exclude-type, as the 5000-wisp
+	// scan limit would) still carries a newer step's hold down its chain:
+	// the chain's first step stays while its last step is too new for --age.
+	cut := bdCreate(t, bd, dir, "first step of a chain the scan cuts", "--ephemeral").ID
+	middle := bdCreate(t, bd, dir, "middle step the scan leaves out", "--ephemeral", "--type", "chore").ID
+	last := bdCreate(t, bd, dir, "last step", "--ephemeral").ID
+	bdDepAdd(t, bd, dir, middle, cut)
+	bdDepAdd(t, bd, dir, last, middle)
+	for _, id := range []string{cut, middle, last} {
+		bdClose(t, bd, dir, id)
+	}
+	backdateEmbeddedWisps(t, beadsDir, cut, middle)
+	out = bdCommand(t, bd, dir, "mol", "wisp", "gc", "--closed", "--force", "--exclude-type", "chore")
+	if !bdShowSucceeds(t, bd, dir, cut) {
+		t.Fatalf("gc --closed --force --exclude-type chore deleted %s, though %s closed moments ago and depends on it through %s, which the scan left out:\n%s", cut, last, middle, out)
+	}
+	if !strings.Contains(out, "Keeping 1 older closed wisp(s) that newer ones depend on") {
+		t.Errorf("gc --closed --force --exclude-type chore does not say it kept the first step for the last:\n%s", out)
+	}
+}
+
+// backdateEmbeddedWisps moves each wisp's updated_at two hours back, past the
+// default --age, straight in the embedded database. Wisps are Dolt-ignored,
+// so there is nothing to commit.
+func backdateEmbeddedWisps(t *testing.T, beadsDir string, ids ...string) {
+	t.Helper()
+	database := ""
+	if cfg, _ := configfile.Load(beadsDir); cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			t.Fatalf("close embedded database: %v", err)
+		}
+	}()
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	for _, id := range ids {
+		res, err := db.ExecContext(t.Context(), "UPDATE wisps SET updated_at = ? WHERE id = ?", old, id)
+		if err != nil {
+			t.Fatalf("backdate wisp %s: %v", id, err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			t.Fatalf("backdate wisp %s: %d rows affected (%v), want 1", id, n, err)
+		}
+	}
 }
 
 // TestEmbeddedWispGCPurgeClosedZeroAgeIsPurgeAll guards the escape hatch of
