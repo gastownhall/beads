@@ -34,7 +34,7 @@ A `config.local.yaml` next to the project `config.yaml` is also merged in last f
 
 Earlier releases also read `~/Library/Application Support/bd/config.yaml` on macOS, and looked for a global `PRIME.md` in `~/Library/Application Support/beads/`. Accessing that folder on every launch can raise a macOS privacy prompt (GH#8113), so bd no longer reads either location when it starts.
 
-The old config file is copied once instead. When bd needs `~/.config/bd/config.yaml` (or `$XDG_CONFIG_HOME/bd/config.yaml`) and it does not exist yet, bd creates it with the old file's contents, unchanged. A `bd metrics off` or `node_id` saved there therefore carries over, and a saved opt-out applies on that same run. That copy is the only time bd opens the old file, and macOS may show its privacy prompt for it once.
+The old config file is copied once instead. When bd needs `~/.config/bd/config.yaml` (or `$XDG_CONFIG_HOME/bd/config.yaml`) and it does not exist yet, bd creates it with the old file's contents, unchanged. A `bd metrics off` or `node_id` saved there therefore carries over, and a saved opt-out applies on that same run. That copy is the only time bd opens the old file, and macOS may show its privacy prompt for it once. If the old file exists but bd cannot read it (for example because that prompt was declined), bd cannot tell whether you opted out of metrics there, so the new file turns metrics off; run `bd metrics on` to turn them back on.
 
 bd creates that file on its own only while metrics are enabled. If you run bd with `BD_DISABLE_METRICS` or `DO_NOT_TRACK` set, other settings in the old file (such as `actor`) stop applying until you copy it yourself:
 

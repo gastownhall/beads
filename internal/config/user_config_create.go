@@ -15,6 +15,19 @@ import (
 // path once instead of retrying the create, so a dangling symlink cannot loop.
 var ErrUserConfigExists = errors.New("user config.yaml already exists")
 
+// statLegacyUserConfig is os.Stat for the legacy macOS config; a seam so tests
+// can stand in the permission error a macOS privacy (TCC) denial returns.
+var statLegacyUserConfig = os.Stat
+
+// SetLegacyUserConfigStatForTest replaces the stat bd runs on the legacy
+// ~/Library/Application Support/bd/config.yaml when it creates the user
+// config on darwin/ios. The returned func restores it. Tests only.
+func SetLegacyUserConfigStatForTest(stat func(string) (fs.FileInfo, error)) (restore func()) {
+	prev := statLegacyUserConfig
+	statLegacyUserConfig = stat
+	return func() { statLegacyUserConfig = prev }
+}
+
 // legacyUserConfigReadCap bounds the one-time read of the legacy macOS
 // config. A user config is a few hundred bytes; anything larger is not one.
 const legacyUserConfigReadCap = 64 << 10
@@ -82,23 +95,44 @@ func isDarwinUserConfigPlatform() bool {
 
 // darwinUserConfigContent returns the bytes for a new darwin user config: the
 // legacy Application Support file's bytes when it is a readable regular file,
-// otherwise seed. This is the only code in bd that names that path.
+// and seed when there is no such file. This is the only code in bd that names
+// that path.
+//
+// Any other outcome (a permission error, as a macOS privacy denial reports, an
+// I/O error, or a file too large to be a config) leaves bd unable to tell
+// whether the user opted out of metrics there, so the new file fails closed:
+// it turns metrics off until the user runs `bd metrics on`.
 func darwinUserConfigContent(seed []byte) []byte {
 	nativeDir, err := osUserConfigDir()
 	if err != nil {
 		return seed
 	}
 	legacy := filepath.Join(nativeDir, "bd", "config.yaml")
-	info, err := os.Stat(legacy)
-	if err != nil || !info.Mode().IsRegular() {
-		// Missing, or a directory, FIFO or socket: never open it.
+	info, err := statLegacyUserConfig(legacy)
+	if errors.Is(err, fs.ErrNotExist) {
+		return seed
+	}
+	if err != nil {
+		return failClosedUserConfig(legacy)
+	}
+	if !info.Mode().IsRegular() {
+		// A directory, FIFO or socket is not a config file: never open it.
 		return seed
 	}
 	data, err := readCapped(legacy, legacyUserConfigReadCap)
 	if err != nil {
-		return seed
+		return failClosedUserConfig(legacy)
 	}
 	return data
+}
+
+// failClosedUserConfig is the new user config written when the legacy file
+// exists but could not be read. The comment must not start with "# metrics:",
+// which the metrics bootstrap reads as a hand-commented block.
+func failClosedUserConfig(legacy string) []byte {
+	return []byte(fmt.Sprintf("# bd could not read %s when it created this file (GH#8113),\n"+
+		"# so it turned metrics off. Run \"bd metrics on\" to turn them back on.\n"+
+		"metrics:\n  disabled: true\n", legacy))
 }
 
 // readCapped reads at most limit bytes of path and fails if it holds more.
