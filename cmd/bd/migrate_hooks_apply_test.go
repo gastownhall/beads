@@ -445,6 +445,179 @@ func TestApplyHookMigration_NonShell(t *testing.T) {
 	})
 }
 
+// TestApplyHookMigration_NonShellSidecar pins migration of a legacy shim or
+// a missing hook whose selected sidecar is a clean non-shell script
+// (GH#6348): the sidecar becomes the active hook verbatim — no bd section
+// injected, sidecars retained, skip reported, second migration a no-op.
+func TestApplyHookMigration_NonShellSidecar(t *testing.T) {
+	pyBody := "#!/usr/bin/env python3\nimport sys\n\nif __name__ == \"__main__\":\n    sys.exit(0)\n"
+	legacyShim := "#!/usr/bin/env sh\n# bd-shim v2\n# bd-hooks-version: 0.56.1\nexec bd hooks run pre-commit \"$@\"\n"
+
+	t.Run("unmodified legacy shim with python .old sidecar restored verbatim", func(t *testing.T) {
+		repoDir, hooksDir := setupHookMigrationRepo(t)
+		preCommitPath := filepath.Join(hooksDir, "pre-commit")
+
+		writeHookMigrationFile(t, preCommitPath, legacyShim)
+		writeHookMigrationFile(t, preCommitPath+".old", pyBody)
+		writeHookMigrationFile(t, preCommitPath+".backup", "#!/usr/bin/env sh\necho backup\n")
+
+		plan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration failed: %v", err)
+		}
+		execPlan := buildHookMigrationExecutionPlan(plan)
+		if len(execPlan.BlockingErrors) > 0 {
+			t.Fatalf("expected no blocking errors, got: %v", execPlan.BlockingErrors)
+		}
+		if len(execPlan.WriteOps) != 1 {
+			t.Fatalf("expected exactly 1 write op, got %d", len(execPlan.WriteOps))
+		}
+		if execPlan.WriteOps[0].SourceKind != hookMigrationWriteFromSidecarCopy {
+			t.Fatalf("source kind = %q, want %q", execPlan.WriteOps[0].SourceKind, hookMigrationWriteFromSidecarCopy)
+		}
+		if execPlan.WriteOps[0].SourcePath != preCommitPath+".old" {
+			t.Fatalf("source path = %q, want the .old sidecar", execPlan.WriteOps[0].SourcePath)
+		}
+		if len(execPlan.RetireOps) != 0 {
+			t.Fatalf("sidecars must be retained, got %d retire ops", len(execPlan.RetireOps))
+		}
+
+		var summary hookMigrationApplySummary
+		var stderrCapture string
+		stderrCapture = captureStderr(t, func() {
+			summary, err = applyHookMigrationExecution(execPlan)
+		})
+		if err != nil {
+			t.Fatalf("applyHookMigrationExecution failed: %v", err)
+		}
+		if summary.WrittenHookCount != 1 {
+			t.Fatalf("expected 1 written hook, got %d", summary.WrittenHookCount)
+		}
+		if summary.RetiredCount != 0 {
+			t.Fatalf("sidecars must be retained, retired %d", summary.RetiredCount)
+		}
+		if !strings.Contains(stderrCapture, "no bd section was injected") {
+			t.Fatalf("apply must report the skip on stderr, got:\n%s", stderrCapture)
+		}
+
+		if got := mustReadHookMigrationFile(t, preCommitPath); got != pyBody {
+			t.Fatalf("python sidecar must become the active hook verbatim, got:\n%s", got)
+		}
+		assertExistsHookMigrationFile(t, preCommitPath+".old")
+		assertExistsHookMigrationFile(t, preCommitPath+".backup")
+
+		secondPlan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("second PlanHookMigration failed: %v", err)
+		}
+		if secondPlan.NeedsMigrationCount != 0 {
+			t.Fatalf("second migration must be a no-op, got %d pending migrations", secondPlan.NeedsMigrationCount)
+		}
+		secondExec := buildHookMigrationExecutionPlan(secondPlan)
+		if secondExec.operationCount() != 0 {
+			t.Fatalf("second execution must be a no-op, got %d operations", secondExec.operationCount())
+		}
+	})
+
+	t.Run("missing hook with python .old sidecar restored verbatim", func(t *testing.T) {
+		repoDir, hooksDir := setupHookMigrationRepo(t)
+		preCommitPath := filepath.Join(hooksDir, "pre-commit")
+
+		// No active hook at all — only the python sidecar survives.
+		writeHookMigrationFile(t, preCommitPath+".old", pyBody)
+
+		plan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration failed: %v", err)
+		}
+		execPlan := buildHookMigrationExecutionPlan(plan)
+		if len(execPlan.WriteOps) != 1 || execPlan.WriteOps[0].SourceKind != hookMigrationWriteFromSidecarCopy {
+			t.Fatalf("expected a single sidecar_copy write op, got %+v", execPlan.WriteOps)
+		}
+		if len(execPlan.RetireOps) != 0 {
+			t.Fatalf("sidecars must be retained, got %d retire ops", len(execPlan.RetireOps))
+		}
+
+		var summary hookMigrationApplySummary
+		stderrCapture := captureStderr(t, func() {
+			summary, err = applyHookMigrationExecution(execPlan)
+		})
+		if err != nil {
+			t.Fatalf("applyHookMigrationExecution failed: %v", err)
+		}
+		if summary.WrittenHookCount != 1 || summary.RetiredCount != 0 {
+			t.Fatalf("expected 1 write and no retires, got %+v", summary)
+		}
+		if !strings.Contains(stderrCapture, "no bd section was injected") {
+			t.Fatalf("apply must report the skip on stderr, got:\n%s", stderrCapture)
+		}
+
+		if got := mustReadHookMigrationFile(t, preCommitPath); got != pyBody {
+			t.Fatalf("python sidecar must become the active hook verbatim, got:\n%s", got)
+		}
+		assertExistsHookMigrationFile(t, preCommitPath+".old")
+
+		secondPlan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("second PlanHookMigration failed: %v", err)
+		}
+		if secondPlan.NeedsMigrationCount != 0 {
+			t.Fatalf("second migration must be a no-op, got %d pending migrations", secondPlan.NeedsMigrationCount)
+		}
+	})
+
+	t.Run("python sidecar carrying a stale bd section is restored clean", func(t *testing.T) {
+		repoDir, hooksDir := setupHookMigrationRepo(t)
+		preCommitPath := filepath.Join(hooksDir, "pre-commit")
+
+		corruptedSidecar := pyBody + "\n" + generateHookSection("pre-commit")
+		writeHookMigrationFile(t, preCommitPath+".old", corruptedSidecar)
+
+		plan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration failed: %v", err)
+		}
+		execPlan := buildHookMigrationExecutionPlan(plan)
+		if len(execPlan.BlockingErrors) > 0 {
+			t.Fatalf("expected no blocking errors, got: %v", execPlan.BlockingErrors)
+		}
+
+		if _, err := applyHookMigrationExecution(execPlan); err != nil {
+			t.Fatalf("applyHookMigrationExecution failed: %v", err)
+		}
+		if got := mustReadHookMigrationFile(t, preCommitPath); got != pyBody {
+			t.Fatalf("restored hook must have the stale section stripped, got:\n%s", got)
+		}
+	})
+
+	t.Run("sidecar with ambiguous bd markers blocks migration for that hook", func(t *testing.T) {
+		repoDir, hooksDir := setupHookMigrationRepo(t)
+		preCommitPath := filepath.Join(hooksDir, "pre-commit")
+
+		ambiguous := "#!/usr/bin/env python3\nimport sys\ns = \"# --- BEGIN BEADS INTEGRATION v1.0.0 ---\"\n"
+		writeHookMigrationFile(t, preCommitPath+".old", ambiguous)
+
+		plan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration failed: %v", err)
+		}
+		execPlan := buildHookMigrationExecutionPlan(plan)
+		if len(execPlan.BlockingErrors) == 0 {
+			t.Fatal("ambiguous sidecar markers must block migration")
+		}
+		found := false
+		for _, msg := range execPlan.BlockingErrors {
+			if strings.Contains(msg, "pre-commit") && strings.Contains(msg, "manually") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("blocking error must ask for manual inspection, got: %v", execPlan.BlockingErrors)
+		}
+	})
+}
+
 func setupHookMigrationRepo(t *testing.T) (repoDir string, hooksDir string) {
 	t.Helper()
 	repoDir = newGitRepo(t)

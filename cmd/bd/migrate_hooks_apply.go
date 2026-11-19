@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 type hookMigrationMode struct {
@@ -58,6 +59,10 @@ const (
 	// version corrupted (GH#6348): the stale bd section is stripped in place —
 	// no re-injection, no shebang, no newline normalization.
 	hookMigrationWriteFromHookFileStrip hookMigrationWriteSource = "hook_file_strip"
+	// hookMigrationWriteFromSidecarCopy restores a non-shell sidecar as the
+	// active hook, verbatim (GH#6348): no bd section is injected, no shebang
+	// is ensured, no line endings are normalized — the sidecars are retained.
+	hookMigrationWriteFromSidecarCopy hookMigrationWriteSource = "sidecar_copy"
 )
 
 type hookMigrationWriteOp struct {
@@ -190,6 +195,37 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 			continue
 		}
 
+		// GH#6348: when the source is a sidecar, its content — not the shim
+		// that displaced it — decides what the migrated hook becomes. A
+		// sidecar run by a non-shell interpreter is restored verbatim: no bd
+		// section is injected (the interpreter could not run it), and the
+		// sidecars are retained, not retired. Ambiguous bd markers in the
+		// sidecar are never rewritten automatically; migration stops for that
+		// hook and asks for manual inspection instead.
+		if sourceKind == hookMigrationWriteFromOld || sourceKind == hookMigrationWriteFromBackup {
+			content, readErr := os.ReadFile(sourcePath) // #nosec G304 -- sidecar path from migration planner
+			if readErr == nil {
+				if lang := doctor.ClassifyHookLanguage(content); lang.Kind != doctor.HookLanguageShell {
+					if lang.Kind != doctor.HookLanguageBinary &&
+						doctor.InspectBdSectionMarkers(string(content)) == doctor.BdSectionMarkersAmbiguous {
+						execPlan.BlockingErrors = append(execPlan.BlockingErrors,
+							fmt.Sprintf("%s: sidecar %s has bd markers that do not form complete, ordered pairs; inspect manually before migration (state: %s)", hook.Name, sourcePath, hook.State))
+						continue
+					}
+					execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
+						HookName:   hook.Name,
+						HookPath:   hook.HookPath,
+						State:      hook.State,
+						SourceKind: hookMigrationWriteFromSidecarCopy,
+						SourcePath: sourcePath,
+					})
+					continue
+				}
+			}
+			// A read failure falls through: prepareHookMigrationWrites surfaces
+			// it without writing anything.
+		}
+
 		execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
 			HookName:   hook.Name,
 			HookPath:   hook.HookPath,
@@ -247,9 +283,11 @@ func chooseHookMigrationWriteSource(hook doctor.HookMigrationHookPlan) (hookMigr
 }
 
 type preparedHookWrite struct {
-	HookName string
-	Path     string
-	Content  []byte
+	HookName   string
+	Path       string
+	Content    []byte
+	SourceKind hookMigrationWriteSource
+	SourcePath string
 }
 
 func applyHookMigrationExecution(execPlan hookMigrationExecutionPlan) (hookMigrationApplySummary, error) {
@@ -277,6 +315,13 @@ func applyHookMigrationExecution(execPlan hookMigrationExecutionPlan) (hookMigra
 	}
 
 	for _, write := range preparedWrites {
+		// GH#6348: a sidecar restored verbatim carries no bd section, so the
+		// skip is reported here — the plan row alone does not say why.
+		if write.SourceKind == hookMigrationWriteFromSidecarCopy {
+			fmt.Fprintf(os.Stderr,
+				"beads: hook '%s' restored from %s is run by a non-shell interpreter; no bd section was injected — call 'bd hooks run %s' from the hook itself, passing the hook's arguments and stdin\n",
+				write.HookName, remedy.PrintedValue(write.SourcePath), write.HookName)
+		}
 		if err := guardHookWritePath(write.Path, false); err != nil {
 			return summary, fmt.Errorf("refusing to write migrated hook %s: %w", write.HookName, err)
 		}
@@ -315,9 +360,11 @@ func prepareHookMigrationWrites(writeOps []hookMigrationWriteOp) ([]preparedHook
 			return nil, err
 		}
 		prepared = append(prepared, preparedHookWrite{
-			HookName: op.HookName,
-			Path:     op.HookPath,
-			Content:  rendered,
+			HookName:   op.HookName,
+			Path:       op.HookPath,
+			Content:    rendered,
+			SourceKind: op.SourceKind,
+			SourcePath: op.SourcePath,
 		})
 	}
 
@@ -332,6 +379,8 @@ func renderMigratedHookContent(op hookMigrationWriteOp) ([]byte, error) {
 		baseContent = ""
 	case hookMigrationWriteFromHookFileStrip:
 		return renderNonShellSectionStrip(op)
+	case hookMigrationWriteFromSidecarCopy:
+		return renderSidecarVerbatimRestore(op)
 	case hookMigrationWriteFromHookFile, hookMigrationWriteFromOld, hookMigrationWriteFromBackup:
 		content, err := os.ReadFile(op.SourcePath) // #nosec G304 -- source paths come from migration planner + known sidecar suffixes
 		if err != nil {
@@ -376,6 +425,30 @@ func renderNonShellSectionStrip(op hookMigrationWriteOp) ([]byte, error) {
 		return nil, fmt.Errorf("%s at %s: stripping the stale bd section no longer validates; inspect manually", op.HookName, op.SourcePath)
 	}
 	return []byte(stripped), nil
+}
+
+// renderSidecarVerbatimRestore restores a non-shell sidecar as the active
+// hook, verbatim (GH#6348): no bd section injected, no shebang ensured, no
+// line endings normalized. It re-validates the classification before
+// copying, and applies the same validated repair as installation when the
+// sidecar itself carries a complete stale bd section an older bd version
+// left in it — so the restored hook is clean.
+func renderSidecarVerbatimRestore(op hookMigrationWriteOp) ([]byte, error) {
+	content, err := os.ReadFile(op.SourcePath) // #nosec G304 -- source paths come from migration planner + known sidecar suffixes
+	if err != nil {
+		return nil, fmt.Errorf("reading source content for %s from %s: %w", op.HookName, op.SourcePath, err)
+	}
+	if lang := doctor.ClassifyHookLanguage(content); lang.Kind == doctor.HookLanguageShell {
+		return nil, fmt.Errorf("%s sidecar %s no longer classifies as non-shell; refusing to restore it without a bd section", op.HookName, op.SourcePath)
+	}
+	if doctor.InspectBdSectionMarkers(string(content)) == doctor.BdSectionMarkersPaired {
+		stripped, ok := stripBdSectionPairsValidated(string(content))
+		if !ok {
+			return nil, fmt.Errorf("%s sidecar %s has bd markers that no longer validate; inspect manually", op.HookName, op.SourcePath)
+		}
+		return []byte(stripped), nil
+	}
+	return content, nil
 }
 
 func ensureHookShebang(content string) string {
