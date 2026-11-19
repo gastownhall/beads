@@ -735,6 +735,55 @@ func TestFixMissingDoltDatabase_SharedServerDeclinesUnanchoredCandidate(t *testi
 	}
 }
 
+// TestFixMissingDoltDatabase_KnownProjectIDDeclinesUnmatchedCandidates pins
+// that a workspace which knows its project_id never adopts a database that
+// does not carry it, in either server mode: not another project's, and not
+// a sole database with no identity at all (absence of an identity is not a
+// match, and the store's identity check tolerates it).
+func TestFixMissingDoltDatabase_KnownProjectIDDeclinesUnmatchedCandidates(t *testing.T) {
+	const localID = "local-proj-id"
+	catalogs := []struct {
+		name    string
+		catalog []serverDatabaseMetadata
+		want    []string
+	}{
+		{
+			name: "sole candidate without identity",
+			catalog: []serverDatabaseMetadata{
+				{Name: configfile.DefaultDoltDatabase},
+				{Name: "legacy_db", HasSchema: true},
+			},
+			want: []string{"legacy_db"},
+		},
+		{
+			name: "sole foreign candidate",
+			catalog: []serverDatabaseMetadata{
+				{Name: "other_project", HasSchema: true, ProjectID: "other-proj-id"},
+			},
+			want: []string{"other_project"},
+		},
+		{
+			name: "several unmatched candidates",
+			catalog: []serverDatabaseMetadata{
+				{Name: "zeta_project", HasSchema: true, ProjectID: "zeta-id"},
+				{Name: "alpha_project", HasSchema: true},
+			},
+			want: []string{"alpha_project, zeta_project"},
+		},
+	}
+	for _, shared := range []bool{false, true} {
+		for _, tt := range catalogs {
+			t.Run(fmt.Sprintf("shared=%t/%s", shared, tt.name), func(t *testing.T) {
+				ws := newFallbackWorkspace(t, shared, localID, tt.catalog)
+				err := FixMissingDoltDatabase(ws.dir)
+				assertPolicySkip(t, err, append(tt.want, localID)...)
+				ws.assertUnchanged(t)
+				ws.assertFallbackRead(t)
+			})
+		}
+	}
+}
+
 // fallbackCase is one row of TestSelectFallbackDoltDatabase.
 type fallbackCase struct {
 	name      string
@@ -823,6 +872,88 @@ var fallbackCases = []fallbackCase{
 			{Name: "beads", HasSchema: true},
 		},
 		wantName: "beads",
+	},
+	{
+		name:    "local id matches one candidate on its own server",
+		localID: "proj-id",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads"},
+			{Name: "other", HasSchema: true, ProjectID: "other-id"},
+			{Name: "mine", HasSchema: true, ProjectID: "proj-id"},
+		},
+		wantName: "mine",
+	},
+	{
+		name:    "local id matches one candidate on a shared server",
+		localID: "proj-id",
+		current: "beads",
+		shared:  true,
+		databases: []serverDatabaseMetadata{
+			{Name: "other", HasSchema: true, ProjectID: "other-id"},
+			{Name: "unnamed", HasSchema: true},
+			{Name: "mine", HasSchema: true, ProjectID: "proj-id"},
+		},
+		wantName: "mine",
+	},
+	{
+		name:    "local id matched by several candidates",
+		localID: "proj-id",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "mine_b", HasSchema: true, ProjectID: "proj-id"},
+			{Name: "mine_a", HasSchema: true, ProjectID: "proj-id"},
+		},
+		wantErr: []string{"multiple server databases match project_id proj-id: mine_a, mine_b"},
+	},
+	{
+		name:    "local id match against a current database with another identity",
+		localID: "proj-id",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads", HasSchema: true, ProjectID: "other-id"},
+			{Name: "mine", HasSchema: true, ProjectID: "proj-id"},
+		},
+		wantErr: []string{"conflicting project identity", "mine", "other-id"},
+	},
+	{
+		name:    "local id, sole candidate without identity",
+		localID: "proj-id",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads"},
+			{Name: "legacy", HasSchema: true},
+		},
+		wantSkip: true,
+		wantErr:  []string{"proj-id", "legacy"},
+	},
+	{
+		name:    "local id, only foreign candidates on a shared server",
+		localID: "proj-id",
+		current: "beads",
+		shared:  true,
+		databases: []serverDatabaseMetadata{
+			{Name: "zeta", HasSchema: true, ProjectID: "zeta-id"},
+			{Name: "alpha", HasSchema: true},
+		},
+		wantSkip: true,
+		wantErr:  []string{"proj-id", "alpha, zeta"},
+	},
+	{
+		name:    "global database is no match even for its own id",
+		localID: doltserver.GlobalProjectID,
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads_global", HasSchema: true, ProjectID: doltserver.GlobalProjectID},
+		},
+	},
+	{
+		name:    "local id with no candidates at all",
+		localID: "proj-id",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads"},
+		},
 	},
 	{
 		name:    "names in a diagnostic are escaped",
