@@ -347,6 +347,47 @@ func resolveEnvShebang(args []string) (command []string, ok bool) {
 	return nil, false
 }
 
+// NonShellHookSectionPairs checks the bd section markers in a non-shell hook
+// before bd removes them. It returns the number of complete BEGIN/END pairs
+// when every marker sits alone on its own line (column 0, an optional
+// trailing CR) and the pairs are ordered and not nested. problem is non-empty
+// when the markers cannot be removed without guessing at the block's extent:
+// an unpaired, reversed or nested marker, or marker text inside another line.
+func NonShellHookSectionPairs(content string) (pairs int, problem string) {
+	inside := false
+	for n, line := range strings.Split(content, "\n") {
+		line = strings.TrimRight(line, "\r")
+		hasBegin := strings.Contains(line, hookMarkerBeginTag)
+		hasEnd := strings.Contains(line, hookMarkerEndTag)
+		if !hasBegin && !hasEnd {
+			continue
+		}
+		lineNo := n + 1
+		if !hookSectionMarkerLinePattern.MatchString(line) {
+			return 0, fmt.Sprintf("line %d holds bd marker text that is not a whole marker line", lineNo)
+		}
+		switch {
+		case hasBegin && inside:
+			return 0, fmt.Sprintf("line %d opens a bd section inside another one", lineNo)
+		case hasBegin:
+			inside = true
+		case !inside:
+			return 0, fmt.Sprintf("line %d closes a bd section that was never opened", lineNo)
+		default:
+			inside = false
+			pairs++
+		}
+	}
+	if inside {
+		return 0, "a bd section is opened but never closed"
+	}
+	return pairs, ""
+}
+
+// hookSectionMarkerLinePattern matches a whole BEGIN or END marker line as
+// bd writes it, with or without a version.
+var hookSectionMarkerLinePattern = regexp.MustCompile(`^# --- (BEGIN|END) BEADS INTEGRATION( v[^ \t]+)? ---$`)
+
 func parseBDHookVersion(content string) (string, bool) {
 	for _, line := range strings.Split(content, "\n") {
 		// Check for section marker: "# --- BEGIN BEADS INTEGRATION v0.57.0 ---"

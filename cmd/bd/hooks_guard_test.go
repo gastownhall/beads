@@ -904,4 +904,61 @@ func TestInstallHooks_NonShell(t *testing.T) {
 		require.Contains(t, stderr, "pre-push")
 		require.Contains(t, stderr, "python3")
 	})
+
+	t.Run("AC4_repairs_complete_sections_once", func(t *testing.T) {
+		section := generateHookSection("pre-push")
+		crlf := strings.ReplaceAll(nonShellPythonPrePush, "\n", "\r\n")
+		noFinalNL := strings.TrimSuffix(nonShellPythonPrePush, "\n")
+		node := "#!/usr/bin/env node\nprocess.exit(0)\n"
+		ruby := "#!/usr/bin/ruby\nexit 0\n"
+		fish := "#!/usr/bin/env fish\nexit 0\n"
+		cases := []struct {
+			name, before, want string
+		}{
+			{"appended_by_injector", injectHookSection(nonShellPythonPrePush, section), nonShellPythonPrePush},
+			{"crlf", crlf + "\r\n" + strings.ReplaceAll(section, "\n", "\r\n"), crlf + "\r\n"},
+			{"missing_final_newline", injectHookSection(noFinalNL, section), noFinalNL + "\n"},
+			{"content_after_end", nonShellPythonPrePush + "\n" + section + "print('after')\n", nonShellPythonPrePush + "print('after')\n"},
+			{"two_disjoint_pairs", nonShellPythonPrePush + "\n" + section + "x = 1\n\n" + section, nonShellPythonPrePush + "x = 1\n"},
+			{"node", injectHookSection(node, section), node},
+			{"ruby", injectHookSection(ruby, section), ruby},
+			{"fish", injectHookSection(fish, section), fish},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				repoDir := setupGuardTestRepo(t)
+				hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+				writeNonShellHookForTest(t, hookPath, tc.before)
+				staleBackup := "#!/usr/bin/env python3\nprint('stale snapshot')\n"
+				writeNonShellHookForTest(t, hookPath+".backup", staleBackup)
+
+				stderr := installHooksCapturingStderr(t, false)
+				require.Equal(t, tc.want, readNonShellHookForTest(t, hookPath))
+				require.Contains(t, stderr, "removed")
+				require.Contains(t, stderr, "bd hooks run pre-push")
+				require.Equal(t, staleBackup, readNonShellHookForTest(t, hookPath+".backup"), "the stale backup is neither restored nor changed")
+
+				stderr = installHooksCapturingStderr(t, false)
+				require.Equal(t, tc.want, readNonShellHookForTest(t, hookPath), "second install changes nothing")
+				require.NotContains(t, stderr, "removed")
+			})
+		}
+
+		t.Run("preservation_copy", func(t *testing.T) {
+			// CRLF: the shell preservation path would normalize the bytes.
+			before := crlf + "\r\n" + strings.ReplaceAll(section, "\n", "\r\n")
+			want := crlf + "\r\n"
+			got, keep := shouldPreserveHookContent(before, false)
+			require.True(t, keep)
+			require.Equal(t, want, got)
+
+			_, repo := setupSymlinkedHooksDirRepo(t)
+			src := filepath.Join(repo, ".git", "hooks", "pre-push")
+			writeNonShellHookForTest(t, src, before)
+			stderr := installHooksCapturingStderr(t, true)
+			require.Equal(t, want, readNonShellHookForTest(t, filepath.Join(repo, ".beads", "hooks", "pre-push")))
+			require.Contains(t, stderr, "removed 1 bd shell section(s) from the preserved pre-push hook")
+			require.Equal(t, before, readNonShellHookForTest(t, src), "the source hook is not modified by preservation")
+		})
+	})
 }
