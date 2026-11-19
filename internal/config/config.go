@@ -132,8 +132,9 @@ func initialize(beadsDirSetting string) error {
 	//
 	// Precedence (highest to lowest):
 	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
-	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
-	//   > legacy <home>/.beads/config.yaml
+	//   <home>/.config/bd/config.yaml > native UserConfigDir()/bd/config.yaml
+	//   (XDG_CONFIG_HOME on Linux and macOS, %AppData% on Windows; GH#8113:
+	//   never ~/Library/Application Support) > legacy <home>/.beads/config.yaml
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),
 	// which meant user-level config was silently ignored when project-level

@@ -23,9 +23,22 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 `config.yaml` is searched in this order, with later files overriding earlier ones:
 
 1. `~/.beads/config.yaml` (legacy user-level, lowest priority)
-2. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
-3. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
-4. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
+2. `$XDG_CONFIG_HOME/bd/config.yaml` on Linux and macOS, `%AppData%\bd\config.yaml` on Windows (native user-level)
+3. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
+4. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
+5. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
+
+On macOS, bd no longer reads `~/Library/Application Support/bd` (or `.../beads/PRIME.md`): resolving that directory is reported by macOS 26 as a privacy prompt on every launch. The native tier above is the documented `~/.config` location unless `XDG_CONFIG_HOME` is set, so on macOS the two usually coincide and are read once.
+
+The first time bd creates `~/.config/bd/config.yaml` on macOS and an older config exists at `~/Library/Application Support/bd/config.yaml`, bd copies that file's contents (including any `metrics` consent) verbatim and never reads the old location again. A config bd cannot read is treated as an opt-out: metrics stay off until you run `bd metrics on`. Cases the one-time copy does not cover, for settings kept in the old file:
+
+```bash
+# both files exist: merge the keys by hand, then remove the old file
+# metrics are off via BD_DISABLE_METRICS/DO_NOT_TRACK and only the legacy file exists:
+mkdir -p ~/.config/bd && cp -n ~/Library/Application\ Support/bd/config.yaml ~/.config/bd/
+# PRIME.md:
+mkdir -p ~/.config/beads && mv ~/Library/Application\ Support/beads/PRIME.md ~/.config/beads/
+```
 
 A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
 
