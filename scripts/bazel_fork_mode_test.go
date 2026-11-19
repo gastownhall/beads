@@ -79,6 +79,8 @@ evil-endpoint) sign ro oss-fork grpcs://elsewhere.example:443 ;;
 # uploaded, which it does not.
 not-found) reply 404 "$(jq -cn --arg repo "${GITHUB_REPOSITORY:?}" --arg id "${ARTIFACT_ID:?}" '{error: ("not found: /repos/" + $repo + "/actions/artifacts/" + $id)}')" ;;
 not-found-other) reply 404 "$(jq -cn --arg repo "${GITHUB_REPOSITORY:?}" --argjson id "$((ARTIFACT_ID + 1))" '{error: ("not found: /repos/" + $repo + "/actions/artifacts/" + ($id | tostring))}')" ;;
+not-found-zip) reply 404 "$(jq -cn --arg repo "${GITHUB_REPOSITORY:?}" --arg id "${ARTIFACT_ID:?}" '{error: ("not found: /repos/" + $repo + "/actions/artifacts/" + $id + "/zip")}')" ;;
+not-found-other-zip) reply 404 "$(jq -cn --arg repo "${GITHUB_REPOSITORY:?}" --argjson id "$((ARTIFACT_ID + 1))" '{error: ("not found: /repos/" + $repo + "/actions/artifacts/" + ($id | tostring) + "/zip")}')" ;;
 *) reply "$answer" "{\"error\": \"stub answer $answer\"}" ;;
 esac
 `
@@ -275,7 +277,7 @@ func TestSetupBazelForkCredential(t *testing.T) {
 	}
 	wantBody := map[string]any{"repo": "beads", "run_id": 4242.0, "run_attempt": 2.0, "pr": 7123.0, "job": "bazel-test", "artifact_id": 99.0}
 	for _, tier := range []string{"ro", "rw"} {
-		for _, answer := range []string{tier, "429-then-" + tier, "502-then-" + tier, "000-then-" + tier, "not-found-then-" + tier} {
+		for _, answer := range []string{tier, "429-then-" + tier, "502-then-" + tier, "000-then-" + tier, "not-found-then-" + tier, "not-found-zip-then-" + tier} {
 			got, logs, err := cert(t, answer, tier)
 			if err != nil {
 				t.Errorf("cert %s (mint %s): %v\n%s", tier, answer, err, logs)
@@ -329,6 +331,8 @@ func TestSetupBazelForkCredential(t *testing.T) {
 		// anything but this run's artifact is a final answer (GH#7429).
 		{"not-found", "ro", 4, "rbe-fork mint refused (HTTP 404)::not found: /repos/gastownhall/beads/actions/artifacts/99"},
 		{"not-found-other", "ro", 1, "rbe-fork mint refused (HTTP 404)::not found: /repos/gastownhall/beads/actions/artifacts/100"},
+		{"not-found-zip", "ro", 4, "rbe-fork mint refused (HTTP 404)::not found: /repos/gastownhall/beads/actions/artifacts/99/zip"},
+		{"not-found-other-zip", "ro", 1, "rbe-fork mint refused (HTTP 404)::not found: /repos/gastownhall/beads/actions/artifacts/100/zip"},
 		{"rw", "ro", 1, "rbe-fork tier changed"},
 		{"ro", "rw", 1, "rbe-fork tier changed"},
 		{"ro-as-rw", "rw", 1, "returned tier 'rw' instance 'oss-fork'"},

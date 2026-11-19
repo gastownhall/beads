@@ -59,7 +59,11 @@ cert)
 	artifact="/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}"
 	retriable() {
 		case "$code" in 429 | 502 | 000) return 0 ;; esac
-		[ "$(jq -r '.error // empty' "$reply" 2>/dev/null || true)" = "not found: $artifact" ]
+		# Metadata and archive visibility can lag for this exact uploaded ID.
+		case "$(jq -r '.error // empty' "$reply" 2>/dev/null || true)" in
+			"not found: $artifact" | "not found: $artifact/zip") return 0 ;;
+		esac
+		return 1
 	}
 	code=000
 	for attempt in 1 2 3 4; do
