@@ -239,3 +239,51 @@ func TestWispGCClosedSelectorHonorsAge(t *testing.T) {
 		}
 	})
 }
+
+// TestWispGCClosedSelectorZeroAgeSelectsAll pins closed GC's escape hatch
+// (GH#8202): --age 0s, or any negative age, sends no UpdatedBefore bound and
+// selects every closed wisp whatever its age, including one whose stored
+// updated_at reads back ahead of now (#7236). Pinned wisps, configured infra
+// types and --exclude-type stay protected.
+func TestWispGCClosedSelectorZeroAgeSelectsAll(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	old := wispGCNow
+	t.Cleanup(func() { wispGCNow = old })
+	wispGCNow = func() time.Time { return now }
+
+	pinned := closedWispAt("gc-pinned", now.Add(-2*time.Hour))
+	pinned.Pinned = true
+	infra := closedWispAt("gc-infra", now.Add(-2*time.Hour))
+	infra.IssueType = "agent"
+	rows := []*types.Issue{
+		closedWispAt("gc-old", now.Add(-2*time.Hour)),
+		closedWispAt("gc-recent", now.Add(-time.Second)),
+		closedWispAt("gc-ahead", now.Add(500*time.Millisecond)),
+		pinned,
+		infra,
+	}
+	exclude := []types.IssueType{"rig"}
+
+	for _, age := range []time.Duration{0, -time.Hour} {
+		var filters []types.IssueFilter
+		sel, err := selectClosedWispsForPurge(context.Background(), closedWispScanReader{rows: rows, filters: &filters}, age, exclude)
+		if err != nil {
+			t.Fatalf("--age %s: %v", age, err)
+		}
+		if got, want := closedWispIDs(sel.candidates), []string{"gc-old", "gc-recent", "gc-ahead"}; !slices.Equal(got, want) {
+			t.Errorf("--age %s: candidates = %v, want %v", age, got, want)
+		}
+		if sel.pinned != 1 || sel.infra != 1 {
+			t.Errorf("--age %s: pinned %d infra %d, want 1 and 1", age, sel.pinned, sel.infra)
+		}
+		if len(filters) != 1 {
+			t.Fatalf("--age %s: scan sent %d queries, want 1", age, len(filters))
+		}
+		if filters[0].UpdatedBefore != nil {
+			t.Errorf("--age %s: UpdatedBefore = %v, want no age bound", age, *filters[0].UpdatedBefore)
+		}
+		if !slices.Equal(filters[0].ExcludeTypes, exclude) {
+			t.Errorf("--age %s: ExcludeTypes = %v, want %v", age, filters[0].ExcludeTypes, exclude)
+		}
+	}
+}
