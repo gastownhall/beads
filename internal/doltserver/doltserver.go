@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
@@ -1556,9 +1557,28 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 			"  To check status: bd dolt status", cfg.Port)
 	}
 
+	// Resolve the pre-start port configuration and the idle window before
+	// the start: after it, the port file this start writes is the
+	// second-highest-precedence port source, so a post-start DefaultConfig
+	// would misread an operator-pinned port as bd's own bookkeeping.
+	startCfg := DefaultConfig(serverDir)
+	idleTimeout := ResolveIdleTimeoutForDir(beadsDir)
 	s, err := startLocked(serverDir)
 	if err != nil {
 		return 0, false, err
+	}
+	// Only an auto-started server bd owns on every listener gets an idle
+	// watcher (GH#4282); Start — an explicit start or a restart — never
+	// launches one. Still under the lifecycle lock: the watcher it spawns
+	// reads state files this start just wrote.
+	if idleWatchEligible(mode, IsSharedServerMode(), startCfg.Port, startCfg.PortSource, startCfg.PortSharedServer, startCfg.RemotesAPIPort, idleTimeout) {
+		idleWatchSpawner(IdleWatchOpts{
+			ServerDir: serverDir,
+			PID:       s.PID,
+			Host:      startCfg.Host,
+			Port:      s.Port,
+			Timeout:   idleTimeout,
+		})
 	}
 	return s.Port, true, nil
 }
@@ -1879,8 +1899,17 @@ func startLocked(beadsDir string) (*State, error) {
 	// Re-check after acquiring the lifecycle lock. A tracked process is only a
 	// successful start when every configured listener is ready.
 	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
+		// An explicit start adopts this server: its "started" postcondition
+		// is to stay up, so cancel any idle watcher an earlier auto-start
+		// left on it (the watcher exits when it finds watcher.pid gone).
+		cancelIdleWatch(beadsDir)
 		return verifyRemotesAPIState(cfg, state)
 	}
+
+	// A watcher that died between writing the reaping marker and stopping the
+	// server must not wedge later opens behind the lifecycle lock. The
+	// server is not running here (IsRunning above), so the marker is stale.
+	clearStaleReapingMarker(beadsDir)
 
 	// Clean up orphaned dolt sql-server processes INSIDE the lock.
 	// This MUST happen under the lock to prevent a race where one process
@@ -2475,10 +2504,24 @@ func sanitizeInheritedFDs() {
 	}
 }
 
-// cleanupStateFiles removes all server state files (PID and port).
-// Returns a joined error for non-NotExist removal failures so callers
-// can surface filesystem problems while still treating "already clean"
-// as success. Logs non-NotExist errors at debug level (GH#2670).
+// SanitizeInheritedFDs is the exported form of sanitizeInheritedFDs, for the
+// CLI's detached re-exec paths (the dolt-idle-watch child), which must not
+// pin descriptors the spawning bd left non-CLOEXEC (GH#4634).
+func SanitizeInheritedFDs() { sanitizeInheritedFDs() }
+
+// ProcAttrDetached returns SysProcAttr detaching a child process from the
+// parent process group so it survives parent exit — the production feature
+// dolt sql-server itself is launched with. Exported for the CLI's detached
+// dolt-idle-watch child, which like the server must outlive the bd that
+// spawned it. See procattr_linux.go for the test-gated Pdeathsig caveat.
+func ProcAttrDetached() *syscall.SysProcAttr { return procAttrDetached() }
+
+// cleanupStateFiles removes all server state files (PID and port, and the
+// activity directory: watcher, reaping marker and client leases are state of
+// a running server and meaningless once it is stopped). Returns a joined
+// error for non-NotExist removal failures so callers can surface filesystem
+// problems while still treating "already clean" as success. Logs non-NotExist
+// errors at debug level (GH#2670).
 func cleanupStateFiles(beadsDir string) error {
 	var errs []error
 	for _, path := range []string{pidPath(beadsDir), portPath(beadsDir)} {
@@ -2486,6 +2529,10 @@ func cleanupStateFiles(beadsDir string) error {
 			debug.Logf("failed to remove server state file %s: %v", path, err)
 			errs = append(errs, err)
 		}
+	}
+	if err := os.RemoveAll(activityDir(beadsDir)); err != nil && !os.IsNotExist(err) {
+		debug.Logf("failed to remove server activity dir %s: %v", activityDir(beadsDir), err)
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }
