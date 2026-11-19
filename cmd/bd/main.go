@@ -1421,21 +1421,7 @@ var rootCmd = &cobra.Command{
 		// span.
 		initTelemetry(rootCtx, Version)
 
-		// Materialize the user-level metrics config only when metrics are
-		// actually enabled. When metrics are disabled (BD_DISABLE_METRICS or a
-		// user-global metrics.disabled), there is nothing to bootstrap. The
-		// send-metrics flusher is exempt so it never recurses into bootstrap.
-		// This mirrors the resolveMetricsEnabled() gate on the first-run notice
-		// below. (~/.config/bd/ lives outside the repo, so this write is not a
-		// stealth/per-repository trace; stealth init is handled by suppressing
-		// the first-run notice, not by skipping this user-global bootstrap.)
-		if cmd.Name() != metrics.SendMetricsSubcommand && resolveMetricsEnabled() {
-			if err := metrics.EnsureUserConfigDefaults(); err != nil {
-				debug.Logf("warning: ensure user config defaults failed: %v", err)
-			}
-		}
-
-		if _, err := metrics.Init(Version, resolveMetricsEnabled(), resolveMetricsEndpoint()); err != nil {
+		if _, err := metrics.Init(Version, prepareRunMetrics(cmd.Name()), resolveMetricsEndpoint()); err != nil {
 			debug.Logf("warning: metrics init failed: %v", err)
 		}
 
@@ -3151,6 +3137,32 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// prepareRunMetrics materializes the user-level metrics config and returns
+// whether metrics are enabled for this run.
+//
+// The config is bootstrapped only when metrics are actually enabled. When
+// metrics are disabled (BD_DISABLE_METRICS or a user-global metrics.disabled),
+// there is nothing to bootstrap. The send-metrics flusher is exempt so it never
+// recurses into bootstrap. This mirrors the resolveMetricsEnabled() gate on the
+// first-run notice. (~/.config/bd/ lives outside the repo, so this write is not
+// a stealth/per-repository trace; stealth init is handled by suppressing the
+// first-run notice, not by skipping this user-global bootstrap.)
+//
+// Ordering matters on the first run after an upgrade on macOS: consent is
+// resolved again AFTER the bootstrap, because creating the user config there
+// carries over the legacy ~/Library/Application Support/bd/config.yaml
+// (GH#8113). A `bd metrics off` saved in that file must hold on the very run
+// that moves it, so neither metrics.Init nor the first-run notice may use the
+// value read before the file existed.
+func prepareRunMetrics(cmdName string) bool {
+	if cmdName != metrics.SendMetricsSubcommand && resolveMetricsEnabled() {
+		if err := metrics.EnsureUserConfigDefaults(); err != nil {
+			debug.Logf("warning: ensure user config defaults failed: %v", err)
+		}
+	}
+	return resolveMetricsEnabled()
 }
 
 func resolveMetricsEnabled() bool {
