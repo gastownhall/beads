@@ -1473,6 +1473,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd update --claim --assignee=<other>` leaves a reclaimable claim.** The
+  claim armed a lease for the claiming actor, and the assignee override in the
+  same update then deleted it as a transfer, so the issue stayed in_progress
+  for the new assignee with no lease: `bd reclaim` could never revert it if
+  that worker died. The override now hands the claim and its lease to the new
+  assignee (a fresh lease from the update time), on both the direct and the
+  proxied-server backends. A claim handed to a `claim.pools` alias gets no
+  lease, a claim whose update ends the claim (another status, or unassigned)
+  or targets a wisp leaves none, and an update without `--claim` still never
+  arms one. Thanks to @quad341 (#6501, #5349).
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

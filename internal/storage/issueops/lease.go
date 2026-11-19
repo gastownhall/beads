@@ -178,6 +178,12 @@ func NodeID(ctx context.Context) string {
 // update that changes status/assignee, an import that accepts a newer
 // non-claimed snapshot — must delete the lease row (DeleteLeaseInTx). Wisps
 // are never leased (see testHeartbeatWisp) and never get a row here.
+//
+// Generic updates never arm a lease (GH#4716). The one update that does is
+// the fields half of a claim verb whose patch hands the claim on (bd update
+// --claim --assignee=bob): it moves the claim leg's lease to the final
+// assignee, so the claim stays reclaimable (LeaseOutcomeOnUpdate,
+// ApplyLeaseOutcomeInTx). A claim handed to a claim.pools alias holds no lease.
 func UpsertLeaseInTx(ctx context.Context, tx DBTX, id, holder string, now time.Time, ttl time.Duration) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO leases (issue_id, holder, granted_at, lease_expires_at, heartbeat_at, granted_node)

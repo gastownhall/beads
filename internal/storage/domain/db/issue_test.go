@@ -336,7 +336,7 @@ func (s *testSuite) issueRowVersionChangesOnUpdate() {
 	s.Require().NoError(err)
 	s.Require().NotZero(before.RowVersion)
 
-	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{}, false))
 	after, err := r.Get(s.Ctx(), "bd-rv-update", domain.IssueTableOpts{})
 	s.Require().NoError(err)
 	s.NotZero(after.RowVersion)
@@ -368,7 +368,7 @@ func (s *testSuite) wispRowVersionChangesOnUpdate() {
 	s.Require().NoError(err)
 	s.Require().NotZero(before.RowVersion)
 
-	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-wisp-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{UseWispsTable: true}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-wisp-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{UseWispsTable: true}, false))
 	after, err := r.Get(s.Ctx(), "bd-rv-wisp-update", domain.IssueTableOpts{UseWispsTable: true})
 	s.Require().NoError(err)
 	s.NotZero(after.RowVersion)
@@ -385,7 +385,7 @@ func (s *testSuite) issueUpdateAllowedFields() {
 		"description": "new desc",
 		"assignee":    "bob",
 	}
-	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-1", updates, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-1", updates, "tester", domain.IssueTableOpts{}, false))
 
 	out, err := r.Get(s.Ctx(), "bd-upd-1", domain.IssueTableOpts{})
 	s.Require().NoError(err)
@@ -399,14 +399,14 @@ func (s *testSuite) issueUpdateRejectsUnknownFields() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-upd-bad", "x"), "tester", domain.InsertIssueOpts{}))
 
-	err := r.Update(s.Ctx(), "bd-upd-bad", map[string]any{"id": "rename-attempt"}, "tester", domain.IssueTableOpts{})
+	err := r.Update(s.Ctx(), "bd-upd-bad", map[string]any{"id": "rename-attempt"}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "not allowed")
 }
 
 func (s *testSuite) issueUpdateMissingID() {
 	r := s.issueRepo()
-	err := r.Update(s.Ctx(), "bd-does-not-exist", map[string]any{"title": "x"}, "tester", domain.IssueTableOpts{})
+	err := r.Update(s.Ctx(), "bd-does-not-exist", map[string]any{"title": "x"}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().Error(err)
 	s.True(errors.Is(err, sql.ErrNoRows), "expected sql.ErrNoRows, got %v", err)
 }
@@ -414,7 +414,7 @@ func (s *testSuite) issueUpdateMissingID() {
 func (s *testSuite) issueUpdateEmpty() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-upd-empty", "x"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-empty", nil, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-empty", nil, "tester", domain.IssueTableOpts{}, false))
 }
 
 func (s *testSuite) issueUpdateStatusType() {
@@ -423,7 +423,7 @@ func (s *testSuite) issueUpdateStatusType() {
 	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-status", map[string]any{
 		"status":     types.StatusInProgress,
 		"issue_type": types.TypeBug,
-	}, "tester", domain.IssueTableOpts{}))
+	}, "tester", domain.IssueTableOpts{}, false))
 
 	out, err := r.Get(s.Ctx(), "bd-upd-status", domain.IssueTableOpts{})
 	s.Require().NoError(err)
@@ -439,7 +439,7 @@ func (s *testSuite) issueUpdateNormalizesTimestamp() {
 	s.Require().NoError(err)
 	due := time.Date(2030, 6, 15, 10, 0, 0, 0, tz)
 
-	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-tz", map[string]any{"due_at": due}, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-upd-tz", map[string]any{"due_at": due}, "tester", domain.IssueTableOpts{}, false))
 
 	out, err := r.Get(s.Ctx(), "bd-upd-tz", domain.IssueTableOpts{})
 	s.Require().NoError(err)
@@ -516,7 +516,7 @@ func (s *testSuite) issueWispUpdate() {
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-iss-wisp-upd",
 		map[string]any{"title": "after"}, "tester",
-		domain.IssueTableOpts{UseWispsTable: true},
+		domain.IssueTableOpts{UseWispsTable: true}, false,
 	))
 
 	out, err := r.Get(s.Ctx(), "bd-iss-wisp-upd", domain.IssueTableOpts{UseWispsTable: true})
@@ -706,7 +706,7 @@ func (s *testSuite) issueNextCounterIDEmptyPrefix() {
 func (s *testSuite) issueUpdateMissingIDWithStatus() {
 	r := s.issueRepo()
 	err := r.Update(s.Ctx(), "bd-status-missing",
-		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{})
+		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().Error(err)
 	s.True(errors.Is(err, sql.ErrNoRows), "expected sql.ErrNoRows, got %v", err)
 }
@@ -758,7 +758,7 @@ func (s *testSuite) issueClaimPreservesStartedAt() {
 	originalStart := *first.StartedAt
 
 	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-sa",
-		map[string]any{"status": string(types.StatusOpen)}, "tester", domain.IssueTableOpts{}))
+		map[string]any{"status": string(types.StatusOpen)}, "tester", domain.IssueTableOpts{}, false))
 
 	res2, err := r.Claim(s.Ctx(), "bd-claim-sa", "alice", domain.IssueTableOpts{})
 	s.Require().NoError(err)
