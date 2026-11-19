@@ -243,6 +243,110 @@ func IsBdHookContent(content string) bool {
 		bdHooksRunPattern.MatchString(content)
 }
 
+// shellHookInterpreters lists the interpreters that can run the POSIX-sh
+// section bd injects into hooks (generateHookSection in cmd/bd).
+var shellHookInterpreters = map[string]bool{
+	"sh": true, "bash": true, "dash": true, "ash": true, "ksh": true, "ksh93": true,
+	"mksh": true, "posh": true, "yash": true, "zsh": true,
+}
+
+// envNameValuePattern matches an `env` NAME=VALUE assignment argument.
+var envNameValuePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// NonShellHookInterpreter reports whether a hook's content must not receive
+// bd's POSIX-sh section, and names the interpreter for diagnostics (GH#6348).
+//
+// It reads only the shebang declaration; it never infers a language from the
+// body. Content without a shebang keeps the historical shell treatment (git
+// runs it with sh). Content holding a NUL byte is binary and reported as
+// "binary content". A shebang naming a shell-compatible interpreter (directly,
+// through env, env -S, or busybox sh/ash) is shell. Anything else, including an
+// env invocation bd cannot resolve without a full parser, is reported as
+// non-shell so callers leave the file alone.
+func NonShellHookInterpreter(content string) (interpreter string, nonShell bool) {
+	if strings.IndexByte(content, 0) >= 0 {
+		return "binary content", true
+	}
+	line := content
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	line = strings.TrimRight(line, "\r")
+	if !strings.HasPrefix(line, "#!") {
+		return "", false
+	}
+	declared := strings.TrimSpace(strings.TrimPrefix(line, "#!"))
+	fields := strings.Fields(declared)
+	if len(fields) == 0 {
+		return "empty shebang", true
+	}
+	name, args := hookInterpreterBase(fields[0]), fields[1:]
+	if name == "env" {
+		resolved, ok := resolveEnvShebang(args)
+		if !ok {
+			return declared, true
+		}
+		name, args = hookInterpreterBase(resolved[0]), resolved[1:]
+	}
+	if name == "busybox" {
+		if len(args) > 0 && (args[0] == "sh" || args[0] == "ash") {
+			return "", false
+		}
+		return declared, true
+	}
+	if shellHookInterpreters[name] {
+		return "", false
+	}
+	return name, true
+}
+
+// hookInterpreterBase returns an interpreter path's base name, accepting both
+// path separators and dropping a Windows ".exe" suffix.
+func hookInterpreterBase(path string) string {
+	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
+		path = path[i+1:]
+	}
+	if strings.HasSuffix(strings.ToLower(path), ".exe") {
+		path = path[:len(path)-len(".exe")]
+	}
+	return path
+}
+
+// resolveEnvShebang skips the env options and NAME=VALUE assignments whose
+// meaning is unambiguous and returns the command env would run with its
+// arguments. ok is false for an unknown option or a missing command.
+func resolveEnvShebang(args []string) (command []string, ok bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			if i+1 < len(args) {
+				return args[i+1:], true
+			}
+			return nil, false
+		case arg == "-S" || arg == "--split-string" || arg == "-i" || arg == "-" ||
+			arg == "--ignore-environment":
+			continue
+		case strings.HasPrefix(arg, "-S") && len(arg) > 2:
+			// `env -Sbash -e`: the split string starts inside the option.
+			rest := append([]string{arg[2:]}, args[i+1:]...)
+			return resolveEnvShebang(rest)
+		case arg == "-u" || arg == "--unset":
+			i++ // the variable name
+			continue
+		case strings.HasPrefix(arg, "--unset="):
+			continue
+		case strings.HasPrefix(arg, "-"):
+			return nil, false
+		case envNameValuePattern.MatchString(arg):
+			continue
+		default:
+			return args[i:], true
+		}
+	}
+	return nil, false
+}
+
 func parseBDHookVersion(content string) (string, bool) {
 	for _, line := range strings.Split(content, "\n") {
 		// Check for section marker: "# --- BEGIN BEADS INTEGRATION v0.57.0 ---"

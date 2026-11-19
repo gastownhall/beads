@@ -729,3 +729,84 @@ func TestInitHooksContextGuardPreservesOwnership(t *testing.T) {
 		})
 	}
 }
+
+// GH#6348: bd appends a POSIX-shell integration block to a foreign pre-push
+// hook whose shebang is python3, which leaves the hook a Python SyntaxError.
+// bd must never splice shell code into a hook interpreted by a non-shell
+// interpreter.
+func TestInstallHooksDoesNotAppendShellToPythonHook(t *testing.T) {
+	repoDir := setupGuardTestRepo(t)
+
+	userContent := "#!/usr/bin/env python3\nimport sys\n\n\ndef main():\n    return 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main())\n"
+	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte(userContent), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = installHooksWithOptions(managedHookNames, false, false, false, false)
+
+	got, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(string(got), "#!/usr/bin/env python3") &&
+		strings.Contains(string(got), "if command -v bd >/dev/null 2>&1; then") {
+		t.Fatalf("bd appended its shell section to a python3 hook (Python SyntaxError at runtime):\n%s", got)
+	}
+}
+
+// nonShellPythonPrePush is a pre-commit/prek style Python pre-push hook that
+// ends in sys.exit, the shape GH#6348 reported.
+const nonShellPythonPrePush = "#!/usr/bin/env python3\nimport sys\n\n\ndef main():\n    return 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main())\n"
+
+func writeNonShellHookForTest(t *testing.T, path, content string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o755))
+}
+
+func readNonShellHookForTest(t *testing.T, path string) string {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(got)
+}
+
+// installHooksCapturingStderr runs a default-mode install of every managed
+// hook and returns what it printed on stderr.
+func installHooksCapturingStderr(t *testing.T, beadsHooks bool) string {
+	t.Helper()
+	var err error
+	stderr := captureStderr(t, func() {
+		err = installHooksWithOptions(managedHookNames, false, false, false, beadsHooks)
+	})
+	require.NoError(t, err, "stderr:\n%s", stderr)
+	return stderr
+}
+
+// TestInstallHooks_NonShell pins GH#6348: an install never splices bd's
+// POSIX-sh section into a hook run by another interpreter, repairs complete
+// sections an earlier install appended, leaves ambiguous markers and binary
+// content alone, and keeps the shell path unchanged.
+func TestInstallHooks_NonShell(t *testing.T) {
+	t.Run("AC1_python_pre_push_is_skipped_byte_identical", func(t *testing.T) {
+		repoDir := setupGuardTestRepo(t)
+		hooksDir := filepath.Join(repoDir, ".git", "hooks")
+		hookPath := filepath.Join(hooksDir, "pre-push")
+		writeNonShellHookForTest(t, hookPath, nonShellPythonPrePush)
+
+		stderr := installHooksCapturingStderr(t, false)
+
+		require.Equal(t, nonShellPythonPrePush, readNonShellHookForTest(t, hookPath), "python hook must stay byte-identical")
+		_, err := os.Lstat(hookPath + ".backup")
+		require.True(t, os.IsNotExist(err), "no pre-push.backup may be created for a skipped hook: %v", err)
+		for _, want := range []string{"pre-push", hookPath, "python3", "bd hooks run pre-push", "arguments and stdin"} {
+			require.Contains(t, stderr, want, "skip warning must name %q", want)
+		}
+		require.Contains(t, readNonShellHookForTest(t, filepath.Join(hooksDir, "pre-commit")), hookSectionBeginPrefix,
+			"the other hooks are still installed")
+	})
+}

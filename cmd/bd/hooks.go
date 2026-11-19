@@ -480,6 +480,39 @@ func removeHookSection(content string) (string, bool) {
 	return result, true
 }
 
+// nonShellHookInstall is what installing into a non-shell hook does: print
+// warning (a skip) when it is set.
+type nonShellHookInstall struct {
+	warning string
+}
+
+// planNonShellHookInstall decides how an install treats an existing hook whose
+// shebang names a non-shell interpreter (GH#6348). nonShell is false for a
+// hook bd's shell section can share, which keeps the ordinary install path.
+//
+// A non-shell hook stays byte-identical. One that already calls
+// `bd hooks run` is a recognized integration and stays untouched and silent;
+// any other is skipped with a warning. bd never restores a .backup over the
+// hook: it may predate the user's later edits.
+func planNonShellHookInstall(hookName, hookPath, content string) (out nonShellHookInstall, nonShell bool) {
+	interp, nonShell := doctor.NonShellHookInterpreter(content)
+	if !nonShell {
+		return out, false
+	}
+	advice := fmt.Sprintf("To integrate bd, have the hook call \"bd hooks run %s\", passing it the hook's arguments and stdin.", hookName)
+	if !hookContentHasMarkers(content) && doctor.IsBdHookContent(content) {
+		return out, true // recognized integration: nothing to add, nothing to report
+	}
+	out.warning = fmt.Sprintf("Warning: skipped bd integration for the %s hook at %s: it runs under %s, which cannot run bd's shell section. %s",
+		hookName, hookPath, interp, advice)
+	return out, true
+}
+
+// hookContentHasMarkers reports whether content holds any bd section marker text.
+func hookContentHasMarkers(content string) bool {
+	return strings.Contains(content, "BEGIN BEADS INTEGRATION") || strings.Contains(content, "END BEADS INTEGRATION")
+}
+
 // isOnlyShebangOrEmpty reports whether the given hook content consists of
 // nothing meaningful — only an optional shebang line plus blank lines and
 // comments. Used by shouldPreserveHookContent to decide, after stripping a
@@ -1222,6 +1255,21 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 
 		if readErr != nil && !os.IsNotExist(readErr) {
 			return fmt.Errorf("failed to read %s: %w", hookName, readErr)
+		}
+
+		// A hook run by a non-shell interpreter (a pre-commit/prek Python
+		// pre-push, a Node or Ruby script) cannot run bd's POSIX-sh section:
+		// appended after the script's own exit it is at best unreachable
+		// and, for Python, a SyntaxError on every run (GH#6348). Classify
+		// before any marker refresh, legacy replacement, backup or
+		// normalization so such a hook keeps its bytes.
+		if readErr == nil {
+			if outcome, nonShell := planNonShellHookInstall(hookName, hookPath, string(existing)); nonShell {
+				if outcome.warning != "" {
+					fmt.Fprintln(os.Stderr, outcome.warning)
+				}
+				continue
+			}
 		}
 
 		var newContent string
