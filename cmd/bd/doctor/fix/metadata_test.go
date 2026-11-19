@@ -784,6 +784,26 @@ func TestFixMissingDoltDatabase_KnownProjectIDDeclinesUnmatchedCandidates(t *tes
 	}
 }
 
+// TestFixMissingDoltDatabase_DeclinesAmbiguousCandidates pins that with no
+// project_id to tell them apart, the fallback never picks one of several
+// schema databases by enumeration order, even on a server of its own: it
+// lists them sorted (test databases left out) and names the remedy.
+func TestFixMissingDoltDatabase_DeclinesAmbiguousCandidates(t *testing.T) {
+	ws := newFallbackWorkspace(t, false, "", []serverDatabaseMetadata{
+		{Name: configfile.DefaultDoltDatabase},
+		{Name: "zeta_project", HasSchema: true},
+		{Name: "testdb_123", HasSchema: true},
+		{Name: "alpha_project", HasSchema: true, ProjectID: "alpha-id"},
+	})
+	err := FixMissingDoltDatabase(ws.dir)
+	assertPolicySkip(t, err, "alpha_project, zeta_project")
+	if strings.Contains(err.Error(), "testdb_123") {
+		t.Errorf("skip %q lists the test database", err)
+	}
+	ws.assertUnchanged(t)
+	ws.assertFallbackRead(t)
+}
+
 // fallbackCase is one row of TestSelectFallbackDoltDatabase.
 type fallbackCase struct {
 	name      string
@@ -863,6 +883,19 @@ var fallbackCases = []fallbackCase{
 			{Name: "beads_global", HasSchema: true, ProjectID: doltserver.GlobalProjectID},
 		},
 		wantName: "my-legacy",
+	},
+	{
+		name:    "own server, no local id, several candidates",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads"},
+			{Name: "zeta", HasSchema: true},
+			{Name: "doctest_1", HasSchema: true},
+			{Name: "alpha", HasSchema: true, ProjectID: "alpha-id"},
+		},
+		wantSkip: true,
+		wantErr:  []string{"alpha, zeta"},
+		notInErr: []string{"doctest_1"},
 	},
 	{
 		name:    "current database chosen by the environment is not a candidate",

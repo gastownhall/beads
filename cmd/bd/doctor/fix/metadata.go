@@ -350,7 +350,9 @@ func selectFallbackDoltDatabase(localID, current string, shared bool, databases 
 	if len(candidates) == 1 {
 		return &candidates[0], nil
 	}
-	return nil, nil
+	return nil, skipFix(fmt.Errorf(
+		"several server databases have Beads schema and metadata.json has no project_id to tell which is this workspace's (candidates: %s); %s",
+		remedy.PrintedList(names, ", "), manualDatabaseRemedy))
 }
 
 // ResolveAuthoritativeServerMetadata reconciles local metadata.json against the
