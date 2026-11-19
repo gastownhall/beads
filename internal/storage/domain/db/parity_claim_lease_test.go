@@ -114,6 +114,7 @@ func (s *testSuite) TestClaimAssigneeOverrideLease() {
 	s.Run("ClaimOverrideRedolesHeldLeaseFromUpdateTime", s.claimOverrideRedolesHeldLeaseFromUpdateTime)
 	s.Run("ClaimOverrideToPoolAliasLeavesNoLease", s.claimOverrideToPoolAliasLeavesNoLease)
 	s.Run("ClaimWhosePatchEndsTheClaimLeavesNoLease", s.claimWhosePatchEndsTheClaimLeavesNoLease)
+	s.Run("ClaimOverrideOnWispLeavesNoLease", s.claimOverrideOnWispLeavesNoLease)
 }
 
 // claimOverrideArmsLeaseForFinalHolder is AC-1: alice claims an open,
@@ -218,5 +219,22 @@ func (s *testSuite) claimWhosePatchEndsTheClaimLeavesNoLease() {
 				s.Equal(0, s.countClaimLeaseRows(id), "a claim whose patch ends the claim must leave no lease")
 			})
 		}
+	}
+}
+
+// claimOverrideOnWispLeavesNoLease is AC-5: wisps are never leased, so a
+// --claim with an assignee override on one leaves no lease row.
+func (s *testSuite) claimOverrideOnWispLeavesNoLease() {
+	for _, stack := range claimLeaseStacks() {
+		s.Run(stack.name, func() {
+			id := "bd-cl-wisp-" + stack.name
+			s.seedParityIssue(id, nil, true)
+			s.Require().NoError(stack.apply(s, id, "alice", claimLeaseUpdate{claim: true, assignee: claimLeaseString("bob")}))
+
+			got := s.readClaimLeaseIssue(id, true)
+			s.Equal(types.StatusInProgress, got.Status)
+			s.Equal("bob", got.Assignee)
+			s.Equal(0, s.countClaimLeaseRows(id), "a wisp must never hold a lease")
+		})
 	}
 }
