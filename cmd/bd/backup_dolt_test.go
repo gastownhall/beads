@@ -2,14 +2,22 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
 func TestResolveDoltBackupURL(t *testing.T) {
@@ -52,6 +60,24 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			name:      "gs:// URL passes through",
 			input:     "gs://bucket/path",
 			wantExact: "gs://bucket/path",
+		},
+		{
+			// s3:// used to go through filepath.Abs, which also collapsed the
+			// "//" inside the endpoint query.
+			name:      "s3:// URL with endpoint query passes through byte-for-byte",
+			input:     "s3://bucket/beads?endpoint=https://minio.local&region=auto&path-style=true",
+			wantExact: "s3://bucket/beads?endpoint=https://minio.local&region=auto&path-style=true",
+		},
+		{
+			// #6227: used to become file://$PWD/az:/container/beads.
+			name:      "az:// URL passes through",
+			input:     "az://account.blob.core.windows.net/container/beads",
+			wantExact: "az://account.blob.core.windows.net/container/beads",
+		},
+		{
+			name:      "oci:// URL passes through",
+			input:     "oci://registry.example/tenant/beads",
+			wantExact: "oci://registry.example/tenant/beads",
 		},
 		{
 			name:      "absolute path gets file:// prefix",
@@ -248,4 +274,408 @@ func TestShowDoltBackupStatusJSON_NilWhenNotConfigured(t *testing.T) {
 	if !ok || configured {
 		t.Errorf("expected configured=false, got %v", result)
 	}
+}
+
+// backupAddCall is one BackupAdd registration seen by recordingInitBackupStore.
+type backupAddCall struct{ name, url string }
+
+// recordingInitBackupStore records the destinations `bd backup init`
+// registers on the direct path, so a test can see the exact URL handed to
+// Dolt instead of only the command's own output.
+type recordingInitBackupStore struct {
+	failingBackupStore
+	adds []backupAddCall
+}
+
+func (r *recordingInitBackupStore) BackupAdd(_ context.Context, name, url string) error {
+	r.adds = append(r.adds, backupAddCall{name: name, url: url})
+	return nil
+}
+
+// sqlmockMaintenanceProvider is a proxied provider stand-in whose RunNonTx
+// hands the callback a real *sql.Conn from a sqlmock database, so a test can
+// pin the exact SQL arguments the proxied route sends to the server.
+type sqlmockMaintenanceProvider struct {
+	uow.UnitOfWorkProvider
+	db   *sql.DB
+	runs int
+}
+
+func (p *sqlmockMaintenanceProvider) RunNonTx(ctx context.Context, fn func(context.Context, *sql.Conn) error) error {
+	p.runs++
+	conn, err := p.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return fn(ctx, conn)
+}
+
+func (p *sqlmockMaintenanceProvider) Close(context.Context) error { return nil }
+
+// prepareBackupInitTest isolates a workspace for driving `bd backup init`'s
+// RunE directly and restores every global the command reads or writes.
+// Cannot be used from parallel tests.
+func prepareBackupInitTest(t *testing.T, asJSON bool) string {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	beadsDir := prepareBackupStatusTest(t)
+
+	oldStore, oldProvider := store, uowProvider
+	oldRootCtx, oldWrote := rootCtx, commandDidWrite.Load()
+	oldReadonly := readonlyMode
+	t.Cleanup(func() {
+		store, uowProvider = oldStore, oldProvider
+		rootCtx = oldRootCtx
+		commandDidWrite.Store(oldWrote)
+		readonlyMode = oldReadonly
+	})
+	rootCtx = context.Background()
+	readonlyMode = false
+	commandDidWrite.Store(false)
+	jsonOutput = asJSON
+	return beadsDir
+}
+
+// runBackupInitForTest runs `bd backup init <arg>`'s RunE and returns what it
+// printed on stdout and stderr.
+func runBackupInitForTest(t *testing.T, arg string) (string, string, error) {
+	t.Helper()
+
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+
+	captureDir := t.TempDir()
+	stdoutFile, err := os.Create(filepath.Join(captureDir, "stdout"))
+	if err != nil {
+		t.Fatalf("create stdout capture: %v", err)
+	}
+	stderrFile, err := os.Create(filepath.Join(captureDir, "stderr"))
+	if err != nil {
+		_ = stdoutFile.Close()
+		t.Fatalf("create stderr capture: %v", err)
+	}
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	var runErr error
+	func() {
+		defer func() { os.Stdout, os.Stderr = oldStdout, oldStderr }()
+		os.Stdout, os.Stderr = stdoutFile, stderrFile
+		runErr = backupInitCmd.RunE(backupInitCmd, []string{arg})
+	}()
+	_ = stdoutFile.Close()
+	_ = stderrFile.Close()
+	stdout, err := os.ReadFile(stdoutFile.Name())
+	if err != nil {
+		t.Fatalf("read stdout capture: %v", err)
+	}
+	stderr, err := os.ReadFile(stderrFile.Name())
+	if err != nil {
+		t.Fatalf("read stderr capture: %v", err)
+	}
+	return string(stdout), string(stderr), runErr
+}
+
+// assertBackupInitConfigured checks the saved backup config and the success
+// output both carry exactly wantURL.
+func assertBackupInitConfigured(t *testing.T, beadsDir, wantURL string, asJSON bool, stdout string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(beadsDir, "dolt-backup.json"))
+	if err != nil {
+		t.Fatalf("read saved backup config: %v", err)
+	}
+	var cfg doltBackupConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("saved backup config is not JSON: %v\n%s", err, data)
+	}
+	if cfg.BackupURL != wantURL {
+		t.Errorf("saved backup_url = %q, want %q", cfg.BackupURL, wantURL)
+	}
+	if asJSON {
+		var resp struct {
+			BackupURL   string `json:"backup_url"`
+			Initialized bool   `json:"initialized"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+			t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+		}
+		if resp.BackupURL != wantURL || !resp.Initialized {
+			t.Errorf("JSON output = %+v, want backup_url %q and initialized", resp, wantURL)
+		}
+		return
+	}
+	if want := "Backup destination configured: " + wantURL + "\n"; !strings.HasPrefix(stdout, want) {
+		t.Errorf("stdout = %q, want it to start with %q", stdout, want)
+	}
+}
+
+// cloudBackupInitURLs are advertised Dolt remote schemes (remotecache's
+// remote scheme list) that `bd backup init` used to rewrite into
+// file://$PWD/<scheme>:/... (#6227).
+var cloudBackupInitURLs = []string{
+	"az://account.blob.core.windows.net/container/beads",
+	"oci://registry.example/tenant/beads",
+}
+
+// TestBackupInitPreservesCloudURL pins #6227 on the direct path: an Azure or
+// OCI destination reaches Dolt's BackupAdd, the saved config and the success
+// output byte-for-byte instead of becoming a local file:// path.
+//
+// Cannot be parallel: mutates store, rootCtx, jsonOutput and stdio.
+func TestBackupInitPreservesCloudURL(t *testing.T) {
+	for _, url := range cloudBackupInitURLs {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", url, asJSON), func(t *testing.T) {
+				beadsDir := prepareBackupInitTest(t, asJSON)
+				fake := &recordingInitBackupStore{}
+				store = fake
+
+				stdout, stderr, err := runBackupInitForTest(t, url)
+				if err != nil {
+					t.Fatalf("backup init %s: %v\nstderr: %s", url, err, stderr)
+				}
+				want := []backupAddCall{{name: defaultDoltBackupName, url: url}}
+				if !slices.Equal(fake.adds, want) {
+					t.Errorf("BackupAdd calls = %+v, want %+v", fake.adds, want)
+				}
+				assertBackupInitConfigured(t, beadsDir, url, asJSON, stdout)
+			})
+		}
+	}
+}
+
+// TestBackupInitProxiedPreservesCloudURL is the managed-local proxied twin of
+// TestBackupInitPreservesCloudURL: the URL the server is asked to register in
+// CALL DOLT_BACKUP('add', ...) is the one the user supplied.
+//
+// Cannot be parallel: mutates proxiedServerMode, uowProvider and stdio.
+func TestBackupInitProxiedPreservesCloudURL(t *testing.T) {
+	for _, url := range cloudBackupInitURLs {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", url, asJSON), func(t *testing.T) {
+				beadsDir := prepareBackupInitTest(t, asJSON)
+				proxiedServerMode = true
+				if err := os.WriteFile(configfile.ProxiedServerClientInfoPath(beadsDir), []byte(`{}`), 0o600); err != nil {
+					t.Fatalf("write managed-local sidecar: %v", err)
+				}
+				db, mock, err := sqlmock.New()
+				if err != nil {
+					t.Fatalf("sqlmock.New: %v", err)
+				}
+				t.Cleanup(func() { _ = db.Close() })
+				mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BACKUP('add', ?, ?)")).
+					WithArgs(proxiedBackupTargetName, url).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				uowProvider = &sqlmockMaintenanceProvider{db: db}
+
+				stdout, stderr, err := runBackupInitForTest(t, url)
+				if err != nil {
+					t.Fatalf("proxied backup init %s: %v\nstdout: %s\nstderr: %s", url, err, stdout, stderr)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Errorf("server registration: %v", err)
+				}
+				assertBackupInitConfigured(t, beadsDir, url, asJSON, stdout)
+			})
+		}
+	}
+}
+
+// backupInitAcceptedFormsForTest is the accepted-forms suffix of the
+// unsupported-scheme refusal, spelled out here rather than read from
+// production so a change to the advertised list fails this test.
+const backupInitAcceptedFormsForTest = "accepted forms: https://, http://, file://, aws://, gs://, s3://, az://, oci://"
+
+// TestBackupInitRefusesUnsupportedSchemeBeforeRegistering pins the other half
+// of #6227: an unlisted URL-shaped destination is refused with the scheme
+// alone named (never the userinfo, host, path or query), in text and JSON,
+// on the direct and the managed-local proxied route, before anything is
+// registered, before the backup config is written, and without marking the
+// command as a write. Before the fix it was registered as a file:// path.
+//
+// Cannot be parallel: mutates store, uowProvider, proxiedServerMode,
+// jsonOutput and stdio.
+func TestBackupInitRefusesUnsupportedSchemeBeforeRegistering(t *testing.T) {
+	const input = "nope://user:secret@host/path?token=value"
+	const wantMsg = `unsupported backup URL scheme "nope"; ` + backupInitAcceptedFormsForTest
+	for _, tc := range []struct {
+		name       string
+		proxied    bool
+		asJSON     bool
+		seedConfig bool
+	}{
+		{name: "direct text", seedConfig: true},
+		{name: "direct json", asJSON: true},
+		{name: "proxied text", proxied: true},
+		{name: "proxied json", proxied: true, asJSON: true, seedConfig: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := prepareBackupInitTest(t, tc.asJSON)
+			direct := &recordingInitBackupStore{}
+			store = direct
+			proxy := &fakeMaintenanceProvider{}
+			if tc.proxied {
+				proxiedServerMode = true
+				if err := os.WriteFile(configfile.ProxiedServerClientInfoPath(beadsDir), []byte(`{}`), 0o600); err != nil {
+					t.Fatalf("write managed-local sidecar: %v", err)
+				}
+				uowProvider = proxy
+			}
+			cfgPath := filepath.Join(beadsDir, "dolt-backup.json")
+			seed := []byte(`{"backup_url": "file:///previous/backup", "backup_name": "default"}`)
+			if tc.seedConfig {
+				if err := os.WriteFile(cfgPath, seed, 0o600); err != nil {
+					t.Fatalf("seed backup config: %v", err)
+				}
+			}
+
+			stdout, stderr, err := runBackupInitForTest(t, input)
+			assertExitCode(t, err, 1)
+
+			if tc.asJSON {
+				if stderr != "" {
+					t.Errorf("stderr = %q, want empty under --json", stderr)
+				}
+				var resp map[string]any
+				if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+					t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+				}
+				if resp["error"] != wantMsg {
+					t.Errorf("JSON error = %q, want %q", resp["error"], wantMsg)
+				}
+			} else {
+				if stdout != "" {
+					t.Errorf("stdout = %q, want empty", stdout)
+				}
+				if want := "Error: " + wantMsg + "\n"; stderr != want {
+					t.Errorf("stderr = %q, want %q", stderr, want)
+				}
+			}
+			for _, secret := range []string{"user", "secret", "host", "path", "token", "value"} {
+				if strings.Contains(stdout+stderr, secret) {
+					t.Errorf("refusal output leaks %q from the URL:\nstdout: %s\nstderr: %s", secret, stdout, stderr)
+				}
+			}
+
+			if len(direct.adds) != 0 {
+				t.Errorf("direct BackupAdd calls = %+v, want none", direct.adds)
+			}
+			if proxy.runs != 0 {
+				t.Errorf("proxied maintenance calls = %d, want none", proxy.runs)
+			}
+			got, readErr := os.ReadFile(cfgPath)
+			switch {
+			case tc.seedConfig && (readErr != nil || string(got) != string(seed)):
+				t.Errorf("backup config = %q (err %v), want it left as %q", got, readErr, seed)
+			case !tc.seedConfig && !errors.Is(readErr, os.ErrNotExist):
+				t.Errorf("backup config written (%q, err %v), want none", got, readErr)
+			}
+			if commandDidWrite.Load() {
+				t.Error("commandDidWrite = true after a refused init, want false")
+			}
+		})
+	}
+}
+
+// TestValidateBackupInitTarget pins the refusal for each kind of unlisted
+// URL-shaped destination, including a listed scheme in another case: the
+// message names only the scheme token and the accepted forms.
+func TestValidateBackupInitTarget(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ input, scheme string }{
+		{"nope://host/path", "nope"},
+		{"dolthub://org/repo", "dolthub"},
+		{"git+ssh://git@github.com/org/repo.git", "git+ssh"},
+		{"oss://bucket/beads", "oss"},
+		{"S3://bucket/beads", "S3"},
+		{"HTTPS://doltremoteapi.dolthub.com/user/repo", "HTTPS"},
+		{"nope://user:secret@host/path?token=value", "nope"},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			t.Parallel()
+			err := validateBackupInitTarget(tc.input)
+			want := `unsupported backup URL scheme "` + tc.scheme + `"; ` + backupInitAcceptedFormsForTest
+			if err == nil || err.Error() != want {
+				t.Fatalf("validateBackupInitTarget(%q) = %v, want %q", tc.input, err, want)
+			}
+		})
+	}
+}
+
+// TestValidateBackupInitTargetKeepsAcceptedInputs is the guard on the other
+// side of the refusal: every accepted URL form and every filesystem input,
+// including one-letter Windows drives (C://backups has a one-character
+// "scheme") and a URL-looking local directory spelled ./name://path, still
+// passes validation and keeps its old resolution.
+func TestValidateBackupInitTargetKeepsAcceptedInputs(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{
+		"https://doltremoteapi.dolthub.com/user/repo",
+		"http://localhost:50051/repo",
+		"file:///tmp/backup",
+		"aws://[table:bucket]/beads",
+		"gs://bucket/beads",
+		"s3://bucket/beads?endpoint=https://minio.local",
+		"az://account.blob.core.windows.net/container/beads",
+		"oci://registry.example/tenant/beads",
+		"",
+		"my-backup",
+		filepath.Join(t.TempDir(), "beads-backup"),
+		"~/backups/beads",
+		"./odd://name",
+		`C:\backups`,
+		"C:/backups",
+		"C://backups",
+	} {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			if err := validateBackupInitTarget(input); err != nil {
+				t.Fatalf("validateBackupInitTarget(%q) = %v, want nil", input, err)
+			}
+		})
+	}
+}
+
+// TestResolveDoltBackupURL_PathLikeInputsStayLocal pins that the inputs the
+// refusal deliberately lets through as paths are still resolved the
+// platform-native filesystem way, not passed through as URLs.
+func TestResolveDoltBackupURL_PathLikeInputsStayLocal(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{"./odd://name", `C:\backups`, "C:/backups", "C://backups"} {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			abs, err := filepath.Abs(input)
+			if err != nil {
+				t.Fatalf("filepath.Abs(%q): %v", input, err)
+			}
+			if got, want := resolveDoltBackupURL(input), "file://"+abs; got != want {
+				t.Errorf("resolveDoltBackupURL(%q) = %q, want %q", input, got, want)
+			}
+		})
+	}
+}
+
+// TestBackupInitRegistersDriveLikePathLocally drives a one-letter drive
+// through the whole command: the refusal must not catch it, and it is
+// registered as the same file:// path it always was.
+//
+// Cannot be parallel: mutates store, rootCtx, jsonOutput and stdio.
+func TestBackupInitRegistersDriveLikePathLocally(t *testing.T) {
+	beadsDir := prepareBackupInitTest(t, false)
+	fake := &recordingInitBackupStore{}
+	store = fake
+	const input = "C://backups"
+	abs, err := filepath.Abs(input)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%q): %v", input, err)
+	}
+	want := "file://" + abs
+
+	stdout, stderr, err := runBackupInitForTest(t, input)
+	if err != nil {
+		t.Fatalf("backup init %s: %v\nstderr: %s", input, err, stderr)
+	}
+	if wantAdds := []backupAddCall{{name: defaultDoltBackupName, url: want}}; !slices.Equal(fake.adds, wantAdds) {
+		t.Errorf("BackupAdd calls = %+v, want %+v", fake.adds, wantAdds)
+	}
+	assertBackupInitConfigured(t, beadsDir, want, false, stdout)
 }

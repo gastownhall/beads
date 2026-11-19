@@ -70,6 +70,7 @@ func TestNativeSchemesContainsEachNativeScheme(t *testing.T) {
 		"aws://",
 		"gs://",
 		"s3://",
+		"az://",
 		"git+https://",
 		"git+ssh://",
 		"git+http://",
@@ -104,10 +105,9 @@ func TestFromGitURLLeavesSchemeURLsUnsplit(t *testing.T) {
 			"git+s3://bucket/db?endpoint=https://acct.r2.example&region=auto",
 		},
 		{"gs://bucket/team@prod/db", "git+gs://bucket/team@prod/db"},
-		// az:// and oci:// are deliberately absent from NativeSchemes (#6227).
-		// The guard is keyed on "://", not on list membership, so they are
-		// protected here exactly as the listed schemes are - which is why
-		// completing that list is not what closes this hole.
+		// az:// is listed in NativeSchemes and oci:// is not. The guard is
+		// keyed on "://", not on list membership, so both are protected here
+		// exactly alike.
 		{
 			"az://account.blob.core.windows.net/container/beads",
 			"git+az://account.blob.core.windows.net/container/beads",

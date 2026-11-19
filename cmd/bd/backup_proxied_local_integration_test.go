@@ -247,3 +247,42 @@ func readProxiedBackupStatus(t *testing.T, bd string, p proxiedProject) proxiedB
 	}
 	return status
 }
+
+// TestManagedLocalProxiedBackupInitPreservesCloudURL pins the proxied half of
+// GH#6227 (AC-1): on a managed-local proxied workspace, `bd backup init` must
+// register and record an Azure or OCI destination exactly as supplied. At base
+// the proxied route resolved the URL through filepath.Abs before handing it
+// to CALL DOLT_BACKUP('add', ...), registering file://<cwd>/az:/... and saving
+// that as the configured destination — a backup that reports success and
+// targets the wrong machine's disk.
+//
+// Registration is enough: the pinned Dolt registers a backup remote without
+// opening its destination, so no cloud access happens here. The second
+// subtest also re-inits over the first destination, exercising the
+// replace-on-conflict path with a cloud URL.
+func TestManagedLocalProxiedBackupInitPreservesCloudURL(t *testing.T) {
+	requireManagedLocalProxiedEnv(t)
+
+	bd := buildEmbeddedBD(t)
+	p := bdManagedLocalInit(t, bd, "bkinit", 5*time.Minute)
+
+	for _, tc := range []struct{ name, url string }{
+		{name: "azure", url: "az://account.blob.core.windows.net/container/beads"},
+		{name: "oci", url: "oci://registry.example/tenant/beads"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := bdProxiedRun(t, bd, p.dir, "backup", "init", tc.url)
+			if err != nil {
+				t.Fatalf("bd backup init %s: %v\n%s", tc.url, err, out)
+			}
+			if !strings.Contains(string(out), "Backup destination configured: "+tc.url) {
+				t.Fatalf("init output does not echo the supplied URL:\n%s", out)
+			}
+			status := readProxiedBackupStatus(t, bd, p)
+			if !status.Dolt.Configured || status.Dolt.BackupURL != tc.url || status.Dolt.BackupName != "default" {
+				t.Fatalf("backup status = %+v, want the exact supplied URL %q as %q",
+					status.Dolt, tc.url, "default")
+			}
+		})
+	}
+}

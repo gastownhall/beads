@@ -1431,6 +1431,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd backup init` keeps `s3://`, `az://` and `oci://` destinations instead
+  of turning them into a local path** (#6227). Only `https://`, `http://`,
+  `file://`, `aws://` and `gs://` were passed to Dolt; any other URL was
+  resolved as a relative path, so `bd backup init az://container/beads`
+  registered `file://$PWD/az:/container/beads` and later syncs wrote a local
+  directory, and an S3 endpoint query lost its `//`. The accepted forms are
+  now `https://`, `http://`, `file://`, `aws://`, `gs://`, `s3://`, `az://`
+  and `oci://`, matched case-sensitively and passed through unchanged. Any
+  other URL-shaped argument, such as `dolthub://`, `oss://` or `S3://`, is
+  refused with `unsupported backup URL scheme` before anything is registered;
+  a one-letter drive such as `C://backups` is still a path. Restoring from a
+  remote URL with `bd backup restore` is unchanged and still needs a local
+  backup directory.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

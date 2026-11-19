@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,8 +35,15 @@ var backupInitCmd = &cobra.Command{
 	Long: `Configure a filesystem path or URL as a backup destination.
 
 The path can be a local directory (external drive, NAS, Dropbox folder) or a
-DoltHub remote URL. If the destination was previously configured, it is
-updated to the new path.
+remote URL. If the destination was previously configured, it is updated to
+the new path.
+
+Accepted backup URL forms: https://, http://, file://, aws://, gs://, s3://, az://, oci://.
+These are matched case-sensitively and handed to Dolt unchanged. Any other
+argument that looks like a URL (a scheme of two or more characters followed
+by "://") is refused. Everything else is a local path, including a
+one-letter drive such as C://backups; for a local directory whose name looks
+like a URL, write ./name://path.
 
 Filesystem examples:
   bd backup add /mnt/usb/beads-backup
@@ -43,6 +51,11 @@ Filesystem examples:
 
 DoltHub (recommended for cloud backup):
   bd backup add https://doltremoteapi.dolthub.com/myuser/beads-backup
+
+Cloud storage (credentials come from the environment of the process running
+Dolt):
+  bd backup add s3://my-bucket/beads-backup
+  bd backup add az://myaccount.blob.core.windows.net/container/beads-backup
 
 After adding, run 'bd backup sync' to push your data.`,
 	Args: cobra.ExactArgs(1),
@@ -65,6 +78,13 @@ After adding, run 'bd backup sync' to push your data.`,
 		ctx := rootCtx
 		rawPath := args[0]
 
+		// Refuse an unlisted URL before either route registers anything:
+		// resolved as a path it would silently configure a local file://
+		// destination the user never asked for.
+		if err := validateBackupInitTarget(rawPath); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+
 		if usesProxiedServer() {
 			return runBackupInitProxied(ctx, rawPath)
 		}
@@ -74,7 +94,7 @@ After adding, run 'bd backup sync' to push your data.`,
 		}
 
 		// Resolve filesystem paths to absolute and add file:// prefix.
-		// DoltHub URLs are passed through as-is.
+		// Backup URLs (backupInitURLSchemes) are passed through as-is.
 		backupURL := resolveDoltBackupURL(rawPath)
 
 		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
@@ -208,14 +228,58 @@ Run 'bd backup init <path>' first to configure a destination.`,
 	},
 }
 
+// backupInitURLSchemes are the URL prefixes `bd backup init` hands to Dolt
+// unchanged. It is init's policy, not Dolt's exhaustive transport list: each
+// entry is a destination Beads advertises and the pinned Dolt registers a
+// remote factory for (DoltHub/HTTP(S), file, AWS, GCS, S3, Azure, OCI). Matching
+// is case-sensitive, like Dolt's own scheme lookup.
+var backupInitURLSchemes = []string{
+	"https://",
+	"http://",
+	"file://",
+	"aws://",
+	"gs://",
+	"s3://",
+	"az://",
+	"oci://",
+}
+
+// isDoltBackupURL reports whether raw starts with one of backupInitURLSchemes.
+func isDoltBackupURL(raw string) bool {
+	for _, scheme := range backupInitURLSchemes {
+		if strings.HasPrefix(raw, scheme) {
+			return true
+		}
+	}
+	return false
+}
+
+// backupInitURLShape matches a URL-shaped argument: a scheme of at least two
+// characters followed by "://". Two, so a one-letter Windows drive such as
+// C://backups stays a filesystem path.
+var backupInitURLShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]+://`)
+
+// validateBackupInitTarget refuses a URL-shaped destination whose scheme is
+// not in backupInitURLSchemes (an unknown scheme, or a listed one in another
+// case). resolveDoltBackupURL would otherwise treat it as a relative path and
+// register file://$PWD/<scheme>:/..., a local destination the user never
+// named. The error names the scheme only: the rest of the URL can carry
+// credentials. Paths and accepted URLs return nil.
+func validateBackupInitTarget(raw string) error {
+	if isDoltBackupURL(raw) || !backupInitURLShape.MatchString(raw) {
+		return nil
+	}
+	scheme, _, _ := strings.Cut(raw, "://")
+	return fmt.Errorf("unsupported backup URL scheme %q; accepted forms: %s",
+		scheme, strings.Join(backupInitURLSchemes, ", "))
+}
+
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.
-// Filesystem paths get resolved to absolute and prefixed with file://
-// URLs (https://, http://) are passed through as-is.
+// URLs with a scheme in backupInitURLSchemes are passed through byte-for-byte;
+// anything else is a filesystem path, resolved to absolute and prefixed with
+// file://.
 func resolveDoltBackupURL(raw string) string {
-	// DoltHub or other remote URLs — pass through
-	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") ||
-		strings.HasPrefix(raw, "file://") || strings.HasPrefix(raw, "aws://") ||
-		strings.HasPrefix(raw, "gs://") {
+	if isDoltBackupURL(raw) {
 		return raw
 	}
 
