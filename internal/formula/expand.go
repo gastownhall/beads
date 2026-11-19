@@ -33,7 +33,20 @@ const DefaultMaxExpansionDepth = 5
 //
 // The parser is used to load referenced expansion formulas by name.
 // If parser is nil, no expansions are applied.
+//
+// The expansions are metered by a fresh ExpansionBudget seeded with steps;
+// see ApplyExpansionsWithBudget.
 func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*Step, error) {
+	return ApplyExpansionsWithBudget(steps, compose, parser, NewExpansionBudget(steps))
+}
+
+// ApplyExpansionsWithBudget is ApplyExpansions charging every expansion to
+// budget, which must already count steps. Each expansion releases the target
+// subtree it replaces and reserves its template's steps before the template
+// is cloned, so chained expand and map rules share one budget and cannot each
+// multiply the formula: the rule that would cross the limit fails with
+// ErrExpansionLimit, naming the rule and its target.
+func ApplyExpansionsWithBudget(steps []*Step, compose *ComposeRules, parser *Parser, budget *ExpansionBudget) ([]*Step, error) {
 	if compose == nil || parser == nil {
 		return steps, nil
 	}
@@ -76,6 +89,12 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 		// Merge formula default vars with rule overrides
 		vars := mergeVars(expFormula, rule.Vars)
+
+		// Swap the target's charge for the template's before cloning it.
+		what := fmt.Sprintf("expand rule on %q (with %q)", rule.Target, rule.With)
+		if _, err := chargeReplacement(budget, result, rule.Target, expFormula.Template, what); err != nil {
+			return nil, err
+		}
 
 		// Expand the target step (start at depth 0)
 		expandedSteps, err := expandStep(targetStep, expFormula.Template, vars)
@@ -134,6 +153,16 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 		// Expand each matching step
 		for _, targetStep := range toExpand {
+			// A match can be stale: expanding a parent that also matched
+			// replaced this step along with it. Only steps still in the
+			// graph release a charge; a stale match is charged for the
+			// template it clones and refunded once nothing inserted it.
+			what := fmt.Sprintf("map rule %q (with %q) on %q", rule.Select, rule.With, targetStep.ID)
+			occurrences, err := chargeReplacement(budget, result, targetStep.ID, expFormula.Template, what)
+			if err != nil {
+				return nil, err
+			}
+
 			expandedSteps, err := expandStep(targetStep, expFormula.Template, vars)
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
@@ -144,6 +173,9 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 			result = replaceStep(result, targetStep.ID, expandedSteps)
 			expanded[targetStep.ID] = true
+			if occurrences == 0 {
+				budget.release(templateSize(expFormula.Template))
+			}
 
 			// Update dependencies: any step that depended on the target should now
 			// depend on the last step of the expansion
@@ -317,6 +349,44 @@ func buildStepMap(steps []*Step) map[string]*Step {
 	return result
 }
 
+// chargeReplacement charges budget, before template is built, for the
+// replacement replaceStep makes of id in steps, and returns how many steps
+// that replaces. replaceStep replaces EVERY step carrying the ID, and an ID
+// can repeat until the duplicate check after the last rule (a template step
+// whose id has no {target} is copied verbatim each time it is inlined), so
+// each occurrence's subtree is released and each is charged its own copy of
+// the template: charging one would let a repeated ID multiply the graph past
+// the meter. A stale match, with no occurrence left, is charged for the one
+// copy its expansion builds; the caller refunds it once nothing inserted it.
+func chargeReplacement(budget *ExpansionBudget, steps []*Step, id string, template []*Step, what string) (int, error) {
+	occurrences, removed := replacedSubtrees(steps, id)
+	if occurrences > 1 {
+		what = fmt.Sprintf("%s at all %d steps with that ID", what, occurrences)
+	}
+	return occurrences, budget.replaceCopies(removed, uint64(max(occurrences, 1)), templateSize(template), what)
+}
+
+// replacedSubtrees counts the steps replaceStep replaces for id: each step
+// with that ID that is not inside another one, since replaceStep does not
+// look inside a step it replaces. It also returns the size of the subtrees
+// they take with them.
+func replacedSubtrees(steps []*Step, id string) (count, size int) {
+	for _, s := range steps {
+		if s == nil {
+			continue
+		}
+		if s.ID == id {
+			count++
+			size += stepGraphSize([]*Step{s})
+			continue
+		}
+		c, n := replacedSubtrees(s.Children, id)
+		count += c
+		size += n
+	}
+	return count, size
+}
+
 // replaceStep replaces a step with the given ID with a slice of new steps.
 // Searches recursively through children to find and replace the target.
 func replaceStep(steps []*Step, targetID string, replacement []*Step) []*Step {
@@ -445,10 +515,16 @@ func prependTargetNeeds(root, target *Step) {
 // without requiring a Compose wrapper (bd-qzb).
 //
 // No-op if the formula is not an expansion type, has no Template, or already
-// has Steps.
+// has Steps. A template of more than MaxExpandedSteps steps fails with
+// ErrExpansionLimit before any step is built.
 func MaterializeExpansion(f *Formula, targetID string, vars map[string]string) error {
 	if f.Type != TypeExpansion || len(f.Template) == 0 || len(f.Steps) > 0 {
 		return nil
+	}
+
+	// The formula holds no steps yet, so the template alone is charged.
+	if err := NewExpansionBudget(nil).reserve(templateSize(f.Template), fmt.Sprintf("expansion formula %q", f.Formula)); err != nil {
+		return fmt.Errorf("materializing expansion %q: %w", f.Formula, err)
 	}
 
 	expandedSteps, err := expandStep(materializeTarget(f, targetID), f.Template, vars)
@@ -489,6 +565,10 @@ func ExpansionVarRefs(f *Formula, targetID string) []string {
 	if f.Type != TypeExpansion || len(f.Template) == 0 {
 		return nil
 	}
+	if templateSize(f.Template) > MaxExpandedSteps {
+		// MaterializeExpansion refuses the template; it reports why.
+		return nil
+	}
 
 	seen := make(map[string]bool)
 	record := func(s string) string {
@@ -520,17 +600,27 @@ func ExpansionVarRefs(f *Formula, targetID string) []string {
 //
 // Returns a new steps slice with inline expansions applied.
 // The original steps slice is not modified.
+//
+// Each inline expansion is charged to a fresh ExpansionBudget seeded with
+// steps; one that would grow the formula past MaxExpandedSteps fails with
+// ErrExpansionLimit before its template is expanded.
 func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
+	return ApplyInlineExpansionsWithBudget(steps, parser, NewExpansionBudget(steps))
+}
+
+// ApplyInlineExpansionsWithBudget is ApplyInlineExpansions charging each
+// expansion to budget, which meters the whole resolution steps belong to.
+func ApplyInlineExpansionsWithBudget(steps []*Step, parser *Parser, budget *ExpansionBudget) ([]*Step, error) {
 	if parser == nil {
 		return steps, nil
 	}
 
-	return applyInlineExpansionsRecursive(steps, parser, 0)
+	return applyInlineExpansionsRecursive(steps, parser, 0, budget)
 }
 
 // applyInlineExpansionsRecursive handles inline expansions for a slice of steps.
 // depth tracks recursion to prevent infinite expansion loops.
-func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([]*Step, error) {
+func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int, budget *ExpansionBudget) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("inline expansion depth limit exceeded: max %d levels", DefaultMaxExpansionDepth)
 	}
@@ -555,6 +645,12 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 				return nil, fmt.Errorf("inline expand on step %q: %q has no template steps", step.ID, step.Expand)
 			}
 
+			// The template replaces the step: charge it before building it.
+			if err := budget.replace(stepGraphSize([]*Step{step}), templateSize(expFormula.Template),
+				fmt.Sprintf("inline expansion %q on step %q", step.Expand, step.ID)); err != nil {
+				return nil, err
+			}
+
 			// Merge formula default vars with step's ExpandVars overrides
 			vars := mergeVars(expFormula, step.ExpandVars)
 
@@ -568,7 +664,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			propagateTargetDeps(step, expandedSteps)
 
 			// Recursively process expanded steps for nested inline expansions
-			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1)
+			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1, budget)
 			if err != nil {
 				return nil, err
 			}
@@ -579,7 +675,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			clone := cloneStep(step)
 
 			if len(step.Children) > 0 {
-				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth)
+				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth, budget)
 				if err != nil {
 					return nil, err
 				}

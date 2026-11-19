@@ -1288,6 +1288,12 @@ bd cook
     |   - Composition rules for bonding formulas together
     |   - Inheritance via extends
     |
+    | Cooked formulas are bounded: one resolution may not expand past
+    | 10000 steps, counted across every transformation together (loop
+    | iterations, advice insertions, inline and compose expansions, and
+    | aspects). A formula that legitimately needs more steps has to be
+    | split into several formulas.
+    |
     | The --persist flag enables the legacy behavior of writing the proto
     | to the database. This is useful when you want to reuse the same
     | proto multiple times without re-cooking.

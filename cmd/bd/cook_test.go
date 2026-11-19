@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -2209,4 +2210,107 @@ gate = { type = "human" }
 			t.Errorf("land blocks edges = %v, want %v (the loop's exit-gate task and its companion)", got, want)
 		}
 	})
+}
+
+// writeCookFormulaJSON writes a formula file for the cook helpers to load.
+func writeCookFormulaJSON(t *testing.T, dir, name string, body map[string]any) {
+	t.Helper()
+	body["formula"] = name
+	body["version"] = 1
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal %s: %v", name, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".formula.json"), raw, 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+// A formula that would grow past formula.MaxExpandedSteps is refused by both
+// cook helpers - before any issue or wisp is created from it - with an error
+// that names the formula, wraps formula.ErrExpansionLimit, and wraps
+// formula.ErrValidation so pour, wisp, bond and seed report it instead of
+// "not found as formula or proto ID".
+func TestCookHelpers_ExpansionLimitNamesTheFormula(t *testing.T) {
+	loop := func(count int) map[string]any {
+		return map[string]any{"id": "fan", "title": "Fan", "loop": map[string]any{
+			"count": count, "body": []map[string]any{{"id": "b", "title": "B"}},
+		}}
+	}
+	template := make([]map[string]any, formula.MaxExpandedSteps+1)
+	for i := range template {
+		template[i] = map[string]any{"id": fmt.Sprintf("{target}.t%d", i), "title": "T"}
+	}
+	cases := []struct {
+		name       string
+		write      func(t *testing.T, dir string)
+		standalone bool // only resolveAndCookFormulaWithVars materializes it
+	}{
+		{name: "loop", write: func(t *testing.T, dir string) {
+			writeCookFormulaJSON(t, dir, "sprawl", map[string]any{"type": "workflow", "steps": []any{loop(formula.MaxExpandedSteps + 1)}})
+		}},
+		{name: "aspect", write: func(t *testing.T, dir string) {
+			writeCookFormulaJSON(t, dir, "wrap", map[string]any{"type": "aspect", "advice": []any{map[string]any{
+				"target": "*", "before": map[string]any{"id": "{step.id}.pre"}, "after": map[string]any{"id": "{step.id}.post"},
+			}}})
+			writeCookFormulaJSON(t, dir, "sprawl", map[string]any{
+				"type": "workflow", "steps": []any{loop(4000)}, "compose": map[string]any{"aspects": []string{"wrap"}},
+			})
+		}},
+		{name: "standalone expansion", standalone: true, write: func(t *testing.T, dir string) {
+			writeCookFormulaJSON(t, dir, "sprawl", map[string]any{"type": "expansion", "template": template})
+		}},
+	}
+	check := func(t *testing.T, helper string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: want an expansion limit error", helper)
+		}
+		if !errors.Is(err, formula.ErrExpansionLimit) || !errors.Is(err, formula.ErrValidation) {
+			t.Errorf("%s error = %v; want it to wrap formula.ErrExpansionLimit and formula.ErrValidation", helper, err)
+		}
+		if !strings.Contains(err.Error(), `"sprawl"`) {
+			t.Errorf("%s error = %q; want it to name the formula %q", helper, err, "sprawl")
+		}
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.write(t, dir)
+			if !tc.standalone {
+				_, err := loadAndResolveFormula("sprawl", []string{dir})
+				check(t, "loadAndResolveFormula", err)
+			}
+			_, err := resolveAndCookFormulaWithVars("sprawl", []string{dir}, nil)
+			check(t, "resolveAndCookFormulaWithVars", err)
+			_, err = resolveAndCookFormulaWithVars("sprawl", []string{dir}, map[string]string{})
+			check(t, "resolveAndCookFormulaWithVars with vars", err)
+		})
+	}
+}
+
+// One budget meters every phase of a resolution: a formula at the limit
+// after its loops, advice and aspects still cooks.
+func TestCookHelpers_FormulaAtExpansionLimitCooks(t *testing.T) {
+	dir := t.TempDir()
+	writeCookFormulaJSON(t, dir, "wrap", map[string]any{"type": "aspect", "advice": []any{map[string]any{
+		"target": "fan.*", "after": map[string]any{"id": "{step.id}.post"},
+	}}})
+	writeCookFormulaJSON(t, dir, "full", map[string]any{
+		"type": "workflow",
+		"steps": []any{map[string]any{"id": "fan", "title": "Fan", "loop": map[string]any{
+			"count": formula.MaxExpandedSteps / 2, "body": []map[string]any{{"id": "b", "title": "B"}},
+		}}},
+		"compose": map[string]any{"aspects": []string{"wrap"}},
+	})
+	resolved, err := loadAndResolveFormula("full", []string{dir})
+	if err != nil {
+		t.Fatalf("loadAndResolveFormula at the limit: %v", err)
+	}
+	if len(resolved.Steps) != formula.MaxExpandedSteps {
+		t.Fatalf("resolved %d steps, want %d", len(resolved.Steps), formula.MaxExpandedSteps)
+	}
+	if _, err := resolveAndCookFormulaWithVars("full", []string{dir}, nil); err != nil {
+		t.Fatalf("resolveAndCookFormulaWithVars at the limit: %v", err)
+	}
 }

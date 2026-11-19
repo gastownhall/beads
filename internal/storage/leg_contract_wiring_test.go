@@ -95,6 +95,21 @@ const idRetentionNoRenameDoorWaiverReason = "IDRetentionFixture.Rename is storag
 	"leg serves no identity change: the unit of work has no rename use case and the http client refuses it as " +
 	"unsupported. The guard is the shared rename body's (issueops.UpdateIssueIDInTx) and runs on every store leg"
 
+// applySnapshotNotOnHTTPWireWaiverReason is why the two BatchApply cases that
+// pin ItemResult.Issue's shared latest-row snapshot (bd-xx3ma9) stop short of
+// the http leg: the snapshot is the subject of both, and it never crosses the
+// wire. internal/httpapi's applyBatchResponse drops Issue and the http client
+// answers every item with Issue nil (ledger row L-apply-snapshot), so both
+// cases would fail on their first row entry with nothing to compare.
+// TestServedBatchApplyAnswersEveryItemWithoutASnapshot already pins that
+// divergence on this leg, and the per-item facts the cases check beside the
+// snapshot travel the wire and run here through the other BatchApply cases.
+// The snapshot sharing itself runs on every store leg.
+const applySnapshotNotOnHTTPWireWaiverReason = "ItemResult.Issue, the shared latest-row snapshot both cases " +
+	"pin, is not on the http wire: internal/httpapi's applyBatchResponse drops it and the http client answers " +
+	"every item with Issue nil (ledger row L-apply-snapshot, pinned on this leg by " +
+	"TestServedBatchApplyAnswersEveryItemWithoutASnapshot); the snapshot sharing runs on every store leg"
+
 // The waivers of the three legs registered here. Each is registered beside its
 // leg rather than written into one literal, so a leg registered elsewhere
 // brings its waivers the same way; see unwiredContractEntrypoints.
@@ -132,6 +147,9 @@ func init() {
 		"RunIDRetentionImportSkipsAndReportsARetiredRow": idRetentionNoImportDoorWaiverReason,
 		"RunIDRetentionARacingImportNeverResurrects":     idRetentionNoImportDoorWaiverReason,
 		"RunIDRetentionRefusesARenameOntoARetiredID":     idRetentionNoRenameDoorWaiverReason,
+
+		"RunBatchApplyRowEntriesShareTheLatestSnapshot":                     applySnapshotNotOnHTTPWireWaiverReason,
+		"RunBatchApplyPersistenceMovesThenSpliceShareThePostSpliceSnapshot": applySnapshotNotOnHTTPWireWaiverReason,
 
 		"RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape":         cycleTracksWireGapWaiverReason,
 		"RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop":            cycleTracksWireGapWaiverReason,

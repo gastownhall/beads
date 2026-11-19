@@ -175,6 +175,12 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("CarriesTheGateMembers", func(t *testing.T) {
 		conformance.RunBatchApplyCarriesTheGateMembers(t, ctx, fixture)
 	})
+	t.Run("RowEntriesShareTheLatestSnapshot", func(t *testing.T) {
+		conformance.RunBatchApplyRowEntriesShareTheLatestSnapshot(t, ctx, fixture)
+	})
+	t.Run("PersistenceMovesThenSpliceShareThePostSpliceSnapshot", func(t *testing.T) {
+		conformance.RunBatchApplyPersistenceMovesThenSpliceShareThePostSpliceSnapshot(t, ctx, fixture)
+	})
 }
 
 func newUOWBatchApplyFixture(t *testing.T, ctx context.Context, prefix string) conformance.BatchApplyFixture {

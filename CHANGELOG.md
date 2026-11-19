@@ -170,6 +170,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remote URL. See
   [Sync failures](docs/recovery/sync-failures.md#credentials-in-a-remote-url-and-merge-commits).
 
+- **A formula can no longer make bd build steps without bound (#7882, from
+  #7883 by @Wenjix).** A formula's loops (a large `count`, a wide `range`,
+  nested loops), chained `compose.expand` and `compose.map` rules, advice,
+  aspects and inline expansions multiplied its steps with no limit, so a
+  committed formula could exhaust the memory of anyone who ran `bd cook`,
+  `bd mol pour`, `bd mol wisp`, `bd mol bond` or `bd mol seed` on it. One
+  resolution of a formula now grows to at most 10000 steps, counted across
+  all of those transformations together: the loop, rule, advice or expansion
+  that would cross the limit is refused before its steps are built, with a
+  `formula expansion limit exceeded` error that names the formula, the loop
+  or rule and the limit. Split a formula that needs more steps into several.
+  The limit counts steps, not text: long titles and descriptions are not
+  bounded.
+
 ### Added
 
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
@@ -819,6 +833,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`issueops.ItemResult.Issue` from a batch apply is now the row's latest
+  snapshot, shared by every entry for that row (#7882, from #7883 by
+  @Wenjix).** `BatchApplier.ApplyBatch` held a full hydrated copy of the row
+  for every item, so a request that wrote one large row many times held that
+  many copies until it returned. It now keeps one snapshot per row: the one
+  the request's last create, update or close of the row hydrated, replaced by
+  the row's metadata splice when one followed, and every create, update and
+  close entry for the row points at it. It is not the row as of that item
+  (read `Changed` and `RowVersion`, which stay per item), a later `dep_add`
+  does not refresh it, and it is read-only: copy it before changing it. Hooks
+  get the same snapshot, so when one request creates a row and then updates
+  or closes it, `on_create` and `on_update` see the row as the request left
+  it, and a label a later item added also fires in the per-label `on_update`
+  events that follow the create. The `bd serve` wire result is unchanged: it
+  never carried the snapshot.
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull

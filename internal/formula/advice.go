@@ -13,6 +13,7 @@
 package formula
 
 import (
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -60,21 +61,53 @@ func MatchGlob(pattern, stepID string) bool {
 // Self-matching prevention: Advice only matches steps that
 // existed BEFORE this call. Steps inserted by advice (before/after/around)
 // are not matched, preventing infinite recursion.
-func ApplyAdvice(steps []*Step, advice []*AdviceRule) []*Step {
+//
+// The steps advice inserts are charged to a fresh ExpansionBudget seeded with
+// steps; advice that would grow the formula past MaxExpandedSteps fails with
+// ErrExpansionLimit before its steps are built.
+func ApplyAdvice(steps []*Step, advice []*AdviceRule) ([]*Step, error) {
+	return ApplyAdviceWithBudget(steps, advice, NewExpansionBudget(steps))
+}
+
+// ApplyAdviceWithBudget is ApplyAdvice charging the steps it inserts to
+// budget, which meters the whole resolution steps belong to. On refusal the
+// budget keeps the charges of the steps already inserted; the resolution is
+// abandoned with the error.
+func ApplyAdviceWithBudget(steps []*Step, advice []*AdviceRule, budget *ExpansionBudget) ([]*Step, error) {
 	if len(advice) == 0 {
-		return steps
+		return steps, nil
 	}
 
 	// Collect original step IDs to prevent self-matching
 	originalIDs := collectStepIDs(steps)
 
-	return applyAdviceWithGuard(steps, advice, originalIDs)
+	return applyAdviceWithGuard(steps, advice, originalIDs, budget)
+}
+
+// adviceInsertions counts the steps the rules matching step insert around it.
+func adviceInsertions(step *Step, advice []*AdviceRule) int {
+	n := 0
+	for _, rule := range advice {
+		if !MatchGlob(rule.Target, step.ID) {
+			continue
+		}
+		if rule.Before != nil {
+			n++
+		}
+		if rule.After != nil {
+			n++
+		}
+		if rule.Around != nil {
+			n += len(rule.Around.Before) + len(rule.Around.After)
+		}
+	}
+	return n
 }
 
 // ApplyAdviceToOriginalOnly applies advice rules but only matches steps
 // whose IDs are in the originalIDs set. This prevents aspects from matching
 // steps they themselves inserted.
-func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[string]bool) []*Step {
+func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[string]bool, budget *ExpansionBudget) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps)*2) // Pre-allocate for insertions
 
 	for _, step := range steps {
@@ -83,6 +116,11 @@ func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[s
 			result = append(result, step)
 			continue
 		}
+		// Charge the steps advice inserts around this one before building them.
+		if err := budget.reserve(adviceInsertions(step, advice), fmt.Sprintf("advice on step %q", step.ID)); err != nil {
+			return nil, err
+		}
+
 		// Find matching advice rules for this step
 		var beforeSteps []*Step
 		var afterSteps []*Step
@@ -148,11 +186,15 @@ func applyAdviceWithGuard(steps []*Step, advice []*AdviceRule, originalIDs map[s
 
 		// Recursively apply advice to children
 		if len(step.Children) > 0 {
-			clonedStep.Children = ApplyAdvice(step.Children, advice)
+			children, err := ApplyAdviceWithBudget(step.Children, advice, budget)
+			if err != nil {
+				return nil, err
+			}
+			clonedStep.Children = children
 		}
 	}
 
-	return result
+	return result, nil
 }
 
 // adviceStepToStep converts an AdviceStep to a Step.

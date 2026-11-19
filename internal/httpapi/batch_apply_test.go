@@ -301,6 +301,55 @@ func TestApplyBatchAnswersWithTheLeanResult(t *testing.T) {
 	}
 }
 
+// TestApplyBatchAnswersEachItemsOwnRevisionUnderASharedSnapshot pins the wire
+// for a batch whose row entries share one latest snapshot (bd-xx3ma9): every
+// item answers with its OWN token, never the shared snapshot's, and the
+// snapshot still stops at the library boundary.
+func TestApplyBatchAnswersEachItemsOwnRevisionUnderASharedSnapshot(t *testing.T) {
+	shared := seededIssue("bd-1", "alice", "closed")
+	shared.RowVersion = 99
+	applier := &roleBatchApplier{result: issueops.ApplyBatchResult{
+		Keys: map[string]string{"root": "bd-1"},
+		Items: []issueops.ItemResult{
+			{Kind: issueops.ItemCreate, IssueID: "bd-1", Changed: true, RowVersion: 77, Issue: shared},
+			{Kind: issueops.ItemUpdate, IssueID: "bd-1", Changed: true, RowVersion: 88, Issue: shared},
+			{Kind: issueops.ItemUpdate, IssueID: "bd-1", Changed: false, RowVersion: 88, Issue: shared},
+			{Kind: issueops.ItemClose, IssueID: "bd-1", Changed: true, RowVersion: 99, Issue: shared},
+			{Kind: issueops.ItemDepAdd, IssueID: "bd-1", DependsOnID: "bd-7", Changed: true},
+		},
+	}}
+	ts := newApplyBatchServer(t, applier)
+
+	resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[{"kind":"create","create":{"title":"one"}}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	items, _ := decodeBody(t, resp)["items"].([]any)
+	want := []struct {
+		kind     string
+		changed  bool
+		revision string
+	}{
+		{"create", true, "77"},
+		{"update", true, "88"},
+		{"update", false, "88"},
+		{"close", true, "99"},
+		{"dep_add", true, "0"},
+	}
+	if len(items) != len(want) {
+		t.Fatalf("items = %v, want one entry per item", items)
+	}
+	for i, w := range want {
+		item, _ := items[i].(map[string]any)
+		if item["kind"] != w.kind || item["issue_id"] != "bd-1" || item["changed"] != w.changed || item["revision"] != w.revision {
+			t.Errorf("items[%d] = %v, want kind %s, changed %v, the item's own revision %s", i, item, w.kind, w.changed, w.revision)
+		}
+		if _, present := item["issue"]; present {
+			t.Errorf("items[%d] carries a hydrated issue; the shared snapshot stops at the library boundary", i)
+		}
+	}
+}
+
 // TestApplyBatchAnswersAnEmptyKeysObjectRatherThanNull: `keys` is a required
 // member, and a request whose creates named nothing must not answer with the
 // `null` a nil Go map marshals to.
