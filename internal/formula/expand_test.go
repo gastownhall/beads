@@ -1524,3 +1524,148 @@ func TestExpandedStepConditionIsVerbatim(t *testing.T) {
 		})
 	}
 }
+
+// TestExpandStepTemplateIsolation: every expanded step owns its mutable
+// state, so mutating one expansion's result changes neither the template nor
+// another expansion of it (bd-w153uq / #6433).
+func TestExpandStepTemplateIsolation(t *testing.T) {
+	target := &Step{ID: "work", Title: "Work"}
+	newTemplate := func() *Step {
+		prio := 1
+		return &Step{
+			ID:        "{target}.s",
+			Title:     "S",
+			Priority:  &prio,
+			Labels:    []string{"a"},
+			DependsOn: []string{"x"},
+			Needs:     []string{"y"},
+			Metadata: map[string]interface{}{
+				"nested":    map[string]interface{}{"list": []interface{}{"v", map[string]interface{}{"deep": "d"}}},
+				"emptyMap":  map[string]interface{}{},
+				"emptyList": []interface{}{},
+				"nilValue":  nil,
+			},
+			Gate:       &Gate{Type: "human", Timeout: "1h"},
+			OnComplete: &OnCompleteSpec{Bond: "b", Vars: map[string]string{}},
+			Children:   []*Step{{ID: "{target}.c", Title: "C", Labels: []string{"c"}, Metadata: map[string]interface{}{"k": "v"}}},
+		}
+	}
+	snapshot := func(s *Step) string {
+		t.Helper()
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	tmpl := newTemplate()
+	tmplBefore := snapshot(tmpl)
+	a, err := expandStep(target, []*Step{tmpl}, nil)
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	b, err := expandStep(target, []*Step{tmpl}, nil)
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	bBefore := snapshot(b[0])
+
+	// Empty containers keep their kind: an empty list stays an empty list,
+	// not null, and OnComplete keeps a non-nil Vars map.
+	if l, ok := a[0].Metadata["emptyList"].([]interface{}); !ok || l == nil {
+		t.Errorf("Metadata[emptyList] = %#v, want a non-nil empty list", a[0].Metadata["emptyList"])
+	}
+	if v, ok := a[0].Metadata["nilValue"]; !ok || v != nil {
+		t.Errorf("Metadata[nilValue] = %#v (present %v), want a present nil", v, ok)
+	}
+	if a[0].OnComplete == nil || a[0].OnComplete.Vars == nil {
+		t.Errorf("OnComplete.Vars = nil, want a non-nil empty map")
+	}
+
+	got := a[0]
+	if got.Priority == nil || got.Metadata == nil || got.Gate == nil || got.OnComplete == nil || len(got.Children) != 1 || got.Children[0].Metadata == nil {
+		t.Fatalf("expanded step dropped template fields, nothing to mutate: %+v", got)
+	}
+	*got.Priority = 4
+	got.Labels[0] = "mut"
+	got.DependsOn[0] = "mut"
+	got.Needs[0] = "mut"
+	nested := got.Metadata["nested"].(map[string]interface{})
+	list := nested["list"].([]interface{})
+	list[0] = "mut"
+	list[1].(map[string]interface{})["deep"] = "mut"
+	nested["added"] = "mut"
+	got.Metadata["emptyMap"].(map[string]interface{})["added"] = "mut"
+	got.Gate.Timeout = "9h"
+	got.OnComplete.Bond = "mut"
+	got.OnComplete.Vars["added"] = "mut"
+	got.Children[0].Title = "mut"
+	got.Children[0].Labels[0] = "mut"
+	got.Children[0].Metadata["k"] = "mut"
+
+	if after := snapshot(tmpl); after != tmplBefore {
+		t.Errorf("mutating an expanded step changed the template:\nbefore %s\nafter  %s", tmplBefore, after)
+	}
+	if after := snapshot(b[0]); after != bBefore {
+		t.Errorf("mutating one expansion changed another:\nbefore %s\nafter  %s", bBefore, after)
+	}
+}
+
+// nestedMetadata returns step metadata whose single string leaf sits at
+// depth levels, counting the root map as depth zero (metadataStrings'
+// convention).
+func nestedMetadata(levels int, leaf string) map[string]interface{} {
+	var v interface{} = leaf
+	for i := 1; i < levels; i++ {
+		v = map[string]interface{}{"k": v}
+	}
+	return map[string]interface{}{"k": v}
+}
+
+func metadataLeaf(t *testing.T, m map[string]interface{}) interface{} {
+	t.Helper()
+	var v interface{} = m
+	for {
+		mm, ok := v.(map[string]interface{})
+		if !ok {
+			return v
+		}
+		v = mm["k"]
+	}
+}
+
+// TestExpandStepMetadataDepthBound: metadata nested up to the scan bound is
+// cloned and substituted; anything deeper is an error naming the step, never
+// dropped or shared with the template (bd-w153uq / #6433).
+func TestExpandStepMetadataDepthBound(t *testing.T) {
+	target := &Step{ID: "work", Title: "Work"}
+	vars := map[string]string{"owner": "alice"}
+
+	t.Run("below_bound", func(t *testing.T) {
+		tmpl := &Step{ID: "{target}.s", Title: "S", Metadata: nestedMetadata(maxMetadataScanDepth-1, "{owner}")}
+		result, err := expandStep(target, []*Step{tmpl}, vars)
+		if err != nil {
+			t.Fatalf("expandStep: %v", err)
+		}
+		if got := metadataLeaf(t, result[0].Metadata); got != "alice" {
+			t.Errorf("deepest leaf = %#v, want %q", got, "alice")
+		}
+		if got := metadataLeaf(t, tmpl.Metadata); got != "{owner}" {
+			t.Errorf("template leaf = %#v, want it unchanged", got)
+		}
+	})
+
+	t.Run("at_bound", func(t *testing.T) {
+		tmpl := &Step{ID: "{target}.s", Title: "S", Metadata: nestedMetadata(maxMetadataScanDepth, "{owner}")}
+		_, err := expandStep(target, []*Step{tmpl}, vars)
+		if err == nil {
+			t.Fatal("expandStep accepted metadata nested past the bound")
+		}
+		for _, want := range []string{`"{target}.s"`, "metadata", fmt.Sprint(maxMetadataScanDepth)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+}
