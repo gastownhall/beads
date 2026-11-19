@@ -672,8 +672,14 @@ func (r initGateRequest) sharedRootHold() workspacegate.Mode {
 //
 // Contention waits up to initGateWait() (not the generic exclusiveGateWait),
 // honoring ctx cancellation, and prints one notice if the wait outlasts
-// gateWaitNoticeDelay. Past the bound init fails with the same refusal,
-// naming the budget and the knob that raises it.
+// gateWaitNoticeDelay. Past the bound init fails with a refusal that wraps
+// ErrBusy, names the budget and the knob that raises it, and says where the
+// contention lives: in shared-server mode the blocking holder can be another
+// project's process on the shared server — for an ordinary init (which holds
+// a resident holder's root SHARED) as much as for a destructive reinit
+// (--reinit-local keeps the shared root EXCLUSIVE, so a resident serve still
+// refuses it; that residual is documented in
+// docs/reference/configuration.md).
 func acquireInitMutationGate(ctx context.Context, req initGateRequest) (*workspacegate.MultiHandle, error) {
 	// Defense against callers that computed no workspace (bootstrap plans
 	// are the untrusted case): gating "" would resolve against the CWD and
@@ -687,11 +693,18 @@ func acquireInitMutationGate(ctx context.Context, req initGateRequest) (*workspa
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// The holder sidecar (and, while a destructive reinit waits behind a
+	// resident shared holder, the queued-writer intent sidecar) records why
+	// this process holds the gate.
+	reason := "bd init"
+	if req.reinitLocal {
+		reason = "bd init --reinit-local"
+	}
 	wait := initGateWait()
 	onWait, stopNotice := delayedGateNotice()
 	opts := workspacegate.Options{
 		Wait:   wait,
-		Reason: "bd init",
+		Reason: reason,
 		OnWait: onWait,
 	}
 	gates, err := buildMaintenanceGateSet(req.beadsDir, req.physicalRoot)
@@ -728,10 +741,23 @@ func acquireInitMutationGate(ctx context.Context, req initGateRequest) (*workspa
 	h, err := workspacegate.AcquireAllMixed(ctx, opts, requests...)
 	stopNotice()
 	if err != nil {
-		if errors.Is(err, workspacegate.ErrBusy) {
-			return nil, fmt.Errorf("bd init refuses to run over live bd activity on this workspace (waited %s; set %s to wait longer): %w", wait, initGateTimeoutEnv, err)
+		// Where the contention lives depends on the mode: outside
+		// shared-server mode every gate names this workspace, but in
+		// shared-server mode the blocking holder may be another project's
+		// process on the machine-global shared root — an ordinary init can
+		// only be blocked by its own workspace's processes or shared-root
+		// maintenance, while a reinit (or a non-shared --db root) can also
+		// meet another project's resident serve. Both halves of the message
+		// stay: the budget and the knob, and ErrBusy for callers that match
+		// on it.
+		where := "on this workspace"
+		if req.sharedServer {
+			where = "in this workspace or its shared server"
 		}
-		return nil, fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", err)
+		if errors.Is(err, workspacegate.ErrBusy) {
+			return nil, fmt.Errorf("bd init refuses to run over live bd activity %s (waited %s; set %s to wait longer): %w", where, wait, initGateTimeoutEnv, err)
+		}
+		return nil, fmt.Errorf("bd init refuses to run over live bd activity %s: %w", where, err)
 	}
 	if req.preflight != nil {
 		if err := req.preflight(); err != nil {

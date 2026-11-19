@@ -1233,3 +1233,153 @@ func TestAcquireInitMutationGateNewSharedServerProjectNotBlockedByOtherProjectSe
 		})
 	}
 }
+
+// bd-xicgb8 (GH#7122) AC-8: an init refusal from the gate wait says where the
+// contention can live — in shared-server mode the blocking holder may be
+// another project's process on the shared server, for an ordinary init
+// (whose shared-root hold is SHARED, so only this workspace or shared-root
+// maintenance can block it) and for a destructive reinit (which keeps the
+// shared root EXCLUSIVE and so can still meet another project's resident
+// serve) — while keeping ErrBusy, the wait budget, the knob that raises it,
+// and the holder detail from the gate sidecar.
+func TestInitGateRefusalNamesWhereTheContentionLives(t *testing.T) {
+	t.Run("ordinary shared-server init blocked in this workspace", func(t *testing.T) {
+		resetGateTestEnv(t)
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+		t.Setenv(initGateTimeoutEnv, "300ms")
+
+		beadsDir := newGateTestWorkspace(t)
+		holdWorkspaceGateExclusive(t, beadsDir)
+		preflightRan := false
+		_, err := acquireInitMutationGate(context.Background(), initGateRequest{
+			beadsDir:     beadsDir,
+			physicalRoot: filepath.Join(t.TempDir(), "dolt"),
+			sharedServer: true,
+			preflight:    func() error { preflightRan = true; return nil },
+		})
+		if err == nil {
+			t.Fatal("init gate acquired while the workspace gate was held exclusively")
+		}
+		if !errors.Is(err, workspacegate.ErrBusy) {
+			t.Fatalf("error %v does not wrap workspacegate.ErrBusy", err)
+		}
+		for _, want := range []string{
+			"bd init refuses to run over live bd activity in this workspace or its shared server",
+			"waited 300ms", initGateTimeoutEnv, "test maintenance",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q missing %q", err, want)
+			}
+		}
+		if preflightRan {
+			t.Error("preflight ran despite the refused gate acquisition")
+		}
+	})
+	t.Run("destructive reinit-local blocked by another project's serve", func(t *testing.T) {
+		resetGateTestEnv(t)
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+		t.Setenv(initGateTimeoutEnv, "300ms")
+
+		// Another project's resident serve: the shared root held SHARED.
+		otherBeadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(otherBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		meta := `{"backend":"dolt","database":"other","dolt_mode":"server","dolt_database":"other"}`
+		if err := os.WriteFile(filepath.Join(otherBeadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sharedRoot := doltserver.DoltDirPath(otherBeadsDir)
+		if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		serveGates, err := buildWorkspaceGateSet(otherBeadsDir)
+		if err != nil {
+			t.Fatalf("build other project's gate set: %v", err)
+		}
+		serveHold, err := workspacegate.AcquireAll(context.Background(), workspacegate.Shared, workspacegate.Options{Reason: "bd serve"}, serveGates...)
+		if err != nil {
+			t.Fatalf("other project's serve shared hold: %v", err)
+		}
+		t.Cleanup(func() { _ = serveHold.Release() })
+
+		// The destructive reinit keeps the shared root EXCLUSIVE, so the
+		// resident serve refuses it by design (the documented residual).
+		// While it waits behind that holder, its queued-writer intent
+		// sidecar names --reinit-local, so a shared acquirer (or a human
+		// reading the sidecar) can tell a destructive reinit queued ahead
+		// of an ordinary one.
+		preflightRan := false
+		done := make(chan error, 1)
+		newBeadsDir := filepath.Join(t.TempDir(), ".beads")
+		go func() {
+			_, gerr := acquireInitMutationGate(context.Background(), initGateRequest{
+				beadsDir:     newBeadsDir,
+				physicalRoot: sharedRoot,
+				reinitLocal:  true,
+				sharedServer: true,
+				preflight:    func() error { preflightRan = true; return nil },
+			})
+			done <- gerr
+		}()
+		rootGate, err := workspacegate.ForPhysicalRoot(sharedRoot)
+		if err != nil {
+			t.Fatalf("gate for the shared root: %v", err)
+		}
+		intentPath := rootGate.Path() + ".intent.info"
+		var intentReason string
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if info, rerr := os.ReadFile(intentPath); rerr == nil {
+				intentReason = string(info)
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		var gateErr error
+		select {
+		case gateErr = <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("destructive reinit did not return within its bound")
+		}
+		if !errors.Is(gateErr, workspacegate.ErrBusy) {
+			t.Fatalf("error %v does not wrap workspacegate.ErrBusy", gateErr)
+		}
+		for _, want := range []string{
+			"bd init refuses to run over live bd activity in this workspace or its shared server",
+			"waited 300ms", initGateTimeoutEnv,
+		} {
+			if !strings.Contains(gateErr.Error(), want) {
+				t.Errorf("error %q missing %q", gateErr, want)
+			}
+		}
+		if preflightRan {
+			t.Error("preflight ran despite the refused gate acquisition")
+		}
+		if !strings.Contains(intentReason, "bd init --reinit-local") {
+			t.Errorf("queued-writer intent sidecar %q does not name %q", intentReason, "bd init --reinit-local")
+		}
+	})
+}
+
+// Outside shared-server mode the refusal keeps saying the contention is on
+// this workspace: every gate the plan holds names it.
+func TestInitGateRefusalKeepsWorkspaceOnlyWordingOutsideSharedServerMode(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Setenv(initGateTimeoutEnv, "300ms")
+
+	beadsDir := newGateTestWorkspace(t)
+	holdWorkspaceGateExclusive(t, beadsDir)
+	_, err := acquireInitMutationGate(context.Background(), initGateTestRequest(beadsDir, filepath.Join(t.TempDir(), "dolt"), nil))
+	if err == nil {
+		t.Fatal("init gate acquired while the workspace gate was held exclusively")
+	}
+	if !strings.Contains(err.Error(), "on this workspace") {
+		t.Errorf("non-shared refusal %q lost the on-this-workspace wording", err)
+	}
+	if strings.Contains(err.Error(), "shared server") {
+		t.Errorf("non-shared refusal %q must not name a shared server", err)
+	}
+}
