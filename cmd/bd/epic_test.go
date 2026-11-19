@@ -319,6 +319,50 @@ func TestEpicStatusListsEveryOpenEpic(t *testing.T) {
 	}
 }
 
+// TestEpicStatusEligibleOnlyReturnsOnlyCompletedEpics pins GH#5720 (bd-ufmqco)
+// AC-4: with zero-child, partial and fully completing-closed epics in the
+// store, `bd epic status --eligible-only` returns only the fully
+// completing-closed one. The "{0,0,false}" rows a childless epic now
+// contributes to the unfiltered list must never leak into --eligible-only.
+func TestEpicStatusEligibleOnlyReturnsOnlyCompletedEpics(t *testing.T) {
+	h := newEpicTestHelper(t)
+
+	childless := &types.Issue{ID: "test-eo-none", Title: "childless epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic, CreatedAt: time.Now()}
+	done := &types.Issue{ID: "test-eo-done", Title: "completed epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic, CreatedAt: time.Now()}
+	partial := &types.Issue{ID: "test-eo-part", Title: "partial epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic, CreatedAt: time.Now()}
+	for _, e := range []*types.Issue{childless, done, partial} {
+		h.createIssue(t, e)
+	}
+	closedChild := &types.Issue{Title: "closed child", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask, ClosedAt: ptrTime(time.Now()), CreatedAt: time.Now()}
+	openChild := &types.Issue{Title: "open child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: time.Now()}
+	h.createIssue(t, closedChild)
+	h.createIssue(t, openChild)
+	h.addDependency(t, &types.Dependency{IssueID: closedChild.ID, DependsOnID: done.ID, Type: types.DepParentChild, CreatedAt: time.Now(), CreatedBy: "test"})
+	h.addDependency(t, &types.Dependency{IssueID: closedChild.ID, DependsOnID: partial.ID, Type: types.DepParentChild, CreatedAt: time.Now(), CreatedBy: "test"})
+	h.addDependency(t, &types.Dependency{IssueID: openChild.ID, DependsOnID: partial.ID, Type: types.DepParentChild, CreatedAt: time.Now(), CreatedBy: "test"})
+
+	oldStore, oldCtx, oldJSON := store, rootCtx, jsonOutput
+	store, rootCtx, jsonOutput = h.s, h.ctx, true
+	t.Cleanup(func() { store, rootCtx, jsonOutput = oldStore, oldCtx, oldJSON })
+
+	if err := epicStatusCmd.Flags().Set("eligible-only", "true"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = epicStatusCmd.Flags().Set("eligible-only", "false") })
+
+	out := captureStdout(t, func() error { return epicStatusCmd.RunE(epicStatusCmd, nil) })
+	var epics []*types.EpicStatus
+	if err := json.Unmarshal([]byte(out), &epics); err != nil {
+		t.Fatalf("parse epic status JSON: %v\n%s", err, out)
+	}
+	if len(epics) != 1 {
+		t.Fatalf("--eligible-only returned %d epic(s) (%s), want exactly the completed one %s", len(epics), epicStatusIDsForTest(epics), done.ID)
+	}
+	if epics[0].Epic.ID != done.ID {
+		t.Errorf("--eligible-only returned %s, want %s", epics[0].Epic.ID, done.ID)
+	}
+}
+
 func epicStatusIDsForTest(epics []*types.EpicStatus) string {
 	ids := make([]string, 0, len(epics))
 	for _, e := range epics {
