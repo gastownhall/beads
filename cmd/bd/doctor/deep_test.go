@@ -471,3 +471,67 @@ func TestCheckDependencyIntegrity_GenuineBrokenEdgeBehindExemptRows(t *testing.T
 		t.Fatalf("Detail = %q, want it to name bd-1→bd-gone (blocks)", check.Detail)
 	}
 }
+
+// TestCheckEpicCompleteness_ChildlessEpicNotReady pins GH#5720 (bd-ufmqco) on
+// the deep check: GetEpicsEligibleForClosure now returns a {0,0,false} row
+// for a childless epic, and the check must keep reporting nothing for it.
+func TestCheckEpicCompleteness_ChildlessEpicNotReady(t *testing.T) {
+	store := newTestDoltStore(t, "epic")
+	ctx := context.Background()
+
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "epic-lonely",
+		Title:     "Childless epic",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkEpicCompleteness(store.UnderlyingDB())
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q; message=%q detail=%q", check.Status, StatusOK, check.Message, check.Detail)
+	}
+	if strings.Contains(check.Fix, "bd close") {
+		t.Errorf("Fix = %q, want no 'bd close' instruction for a childless epic", check.Fix)
+	}
+}
+
+// TestCheckEpicCompleteness_UnlinkedDottedClosedChildNotReady: an epic whose
+// only child is a dotted-ID issue closed with a completing reason but never
+// linked by a parent-child edge is still a zero-linked-child row and must not
+// be reported ready to close — the dotted prefix is navigation-only.
+func TestCheckEpicCompleteness_UnlinkedDottedClosedChildNotReady(t *testing.T) {
+	store := newTestDoltStore(t, "epic")
+	ctx := context.Background()
+
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "epic-dot",
+		Title:     "Dotted child only epic",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	// Closed with the default (completing) reason, but NO dep edge.
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "epic-dot.1",
+		Title:     "Unlinked dotted child",
+		Status:    types.StatusClosed,
+		IssueType: types.TypeTask,
+		ClosedAt:  ptrTime(time.Now()),
+		CreatedAt: time.Now(),
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkEpicCompleteness(store.UnderlyingDB())
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q; message=%q detail=%q", check.Status, StatusOK, check.Message, check.Detail)
+	}
+	if strings.Contains(check.Fix, "bd close") {
+		t.Errorf("Fix = %q, want no 'bd close' instruction for an unlinked-dotted-only epic", check.Fix)
+	}
+}

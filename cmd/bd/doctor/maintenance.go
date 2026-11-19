@@ -185,6 +185,10 @@ func staleClosedCheckResult(cleanable, retained, thresholdDays int) DoctorCheck 
 // whose root issue is still open. Closes on children that redirect or
 // abandon the work (duplicate/wontfix/superseded/…) do not count as
 // completing, so a molecule with such a close is not reported here (GH#5026).
+// It reports nothing for epics with zero linked children: GetEpicsEligibleForClosure
+// returns one row per non-closed epic (GH#5720) and eligibility requires at
+// least one completingly-closed linked child.
+// Opens its own store; prefer CheckStaleMoleculesWithStore when a shared store is available.
 func CheckStaleMolecules(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -202,6 +206,17 @@ func CheckStaleMolecules(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
+	return checkStaleMoleculesForStore(ctx, store)
+}
+
+// CheckStaleMoleculesWithStore is CheckStaleMolecules on a shared store, so
+// tests and callers holding one can exercise the counting without a
+// workspace-path open (the same shape as the other *WithStore checks).
+func CheckStaleMoleculesWithStore(ctx context.Context, store *dolt.DoltStore) DoctorCheck {
+	return checkStaleMoleculesForStore(ctx, store)
+}
+
+func checkStaleMoleculesForStore(ctx context.Context, store *dolt.DoltStore) DoctorCheck {
 	// Get all epics eligible for closure (complete but unclosed)
 	epicStatuses, err := store.GetEpicsEligibleForClosure(ctx)
 	if err != nil {

@@ -3,9 +3,13 @@
 package doctor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestCheckStaleClosedIssues_NoDatabase(t *testing.T) {
@@ -178,5 +182,91 @@ func TestCheckAndFixStaleMQFiles_WorktreeFallback(t *testing.T) {
 	check = CheckStaleMQFiles(worktreeDir)
 	if check.Status != StatusOK {
 		t.Fatalf("expected OK after removing shared mq dir, got %q: %s", check.Status, check.Message)
+	}
+}
+
+// TestCheckStaleMolecules_ChildlessAndDottedOnlyEpicsNotStale pins GH#5720
+// (bd-ufmqco) on the Stale Molecules check. GetEpicsEligibleForClosure now
+// returns one row per non-closed epic, so the childless and
+// unlinked-dotted-only epics reach the check as {0,0,false} rows; the
+// eligibility filter must keep them out (a positive-control store with a
+// genuinely completable epic proves the check is not vacuously OK).
+func TestCheckStaleMolecules_ChildlessAndDottedOnlyEpicsNotStale(t *testing.T) {
+	store := newTestDoltStore(t, "epic")
+	ctx := context.Background()
+
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "mol-lonely",
+		Title:     "Childless epic",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "mol-dot",
+		Title:     "Dotted child only epic",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	// Closed with the default (completing) reason, never linked by an edge.
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "mol-dot.1",
+		Title:     "Unlinked dotted child",
+		Status:    types.StatusClosed,
+		IssueType: types.TypeTask,
+		ClosedAt:  ptrTime(time.Now()),
+		CreatedAt: time.Now(),
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckStaleMoleculesWithStore(ctx, store)
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q; message=%q detail=%q", check.Status, StatusOK, check.Message, check.Detail)
+	}
+	if check.Message != "No stale molecules" {
+		t.Errorf("Message = %q, want %q (not an N/A placeholder)", check.Message, "No stale molecules")
+	}
+
+	// Positive control: the same check on a store with an epic whose only
+	// linked child is completingly closed must warn.
+	store2 := newTestDoltStore(t, "epic")
+	if err := store2.CreateIssue(ctx, &types.Issue{
+		ID:        "mol-done",
+		Title:     "Completed epic",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store2.CreateIssue(ctx, &types.Issue{
+		ID:        "mol-done.1",
+		Title:     "Closed child",
+		Status:    types.StatusClosed,
+		IssueType: types.TypeTask,
+		ClosedAt:  ptrTime(time.Now()),
+		CreatedAt: time.Now(),
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store2.AddDependency(ctx, &types.Dependency{
+		IssueID:     "mol-done.1",
+		DependsOnID: "mol-done",
+		Type:        types.DepParentChild,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	check = CheckStaleMoleculesWithStore(ctx, store2)
+	if check.Status != StatusWarning {
+		t.Errorf("positive control: Status = %q, want %q; message=%q", check.Status, StatusWarning, check.Message)
 	}
 }

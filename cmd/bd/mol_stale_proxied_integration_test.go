@@ -108,6 +108,16 @@ func TestProxiedServerMolStale(t *testing.T) {
 		p := newSharedProxiedProject(t, bd, "msta")
 		lonely := bdProxiedCreate(t, bd, p.dir, "Childless open epic", "--type", "epic")
 
+		// Zero-linked-child in the other GH#5720 shape too: an epic whose
+		// only child is an unlinked dotted-ID issue, closed with a
+		// completing reason. Neither row is actionable, so --all still skips
+		// both.
+		dottedEpic := bdProxiedCreate(t, bd, p.dir, "Dotted child only epic", "--type", "epic")
+		dottedChild := bdProxiedCreate(t, bd, p.dir, "Unlinked dotted child", "--type", "task", "--id", dottedEpic.ID+".1")
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", dottedChild.ID); err != nil {
+			t.Fatalf("bd close dotted child: %v\n%s", err, out)
+		}
+
 		out, err := bdProxiedRun(t, bd, p.dir, "mol", "stale", "--all", "--json")
 		if err != nil {
 			t.Fatalf("bd mol stale --all --json: %v\n%s", err, out)
@@ -121,8 +131,8 @@ func TestProxiedServerMolStale(t *testing.T) {
 			t.Fatalf("unmarshal: %v\n%s", err, out)
 		}
 		for _, m := range got.StaleMolecules {
-			if m.ID == lonely.ID {
-				t.Errorf("childless epic %s unexpectedly present (parity guard: GetEpicsEligibleForClosure skips zero-child epics in both backends)", lonely.ID)
+			if m.ID == lonely.ID || m.ID == dottedEpic.ID {
+				t.Errorf("zero-linked-child epic %s unexpectedly stale: this assertion reads mol stale's actionable output, which lists only EligibleForClose epics, and eligibility still requires at least one linked child — even now that GetEpicsEligibleForClosure returns one row per non-closed epic", m.ID)
 			}
 		}
 	})
