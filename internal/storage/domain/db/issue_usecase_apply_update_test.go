@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -30,6 +31,7 @@ func (s *testSuite) TestIssueUseCase_ApplyUpdate() {
 	s.Run("ClaimAssigneeOverrideArmsLease", s.iucApplyUpdateClaimAssigneeOverrideArmsLease)
 	s.Run("ClaimAssigneeOverrideOnLiveClaimReArmsForNewHolder", s.iucApplyUpdateClaimOverrideOnLiveClaimReArms)
 	s.Run("ClaimAssigneeOverridePoolAliasStaysLeaseless", s.iucApplyUpdateClaimOverridePoolAliasStaysLeaseless)
+	s.Run("ClaimOverrideEndingClaimStillDeletesLease", s.iucApplyUpdateClaimOverrideEndingClaimStillDeletesLease)
 	s.Run("AddRemoveLabelPaths", s.iucApplyUpdateAddRemoveLabels)
 	s.Run("SetLabelsDiffsAgainstCurrent", s.iucApplyUpdateSetLabels)
 	s.Run("SetLabelsThenAddsThenRemoves", s.iucApplyUpdateSetLabelsThenAddRemove)
@@ -225,6 +227,36 @@ func (s *testSuite) iucApplyUpdateClaimOverridePoolAliasStaysLeaseless() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM leases WHERE issue_id = ?", "bd-iuc-au-cao3").Scan(&count))
 	s.Equal(0, count, "a claim.pools alias must not hold a lease row")
+}
+
+// iucApplyUpdateClaimOverrideEndingClaimStillDeletesLease pins AC-4 of
+// bd-zprbhg on the proxied/domain stack: a claim update whose patch ends the
+// claim (status reverted to open, a custom active status, or a cleared
+// assignee) commits with no lease row. The re-arm covers a live claim only.
+func (s *testSuite) iucApplyUpdateClaimOverrideEndingClaimStillDeletesLease() {
+	cases := []struct {
+		name   string
+		fields map[string]any
+	}{
+		{name: "StatusOpen", fields: map[string]any{"assignee": "bob", "status": types.StatusOpen}},
+		{name: "ClearedAssignee", fields: map[string]any{"assignee": ""}},
+	}
+	for i, tc := range cases {
+		s.Run(tc.name, func() {
+			id := fmt.Sprintf("bd-iuc-au-cao4-%d", i)
+			s.seedOpenIssue(id)
+			_, err := s.issueUseCase().ApplyUpdate(s.Ctx(), id, domain.UpdateSpec{
+				Claim:  true,
+				Fields: tc.fields,
+			}, "alice")
+			s.Require().NoError(err)
+
+			var count int
+			s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+				"SELECT COUNT(*) FROM leases WHERE issue_id = ?", id).Scan(&count))
+			s.Equal(0, count, "patch ending the claim must leave no lease row")
+		})
+	}
 }
 
 func (s *testSuite) iucApplyUpdateAddRemoveLabels() {

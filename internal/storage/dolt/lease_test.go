@@ -1174,4 +1174,79 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			t.Fatalf("pool-alias override must not hold a lease (nothing heartbeats as an alias): %+v", ls)
 		}
 	})
+
+	// AC4: a claim update whose patch ends the claim commits leaseless. The
+	// re-arm arms a live claim only; a patch that reverts the status (built-in
+	// or custom) or clears the assignee must still delete the lease the claim
+	// leg armed.
+	t.Run("AC4 claim patch ending the claim stays leaseless", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			customConf string
+			patch      publicops.IssuePatch
+		}{
+			{
+				name:  "override plus status open",
+				patch: publicops.IssuePatch{Assignee: setAssignee("bob"), Status: setStatus(types.StatusOpen)},
+			},
+			{
+				name:  "override plus status blocked",
+				patch: publicops.IssuePatch{Assignee: setAssignee("bob"), Status: setStatus(types.StatusBlocked)},
+			},
+			{
+				name:  "clearing the assignee",
+				patch: publicops.IssuePatch{Assignee: setAssignee("")},
+			},
+			{
+				name:       "override plus a custom active status",
+				customConf: "triaged:active",
+				patch:      publicops.IssuePatch{Assignee: setAssignee("bob"), Status: setStatus(types.Status("triaged"))},
+			},
+		}
+		for i, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				id := fmt.Sprintf("bd-lease-cao-4-%d", i)
+				store, cleanup := setupConcurrentTestStore(t)
+				defer cleanup()
+				ctx, cancel := testContext(t)
+				defer cancel()
+
+				if tc.customConf != "" {
+					if err := store.SetConfig(ctx, "status.custom", tc.customConf); err != nil {
+						t.Fatalf("set status.custom: %v", err)
+					}
+				}
+				if err := store.CreateIssue(ctx, &types.Issue{
+					ID: id, Title: "ends the claim", Status: types.StatusOpen,
+					Priority: 2, IssueType: types.TypeTask,
+				}, "seeder"); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+
+				ops, err := store.IssueLifecycle()
+				if err != nil {
+					t.Fatalf("lifecycle: %v", err)
+				}
+				if _, err := ops.Update(ctx, publicops.UpdateRequest{
+					Actor: "alice", IssueID: id, Claim: true, Patch: tc.patch,
+				}); err != nil {
+					t.Fatalf("claim with ending patch: %v", err)
+				}
+
+				ls := readLeaseState(t, ctx, store, id)
+				if ls.leaseExpires.Valid || ls.heartbeatAt.Valid {
+					t.Fatalf("patch ending the claim must leave no lease: %+v", ls)
+				}
+			})
+		}
+	})
+}
+
+// setAssignee and setStatus build the patch fields of a claim-override update.
+func setAssignee(v string) publicops.Field[string] {
+	return publicops.Field[string]{Set: true, Value: v}
+}
+
+func setStatus(v types.Status) publicops.Field[publicops.Status] {
+	return publicops.Field[publicops.Status]{Set: true, Value: v}
 }
