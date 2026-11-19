@@ -35,6 +35,9 @@ This optional JSONL sidecar is disabled by default. Enable it with:
 
   bd config set audit.enabled true
 
+or for one process with the environment variable BD_AUDIT_ENABLED=1
+(BD_AUDIT_ENABLED=0 turns it off and overrides the config key).
+
 Issue history is always recorded in the database and is visible with
 bd history <id> --events. The JSONL sidecar is for explicit interaction capture:
 - auditing ("why did the agent do that?")

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestCreateCommandRejectsExtraPositionalArguments(t *testing.T) {
@@ -270,5 +275,248 @@ func TestIsAmbiguousRepoTarget(t *testing.T) {
 				t.Errorf("isAmbiguousRepoTarget(%v, %q) = %v, want %v", tt.flagChanged, tt.repoOverride, got, tt.wantAmbiguous)
 			}
 		})
+	}
+}
+
+// newCreateTypeHintCommand clones the flags validateCreateArgs reads, keeping
+// --type's -t shorthand: the mistake the hint names is typed as -t.
+func newCreateTypeHintCommand(t *testing.T, args ...string) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "create [title]"}
+	for _, name := range []string{"title", "file", "graph", "type"} {
+		f := createCmd.Flags().Lookup(name)
+		if f == nil {
+			t.Fatalf("create does not register --%s", name)
+		}
+		cmd.Flags().StringP(f.Name, f.Shorthand, f.DefValue, f.Usage)
+	}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("parse %v: %v", args, err)
+	}
+	return cmd
+}
+
+// TestCreateTypeHint pins GH#5787 issue 1: -t is --type's shorthand, so
+// `--type=bug -t "<title>"` overrides the type with the title text and leaves
+// no title. The Args-time refusal keeps its missing-title line and names the
+// parsed type value, the shorthand and where a title goes — before any store
+// opens, so it cannot say whether a non-built-in value is a custom type.
+func TestCreateTypeHint(t *testing.T) {
+	if f := createCmd.Flags().ShorthandLookup("t"); f == nil || f.Name != "type" {
+		t.Fatalf("-t no longer binds --type (got %v); revisit the hint", f)
+	}
+	const mistaken = "a long human title with spaces"
+
+	validate := func(t *testing.T, positional []string, flags ...string) (string, error) {
+		t.Helper()
+		cmd := newCreateTypeHintCommand(t, flags...)
+		var err error
+		stderr := captureStderr(t, func() { err = validateCreateArgs(cmd, positional) })
+		return stderr, err
+	}
+
+	hinted := []struct {
+		name  string
+		flags []string
+	}{
+		{"repeated type", []string{"--type=bug", "-t", mistaken}},
+		{"single short type", []string{"-t", mistaken}},
+		{"custom-looking name", []string{"--type", "incident"}},
+	}
+	for _, tc := range hinted {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr, err := validate(t, nil, tc.flags...)
+			if err == nil {
+				t.Fatalf("validateCreateArgs accepted %v with no title", tc.flags)
+			}
+			value := tc.flags[len(tc.flags)-1]
+			for _, want := range []string{
+				"title required",
+				fmt.Sprintf("--type is %q", value),
+				"-t is short for --type, not --title",
+				"--title",
+			} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr)
+				}
+			}
+			if strings.Contains(stderr, "invalid issue type") {
+				t.Errorf("Args-time hint must not declare the type invalid (custom types are unknowable before the store opens):\n%s", stderr)
+			}
+		})
+	}
+
+	unhinted := []struct {
+		name       string
+		positional []string
+		flags      []string
+		wantErr    string
+	}{
+		{"default type", nil, nil, "title required"},
+		{"built-in type", nil, []string{"--type", "bug"}, "title required"},
+		{"alias type", nil, []string{"-t", "feat"}, "title required"},
+		{"whitespace title", nil, []string{"--title", "   ", "-t", mistaken}, "title cannot be empty"},
+		{"flag title", nil, []string{"--title", "real", "-t", mistaken}, ""},
+		{"positional title", []string{"real"}, []string{"-t", mistaken}, ""},
+		{"file", nil, []string{"--file", "x.md", "-t", mistaken}, ""},
+		{"graph", nil, []string{"--graph", "x.json", "-t", mistaken}, ""},
+	}
+	for _, tc := range unhinted {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr, err := validate(t, tc.positional, tc.flags...)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateCreateArgs refused %v %v: %v\n%s", tc.positional, tc.flags, err, stderr)
+				}
+			} else if err == nil || !strings.Contains(stderr, tc.wantErr) {
+				t.Fatalf("want %q refusal, got err=%v stderr=%q", tc.wantErr, err, stderr)
+			}
+			if strings.Contains(stderr, "short for --type") {
+				t.Errorf("unexpected -t hint:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// previewVocabularyFake answers the two vocabulary reads a dry-run preview
+// makes and counts them. The embedded DoltStorage is nil: any other call
+// panics, so the test says so if the preview starts reading something else.
+type previewVocabularyFake struct {
+	storage.DoltStorage
+	remote      bool
+	customTypes []string
+	reads       int
+}
+
+func (f *previewVocabularyFake) IsRemoteBackendStore() bool { return f.remote }
+
+func (f *previewVocabularyFake) GetCustomTypes(context.Context) ([]string, error) {
+	f.reads++
+	return f.customTypes, nil
+}
+
+func (f *previewVocabularyFake) GetCustomStatuses(context.Context) ([]string, error) {
+	f.reads++
+	return nil, nil
+}
+
+// TestCreatePreviewVocabulary pins the vocabulary a validated dry run
+// (GH#5787) checks a custom type or status against. A local store's refuses a
+// type it does not hold, as the create would. A bd connect HTTP backend's
+// client copy is degraded (L7) and can be short of what the server validates
+// against, so there the preview's own type and status count as known and the
+// server's create decides them: the store is not read, and the rest of the
+// insert validation still runs.
+func TestCreatePreviewVocabulary(t *testing.T) {
+	ctx := context.Background()
+	preview := func(issueType types.IssueType, status types.Status, priority int) *types.Issue {
+		return &types.Issue{Title: "PROBE", Priority: priority, IssueType: issueType, Status: status}
+	}
+	check := func(t *testing.T, issue *types.Issue, s storage.DoltStorage) error {
+		t.Helper()
+		customStatuses, customTypes, err := createPreviewVocabulary(ctx, issue, s)
+		if err != nil {
+			t.Fatalf("createPreviewVocabulary: %v", err)
+		}
+		return validateCreatePreview(issue, customStatuses, customTypes)
+	}
+
+	local := &previewVocabularyFake{customTypes: []string{"agentx"}}
+	if err := check(t, preview("agentx", types.StatusOpen, 2), local); err != nil {
+		t.Fatalf("a local store's own type was refused: %v", err)
+	}
+	if err := check(t, preview("incident", types.StatusOpen, 2), local); err == nil || !strings.Contains(err.Error(), "invalid issue type: incident") {
+		t.Fatalf("a local store without incident: got %v, want the create's invalid issue type", err)
+	}
+
+	remote := &previewVocabularyFake{remote: true, customTypes: []string{"agentx"}}
+	for _, issue := range []*types.Issue{
+		preview("incident", types.StatusOpen, 2),
+		preview("bug", "triage", 2),
+		preview("incident", "triage", 2),
+	} {
+		if err := check(t, issue, remote); err != nil {
+			t.Errorf("remote backend: type %q, status %q refused: %v; the server's create decides them", issue.IssueType, issue.Status, err)
+		}
+	}
+	if err := check(t, preview("incident", types.StatusOpen, 9), remote); err == nil || !strings.Contains(err.Error(), "priority") {
+		t.Errorf("remote backend: priority 9 got %v; the rest of the insert validation must still run", err)
+	}
+	if remote.reads != 0 {
+		t.Errorf("the remote backend's vocabulary was read %d times, want 0", remote.reads)
+	}
+}
+
+// TestCreatePreviewVocabularyNewDatabase pins the vocabulary of a target the
+// create would initialize: its new database holds none of its own, so the
+// create validates against config.yaml's types and statuses alone, and so
+// does the preview.
+func TestCreatePreviewVocabularyNewDatabase(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("types.custom", "yamltype")
+	config.Set("status.custom", "triage")
+
+	for _, tc := range []struct {
+		issueType types.IssueType
+		status    types.Status
+		want      string
+	}{
+		{"yamltype", "triage", ""},
+		{"incident", types.StatusOpen, "invalid issue type: incident"},
+		{"bug", "review", "invalid status: review"},
+	} {
+		issue := &types.Issue{Title: "PROBE", Priority: 2, IssueType: tc.issueType, Status: tc.status}
+		customStatuses, customTypes, err := createPreviewVocabulary(context.Background(), issue, nil)
+		if err != nil {
+			t.Fatalf("createPreviewVocabulary: %v", err)
+		}
+		err = validateCreatePreview(issue, customStatuses, customTypes)
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("type %q, status %q: %v, want config.yaml's vocabulary to accept it", tc.issueType, tc.status, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("type %q, status %q: got %v, want %q", tc.issueType, tc.status, err, tc.want)
+		}
+	}
+}
+
+// TestDryRunTargetGetsNewDatabase pins which routed targets a dry run with no
+// --parent checks against the config.yaml layer without opening them
+// (GH#5787): a local one the create would give a new database. A target that
+// exists, one the create would not initialize, an embedded database the
+// create would adopt and a remote target are opened read-only instead.
+func TestDryRunTargetGetsNewDatabase(t *testing.T) {
+	root := t.TempDir()
+	writeFile := func(t *testing.T, parts ...string) string {
+		t.Helper()
+		path := filepath.Join(append([]string{root}, parts...)...)
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(root, parts[0])
+	}
+	initialized := writeFile(t, "initialized", ".beads", "metadata.json")
+	adoptable := writeFile(t, "adoptable", ".beads", "embeddeddolt", "adb", ".dolt", "manifest")
+	fresh := filepath.Join(root, "fresh")
+	const remote = "https://example.com/org/planning.git"
+
+	for _, tc := range []struct {
+		repoPath    string
+		allowCreate bool
+		want        bool
+	}{
+		{fresh, true, true},
+		{fresh, false, false},
+		{initialized, true, false},
+		{adoptable, true, false},
+		{remote, true, false},
+	} {
+		if got := dryRunTargetGetsNewDatabase(tc.repoPath, tc.allowCreate); got != tc.want {
+			t.Errorf("dryRunTargetGetsNewDatabase(%q, allowCreate=%v) = %v, want %v", tc.repoPath, tc.allowCreate, got, tc.want)
+		}
 	}
 }

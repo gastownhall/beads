@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/tracker"
 )
 
@@ -14,6 +15,9 @@ func TestIsRecognizedConfigKey(t *testing.T) {
 		"status.custom", "types.custom", "types.infra", "ai.model",
 		"backup.enabled", "import.path", "dolt.local-only", "agent.profile",
 		"claim.pools",
+		// Routed to config.yaml and defaulted, so `bd config set` must not
+		// warn about them (GH#6184).
+		"audit.enabled", "list.limit",
 		// Tracker namespaces are derived from the registry (GH#4427); cover
 		// ado (the original bug) plus the others removed from the static list.
 		"ado.org", "ado.project", "github.token", "linear.api-key",
@@ -136,6 +140,50 @@ func TestLevenshteinDistance(t *testing.T) {
 		got := levenshteinDistance(tt.a, tt.b)
 		if got != tt.want {
 			t.Errorf("levenshteinDistance(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+// TestAuditConfigRecognition pins GH#5787 issue 4: a key config.yaml stores
+// (config.IsYamlOnlyKey) is one bd reads, so the CLI recognizer must not warn
+// on it — `bd audit --help` prescribes `bd config set audit.enabled true`.
+func TestAuditConfigRecognition(t *testing.T) {
+	for key := range config.YamlOnlyKeys {
+		if _, protected := rejectProtectedConfigKey(key); protected {
+			// no-db: obsolete and refused (TestRejectProtectedConfigKeyNoDB).
+			continue
+		}
+		if !isRecognizedConfigKey(key) {
+			t.Errorf("isRecognizedConfigKey(%q) = false for a config.YamlOnlyKeys key", key)
+		}
+	}
+	for _, key := range []string{
+		"audit.enabled", "list.limit", "mail.delegate", "routing.mode",
+		"hierarchy.max-depth", "storage-class.default", "federation.peer",
+	} {
+		if !config.IsYamlOnlyKey(key) {
+			t.Fatalf("config.IsYamlOnlyKey(%q) = false; pick a key it accepts", key)
+		}
+		if !isRecognizedConfigKey(key) {
+			t.Errorf("isRecognizedConfigKey(%q) = false, want true (config.IsYamlOnlyKey accepts it)", key)
+		}
+	}
+	for _, key := range []string{"totally.bogus", "audits.enabled", "mail.other", "no-db"} {
+		if isRecognizedConfigKey(key) {
+			t.Errorf("isRecognizedConfigKey(%q) = true, want false", key)
+		}
+	}
+}
+
+// TestAuditConfigHelp pins GH#5787 issue 4's help half: config help lists the
+// audit namespace, and audit help names both ways to enable the sidecar.
+func TestAuditConfigHelp(t *testing.T) {
+	if !strings.Contains(configCmd.Long, "  - audit.*") {
+		t.Errorf("config help does not list the audit.* namespace:\n%s", configCmd.Long)
+	}
+	for _, want := range []string{"bd config set audit.enabled true", "BD_AUDIT_ENABLED=1"} {
+		if !strings.Contains(auditCmd.Long, want) {
+			t.Errorf("audit help missing %q:\n%s", want, auditCmd.Long)
 		}
 	}
 }

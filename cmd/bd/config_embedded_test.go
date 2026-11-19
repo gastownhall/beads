@@ -473,3 +473,47 @@ func TestEmbeddedConfigConcurrent(t *testing.T) {
 		t.Fatal("expected at least 1 worker to succeed")
 	}
 }
+
+// TestEmbeddedConfigSetAuditEnabled pins GH#5787 issue 4 end to end: the
+// command `bd audit --help` prescribes sets the key without the
+// "not a recognized config key" warning, reads back true, and turns on the
+// interactions sidecar that `bd audit record` appends to.
+func TestEmbeddedConfigSetAuditEnabled(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ae")
+
+	set := exec.Command(bd, "config", "set", "audit.enabled", "true")
+	set.Dir = dir
+	set.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, set)
+	if err != nil {
+		t.Fatalf("bd config set audit.enabled true failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "not a recognized config key") {
+		t.Errorf("bd config set audit.enabled true warned the key is unrecognized:\n%s", stderr.String())
+	}
+
+	if got := strings.TrimSpace(bdConfig(t, bd, dir, "get", "audit.enabled")); got != "true" {
+		t.Errorf("bd config get audit.enabled = %q, want %q", got, "true")
+	}
+
+	record := exec.Command(bd, "audit", "record", "--kind", "tool_call", "--tool-name", "gh5787", "--exit-code", "0")
+	record.Dir = dir
+	record.Env = bdEnv(dir)
+	stdout, stderr, err = runCommandBuffers(t, record)
+	if err != nil {
+		t.Fatalf("bd audit record failed after enabling the sidecar: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(beadsDir, "interactions.jsonl"))
+	if err != nil {
+		t.Fatalf("read interactions.jsonl: %v", err)
+	}
+	if !strings.Contains(string(data), `"gh5787"`) {
+		t.Errorf("interactions.jsonl lacks the recorded entry:\n%s", data)
+	}
+}

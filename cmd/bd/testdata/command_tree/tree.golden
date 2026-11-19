@@ -298,6 +298,9 @@ bd audit
     |
     |   bd config set audit.enabled true
     |
+    | or for one process with the environment variable BD_AUDIT_ENABLED=1
+    | (BD_AUDIT_ENABLED=0 turns it off and overrides the config key).
+    |
     | Issue history is always recorded in the database and is visible with
     | bd history <id> --events. The JSONL sidecar is for explicit interaction capture:
     | - auditing ("why did the agent do that?")
@@ -925,6 +928,7 @@ bd config
     |   - claim.*           Claim arbitration settings (pool-aware claiming)
     |   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
     |   - lint.*            Additional per-type lint sections (stored in config.yaml)
+    |   - audit.*           Interaction audit sidecar, e.g. audit.enabled (stored in config.yaml)
     |
     | Auto-Export (config.yaml):
     |   Optional JSONL export to .beads/issues.jsonl after write commands (throttled).

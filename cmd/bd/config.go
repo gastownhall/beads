@@ -49,6 +49,7 @@ Common namespaces:
   - claim.*           Claim arbitration settings (pool-aware claiming)
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
   - lint.*            Additional per-type lint sections (stored in config.yaml)
+  - audit.*           Interaction audit sidecar, e.g. audit.enabled (stored in config.yaml)
 
 Auto-Export (config.yaml):
   Optional JSONL export to .beads/issues.jsonl after write commands (throttled).
@@ -1375,6 +1376,7 @@ var recognizedConfigPrefixes = []string{
 	"directory.", "repos.", "external_projects.", "validation.",
 	"lint.", "hierarchy.", "ai.", "backup.", "federation.", "metrics.",
 	"agent.", "claim.", "storage-class.", "versioned-history.",
+	"audit.", "list.",
 }
 
 // validateStorageClassConfig validates a storage-class.<type> per-type
@@ -1449,6 +1451,15 @@ var recognizedConfigKeys = map[string]bool{
 func isRecognizedConfigKey(key string) bool {
 	if recognizedConfigKeys[key] {
 		return true
+	}
+	// A key config.yaml stores is one bd reads (audit.enabled, list.*,
+	// mail.delegate, ...); reuse that classifier rather than a parallel list
+	// that drifts from it (GH#5787). A key 'bd config set' refuses outright
+	// (no-db) stays unrecognized.
+	if config.IsYamlOnlyKey(key) {
+		if _, protected := rejectProtectedConfigKey(key); !protected {
+			return true
+		}
 	}
 	for _, prefix := range allRecognizedConfigPrefixes() {
 		if strings.HasPrefix(key, prefix) {

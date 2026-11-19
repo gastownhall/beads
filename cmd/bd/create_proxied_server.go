@@ -61,33 +61,57 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 			return HandleError("proxied-server UOW provider not initialized")
 		}
 		previewLabels := in.labels
-		if in.parentID != "" {
+		previewIssue := buildCreateIssueFromInput(in)
+		needsVocabulary := createPreviewNeedsVocabulary(previewIssue)
+		var customStatuses, customTypes []string
+		if in.parentID != "" || needsVocabulary {
+			// One read-only unit of work answers every read the preview
+			// needs, as the graph preview's does; it is closed, never
+			// committed.
 			dryUW, err := uowProvider.NewUOW(ctx)
 			if err != nil {
 				return HandleError("open unit of work: %v", err)
 			}
-			if _, err := dryUW.IssueUseCase().GetIssue(ctx, in.parentID); err != nil {
-				dryUW.Close(ctx)
-				return HandleError("parent issue %s not found: %v", in.parentID, err)
-			}
-			if !in.noInheritLabels {
-				// A READ inside the DRY-RUN unit of work, which is opened only to
-				// be discarded: this previews what --parent would inherit without
-				// creating anything. The role that answers it for real is
-				// CreateRequest.InheritLabelsFromParent, which resolves the parent's
-				// labels inside the create it is part of — and a preview has no
-				// create to be part of. A dry-run mode on the create role is the
-				// follow-up (ga-2ltro.12).
-				inherited, lerr := dryUW.LabelUseCase().GetLabels(ctx, in.parentID) //nolint:forbidigo // dry-run preview; the role resolves this only inside a real create
-				if lerr != nil {
+			if in.parentID != "" {
+				if _, err := dryUW.IssueUseCase().GetIssue(ctx, in.parentID); err != nil {
 					dryUW.Close(ctx)
-					return HandleError("dry-run inherit labels: %v", lerr)
+					return HandleError("parent issue %s not found: %v", in.parentID, err)
 				}
-				previewLabels = mergeCreateLabels(in.labels, inherited)
+				if !in.noInheritLabels {
+					// A READ inside the DRY-RUN unit of work, which is opened only to
+					// be discarded: this previews what --parent would inherit without
+					// creating anything. The role that answers it for real is
+					// CreateRequest.InheritLabelsFromParent, which resolves the parent's
+					// labels inside the create it is part of — and a preview has no
+					// create to be part of. A dry-run mode on the create role is the
+					// follow-up (ga-2ltro.12).
+					inherited, lerr := dryUW.LabelUseCase().GetLabels(ctx, in.parentID) //nolint:forbidigo // dry-run preview; the role resolves this only inside a real create
+					if lerr != nil {
+						dryUW.Close(ctx)
+						return HandleError("dry-run inherit labels: %v", lerr)
+					}
+					previewLabels = mergeCreateLabels(in.labels, inherited)
+				}
+			}
+			if needsVocabulary {
+				// The vocabulary the create validates against
+				// (CreateContext), so a preview accepts a type registered
+				// only in this database and refuses one the create refuses.
+				cctx, err := dryUW.ConfigUseCase().LoadCreateContext(ctx)
+				if err != nil {
+					dryUW.Close(ctx)
+					return HandleError("load create context: %v", err)
+				}
+				customStatuses = types.CustomStatusNames(cctx.CustomStatuses)
+				customTypes = cctx.CustomTypes
 			}
 			dryUW.Close(ctx)
 		}
-		previewIssue := buildCreateIssueFromInput(in)
+		// GH#5787: the insert validation the create runs, so a preview fails
+		// where the create would and prints nothing.
+		if err := validateCreatePreview(previewIssue, customStatuses, customTypes); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 		if in.jsonOutput {
 			if err := outputJSON(previewIssue); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)

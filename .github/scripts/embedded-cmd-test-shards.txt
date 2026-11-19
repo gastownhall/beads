@@ -78,11 +78,13 @@
 100 17 TestEmbeddedMigratePersonal_planningDatabaseIgnoresLauncherOverride
 100 17 TestEmbeddedReopen
 
+100 18 TestEmbeddedConfigSetAuditEnabled
 100 18 TestEmbeddedLabelPropagateRename
 100 18 TestEmbeddedPrune_protectsBeadCitedByCustomStatusBead
 
 100 19 TestEmbeddedLabelConcurrent
 100 19 TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase
+100 19 TestEmbeddedUpdateCloseGuardWarning
 
 100 20 TestEmbeddedDoctorExportCheckMissingFileWarns
 100 20 TestEmbeddedInitGitOriginAdoptionWithConsent
@@ -108,10 +110,12 @@
 100 24 TestEmbeddedUndeferConcurrent
 100 24 TestEmbeddedWispGCProtectsActiveWisps
 
+100 25 TestEmbeddedCreateDryRunValidatesIssue
 100 25 TestEmbeddedDoltRemoteAdd_LocalOnly_FiresBeforeGuard
 100 25 TestEmbeddedMaxRowsListBasic
 100 25 TestEmbeddedRemovedBackendHealRejectionPerBackend
 
+100 26 TestEmbeddedCreateDryRunUsesDestinationTypes
 100 26 TestEmbeddedDoltRemoteAdd_JSON_AllowGitOrigin_WarningOnStderr
 100 26 TestEmbeddedExternalMutationPolicy
 100 26 TestEmbeddedPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace

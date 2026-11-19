@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -45,8 +46,123 @@ func validateCreateArgs(cmd *cobra.Command, args []string) error {
 	graphFile, _ := cmd.Flags().GetString("graph")
 	titleFlag, _ := cmd.Flags().GetString("title")
 
+	if len(args) == 0 && titleFlag == "" && markdownFile == "" && graphFile == "" {
+		if hint := createTypeShorthandHint(cmd); hint != "" {
+			return HandleError("title required (or use --file to create from markdown)\n%s", hint)
+		}
+	}
 	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
 	return err
+}
+
+// createPreviewNeedsVocabulary reports whether validating a preview needs a
+// store's custom vocabulary: a built-in type and status validate without one.
+func createPreviewNeedsVocabulary(issue *types.Issue) bool {
+	return !issue.IssueType.IsBuiltIn() || !issue.Status.IsValid()
+}
+
+// loadCreatePreviewVocabulary reads the custom statuses and types a create
+// into s validates against — the same composition `bd types` lists. A nil s
+// is a new database, which holds no vocabulary of its own: the create
+// validates against the config.yaml layer alone (ResolveCustomTypesInTx,
+// ResolveCustomStatusesDetailedInTx).
+func loadCreatePreviewVocabulary(ctx context.Context, s storage.DoltStorage) (customStatuses, customTypes []string, err error) {
+	if s == nil {
+		customStatuses = types.CustomStatusNames(storeissueops.ParseStatusFallback(config.GetCustomStatusesFromYAML()))
+		return customStatuses, storeissueops.ComposeCustomTypes(nil, "", config.GetCustomTypesFromYAML()), nil
+	}
+	customTypes, err = s.GetCustomTypes(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading custom types: %w", err)
+	}
+	customStatuses, err = s.GetCustomStatuses(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading custom statuses: %w", err)
+	}
+	return customStatuses, customTypes, nil
+}
+
+// createPreviewVocabulary returns the custom statuses and types a dry run
+// validates issue against. vocabStore is the store the create it previews
+// validates in (nil: a new database, see loadCreatePreviewVocabulary). On a
+// bd connect HTTP backend the preview cannot know them: the client's copy of
+// the vocabulary is the degraded one (internal/httpclient/vocabulary.go,
+// ledger row L7), which can be short of what the server validates the create
+// against. There the preview's own status and type are taken as known, so
+// the rest of the insert validation still runs and the server's create
+// decides those two.
+func createPreviewVocabulary(ctx context.Context, issue *types.Issue, vocabStore storage.DoltStorage) (customStatuses, customTypes []string, err error) {
+	if !storeIsRemoteBackend(vocabStore) {
+		return loadCreatePreviewVocabulary(ctx, vocabStore)
+	}
+	if !issue.Status.IsValid() {
+		customStatuses = []string{string(issue.Status)}
+	}
+	if !issue.IssueType.IsBuiltIn() {
+		customTypes = []string{string(issue.IssueType)}
+	}
+	return customStatuses, customTypes, nil
+}
+
+// dryRunTargetGetsNewDatabase reports whether the create a routed dry run
+// previews would give the local target repoPath a new database
+// (ensureBeadsDirForPath, given the allowCreate it would pass): one with no
+// metadata.json and no embedded database to adopt. A new database holds no
+// vocabulary of its own, so the preview checks it against the config.yaml
+// layer without opening the target, which does not exist yet. Any other
+// target is opened read-only (openDryRunTargetStore), which refuses one the
+// create would refuse and one a dry run cannot read.
+func dryRunTargetGetsNewDatabase(repoPath string, allowCreate bool) bool {
+	if !allowCreate || remotecache.IsRemoteURL(repoPath) {
+		return false
+	}
+	beadsDir := filepath.Join(routing.ExpandPath(repoPath), ".beads")
+	if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	return !embeddeddolt.HasRepository(beadsDir)
+}
+
+// validateCreatePreview runs the insert validation a create runs
+// (issueops.PrepareIssueForInsert: metadata, field and vocabulary rules) on a
+// copy of a dry-run preview, so a preview fails exactly where the create it
+// previews would (GH#5787). The copy is discarded: the preview shows the
+// issue as the command built it. It is field validation only; the create's
+// transactional checks (ids, dependencies) are not previewed.
+func validateCreatePreview(issue *types.Issue, customStatuses, customTypes []string) error {
+	probe := *issue
+	if err := storeissueops.PrepareIssueForInsert(&probe, customStatuses, customTypes); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+	return nil
+}
+
+// handleDryRunTargetStoreError reports a dry-run's failure to open its routed
+// target read-only, naming the target's .beads directory for a local path.
+func handleDryRunTargetStoreError(repoPath string, err error) error {
+	targetPath := repoPath
+	if !remotecache.IsRemoteURL(repoPath) {
+		targetPath = filepath.Join(routing.ExpandPath(repoPath), ".beads")
+	}
+	return handleCreateTargetStoreError(err, targetPath, "%v")
+}
+
+// createTypeShorthandHint explains a missing title when --type carries a
+// value that is not a built-in type (GH#5787): -t is --type's shorthand, so
+// `bd create --type=bug -t "<title>"` overrides the type with the title text
+// and leaves no title. It runs before the store opens, so it cannot tell a
+// registered custom type from a mistake and never calls the value invalid; it
+// says what was parsed and where a title goes.
+func createTypeShorthandHint(cmd *cobra.Command) string {
+	if !cmd.Flags().Changed("type") {
+		return ""
+	}
+	issueType, _ := cmd.Flags().GetString("type")
+	if types.IssueType(issueType).Normalize().IsBuiltIn() {
+		return ""
+	}
+	return fmt.Sprintf("  --type is %q: -t is short for --type, not --title\n"+
+		"  Give the title as a positional argument or with --title: bd create \"<title>\" --type <type>", issueType)
 }
 
 var createCmd = &cobra.Command{
@@ -338,7 +454,13 @@ var createCmd = &cobra.Command{
 			repoPath = routing.DetermineTargetRepo(routingConfig, userRole, ".")
 		}
 
-		renderDryRun := func() error {
+		// renderDryRun previews the issue after the insert validation the
+		// create runs (GH#5787). vocabulary names the store whose custom
+		// types and statuses the create would validate against — the
+		// destination's, not the source's; nil for a new database — and is
+		// consulted only when the preview asks for a value outside the
+		// built-in vocabulary.
+		renderDryRun := func(vocabulary func() (storage.DoltStorage, error)) error {
 			previewIssue := buildCreateIssue(createIssueParams{
 				ID:                 explicitID,
 				Title:              title,
@@ -370,6 +492,21 @@ var createCmd = &cobra.Command{
 				Payload:            eventPayload,
 			})
 
+			var customStatuses, customTypes []string
+			if createPreviewNeedsVocabulary(previewIssue) {
+				vocabStore, err := vocabulary()
+				if err != nil {
+					return err
+				}
+				customStatuses, customTypes, err = createPreviewVocabulary(rootCtx, previewIssue, vocabStore)
+				if err != nil {
+					return HandleErrorRespectJSON("%v", err)
+				}
+			}
+			if err := validateCreatePreview(previewIssue, customStatuses, customTypes); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+
 			if jsonOutput {
 				return outputJSON(previewIssue)
 			}
@@ -390,7 +527,32 @@ var createCmd = &cobra.Command{
 			if targetBeadsDir, err := checkRepoTargetInitializable(repoPath, allowCreate); err != nil {
 				return handleRepoTargetInitError(targetBeadsDir, err)
 			}
-			return renderDryRun()
+			if repoPath == "." {
+				return renderDryRun(func() (storage.DoltStorage, error) { return store, nil })
+			}
+			// A routed preview validates against the destination's
+			// vocabulary, never the source's. It opens the target (read-only,
+			// as the --parent lookup below does) only when a non-built-in
+			// value needs that vocabulary, and never one the create would
+			// give a new database (dryRunTargetGetsNewDatabase), so a preview
+			// of a target that does not exist yet opens and creates nothing.
+			var previewTarget storage.DoltStorage
+			defer func() {
+				if previewTarget != nil {
+					_ = previewTarget.Close()
+				}
+			}()
+			return renderDryRun(func() (storage.DoltStorage, error) {
+				if dryRunTargetGetsNewDatabase(repoPath, allowCreate) {
+					return nil, nil
+				}
+				targetStore, err := openDryRunTargetStore(rootCtx, repoPath)
+				if err != nil {
+					return nil, handleDryRunTargetStoreError(repoPath, err)
+				}
+				previewTarget = targetStore
+				return targetStore, nil
+			})
 		}
 
 		var targetStore storage.DoltStorage
@@ -454,11 +616,7 @@ var createCmd = &cobra.Command{
 			var err error
 			parentLookupStore, err = openDryRunTargetStore(rootCtx, repoPath)
 			if err != nil {
-				targetPath := repoPath
-				if !remotecache.IsRemoteURL(repoPath) {
-					targetPath = filepath.Join(routing.ExpandPath(repoPath), ".beads")
-				}
-				return handleCreateTargetStoreError(err, targetPath, "%v")
+				return handleDryRunTargetStoreError(repoPath, err)
 			}
 			defer func() { _ = parentLookupStore.Close() }()
 		}
@@ -490,7 +648,7 @@ var createCmd = &cobra.Command{
 				}
 				labels = mergeCreateLabels(labels, inherited)
 			}
-			return renderDryRun()
+			return renderDryRun(func() (storage.DoltStorage, error) { return parentLookupStore, nil })
 		}
 
 		// Parse every requested dependency edge BEFORE reserving a child ID
@@ -1027,7 +1185,8 @@ func formatTimeForRPC(t *time.Time) string {
 }
 
 // openDryRunTargetStore opens the store a `create --dry-run --repo <other>`
-// resolves --parent against. It is read-only on BOTH paths and must stay that
+// resolves --parent against, and the target whose custom vocabulary a preview
+// with no --parent checks. It is read-only on BOTH paths and must stay that
 // way: newDoltStoreFromConfig runs schema initialization on whatever it opens
 // and can rename a legacy hyphenated database and rewrite the target's
 // metadata.json on the way (GH#3231), so using it here would have a dry-run
@@ -1042,11 +1201,11 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize remote cache: %w", err)
 		}
-		// The dry-run parent lookup only reads from this cached remote store.
-		// Do not add writes here; dry-runs must not mutate cached remotes.
+		// A dry run only reads from this cached remote store. Do not add
+		// writes here; dry-runs must not mutate cached remotes.
 		store, err := cache.OpenStore(ctx, repoPath, newPreviewStoreFromConfig)
 		if err != nil {
-			return nil, fmt.Errorf("dry-run parent lookup requires an existing cached remote store for %s: %w", remedy.PrintedValue(repoPath), err)
+			return nil, fmt.Errorf("a dry run reads remote target %s only from its cached clone, and does not clone or sync it: %w", remedy.PrintedValue(repoPath), err)
 		}
 		return store, nil
 	}
