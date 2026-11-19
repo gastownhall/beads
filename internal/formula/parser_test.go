@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1319,9 +1320,14 @@ func TestParse_OnComplete(t *testing.T) {
 		t.Fatalf("Parse failed: %v", err)
 	}
 
-	// Validate parsed formula
-	if err := formula.Validate(); err != nil {
-		t.Errorf("Validate failed: %v", err)
+	// The field still decodes (so show --json and convert keep what the
+	// author wrote), but bd never runs it, so Validate refuses it (GH#3782).
+	err = formula.Validate()
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("Validate = %v, want ErrValidation refusing on_complete", err)
+	}
+	if !strings.Contains(err.Error(), "steps[0] (survey-workers): on_complete is not supported") {
+		t.Errorf("Validate error does not name the step and refusal: %v", err)
 	}
 
 	// Check on_complete field
@@ -1346,182 +1352,215 @@ func TestParse_OnComplete(t *testing.T) {
 	}
 }
 
-func TestValidate_OnComplete_Valid(t *testing.T) {
-	formula := &Formula{
-		Formula: "mol-valid",
-		Version: 1,
-		Type:    TypeWorkflow,
-		Steps: []*Step{
-			{
-				ID:    "survey",
-				Title: "Survey",
-				OnComplete: &OnCompleteSpec{
-					ForEach: "output.items",
-					Bond:    "mol-item",
-				},
-			},
-		},
-	}
+// GH#3782: bd parses on_complete but never runs it, so Validate refuses every
+// step that sets it, at any depth, whatever the spec holds.
 
-	if err := formula.Validate(); err != nil {
-		t.Errorf("Validate failed for valid on_complete: %v", err)
-	}
-}
-
-func TestValidate_OnComplete_MissingBond(t *testing.T) {
-	formula := &Formula{
-		Formula: "mol-invalid",
-		Version: 1,
-		Type:    TypeWorkflow,
-		Steps: []*Step{
-			{
-				ID:    "survey",
-				Title: "Survey",
-				OnComplete: &OnCompleteSpec{
-					ForEach: "output.items",
-					// Bond is missing
-				},
-			},
-		},
-	}
-
-	err := formula.Validate()
+// onCompleteRefusalLines returns the error lines of a Validate failure that
+// carry the on_complete refusal.
+func onCompleteRefusalLines(err error) []string {
 	if err == nil {
-		t.Error("expected validation error for missing bond")
+		return nil
 	}
-	if !strings.Contains(err.Error(), "bond is required") {
-		t.Errorf("expected 'bond is required' error, got: %v", err)
+	var lines []string
+	for _, line := range strings.Split(err.Error(), "\n") {
+		if strings.Contains(line, "on_complete") {
+			lines = append(lines, strings.TrimPrefix(strings.TrimSpace(line), "- "))
+		}
 	}
+	return lines
 }
 
-func TestValidate_OnComplete_MissingForEach(t *testing.T) {
-	formula := &Formula{
-		Formula: "mol-invalid",
-		Version: 1,
-		Type:    TypeWorkflow,
-		Steps: []*Step{
-			{
-				ID:    "survey",
-				Title: "Survey",
-				OnComplete: &OnCompleteSpec{
-					Bond: "mol-item",
-					// ForEach is missing
-				},
-			},
-		},
-	}
+func TestValidate_OnCompleteRefused(t *testing.T) {
+	const refusal = "on_complete is not supported"
+	spec := func() *OnCompleteSpec { return &OnCompleteSpec{ForEach: "output.items", Bond: "mol-item"} }
 
-	err := formula.Validate()
-	if err == nil {
-		t.Error("expected validation error for missing for_each")
-	}
-	if !strings.Contains(err.Error(), "for_each is required") {
-		t.Errorf("expected 'for_each is required' error, got: %v", err)
-	}
+	t.Run("placement", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			steps    []*Step
+			template []*Step
+			want     string
+		}{
+			{
+				name:  "top-level",
+				steps: []*Step{{ID: "survey", Title: "Survey", OnComplete: spec()}},
+				want:  "steps[0] (survey)",
+			},
+			{
+				name: "child",
+				steps: []*Step{{ID: "parent", Title: "Parent", Children: []*Step{
+					{ID: "child", Title: "Child", OnComplete: spec()},
+				}}},
+				want: "steps[0].children[0] (child)",
+			},
+			{
+				name: "grandchild",
+				steps: []*Step{{ID: "parent", Title: "Parent", Children: []*Step{
+					{ID: "child", Title: "Child", Children: []*Step{
+						{ID: "grandchild", Title: "Grandchild", OnComplete: spec()},
+					}},
+				}}},
+				want: "steps[0].children[0].children[0] (grandchild)",
+			},
+			{
+				name: "loop body",
+				steps: []*Step{
+					{ID: "first", Title: "First"},
+					{ID: "loop", Title: "Loop", Loop: &LoopSpec{Count: 2, Body: []*Step{
+						{ID: "body", Title: "Body", OnComplete: spec()},
+					}}},
+				},
+				want: "steps[1].loop.body[0] (body)",
+			},
+			{
+				name: "loop nested in a loop body",
+				steps: []*Step{{ID: "outer", Title: "Outer", Loop: &LoopSpec{Count: 2, Body: []*Step{
+					{ID: "inner", Title: "Inner", Loop: &LoopSpec{Count: 2, Body: []*Step{
+						{ID: "leaf", Title: "Leaf", OnComplete: spec()},
+					}}},
+				}}}},
+				want: "steps[0].loop.body[0].loop.body[0] (leaf)",
+			},
+			{
+				name: "child of a loop-body step",
+				steps: []*Step{{ID: "loop", Title: "Loop", Loop: &LoopSpec{Count: 2, Body: []*Step{
+					{ID: "body", Title: "Body", Children: []*Step{
+						{ID: "kid", Title: "Kid", OnComplete: spec()},
+					}},
+				}}}},
+				want: "steps[0].loop.body[0].children[0] (kid)",
+			},
+			{
+				name:     "template step",
+				template: []*Step{{ID: "{target}.check", Title: "Check", OnComplete: spec()}},
+				want:     "template[0] ({target}.check)",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				f := &Formula{Formula: "mol-oc", Version: 1, Type: TypeWorkflow, Steps: tc.steps, Template: tc.template}
+				if tc.template != nil {
+					f.Type = TypeExpansion
+				}
+				err := f.Validate()
+				if !errors.Is(err, ErrValidation) {
+					t.Fatalf("Validate = %v, want ErrValidation", err)
+				}
+				lines := onCompleteRefusalLines(err)
+				if len(lines) != 1 {
+					t.Fatalf("want exactly one on_complete line, got %d: %q", len(lines), lines)
+				}
+				if want := tc.want + ": " + refusal; !strings.HasPrefix(lines[0], want) {
+					t.Errorf("line = %q, want prefix %q", lines[0], want)
+				}
+			})
+		}
+	})
+
+	t.Run("toml shapes", func(t *testing.T) {
+		shapes := map[string]string{
+			"for_each and bond":     "for_each = \"output.workers\"\nbond = \"mol-worker\"",
+			"empty table":           "",
+			"old docs run field":    "run = \"make build\"",
+			"vars only":             "[steps.on_complete.vars]\nworker_name = \"{item.name}\"",
+			"parallel only":         "parallel = true",
+			"sequential only":       "sequential = true",
+			"parallel + sequential": "parallel = true\nsequential = true",
+			"for_each without bond": "for_each = \"output.workers\"",
+		}
+		for name, body := range shapes {
+			t.Run(name, func(t *testing.T) {
+				src := "formula = \"survey\"\nversion = 1\ntype = \"workflow\"\n\n" +
+					"[[steps]]\nid = \"survey-workers\"\ntitle = \"Survey workers\"\n\n" +
+					"[steps.on_complete]\n" + body + "\n"
+				f, err := NewParser().ParseTOML([]byte(src))
+				if err != nil {
+					t.Fatalf("ParseTOML: %v", err)
+				}
+				err = f.Validate()
+				if !errors.Is(err, ErrValidation) {
+					t.Fatalf("Validate = %v, want ErrValidation", err)
+				}
+				lines := onCompleteRefusalLines(err)
+				if len(lines) != 1 {
+					t.Fatalf("want exactly one on_complete line (no shape checks), got %d: %q", len(lines), lines)
+				}
+				if want := "steps[0] (survey-workers): " + refusal; !strings.HasPrefix(lines[0], want) {
+					t.Errorf("line = %q, want prefix %q", lines[0], want)
+				}
+			})
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		const tmpl = `{"formula":"survey","version":1,"type":"workflow",` +
+			`"steps":[{"id":"survey-workers","title":"Survey workers","on_complete":%s}]}`
+		f, err := NewParser().Parse([]byte(fmt.Sprintf(tmpl, "{}")))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := f.Validate(); !errors.Is(err, ErrValidation) || len(onCompleteRefusalLines(err)) != 1 {
+			t.Errorf(`"on_complete": {} Validate = %v, want one on_complete refusal`, err)
+		}
+		f, err = NewParser().Parse([]byte(fmt.Sprintf(tmpl, "null")))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := f.Validate(); err != nil {
+			t.Errorf(`"on_complete": null Validate = %v, want nil`, err)
+		}
+	})
+
+	t.Run("two offending steps", func(t *testing.T) {
+		f := &Formula{Formula: "mol-oc", Version: 1, Type: TypeWorkflow, Steps: []*Step{
+			{ID: "a", Title: "A", OnComplete: spec()},
+			{ID: "b", Title: "B", Children: []*Step{{ID: "c", Title: "C", OnComplete: &OnCompleteSpec{}}}},
+		}}
+		err := f.Validate()
+		if !errors.Is(err, ErrValidation) {
+			t.Fatalf("Validate = %v, want ErrValidation", err)
+		}
+		lines := onCompleteRefusalLines(err)
+		if len(lines) != 2 {
+			t.Fatalf("want two on_complete lines, got %d: %q", len(lines), lines)
+		}
+		if !strings.HasPrefix(lines[0], "steps[0] (a): "+refusal) ||
+			!strings.HasPrefix(lines[1], "steps[1].children[0] (c): "+refusal) {
+			t.Errorf("lines = %q", lines)
+		}
+	})
 }
 
-func TestValidate_OnComplete_InvalidForEachPath(t *testing.T) {
-	formula := &Formula{
-		Formula: "mol-invalid",
-		Version: 1,
-		Type:    TypeWorkflow,
-		Steps: []*Step{
-			{
-				ID:    "survey",
-				Title: "Survey",
-				OnComplete: &OnCompleteSpec{
-					ForEach: "items", // Should start with "output."
-					Bond:    "mol-item",
-				},
-			},
-		},
+// TestValidate_NoStepOnCompleteAccepted: formulas with no step-level
+// on_complete validate exactly as before — plain steps, children, loop
+// bodies — and a top-level [squash] table whose trigger string says
+// "on_complete" is not a step field, so the refusal must not catch it
+// (GH#3782 regression guard).
+func TestValidate_NoStepOnCompleteAccepted(t *testing.T) {
+	f := &Formula{Formula: "mol-plain", Version: 1, Type: TypeWorkflow, Steps: []*Step{
+		{ID: "build", Title: "Build"},
+		{ID: "phase", Title: "Phase", Children: []*Step{
+			{ID: "impl", Title: "Implement"},
+		}},
+		{ID: "matrix", Title: "Matrix", Loop: &LoopSpec{
+			Count: 3,
+			Var:   "i",
+			Body:  []*Step{{ID: "cell", Title: "Cell {{i}}"}},
+		}},
+	}}
+	if err := f.Validate(); err != nil {
+		t.Errorf("Validate failed for an on_complete-free formula: %v", err)
 	}
 
-	err := formula.Validate()
-	if err == nil {
-		t.Error("expected validation error for invalid for_each path")
+	src := "formula = \"mol-squash\"\nversion = 1\ntype = \"workflow\"\n\n" +
+		"[[steps]]\nid = \"build\"\ntitle = \"Build\"\n\n" +
+		"[squash]\ntrigger = \"on_complete\"\n"
+	parsed, err := NewParser().ParseTOML([]byte(src))
+	if err != nil {
+		t.Fatalf("ParseTOML: %v", err)
 	}
-	if !strings.Contains(err.Error(), "must start with 'output.'") {
-		t.Errorf("expected 'must start with output.' error, got: %v", err)
-	}
-}
-
-func TestValidate_OnComplete_ParallelAndSequential(t *testing.T) {
-	formula := &Formula{
-		Formula: "mol-invalid",
-		Version: 1,
-		Type:    TypeWorkflow,
-		Steps: []*Step{
-			{
-				ID:    "survey",
-				Title: "Survey",
-				OnComplete: &OnCompleteSpec{
-					ForEach:    "output.items",
-					Bond:       "mol-item",
-					Parallel:   true,
-					Sequential: true, // Can't have both
-				},
-			},
-		},
-	}
-
-	err := formula.Validate()
-	if err == nil {
-		t.Error("expected validation error for parallel + sequential")
-	}
-	if !strings.Contains(err.Error(), "cannot set both parallel and sequential") {
-		t.Errorf("expected 'cannot set both' error, got: %v", err)
-	}
-}
-
-func TestValidate_OnComplete_Sequential(t *testing.T) {
-	formula := &Formula{
-		Formula: "mol-valid",
-		Version: 1,
-		Type:    TypeWorkflow,
-		Steps: []*Step{
-			{
-				ID:    "process-queue",
-				Title: "Process queue",
-				OnComplete: &OnCompleteSpec{
-					ForEach:    "output.branches",
-					Bond:       "mol-merge",
-					Sequential: true,
-				},
-			},
-		},
-	}
-
-	if err := formula.Validate(); err != nil {
-		t.Errorf("Validate failed for sequential on_complete: %v", err)
-	}
-}
-
-func TestValidate_OnComplete_InChildren(t *testing.T) {
-	formula := &Formula{
-		Formula: "mol-valid",
-		Version: 1,
-		Type:    TypeWorkflow,
-		Steps: []*Step{
-			{
-				ID:    "parent",
-				Title: "Parent",
-				Children: []*Step{
-					{
-						ID:    "child",
-						Title: "Child",
-						OnComplete: &OnCompleteSpec{
-							ForEach: "output.items",
-							Bond:    "mol-item",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	if err := formula.Validate(); err != nil {
-		t.Errorf("Validate failed for on_complete in child: %v", err)
+	if err := parsed.Validate(); err != nil {
+		t.Errorf("Validate refused a formula whose only on_complete text is the unrelated [squash] trigger: %v", err)
 	}
 }
 

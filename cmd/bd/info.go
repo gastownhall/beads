@@ -1241,7 +1241,7 @@ var versionChanges = []VersionChange{
 			"NEW: Fork repo auto-detection - Offer to configure .git/info/exclude",
 			"NEW: Control flow operators - loop and gate operators for formula composition",
 			"NEW: Aspect composition - Cross-cutting concerns via aspects field in formulas",
-			"NEW: Runtime expansion - on_complete and for-each dynamic step generation",
+			"NEW: on_complete/for-each formula fields - declared only; bd never ran them and now refuses formulas that set them (#3782)",
 			"NEW: bd formula list/show - Discover and inspect available formulas",
 			"NEW: bd mol stale - Detect molecules with all children closed but root still open",
 			"NEW: Stale molecules check in bd doctor - Proactive detection",

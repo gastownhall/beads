@@ -285,8 +285,10 @@ type Step struct {
 	// When set, the step becomes a container that expands its body.
 	Loop *LoopSpec `json:"loop,omitempty"`
 
-	// OnComplete defines actions triggered when this step completes.
-	// Used for runtime expansion over step output (the for-each construct).
+	// OnComplete is declared but never executed: bd refuses formulas that set on_complete.
+	// It is still decoded so show --json and convert keep what the author
+	// wrote, but Validate fails for any step that sets it (GH#3782). To fan
+	// out per item, bond one molecule per item with 'bd mol bond'.
 	OnComplete *OnCompleteSpec `json:"on_complete,omitempty" toml:"on_complete,omitempty"`
 
 	// Source tracing fields: track where this step came from.
@@ -360,43 +362,29 @@ type LoopSpec struct {
 	Body []*Step `json:"body"`
 }
 
-// OnCompleteSpec defines actions triggered when a step completes.
-// Used for runtime expansion over step output (the for-each construct).
-//
-// Example YAML:
-//
-//	step: survey-workers
-//	on_complete:
-//	  for_each: output.workers
-//	  bond: mol-worker-arm
-//	  vars:
-//	    worker_name: "{item.name}"
-//	    rig: "{item.rig}"
-//	  parallel: true
+// OnCompleteSpec is declared only: bd refuses formulas that set on_complete.
+// bd never executed it, so a step that set it completed without spawning
+// anything (GH#3782). The fields below describe what the spec was meant to
+// hold; Validate refuses every shape. To fan out per item, bond one molecule
+// per item with 'bd mol bond'.
 type OnCompleteSpec struct {
 	// ForEach is the path to the iterable collection in step output.
 	// Format: "output.<field>" or "output.<field>.<nested>"
-	// The collection must be an array at runtime.
+	// It was meant to name an array; bd never reads it.
 	ForEach string `json:"for_each,omitempty" toml:"for_each,omitempty"`
 
-	// Bond is the formula to instantiate for each item.
-	// A new molecule is created for each element in the ForEach collection.
+	// Bond is the formula meant to be instantiated for each item.
+	// bd never instantiates it.
 	Bond string `json:"bond,omitempty"`
 
-	// Vars are variable bindings for each iteration.
-	// Supports placeholders:
-	//   - {item} - the current item value (for primitives)
-	//   - {item.field} - a field from the current item (for objects)
-	//   - {index} - the zero-based iteration index
+	// Vars are the variable bindings meant for each iteration. The
+	// {item}, {item.field} and {index} placeholders were never implemented.
 	Vars map[string]string `json:"vars,omitempty"`
 
-	// Parallel runs all bonded molecules concurrently (default behavior).
-	// Set to true to make this explicit.
+	// Parallel was meant to run the bonded molecules concurrently.
 	Parallel bool `json:"parallel,omitempty"`
 
-	// Sequential runs bonded molecules one at a time.
-	// Each molecule starts only after the previous one completes.
-	// Mutually exclusive with Parallel.
+	// Sequential was meant to run the bonded molecules one at a time.
 	Sequential bool `json:"sequential,omitempty"`
 }
 
@@ -656,13 +644,13 @@ func (f *Formula) Validate() error {
 				errs = append(errs, fmt.Sprintf("steps[%d] (%s): %s", i, step.ID, err.Error()))
 			}
 		}
-		// Validate on_complete field - runtime expansion
-		if step.OnComplete != nil {
-			validateOnComplete(step.OnComplete, &errs, fmt.Sprintf("steps[%d] (%s)", i, step.ID))
-		}
 		// Validate children's depends_on and needs recursively
 		validateChildDependsOn(step.Children, stepIDLocations, &errs, fmt.Sprintf("steps[%d]", i))
 	}
+
+	// on_complete is declared but never executed: refuse it wherever it appears.
+	refuseOnComplete(f.Steps, "steps", &errs)
+	refuseOnComplete(f.Template, "template", &errs)
 
 	// Validate compose rules
 	if f.Compose != nil {
@@ -819,36 +807,38 @@ func validateChildDependsOn(children []*Step, idLocations map[string]string, err
 				*errs = append(*errs, fmt.Sprintf("%s (%s): %s", childPrefix, child.ID, err.Error()))
 			}
 		}
-		// Validate on_complete field
-		if child.OnComplete != nil {
-			validateOnComplete(child.OnComplete, errs, fmt.Sprintf("%s (%s)", childPrefix, child.ID))
-		}
 		validateChildDependsOn(child.Children, idLocations, errs, childPrefix)
 	}
 }
 
-// validateOnComplete validates an OnCompleteSpec.
-func validateOnComplete(oc *OnCompleteSpec, errs *[]string, prefix string) {
-	// Check that for_each and bond are both present or both absent
-	if oc.ForEach != "" && oc.Bond == "" {
-		*errs = append(*errs, fmt.Sprintf("%s.on_complete: bond is required when for_each is set", prefix))
-	}
-	if oc.ForEach == "" && oc.Bond != "" {
-		*errs = append(*errs, fmt.Sprintf("%s.on_complete: for_each is required when bond is set", prefix))
-	}
-
-	// Validate for_each path format
-	if oc.ForEach != "" {
-		if !strings.HasPrefix(oc.ForEach, "output.") {
-			*errs = append(*errs, fmt.Sprintf("%s.on_complete: for_each must start with 'output.' (got %q)", prefix, oc.ForEach))
+// refuseOnComplete appends one error for every step in steps (and in their
+// children and loop bodies, at any depth) that sets on_complete. bd parses the
+// field but has never executed it, so a formula that sets it would cook and
+// pour cleanly and then spawn nothing when the step closes (GH#3782). The
+// spec's shape is deliberately not checked: every shape is refused.
+func refuseOnComplete(steps []*Step, prefix string, errs *[]string) {
+	for i, step := range steps {
+		if step == nil {
+			continue
+		}
+		stepPrefix := fmt.Sprintf("%s[%d]", prefix, i)
+		if step.OnComplete != nil {
+			*errs = append(*errs, fmt.Sprintf("%s (%s): %s", stepPrefix, step.ID, onCompleteRefusal))
+		}
+		refuseOnComplete(step.Children, stepPrefix+".children", errs)
+		if step.Loop != nil {
+			refuseOnComplete(step.Loop.Body, stepPrefix+".loop.body", errs)
 		}
 	}
-
-	// Check parallel and sequential are mutually exclusive
-	if oc.Parallel && oc.Sequential {
-		*errs = append(*errs, fmt.Sprintf("%s.on_complete: cannot set both parallel and sequential", prefix))
-	}
 }
+
+// onCompleteRefusal is the reason given for every step that sets on_complete.
+// "on_complete is not supported" is the stable substring callers may match.
+// It does not tell the author to delete the field: a formula written for an
+// engine that runs on_complete itself can sit on bd's search path, and that
+// file is not bd's to edit.
+const onCompleteRefusal = "on_complete is not supported: bd does not run it, so a molecule bd cooks from this formula would never fan out; " +
+	"to fan out with bd, bond one molecule per item with 'bd mol bond'"
 
 // GetRequiredVars returns the names of all required variables.
 func (f *Formula) GetRequiredVars() []string {

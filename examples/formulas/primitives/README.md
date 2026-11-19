@@ -47,9 +47,8 @@ bazel test //cmd/bd:bd_test --config=ci --test_filter='^TestFormulaPrimitiveExam
 
 ## What's NOT here
 
-* `on_complete` — runtime no-op for every valid configuration as of
-  v1.0.3 (tracked in `beads-i02`). Its fixture and smoke test ship with
-  that issue's resolution PR, not here.
+* `on_complete` — not a bd primitive: bd refuses formulas that set it,
+  so there is no fixture.
 * Anything in `internal/formula/types.go` without a verified end-to-end
   parse → cook → pour audit. New primitives earn a fixture once they're
   empirically wired, not when they're declared.

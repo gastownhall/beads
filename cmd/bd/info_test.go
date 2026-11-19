@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -82,5 +83,29 @@ func TestVersionChangesCoverage(t *testing.T) {
 		if len(vc.Changes) < 1 {
 			t.Errorf("versionChanges[%d] (v%s) should have at least 1 change, found %d", i, vc.Version, len(vc.Changes))
 		}
+	}
+}
+
+// TestVersionChangesOnCompleteNotAdvertised: bd info --whats-new must not
+// advertise on_complete as working runtime expansion. bd never ran it and now
+// refuses formulas that set it (GH#3782).
+func TestVersionChangesOnCompleteNotAdvertised(t *testing.T) {
+	found := false
+	for _, vc := range versionChanges {
+		for _, change := range vc.Changes {
+			if !strings.Contains(change, "on_complete") {
+				continue
+			}
+			found = true
+			if strings.Contains(change, "Runtime expansion") {
+				t.Errorf("%s still advertises runtime expansion: %q", vc.Version, change)
+			}
+			if !strings.Contains(change, "refuses") {
+				t.Errorf("%s on_complete entry does not say bd refuses it: %q", vc.Version, change)
+			}
+		}
+	}
+	if !found {
+		t.Error("no versionChanges entry mentions on_complete; the 0.37.0 entry should be corrected in place, not removed")
 	}
 }
