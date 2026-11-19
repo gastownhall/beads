@@ -526,6 +526,31 @@ func TestCLIPullMergeSettlesOnRealDolt(t *testing.T) {
 		}
 		assertNoOpenMerge(t, ctx, fx.store.db, "a declined CLI-route merge")
 	})
+
+	// GH#7839: a declined merge left open made Dolt refuse every later commit
+	// and merge on the branch. Rolled back, it leaves the branch writable,
+	// and the retry declines the same conflict the same way.
+	t.Run("a declined merge leaves the branch writable and the retry repeats", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		fx, _ := declinedCLIPullFixture(t, ctx)
+
+		assertDeclinedMergeConflicts(t, fetchAndMergeAsCLIPull(t, ctx, fx.store))
+		db := fx.store.db
+		if _, err := db.ExecContext(ctx, "INSERT INTO pull_msg_marker VALUES (2, 'local write after the declined pull')"); err != nil {
+			t.Fatalf("local write after the declined pull: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'local: write after the declined pull')"); err != nil {
+			t.Fatalf("commit after the declined pull: %v", err)
+		}
+		var v string
+		if err := db.QueryRowContext(ctx, "SELECT v FROM pull_msg_marker AS OF 'HEAD' WHERE id = 2").Scan(&v); err != nil {
+			t.Fatalf("read the committed write AS OF 'HEAD': %v", err)
+		}
+		err := fetchAndMergeAsCLIPull(t, ctx, fx.store)
+		assertDeclinedMergeConflicts(t, err)
+		assertNoOpenMerge(t, ctx, db, "the retried CLI-route merge")
+	})
 }
 
 // TestCLIPullDeclinedConflictLeavesNoOpenMerge reproduces GH#7839 (bd-2ypu02):
