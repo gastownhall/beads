@@ -631,8 +631,10 @@ it ages out, a closed one only by --all, --closed or 'bd purge'.
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
 
-Use --closed to purge ALL closed wisps (regardless of age). This is the
-fastest way to reclaim space from accumulated wisp bloat. Safe by default:
+Use --closed to purge closed wisps. It honors the same --age threshold as the
+abandoned-wisp sweep (default 1h): only closed wisps not updated within that
+window are purge candidates, so a report closed moments ago survives (GH#8202).
+Pass --age 0s to purge every closed wisp regardless of age. Safe by default:
 requires --force to actually delete.
 
 --closed --force deletes in batches of 200 wisps, each committed on its own,
@@ -652,7 +654,8 @@ Examples:
   bd mol wisp gc --age 24h                          # Custom age threshold
   bd mol wisp gc --all                              # Also clean closed wisps older than threshold
   bd mol wisp gc --closed                           # Preview closed wisp deletion
-  bd mol wisp gc --closed --force                   # Delete all closed wisps
+  bd mol wisp gc --closed --force                   # Delete closed wisps idle for more than 1h
+  bd mol wisp gc --closed --force --age 0s          # Delete all closed wisps (any age)
   bd mol wisp gc --closed --dry-run                 # Explicit dry-run (same as no --force)
   bd mol wisp gc --exclude-type agent,rig           # Protect agent and rig wisps from GC
   bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type`,
@@ -1393,7 +1396,7 @@ func init() {
 	wispGCCmd.Flags().Bool("dry-run", false, "Preview what would be cleaned")
 	wispGCCmd.Flags().String("age", "1h", "Age threshold for abandoned wisp detection")
 	wispGCCmd.Flags().Bool("all", false, "Also clean closed wisps older than threshold")
-	wispGCCmd.Flags().Bool("closed", false, "Delete all closed wisps (ignores --age threshold)")
+	wispGCCmd.Flags().Bool("closed", false, "Delete closed wisps older than the --age threshold (use --age 0s for all)")
 	wispGCCmd.Flags().BoolP("force", "f", false, "Actually delete (default: preview only)")
 	wispGCCmd.Flags().StringSlice("exclude-type", nil, "Exclude wisps of these types from GC (comma-separated, e.g., agent,rig)")
 

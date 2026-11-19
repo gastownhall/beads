@@ -57,7 +57,10 @@ bd purge --force      # delete all closed ephemeral beads
 ```
 
 `bd mol wisp gc --closed --force` deletes closed wisps in batches of 200, each
-committed on its own. If a batch fails, the batches before it stay deleted:
+committed on its own. It honors the same `--age` threshold as the
+abandoned-wisp sweep (default 1h): a wisp closed moments ago survives — the
+wisps table is not versioned, so a purge cannot be undone. Pass `--age 0s` to
+purge every closed wisp regardless of age. If a batch fails, the batches before it stay deleted:
 the summary counts only committed deletions, `--json` adds `remaining_count`,
 `error` and `hint`, and the command exits nonzero. Rerun it to delete the
 rest. One run scans at most 5000 closed wisps; when the scan reaches that

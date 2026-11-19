@@ -1431,6 +1431,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd mol wisp gc --closed` honors the `--age` threshold** (#8202). The
+  closed purge deleted every closed wisp regardless of age, destroying a
+  patrol molecule's report moments after it closed; the wisps table is
+  Dolt-ignored, so the deletion was unrecoverable. `--closed` now selects
+  only closed wisps not updated within `--age` (default 1h) on both the
+  direct and proxied-server routes, via one shared selector, and the output
+  names the threshold. `--age 0s` (or any non-positive duration) keeps the
+  purge-all escape hatch. Pinned wisps and configured infra types stay
+  protected.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
