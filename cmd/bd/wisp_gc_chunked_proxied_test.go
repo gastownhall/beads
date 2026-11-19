@@ -146,3 +146,27 @@ func TestProxiedServerWispGCDeletesInChunks(t *testing.T) {
 		})
 	}
 }
+
+// TestDeleteBatchStaysOneRequest pins that chunking is gc's alone: an
+// ordinary forced multi-id delete (`bd delete --force a b ...`) still hands
+// its whole resolved selection to the deletion role as one atomic request.
+func TestDeleteBatchStaysOneRequest(t *testing.T) {
+	s := useWispPurgeStub(t, 250)
+
+	stdout, stderr, err := captureWispGC(t, func() error {
+		return deleteBatch(nil, s.closed, true, false, false, false, false, nil)
+	})
+	if err != nil {
+		t.Fatalf("deleteBatch: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if got := requestSizes(s.deleter.requests); !slices.Equal(got, []int{250}) {
+		t.Fatalf("request sizes = %v, want one request of all 250 ids", got)
+	}
+	req := s.deleter.requests[0]
+	if !slices.Equal(req.IDs, s.closed) || !req.Force || req.DryRun || req.Cascade {
+		t.Errorf("request = force %v dry_run %v cascade %v over %d ids, want a forced real delete of the whole selection in order", req.Force, req.DryRun, req.Cascade, len(req.IDs))
+	}
+	if len(s.deleter.deleted) != 250 {
+		t.Errorf("deleted %d, want 250", len(s.deleter.deleted))
+	}
+}
