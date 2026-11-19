@@ -241,4 +241,21 @@ func TestExternalServerInitWritesWitnessWhenDataDirSpelledOutsideBeadsDir(t *tes
 			t.Errorf("bd init created metadata.json in a provisioner-owned explicit workspace")
 		}
 	})
+
+	t.Run("reopen-after-root-populated", func(t *testing.T) {
+		// Simulate a managed server materializing data in the local root.
+		writeFile(t, filepath.Join(beadsDir, "dolt", "population.marker"), []byte("server data\n"))
+		listEnv := append(env,
+			"BEADS_DOLT_SERVER_HOST=127.0.0.1",
+			fmt.Sprintf("BEADS_DOLT_SERVER_PORT=%d", testDoltServerPort),
+			"BEADS_DOLT_SERVER_DATABASE="+database,
+		)
+		out, err := runExternalServerBD(t, repoDir, listEnv, "list", "--json", "--all")
+		if err != nil {
+			t.Fatalf("bd list over a populated local root after init failed: %v\n%s", err, out)
+		}
+		if strings.Contains(out, "explicit migration is required") {
+			t.Fatalf("bd list reported a legacy-upgrade refusal:\n%s", out)
+		}
+	})
 }
