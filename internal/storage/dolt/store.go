@@ -1479,6 +1479,18 @@ func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn
 	if err := fn(tx); err != nil {
 		return issueops.BlockedRecheck{}, errors.Join(err, tx.Rollback())
 	}
+	// Private create-replay test seam (GH#7289): a context created by
+	// withPreCommitHook runs its callback here — body complete, transaction
+	// still open — so a test can interleave a real concurrent writer before
+	// this transaction's commit and let the commit's own serialization
+	// conflict drive withRetryTx's replay. Production contexts carry no
+	// hook. A hook error fails the attempt through the same rollback path as
+	// a body error.
+	if hook, ok := preCommitHookFrom(ctx); ok {
+		if err := hook(tx); err != nil {
+			return issueops.BlockedRecheck{}, errors.Join(err, tx.Rollback())
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return issueops.BlockedRecheck{}, wrapSQLCommitError("commit write tx", err)
 	}

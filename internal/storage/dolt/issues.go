@@ -46,6 +46,16 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 	resetMintedIDs := issueops.SnapshotUnsetCreateIDs([]*types.Issue{issue})
 	var result issueops.CreateIssueResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		// The closure contract on withRetryTx: re-derive captured state on
+		// EVERY attempt. resetMintedIDs clears the create-time IDs a
+		// rolled-back attempt minted — the issue ID, the dependency sources
+		// it defaulted and the comment IDs it derived, exactly the fields
+		// the caller left empty — so the replay mints afresh instead of
+		// reading its own dead mints as caller-supplied IDs, skipping
+		// generation and its collision probe, and upserting over the
+		// concurrent writer that took the candidate (GH#7289). IDs the
+		// caller supplied are never captured and never cleared.
+		resetMintedIDs()
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{

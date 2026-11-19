@@ -1105,3 +1105,55 @@ func TestCrossProject_IdentityCheck_PathOnly_SoftSkipAndMatch(t *testing.T) {
 		})
 	}
 }
+
+// TestCrossProject_ConcurrentCreateSameHashInputsKeepsBothIssues forces two
+// concurrent CreateIssue calls to generate the same ID candidate (title,
+// description, actor and CreatedAt equal) and asserts that each call either
+// fails or gets its own row: two nil returns with one shared ID means one
+// caller's issue was silently overwritten on withRetryTx replay (GH#7289).
+func TestCrossProject_ConcurrentCreateSameHashInputsKeepsBothIssues(t *testing.T) {
+	storeA, _, cleanup := setupTwoProjectStores(t, "proj-a", "proj-b")
+	defer cleanup()
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	const rounds = 20
+	base := time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC)
+	for r := 0; r < rounds; r++ {
+		title := fmt.Sprintf("collide-round-%d", r)
+		created := base.Add(time.Duration(r) * time.Second)
+		ids := make([]string, 2)
+		errsOut := make([]error, 2)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for w := 0; w < 2; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				issue := &types.Issue{
+					Title:       title,
+					Description: "same hash inputs",
+					Notes:       fmt.Sprintf("writer-%d", w),
+					Status:      types.StatusOpen,
+					Priority:    2,
+					IssueType:   types.TypeTask,
+					CreatedAt:   created,
+				}
+				<-start
+				errsOut[w] = storeA.CreateIssue(ctx, issue, "same-actor")
+				ids[w] = issue.ID
+			}(w)
+		}
+		close(start)
+		wg.Wait()
+		if errsOut[0] == nil && errsOut[1] == nil && ids[0] == ids[1] {
+			got, err := storeA.GetIssue(ctx, ids[0])
+			notes := "<unreadable>"
+			if err == nil && got != nil {
+				notes = got.Notes
+			}
+			t.Fatalf("round %d: both CreateIssue calls returned nil with the same ID %q; one row survives (notes=%q), the other caller's issue was overwritten",
+				r, ids[0], notes)
+		}
+	}
+}
