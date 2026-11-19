@@ -918,6 +918,7 @@ go_test(
         "hooks_guard_test.go",
         "hooks_husky_test.go",
         "hooks_marker_skip_test.go",
+        "hooks_non_shell_test.go",
         "hooks_post_merge_import_test.go",
         "hooks_symlinked_dir_test.go",
         "hooks_symlinked_hooks_dir_repro_test.go",

@@ -149,6 +149,44 @@ hooks {
 }
 ```
 
+### Non-Shell Hooks (Python, Node, Ruby, ...)
+
+bd's generated hook section is POSIX `sh`. Installing it into a hook run by
+another interpreter — pre-commit and prek install Python `pre-push` hooks,
+for example — leaves a syntax error that breaks the whole file rather than
+just an unreachable section. bd therefore never injects into a hook whose
+shebang names a non-shell interpreter (or a shebang it cannot resolve), and
+it never injects into binary content:
+
+- Installation skips the hook with a stderr warning naming the hook, its
+  interpreter and its path, and continues with the remaining hooks. The
+  skipped file stays byte-identical and gets no `.backup` sidecar. The
+  `bd hooks install` report lists it under skipped hooks (JSON:
+  `skipped_hooks`).
+- A hook that already calls `bd hooks run` — the manual-integration shape bd
+  prescribes for external managers — is left untouched and silent.
+- To integrate bd into such a hook manually, call `bd hooks run <hook>` from
+  the hook itself, passing the hook's arguments and stdin.
+- Hooks written for a POSIX-compatible shell (`sh`, `bash`, `dash`, `ash`,
+  `ksh`, `mksh`, `zsh`, ...) and hooks without a shebang are unaffected:
+  bd keeps injecting into them exactly as before.
+
+**Repair of already-corrupted hooks.** If an older bd version already
+appended its shell section to a non-shell hook, installation removes the
+stale `BEGIN`/`END BEADS INTEGRATION` section — including its markers — and
+leaves the rest of the file byte-identical, warning about what it removed.
+bd never restores the stale `.backup` sidecar over your current hook: the
+backup is a one-time snapshot from the original install and would discard
+every edit since. Re-running installation makes no further changes.
+
+**Ambiguous markers.** When a non-shell hook contains bd marker text that
+does not form complete, whole-line, properly ordered
+`BEGIN`/`END` pairs — unpaired, nested, reversed or embedded inside another
+line — bd will not rewrite the file automatically. Inspect the hook manually
+and remove the stale bd section yourself. The same policy applies to
+`bd migrate hooks` and to the hooks preserved when switching to
+`--beads`/`--shared` mode.
+
 ### Hook Timeout
 
 The hook shim applies a soft deadline to `bd hooks run` when a compatible

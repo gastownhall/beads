@@ -729,3 +729,31 @@ func TestInitHooksContextGuardPreservesOwnership(t *testing.T) {
 		})
 	}
 }
+
+// GH#6348: bd appends a POSIX-shell integration block to a foreign pre-push
+// hook whose shebang is python3, which leaves the hook a Python SyntaxError.
+// bd must never splice shell code into a hook interpreted by a non-shell
+// interpreter.
+func TestInstallHooksDoesNotAppendShellToPythonHook(t *testing.T) {
+	repoDir := setupGuardTestRepo(t)
+
+	userContent := "#!/usr/bin/env python3\nimport sys\n\n\ndef main():\n    return 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main())\n"
+	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte(userContent), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = installHooksWithOptions(managedHookNames, false, false, false, false)
+
+	got, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(string(got), "#!/usr/bin/env python3") &&
+		strings.Contains(string(got), "if command -v bd >/dev/null 2>&1; then") {
+		t.Fatalf("bd appended its shell section to a python3 hook (Python SyntaxError at runtime):\n%s", got)
+	}
+}
