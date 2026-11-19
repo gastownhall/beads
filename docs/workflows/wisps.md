@@ -56,12 +56,16 @@ bd mol wisp gc        # garbage collect old/abandoned wisps
 bd purge --force      # delete all closed ephemeral beads
 ```
 
-`bd mol wisp gc --closed --force` deletes closed wisps in batches of 200, each
-committed on its own. If a batch fails, the batches before it stay deleted:
-the summary counts only committed deletions, `--json` adds `remaining_count`,
-`error` and `hint`, and the command exits nonzero. Rerun it to delete the
-rest. One run scans at most 5000 closed wisps; when the scan reaches that
-limit the output says more may remain (`candidates_capped` in `--json`).
+`bd mol wisp gc` (age-based) and `bd mol wisp gc --closed --force` delete
+wisps in batches of 200, each committed on its own. If a batch fails, the
+batches before it stay deleted and no later batch is sent: the summary counts
+only committed deletions, `--json` adds `unconfirmed_count` (selected wisps no
+committed batch confirmed, the failed batch included; `remaining_count` is the
+same number), `error` and `hint` to the one stdout object and writes one error
+object to stderr, and the command exits nonzero. Rerun it to reselect and
+delete the rest. One run scans at most 5000 closed wisps; when the scan
+reaches that limit the output says more may remain (`candidates_capped` in
+`--json`).
 
 ### Retiring ids with `--retain-ids`
 
