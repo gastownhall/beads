@@ -1515,15 +1515,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open** (#7849, #8503; thanks @rjgeng). When a server-mode pull went
   through the dolt CLI (a git-protocol remote, or `bd federation sync` with
   such a peer) and met a conflict bd does not auto-resolve, it committed the
+- **A pull through the dolt CLI no longer leaves a declined merge open**
+  (#7839, #8503; supersedes #7849; thanks @rjgeng). In server mode,
+  `bd dolt pull` and `bd sync` fetch a git-protocol remote, a remote with
+  stored credentials, or a cloud remote whose credentials are in the
+  environment through the dolt CLI, then merge the fetched branch. When
+  that merge met a conflict bd does not auto-resolve, bd committed the
   conflicted merge into the working set and left it open: every later write
-  and pull failed until an operator aborted it by hand. That route now
-  settles the merge in its own transaction, as the SQL route does: a merge
-  that settles cleanly commits, and one that does not rolls back with the
-  working set restored and the conflicted tables reported, so
-  `bd dolt pull` and `bd sync` fail cleanly and `bd federation sync` lists
-  the conflicts. The `bd sync` help and halt message no longer say that this
-  route leaves conflict rows live; live rows now come only from a merge
-  already open in the working set.
+  and pull failed until an operator resolved or aborted it by hand. The
+  merge now settles in its own transaction, as the SQL route does: a merge
+  that settles commits, and one that does not rolls back with the working
+  set restored, so the pull fails naming the conflicted tables and the
+  database stays writable. The SDK's `PullFrom` on such a peer still returns
+  the conflicts, now with the merge rolled back. `bd conflicts resolve` has
+  no live rows to act on after such a pull; to take one side, run
+  `bd vc merge <remote>/<branch> --strategy ours|theirs`. The `bd sync` help
+  and halt messages no longer say that a pull leaves conflict rows live;
+  live rows come only from a merge already open in the working set.
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row

@@ -230,9 +230,10 @@ func TestRunSyncLoopHappyPath(t *testing.T) {
 	}
 }
 
-// A conflict left live by an earlier halted sync must be reported as a conflict
-// before anything is attempted — Dolt refuses to merge over it, so without the
-// pre-flight the operator sees an opaque transport failure instead.
+// A conflict left live by a merge already open in the working set must be
+// reported as a conflict before anything is attempted — Dolt refuses to merge
+// over it, so without the pre-flight the operator sees an opaque transport
+// failure instead.
 func TestRunSyncLoopPreflightConflictHaltsBeforePull(t *testing.T) {
 	r := &syncOpsRecorder{conflictsSeq: [][]string{{"issues"}}}
 	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
@@ -984,6 +985,15 @@ func TestSyncConflictMessage(t *testing.T) {
 		}
 		if strings.Contains(got, "working set restored") {
 			t.Errorf("a live conflict must not be described as restored:\n%s", got)
+		}
+		// No pull route of this bd leaves its declined merge open (GH#7839),
+		// so the live rows are attributed to a merge already open there, not
+		// to a sync run that cannot have produced them.
+		if !strings.Contains(got, "merge already open there") {
+			t.Errorf("message does not attribute the live rows to an open merge:\n%s", got)
+		}
+		if strings.Contains(got, "earlier halted sync") {
+			t.Errorf("message still blames an earlier halted sync:\n%s", got)
 		}
 	})
 

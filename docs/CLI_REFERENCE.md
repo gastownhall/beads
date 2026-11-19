@@ -3095,9 +3095,8 @@ recomputing or pushing and exits 2, and repeated runs keep halting the same way
 until an operator resolves the divergence. (The pull underneath does auto-settle
 the conflict classes it can settle convergently — machine-local metadata,
 audit-only dependency rows, and last-write-wins on issue cells. Anything beyond
-those halts here.) The pull aborts a merge it cannot settle and restores the
-working set; conflict rows already live in the working set come from a merge
-left open there, and the halt message reports which applies.
+those halts here.) Whether the halted merge was aborted or left live in the
+working set depends on the pull route, so the halt message reports which.
 
 Exit codes (a sync timer can branch on these without parsing output):
 

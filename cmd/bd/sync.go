@@ -73,8 +73,9 @@ type syncOutcome struct {
 	Attempts  int      `json:"attempts"`
 	Conflicts []string `json:"conflicts,omitempty"`
 	// ConflictsPreexisting distinguishes conflicts that were already live in
-	// the working set when sync started (an earlier halted sync or a hand-run
-	// merge) from ones this run's pull surfaced.
+	// the working set when sync started (a merge already open there: another
+	// client, a hand-run merge, or an older bd's halted sync) from ones this
+	// run's pull surfaced.
 	ConflictsPreexisting bool `json:"conflicts_preexisting,omitempty"`
 	// ConflictsLive reports whether the conflicts are sitting in the working
 	// set right now rather than having been aborted away. It is read from
@@ -202,8 +203,10 @@ func (o syncOps) report(format string, args ...interface{}) {
 //     a. the conflicts the merge itself captured — the settle pass aborts a
 //     merge it cannot auto-resolve and hands back a MergeConflictsError
 //     holding the conflict rows it read BEFORE the abort;
-//     b. live rows in dolt_conflicts, which is what a conflict left behind by
-//     some earlier operation (a hand-run merge, a halted sync) looks like.
+//     b. live rows in dolt_conflicts, which is what a merge already open in
+//     the working set looks like (another client, a hand-run merge, or an
+//     older bd's halted sync; no pull route leaves its own declined merge
+//     open, GH#7839).
 //
 //     Source (a) is why the check cannot just be a dolt_conflicts query: by
 //     the time a conflicted pull returns, its merge has been aborted and the
@@ -245,9 +248,10 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 	out := &syncOutcome{Status: syncStatusOK}
 	var evidence dirtyEvidence
 
-	// Pre-flight. A previous halted sync leaves its conflicts live, and Dolt
-	// refuses to merge over them — without this check that shows up as an
-	// opaque pull failure (exit 1) instead of the conflict it actually is.
+	// Pre-flight. A merge already open in the working set (another client, a
+	// hand-run merge, or an older bd's halted sync) leaves its conflicts live,
+	// and Dolt refuses to merge over them — without this check that shows up
+	// as an opaque pull failure (exit 1) instead of the conflict it actually is.
 	preConflicts, err := ops.conflicts(ctx)
 	if err != nil {
 		return out, fmt.Errorf("conflict check: %w", err)
@@ -1015,9 +1019,10 @@ func syncConflictMessage(out *syncOutcome) []string {
 	case out.ConflictsPreexisting:
 		lines = append(lines,
 			"This replica was ALREADY in a conflicted state before this run: the conflict rows",
-			"above are live in the working set, left by an earlier halted sync or a hand-run",
-			"merge. Nothing was pulled, merged, or pushed this run. Resolve the live conflict",
-			"before sync can make progress — Dolt refuses to merge over an unresolved one.",
+			"above are live in the working set, left by a merge already open there (another",
+			"client, a hand-run merge, or an older bd's halted sync). Nothing was pulled, merged,",
+			"or pushed this run. Resolve the live conflict before sync can make progress — Dolt",
+			"refuses to merge over an unresolved one.",
 			"Inspect with: bd conflicts list / bd conflicts show",
 			conflictsResolveHint)
 	case out.ConflictsLive:
