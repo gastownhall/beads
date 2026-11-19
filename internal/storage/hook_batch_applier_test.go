@@ -238,3 +238,88 @@ func (r *recordingBatchApplyIssues) CompleteIssueOperationMetadata(context.Conte
 func (r *recordingBatchApplyIssues) CompleteIssueOperationRelease(context.Context, string)    {}
 func (r *recordingBatchApplyIssues) CompleteIssueOperationReclaim(context.Context, string)    {}
 func (r *recordingBatchApplyIssues) CompleteIssueOperationUpdateByID(context.Context, string) {}
+
+// snapshotFiring is one hook firing with the issue value it was handed, which
+// is the fact the id-only recorder above cannot check.
+type snapshotFiring struct {
+	verb  string
+	id    string
+	issue *types.Issue
+}
+
+// snapshotRecordingHooks records every firing's verb, id and issue value.
+type snapshotRecordingHooks struct {
+	fired []snapshotFiring
+}
+
+func (r *snapshotRecordingHooks) CompleteIssueOperationCreate(_ context.Context, issue *types.Issue, _ []*types.Dependency) {
+	r.fired = append(r.fired, snapshotFiring{"create", issueIDOrNil(issue), issue})
+}
+func (r *snapshotRecordingHooks) CompleteIssueOperationUpdate(issue *types.Issue) {
+	r.fired = append(r.fired, snapshotFiring{"update", issueIDOrNil(issue), issue})
+}
+func (r *snapshotRecordingHooks) CompleteIssueOperationClose(issue *types.Issue) {
+	r.fired = append(r.fired, snapshotFiring{"close", issueIDOrNil(issue), issue})
+}
+func (r *snapshotRecordingHooks) CompleteIssueOperationDependency(_ context.Context, issueID string) {
+	r.fired = append(r.fired, snapshotFiring{"dependency", issueID, nil})
+}
+func (r *snapshotRecordingHooks) CompleteIssueOperationComment(_ context.Context, issueID string) {
+	r.fired = append(r.fired, snapshotFiring{"comment", issueID, nil})
+}
+func (r *snapshotRecordingHooks) CompleteIssueOperationMetadata(_ context.Context, issueID string) {
+	r.fired = append(r.fired, snapshotFiring{"metadata", issueID, nil})
+}
+func (r *snapshotRecordingHooks) CompleteIssueOperationRelease(_ context.Context, issueID string) {
+	r.fired = append(r.fired, snapshotFiring{"release", issueID, nil})
+}
+func (r *snapshotRecordingHooks) CompleteIssueOperationReclaim(_ context.Context, issueID string) {
+	r.fired = append(r.fired, snapshotFiring{"reclaim", issueID, nil})
+}
+func (r *snapshotRecordingHooks) CompleteIssueOperationUpdateByID(_ context.Context, issueID string) {
+	r.fired = append(r.fired, snapshotFiring{"update-by-id", issueID, nil})
+}
+
+// TestHookBatchApplierHandsEveryRowHookTheSharedSnapshot (bd-xx3ma9): a mixed
+// batch whose row-verb entries share ONE snapshot — one per row, the state it
+// finished the batch in — fires each row verb's own hook, in request order,
+// under the same count and gating rules as before, and hands EVERY row hook
+// the shared snapshot the entries carry, not a re-read of the row. A script
+// reacting to the create and to the update of the same row sees the row's
+// final state both times, which is also all it can act on: the batch commits
+// or rolls back together.
+func TestHookBatchApplierHandsEveryRowHookTheSharedSnapshot(t *testing.T) {
+	shared := &types.Issue{ID: "bd-1", Title: "after the batch"}
+	other := &types.Issue{ID: "bd-2", Title: "the edge's other end"}
+	recorder := &snapshotRecordingHooks{}
+	applier := &hookBatchApplier{
+		inner: &fakeBatchApplier{result: issueops.ApplyBatchResult{Items: []issueops.ItemResult{
+			{Kind: issueops.ItemCreate, IssueID: "bd-1", Changed: true, Issue: shared},
+			{Kind: issueops.ItemUpdate, IssueID: "bd-1", Changed: true, Issue: shared},
+			{Kind: issueops.ItemUpdate, IssueID: "bd-1", Changed: false, Issue: shared},
+			{Kind: issueops.ItemCreate, IssueID: "bd-2", Changed: true, Issue: other},
+			{Kind: issueops.ItemDepAdd, IssueID: "bd-1", DependsOnID: "bd-2", Changed: true},
+		}}},
+		hooks: recorder,
+	}
+
+	if _, err := applier.ApplyBatch(context.Background(), issueops.ApplyBatchRequest{Actor: "worker"}); err != nil {
+		t.Fatalf("ApplyBatch() error = %v", err)
+	}
+
+	want := []snapshotFiring{
+		{"create", "bd-1", shared},
+		{"update", "bd-1", shared},
+		{"create", "bd-2", other},
+	}
+	if !reflect.DeepEqual(recorder.fired, want) {
+		t.Fatalf("hooks fired = %v, want %v (count, order and gating unchanged; every row hook handed the shared snapshot)", recorder.fired, want)
+	}
+	for _, firing := range recorder.fired {
+		if firing.verb == "create" || firing.verb == "update" || firing.verb == "close" {
+			if firing.issue == nil || (firing.id == "bd-1" && firing.issue != shared) {
+				t.Errorf("the %s hook for %s was not handed the row's shared snapshot", firing.verb, firing.id)
+			}
+		}
+	}
+}

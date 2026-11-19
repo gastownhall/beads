@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -1059,3 +1060,43 @@ func TestApplyBatchMetadataMembersDecodeAPresentNull(t *testing.T) {
 }
 
 func applyStrPtr(s string) *string { return &s }
+
+// TestApplyBatchAnswersPerItemRevisionsBesideASharedSnapshot pins that the
+// one-snapshot-per-row retention (bd-xx3ma9) changes nothing on the wire: the
+// shared snapshot stops at the library boundary, while the revision each entry
+// carries is still ITS OWN — the row's token after THAT item, which is what an
+// expected_version guard is composed from.
+func TestApplyBatchAnswersPerItemRevisionsBesideASharedSnapshot(t *testing.T) {
+	shared := seededIssue("bd-1", "alice", types.StatusOpen)
+	applier := &roleBatchApplier{result: issueops.ApplyBatchResult{
+		Keys: map[string]string{"root": "bd-1"},
+		Items: []issueops.ItemResult{
+			{Kind: issueops.ItemCreate, IssueID: "bd-1", Changed: true, RowVersion: 3, Issue: shared},
+			{Kind: issueops.ItemUpdate, IssueID: "bd-1", Changed: true, RowVersion: 9, Issue: shared},
+			{Kind: issueops.ItemClose, IssueID: "bd-1", Changed: true, RowVersion: 12, Issue: shared},
+		},
+	}}
+	ts := newApplyBatchServer(t, applier)
+
+	resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[`+
+		`{"kind":"create","create":{"title":"one"}},`+
+		`{"kind":"update","update":{"target":{"id":"bd-1"},"patch":{"title":"two"}}},`+
+		`{"kind":"close","close":{"target":{"id":"bd-1"}}}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	items, _ := body["items"].([]any)
+	if len(items) != 3 {
+		t.Fatalf("items = %v, want one entry per requested item", body["items"])
+	}
+	for i, want := range []string{"3", "9", "12"} {
+		entry, _ := items[i].(map[string]any)
+		if entry["revision"] != want {
+			t.Errorf("items[%d].revision = %v, want %q: each entry keeps the token after ITS OWN item", i, entry["revision"], want)
+		}
+		if _, present := entry["issue"]; present {
+			t.Errorf("items[%d] carries a hydrated issue; the shared snapshot stops at the library boundary", i)
+		}
+	}
+}
