@@ -325,5 +325,7 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		}
 		return wispPurgeChunkFromDomain(res), nil
 	})
-	return renderWispPurgeOutcome(outcome, wispGCReport{withScanCapped: true, scanCapped: scanCapped})
+	report := wispPurgeClosedReport
+	report.scanCapped = scanCapped
+	return renderWispPurgeOutcome(outcome, report)
 }

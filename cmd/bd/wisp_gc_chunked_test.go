@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -204,5 +205,66 @@ func TestWispGCDeletesInBoundedTransactions(t *testing.T) {
 				t.Errorf("deleted names %d ids, want 450", len(got))
 			}
 		})
+	}
+}
+
+// TestWispGCKeepsCommittedChunksWhenALaterChunkFails pins that an age gc
+// whose second deletion request is refused before it changes anything keeps
+// the first chunk deleted, sends no third request, exits nonzero naming the
+// 200 confirmed deletions and the 250 selected wisps it could not confirm,
+// with the age command's own wording, and that rerunning without the fault
+// deletes the rest. With the whole selection in one request, a failure took
+// every deletion of the run with it.
+func TestWispGCKeepsCommittedChunksWhenALaterChunkFails(t *testing.T) {
+	s, rec := useWispGCRealStore(t)
+	wisps := seedWisps(t, s, 450, types.StatusOpen)
+	rec.failAt = 2
+
+	stdout, stderr, err := runWispGCCommand(t, wispGCAgeFlags)
+	if err == nil {
+		t.Fatalf("gc succeeded, want the injected refusal\nstdout:\n%s", stdout)
+	}
+	if code, ok := exitCodeFromError(err); !ok || code != 1 {
+		t.Errorf("error = %v, want an already-reported exit 1", err)
+	}
+	if got, want := rec.requestSizes(), []int{200, 200}; !slices.Equal(got, want) {
+		t.Errorf("deletion request sizes = %v, want %v (no request after the refused one)", got, want)
+	}
+	if left := wispCount(t, s); left != 250 {
+		t.Errorf("%d wisps remain, want the 250 the first chunk did not carry", left)
+	}
+	for _, id := range rec.requests[0].IDs {
+		if _, err := s.GetIssue(context.Background(), id); err == nil {
+			t.Errorf("%s of the committed first chunk is still present", id)
+			break
+		}
+	}
+	if !bytes.Contains([]byte(stdout), []byte("Deleted 200 issue(s)")) {
+		t.Errorf("stdout lacks the 200 confirmed deletions:\n%s", stdout)
+	}
+	for _, want := range []string{
+		"wisp gc stopped after deleting 200 of 450 selected wisp(s); 250 not confirmed deleted",
+		errWispGCInjected.Error(),
+		"Rerun the same command to reselect current data and delete the remaining abandoned wisps.",
+	} {
+		if !bytes.Contains([]byte(stderr), []byte(want)) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+	if bytes.Contains([]byte(stderr), []byte("--closed")) {
+		t.Errorf("an age gc failure names the closed purge:\n%s", stderr)
+	}
+	assertExportBookkeeping(t, rec.requests[0].IDs, rec.requests[1].IDs)
+
+	rec.failAt, rec.requests = 0, nil
+	stdout, stderr, err = runWispGCCommand(t, wispGCAgeFlags)
+	if err != nil {
+		t.Fatalf("rerun: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if got, want := rec.requestSizes(), []int{200, 50}; !slices.Equal(got, want) {
+		t.Errorf("rerun request sizes = %v, want %v", got, want)
+	}
+	if left := wispCount(t, s); left != 0 {
+		t.Errorf("%d of %d wisps remain after the rerun, want 0", left, len(wisps))
 	}
 }

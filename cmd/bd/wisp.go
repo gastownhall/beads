@@ -847,7 +847,9 @@ func runWispGCAbandoned(ctx context.Context, dryRun, cleanAll bool, ageThreshold
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	return renderWispPurgeOutcome(outcome, wispGCReport{withDeletedIDs: true})
+	report := wispGCAbandonedReport
+	report.withDeletedIDs = true
+	return renderWispPurgeOutcome(outcome, report)
 }
 
 // wispIsAbandoned reports whether a wisp counts as abandoned for GC
@@ -1055,7 +1057,9 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	if err := renderWispPurgeOutcome(outcome, wispGCReport{withScanCapped: true, scanCapped: scanCapped, withDeletedIDs: true}); err != nil {
+	report := wispPurgeClosedReport
+	report.scanCapped, report.withDeletedIDs = scanCapped, true
+	if err := renderWispPurgeOutcome(outcome, report); err != nil {
 		return err
 	}
 	if !jsonOutput {
@@ -1202,6 +1206,16 @@ func (o wispPurgeOutcome) remaining() int {
 // and it does not promise the failed chunk wrote nothing: a rerun reselects.
 const wispPurgeRerunHint = "Rerun the same command to reselect current data and delete the remaining closed wisps."
 
+// wispGCRerunHint is wispPurgeRerunHint for a stopped age gc.
+const wispGCRerunHint = "Rerun the same command to reselect current data and delete the remaining abandoned wisps."
+
+// wispPurgeClosedReport and wispGCAbandonedReport name a gc mode for
+// renderWispPurgeOutcome; each route adds its own keys.
+var (
+	wispPurgeClosedReport = wispGCReport{command: "wisp gc --closed", rerunHint: wispPurgeRerunHint, withScanCapped: true}
+	wispGCAbandonedReport = wispGCReport{command: "wisp gc", rerunHint: wispGCRerunHint}
+)
+
 // deleteSelectedWispsDirect deletes ids, which this store's own scan just
 // selected (closed purge or age GC), through its deletion role. The ids go to the role as they are: the
 // front door's per-id resolution (deleteBatch) would re-read each one to learn
@@ -1244,6 +1258,10 @@ func deleteSelectedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutc
 // wispGCReport says how renderWispPurgeOutcome prints a chunked gc's result
 // for the route and mode that ran it.
 type wispGCReport struct {
+	// command names the gc mode in a stopped run's error ("wisp gc" or
+	// "wisp gc --closed"); rerunHint is that mode's continue guidance.
+	command   string
+	rerunHint string
 	// withScanCapped adds candidates_capped, set from scanCapped: the closed
 	// purge's scan came back full, so more may remain.
 	withScanCapped bool
@@ -1280,7 +1298,7 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, report wispGCReport) error {
 		if out.err != nil {
 			answer["remaining_count"] = out.remaining()
 			answer["error"] = out.err.Error()
-			answer["hint"] = wispPurgeRerunHint
+			answer["hint"] = report.rerunHint
 		}
 		if err := outputJSON(answer); err != nil {
 			return err
@@ -1310,8 +1328,8 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, report wispGCReport) error {
 		// The counts above are what committed chunks confirmed. The failed
 		// chunk is not claimed either way: an error at a commit boundary does
 		// not prove nothing was written, which is why the hint reselects.
-		return HandleErrorWithHint(fmt.Sprintf("wisp gc --closed stopped after deleting %d of %d selected wisp(s); %d not confirmed deleted: %v",
-			len(out.confirmed), out.selected, out.remaining(), out.err), wispPurgeRerunHint)
+		return HandleErrorWithHint(fmt.Sprintf("%s stopped after deleting %d of %d selected wisp(s); %d not confirmed deleted: %v",
+			report.command, len(out.confirmed), out.selected, out.remaining(), out.err), report.rerunHint)
 	}
 	return nil
 }
