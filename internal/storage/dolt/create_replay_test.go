@@ -415,3 +415,67 @@ func TestCreateBatchReplayRemintsGeneratedIdentifiers(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateWispBatchReplayRemintsGeneratedIdentifiers (AC-4): the all-wisps
+// batch branch has its own retry closure; a replay there re-mints too and
+// both issues keep their related records in the wisp tables.
+func TestCreateWispBatchReplayRemintsGeneratedIdentifiers(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, noHistory := range []bool{false, true} {
+		name := "ephemeral"
+		if noHistory {
+			name = "no_history"
+		}
+		t.Run(name, func(t *testing.T) {
+			target := &types.Issue{Title: "replay-wisp-target-" + name, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+			target.Ephemeral = !noHistory
+			target.NoHistory = noHistory
+			if err := store.CreateIssue(ctx, target, "tester"); err != nil {
+				t.Fatalf("create wisp dependency target: %v", err)
+			}
+
+			title := "replay-wisp-" + name
+			loser := replayIssue(title, "loser")
+			loser.Ephemeral = !noHistory
+			loser.NoHistory = noHistory
+			loser.Dependencies = []*types.Dependency{{DependsOnID: target.ID, Type: types.DepBlocks}}
+			loser.Comments = []*types.Comment{{Author: "loser", Text: "loser comment", CreatedAt: replayFixedCreatedAt}}
+
+			winner := replayIssue(title, "winner")
+			winner.Ephemeral = !noHistory
+			winner.NoHistory = noHistory
+			winner.Comments = []*types.Comment{{Author: "winner", Text: "winner comment", CreatedAt: replayFixedCreatedAt}}
+
+			loserCtx, f := withForcedReplay(ctx, ctx, func() string { return loser.ID }, func(ctx context.Context) (string, error) {
+				err := store.CreateIssue(ctx, winner, replayActor)
+				return winner.ID, err
+			})
+			if err := store.CreateIssues(loserCtx, []*types.Issue{loser}, replayActor); err != nil {
+				t.Fatalf("loser wisp batch create: %v", err)
+			}
+			f.requireReplayed(t)
+
+			if loser.ID == winner.ID {
+				t.Fatalf("wisp batch replay reused the winner's ID %q", loser.ID)
+			}
+			requireReplayRow(t, ctx, store, wispPlane, loser.ID, "loser")
+			requireReplayRow(t, ctx, store, wispPlane, winner.ID, "winner")
+			for _, id := range []string{loser.ID, winner.ID} {
+				if n := replayQueryInt(t, ctx, store, "SELECT COUNT(*) FROM issues WHERE id = ?", id); n != 0 {
+					t.Fatalf("wisp %s also has a durable issues row", id)
+				}
+			}
+			if got := loser.Dependencies[0].IssueID; got != loser.ID {
+				t.Fatalf("loser dependency IssueID = %q, want the fresh wisp ID %q", got, loser.ID)
+			}
+			requireDepTargets(t, ctx, store, wispPlane, loser.ID, target.ID)
+			requireDepTargets(t, ctx, store, wispPlane, winner.ID)
+			requireOnlyComment(t, ctx, store, wispPlane, loser.ID, loser.Comments[0].ID, "loser comment")
+			requireOnlyComment(t, ctx, store, wispPlane, winner.ID, winner.Comments[0].ID, "winner comment")
+		})
+	}
+}
