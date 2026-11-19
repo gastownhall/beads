@@ -292,6 +292,66 @@ func TestEmbeddedEpicCloseEligibleNotEligible(t *testing.T) {
 			t.Errorf("epic1 should not be closed: %s", out)
 		}
 	})
+
+	// GH#5720: bd epic status now lists epics with no linked children, but
+	// they are never eligible, so close-eligible must neither select nor
+	// close a childless epic or an epic whose only dotted-ID issue (no
+	// parent-child edge) was closed for a completing reason. A complete
+	// epic in the same workspace proves the command does act.
+	t.Run("close_eligible_skips_zero_child_epics", func(t *testing.T) {
+		dirZ, _, _ := bdInit(t, bd, "--prefix", "epz")
+		childless := bdCreate(t, bd, dirZ, "Childless epic", "--type", "epic")
+		dotted := bdCreate(t, bd, dirZ, "Epic with dotted issue only", "--type", "epic")
+		dottedIssue := bdCreate(t, bd, dirZ, "Unlinked dotted issue", "--type", "task", "--id", dotted.ID+".1")
+		bdClose(t, bd, dirZ, dottedIssue.ID)
+		done := bdCreate(t, bd, dirZ, "Complete epic", "--type", "epic")
+		doneChild := bdCreate(t, bd, dirZ, "Done child", "--type", "task", "--parent", done.ID)
+		bdClose(t, bd, dirZ, doneChild.ID)
+
+		out := bdEpic(t, bd, dirZ, "close-eligible", "--dry-run")
+		if !strings.Contains(out, done.ID) {
+			t.Errorf("dry-run should list complete epic %s: %s", done.ID, out)
+		}
+		for _, id := range []string{childless.ID, dotted.ID} {
+			if strings.Contains(out, id+":") {
+				t.Errorf("dry-run must not select zero-child epic %s: %s", id, out)
+			}
+		}
+
+		result := bdEpicJSON(t, bd, dirZ, "close-eligible", "--dry-run")
+		rows, ok := result.([]interface{})
+		if !ok {
+			t.Fatalf("dry-run --json: expected array, got %T", result)
+		}
+		var selected []string
+		for _, row := range rows {
+			epic, _ := row.(map[string]interface{})["epic"].(map[string]interface{})
+			id, _ := epic["id"].(string)
+			selected = append(selected, id)
+		}
+		if len(selected) != 1 || selected[0] != done.ID {
+			t.Errorf("dry-run --json selected %v, want only %s", selected, done.ID)
+		}
+
+		result = bdEpicJSON(t, bd, dirZ, "close-eligible")
+		obj, ok := result.(map[string]interface{})
+		if !ok {
+			t.Fatalf("close-eligible --json: expected object, got %T", result)
+		}
+		closed, _ := obj["closed"].([]interface{})
+		if len(closed) != 1 || closed[0] != done.ID {
+			t.Errorf("close-eligible closed %v, want only %s", closed, done.ID)
+		}
+
+		for _, id := range []string{childless.ID, dotted.ID} {
+			if got := bdShow(t, bd, dirZ, id); got.Status != types.StatusOpen {
+				t.Errorf("zero-child epic %s status = %s, want open", id, got.Status)
+			}
+		}
+		if got := bdShow(t, bd, dirZ, done.ID); got.Status != types.StatusClosed {
+			t.Errorf("complete epic %s status = %s, want closed", done.ID, got.Status)
+		}
+	})
 }
 
 func TestEmbeddedEpicCloseEligibleClosesEpics(t *testing.T) {
