@@ -293,6 +293,44 @@ func TestForeignPrefixAbsentTargetStillExternal(t *testing.T) {
 	}
 }
 
+// TestForeignPrefixAncestorBlockerRefusedEmbedded pins hierarchy validation
+// across prefixes (GH#6066): a blocks edge whose foreign-prefix blocker is
+// already an ancestor through a parent-child edge is refused exactly like a
+// same-prefix one, and no edge is written. Prefix-only classification used to
+// route both edges external, where no hierarchy rule could see them.
+func TestForeignPrefixAncestorBlockerRefusedEmbedded(t *testing.T) {
+	store := openExternalDependencyStore(t, "demo")
+	ctx := t.Context()
+	ancestor := &types.Issue{ID: "treehouse-lease-t7", Title: "the ancestor", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}
+	dependent := &types.Issue{ID: "firstmate-lease-hier", Title: "the dependent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{ancestor, dependent} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", issue.ID, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: dependent.ID, DependsOnID: ancestor.ID, Type: types.DepParentChild}, "tester"); err != nil {
+		t.Fatalf("AddDependency(parent-child): %v", err)
+	}
+
+	err := store.AddDependency(ctx, &types.Dependency{IssueID: dependent.ID, DependsOnID: ancestor.ID, Type: types.DepBlocks}, "tester")
+	if err == nil {
+		t.Fatalf("AddDependency(blocks) = nil, want the ancestor-blocker refusal: %s is %s's parent", ancestor.ID, dependent.ID)
+	}
+	if !strings.Contains(err.Error(), "ancestor") && !strings.Contains(err.Error(), "hierarchy") {
+		t.Fatalf("AddDependency(blocks) error = %v, want the blocking-hierarchy refusal", err)
+	}
+
+	records, err := store.GetDependencyRecords(ctx, dependent.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords: %v", err)
+	}
+	for _, r := range records {
+		if r.Type == types.DepBlocks {
+			t.Fatalf("stored edges = %v: the refused blocks edge must not be written", records)
+		}
+	}
+}
+
 func openExternalDependencyStore(t *testing.T, prefix string) *embeddeddolt.EmbeddedDoltStore {
 	t.Helper()
 	store, err := embeddeddolt.Open(t.Context(), filepath.Join(t.TempDir(), ".beads"), prefix, "main")
