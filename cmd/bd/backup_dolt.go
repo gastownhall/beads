@@ -74,7 +74,7 @@ After adding, run 'bd backup sync' to push your data.`,
 		}
 
 		// Resolve filesystem paths to absolute and add file:// prefix.
-		// DoltHub URLs are passed through as-is.
+		// Backup URLs (backupInitURLSchemes) are passed through as-is.
 		backupURL := resolveDoltBackupURL(rawPath)
 
 		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
@@ -208,14 +208,37 @@ Run 'bd backup init <path>' first to configure a destination.`,
 	},
 }
 
+// backupInitURLSchemes are the URL prefixes `bd backup init` hands to Dolt
+// unchanged. It is init's policy, not Dolt's exhaustive transport list: each
+// entry is a destination Beads advertises and the pinned Dolt registers a
+// remote factory for (DoltHub/HTTP(S), file, AWS, GCS, Azure, OCI). Matching
+// is case-sensitive, like Dolt's own scheme lookup.
+var backupInitURLSchemes = []string{
+	"https://",
+	"http://",
+	"file://",
+	"aws://",
+	"gs://",
+	"az://",
+	"oci://",
+}
+
+// isDoltBackupURL reports whether raw starts with one of backupInitURLSchemes.
+func isDoltBackupURL(raw string) bool {
+	for _, scheme := range backupInitURLSchemes {
+		if strings.HasPrefix(raw, scheme) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.
-// Filesystem paths get resolved to absolute and prefixed with file://
-// URLs (https://, http://) are passed through as-is.
+// URLs with a scheme in backupInitURLSchemes are passed through byte-for-byte;
+// anything else is a filesystem path, resolved to absolute and prefixed with
+// file://.
 func resolveDoltBackupURL(raw string) string {
-	// DoltHub or other remote URLs — pass through
-	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") ||
-		strings.HasPrefix(raw, "file://") || strings.HasPrefix(raw, "aws://") ||
-		strings.HasPrefix(raw, "gs://") {
+	if isDoltBackupURL(raw) {
 		return raw
 	}
 
