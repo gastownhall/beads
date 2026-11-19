@@ -197,6 +197,18 @@ func TestEmbeddedReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *t
 	conformance.RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderListWiderThanTheHydrationBatchKeepsItsPageContracts(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
+func TestEmbeddedReaderListOffsetPastTheHydrationBatchKeepsItsWindow(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListOffsetPastTheHydrationBatchKeepsItsWindow(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 func TestEmbeddedReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
