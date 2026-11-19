@@ -20,8 +20,8 @@ import (
 
 // missingHistoryStore is a pure store holding several issues. Its
 // transactions route each write to the issue it names and count it, and its
-// PreviousExternalRef answers from previousRefs: an ID absent from it has no
-// history row at the asked time (found=false), as after a compaction whose
+// PreviousExternalRefs answers from previousRefs: an ID absent from it has no
+// history row at the asked time, as after a compaction whose
 // squashed base postdates last_sync.
 type missingHistoryStore struct {
 	*pureTestStore
@@ -39,9 +39,10 @@ func newMissingHistoryStore(issues ...*types.Issue) *missingHistoryStore {
 	}
 }
 
-func (s *missingHistoryStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
-	ref, ok := s.previousRefs[id]
-	return ref, ok, nil
+var _ ExternalRefHistoryStore = (*missingHistoryStore)(nil)
+
+func (s *missingHistoryStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
+	return historyFrom(s.previousRefs, ids), nil
 }
 
 func (s *missingHistoryStore) GetIssueByExternalRef(_ context.Context, ref string) (*types.Issue, error) {

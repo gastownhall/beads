@@ -29,15 +29,17 @@ type HistoryViewer interface {
 type ExternalRefHistoryQuerier interface {
 	HistoryViewer
 
-	// PreviousExternalRef returns the external_ref value recorded for
-	// issueID as of the most recent commit at or before asOf.
+	// PreviousExternalRefs returns, for each of ids, the external_ref value
+	// recorded by the most recent commit at or before asOf. A tracker pull
+	// asks it once for all its linked issues at lastSync (GH#6605).
 	//
-	// found is false when no comparable history entry exists for issueID
-	// at or before asOf: the issue may have been created after asOf, or
-	// the history that held it may have been compacted, flattened or
-	// otherwise rewritten (#7294). It says nothing about whether the ref
-	// changed; callers decide how to treat it. ref is the empty string,
-	// with found true, when the historical row's external_ref column was
-	// NULL. A query failure returns err, never found=false.
-	PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (ref string, found bool, err error)
+	// An id is absent from the map when no comparable history entry exists
+	// for it at or before asOf: the issue may have been created after asOf,
+	// or the history that held it may have been compacted, flattened or
+	// otherwise rewritten (#7294). Absence says nothing about whether the
+	// ref changed; callers decide how to treat it. A present empty string is
+	// a historical row whose external_ref column was NULL. Empty and repeated
+	// ids are ignored. A query failure returns err and no map, never a
+	// partial answer. Nothing is cached between calls.
+	PreviousExternalRefs(ctx context.Context, ids []string, asOf time.Time) (map[string]string, error)
 }

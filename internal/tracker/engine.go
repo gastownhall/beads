@@ -978,6 +978,7 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 	// decided on its own history: one missing row says nothing about the
 	// next issue's.
 	unverified := unverifiedLinks{lastSync: *lastSync}
+	var candidates []prelinkCandidate
 	for _, local := range localIssues {
 		if local == nil || local.ExternalRef == nil {
 			continue
@@ -986,10 +987,18 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if ref == "" || !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		changedAfterLastSync, historyUnknown, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
-		if err != nil {
-			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
-		}
+		candidates = append(candidates, prelinkCandidate{local: local, ref: ref})
+	}
+	// One history read decides every candidate before any is hydrated: a
+	// failure aborts the pull here, before a FetchIssue, rather than falling
+	// back to the timestamp heuristic.
+	verdicts, err := e.prelinkVerdicts(ctx, candidates, *lastSync)
+	if err != nil {
+		return nil, hydratedLocalIDs, err
+	}
+	for i, candidate := range candidates {
+		local, ref := candidate.local, candidate.ref
+		changedAfterLastSync, historyUnknown := verdicts[i].changed, verdicts[i].historyUnknown
 		unverified.note(local, historyUnknown)
 		if !changedAfterLastSync {
 			// An issue whose history at lastSync is missing is not hydrated:
@@ -1085,12 +1094,31 @@ func (e *Engine) warnUnverifiedLinks(u unverifiedLinks) {
 		e.Tracker.DisplayName(), len(u.ids), u.lastSync.UTC().Format(time.RFC3339), names, advice)
 }
 
-// externalRefChangedAfter reports whether local's external_ref differed
-// from currentRef as of lastSync. When the backing store can answer this
-// precisely (storage.ExternalRefHistoryQuerier — Dolt-shaped stores that
-// expose dolt_history_issues), it does, and prelinkDecision decides from
-// the history it returns; otherwise it falls back to a coarser timestamp
-// heuristic.
+// prelinkCandidate is a local issue linked to this tracker, which pre-link
+// detection decides; ref is its trimmed current external_ref.
+type prelinkCandidate struct {
+	local *types.Issue
+	ref   string
+}
+
+// prelinkVerdict is prelinkDecision's answer for one candidate.
+type prelinkVerdict struct {
+	changed, historyUnknown bool
+}
+
+// prelinkVerdicts decides, for every candidate, whether its external_ref
+// differed from its current ref as of lastSync, returning one verdict per
+// candidate in order. When the backing store can answer this precisely
+// (storage.ExternalRefHistoryQuerier — Dolt-shaped stores that expose
+// dolt_history_issues), it asks the store once for all candidates and
+// prelinkDecision decides each from the history returned; otherwise each
+// falls back to a coarser timestamp heuristic and never reports
+// historyUnknown. No candidates means no history read.
+//
+// One batch read, not one per candidate: a pull asks about every linked
+// local at the same lastSync, and a per-issue history scan (plus, on the
+// embedded store, an engine open per issue) made a 3.8k-issue tracker's
+// pull take ~35 minutes (GH#6605).
 //
 // The fast path is gated on the ExternalRefHistoryQuerier capability, not on
 // whether the store happens to expose a raw *sql.DB: some Dolt-shaped
@@ -1098,34 +1126,59 @@ func (e *Engine) warnUnverifiedLinks(u unverifiedLinks) {
 // dolt_history_issues query without a pooled *sql.DB, and a non-Dolt SQL
 // backend could expose *sql.DB without having that Dolt system table at
 // all. Gating on the capability keeps this correct in both directions.
-//
-// A store without the history capability keeps the timestamp heuristic and
-// never reports historyUnknown.
-func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (changed, historyUnknown bool, err error) {
-	if local == nil {
-		return false, false, nil
+func (e *Engine) prelinkVerdicts(ctx context.Context, candidates []prelinkCandidate, lastSync time.Time) ([]prelinkVerdict, error) {
+	verdicts := make([]prelinkVerdict, len(candidates))
+	if len(candidates) == 0 {
+		return verdicts, nil
 	}
 	querier, ok := externalRefHistoryQuerier(e.Store)
 	if !ok {
-		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), false, nil
+		for i, candidate := range candidates {
+			if local := candidate.local; local != nil {
+				verdicts[i].changed = local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync)
+			}
+		}
+		return verdicts, nil
 	}
 
-	previousRef, found, err := querier.PreviousExternalRef(ctx, local.ID, lastSync)
-	if err != nil {
-		return false, false, err
+	ids := make([]string, 0, len(candidates))
+	asked := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.local == nil {
+			continue
+		}
+		if _, dup := asked[candidate.local.ID]; dup {
+			continue
+		}
+		asked[candidate.local.ID] = struct{}{}
+		ids = append(ids, candidate.local.ID)
 	}
-	changed, historyUnknown = prelinkDecision(local, currentRef, previousRef, found, lastSync)
-	return changed, historyUnknown, nil
+	if len(ids) == 0 {
+		return verdicts, nil
+	}
+	previousRefs, err := querier.PreviousExternalRefs(ctx, ids, lastSync)
+	if err != nil {
+		return nil, fmt.Errorf("checking %d pre-linked local issue(s) against their history at %s: %w",
+			len(ids), lastSync.UTC().Format(time.RFC3339), err)
+	}
+	for i, candidate := range candidates {
+		if candidate.local == nil {
+			continue
+		}
+		previousRef, found := previousRefs[candidate.local.ID]
+		verdicts[i].changed, verdicts[i].historyUnknown = prelinkDecision(candidate.local, candidate.ref, previousRef, found, lastSync)
+	}
+	return verdicts, nil
 }
 
 // prelinkDecision decides, from the history a store holds for the linked
 // local issue at lastSync, whether pre-link detection treats the issue as
 // linked after lastSync (changed: hydrate it from its remote) or cannot
-// tell (historyUnknown). previousRef and found are what
-// storage.ExternalRefHistoryQuerier.PreviousExternalRef returned for the
-// issue at lastSync, and currentRef is its ref now. A path that reads this
-// history for many issues at once must decide each issue here as well, so
-// every path keeps the same rule (#7294).
+// tell (historyUnknown). previousRef and found are the issue's entry (and
+// its presence) in what storage.ExternalRefHistoryQuerier.PreviousExternalRefs
+// returned at lastSync, and currentRef is its ref now. Every path that reads
+// this history decides each issue here, so every path keeps the same rule
+// (#7294).
 //
 // With a history row, the issue changed when its ref then differs from
 // currentRef (a NULL ref reads as ""). Without one, the issue may be newer
