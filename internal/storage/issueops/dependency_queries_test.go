@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"errors"
+	"reflect"
 	"regexp"
 	"testing"
 	"time"
@@ -192,5 +193,75 @@ func TestGetDependentsWithMetadataInTxToleratesMissingWispDependencyTable(t *tes
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// bd-uschhs (#5850): an edge whose target has no local row (a cross-repo or
+// `external:` target in depends_on_external) must not be silently dropped by
+// the dependency listing while every count keeps it.
+//
+// The triage repro for this issue expected the OLD reader to answer with a
+// placeholder entry carrying only the target id and type. The approved design
+// (C2) supersedes that shape: a placeholder Issue would leak into every
+// issue-only consumer of this reader — sync writers that would push a stub
+// outward, traversal that would walk into it, Relations, whose RelatedIssue
+// contract excludes placeholders — so the edge is instead reported out-of-band
+// as an exact stored record by the combined reader
+// GetDependenciesWithUnresolvableInTx, and the old reader keeps its
+// issue-only contract. This test pins both halves of that decision: the
+// combined read keeps the unresolvable target as the exact stored record
+// (with its type and metadata, never dropped), and the old metadata reader
+// equals the combined read's resolved portion.
+func TestGetDependenciesWithMetadataInTxKeepsUnresolvableTarget(t *testing.T) {
+	t.Parallel()
+
+	const anchor = "ud-1"
+	const target = "external:liveop:liveop-kmf"
+	stored := &types.Dependency{
+		IssueID: anchor, DependsOnID: target, Type: types.DepTracks,
+		CreatedAt: time.Unix(1700000000, 0).UTC(), CreatedBy: "porter",
+		Metadata: `{"score":0.9}`, ThreadID: "thread-1",
+	}
+
+	_, mock, tx := beginMockTx(t)
+	expectOutgoingAnchorEdges(mock, anchor, []anchorEdgeRow{{target, "tracks"}}, nil)
+	expectEdgeHydration(mock, []string{target}, nil)
+	expectUnresolvedRecordBatches(mock, anchor, []string{target},
+		unresolvedRecordPlan{recs: map[string]*types.Dependency{target: stored}},
+		unresolvedRecordPlan{})
+
+	resolved, unresolvable, err := GetDependenciesWithUnresolvableInTx(context.Background(), tx, anchor)
+	if err != nil {
+		t.Fatalf("GetDependenciesWithUnresolvableInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+	if len(resolved) != 0 {
+		t.Fatalf("resolved = %+v, want none: the target has no row in this database", resolved)
+	}
+	if len(unresolvable) != 1 {
+		t.Fatalf("got %d unresolved records, want 1 for the unresolvable target %q (edge silently dropped)", len(unresolvable), target)
+	}
+	got := unresolvable[0]
+	if got.DependsOnID != target || got.Type != types.DepTracks || got.IssueID != anchor ||
+		!got.CreatedAt.Equal(stored.CreatedAt) || got.Metadata != stored.Metadata {
+		t.Fatalf("record = %+v, want the exact stored edge {target:%q type:%q}", got, target, types.DepTracks)
+	}
+
+	// The old metadata reader equals the combined read's resolved portion: it
+	// still answers with real issue rows only.
+	_, mock, tx = beginMockTx(t)
+	expectOutgoingAnchorEdges(mock, anchor, []anchorEdgeRow{{target, "tracks"}}, nil)
+	expectEdgeHydration(mock, []string{target}, nil)
+	old, err := GetDependenciesWithMetadataInTx(context.Background(), tx, anchor)
+	if err != nil {
+		t.Fatalf("GetDependenciesWithMetadataInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (old reader): %v", err)
+	}
+	if !reflect.DeepEqual(old, resolved) {
+		t.Fatalf("old reader = %+v, want the combined read's resolved portion %+v", old, resolved)
 	}
 }
