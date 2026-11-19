@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // leaseState reads an issue's claim state plus its lease-row overlay (the
@@ -1021,4 +1022,91 @@ func TestConcurrentReapersAreBenign(t *testing.T) {
 	if live := readLeaseState(t, ctx, store, "reapers-live"); live.status != "in_progress" || live.assignee.String != "live-worker" {
 		t.Errorf("live issue disturbed: %+v", live)
 	}
+}
+
+// claimOverrideLease is one issue's lease row read for
+// TestClaimAssigneeOverrideLeasesTheFinalHolder; ok is false when it has none.
+type claimOverrideLease struct {
+	ok        bool
+	rows      int
+	holder    string
+	grantedAt time.Time
+	expiresAt time.Time
+}
+
+func readClaimOverrideLease(t *testing.T, ctx context.Context, store *DoltStore, id string) claimOverrideLease {
+	t.Helper()
+	var lease claimOverrideLease
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM leases WHERE issue_id = ?", id).Scan(&lease.rows); err != nil {
+		t.Fatalf("count leases for %s: %v", id, err)
+	}
+	err := store.db.QueryRowContext(ctx,
+		"SELECT holder, granted_at, lease_expires_at FROM leases WHERE issue_id = ?", id).
+		Scan(&lease.holder, &lease.grantedAt, &lease.expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return lease
+	}
+	if err != nil {
+		t.Fatalf("read lease for %s: %v", id, err)
+	}
+	lease.ok = true
+	return lease
+}
+
+// TestClaimAssigneeOverrideLeasesTheFinalHolder pins bd-zprbhg on the classic
+// stack (direct Dolt; embedded and batch apply share issueops.ExecuteUpdate):
+// `bd update X --claim --assignee=bob` runs the claim leg, which arms a lease
+// for the claiming actor, then the fields leg, which hands the claim to bob.
+// The fields leg used to treat that as a plain transfer and delete the lease
+// the claim leg had just armed, leaving a live claim bd reclaim could never
+// see. It now re-arms the lease for the final assignee.
+func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	operations, err := NewIssueOperations(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedOpen := func(t *testing.T, id string) {
+		t.Helper()
+		issue := &types.Issue{ID: id, Title: "lease " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, issue, "seeder"); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	claimFor := func(t *testing.T, id, actor, assignee string) {
+		t.Helper()
+		if _, err := operations.Update(ctx, publicops.UpdateRequest{
+			Actor:   actor,
+			IssueID: id,
+			Claim:   true,
+			Patch:   publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: assignee}},
+		}); err != nil {
+			t.Fatalf("claim %s by %s for %s: %v", id, actor, assignee, err)
+		}
+	}
+
+	// AC-1: an open, unassigned issue claimed on bob's behalf ends
+	// in_progress/bob with exactly one lease row, held by bob.
+	t.Run("open issue claimed for another holder", func(t *testing.T) {
+		seedOpen(t, "lease-ovr-open")
+		claimFor(t, "lease-ovr-open", "alice", "bob")
+
+		ls := readLeaseState(t, ctx, store, "lease-ovr-open")
+		if ls.status != "in_progress" || ls.assignee.String != "bob" {
+			t.Fatalf("issue = %s/%s, want in_progress/bob", ls.status, ls.assignee.String)
+		}
+		lease := readClaimOverrideLease(t, ctx, store, "lease-ovr-open")
+		if lease.rows != 1 {
+			t.Fatalf("lease rows = %d, want exactly 1: a claim with an assignee override must stay leased", lease.rows)
+		}
+		if lease.holder != "bob" {
+			t.Errorf("lease holder = %q, want bob (the final assignee, not the claiming actor)", lease.holder)
+		}
+		if !lease.expiresAt.After(time.Now().UTC()) {
+			t.Errorf("lease_expires_at = %v, want a future time", lease.expiresAt)
+		}
+	})
 }

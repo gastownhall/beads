@@ -1,0 +1,137 @@
+package db
+
+// Claim + assignee override lease parity (bd-zprbhg, GH PR #6501): a claim
+// whose patch also names an assignee runs the claim leg, which arms a lease
+// for the claiming actor, and then the fields leg, which hands the claim to the
+// override. Both stacks read the SAME database here: the classic stack through
+// issueops.ExecuteUpdate (what DoltStore and the embedded store run) and the
+// proxied/domain stack through IssueUseCase.ApplyUpdate. Each case runs on
+// both and asserts the same lease row, so the two backends cannot drift.
+//
+// The leases table is dolt-ignored, so the suite's per-method DOLT_RESET does
+// not clear it between subtests: every case uses its own issue ID.
+
+import (
+	"database/sql"
+	"errors"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
+)
+
+// claimLeaseUpdate is one update request, spelled once and translated into
+// each stack's request shape.
+type claimLeaseUpdate struct {
+	claim    bool
+	assignee *string
+	status   *types.Status
+}
+
+// claimLeaseStack is one backend's way of applying a claimLeaseUpdate.
+type claimLeaseStack struct {
+	name  string
+	apply func(s *testSuite, id, actor string, u claimLeaseUpdate) error
+}
+
+func claimLeaseStacks() []claimLeaseStack {
+	return []claimLeaseStack{
+		{name: "classic", apply: (*testSuite).classicClaimLeaseUpdate},
+		{name: "domain", apply: (*testSuite).domainClaimLeaseUpdate},
+	}
+}
+
+func (s *testSuite) classicClaimLeaseUpdate(id, actor string, u claimLeaseUpdate) error {
+	request := publicops.UpdateRequest{Actor: actor, IssueID: id, Claim: u.claim}
+	if u.assignee != nil {
+		request.Patch.Assignee = publicops.Field[string]{Set: true, Value: *u.assignee}
+	}
+	if u.status != nil {
+		request.Patch.Status = publicops.Field[publicops.Status]{Set: true, Value: *u.status}
+	}
+	tx := s.beginClassicTx()
+	if _, _, err := issueops.ExecuteUpdate(s.Ctx(), tx, request); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *testSuite) domainClaimLeaseUpdate(id, actor string, u claimLeaseUpdate) error {
+	spec := domain.UpdateSpec{Claim: u.claim, Fields: map[string]any{}}
+	if u.assignee != nil {
+		spec.Fields["assignee"] = *u.assignee
+	}
+	if u.status != nil {
+		spec.Fields["status"] = string(*u.status)
+	}
+	_, err := s.issueUseCase().ApplyUpdate(s.Ctx(), id, spec, actor)
+	return err
+}
+
+// claimLeaseRow is an issue's lease row; ok is false when it has none.
+type claimLeaseRow struct {
+	ok        bool
+	holder    string
+	grantedAt time.Time
+	expiresAt time.Time
+}
+
+func (s *testSuite) readClaimLeaseRow(id string) claimLeaseRow {
+	var row claimLeaseRow
+	err := s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT holder, granted_at, lease_expires_at FROM leases WHERE issue_id = ?", id).
+		Scan(&row.holder, &row.grantedAt, &row.expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return row
+	}
+	s.Require().NoError(err)
+	row.ok = true
+	return row
+}
+
+func (s *testSuite) countClaimLeaseRows(id string) int {
+	var n int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM leases WHERE issue_id = ?", id).Scan(&n))
+	return n
+}
+
+func (s *testSuite) readClaimLeaseIssue(id string, wisp bool) *types.Issue {
+	out, err := s.issueRepo().Get(s.Ctx(), id, domain.IssueTableOpts{UseWispsTable: wisp})
+	s.Require().NoError(err)
+	return out
+}
+
+func claimLeaseString(v string) *string { return &v }
+
+func claimLeaseStatus(v types.Status) *types.Status { return &v }
+
+func (s *testSuite) TestClaimAssigneeOverrideLease() {
+	s.Run("ClaimOverrideArmsLeaseForFinalHolder", s.claimOverrideArmsLeaseForFinalHolder)
+}
+
+// claimOverrideArmsLeaseForFinalHolder is AC-1: alice claims an open,
+// unassigned issue on bob's behalf. Both stacks leave it in_progress/bob with
+// exactly one lease row, held by bob and expiring in the future. Before the fix
+// the fields leg deleted the lease the claim leg had just armed.
+func (s *testSuite) claimOverrideArmsLeaseForFinalHolder() {
+	for _, stack := range claimLeaseStacks() {
+		s.Run(stack.name, func() {
+			id := "bd-cl-ovr-" + stack.name
+			s.seedOpenIssue(id)
+			s.Require().NoError(stack.apply(s, id, "alice", claimLeaseUpdate{claim: true, assignee: claimLeaseString("bob")}))
+
+			got := s.readClaimLeaseIssue(id, false)
+			s.Equal(types.StatusInProgress, got.Status)
+			s.Equal("bob", got.Assignee)
+			s.Equal(1, s.countClaimLeaseRows(id), "claim with an assignee override must leave exactly one lease row")
+			lease := s.readClaimLeaseRow(id)
+			s.Require().True(lease.ok)
+			s.Equal("bob", lease.holder, "the lease belongs to the final assignee, not the claiming actor")
+			s.True(lease.expiresAt.After(time.Now().UTC()), "lease_expires_at = %v, want a future time", lease.expiresAt)
+		})
+	}
+}

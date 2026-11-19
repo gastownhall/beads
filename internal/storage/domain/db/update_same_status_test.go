@@ -17,7 +17,7 @@ func (s *testSuite) issueUpdateSameStatusInUnitOfWork() {
 	repo := NewIssueSQLRepository(tx)
 	before, err := repo.Get(ctx, issue.ID, domain.IssueTableOpts{})
 	s.Require().NoError(err)
-	s.Require().NoError(repo.Update(ctx, issue.ID, map[string]any{"status": types.StatusOpen}, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(repo.Update(ctx, issue.ID, map[string]any{"status": types.StatusOpen}, "tester", domain.IssueTableOpts{}, false))
 	afterNoop, err := repo.Get(ctx, issue.ID, domain.IssueTableOpts{})
 	s.Require().NoError(err)
 	s.Equal(before.RowVersion, afterNoop.RowVersion)
@@ -27,7 +27,7 @@ func (s *testSuite) issueUpdateSameStatusInUnitOfWork() {
 	s.Equal(eventsBefore, eventsAfterNoop)
 	s.Zero(statusChangedAfterNoop)
 
-	s.Require().NoError(repo.Update(ctx, issue.ID, map[string]any{"status": types.StatusOpen, "title": "after"}, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(repo.Update(ctx, issue.ID, map[string]any{"status": types.StatusOpen, "title": "after"}, "tester", domain.IssueTableOpts{}, false))
 	afterScalar, err := repo.Get(ctx, issue.ID, domain.IssueTableOpts{})
 	s.Require().NoError(err)
 	s.Equal("after", afterScalar.Title)
@@ -46,6 +46,6 @@ func (s *testSuite) issueUpdatePreservesCallerMap() {
 	s.Require().NoError(s.issueRepo().Insert(ctx, issue, "tester", domain.InsertIssueOpts{}))
 	updates := map[string]any{"status": types.StatusOpen}
 
-	s.Require().NoError(s.issueRepo().Update(ctx, issue.ID, updates, "tester", domain.IssueTableOpts{}))
+	s.Require().NoError(s.issueRepo().Update(ctx, issue.ID, updates, "tester", domain.IssueTableOpts{}, false))
 	s.Equal(map[string]any{"status": types.StatusOpen}, updates)
 }
