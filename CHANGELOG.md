@@ -1431,6 +1431,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Expansion template steps keep their gates, `waits_for`, conditions,
+  notes and metadata** (#6433). Expanding a template step (through
+  `compose.expand`, `compose.map`, an inline `expand`, or pouring an
+  expansion formula on its own) silently dropped `gate`, `waits_for`,
+  `condition`, `notes` and `metadata`, so the gates and fanout edges the
+  template declared were missing from the poured molecule. They are now
+  carried: `notes`, `metadata` string values, `waits_for` and the gate's
+  `id`, `await_id`, `timeout` and `repo` get the same `{target}` and
+  `{name}` substitution as the description. A template condition that tests
+  a variable the expansion sets (its `[vars]` default, the `compose` rule's
+  `vars` or the step's `expand_vars`) uses the expansion's value; setting it
+  to `"{{name}}"` tests the poured formula's `name` instead, and a condition
+  on a variable the expansion does not set reads the poured formula's
+  variables. A step that the expansion's value excludes is also left out of
+  `bd cook`'s JSON, `--dry-run` and `--persist` proto, as it is out of every
+  pour. Pouring an expansion formula on its own now also filters its
+  template steps by their conditions and accepts a variable used only in
+  such a condition. A step that needs or depends on a step that
+  `compose.expand` or `compose.map` replaced waits for the expansion's last
+  step and, when a condition drops that step, for the steps it depends on,
+  instead of failing the pour. Expansion no longer
+  turns a `{{name}}` reference in a template step's text into `{value}` when
+  it has a value for `name`; the pour fills it in. `on_complete` is copied
+  with the step, but bd does not run it. `expand`/`expand_vars` on a
+  template step are still cleared (an expanded step is never expanded
+  again). Four cases are now errors, which `bd mol pour` and `bd mol wisp`
+  report as such: a `loop` on an expansion template step, template metadata
+  nested inside 32 or more tables or arrays (`maxMetadataScanDepth`, the
+  `metadata` table itself counting as one), a template condition whose
+  variable the expansion sets to a value with a brace in it other than
+  `"{{name}}"`, and a template condition bd cannot read, such as
+  `{env} == prod`, which was ignored before because template conditions were
+  dropped. Pour and wisp now also report any other step condition bd cannot
+  read as such, instead of saying the formula was not found.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

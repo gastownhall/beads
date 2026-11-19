@@ -200,6 +200,12 @@ func TestEvaluateStepCondition(t *testing.T) {
 				t.Errorf("EvaluateStepCondition() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
+			// pour and wisp report only a cook error that wraps
+			// ErrValidation; any other makes them say the formula was not
+			// found.
+			if err != nil && !errors.Is(err, ErrValidation) {
+				t.Errorf("EvaluateStepCondition() error %v does not wrap ErrValidation", err)
+			}
 			if got != tt.want {
 				t.Errorf("EvaluateStepCondition() = %v, want %v", got, tt.want)
 			}

@@ -240,10 +240,21 @@ type Step struct {
 	Needs []string `json:"needs,omitempty" toml:"needs,omitempty"`
 
 	// generatedNeeds lists the Needs entries a transform added on its own
-	// (loop iteration chaining, compose.branch, advice) rather than the
-	// formula text. FilterStepsByCondition routes such an edge around a step
-	// it drops; a reference the formula wrote to that step is an error.
+	// (loop iteration chaining, compose.branch, advice, an expansion's
+	// stand-in for the step it replaced) rather than the formula text.
+	// FilterStepsByCondition routes such an edge around a step it drops; a
+	// reference the formula wrote to that step is an error.
 	generatedNeeds []string
+
+	// generatedDependsOn is generatedNeeds for DependsOn. Its only entries
+	// are an expansion's stand-ins (UpdateDependenciesForExpansion).
+	generatedDependsOn []string
+
+	// excludedBy is set when the expansion that built this step binds the
+	// variable its condition tested, and that value made the condition false
+	// (bindTemplateConditions). The condition is then cleared, and
+	// FilterStepsByCondition drops the step as if it had evaluated false.
+	excludedBy *conditionBinding
 
 	// WaitsFor specifies a fanout gate type for this step.
 	// Values: "all-children" (wait for all dynamic children) or "any-children" (wait for first).

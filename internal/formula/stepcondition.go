@@ -79,7 +79,21 @@ func EvaluateStepCondition(condition string, vars map[string]string) (bool, erro
 		}
 	}
 
-	return false, fmt.Errorf("invalid step condition format: %q (expected {{var}} or {{var}} == value)", condition)
+	// ErrValidation: pour and wisp report a formula that does not validate
+	// as it is, where any other cook error makes them say it was not found.
+	return false, fmt.Errorf("%w: invalid step condition format: %q (expected {{var}} or {{var}} == value)", ErrValidation, condition)
+}
+
+// stepConditionVar returns the variable a step condition tests, or "" for an
+// empty condition or one EvaluateStepCondition cannot read.
+func stepConditionVar(condition string) string {
+	condition = strings.TrimSpace(condition)
+	for _, pattern := range []*regexp.Regexp{stepCondVarPattern, stepCondNegatedVarPattern, stepCondComparePattern} {
+		if m := pattern.FindStringSubmatch(condition); m != nil {
+			return m[1]
+		}
+	}
+	return ""
 }
 
 // isTruthy returns true if a value is considered "truthy" for step conditions.
@@ -126,7 +140,14 @@ func unquoteValue(s string) string {
 // excluded stays chained through that step's needs, and a compose.branch
 // join waits for the parallel steps that stay. A bare waits_for gate that the
 // route leaves with no needs would wait for no one, so it is rejected like a
-// spawner the formula named.
+// spawner the formula named. The same goes for a needs or depends_on edge
+// that an expansion pointed at its last step in place of the step it
+// replaced (UpdateDependenciesForExpansion): when the last step is excluded,
+// the edge waits for the steps the last step depends on.
+//
+// A step that its expansion excluded when it was expanded (the expansion
+// binds the variable its condition tested, see bindTemplateConditions) is
+// excluded here, whatever vars holds.
 //
 // Parameters:
 //   - steps: the steps to filter
@@ -137,9 +158,30 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 	if vars == nil {
 		vars = make(map[string]string)
 	}
+	return filterSteps(steps, func(condition string) (bool, error) {
+		return EvaluateStepCondition(condition, vars)
+	})
+}
 
+// DropExpansionExcludedSteps drops only the steps that their expansion
+// excluded when it expanded them (see bindTemplateConditions), with the
+// routing and refusals of FilterStepsByCondition, and leaves every other step
+// and condition as it is, for the pour to evaluate against its variables.
+// Every pour of the formula drops such a step, but no field that is
+// serialized records the exclusion (the condition it decided is cleared), so
+// bd cook drops the step before it prints the steps or persists a proto,
+// where it would otherwise read as unconditional. Gas City drops such a step
+// as it expands it (materializeExpandedStepConditions).
+func DropExpansionExcludedSteps(steps []*Step) ([]*Step, error) {
+	return filterSteps(steps, func(string) (bool, error) { return true, nil })
+}
+
+// filterSteps drops, with its children, each step that its expansion
+// excluded and each step whose condition include reports false, then routes
+// or refuses the references to the dropped steps (see FilterStepsByCondition).
+func filterSteps(steps []*Step, include func(condition string) (bool, error)) ([]*Step, error) {
 	dropped := make(map[string]droppedStep)
-	result, err := filterStepsByCondition(steps, vars, dropped)
+	result, err := filterStepsByCondition(steps, include, dropped)
 	if err != nil {
 		return nil, err
 	}
@@ -157,20 +199,28 @@ func FilterStepsByCondition(steps []*Step, vars map[string]string) ([]*Step, err
 
 // droppedStep records why FilterStepsByCondition excluded a step: the
 // condition that evaluated false and the ID of the step carrying it (the step
-// itself, or the excluded ancestor it went with). deps are the excluded
-// step's own needs and depends_on, where a generated edge onto it is routed.
+// itself, or the excluded ancestor it went with). binding, when the carrier's
+// expansion decided the condition, says which value did. deps are the
+// excluded step's own needs and depends_on, where a generated edge onto it is
+// routed.
 type droppedStep struct {
 	condition string
 	carrierID string
+	binding   string
 	deps      []string
 }
 
-func filterStepsByCondition(steps []*Step, vars map[string]string, dropped map[string]droppedStep) ([]*Step, error) {
+func filterStepsByCondition(steps []*Step, evaluate func(condition string) (bool, error), dropped map[string]droppedStep) ([]*Step, error) {
 	result := make([]*Step, 0, len(steps))
 
 	for _, step := range steps {
+		if b := step.excludedBy; b != nil {
+			recordDropped(step, droppedStep{condition: b.condition, carrierID: step.ID, binding: b.String()}, dropped)
+			continue
+		}
+
 		// Evaluate step condition
-		include, err := EvaluateStepCondition(step.Condition, vars)
+		include, err := evaluate(step.Condition)
 		if err != nil {
 			return nil, fmt.Errorf("step %q: %w", step.ID, err)
 		}
@@ -186,7 +236,7 @@ func filterStepsByCondition(steps []*Step, vars map[string]string, dropped map[s
 
 		// Recursively filter children
 		if len(step.Children) > 0 {
-			filteredChildren, err := filterStepsByCondition(step.Children, vars, dropped)
+			filteredChildren, err := filterStepsByCondition(step.Children, evaluate, dropped)
 			if err != nil {
 				return nil, err
 			}
@@ -210,36 +260,52 @@ func recordDropped(step *Step, why droppedStep, dropped map[string]droppedStep) 
 }
 
 // resolveDroppedReferences goes through the kept steps (the filter's clones)
-// for references to a dropped step: it routes each generated needs edge
-// around the dropped step, and appends one line to errs for each reference
-// the formula wrote and for each bare waits_for gate that the route leaves
-// nothing to wait for.
+// for references to a dropped step: it routes each generated needs or
+// depends_on edge around the dropped step, and appends one line to errs for
+// each reference the formula wrote and for each bare waits_for gate that the
+// route leaves nothing to wait for.
 func resolveDroppedReferences(steps []*Step, dropped map[string]droppedStep, errs *[]string) {
 	for _, step := range steps {
 		// Read the spawner before routeNeeds rewrites the needs it may
 		// be inferred from.
 		spawner, generated := waitsForSpawner(step)
-		for _, ref := range step.DependsOn {
-			if why, ok := dropped[ref]; ok {
-				*errs = append(*errs, droppedReferenceError(step.ID, "depends_on", ref, why))
-			}
-		}
+		routeDependsOn(step, dropped, errs)
 		routeNeeds(step, dropped, errs)
 		// "" names no spawner, also where a step without an ID was dropped.
 		if why, ok := dropped[spawner]; ok && spawner != "" {
 			switch {
 			case !generated:
-				*errs = append(*errs, fmt.Sprintf("step %q: waits_for %q waits for the children of %q, but condition %q on step %q drops it from this pour (give %q the same condition, or name a spawner that is always poured)",
-					step.ID, step.WaitsFor, spawner, why.condition, why.carrierID, step.ID))
+				*errs = append(*errs, fmt.Sprintf("step %q: waits_for %q waits for the children of %q, but condition %q on step %q drops it from this pour%s (give %q the same condition, or name a spawner that is always poured)",
+					step.ID, step.WaitsFor, spawner, why.condition, why.carrierID, why.because(), step.ID))
 			case len(step.Needs) == 0:
 				// routeNeeds routed the generated need and the cook infers
 				// the spawner from the needs it left: none, so the cook would
 				// pour the gate's label with no one to wait for.
-				*errs = append(*errs, fmt.Sprintf("step %q: waits_for %q takes its spawner from the dependency bd, not the formula, added onto %q, but condition %q on step %q drops it from this pour and leaves the gate nothing to wait for (give %q the same condition, or name a spawner that is always poured)",
-					step.ID, step.WaitsFor, spawner, why.condition, why.carrierID, step.ID))
+				*errs = append(*errs, fmt.Sprintf("step %q: waits_for %q takes its spawner from the dependency bd, not the formula, added onto %q, but condition %q on step %q drops it from this pour%s and leaves the gate nothing to wait for (give %q the same condition, or name a spawner that is always poured)",
+					step.ID, step.WaitsFor, spawner, why.condition, why.carrierID, why.because(), step.ID))
 			}
 		}
 		resolveDroppedReferences(step.Children, dropped, errs)
+	}
+}
+
+// routeDependsOn is routeNeeds for depends_on, whose only generated edges are
+// an expansion's stand-ins for the step it replaced.
+func routeDependsOn(step *Step, dropped map[string]droppedStep, errs *[]string) {
+	deps := step.DependsOn
+	step.DependsOn = nil
+	for _, ref := range deps {
+		why, ok := dropped[ref]
+		switch {
+		case !ok:
+			step.DependsOn = append(step.DependsOn, ref)
+		case isGeneratedDependsOn(step, ref):
+			for _, target := range routeAround(ref, dropped, map[string]bool{step.ID: true, ref: true}) {
+				addGeneratedDependsOn(step, target)
+			}
+		default:
+			*errs = append(*errs, droppedReferenceError(step.ID, "depends_on", ref, why))
+		}
 	}
 }
 
@@ -303,6 +369,15 @@ func routeAround(id string, dropped map[string]droppedStep, seen map[string]bool
 }
 
 func droppedReferenceError(stepID, field, ref string, why droppedStep) string {
-	return fmt.Sprintf("step %q: %s references %q, but condition %q on step %q drops it from this pour (give %q the same condition, or do not name a step that this pour excludes)",
-		stepID, field, ref, why.condition, why.carrierID, stepID)
+	return fmt.Sprintf("step %q: %s references %q, but condition %q on step %q drops it from this pour%s (give %q the same condition, or do not name a step that this pour excludes)",
+		stepID, field, ref, why.condition, why.carrierID, why.because(), stepID)
+}
+
+// because is the clause naming the value an expansion decided the dropped
+// step's condition with, or "" when the poured formula's variables did.
+func (why droppedStep) because() string {
+	if why.binding == "" {
+		return ""
+	}
+	return ", since " + why.binding
 }

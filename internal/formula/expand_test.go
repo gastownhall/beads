@@ -1,9 +1,12 @@
 package formula
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1270,10 +1273,15 @@ func TestExpansionVarRefs(t *testing.T) {
 					Labels:      []string{"team:{team}"},
 					DependsOn:   []string{"{target}.prep-{stage}"},
 					Needs:       []string{"{target.id}.gate-{gate}"},
-					// Neither field is carried into the expanded step, so
-					// nothing in them is ever substituted.
-					Notes:     "{notes_only}",
-					Condition: "{{condition_only}}",
+					Notes:       "{note}",
+					Metadata:    map[string]interface{}{"{key_only}": map[string]interface{}{"leaf": []interface{}{"{meta}"}}},
+					WaitsFor:    "children-of({target}.spawn-{spawner})",
+					// The gate's text fields are substituted like the
+					// step's; the condition and on_complete are carried
+					// verbatim, so nothing in them is substituted here.
+					Condition:  "{{condition_only}}",
+					Gate:       &Gate{Type: "gh:run", ID: "{gate_only}"},
+					OnComplete: &OnCompleteSpec{Bond: "{bond_only}", Vars: map[string]string{"v": "{item}"}},
 					Children: []*Step{
 						{ID: "{target}.child", Title: "Work on {{feature}}"},
 					},
@@ -1283,12 +1291,20 @@ func TestExpansionVarRefs(t *testing.T) {
 
 		// {target}, {target.id} and {target.title} are replaced before any
 		// variable is, so none of them is a name; {target.description} pulls
-		// in the formula's description, whose {release} IS substituted. The
-		// single-brace pattern also matches inside {{feature}}, so a
-		// --var feature=x is consumed there too.
+		// in the formula's description, whose {release} IS substituted. A
+		// {{feature}} reference is the cook's, not the expansion's, so the
+		// {feature} inside it is not a name. Metadata keys are never
+		// rewritten, so {key_only} is not a name.
+		before, err := json.Marshal(f.Template)
+		if err != nil {
+			t.Fatal(err)
+		}
 		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
-		if want := "component env feature gate owner release stage team"; got != want {
+		if want := "component env gate gate_only meta note owner release spawner stage team"; got != want {
 			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
+		}
+		if after, _ := json.Marshal(f.Template); string(after) != string(before) {
+			t.Errorf("ExpansionVarRefs changed the template:\nbefore %s\nafter  %s", before, after)
 		}
 		if f.Steps != nil {
 			t.Errorf("ExpansionVarRefs materialized the formula: Steps = %v", f.Steps)
@@ -1327,4 +1343,954 @@ func TestExpansionVarRefs(t *testing.T) {
 			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
+}
+
+// TestExpandStepPreservesTemplateFields: an expansion template step's notes,
+// metadata, waits_for, gate and on_complete survive the expansion
+// (bd-w153uq / #6433). Notes, metadata string leaves, waits_for and the
+// gate's text fields get the same {target} and {var} substitution as the
+// description, which leaves a {{name}} reference for the cook; on_complete is
+// carried verbatim, even where it holds a {name} that the expansion has a
+// value for.
+func TestExpandStepPreservesTemplateFields(t *testing.T) {
+	target := &Step{ID: "implement", Title: "Implement"}
+	template := []*Step{
+		{ID: "{target}.spawn", Title: "Spawn"},
+		{
+			ID:    "{target}.collect",
+			Title: "Collect",
+			Notes: "review {target.title} for {owner}",
+			Metadata: map[string]interface{}{
+				"owner":   "{owner}",
+				"count":   int64(3),
+				"enabled": true,
+				"{owner}": "key is never rewritten",
+				"nested": map[string]interface{}{
+					"step": "{target}.spawn",
+					"list": []interface{}{"{owner}", 1.5, nil},
+				},
+			},
+			Needs:    []string{"{target}.spawn"},
+			WaitsFor: "children-of({target}.spawn)",
+			Gate: &Gate{
+				Type:    "gh:run",
+				ID:      "{owner}-ci",
+				AwaitID: "{{run_id}}",
+				Timeout: "1h",
+				Repo:    "{owner}/repo",
+			},
+			OnComplete: &OnCompleteSpec{
+				ForEach:    "output.items",
+				Bond:       "mol-{owner}",
+				Vars:       map[string]string{"name": "{item.name}", "owner": "{owner}", "at": "{index}"},
+				Sequential: true,
+			},
+		},
+		{ID: "{target}.wait", Title: "Wait", Needs: []string{"{target}.spawn"}, WaitsFor: "all-children"},
+	}
+
+	result, err := expandStep(target, template, map[string]string{"owner": "alice"})
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	if len(result) != 3 {
+		t.Fatalf("got %d steps, want 3", len(result))
+	}
+	got := result[1]
+
+	if want := "review Implement for alice"; got.Notes != want {
+		t.Errorf("Notes = %q, want %q", got.Notes, want)
+	}
+
+	wantMeta := map[string]interface{}{
+		"owner":   "alice",
+		"count":   int64(3),
+		"enabled": true,
+		"{owner}": "key is never rewritten",
+		"nested": map[string]interface{}{
+			"step": "implement.spawn",
+			"list": []interface{}{"alice", 1.5, nil},
+		},
+	}
+	if !reflect.DeepEqual(got.Metadata, wantMeta) {
+		t.Errorf("Metadata = %#v, want %#v", got.Metadata, wantMeta)
+	}
+
+	if want := "children-of(implement.spawn)"; got.WaitsFor != want {
+		t.Errorf("WaitsFor = %q, want %q", got.WaitsFor, want)
+	}
+	if spec := ParseWaitsFor(got.WaitsFor); spec == nil || spec.SpawnerID != "implement.spawn" {
+		t.Errorf("ParseWaitsFor(%q) = %+v, want spawner implement.spawn", got.WaitsFor, spec)
+	}
+	if want := "all-children"; result[2].WaitsFor != want {
+		t.Errorf("literal WaitsFor = %q, want %q", result[2].WaitsFor, want)
+	}
+
+	wantGate := Gate{Type: "gh:run", ID: "alice-ci", AwaitID: "{{run_id}}", Timeout: "1h", Repo: "alice/repo"}
+	if got.Gate == nil || *got.Gate != wantGate {
+		t.Errorf("Gate = %+v, want %+v", got.Gate, wantGate)
+	}
+	if template[1].Gate.ID != "{owner}-ci" {
+		t.Errorf("template gate ID = %q, want it unchanged", template[1].Gate.ID)
+	}
+	if got.OnComplete == nil || !reflect.DeepEqual(*got.OnComplete, *template[1].OnComplete) {
+		t.Errorf("OnComplete = %+v, want verbatim %+v", got.OnComplete, template[1].OnComplete)
+	}
+}
+
+// TestExpansionKeepsDoubleBraceReferences: a {{name}} reference in a template
+// step's text is the cook's, filled in from the poured formula's variables,
+// so the expansion leaves it whole even where it has a value for name, or
+// name is target: replacing the {name} inside it left a {value} that neither
+// stage reads (bd-w153uq / #6433).
+func TestExpansionKeepsDoubleBraceReferences(t *testing.T) {
+	target := &Step{ID: "work", Title: "Work"}
+	tmpl := &Step{
+		ID:          "{target}.s",
+		Title:       "{story}: {{story}}",
+		Description: "for {{target}} and {{target.title}}",
+		Notes:       "story {{story}}",
+		Labels:      []string{"story:{{story}}"},
+		Metadata:    map[string]interface{}{"story": "{{story}}", "nested": []interface{}{"{story}/{{story}}"}},
+		Gate:        &Gate{Type: "gh:run", ID: "{target}-{{story}}"},
+	}
+	result, err := expandStep(target, []*Step{tmpl}, map[string]string{"story": "s1", "target": "t1"})
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	got := result[0]
+	for _, c := range []struct{ field, got, want string }{
+		{"Title", got.Title, "s1: {{story}}"},
+		{"Description", got.Description, "for {{target}} and {{target.title}}"},
+		{"Notes", got.Notes, "story {{story}}"},
+		{"Labels[0]", got.Labels[0], "story:{{story}}"},
+		{"Gate.ID", got.Gate.ID, "work-{{story}}"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.field, c.got, c.want)
+		}
+	}
+	wantMeta := map[string]interface{}{"story": "{{story}}", "nested": []interface{}{"s1/{{story}}"}}
+	if !reflect.DeepEqual(got.Metadata, wantMeta) {
+		t.Errorf("Metadata = %#v, want %#v", got.Metadata, wantMeta)
+	}
+}
+
+// condExpansionJSON is an expansion formula whose template conditions test a
+// variable it leaves unbound (flag), one its [vars] default binds
+// (with_tests), and two that a compose rule's vars or an inline step's
+// expand_vars bind in the cases below (env, run).
+const condExpansionJSON = `{
+	"formula": "cond-exp",
+	"type": "expansion",
+	"version": 1,
+	"vars": {"with_tests": {"default": "true"}},
+	"template": [
+		{"id": "{target}.always", "title": "Always"},
+		{"id": "{target}.on", "title": "On", "condition": "{{flag}}"},
+		{"id": "{target}.tests", "title": "Tests", "condition": "{{with_tests}}"},
+		{"id": "{target}.no-tests", "title": "No tests", "condition": "!{{with_tests}}"},
+		{"id": "{target}.prod", "title": "Prod", "condition": "{{env}} == prod"},
+		{"id": "{target}.run", "title": "Run", "condition": "{{run}}"}
+	]
+}`
+
+// condExpansionPaths expands step "work" with cond-exp through each
+// expansion path, the rule or the step binding bound.
+func condExpansionPaths(t *testing.T) map[string]func(t *testing.T, bound map[string]string) ([]*Step, error) {
+	t.Helper()
+	return expansionPathsFor(t, "cond-exp", condExpansionJSON)
+}
+
+// expansionPathsFor expands step "work" with the expansion formula name,
+// written from body, through each expansion path, the rule or the step
+// binding bound.
+func expansionPathsFor(t *testing.T, name, body string) map[string]func(t *testing.T, bound map[string]string) ([]*Step, error) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, name+".formula.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(tmpDir)
+	return map[string]func(t *testing.T, bound map[string]string) ([]*Step, error){
+		"compose_expand": func(t *testing.T, bound map[string]string) ([]*Step, error) {
+			return ApplyExpansions([]*Step{{ID: "work", Title: "Work"}}, &ComposeRules{Expand: []*ExpandRule{{Target: "work", With: name, Vars: bound}}}, parser)
+		},
+		"compose_map": func(t *testing.T, bound map[string]string) ([]*Step, error) {
+			return ApplyExpansions([]*Step{{ID: "work", Title: "Work"}}, &ComposeRules{Map: []*MapRule{{Select: "work", With: name, Vars: bound}}}, parser)
+		},
+		"inline": func(t *testing.T, bound map[string]string) ([]*Step, error) {
+			return ApplyInlineExpansions([]*Step{{ID: "work", Title: "Work", Expand: name, ExpandVars: bound}}, parser)
+		},
+	}
+}
+
+func stepIDs(steps []*Step) []string {
+	var ids []string
+	for _, s := range steps {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+// allStepIDs is stepIDs with each step's children, depth first.
+func allStepIDs(steps []*Step) []string {
+	var ids []string
+	for _, s := range steps {
+		ids = append(ids, s.ID)
+		ids = append(ids, allStepIDs(s.Children)...)
+	}
+	return ids
+}
+
+// childCondExpansionJSON is an expansion formula whose template conditions
+// on a template step's children test a variable its [vars] default binds.
+const childCondExpansionJSON = `{
+	"formula": "child-cond-exp",
+	"type": "expansion",
+	"version": 1,
+	"vars": {"with_tests": {"default": "true"}},
+	"template": [
+		{"id": "{target}.group", "title": "Group", "children": [
+			{"id": "{target}.group.build", "title": "Build"},
+			{"id": "{target}.group.tests", "title": "Tests", "condition": "{{with_tests}}"},
+			{"id": "{target}.group.no-tests", "title": "No tests", "condition": "!{{with_tests}}"}
+		]}
+	]
+}`
+
+// TestTemplateChildConditionsReadTheExpansionsVars: on every expansion path,
+// a template step's children read the expansion's value for a variable it
+// binds in their conditions too, whatever the poured formula's variable of
+// the same name says (bd-w153uq / #6433).
+func TestTemplateChildConditionsReadTheExpansionsVars(t *testing.T) {
+	for name, expand := range expansionPathsFor(t, "child-cond-exp", childCondExpansionJSON) {
+		t.Run(name, func(t *testing.T) {
+			for _, tc := range []struct {
+				bound map[string]string
+				vars  map[string]string
+				want  []string
+			}{
+				{nil, map[string]string{"with_tests": "false"},
+					[]string{"work.group", "work.group.build", "work.group.tests"}},
+				{map[string]string{"with_tests": "false"}, map[string]string{"with_tests": "true"},
+					[]string{"work.group", "work.group.build", "work.group.no-tests"}},
+			} {
+				steps, err := expand(t, tc.bound)
+				if err != nil {
+					t.Fatalf("bound %v: expand: %v", tc.bound, err)
+				}
+				for _, child := range steps[0].Children {
+					if child.Condition != "" {
+						t.Errorf("bound %v: %s condition = %q, want the decided condition cleared", tc.bound, child.ID, child.Condition)
+					}
+				}
+				filtered, err := FilterStepsByCondition(steps, tc.vars)
+				if err != nil {
+					t.Fatalf("bound %v: FilterStepsByCondition: %v", tc.bound, err)
+				}
+				if ids := allStepIDs(filtered); !slices.Equal(ids, tc.want) {
+					t.Errorf("bound %v, poured %v: kept %v, want %v", tc.bound, tc.vars, ids, tc.want)
+				}
+				// bd cook drops the same steps before its output.
+				kept, err := DropExpansionExcludedSteps(steps)
+				if err != nil {
+					t.Fatalf("bound %v: DropExpansionExcludedSteps: %v", tc.bound, err)
+				}
+				if ids := allStepIDs(kept); !slices.Equal(ids, tc.want) {
+					t.Errorf("bound %v: DropExpansionExcludedSteps kept %v, want %v", tc.bound, ids, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestDropExpansionExcludedSteps: bd cook drops only the steps that their
+// expansion's own value excluded, routing a generated edge onto one and
+// refusing an edge the formula wrote, as the pour does; every other
+// condition is left as it is for the pour to evaluate (bd-w153uq / #6433).
+func TestDropExpansionExcludedSteps(t *testing.T) {
+	for name, expand := range condExpansionPaths(t) {
+		t.Run(name, func(t *testing.T) {
+			steps, err := expand(t, map[string]string{"env": "dev", "run": "{{run_tests}}"})
+			if err != nil {
+				t.Fatalf("expand: %v", err)
+			}
+			kept, err := DropExpansionExcludedSteps(steps)
+			if err != nil {
+				t.Fatalf("DropExpansionExcludedSteps: %v", err)
+			}
+			got := make(map[string]string, len(kept))
+			for _, s := range kept {
+				got[s.ID] = s.Condition
+			}
+			// with_tests defaults to true and env is bound to dev, so
+			// work.no-tests and work.prod go; flag and run_tests are the
+			// pour's.
+			want := map[string]string{
+				"work.always": "",
+				"work.on":     "{{flag}}",
+				"work.tests":  "",
+				"work.run":    "{{run_tests}}",
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("kept conditions = %v, want %v", got, want)
+			}
+		})
+	}
+
+	tmpDir := t.TempDir()
+	expansion := `{
+		"formula": "opt-exp",
+		"type": "expansion",
+		"version": 1,
+		"vars": {"with_extra": {"default": "false"}},
+		"template": [
+			{"id": "{target}.draft", "title": "Draft"},
+			{"id": "{target}.extra", "title": "Extra", "needs": ["{target}.draft"], "condition": "{{with_extra}}"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "opt-exp.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(tmpDir)
+	expanded, err := ApplyExpansions([]*Step{
+		{ID: "work", Title: "Work"},
+		{ID: "deploy", Title: "Deploy", Needs: []string{"work"}},
+	}, &ComposeRules{Expand: []*ExpandRule{{Target: "work", With: "opt-exp"}}}, parser)
+	if err != nil {
+		t.Fatalf("ApplyExpansions: %v", err)
+	}
+	kept, err := DropExpansionExcludedSteps(expanded)
+	if err != nil {
+		t.Fatalf("DropExpansionExcludedSteps: %v", err)
+	}
+	if ids, want := stepIDs(kept), []string{"work.draft", "deploy"}; !slices.Equal(ids, want) {
+		t.Errorf("kept %v, want %v", ids, want)
+	}
+	if got := buildStepMap(kept)["deploy"].Needs; !slices.Equal(got, []string{"work.draft"}) {
+		t.Errorf("deploy needs %v, want [work.draft] (routed around the excluded last step)", got)
+	}
+
+	named := slices.Concat(expanded, []*Step{{ID: "audit", Title: "Audit", Needs: []string{"work.extra"}}})
+	_, err = DropExpansionExcludedSteps(named)
+	if err == nil || !errors.Is(err, ErrValidation) || !strings.Contains(err.Error(), `step "audit": needs references "work.extra"`) {
+		t.Errorf("DropExpansionExcludedSteps err = %v, want the written reference refused with ErrValidation", err)
+	}
+}
+
+// TestTemplateConditionsReadTheExpansionsVars: on every expansion path -
+// compose.expand, compose.map and inline expand - a template step's condition
+// reads the expansion's value for a variable the expansion binds (its [vars]
+// default, a rule's vars or expand_vars), the value its {name} placeholders
+// get, whatever the poured formula's variables say; "{{name}}" passes the
+// poured formula's variable through; a condition on a variable the expansion
+// does not bind reads the poured formula's variables (bd-w153uq / #6433).
+func TestTemplateConditionsReadTheExpansionsVars(t *testing.T) {
+	for name, expand := range condExpansionPaths(t) {
+		t.Run(name, func(t *testing.T) {
+			bound := map[string]string{"env": "prod", "run": "{{run_tests}}"}
+			steps, err := expand(t, bound)
+			if err != nil {
+				t.Fatalf("expand: %v", err)
+			}
+			got := make(map[string]string, len(steps))
+			for _, s := range steps {
+				got[s.ID] = s.Condition
+			}
+			// A decided condition is cleared; "{{run_tests}}" is now what
+			// work.run tests; flag is left for the cook.
+			want := map[string]string{
+				"work.always":   "",
+				"work.on":       "{{flag}}",
+				"work.tests":    "",
+				"work.no-tests": "",
+				"work.prod":     "",
+				"work.run":      "{{run_tests}}",
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("expanded conditions = %v, want %v", got, want)
+			}
+
+			for _, tc := range []struct {
+				vars map[string]string
+				want []string
+			}{
+				// The poured formula's with_tests and env do not reach the
+				// template: the expansion binds them.
+				{map[string]string{"flag": "true", "run_tests": "true", "with_tests": "false", "env": "dev"},
+					[]string{"work.always", "work.on", "work.tests", "work.prod", "work.run"}},
+				{map[string]string{"flag": "false", "run_tests": "false", "with_tests": "true"},
+					[]string{"work.always", "work.tests", "work.prod"}},
+			} {
+				filtered, err := FilterStepsByCondition(steps, tc.vars)
+				if err != nil {
+					t.Fatalf("FilterStepsByCondition(%v): %v", tc.vars, err)
+				}
+				if ids := stepIDs(filtered); !slices.Equal(ids, tc.want) {
+					t.Errorf("FilterStepsByCondition(%v) kept %v, want %v", tc.vars, ids, tc.want)
+				}
+			}
+
+			// The rule's or step's own value overrides the default.
+			steps, err = expand(t, map[string]string{"with_tests": "false", "env": "dev", "run": "yes"})
+			if err != nil {
+				t.Fatalf("expand: %v", err)
+			}
+			filtered, err := FilterStepsByCondition(steps, map[string]string{"flag": "true", "with_tests": "true", "env": "prod"})
+			if err != nil {
+				t.Fatalf("FilterStepsByCondition: %v", err)
+			}
+			if ids, want := stepIDs(filtered), []string{"work.always", "work.on", "work.no-tests", "work.run"}; !slices.Equal(ids, want) {
+				t.Errorf("kept %v, want %v", ids, want)
+			}
+		})
+	}
+}
+
+// TestTemplateConditionRefusesAPlaceholderValue: the expansion fills {name}
+// placeholders in template text, never in a value, so a condition whose
+// variable is bound to "{skip}" would test that text, which is truthy, and
+// keep or drop the step whatever the poured formula says. It is refused,
+// naming the spelling that passes a variable through (bd-w153uq / #6433).
+func TestTemplateConditionRefusesAPlaceholderValue(t *testing.T) {
+	for name, expand := range condExpansionPaths(t) {
+		t.Run(name, func(t *testing.T) {
+			for _, value := range []string{"{run_tests}", "x{{run_tests}}"} {
+				_, err := expand(t, map[string]string{"run": value})
+				if err == nil {
+					t.Fatalf("run = %q: expansion accepted it", value)
+				}
+				if !errors.Is(err, ErrValidation) {
+					t.Errorf("run = %q: error %v does not wrap ErrValidation", value, err)
+				}
+				for _, want := range []string{`"work.run"`, `expansion "cond-exp"`, `"{{name}}"`} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("run = %q: error %q does not mention %s", value, err, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestExpansionExcludedStepReferences: a template step that its expansion's
+// value excludes is dropped by the condition filter whatever the poured
+// variables are, its advice goes with it, a reference the template wrote to
+// it is refused with the value that excluded it, and a dependency the
+// expansion moved onto it from the step it replaced is routed around it
+// (bd-w153uq / #6433).
+func TestExpansionExcludedStepReferences(t *testing.T) {
+	tmpDir := t.TempDir()
+	expansion := `{
+		"formula": "opt-exp",
+		"type": "expansion",
+		"version": 1,
+		"vars": {"with_extra": {"default": "false"}},
+		"template": [
+			{"id": "{target}.draft", "title": "Draft"},
+			{"id": "{target}.extra", "title": "Extra", "needs": ["{target}.draft"], "condition": "{{with_extra}}"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "opt-exp.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(tmpDir)
+	steps := []*Step{
+		{ID: "work", Title: "Work"},
+		{ID: "deploy", Title: "Deploy", Needs: []string{"work"}},
+		{ID: "notify", Title: "Notify", DependsOn: []string{"work"}},
+	}
+	expanded, err := ApplyExpansions(steps, &ComposeRules{Expand: []*ExpandRule{{Target: "work", With: "opt-exp"}}}, parser)
+	if err != nil {
+		t.Fatalf("ApplyExpansions: %v", err)
+	}
+	// An aspect's advice is applied after expansions.
+	advised := ApplyAdvice(expanded, []*AdviceRule{{Target: "work.extra", After: &AdviceStep{ID: "{step.id}-review", Title: "Review"}}})
+
+	filtered, err := FilterStepsByCondition(advised, map[string]string{"with_extra": "true"})
+	if err != nil {
+		t.Fatalf("FilterStepsByCondition: %v", err)
+	}
+	byID := buildStepMap(filtered)
+	if _, ok := byID["work.extra"]; ok {
+		t.Errorf("work.extra kept although its expansion sets with_extra = false; kept %v", stepIDs(filtered))
+	}
+	if _, ok := byID["work.extra-review"]; ok {
+		t.Errorf("the advice after work.extra was kept without its target; kept %v", stepIDs(filtered))
+	}
+	if got := byID["deploy"].Needs; !slices.Equal(got, []string{"work.draft"}) {
+		t.Errorf("deploy needs %v, want [work.draft] (routed around the excluded last step)", got)
+	}
+	if got := byID["notify"].DependsOn; !slices.Equal(got, []string{"work.draft"}) {
+		t.Errorf("notify depends_on %v, want [work.draft] (routed around the excluded last step)", got)
+	}
+
+	// A step that names the excluded step itself is refused, with the value
+	// that excluded it.
+	named := slices.Concat(expanded, []*Step{{ID: "audit", Title: "Audit", Needs: []string{"work.extra"}}})
+	_, err = FilterStepsByCondition(named, nil)
+	if err == nil || !errors.Is(err, ErrValidation) {
+		t.Fatalf("FilterStepsByCondition err = %v, want a refusal wrapping ErrValidation", err)
+	}
+	for _, want := range []string{`step "audit": needs references "work.extra"`, `since expansion "opt-exp" sets with_extra = "false"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// TestExpansionStandInEdgeRoutesAroundADroppedLastStep: a needs or depends_on
+// edge onto an expanded step is moved onto the expansion's last step, an edge
+// the formula never wrote; when a condition drops that last step, the edge is
+// routed to the steps it needs instead of refusing the pour, on compose.expand
+// and compose.map, also where the last step takes the expanded step's own ID.
+// An edge the formula wrote onto the last step itself is still refused
+// (bd-w153uq / #6433).
+func TestExpansionStandInEdgeRoutesAroundADroppedLastStep(t *testing.T) {
+	tmpDir := t.TempDir()
+	for name, lastID := range map[string]string{"tail-exp": "{target}.extra", "tail-self-exp": "{target}"} {
+		body := fmt.Sprintf(`{
+			"formula": %q,
+			"type": "expansion",
+			"version": 1,
+			"template": [
+				{"id": "{target}.draft", "title": "Draft"},
+				{"id": %q, "title": "Extra", "needs": ["{target}.draft"], "condition": "{{with_extra}}"}
+			]
+		}`, name, lastID)
+		if err := os.WriteFile(filepath.Join(tmpDir, name+".formula.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	twoExp := `{
+		"formula": "two-exp",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.x", "title": "X"},
+			{"id": "{target}.y", "title": "Y", "needs": ["{target}.x"]}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "two-exp.formula.json"), []byte(twoExp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(tmpDir)
+
+	// A step expanded after the expansion with the conditional last step
+	// passes the moved edge on to its own first step, still generated, so
+	// the edge is routed there too.
+	t.Run("chained_expansion", func(t *testing.T) {
+		for _, field := range []string{"needs", "depends_on"} {
+			implement := &Step{ID: "implement", Title: "Implement"}
+			edges := func(s *Step) []string { return s.Needs }
+			if field == "needs" {
+				implement.Needs = []string{"design"}
+			} else {
+				implement.DependsOn = []string{"design"}
+				edges = func(s *Step) []string { return s.DependsOn }
+			}
+			expanded, err := ApplyExpansions([]*Step{{ID: "design", Title: "Design"}, implement}, &ComposeRules{Expand: []*ExpandRule{
+				{Target: "design", With: "tail-exp"},
+				{Target: "implement", With: "two-exp"},
+			}}, parser)
+			if err != nil {
+				t.Fatalf("%s: ApplyExpansions: %v", field, err)
+			}
+			for _, c := range []struct {
+				withExtra, want string
+			}{{"true", "design.extra"}, {"false", "design.draft"}} {
+				filtered, err := FilterStepsByCondition(expanded, map[string]string{"with_extra": c.withExtra})
+				if err != nil {
+					t.Fatalf("%s, with_extra=%s: FilterStepsByCondition: %v", field, c.withExtra, err)
+				}
+				if got := edges(buildStepMap(filtered)["implement.x"]); !slices.Equal(got, []string{c.want}) {
+					t.Errorf("%s, with_extra=%s: implement.x %s %v, want [%s]", field, c.withExtra, field, got, c.want)
+				}
+			}
+		}
+	})
+
+	for _, tc := range []struct {
+		name, with, last string
+		map_             bool
+	}{
+		{"compose_expand", "tail-exp", "work.extra", false},
+		{"compose_map", "tail-exp", "work.extra", true},
+		{"last_step_takes_the_target_id", "tail-self-exp", "work", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := []*Step{
+				{ID: "work", Title: "Work"},
+				{ID: "deploy", Title: "Deploy", Needs: []string{"work"}},
+				{ID: "notify", Title: "Notify", DependsOn: []string{"work"}},
+			}
+			compose := &ComposeRules{Expand: []*ExpandRule{{Target: "work", With: tc.with}}}
+			if tc.map_ {
+				compose = &ComposeRules{Map: []*MapRule{{Select: "work", With: tc.with}}}
+			}
+			expanded, err := ApplyExpansions(steps, compose, parser)
+			if err != nil {
+				t.Fatalf("ApplyExpansions: %v", err)
+			}
+
+			for _, c := range []struct {
+				withExtra string
+				want      string
+			}{{"true", tc.last}, {"false", "work.draft"}} {
+				filtered, err := FilterStepsByCondition(expanded, map[string]string{"with_extra": c.withExtra})
+				if err != nil {
+					t.Fatalf("with_extra=%s: FilterStepsByCondition: %v", c.withExtra, err)
+				}
+				byID := buildStepMap(filtered)
+				if got := byID["deploy"].Needs; !slices.Equal(got, []string{c.want}) {
+					t.Errorf("with_extra=%s: deploy needs %v, want [%s]", c.withExtra, got, c.want)
+				}
+				if got := byID["notify"].DependsOn; !slices.Equal(got, []string{c.want}) {
+					t.Errorf("with_extra=%s: notify depends_on %v, want [%s]", c.withExtra, got, c.want)
+				}
+			}
+		})
+	}
+
+	t.Run("an_edge_the_formula_wrote_onto_the_last_step_is_refused", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "work", Title: "Work"},
+			{ID: "deploy", Title: "Deploy", Needs: []string{"work.extra", "work"}},
+		}
+		expanded, err := ApplyExpansions(steps, &ComposeRules{Expand: []*ExpandRule{{Target: "work", With: "tail-exp"}}}, parser)
+		if err != nil {
+			t.Fatalf("ApplyExpansions: %v", err)
+		}
+		if got := buildStepMap(expanded)["deploy"].Needs; !slices.Equal(got, []string{"work.extra"}) {
+			t.Errorf("deploy needs %v, want [work.extra] (the moved edge merged into the written one)", got)
+		}
+		_, err = FilterStepsByCondition(expanded, map[string]string{"with_extra": "false"})
+		if err == nil || !strings.Contains(err.Error(), `step "deploy": needs references "work.extra"`) {
+			t.Errorf("FilterStepsByCondition err = %v, want the written reference refused", err)
+		}
+	})
+}
+
+// TestExpandStepTemplateIsolation: every expanded step owns its mutable
+// state, so mutating one expansion's result changes neither the template nor
+// another expansion of it (bd-w153uq / #6433).
+func TestExpandStepTemplateIsolation(t *testing.T) {
+	target := &Step{ID: "work", Title: "Work"}
+	newTemplate := func() *Step {
+		prio := 1
+		return &Step{
+			ID:        "{target}.s",
+			Title:     "S",
+			Priority:  &prio,
+			Labels:    []string{"a"},
+			DependsOn: []string{"x"},
+			Needs:     []string{"y"},
+			Metadata: map[string]interface{}{
+				"nested":    map[string]interface{}{"list": []interface{}{"v", map[string]interface{}{"deep": "d"}}},
+				"emptyMap":  map[string]interface{}{},
+				"emptyList": []interface{}{},
+				"nilValue":  nil,
+			},
+			Gate:       &Gate{Type: "human", Timeout: "1h"},
+			OnComplete: &OnCompleteSpec{Bond: "b", Vars: map[string]string{}},
+			Children:   []*Step{{ID: "{target}.c", Title: "C", Labels: []string{"c"}, Metadata: map[string]interface{}{"k": "v"}}},
+		}
+	}
+	snapshot := func(s *Step) string {
+		t.Helper()
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	tmpl := newTemplate()
+	tmplBefore := snapshot(tmpl)
+	a, err := expandStep(target, []*Step{tmpl}, nil)
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	b, err := expandStep(target, []*Step{tmpl}, nil)
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	bBefore := snapshot(b[0])
+
+	// Empty containers keep their kind: an empty list stays an empty list,
+	// not null, and OnComplete keeps a non-nil Vars map.
+	if l, ok := a[0].Metadata["emptyList"].([]interface{}); !ok || l == nil {
+		t.Errorf("Metadata[emptyList] = %#v, want a non-nil empty list", a[0].Metadata["emptyList"])
+	}
+	if v, ok := a[0].Metadata["nilValue"]; !ok || v != nil {
+		t.Errorf("Metadata[nilValue] = %#v (present %v), want a present nil", v, ok)
+	}
+	if a[0].OnComplete == nil || a[0].OnComplete.Vars == nil {
+		t.Errorf("OnComplete.Vars = nil, want a non-nil empty map")
+	}
+
+	got := a[0]
+	if got.Priority == nil || got.Metadata == nil || got.Gate == nil || got.OnComplete == nil || len(got.Children) != 1 || got.Children[0].Metadata == nil {
+		t.Fatalf("expanded step dropped template fields, nothing to mutate: %+v", got)
+	}
+	*got.Priority = 4
+	got.Labels[0] = "mut"
+	got.DependsOn[0] = "mut"
+	got.Needs[0] = "mut"
+	nested := got.Metadata["nested"].(map[string]interface{})
+	list := nested["list"].([]interface{})
+	list[0] = "mut"
+	list[1].(map[string]interface{})["deep"] = "mut"
+	nested["added"] = "mut"
+	got.Metadata["emptyMap"].(map[string]interface{})["added"] = "mut"
+	got.Gate.Timeout = "9h"
+	got.OnComplete.Bond = "mut"
+	got.OnComplete.Vars["added"] = "mut"
+	got.Children[0].Title = "mut"
+	got.Children[0].Labels[0] = "mut"
+	got.Children[0].Metadata["k"] = "mut"
+
+	if after := snapshot(tmpl); after != tmplBefore {
+		t.Errorf("mutating an expanded step changed the template:\nbefore %s\nafter  %s", tmplBefore, after)
+	}
+	if after := snapshot(b[0]); after != bBefore {
+		t.Errorf("mutating one expansion changed another:\nbefore %s\nafter  %s", bBefore, after)
+	}
+}
+
+// nestedMetadata returns step metadata whose single string leaf sits at
+// depth levels, counting the root map as depth zero (metadataStrings'
+// convention).
+func nestedMetadata(levels int, leaf string) map[string]interface{} {
+	var v interface{} = leaf
+	for i := 1; i < levels; i++ {
+		v = map[string]interface{}{"k": v}
+	}
+	return map[string]interface{}{"k": v}
+}
+
+func metadataLeaf(t *testing.T, m map[string]interface{}) interface{} {
+	t.Helper()
+	var v interface{} = m
+	for {
+		mm, ok := v.(map[string]interface{})
+		if !ok {
+			return v
+		}
+		v = mm["k"]
+	}
+}
+
+// TestExpandStepMetadataDepthBound: metadata nested up to the scan bound is
+// cloned and substituted; anything deeper is an error naming the step, never
+// dropped or shared with the template (bd-w153uq / #6433).
+func TestExpandStepMetadataDepthBound(t *testing.T) {
+	target := &Step{ID: "work", Title: "Work"}
+	vars := map[string]string{"owner": "alice"}
+
+	t.Run("below_bound", func(t *testing.T) {
+		tmpl := &Step{ID: "{target}.s", Title: "S", Metadata: nestedMetadata(maxMetadataScanDepth-1, "{owner}")}
+		result, err := expandStep(target, []*Step{tmpl}, vars)
+		if err != nil {
+			t.Fatalf("expandStep: %v", err)
+		}
+		if got := metadataLeaf(t, result[0].Metadata); got != "alice" {
+			t.Errorf("deepest leaf = %#v, want %q", got, "alice")
+		}
+		if got := metadataLeaf(t, tmpl.Metadata); got != "{owner}" {
+			t.Errorf("template leaf = %#v, want it unchanged", got)
+		}
+	})
+
+	t.Run("at_bound", func(t *testing.T) {
+		tmpl := &Step{ID: "{target}.s", Title: "S", Metadata: nestedMetadata(maxMetadataScanDepth, "{owner}")}
+		_, err := expandStep(target, []*Step{tmpl}, vars)
+		if err == nil {
+			t.Fatal("expandStep accepted metadata nested past the bound")
+		}
+		// pour and wisp report only a cook error that wraps ErrValidation;
+		// any other makes them say the formula was not found.
+		if !errors.Is(err, ErrValidation) {
+			t.Errorf("error %v does not wrap ErrValidation", err)
+		}
+		for _, want := range []string{`"{target}.s"`, "metadata", fmt.Sprint(maxMetadataScanDepth)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+}
+
+// TestExpandStepRejectsTemplateLoop: control flow runs before expansions, so
+// a loop on an expansion template step would never be expanded; it is an
+// error naming the step instead of being dropped (bd-w153uq / #6433).
+func TestExpandStepRejectsTemplateLoop(t *testing.T) {
+	target := &Step{ID: "work", Title: "Work"}
+	loop := &LoopSpec{Count: 2, Body: []*Step{{ID: "iter", Title: "Iter"}}}
+
+	t.Run("top_level", func(t *testing.T) {
+		_, err := expandStep(target, []*Step{{ID: "{target}.loop", Title: "L", Loop: loop}}, nil)
+		if err == nil || !strings.Contains(err.Error(), `"{target}.loop"`) || !strings.Contains(err.Error(), "loop") {
+			t.Fatalf("err = %v, want a loop error naming {target}.loop", err)
+		}
+		// pour and wisp report only a cook error that wraps ErrValidation;
+		// any other makes them say the formula was not found.
+		if !errors.Is(err, ErrValidation) {
+			t.Errorf("error %v does not wrap ErrValidation", err)
+		}
+	})
+
+	t.Run("child", func(t *testing.T) {
+		tmpl := &Step{ID: "{target}.parent", Title: "P", Children: []*Step{{ID: "{target}.inner", Title: "I", Loop: loop}}}
+		_, err := expandStep(target, []*Step{tmpl}, nil)
+		if err == nil || !strings.Contains(err.Error(), `"{target}.inner"`) {
+			t.Fatalf("err = %v, want a loop error naming {target}.inner", err)
+		}
+	})
+
+	t.Run("wrappers", func(t *testing.T) {
+		f := &Formula{Formula: "looped", Type: TypeExpansion, Template: []*Step{{ID: "{target}.loop", Title: "L", Loop: loop}}}
+		if err := MaterializeExpansion(f, "main", nil); err == nil || !strings.Contains(err.Error(), "loop") {
+			t.Errorf("MaterializeExpansion err = %v, want the loop error", err)
+		}
+		if f.Steps != nil {
+			t.Errorf("MaterializeExpansion produced steps %v", f.Steps)
+		}
+		if got := ExpansionVarRefs(f, "main"); got != nil {
+			t.Errorf("ExpansionVarRefs = %v, want nil for a template that cannot expand", got)
+		}
+
+		tmpDir := t.TempDir()
+		body := `{"formula": "looped", "type": "expansion", "version": 1,
+			"template": [{"id": "{target}.loop", "title": "L", "loop": {"count": 2, "body": [{"id": "iter", "title": "Iter"}]}}]}`
+		if err := os.WriteFile(filepath.Join(tmpDir, "looped.formula.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		parser := NewParser(tmpDir)
+		_, err := ApplyExpansions([]*Step{{ID: "work", Title: "Work"}}, &ComposeRules{Expand: []*ExpandRule{{Target: "work", With: "looped"}}}, parser)
+		if err == nil || !strings.Contains(err.Error(), `"{target}.loop"`) || !errors.Is(err, ErrValidation) {
+			t.Errorf("ApplyExpansions err = %v, want the loop error, wrapping ErrValidation", err)
+		}
+		_, err = ApplyInlineExpansions([]*Step{{ID: "work", Title: "Work", Expand: "looped"}}, parser)
+		if err == nil || !strings.Contains(err.Error(), `"{target}.loop"`) || !errors.Is(err, ErrValidation) {
+			t.Errorf("ApplyInlineExpansions err = %v, want the loop error, wrapping ErrValidation", err)
+		}
+	})
+}
+
+// TestExpandStepClearsInlineExpand pins the documented policy that nested
+// template expansion directives are cleared: an expanded step carries no
+// expand/expand_vars, so it is neither re-expanded nor an error to load
+// (bd-w153uq / #6433). This matched the old behavior as well; it is
+// compatibility coverage for the copy-based expansion.
+func TestExpandStepClearsInlineExpand(t *testing.T) {
+	target := &Step{ID: "work", Title: "Work"}
+	tmpl := &Step{ID: "{target}.nested", Title: "N", Expand: "does-not-exist", ExpandVars: map[string]string{"k": "v"},
+		Children: []*Step{{ID: "{target}.child", Title: "C", Expand: "does-not-exist"}}}
+
+	result, err := expandStep(target, []*Step{tmpl}, nil)
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	if result[0].Expand != "" || result[0].ExpandVars != nil || result[0].Children[0].Expand != "" {
+		t.Errorf("expand directives carried: Expand=%q ExpandVars=%v child Expand=%q",
+			result[0].Expand, result[0].ExpandVars, result[0].Children[0].Expand)
+	}
+
+	tmpDir := t.TempDir()
+	body := `{"formula": "outer", "type": "expansion", "version": 1,
+		"template": [{"id": "{target}.nested", "title": "N", "expand": "does-not-exist", "expand_vars": {"k": "v"}}]}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "outer.formula.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ApplyInlineExpansions([]*Step{{ID: "work", Title: "Work", Expand: "outer"}}, NewParser(tmpDir))
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansions: %v", err)
+	}
+	if len(out) != 1 || out[0].ID != "work.nested" || out[0].Expand != "" {
+		t.Errorf("ApplyInlineExpansions = %+v, want the single cleared step work.nested", out)
+	}
+}
+
+// expandStepNotCarried names the exported Step fields an expansion
+// deliberately does not carry onto the expanded step, with the reason.
+// Every other field must survive; see TestExpandStepFieldGuard.
+var expandStepNotCarried = map[string]string{
+	"Loop":       "rejected: control flow runs before expansions, so a template loop would never be expanded (TestExpandStepRejectsTemplateLoop)",
+	"Expand":     "cleared: nested template expansion directives are disabled (TestExpandStepClearsInlineExpand)",
+	"ExpandVars": "cleared together with Expand",
+}
+
+// TestExpandStepFieldGuard fails when a Step field is added that the
+// expansion drops: every exported field must be set in the fixture below and
+// come through an expansion unchanged (no placeholders, so substitution is the
+// identity), unless expandStepNotCarried names it (bd-w153uq / #6433).
+func TestExpandStepFieldGuard(t *testing.T) {
+	prio := 2
+	fixture := &Step{
+		ID:             "step",
+		Title:          "Title",
+		Description:    "Description",
+		Notes:          "Notes",
+		Type:           "bug",
+		Priority:       &prio,
+		Labels:         []string{"label"},
+		Metadata:       map[string]interface{}{"key": "value", "n": int64(1)},
+		DependsOn:      []string{"dep"},
+		Needs:          []string{"need"},
+		WaitsFor:       "all-children",
+		Assignee:       "assignee",
+		Expand:         "nested-expansion",
+		ExpandVars:     map[string]string{"k": "v"},
+		Condition:      "{{flag}}",
+		Children:       []*Step{{ID: "child", Title: "Child"}},
+		Gate:           &Gate{Type: "human", Timeout: "1h"},
+		OnComplete:     &OnCompleteSpec{ForEach: "output.items", Bond: "mol", Vars: map[string]string{"k": "{item}"}},
+		SourceFormula:  "source",
+		SourceLocation: "template[0]",
+	}
+
+	stepType := reflect.TypeOf(Step{})
+	in := reflect.ValueOf(fixture).Elem()
+	for name := range expandStepNotCarried {
+		if _, ok := stepType.FieldByName(name); !ok {
+			t.Errorf("expandStepNotCarried names %q, which is not a Step field", name)
+		}
+	}
+	for i := 0; i < stepType.NumField(); i++ {
+		f := stepType.Field(i)
+		// A template loop is an error (TestExpandStepRejectsTemplateLoop),
+		// so the fixture cannot carry one.
+		if !f.IsExported() || f.Name == "Loop" {
+			continue
+		}
+		if in.Field(i).IsZero() {
+			t.Errorf("Step.%s is zero in the guard fixture: set it, and make expandStep carry it or list it in expandStepNotCarried with a reason", f.Name)
+		}
+	}
+
+	result, err := expandStep(&Step{ID: "target", Title: "Target"}, []*Step{fixture}, nil)
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("got %d steps, want 1", len(result))
+	}
+	out := reflect.ValueOf(result[0]).Elem()
+	for i := 0; i < stepType.NumField(); i++ {
+		f := stepType.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		if _, skip := expandStepNotCarried[f.Name]; skip {
+			if !out.Field(i).IsZero() {
+				t.Errorf("Step.%s is listed as not carried but survived expansion: %#v", f.Name, out.Field(i).Interface())
+			}
+			continue
+		}
+		if !reflect.DeepEqual(out.Field(i).Interface(), in.Field(i).Interface()) {
+			t.Errorf("Step.%s did not survive expansion: got %#v, want %#v", f.Name, out.Field(i).Interface(), in.Field(i).Interface())
+		}
+	}
 }

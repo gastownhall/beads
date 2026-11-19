@@ -218,6 +218,17 @@ func loadAndResolveFormula(formulaPath string, searchPaths []string) (*formula.F
 		}
 	}
 
+	// Drop each step that its expansion's own value excluded (with its
+	// advice), routing or refusing the edges onto it, as every pour does.
+	// Nothing in the JSON or a persisted proto would record the exclusion,
+	// so the step would read as unconditional there. Every other condition
+	// stays for the pour (bd-w153uq / #6433).
+	keptSteps, err := formula.DropExpansionExcludedSteps(resolved.Steps)
+	if err != nil {
+		return nil, fmt.Errorf("applying expansion conditions: %w", err)
+	}
+	resolved.Steps = keptSteps
+
 	return resolved, nil
 }
 
@@ -866,8 +877,24 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 				expansionVars[k] = v
 			}
 		}
+		materializing := len(resolved.Steps) == 0
 		if err := formula.MaterializeExpansion(resolved, expansionTarget, expansionVars); err != nil {
 			return nil, fmt.Errorf("standalone expansion %q: %w", formulaName, err)
+		}
+		if materializing {
+			// The steps just materialized carry the template's conditions
+			// and {{var}} references, which the scan and the condition
+			// filter above never saw: record their names before filtering
+			// can drop the steps that hold them, then filter them once
+			// against the same defaults-plus-supplied vars.
+			formulaVarNames = append(formulaVarNames, formulaVarRefs(resolved.Steps)...)
+			if conditionVars != nil {
+				filteredSteps, err := formula.FilterStepsByCondition(resolved.Steps, expansionVars)
+				if err != nil {
+					return nil, fmt.Errorf("standalone expansion %q: filtering steps by condition: %w", formulaName, err)
+				}
+				resolved.Steps = filteredSteps
+			}
 		}
 	}
 
@@ -1166,7 +1193,8 @@ func collectDependencies(step *formula.Step, idMapping, exitGates map[string]str
 		if !ok {
 			// FilterStepsByCondition has already rejected a reference the
 			// formula wrote to a step its condition dropped, and routed an
-			// edge that a loop, compose.branch or advice added around one. A
+			// edge that a loop, compose.branch, advice or an expansion's
+			// stand-in for the step it replaced added around one. A
 			// target still missing here is a step that a transform replaced
 			// without rewriting the references to it: a loop container named
 			// from outside the loop (Validate accepts it as written, ApplyLoops

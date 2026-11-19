@@ -219,6 +219,52 @@ title = "Deploy to production"
 needs = ["approval"]   # waits for the prep task and for bd gate resolve
 ```
 
+## Expansion templates
+
+An `expansion` formula's `[[template]]` steps are copied in place of a target
+step: through `compose.expand` or `compose.map`, an inline `expand` on a step,
+or by pouring the expansion formula on its own (the target is then a synthetic
+step named `main`). `{target}` (or `{target.id}`), `{target.title}`,
+`{target.description}` and the expansion's `{name}` variables are filled in as
+the steps are copied. A `{{name}}` reference is left as it is, for the pour to
+fill in from the poured formula's variables.
+
+| Template step field | When expanded |
+|---------------------|---------------|
+| `id`, `title`, `description`, `notes`, `labels`, `needs`, `depends_on`, `waits_for` | `{target…}` placeholders and `{name}` variables filled in |
+| `assignee` | `{name}` variables filled in |
+| `metadata` | String values filled in like `notes`, at any depth; keys unchanged |
+| `gate` | `id`, `await_id`, `timeout` and `repo` filled in like `notes`; the gate then gets the usual `{{variable}}` substitution when cooked |
+| `type`, `priority`, `children` | Kept (children are expanded the same way) |
+| `condition` | Tests the expansion's value for a variable the expansion sets (see below); otherwise evaluated against the poured formula's variables when the formula is cooked or poured |
+| `on_complete` | Copied as written; bd does not run it (see [Hooks](/workflows/molecules#hooks)) |
+| `expand`, `expand_vars` | Cleared: an expanded step is never expanded again |
+| `loop` | Not supported: expansion fails with an error naming the step; move the loop onto the step that expands the template, or the loop body's steps into the template |
+
+`waits_for` can name its spawner through the target, for example
+`waits_for = "children-of({target}.spawn)"`, and so can a gate under
+`compose.map`, for example `id = "ci-{target}"`. A template metadata value
+nested inside 32 or more tables or arrays (the `metadata` table itself counts
+as one) is an error rather than being dropped.
+
+A template step's condition that tests a variable the expansion sets (its
+`[vars]` default, overridden by the `compose` rule's `vars` or the step's
+`expand_vars`) uses that value, the one its `{name}` placeholders get, whatever
+a variable of the same name in the poured formula says. To test a variable of
+the poured formula instead, set the expansion's variable to `"{{name}}"`, for
+example `vars = { with_tests = "{{run_tests}}" }`; any other value with a
+brace in it is an error. A step that the expansion's value excludes is left
+out of every pour, and out of `bd cook`'s output (the JSON, `--dry-run` and
+the proto `--persist` writes) too. A condition on a variable the expansion
+does not set reads the poured formula's variables. When an expansion formula
+is poured on its own, its variables are the poured ones: its template steps'
+conditions filter the poured steps, and a variable a template step uses only
+in its condition is accepted.
+
+A step that needs or depends on a step that `compose.expand` or `compose.map`
+replaced waits for the expansion's last step. When a condition drops that last
+step, the step waits for the steps the dropped one depends on instead.
+
 ## Aspects (Cross-cutting)
 
 Apply transformations to matching steps:

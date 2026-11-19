@@ -176,8 +176,11 @@ func adviceStepToStep(as *AdviceStep, target *Step) *Step {
 		SourceLocation: "advice",
 		// Advice goes where its target goes: a target that its condition
 		// drops from a pour takes its advice steps with it, instead of
-		// leaving them poured around a step that is not there.
-		Condition: target.Condition,
+		// leaving them poured around a step that is not there. An aspect's
+		// advice is applied after expansions, so its target can be a step
+		// that its expansion already excluded (excludedBy).
+		Condition:  target.Condition,
+		excludedBy: target.excludedBy,
 	}
 }
 
@@ -204,6 +207,10 @@ func cloneStep(s *Step) *Step {
 		clone.generatedNeeds = make([]string, len(s.generatedNeeds))
 		copy(clone.generatedNeeds, s.generatedNeeds)
 	}
+	if len(s.generatedDependsOn) > 0 {
+		clone.generatedDependsOn = make([]string, len(s.generatedDependsOn))
+		copy(clone.generatedDependsOn, s.generatedDependsOn)
+	}
 	if len(s.Labels) > 0 {
 		clone.Labels = make([]string, len(s.Labels))
 		copy(clone.Labels, s.Labels)
@@ -222,7 +229,7 @@ func cloneOnComplete(oc *OnCompleteSpec) *OnCompleteSpec {
 		return nil
 	}
 	clone := *oc
-	if len(oc.Vars) > 0 {
+	if oc.Vars != nil {
 		clone.Vars = make(map[string]string, len(oc.Vars))
 		for k, v := range oc.Vars {
 			clone.Vars[k] = v
@@ -255,6 +262,20 @@ func addGeneratedNeed(s *Step, ref string) {
 // the edge (see addGeneratedNeed).
 func isGeneratedNeed(s *Step, ref string) bool {
 	return slices.Contains(s.generatedNeeds, ref)
+}
+
+// addGeneratedDependsOn is addGeneratedNeed for depends_on.
+func addGeneratedDependsOn(s *Step, ref string) {
+	if slices.Contains(s.DependsOn, ref) {
+		return
+	}
+	s.DependsOn = append(s.DependsOn, ref)
+	s.generatedDependsOn = append(s.generatedDependsOn, ref)
+}
+
+// isGeneratedDependsOn is isGeneratedNeed for depends_on.
+func isGeneratedDependsOn(s *Step, ref string) bool {
+	return slices.Contains(s.generatedDependsOn, ref)
 }
 
 // collectStepIDs returns a set of all step IDs (including nested children).

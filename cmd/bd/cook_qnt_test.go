@@ -272,6 +272,65 @@ gate = `+gateSrc+"\n")
 	})
 }
 
+// TestCookPersistLeavesOutAStepItsExpansionExcludes: through compose.expand,
+// compose.map and an inline expand, the proto bd cook --persist writes holds
+// no template step that the expansion's own value excludes, as every pour of
+// the formula drops it, and a step that waited for it waits for the step it
+// needed (bd-w153uq / #6433).
+func TestCookPersistLeavesOutAStepItsExpansionExcludes(t *testing.T) {
+	ctx := context.Background()
+	for _, path := range expansionPaths {
+		t.Run(path, func(t *testing.T) {
+			// An inline expand moves no edge onto its last step.
+			var deploy []map[string]interface{}
+			if path != "inline" {
+				deploy = []map[string]interface{}{{"id": "deploy", "title": "Deploy", "needs": []string{"work"}}}
+			}
+			dir := writePipelineFormulaSet(t, map[string]string{
+				"tests-exp.formula.json": testsExpansionJSON,
+				"composed.formula.json": composedFormulaJSON(t, "composed", path, "tests-exp",
+					map[string]string{"with_tests": "false"}, deploy, nil),
+			})
+			s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+			withWispTestGlobals(t, s, ctx)
+
+			cmd := newCookOutputTestCommand(dir, false, "")
+			if err := cmd.Flags().Set("persist", "true"); err != nil {
+				t.Fatal(err)
+			}
+			if _, stderr, err := runCookCapturingOutput(t, cmd, "composed"); err != nil {
+				t.Fatalf("bd cook --persist: %v; stderr = %q", err, stderr)
+			}
+
+			if issue, err := s.GetIssue(ctx, "composed.work.impl"); err != nil || issue == nil {
+				t.Fatalf("the proto lacks composed.work.impl: issue=%v err=%v", issue, err)
+			}
+			switch issue, err := s.GetIssue(ctx, "composed.work.tests"); {
+			case err == nil && issue != nil:
+				t.Errorf("the proto holds composed.work.tests, which the expansion excludes from every pour")
+			case err != nil && !isNotFoundErr(err):
+				t.Fatalf("GetIssue(composed.work.tests): %v", err)
+			}
+			if deploy == nil {
+				return
+			}
+			recs, err := s.GetDependencyRecords(ctx, "composed.deploy")
+			if err != nil {
+				t.Fatalf("GetDependencyRecords(composed.deploy): %v", err)
+			}
+			var blockers []string
+			for _, d := range recs {
+				if d.Type == types.DepBlocks {
+					blockers = append(blockers, d.DependsOnID)
+				}
+			}
+			if want := []string{"composed.work.impl"}; !slices.Equal(blockers, want) {
+				t.Errorf("the proto's deploy is blocked by %v, want %v", blockers, want)
+			}
+		})
+	}
+}
+
 // gateFanTOML is a gate-typed step that spawns workers, followed by a fan-in
 // step; callers append the fan-in step's needs/waits_for lines (GH#3316).
 const gateFanTOML = `formula = "gate-fan"
