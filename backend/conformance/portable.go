@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // This file holds the behavior contract for the portable, non-version-control methods
@@ -35,6 +36,7 @@ func RunPortableMethods(t *testing.T, factory Factory) {
 	t.Run("AllEventsSince", func(t *testing.T) { testGetAllEventsSince(t, factory) })
 	t.Run("AllDependencyRecords", func(t *testing.T) { testGetAllDependencyRecords(t, factory) })
 	t.Run("GetDependenciesWithUnresolvable", func(t *testing.T) { testGetDependenciesWithUnresolvable(t, factory) })
+	t.Run("RelationsAndTreeSeeOnlyRealRows", func(t *testing.T) { testRelationsAndTreeSeeOnlyRealRows(t, factory) })
 	t.Run("IterAllDependencyRecords", func(t *testing.T) { testIterAllDependencyRecords(t, factory) })
 	t.Run("IterAllEventsSince", func(t *testing.T) { testIterAllEventsSince(t, factory) })
 	t.Run("CountDependentsByStatus", func(t *testing.T) { testCountDependentsByStatus(t, factory) })
@@ -387,6 +389,51 @@ func testGetDependenciesWithUnresolvable(t *testing.T, f Factory) {
 	}
 	if len(localUnresolvable) != 0 {
 		t.Errorf("local anchor unresolvable = %+v, want none", localUnresolvable)
+	}
+}
+
+// testRelationsAndTreeSeeOnlyRealRows pins the GH#5850 AC-6 invariants on
+// real databases: the consumers that sit on the existing metadata readers —
+// the Relations neighbor query and the recursive dependency-tree walk —
+// receive only real rows when an anchor carries an edge whose target has no
+// row in this database. The tree is the sharper pin: its recursion fetches
+// each neighbor by id, so a missing target that leaked through would fail
+// the whole walk with not-found rather than merely drawing a wrong tree —
+// this test passing means no fetch of the missing id was ever attempted.
+func testRelationsAndTreeSeeOnlyRealRows(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	const anchor = "test-tu"
+	const child = "test-tv"
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: anchor, Title: "anchor"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: child, Title: "real child"}), "a"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: anchor, DependsOnID: child, Type: types.DepBlocks}, "actor"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: anchor, DependsOnID: "external:liveop:gone", Type: types.DepTracks}, "actor"))
+
+	// Relations: the neighbor list is the anchor's real rows alone — no
+	// placeholder for the missing far end, no error naming it.
+	rel, err := s.IssueRelations()
+	must(t, err)
+	neighbors, err := rel.Related(c, issueops.RelatedRequest{ID: anchor, Direction: issueops.RelationOut})
+	must(t, err)
+	if len(neighbors) != 1 || neighbors[0].ID != child || neighbors[0].DependencyType != types.DepBlocks {
+		t.Fatalf("Related(out) = %+v, want exactly the one real neighbor %q under a blocks edge", neighbors, child)
+	}
+
+	// The dependency tree: root plus the real child, and the walk did not
+	// fail fetching the missing target (its edge type, tracks, is a tree
+	// edge, so a leak would have been followed, not filtered).
+	tree, err := s.GetDependencyTree(c, anchor, 3, false, false)
+	must(t, err)
+	if len(tree) != 2 {
+		t.Fatalf("tree = %+v, want exactly the root and the real child", tree)
+	}
+	if tree[0].ID != anchor || tree[0].Depth != 0 {
+		t.Errorf("tree[0] = %+v, want the anchor at depth 0", tree[0])
+	}
+	if tree[1].ID != child || tree[1].Depth != 1 || tree[1].ParentID != anchor || tree[1].EdgeFromParent != types.DepBlocks {
+		t.Errorf("tree[1] = %+v, want the real child under a blocks edge", tree[1])
 	}
 }
 
