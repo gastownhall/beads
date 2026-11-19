@@ -61,6 +61,25 @@ func TestEmbeddedBlocked(t *testing.T) {
 		}
 	})
 
+	// ===== Unresolvable blocks edges (bd-uschhs AC-8) =====
+
+	t.Run("unresolvable_blocks_edges_keep_ready_and_blocked", func(t *testing.T) {
+		assertUnresolvableBlocksMembership(t, unresolvableBlocksDriver{
+			create: func(title string) string { return bdCreate(t, bd, dir, title, "--type", "task").ID },
+			depAdd: func(from, to string) { bdDep(t, bd, dir, "add", from, to, "--type", "blocks") },
+			ready:  func() map[string]bool { return readyJSONIDs(t, bd, dir, "--limit", "0") },
+			blocked: func() map[string]bool {
+				ids := map[string]bool{}
+				for _, e := range bdBlockedJSON(t, bd, dir) {
+					if id, ok := e["id"].(string); ok {
+						ids[id] = true
+					}
+				}
+				return ids
+			},
+		})
+	})
+
 	// ===== --json =====
 
 	t.Run("blocked_json", func(t *testing.T) {
@@ -267,4 +286,52 @@ func TestEmbeddedBlockedLabelFilters(t *testing.T) {
 			t.Errorf("exclusion dropped %s, which it should have kept: %v", beta.ID, excludeIDs)
 		}
 	})
+}
+
+// unresolvableBlocksDriver is the four operations
+// assertUnresolvableBlocksMembership needs, so the embedded and proxied-server
+// configurations run one fixture with one set of expectations.
+type unresolvableBlocksDriver struct {
+	create  func(title string) string
+	depAdd  func(from, to string)
+	ready   func() map[string]bool
+	blocked func() map[string]bool
+}
+
+// assertUnresolvableBlocksMembership pins bd ready and bd blocked membership
+// for a blocks edge onto a local open issue, an `external:` reference and a
+// cross-repo id with no row here (bd-uschhs AC-8). The combined outgoing read
+// changes only what bd show names; readiness and the blocked policy keep
+// their existing answers, so this passes before and after the change. Those
+// answers differ by target shape and are pinned as they stand: an `external:`
+// reference blocks, while a bare cross-repo id with no row does not.
+func assertUnresolvableBlocksMembership(t *testing.T, d unresolvableBlocksDriver) {
+	t.Helper()
+	blocker := d.create("Local open blocker")
+	local := d.create("Blocked by a local issue")
+	external := d.create("Blocked by an external reference")
+	missing := d.create("Blocked by a cross-repo id")
+	free := d.create("No blocking edge")
+	d.depAdd(local, blocker)
+	d.depAdd(external, "external:otherproj:cap")
+	d.depAdd(missing, "liveop-gone")
+
+	ready, blocked := d.ready(), d.blocked()
+	for _, tc := range []struct {
+		name, id       string
+		ready, blocked bool
+	}{
+		{"local", local, false, true},
+		{"external", external, false, true},
+		{"missing", missing, true, false},
+		{"free", free, true, false},
+		{"blocker", blocker, true, false},
+	} {
+		if ready[tc.id] != tc.ready {
+			t.Errorf("%s (%s): in bd ready = %v, want %v", tc.name, tc.id, ready[tc.id], tc.ready)
+		}
+		if blocked[tc.id] != tc.blocked {
+			t.Errorf("%s (%s): in bd blocked = %v, want %v", tc.name, tc.id, blocked[tc.id], tc.blocked)
+		}
+	}
 }

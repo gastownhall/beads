@@ -83,6 +83,33 @@ func TestProxiedServerBlocked(t *testing.T) {
 		}
 	})
 
+	t.Run("unresolvable_blocks_edges_keep_ready_and_blocked", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "bku")
+		assertUnresolvableBlocksMembership(t, unresolvableBlocksDriver{
+			create: func(title string) string { return bdProxiedCreate(t, bd, p.dir, title).ID },
+			depAdd: func(from, to string) {
+				if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "dep", "add", from, to, "--type", "blocks"); err != nil {
+					t.Fatalf("dep add %s %s: %v\n%s", from, to, err, stderr)
+				}
+			},
+			ready: func() map[string]bool {
+				ids := map[string]bool{}
+				for _, r := range bdProxiedReadyJSON(t, bd, p, "--limit", "0") {
+					ids[r.ID] = true
+				}
+				return ids
+			},
+			blocked: func() map[string]bool {
+				ids := map[string]bool{}
+				for _, bi := range bdProxiedBlockedJSON(t, bd, p) {
+					ids[bi.ID] = true
+				}
+				return ids
+			},
+		})
+	})
+
 	t.Run("flags_reads_ids_from_stdin", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "bkf")
