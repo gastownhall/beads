@@ -542,3 +542,129 @@ func TestWispGCPreviewsWriteNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestWispGCChunkLoop pins the chunk executor's own contract, independent of
+// either route: sizes (empty, one chunk, one over, several), selection order,
+// cancellation between chunks, stopping at the first error, and discarding
+// whatever a chunk reported beside its error (GH#6246: an error at a commit
+// boundary proves nothing about what was written).
+func TestWispGCChunkLoop(t *testing.T) {
+	t.Run("chunk sizes", func(t *testing.T) {
+		for _, tc := range []struct {
+			in   int
+			want []int
+		}{
+			{0, nil},
+			{200, []int{200}},
+			{201, []int{200, 1}},
+			{450, []int{200, 200, 50}},
+		} {
+			var got []int
+			var sent []string
+			ids := wispPurgeIDs(tc.in)
+			out := runWispPurgeChunks(context.Background(), ids, func(_ context.Context, chunk []string) (wispPurgeChunk, error) {
+				got = append(got, len(chunk))
+				sent = append(sent, chunk...)
+				return wispPurgeChunk{deleted: len(chunk), deletedIDs: slices.Clone(chunk)}, nil
+			})
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("%d ids went out in chunks %v, want %v", tc.in, got, tc.want)
+			}
+			if !slices.Equal(sent, ids) {
+				t.Errorf("%d ids: chunks carried %d ids, want the selection once each in order", tc.in, len(sent))
+			}
+			if out.err != nil {
+				t.Errorf("%d ids: err = %v, want nil", tc.in, out.err)
+			}
+			if len(out.confirmed) != tc.in {
+				t.Errorf("%d ids: confirmed %d, want %d", tc.in, len(out.confirmed), tc.in)
+			}
+		}
+	})
+
+	t.Run("first error stops with nothing confirmed", func(t *testing.T) {
+		boom := fmt.Errorf("injected failure")
+		var calls int
+		out := runWispPurgeChunks(context.Background(), wispPurgeIDs(450), func(_ context.Context, _ []string) (wispPurgeChunk, error) {
+			calls++
+			return wispPurgeChunk{}, boom
+		})
+		if calls != 1 {
+			t.Errorf("sent %d chunks after the first error, want 1", calls)
+		}
+		if len(out.confirmed) != 0 {
+			t.Errorf("confirmed %d ids beside the failed first chunk, want 0", len(out.confirmed))
+		}
+		if out.remaining() != 450 {
+			t.Errorf("remaining = %d, want 450", out.remaining())
+		}
+	})
+
+	t.Run("later error keeps the earlier chunks and discards the failed chunk's report", func(t *testing.T) {
+		boom := fmt.Errorf("injected later failure")
+		var calls int
+		out := runWispPurgeChunks(context.Background(), wispPurgeIDs(450), func(_ context.Context, chunk []string) (wispPurgeChunk, error) {
+			calls++
+			if calls == 2 {
+				// A chunk that reports deletions AND an error: the report
+				// must not survive the error.
+				return wispPurgeChunk{deleted: 99, deletedIDs: chunk}, boom
+			}
+			return wispPurgeChunk{deleted: len(chunk), deletedIDs: slices.Clone(chunk)}, nil
+		})
+		if calls != 2 {
+			t.Errorf("sent %d chunks, want 2 (none after the failed one)", calls)
+		}
+		if len(out.confirmed) != 200 {
+			t.Errorf("confirmed %d ids, want the first chunk's 200", len(out.confirmed))
+		}
+		if out.deleted != 200 {
+			t.Errorf("deleted = %d, want 200 (the failed chunk's report discarded)", out.deleted)
+		}
+		if len(out.deletedIDs) != 200 {
+			t.Errorf("deleted_ids holds %d ids, want 200", len(out.deletedIDs))
+		}
+		if out.remaining() != 250 {
+			t.Errorf("remaining = %d, want 250", out.remaining())
+		}
+	})
+
+	t.Run("canceled before the first chunk", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var calls int
+		out := runWispPurgeChunks(ctx, wispPurgeIDs(450), func(_ context.Context, _ []string) (wispPurgeChunk, error) {
+			calls++
+			return wispPurgeChunk{deleted: 1}, nil
+		})
+		if calls != 0 {
+			t.Errorf("sent %d chunks to a canceled context, want 0", calls)
+		}
+		if out.err == nil {
+			t.Error("err = nil, want the cancellation")
+		}
+		if len(out.confirmed) != 0 {
+			t.Errorf("confirmed %d ids beside a cancellation, want 0", len(out.confirmed))
+		}
+	})
+
+	t.Run("canceled between chunks", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var calls int
+		out := runWispPurgeChunks(ctx, wispPurgeIDs(450), func(_ context.Context, chunk []string) (wispPurgeChunk, error) {
+			calls++
+			cancel()
+			return wispPurgeChunk{deleted: len(chunk), deletedIDs: slices.Clone(chunk)}, nil
+		})
+		if calls != 1 {
+			t.Errorf("sent %d chunks, want 1 (canceled after it committed)", calls)
+		}
+		if len(out.confirmed) != 200 {
+			t.Errorf("confirmed %d ids, want the committed chunk's 200", len(out.confirmed))
+		}
+		if out.err == nil {
+			t.Error("err = nil, want the cancellation")
+		}
+	})
+}
