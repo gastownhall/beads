@@ -175,6 +175,17 @@ func TestWispPurgeClosedPersistsCompletedChunksOnRealStore(t *testing.T) {
 	if _, err := s.GetIssue(ctx, live.ID); err != nil {
 		t.Errorf("live step %s did not survive: %v", live.ID, err)
 	}
+	// The survivor lost its dependency to a chunk that committed: the edge is
+	// gone, so it must not read as blocked on anything (GH#6246).
+	blocked, err := s.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("listing blocked issues: %v", err)
+	}
+	for _, b := range blocked {
+		if b.ID == live.ID {
+			t.Errorf("live step %s is still blocked after its dependency was deleted; is_blocked was left stale", live.ID)
+		}
+	}
 	if !commandDeletedIssueIDs.has(chunk1) || commandDeletedIssueIDs.has(chunk3) {
 		t.Errorf("deletion bookkeeping: has(%s)=%v has(%s)=%v, want only committed chunks recorded",
 			chunk1, commandDeletedIssueIDs.has(chunk1), chunk3, commandDeletedIssueIDs.has(chunk3))
