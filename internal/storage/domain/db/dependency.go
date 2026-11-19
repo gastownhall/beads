@@ -923,6 +923,10 @@ func (r *dependencySQLRepositoryImpl) ListWithIssueMetadata(ctx context.Context,
 	return out, nil
 }
 
+func (r *dependencySQLRepositoryImpl) ListOutgoingWithUnresolvable(ctx context.Context, sourceID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return issueops.GetDependenciesWithUnresolvableInTx(ctx, r.runner, sourceID)
+}
+
 func (r *dependencySQLRepositoryImpl) IterWithIssueMetadata(ctx context.Context, sourceID string, opts domain.DepListOpts) (storage.Iter[types.IssueWithDependencyMetadata], error) {
 	items, err := r.ListWithIssueMetadata(ctx, sourceID, opts)
 	if err != nil {

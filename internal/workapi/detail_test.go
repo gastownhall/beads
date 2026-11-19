@@ -121,8 +121,8 @@ func (f fakeStoreReader) GetLabels(_ context.Context, id string) ([]string, erro
 	return f.fx.labels[id], nil
 }
 
-func (f fakeStoreReader) GetDependenciesWithMetadata(_ context.Context, id string) ([]*types.IssueWithDependencyMetadata, error) {
-	return f.fx.deps[id], nil
+func (f fakeStoreReader) GetDependenciesWithUnresolvable(_ context.Context, id string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return f.fx.deps[id], nil, nil
 }
 
 func (f fakeStoreReader) CountDependencies(_ context.Context, id string) (int64, error) {
@@ -228,6 +228,10 @@ func (f fakeDepUC) ListWispWithIssueMetadata(_ context.Context, id string, filte
 		return nil, fmt.Errorf("ListWispWithIssueMetadata called for durable issue %s", id)
 	}
 	return f.rows(id, filter), nil
+}
+
+func (f fakeDepUC) ListOutgoingWithUnresolvable(_ context.Context, id string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return f.fx.deps[id], nil, nil
 }
 
 func (f fakeDepUC) IterWithIssueMetadata(ctx context.Context, id string, filter domain.DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error) {

@@ -37,7 +37,10 @@ type DetailSource interface {
 	GetWisp(ctx context.Context, id string) (*types.Issue, error)
 
 	Labels(ctx context.Context, id string, isWisp bool) ([]string, error)
-	Dependencies(ctx context.Context, id string, isWisp bool) ([]*types.IssueWithDependencyMetadata, error)
+	// Dependencies is the outgoing read in one snapshot: the far ends that
+	// resolve to an issue here, and the exact stored records of the edges
+	// whose far end does not (storage.Storage.GetDependenciesWithUnresolvable).
+	Dependencies(ctx context.Context, id string, isWisp bool) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 
 	CountDependencies(ctx context.Context, id string, isWisp bool) (int64, error)
 	CountDependents(ctx context.Context, id string, isWisp bool) (int64, error)
@@ -142,7 +145,7 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	// depsErr is kept rather than discarded: it is what separates "the edge
 	// list came back short" from "the edge list never came back", and the
 	// unresolvable-edge delta below is only meaningful in the first case.
-	deps, depsErr := src.Dependencies(ctx, id, isWisp)
+	deps, unresolvable, depsErr := src.Dependencies(ctx, id, isWisp)
 	details.Dependencies = deps
 
 	// The gates blocking this issue are the gate-typed subset of the
@@ -160,7 +163,14 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	// therefore disagree by exactly the cross-repo and `external:` edges,
 	// which is real stored data rather than a phantom count (be-lpi).
 	// Publish the difference instead of leaving the caller to infer it.
-	if depsErr == nil && dependencyCountErr == nil {
+	//
+	// bd-uschhs: a combined read that returned the stored records names
+	// them, and the count is their number, both from the read's own snapshot.
+	if depsErr == nil && len(unresolvable) > 0 {
+		details.UnresolvableDependencyEdges = unresolvable
+		n := int64(len(unresolvable))
+		details.UnresolvableDependencies = &n
+	} else if depsErr == nil && dependencyCountErr == nil {
 		if n := dependencyCount - int64(len(details.Dependencies)); n > 0 {
 			details.UnresolvableDependencies = &n
 		}
@@ -338,7 +348,7 @@ func applyEpicProgress(details *types.IssueDetails, dependents []*types.IssueWit
 type StoreDetailReader interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetLabels(ctx context.Context, issueID string) ([]string, error)
-	GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
+	GetDependenciesWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 	CountDependencies(ctx context.Context, issueID string) (int64, error)
 	CountDependents(ctx context.Context, issueID string) (int64, error)
 	CountIssueComments(ctx context.Context, issueID string) (int64, error)
@@ -371,8 +381,8 @@ func (s storeDetailSource) Labels(ctx context.Context, id string, _ bool) ([]str
 	return s.store.GetLabels(ctx, id)
 }
 
-func (s storeDetailSource) Dependencies(ctx context.Context, id string, _ bool) ([]*types.IssueWithDependencyMetadata, error) {
-	return s.store.GetDependenciesWithMetadata(ctx, id)
+func (s storeDetailSource) Dependencies(ctx context.Context, id string, _ bool) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return s.store.GetDependenciesWithUnresolvable(ctx, id)
 }
 
 func (s storeDetailSource) CountDependencies(ctx context.Context, id string, _ bool) (int64, error) {
@@ -410,8 +420,7 @@ type (
 	}
 
 	detailDepReader interface {
-		ListWithIssueMetadata(ctx context.Context, issueID string, filter domain.DepListFilter) ([]*types.IssueWithDependencyMetadata, error)
-		ListWispWithIssueMetadata(ctx context.Context, wispID string, filter domain.DepListFilter) ([]*types.IssueWithDependencyMetadata, error)
+		ListOutgoingWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 		IterWithIssueMetadata(ctx context.Context, issueID string, filter domain.DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error)
 		IterWispWithIssueMetadata(ctx context.Context, wispID string, filter domain.DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error)
 		CountByIssueID(ctx context.Context, issueID string, filter domain.DepListFilter) (int64, error)
@@ -457,12 +466,11 @@ func (u useCaseDetailSource) Labels(ctx context.Context, id string, isWisp bool)
 	return u.labels.GetLabels(ctx, id)
 }
 
-func (u useCaseDetailSource) Dependencies(ctx context.Context, id string, isWisp bool) ([]*types.IssueWithDependencyMetadata, error) {
-	filter := domain.DepListFilter{Direction: domain.DepDirectionOut}
-	if isWisp {
-		return u.deps.ListWispWithIssueMetadata(ctx, id, filter)
-	}
-	return u.deps.ListWithIssueMetadata(ctx, id, filter)
+// Dependencies needs no wisp routing: the combined read spans both edge
+// planes for an issue or a wisp source alike, as the per-table metadata reads
+// it replaced already did underneath.
+func (u useCaseDetailSource) Dependencies(ctx context.Context, id string, _ bool) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return u.deps.ListOutgoingWithUnresolvable(ctx, id)
 }
 
 func (u useCaseDetailSource) CountDependencies(ctx context.Context, id string, isWisp bool) (int64, error) {

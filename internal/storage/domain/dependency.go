@@ -144,6 +144,11 @@ type DependencySQLRepository interface {
 	HasCycle(ctx context.Context, issueID, dependsOnID string) (bool, error)
 	ListByIssueIDs(ctx context.Context, issueIDs []string, opts DepListOpts) (DepBulkResult, error)
 	ListWithIssueMetadata(ctx context.Context, sourceID string, opts DepListOpts) ([]*types.IssueWithDependencyMetadata, error)
+	// ListOutgoingWithUnresolvable reads sourceID's outgoing edges across both
+	// planes in one snapshot: the far ends that resolve to an issue here, and
+	// the exact stored records of the edges whose far end does not
+	// (issueops.GetDependenciesWithUnresolvableInTx).
+	ListOutgoingWithUnresolvable(ctx context.Context, sourceID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 	IterWithIssueMetadata(ctx context.Context, sourceID string, opts DepListOpts) (storage.Iter[types.IssueWithDependencyMetadata], error)
 	CountByID(ctx context.Context, sourceID string, opts DepListOpts) (int64, error)
 	CountsByIssueIDs(ctx context.Context, issueIDs []string, opts DepCountsOpts) (map[string]*types.DependencyCounts, error)
@@ -202,6 +207,10 @@ type DependencyUseCase interface {
 	Reparent(ctx context.Context, childID, newParentID, actor string) error
 	ListByIssueIDs(ctx context.Context, issueIDs []string, filter DepListFilter) (DepBulkResult, error)
 	ListWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) ([]*types.IssueWithDependencyMetadata, error)
+	// ListOutgoingWithUnresolvable is the repository read of the same name. It
+	// takes no plane flag: the edge read spans both planes for an issue or a
+	// wisp source alike.
+	ListOutgoingWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 	IterWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error)
 	CountByIssueID(ctx context.Context, issueID string, filter DepListFilter) (int64, error)
 	CountsByIssueIDs(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error)
@@ -479,6 +488,17 @@ func (u *dependencyUseCaseImpl) ListByIssueIDs(ctx context.Context, issueIDs []s
 
 func (u *dependencyUseCaseImpl) ListWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) ([]*types.IssueWithDependencyMetadata, error) {
 	return u.listWithMetadata(ctx, issueID, filter, false)
+}
+
+func (u *dependencyUseCaseImpl) ListOutgoingWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	if issueID == "" {
+		return nil, nil, fmt.Errorf("list outgoing deps: issueID must not be empty")
+	}
+	resolved, unresolvable, err := u.depRepo.ListOutgoingWithUnresolvable(ctx, issueID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list outgoing deps: %w", err)
+	}
+	return resolved, unresolvable, nil
 }
 
 func (u *dependencyUseCaseImpl) IterWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error) {
