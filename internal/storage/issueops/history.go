@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -130,36 +131,85 @@ func PreviousExternalRefInTx(ctx context.Context, tx *sql.Tx, issueID string, as
 	return previousRef.String, true, nil
 }
 
+// previousExternalRefsChunk caps how many ids go into one dolt_history_issues
+// IN-list, matching historicalIssueIDsChunk: Dolt's history tables fan a row
+// out per commit per id, and very wide IN-lists are where its planner
+// starts choosing badly. A pull with more linked issues than this reads
+// history once more per extra chunk, not once per issue.
+const previousExternalRefsChunk = historicalIssueIDsChunk
+
 // PreviousExternalRefsInTx is the batch form of PreviousExternalRefInTx: it
 // resolves, for every id in ids, the external_ref recorded as of the most
-// recent commit at or before asOf. The returned map holds an entry only for
-// ids with a committed history row at or before asOf — the single-id form's
+// recent commit at or before asOf, reading dolt_history_issues once per
+// 200-id chunk (ceil(U/200) queries for U unique non-empty ids) instead of
+// once per issue. The returned map holds an entry only for ids with a
+// committed history row at or before asOf — the single-id form's
 // found=false — and a present entry is the empty string when the historical
 // row's external_ref column was NULL. Empty ids are dropped and duplicates
-// collapse; an empty ids returns an empty map without querying. An error
-// returns no map, never a partial answer.
+// collapse; empty input returns an empty map without querying. Any query,
+// scan or iteration failure returns the error and no map, never a partial
+// answer and never a per-id fallback.
+//
+// The subquery wrapper is the same workaround HistoryInTx and
+// PreviousExternalRefInTx use: Dolt's planner assumes a predicate on the PK
+// of a dolt_history_* table matches at most one row, which is false there.
 func PreviousExternalRefsInTx(ctx context.Context, tx DBTX, ids []string, asOf time.Time) (map[string]string, error) {
 	refs := make(map[string]string)
-	for _, id := range uniqueNonEmptyHistoryIDs(ids) {
-		var previousRef sql.NullString
-		err := tx.QueryRowContext(ctx, `
-			SELECT external_ref
-			FROM (
-				SELECT id, external_ref, commit_date FROM dolt_history_issues
-			) h
-			WHERE h.id = ? AND h.commit_date <= ?
-			ORDER BY h.commit_date DESC
-			LIMIT 1
-		`, id, asOf.UTC()).Scan(&previousRef)
-		if err == sql.ErrNoRows {
-			continue
+	unique := uniqueNonEmptyHistoryIDs(ids)
+	if len(unique) == 0 {
+		return refs, nil
+	}
+	for start := 0; start < len(unique); start += previousExternalRefsChunk {
+		end := start + previousExternalRefsChunk
+		if end > len(unique) {
+			end = len(unique)
 		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to get previous external_ref: %w", err)
+		if err := previousExternalRefsChunkInTx(ctx, tx, unique[start:end], asOf, refs); err != nil {
+			return nil, err
 		}
-		refs[id] = previousRef.String
 	}
 	return refs, nil
+}
+
+// previousExternalRefsChunkInTx resolves one chunk of ids into refs. Each
+// chunk's rows arrive ordered id then commit_date descending, so the first
+// row per id is its newest committed value at or before asOf; later rows of
+// an already-answered id are skipped. rows is closed before the next chunk
+// runs.
+func previousExternalRefsChunkInTx(ctx context.Context, tx DBTX, chunk []string, asOf time.Time, refs map[string]string) error {
+	args := make([]any, 0, len(chunk)+1)
+	for _, id := range chunk {
+		args = append(args, id)
+	}
+	args = append(args, asOf.UTC())
+	query := `
+		SELECT h.id, h.external_ref
+		FROM (
+			SELECT id, external_ref, commit_date FROM dolt_history_issues
+		) h
+		WHERE h.id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",") + `) AND h.commit_date <= ?
+		ORDER BY h.id, h.commit_date DESC`
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("query previous external refs: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id string
+		var ref sql.NullString
+		if err := rows.Scan(&id, &ref); err != nil {
+			return fmt.Errorf("scan previous external ref: %w", err)
+		}
+		if _, answered := refs[id]; answered {
+			continue
+		}
+		refs[id] = ref.String
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate previous external refs: %w", err)
+	}
+	return nil
 }
 
 // uniqueNonEmptyHistoryIDs returns ids without empties or duplicates, in
