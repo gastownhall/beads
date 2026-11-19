@@ -201,6 +201,23 @@ func TestExternalServerInitWritesWitnessWhenDataDirSpelledOutsideBeadsDir(t *tes
 		}
 	})
 
+	t.Run("reopen_after_root_populated", func(t *testing.T) {
+		repoDir, beadsDir, env, database := initAliased(t)
+		writeFile(t, filepath.Join(beadsDir, "dolt", "server-owned-entry"), []byte("x\n"))
+
+		listEnv := append(env,
+			"BEADS_DOLT_SERVER_HOST=127.0.0.1",
+			fmt.Sprintf("BEADS_DOLT_SERVER_PORT=%d", testDoltServerPort),
+			"BEADS_DOLT_SERVER_DATABASE="+database)
+		out, err := runExternalServerBD(t, repoDir, listEnv, "list", "--json", "--all")
+		if strings.Contains(out, "explicit migration is required") {
+			t.Fatalf("bd list refused the workspace bd init just admitted:\n%s", out)
+		}
+		if err != nil {
+			t.Fatalf("bd list after init failed: %v\n%s", err, out)
+		}
+	})
+
 	t.Run("sibling_data_dir", func(t *testing.T) {
 		repoDir, beadsDir, _ := explicitServerWorkspace(t)
 		env := append(externalServerTestEnv(t),
