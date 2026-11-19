@@ -5,6 +5,7 @@ package doltserver
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -101,5 +102,33 @@ func TestIdleWatch_ExitsWhenWatchChangesHands(t *testing.T) {
 	}
 	if !isProcessAlive(state.PID) {
 		t.Error("the watcher stopped the server after its pid file went away")
+	}
+}
+
+// TestIdleWatch_RelativeServerDirSpawnsAnAbsoluteOne pins the path the
+// watcher gets: bd init auto-starts with the relative ".beads", and the
+// watcher, which runs inside the server directory, must still name it.
+func TestIdleWatch_RelativeServerDirSpawnsAnAbsoluteOne(t *testing.T) {
+	beadsDir, _ := fakeStartWorkspace(t)
+	calls := stubIdleWatchSpawner(t)
+	t.Chdir(filepath.Dir(beadsDir))
+	autoStartForTest(t, filepath.Base(beadsDir))
+	if len(*calls) != 1 {
+		t.Fatalf("spawner called %d times, want once for the auto-start", len(*calls))
+	}
+	got := (*calls)[0].ServerDir
+	if !filepath.IsAbs(got) {
+		t.Fatalf("watcher server dir = %q, want an absolute path", got)
+	}
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("watcher server dir %q: %v", got, err)
+	}
+	wantInfo, err := os.Stat(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Errorf("watcher server dir = %q, want %q", got, beadsDir)
 	}
 }

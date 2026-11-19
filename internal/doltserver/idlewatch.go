@@ -187,8 +187,16 @@ func launchIdleWatcherLocked(serverDir string, state *State, host string, timeou
 		debug.Logf("idle watch: %v", err)
 		return
 	}
+	// The watcher runs in serverDir and outlives this process, so it needs
+	// the path from anywhere: a relative one (bd init passes ".beads") would
+	// name a directory under itself, where it finds no watcher.pid and exits
+	// as superseded.
+	watchDir := serverDir
+	if abs, err := filepath.Abs(serverDir); err == nil {
+		watchDir = abs
+	}
 	pid, err := IdleWatchSpawner(IdleWatchOpts{
-		ServerDir: serverDir,
+		ServerDir: watchDir,
 		PID:       state.PID,
 		Host:      host,
 		Port:      state.Port,
