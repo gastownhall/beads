@@ -1,6 +1,9 @@
 package formula
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -64,7 +67,10 @@ func TestApplyAdvice_Before(t *testing.T) {
 		},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice() error = %v", err)
+	}
 
 	if len(result) != 3 {
 		t.Fatalf("expected 3 steps, got %d", len(result))
@@ -103,7 +109,10 @@ func TestApplyAdvice_After(t *testing.T) {
 		},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice() error = %v", err)
+	}
 
 	if len(result) != 3 {
 		t.Fatalf("expected 3 steps, got %d", len(result))
@@ -145,7 +154,10 @@ func TestApplyAdvice_Around(t *testing.T) {
 		},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice() error = %v", err)
+	}
 
 	if len(result) != 3 {
 		t.Fatalf("expected 3 steps, got %d", len(result))
@@ -188,7 +200,10 @@ func TestApplyAdvice_GlobPattern(t *testing.T) {
 		},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice() error = %v", err)
+	}
 
 	// Should have: design, log-shiny.implement, shiny.implement, log-shiny.review, shiny.review
 	if len(result) != 5 {
@@ -222,7 +237,10 @@ func TestApplyAdvice_NoMatch(t *testing.T) {
 		},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice() error = %v", err)
+	}
 
 	// No changes expected
 	if len(result) != 2 {
@@ -239,7 +257,10 @@ func TestApplyAdvice_EmptyAdvice(t *testing.T) {
 		{ID: "design", Title: "Design"},
 	}
 
-	result := ApplyAdvice(steps, nil)
+	result, err := ApplyAdvice(steps, nil)
+	if err != nil {
+		t.Fatalf("ApplyAdvice() error = %v", err)
+	}
 
 	if len(result) != 1 || result[0].ID != "design" {
 		t.Errorf("empty advice should return original steps")
@@ -345,7 +366,10 @@ func TestApplyAdvice_SelfMatchingPrevention(t *testing.T) {
 		{ID: "implement", Title: "Implement"},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice() error = %v", err)
+	}
 
 	// Without self-matching prevention, pattern "*" would match the inserted
 	// "implement-before" and "implement-after" steps, causing them to also
@@ -372,4 +396,96 @@ func getStepIDs(steps []*Step) []string {
 		ids[i] = s.ID
 	}
 	return ids
+}
+
+// bd-xx3ma9 (#7882): advice insertions are bounded like every other cook
+// transform. 5001 matched steps x 2 insertions each is 10002 advice steps,
+// past MaxExpandedSteps on its own — the fresh-budget wrapper refuses before
+// the over-budget steps enter the graph.
+func TestApplyAdvice_OverLimitRefusesBeforeInserting(t *testing.T) {
+	steps := make([]*Step, 0, 5001)
+	for i := 0; i < 5001; i++ {
+		steps = append(steps, &Step{ID: fmt.Sprintf("work.step%d", i), Title: "Work"})
+	}
+	advice := []*AdviceRule{{
+		Target: "work.*",
+		Before: &AdviceStep{ID: "pre-{step.id}", Title: "Pre"},
+		After:  &AdviceStep{ID: "post-{step.id}", Title: "Post"},
+	}}
+
+	result, err := ApplyAdvice(steps, advice)
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyAdvice() error = %v, want ErrExpansionLimit", err)
+	}
+	if result != nil {
+		t.Errorf("ApplyAdvice() returned %d steps with the refusal; want nil", len(result))
+	}
+	if !strings.Contains(err.Error(), `advice around "work.`) {
+		t.Errorf("refusal should name the advice insertion it refused: %v", err)
+	}
+}
+
+// Two aspects applied one after the other share one budget: the second is
+// refused when the first already spent the room. This is the seam cook.go
+// uses to thread the aspects through the same limit as the rest of the cook.
+func TestApplyAdviceWithBudget_AspectsShareOneBudget(t *testing.T) {
+	steps := []*Step{
+		{ID: "design", Title: "Design"},
+		{ID: "implement", Title: "Implement"},
+		{ID: "test", Title: "Test"},
+	}
+	loggingAspect := []*AdviceRule{{
+		Target: "implement",
+		Before: &AdviceStep{ID: "log-{step.id}", Title: "Log"},
+	}}
+	securityAspect := []*AdviceRule{{
+		Target: "implement",
+		Around: &AroundAdvice{
+			Before: []*AdviceStep{{ID: "sec-pre-{step.id}", Title: "Sec pre"}},
+			After:  []*AdviceStep{{ID: "sec-post-{step.id}", Title: "Sec post"}},
+		},
+	}}
+
+	budget := NewStepBudgetWithLimit(4)
+	if err := budget.Seed(steps); err != nil {
+		t.Fatalf("Seed() error = %v", err)
+	}
+	first, err := ApplyAdviceWithBudget(steps, loggingAspect, budget)
+	if err != nil {
+		t.Fatalf("first aspect: %v", err)
+	}
+	// The logging aspect spent the only room: 3 seeded + 1 inserted, and the
+	// security aspect's around adds 2 more.
+	if _, err := ApplyAdviceWithBudget(first, securityAspect, budget); !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("second aspect error = %v, want ErrExpansionLimit", err)
+	}
+}
+
+// Advice into a step's children counts against the same budget as the advice
+// around the parent: a recursion that gave each nesting level a fresh budget
+// would pass where the shared one must refuse.
+func TestApplyAdvice_ChildrenShareTheBudget(t *testing.T) {
+	parent := &Step{ID: "parent", Title: "Parent", Children: []*Step{
+		{ID: "parent.child1", Title: "Child 1"},
+		{ID: "parent.child2", Title: "Child 2"},
+	}}
+	advice := []*AdviceRule{{
+		Target: "*",
+		Before: &AdviceStep{ID: "pre-{step.id}", Title: "Pre"},
+		After:  &AdviceStep{ID: "post-{step.id}", Title: "Post"},
+	}}
+
+	// Room for everything but the last child's second insertion: 3 seeded +
+	// 2 (parent) + 2 (child1) + 2 (child2) = 9 > 8.
+	budget := NewStepBudgetWithLimit(8)
+	if err := budget.Seed([]*Step{parent}); err != nil {
+		t.Fatalf("Seed() error = %v", err)
+	}
+	_, err := ApplyAdviceWithBudget([]*Step{parent}, advice, budget)
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyAdviceWithBudget() error = %v, want ErrExpansionLimit", err)
+	}
+	if !strings.Contains(err.Error(), `advice around "parent.child2"`) {
+		t.Errorf("refusal should name the step whose advice was refused: %v", err)
+	}
 }

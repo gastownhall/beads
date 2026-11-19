@@ -1464,3 +1464,95 @@ func TestApplyExpansionsWithBudget_OverlappingMatchesDoNotUnderflow(t *testing.T
 		t.Fatalf("result IDs = %v; want the parent's replacement and the untouched sibling only", ids)
 	}
 }
+
+// bd-xx3ma9 (#7882): inline expansions are bounded. Two steps each expanding a
+// 6000-step template multiply the graph past MaxExpandedSteps together, and the
+// refusal names the step whose expansion did not fit — before it is built.
+func TestApplyInlineExpansions_OverLimitRefuses(t *testing.T) {
+	parser := expansionTestParser(t, &Formula{
+		Formula:  "big-inline",
+		Type:     TypeExpansion,
+		Template: bigTemplate(t, "fan", 6000),
+	})
+	steps := []*Step{
+		{ID: "first", Title: "First", Expand: "big-inline"},
+		{ID: "second", Title: "Second", Expand: "big-inline"},
+	}
+
+	result, err := ApplyInlineExpansions(steps, parser)
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyInlineExpansions() error = %v, want ErrExpansionLimit", err)
+	}
+	if result != nil {
+		t.Errorf("ApplyInlineExpansions() returned %d steps with the refusal; want nil", len(result))
+	}
+	if !strings.Contains(err.Error(), `inline expand on step "second"`) {
+		t.Errorf("refusal should name the step whose expansion was refused: %v", err)
+	}
+}
+
+// Inline expansions share the caller's budget with the steps the cook already
+// stands for: each template fits on its own, both together do not.
+func TestApplyInlineExpansionsWithBudget_SharesBudgetWithSteps(t *testing.T) {
+	parser := expansionTestParser(t, &Formula{
+		Formula:  "six",
+		Type:     TypeExpansion,
+		Template: bigTemplate(t, "six", 6),
+	})
+	steps := []*Step{
+		{ID: "first", Title: "First", Expand: "six"},
+		{ID: "second", Title: "Second", Expand: "six"},
+	}
+	budget := NewStepBudgetWithLimit(10)
+	if err := budget.Seed(steps); err != nil {
+		t.Fatalf("Seed() error = %v", err)
+	}
+
+	// first: 2 - 1 + 6 = 7 fits; second: 7 - 1 + 6 = 12 > 10 refused.
+	if _, err := ApplyInlineExpansionsWithBudget(steps, parser, budget); !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyInlineExpansionsWithBudget() error = %v, want ErrExpansionLimit", err)
+	}
+}
+
+// bd-xx3ma9 (#7882): a standalone expansion formula's template is bounded too.
+// The refusal comes before f.Steps is allocated — no over-budget graph is
+// materialized for the caller to pour.
+func TestMaterializeExpansion_OverLimitRefusesBeforeAllocation(t *testing.T) {
+	f := &Formula{
+		Formula:     "huge",
+		Description: "Too big to pour",
+		Type:        TypeExpansion,
+		Template:    bigTemplate(t, "huge", MaxExpandedSteps+1),
+	}
+
+	err := MaterializeExpansion(f, "main", nil)
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("MaterializeExpansion() error = %v, want ErrExpansionLimit", err)
+	}
+	if len(f.Steps) != 0 {
+		t.Errorf("f.Steps holds %d steps after the refusal; want none allocated", len(f.Steps))
+	}
+}
+
+// A standalone expansion shares the cook's budget: the template fits the
+// default limit on its own but not on top of the steps the cook already
+// stands for.
+func TestMaterializeExpansionWithBudget_SharesBudgetWithTheCook(t *testing.T) {
+	f := &Formula{
+		Formula:  "eight",
+		Type:     TypeExpansion,
+		Template: bigTemplate(t, "eight", 8),
+	}
+	budget := NewStepBudgetWithLimit(10)
+	if err := budget.Seed(bigTemplate(t, "already", 3)); err != nil {
+		t.Fatalf("Seed() error = %v", err)
+	}
+
+	err := MaterializeExpansionWithBudget(f, "main", nil, budget)
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("MaterializeExpansionWithBudget() error = %v, want ErrExpansionLimit", err)
+	}
+	if len(f.Steps) != 0 {
+		t.Errorf("f.Steps holds %d steps after the refusal; want none allocated", len(f.Steps))
+	}
+}

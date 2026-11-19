@@ -677,7 +677,10 @@ func TestFilterStepsByConditionRoutesGeneratedNeeds(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ApplyControlFlow() error = %v", err)
 			}
-			steps = ApplyAdvice(steps, tt.advice)
+			steps, err = ApplyAdvice(steps, tt.advice)
+			if err != nil {
+				t.Fatalf("ApplyAdvice() error = %v", err)
+			}
 
 			before := stepTreeSnapshot(steps)
 			result, err := FilterStepsByCondition(steps, map[string]string{"on": "false"})
