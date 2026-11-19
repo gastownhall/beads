@@ -235,6 +235,23 @@ id = "security-scan-{step.id}"
 title = "Security scan before {step.title}"
 ```
 
+## Size Limit
+
+A formula may grow to at most 10,000 steps while it is resolved. The count
+covers every step and child step after loops, advice, inline expansions,
+`compose` expand and map rules, and aspects are applied, and the template of
+a standalone expansion formula. A formula that would grow past the limit is
+refused before any issue or wisp is created:
+
+```
+formula "sprawl": applying control flow: applying loops: formula expansion limit exceeded: loop "fan" would grow the formula past the 10000-step limit; split it into smaller formulas
+```
+
+`bd cook`, `bd mol pour`, `bd mol wisp`, `bd mol bond` and `bd mol seed`
+all report this error. To fix it, split the work into smaller formulas, for
+example one formula per batch of loop iterations. The limit counts steps,
+not the length of titles or descriptions.
+
 ## Formula Locations
 
 Formulas are searched in order:
