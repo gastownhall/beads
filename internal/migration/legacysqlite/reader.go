@@ -1007,9 +1007,11 @@ func validateDependencyGraph(issues []*types.Issue) error {
 		return fmt.Errorf("legacy SQLite dependency graph has a scheduling cycle")
 	}
 	for _, dep := range blocking {
-		if types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) &&
-			(reachable(hierarchy, dep.IssueID, dep.DependsOnID) ||
-				reachable(hierarchy, dep.DependsOnID, dep.IssueID)) {
+		// Every edge in the legacy graph is between issues the same database
+		// holds, including foreign-prefix ones, so hierarchy conflicts are
+		// checked for all of them (GH#6066) — no same-prefix gate.
+		if reachable(hierarchy, dep.IssueID, dep.DependsOnID) ||
+			reachable(hierarchy, dep.DependsOnID, dep.IssueID) {
 			return fmt.Errorf("blocking dependency %s -> %s conflicts with parent-child hierarchy", dep.IssueID, dep.DependsOnID)
 		}
 	}

@@ -180,6 +180,44 @@ func TestForeignPrefixLocalBlockerCloseUnblocksEmbeddedReady(t *testing.T) {
 	}
 }
 
+// TestForeignPrefixLocalBlockerFromBatchImportGatesEmbeddedReady pins the
+// batch-import route of GH#6066: a create batch whose inline dependencies
+// connect foreign-prefix local ids (the depBatchLookups pass, not the
+// per-edge store verbs) must persist the edge against the local target
+// column, so the blocker gates ready exactly like an edge added by bd dep
+// add.
+func TestForeignPrefixLocalBlockerFromBatchImportGatesEmbeddedReady(t *testing.T) {
+	store := openExternalDependencyStore(t, "demo")
+	ctx := t.Context()
+	blocker := &types.Issue{ID: "treehouse-lease-t6", Title: "batch blocker", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	third := &types.Issue{ID: "dinghy-lease-standalone", Title: "batch third", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	dependent := &types.Issue{ID: "firstmate-lease-batch", Title: "batch dependent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{
+			{DependsOnID: blocker.ID, Type: types.DepBlocks},
+			{DependsOnID: third.ID, Type: types.DepRelated},
+		},
+	}
+	if err := store.CreateIssuesWithFullOptions(ctx, []*types.Issue{blocker, third, dependent}, "tester", storage.BatchCreateOptions{
+		SkipPrefixValidation: true,
+	}); err != nil {
+		t.Fatalf("CreateIssuesWithFullOptions: %v", err)
+	}
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	got := embeddedIssueIDs(ready)
+	if slices.Contains(got, dependent.ID) {
+		t.Fatalf("ready IDs = %v: the batch-imported local edge must gate %s like any local blocks edge", got, dependent.ID)
+	}
+	for _, want := range []string{blocker.ID, third.ID} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("ready IDs = %v, want %s among them", got, want)
+		}
+	}
+}
+
 func openExternalDependencyStore(t *testing.T, prefix string) *embeddeddolt.EmbeddedDoltStore {
 	t.Helper()
 	store, err := embeddeddolt.Open(t.Context(), filepath.Join(t.TempDir(), ".beads"), prefix, "main")
