@@ -1450,6 +1450,15 @@ func isRecognizedConfigKey(key string) bool {
 	if recognizedConfigKeys[key] {
 		return true
 	}
+	// A key config.yaml stores is one bd reads (audit.enabled, list.*,
+	// mail.delegate, ...); reuse that classifier rather than a parallel list
+	// that drifts from it (GH#5787). A key 'bd config set' refuses outright
+	// (no-db) stays unrecognized.
+	if config.IsYamlOnlyKey(key) {
+		if _, protected := rejectProtectedConfigKey(key); !protected {
+			return true
+		}
+	}
 	for _, prefix := range allRecognizedConfigPrefixes() {
 		if strings.HasPrefix(key, prefix) {
 			return true

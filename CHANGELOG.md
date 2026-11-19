@@ -1431,6 +1431,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd config set audit.enabled true` no longer warns that the key is not
+  recognized.** The key `bd audit --help` prescribes, like every other key
+  bd keeps in `config.yaml` (`list.*`, `mail.delegate`, `routing.*`,
+  `hierarchy.*` and the rest), drew `Warning: "audit.enabled" is not a
+  recognized config key` although bd stores and reads it. The recognizer now
+  accepts every key `config.yaml` holds. (#5787)
+
 - **`bd create --dry-run` validates the issue it previews.** A single-issue
   dry run printed a preview for an issue the real create would refuse, such as
   an unknown `--type`. It now runs the same insert validation first, against
