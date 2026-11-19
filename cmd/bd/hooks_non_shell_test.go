@@ -163,6 +163,86 @@ func TestInstallHooks_NonShell(t *testing.T) {
 		}
 	})
 
+	// AC-8: a marker tag embedded in another line — here a Python string
+	// literal — must never be treated as a strippable section.
+	t.Run("AC-8 ambiguous markers are never rewritten; diagnostics explain manual inspection", func(t *testing.T) {
+		repoDir := setupGuardTestRepo(t)
+		hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+		ambiguous := "#!/usr/bin/env python3\nimport sys\ns = \"# --- BEGIN BEADS INTEGRATION v1.2.3 ---\"\n"
+		writeHookFile(t, hookPath, ambiguous)
+
+		var installErr error
+		stderr := captureStderr(t, func() {
+			installErr = installHooksWithOptions(managedHookNames, false, false, false, false)
+		})
+		if installErr != nil {
+			t.Fatalf("install failed: %v", installErr)
+		}
+
+		got, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != ambiguous {
+			t.Fatalf("ambiguous hook must stay byte-identical, got:\n%s", got)
+		}
+		if _, statErr := os.Lstat(hookPath + ".backup"); !os.IsNotExist(statErr) {
+			t.Fatalf("skip must not create a .backup sidecar, stat err = %v", statErr)
+		}
+		if !strings.Contains(stderr, "manual inspection") {
+			t.Fatalf("stderr must explain manual inspection, got:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "removed the stale section") {
+			t.Fatalf("diagnostics must not claim a repair, got:\n%s", stderr)
+		}
+
+		// Second install run: identical diagnostics, still no changes.
+		stderr2 := captureStderr(t, func() {
+			if err := installHooksWithOptions(managedHookNames, false, false, false, false); err != nil {
+				t.Fatalf("second install failed: %v", err)
+			}
+		})
+		got2, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got2) != ambiguous {
+			t.Fatalf("second install must not rewrite the ambiguous hook, got:\n%s", got2)
+		}
+		if !strings.Contains(stderr2, "manual inspection") {
+			t.Fatalf("second install must keep explaining manual inspection, got:\n%s", stderr2)
+		}
+	})
+
+	t.Run("AC-8 binary hook is never rewritten and is diagnosed", func(t *testing.T) {
+		repoDir := setupGuardTestRepo(t)
+		hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
+		binary := "#!/bin/sh\n\x00binary\x00content\n"
+		writeHookFile(t, hookPath, binary)
+
+		var installErr error
+		stderr := captureStderr(t, func() {
+			installErr = installHooksWithOptions(managedHookNames, false, false, false, false)
+		})
+		if installErr != nil {
+			t.Fatalf("install failed: %v", installErr)
+		}
+
+		got, err := os.ReadFile(hookPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != binary {
+			t.Fatalf("binary hook must stay byte-identical, got:\n%q", got)
+		}
+		if !strings.Contains(stderr, "binary content") || !strings.Contains(stderr, "never rewrites") {
+			t.Fatalf("stderr must diagnose binary content, got:\n%s", stderr)
+		}
+		if strings.Contains(stderr, "removed the stale section") {
+			t.Fatalf("diagnostics must not claim a repair, got:\n%s", stderr)
+		}
+	})
+
 	t.Run("AC-1 external integration non-shell hook is skipped silently", func(t *testing.T) {
 		repoDir := setupGuardTestRepo(t)
 		hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-push")
@@ -452,6 +532,70 @@ func TestInstallHooksBeads_NonShell(t *testing.T) {
 			}
 			if !strings.Contains(stderr, "removed a stale bd shell section") {
 				t.Fatalf("stderr must report the repair, got:\n%s", stderr)
+			}
+		})
+	})
+
+	// AC-8 across preservation: ambiguous markers and binary content are
+	// copied through untouched, with the manual-inspection diagnostic.
+	t.Run("AC-8 ambiguous python hook preserved for manual inspection", func(t *testing.T) {
+		repoDir := newGitRepo(t)
+		runInDir(t, repoDir, func() {
+			hooksDir := filepath.Join(repoDir, ".git", "hooks")
+			ambiguous := "#!/usr/bin/env python3\nimport sys\ns = \"# --- BEGIN BEADS INTEGRATION v1.2.3 ---\"\n"
+			writeHookFile(t, filepath.Join(hooksDir, "pre-push"), ambiguous)
+
+			gitCommand("config", "--unset", "core.hooksPath").Run()
+			beadsDir := setupBeadsDir(t, repoDir)
+
+			var installErr error
+			stderr := captureStderr(t, func() {
+				installErr = installHooksWithOptions(managedHookNames, false, false, false, true)
+			})
+			if installErr != nil {
+				t.Fatalf("beads-mode install failed: %v", installErr)
+			}
+
+			got, err := os.ReadFile(filepath.Join(beadsDir, "hooks", "pre-push"))
+			if err != nil {
+				t.Fatalf("ambiguous pre-push not preserved: %v", err)
+			}
+			if string(got) != ambiguous {
+				t.Fatalf("ambiguous hook must be preserved byte-identical, got:\n%s", got)
+			}
+			if !strings.Contains(stderr, "ambiguous bd markers") || !strings.Contains(stderr, "manual inspection") {
+				t.Fatalf("stderr must explain manual inspection, got:\n%s", stderr)
+			}
+		})
+	})
+
+	t.Run("AC-8 binary hook preserved untouched", func(t *testing.T) {
+		repoDir := newGitRepo(t)
+		runInDir(t, repoDir, func() {
+			hooksDir := filepath.Join(repoDir, ".git", "hooks")
+			binary := "#!/bin/sh\n\x00binary\x00content\n"
+			writeHookFile(t, filepath.Join(hooksDir, "pre-push"), binary)
+
+			gitCommand("config", "--unset", "core.hooksPath").Run()
+			beadsDir := setupBeadsDir(t, repoDir)
+
+			var installErr error
+			stderr := captureStderr(t, func() {
+				installErr = installHooksWithOptions(managedHookNames, false, false, false, true)
+			})
+			if installErr != nil {
+				t.Fatalf("beads-mode install failed: %v", installErr)
+			}
+
+			got, err := os.ReadFile(filepath.Join(beadsDir, "hooks", "pre-push"))
+			if err != nil {
+				t.Fatalf("binary pre-push not preserved: %v", err)
+			}
+			if string(got) != binary {
+				t.Fatalf("binary hook must be preserved untouched, got:\n%q", got)
+			}
+			if !strings.Contains(stderr, "binary content") {
+				t.Fatalf("stderr must diagnose binary content, got:\n%s", stderr)
 			}
 		})
 	})

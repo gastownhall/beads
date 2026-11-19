@@ -1450,23 +1450,35 @@ func handleNonShellInstallHook(hookName, hookPath string, lang doctor.HookLangua
 		doctor.InspectBdSectionMarkers(existing) == doctor.BdSectionMarkersNone {
 		return true
 	}
+	// Binary content is never rewritten, whatever its first line says (GH#6348):
+	// no repair, no injection, and a diagnostic instead of silence.
+	if lang.Kind == doctor.HookLanguageBinary {
+		fmt.Fprintf(os.Stderr,
+			"beads: hook '%s' at %s contains binary content — bd never rewrites it; inspect manually\n",
+			hookName, remedy.PrintedValue(hookPath))
+		return true
+	}
 	// An older bd version may already have appended its shell section to
 	// this hook — the corruption GH#6348 reports. A complete, ordered,
 	// whole-line marker section is removed in place, byte-exact. bd never
 	// restores the stale .backup sidecar over the current script: the backup
 	// is a one-time snapshot from the original install and would discard
-	// every edit since. Markers that do not validate as pairs — and binary
-	// content — are left for manual inspection, never rewritten.
-	if lang.Kind != doctor.HookLanguageBinary &&
-		doctor.InspectBdSectionMarkers(existing) == doctor.BdSectionMarkersPaired {
+	// every edit since. Markers that do not validate as pairs are left for
+	// manual inspection, never rewritten.
+	switch doctor.InspectBdSectionMarkers(existing) {
+	case doctor.BdSectionMarkersPaired:
 		return removeStaleSectionFromNonShellHook(hookName, hookPath, lang, existing)
-	}
-	if lang.Kind != doctor.HookLanguageBinary {
+	case doctor.BdSectionMarkersAmbiguous:
 		fmt.Fprintf(os.Stderr,
-			"beads: hook '%s' at %s is run by %s, which cannot execute bd's shell section — left untouched\n"+
+			"beads: hook '%s' at %s is run by %s and contains bd section markers that do not form complete, ordered BEGIN/END pairs — left for manual inspection\n"+
 				"beads: to run bd from this hook, call 'bd hooks run %s' from the hook itself, passing the hook's arguments and stdin\n",
 			hookName, remedy.PrintedValue(hookPath), lang.Interpreter, hookName)
+		return true
 	}
+	fmt.Fprintf(os.Stderr,
+		"beads: hook '%s' at %s is run by %s, which cannot execute bd's shell section — left untouched\n"+
+			"beads: to run bd from this hook, call 'bd hooks run %s' from the hook itself, passing the hook's arguments and stdin\n",
+		hookName, remedy.PrintedValue(hookPath), lang.Interpreter, hookName)
 	return true
 }
 
