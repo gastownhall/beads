@@ -1432,14 +1432,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`bd doctor --fix` no longer points a workspace at another project's
-  database when `dolt_database` is missing.** The missing-database repair's
+  database when `dolt_database` is missing.** The Dolt Schema repair's
   fallback adopted the first server database with an `issues` table, even in
   shared-server mode and even when `metadata.json` knew a different
-  `project_id` (GH#5576). It now requires a database carrying the local
-  `project_id` when there is one, keeps a current database that already has
-  Beads schema, and adopts a database without an identity match only when it
-  is the sole candidate on a non-shared server. Otherwise it changes nothing
-  and reports the fix skipped, listing the candidates and the manual remedy,
+  `project_id` (GH#5576). It now adopts the database that carries the local
+  `project_id`. Short of such a match it keeps the configured database when
+  that already holds issues or a `project_id`, and a workspace with no
+  `project_id` adopts a database only when it is the sole candidate on a
+  non-shared server. Otherwise the repair changes nothing and reports the
+  fix skipped, listing the candidates and the manual remedy,
   `bd dolt set database <name>`.
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only

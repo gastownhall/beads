@@ -882,12 +882,12 @@ func TestFixMissingDoltDatabase_SaveErrorPropagates(t *testing.T) {
 }
 
 // TestFixMissingDoltDatabase_KeepsCurrentSchemaDatabase pins that the
-// fallback never moves a workspace off a database that already has Beads
-// schema: with dolt_database unset, the default database is the one bd
-// opens, and another schema database on the server is no reason to leave it.
+// fallback never moves a workspace off a database that already holds its
+// data: with dolt_database unset, the default database is the one bd opens,
+// and another schema database on the server is no reason to leave it.
 func TestFixMissingDoltDatabase_KeepsCurrentSchemaDatabase(t *testing.T) {
 	ws := newFallbackWorkspace(t, false, "", []serverDatabaseMetadata{
-		{Name: configfile.DefaultDoltDatabase, HasSchema: true},
+		{Name: configfile.DefaultDoltDatabase, HasSchema: true, IssueCount: 2},
 		{Name: "other_project", HasSchema: true, ProjectID: "other-proj-id"},
 	})
 	if err := FixMissingDoltDatabase(ws.dir); err != nil {
@@ -895,6 +895,44 @@ func TestFixMissingDoltDatabase_KeepsCurrentSchemaDatabase(t *testing.T) {
 	}
 	ws.assertUnchanged(t)
 	ws.assertFallbackRead(t)
+}
+
+// TestFixMissingDoltDatabase_EmptyCurrentSchemaIsNotKept pins the catalog the
+// fix reads when bd doctor runs it. The diagnostics open the configured
+// database through the migrating store, so by the time the fix runs an empty
+// default database has Beads schema, with no issues and no project_id. That
+// schema is no reason to stay: on a server of its own the workspace still
+// adopts its sole legacy database (GH#2160), and on a shared server the fix
+// still declines (GH#5576).
+func TestFixMissingDoltDatabase_EmptyCurrentSchemaIsNotKept(t *testing.T) {
+	catalog := []serverDatabaseMetadata{
+		{Name: configfile.DefaultDoltDatabase, HasSchema: true},
+		{Name: "my_legacy", HasSchema: true, IssueCount: 2},
+	}
+	t.Run("own server adopts the sole legacy database", func(t *testing.T) {
+		ws := newFallbackWorkspace(t, false, "", catalog)
+		if err := FixMissingDoltDatabase(ws.dir); err != nil {
+			t.Fatalf("FixMissingDoltDatabase = %v, want nil", err)
+		}
+		ws.assertFallbackRead(t)
+		cfg, err := configfile.Load(ws.beadsDir)
+		if err != nil || cfg == nil {
+			t.Fatalf("reload metadata.json: %v", err)
+		}
+		if cfg.DoltDatabase != "my_legacy" {
+			t.Errorf("dolt_database = %q, want %q", cfg.DoltDatabase, "my_legacy")
+		}
+		if cfg.ProjectID != "" {
+			t.Errorf("project_id = %q, want none", cfg.ProjectID)
+		}
+	})
+	t.Run("shared server declines", func(t *testing.T) {
+		ws := newFallbackWorkspace(t, true, "", catalog)
+		err := FixMissingDoltDatabase(ws.dir)
+		assertPolicySkip(t, err, "shared-server", "my_legacy")
+		ws.assertUnchanged(t)
+		ws.assertFallbackRead(t)
+	})
 }
 
 // fallbackCase is one row of TestSelectFallbackDoltDatabase.
@@ -991,29 +1029,68 @@ var fallbackCases = []fallbackCase{
 		notInErr: []string{"doctest_1"},
 	},
 	{
-		name:    "current database with schema and no identity is kept",
+		name:    "current database with issues and no identity is kept",
 		current: "beads",
 		databases: []serverDatabaseMetadata{
-			{Name: "beads", HasSchema: true},
+			{Name: "beads", HasSchema: true, IssueCount: 3},
 			{Name: "other", HasSchema: true, ProjectID: "other-id"},
 		},
 	},
 	{
-		name:    "current database with schema is kept over unmatched candidates",
+		name:    "current database with an identity and no issues is kept",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads", HasSchema: true, ProjectID: "beads-id"},
+			{Name: "other", HasSchema: true, IssueCount: 3},
+		},
+	},
+	{
+		name:    "current database with data is kept over unmatched candidates",
 		localID: "proj-id",
 		current: "beads",
 		shared:  true,
 		databases: []serverDatabaseMetadata{
-			{Name: "beads", HasSchema: true},
+			{Name: "beads", HasSchema: true, IssueCount: 1},
 			{Name: "other", HasSchema: true, ProjectID: "other-id"},
 		},
 	},
 	{
-		name:    "exact match outranks a current schema database without identity",
+		name:    "own server, empty current schema, sole candidate is adopted",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads", HasSchema: true},
+			{Name: "my-legacy", HasSchema: true, IssueCount: 2},
+		},
+		wantName: "my-legacy",
+	},
+	{
+		name:    "shared, empty current schema, sole candidate is a skip",
+		current: "beads",
+		shared:  true,
+		databases: []serverDatabaseMetadata{
+			{Name: "beads", HasSchema: true},
+			{Name: "other_project", HasSchema: true, IssueCount: 4, ProjectID: "other-id"},
+		},
+		wantSkip: true,
+		wantErr:  []string{"shared-server", "other_project"},
+	},
+	{
+		name:    "local id, empty current schema, unmatched candidates are a skip",
 		localID: "proj-id",
 		current: "beads",
 		databases: []serverDatabaseMetadata{
 			{Name: "beads", HasSchema: true},
+			{Name: "other", HasSchema: true, ProjectID: "other-id"},
+		},
+		wantSkip: true,
+		wantErr:  []string{"proj-id", "other"},
+	},
+	{
+		name:    "exact match outranks a current database with data and no identity",
+		localID: "proj-id",
+		current: "beads",
+		databases: []serverDatabaseMetadata{
+			{Name: "beads", HasSchema: true, IssueCount: 5},
 			{Name: "mine", HasSchema: true, ProjectID: "proj-id"},
 		},
 		wantName: "mine",

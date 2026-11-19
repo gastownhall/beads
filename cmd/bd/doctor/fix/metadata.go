@@ -20,9 +20,19 @@ import (
 )
 
 type serverDatabaseMetadata struct {
-	Name      string
-	HasSchema bool
-	ProjectID string
+	Name       string
+	HasSchema  bool
+	IssueCount int // rows in its issues table; 0 without Beads schema
+	ProjectID  string
+}
+
+// holdsWorkspaceData reports whether db holds a workspace's data: Beads schema
+// with a _project_id (bd init writes one) or at least one issue. An empty
+// schema without an identity is no sign of a workspace: bd's migrating store
+// open gives exactly that to a fresh database, and bd doctor's diagnostics
+// open the configured database that way before any fix runs.
+func (db serverDatabaseMetadata) holdsWorkspaceData() bool {
+	return db.HasSchema && (db.ProjectID != "" || db.IssueCount > 0)
 }
 
 var listServerMetadataDatabases = inspectServerMetadataDatabases
@@ -297,7 +307,8 @@ func isFallbackCandidate(db serverDatabaseMetadata) bool {
 //   - a local project_id carried by one candidate selects it, unless the
 //     current database has schema and another identity (an error); carried
 //     by several, it is an error;
-//   - a current database with Beads schema is kept (no repair);
+//   - a current database that holds a workspace's data (holdsWorkspaceData)
+//     is kept (no repair);
 //   - with no candidates there is no repair;
 //   - a local project_id no candidate carries is a skip;
 //   - with no local project_id: a skip in shared-server mode, the sole
@@ -306,95 +317,132 @@ func isFallbackCandidate(db serverDatabaseMetadata) bool {
 // Candidates are the databases other than current that pass
 // isFallbackCandidate.
 func selectFallbackDoltDatabase(localID, current string, shared bool, databases []serverDatabaseMetadata) (*serverDatabaseMetadata, error) {
-	var currentDB *serverDatabaseMetadata
-	var candidates []serverDatabaseMetadata
-	for _, db := range databases {
-		if db.Name == current {
-			currentDB = &db
-			continue
-		}
-		if !isFallbackCandidate(db) {
-			continue
-		}
-		candidates = append(candidates, db)
-	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Name < candidates[j].Name })
-	names := make([]string, len(candidates))
-	for i, db := range candidates {
-		names[i] = db.Name
-	}
+	currentDB, candidates := splitFallbackCatalog(current, databases)
 
 	if localID != "" {
-		var matches []serverDatabaseMetadata
-		for _, db := range candidates {
-			if db.ProjectID == localID {
-				matches = append(matches, db)
-			}
-		}
+		matches := carryingProjectID(localID, candidates)
 		// The current database counts toward the match, as it does in the
 		// authoritative reconcile: when the reconcile is mode-gated, it is
 		// the only place a duplicate holding the current database is caught.
-		currentMatches := currentDB != nil && isFallbackCandidate(*currentDB) && currentDB.ProjectID == localID
-		if len(matches) > 1 || (currentMatches && len(matches) > 0) {
-			var matchNames []string
-			if currentMatches {
-				matchNames = append(matchNames, currentDB.Name)
+		if currentDB != nil && isFallbackCandidate(*currentDB) && currentDB.ProjectID == localID {
+			if len(matches) > 0 {
+				return nil, multipleProjectIDMatchesError(localID, append(matches, *currentDB))
 			}
-			for _, db := range matches {
-				matchNames = append(matchNames, db.Name)
-			}
-			sort.Strings(matchNames)
-			return nil, fmt.Errorf("multiple server databases match project_id %s: %s",
-				remedy.PrintedValue(localID), remedy.PrintedList(matchNames, ", "))
-		}
-		if currentMatches {
 			// The database bd opens today already carries this workspace's
 			// identity: there is nothing to move.
 			return nil, nil
 		}
+		if len(matches) > 1 {
+			return nil, multipleProjectIDMatchesError(localID, matches)
+		}
 		if len(matches) == 1 {
-			// Conflicting identity signals: the database bd opens today has
-			// Beads schema and another project's id. Moving the workspace
-			// is the same guess the authoritative reconcile refuses.
-			if currentDB != nil && currentDB.HasSchema && currentDB.ProjectID != "" && currentDB.ProjectID != localID {
-				return nil, fmt.Errorf(
-					"conflicting project identity: metadata.json project_id %s matches database %s, but configured database %s reports project_id %s",
-					remedy.PrintedValue(localID), remedy.PrintedValue(matches[0].Name),
-					remedy.PrintedValue(currentDB.Name), remedy.PrintedValue(currentDB.ProjectID))
-			}
-			return &matches[0], nil
+			return adoptProjectIDMatch(localID, currentDB, &matches[0])
 		}
 	}
 
-	// The database bd opens today already has Beads schema: whatever else
-	// is wrong with it, another schema database is no reason to move the
-	// workspace. Only an exact project_id match (above) outranks it.
-	if currentDB != nil && currentDB.HasSchema {
+	// The database bd opens today already holds a workspace's data: whatever
+	// else is wrong with it, another schema database is no reason to move the
+	// workspace. Only an exact project_id match (above) outranks it. Schema
+	// alone is not enough: bd doctor's diagnostics give an empty configured
+	// database the full schema before this fix runs, and keeping that
+	// database would orphan the legacy one GH#2160 recovers.
+	if currentDB != nil && currentDB.holdsWorkspaceData() {
 		return nil, nil
 	}
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	if localID != "" {
+	return selectUnmatchedCandidate(localID, shared, candidates)
+}
+
+// splitFallbackCatalog returns the database in databases named current (nil
+// when the server does not list it) and the others that pass
+// isFallbackCandidate, sorted by name so that no choice depends on the order
+// the server listed them in.
+func splitFallbackCatalog(current string, databases []serverDatabaseMetadata) (*serverDatabaseMetadata, []serverDatabaseMetadata) {
+	var currentDB *serverDatabaseMetadata
+	var candidates []serverDatabaseMetadata
+	for _, db := range databases {
+		switch {
+		case db.Name == current:
+			currentDB = &db
+		case isFallbackCandidate(db):
+			candidates = append(candidates, db)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Name < candidates[j].Name })
+	return currentDB, candidates
+}
+
+// carryingProjectID returns the databases whose _project_id is id.
+func carryingProjectID(id string, databases []serverDatabaseMetadata) []serverDatabaseMetadata {
+	var matches []serverDatabaseMetadata
+	for _, db := range databases {
+		if db.ProjectID == id {
+			matches = append(matches, db)
+		}
+	}
+	return matches
+}
+
+// databaseNames returns the names of databases, in order.
+func databaseNames(databases []serverDatabaseMetadata) []string {
+	names := make([]string, len(databases))
+	for i, db := range databases {
+		names[i] = db.Name
+	}
+	return names
+}
+
+// multipleProjectIDMatchesError is the refusal when more than one database
+// carries the workspace's project_id localID, worded as the authoritative
+// reconcile words it, with the names sorted.
+func multipleProjectIDMatchesError(localID string, matches []serverDatabaseMetadata) error {
+	names := databaseNames(matches)
+	sort.Strings(names)
+	return fmt.Errorf("multiple server databases match project_id %s: %s",
+		remedy.PrintedValue(localID), remedy.PrintedList(names, ", "))
+}
+
+// adoptProjectIDMatch selects match, the one candidate carrying the
+// workspace's project_id localID, unless the database bd opens today has
+// Beads schema and another project's id. Those are conflicting identity
+// signals, and moving the workspace is the same guess the authoritative
+// reconcile refuses.
+func adoptProjectIDMatch(localID string, currentDB, match *serverDatabaseMetadata) (*serverDatabaseMetadata, error) {
+	if currentDB != nil && currentDB.HasSchema && currentDB.ProjectID != "" && currentDB.ProjectID != localID {
+		return nil, fmt.Errorf(
+			"conflicting project identity: metadata.json project_id %s matches database %s, but configured database %s reports project_id %s",
+			remedy.PrintedValue(localID), remedy.PrintedValue(match.Name),
+			remedy.PrintedValue(currentDB.Name), remedy.PrintedValue(currentDB.ProjectID))
+	}
+	return match, nil
+}
+
+// selectUnmatchedCandidate decides among candidates, sorted and not empty,
+// when none carries the workspace's project_id localID and the database bd
+// opens today holds no workspace data.
+func selectUnmatchedCandidate(localID string, shared bool, candidates []serverDatabaseMetadata) (*serverDatabaseMetadata, error) {
+	names := remedy.PrintedList(databaseNames(candidates), ", ")
+	switch {
+	case localID != "":
 		// No database carries this workspace's identity. One without any
 		// identity is no match either: the store's identity check accepts a
 		// database with no _project_id, so adopting it would go unnoticed.
 		return nil, skipFix(fmt.Errorf(
 			"no server database carries this workspace's project_id %s (candidates: %s); %s",
-			remedy.PrintedValue(localID), remedy.PrintedList(names, ", "), manualDatabaseRemedy))
-	}
-	if shared {
+			remedy.PrintedValue(localID), names, manualDatabaseRemedy))
+	case shared:
 		return nil, skipFix(fmt.Errorf(
 			"in shared-server mode a database with Beads schema may belong to another project, "+
 				"and metadata.json has no project_id to tell which is this workspace's (candidates: %s); %s",
-			remedy.PrintedList(names, ", "), manualDatabaseRemedy))
-	}
-	if len(candidates) == 1 {
+			names, manualDatabaseRemedy))
+	case len(candidates) == 1:
 		return &candidates[0], nil
 	}
 	return nil, skipFix(fmt.Errorf(
 		"several server databases have Beads schema and metadata.json has no project_id to tell which is this workspace's (candidates: %s); %s",
-		remedy.PrintedList(names, ", "), manualDatabaseRemedy))
+		names, manualDatabaseRemedy))
 }
 
 // ResolveAuthoritativeServerMetadata reconciles local metadata.json against the
@@ -565,8 +613,9 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 
 // readServerMetadataDatabases reads the catalog of the server db is connected
 // to: each database but information_schema and mysql, whether it has Beads
-// schema (an issues table) and its _project_id. A database this user cannot
-// inspect, or that lacks the tables, reads as having neither.
+// schema (an issues table), how many issues it holds and its _project_id. A
+// database this user cannot inspect, or that lacks the tables, reads as
+// having none of them.
 func readServerMetadataDatabases(ctx context.Context, db *sql.DB) ([]serverDatabaseMetadata, error) {
 	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
 	if err != nil {
@@ -591,6 +640,7 @@ func readServerMetadataDatabases(ctx context.Context, db *sql.DB) ([]serverDatab
 		//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
 		if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s.issues LIMIT 1", quotedName)).Scan(&count); err == nil {
 			meta.HasSchema = true
+			meta.IssueCount = count
 		} else if !isExpectedProbeError(err) {
 			return nil, fmt.Errorf("probing database %q for schema: %w", dbName, err)
 		}

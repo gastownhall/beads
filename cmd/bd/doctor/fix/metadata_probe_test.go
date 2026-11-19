@@ -74,7 +74,7 @@ func TestReadServerMetadataDatabasesQuotesIdentifiers(t *testing.T) {
 	}
 	want := []serverDatabaseMetadata{
 		{Name: "x`; DROP TABLE issues; --"},
-		{Name: "my-project", HasSchema: true, ProjectID: "proj-123"},
+		{Name: "my-project", HasSchema: true, IssueCount: 3, ProjectID: "proj-123"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("readServerMetadataDatabases = %+v, want %+v", got, want)

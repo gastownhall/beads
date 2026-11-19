@@ -311,12 +311,17 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 		// dolt_database to metadata.json, so we may be connected to the
 		// wrong (default "beads") database.
 		if correctDB := probeForCorrectDatabase(conn); correctDB != "" {
+			// The Fix names no database: the probe takes the first one with
+			// an issues table, which can be another project's, and
+			// bd doctor --fix adopts a database only when it can tell the
+			// database is this workspace's (GH#5576). When it cannot, it
+			// skips, and this Fix is the manual fix printed beside the skip.
 			return DoctorCheck{
 				Name:     "Dolt Schema",
 				Status:   StatusError,
 				Message:  fmt.Sprintf("Wrong database — tables found in %q, not in configured database", correctDB),
 				Detail:   "Pre-v0.56 migration created database without saving its name to metadata.json",
-				Fix:      fmt.Sprintf("Run 'bd doctor --fix' to set dolt_database=%s in metadata.json", remedy.PrintedValue(correctDB)),
+				Fix:      "Run 'bd doctor --fix' to set dolt_database in metadata.json, or set it by hand with 'bd dolt set database <name>'",
 				Category: CategoryCore,
 			}
 		}
