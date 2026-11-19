@@ -168,3 +168,30 @@ func TestCrossPrefixBlockerBlocksInspectionCloseAndClaim(t *testing.T) {
 		t.Fatalf("forced closes: lifecycle %d, raw %v; want one each", lifecycle.closed, raw.closed)
 	}
 }
+
+// TestCrossPrefixNonBlockingEdgeTypesDoNotExclude (GH#4647, AC-6): a bare
+// cross-prefix edge of any type but blocks / conditional-blocks — waits-for,
+// related, relates-to among them — is not evaluated, even with an open target.
+func TestCrossPrefixNonBlockingEdgeTypesDoNotExclude(t *testing.T) {
+	for _, depType := range []types.DependencyType{types.DepWaitsFor, types.DepRelated, types.DepRelatesTo, types.DepDiscoveredFrom} {
+		t.Run(string(depType), func(t *testing.T) {
+			src := issue("hq-src")
+			raw := &fakeStore{
+				ready: []*types.Issue{src},
+				deps:  map[string][]*types.Dependency{src.ID: {externalDep(src.ID, "gt-target", depType)}},
+			}
+			rig := &crossPrefixRig{store: &fakeStore{ready: []*types.Issue{issue("gt-target")}}}
+			store, _ := crossPrefixStore(raw, rig)
+
+			if got := readyIDs(t, store); !slices.Equal(got, []string{src.ID}) {
+				t.Fatalf("ready = %v, want [%s]", got, src.ID)
+			}
+			if blocked, blockers, err := store.IsBlocked(t.Context(), src.ID); err != nil || blocked {
+				t.Fatalf("IsBlocked = %v, %v, %v; want false", blocked, blockers, err)
+			}
+			if rig.lookups != 0 {
+				t.Fatalf("router lookups = %d, want 0", rig.lookups)
+			}
+		})
+	}
+}
