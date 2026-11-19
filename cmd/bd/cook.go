@@ -866,8 +866,24 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 				expansionVars[k] = v
 			}
 		}
+		materializing := len(resolved.Steps) == 0
 		if err := formula.MaterializeExpansion(resolved, expansionTarget, expansionVars); err != nil {
 			return nil, fmt.Errorf("standalone expansion %q: %w", formulaName, err)
+		}
+		if materializing {
+			// The steps just materialized carry the template's conditions
+			// and {{var}} references, which the scan and the condition
+			// filter above never saw: record their names before filtering
+			// can drop the steps that hold them, then filter them once
+			// against the same defaults-plus-supplied vars.
+			formulaVarNames = append(formulaVarNames, formulaVarRefs(resolved.Steps)...)
+			if conditionVars != nil {
+				filteredSteps, err := formula.FilterStepsByCondition(resolved.Steps, expansionVars)
+				if err != nil {
+					return nil, fmt.Errorf("standalone expansion %q: filtering steps by condition: %w", formulaName, err)
+				}
+				resolved.Steps = filteredSteps
+			}
 		}
 	}
 
