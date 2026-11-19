@@ -3,6 +3,7 @@ package gitlab
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -147,6 +148,20 @@ func derefRef(s *string) string {
 func gitLabIssueJSON(id, iid int, title, webURL string) string {
 	return `{"id":` + strconv.Itoa(id) + `,"iid":` + strconv.Itoa(iid) + `,"title":"` + title + `","state":"opened",` +
 		`"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z","web_url":"` + webURL + `"}`
+}
+
+// namedServerClient returns srv's host spelled "localhost:<port>" and a client
+// configured by that name whose connections always reach srv's own listener.
+// "localhost" resolves to ::1 before 127.0.0.1, so a client that dials the
+// name reaches whatever else listens on [::1]:<port> (the Bazel server's gRPC
+// port, for one) instead of the 127.0.0.1 listener httptest binds.
+func namedServerClient(srv *httptest.Server, projectID string) (string, *Client) {
+	addr := srv.Listener.Addr().String()
+	host := "localhost:" + addr[strings.LastIndex(addr, ":")+1:]
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}}
+	return host, NewClient("token", "http://"+host, projectID).WithHTTPClient(&http.Client{Transport: transport})
 }
 
 // newIssueListServer serves listPath (a project or group issues listing) with
@@ -297,17 +312,17 @@ func TestPull_SameProjectRespellingUpdatesExistingBead(t *testing.T) {
 				_, _ = w.Write([]byte(gitLabIssueJSON(9007, 7, "Project B issue 7 (remote)", webURL)))
 			}))
 			t.Cleanup(srv.Close)
-			// Configure the server by name so the self-hosted host has a case
-			// to differ in; onConfiguredHost recognizes it case-insensitively.
-			host := "localhost:" + srv.URL[strings.LastIndex(srv.URL, ":")+1:]
-			expand := strings.NewReplacer("%s", host, "%S", strings.ToUpper(host)).Replace
-			webURL = expand(tt.webURL)
-
 			projectID := tt.projectID
 			if projectID == "" {
 				projectID = "200"
 			}
-			tr := &Tracker{client: NewClient("token", "http://"+host, projectID), config: DefaultMappingConfig(), projectPath: tt.projectPath}
+			// Configure the server by name so the self-hosted host has a case
+			// to differ in; onConfiguredHost recognizes it case-insensitively.
+			host, client := namedServerClient(srv, projectID)
+			expand := strings.NewReplacer("%s", host, "%S", strings.ToUpper(host)).Replace
+			webURL = expand(tt.webURL)
+
+			tr := &Tracker{client: client, config: DefaultMappingConfig(), projectPath: tt.projectPath}
 
 			stored := expand(tt.stored)
 			store := &crossProjectStore{issues: map[string]*types.Issue{
@@ -637,9 +652,9 @@ func TestPull_RenamedProjectMatchesBySourceSystem(t *testing.T) {
 				_, _ = w.Write([]byte(gitLabProjectIssueJSON(9007, 7, 200, "Project B issue 7 (remote)", webURL)))
 			}))
 			t.Cleanup(srv.Close)
-			host := "localhost:" + srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+			host, client := namedServerClient(srv, "200")
 			webURL = "http://" + host + "/new-group/project-b/-/issues/7"
-			tr := &Tracker{client: NewClient("token", "http://"+host, "200"), config: DefaultMappingConfig()}
+			tr := &Tracker{client: client, config: DefaultMappingConfig()}
 
 			stored := strings.ReplaceAll(tt.stored, "%s", host)
 			store := &crossProjectStore{issues: map[string]*types.Issue{
