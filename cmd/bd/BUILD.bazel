@@ -895,6 +895,7 @@ go_test(
         "github_link_scope_test.go",
         "gitlab_integration_test.go",
         "gitlab_test.go",
+        "gitusage_guard_test.go",
         "global_identity_integration_test.go",
         "gomodcache_rehome_test.go",
         "graph_apply_execution_test.go",
