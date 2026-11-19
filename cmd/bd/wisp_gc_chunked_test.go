@@ -466,6 +466,62 @@ func TestWispGCReportsOneAggregateResult(t *testing.T) {
 	assertExportBookkeeping(t, wispPurgeIDs(200), wispPurgeIDs(450)[200:])
 }
 
+// TestWispGCAgePreviewDoesNotMutate pins that chunking reaches only the
+// forced age GC: a --dry-run deletes nothing, keeps the preview answer it
+// always gave, and sends no deletion request (GH#6246).
+func TestWispGCAgePreviewDoesNotMutate(t *testing.T) {
+	s := useWispGCAgeStub(t, 3)
+	jsonOutput = true
+
+	stdout, stderr, err := captureWispGC(t, func() error {
+		return runWispGCAge(context.Background(), true, 0, false, nil)
+	})
+	if err != nil {
+		t.Fatalf("runWispGCAge dry run: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	obj := decodeSingleJSONObject(t, stdout)
+	if got, _ := obj["cleaned_ids"].([]interface{}); len(got) != 3 {
+		t.Errorf("cleaned_ids names %d wisps, want 3", len(got))
+	}
+	if obj["cleaned_count"] != float64(0) || obj["dry_run"] != true {
+		t.Errorf("preview = %v, want cleaned_count 0 and dry_run true (the shape is unchanged)", obj)
+	}
+	if len(s.deleter.requests) != 0 {
+		t.Errorf("dry run sent %d deletion requests", len(s.deleter.requests))
+	}
+	if len(s.deleter.deleted) != 0 {
+		t.Errorf("dry run deleted %d wisps", len(s.deleter.deleted))
+	}
+}
+
+// TestDeleteBatchStaysOneRequest pins the other side of GH#6246's scoping:
+// ordinary multi-id `bd delete --force` is NOT chunked — the front door
+// submits one atomic request for its whole resolved selection, exactly as
+// before the wisp GCs gained bounded transactions.
+func TestDeleteBatchStaysOneRequest(t *testing.T) {
+	s := useWispPurgeStub(t, 250)
+
+	stdout, stderr, err := captureWispGC(t, func() error {
+		return deleteBatch(nil, s.closed, true, false, false, false, false, nil)
+	})
+	if err != nil {
+		t.Fatalf("deleteBatch: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if len(s.deleter.requests) != 1 {
+		t.Fatalf("deleteBatch sent %d requests for 250 ids, want exactly one atomic request", len(s.deleter.requests))
+	}
+	req := s.deleter.requests[0]
+	if len(req.IDs) != 250 {
+		t.Errorf("the one request carries %d ids, want 250", len(req.IDs))
+	}
+	if !req.Force || req.Cascade || req.DryRun {
+		t.Errorf("request = Force %v Cascade %v DryRun %v, want a forced, uncascaded, real delete", req.Force, req.Cascade, req.DryRun)
+	}
+	if !slices.Equal(req.IDs, s.closed) {
+		t.Error("the request did not carry the resolved selection once each, in order")
+	}
+}
+
 // wispGCAgeProxiedProvider is the proxied route's unit-of-work provider for
 // the age GC: every NewUOW opens a unit of work, the abandoned-wisp scan
 // reads through one, and each bounded deletion chunk is one more. Only a unit
