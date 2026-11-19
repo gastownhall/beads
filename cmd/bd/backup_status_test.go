@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -452,4 +453,145 @@ func assertExitCode(t *testing.T, err error, want int) {
 	if !ok || got != want {
 		t.Fatalf("command error = %v, want exit code %d", err, want)
 	}
+}
+
+// seedBackupStateJSON writes a raw backup_state.json into the workspace's
+// backup directory and returns that directory. Seeding raw JSON (not
+// saveBackupState) keeps tests for GH#4070 (bd-5mwx39) compiling before the
+// failure fields exist and lets them hold states an older bd wrote.
+func seedBackupStateJSON(t *testing.T, beadsDir, raw string) string {
+	t.Helper()
+	dir := filepath.Join(beadsDir, "backup")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "backup_state.json"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestBackupStatusReportsFailedAutoBackup is the reporting half of GH#4070
+// (bd-5mwx39): once failed syncs are recorded, `bd backup status` must show
+// the last SUCCESS as "Last backup", name the failed attempt as FAILED with
+// its error, and point at the move-aside recovery — in text and in --json —
+// instead of advertising the throttle watermark of a backup that never
+// happened.
+func TestBackupStatusReportsFailedAutoBackup(t *testing.T) {
+	const failureText = "sync to backup: sync backup backup_export: Error 1105: error opening table file: table file not found: /backup/0123456789"
+	// Whole-second times: status prints them back through time.RFC3339.
+	t1 := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	t2 := time.Now().UTC().Add(-1 * time.Hour).Truncate(time.Second)
+	t3 := time.Now().UTC().Add(-25 * time.Minute).Truncate(time.Second)
+	seeded := fmt.Sprintf(`{
+  "last_dolt_commit": "deadbeef",
+  "timestamp": %q,
+  "last_cap_warn_at": %q,
+  "last_success_at": %q,
+  "last_error": %q,
+  "last_error_at": %q
+}`,
+		t2.Format(time.RFC3339), t3.Format(time.RFC3339), t1.Format(time.RFC3339),
+		failureText, t2.Format(time.RFC3339))
+
+	sizeDatabase := func(context.Context) (int64, bool, error) { return 0, false, nil }
+
+	t.Run("text_shows_last_success_and_failed_attempt", func(t *testing.T) {
+		beadsDir := prepareBackupStatusTest(t)
+		dir := seedBackupStateJSON(t, beadsDir, seeded)
+
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status"})
+		stdout, stderr, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v\nstderr:\n%s", err, stderr)
+		}
+		if !strings.Contains(stdout, "Last backup: "+t1.Format(time.RFC3339)) {
+			t.Errorf("status does not show the last successful backup %s:\n%s", t1.Format(time.RFC3339), stdout)
+		}
+		if strings.Contains(stdout, "Last backup: "+t2.Format(time.RFC3339)) {
+			t.Errorf("status advertises the FAILED attempt's time %s as the last backup:\n%s", t2.Format(time.RFC3339), stdout)
+		}
+		if !strings.Contains(stdout, "Last attempt: FAILED "+t2.Format(time.RFC3339)) {
+			t.Errorf("status does not show the failed attempt %s as FAILED:\n%s", t2.Format(time.RFC3339), stdout)
+		}
+		if !strings.Contains(stdout, failureText) {
+			t.Errorf("status does not print the failure's error text:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, dir) {
+			t.Errorf("recovery hint does not name the backup directory %s:\n%s", dir, stdout)
+		}
+		if !strings.Contains(stdout, "mv "+dir) {
+			t.Errorf("recovery hint does not spell the move-aside step:\n%s", stdout)
+		}
+	})
+
+	t.Run("legacy_state_prints_its_watermark_unchanged", func(t *testing.T) {
+		t0 := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
+		beadsDir := prepareBackupStatusTest(t)
+		seedBackupStateJSON(t, beadsDir, fmt.Sprintf(`{
+  "last_dolt_commit": "deadbeef",
+  "timestamp": %q
+}`, t0.Format(time.RFC3339)))
+
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status"})
+		stdout, _, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		if !strings.Contains(stdout, "Last backup: "+t0.Format(time.RFC3339)) {
+			t.Errorf("legacy state no longer prints its watermark as the last backup:\n%s", stdout)
+		}
+		if strings.Contains(stdout, "FAILED") || strings.Contains(stdout, "none succeeded") {
+			t.Errorf("legacy state with no recorded failure prints a failure block:\n%s", stdout)
+		}
+	})
+
+	t.Run("failure_without_success_says_none_succeeded", func(t *testing.T) {
+		beadsDir := prepareBackupStatusTest(t)
+		dir := seedBackupStateJSON(t, beadsDir, fmt.Sprintf(`{
+  "timestamp": %q,
+  "last_error": %q,
+  "last_error_at": %q
+}`, t2.Format(time.RFC3339), failureText, t2.Format(time.RFC3339)))
+
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status"})
+		stdout, _, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		if !strings.Contains(stdout, "Last backup: none succeeded yet") {
+			t.Errorf("a state with only failed attempts does not say none succeeded yet:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "Last attempt: FAILED "+t2.Format(time.RFC3339)) {
+			t.Errorf("the failed attempt is not shown as FAILED:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "mv "+dir) {
+			t.Errorf("recovery hint does not spell the move-aside step:\n%s", stdout)
+		}
+	})
+
+	t.Run("no_failure_prints_no_failed_line", func(t *testing.T) {
+		beadsDir := prepareBackupStatusTest(t)
+		seedBackupStateJSON(t, beadsDir, fmt.Sprintf(`{
+  "last_dolt_commit": "deadbeef",
+  "timestamp": %q,
+  "last_success_at": %q
+}`, t2.Format(time.RFC3339), t1.Format(time.RFC3339)))
+
+		cmd := newBackupStatusTestRoot(sizeDatabase)
+		cmd.SetArgs([]string{"backup", "status"})
+		stdout, _, err := executeBackupStatusCommand(t, cmd)
+		if err != nil {
+			t.Fatalf("backup status: %v", err)
+		}
+		if !strings.Contains(stdout, "Last backup: "+t1.Format(time.RFC3339)) {
+			t.Errorf("status does not show the last successful backup:\n%s", stdout)
+		}
+		if strings.Contains(stdout, "FAILED") {
+			t.Errorf("a healthy state prints a FAILED line:\n%s", stdout)
+		}
+	})
 }

@@ -51,6 +51,18 @@ Auto-backup default:
 
 type backupSizeFunc func(context.Context) (bytes int64, available bool, err error)
 
+// lastBackupSuccessAt returns the time the last backup that actually synced
+// succeeded: last_success_at once any attempt has been recorded, else the
+// legacy Timestamp for state written before failures were tracked — no
+// last_error means every recorded attempt succeeded, so that watermark is a
+// success time and older output stays unchanged.
+func (s *backupState) lastBackupSuccessAt() time.Time {
+	if !s.LastSuccessAt.IsZero() || s.LastError != "" {
+		return s.LastSuccessAt
+	}
+	return s.Timestamp
+}
+
 var backupStatusCmd = newBackupStatusCommand(doltBackupSize)
 
 func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
@@ -104,12 +116,13 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 			}
 
 			hasBackup := state.LastDoltCommit != ""
+			hasFailure := state.LastError != ""
 			hasDolt := false
 			if cfg, _ := loadDoltBackupConfig(); cfg != nil {
 				hasDolt = true
 			}
 
-			if !hasBackup && !hasDolt {
+			if !hasBackup && !hasDolt && !hasFailure {
 				fmt.Println("No backup has been performed yet.")
 				fmt.Println()
 				fmt.Println("Setup:")
@@ -121,12 +134,31 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 				return nil
 			}
 
-			if hasBackup {
+			if hasBackup || hasFailure {
 				fmt.Println("Backup:")
-				fmt.Printf("  Last backup: %s (%s ago)\n",
-					state.Timestamp.Format(time.RFC3339),
-					time.Since(state.Timestamp).Round(time.Second))
-				fmt.Printf("  Dolt commit: %s\n", state.LastDoltCommit)
+				lastSuccess := state.lastBackupSuccessAt()
+				if lastSuccess.IsZero() {
+					// A failure is recorded but no backup ever succeeded.
+					fmt.Println("  Last backup: none succeeded yet")
+				} else {
+					fmt.Printf("  Last backup: %s (%s ago)\n",
+						lastSuccess.Format(time.RFC3339),
+						time.Since(lastSuccess).Round(time.Second))
+				}
+				if hasBackup {
+					fmt.Printf("  Dolt commit: %s\n", state.LastDoltCommit)
+				}
+				if hasFailure {
+					fmt.Printf("  Last attempt: FAILED %s (%s ago)\n",
+						state.LastErrorAt.Format(time.RFC3339),
+						time.Since(state.LastErrorAt).Round(time.Second))
+					fmt.Printf("    %s\n", state.LastError)
+					fmt.Println("  If every attempt fails with the same error, the backup directory may be")
+					fmt.Println("  damaged. Move it aside and keep it until a new backup succeeds; the next")
+					fmt.Println("  auto-backup then writes a fresh full backup:")
+					fmt.Printf("    mv %s %s.broken-%s\n",
+						dir, dir, state.LastErrorAt.Format("20060102"))
+				}
 			}
 
 			// Show config (effective values with source)
