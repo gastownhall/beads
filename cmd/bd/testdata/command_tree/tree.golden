@@ -401,8 +401,15 @@ bd backup init
     | Configure a filesystem path or URL as a backup destination.
     |
     | The path can be a local directory (external drive, NAS, Dropbox folder) or a
-    | DoltHub remote URL. If the destination was previously configured, it is
-    | updated to the new path.
+    | remote URL. If the destination was previously configured, it is updated to
+    | the new path.
+    |
+    | Accepted backup URL forms: https://, http://, file://, aws://, gs://, s3://, az://, oci://.
+    | These are matched case-sensitively and handed to Dolt unchanged. Any other
+    | argument that looks like a URL (a scheme of two or more characters followed
+    | by "://") is refused. Everything else is a local path, including a
+    | one-letter drive such as C://backups; for a local directory whose name looks
+    | like a URL, write ./name://path.
     |
     | Filesystem examples:
     |   bd backup add /mnt/usb/beads-backup
@@ -410,6 +417,11 @@ bd backup init
     |
     | DoltHub (recommended for cloud backup):
     |   bd backup add https://doltremoteapi.dolthub.com/myuser/beads-backup
+    |
+    | Cloud storage (credentials come from the environment of the process running
+    | Dolt):
+    |   bd backup add s3://my-bucket/beads-backup
+    |   bd backup add az://myaccount.blob.core.windows.net/container/beads-backup
     |
     | After adding, run 'bd backup sync' to push your data.
 
