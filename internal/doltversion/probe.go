@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/steveyegge/beads/internal/execwin"
 )
 
 // defaultProbeTimeout bounds how long Probe waits for `<path> version` to
@@ -118,7 +120,7 @@ func Probe(ctx context.Context, path string) (Identity, error) {
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(ctx, path, "version") //nolint:gosec // G204: path is caller-resolved and pre-exec-validated above, not user-request input
+	cmd := execwin.Hide(exec.CommandContext(ctx, path, "version")) //nolint:gosec // G204: path is caller-resolved and pre-exec-validated above, not user-request input
 	// WaitDelay bounds how long Wait() waits for the child's I/O pipes to
 	// close after the context is done / the process is signaled. Without
 	// it, a child that ignores SIGKILL's effect on its own goroutines (or
