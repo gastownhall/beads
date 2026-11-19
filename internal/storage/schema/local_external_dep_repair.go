@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	pubissueops "github.com/steveyegge/beads/issueops"
 )
 
 // Repair for dependency edges stored as external although their target is held
@@ -106,20 +107,27 @@ func repairLocalExternalDepTargets(ctx context.Context, db DBConn) error {
 		return nil
 	}
 
-	var moves []localExternalDepMove
+	var tables []string
 	for _, table := range localExternalDepTables {
 		exists, err := schemaTableExists(ctx, db, table)
 		if err != nil {
 			return fmt.Errorf("checking %s table: %w", table, err)
 		}
-		if !exists {
-			continue
+		if exists {
+			tables = append(tables, table)
 		}
+	}
+	var moves []localExternalDepMove
+	for _, table := range tables {
 		planned, err := planLocalExternalDepMoves(ctx, db, table)
 		if err != nil {
 			return err
 		}
 		moves = append(moves, planned...)
+	}
+	moves, err = dropHierarchyConflictingMoves(ctx, db, moves, tables)
+	if err != nil {
+		return err
 	}
 	if len(moves) == 0 {
 		return nil
@@ -214,6 +222,33 @@ ORDER BY d.issue_id, d.depends_on_external`, table)
 		return nil, fmt.Errorf("%s: read local external dependency targets: %w", table, err)
 	}
 	return moves, nil
+}
+
+// dropHierarchyConflictingMoves returns moves without the blocking edges whose
+// target is an ancestor or descendant of their source along parent-child
+// edges; those stay external (see the package comment above). It is read-only
+// and runs after every plan query's rows are closed, so its reachability
+// queries never interleave with an open result set on the migration's pinned
+// connection. The parent-child walk reads every target column, external
+// included, so it sees the same hierarchy before and after the moves. Any
+// other error from the check propagates.
+func dropHierarchyConflictingMoves(ctx context.Context, db DBConn, moves []localExternalDepMove, depTables []string) ([]localExternalDepMove, error) {
+	kept := moves[:0:0]
+	for _, m := range moves {
+		dep := &types.Dependency{IssueID: m.issueID, DependsOnID: m.target, Type: m.depType}
+		err := issueops.CheckBlockingHierarchyInTx(ctx, db, dep, depTables)
+		var conflict *pubissueops.DependencyHierarchyConflictError
+		switch {
+		case errors.As(err, &conflict):
+			log.Printf("schema: %s: edge %s -> %s (%s) conflicts with the parent hierarchy; keeping it external",
+				m.table, m.issueID, m.target, m.depType)
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("%s: check edge %s -> %s against the parent hierarchy: %w", m.table, m.issueID, m.target, err)
+		}
+		kept = append(kept, m)
+	}
+	return kept, nil
 }
 
 // applyLocalExternalDepMoves writes every move, then recomputes blocked state

@@ -144,6 +144,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/rowid",
         "//internal/types",
+        "//issueops",
         "@org_golang_x_term//:term",
     ],
 )

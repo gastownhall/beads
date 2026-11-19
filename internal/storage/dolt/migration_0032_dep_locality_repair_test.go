@@ -304,3 +304,76 @@ func TestMigration0032DepLocalityRepairRefusesDirtyGraphOnDoltBackend(t *testing
 		t.Fatalf("ignored cursor does not record %d after the reconcile pass", depLocalityMarkerVersion)
 	}
 }
+
+// TestMigration0032DepLocalityRepairKeepsHierarchyConflictsExternalOnDoltBackend
+// is the server twin of the embedded hierarchy-conflict test: a legacy blocking
+// edge between an issue and its own ancestor or descendant, stored as external
+// because the old writer never checked hierarchy across prefixes, is not moved
+// (the repair does not resurrect a shape the write path refuses), while the
+// cross-prefix parent-child link and an unrelated blocking edge onto the same
+// held target still move.
+func TestMigration0032DepLocalityRepairKeepsHierarchyConflictsExternalOnDoltBackend(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	child, mid, free, epic := "firstmate-hc-child", "firstmate-hc-mid", "firstmate-hc-free", "treehouse-hc-epic"
+	for _, id := range []string{child, mid, free, epic} {
+		if err := store.CreateIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	type edge struct {
+		source, target, depType string
+		typed                   bool
+	}
+	// child -> mid -> epic is the hierarchy (a grandparent blocker, since one
+	// row holds an issue pair); the cross-prefix upper link is external too.
+	edges := []edge{
+		{child, mid, "parent-child", true},
+		{mid, epic, "parent-child", false},
+		{child, epic, "blocks", false},             // blocker is the child's ancestor
+		{epic, child, "conditional-blocks", false}, // blocker is the epic's descendant
+		{free, epic, "blocks", false},
+	}
+	for _, e := range edges {
+		var issueTarget, external any = nil, e.target
+		if e.typed {
+			issueTarget, external = e.target, nil
+		}
+		if _, err := store.db.ExecContext(ctx, `
+			INSERT INTO dependencies (id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata)
+			VALUES (?, ?, ?, NULL, ?, ?, '2026-01-15 10:30:00', 'legacy-importer', '{}')`,
+			depid.New(e.source, e.target), e.source, issueTarget, external, e.depType); err != nil {
+			t.Fatalf("seed %s edge %s -> %s: %v", e.depType, e.source, e.target, err)
+		}
+	}
+	if err := store.doltAddAndCommit(ctx, []string{"issues", "dependencies"}, "test: seed hierarchy-conflicting legacy edges"); err != nil {
+		t.Fatalf("commit the legacy seed: %v", err)
+	}
+	depLocalityReopenMarker(t, ctx, store)
+
+	if _, err := rerunSchemaInitOnTestStore(ctx, store); err != nil {
+		t.Fatalf("migration pass with hierarchy-conflicting edges: %v", err)
+	}
+
+	for _, e := range []edge{edges[2], edges[3]} {
+		depLocalityRequireExternal(t, ctx, store, depid.New(e.source, e.target), e.target)
+	}
+	for _, e := range []edge{edges[1], edges[4]} {
+		depLocalityRequireTyped(t, ctx, store, depid.New(e.source, e.target), e.target)
+	}
+	for _, id := range []string{child, epic} {
+		if blocked := depLocalityBlocked(t, ctx, store, id); blocked != 0 {
+			t.Errorf("%s is_blocked = %d after the repair, want 0: the hierarchy-conflicting edge must not become a live blocker", id, blocked)
+		}
+	}
+	if blocked := depLocalityBlocked(t, ctx, store, free); blocked != 1 {
+		t.Errorf("%s is_blocked = %d after the repair, want 1 (its local blocker %s is open)", free, blocked, epic)
+	}
+	if !depLocalityCursorHas(t, ctx, store) {
+		t.Fatalf("ignored cursor does not record %d after the repair pass", depLocalityMarkerVersion)
+	}
+}

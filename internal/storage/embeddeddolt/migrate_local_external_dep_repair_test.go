@@ -340,3 +340,77 @@ func TestEmbeddedDepLocalityRepairRollsBackMovesAndRecomputeTogether(t *testing.
 		t.Fatalf("ignored migration %d not recorded after the retry", localExternalDepRepairVersion)
 	}
 }
+
+// TestEmbeddedLocalExternalDepRepairKeepsHierarchyConflictsExternal: a legacy
+// clone can hold a blocking edge between an issue and its own ancestor or
+// descendant in depends_on_external, because the old write path never checked
+// hierarchy across prefixes. The repair heals storage, it does not police such
+// graphs: those edges stay external and their endpoints stay unblocked, while
+// the parent-child edge and an unrelated blocking edge onto the same held
+// target still move.
+func TestEmbeddedLocalExternalDepRepairKeepsHierarchyConflictsExternal(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMigratedStore(t, ctx)
+	conn, closeConn := openDepConn(t, ctx, dataDir)
+	for _, id := range []string{"demo-child", "demo-mid", "demo-free", "ops-epic"} {
+		seedIssue(t, ctx, conn, id)
+	}
+	// demo-child -> demo-mid -> ops-epic is the hierarchy; the upper link is
+	// cross-prefix, so the old writer stored it as external too. A grandparent
+	// blocker, because one row holds an issue pair (depid keys on the pair).
+	parentChild := []localDepEdge{
+		{"dependencies", "demo-child", "demo-mid"},
+		{"dependencies", "demo-mid", "ops-epic"},
+	}
+	seedDepTable(t, ctx, conn, "dependencies", depid.New("demo-child", "demo-mid"), "demo-child", strptr("demo-mid"), nil, nil)
+	seedDepTable(t, ctx, conn, "dependencies", depid.New("demo-mid", "ops-epic"), "demo-mid", nil, nil, strptr("ops-epic"))
+	mustExecConn(t, ctx, conn, `UPDATE dependencies SET type = 'parent-child' WHERE issue_id IN ('demo-child', 'demo-mid')`)
+	conflicts := []localDepEdge{
+		{"dependencies", "demo-child", "ops-epic"}, // blocker is the child's ancestor
+		{"dependencies", "ops-epic", "demo-child"}, // blocker is the epic's descendant
+	}
+	for _, e := range conflicts {
+		seedDepTable(t, ctx, conn, e.table, depid.New(e.issueID, e.target), e.issueID, nil, nil, strptr(e.target))
+	}
+	mustExecConn(t, ctx, conn, `UPDATE dependencies SET type = 'conditional-blocks' WHERE issue_id = 'ops-epic' AND depends_on_external = 'demo-child'`)
+	free := localDepEdge{"dependencies", "demo-free", "ops-epic"}
+	seedDepTable(t, ctx, conn, free.table, depid.New(free.issueID, free.target), free.issueID, nil, nil, strptr(free.target))
+	commitSeed(t, ctx, conn, "test: hierarchy-conflicting blocking edges stored as external")
+	unrecordIgnoredVersionsFrom(t, ctx, conn, localExternalDepRepairVersion)
+
+	before := map[localDepEdge]localDepRow{}
+	for _, e := range conflicts {
+		before[e] = readLocalDepRow(t, ctx, conn, e)
+	}
+	closeConn()
+
+	conn2, _ := openDepConn(t, ctx, dataDir)
+	if _, err := schema.MigrateUp(ctx, conn2); err != nil {
+		t.Fatalf("MigrateUp with hierarchy-conflicting edges stored as external: %v", err)
+	}
+
+	for _, e := range conflicts {
+		if got := readLocalDepRow(t, ctx, conn2, e); got != before[e] {
+			t.Errorf("%s edge %s -> %s after the repair = %+v, want %+v: a hierarchy-conflicting blocking edge stays external",
+				e.table, e.issueID, e.target, got, before[e])
+		}
+	}
+	for _, e := range []localDepEdge{parentChild[1], free} {
+		if got := readLocalDepRow(t, ctx, conn2, e); got.issueTarget != e.target || got.external != "" {
+			t.Errorf("%s edge %s -> %s after the repair = %+v, want it in depends_on_issue_id", e.table, e.issueID, e.target, got)
+		}
+	}
+	for _, id := range []string{"demo-child", "ops-epic"} {
+		if blocked, _ := readBlockedState(t, ctx, conn2, "issues", id); blocked != 0 {
+			t.Errorf("%s is_blocked = %d after the repair, want 0: the hierarchy-conflicting edge must not become a live blocker", id, blocked)
+		}
+	}
+	if blocked, _ := readBlockedState(t, ctx, conn2, "issues", "demo-free"); blocked != 1 {
+		t.Errorf("demo-free is_blocked = %d after the repair, want 1 (its local blocker ops-epic is open)", blocked)
+	}
+	if !ignoredVersionRecorded(t, ctx, conn2, localExternalDepRepairVersion) {
+		t.Fatalf("ignored migration %d not recorded after the repair", localExternalDepRepairVersion)
+	}
+}
