@@ -135,6 +135,13 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		}
 		var result issueops.CreateIssuesResult
 		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			// The closure contract on withRetryTx: re-derive captured state
+			// on EVERY attempt (GH#7289) — same reset as the regular batch
+			// branch above. The all-wisps closure has its own copy, so it
+			// needs its own reset: without it the replay upserts the stale
+			// wisp ID over the concurrent winner's wisp row and attaches
+			// the defaulted dependency edge and derived comment to it.
+			resetMintedIDs()
 			var err error
 			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 			return err

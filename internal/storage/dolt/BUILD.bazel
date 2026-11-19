@@ -195,6 +195,7 @@ go_test(
         "create_replay_explicit_test.go",
         "create_replay_helpers_test.go",
         "create_replay_single_test.go",
+        "create_replay_wisp_test.go",
         "create_rollback_test.go",
         "credentials_peer_test.go",
         "credentials_test.go",
