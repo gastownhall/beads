@@ -74,6 +74,7 @@ go_test(
         "idlewatch_explicitstart_test.go",
         "idlewatch_integration_test.go",
         "idlewatch_test.go",
+        "idlewatch_timeout_test.go",
         "lifecycle_integration_test.go",
         "listenerowner_darwin_test.go",
         "listenerowner_linux_test.go",
