@@ -479,3 +479,124 @@ func TestBackupInitProxiedPreservesCloudURL(t *testing.T) {
 		}
 	}
 }
+
+// backupInitAcceptedFormsForTest is the accepted-forms suffix of the
+// unsupported-scheme refusal, spelled out here rather than read from
+// production so a change to the advertised list fails this test.
+const backupInitAcceptedFormsForTest = "accepted forms: https://, http://, file://, aws://, gs://, s3://, az://, oci://"
+
+// TestBackupInitRefusesUnsupportedSchemeBeforeRegistering pins the other half
+// of #6227: an unlisted URL-shaped destination is refused with the scheme
+// alone named (never the userinfo, host, path or query), in text and JSON,
+// on the direct and the managed-local proxied route, before anything is
+// registered, before the backup config is written, and without marking the
+// command as a write. Before the fix it was registered as a file:// path.
+//
+// Cannot be parallel: mutates store, uowProvider, proxiedServerMode,
+// jsonOutput and stdio.
+func TestBackupInitRefusesUnsupportedSchemeBeforeRegistering(t *testing.T) {
+	const input = "nope://user:secret@host/path?token=value"
+	const wantMsg = `unsupported backup URL scheme "nope"; ` + backupInitAcceptedFormsForTest
+	for _, tc := range []struct {
+		name       string
+		proxied    bool
+		asJSON     bool
+		seedConfig bool
+	}{
+		{name: "direct text", seedConfig: true},
+		{name: "direct json", asJSON: true},
+		{name: "proxied text", proxied: true},
+		{name: "proxied json", proxied: true, asJSON: true, seedConfig: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := prepareBackupInitTest(t, tc.asJSON)
+			direct := &recordingInitBackupStore{}
+			store = direct
+			proxy := &fakeMaintenanceProvider{}
+			if tc.proxied {
+				proxiedServerMode = true
+				if err := os.WriteFile(configfile.ProxiedServerClientInfoPath(beadsDir), []byte(`{}`), 0o600); err != nil {
+					t.Fatalf("write managed-local sidecar: %v", err)
+				}
+				uowProvider = proxy
+			}
+			cfgPath := filepath.Join(beadsDir, "dolt-backup.json")
+			seed := []byte(`{"backup_url": "file:///previous/backup", "backup_name": "default"}`)
+			if tc.seedConfig {
+				if err := os.WriteFile(cfgPath, seed, 0o600); err != nil {
+					t.Fatalf("seed backup config: %v", err)
+				}
+			}
+
+			stdout, stderr, err := runBackupInitForTest(t, input)
+			assertExitCode(t, err, 1)
+
+			if tc.asJSON {
+				if stderr != "" {
+					t.Errorf("stderr = %q, want empty under --json", stderr)
+				}
+				var resp map[string]any
+				if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+					t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+				}
+				if resp["error"] != wantMsg {
+					t.Errorf("JSON error = %q, want %q", resp["error"], wantMsg)
+				}
+			} else {
+				if stdout != "" {
+					t.Errorf("stdout = %q, want empty", stdout)
+				}
+				if want := "Error: " + wantMsg + "\n"; stderr != want {
+					t.Errorf("stderr = %q, want %q", stderr, want)
+				}
+			}
+			for _, secret := range []string{"user", "secret", "host", "path", "token", "value"} {
+				if strings.Contains(stdout+stderr, secret) {
+					t.Errorf("refusal output leaks %q from the URL:\nstdout: %s\nstderr: %s", secret, stdout, stderr)
+				}
+			}
+
+			if len(direct.adds) != 0 {
+				t.Errorf("direct BackupAdd calls = %+v, want none", direct.adds)
+			}
+			if proxy.runs != 0 {
+				t.Errorf("proxied maintenance calls = %d, want none", proxy.runs)
+			}
+			got, readErr := os.ReadFile(cfgPath)
+			switch {
+			case tc.seedConfig && (readErr != nil || string(got) != string(seed)):
+				t.Errorf("backup config = %q (err %v), want it left as %q", got, readErr, seed)
+			case !tc.seedConfig && !errors.Is(readErr, os.ErrNotExist):
+				t.Errorf("backup config written (%q, err %v), want none", got, readErr)
+			}
+			if commandDidWrite.Load() {
+				t.Error("commandDidWrite = true after a refused init, want false")
+			}
+		})
+	}
+}
+
+// TestValidateBackupInitTarget pins the refusal for each kind of unlisted
+// URL-shaped destination, including a listed scheme in another case: the
+// message names only the scheme token and the accepted forms.
+func TestValidateBackupInitTarget(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ input, scheme string }{
+		{"nope://host/path", "nope"},
+		{"dolthub://org/repo", "dolthub"},
+		{"git+ssh://git@github.com/org/repo.git", "git+ssh"},
+		{"oss://bucket/beads", "oss"},
+		{"S3://bucket/beads", "S3"},
+		{"HTTPS://doltremoteapi.dolthub.com/user/repo", "HTTPS"},
+		{"nope://user:secret@host/path?token=value", "nope"},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			t.Parallel()
+			err := validateBackupInitTarget(tc.input)
+			want := `unsupported backup URL scheme "` + tc.scheme + `"; ` + backupInitAcceptedFormsForTest
+			if err == nil || err.Error() != want {
+				t.Fatalf("validateBackupInitTarget(%q) = %v, want %q", tc.input, err, want)
+			}
+		})
+	}
+}
