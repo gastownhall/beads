@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -24,7 +23,18 @@ func EnsureUserConfigDefaults() error {
 
 	data, err := os.ReadFile(path) //nolint:gosec // path is a validated absolute user config path
 	if errors.Is(err, fs.ErrNotExist) {
-		return writeUserConfigBootstrap(path)
+		if err := writeUserConfigBootstrap(path); err != nil {
+			return err
+		}
+		// Read back what was published: this run's bootstrap, or the file a
+		// concurrent bd process created first. The defaults below then fill
+		// whatever it lacks. This is a single re-read, never a retry of the
+		// create, so a path that keeps reading as missing (a dangling
+		// symlink) cannot loop.
+		data, err = os.ReadFile(path) //nolint:gosec // path is a validated absolute user config path
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("ensure user config: %s is a dangling symlink", path)
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("ensure user config: read %s: %w", path, err)
@@ -59,23 +69,17 @@ func EnsureUserConfigDefaults() error {
 	return nil
 }
 
+// writeUserConfigBootstrap creates the missing user config with metrics on and
+// the default endpoint. A file that appeared since the caller's read (another
+// bd process, or a dangling symlink) is left alone and reported as success:
+// the caller re-reads the path once.
 func writeUserConfigBootstrap(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("ensure user config: mkdir %s: %w", filepath.Dir(path), err)
-	}
 	body := []byte("metrics:\n  disabled: false\n  endpoint: " + DefaultEndpoint + "\n")
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // path is from config.UserConfigYamlPath
-	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return EnsureUserConfigDefaults()
-		}
-		return fmt.Errorf("ensure user config: create %s: %w", path, err)
+	err := config.CreateUserConfigYaml(path, body)
+	if err == nil || errors.Is(err, config.ErrUserConfigExists) {
+		return nil
 	}
-	defer f.Close()
-	if _, err := f.Write(body); err != nil {
-		return fmt.Errorf("ensure user config: write %s: %w", path, err)
-	}
-	return nil
+	return fmt.Errorf("ensure user config: %w", err)
 }
 
 func userConfigHasLeaf(root *yaml.Node, parts ...string) bool {
