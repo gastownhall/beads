@@ -195,3 +195,38 @@ func TestCrossPrefixNonBlockingEdgeTypesDoNotExclude(t *testing.T) {
 		})
 	}
 }
+
+// TestCrossPrefixUnroutedOrAbsentTargetDoesNotBlock (GH#4647, AC-7): a target
+// with no route, one routed to a store this process cannot read issues from
+// (a proxied rig), and one the owning store does not hold are not blockers,
+// and none of them prints the unavailable-route warning.
+func TestCrossPrefixUnroutedOrAbsentTargetDoesNotBlock(t *testing.T) {
+	cases := map[string]struct {
+		target string
+		rig    *crossPrefixRig
+	}{
+		"no route":        {target: "zz-target", rig: &crossPrefixRig{store: &fakeStore{}}},
+		"unsupported":     {target: "gt-target", rig: &crossPrefixRig{store: &fakeStore{}, openErr: errors.Join(ErrNoIssueRoute, errors.New("proxied rig"))}},
+		"absent in owner": {target: "gt-missing", rig: &crossPrefixRig{store: &fakeStore{ready: []*types.Issue{issue("gt-target")}}}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			src := issue("hq-src")
+			raw := &fakeStore{
+				ready: []*types.Issue{src},
+				deps:  map[string][]*types.Dependency{src.ID: {externalDep(src.ID, tc.target, types.DepBlocks)}},
+			}
+			store, warnings := crossPrefixStore(raw, tc.rig)
+
+			if got := readyIDs(t, store); !slices.Equal(got, []string{src.ID}) {
+				t.Fatalf("ready = %v, want [%s]", got, src.ID)
+			}
+			if blocked, blockers, err := store.IsBlocked(t.Context(), src.ID); err != nil || blocked {
+				t.Fatalf("IsBlocked = %v, %v, %v; want false", blocked, blockers, err)
+			}
+			if len(*warnings) != 0 {
+				t.Fatalf("route warnings = %v, want none", *warnings)
+			}
+		})
+	}
+}

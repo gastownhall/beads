@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -93,4 +94,51 @@ func sourceRow(t *testing.T, ctx context.Context, s *dolt.DoltStore) sourceRowSt
 		t.Fatalf("GetDependencyRecords(hq-src1): %v", err)
 	}
 	return sourceRowState{status: issue.Status, updatedAt: issue.UpdatedAt.String(), edges: len(deps)}
+}
+
+// crossPrefixReadyIDs lists the IDs policy.GetReadyWork returns, sorted.
+func crossPrefixReadyIDs(t *testing.T, ctx context.Context, policy interface {
+	GetReadyWork(context.Context, types.WorkFilter) ([]*types.Issue, error)
+}) []string {
+	t.Helper()
+	issues, err := policy.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// TestReadyAdmitsUnroutedAndAbsentCrossPrefixTargets (GH#4647, AC-7) runs the
+// real CLI router end to end: a blocks edge to xx-missing, a prefix
+// routes.jsonl never names, and one to gt-nobody, which the gt- route reaches
+// but the rig does not hold, leave both sources ready, and neither prints an
+// unavailable-route warning.
+func TestReadyAdmitsUnroutedAndAbsentCrossPrefixTargets(t *testing.T) {
+	r := setupRelateRigs(t, nil)
+	seedIssue(t, r.ctx, r.town, "hq-src2")
+	for _, edge := range []struct{ source, target string }{
+		{source: "hq-src1", target: "xx-missing"},
+		{source: "hq-src2", target: "gt-nobody"},
+	} {
+		if err := r.town.AddDependency(r.ctx, &types.Dependency{IssueID: edge.source, DependsOnID: edge.target, Type: types.DepBlocks}, "test"); err != nil {
+			t.Fatalf("add %s blocks on %s: %v", edge.source, edge.target, err)
+		}
+	}
+	policy := wireStorageDecorators(r.town, nil, true, crossPrefixBlockerRouting())
+
+	var got []string
+	stderr := captureStderrForBackupLockTest(t, func() {
+		got = crossPrefixReadyIDs(t, r.ctx, policy)
+	})
+	if !slices.Contains(got, "hq-src1") || !slices.Contains(got, "hq-src2") {
+		t.Fatalf("ready = %v with an unrouted and an absent cross-prefix target; want hq-src1 and hq-src2", got)
+	}
+	if strings.Contains(stderr, "unavailable through their route") {
+		t.Fatalf("an unrouted or absent target printed a route warning:\n%s", stderr)
+	}
 }
