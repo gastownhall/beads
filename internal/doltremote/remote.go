@@ -8,11 +8,10 @@ import (
 // NativeSchemes are URL schemes that Dolt understands natively and should not
 // be converted through FromGitURL.
 //
-// This list is deliberately narrower than remotecache.remoteSchemes, the repo's
-// fuller scheme authority: az:// and oci:// are absent here. For az:// that gap
-// is tracked in #6227, which also covers dolt.IsBackupURL - the site where the
-// gap actually changes behavior - so completing this list on its own would
-// close only half of it.
+// This list is narrower than remotecache.remoteSchemes, the repo's fuller
+// scheme authority: oci:// is absent here. It is not the backup-init policy
+// either; `bd backup init` keeps its own accepted list (backupInitURLSchemes in
+// cmd/bd), which is where a scheme's absence changes behavior.
 //
 // Membership is not load-bearing either way. Every entry contains "://", which
 // isSCPStyleGitURL rejects outright, so Normalize's closing "return url"
@@ -24,6 +23,7 @@ var NativeSchemes = []string{
 	"aws://",
 	"gs://",
 	"s3://",
+	"az://",
 	"git+https://",
 	"git+ssh://",
 	"git+http://",
@@ -31,7 +31,7 @@ var NativeSchemes = []string{
 }
 
 // Normalize converts a remote URL to a Dolt-compatible format.
-// Dolt-native URLs (dolthub://, file://, aws://, gs://, s3://, git+...) are returned
+// Dolt-native URLs (dolthub://, file://, aws://, gs://, s3://, az://, git+...) are returned
 // as-is. Git URLs (https://, ssh://, git@...) are converted via FromGitURL.
 // Unknown schemes are returned as-is and let dolt clone decide.
 //
