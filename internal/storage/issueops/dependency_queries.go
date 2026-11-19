@@ -67,8 +67,9 @@ func getExternalBlockingDependencyRecordsIntoFromTable(ctx context.Context, tx D
 	}
 	// The cross-prefix leg picks up every bare id in the same column — the id
 	// a routed `bd dep add` stored for another rig's issue — of the types the
-	// read-time policy classifies (DependencyType.IsBlockingEdge, mirrored
-	// here in SQL: blocks, conditional-blocks, waits-for). All source statuses
+	// read-time policy classifies (types.IsGateEdge, mirrored here in SQL:
+	// blocks, conditional-blocks; a waits-for bare target is not a blocker,
+	// GH#4647 AC-6). All source statuses
 	// are returned: the served queries filter by their own semantics, and the
 	// caller (the policy) needs closed sources too, to leave them admitted.
 	// Every bare value this leg returns carries a foreign prefix, but the
@@ -79,7 +80,7 @@ func getExternalBlockingDependencyRecordsIntoFromTable(ctx context.Context, tx D
 		FROM %s
 		WHERE depends_on_external IS NOT NULL
 		  AND depends_on_external NOT LIKE 'external:%%'
-		  AND type IN ('blocks', 'conditional-blocks', 'waits-for')
+		  AND type IN ('blocks', 'conditional-blocks')
 		ORDER BY issue_id
 	`, DepTargetExpr, depTable), depTable, "cross-prefix blocking", result)
 }

@@ -86,16 +86,18 @@ func dependencyIsExternalCapabilityRef(dep *types.Dependency) bool {
 // dependencyIsCrossPrefixRef reports whether dep is a bare cross-prefix issue
 // target of a kind the policy guards: an id whose prefix names another
 // repository (not an external: ref, whose colon prefix disqualifies it),
-// attached with a blocking edge type. The source's own prefix decides: same
-// store, multi-prefix databases included — an id whose prefix equals the
-// source's is a local id, wherever the row physically sits.
+// attached with a blocks or conditional-blocks edge. The source's own prefix
+// decides: same store, multi-prefix databases included — an id whose prefix
+// equals the source's is a local id, wherever the row physically sits.
 //
-// The edge types deliberately mirror DependencyType.IsBlockingEdge at the
-// query layer (GetExternalBlockingDependencyRecordsInTx selects
-// blocks/conditional-blocks/waits-for): the Go filter and the SQL leg must
-// agree on which bare ids reach the policy at all.
+// The edge types deliberately mirror types.IsGateEdge at the query layer
+// (GetExternalBlockingDependencyRecordsInTx selects blocks and
+// conditional-blocks for the cross-prefix leg): the Go filter and the SQL leg
+// must agree on which bare ids reach the policy at all. Other bare cross-prefix
+// edge types — waits-for, relates-to — do not make their target a blocker
+// (GH#4647 AC-6): only the two types whose LOCAL semantics are hard blockers.
 func dependencyIsCrossPrefixRef(sourceID string, dep *types.Dependency) bool {
-	if isExternalReference(dep.DependsOnID) || !dep.Type.IsBlockingEdge() {
+	if isExternalReference(dep.DependsOnID) || !types.IsGateEdge(dep.Type) {
 		return false
 	}
 	sourcePrefix := types.ExtractPrefix(sourceID)

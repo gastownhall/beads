@@ -230,6 +230,50 @@ func TestCrossPrefixBlockerIsNamedByInspectionAndGuardsMutations(t *testing.T) {
 	}
 }
 
+// TestCrossPrefixNonBlockingEdgeTypesDoNotExclude pins AC-6 (GH#4647): only
+// blocks and conditional-blocks make a bare cross-prefix target a blocker. A
+// waits-for or relates-to edge onto another rig's open issue leaves its
+// source ready and unblocked — the same single classification the ready
+// evaluation, the blocked inspection and the close guard share, so no
+// collector may treat these edges as blockers.
+func TestCrossPrefixNonBlockingEdgeTypesDoNotExclude(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		depType types.DependencyType
+	}{
+		{name: "waits-for", depType: types.DepWaitsFor},
+		{name: "relates-to", depType: types.DepRelatesTo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := issue("be-a"), issue("be-b")
+			raw := &fakeStore{
+				ready: []*types.Issue{a, b},
+				deps: map[string][]*types.Dependency{
+					"be-a": {crossPrefixDep("be-a", "gt-target", tc.depType)},
+				},
+			}
+			router := &fakeIssueRouter{statuses: map[string]RoutedIssue{
+				"gt-target": {Verdict: IssueRouteFound, Status: types.StatusOpen},
+			}}
+			store := testStoreWithRouter(raw, router)
+
+			if got := readyIDList(t, store, types.WorkFilter{}); !slices.Equal(got, []string{"be-a", "be-b"}) {
+				t.Fatalf("ready IDs with an open bare %s cross-prefix edge = %v, want both sources", tc.name, got)
+			}
+			if n, err := store.CountReadyWork(t.Context(), types.WorkFilter{}); err != nil {
+				t.Fatalf("CountReadyWork: %v", err)
+			} else if n != 2 {
+				t.Fatalf("ready count with an open bare %s cross-prefix edge = %d, want 2", tc.name, n)
+			}
+			if blocked, blockers, err := store.IsBlocked(t.Context(), "be-a"); err != nil {
+				t.Fatalf("IsBlocked: %v", err)
+			} else if blocked || len(blockers) > 0 {
+				t.Fatalf("IsBlocked over an open bare %s cross-prefix edge = (%v, %v), want unblocked", tc.name, blocked, blockers)
+			}
+		})
+	}
+}
+
 // TestRouterlessPolicyInstanceHasLegacyCrossPrefixBehavior documents the
 // staged boundary: a policy instance with NO router (a serve chain, the
 // proxied provider) treats bare cross-prefix targets as blockers it cannot
