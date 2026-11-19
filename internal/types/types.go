@@ -1322,6 +1322,24 @@ type IssueDetails struct {
 	// leg, carries no gated_by.
 	GatedBy []GateRef `json:"gated_by,omitempty"`
 
+	// UnresolvableDependencyEdges carries the exact stored records behind the
+	// outgoing disclosure: one Dependency per far end that has no row in this
+	// database (GH#5850). UnresolvableDependencies below is derived from this
+	// list's length — never from DependencyCount — so a count gone stale
+	// under a concurrent write can no longer invent or hide a member, and a
+	// caller can finally ENUMERATE the edges the count has been summarizing.
+	// ADDITIVE and absent when the combined read answered none, which is also
+	// the shape a pre-change server answers with: the member is new on the
+	// wire, and its absence beside a positive UnresolvableDependencies means
+	// "count only, by a server that predates this member" rather than
+	// "verified empty".
+	//
+	// Records carry only what this database stored — DependsOnID, Type, the
+	// created/created_by/metadata/thread_id stamps the row carries. They are
+	// never padded into Issue stubs: a fake status on a row that does not
+	// exist would lie to every readiness and relations consumer at once.
+	UnresolvableDependencyEdges []*Dependency `json:"unresolvable_dependency_edges,omitempty"`
+
 	// UnresolvableDependencies / UnresolvableDependents count the edges
 	// DependencyCount / DependentCount include that the Dependencies /
 	// Dependents slices could not represent, because the issue on the far
@@ -1335,7 +1353,8 @@ type IssueDetails struct {
 	// Without these, the count is a number with no referent (be-lpi): a
 	// caller reads `dependency_count: 1` beside `dependencies: null`,
 	// finds nothing in `bd dep list`, and concludes the count is phantom.
-	// It is not — `bd dep list <id> <id>` shows the raw edge record.
+	// It is not — the edge record itself is readable, and since GH#5850 it
+	// travels in UnresolvableDependencyEdges above.
 	//
 	// Set only when the slice was actually READ and came back short. A
 	// failed or skipped read leaves them unset, because "could not be
@@ -1343,6 +1362,11 @@ type IssueDetails struct {
 	// signal — the same distinction CommentsOmitted draws above.
 	// UnresolvableDependents is therefore set only under
 	// DetailOptions.IncludeDependents, where the rows are collected.
+	//
+	// The OUTGOING count is the length of UnresolvableDependencyEdges, so the
+	// two are set and unset together; the INBOUND half keeps its
+	// count-minus-rows derivation, because no inbound record list exists to
+	// derive it from.
 	//
 	// That gate is on this field only, and the two planes disagree because of
 	// it: `bd show` in text mode reads dependents unconditionally, so a human

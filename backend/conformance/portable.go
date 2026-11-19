@@ -34,6 +34,7 @@ func RunPortableMethods(t *testing.T, factory Factory) {
 	t.Run("RepoMtime", func(t *testing.T) { testRepoMtime(t, factory) })
 	t.Run("AllEventsSince", func(t *testing.T) { testGetAllEventsSince(t, factory) })
 	t.Run("AllDependencyRecords", func(t *testing.T) { testGetAllDependencyRecords(t, factory) })
+	t.Run("GetDependenciesWithUnresolvable", func(t *testing.T) { testGetDependenciesWithUnresolvable(t, factory) })
 	t.Run("IterAllDependencyRecords", func(t *testing.T) { testIterAllDependencyRecords(t, factory) })
 	t.Run("IterAllEventsSince", func(t *testing.T) { testIterAllEventsSince(t, factory) })
 	t.Run("CountDependentsByStatus", func(t *testing.T) { testCountDependentsByStatus(t, factory) })
@@ -52,6 +53,17 @@ func RunPortableMethods(t *testing.T, factory Factory) {
 }
 
 // --- helpers (file-private) ---
+
+// depTargets2 is depTargets for the hydrated metadata rows: the id on the
+// far end, sorted.
+func depTargets2(deps []*types.IssueWithDependencyMetadata) []string {
+	out := make([]string, len(deps))
+	for i, d := range deps {
+		out[i] = d.ID
+	}
+	sort.Strings(out)
+	return out
+}
 
 func depTargets(deps []*types.Dependency) []string {
 	out := make([]string, len(deps))
@@ -313,6 +325,68 @@ func testGetAllDependencyRecords(t *testing.T, f Factory) {
 	must(t, err)
 	if len(m["test-b"]) != 0 {
 		t.Errorf("after remove, test-b still has %v", depTargets(m["test-b"]))
+	}
+}
+
+// testGetDependenciesWithUnresolvable pins the combined outgoing read
+// (GH#5850): the resolved half carries only far ends that have rows here,
+// the unresolvable half carries the exact stored records of the rest — one
+// per far-end id, sorted, durable stamps — and the old metadata reader
+// equals the resolved portion.
+func testGetDependenciesWithUnresolvable(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	const anchor = "test-xu"
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: anchor, Title: "anchor"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-xl", Title: "local target"}), "a"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: anchor, DependsOnID: "test-xl", Type: types.DepBlocks}, "actor"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: anchor, DependsOnID: "liveop-miss", Type: types.DepTracks}, "actor"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: anchor, DependsOnID: "external:liveop:ext", Type: types.DepWaitsFor}, "actor"))
+
+	resolved, unresolvable, err := s.GetDependenciesWithUnresolvable(c, anchor)
+	must(t, err)
+	if got := depTargets2(resolved); !slices.Equal(got, []string{"test-xl"}) {
+		t.Fatalf("resolved = %v, want only the local target", got)
+	}
+	if len(unresolvable) != 2 {
+		t.Fatalf("unresolvable = %+v, want the two missing targets", unresolvable)
+	}
+	// Sorted by far-end id, one record each, exact stored shape.
+	want := []struct {
+		far string
+		typ types.DependencyType
+	}{
+		{"external:liveop:ext", types.DepWaitsFor},
+		{"liveop-miss", types.DepTracks},
+	}
+	for i, w := range want {
+		rec := unresolvable[i]
+		if rec.DependsOnID != w.far || rec.IssueID != anchor || rec.Type != w.typ || rec.CreatedBy != "actor" {
+			t.Errorf("unresolvable[%d] = %+v, want the exact stored record for %q", i, rec, w.far)
+		}
+	}
+
+	// The old metadata reader equals the resolved portion.
+	old, err := s.GetDependenciesWithMetadata(c, anchor)
+	must(t, err)
+	if got := depTargets2(old); !slices.Equal(got, []string{"test-xl"}) {
+		t.Errorf("GetDependenciesWithMetadata = %v, want the resolved portion", got)
+	}
+
+	// Negative control: a fully local anchor answers an empty unresolvable
+	// list, never a phantom. Fresh ids, so the edges cannot close a cycle
+	// against the anchor's above.
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-xa", Title: "local anchor"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-xb", Title: "local target"}), "a"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: "test-xa", DependsOnID: "test-xb", Type: types.DepBlocks}, "actor"))
+	localResolved, localUnresolvable, err := s.GetDependenciesWithUnresolvable(c, "test-xa")
+	must(t, err)
+	if len(localResolved) != 1 || localResolved[0].ID != "test-xb" {
+		t.Errorf("local anchor resolved = %v, want the one local edge", localResolved)
+	}
+	if len(localUnresolvable) != 0 {
+		t.Errorf("local anchor unresolvable = %+v, want none", localUnresolvable)
 	}
 }
 

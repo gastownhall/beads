@@ -108,6 +108,10 @@ The `beads.Storage` interface provides:
 - `AddDependency(ctx, dep, actor)` - Add dependency between issues
 - `RemoveDependency(ctx, issueID, dependsOnID, actor)` - Remove dependency
 - `GetDependencies(ctx, issueID)` - Get what this issue depends on
+- `GetDependenciesWithUnresolvable(ctx, issueID)` - The combined outgoing
+  read: the hydrated far-end issues plus the exact stored records
+  (`[]*beads.Dependency`) of edges whose target has no row in this database
+  (a cross-repo id or an `external:` reference), both from one transaction
 - `GetDependents(ctx, issueID)` - Get what depends on this issue
 - `GetDependencyTree(ctx, issueID, maxDepth, showAllPaths)` - Visualize tree
 
@@ -149,6 +153,13 @@ The `beads.Storage` interface provides:
 > `UpdateIssueChecked` with a nil `opts.ExpectedVersion` is identical to
 > `UpdateIssue`, and `MergeMetadata` can be layered over a read-modify-write of
 > the issue's metadata.
+>
+> The same applies to `GetDependenciesWithUnresolvable` (GH#5850): it is a
+> required method on `beads.Storage`, and an implementer that has no combined
+> read can satisfy it with the resolved half of its existing
+> `GetDependenciesWithMetadata` plus a nil record list — or, where the honest
+> answer is "this backend cannot answer that" (as the built-in HTTP client
+> does), a typed `*beads.ErrUnsupported`.
 
 ## Types
 

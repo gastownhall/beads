@@ -10,22 +10,23 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// skewSource is a DetailSource whose COUNTS and ROWS are set independently.
+// skewSource is a DetailSource whose COUNTS and RECORDS are set
+// independently.
 //
-// The shared fakeStoreReader derives both from one slice, so it can only ever
-// produce a store where they agree — which is exactly the state this test has
-// to move away from. A real backend derives them from two different queries:
-// the counts are a plain COUNT(*) over the dependency tables, while the rows
-// are the issues on the far end and silently omit any id with no row in this
-// database (issueops.GetDependenciesWithMetadataInTx's `continue`). A
-// cross-repo or `external:` target hits that gap by construction, since
-// depends_on_external is the one target column carrying no foreign key into
-// issues.
+// The shared fakeStoreReader derives both from one dataset, so it can only
+// ever produce a store where they agree — which is exactly the state this
+// test has to move away from. A real backend derives them from different
+// queries: the counts are a plain COUNT(*) over the dependency tables, while
+// the combined read returns the hydrated far-end issues plus the exact stored
+// records of the edges whose target has no row in this database. The two can
+// disagree under a concurrent write, and the assertions below pin which
+// member the disclosure follows (the records, never the count).
 type skewSource struct {
 	issue *types.Issue
 
-	deps    []*types.IssueWithDependencyMetadata
-	depsErr error
+	deps         []*types.IssueWithDependencyMetadata
+	unresolvable []*types.Dependency
+	depsErr      error
 
 	dependents []*types.IssueWithDependencyMetadata
 
@@ -40,8 +41,8 @@ func (s skewSource) GetWisp(_ context.Context, id string) (*types.Issue, error) 
 	return nil, notFound(id)
 }
 func (s skewSource) Labels(_ context.Context, _ string, _ bool) ([]string, error) { return nil, nil }
-func (s skewSource) Dependencies(_ context.Context, _ string, _ bool) ([]*types.IssueWithDependencyMetadata, error) {
-	return s.deps, s.depsErr
+func (s skewSource) Dependencies(_ context.Context, _ string, _ bool) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return s.deps, s.unresolvable, s.depsErr
 }
 func (s skewSource) CountDependencies(_ context.Context, _ string, _ bool) (int64, error) {
 	return s.depCount, s.depCountErr
@@ -63,19 +64,25 @@ func depRow(id string, t types.DependencyType) *types.IssueWithDependencyMetadat
 	return &types.IssueWithDependencyMetadata{Issue: types.Issue{ID: id}, DependencyType: t}
 }
 
-// TestBuildIssueDetails_UnresolvableDependencies pins be-lpi: a dependency
-// edge whose target has no row in this database counts toward
-// dependency_count and cannot appear in the dependencies slice, and that
-// difference must be published rather than left for the caller to infer.
+// TestBuildIssueDetails_UnresolvableDependencies pins be-lpi and GH#5850: a
+// dependency edge whose target has no row in this database counts toward
+// dependency_count, cannot appear in the dependencies slice, and since
+// GH#5850 travels as its exact stored record in
+// unresolvable_dependency_edges — with unresolvable_dependencies derived from
+// that list's length rather than from the count, so a count gone stale under
+// a concurrent write can no longer invent or hide a member.
 //
-// The convoy case that produced the report is the one-edge, zero-row row:
-// hq-cv-ftcra carries a single `tracks` edge to
+// The convoy case that produced the original report is the one-edge, zero-row
+// store: hq-cv-ftcra carries a single `tracks` edge to
 // external:liveop:liveop-kmf, so bd show --json answered
 // dependency_count 1 beside dependencies:null and every enumeration path
 // agreed the edge did not exist.
 func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 	ctx := context.Background()
 	issue := &types.Issue{ID: "rp-1"}
+	rec := func(far string) *types.Dependency {
+		return &types.Dependency{IssueID: "rp-1", DependsOnID: far, Type: types.DepTracks, CreatedBy: "porter"}
+	}
 
 	tests := []struct {
 		name  string
@@ -84,17 +91,23 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 		count int64
 	}{
 		{
-			name:  "all edges unresolvable",
-			src:   skewSource{issue: issue, deps: nil, depCount: 1},
+			name: "all edges unresolvable",
+			src: skewSource{
+				issue:        issue,
+				deps:         nil,
+				unresolvable: []*types.Dependency{rec("liveop-kmf")},
+				depCount:     1,
+			},
 			want:  ptr64(1),
 			count: 1,
 		},
 		{
 			name: "one of two edges unresolvable",
 			src: skewSource{
-				issue:    issue,
-				deps:     []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
-				depCount: 2,
+				issue:        issue,
+				deps:         []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
+				unresolvable: []*types.Dependency{rec("external:liveop:liveop-kmf")},
+				depCount:     2,
 			},
 			want:  ptr64(1),
 			count: 2,
@@ -119,26 +132,34 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 			count: 0,
 		},
 		{
-			// A FAILED read and a SHORT read both leave the slice
+			// A FAILED read and a SHORT read both leave the slices
 			// empty. Only the first must stay silent: reporting it
 			// would announce a data property on the strength of a
 			// query that never ran.
-			name:  "dependency read failed, not merely short",
-			src:   skewSource{issue: issue, depsErr: errors.New("backend down"), depCount: 3},
+			name: "dependency read failed, not merely short",
+			src: skewSource{
+				issue:        issue,
+				depsErr:      errors.New("backend down"),
+				unresolvable: []*types.Dependency{rec("liveop-kmf")},
+				depCount:     3,
+			},
 			want:  nil,
 			count: 3,
 		},
 		{
-			// Symmetric: a failed COUNT yields 0, and 0 minus a
-			// populated slice is negative, but say so explicitly
-			// rather than relying on the sign.
-			name: "count read failed",
+			// The count no longer feeds the disclosure, so its failure
+			// no longer suppresses it: the records were read
+			// successfully and are the truth, and a count that never
+			// ran is not evidence against them. The reversal is
+			// deliberate — this case answered "unset" before GH#5850.
+			name: "count read failed, records still answer",
 			src: skewSource{
-				issue:       issue,
-				deps:        []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
-				depCountErr: errors.New("backend down"),
+				issue:        issue,
+				deps:         []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
+				unresolvable: []*types.Dependency{rec("liveop-kmf")},
+				depCountErr:  errors.New("backend down"),
 			},
-			want:  nil,
+			want:  ptr64(1),
 			count: 0,
 		},
 	}
@@ -159,6 +180,24 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 				t.Errorf("UnresolvableDependencies unset, want %d", *tc.want)
 			case tc.want != nil && *details.UnresolvableDependencies != *tc.want:
 				t.Errorf("UnresolvableDependencies = %d, want %d", *details.UnresolvableDependencies, *tc.want)
+			}
+			// The record list and the count are set and unset together,
+			// and the count is the list's length.
+			switch {
+			case tc.want == nil && details.UnresolvableDependencyEdges != nil:
+				t.Errorf("UnresolvableDependencyEdges = %v, want unset", details.UnresolvableDependencyEdges)
+			case tc.want != nil && details.UnresolvableDependencyEdges == nil:
+				t.Errorf("UnresolvableDependencyEdges unset, want %d records", *tc.want)
+			case tc.want != nil && int64(len(details.UnresolvableDependencyEdges)) != *tc.want:
+				t.Errorf("UnresolvableDependencyEdges has %d records, want %d",
+					len(details.UnresolvableDependencyEdges), *tc.want)
+			}
+			// The dependencies slice carries only real issues: no
+			// stub for a far end that has no row.
+			for _, dep := range details.Dependencies {
+				if dep == nil || dep.ID == "" {
+					t.Errorf("dependencies carries a stub row: %+v", dep)
+				}
 			}
 		})
 	}
@@ -236,13 +275,13 @@ func (m *mutatingSource) GetWisp(_ context.Context, id string) (*types.Issue, er
 func (m *mutatingSource) Labels(_ context.Context, _ string, _ bool) ([]string, error) {
 	return nil, nil
 }
-func (m *mutatingSource) Dependencies(_ context.Context, _ string, _ bool) ([]*types.IssueWithDependencyMetadata, error) {
+func (m *mutatingSource) Dependencies(_ context.Context, _ string, _ bool) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
 	n := m.observe()
 	out := make([]*types.IssueWithDependencyMetadata, 0, n)
 	for i := 0; i < n; i++ {
 		out = append(out, depRow(fmt.Sprintf("rp-%d", i+2), types.DepBlocks))
 	}
-	return out, nil
+	return out, nil, nil
 }
 func (m *mutatingSource) CountDependencies(_ context.Context, _ string, _ bool) (int64, error) {
 	return int64(m.observe()), nil
@@ -260,21 +299,16 @@ func (m *mutatingSource) IterComments(_ context.Context, _ string, _ bool) (stor
 	return storage.NewSliceIter[types.Comment](nil), nil
 }
 
-// TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable pins the
-// ORDER of the two reads, which is the only defence the store-backed source
-// has against a write landing between them. (The UOW source runs the whole
-// build inside one read transaction and needs none.)
+// TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable pins that a
+// write landing between the two reads cannot manufacture an unresolvable
+// report. Before GH#5850 the defence was the ORDER of the reads (count first,
+// so an add in the window left the delta negative and suppressed); since
+// GH#5850 the disclosure is derived from the combined read's own records and
+// the order is defence-in-depth for the INBOUND delta alone, which is still
+// count-minus-rows.
 //
-// The count is read FIRST, so an edge added in the window leaves it
-// stale-LOW: the difference goes negative and nothing is reported. Read
-// afterwards it would be stale-HIGH, and a freshly added, perfectly ordinary
-// local edge would be published as unresolvable — a false claim about the
-// data, which is the expensive direction. Found by a codex review of the
-// first cut of this change.
-//
-// The source above mutates between calls, so swapping the two reads in
-// BuildIssueDetails turns this red. That is the control; without it the case
-// passes under either order.
+// The source above mutates between calls, so a regression that reintroduces
+// an outgoing count-based delta turns this red.
 func TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable(t *testing.T) {
 	ctx := context.Background()
 	issue := &types.Issue{ID: "rp-1"}
@@ -285,8 +319,11 @@ func TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable(t *testing.T
 		t.Fatalf("BuildIssueDetails: %v", err)
 	}
 	if details.UnresolvableDependencies != nil {
-		t.Errorf("UnresolvableDependencies = %d, want unset — a count read before a concurrent add is stale-low, not evidence of an unrenderable edge; are the two reads still in count-then-listing order?",
+		t.Errorf("UnresolvableDependencies = %d, want unset — a count read before a concurrent add is stale-low, not evidence of an unrenderable edge",
 			*details.UnresolvableDependencies)
+	}
+	if details.UnresolvableDependencyEdges != nil {
+		t.Errorf("UnresolvableDependencyEdges = %v, want unset — the combined read answered no missing targets", details.UnresolvableDependencyEdges)
 	}
 }
 

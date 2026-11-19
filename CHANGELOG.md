@@ -172,6 +172,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`unresolvable_dependency_edges`: the detail view now enumerates the edges
+  it could only count.** `GetDependenciesWithMetadata` silently dropped every
+  dependency edge whose target has no row in this database (a cross-repo id
+  or an `external:` reference), so `bd show --json` answered
+  `dependency_count: 1` beside `dependencies: null` with nothing saying the
+  edge was real, and `bd show` in text mode rendered no section at all. The
+  new combined read — `Storage.GetDependenciesWithUnresolvable` on the SDK
+  surface, `unresolvable_dependency_edges` on the `GET /v0/beads/issues/{id}`
+  detail body and `bd show --json` — answers both halves from one
+  transaction: the hydrated far-end issues, plus one exact stored record per
+  missing far end, sorted, with the durable row's stamps when both planes
+  carry the same edge. `unresolvable_dependencies` is now derived from that
+  record list's length rather than from the count, so a count gone stale
+  under a concurrent write can no longer invent or hide a member. `bd show`
+  renders each record in its relation section as `(not in this database)`
+  instead of warning about a nameless count. A pre-change server answers
+  without the new member; a new client reads that as count-only disclosure
+  and never invents records, and the built-in HTTP client refuses an exact
+  combined-read call with the typed unsupported error rather than answering a
+  falsely-complete empty result.
+  **BREAKING (out-of-tree storage backends):** `GetDependenciesWithUnresolvable`
+  is now a required method on the `beads.Storage` interface; implementers must
+  add it (an embedded `beads.Storage` delegate or the typed
+  `*beads.ErrUnsupported` refusal both satisfy it — see
+  `examples/library-usage`).
+  ([#5850](https://github.com/gastownhall/beads/issues/5850))
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,

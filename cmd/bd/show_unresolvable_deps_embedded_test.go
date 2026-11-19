@@ -68,6 +68,21 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 					details["unresolvable_dependencies"])
 			}
 
+			// GH#5850: the exact stored record travels beside the
+			// count — one record, the target id the caller typed,
+			// the type the edge carries, and the anchor it belongs
+			// to. No stub issue, no invented status.
+			edges, isList := details["unresolvable_dependency_edges"].([]interface{})
+			if !isList || len(edges) != 1 {
+				t.Fatalf("unresolvable_dependency_edges = %v, want the one stored record",
+					details["unresolvable_dependency_edges"])
+			}
+			rec, isMap := edges[0].(map[string]interface{})
+			if !isMap || rec["depends_on_id"] != tc.target || rec["issue_id"] != subject.ID || rec["type"] != tc.depTyp {
+				t.Fatalf("unresolvable_dependency_edges[0] = %v, want the exact stored record for %q",
+					edges[0], tc.target)
+			}
+
 			// Text mode: the notice goes to stderr, so stdout stays
 			// byte-identical for scripts. Assert on stderr alone, or
 			// this passes on a build that prints nothing anywhere.
@@ -91,6 +106,9 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 		details := bdShowDetails(t, bd, dir, anchor.ID)
 		if v, present := details["unresolvable_dependencies"]; present {
 			t.Errorf("unresolvable_dependencies = %v on a fully local edge, want absent", v)
+		}
+		if v, present := details["unresolvable_dependency_edges"]; present {
+			t.Errorf("unresolvable_dependency_edges = %v on a fully local edge, want absent", v)
 		}
 		deps, _ := details["dependencies"].([]interface{})
 		if len(deps) != 1 {

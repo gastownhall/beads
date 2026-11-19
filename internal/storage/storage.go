@@ -519,6 +519,18 @@ type Storage interface {
 	GetDependencies(ctx context.Context, issueID string) ([]*types.Issue, error)
 	GetDependents(ctx context.Context, issueID string) ([]*types.Issue, error)
 	GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
+	// GetDependenciesWithUnresolvable is the combined outgoing read (GH#5850):
+	// resolved carries the hydrated far-end issues — the exact answer
+	// GetDependenciesWithMetadata gives — and unresolvable carries the exact
+	// stored edge records whose far end has no row in this database, one
+	// record per far-end id, durable row winning a cross-plane duplicate.
+	// Both halves come from one transaction, so they never disagree under a
+	// concurrent write the count-based disclosure used to skew on.
+	//
+	// Adding this member to Storage is a breaking change for out-of-tree
+	// implementations; the migration note is in CHANGELOG.md and
+	// examples/library-usage.
+	GetDependenciesWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 	GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
 	GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error)
 

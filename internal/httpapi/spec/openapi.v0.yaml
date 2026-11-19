@@ -8419,11 +8419,17 @@ components:
             here, so the listing drops it while the count keeps it.
 
 
+            DERIVED from `unresolvable_dependency_edges`' length, never from
+            `dependency_count` itself, so a count gone stale under a
+            concurrent write can neither invent nor hide a member. The two
+            members are therefore always set and unset together.
+
+
             Without it the count reads as phantom: a caller sees
             `dependency_count: 1` beside an absent `dependencies`, finds
             nothing under that id anywhere, and concludes the count is wrong.
-            It is not — the edge record itself is readable, and on the CLI
-            `bd dep list <id> <id>` prints it.
+            It is not — the edge records themselves travel in
+            `unresolvable_dependency_edges`.
 
 
             ABSENT, NEVER ZERO, WHEN THERE IS NOTHING TO REPORT, and absent
@@ -8431,6 +8437,25 @@ components:
             "Could not be represented" and "was never fetched" are different
             facts and do not collapse into one member — the same distinction
             `comments_omitted` draws.
+        unresolvable_dependency_edges:
+          type: array
+          description: >-
+            The exact stored edge records behind `unresolvable_dependencies`:
+            one `Dependency` per far end that has no row in this database,
+            whatever stamps the stored row carries and nothing invented. A
+            caller can finally ENUMERATE the edges the count has been
+            summarizing, and `bd show` renders each one in its relation
+            section rather than as a nameless count.
+
+
+            ABSENT when the combined read answered no missing targets, which
+            for a pre-change server is indistinguishable from "does not know
+            the member": such a response may carry a positive
+            `unresolvable_dependencies` with this member absent, and a client
+            must read THAT as count-only disclosure, not as a verified-empty
+            edge list.
+          items:
+            $ref: '#/components/schemas/Dependency'
         unresolvable_dependents:
           type: integer
           format: int64

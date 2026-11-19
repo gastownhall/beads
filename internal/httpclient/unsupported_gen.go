@@ -267,6 +267,11 @@ func (unsupportedDoltStorage) GetDependencies(_ context.Context, _ string) (_ []
 	return
 }
 
+func (unsupportedDoltStorage) GetDependenciesWithUnresolvable(_ context.Context, _ string) (_ []*types.IssueWithDependencyMetadata, _ []*types.Dependency, err error) {
+	err = errUnsupported("GetDependenciesWithUnresolvable")
+	return
+}
+
 func (unsupportedDoltStorage) GetDependencyCounts(_ context.Context, _ []string) (_ map[string]*types.DependencyCounts, err error) {
 	err = errUnsupported("GetDependencyCounts")
 	return
@@ -717,4 +722,4 @@ func (unsupportedDoltStorage) VersionReconciler() (_ issueops.VersionReconciler,
 	return
 }
 
-// NOTE: partial shell (140 of 205 methods generated; 65 left to this package's hand-written set).
+// NOTE: partial shell (141 of 206 methods generated; 65 left to this package's hand-written set).

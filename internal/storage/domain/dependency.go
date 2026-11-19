@@ -144,6 +144,11 @@ type DependencySQLRepository interface {
 	HasCycle(ctx context.Context, issueID, dependsOnID string) (bool, error)
 	ListByIssueIDs(ctx context.Context, issueIDs []string, opts DepListOpts) (DepBulkResult, error)
 	ListWithIssueMetadata(ctx context.Context, sourceID string, opts DepListOpts) ([]*types.IssueWithDependencyMetadata, error)
+	// ListOutgoingWithUnresolvable is the combined outgoing read GH#5850
+	// added: hydrated far-end issues plus the exact stored edge records whose
+	// target has no row in this database, from one transaction. One method
+	// serves both anchor planes — see the db implementation.
+	ListOutgoingWithUnresolvable(ctx context.Context, sourceID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 	IterWithIssueMetadata(ctx context.Context, sourceID string, opts DepListOpts) (storage.Iter[types.IssueWithDependencyMetadata], error)
 	CountByID(ctx context.Context, sourceID string, opts DepListOpts) (int64, error)
 	CountsByIssueIDs(ctx context.Context, issueIDs []string, opts DepCountsOpts) (map[string]*types.DependencyCounts, error)
@@ -202,6 +207,18 @@ type DependencyUseCase interface {
 	Reparent(ctx context.Context, childID, newParentID, actor string) error
 	ListByIssueIDs(ctx context.Context, issueIDs []string, filter DepListFilter) (DepBulkResult, error)
 	ListWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) ([]*types.IssueWithDependencyMetadata, error)
+	// ListWithUnresolvable is the combined outgoing read GH#5850 added, for a
+	// durable anchor: the resolved far-end issues plus the exact stored edge
+	// records whose target has no row in this database. The resolved half is
+	// byte-for-byte what ListWithIssueMetadata answers with an outgoing
+	// filter; the unresolvable half is the disclosure that used to be
+	// count-only.
+	ListWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
+	// ListWispWithUnresolvable is ListWithUnresolvable for a wisp anchor. The
+	// repository body is anchor-plane-agnostic (both dependency planes are
+	// keyed by the anchor's id), so this delegates to the same call rather
+	// than carrying a plane flag of its own.
+	ListWispWithUnresolvable(ctx context.Context, wispID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error)
 	IterWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error)
 	CountByIssueID(ctx context.Context, issueID string, filter DepListFilter) (int64, error)
 	CountsByIssueIDs(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error)
@@ -479,6 +496,25 @@ func (u *dependencyUseCaseImpl) ListByIssueIDs(ctx context.Context, issueIDs []s
 
 func (u *dependencyUseCaseImpl) ListWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) ([]*types.IssueWithDependencyMetadata, error) {
 	return u.listWithMetadata(ctx, issueID, filter, false)
+}
+
+func (u *dependencyUseCaseImpl) ListWithUnresolvable(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return u.listWithUnresolvable(ctx, issueID)
+}
+
+func (u *dependencyUseCaseImpl) ListWispWithUnresolvable(ctx context.Context, wispID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return u.listWithUnresolvable(ctx, wispID)
+}
+
+func (u *dependencyUseCaseImpl) listWithUnresolvable(ctx context.Context, sourceID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	if sourceID == "" {
+		return nil, nil, fmt.Errorf("list dep metadata with unresolvable: sourceID must not be empty")
+	}
+	resolved, unresolvable, err := u.depRepo.ListOutgoingWithUnresolvable(ctx, sourceID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list dep metadata with unresolvable: %w", err)
+	}
+	return resolved, unresolvable, nil
 }
 
 func (u *dependencyUseCaseImpl) IterWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error) {

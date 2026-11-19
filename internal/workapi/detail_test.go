@@ -25,6 +25,10 @@ type detailFixture struct {
 	deps       map[string][]*types.IssueWithDependencyMetadata
 	dependents map[string][]*types.IssueWithDependencyMetadata
 	comments   map[string][]*types.Comment
+	// unresolvable holds the stored edge records whose far end has no row in
+	// this database (GH#5850). Empty for every id but bd-xedge, so the
+	// pre-existing assertions about a fully local store are unaffected.
+	unresolvable map[string][]*types.Dependency
 }
 
 func newDetailFixture() *detailFixture {
@@ -36,6 +40,7 @@ func newDetailFixture() *detailFixture {
 			"bd-epic":     {ID: "bd-epic", Title: "Epic", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1},
 			"bd-epic-dup": {ID: "bd-epic-dup", Title: "Epic with a duplicate close", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1},
 			"bd-chat":     {ID: "bd-chat", Title: "Has comments", IssueType: types.TypeTask, Status: types.StatusOpen},
+			"bd-xedge":    {ID: "bd-xedge", Title: "Mixed local and unresolvable edges", IssueType: types.TypeTask, Status: types.StatusOpen},
 		},
 		wisps: map[string]*types.Issue{
 			"bd-w1": {ID: "bd-w1", Title: "Ephemeral wisp", IssueType: types.TypeTask, Status: types.StatusOpen},
@@ -48,6 +53,9 @@ func newDetailFixture() *detailFixture {
 			"bd-1": {
 				{Issue: types.Issue{ID: "bd-parent", Title: "Parent"}, DependencyType: types.DepParentChild},
 				{Issue: types.Issue{ID: "bd-blocker", Title: "Blocker"}, DependencyType: types.DepBlocks},
+			},
+			"bd-xedge": {
+				{Issue: types.Issue{ID: "bd-1", Title: "Durable issue"}, DependencyType: types.DepBlocks},
 			},
 			"bd-w1": {
 				{Issue: types.Issue{ID: "bd-1", Title: "Durable issue"}, DependencyType: types.DepBlocks},
@@ -82,6 +90,13 @@ func newDetailFixture() *detailFixture {
 			},
 			"bd-w1": {
 				{ID: "c3", IssueID: "bd-w1", Author: "carol", Text: "wisp comment"},
+			},
+		},
+		unresolvable: map[string][]*types.Dependency{
+			// Sorted by far-end id, the order the combined read answers in.
+			"bd-xedge": {
+				{IssueID: "bd-xedge", DependsOnID: "external:liveop:liveop-kmf", Type: types.DepTracks, CreatedBy: "porter"},
+				{IssueID: "bd-xedge", DependsOnID: "liveop-kmf", Type: types.DepBlocks, CreatedBy: "porter"},
 			},
 		},
 	}
@@ -125,8 +140,12 @@ func (f fakeStoreReader) GetDependenciesWithMetadata(_ context.Context, id strin
 	return f.fx.deps[id], nil
 }
 
+func (f fakeStoreReader) GetDependenciesWithUnresolvable(_ context.Context, id string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return f.fx.deps[id], f.fx.unresolvable[id], nil
+}
+
 func (f fakeStoreReader) CountDependencies(_ context.Context, id string) (int64, error) {
-	return int64(len(f.fx.deps[id])), nil
+	return int64(len(f.fx.deps[id]) + len(f.fx.unresolvable[id])), nil
 }
 
 func (f fakeStoreReader) CountDependents(_ context.Context, id string) (int64, error) {
@@ -230,6 +249,20 @@ func (f fakeDepUC) ListWispWithIssueMetadata(_ context.Context, id string, filte
 	return f.rows(id, filter), nil
 }
 
+func (f fakeDepUC) ListWithUnresolvable(_ context.Context, id string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	if f.fx.isWisp(id) {
+		return nil, nil, fmt.Errorf("ListWithUnresolvable called for wisp %s", id)
+	}
+	return f.fx.deps[id], f.fx.unresolvable[id], nil
+}
+
+func (f fakeDepUC) ListWispWithUnresolvable(_ context.Context, id string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	if !f.fx.isWisp(id) {
+		return nil, nil, fmt.Errorf("ListWispWithUnresolvable called for durable issue %s", id)
+	}
+	return f.fx.deps[id], f.fx.unresolvable[id], nil
+}
+
 func (f fakeDepUC) IterWithIssueMetadata(ctx context.Context, id string, filter domain.DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error) {
 	rows, err := f.ListWithIssueMetadata(ctx, id, filter)
 	if err != nil {
@@ -248,12 +281,29 @@ func (f fakeDepUC) IterWispWithIssueMetadata(ctx context.Context, id string, fil
 
 func (f fakeDepUC) CountByIssueID(ctx context.Context, id string, filter domain.DepListFilter) (int64, error) {
 	rows, err := f.ListWithIssueMetadata(ctx, id, filter)
-	return int64(len(rows)), err
+	if err != nil {
+		return 0, err
+	}
+	// The count keeps the unresolvable records — but only on the direction
+	// they belong to: they are OUTGOING edges and must not swell a dependents
+	// count.
+	n := len(rows)
+	if filter.Direction == domain.DepDirectionOut || filter.Direction == domain.DepDirectionBoth {
+		n += len(f.fx.unresolvable[id])
+	}
+	return int64(n), nil
 }
 
 func (f fakeDepUC) CountByWispID(ctx context.Context, id string, filter domain.DepListFilter) (int64, error) {
 	rows, err := f.ListWispWithIssueMetadata(ctx, id, filter)
-	return int64(len(rows)), err
+	if err != nil {
+		return 0, err
+	}
+	n := len(rows)
+	if filter.Direction == domain.DepDirectionOut || filter.Direction == domain.DepDirectionBoth {
+		n += len(f.fx.unresolvable[id])
+	}
+	return int64(n), nil
 }
 
 type fakeCommentUC struct{ fx *detailFixture }
@@ -421,7 +471,7 @@ func TestDetailSourceConformance(t *testing.T) {
 	fx := newDetailFixture()
 	store, useCase := fixtureSources(fx)
 
-	ids := []string{"bd-1", "bd-epic", "bd-chat", "bd-w1"}
+	ids := []string{"bd-1", "bd-epic", "bd-chat", "bd-w1", "bd-xedge"}
 	optionSets := []struct {
 		name string
 		opts DetailOptions
@@ -872,5 +922,55 @@ func TestBuildIssueDetailsGatedByReadsTheDependencies(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBuildIssueDetailsUnresolvableEdgeRecords is the fixture-level pin of
+// GH#5850's detail contract: bd-xedge carries one local edge and two whose
+// far end has no row in this database, and the detail view must answer with
+// dependencies holding only the real issue, unresolvable_dependency_edges
+// holding the exact stored records, and unresolvable_dependencies equal to
+// that list's length. Both adapters must agree (the conformance test above
+// checks the rest of the shape); this one names the members.
+func TestBuildIssueDetailsUnresolvableEdgeRecords(t *testing.T) {
+	ctx := context.Background()
+	fx := newDetailFixture()
+	store, useCase := fixtureSources(fx)
+
+	for name, src := range map[string]DetailSource{"store": store, "usecase": useCase} {
+		details, err := BuildIssueDetails(ctx, src, fx.issues["bd-xedge"], false, DetailOptions{})
+		if err != nil {
+			t.Fatalf("%s: BuildIssueDetails: %v", name, err)
+		}
+		if len(details.Dependencies) != 1 || details.Dependencies[0].ID != "bd-1" {
+			t.Errorf("%s: dependencies = %+v, want only the one local edge's issue", name, details.Dependencies)
+		}
+		if len(details.UnresolvableDependencyEdges) != 2 {
+			t.Fatalf("%s: unresolvable_dependency_edges = %+v, want the two stored records", name, details.UnresolvableDependencyEdges)
+		}
+		want := []string{"external:liveop:liveop-kmf", "liveop-kmf"}
+		for i, rec := range details.UnresolvableDependencyEdges {
+			if rec.DependsOnID != want[i] || rec.IssueID != "bd-xedge" || rec.CreatedBy != "porter" {
+				t.Errorf("%s: unresolvable_dependency_edges[%d] = %+v, want the exact stored record for %q", name, i, rec, want[i])
+			}
+		}
+		if details.UnresolvableDependencies == nil || *details.UnresolvableDependencies != 2 {
+			t.Errorf("%s: unresolvable_dependencies = %v, want 2 — the list's length", name, details.UnresolvableDependencies)
+		}
+		if got := deref(t, details.DependencyCount); got != 3 {
+			t.Errorf("%s: dependency_count = %d, want 3 — the count keeps every stored edge", name, got)
+		}
+	}
+
+	// Negative control on the same fixture: bd-1 is fully local, so both
+	// members stay absent — the additive member must not appear on healthy
+	// rows.
+	details, err := BuildIssueDetails(ctx, store, fx.issues["bd-1"], false, DetailOptions{})
+	if err != nil {
+		t.Fatalf("BuildIssueDetails: %v", err)
+	}
+	if details.UnresolvableDependencyEdges != nil || details.UnresolvableDependencies != nil {
+		t.Errorf("fully local issue answered unresolvable_dependency_edges=%v unresolvable_dependencies=%v, want both unset",
+			details.UnresolvableDependencyEdges, details.UnresolvableDependencies)
 	}
 }

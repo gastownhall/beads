@@ -923,6 +923,17 @@ func (r *dependencySQLRepositoryImpl) ListWithIssueMetadata(ctx context.Context,
 	return out, nil
 }
 
+// ListOutgoingWithUnresolvable is the combined outgoing read (GH#5850): the
+// hydrated far-end issues plus the exact stored edge records whose target has
+// no row in this database, from one transaction over the runner. There is
+// deliberately no plane flag and no direction filter: the issueops reader
+// answers both anchor planes from the same anchor-keyed rows, and the
+// combined read exists only in the outgoing direction — the inbound half
+// keeps its count-based disclosure, which no design has widened yet.
+func (r *dependencySQLRepositoryImpl) ListOutgoingWithUnresolvable(ctx context.Context, sourceID string) ([]*types.IssueWithDependencyMetadata, []*types.Dependency, error) {
+	return issueops.GetDependenciesWithUnresolvableInTx(ctx, r.runner, sourceID)
+}
+
 func (r *dependencySQLRepositoryImpl) IterWithIssueMetadata(ctx context.Context, sourceID string, opts domain.DepListOpts) (storage.Iter[types.IssueWithDependencyMetadata], error) {
 	items, err := r.ListWithIssueMetadata(ctx, sourceID, opts)
 	if err != nil {
