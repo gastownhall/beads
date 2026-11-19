@@ -26,8 +26,9 @@ import (
 // none is running, and nothing used to stop it: each workspace a user had
 // touched kept a server (about 2 GB in the report) until reboot. Each
 // auto-start now launches a small watcher process beside its server. Once
-// the server has been idle for the idle window, the watcher stops it through
-// the `bd dolt stop` path, and the next bd command auto-starts it as before.
+// the server has had no new or open SQL connection for the idle window, the
+// watcher stops it through the `bd dolt stop` path, and the next bd command
+// auto-starts it as before.
 //
 // All watcher state lives under <serverDir>/dolt-server.activity/, a name the
 // shipped .gitignore template already ignores:
@@ -172,9 +173,10 @@ type idleSample struct {
 // calls a server idle on doubt: a failed poll, or a poll with no earlier
 // counter to compare with, counts as activity.
 type idleTracker struct {
-	timeout      time.Duration
-	haveBaseline bool
-	lastActivity time.Time
+	timeout         time.Duration
+	haveBaseline    bool
+	lastConnections int64
+	lastActivity    time.Time
 }
 
 func newIdleTracker(timeout time.Duration, now time.Time) *idleTracker {
@@ -193,6 +195,16 @@ func (t *idleTracker) observe(now time.Time, s idleSample) bool {
 	case !t.haveBaseline:
 		t.haveBaseline = true
 		active = true
+	default:
+		if s.status.connections-t.lastConnections > s.status.ownDials {
+			active = true
+		}
+	}
+	if s.statusErr == nil {
+		t.lastConnections = s.status.connections
+		if s.status.threads > 1 {
+			active = true
+		}
 	}
 	if active {
 		t.lastActivity = now
