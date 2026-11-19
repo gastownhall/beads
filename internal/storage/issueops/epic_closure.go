@@ -7,8 +7,20 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// GetEpicsEligibleForClosureInTx returns open epics whose children are all closed
-// with completing close reasons (not duplicate/wontfix/superseded).
+// GetEpicsEligibleForClosureInTx returns one EpicStatus row for every
+// non-closed durable epic — including epics with zero linked children, which
+// report {TotalChildren:0, ClosedChildren:0, EligibleForClose:false}.
+//
+// "Children" here are issues linked by a parent-child dependency row (either
+// dependency table); an issue whose ID merely starts with "<epic-id>." (the
+// dotted-ID fallback `bd children` uses for navigation) is NOT counted —
+// linking requires `bd create --parent` or
+// `bd dep add <child> <epic> --type parent-child`.
+//
+// The name is historical: despite it, this query is the `bd epic status`
+// enumeration as well as the close-eligibility source. Callers that act
+// (close, mol stale, doctor) filter on EligibleForClose, which keeps its
+// positive-child guard: a zero-child epic is never eligible (GH#5720).
 // nolint:gosec // G201: table names are hardcoded, placeholders contain only ? markers
 func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.EpicStatus, error) {
 	// Step 1: Get open epic IDs (single-table scan)
@@ -122,14 +134,11 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.Epic
 		}
 	}
 
-	// Step 4: Batch-fetch all epic issues
-	epicsWithChildren := make([]string, 0)
-	for _, epicID := range epicIDs {
-		if len(epicChildMap[epicID]) > 0 {
-			epicsWithChildren = append(epicsWithChildren, epicID)
-		}
-	}
-	epicIssues, err := GetIssuesByIDsInTx(ctx, tx, epicsWithChildren, nil)
+	// Step 4: Batch-fetch every epic issue, not only epics with children:
+	// `bd epic status` renders one row per non-closed durable epic, so a
+	// childless epic must be returned as {0, 0, false} (GH#5720). Its
+	// ineligibility comes from the positive-child guard in Step 5.
+	epicIssues, err := GetIssuesByIDsInTx(ctx, tx, epicIDs, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to batch-fetch epic issues: %w", err)
 	}
@@ -142,9 +151,6 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.Epic
 	var results []*types.EpicStatus
 	for _, epicID := range epicIDs {
 		children := epicChildMap[epicID]
-		if len(children) == 0 {
-			continue
-		}
 
 		issue, ok := epicIssueMap[epicID]
 		if !ok || issue == nil {

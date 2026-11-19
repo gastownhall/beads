@@ -551,6 +551,13 @@ type Storage interface {
 	// `bd ready --limit N` print "Showing N of M" without a second pass.
 	GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error)
 	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
+	// GetEpicsEligibleForClosure returns one EpicStatus row for every
+	// non-closed durable epic — including zero-child epics, reported as
+	// {TotalChildren:0, ClosedChildren:0, EligibleForClose:false} instead of
+	// being omitted (GH#5720). Children counted are parent-child dependency
+	// rows (a dotted-ID child without such an edge does not count); acting
+	// callers filter on EligibleForClose, which keeps its positive-child
+	// guard, so zero-child epics never become eligible.
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 
 	// Wisp queries

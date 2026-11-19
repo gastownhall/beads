@@ -223,7 +223,11 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 	return result, err
 }
 
-// GetEpicsEligibleForClosure returns epics whose children are all closed
+// GetEpicsEligibleForClosure returns one EpicStatus row for every non-closed
+// durable epic, including zero-child epics as {0, 0, false} (GH#5720); it is
+// the `bd epic status` enumeration as well as the close-eligibility source.
+// Children counted are parent-child dependency rows; callers that act filter
+// on EligibleForClose, which keeps its positive-child guard.
 func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error) {
 	var result []*types.EpicStatus
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
