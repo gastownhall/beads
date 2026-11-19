@@ -225,12 +225,16 @@ func TestRunBackupExport_RecordsSyncFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("legacy_state_carries_timestamp_into_last_success", func(t *testing.T) {
+	t.Run("legacy_state_leaves_last_success_unknown", func(t *testing.T) {
+		// The state shape every release since v1.2.0 writes, here after a
+		// failed sync: no last_success_at, and a timestamp that failed sync
+		// advanced. It is the failure's time, so the first failure under
+		// this bd must not record it as the last success.
 		dir := backupExportTestDir(t)
-		t0 := time.Date(2026, 5, 5, 18, 31, 51, 0, time.UTC)
+		failedAt := time.Now().UTC().Add(-20 * time.Minute).Truncate(time.Second)
 		writeWireBackupState(t, dir, map[string]any{
 			"last_dolt_commit": "c0",
-			"timestamp":        t0,
+			"timestamp":        failedAt,
 			"last_cap_warn_at": time.Time{},
 		})
 		fake := &failingBackupStore{commit: "c1", backupErr: errors.New(boom)}
@@ -238,14 +242,17 @@ func TestRunBackupExport_RecordsSyncFailure(t *testing.T) {
 			t.Fatal("want the sync error, got nil")
 		}
 		st := readWireBackupState(t, dir)
-		if !st.LastSuccessAt.Equal(t0) {
-			t.Errorf("last_success_at = %v, want the legacy timestamp %v", st.LastSuccessAt, t0)
+		if !st.LastSuccessAt.IsZero() {
+			t.Errorf("last_success_at = %v, want zero: the older bd's timestamp %v was a failed attempt", st.LastSuccessAt, failedAt)
 		}
 		if st.LastError != boom {
 			t.Errorf("last_error = %q, want %q", st.LastError, boom)
 		}
 		if st.LastDoltCommit != "c0" {
 			t.Errorf("last_dolt_commit = %q, want %q", st.LastDoltCommit, "c0")
+		}
+		if !st.Timestamp.After(failedAt) || !st.Timestamp.Equal(st.LastErrorAt) {
+			t.Errorf("timestamp = %v, want this attempt's time %v (after %v)", st.Timestamp, st.LastErrorAt, failedAt)
 		}
 	})
 

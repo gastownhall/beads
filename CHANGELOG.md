@@ -1438,11 +1438,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a backup that had failed for days read as minutes old. bd now records the
   last failed attempt separately: status prints the last successful backup,
   a `FAILED` line with the attempt's time and error, and how to recover by
-  moving the directory aside; `--json` adds `last_success_at`, `last_error`
-  and `last_error_at` to `backup`. The auto-backup warning names the backup
-  directory and points at `bd backup status`. `bd backup sync` reports such
-  a destination as a sync failure naming the directory instead of "no backup
-  destination configured", and its help no longer claims the sync is atomic.
+  moving the directory aside under a name `.beads/.gitignore` ignores (out of
+  the repository for `backup.git-repo`); `--json` adds `last_success_at`,
+  `last_error` and `last_error_at` to `backup`. A backup made by an older bd
+  shows its time as unknown until the next one succeeds, because those
+  releases recorded only the last attempt. The auto-backup warning names the
+  backup directory and points at `bd backup status`. `bd backup sync` reports
+  such a destination as a sync failure naming the directory instead of "no
+  backup destination configured", and its help no longer claims the sync is
+  atomic.
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row

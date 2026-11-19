@@ -17,11 +17,14 @@ import (
 
 // backupState tracks watermarks for backup change detection.
 //
-// Timestamp is the time of the last attempt, successful or not: it is the
-// auto-backup throttle watermark. LastSuccessAt is the time of the last
-// backup that completed, and LastError/LastErrorAt describe the most recent
-// failed attempt since then (both empty once a backup succeeds). State files
-// written before these fields existed carry neither.
+// Timestamp is the auto-backup throttle watermark: the time of the last
+// attempt, successful or not, or of the last skip while auto-backup is paused
+// over its size cap. LastSuccessAt is the time of the last backup that
+// completed, and LastError/LastErrorAt describe the most recent failed sync
+// since then (both empty once a backup succeeds); a failure before the sync
+// starts is not recorded. A state file written by an older bd carries none of
+// the three, and its Timestamp is no success time either: older releases
+// advanced it on failed syncs and size-cap skips too (bd-5mwx39, GH#4070).
 type backupState struct {
 	LastDoltCommit string    `json:"last_dolt_commit"`
 	Timestamp      time.Time `json:"timestamp"`
@@ -36,12 +39,7 @@ type backupState struct {
 // inside that repo. Otherwise it requires an active beads workspace and uses its
 // backup/ subdirectory.
 func backupDir() (string, error) {
-	gitRepo := config.GetString("backup.git-repo")
-	if gitRepo != "" {
-		if strings.HasPrefix(gitRepo, "~/") {
-			home, _ := os.UserHomeDir()
-			gitRepo = filepath.Join(home, gitRepo[2:])
-		}
+	if gitRepo := backupGitRepo(); gitRepo != "" {
 		if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: backup.git-repo %s is not a git repo, falling back to .beads/backup\n", gitRepo)
 		} else {
@@ -61,6 +59,18 @@ func backupDir() (string, error) {
 		return "", fmt.Errorf("failed to create backup directory: %w", err)
 	}
 	return dir, nil
+}
+
+// backupGitRepo returns backup.git-repo with a leading ~/ expanded, or "" when
+// it is unset. backupDir uses its backup/ subdirectory only when it is a git
+// repository.
+func backupGitRepo() string {
+	gitRepo := config.GetString("backup.git-repo")
+	if strings.HasPrefix(gitRepo, "~/") {
+		home, _ := os.UserHomeDir()
+		gitRepo = filepath.Join(home, gitRepo[2:])
+	}
+	return gitRepo
 }
 
 // loadBackupState reads the backup state file, returning a zero state if missing.
@@ -200,13 +210,12 @@ func runBackupExport(ctx context.Context, backend localBackupBackend, force bool
 		//
 		// The failure is recorded next to the last success rather than in
 		// place of it (bd-5mwx39, GH#4070): Timestamp alone made a
-		// destination that failed for days read as freshly backed up. A
-		// state file from an older bd has no LastSuccessAt; its Timestamp
-		// is the last success unless an error was recorded since.
+		// destination that failed for days read as freshly backed up.
+		// LastSuccessAt is left alone. A state file from an older bd has
+		// none, and its Timestamp is not one to carry over: those releases
+		// advanced it on failed syncs too, so it is as likely the time of
+		// the failure before this one.
 		now := time.Now().UTC()
-		if state.LastSuccessAt.IsZero() && state.LastError == "" && state.LastDoltCommit != "" {
-			state.LastSuccessAt = state.Timestamp
-		}
 		state.LastError = err.Error()
 		state.LastErrorAt = now
 		state.Timestamp = now

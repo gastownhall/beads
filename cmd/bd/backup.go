@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -125,13 +127,7 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 
 			if hasBackup {
 				fmt.Println("Backup:")
-				if last := lastSuccessfulBackup(state); last.IsZero() {
-					fmt.Println("  Last backup: none succeeded yet")
-				} else {
-					fmt.Printf("  Last backup: %s (%s ago)\n",
-						last.Format(time.RFC3339),
-						time.Since(last).Round(time.Second))
-				}
+				fmt.Printf("  Last backup: %s\n", lastSuccessfulBackupText(state))
 				if state.LastDoltCommit != "" {
 					fmt.Printf("  Dolt commit: %s\n", state.LastDoltCommit)
 				}
@@ -164,18 +160,28 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 	}
 }
 
-// lastSuccessfulBackup returns when the last backup into the auto-backup
-// directory succeeded, or the zero time if none is known to have. A state
-// file from an older bd has no LastSuccessAt; its Timestamp is the last
-// success as long as no failure has been recorded since.
-func lastSuccessfulBackup(state *backupState) time.Time {
-	if !state.LastSuccessAt.IsZero() {
-		return state.LastSuccessAt
+// lastSuccessfulBackupText describes when the last backup into the
+// auto-backup directory succeeded, for status's "Last backup:" line. A known
+// time is LastSuccessAt. An older bd recorded no success time, only
+// Timestamp, which it also advanced on failed syncs and size-cap skips
+// (bd-5mwx39, GH#4070): its state proves a backup succeeded once
+// (LastDoltCommit) and no later than Timestamp, never when.
+func lastSuccessfulBackupText(state *backupState) string {
+	switch {
+	case !state.LastSuccessAt.IsZero():
+		return fmt.Sprintf("%s (%s ago)",
+			state.LastSuccessAt.Format(time.RFC3339),
+			time.Since(state.LastSuccessAt).Round(time.Second))
+	case state.LastDoltCommit == "":
+		return "none succeeded yet"
+	case state.LastError == "" && !state.Timestamp.IsZero():
+		// Timestamp is still the older bd's own: the last success was at
+		// or before it. A failure recorded since moved it to that failure.
+		return fmt.Sprintf("unknown (recorded by an older bd; at or before %s)",
+			state.Timestamp.Format(time.RFC3339))
+	default:
+		return "unknown (recorded by an older bd)"
 	}
-	if state.LastError == "" && state.LastDoltCommit != "" {
-		return state.Timestamp
-	}
-	return time.Time{}
 }
 
 // showFailedBackupAttempt prints the most recent failed backup attempt and
@@ -188,11 +194,33 @@ func showFailedBackupAttempt(state *backupState, dir string) {
 		state.LastErrorAt.Format(time.RFC3339),
 		time.Since(state.LastErrorAt).Round(time.Second))
 	fmt.Printf("    %s\n", state.LastError)
-	fmt.Println("  If every attempt fails with the same error, the backup directory may be")
-	fmt.Println("  damaged. Move it aside and keep it until a new backup succeeds; the next")
-	fmt.Println("  auto-backup then writes a fresh full backup:")
-	aside := fmt.Sprintf("%s.broken-%s", dir, time.Now().Format("20060102"))
+	fmt.Println("  If every attempt fails with the same error naming a file under the backup")
+	fmt.Println("  directory, the directory may be damaged. Move it aside and keep it until a")
+	fmt.Println("  new backup succeeds; the next auto-backup then writes a fresh full backup:")
+	aside := backupAsidePath(dir, backupGitRepo(), time.Now())
 	fmt.Printf("    mv %s %s\n", backupShellArg(dir), backupShellArg(aside))
+}
+
+// backupAsidePath is where status tells the user to move a damaged
+// auto-backup directory. It is <dir>.<UTC time>.corrupt.backup, the name
+// bd doctor --fix gives a damaged Dolt directory, which the .beads/.gitignore
+// template ignores (*.corrupt.backup/) and doctor's tracked-runtime check
+// knows. When dir is the backup/ directory inside gitRepo (backup.git-repo),
+// the copy goes next to that repository instead: nothing ignores it inside,
+// and a commit there would carry a full copy of the database.
+func backupAsidePath(dir, gitRepo string, now time.Time) string {
+	suffix := "." + now.UTC().Format("20060102T150405Z") + ".corrupt.backup"
+	if gitRepo == "" || filepath.Join(gitRepo, "backup") != dir {
+		return dir + suffix
+	}
+	if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err != nil {
+		return dir + suffix // not a git repository: backupDir did not use it
+	}
+	repo, err := filepath.Abs(gitRepo)
+	if err != nil {
+		repo = filepath.Clean(gitRepo)
+	}
+	return filepath.Join(filepath.Dir(repo), filepath.Base(repo)+"-backup"+suffix)
 }
 
 // backupShellArg quotes a path for a copy-pasteable shell command when it

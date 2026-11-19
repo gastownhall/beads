@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestBackupStatusSizeErrorRespectsOutputMode(t *testing.T) {
@@ -458,7 +460,8 @@ func assertExitCode(t *testing.T, err error, want int) {
 // seedFailedAutoBackupState writes a backup_state.json, as raw JSON so the
 // fixture does not depend on backupState's Go fields, for a workspace whose
 // last good backup ran at t1 and whose later attempt at t2 failed with
-// errText. It returns the backup directory.
+// errText; a zero t1 is a success an older bd made without recording its
+// time. It returns the backup directory.
 func seedFailedAutoBackupState(t *testing.T, t1, t2, capWarn time.Time, errText string) string {
 	t.Helper()
 	dir, err := backupDir()
@@ -588,29 +591,123 @@ func TestBackupStatusReportsFailedAutoBackup(t *testing.T) {
 		if !strings.Contains(out, errText) {
 			t.Errorf("status does not show the error text %q:\n%s", errText, out)
 		}
-		mv := lineWith(out, "mv ")
-		if mv == "" || !strings.Contains(mv, dir) {
-			t.Errorf("no move-aside hint naming the backup directory %s:\n%s", dir, out)
+		src, dst := moveAsideHint(t, out)
+		if src != dir {
+			t.Errorf("move-aside hint moves %q, want the backup directory %s", src, dir)
+		}
+		if filepath.Dir(dst) != filepath.Dir(dir) || !strings.HasSuffix(dst, ".corrupt.backup") {
+			t.Errorf("move-aside target = %q, want a *.corrupt.backup sibling of %s", dst, dir)
 		}
 	})
 
-	t.Run("legacy_state_unchanged", func(t *testing.T) {
+	t.Run("move_aside_target_is_gitignored", func(t *testing.T) {
+		// The printed recovery must not leave a full copy of the database
+		// for the project's next `git add -A`: the moved directory has to
+		// be ignored by the .beads/.gitignore that bd init writes.
+		beadsDir := prepareBackupStatusTest(t)
+		root := filepath.Dir(beadsDir)
+		initGitRepoAt(t, root)
+		runGitForBootstrapTest(t, root, "config", "core.excludesFile", os.DevNull)
+		if err := os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte(doctor.GitignoreTemplate), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := seedFailedAutoBackupState(t, t1, t2, capWarn, errText)
+
+		src, dst := moveAsideHint(t, runText(t))
+		if src != dir {
+			t.Fatalf("move-aside hint moves %q, want the backup directory %s", src, dir)
+		}
+		if err := os.Rename(src, dst); err != nil {
+			t.Fatal(err)
+		}
+		// Control: a directory under any other name beside it is visible.
+		control := filepath.Join(beadsDir, "backup.moved")
+		if err := os.MkdirAll(control, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(control, "backup_state.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := gitCommand("status", "--porcelain", "--untracked-files=all")
+		cmd.Dir = root
+		cmd.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
+		status, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git status: %v", err)
+		}
+		if !strings.Contains(string(status), ".beads/backup.moved/") {
+			t.Fatalf("control: git status does not list the un-ignored .beads/backup.moved/:\n%s", status)
+		}
+		if rel, _ := filepath.Rel(root, dst); strings.Contains(string(status), filepath.ToSlash(rel)) {
+			t.Errorf("the moved-aside backup %s is not ignored by .beads/.gitignore:\n%s", rel, status)
+		}
+	})
+
+	t.Run("git_repo_target_outside_the_repository", func(t *testing.T) {
+		// Inside backup.git-repo no rule ignores the moved directory, so it
+		// has to leave the repository.
+		prepareBackupStatusTest(t)
+		repo := filepath.Join(t.TempDir(), "backups")
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BD_BACKUP_GIT_REPO", repo)
+		initConfigForTest(t)
+		dir := seedFailedAutoBackupState(t, t1, t2, capWarn, errText)
+		if want := filepath.Join(repo, "backup"); dir != want {
+			t.Fatalf("precondition: backup directory = %s, want %s inside backup.git-repo", dir, want)
+		}
+
+		src, dst := moveAsideHint(t, runText(t))
+		if src != dir {
+			t.Errorf("move-aside hint moves %q, want the backup directory %s", src, dir)
+		}
+		rel, err := filepath.Rel(repo, dst)
+		if err != nil || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+			t.Errorf("move-aside target %s is inside the backup repository %s", dst, repo)
+		}
+		if !strings.HasSuffix(dst, ".corrupt.backup") {
+			t.Errorf("move-aside target = %q, want a *.corrupt.backup name", dst)
+		}
+	})
+
+	t.Run("legacy_state_success_time_unknown", func(t *testing.T) {
+		// What every release since v1.2.0 leaves after a failed sync: no
+		// last_success_at, and a timestamp that failure advanced. Status
+		// must not present that time as the last success.
 		prepareBackupStatusTest(t)
 		dir, err := backupDir()
 		if err != nil {
 			t.Fatalf("backupDir: %v", err)
 		}
-		t0 := time.Date(2026, 5, 5, 18, 31, 51, 0, time.UTC)
-		data := fmt.Sprintf(`{"last_dolt_commit":"deadbeef","timestamp":%q,"last_cap_warn_at":"0001-01-01T00:00:00Z"}`, t0.Format(time.RFC3339))
+		data := fmt.Sprintf(`{"last_dolt_commit":"deadbeef","timestamp":%q,"last_cap_warn_at":"0001-01-01T00:00:00Z"}`, t2.Format(time.RFC3339))
 		if err := os.WriteFile(filepath.Join(dir, "backup_state.json"), []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		out := runText(t)
-		if last := lineWith(out, "Last backup:"); !strings.Contains(last, t0.Format(time.RFC3339)) {
-			t.Errorf("Last backup line = %q, want the legacy timestamp %s", last, t0.Format(time.RFC3339))
+		last := lineWith(out, "Last backup:")
+		if !strings.Contains(last, "unknown") || !strings.Contains(last, "at or before "+t2.Format(time.RFC3339)) {
+			t.Errorf("Last backup line = %q, want an unknown time at or before the older bd's timestamp %s", last, t2.Format(time.RFC3339))
 		}
 		if strings.Contains(out, "FAILED") || strings.Contains(out, "mv ") {
 			t.Errorf("legacy state with no recorded failure shows a failure:\n%s", out)
+		}
+	})
+
+	t.Run("legacy_success_then_failure", func(t *testing.T) {
+		// A failure this bd recorded over an older bd's state: a backup
+		// succeeded once (last_dolt_commit), at a time nobody recorded.
+		prepareBackupStatusTest(t)
+		seedFailedAutoBackupState(t, time.Time{}, t2, capWarn, errText)
+
+		out := runText(t)
+		last := lineWith(out, "Last backup:")
+		if !strings.Contains(last, "unknown") || strings.Contains(last, t2.Format(time.RFC3339)) {
+			t.Errorf("Last backup line = %q, want an unknown time, not the failed attempt %s\n%s", last, t2.Format(time.RFC3339), out)
+		}
+		if failed := lineWith(out, "FAILED"); !strings.Contains(failed, t2.Format(time.RFC3339)) {
+			t.Errorf("no FAILED line carrying the attempt time %s:\n%s", t2.Format(time.RFC3339), out)
 		}
 	})
 
@@ -672,6 +769,67 @@ func TestBackupStatusReportsFailedAutoBackup(t *testing.T) {
 		}
 		if strings.Contains(out, "FAILED") || strings.Contains(out, "mv ") {
 			t.Errorf("a healthy backup shows a failure or a recovery hint:\n%s", out)
+		}
+	})
+}
+
+// moveAsideHint returns the source and target of the `mv` line status prints
+// under a failed attempt. Neither is quoted for a path free of shell
+// metacharacters, which every test temp path is.
+func moveAsideHint(t *testing.T, out string) (src, dst string) {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) > 0 && f[0] == "mv" {
+			if len(f) != 3 {
+				t.Fatalf("move-aside hint %q is not `mv <dir> <target>`", line)
+			}
+			return f[1], f[2]
+		}
+	}
+	t.Fatalf("no move-aside hint:\n%s", out)
+	return "", ""
+}
+
+// TestBackupAsidePath pins where status tells the user to move a damaged
+// auto-backup directory (bd-5mwx39): beside it under the *.corrupt.backup name
+// that .beads/.gitignore ignores, or, for the backup/ directory inside
+// backup.git-repo, beside that repository, where no commit to it can pick the
+// copy up.
+func TestBackupAsidePath(t *testing.T) {
+	now := time.Date(2026, 11, 19, 9, 21, 0, 0, time.FixedZone("UTC+1", 3600))
+	const suffix = ".20261119T082100Z.corrupt.backup"
+
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "backups")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	beadsDir := filepath.Join(tmp, "project", ".beads")
+	beadsBackup := filepath.Join(beadsDir, "backup")
+	besideRepo := filepath.Join(tmp, "backups-backup"+suffix)
+
+	for _, tc := range []struct {
+		name, dir, gitRepo, want string
+	}{
+		{"beads_backup", beadsBackup, "", beadsBackup + suffix},
+		{"git_repo_backup", filepath.Join(repo, "backup"), repo, besideRepo},
+		{"git_repo_trailing_slash", filepath.Join(repo, "backup"), repo + string(filepath.Separator), besideRepo},
+		// backupDir falls back to .beads/backup for a git-repo setting with
+		// no .git, so a setting naming .beads itself is no repository.
+		{"git_repo_without_dot_git", beadsBackup, beadsDir, beadsBackup + suffix},
+		{"git_repo_set_but_not_used", beadsBackup, repo, beadsBackup + suffix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := backupAsidePath(tc.dir, tc.gitRepo, now); got != tc.want {
+				t.Errorf("backupAsidePath(%q, %q) = %q, want %q", tc.dir, tc.gitRepo, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("relative_git_repo", func(t *testing.T) {
+		t.Chdir(repo)
+		if got := backupAsidePath("backup", ".", now); got != besideRepo {
+			t.Errorf("backupAsidePath(%q, %q) = %q, want %q outside the repository", "backup", ".", got, besideRepo)
 		}
 	})
 }
