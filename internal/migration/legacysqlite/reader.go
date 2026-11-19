@@ -988,6 +988,10 @@ func validateDependencyGraph(issues []*types.Issue) error {
 	scheduling := make(map[string][]string)
 	hierarchy := make(map[string][]string)
 	var blocking []*types.Dependency
+	held := make(map[string]bool, len(issues))
+	for _, issue := range issues {
+		held[issue.ID] = true
+	}
 	for _, issue := range issues {
 		for _, dep := range issue.Dependencies {
 			if dep.IssueID == dep.DependsOnID {
@@ -1007,7 +1011,9 @@ func validateDependencyGraph(issues []*types.Issue) error {
 		return fmt.Errorf("legacy SQLite dependency graph has a scheduling cycle")
 	}
 	for _, dep := range blocking {
-		if types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) &&
+		// A target the legacy database holds is local whatever its prefix
+		// (GH#6066); only an absent one has no hierarchy to conflict with.
+		if held[dep.DependsOnID] &&
 			(reachable(hierarchy, dep.IssueID, dep.DependsOnID) ||
 				reachable(hierarchy, dep.DependsOnID, dep.IssueID)) {
 			return fmt.Errorf("blocking dependency %s -> %s conflicts with parent-child hierarchy", dep.IssueID, dep.DependsOnID)

@@ -302,3 +302,43 @@ func TestForeignPrefixLocalBlockerCloseReadiesDependent(t *testing.T) {
 		t.Fatalf("blocked: %s still blocked by %v after its blocker closed", dependent, got)
 	}
 }
+
+// Create-with-dependencies stores local target columns for held
+// foreign-prefix targets on the single-edge path (one dependency) and on the
+// batch path (several, answered from batch reads).
+func TestForeignPrefixCreateDependenciesAreLocal(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		targets []string
+	}{
+		{"single_edge", []string{"treehouse-a"}},
+		{"batch", []string{"treehouse-a", "treehouse-b", "outpost-c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newForeignPrefixEnv(t)
+			ctx := t.Context()
+			for _, id := range tc.targets {
+				e.create(&types.Issue{ID: id})
+			}
+			dependent := &types.Issue{ID: "firstmate-dependent", Title: "dependent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+			for _, id := range tc.targets {
+				dependent.Dependencies = append(dependent.Dependencies, &types.Dependency{DependsOnID: id, Type: types.DepBlocks})
+			}
+			if err := e.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{dependent}, "tester", storage.BatchCreateOptions{
+				SkipPrefixValidation: true,
+			}); err != nil {
+				t.Fatalf("CreateIssuesWithFullOptions: %v", err)
+			}
+			for _, id := range tc.targets {
+				if got := e.targetColumn("dependencies", dependent.ID, id); got != "depends_on_issue_id" {
+					t.Fatalf("created edge -> %s stored in %s, want depends_on_issue_id", id, got)
+				}
+			}
+			want := slices.Clone(tc.targets)
+			slices.Sort(want)
+			if got := e.readyIDs(); !slices.Equal(got, want) {
+				t.Fatalf("ready = %v, want %v (%s withheld by its open local blockers)", got, want, dependent.ID)
+			}
+		})
+	}
+}
