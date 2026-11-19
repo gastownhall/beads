@@ -7,6 +7,180 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-rc.4] - 2026-11-19
+
+Fourth release candidate for 1.4.0. It adds no schema migration, so upgrading
+from 1.4.0-rc.1, rc.2 or rc.3 is a binary swap. Coming from 1.3.x, the
+consented migration and the [1.4.0-rc.3], [1.4.0-rc.2] and [1.4.0-rc.1]
+**Upgrade notes** still apply. rc.4 makes one change, for Go programs that
+link beads: `beads.OpenBestAvailable` opens a proxied-server workspace through
+the workspace's bd proxy, as bd does. That fixes the `OpenBestAvailable` half
+of the [1.4.0-rc.2] known issue; `Open`, `OpenFromConfig` and `OpenGated`
+still go around the proxy (see **Known issues**). bd itself opens
+proxied-server workspaces as in rc.3.
+
+### Upgrade notes
+
+- **Go programs: `OpenBestAvailable` reaches a proxied-server workspace
+  through its bd proxy**
+  ([#8563](https://github.com/gastownhall/beads/pull/8563), backport of
+  [#8558](https://github.com/gastownhall/beads/pull/8558)). This applies to
+  `beads.OpenBestAvailable` and `OpenBestAvailableWith`, in cgo and
+  `CGO_ENABLED=0` builds alike, on a workspace whose `metadata.json` sets
+  `dolt_mode` to `proxied-server`:
+  - A running proxy is adopted. With none, the library starts one from the
+    `bd` on `PATH`, never from the host executable, so put the bd build you
+    want first on `PATH`. With no `bd` there, the open fails with the new
+    `beads.ErrProxyUnavailable` (match it with `errors.Is`). A `bd` older
+    than 1.4 there can fail to start the proxy: the open then retries for
+    about 15 s and fails with an untyped "timeout waiting for proxy to become
+    ready" error, and `.beads/dolt/server.log` shows the proxy child's
+    "unknown flag" error.
+  - A proxy that a bd older than 1.4 started is left running, because every
+    older bd on the workspace shares it. The open fails with
+    `beads.ErrProxyUnavailable`, and its message says a proxy started by an
+    older bd is running. Upgrade the `bd` on `PATH` and run a bd command in
+    the workspace, which replaces the old proxy as the [1.4.0-rc.1] notes
+    describe, or wait for its idle exit, then retry. A workspace that an
+    older bd still uses is usually still at its 1.3.x schema: bd then refuses
+    it with a schema version mismatch, and the library with
+    `beads.RemoteMigrateGateError`, until `bd migrate schema` migrates it,
+    which is one-way (see the [1.4.0-rc.1] **Upgrade notes**). If the
+    database has a Dolt remote, which `bd init --proxied-server` adds by
+    default when the repository has a git `origin`, `bd migrate schema`
+    refuses too: run `bd migrate schema --force` instead, on one clone of
+    that remote only. bd itself still stops such a proxy and starts its own.
+  - No open creates an embedded store. An open refused with
+    `ErrProxyUnavailable` also starts or stops no proxy; it may still create
+    the server root directory and write the proxied sql-server config. An
+    open refused later, for example by a schema gate, can leave a proxy it
+    started running until the proxy's idle exit.
+  - A managed-local workspace (no external upstream) needs `dolt` on `PATH`,
+    or named by `BEADS_DOLT_BIN`, even to adopt a running proxy. Without it
+    the open fails with the dolt lookup error, not `ErrProxyUnavailable`.
+  - On a team-server workspace (`dolt_team_server` in `metadata.json`) the
+    open checks the workspace's project identity against the shared
+    database, as bd does. On any other proxied-server workspace neither bd
+    nor the library checks it. The open refuses a managed-local root that
+    holds no Dolt database rather than creating one. It turns on the events
+    journal under the same workspace settings as bd, but versioned history
+    only when the store's own setting is on
+    (`bd config set versioned-history.enabled true`):
+    `BD_VERSIONED_HISTORY_ENABLED` and `config.yaml`, which turn it on for
+    bd, do not reach the library. `Close` releases the handle's connections
+    and leaves the shared proxy running.
+  - **Named-port exemption:** an environment that forces server mode
+    (`BEADS_DOLT_SERVER_MODE=1` or `BEADS_DOLT_SHARED_SERVER`) and names a
+    port in `BEADS_DOLT_SERVER_PORT` keeps the direct Dolt server arm and
+    dials that port as a plain MySQL client, as before. The port must be a
+    plain Dolt server's: the data port of a proxy that bd 1.4 started
+    accepts only bd, and naming it fails after about 15 s with "invalid
+    connection". Forced server mode without a named port now goes through
+    the proxy. The legacy `BEADS_DOLT_PORT` does not count as a named port.
+  - `Open`, `OpenFromConfig` and `OpenGated` are unchanged and do not go
+    through the proxy, so use `OpenBestAvailable` on a proxied-server
+    workspace. **Known issues** says what the other three do there.
+  - Schema refusals can be matched with `errors.As` against the newly
+    exported `beads.SchemaSkewError`, `beads.RemoteMigrateGateError` and
+    `beads.MigrateConsentError`. Once every client of the database is
+    upgraded, run `bd migrate schema` in the workspace (if the database has
+    a Dolt remote, `bd migrate schema --force`, on one clone of that remote
+    only); the open then succeeds. A program that must migrate on open
+    needs consent for both gates: `BD_ALLOW_REMOTE_MIGRATE=1` in its
+    environment gives both.
+    `beads.AllowSharedSchemaMigration(true)` clears only the shared-database
+    gate, and only for a database with no Dolt remote, so the open then
+    fails with `MigrateConsentError` unless `BD_ALLOW_MIGRATE=1` is set too.
+    Each of these migrates the database for every client, one way (see the
+    [1.4.0-rc.1] **Upgrade notes**).
+
+  The store this arm returns is not a `DoltStore`, and it diverges in ways an
+  embedder can see:
+  - It serves most of the issue, label, dependency, comment, config,
+    local-metadata, ready-work, blocked, statistics and claim methods, the
+    role accessors and `RunInTransaction`, whose callback runs at most once
+    and is never replayed. The other 38 `Storage` methods, listed in
+    `internal/storage/uowstore/unsupported_gen.go`, return a typed
+    `beads.ErrUnsupported` with backend `"proxied-server"`, as do six
+    transaction methods. They include the event and provenance methods,
+    `GetDependencies`, `GetDependents`, `GetDependencyTree`,
+    `CountDependencies`, `CountDependents`, `GetIssuesByLabel`,
+    `RenameLabel`, `GetIssueByExternalRef`, `SearchIssueSummaries`,
+    `UpdateIssueType`, the `*Checked` update and close variants,
+    `GetIssueCommentsPage`, `GetReadyWorkWithCountsAndTotal`, `ListWisps`,
+    `MergeMetadata`, merge slots and slot state, and every `Iter*` stream.
+  - `AsEventQuerier` and `AsDependentQuerier` report `false`.
+  - Its Dolt commits carry no `--author`; they are attributed to the proxy's
+    SQL user.
+  - `UnderlyingDB()` and `DB()` return the proxy's connection pool, and
+    statements on it bypass hooks and the events journal.
+  - A flat `CreateIssue` or `CreateIssues` that definitely fails empties the
+    IDs it filled in again. `DoltStore` in 1.4.0 keeps them.
+
+  `engdocs/EMBEDDING_OVER_PROXIED_SERVER.md` §8 lists the rest.
+
+### Fixed
+
+- **`OpenBestAvailable` no longer opens a second, empty database in a
+  proxied-server workspace**
+  ([#8563](https://github.com/gastownhall/beads/pull/8563), backport of
+  [#8558](https://github.com/gastownhall/beads/pull/8558); fixes
+  [#8323](https://github.com/gastownhall/beads/issues/8323)). Up to rc.3,
+  `OpenBestAvailable` had no proxied-server arm. A cgo build fell through to
+  embedded Dolt, returned no error, and created and migrated a new database at
+  `.beads/embeddeddolt` beside the one the proxy serves, so reads saw no
+  issues and writes landed where bd never reads them. A `CGO_ENABLED=0` build
+  returned the embedded-requires-CGO error. Both builds now open the
+  workspace through its proxy (see **Upgrade notes**). A
+  `.beads/embeddeddolt` that an earlier open created stays on disk and is no
+  longer opened: anything written to it is not in the workspace's database.
+
+  This corrects two earlier notes. The [1.4.0-rc.2] **Known issues** entry "A
+  Go program that links beads cannot open a proxied-server workspace"
+  ([#8412](https://github.com/gastownhall/beads/pull/8412), #8323) no longer
+  applies to `OpenBestAvailable` and `OpenBestAvailableWith`; it still
+  applies to `Open`, `OpenFromConfig` and `OpenGated` (see **Known
+  issues**). `engdocs/EMBEDDING_OVER_PROXIED_SERVER.md` §8 now describes the
+  proxied path, and its §3 now says the data port accepts only bd. The
+  [1.4.0-rc.1] note that only bd can use a proxied workspace's proxy data
+  port is still true for other clients, but `OpenBestAvailable` now uses
+  that port too, through bd's own code.
+
+### Known issues
+
+- **`Open`, `OpenFromConfig` and `OpenGated` still go around a
+  proxied-server workspace's proxy**
+  ([#8323](https://github.com/gastownhall/beads/issues/8323),
+  [#8412](https://github.com/gastownhall/beads/pull/8412)). Only
+  `OpenBestAvailable` and `OpenBestAvailableWith` changed in rc.4. On a
+  proxied-server workspace:
+  - `Open` does not read the database name from `metadata.json`. Given the
+    workspace's `.beads/dolt` while its proxy runs, it returns no error and
+    creates an empty `beads` database on the proxy's Dolt server: reads find
+    no issues and creates fail.
+  - While a proxy runs, `OpenFromConfig` and `OpenGated` connect to its Dolt
+    server directly. The proxy does not count those connections, so it
+    exits about 30 s after its last bd client (a bd command or an
+    `OpenBestAvailable` handle) goes away, and the handle then fails with
+    "connection refused".
+  - With no proxy running, `OpenFromConfig` and `OpenGated` start a
+    standalone `dolt sql-server` on the workspace's data and leave it
+    running after the program exits. Until it stops, every bd command that
+    opens the workspace, and `OpenBestAvailable`, fails after about 15 s
+    with "timeout waiting for proxy to become ready". `bd dolt stop` does
+    not stop it: run `kill $(cat .beads/dolt-server.pid)` from the workspace
+    root.
+
+  Workaround: use `OpenBestAvailable`. A program that cannot switch yet can
+  set `BEADS_DOLT_AUTO_START=0`, so these opens fail instead of starting a
+  server (the error's `bd dolt start` hint does not apply: bd refuses it in
+  proxied-server mode). No dialer for the proxy's data port is exported yet
+  ([#8412](https://github.com/gastownhall/beads/pull/8412)).
+
+The [1.4.0-rc.2] and [1.4.0-rc.1] **Known issues** still apply. The
+[1.4.0-rc.2] entry on Go programs and proxied-server workspaces is fixed for
+`OpenBestAvailable` only, and the entry above replaces it.
+
 ## [1.4.0-rc.3] - 2026-11-18
 
 Third release candidate for 1.4.0. It adds no schema migration, so upgrading

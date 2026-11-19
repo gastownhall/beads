@@ -97,10 +97,15 @@ var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
 // older than 1.4, which the library cannot talk to and does not stop, since
 // every older bd on the workspace shares it (upgrade the bd on PATH and run
 // a bd command in the workspace, which replaces it, or wait for its idle
-// exit, and retry). The refused open creates no embedded store and starts or
-// stops no proxy (it may still create the server root directory and write
-// the proxied sql-server config). The library never starts the proxy from
-// the host executable. Match it with errors.Is.
+// exit, and retry; a workspace still at a 1.3.x schema then also needs
+// `bd migrate schema`, or, if the database has a Dolt remote,
+// `bd migrate schema --force` on one clone only; either is one-way). The
+// refused open creates no embedded store and starts or stops no proxy (it
+// may still create the server root directory and write the proxied
+// sql-server config); an open refused later, for example by a schema gate,
+// can leave a proxy it started running until the proxy's idle exit. The
+// library never starts the proxy from the host executable. Match it with
+// errors.Is.
 var ErrProxyUnavailable = proxiedopen.ErrProxyUnavailable
 
 // SchemaSkewError reports a database whose schema is newer than this
@@ -113,8 +118,10 @@ type SchemaSkewError = schema.SchemaSkewError
 // database other clients share. Match it with errors.As.
 type RemoteMigrateGateError = schema.RemoteMigrateGateError
 
-// MigrateConsentError reports schema migrations that need operator consent
-// (see AllowSharedSchemaMigration). Match it with errors.As.
+// MigrateConsentError reports schema migrations that need operator
+// consent: BD_ALLOW_MIGRATE=1 (or BD_ALLOW_REMOTE_MIGRATE=1) in the
+// process environment, or `bd migrate schema` run in the workspace.
+// AllowSharedSchemaMigration does not clear it. Match it with errors.As.
 type MigrateConsentError = schema.MigrateConsentError
 
 // proxiedCloseTimeout bounds the provider close on a failed proxied open,
@@ -126,13 +133,17 @@ const proxiedCloseTimeout = 10 * time.Second
 // the per-root bd proxy, exactly as the bd CLI does (GH#8323), and never
 // creates an embedded store or dials around the proxy.
 //
-// The posture is a root bd command's: the workspace's project identity is
-// asserted, and a managed-local root holding no Dolt database is refused
-// rather than initialized. A running proxy is adopted; with none, one is
-// started from `bd` on PATH, and with no bd there the open fails with
-// ErrProxyUnavailable. The events journal and versioned history are activated
-// under the same workspace switches as the CLI's. The returned store's Close
-// releases this handle's connections and leaves the shared proxy running.
+// The posture is a root bd command's: on a team-server workspace the
+// workspace's project identity is asserted (other proxied-server
+// workspaces are not checked, by bd either), and a managed-local root
+// holding no Dolt database is refused rather than initialized. A running
+// proxy is adopted; with none, one is started from `bd` on PATH, and with no
+// bd there the open fails with ErrProxyUnavailable. The events journal is
+// activated under the same workspace switches as the CLI's; versioned
+// history only by the store's own versioned-history.enabled row (the CLI's
+// environment and config.yaml switches do not reach the library). The
+// returned store's Close releases this handle's connections and leaves the
+// shared proxy running.
 func openProxiedServer(ctx context.Context, beadsDir string) (Storage, error) {
 	p, err := proxiedopen.Open(ctx, beadsDir, proxiedopen.Options{
 		Identity:        proxiedopen.AssertWorkspaceIdentity,
@@ -161,10 +172,10 @@ func openProxiedServer(ctx context.Context, beadsDir string) (Storage, error) {
 // exempts the mode). Such an open keeps the server arm when
 // BEADS_DOLT_SERVER_PORT names a port, parsed as dolt.ResolveServerPort
 // parses it, because that port outranks every other source the server arm
-// reads; this is the named-port exemption approved on #8476. Gas City's
-// proxied-native lane opens that way against a bd 1.3.x proxy, whose data
-// port still answers a plain MySQL client, and its env also pins what the
-// proxied arm ignores: no auto-start, the commit author, the pool bound.
+// reads; this is the named-port exemption (proposed in #8476). An
+// embedder that pins its own server settings (no auto-start, the commit
+// author, the pool bound) opens that way; the named port must be a plain
+// Dolt server's, because a 1.4 proxy's data port accepts only bd.
 // The legacy BEADS_DOLT_PORT does not count, because a port persisted in
 // config.yaml or metadata.json outranks it. Without a named port the server
 // arm would dial a port bd resolves itself, never the proxy's data port, so
@@ -458,7 +469,11 @@ type (
 // Without it, an embedder that upgrades its beads dependency across a schema
 // bump gets a migration-gate error from every writable Open* call, whose
 // guidance names CLI commands (`bd migrate schema`) that mean nothing inside a
-// library process. This is the programmatic equivalent of that command.
+// library process. This is the programmatic equivalent of that command for
+// the shared-database gate only, on a database with no Dolt remote: it clears
+// RemoteMigrateGateError there, while the consent gate (MigrateConsentError)
+// still needs BD_ALLOW_MIGRATE=1, unlike `bd migrate schema`, which clears
+// both there.
 //
 // It is process-local and set-or-clear, which is the point: the alternative —
 // os.Setenv("BD_ALLOW_REMOTE_MIGRATE", "1") — is process-GLOBAL and inherited
@@ -507,7 +522,8 @@ func Open(ctx context.Context, dbPath string) (Storage, error) {
 
 // OpenFromConfig opens the Dolt implementation using configuration from
 // metadata.json. Unlike Open, this respects Dolt server mode settings and database
-// name configuration.
+// name configuration. On a proxied-server workspace use OpenBestAvailable:
+// this open goes around the proxy.
 // beadsDir is the path to the .beads directory.
 func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
 	// NewFromConfigWithOptions refuses a historical SQLite workspace or an
@@ -535,7 +551,9 @@ func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
 // consumer from another workspace. Library consumers that use the ungated
 // Open/OpenFromConfig are invisible to the gate, and gate-aware
 // maintenance operations refuse to proceed on workspaces they cannot
-// prove quiet — prefer OpenGated in long-lived embedders.
+// prove quiet — prefer OpenGated in long-lived embedders. On a
+// proxied-server workspace use OpenBestAvailable: this open goes around the
+// proxy.
 //
 // The physical roots are the UNION of doltserver.ResolvePhysicalRoots
 // (the side-effect-free CLI-parity resolver: embedded engine's
