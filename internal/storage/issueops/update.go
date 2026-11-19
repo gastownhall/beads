@@ -309,11 +309,25 @@ func LeaseOutcomeOnUpdate(oldIssue *types.Issue, updates map[string]interface{},
 // row_lock, so a concurrent reclaim or close still collides on that cell).
 // LeaseArm grants holder a fresh lease from now for LeaseTTL(ctx); the upsert
 // replaces the claimant's row rather than adding a second one.
+//
+// A holder that is a claim.pools alias gets no lease: the claim leg's row is
+// deleted and the issue stays leaseless. Nobody heartbeats as a pool, so its
+// lease could only expire and let bd reclaim un-assign live pool work (the
+// reclaim bait GH#4716 forbids), while pool members can still take the issue
+// through the claim CAS. Membership is exact-string, as in the claim CAS
+// (ClaimIssueInTx): an alias is a literal config value, never respelled.
 func ApplyLeaseOutcomeInTx(ctx context.Context, tx DBTX, id string, outcome LeaseOutcome, holder string, now time.Time) error {
 	switch outcome {
 	case LeaseClear:
 		return DeleteLeaseInTx(ctx, tx, id)
 	case LeaseArm:
+		pools, err := ClaimPoolAliasesInTx(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("failed to resolve claim pools: %w", err)
+		}
+		if slices.Contains(pools, holder) {
+			return DeleteLeaseInTx(ctx, tx, id)
+		}
 		return UpsertLeaseInTx(ctx, tx, id, holder, now, LeaseTTL(ctx))
 	default:
 		return nil
