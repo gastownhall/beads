@@ -76,7 +76,33 @@ type OpenOpts struct {
 	// operator's log elsewhere, which another workspace's live proxy may
 	// still be writing. rootDir/proxy.log is always rotated.
 	RotateLogFile bool
+
+	// ResolveExecutable, when set, names the binary that is exec'd as
+	// `<binary> db-proxy-child` if no proxy is running for the root. Nil
+	// means the package-level ResolveExecutable (os.Executable): the CLI,
+	// which is bd itself. A library host that is not bd (the Go SDK) sets
+	// it so it never execs its own binary; returning an error wrapping
+	// ErrNoProxyExecutable makes the open fail at once rather than poll.
+	// It is consulted only on the spawn path, so adopting a running proxy
+	// never needs it. Setting it also marks the opener as a host that is
+	// not bd: it never stops a proxy started by a bd older than the
+	// request-MAC control handshake, and gets ErrPreUpgradeProxyRunning
+	// instead.
+	ResolveExecutable func() (string, error)
 }
+
+// ErrNoProxyExecutable reports that no proxy is running for the root and
+// OpenOpts.ResolveExecutable found no binary to spawn one with. It is
+// terminal: GetCreateDatabaseProxyServerEndpoint returns it without waiting
+// out the open deadline.
+var ErrNoProxyExecutable = errors.New("no executable available to start the proxy")
+
+// ErrPreUpgradeProxyRunning reports that the root is held by a live proxy
+// started by a bd older than the request-MAC control handshake (bd 1.3.x
+// and earlier), which this process cannot use, and that the opener set
+// OpenOpts.ResolveExecutable, so it does not stop that proxy (see
+// replacePreMACProxy). It is terminal, like ErrNoProxyExecutable.
+var ErrPreUpgradeProxyRunning = errors.New("a proxy started by an older bd is running for this root")
 
 const (
 	openDeadline          = 15 * time.Second
@@ -286,7 +312,7 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 				registerDataAddress(rootDir, ep)
 				return ep, nil
 			}
-			if errors.Is(lastSpawnErr, errStartInterrupted) {
+			if errors.Is(lastSpawnErr, errStartInterrupted) || errors.Is(lastSpawnErr, ErrNoProxyExecutable) {
 				return Endpoint{}, lastSpawnErr
 			}
 		case !lockfile.IsLocked(err):
@@ -301,7 +327,7 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 				recordPath,
 			)
 		case isPreMACIdentRefusal(discovery):
-			if stopErr := stopVerifiedPreMACProxy(rootDir, discovery.pidfile); stopErr != nil {
+			if stopErr := replacePreMACProxy(rootDir, opts, discovery.pidfile); stopErr != nil {
 				return Endpoint{}, stopErr
 			}
 		}
@@ -340,6 +366,22 @@ func adoptedEndpoint(rootDir, want string, discovery adoptionResult) (Endpoint, 
 		}
 	}
 	return discovery.endpoint, nil
+}
+
+// replacePreMACProxy makes way for a fresh proxy when a pre-upgrade proxy
+// holds the root. The bd CLI stops it (stopVerifiedPreMACProxy), and the next
+// discovery round finds proxy.lock free and starts a proxy from the CLI's own
+// executable. A host that is not bd (opts.ResolveExecutable is set, as in the
+// Go SDK) is refused before anything is touched. The old proxy serves every
+// bd 1.3.x process on the workspace, and the host cannot know whether the
+// binary it would start can replace it: a bd on PATH as old as the proxy
+// cannot. Stopping the proxy could leave the workspace with none.
+func replacePreMACProxy(rootDir string, opts OpenOpts, pf *pidfile.PidFile) error {
+	if opts.ResolveExecutable != nil {
+		return fmt.Errorf("%w: pid %d (record %s) predates the authenticated control handshake of bd 1.4, so this process cannot use it, and a host that is not bd leaves it running; upgrade the bd on PATH and run a bd command such as `bd list` in the workspace, which replaces the old proxy, or wait for its idle exit, then retry",
+			ErrPreUpgradeProxyRunning, pf.Pid, pidfile.Path(rootDir, PIDFileName))
+	}
+	return stopVerifiedPreMACProxy(rootDir, pf)
 }
 
 func stopVerifiedPreMACProxy(rootDir string, pf *pidfile.PidFile) error {
@@ -384,6 +426,19 @@ func spawnAndHandoff(
 	if currentEpoch != stopEpoch {
 		return Endpoint{}, fmt.Errorf("%w for %s", errStartInterrupted, rootDir)
 	}
+
+	// Resolve the executable before anything is mutated: a library host with
+	// no binary to spawn (ErrNoProxyExecutable) must fail leaving the root's
+	// records and backend exactly as it found them.
+	resolve := opts.ResolveExecutable
+	if resolve == nil {
+		resolve = ResolveExecutable
+	}
+	self, err := resolve()
+	if err != nil {
+		return Endpoint{}, fmt.Errorf("locate bd executable: %w", err)
+	}
+	opts.ResolveExecutable = func() (string, error) { return self, nil }
 
 	if err := quarantineForSpawn(rootDir, discovery); err != nil {
 		return Endpoint{}, err
@@ -490,7 +545,11 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lo
 		}
 	}()
 
-	self, err := ResolveExecutable()
+	resolve := opts.ResolveExecutable
+	if resolve == nil {
+		resolve = ResolveExecutable
+	}
+	self, err := resolve()
 	if err != nil {
 		return nil, fmt.Errorf("locate bd executable: %w", err)
 	}

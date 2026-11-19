@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"sort"
 	"testing"
@@ -30,8 +31,10 @@ type fakeMolecules struct {
 	claimErrs map[string]error
 	claimed   []string
 	updated   []string
-	closes    []issueops.CloseRequest
-	closeErr  error
+	// updates records every Lifecycle.Update request, in order.
+	updates  []issueops.UpdateRequest
+	closes   []issueops.CloseRequest
+	closeErr error
 }
 
 func newFakeMolecules() *fakeMolecules {
@@ -134,6 +137,7 @@ func (f *fakeMolecules) Claim(_ context.Context, req issueops.ClaimRequest) (iss
 }
 
 func (f *fakeMolecules) Update(_ context.Context, req issueops.UpdateRequest) (issueops.UpdateResult, error) {
+	f.updates = append(f.updates, req)
 	if !req.Claim {
 		return issueops.UpdateResult{}, errors.New("fake: only claims")
 	}
@@ -540,6 +544,13 @@ func TestMoleculeStepperClaimsAWispStepThroughLifecycle(t *testing.T) {
 	}
 	if !res.Claimed || !slices.Equal(f.updated, []string{"w.2"}) || len(f.claimed) != 0 {
 		t.Fatalf("Advance over a wisp = %+v (updates %v, claims %v), want w.2 claimed through Lifecycle", res, f.updated, f.claimed)
+	}
+	// The Claimer that claims a durable step applies no live-local-blocker
+	// check, so the wisp claim waives Lifecycle.Update's: the two planes claim
+	// by the molecule's readiness alike.
+	want := issueops.UpdateRequest{Actor: "alice", IssueID: "w.2", Claim: true, ForceClaimBlocked: true}
+	if len(f.updates) != 1 || !reflect.DeepEqual(f.updates[0], want) {
+		t.Errorf("wisp claim requests = %+v, want exactly %+v", f.updates, want)
 	}
 }
 

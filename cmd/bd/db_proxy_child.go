@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/proxiedopen"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
@@ -105,7 +106,7 @@ func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, dolt
 		if err != nil {
 			return nil, err
 		}
-		s.SetConfigValidator(validateManagedServerConfigPolicy)
+		s.SetConfigValidator(proxiedopen.ValidateManagedServerConfigPolicy)
 		// A Beads-generated config's port was picked before dolt binds it;
 		// if another process got there first, run on a free port instead.
 		s.SetPortConflictPolicy(managedPortConflictPolicy)

@@ -146,6 +146,7 @@
 34 15 TestProxiedServerImport
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
 34 15 TestProxiedServerReopenConcurrent
+34 15 TestProxiedServerSDKOpenBestAvailable
 34 15 TestProxiedServerSQL
 
 34 16 TestProxiedServerBackupRefusedOnExternalTopology
@@ -273,10 +274,13 @@
 34 31 TestProxiedServerIfRevisionGuardClose
 34 31 TestProxiedServerMolBond
 
+34 32 TestProxiedServerAssigneeHiddenEmptyClears
+34 32 TestProxiedServerClaimPathsJournalSidecar
 34 32 TestProxiedServerCleanDatabasesPurgeDropped
 34 32 TestProxiedServerConfigConcurrent
 34 32 TestProxiedServerDatabaseFlagForeignProjectIdentity
 34 32 TestProxiedServerDepB
+34 32 TestProxiedServerDoltDropDatabase
 34 32 TestProxiedServerServeStreamsTheJournalItIsWriting
 34 32 TestProxiedServerServeUpdateClaim
 34 32 TestProxiedServerStorageClass

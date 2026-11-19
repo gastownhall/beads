@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -85,6 +86,33 @@ func TestCLI_ServerModeConfigWritesCommit_E2E(t *testing.T) {
 		}
 	}
 
+	// GH#7523: bd kv set and clear write a config row too, and each commits it
+	// with a message naming its verb.
+	headMessage := func() string {
+		t.Helper()
+		return mustBD("sql", "--csv", "SELECT message FROM dolt_log LIMIT 1")
+	}
+	mustBD("kv", "set", "gh7523", "server-mode kv value")
+	if got := dirtyConfigTables(); got != "" {
+		t.Fatalf("after bd kv set: %s left uncommitted in the working set (GH#7523)", got)
+	}
+	if msg := headMessage(); !strings.Contains(msg, "bd: kv set (auto-commit)") {
+		t.Fatalf("after bd kv set: HEAD message = %q, want the kv set auto-commit", msg)
+	}
+	if out := mustBD("kv", "get", "gh7523"); !strings.Contains(out, "server-mode kv value") {
+		t.Fatalf("bd kv get gh7523 after set = %q, want the stored value", out)
+	}
+	mustBD("kv", "clear", "gh7523")
+	if got := dirtyConfigTables(); got != "" {
+		t.Fatalf("after bd kv clear: %s left uncommitted in the working set (GH#7523)", got)
+	}
+	if msg := headMessage(); !strings.Contains(msg, "bd: kv clear (auto-commit)") {
+		t.Fatalf("after bd kv clear: HEAD message = %q, want the kv clear auto-commit", msg)
+	}
+	if out, err := bd("kv", "get", "gh7523"); err == nil {
+		t.Fatalf("bd kv get gh7523 succeeded after clear, want the key gone:\n%s", out)
+	}
+
 	// A bd that predates notion.token moving to config.yaml stored it in the
 	// config table, and that row was committed and pushed.
 	mustBD("sql", "INSERT INTO config (`key`, value) VALUES ('notion.token', 'gh4078-leaked-credential')")
@@ -127,6 +155,55 @@ func TestCLI_ServerModeConfigWritesCommit_E2E(t *testing.T) {
 	}
 	if out := mustBD("forget", "gh4078-screened"); !strings.Contains(out, "Warning:") || !strings.Contains(out, "issue_prefix") {
 		t.Fatalf("bd forget did not warn about the refused commit naming issue_prefix:\n%s", out)
+	}
+	// GH#7523: bd kv set and clear take the same kv.* screen. Their write lands
+	// and the command succeeds with a warning naming the refused key, the
+	// --json result keeps its shipped shape, and the internal key stays out of
+	// HEAD.
+	issuePrefixAt := func(asOf string) string {
+		t.Helper()
+		return mustBD("sql", "--csv", "SELECT value FROM config "+asOf+" WHERE `key` = 'issue_prefix'")
+	}
+	headPrefix := issuePrefixAt("AS OF 'HEAD'")
+	if headPrefix == issuePrefixAt("") {
+		t.Fatalf("precondition: issue_prefix is not dirty after bd rename-prefix (HEAD %q)", headPrefix)
+	}
+	for _, step := range []struct {
+		args []string
+		want map[string]interface{}
+	}{
+		{[]string{"kv", "set", "gh7523-screened", "screened kv value", "--json"},
+			map[string]interface{}{"key": "gh7523-screened", "value": "screened kv value"}},
+		{[]string{"kv", "clear", "gh7523-screened", "--json"},
+			map[string]interface{}{"key": "gh7523-screened", "deleted": "true"}},
+	} {
+		verb := strings.Join(step.args[:2], " ")
+		stdout, stderr, err := runBDExecSeparated(t, testBD, tmpDir, env, step.args...)
+		if err != nil {
+			t.Fatalf("bd %s failed after its write landed: %v\nstdout:\n%s\nstderr:\n%s", verb, err, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "Warning: committing kv write: refusing to commit") || !strings.Contains(stderr, "issue_prefix") {
+			t.Fatalf("bd %s stderr does not warn about the refused kv commit naming issue_prefix:\n%s", verb, stderr)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+			t.Fatalf("bd %s --json stdout is not one JSON object: %v\n%s", verb, err, stdout)
+		}
+		delete(got, "schema_version")
+		if !reflect.DeepEqual(got, step.want) {
+			t.Fatalf("bd %s --json = %s, want the shipped shape %v", verb, stdout, step.want)
+		}
+		if verb == "kv set" {
+			if out := mustBD("kv", "get", "gh7523-screened"); !strings.Contains(out, "screened kv value") {
+				t.Fatalf("the screened kv write was not stored:\n%s", out)
+			}
+		}
+		if got := issuePrefixAt("AS OF 'HEAD'"); got != headPrefix {
+			t.Fatalf("after bd %s: HEAD issue_prefix = %q, want %q: the refused internal key was committed", verb, got, headPrefix)
+		}
+	}
+	if out, err := bd("kv", "get", "gh7523-screened"); err == nil {
+		t.Fatalf("bd kv get gh7523-screened succeeded after clear, want the key gone:\n%s", out)
 	}
 	if got := dirtyConfigTables(); got != "config" {
 		t.Fatalf("after the refused memory commits: dirty = %q, want config left for bd dolt commit", got)

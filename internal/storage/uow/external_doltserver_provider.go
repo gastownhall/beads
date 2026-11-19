@@ -63,12 +63,13 @@ func NewExternalDoltServerUOWProvider(
 	// rediscover it too. Only its address is refreshed: the upstream, its TLS
 	// config and the credentials stay the ones this provider opened with.
 	discover := workspaceProxyDiscovery(absServerRootDir, proxy.OpenOpts{
-		Backend:       proxy.BackendExternal,
-		LogFilePath:   serverLogFilePath,
-		RotateLogFile: resolved.rotateServerLog,
-		External:      external,
-		IdleTimeout:   idleTimeout,
-		Port:          proxyPort,
+		Backend:           proxy.BackendExternal,
+		LogFilePath:       serverLogFilePath,
+		RotateLogFile:     resolved.rotateServerLog,
+		External:          external,
+		IdleTimeout:       idleTimeout,
+		Port:              proxyPort,
+		ResolveExecutable: resolved.proxyExecutable,
 	})
 	ep, err := discover()
 	if err != nil {

@@ -144,8 +144,8 @@ var versionedHistoryFactoryKeys = []string{
 	"store_factory_nocgo.go:newDoltStore",
 	"store_factory_nocgo.go:newDoltStoreFromConfig",
 	"store_factory_nocgo.go:newRegisteredBackendStore",
-	"uow_factory.go:newExternalProxiedServerUOWProvider",
-	"uow_factory.go:newManagedProxiedServerUOWProvider",
+	"proxiedopen/open.go:newExternalProxiedServerUOWProvider",
+	"proxiedopen/open.go:newManagedProxiedServerUOWProvider",
 }
 
 // TestVersionedHistoryConstructionGuardFailsWhenAFactoryLosesItsActivation is the

@@ -85,8 +85,9 @@ func TestRejectProtectedConfigKey(t *testing.T) {
 			t.Errorf("rejectProtectedConfigKey(%q) = (_, false), want rejected", key)
 			continue
 		}
-		// Error message must surface the three lifecycle alternatives.
-		wantSubstrings := []string{"bd init --prefix", "bd bootstrap", "bd rename-prefix"}
+		// Error message must surface the lifecycle alternatives, including
+		// re-pointing new IDs without renaming existing ones (GH#6591).
+		wantSubstrings := []string{"bd init --prefix", "bd bootstrap", "bd rename-prefix", "--mint-only"}
 		for _, want := range wantSubstrings {
 			if !strings.Contains(msg, want) {
 				t.Errorf("rejectProtectedConfigKey(%q) message missing %q; got:\n%s", key, want, msg)
@@ -99,6 +100,23 @@ func TestRejectProtectedConfigKey(t *testing.T) {
 		if _, rejected := rejectProtectedConfigKey(key); rejected {
 			t.Errorf("rejectProtectedConfigKey(%q) = (_, true), want not rejected", key)
 		}
+	}
+}
+
+// TestRejectProtectedConfigKeyNoDB: no-db is obsolete, so 'bd config set'
+// refuses it whatever the value and explains where issues live (GH#7387).
+func TestRejectProtectedConfigKeyNoDB(t *testing.T) {
+	msg, rejected := rejectProtectedConfigKey("no-db")
+	if !rejected {
+		t.Fatal(`rejectProtectedConfigKey("no-db") = (_, false), want rejected`)
+	}
+	for _, want := range []string{"no-db", "obsolete", "Dolt", "issues.jsonl", "bd config unset no-db"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("rejectProtectedConfigKey(\"no-db\") message missing %q; got:\n%s", want, msg)
+		}
+	}
+	if isRecognizedConfigKey("no-db") {
+		t.Error(`isRecognizedConfigKey("no-db") = true, want the obsolete key unrecognized`)
 	}
 }
 

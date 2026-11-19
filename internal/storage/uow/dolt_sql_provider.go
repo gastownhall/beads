@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,7 +38,11 @@ const (
 
 type doltSQLProvider struct {
 	defaultBranch string
-	db            *sql.DB
+	// dbMu guards db against Close: a library host (internal/storage/uowstore)
+	// may begin a unit of work or read the pool on one goroutine while another
+	// closes the provider. Readers go through pool().
+	dbMu sync.RWMutex
+	db   *sql.DB
 	// serverEndpoint is the exact transport endpoint used by the migration
 	// connection. Fresh-bootstrap reset authority is bound to it together with
 	// the Dolt server UUID, database name, and initial HEAD.
@@ -107,7 +112,8 @@ type doltSQLProvider struct {
 // probe found a shape the journal cannot run against. A probe that could not
 // run degrades to the canonical shape (issueops.JournalActivationError).
 // Deactivating clears both and skips the probe entirely — a disabled provider
-// accepts any shape.
+// accepts any shape. After Close the probe is skipped too (the pool is gone);
+// a pool closed mid-probe fails the probe, which degrades as above.
 func (p *doltSQLProvider) SetEventsJournalEnabled(enabled bool) {
 	p.eventsJournalEnabled.Store(enabled)
 	if !enabled {
@@ -115,9 +121,16 @@ func (p *doltSQLProvider) SetEventsJournalEnabled(enabled bool) {
 		p.journalActivationErr.Store(nil)
 		return
 	}
+	db, err := p.pool()
+	if err != nil {
+		// Closed: there is no pool to probe, and no write can follow.
+		p.journalShape.Store(nil)
+		p.journalActivationErr.Store(nil)
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), issueops.JournalShapeProbeTimeout)
 	defer cancel()
-	shape, err := issueops.ProbeJournalShape(ctx, p.db)
+	shape, err := issueops.ProbeJournalShape(ctx, db)
 	p.journalShape.Store(shape)
 	if activationErr := issueops.JournalActivationError(err); activationErr != nil {
 		p.journalActivationErr.Store(&activationErr)
@@ -226,6 +239,11 @@ type providerOptions struct {
 	// that file: bd sets it for its default server.log, never for a log path
 	// the operator chose.
 	rotateServerLog bool
+	// proxyExecutable resolves the binary spawned as the proxy child when no
+	// proxy is running (proxy.OpenOpts.ResolveExecutable). Nil keeps the
+	// proxy package default, the running executable: right for bd, wrong
+	// for a library host.
+	proxyExecutable func() (string, error)
 }
 
 // WithPreview opens the provider for a non-mutating preview command.
@@ -266,6 +284,16 @@ func WithServerLogRotation() ProviderOption {
 	return func(o *providerOptions) { o.rotateServerLog = true }
 }
 
+// WithProxyExecutable names the binary to spawn as `<binary> db-proxy-child`
+// when no proxy is running for the root, instead of the running executable.
+// The Go SDK passes a resolver for `bd` on PATH so it never execs its host.
+// The resolver is consulted lazily, only on the spawn path (including
+// rediscovery after the proxy retires on idle); an error wrapping
+// proxy.ErrNoProxyExecutable fails the open without waiting.
+func WithProxyExecutable(resolve func() (string, error)) ProviderOption {
+	return func(o *providerOptions) { o.proxyExecutable = resolve }
+}
+
 func applyProviderOptions(opts []ProviderOption) providerOptions {
 	var resolved providerOptions
 	for _, opt := range opts {
@@ -283,10 +311,44 @@ var (
 	_ storage.EventsJournalShapeChecker  = (*doltSQLProvider)(nil)
 	_ storage.VersionedHistoryConfigurer = (*doltSQLProvider)(nil)
 	_ storage.VersionedHistoryDeferrer   = (*doltSQLProvider)(nil)
+	_ SQLDBSource                        = (*doltSQLProvider)(nil)
 )
 
 func (p *doltSQLProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
 	return NewUOW(ctx, p)
+}
+
+// SQLDBSource is implemented by a provider that can hand out its connection
+// pool. It exists for library hosts (internal/storage/uowstore) that must
+// offer the same raw-SQL escape hatch DoltStore.UnderlyingDB does.
+type SQLDBSource interface {
+	UnderlyingDB() *sql.DB
+}
+
+// UnderlyingDB returns the provider's connection pool, or nil once the
+// provider is closed. For a proxied provider every connection speaks BDPROXY1
+// to the per-root proxy, so the pool is already authenticated.
+//
+// RAW-SQL ESCAPE HATCH: statements on this pool bypass units of work, so they
+// fire no hooks, write nothing to the events journal or versioned history,
+// and mint no Dolt commit. The caveat is DoltStore.UnderlyingDB's.
+func (p *doltSQLProvider) UnderlyingDB() *sql.DB {
+	db, _ := p.pool()
+	return db
+}
+
+// ErrProviderClosed is returned by a provider operation that needs the
+// connection pool after Close released it.
+var ErrProviderClosed = errors.New("uow: provider is closed")
+
+// pool returns the connection pool, or ErrProviderClosed after Close.
+func (p *doltSQLProvider) pool() (*sql.DB, error) {
+	p.dbMu.RLock()
+	defer p.dbMu.RUnlock()
+	if p.db == nil {
+		return nil, ErrProviderClosed
+	}
+	return p.db, nil
 }
 
 func (p *doltSQLProvider) Close(ctx context.Context) error {
@@ -294,16 +356,22 @@ func (p *doltSQLProvider) Close(ctx context.Context) error {
 	if p.endpointResolver != nil {
 		p.endpointResolver.close()
 	}
-	if p.db == nil {
-		return nil
-	}
+	p.dbMu.Lock()
 	db := p.db
 	p.db = nil
+	p.dbMu.Unlock()
+	if db == nil {
+		return nil
+	}
 	return db.Close()
 }
 
 func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
-	conn, err := p.db.Conn(ctx)
+	db, err := p.pool()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("uow: pin connection: %w", err)
 	}
@@ -573,6 +641,9 @@ func dataBehindAdopter(readOnly bool) *schema.FastForwardAdopter {
 // would newly brick every read on a workspace waiting for its operator to
 // consent — which is the opposite of the contract the gate's own message
 // promises ("read commands keep working against the current schema").
+// A read that cannot carry on, because this binary's reads cannot query the
+// current schema, still reports a stop the smart gate shaped
+// (reportsStopOnDrift) rather than only the drift.
 // It is a free function rather than a provider method on purpose: it needs no
 // provider state, and the parity test that enumerates doltSQLProvider's method
 // set as the capability surface a caller can reach through a
@@ -595,6 +666,18 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	if err := schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)); err != nil {
 		if isSerializationError(err) {
 			return err
+		}
+		// The read cannot run, but a stop the smart gate shaped is still the
+		// actionable half, as when the database cannot be attached at all. On
+		// a proxied workspace a read like this one is where the operator is
+		// sent to see that stop: the front door refuses the bare
+		// `bd migrate schema` whose open used to print it, and the forced verb
+		// skips it (gastownhall/beads#6656). The drift error alone would hide
+		// the stop behind a remedy that names the refused bare verb. So the
+		// open fails with the refusal, which cmd/bd's renderTypedOpenError and
+		// its JSON twin print, and the drift stays in the chain for errors.As.
+		if reportsStopOnDrift(gateErr) && schema.IsSchemaBehindError(err) {
+			return backoff.Permanent(errors.Join(gateErr, err))
 		}
 		return backoff.Permanent(err)
 	}
@@ -619,10 +702,50 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	fmt.Fprintf(os.Stderr,
 		"Warning: %[1]v\n"+
 			"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
-			"  Writes are blocked until the schema is reconciled. Run '%[3]s'\n"+
-			"  once every client of this server is upgraded.\n",
-		gateErr, gateErr.CurrentVersion, schema.SharedConsentCommand)
+			"%[3]s",
+		gateErr, gateErr.CurrentVersion, bluntReadThroughRemedy(gateErr))
 	return nil
+}
+
+// reportsStopOnDrift reports whether a read that the drift check stops must
+// still report gateErr: a stop the smart gate shaped, by the predicate the
+// read-through warning keys on, except shared-no-remote. That body says read
+// commands keep working, which is false once the drift check has stopped
+// this one, and its remedy is the forced verb the proxied front door's
+// refusal names anyway. The blunt fallback is left out too. It is none of
+// the stops (adopt, pull first, forked schema) that the forced verb's caveat
+// sends the operator to look for, and its UserMessage body prescribes the
+// bare `bd migrate --force` and `bd dolt push`, which a proxied front door
+// refuses.
+func reportsStopOnDrift(gateErr *schema.RemoteMigrateGateError) bool {
+	if gateErr.IsDataBehind() {
+		return true
+	}
+	return gateErr.Decision != "" && gateErr.Decision != "shared-no-remote"
+}
+
+// bluntReadThroughRemedy is how the blunt read-through warning says to
+// reconcile the schema the gate would not migrate. The blunt stop is
+// remote-backed by construction (with no remote the shared gate decides
+// shared-no-remote instead), so its choice is adopt or migrate as the single
+// designated migrator. On a proxied workspace the front door refuses the bare
+// `bd migrate schema` and `bd dolt push` (gastownhall/beads#6656), so the
+// migrate route there is the forced verb, with the library clients of the
+// proxy's backend stopped around it, and the push runs from a workspace with
+// direct access to the database.
+func bluntReadThroughRemedy(gateErr *schema.RemoteMigrateGateError) string {
+	if !gateErr.Proxied {
+		return "  Writes are blocked until the schema is reconciled. Run '" + schema.SharedConsentCommand + "'\n" +
+			"  once every client of this server is upgraded.\n"
+	}
+	return "" +
+		"  Writes are blocked until the schema is reconciled. If another clone has\n" +
+		"  already migrated and pushed, adopt its database instead of migrating here.\n" +
+		"  Otherwise, and only as the single designated migrator, once every client\n" +
+		"  of this server is upgraded: stop every library client connected to this\n" +
+		"  proxy's backend, run '" + schema.SharedConsentCommandForced + "', restart them, and push\n" +
+		"  with 'bd dolt push' from a workspace with direct access to the database\n" +
+		"  (this proxied-server workspace refuses it).\n"
 }
 
 // verifyTeamServerSchema is the team-server open path: the schema is owned by

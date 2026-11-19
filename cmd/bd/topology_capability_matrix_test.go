@@ -88,6 +88,12 @@ type expectation struct {
 	// silent omission (config show dropping database-backed settings) is
 	// pinned down as a wrong answer rather than a formatting difference.
 	absent string
+	// stderrSubstr, when set, must appear on stderr and NOT on stdout. It pins
+	// a warning to the stream a --json consumer does not parse.
+	stderrSubstr string
+	// stdoutOneJSON, when set, requires stdout to hold exactly one JSON object
+	// and nothing else: the command's report, uncontaminated by a warning.
+	stdoutOneJSON bool
 	// knownBad names the defect this cell documents. Required for
 	// WRONG_ANSWER and DEGRADED; a later slice deletes it when it flips.
 	knownBad string
@@ -486,10 +492,16 @@ var capabilityProbes = []probe{
 		},
 	},
 
-	// --- migrate schema: already lifted in 1.3.0 -----------------------------
+	// --- migrate schema: refused on proxied unless forced ---------------------
 	{
-		// The one family the 1.3.0 release already lifted. It is HONORED
-		// proxied, but reports no applied count — S6 makes it report one.
+		// The 1.3.0 release lifted this verb on proxied workspaces, and that
+		// lift was the defect (gastownhall/beads#6656): the provider open IS
+		// the migration, and it promotes the schema underneath every library
+		// client of the proxy's backend, none of which the proxy tracks. So
+		// the bare verb is now a typed design refusal that names the forced
+		// route. It runs in the refusal partition, behind the
+		// no-provider-side-effects invariants: refusing after the open would
+		// be refusing after the migration.
 		name: "migrate schema",
 		args: []string{"migrate", "schema"},
 		direct: expectation{
@@ -498,7 +510,28 @@ var capabilityProbes = []probe{
 			outcome: outcomeHonored, substr: `"status": "current"`, reason: reasonNA,
 		},
 		proxied: expectation{
-			outcome: outcomeDegraded, substr: "reconciled during provider open",
+			outcome: outcomeRefusedTyped, code: "proxy.migrate.unsupported",
+			substr: "without --force", reason: reasonDesign,
+		},
+	},
+	{
+		// The sanctioned route past the refusal above: the operator stops the
+		// co-resident clients, forces, restarts them. It keeps the 1.3.0
+		// behaviour it was lifted with, defect included — it reports no
+		// applied count — and that knownBad moved here from the bare row
+		// with the behaviour. `absent` pins the key's absence so a consumer
+		// knows it must not read a missing `applied` as zero. The front
+		// door's client-stop warning goes to stderr, leaving stdout the one
+		// report a --json caller parses.
+		name: "migrate schema --force",
+		args: []string{"migrate", "schema", "--force"},
+		direct: expectation{
+			outcome: outcomeHonored, substr: `"status": "current"`, reason: reasonNA,
+			stdoutOneJSON: true, absent: "close co-resident library clients",
+		},
+		proxied: expectation{
+			outcome: outcomeDegraded, substr: "reconciled during provider open", absent: `"applied"`,
+			stderrSubstr: "close co-resident library clients", stdoutOneJSON: true,
 			knownBad: "proxied migrate schema reports no applied count (design 1.5 / slice S6)",
 			reason:   reasonNA,
 		},
@@ -996,6 +1029,24 @@ func assertCell(t *testing.T, w topologyWorkspace, bd string, p probe, want expe
 		t.Fatalf("unhandled outcome %q", want.outcome)
 	}
 
+	if want.stderrSubstr != "" {
+		if !strings.Contains(stderr, want.stderrSubstr) {
+			fail("stderr lacks %q", want.stderrSubstr)
+		}
+		if strings.Contains(stdout, want.stderrSubstr) {
+			fail("stdout carries %q, which belongs on stderr", want.stderrSubstr)
+		}
+	}
+	if want.stdoutOneJSON {
+		dec := json.NewDecoder(strings.NewReader(stdout))
+		var report map[string]interface{}
+		if err := dec.Decode(&report); err != nil {
+			fail("stdout is not a JSON object: %v", err)
+		}
+		if _, err := dec.Token(); err == nil {
+			fail("stdout carries more than the one JSON report")
+		}
+	}
 	if want.absent != "" && strings.Contains(combined, want.absent) {
 		fail("output unexpectedly contains %q", want.absent)
 	}

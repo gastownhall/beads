@@ -48,6 +48,7 @@ type initProxiedServerInput struct {
 	teamServer             bool
 	fromJSONL              bool
 	nonInteractive         bool
+	noAdopt                bool // --no-adopt: never derive a remote from git origin (GH#6099)
 }
 
 func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput) error {
@@ -342,7 +343,8 @@ func resolveProxiedInitRemoteURL(ctx context.Context, workDir string, in initPro
 	}
 	// Under keepHomeClean the repository around the home is not the project's,
 	// so its origin is not this workspace's remote (see guardInitInHomeDir).
-	if !in.stealth && !in.keepHomeClean {
+	// --no-adopt / BD_NO_REMOTE_ADOPT: no remote is derived from origin.
+	if !in.stealth && !in.keepHomeClean && !initSkipsDerivedRemote(in.noAdopt) {
 		// Origin belongs to the selected project, independently of Beads storage.
 		gitUC := domain.NewGitUseCase(workDir, domaingit.NewInitGitRepository(workDir))
 		if originURL, err := gitUC.OriginRemoteURL(ctx); err == nil && originURL != "" {
@@ -510,7 +512,7 @@ func proxiedInitConfigYAMLBody(beadsDir string) []byte {
 	if _, err := os.Stat(filepath.Join(beadsDir, "config.yaml")); err == nil {
 		return nil
 	}
-	return renderInitConfigYAML("", false)
+	return renderInitConfigYAML()
 }
 
 // proxiedInitTeamServer is the team-server posture init runs with: the

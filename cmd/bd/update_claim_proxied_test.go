@@ -162,6 +162,34 @@ func TestProxiedClaimConflictStaysAPerIDFailure(t *testing.T) {
 	}
 }
 
+// A claim the lifecycle refuses over a live local blocker is a per-id failure
+// that names the blocker and the --force override, and exits 1 like any other
+// lost claim, never 13.
+func TestProxiedClaimBlockedStaysAPerIDFailure(t *testing.T) {
+	before := &types.Issue{ID: "bd-blocked", Status: types.StatusOpen}
+	blockerID := "bd-blocker"
+	refusal := issueops.NewClaimBlockedError(before.ID, []string{blockerID})
+	claimRoleFixture(t, before, issueops.UpdateResult{}, refusal)
+
+	var fail *updateIDFailure
+	stderr := captureStderrDuring(t, func() {
+		_, fail, _ = applyUpdateProxiedOne(context.Background(), before.ID, &updateInput{claim: true, fields: map[string]any{}})
+	})
+	if fail == nil {
+		t.Fatal("blocked claim did not produce a per-id failure")
+	}
+	if fail.GuardMismatch {
+		t.Error("a blocked claim must not exit 13")
+	}
+	want := "cannot claim blocked issue: bd-blocked is blocked by [bd-blocker] (use --force to override)"
+	if !strings.Contains(stderr, want) {
+		t.Errorf("stderr = %q, want %q", stderr, want)
+	}
+	if fail.Error != want {
+		t.Errorf("per-id failure = %q, want %q", fail.Error, want)
+	}
+}
+
 // SIGINT cancels bd's root context mid-batch. That is not a verdict on the
 // issue in flight: the loop aborts, rather than recording one "context
 // canceled" failure for this id and then the same failure for every id left.

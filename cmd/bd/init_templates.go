@@ -7,8 +7,7 @@ import (
 )
 
 // createConfigYaml creates the config.yaml template in the specified directory
-// In --no-db mode, the prefix is saved here since there's no database to store it.
-func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
+func createConfigYaml(beadsDir string) error {
 	configYamlPath := filepath.Join(beadsDir, "config.yaml")
 
 	// Skip if already exists
@@ -16,7 +15,7 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 		return nil
 	}
 
-	body := renderInitConfigYAML(prefix, noDbMode)
+	body := renderInitConfigYAML()
 	if err := os.WriteFile(configYamlPath, body, 0600); err != nil {
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
@@ -24,18 +23,8 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 	return nil
 }
 
-func renderInitConfigYAML(prefix string, noDbMode bool) []byte {
-	noDbLine := "# no-db: false"
-	if noDbMode {
-		noDbLine = "no-db: true  # JSONL-only mode, no database"
-	}
-
-	prefixLine := "# issue-prefix: \"\""
-	if noDbMode && prefix != "" {
-		prefixLine = fmt.Sprintf("issue-prefix: %q", prefix)
-	}
-
-	body := fmt.Sprintf(`# Beads Configuration File
+func renderInitConfigYAML() []byte {
+	body := `# Beads Configuration File
 # This file configures default behavior for all bd commands in this repository
 # All settings can also be set via environment variables (BD_* prefix)
 # or overridden with command-line flags
@@ -43,11 +32,7 @@ func renderInitConfigYAML(prefix string, noDbMode bool) []byte {
 # Issue prefix for this repository (used by bd init)
 # If not set, bd init will auto-detect from directory name
 # Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
-%s
-
-# Use no-db mode: JSONL-only, no Dolt database
-# When true, .beads/issues.jsonl is the only local store
-%s
+# issue-prefix: ""
 
 # Enable JSON output by default
 # json: false
@@ -107,7 +92,7 @@ func renderInitConfigYAML(prefix string, noDbMode bool) []byte {
 # Secret keys (stored in this file but prefer env vars to avoid git exposure):
 # - linear.api_key  → use LINEAR_API_KEY env var instead
 # - github.token    → use GITHUB_TOKEN env var instead
-`, prefixLine, noDbLine)
+`
 	return []byte(body)
 }
 

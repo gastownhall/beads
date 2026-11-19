@@ -910,6 +910,38 @@ func TestIssueLifecycleClaimExternalPolicy(t *testing.T) {
 	}
 }
 
+// TestIssueLifecycleClaimExternalPolicyIgnoresForce pins the scope split the
+// forced blocked-claim override documents (bd-ltvqa9 AC-7): ForceClaimBlocked
+// covers LOCAL blockers only. The external claim guard stays in force with it
+// — the decorator's Update passes a hard-coded force=false for claims — so
+// both attempts refuse with the external policy's own refusal and neither
+// reaches the inner lifecycle.
+func TestIssueLifecycleClaimExternalPolicyIgnoresForce(t *testing.T) {
+	lifecycle := &fakeLifecycle{}
+	raw := &fakeStore{lifecycle: lifecycle, deps: map[string][]*types.Dependency{
+		"be-consumer": {externalDep("be-consumer", "external:remote:payments", types.DepBlocks)},
+	}}
+	foreign := &fakeStore{labels: map[string][]*types.Issue{
+		"provides:payments": {{ID: "remote-provider", Status: types.StatusOpen}},
+	}}
+	ops, err := testStore(raw, foreign, true).IssueLifecycle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forced := range []bool{false, true} {
+		_, err := ops.Update(t.Context(), publicops.UpdateRequest{
+			IssueID: "be-consumer", Actor: "worker", Claim: true, ForceClaimBlocked: forced,
+		})
+		if !errors.Is(err, storage.ErrCloseBlocked) {
+			t.Fatalf("claim with force=%v: error = %v, want ErrCloseBlocked (the override covers local blockers only)",
+				forced, err)
+		}
+	}
+	if lifecycle.updated != 0 {
+		t.Fatalf("inner updates = %d, want 0 (neither attempt writes)", lifecycle.updated)
+	}
+}
+
 // A backend without policy support still closes a batch that no external
 // blocker touches. A blocked item or a next claim, which must exclude every
 // blocked candidate, still refuses rather than bypassing the policy.

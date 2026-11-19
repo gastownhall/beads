@@ -349,7 +349,7 @@ func TestInitStoreServerPortReadsTheNewWorkspace(t *testing.T) {
 					if err := meta.Save(beadsDir); err != nil {
 						t.Fatal(err)
 					}
-					if err := createConfigYaml(beadsDir, false, ""); err != nil {
+					if err := createConfigYaml(beadsDir); err != nil {
 						t.Fatal(err)
 					}
 					want := tc.host + " (no port pinned)"
@@ -586,7 +586,7 @@ func TestInitSummaryServerAddrReadsTheNewWorkspace(t *testing.T) {
 				if err := meta.Save(beadsDir); err != nil {
 					t.Fatal(err)
 				}
-				if err := createConfigYaml(beadsDir, false, ""); err != nil {
+				if err := createConfigYaml(beadsDir); err != nil {
 					t.Fatal(err)
 				}
 				if portFile {

@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"testing"
@@ -559,6 +560,72 @@ func TestReconcileChildCountersReturnsWispLookupError(t *testing.T) {
 	}
 }
 
+// TestReserveChildSuffixesSkipsASuffixBeyondTheCounterColumn pins the INT
+// bound of the GH#4750 reservation. last_child is an INT column, and Dolt
+// refuses an upsert above math.MaxInt32 as out of range, which would fail the
+// rename or removal of a legacy P.3000000000. So a suffix above the bound is
+// skipped, and a sibling exactly at the bound is still reserved. Its
+// real-backend twin is the dolt TestChildSuffixReservation case
+// SuffixBeyondTheCounterColumnIsSkipped.
+func TestReserveChildSuffixesSkipsASuffixBeyondTheCounterColumn(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("AloneItIssuesNoStatement", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+
+		changed, err := ReserveChildSuffixesInTx(ctx, tx, []string{"test-parent.3000000000"}, nil)
+		if err != nil {
+			t.Fatalf("ReserveChildSuffixesInTx error = %v, want nil", err)
+		}
+		if len(changed) != 0 {
+			t.Fatalf("changed tables = %#v, want none", changed)
+		}
+
+		// No routing, parent, counter read or upsert statement is expected.
+		mock.ExpectRollback()
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("ASiblingAtTheBoundIsStillReserved", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
+			WillReturnError(sql.ErrNoRows)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM issues WHERE id = ?")).
+			WithArgs("test-parent").
+			WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT last_child FROM child_counters WHERE parent_id = ?")).
+			WithArgs("test-parent").
+			WillReturnError(sql.ErrNoRows)
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)")).
+			WithArgs("test-parent", math.MaxInt32, math.MaxInt32).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		changed, err := ReserveChildSuffixesInTx(ctx, tx, []string{"test-parent.3000000000", "test-parent.2147483647"}, nil)
+		if err != nil {
+			t.Fatalf("ReserveChildSuffixesInTx error = %v, want nil", err)
+		}
+		if len(changed) != 1 || !changed["child_counters"] {
+			t.Fatalf("changed tables = %#v, want only child_counters", changed)
+		}
+
+		mock.ExpectRollback()
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+}
+
 // TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking is the
 // batch-lookup twin of TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking:
 // routing and target presence come from one batch read each, edges are read
@@ -952,5 +1019,68 @@ func expectDepBatchReads(mock sqlmock.Sqlmock, issueTargets, ids []driver.Value,
 				WithArgs(ids...).
 				WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
 		}
+	}
+}
+
+// TestResetCreateIDsIfRolledBack pins the shared reset rule the store create
+// entry points use (bd-wm5ahf, GH#8457): only ID fields the caller left empty
+// are recorded, and they are emptied again only for an error that means the
+// transaction rolled back. A nil error or one wrapping
+// storage.ErrCommitIndeterminate keeps them, and the error is returned as is.
+func TestResetCreateIDsIfRolledBack(t *testing.T) {
+	plain := errors.New("label too long")
+	indeterminate := fmt.Errorf("commit: %w", storage.ErrCommitIndeterminate)
+	joined := errors.Join(errors.New("cleanup failed"), indeterminate)
+
+	cases := []struct {
+		name      string
+		err       error
+		wantReset bool
+	}{
+		{name: "nil keeps", err: nil, wantReset: false},
+		{name: "plain error resets", err: plain, wantReset: true},
+		{name: "indeterminate keeps", err: indeterminate, wantReset: false},
+		{name: "joined indeterminate keeps", err: joined, wantReset: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			auto := &types.Issue{
+				Dependencies: []*types.Dependency{{DependsOnID: "x-1"}, nil},
+				Comments:     []*types.Comment{{Text: "fresh"}, nil},
+			}
+			explicit := &types.Issue{
+				ID:           "x-explicit",
+				Dependencies: []*types.Dependency{{IssueID: "x-explicit", DependsOnID: "x-1"}},
+				Comments:     []*types.Comment{{ID: "c-explicit", Text: "kept"}},
+			}
+			reset := SnapshotUnsetCreateIDs([]*types.Issue{auto, explicit, nil})
+
+			// Simulate a create that filled every empty field.
+			auto.ID = "x-minted"
+			auto.Dependencies[0].IssueID = "x-minted"
+			auto.Comments[0].ID = "c-minted"
+
+			if got := ResetCreateIDsIfRolledBack(tc.err, reset); got != tc.err {
+				t.Fatalf("returned %v, want the input error %v unchanged", got, tc.err)
+			}
+
+			wantID, wantDep, wantComment := "x-minted", "x-minted", "c-minted"
+			if tc.wantReset {
+				wantID, wantDep, wantComment = "", "", ""
+			}
+			if auto.ID != wantID {
+				t.Errorf("auto.ID = %q, want %q", auto.ID, wantID)
+			}
+			if got := auto.Dependencies[0].IssueID; got != wantDep {
+				t.Errorf("auto dependency IssueID = %q, want %q", got, wantDep)
+			}
+			if got := auto.Comments[0].ID; got != wantComment {
+				t.Errorf("auto comment ID = %q, want %q", got, wantComment)
+			}
+			if explicit.ID != "x-explicit" || explicit.Dependencies[0].IssueID != "x-explicit" || explicit.Comments[0].ID != "c-explicit" {
+				t.Errorf("caller-supplied IDs changed: issue %q dep %q comment %q",
+					explicit.ID, explicit.Dependencies[0].IssueID, explicit.Comments[0].ID)
+			}
+		})
 	}
 }
