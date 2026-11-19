@@ -142,7 +142,7 @@ func TestWispPurgeClosedPersistsCompletedChunksOnRealStore(t *testing.T) {
 	store, rootCtx, jsonOutput, quietFlag, proxiedServerMode, actor = rec, ctx, true, false, false, "test"
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(ctx, false, true, nil)
+		return runWispPurgeClosed(ctx, false, true, nil, 0)
 	})
 	if err == nil {
 		t.Fatalf("first run succeeded, want the injected failure\nstdout:\n%s", stdout)
@@ -182,7 +182,7 @@ func TestWispPurgeClosedPersistsCompletedChunksOnRealStore(t *testing.T) {
 
 	rec.failOn, rec.requests = "", nil
 	stdout, stderr, err = captureWispGC(t, func() error {
-		return runWispPurgeClosed(ctx, false, true, nil)
+		return runWispPurgeClosed(ctx, false, true, nil, 0)
 	})
 	if err != nil {
 		t.Fatalf("rerun: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
