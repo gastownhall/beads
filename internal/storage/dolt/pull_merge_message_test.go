@@ -552,8 +552,8 @@ func conflictsNameTable(conflicts []storage.Conflict, table string) bool {
 }
 
 // TestCLIPullDeclinedConflictLeavesNoOpenMerge reproduces GH#7839 (bd-2ypu02):
-// when finishCLIPull's resolver declines a conflict, the CLI route must abort
-// the merge it opened, as the SQL route does, instead of leaving
+// when the settle machinery declines a conflict, the CLI route must abort the
+// merge it opened, as the SQL route does, instead of leaving
 // dolt_merge_status.is_merging set so every later write and pull fails.
 func TestCLIPullDeclinedConflictLeavesNoOpenMerge(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)

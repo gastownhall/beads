@@ -182,19 +182,6 @@ func expectCLIMerge(pool, session sqlmock.Sqlmock, ref string) {
 	session.ExpectClose()
 }
 
-// expectCleanCLIResolve expects finishCLIPull's resolver to find nothing to
-// resolve or repair.
-func expectCleanCLIResolve(mock sqlmock.Sqlmock) {
-	mock.ExpectExec("SET @@dolt_allow_commit_conflicts = 1").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT `table`, num_conflicts FROM dolt_conflicts").
-		WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}))
-	mock.ExpectQuery("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0").
-		WillReturnRows(sqlmock.NewRows([]string{"table"}))
-	mock.ExpectRollback()
-	mock.ExpectExec("SET @@dolt_allow_commit_conflicts = 0").WillReturnResult(sqlmock.NewResult(0, 0))
-}
-
 func readCallLog(t *testing.T, callLog string) string {
 	t.Helper()
 	raw, err := os.ReadFile(callLog)
@@ -211,8 +198,8 @@ func readCallLog(t *testing.T, callLog string) string {
 // <branch>` with the same credential environment, then merge
 // <remote>/<branch> themselves with CALL DOLT_MERGE on the merge's own
 // session (see TestCLIPullMergeRunsOnAPinnedLongTimeoutSession), which
-// settles in the merge's own transaction; finishCLIPull's resolver runs on
-// the pool.
+// settles in the merge's own transaction (GH#7839). The pool runs no merge
+// and no resolver: there is no after-the-fact pass anymore.
 func TestCLIPullRoutesFetchThenMergeTrackingRef(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell fake")
@@ -262,7 +249,6 @@ func TestCLIPullRoutesFetchThenMergeTrackingRef(t *testing.T) {
 			store.remotePassword = tc.password
 			session := cliMergeSession(t)
 			expectCLIMerge(mock, session, "origin/main")
-			expectCleanCLIResolve(mock)
 
 			if _, err := store.pullTransportReporting(context.Background(), "origin"); err != nil {
 				t.Fatalf("pull: %v", err)
@@ -385,10 +371,11 @@ func TestCLIPeerPullReportsDeclinedMergeAndRollsBack(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	store := cliPullStore(t, mock, db, unmanagedWorkspace(t), "peer", peerURL)
-	// A read-only store surfaces the CLI pull's result untouched: with the
-	// merge rolled back, the working set holds nothing for finishCLIPull's
-	// resolver to settle anyway, so what reaches peerPullOutcome is the
-	// merge's own conflicts error either way.
+	// A read-only store skips pullFromPeer's bookends — the auto-commit
+	// before the pull, the pre-pull HEAD read, and finishPeerPull's
+	// post-merge recompute — so the pool sees only the route's own reads.
+	// What reaches peerPullOutcome is the merge's own conflicts error
+	// either way.
 	store.readOnly = true
 	session := cliMergeSession(t)
 

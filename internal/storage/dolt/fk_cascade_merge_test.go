@@ -202,12 +202,12 @@ func TestFKCascadeViolationRepairOnSQLPull(t *testing.T) {
 	}
 }
 
-// TestFKCascadeViolationRepairOnCLIPull covers the CLI pull route: a CLI
-// `dolt pull` leaves the violated merge in the shared working set with no
-// transaction to inspect, and autoResolveConflictsAfterCLIPull repairs it
-// after the fact. The violated working set is staged here by committing a
-// forced merge transaction without settling it — exactly the state a CLI pull
-// leaves behind.
+// TestFKCascadeViolationRepairOnCLIPull covers the CLI pull route's settle
+// (GH#7839): the route's merge runs and settles in its own transaction
+// (mergeTrackingRefAfterCLIFetch), so the delete-vs-insert FK violation is
+// repaired inside that transaction and the settled merge commits — no
+// after-the-fact resolver pass on the pool, and no violated working set left
+// behind for the next writer.
 func TestFKCascadeViolationRepairOnCLIPull(t *testing.T) {
 	tc := fkCascadeCases[1] // labels — any synced child table works
 	store, cleanup := setupTestStore(t)
@@ -218,29 +218,17 @@ func TestFKCascadeViolationRepairOnCLIPull(t *testing.T) {
 
 	peerBranch := seedFKCascadeDivergence(ctx, t, db, tc)
 
-	// Simulate the CLI pull: forced merge committed with its violations.
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("begin merge tx: %v", err)
+	// The CLI route's merge runs on a connection of its own, pinned to the
+	// store's branch (pinStoreBranch): point the store at this test's
+	// isolated branch, where the divergence lives, before the merge runs.
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("get current branch: %v", err)
 	}
-	for _, q := range []string{"SET @@dolt_allow_commit_conflicts = 1", "SET @@dolt_force_transaction_commit = 1"} {
-		if _, err := tx.ExecContext(ctx, q); err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
-		t.Fatalf("forced merge: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit violated working set: %v", err)
-	}
+	store.branch = currentBranch
 
-	resolved, err := store.autoResolveConflictsAfterCLIPull(ctx)
-	if err != nil {
-		t.Fatalf("autoResolveConflictsAfterCLIPull: %v", err)
-	}
-	if !resolved {
-		t.Fatal("expected the CLI-pull resolver to repair the FK cascade violations")
+	if err := store.mergeTrackingRefAfterCLIFetch(ctx, peerBranch); err != nil {
+		t.Fatalf("settling the CLI-route merge: %v", err)
 	}
 
 	var orphans int
@@ -257,6 +245,13 @@ func TestFKCascadeViolationRepairOnCLIPull(t *testing.T) {
 	}
 	if violations != 0 {
 		t.Errorf("%d constraint violations survive the repair", violations)
+	}
+	var merging bool
+	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
+	}
+	if merging {
+		t.Error("merge left open (dolt_merge_status.is_merging = 1) after the settlement")
 	}
 }
 
@@ -425,30 +420,13 @@ func TestFKCascadeRepairKeepsCleanMergedTables(t *testing.T) {
 					t.Fatalf("settling FK-violating merge: %v", err)
 				}
 			case "cli":
-				// What a CLI pull leaves behind: the forced merge committed
-				// with its violations, unsettled (as in
-				// TestFKCascadeViolationRepairOnCLIPull).
-				tx, err := db.BeginTx(ctx, nil)
-				if err != nil {
-					t.Fatalf("begin merge tx: %v", err)
-				}
-				for _, q := range []string{"SET @@dolt_allow_commit_conflicts = 1", "SET @@dolt_force_transaction_commit = 1"} {
-					if _, err := tx.ExecContext(ctx, q); err != nil {
-						t.Fatalf("%s: %v", q, err)
-					}
-				}
-				if _, err := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
-					t.Fatalf("forced merge: %v", err)
-				}
-				if err := tx.Commit(); err != nil {
-					t.Fatalf("commit violated working set: %v", err)
-				}
-				resolved, err := store.autoResolveConflictsAfterCLIPull(ctx)
-				if err != nil {
-					t.Fatalf("autoResolveConflictsAfterCLIPull: %v", err)
-				}
-				if !resolved {
-					t.Fatal("expected the CLI-pull resolver to repair the FK cascade violation")
+				// The CLI route settles its merge in the merge's own
+				// transaction (mergeTrackingRefAfterCLIFetch), on a
+				// connection pinned to the store's branch — the same settle
+				// the "sql" arm drives, through the production CLI path.
+				store.branch = currentBranch
+				if err := store.mergeTrackingRefAfterCLIFetch(ctx, peerBranch); err != nil {
+					t.Fatalf("settling the CLI-route merge: %v", err)
 				}
 			}
 
