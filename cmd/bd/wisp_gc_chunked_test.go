@@ -414,6 +414,56 @@ func TestWispGCKeepsCommittedChunksWhenALaterChunkFails(t *testing.T) {
 	}
 }
 
+// TestWispGCReportsOneAggregateResult pins the --json half of a stopped age
+// GC: exactly one stdout object, describing the committed chunks with
+// unconfirmed_count (GH#6246's name for the selected ids no committed chunk
+// confirmed — the errored and unattempted ones), with no second error
+// envelope on stdout and no JSON on stderr, and the command's write/export
+// bookkeeping still recording the confirmed deletions although the command
+// fails.
+func TestWispGCReportsOneAggregateResult(t *testing.T) {
+	s := useWispGCAgeStub(t, 450)
+	s.deleter.fail = failRequestContaining(s.wisps[250].ID, context.DeadlineExceeded)
+	jsonOutput = true
+
+	stdout, stderr, err := captureWispGC(t, runWispGCAgeForced)
+	if err == nil {
+		t.Fatalf("runWispGCAge succeeded, want a nonzero exit\nstdout:\n%s", stdout)
+	}
+	if !isReportedExit(err) {
+		t.Errorf("error = %v, want an already-reported exit (the caller must not print it again)", err)
+	}
+	if strings.Contains(stderr, "{") {
+		t.Errorf("stderr carries a JSON value; the answer belongs in the one stdout object:\n%s", stderr)
+	}
+	obj := decodeSingleJSONObject(t, stdout)
+	if got := obj["deleted_count"]; got != float64(200) {
+		t.Errorf("deleted_count = %v, want 200", got)
+	}
+	if got, _ := obj["deleted"].([]interface{}); len(got) != 200 {
+		t.Errorf("deleted names %d ids, want 200", len(got))
+	}
+	if got, _ := obj["deleted_ids"].([]interface{}); len(got) != 200 {
+		t.Errorf("deleted_ids names %d ids, want 200", len(got))
+	}
+	if got := obj["unconfirmed_count"]; got != float64(250) {
+		t.Errorf("unconfirmed_count = %v, want 250", got)
+	}
+	if got := obj["remaining_count"]; got != float64(250) {
+		t.Errorf("remaining_count = %v, want 250 (the published spelling stays)", got)
+	}
+	if got, _ := obj["error"].(string); !containsAll(got, "context deadline exceeded") {
+		t.Errorf("error = %q, want the cause", got)
+	}
+	if got, _ := obj["hint"].(string); got != wispPurgeRerunHint {
+		t.Errorf("hint = %q, want the same-command rerun guidance", got)
+	}
+	if _, ok := obj["dependencies_removed"].(float64); !ok {
+		t.Errorf("dependencies_removed missing from the partial-failure object: %v", obj)
+	}
+	assertExportBookkeeping(t, wispPurgeIDs(200), wispPurgeIDs(450)[200:])
+}
+
 // containsAll reports whether s contains every want as a substring.
 func containsAll(s string, want ...string) bool {
 	for _, w := range want {

@@ -167,12 +167,12 @@ func purgeWispIDsDirect(ctx context.Context, ids []string) (wispPurgeOutcome, er
 // deleted_ids. A GC a failure stopped prints the same summary of what its
 // committed chunks deleted, then the cause and the rerun hint, and returns an
 // already-reported exit: under --json all of it is one stdout object
-// (remaining_count, error and hint beside the success keys), so a caller that
-// reads one JSON value still gets the progress. On failure the stderr object
-// the GH#6246 design sketched was folded into that one stdout object on
-// purpose: the closed route's published, regression-pinned shape is exactly
-// that, and two GC modes answering a partial failure differently is worse
-// than either alone.
+// (unconfirmed_count — and remaining_count, its older spelling — with error
+// and hint beside the success keys), so a caller that reads one JSON value
+// still gets the progress. On failure the stderr object the GH#6246 design
+// sketched was folded into that one stdout object on purpose: the closed
+// route's published, regression-pinned shape is exactly that, and two GC
+// modes answering a partial failure differently is worse than either alone.
 func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs bool) error {
 	if jsonOutput {
 		answer := map[string]interface{}{
@@ -189,6 +189,13 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs boo
 			answer["deleted_ids"] = out.deletedIDs
 		}
 		if out.err != nil {
+			// unconfirmed_count (GH#6246's name for it) is selected ids minus
+			// the ids a committed chunk confirmed deleted: it includes the
+			// errored and unattempted chunks, and is deliberately not a
+			// measured count of rows still present — an error at a commit
+			// boundary proves nothing either way. remaining_count is the same
+			// number under the key the closed route already published.
+			answer["unconfirmed_count"] = out.remaining()
 			answer["remaining_count"] = out.remaining()
 			answer["error"] = out.err.Error()
 			answer["hint"] = wispPurgeRerunHint
@@ -221,7 +228,7 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs boo
 		// The counts above are what committed chunks confirmed. The failed
 		// chunk is not claimed either way: an error at a commit boundary does
 		// not prove nothing was written, which is why the hint reselects.
-		return HandleErrorWithHint(fmt.Sprintf("wisp gc stopped after deleting %d of %d selected wisp(s); %d not confirmed deleted: %v",
+		return HandleErrorWithHint(fmt.Sprintf("wisp gc stopped after deleting %d of %d selected wisp(s); %d unconfirmed: %v",
 			len(out.confirmed), out.selected, out.remaining(), out.err), wispPurgeRerunHint)
 	}
 	return nil

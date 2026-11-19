@@ -639,11 +639,12 @@ requires --force to actually delete.
 so a failure keeps the batches already committed. The same bounded batching
 applies to age-based GC: every forced run deletes in transactions of at most
 200 wisps and stops at the first failure. The summary then reports
-only the deletions that committed, plus remaining_count, error and hint in
---json output, and the command exits nonzero; rerun it to delete the rest.
-On a large database a single batch can still be slow; if a batch times out,
-the pool read timeout can be raised for the run with
-BEADS_DOLT_POOL_READ_TIMEOUT (dolt.pool-read-timeout in settings).
+only the deletions that committed, plus remaining_count (and its newer alias
+unconfirmed_count), error and hint in --json output, and the command exits
+nonzero; rerun it to delete the rest. On a large database a single batch can
+still be slow; if a batch times out, the pool read timeout can be raised for
+the run with BEADS_DOLT_POOL_READ_TIMEOUT (dolt.pool-read-timeout in
+settings).
 A scan reads at most 5000 closed wisps: when it reaches that limit the output
 says more may remain (candidates_capped in --json), even if every wisp it
 read was excluded.

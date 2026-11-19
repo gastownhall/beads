@@ -59,10 +59,11 @@ bd purge --force      # delete all closed ephemeral beads
 `bd mol wisp gc --closed --force` deletes closed wisps in batches of 200, each
 committed on its own. Age-based GC (with or without `--all`) uses the same
 bounded batching. If a batch fails, the batches before it stay deleted:
-the summary counts only committed deletions, `--json` adds `remaining_count`,
-`error` and `hint`, and the command exits nonzero. Rerun it to delete the
-rest. One run scans at most 5000 closed wisps; when the scan reaches that
-limit the output says more may remain (`candidates_capped` in `--json`).
+the summary counts only committed deletions, `--json` adds `remaining_count`
+(alias `unconfirmed_count`), `error` and `hint`, and the command exits
+nonzero. Rerun it to delete the rest. One run scans at most 5000 closed
+wisps; when the scan reaches that limit the output says more may remain
+(`candidates_capped` in `--json`).
 
 A single batch can still be slow on a large database, because each
 transaction recomputes `is_blocked` for everything the deletion touched. If a
