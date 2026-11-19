@@ -54,8 +54,10 @@ type hookBatchApplier struct {
 // applied across kinds.
 //
 // The result's snapshots are what the hooks are handed, hydrated inside the
-// transaction that wrote them. That is why ItemResult carries an Issue at all;
-// see issueops.ItemResult.Issue.
+// transaction that wrote them. That is why ItemResult carries an Issue at all.
+// Every entry for one row shares that row's latest snapshot, so a row created
+// and then updated in one request hands both hooks the row as the batch left
+// it; see issueops.ItemResult.Issue.
 func (o *hookBatchApplier) ApplyBatch(ctx context.Context, request issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
 	result, err := o.inner.ApplyBatch(ctx, request)
 	if err != nil {

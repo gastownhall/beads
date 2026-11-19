@@ -238,3 +238,72 @@ func (r *recordingBatchApplyIssues) CompleteIssueOperationMetadata(context.Conte
 func (r *recordingBatchApplyIssues) CompleteIssueOperationRelease(context.Context, string)    {}
 func (r *recordingBatchApplyIssues) CompleteIssueOperationReclaim(context.Context, string)    {}
 func (r *recordingBatchApplyIssues) CompleteIssueOperationUpdateByID(context.Context, string) {}
+
+// recordingBatchApplyRowHooks keeps both facts a row hook is handed: which hook
+// fired for which id, and the issue value it was given.
+type recordingBatchApplyRowHooks struct {
+	recordingBatchApplyHooks
+	issues []*types.Issue
+}
+
+func (r *recordingBatchApplyRowHooks) CompleteIssueOperationCreate(ctx context.Context, issue *types.Issue, deps []*types.Dependency) {
+	r.recordingBatchApplyHooks.CompleteIssueOperationCreate(ctx, issue, deps)
+	r.issues = append(r.issues, issue)
+}
+func (r *recordingBatchApplyRowHooks) CompleteIssueOperationUpdate(issue *types.Issue) {
+	r.recordingBatchApplyHooks.CompleteIssueOperationUpdate(issue)
+	r.issues = append(r.issues, issue)
+}
+func (r *recordingBatchApplyRowHooks) CompleteIssueOperationClose(issue *types.Issue) {
+	r.recordingBatchApplyHooks.CompleteIssueOperationClose(issue)
+	r.issues = append(r.issues, issue)
+}
+
+// TestHookBatchApplierHandsEveryRowHookTheSharedSnapshot pins the hook side of
+// a batch whose rows share one latest snapshot (bd-xx3ma9): a row created,
+// updated and closed in one request hands the create, update and close hooks
+// the SAME issue value, which is the row as the batch left it. Firing count,
+// order and Changed gating are what they were with a snapshot per item.
+func TestHookBatchApplierHandsEveryRowHookTheSharedSnapshot(t *testing.T) {
+	row := &types.Issue{ID: "bd-1", Title: "after the last verb", Status: types.StatusClosed}
+	other := &types.Issue{ID: "bd-2", Title: "other row"}
+	recorder := &recordingBatchApplyRowHooks{}
+	applier := &hookBatchApplier{
+		inner: &fakeBatchApplier{result: issueops.ApplyBatchResult{Items: []issueops.ItemResult{
+			{Kind: issueops.ItemCreate, IssueID: "bd-1", Changed: true, RowVersion: 1, Issue: row},
+			{Kind: issueops.ItemUpdate, IssueID: "bd-1", Changed: true, RowVersion: 2, Issue: row},
+			{Kind: issueops.ItemUpdate, IssueID: "bd-1", Changed: false, RowVersion: 2, Issue: row},
+			{Kind: issueops.ItemUpdate, IssueID: "bd-2", Changed: true, RowVersion: 5, Issue: other},
+			{Kind: issueops.ItemClose, IssueID: "bd-1", Changed: true, RowVersion: 3, Issue: row},
+			{Kind: issueops.ItemDepAdd, IssueID: "bd-1", DependsOnID: "bd-2", Changed: true},
+			{Kind: issueops.ItemDepAdd, IssueID: "bd-2", DependsOnID: "bd-9", Changed: true},
+			{Kind: issueops.ItemDepAdd, IssueID: "bd-2", DependsOnID: "bd-8", Changed: true},
+		}}},
+		hooks: recorder,
+	}
+
+	result, err := applier.ApplyBatch(context.Background(), issueops.ApplyBatchRequest{Actor: "worker"})
+	if err != nil {
+		t.Fatalf("ApplyBatch() error = %v", err)
+	}
+	wantFired := []string{"create:bd-1", "update:bd-1", "update:bd-2", "close:bd-1", "dependency:bd-2"}
+	if !reflect.DeepEqual(recorder.completions, wantFired) {
+		t.Fatalf("hooks fired = %v, want %v", recorder.completions, wantFired)
+	}
+	wantIssues := []*types.Issue{row, row, other, row}
+	if len(recorder.issues) != len(wantIssues) {
+		t.Fatalf("row hooks were handed %d issues, want %d", len(recorder.issues), len(wantIssues))
+	}
+	for i, want := range wantIssues {
+		if recorder.issues[i] != want {
+			t.Errorf("row hook %d (%s) was handed %p, want the row's shared snapshot %p", i, wantFired[i], recorder.issues[i], want)
+		}
+	}
+	// The decorator hands the result on untouched: each item keeps its own
+	// token, which is what a caller reads instead of the shared snapshot's.
+	for i, want := range []int64{1, 2, 2, 5, 3, 0, 0, 0} {
+		if got := result.Items[i].RowVersion; got != want {
+			t.Errorf("result.Items[%d].RowVersion = %d, want the item's own token %d", i, got, want)
+		}
+	}
+}
