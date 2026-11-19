@@ -12,6 +12,7 @@ package formula
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -618,20 +619,20 @@ func chainExpandedIterations(steps []*Step, loopID string, count int) []*Step {
 
 	// Find the first and last step index of each iteration
 	// Iteration N has steps with ID prefix: {loopID}.iter{N}.
+	// Each ID is parsed once, rather than probed with every iteration's
+	// prefix, which was quadratic in the loop's size.
 	iterFirstIdx := make(map[int]int) // iteration -> index of first step
 	iterLastIdx := make(map[int]int)  // iteration -> index of last step
 
 	for i, s := range steps {
-		for iter := 1; iter <= count; iter++ {
-			prefix := fmt.Sprintf("%s.iter%d.", loopID, iter)
-			if strings.HasPrefix(s.ID, prefix) {
-				if _, found := iterFirstIdx[iter]; !found {
-					iterFirstIdx[iter] = i
-				}
-				iterLastIdx[iter] = i
-				break
-			}
+		iter, ok := loopIteration(s.ID, loopID, count)
+		if !ok {
+			continue
 		}
+		if _, found := iterFirstIdx[iter]; !found {
+			iterFirstIdx[iter] = i
+		}
+		iterLastIdx[iter] = i
 	}
 
 	// Chain: first step of iteration N+1 depends on last step of iteration N
@@ -646,6 +647,31 @@ func chainExpandedIterations(steps []*Step, loopID string, count int) []*Step {
 	}
 
 	return steps
+}
+
+// loopIteration reports the iteration N of a step whose ID starts with
+// "{loopID}.iter{N}." for N in 1..count, written as fmt's %d writes it (no
+// sign, no leading zero), which is the prefix expandLoopIteration gives it.
+func loopIteration(id, loopID string, count int) (int, bool) {
+	rest, ok := strings.CutPrefix(id, loopID+".iter")
+	if !ok {
+		return 0, false
+	}
+	digits, _, ok := strings.Cut(rest, ".")
+	if !ok || digits == "" || digits[0] == '0' || len(digits) > len(strconv.Itoa(count)) {
+		return 0, false
+	}
+	iter := 0
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		iter = iter*10 + int(c-'0')
+	}
+	if iter < 1 || iter > count {
+		return 0, false
+	}
+	return iter, true
 }
 
 // ApplyBranches wires fork-join dependency patterns.
