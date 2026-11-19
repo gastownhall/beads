@@ -12,13 +12,15 @@ import (
 // ReadyWorkExcludeTypes returns the issue types excluded from ready work by
 // default, plus any caller extras (deduped, empty entries dropped). Infra types
 // stay hidden from ready work, and rig identity beads are also hidden even
-// though they are durable issues rather than infra wisps.
+// though they are durable issues rather than infra wisps. Decisions are hidden
+// too: a decision is a standing ruling, not work anyone claims.
 func ReadyWorkExcludeTypes(extra []types.IssueType) []types.IssueType {
 	out := []types.IssueType{
 		types.IssueType("merge-request"),
 		types.TypeGate,
 		types.TypeMolecule,
 		types.IssueType("rig"),
+		types.TypeDecision,
 	}
 	for _, t := range domain.DefaultInfraTypes() {
 		out = append(out, types.IssueType(t))

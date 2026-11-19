@@ -253,7 +253,7 @@ func TestReadyWorkExcludeTypes(t *testing.T) {
 		}
 		seen[typ] = true
 	}
-	for _, want := range []types.IssueType{"merge-request", types.TypeGate, types.TypeMolecule, "agent", "rig", "role", "message"} {
+	for _, want := range []types.IssueType{"merge-request", types.TypeGate, types.TypeMolecule, "agent", "rig", "role", "message", types.TypeDecision} {
 		if !seen[want] {
 			t.Errorf("default exclude list missing %q", want)
 		}

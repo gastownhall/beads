@@ -36,6 +36,7 @@ bd show bd-42 --json
 | `task` | Work item (tests, docs, refactoring) |
 | `epic` | Large feature with subtasks |
 | `chore` | Maintenance (dependencies, tooling) |
+| `decision` | A standing ruling (ADR); not claimable work, so `bd ready` leaves it out unless asked with `--type=decision` |
 
 ## Priorities
 

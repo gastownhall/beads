@@ -32,6 +32,9 @@ GetReadyWork API which applies blocker-aware semantics to find truly claimable w
 
 Note: 'bd list --ready' uses the same blocker-aware ready-work semantics.
 
+Decisions are excluded by default: a decision is a standing ruling, not work
+to claim. Use --type=decision to list ready decisions.
+
 Use --mol to filter to a specific molecule's steps:
   bd ready --mol bd-patrol   # Show ready steps within molecule
 

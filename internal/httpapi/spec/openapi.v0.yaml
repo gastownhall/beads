@@ -399,8 +399,9 @@ paths:
 
 
         SOME TYPES ARE EXCLUDED BY DEFAULT, exactly as `bd ready` excludes them:
-        `merge-request`, `gate`, `molecule`, `rig` and the workspace's
-        configured infrastructure types, plus anything named in `exclude_type`.
+        `merge-request`, `gate`, `molecule`, `rig`, `decision` and the
+        workspace's configured infrastructure types, plus anything named in
+        `exclude_type`.
         Setting `type` DROPS THAT ENTIRE EXCLUSION SET (also matching the CLI),
         so `type=molecule` returns records the default view never shows. A
         client scanning the active set with `limit=0` and no `type` therefore
