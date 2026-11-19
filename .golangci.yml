@@ -37,8 +37,9 @@ linters:
             - "!**/internal/doltserver/**"
             # Exception: the proxied-server surface needs Dolt server config
             # (servercfg, filesys) to launch/manage a real `dolt sql-server`
-            # process. Candidate for migration behind the storage adapter.
-            - "!**/cmd/bd/proxied_server.go"
+            # process. Shared by the CLI and the Go SDK. Candidate for
+            # migration behind the storage adapter.
+            - "!**/internal/proxiedopen/paths.go"
             # Exception: eventkit is DoltHub's analytics/telemetry client,
             # not the Dolt storage engine - dropped here so the narrower
             # dolt-storage-boundary-metrics-exception rule below can allow

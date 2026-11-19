@@ -17,7 +17,8 @@ import (
 
 // Events-journal activation, applied in ONE place: the factories that construct
 // a store or a unit-of-work provider (store_factory.go, store_factory_nocgo.go,
-// uow_factory.go, and bd doctor's repair handlers through the same package).
+// internal/proxiedopen for unit-of-work providers, and bd doctor's repair
+// handlers through the same package).
 // Every plumbing bd opens goes through one of those, so a new command cannot
 // acquire a store that silently records nothing.
 //
@@ -251,19 +252,6 @@ func reportEventsJournalAutoPrune(n int64, err error) {
 	}
 }
 
-// activateEventsJournalProvider is the same for a unit-of-work provider — bd's
-// second write plumbing, with its own transactions and its own activation.
-// writesBeads is the provider's posture (uow.OpensForBeadWrites).
-func activateEventsJournalProvider(ctx context.Context, beadsDir string, writesBeads bool, p uow.UnitOfWorkProvider, err error) (uow.UnitOfWorkProvider, error) {
-	if err != nil || p == nil {
-		return p, err
-	}
-	configurer, _ := p.(storage.EventsJournalConfigurer)
-	if cfgErr := eventsjournal.Apply(configurer, eventsjournal.EnabledFor(beadsDir), writesBeads); cfgErr != nil {
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), providerCloseTimeout)
-		defer cancel()
-		_ = p.Close(closeCtx)
-		return nil, cfgErr
-	}
-	return p, nil
-}
+// A unit-of-work provider — bd's second write plumbing, with its own
+// transactions — is activated by internal/proxiedopen's constructors, which
+// the construction guard scans alongside this package.

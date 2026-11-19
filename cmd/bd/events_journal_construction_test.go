@@ -100,11 +100,20 @@ var scannedPackages = map[string]string{
 	"doctor/fix": "doctor/fix/",
 	"../../internal/storage/embeddeddolt/cmd": "embeddeddolt-cmd/",
 	"../..": "sdk/",
+	// The proxied-server provider construction, shared by the bd binary and
+	// the Go SDK's proxied-server open (GH#8323).
+	"../../internal/proxiedopen": "proxiedopen/",
 }
 
-// sdkOpenExemptionReason is the one reason the Go SDK's five opens share. It has
+// sdkOpenExemptionReason is the reason the Go SDK's three Dolt-only opens share. It has
 // to be true of both per-store switches, because the exemption list is shared.
 const sdkOpenExemptionReason = "SDK entry point (library surface, not the bd binary): applies neither per-store switch, the events journal's or versioned history's; the bd binary's factories do"
+
+// sdkBestAvailableExemptionReason is sdkOpenExemptionReason for the two
+// OpenBestAvailableWith twins, whose proxied-server arm is the exception: it
+// opens through proxiedopen.Open (openProxiedServer), whose provider
+// constructors activate both switches exactly as the bd binary's do (GH#8323).
+const sdkBestAvailableExemptionReason = "SDK entry point (library surface, not the bd binary): its registered-backend, server and embedded arms apply neither per-store switch, the events journal's or versioned history's; its proxied-server arm opens through proxiedopen, which applies both, as the bd binary does"
 
 // constructionExemptions are construction sites that legitimately do NOT
 // activate the events journal, each with a reason. Keyed by
@@ -189,8 +198,8 @@ var constructionExemptions = map[string]string{
 	"sdk/beads.go:Open":                        sdkOpenExemptionReason,
 	"sdk/beads.go:OpenFromConfig":              sdkOpenExemptionReason,
 	"sdk/beads.go:OpenGated":                   sdkOpenExemptionReason,
-	"sdk/beads_cgo.go:OpenBestAvailableWith":   sdkOpenExemptionReason,
-	"sdk/beads_nocgo.go:OpenBestAvailableWith": sdkOpenExemptionReason,
+	"sdk/beads_cgo.go:OpenBestAvailableWith":   sdkBestAvailableExemptionReason,
+	"sdk/beads_nocgo.go:OpenBestAvailableWith": sdkBestAvailableExemptionReason,
 }
 
 func TestEveryStoreConstructionActivatesTheEventsJournal(t *testing.T) {
@@ -279,8 +288,8 @@ func TestRootOpensPassTheirPostureToActivation(t *testing.T) {
 		{"store_factory_nocgo.go", "newDoltStore", "activateEventsJournalStore", 1, "opensForBeadWrites(cfg)"},
 		{"store_factory.go", "newRegisteredBackendStore", "activateEventsJournalStore", 1, "writesBeads"},
 		{"store_factory_nocgo.go", "newRegisteredBackendStore", "activateEventsJournalStore", 1, "writesBeads"},
-		{"uow_factory.go", "newExternalProxiedServerUOWProvider", "activateEventsJournalProvider", 2, "uow.OpensForBeadWrites(opts...)"},
-		{"uow_factory.go", "newManagedProxiedServerUOWProvider", "activateEventsJournalProvider", 2, "uow.OpensForBeadWrites(opts...)"},
+		{"../../internal/proxiedopen/open.go", "newExternalProxiedServerUOWProvider", "activateEventsJournalProvider", 2, "uow.OpensForBeadWrites(opts...)"},
+		{"../../internal/proxiedopen/open.go", "newManagedProxiedServerUOWProvider", "activateEventsJournalProvider", 2, "uow.OpensForBeadWrites(opts...)"},
 		// The root pre-run, inside rootCmd's literal: the proxied provider reads
 		// its posture back out of these options, and the registry arm is handed
 		// it directly.

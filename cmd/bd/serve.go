@@ -391,7 +391,7 @@ func runServe() error {
 		// The store source needs no such override: backend.Open consumes the
 		// same metadata.json GetContextInfo just read, so the handshake and the
 		// operations share one source of truth by construction.
-		info.Database = topology.database
+		info.Database = topology.Database
 		p, err := newSQLServerUOWProvider(rootCtx, info.BeadsDir, topology)
 		if err != nil {
 			// A daemon has no operator watching a prompt, so a migration-gate

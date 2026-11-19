@@ -15,6 +15,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/proxiedopen"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/stretchr/testify/assert"
@@ -25,9 +26,9 @@ import (
 // as this host's answer to whether it can prove listener ownership.
 func withListenerOwnershipProvable(t *testing.T, provable bool) {
 	t.Helper()
-	orig := listenerOwnershipProvable
-	listenerOwnershipProvable = func() bool { return provable }
-	t.Cleanup(func() { listenerOwnershipProvable = orig })
+	orig := proxiedopen.ListenerOwnershipProvable
+	proxiedopen.ListenerOwnershipProvable = func() bool { return provable }
+	t.Cleanup(func() { proxiedopen.ListenerOwnershipProvable = orig })
 }
 
 func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
@@ -709,7 +710,7 @@ func TestValidateManagedServerConfigPolicy(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(cfg)
 			}
-			err := validateManagedServerConfigPolicy(cfg)
+			err := proxiedopen.ValidateManagedServerConfigPolicy(cfg)
 			if tt.wantErr == "" {
 				require.NoError(t, err)
 				return
@@ -990,7 +991,7 @@ func TestCheckExistingBeadsDataAt_ProxiedServerWithExistingDB(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(proxiedRoot, name), []byte("left by a failed init\n"), 0o644))
 		}
 
-		refusal := proxiedFreshStoreRefusal(beadsDir, sqlServerUOWTopology{database: "myproj"})
+		refusal := proxiedFreshStoreRefusal(beadsDir, sqlServerUOWTopology{Database: "myproj"})
 		require.Error(t, refusal, "the open must refuse this root for the test to mean anything")
 		assert.Contains(t, refusal.Error(), "bd init --proxied-server")
 		assert.NoError(t, checkExistingBeadsDataAt(beadsDir, "myproj"),
