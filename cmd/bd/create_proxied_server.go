@@ -110,7 +110,7 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		// GH#5787: the insert validation the create runs, so a preview fails
 		// where the create would and prints nothing.
 		if err := validateCreatePreview(previewIssue, customStatuses, customTypes); err != nil {
-			return HandleError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 		if in.jsonOutput {
 			if err := outputJSON(previewIssue); err != nil {
