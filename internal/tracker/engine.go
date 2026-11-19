@@ -978,6 +978,13 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 	// decided on its own history: one missing row says nothing about the
 	// next issue's.
 	unverified := unverifiedLinks{lastSync: *lastSync}
+
+	// Collect the pull's valid linked locals first, then resolve all their
+	// history in one batch call: the old loop asked the store once per
+	// linked issue at the same lastSync instant, and on the embedded backend
+	// every one of those calls reopened the SQL engine and scanned
+	// dolt_history_issues again (#6605).
+	candidates := make([]prelinkCandidate, 0, len(localIssues))
 	for _, local := range localIssues {
 		if local == nil || local.ExternalRef == nil {
 			continue
@@ -986,10 +993,16 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if ref == "" || !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		changedAfterLastSync, historyUnknown, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
-		if err != nil {
-			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
-		}
+		candidates = append(candidates, prelinkCandidate{local: local, ref: ref})
+	}
+	verdicts, err := e.resolvePrelinkVerdicts(ctx, candidates, *lastSync)
+	if err != nil {
+		return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issues: %w", err)
+	}
+
+	for i, candidate := range candidates {
+		local, ref := candidate.local, candidate.ref
+		changedAfterLastSync, historyUnknown := verdicts[i].changed, verdicts[i].historyUnknown
 		unverified.note(local, historyUnknown)
 		if !changedAfterLastSync {
 			// An issue whose history at lastSync is missing is not hydrated:
@@ -1083,6 +1096,74 @@ func (e *Engine) warnUnverifiedLinks(u unverifiedLinks) {
 	}
 	e.warn("%s: cannot verify the links of %d issue(s) changed since the last sync (%s): %s. Their history at that sync is missing (bd compact or bd flatten rewrote it, an issue was renamed, or changes were committed after that sync), so the pull did not treat them as newly linked, and the conflict checks decided their content. If one of them was linked to another remote issue since that sync, %s.",
 		e.Tracker.DisplayName(), len(u.ids), u.lastSync.UTC().Format(time.RFC3339), names, advice)
+}
+
+// prelinkCandidate is one of a pull's valid linked locals: a local issue
+// with a trimmed, non-empty external ref the tracker recognizes, whose link
+// history the pull is about to resolve.
+type prelinkCandidate struct {
+	local *types.Issue
+	ref   string
+}
+
+// prelinkVerdict is the resolved pre-link decision for one candidate:
+// whether its external_ref differed from its current value at lastSync, and
+// whether that could not be answered from history.
+type prelinkVerdict struct {
+	changed        bool
+	historyUnknown bool
+}
+
+// resolvePrelinkVerdicts decides every candidate's pre-link question against
+// the same lastSync. When the backing store has the batch history capability
+// (storage.ExternalRefHistoryQuerier — Dolt-shaped stores that expose
+// dolt_history_issues), one PreviousExternalRefs call resolves all of them
+// and prelinkDecision reads each answer from its map; a store without the
+// capability keeps the coarser CreatedAt/UpdatedAt heuristic per candidate
+// and never reports historyUnknown. A history failure returns err and no
+// verdicts: the caller must abort rather than fall back to the heuristic,
+// which would silently decide relinks on timestamps.
+func (e *Engine) resolvePrelinkVerdicts(ctx context.Context, candidates []prelinkCandidate, lastSync time.Time) ([]prelinkVerdict, error) {
+	verdicts := make([]prelinkVerdict, len(candidates))
+	if len(candidates) == 0 {
+		return verdicts, nil
+	}
+	querier, ok := externalRefHistoryQuerier(e.Store)
+	if !ok {
+		for i, candidate := range candidates {
+			local := candidate.local
+			verdicts[i] = prelinkVerdict{
+				changed: local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync),
+			}
+		}
+		return verdicts, nil
+	}
+
+	// One call for the pull's unique ids: the engine has the whole candidate
+	// list and the single cutoff, so the store can read history once instead
+	// of per issue (#6605).
+	ids := make([]string, 0, len(candidates))
+	idSet := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.local.ID == "" {
+			continue
+		}
+		if _, dup := idSet[candidate.local.ID]; dup {
+			continue
+		}
+		idSet[candidate.local.ID] = struct{}{}
+		ids = append(ids, candidate.local.ID)
+	}
+	previousRefs, err := querier.PreviousExternalRefs(ctx, ids, lastSync)
+	if err != nil {
+		return nil, err
+	}
+	for i, candidate := range candidates {
+		previousRef, found := previousRefs[candidate.local.ID]
+		changed, historyUnknown := prelinkDecision(candidate.local, candidate.ref, previousRef, found, lastSync)
+		verdicts[i] = prelinkVerdict{changed: changed, historyUnknown: historyUnknown}
+	}
+	return verdicts, nil
 }
 
 // externalRefChangedAfter reports whether local's external_ref differed

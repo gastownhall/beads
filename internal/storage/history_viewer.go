@@ -40,4 +40,18 @@ type ExternalRefHistoryQuerier interface {
 	// with found true, when the historical row's external_ref column was
 	// NULL. A query failure returns err, never found=false.
 	PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (ref string, found bool, err error)
+
+	// PreviousExternalRefs is the batch form of PreviousExternalRef: it
+	// resolves the external_ref recorded for every id in issueIDs as of
+	// the most recent commit at or before asOf, reading history a bounded
+	// number of times instead of once per issue.
+	//
+	// The returned map holds an entry only for the ids that have a
+	// committed history row at or before asOf — the single-id method's
+	// found=false — and a present entry is the empty string when the
+	// historical row's external_ref column was NULL. Empty ids are
+	// dropped, duplicates collapse, and an empty issueIDs returns an
+	// empty map without opening storage. A query failure returns err
+	// and no usable map, never a partial answer.
+	PreviousExternalRefs(ctx context.Context, issueIDs []string, asOf time.Time) (map[string]string, error)
 }

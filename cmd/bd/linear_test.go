@@ -2145,3 +2145,13 @@ func (s *linearSyncStore) PreviousExternalRef(context.Context, string, time.Time
 	}
 	return *s.issue.ExternalRef, true, nil
 }
+
+func (s *linearSyncStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
+	refs := make(map[string]string, len(ids))
+	if s.issue.ExternalRef != nil {
+		for _, id := range ids {
+			refs[id] = *s.issue.ExternalRef
+		}
+	}
+	return refs, nil
+}

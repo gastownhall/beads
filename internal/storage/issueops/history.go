@@ -129,3 +129,53 @@ func PreviousExternalRefInTx(ctx context.Context, tx *sql.Tx, issueID string, as
 	}
 	return previousRef.String, true, nil
 }
+
+// PreviousExternalRefsInTx is the batch form of PreviousExternalRefInTx: it
+// resolves, for every id in ids, the external_ref recorded as of the most
+// recent commit at or before asOf. The returned map holds an entry only for
+// ids with a committed history row at or before asOf — the single-id form's
+// found=false — and a present entry is the empty string when the historical
+// row's external_ref column was NULL. Empty ids are dropped and duplicates
+// collapse; an empty ids returns an empty map without querying. An error
+// returns no map, never a partial answer.
+func PreviousExternalRefsInTx(ctx context.Context, tx DBTX, ids []string, asOf time.Time) (map[string]string, error) {
+	refs := make(map[string]string)
+	for _, id := range uniqueNonEmptyHistoryIDs(ids) {
+		var previousRef sql.NullString
+		err := tx.QueryRowContext(ctx, `
+			SELECT external_ref
+			FROM (
+				SELECT id, external_ref, commit_date FROM dolt_history_issues
+			) h
+			WHERE h.id = ? AND h.commit_date <= ?
+			ORDER BY h.commit_date DESC
+			LIMIT 1
+		`, id, asOf.UTC()).Scan(&previousRef)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to get previous external_ref: %w", err)
+		}
+		refs[id] = previousRef.String
+	}
+	return refs, nil
+}
+
+// uniqueNonEmptyHistoryIDs returns ids without empties or duplicates, in
+// first-seen order, for the batched history helpers.
+func uniqueNonEmptyHistoryIDs(ids []string) []string {
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	return unique
+}

@@ -12,6 +12,8 @@ package tracker
 import (
 	"context"
 	"errors"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -54,6 +56,20 @@ func (h *historyQuerierStore) PreviousExternalRef(_ context.Context, _ string, _
 	return h.prevRef, h.prevFound, h.prevErr
 }
 
+func (h *historyQuerierStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
+	h.calls++
+	if h.prevErr != nil {
+		return nil, h.prevErr
+	}
+	refs := make(map[string]string, len(ids))
+	if h.prevFound {
+		for _, id := range ids {
+			refs[id] = h.prevRef
+		}
+	}
+	return refs, nil
+}
+
 // doltLikeStore is a full storage.DoltStorage that also implements
 // ExternalRefHistoryQuerier, standing in for dolt.DoltStore. It embeds
 // storage.DoltStorage (nil) for the rest of the (huge) interface's methods,
@@ -84,6 +100,17 @@ func (d *doltLikeStore) Diff(_ context.Context, _, _ string) ([]*storage.DiffEnt
 func (d *doltLikeStore) PreviousExternalRef(_ context.Context, _ string, _ time.Time) (string, bool, error) {
 	d.calls++
 	return d.prevRef, d.prevFound, nil
+}
+
+func (d *doltLikeStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
+	d.calls++
+	refs := make(map[string]string, len(ids))
+	if d.prevFound {
+		for _, id := range ids {
+			refs[id] = d.prevRef
+		}
+	}
+	return refs, nil
 }
 
 // fakeStoreDecorator stands in for storage.HookFiringStore (or any other
@@ -279,6 +306,105 @@ func TestEngineExternalRefChangedAfter_KnownAnswersReportHistoryKnown(t *testing
 				t.Errorf("externalRefChangedAfter = (changed %v, historyUnknown %v), want (%v, false)", changed, historyUnknown, test.wantChanged)
 			}
 		})
+	}
+}
+
+// countingHistoryStore is a pull-capable pure store that answers
+// external-ref history from a fixed map and counts the single-id and batch
+// history calls a pull makes. The batch capability must answer a whole pull
+// in one call (#6605); the single-id method is only there so the double
+// compiles before the migration and can prove the engine stops calling it.
+type countingHistoryStore struct {
+	*pullFailureStore
+	previousRefs map[string]string
+
+	singleCalls int
+	batchCalls  int
+	batchIDs    []string
+	batchAsOf   time.Time
+}
+
+func newCountingHistoryStore(issues ...*types.Issue) *countingHistoryStore {
+	pure := newPureTestStore(issues...)
+	pure.localMetadata["test.last_sync"] = overlapLastSync.Format(time.RFC3339)
+	return &countingHistoryStore{
+		pullFailureStore: &pullFailureStore{pureTestStore: pure, tx: &pullTestTransaction{issue: &types.Issue{}}},
+		previousRefs:     make(map[string]string),
+	}
+}
+
+func (s *countingHistoryStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
+	s.singleCalls++
+	ref, ok := s.previousRefs[id]
+	return ref, ok, nil
+}
+
+func (s *countingHistoryStore) PreviousExternalRefs(_ context.Context, ids []string, asOf time.Time) (map[string]string, error) {
+	s.batchCalls++
+	s.batchIDs = append([]string(nil), ids...)
+	s.batchAsOf = asOf
+	refs := make(map[string]string, len(ids))
+	for _, id := range ids {
+		if ref, ok := s.previousRefs[id]; ok {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
+}
+
+// TestEnginePullAsksExternalRefHistoryOncePerPull is the #6605 regression:
+// an incremental pull asks the history-capable store about every linked
+// local at the same lastSync instant, so it must resolve them in one batch
+// call rather than one single-id history call per issue — on the embedded
+// backend each of those reopened the SQL engine and scanned
+// dolt_history_issues again (GH#6605). Three linked locals and two
+// unrelated ones (no ref, whitespace-only ref) must produce exactly one
+// batch call carrying the three unique linked ids at lastSync, no
+// single-id calls, and no hydration, since every linked ref is unchanged.
+func TestEnginePullAsksExternalRefHistoryOncePerPull(t *testing.T) {
+	ctx := context.Background()
+	created := overlapLastSync.Add(-24 * time.Hour)
+	linked := []*types.Issue{
+		linkedIssue("bd-1", "EXT-1", "linked one", created, created),
+		linkedIssue("bd-2", "EXT-2", "linked two", created, created),
+		linkedIssue("bd-3", "EXT-3", "linked three", created, created),
+	}
+	blankRef := "   "
+	unlinked := []*types.Issue{
+		{ID: "bd-free", Title: "never linked", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: created, UpdatedAt: created},
+		{ID: "bd-blank", Title: "blank ref", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, ExternalRef: &blankRef, CreatedAt: created, UpdatedAt: created},
+	}
+	store := newCountingHistoryStore(append(append([]*types.Issue(nil), linked...), unlinked...)...)
+	for _, issue := range linked {
+		store.previousRefs[issue.ID] = *issue.ExternalRef
+	}
+	// The bulk fetch returns nothing: no remote changed since last_sync.
+	mock, _ := newOverlapTracker()
+
+	result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if store.batchCalls != 1 {
+		t.Fatalf("batch history calls = %d, want exactly 1 for the whole pull", store.batchCalls)
+	}
+	if store.singleCalls != 0 {
+		t.Fatalf("single-id history calls = %d, want 0: the pull must not query history per issue", store.singleCalls)
+	}
+	gotIDs := append([]string(nil), store.batchIDs...)
+	sort.Strings(gotIDs)
+	wantIDs := []string{"bd-1", "bd-2", "bd-3"}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("batch history ids = %v, want exactly the unique linked ids %v", gotIDs, wantIDs)
+	}
+	if !store.batchAsOf.Equal(overlapLastSync) {
+		t.Fatalf("batch history asOf = %s, want the pull's last_sync %s", store.batchAsOf.UTC(), overlapLastSync.UTC())
+	}
+	if mock.fetchCalls != 0 {
+		t.Fatalf("FetchIssue calls = %d, want 0: unchanged refs are not hydrated", mock.fetchCalls)
+	}
+	if result.PullStats.Candidates != 0 || result.PullStats.Created != 0 || result.PullStats.Updated != 0 {
+		t.Fatalf("PullStats = %+v, want no candidates, creates or updates", result.PullStats)
 	}
 }
 

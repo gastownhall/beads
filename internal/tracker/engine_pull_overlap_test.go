@@ -24,6 +24,16 @@ func (s *overlapStore) PreviousExternalRef(_ context.Context, id string, _ time.
 	return ref, ok, nil
 }
 
+func (s *overlapStore) PreviousExternalRefs(_ context.Context, ids []string, _ time.Time) (map[string]string, error) {
+	refs := make(map[string]string, len(ids))
+	for _, id := range ids {
+		if ref, ok := s.previousRefs[id]; ok {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
+}
+
 // newOverlapStore returns a store holding local (when non-nil) with
 // test.last_sync set to overlapLastSync.
 func newOverlapStore(local *types.Issue) *overlapStore {

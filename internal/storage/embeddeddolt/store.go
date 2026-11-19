@@ -1357,6 +1357,26 @@ func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID str
 	return ref, found, err
 }
 
+// PreviousExternalRefs is the batch form of PreviousExternalRef: the
+// external_ref recorded for every id in ids as of the most recent commit at
+// or before asOf, resolved in one connection. Each of this store's
+// transactions opens a fresh OpenSQL handle (see withConn), so the per-issue
+// calls a pull used to make reopened the embedded engine for every linked
+// issue (#6605); the batch resolves them all inside one handle.
+// Implements storage.ExternalRefHistoryQuerier.
+func (s *EmbeddedDoltStore) PreviousExternalRefs(ctx context.Context, ids []string, asOf time.Time) (map[string]string, error) {
+	var refs map[string]string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		refs, err = issueops.PreviousExternalRefsInTx(ctx, tx, ids, asOf)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return refs, nil
+}
+
 // ---------------------------------------------------------------------------
 // storage.RemoteStore
 // ---------------------------------------------------------------------------
