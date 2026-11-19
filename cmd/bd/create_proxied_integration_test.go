@@ -242,6 +242,29 @@ func TestProxiedServerCreate2B(t *testing.T) {
 		}
 	})
 
+	t.Run("dry_run_accepts_database_only_type", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dv")
+		if out, err := bdProxiedRun(t, bd, p.dir, "config", "set", "types.custom", "incident"); err != nil {
+			t.Fatalf("bd config set types.custom failed: %v\n%s", err, out)
+		}
+		out, err := bdProxiedRun(t, bd, p.dir, "create", "--dry-run", "--type", "incident", "--title", "PROBE")
+		if err != nil {
+			t.Fatalf("proxied dry-run refused a type registered in its own database; got:\n%s", out)
+		}
+		if !strings.Contains(string(out), "Would create") {
+			t.Fatalf("expected an incident preview; got:\n%s", out)
+		}
+		db := openProxiedDB(t, p)
+		var count int
+		if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+			t.Fatalf("query issues: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("expected the accepted dry-run to persist nothing, found %d issues", count)
+		}
+	})
+
 	t.Run("skills_and_context", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sc")

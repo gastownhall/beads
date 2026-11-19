@@ -696,6 +696,7 @@ go_test(
         "create_atomic_test.go",
         "create_deps_atomic_test.go",
         "create_deps_test.go",
+        "create_destination_vocab_embedded_test.go",
         "create_dispatch_test.go",
         "create_embedded_test.go",
         "create_external_ref_test.go",
