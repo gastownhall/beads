@@ -2526,6 +2526,102 @@ func RunReaderReadyExcludeParentsCountsChildrenTheQueryCannotSee(t *testing.T, c
 	assertReaderPageIDSet(t, "Ready --exclude-parents", page, []string{leaf, dottedParent, dottedOnly})
 }
 
+// RunReaderReadyExcludeParentsPagesTheFilteredSet pins the exclusion's half of
+// the PAGING contracts (reader.go:85-100): a flagged page is the prefix of the
+// flagged unbounded answer, its has-more is about the filtered set, and an
+// offset walks the filtered rows — never stepping over an excluded parent as
+// if it had been delivered. The parent sits BETWEEN the two leaves in the
+// requested order, so the unfiltered page walk would deliver it on page two
+// and an offset that counted it would skip leaf-b; both failures are visible
+// here (GH#6817, AC-4).
+func RunReaderReadyExcludeParentsPagesTheFilteredSet(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope := readerLabel(fixture, "rdyxpp")
+	leafA := readerID(fixture, "rdyxpp", "leaf-a")
+	parent := readerID(fixture, "rdyxpp", "parent")
+	leafB := readerID(fixture, "rdyxpp", "leaf-b")
+	child := readerID(fixture, "rdyxpp", "child")
+
+	a := readerIssue(leafA, types.TypeTask, scope)
+	a.Priority = 1
+	p := readerIssue(parent, types.TypeTask, scope)
+	p.Priority = 2
+	b := readerIssue(leafB, types.TypeTask, scope)
+	b.Priority = 3
+	seedReaderIssue(t, ctx, fixture, a)
+	seedReaderIssue(t, ctx, fixture, p)
+	seedReaderIssue(t, ctx, fixture, b)
+	// The child takes no part in any answer's scoping: it exists to make the
+	// parent excluded, and nothing else.
+	seedReaderIssue(t, ctx, fixture, readerIssue(child, types.TypeTask, ""))
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed edge %s -> %s: %v", child, parent, err)
+	}
+
+	// The orders the two requests describe. Priority sort with distinct
+	// priorities has one unambiguous order each way.
+	unflaggedOrder := []string{leafA, parent, leafB}
+	flaggedOrder := []string{leafA, leafB}
+
+	flagged := func(offset, limit int) publicops.ReadyRequest {
+		return publicops.ReadyRequest{
+			Labels:                         []string{scope},
+			Sort:                           "priority",
+			Offset:                         offset,
+			Limit:                          &limit,
+			ExcludeParentsWithOpenChildren: true,
+		}
+	}
+
+	// The page walk the epilogue contract describes: page, then the row the
+	// position resumed at, then off the end.
+	page, err := fixture.Reader.Ready(ctx, flagged(0, 1))
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents --limit 1: %v", err)
+	}
+	assertReaderPageIDs(t, "Ready --exclude-parents --limit 1", page, flaggedOrder[:1])
+	if !page.HasMore {
+		t.Errorf("--limit 1 over a filtered set of 2 reported HasMore = false, want true — the filtered set, not the unfiltered one, is what has a second page")
+	}
+
+	page, err = fixture.Reader.Ready(ctx, flagged(1, 1))
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents --limit 1 --offset 1: %v", err)
+	}
+	assertReaderPageIDs(t, "Ready --exclude-parents --limit 1 --offset 1", page, flaggedOrder[1:])
+	if page.HasMore {
+		t.Errorf("--offset 1 --limit 1 reported HasMore = true over a filtered set of 2, want false")
+	}
+	// The excluded parent never occupied a delivered position: an offset that
+	// counted it would have skipped leaf-b here.
+	if containsID := slices.Contains(readerPageIDs(page), parent); containsID {
+		t.Errorf("the flagged offset walk delivered the excluded parent %s", parent)
+	}
+
+	page, err = fixture.Reader.Ready(ctx, flagged(2, 1))
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents --limit 1 --offset 2: %v", err)
+	}
+	assertReaderPageIDs(t, "Ready --exclude-parents --offset 2 (past the filtered end)", page, nil)
+
+	// Both orders, unpaged, so the walk above is shown to be a walk over the
+	// filtered answer and the exclusion did not quietly reorder anything.
+	page, err = fixture.Reader.Ready(ctx, flagged(0, 0))
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents --limit 0: %v", err)
+	}
+	assertReaderPageIDs(t, "Ready --exclude-parents unbounded", page, flaggedOrder)
+	plain := flagged(0, 0)
+	plain.ExcludeParentsWithOpenChildren = false
+	page, err = fixture.Reader.Ready(ctx, plain)
+	if err != nil {
+		t.Fatalf("Ready (unflagged): %v", err)
+	}
+	assertReaderPageIDs(t, "Ready without the flag", page, unflaggedOrder)
+}
+
 // RunReaderListParentReachesEveryDescendantAndOnlyItsOwn is the same field on
 // the listing plane (reader.go:213), where it is rendered differently: one
 // clause with a parent-child subquery ORed against the id prefix

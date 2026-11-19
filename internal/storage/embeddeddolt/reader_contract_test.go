@@ -215,6 +215,12 @@ func TestEmbeddedReaderReadyExcludeParentsWithOpenChildren(t *testing.T) {
 	conformance.RunReaderReadyExcludeParentsWithOpenChildren(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderReadyExcludeParentsPagesTheFilteredSet(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderReadyExcludeParentsPagesTheFilteredSet(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 func TestEmbeddedReaderReadyExcludeParentsCountsChildrenTheQueryCannotSee(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

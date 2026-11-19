@@ -20,6 +20,12 @@ func TestEmbeddedReadyClaimerEmptyFrontIsNormal(t *testing.T) {
 	conformance.RunReadyClaimerEmptyFrontIsNormal(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcempty"))
 }
 
+func TestEmbeddedReadyClaimerClaimsTheFrontOfTheExcludedSet(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReadyClaimerClaimsTheFrontOfTheExcludedSet(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcxpl"))
+}
+
 func TestEmbeddedReadyClaimerClaimsTheFrontRowAndReturnsThePostClaimState(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

@@ -148,6 +148,12 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ReadyExcludeParentsCountsChildrenTheQueryCannotSee", func(t *testing.T) {
 		conformance.RunReaderReadyExcludeParentsCountsChildrenTheQueryCannotSee(t, ctx, fixture)
 	})
+	// The paging half: this seam trims a natively bounded window, where the
+	// store-backed one drops an over-fetched probe row, and the filtered set
+	// is where those two arrangements can hand out different positions.
+	t.Run("ReadyExcludeParentsPagesTheFilteredSet", func(t *testing.T) {
+		conformance.RunReaderReadyExcludeParentsPagesTheFilteredSet(t, ctx, fixture)
+	})
 	t.Run("ListParentReachesEveryDescendantAndOnlyItsOwn", func(t *testing.T) {
 		conformance.RunReaderListParentReachesEveryDescendantAndOnlyItsOwn(t, ctx, fixture)
 	})

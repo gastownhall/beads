@@ -532,6 +532,102 @@ func RunReadyClaimerSkipsIneligibleFrontRows(t *testing.T, ctx context.Context, 
 	assertReadyClaimerRowState(t, ctx, fixture, takenSecond, string(types.StatusOpen), "other-agent")
 }
 
+// RunReadyClaimerClaimsTheFrontOfTheExcludedSet pins the exclusion's half of
+// this role's contract (GH#6817, AC-4): a flagged request's pool is the
+// ordinary ready set minus its parents with open children, so the claim takes
+// the first ELIGIBLE member of that smaller set — the parent the flag hides is
+// skipped the same way an ineligible front row is — and a pool the flag empties
+// of everything but containers is the empty front of
+// RunReadyClaimerEmptyFrontIsNormal: nil result, nil error, nothing written.
+//
+// The parent is the front row unflagged (priority 0) and the leaf sits behind
+// it (priority 1), so the claim's choice is observable: taking the front row
+// of the UNFLAGGED order is exactly the off-by-the-whole-filter failure.
+func RunReadyClaimerClaimsTheFrontOfTheExcludedSet(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture) {
+	t.Helper()
+	label := fixture.IssuePrefix + "-rcxpl"
+	parent := fixture.IssuePrefix + "-rcxpl-parent"
+	child := fixture.IssuePrefix + "-rcxpl-child"
+	leaf := fixture.IssuePrefix + "-rcxpl-leaf"
+
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(parent, 0, label))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(child, 2, label+"-child"))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(leaf, 1, label))
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the parent-child edge: %v", err)
+	}
+
+	// The two fronts this claim could answer from, asserted through the same
+	// backend's reader so the choice below means something.
+	unflagged := publicops.ReadyRequest{Labels: []string{label}, Sort: readyClaimerSort}
+	page, err := fixture.Reader.Ready(ctx, unflagged)
+	if err != nil {
+		t.Fatalf("Reader.Ready (unflagged): %v", err)
+	}
+	if !readyClaimerPageHas(page, parent) {
+		t.Fatalf("Reader.Ready did not list the parent %s (page: %v); the claim below needs an unflagged front it refuses to walk", parent, readyClaimerPageIDs(page))
+	}
+	flagged := unflagged
+	flagged.ExcludeParentsWithOpenChildren = true
+	page, err = fixture.Reader.Ready(ctx, flagged)
+	if err != nil {
+		t.Fatalf("Reader.Ready --exclude-parents: %v", err)
+	}
+	if readyClaimerPageHas(page, parent) {
+		t.Fatalf("Reader.Ready --exclude-parents listed the parent %s; the claim's pool must not contain it", parent)
+	}
+
+	result, err := fixture.Claimer.ClaimNext(ctx, publicops.ClaimNextRequest{Actor: "claimer", Filter: flagged})
+	if err != nil {
+		t.Fatalf("ClaimNext --exclude-parents: %v", err)
+	}
+	if result.Claimed == nil {
+		t.Fatal("ClaimNext --exclude-parents returned nothing while the leaf sat eligible on the excluded set")
+	}
+	if result.Claimed.ID != leaf {
+		t.Fatalf("claimed %s, want %s — the first eligible row of the EXCLUDED set, not the front of the unfiltered one", result.Claimed.ID, leaf)
+	}
+	assertReadyClaimerRowState(t, ctx, fixture, leaf, string(types.StatusInProgress), "claimer")
+	// The containers the exclusion protects stay untouched: that is the
+	// point of the flag over a claim.
+	assertReadyClaimerRowState(t, ctx, fixture, parent, string(types.StatusOpen), "")
+	assertReadyClaimerRowState(t, ctx, fixture, child, string(types.StatusOpen), "")
+
+	// THE ALL-CONTAINERS POOL: a fresh label whose only ready row is a parent
+	// the flag hides. The claim returns the same empty answer an empty front
+	// does — nil claimed, nil error — and writes nothing.
+	allLabel := fixture.IssuePrefix + "-rcxpl-all"
+	solo := fixture.IssuePrefix + "-rcxpl-all-parent"
+	soloChild := fixture.IssuePrefix + "-rcxpl-all-child"
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(solo, 0, allLabel))
+	seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(soloChild, 2, allLabel+"-child"))
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: soloChild, DependsOnID: solo, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the all-containers edge: %v", err)
+	}
+
+	before := readyClaimerHistoryCount(t, ctx, fixture)
+	result, err = fixture.Claimer.ClaimNext(ctx, publicops.ClaimNextRequest{
+		Actor: "claimer",
+		Filter: publicops.ReadyRequest{
+			Labels:                         []string{allLabel},
+			Sort:                           readyClaimerSort,
+			ExcludeParentsWithOpenChildren: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ClaimNext over a pool the flag empties: error = %v, want nil — an all-containers pool is an empty front, not an error", err)
+	}
+	if result.Claimed != nil {
+		t.Fatalf("ClaimNext over a pool the flag empties claimed %s, want nil", result.Claimed.ID)
+	}
+	assertReadyClaimerRowState(t, ctx, fixture, solo, string(types.StatusOpen), "")
+	assertReadyClaimerHistoryDelta(t, ctx, fixture, before, 0, "a claim whose pool the flag emptied")
+}
+
 // RunReadyClaimerRecordsOneHistoryEntryForAWin pins the counting half of "at
 // most one durable history entry [per call], and none at all when nothing was
 // eligible" (issueops/readyclaimer.go:71-76). The empty-front half lives in

@@ -67,6 +67,12 @@ func TestReadyClaimerSkipsIneligibleFrontRows(t *testing.T) {
 	conformance.RunReadyClaimerSkipsIneligibleFrontRows(t, ctx, fixture)
 }
 
+func TestReadyClaimerClaimsTheFrontOfTheExcludedSet(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rcxpl")
+	defer cleanup()
+	conformance.RunReadyClaimerClaimsTheFrontOfTheExcludedSet(t, ctx, fixture)
+}
+
 func TestReadyClaimerRecordsOneHistoryEntryForAWin(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rchist")
 	defer cleanup()

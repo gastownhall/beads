@@ -40,6 +40,7 @@ func TestReadyClaimerContract(t *testing.T) {
 		{name: "HydratesOnlyItsBlocksEdgesIntoTheCardinalities", run: conformance.RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities},
 		{name: "AnswersTheQuestionReaderReadyLists", run: conformance.RunReadyClaimerAnswersTheQuestionReaderReadyLists},
 		{name: "SkipsIneligibleFrontRows", run: conformance.RunReadyClaimerSkipsIneligibleFrontRows},
+		{name: "ClaimsTheFrontOfTheExcludedSet", run: conformance.RunReadyClaimerClaimsTheFrontOfTheExcludedSet},
 		{name: "RecordsOneHistoryEntryForAWin", run: conformance.RunReadyClaimerRecordsOneHistoryEntryForAWin},
 		{name: "DoesNotMutateTheCallerRequest", run: conformance.RunReadyClaimerDoesNotMutateTheCallerRequest},
 	} {
