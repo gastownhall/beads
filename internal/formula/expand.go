@@ -229,6 +229,15 @@ func expandStep(target *Step, template []*Step, vars map[string]string) ([]*Step
 //     cook/pour time against the enclosing formula's vars; rewriting inside
 //     its braces would corrupt it.
 //   - Children: expanded recursively, as before.
+//
+// Expand and ExpandVars are cleared, not carried: an expansion template's
+// output is never re-expanded, so the directives would ride along inert at
+// best, and a later pass could mistake them for live ones.
+//
+// Loop is not carried either: control flow runs before expansion in every
+// cook path, so a loop on a template step can never execute there. It is
+// rejected with a step-specific error - in child templates too, via the
+// recursion below - instead of being silently dropped.
 func expandStepWith(target *Step, template []*Step, depth int, subst func(string) string) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("expansion depth limit exceeded: max %d levels (currently at %d) - step %q",
@@ -238,6 +247,11 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 	result := make([]*Step, 0, len(template))
 
 	for _, tmpl := range template {
+		if tmpl.Loop != nil {
+			return nil, fmt.Errorf("template step %q declares a loop, which expansion does not run; move the loop onto the step that expands this template, or the loop body's steps into the template",
+				tmpl.ID)
+		}
+
 		expanded := *tmpl
 
 		expanded.ID = subst(substituteTargetPlaceholders(tmpl.ID, target))
@@ -269,6 +283,11 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 
 		expanded.Gate = cloneGate(tmpl.Gate)
 		expanded.OnComplete = cloneOnComplete(tmpl.OnComplete)
+
+		// Cleared, not carried - see the doc comment above. The template
+		// itself keeps its directives; only the results lose them.
+		expanded.Expand = ""
+		expanded.ExpandVars = nil
 
 		// Handle children recursively with depth tracking
 		if len(tmpl.Children) > 0 {

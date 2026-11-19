@@ -1717,3 +1717,127 @@ func TestExpandStepTemplateIsolation(t *testing.T) {
 		t.Errorf("beyond-bound error is not contextual: %v", err)
 	}
 }
+
+// TestExpandStepRejectsTemplateLoop: a loop declared on an expansion
+// template step can never run - control flow is applied before expansion in
+// every cook path - so carrying it would silently drop the iteration the
+// author wrote. Expansion rejects it instead (#6433).
+func TestExpandStepRejectsTemplateLoop(t *testing.T) {
+	target := &Step{ID: "implement", Title: "Implement"}
+
+	t.Run("top-level template step", func(t *testing.T) {
+		template := []*Step{{ID: "sweep", Title: "Sweep", Loop: &LoopSpec{Count: 3}}}
+		_, err := expandStep(target, template, nil)
+		if err == nil {
+			t.Fatal("a template loop was silently accepted")
+		}
+		if !strings.Contains(err.Error(), "sweep") || !strings.Contains(err.Error(), "loop") {
+			t.Errorf("error is not step-specific: %v", err)
+		}
+	})
+
+	t.Run("child template step", func(t *testing.T) {
+		template := []*Step{{
+			ID: "outer", Title: "Outer",
+			Children: []*Step{{ID: "inner", Title: "Inner", Loop: &LoopSpec{Count: 2}}},
+		}}
+		_, err := expandStep(target, template, nil)
+		if err == nil {
+			t.Fatal("a child template loop was silently accepted")
+		}
+		if !strings.Contains(err.Error(), "inner") {
+			t.Errorf("error does not name the looping child: %v", err)
+		}
+	})
+
+	t.Run("public entry points wrap the rejection", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		loopy := `{
+			"formula": "loopy",
+			"type": "expansion",
+			"version": 1,
+			"template": [
+				{"id": "{target}.sweep", "title": "Sweep", "loop": {"count": 2}}
+			]
+		}`
+		if err := os.WriteFile(filepath.Join(tmpDir, "loopy.formula.json"), []byte(loopy), 0644); err != nil {
+			t.Fatal(err)
+		}
+		parser := NewParser(tmpDir)
+
+		_, err := ApplyExpansions([]*Step{{ID: "work", Title: "Work"}},
+			&ComposeRules{Expand: []*ExpandRule{{Target: "work", With: "loopy"}}}, parser)
+		if err == nil || !strings.Contains(err.Error(), "sweep") {
+			t.Errorf("compose expand: want the looping step named, got %v", err)
+		}
+
+		_, err = ApplyInlineExpansions([]*Step{{ID: "work", Title: "Work", Expand: "loopy"}}, parser)
+		if err == nil || !strings.Contains(err.Error(), "sweep") {
+			t.Errorf("inline expand: want the looping step named, got %v", err)
+		}
+
+		f := &Formula{
+			Formula:  "loopy",
+			Type:     TypeExpansion,
+			Template: []*Step{{ID: "{target}.sweep", Title: "Sweep", Loop: &LoopSpec{Count: 2}}},
+		}
+		if err := MaterializeExpansion(f, "main", nil); err == nil {
+			t.Error("standalone materialization accepted a template loop")
+		}
+		// A template that cannot expand at all consumes no variables.
+		if got := ExpansionVarRefs(f, "main"); got != nil {
+			t.Errorf("ExpansionVarRefs() = %v, want nil for a rejected template", got)
+		}
+		if f.Steps != nil {
+			t.Errorf("the rejected template still materialized: %v", f.Steps)
+		}
+	})
+}
+
+// TestExpandStepClearsInlineExpand: an expansion template's output is never
+// re-expanded, so expand/expand_vars on a template step are cleared on
+// every entry point instead of riding along as inert directives a later
+// pass might mistake for live ones (#6433).
+func TestExpandStepClearsInlineExpand(t *testing.T) {
+	target := &Step{ID: "implement", Title: "Implement"}
+	template := []*Step{{
+		ID:         "{target}.work",
+		Title:      "Work",
+		Expand:     "inner-exp",
+		ExpandVars: map[string]string{"k": "v"},
+	}}
+
+	result, err := expandStep(target, template, nil)
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	if result[0].Expand != "" {
+		t.Errorf("Expand = %q, want cleared", result[0].Expand)
+	}
+	if result[0].ExpandVars != nil {
+		t.Errorf("ExpandVars = %v, want cleared", result[0].ExpandVars)
+	}
+
+	// The same clearing through the public entry points.
+	f := &Formula{Formula: "clears", Type: TypeExpansion, Template: template}
+	if err := MaterializeExpansion(f, "main", nil); err != nil {
+		t.Fatalf("MaterializeExpansion failed: %v", err)
+	}
+	if f.Steps[0].Expand != "" || f.Steps[0].ExpandVars != nil {
+		t.Errorf("standalone materialization kept the directives: %+v", f.Steps[0])
+	}
+
+	// The template itself keeps its directives; only the results are
+	// cleared, and a second expansion is unaffected by the first.
+	template[0].ExpandVars = map[string]string{"k": "v"}
+	again, err := expandStep(target, template, nil)
+	if err != nil {
+		t.Fatalf("second expandStep failed: %v", err)
+	}
+	if again[0].Expand != "" || again[0].ExpandVars != nil {
+		t.Errorf("second expansion kept the directives: %+v", again[0])
+	}
+	if template[0].Expand != "inner-exp" || len(template[0].ExpandVars) != 1 {
+		t.Errorf("clearing wrote back into the template: %+v", template[0])
+	}
+}

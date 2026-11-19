@@ -1431,6 +1431,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Expansion templates keep their gates, waits, conditions, notes,
+  metadata and `on_complete`.** `expandStep` built each expanded step from
+  a struct literal naming only 12 of `Step`'s 21 exported fields (#6433),
+  so `notes`, `metadata`, `waits_for`, `condition`, `gate`, `loop`,
+  `on_complete`, `expand` and `expand_vars` were silently dropped from
+  every expansion: a template step's gate issue and fanout edge never
+  reached the cooked graph, its condition was never evaluated, and its
+  notes and metadata vanished. Each expanded step is now a copy of the
+  template step with the substituted fields rewritten over it, so a `Step`
+  field added later carries through by default. Substitution follows each
+  field's existing contract: `notes`, the metadata string leaves and
+  `waits_for` take `{target}` and `{var}` placeholders, while `gate`,
+  `condition` and `on_complete` stay verbatim for the cook/pour-time
+  substitution and the molecule runtime. Standalone expansion pours now
+  evaluate template steps' conditions (including a declared var's default)
+  and accept a condition-only `--var` whose step the condition removes.
+  Two compatibility changes come with the fix: a `loop` on an expansion
+  template step is now a hard error naming the step instead of being
+  silently dropped, and `expand`/`expand_vars` on a template step are
+  cleared instead of riding along inert. Metadata nested deeper than 32
+  levels errors during expansion instead of being dropped.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

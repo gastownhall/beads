@@ -185,6 +185,41 @@ and earlier pour the step with that dependency silently dropped). Give the
 dependent step the same condition, or depend only on steps that are always
 poured.
 
+## Expansion Formulas
+
+An `expansion` formula's `[[template]]` steps replace the target of an
+`expand` or `map` compose rule, a step's `expand` field, or - for a
+standalone pour - the formula's own steps. A template step is a full step:
+`gate`, `waits_for`, `condition`, `notes`, `metadata` and `on_complete` all
+carry into the expanded steps, not just the title and dependencies.
+
+Which fields take placeholders, and which kind:
+
+| Field | Placeholders |
+|-------|--------------|
+| `id`, `title`, `description`, `notes`, `labels`, `depends_on`, `needs`, `assignee`, `waits_for`, metadata string values | `{target}` (and `{target.id}`/`{target.title}`/`{target.description}`) plus the expansion's single-brace `{var}` |
+| `condition` | none - kept verbatim as a `{{var}}` expression, evaluated at pour time against the enclosing formula's variables |
+| `gate`, `on_complete` | none - kept verbatim for cook/pour-time substitution and the molecule runtime |
+
+Metadata map keys are never rewritten, and non-string metadata values are
+carried as the decoded scalars they are. Metadata nested deeper than 32
+levels is an error during expansion rather than being silently dropped.
+
+A `condition` on a template step works like any other condition: a standalone
+expansion pour evaluates it (a declared variable's `default` applies when the
+pour does not supply the variable), and `--var` accepts a variable the
+condition itself consumes, including one whose step the condition removed.
+
+Two things a template step deliberately does not support:
+
+- `loop` is an error naming the step. Loops run before expansion in every
+  cook path, so a loop on a template step could never execute; move the loop
+  onto the step that expands the template, or the loop body's steps into
+  the template.
+- `expand` and `expand_vars` are cleared: an expansion's output is never
+  re-expanded. Put the nested expansion on the step that consumes the
+  template instead.
+
 ## Gates
 
 Add gates for async coordination. A `[steps.gate]` on an ordinary step is an
