@@ -157,6 +157,7 @@ go_test(
         "bootstrap_test.go",
         "bootstrapper_contract_test.go",
         "central_config_integration_test.go",
+        "changed_issue_ids_contract_test.go",
         "checked_wrapper_smoke_test.go",
         "child_suffix_reserve_test.go",
         "circuit_test.go",
