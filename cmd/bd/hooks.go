@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -857,41 +858,82 @@ Installed hooks:
 		chain, _ := cmd.Flags().GetBool("chain")
 		beadsHooks, _ := cmd.Flags().GetBool("beads")
 
-		if err := installStandaloneHooks(managedHookNames, force, shared, chain, beadsHooks); err != nil {
+		skipped, err := installStandaloneHooks(managedHookNames, force, shared, chain, beadsHooks)
+		if err != nil {
 			return HandleErrorRespectJSON("installing hooks: %v", err)
 		}
+		installed := hooksInstalledNames(managedHookNames, skipped)
 
 		if jsonOutput {
-			output := map[string]interface{}{
-				"success":    true,
-				"message":    "Git hooks installed successfully",
-				"shared":     shared,
-				"chained":    chain,
-				"beadsHooks": beadsHooks,
-			}
-			jsonBytes, _ := json.MarshalIndent(output, "", "  ")
+			jsonBytes, _ := json.MarshalIndent(hooksInstallJSONReport(shared, chain, beadsHooks, skipped), "", "  ")
 			fmt.Println(string(jsonBytes))
 		} else {
-			fmt.Println("✓ Git hooks installed successfully")
-			fmt.Println()
-			if beadsHooks {
-				fmt.Println("Hooks installed to: .beads/hooks/")
-				fmt.Println("Git config set: core.hooksPath=.beads/hooks")
-				fmt.Println()
-			} else if shared {
-				fmt.Println("Hooks installed to: .beads-hooks/")
-				fmt.Println("Git config set: core.hooksPath=.beads-hooks")
-				fmt.Println()
-				fmt.Println("⚠️  Remember to commit .beads-hooks/ to share with your team!")
-				fmt.Println()
-			}
-			fmt.Println("Installed hooks:")
-			for _, hookName := range managedHookNames {
-				fmt.Printf("  - %s\n", hookName)
-			}
+			printHooksInstallHumanOutput(beadsHooks, shared, installed, skipped)
 		}
 		return nil
 	},
+}
+
+// hooksInstalledNames returns the hook names an install actually wrote: all
+// requested names except the ones installHooksAt skipped without writing
+// (GH#6348's non-shell hooks).
+func hooksInstalledNames(all, skipped []string) []string {
+	installed := make([]string, 0, len(all))
+	for _, hookName := range all {
+		if !slices.Contains(skipped, hookName) {
+			installed = append(installed, hookName)
+		}
+	}
+	return installed
+}
+
+// hooksInstallJSONReport is the --json payload of a successful hooks install.
+// skipped_hooks is present only when at least one hook was skipped (GH#6348);
+// the per-hook diagnostics went to stderr, never into the JSON.
+func hooksInstallJSONReport(shared, chain, beadsHooks bool, skipped []string) map[string]any {
+	output := map[string]any{
+		"success":    true,
+		"message":    "Git hooks installed successfully",
+		"shared":     shared,
+		"chained":    chain,
+		"beadsHooks": beadsHooks,
+	}
+	if len(skipped) > 0 {
+		output["skipped_hooks"] = skipped
+	}
+	return output
+}
+
+// printHooksInstallHumanOutput prints the human report of a hooks install:
+// where the hooks went, which hooks were written, and — when install skipped
+// a hook its interpreter cannot run bd's shell section in — which ones were
+// left untouched. The per-hook diagnostics (interpreter, path, advice) were
+// printed to stderr during the install itself.
+func printHooksInstallHumanOutput(beadsHooks, shared bool, installed, skipped []string) {
+	fmt.Println("✓ Git hooks installed successfully")
+	fmt.Println()
+	if beadsHooks {
+		fmt.Println("Hooks installed to: .beads/hooks/")
+		fmt.Println("Git config set: core.hooksPath=.beads/hooks")
+		fmt.Println()
+	} else if shared {
+		fmt.Println("Hooks installed to: .beads-hooks/")
+		fmt.Println("Git config set: core.hooksPath=.beads-hooks")
+		fmt.Println()
+		fmt.Println("⚠️  Remember to commit .beads-hooks/ to share with your team!")
+		fmt.Println()
+	}
+	fmt.Println("Installed hooks:")
+	for _, hookName := range installed {
+		fmt.Printf("  - %s\n", hookName)
+	}
+	if len(skipped) > 0 {
+		fmt.Println()
+		fmt.Println("Skipped hooks (left untouched; see the warnings above):")
+		for _, hookName := range skipped {
+			fmt.Printf("  - %s\n", hookName)
+		}
+	}
 }
 
 var hooksUninstallCmd = &cobra.Command{
@@ -1184,21 +1226,20 @@ func resolveStandaloneHooksContext() (*initHooksContext, error) {
 	return &initHooksContext{workDir: paths.RepoRoot, paths: paths, env: clean, inheritedEnv: inherited}, nil
 }
 
-func installStandaloneHooks(hookNames []string, force, shared, chain, beadsHooks bool) error {
+func installStandaloneHooks(hookNames []string, force, shared, chain, beadsHooks bool) ([]string, error) {
 	selected, err := resolveStandaloneHooksContext()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if shared || beadsHooks {
 		if selected.paths.CommonDir == "" {
-			return fmt.Errorf("shared or beads hooks require a working Git repository")
+			return nil, fmt.Errorf("shared or beads hooks require a working Git repository")
 		}
 		if beadsHooks {
 			selected.beadsDir = beads.FindBeadsDir()
 		}
 	}
-	_, err = installHooksAt(hookNames, force, shared, chain, beadsHooks, selected)
-	return err
+	return installHooksAt(hookNames, force, shared, chain, beadsHooks, selected)
 }
 
 //nolint:unparam // force and chain kept for CLI flag compatibility; section markers make them no-ops

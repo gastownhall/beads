@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -246,6 +247,95 @@ func TestInstallHooksBeads_NonShell(t *testing.T) {
 			}
 			if !strings.Contains(stderr, "removed a stale bd shell section") {
 				t.Fatalf("stderr must report the repair, got:\n%s", stderr)
+			}
+		})
+	})
+}
+
+// The CLI report must tell the truth about a skipped hook (GH#6348): the
+// human "Installed hooks" list excludes it, the skip is identified, and the
+// JSON gains skipped_hooks only when something was skipped. Per-hook
+// diagnostics stay on stderr.
+func TestHooksInstallCmdReportsSkippedHooks(t *testing.T) {
+	t.Run("AC-3 human report excludes the skipped hook and identifies the skip", func(t *testing.T) {
+		repoDir := newGitRepo(t)
+		runInDir(t, repoDir, func() {
+			writeHookFile(t, filepath.Join(repoDir, ".git", "hooks", "pre-push"), pythonPrePushFixture)
+
+			stdout := captureStdout(t, func() error {
+				return hooksInstallCmd.RunE(hooksInstallCmd, nil)
+			})
+
+			skipIdx := strings.Index(stdout, "Skipped hooks")
+			if skipIdx < 0 {
+				t.Fatalf("skip not identified in the report:\n%s", stdout)
+			}
+			beforeSkip := stdout[:skipIdx]
+			if !strings.Contains(beforeSkip, "Installed hooks:") {
+				t.Fatalf("installed list missing:\n%s", stdout)
+			}
+			if strings.Contains(beforeSkip, "pre-push") {
+				t.Fatalf("skipped hook listed under Installed hooks:\n%s", stdout)
+			}
+			for _, hookName := range []string{"pre-commit", "post-merge", "post-checkout", "prepare-commit-msg"} {
+				if !strings.Contains(beforeSkip, hookName) {
+					t.Fatalf("%s missing from installed list:\n%s", hookName, stdout)
+				}
+			}
+			if !strings.Contains(stdout[skipIdx:], "pre-push") {
+				t.Fatalf("skipped section does not name pre-push:\n%s", stdout)
+			}
+		})
+	})
+
+	t.Run("AC-3 JSON gains skipped_hooks when a hook was skipped", func(t *testing.T) {
+		repoDir := newGitRepo(t)
+		runInDir(t, repoDir, func() {
+			writeHookFile(t, filepath.Join(repoDir, ".git", "hooks", "pre-push"), pythonPrePushFixture)
+
+			oldJSON := jsonOutput
+			jsonOutput = true
+			defer func() { jsonOutput = oldJSON }()
+
+			stdout := captureStdout(t, func() error {
+				return hooksInstallCmd.RunE(hooksInstallCmd, nil)
+			})
+
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatalf("install output is not JSON:\n%s", stdout)
+			}
+			if payload["success"] != true {
+				t.Fatalf("success missing from JSON:\n%s", stdout)
+			}
+			skipped, ok := payload["skipped_hooks"].([]any)
+			if !ok || len(skipped) != 1 || skipped[0] != "pre-push" {
+				t.Fatalf("skipped_hooks = %v, want [pre-push]:\n%s", payload["skipped_hooks"], stdout)
+			}
+			// Diagnostics stay on stderr; the JSON carries no interpreter text.
+			if strings.Contains(stdout, "cannot execute") || strings.Contains(stdout, "bd hooks run pre-push") {
+				t.Fatalf("diagnostics leaked into JSON:\n%s", stdout)
+			}
+		})
+	})
+
+	t.Run("AC-3 JSON has no skipped_hooks key on a clean install", func(t *testing.T) {
+		repoDir := newGitRepo(t)
+		runInDir(t, repoDir, func() {
+			oldJSON := jsonOutput
+			jsonOutput = true
+			defer func() { jsonOutput = oldJSON }()
+
+			stdout := captureStdout(t, func() error {
+				return hooksInstallCmd.RunE(hooksInstallCmd, nil)
+			})
+
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatalf("install output is not JSON:\n%s", stdout)
+			}
+			if _, present := payload["skipped_hooks"]; present {
+				t.Fatalf("skipped_hooks must be absent when nothing was skipped:\n%s", stdout)
 			}
 		})
 	})
