@@ -129,6 +129,46 @@ func (s *DoltStore) PreviousExternalRef(ctx context.Context, issueID string, asO
 	return ref, found, err
 }
 
+// PreviousExternalRefs returns, for each of ids, the external_ref value
+// recorded by the most recent commit at or before asOf, in one read
+// transaction and one history query per 200 unique ids. An id without such a
+// row is absent from the map. Nothing is cached: each call reads the history
+// reachable when its transaction starts.
+//
+// Uses withReadTxLongTimeout for the same reason History does: it scans
+// dolt_history_issues, which can outlast the shared pool's ReadTimeout.
+// Implements storage.ExternalRefHistoryQuerier.
+func (s *DoltStore) PreviousExternalRefs(ctx context.Context, ids []string, asOf time.Time) (map[string]string, error) {
+	if !hasNonEmptyID(ids) {
+		return map[string]string{}, nil
+	}
+	var refs map[string]string
+	err := s.withReadTxLongTimeout(ctx, func(tx *sql.Tx) error {
+		var err error
+		refs, err = issueops.PreviousExternalRefsInTx(ctx, tx, ids, asOf)
+		if err != nil {
+			refs = nil
+			return wrapQueryError("get previous external refs", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return refs, nil
+}
+
+// hasNonEmptyID reports whether ids holds an id worth asking history about,
+// so an empty request opens no transaction.
+func hasNonEmptyID(ids []string) bool {
+	for _, id := range ids {
+		if id != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // ChangedIssueIDs returns the set of issue IDs whose data differs between
 // fromCommit and toCommit, derived from dolt_diff over the issues, labels,
 // dependencies, and comments tables. An issue is reported under Removed

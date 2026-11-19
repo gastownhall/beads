@@ -230,6 +230,7 @@ go_test(
         "open_test.go",
         "post_sql_commit_test.go",
         "preview_readonly_test.go",
+        "previous_external_refs_contract_test.go",
         "promote_no_history_test.go",
         "pull_config_wedge_test.go",
         "pull_settle_test.go",
