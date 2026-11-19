@@ -1228,7 +1228,13 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return applied, fmt.Errorf("ignored schema migrations that became pending during the migration pass alter pre-existing dirty tables: %s (the main migrations already applied; re-run the open to refuse before any migration runs)", strings.Join(lateIgnoredDirtyTables, ", "))
 	}
 
-	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)
+	// The ignored series' pre-migration repairs that write committable tables
+	// (ignored 0032) apply the same dirty-table rule as the checks above.
+	repairCtx := withMigrationPassState(ctx, migrationPassState{
+		dirtyBefore:   dirtyBefore,
+		earlierWrites: applied > 0 || backfilled || mainColumnAdded,
+	})
+	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(repairCtx, db, 0)
 	if err != nil {
 		return applied, fmt.Errorf("ignored migrations: %w", err)
 	}

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -49,11 +51,45 @@ type localExternalDepMove struct {
 	toColumn string
 }
 
+// migrationPassStateKey carries MigrateUp's pass state to the pre-migration
+// repairs that write committable tables.
+type migrationPassStateKey struct{}
+
+// migrationPassState is what MigrateUp knows when the ignored series runs:
+// the committable tables that were dirty before the pass began, and whether
+// the pass has already written (main steps, column adds, re-keys).
+type migrationPassState struct {
+	dirtyBefore   map[string]dirtyTableState
+	earlierWrites bool
+}
+
+// withMigrationPassState returns ctx carrying state for the repairs.
+func withMigrationPassState(ctx context.Context, state migrationPassState) context.Context {
+	return context.WithValue(ctx, migrationPassStateKey{}, state)
+}
+
+// migrationPassStateFrom is the state withMigrationPassState stored, or the
+// zero state on a path that carries none (MigrateUpTo): nothing dirty.
+func migrationPassStateFrom(ctx context.Context) migrationPassState {
+	state, _ := ctx.Value(migrationPassStateKey{}).(migrationPassState)
+	return state
+}
+
 // repairLocalExternalDepTargets is the {ignored_schema_migrations, 32} repair.
 //
 // It plans both tables before writing either. When nothing needs moving it
 // writes nothing, which is every fresh database and every clone that never
 // held a foreign-prefix target.
+//
+// The moves write dependencies (a committable table) and the recompute can
+// write issues.is_blocked. If either table already carried uncommitted user
+// changes when the pass began, the repair refuses with *DirtyTablesError before
+// any write, so the marker stays pending, the migration commit never entangles
+// user rows, and the working-set-reconcile opens can commit the user's changes
+// first; the next open repairs. When the pass already wrote before reaching the
+// ignored series, the refusal is a plain error instead (see MigrateUp's late
+// backstop) and the next open returns the typed one. wisp_dependencies and wisps are dolt-ignored,
+// clone-local tables and are exempt, as in every other migration.
 //
 // The moves and the recompute run in one SQL transaction: a failure in either
 // rolls both back, so a retry still finds every edge to move and recomputes
@@ -89,9 +125,39 @@ func repairLocalExternalDepTargets(ctx context.Context, db DBConn) error {
 		return nil
 	}
 
+	state := migrationPassStateFrom(ctx)
+	if blocked := localExternalDepRepairDirtyTables(moves, state.dirtyBefore); len(blocked) > 0 {
+		if state.earlierWrites {
+			// Same rule as MigrateUp's late ignored-series backstop: this pass
+			// already wrote, so the refusal must not be the recoverable type a
+			// working-set-reconcile open would commit through. The next open
+			// has nothing earlier to write and returns the typed refusal.
+			return fmt.Errorf("repairing local dependency targets would write pre-existing dirty tables: %s (earlier migrations in this pass already applied; re-run the open to refuse before any migration runs)",
+				strings.Join(blocked, ", "))
+		}
+		return &DirtyTablesError{Tables: blocked}
+	}
+
 	return runInRepairTx(ctx, db, func(tx DBConn) error {
 		return applyLocalExternalDepMoves(ctx, tx, moves)
 	})
+}
+
+// localExternalDepRepairDirtyTables names the committable tables the planned
+// moves would write that were already dirty when the pass began: dependencies
+// when it has a move, and issues whenever anything moves (the recompute can
+// change is_blocked on either table's sources and their descendants).
+func localExternalDepRepairDirtyTables(moves []localExternalDepMove, dirtyBefore map[string]dirtyTableState) []string {
+	var blocked []string
+	if _, dirty := dirtyBefore["dependencies"]; dirty && slices.ContainsFunc(moves, func(m localExternalDepMove) bool {
+		return m.table == "dependencies"
+	}) {
+		blocked = append(blocked, "dependencies")
+	}
+	if _, dirty := dirtyBefore["issues"]; dirty {
+		blocked = append(blocked, "issues")
+	}
+	return blocked
 }
 
 // planLocalExternalDepMoves reads table's external-column edges whose target is

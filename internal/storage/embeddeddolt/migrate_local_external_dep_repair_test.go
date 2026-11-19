@@ -5,6 +5,8 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
@@ -174,5 +176,79 @@ func TestEmbeddedLocalExternalDepRepairMovesHeldTargets(t *testing.T) {
 	}
 	if dirty := dirtyStatus(t, ctx, conn2); dirty != "" {
 		t.Errorf("working set after the second open = %s, want clean", dirty)
+	}
+}
+
+// TestEmbeddedLocalExternalDepRepairRefusesDirtyTables: a needed repair over
+// uncommitted user changes in issues or dependencies refuses with the typed
+// error before writing, leaves the marker pending, and runs once the user's
+// changes are committed.
+func TestEmbeddedLocalExternalDepRepairRefusesDirtyTables(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	for _, tc := range []struct {
+		name, table string
+		dirty       func(t *testing.T, ctx context.Context, conn *sql.Conn)
+	}{
+		{"dirty issues", "issues", func(t *testing.T, ctx context.Context, conn *sql.Conn) {
+			seedIssue(t, ctx, conn, "demo-uncommitted")
+		}},
+		{"dirty dependencies", "dependencies", func(t *testing.T, ctx context.Context, conn *sql.Conn) {
+			mustExecConn(t, ctx, conn,
+				`UPDATE dependencies SET metadata = JSON_OBJECT('user', 'edit') WHERE issue_id = 'demo-a' AND depends_on_external = 'ops-gone'`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := seedMigratedStore(t, ctx)
+			conn, closeConn := openDepConn(t, ctx, dataDir)
+			seedLocalExternalDepFixture(t, ctx, conn)
+			commitSeed(t, ctx, conn, "test: edges onto held foreign-prefix targets stored as external")
+			unrecordIgnoredVersionsFrom(t, ctx, conn, localExternalDepRepairVersion)
+			tc.dirty(t, ctx, conn)
+			closeConn()
+
+			conn2, closeConn2 := openDepConn(t, ctx, dataDir)
+			deps, wispDeps := readDeps(t, ctx, conn2), readDepTable(t, ctx, conn2, "wisp_dependencies")
+
+			_, err := schema.MigrateUp(ctx, conn2)
+			var dirtyErr *schema.DirtyTablesError
+			if !errors.As(err, &dirtyErr) {
+				t.Fatalf("MigrateUp over a needed repair and dirty %s = %v, want a *schema.DirtyTablesError", tc.table, err)
+			}
+			if !slices.Contains(dirtyErr.Tables, tc.table) {
+				t.Errorf("dirtyErr.Tables = %v, want it to name %s", dirtyErr.Tables, tc.table)
+			}
+			if got := readDeps(t, ctx, conn2); !slices.Equal(got, deps) {
+				t.Errorf("dependencies = %v after the refusal, want %v untouched", got, deps)
+			}
+			if got := readDepTable(t, ctx, conn2, "wisp_dependencies"); !slices.Equal(got, wispDeps) {
+				t.Errorf("wisp_dependencies = %v after the refusal, want %v untouched", got, wispDeps)
+			}
+			if blocked, _ := readBlockedState(t, ctx, conn2, "issues", "demo-a"); blocked != 0 {
+				t.Errorf("demo-a is_blocked = %d after the refusal, want 0 (nothing written)", blocked)
+			}
+			if ignoredVersionRecorded(t, ctx, conn2, localExternalDepRepairVersion) {
+				t.Fatalf("ignored migration %d recorded despite the refusal", localExternalDepRepairVersion)
+			}
+
+			// The recovery the refusal names: commit the user's changes, reopen.
+			commitSeed(t, ctx, conn2, "test: commit the user's working set")
+			closeConn2()
+
+			conn3, _ := openDepConn(t, ctx, dataDir)
+			if _, err := schema.MigrateUp(ctx, conn3); err != nil {
+				t.Fatalf("MigrateUp after committing the working set: %v", err)
+			}
+			if got := readLocalDepRow(t, ctx, conn3, localDepEdge{"dependencies", "demo-a", "ops-blk"}); got.issueTarget != "ops-blk" || got.external != "" {
+				t.Errorf("demo-a -> ops-blk after the retried pass = %+v, want it in depends_on_issue_id", got)
+			}
+			if blocked, _ := readBlockedState(t, ctx, conn3, "issues", "demo-a"); blocked != 1 {
+				t.Errorf("demo-a is_blocked = %d after the retried pass, want 1", blocked)
+			}
+			if !ignoredVersionRecorded(t, ctx, conn3, localExternalDepRepairVersion) {
+				t.Fatalf("ignored migration %d not recorded after the retried pass", localExternalDepRepairVersion)
+			}
+		})
 	}
 }

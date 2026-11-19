@@ -13,7 +13,9 @@
 -- repairLocalExternalDepTargets (local_external_dep_repair.go): it moves each
 -- such edge to depends_on_wisp_id or depends_on_issue_id, leaves explicit
 -- "external:" refs and targets this database does not hold alone, and
--- recomputes blocked state for the affected rows, all in one transaction.
+-- recomputes blocked state for the affected rows, all in one transaction. It
+-- refuses with DirtyTablesError, leaving this version pending, when the tables
+-- it would write already carry uncommitted changes.
 --
 -- The cursor table is dolt-ignored, so every clone runs the repair once; the
 -- rules are a deterministic function of table content.
