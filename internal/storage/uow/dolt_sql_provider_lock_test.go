@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"regexp"
 	"strings"
@@ -522,6 +523,106 @@ func TestInitSchemaAttemptDiscardsSessionOnFailure(t *testing.T) {
 			if stats := db.Stats(); stats.OpenConnections != 0 || stats.Idle != 0 {
 				t.Fatalf("after a failed attempt the pool holds %d open / %d idle sessions, want 0: "+
 					"the failed session was handed back for reuse", stats.OpenConnections, stats.Idle)
+			}
+		})
+	}
+}
+
+// TestInitSchemaAttemptKeepsSessionOnSuccess is the other half of the
+// gastownhall/beads#6504 contract: only a FAILED attempt discards its session.
+// Every success shape — a preview attach, the converged fast path, or a
+// read-only open that reads through a refused migration — leaves its usable
+// session idle in the pool, so initialization never forces a fresh connection.
+func TestInitSchemaAttemptKeepsSessionOnSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider
+	}{
+		{
+			name: "preview attach keeps its session",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", preview: true}
+			},
+		},
+		{
+			name: "converged fast path keeps its session",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				calls := stubConvergedMigrateUp(t)
+				t.Cleanup(func() {
+					if *calls != 1 {
+						t.Errorf("MigrateUpWithLock called %d times, want 1", *calls)
+					}
+				})
+				// The drift check after the converged fast path: one version
+				// read, at latest, on the pinned session.
+				expectVersionQuery(mock, schema.LatestVersion())
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306"}
+			},
+		},
+		{
+			name: "read-only read-through keeps its session",
+			setup: func(t *testing.T, db *sql.DB, mock sqlmock.Sqlmock) *doltSQLProvider {
+				t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+				behind := schema.LatestVersion() - 1
+				lockName := expectBehindDatabaseThroughPreparation(mock, "beads", behind)
+				expectSharedGateProbe(mock, behind, 0)
+				expectLockRelease(mock, lockName)
+				mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				expectIssuesProjection(mock, behind, "")
+				return &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", readOnly: true}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema.SetSharedMigrateConsent(false)
+			t.Cleanup(func() {
+				schema.SetSharedMigrateConsent(false)
+				schema.SetForceAllowRemoteMigrate(false)
+			})
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+			db.SetMaxOpenConns(1)
+
+			p := tc.setup(t, db, mock)
+			var attemptErr error
+			if p.readOnly {
+				stderr := captureStderr(t, func() {
+					attemptErr = p.initSchemaAttempt(context.Background(), "beads", &bootstrapPreparer{provider: p, database: "beads"})
+				})
+				for _, want := range []string{"Read-only command", "without migrating"} {
+					if !strings.Contains(stderr, want) {
+						t.Errorf("warning missing %q:\n%s", want, stderr)
+					}
+				}
+			} else {
+				attemptErr = p.initSchemaAttempt(context.Background(), "beads", &bootstrapPreparer{provider: p, database: "beads"})
+			}
+			if attemptErr != nil {
+				t.Fatalf("initSchemaAttempt() error = %v, want nil", attemptErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("attempt SQL expectations: %v", err)
+			}
+			if stats := db.Stats(); stats.OpenConnections != 1 || stats.Idle != 1 {
+				t.Fatalf("after a successful attempt the pool holds %d open / %d idle sessions, want 1 / 1: "+
+					"a successful attempt must keep its session", stats.OpenConnections, stats.Idle)
+			}
+			// The kept session is usable: the next query runs on it without a
+			// new driver connection (sqlmock would refuse one only after the
+			// last connection closed, which this proves did not happen).
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT 1")).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			var one int
+			if err := db.QueryRowContext(context.Background(), "SELECT 1").Scan(&one); err != nil {
+				t.Fatalf("query on the kept session: %v", err)
+			}
+			if stats := db.Stats(); stats.OpenConnections != 1 {
+				t.Fatalf("query after a successful attempt opened %d connections, want the kept 1", stats.OpenConnections)
 			}
 		})
 	}
