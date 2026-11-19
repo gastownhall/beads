@@ -56,6 +56,25 @@ func TestCountsWithMissingWispPlaneTables(t *testing.T) {
 	t.Run("missing_wisp_labels_is_an_error", func(t *testing.T) {
 		te := newTestEnv(t, "cwl")
 		seedCountsPlane(t, te, "cwl")
+		// GH#4370: the counts seams select ids first and hydrate only the
+		// page, so a wisp leg whose page is EMPTY never opens the hydration
+		// query that reads wisp_labels. The ephemeral wisp above is excluded
+		// from ready work, so this no-history wisp (ephemeral=0, wisps-table
+		// resident) is what keeps the READY arm's wisp page non-empty and its
+		// hydration reading the broken table; the search/merge arm already
+		// hydrates the ephemeral wisp, and the by-label group reads the table
+		// directly.
+		noHistory := &types.Issue{
+			ID:        "cwl" + "-wisp-nohistory",
+			Title:     "no-history bead",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			NoHistory: true,
+		}
+		if err := te.store.CreateIssue(t.Context(), noHistory, "tester"); err != nil {
+			t.Fatalf("CreateIssue no-history wisp: %v", err)
+		}
 		te.assertRowExists(t, t.Context(), "wisps", "cwl-wisp")
 		te.exec(t, t.Context(), "RENAME TABLE wisp_labels TO wisp_labels_renamed_away")
 
