@@ -139,6 +139,9 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("RefusesAMetadataRefNoItemDeclares", func(t *testing.T) {
 		conformance.RunBatchApplyRefusesAMetadataRefNoItemDeclares(t, ctx, fixture)
 	})
+	t.Run("MovedRowsShareTheSplicedSnapshot", func(t *testing.T) {
+		conformance.RunBatchApplyMovedRowsShareTheSplicedSnapshot(t, ctx, fixture)
+	})
 	t.Run("TheSpliceRecordsAnUpdateEvent", func(t *testing.T) {
 		conformance.RunBatchApplyTheSpliceRecordsAnUpdateEvent(t, ctx, fixture)
 	})

@@ -215,6 +215,11 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyRefusesAMetadataRefNoItemDeclares(t, ctx, fixture)
 	})
+	t.Run("MovedRowsShareTheSplicedSnapshot", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyMovedRowsShareTheSplicedSnapshot(t, ctx, fixture)
+	})
 	t.Run("TheSpliceRecordsAnUpdateEvent", func(t *testing.T) {
 		ctx, cancel := testContext(t)
 		defer cancel()

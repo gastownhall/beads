@@ -2880,3 +2880,75 @@ func RunBatchApplyRowEntriesShareTheLatestSnapshot(t *testing.T, ctx context.Con
 		t.Errorf("the last update's RowVersion (%d) is not the shared snapshot's (%d)", result.Items[40].RowVersion, shared.RowVersion)
 	}
 }
+
+// RunBatchApplyMovedRowsShareTheSplicedSnapshot pins the same contract through
+// the two writes that REWRITE the row after its verbs: a persistence move —
+// which deletes the row from one plane and re-inserts it into the other — and
+// the metadata splice, which runs after every item. Every row-verb entry for
+// the moved row shares ONE hydrated post-splice snapshot, the row's final
+// state in the plane the move landed it in; an edge entry in the same batch
+// stays snapshotless, because an edge is a fact about two rows, not a row
+// state (bd-xx3ma9, #7882).
+//
+// THE EDGE CONNECTS TWO ROWS THAT DID NOT MOVE. Edge resolution reads the
+// plane a row is in at the edge's item, and a source that has crossed planes
+// mid-batch is the cross-plane edge question, which has its own refusal case
+// (RunBatchApplyRefusesACrossPlaneEdgeBetweenRowsItCreated) — not the snapshot
+// question this case asks.
+func RunBatchApplyMovedRowsShareTheSplicedSnapshot(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	id := fixture.IssuePrefix + "-moved-spliced"
+	anchor := fixture.IssuePrefix + "-moved-anchor"
+	post := fixture.IssuePrefix + "-moved-post"
+
+	moved := batchApplyIssue(id, "created, moved to the ephemeral plane, then spliced")
+	mover := batchApplyCreate("moved", moved)
+	mover.Create.MetadataRefs = map[string]publicops.Ref{"gc.self": {Key: "moved"}}
+
+	result := batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor:         "apply-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.ApplyItem{
+			mover,
+			batchApplyUpdate(publicops.Ref{Key: "moved"}, publicops.IssuePatch{
+				Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: publicops.PersistenceModeEphemeral},
+			}),
+			batchApplyCreate("anchor", batchApplyIssue(anchor, "the edge's source")),
+			batchApplyCreate("post", batchApplyIssue(post, "the edge's target")),
+			batchApplyDepAdd(publicops.Ref{Key: "anchor"}, publicops.Ref{Key: "post"}, publicops.DepBlocks, ""),
+		},
+	})
+
+	createEntry, moveEntry, edgeEntry := result.Items[0], result.Items[1], result.Items[4]
+	if createEntry.Issue == nil || moveEntry.Issue == nil {
+		t.Fatalf("the moved row's entries carry no snapshot")
+	}
+	if createEntry.Issue != moveEntry.Issue {
+		t.Fatal("the create and the persistence move do not share one snapshot; want the row's post-splice snapshot in every row-verb entry")
+	}
+	shared := createEntry.Issue
+
+	// The shared snapshot is the POST-SPLICE state: it carries the ref this
+	// batch minted, which only the splice could have written.
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(shared.Metadata, &meta); err != nil {
+		t.Fatalf("the shared snapshot's metadata: %v", err)
+	}
+	spliced, ok := meta["gc.self"]
+	if !ok {
+		t.Fatalf("%s carries no gc.self key; the entries share a PRE-splice snapshot", id)
+	}
+	var selfID string
+	if err := json.Unmarshal(spliced, &selfID); err != nil || selfID != id {
+		t.Errorf("gc.self on the shared snapshot = %s, want %q", spliced, id)
+	}
+
+	// The move landed: the row lives in the wisps plane, not the issues plane.
+	assertBatchApplyRowCount(t, ctx, fixture, "wisps", id, 1)
+	assertBatchApplyRowCount(t, ctx, fixture, "issues", id, 0)
+
+	// An edge entry never carries a snapshot.
+	if edgeEntry.Issue != nil {
+		t.Errorf("the dep_add entry carries a snapshot; an edge is a fact about two rows, not a row state")
+	}
+}
