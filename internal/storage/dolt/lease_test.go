@@ -1164,4 +1164,31 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			t.Errorf("lease = %+v, want no lease row for a wisp", lease)
 		}
 	})
+
+	// AC-7: bob's lease is what bd reclaim drives off. Once it is past the
+	// cutoff, reclaim reverts the issue and names bob as the previous owner.
+	t.Run("expired override lease is reclaimed", func(t *testing.T) {
+		seedOpen(t, "lease-ovr-reclaim")
+		claimFor(t, "lease-ovr-reclaim", "alice", "bob")
+		if _, err := store.db.ExecContext(ctx,
+			"UPDATE leases SET lease_expires_at = ? WHERE issue_id = ?",
+			time.Now().UTC().Add(-10*time.Second), "lease-ovr-reclaim"); err != nil {
+			t.Fatalf("force lease expiry: %v", err)
+		}
+
+		reclaimed, err := store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{IDs: []string{"lease-ovr-reclaim"}}, "reaper")
+		if err != nil {
+			t.Fatalf("reclaim: %v", err)
+		}
+		if len(reclaimed) != 1 || reclaimed[0].ID != "lease-ovr-reclaim" {
+			t.Fatalf("reclaimed = %+v, want exactly [lease-ovr-reclaim]", reclaimed)
+		}
+		if reclaimed[0].PreviousOwner != "bob" {
+			t.Errorf("PreviousOwner = %q, want bob", reclaimed[0].PreviousOwner)
+		}
+		ls := readLeaseState(t, ctx, store, "lease-ovr-reclaim")
+		if ls.status != "open" || ls.assignee.String != "" {
+			t.Errorf("reclaimed issue = %s/%q, want open/unassigned", ls.status, ls.assignee.String)
+		}
+	})
 }

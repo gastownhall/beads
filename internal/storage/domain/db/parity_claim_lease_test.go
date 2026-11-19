@@ -116,6 +116,7 @@ func (s *testSuite) TestClaimAssigneeOverrideLease() {
 	s.Run("ClaimWhosePatchEndsTheClaimLeavesNoLease", s.claimWhosePatchEndsTheClaimLeavesNoLease)
 	s.Run("ClaimOverrideOnWispLeavesNoLease", s.claimOverrideOnWispLeavesNoLease)
 	s.Run("UpdateWithoutClaimNeverArms", s.updateWithoutClaimNeverArms)
+	s.Run("ClaimOverrideLeaseIsReclaimable", s.claimOverrideLeaseIsReclaimable)
 }
 
 // claimOverrideArmsLeaseForFinalHolder is AC-1: alice claims an open,
@@ -271,6 +272,35 @@ func (s *testSuite) updateWithoutClaimNeverArms() {
 			got := s.readClaimLeaseIssue(id, false)
 			s.Equal("bob", got.Assignee)
 			s.Equal(0, s.countClaimLeaseRows(id), "a transfer without --claim must delete the lease and arm none")
+		})
+	}
+}
+
+// claimOverrideLeaseIsReclaimable is AC-7: the lease a claim override arms is
+// the one bd reclaim drives off. Once bob's lease is past the cutoff, reclaim
+// reverts the issue to open/unassigned and names bob as the previous owner.
+// Before the fix the issue had no lease row, so reclaim never saw it.
+func (s *testSuite) claimOverrideLeaseIsReclaimable() {
+	for _, stack := range claimLeaseStacks() {
+		s.Run(stack.name, func() {
+			id := "bd-cl-reclaim-" + stack.name
+			s.seedOpenIssue(id)
+			s.Require().NoError(stack.apply(s, id, "alice", claimLeaseUpdate{claim: true, assignee: claimLeaseString("bob")}))
+			_, err := s.Runner().ExecContext(s.Ctx(),
+				"UPDATE leases SET lease_expires_at = ? WHERE issue_id = ?", time.Now().UTC().Add(-10*time.Second), id)
+			s.Require().NoError(err)
+
+			reclaimed, err := issueops.ReclaimExpiredLeasesInTx(s.Ctx(), s.Runner(), time.Now().UTC(),
+				types.ReclaimFilter{IDs: []string{id}}, "reaper")
+			s.Require().NoError(err)
+			s.Require().Len(reclaimed, 1, "bob's expired lease must make the claim reclaimable")
+			s.Equal(id, reclaimed[0].ID)
+			s.Equal("bob", reclaimed[0].PreviousOwner)
+
+			got := s.readClaimLeaseIssue(id, false)
+			s.Equal(types.StatusOpen, got.Status)
+			s.Equal("", got.Assignee)
+			s.Equal(0, s.countClaimLeaseRows(id))
 		})
 	}
 }
