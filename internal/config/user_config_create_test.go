@@ -58,8 +58,9 @@ func readCreatedUserConfig(t *testing.T, path string) string {
 }
 
 // TestCreateUserConfigYamlDarwinProbeBounds covers the carry-over's edge
-// inputs: no legacy file, a legacy directory (never opened) and a dangling
-// legacy symlink (treated as absent). Each is probed at creation only.
+// inputs: no legacy file, a legacy directory (never opened), a dangling
+// legacy symlink (treated as absent) and a legacy file over the size cap
+// (fail closed). Each is probed at creation only.
 func TestCreateUserConfigYamlDarwinProbeBounds(t *testing.T) {
 	seed := []byte("metrics:\n  disabled: false\n")
 
@@ -112,6 +113,35 @@ func TestCreateUserConfigYamlDarwinProbeBounds(t *testing.T) {
 		}
 		if got := readCreatedUserConfig(t, path); got != string(seed) {
 			t.Errorf("created config = %q, want seed %q", got, seed)
+		}
+	})
+
+	// readCapped's over-limit branch: a legacy file one byte past the cap is
+	// not a config bd can trust, so the new file fails closed.
+	t.Run("legacy file over the size cap: fail closed", func(t *testing.T) {
+		home, nativeDir := darwinCreateSeamForTest(t)
+		countLegacyProbes(t)
+		path := mkUserConfigDir(t, home)
+		legacyPath := filepath.Join(nativeDir, "bd", "config.yaml")
+		if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+			t.Fatalf("mkdir legacy dir: %v", err)
+		}
+		big := make([]byte, legacyUserConfigReadCap+1)
+		for i := range big {
+			big[i] = '#'
+		}
+		if err := os.WriteFile(legacyPath, big, 0o600); err != nil {
+			t.Fatalf("plant oversized legacy config: %v", err)
+		}
+
+		if err := CreateUserConfigYaml(path, seed); err != nil {
+			t.Fatalf("CreateUserConfigYaml: %v", err)
+		}
+		if got, want := readCreatedUserConfig(t, path), string(failClosedUserConfig(legacyPath)); got != want {
+			t.Errorf("created config = %q, want fail-closed config %q", got, want)
+		}
+		if !MetricsDisabledByUserConfig() {
+			t.Error("an oversized legacy config must fail closed with metrics off")
 		}
 	})
 }
