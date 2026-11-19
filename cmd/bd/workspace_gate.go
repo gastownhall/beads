@@ -174,18 +174,24 @@ func exclusiveGateOptions(reason string) workspacegate.Options {
 // a Go duration ("90s", "2m") or bare whole seconds ("90").
 const initGateTimeoutEnv = "BEADS_INIT_GATE_TIMEOUT"
 
-// initGateWaitDefault is how long bd init waits for its EXCLUSIVE gate set.
-// It is deliberately longer than exclusiveGateWait and scoped to init only:
-// in shared-server mode every project's physical root is the one shared
-// dolt data dir, so init in project A contends with init (or any gated
-// command) in project B. A single init holds the gate for ~8s, so the
+// initGateWaitDefault is how long bd init waits for its gate set (see
+// initGateRequests for which gates it holds EXCLUSIVE). It is deliberately
+// longer than exclusiveGateWait and scoped to init only. It was sized when
+// every init took the one shared dolt data dir of shared-server mode
+// EXCLUSIVELY, so init in project A contended with init (or any gated
+// command) in project B: a single init holds its gates for ~8s, so the
 // generic 5s budget made two concurrent `bd init --shared-server` runs in
-// different projects refuse each other. Under load a single init holds the
-// gate for 10-15s and each queued init waits for every one ahead of it, so
-// 60s rides out a few back-to-back inits while still failing with a clear
-// error on a genuinely stuck holder. (Waiting this long is only acceptable
-// because a waiting init no longer holds ordinary commands back for its
-// whole budget: workspacegate caps how long it queues them, maxIntentHold.)
+// different projects refuse each other, and under load (10-15s an init,
+// each queued init waiting for every one ahead of it) 60s rode out a few
+// back-to-back inits while still failing with a clear error on a genuinely
+// stuck holder. An ordinary shared-server init now holds that root SHARED,
+// so it waits only for its own workspace and for maintenance on the shared
+// root (another project's `bd init --reinit-local`, backup restore, migrate
+// or bootstrap); `bd init --reinit-local` still takes the root EXCLUSIVE and
+// waits for every other project's commands. (Waiting this long is only
+// acceptable because a waiting init no longer holds ordinary commands back
+// for its whole budget: workspacegate caps how long it queues them,
+// maxIntentHold.)
 // The other exclusive callers (backup restore, bootstrap, migrate) keep
 // exclusiveGateWait: they are rare, deliberate maintenance operations rather
 // than routine setup that tooling fans out across many projects at once.
@@ -260,12 +266,15 @@ const sharedGateWaitEnv = "BEADS_GATE_WAIT_TIMEOUT"
 // exclusive maintenance holder (bd init ~8s, backup restore, migrate,
 // bootstrap) — or for a queued one, see workspacegate's writer fairness —
 // before failing. In shared-server mode every project shares one physical
-// root gate, so another project's `bd init` briefly excludes every bd
-// command on the machine; failing those instantly made routine tooling
-// flaky. Queued maintenance operations run one after another (two inits
-// fanned out across projects hold the gate back to back, 10-15s each under
-// load), and a waiting command waits for all of them, so the default matches
-// init's own patience rather than a single init: 30s. Humans see the notice
+// root gate, so another project's shared-root maintenance (`bd init
+// --reinit-local`, backup restore, migrate, bootstrap) briefly excludes
+// every bd command on the machine; an ordinary `bd init` holds that root
+// SHARED and excludes only commands on its own workspace. Failing those
+// instantly made routine tooling flaky. Queued maintenance operations run
+// one after another (as two inits fanned out across projects did when every
+// init took the shared root EXCLUSIVELY, 10-15s each under load), and a
+// waiting command waits for all of them, so the default matches init's own
+// patience rather than a single init: 30s. Humans see the notice
 // after 2s and can Ctrl-C; agents and CI, the callers that suffered most
 // from fail-fast, just get their command run. A genuinely long restore or
 // migration still fails with a clear error naming the holder and the knob.
@@ -514,12 +523,14 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 }
 
 // acquireExclusiveWorkspaceGates is the maintenance-side acquisition used by
-// bd init and bd migrate, which live on the skip-store path and therefore
-// never reach the chokepoint. It takes the workspace gate plus the resolved
-// physical roots (when .beads exists — bd init on a fresh directory has
-// nothing to resolve yet) plus any extraRoots, all EXCLUSIVE in ONE
-// AcquireAll (never nested — that is a workspacegate invariant). Failures
-// are returned, not softened: maintenance refuses rather than pretends.
+// bd migrate and bd bootstrap, which live on the skip-store path and
+// therefore never reach the chokepoint (bd init plans the same gate set but
+// acquires it through acquireInitMutationGateFor, which can hold the shared
+// root SHARED). It takes the workspace gate plus the resolved physical roots
+// (when .beads exists — a fresh directory has nothing to resolve yet) plus
+// any extraRoots, all EXCLUSIVE in ONE AcquireAll (never nested — that is a
+// workspacegate invariant). Failures are returned, not softened: maintenance
+// refuses rather than pretends.
 //
 // Lock ordering (normative for the callers): workspace gate(s) →
 // physical-root gate(s) → migrate.lock → embedded .lock → proxy locks →
@@ -538,7 +549,7 @@ func acquireExclusiveWorkspaceGates(ctx context.Context, beadsDir, reason string
 }
 
 // acquireExclusiveWorkspaceGatesWithOptions is acquireExclusiveWorkspaceGates
-// with caller-supplied acquisition options (bd init uses a longer wait).
+// with caller-supplied acquisition options.
 func acquireExclusiveWorkspaceGatesWithOptions(ctx context.Context, beadsDir string, opts workspacegate.Options, extraRoots ...string) (*workspacegate.MultiHandle, error) {
 	// Normalize a nil context (tests and helpers call maintenance paths
 	// directly, before the process-level signal context exists); the

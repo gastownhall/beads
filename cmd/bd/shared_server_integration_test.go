@@ -4,7 +4,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,9 +18,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/workspacegate"
+	"github.com/steveyegge/beads/issueops"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -158,7 +166,9 @@ func TestSharedServerConcurrent(t *testing.T) {
 	// destructive reinit is the plan that still takes it exclusively), so
 	// concurrent inits of different projects no longer serialize on the
 	// root gate at all — and no raised BEADS_INIT_GATE_TIMEOUT is needed
-	// for larger runs.
+	// for larger runs. They still meet on the global database, which the
+	// first of them creates and migrates; the others must wait that pass out
+	// (ssGlobalDatabaseOpened).
 	initEnv := baseEnv
 	phase = time.Now()
 	type project struct {
@@ -183,6 +193,9 @@ func TestSharedServerConcurrent(t *testing.T) {
 				"--prefix", prefix, "--quiet", "--non-interactive")
 			if err != nil {
 				return fmt.Errorf("project %d init: %s: %w", i, out, err)
+			}
+			if err := ssGlobalDatabaseOpened(out); err != nil {
+				return fmt.Errorf("project %d init: %w", i, err)
 			}
 			projects[i] = project{dir: dir, prefix: prefix}
 			return nil
@@ -228,6 +241,9 @@ func TestSharedServerConcurrent(t *testing.T) {
 		if err != nil {
 			return fmt.Errorf("late init during client workloads: %s: %w", out, err)
 		}
+		if err := ssGlobalDatabaseOpened(out); err != nil {
+			return fmt.Errorf("late init during client workloads: %w", err)
+		}
 		t.Logf("late init during client workloads: %s", time.Since(start))
 		if out, err := ssExec(egCtx, bdBinary, dir, baseEnv, "list", "--json", "--flat"); err != nil {
 			return fmt.Errorf("list in late project: %s: %w", out, err)
@@ -254,6 +270,20 @@ func TestSharedServerConcurrent(t *testing.T) {
 	}
 	t.Logf("workloads (%d clients x %d dirs): %s", numClients, numDirs, time.Since(phase))
 	t.Logf("total: %s", time.Since(testStart))
+}
+
+// ssGlobalDatabaseOpened fails an init whose output says it could not open
+// the shared global database. Init only warns there and exits 0, so the exit
+// code alone hides it. Every shared-server init opens beads_global, and on a
+// fresh server the first to arrive creates and migrates it while the others
+// open it: an open that reads the creator's half-applied schema cursor must
+// wait for that pass, not refuse it as a migration that needs consent and
+// skip seeding the global database (GH#7122).
+func ssGlobalDatabaseOpened(initOutput string) error {
+	if strings.Contains(initOutput, "failed to open global database") {
+		return fmt.Errorf("init could not open the global database:\n%s", initOutput)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -842,14 +872,23 @@ func TestSharedServerInitManagedResidentHolder(t *testing.T) {
 }
 
 // TestSharedServerInitIdentityRace pins the identity half of GH#7122
-// (AC-6/AC-7): two initializers racing onto ONE unidentified database on
-// the shared server — both with the same explicit --database, so they
-// cannot end up on different ones. The race has one winner: the loser's
-// Bootstrap is refused (ErrAlreadyIdentified, decided transactionally by
-// the role) and the loser fails WITHOUT publishing its freshly minted
-// local identity — no metadata.json carrying an id the database never
-// accepted. Re-running the loser's init with the same --database then
-// ADOPTS the winner's identity, which is how a lost race must recover.
+// (AC-6/AC-7): two initializers, each a git project with its own origin,
+// racing onto ONE pre-provisioned, unidentified database on the shared
+// server — both with the same explicit --database, so they cannot end up on
+// different ones. The race has one winner. When the other loses (its
+// Bootstrap is refused, ErrAlreadyIdentified decided transactionally by the
+// role, or its overlapping bootstrap commit conflicts), it fails at the
+// identity seed WITHOUT publishing anything it minted: no metadata.json
+// carrying an id the database never accepted, and no Dolt origin or repo_id
+// of its own in the winner's database. Re-running the loser's init with the
+// same --database then ADOPTS the winner's identity, which is how a lost
+// race must recover. When the other racer's read lands after the winner's
+// commit it adopts instead, and both succeed on the one identity; the run
+// logs which way it went. Which way is scheduling's choice (the window for
+// a refusal is the few milliseconds between a racer's identity read and its
+// seed), so the refused racer is pinned deterministically at the publication
+// boundary by TestSharedServerInitIdentityLoserLeavesNoState (real Dolt) and
+// TestInitIdentityPublicationLoserPublishesNothing.
 //
 // The resident shared holder stays in place throughout, so this is also
 // the AC-1/AC-7 shape: at base the holder refuses both inits before the
@@ -916,9 +955,19 @@ func TestSharedServerInitIdentityRace(t *testing.T) {
 		defer cancel()
 	}
 
+	// The database the racers claim already holds the bd schema and no
+	// identity, as a pre-provisioned database (or one whose first init died
+	// before its bootstrap) does: neither racer creates or migrates it.
+	const raceDB = "ssracetest"
+	ssProvisionUnidentifiedDatabase(t, containerPort, raceDB)
+
+	// Each racer is its own git project with its OWN origin, so the state a
+	// racer leaves in the database (the Dolt origin remote, the repo_id
+	// fingerprint) says which racer wrote it.
 	type racer struct {
 		name, prefix string
 		dir          string
+		origin       string
 		out          string
 		ranErr       error
 	}
@@ -931,7 +980,17 @@ func TestSharedServerInitIdentityRace(t *testing.T) {
 		if err := gitInit(ctx, r.dir); err != nil {
 			t.Fatalf("git init %s: %v", r.dir, err)
 		}
+		r.origin = filepath.Join(t.TempDir(), r.name+"-origin.git")
+		if out, err := exec.CommandContext(ctx, "git", "init", "--bare", r.origin).CombinedOutput(); err != nil {
+			t.Fatalf("git init --bare %s: %s: %v", r.origin, out, err)
+		}
+		addOrigin := exec.CommandContext(ctx, "git", "remote", "add", "origin", r.origin)
+		addOrigin.Dir = r.dir
+		if out, err := addOrigin.CombinedOutput(); err != nil {
+			t.Fatalf("git remote add origin in %s: %s: %v", r.dir, out, err)
+		}
 	}
+	namesOrigin := func(url string, r *racer) bool { return strings.Contains(url, r.name+"-origin.git") }
 
 	var wg sync.WaitGroup
 	for _, r := range racers {
@@ -939,64 +998,514 @@ func TestSharedServerInitIdentityRace(t *testing.T) {
 		go func(r *racer) {
 			defer wg.Done()
 			r.out, r.ranErr = ssExec(ctx, bdBinary, r.dir, baseEnv,
-				"init", "--shared-server", "--external", "--database", "ssracetest",
+				"init", "--shared-server", "--external", "--database", raceDB,
 				"--prefix", r.prefix, "--quiet", "--non-interactive")
 		}(r)
 	}
 	wg.Wait()
 
-	// One winner is enough; both may succeed (a racer whose identity read
-	// landed after the winner's commit adopts instead of racing).
-	sharedID := ""
+	var winners, losers []*racer
 	for _, r := range racers {
 		if r.ranErr == nil {
-			id, _ := ssMetadataJSON(t, r.dir)["project_id"].(string)
-			if id == "" {
-				t.Fatalf("%s won the race without recording an identity", r.name)
-			}
-			if sharedID == "" {
-				sharedID = id
-			} else if id != sharedID {
-				t.Errorf("%s recorded identity %s, want the one identity %s (one database)", r.name, id, sharedID)
-			}
+			winners = append(winners, r)
+		} else {
+			losers = append(losers, r)
 		}
 	}
-	if sharedID == "" {
+	if len(winners) == 0 {
 		for _, r := range racers {
 			t.Errorf("%s init: %s: %v", r.name, r.out, r.ranErr)
 		}
 		t.Fatal("both racing initializers failed; one must win")
 	}
 
-	for _, r := range racers {
-		if r.ranErr == nil {
+	// Read what the race left in the database BEFORE any recovery init
+	// writes its own state over it.
+	state := ssReadInitState(t, containerPort, raceDB)
+	if state.projectID == "" {
+		t.Fatalf("no racer recorded an identity in %s", raceDB)
+	}
+	// One identity: every racer that succeeded carries the database's.
+	for _, r := range winners {
+		if id, _ := ssMetadataJSON(t, r.dir)["project_id"].(string); id != state.projectID {
+			t.Errorf("%s recorded identity %q, want the database's identity %s", r.name, id, state.projectID)
+		}
+	}
+
+	if len(losers) == 0 {
+		// Both settled: one bootstrapped and the other read the identity
+		// after that commit and adopted it. The two share one database, so
+		// it carries one origin, whichever racer recorded it first, and the
+		// fingerprint of whichever recorded last. A refused racer's state is
+		// pinned deterministically by TestSharedServerInitIdentityLoserLeavesNoState.
+		t.Logf("neither racer lost the identity race: one bootstrapped %s and the other adopted it", raceDB)
+		if !namesOrigin(state.origin, racers[0]) && !namesOrigin(state.origin, racers[1]) {
+			t.Errorf("%s has origin %q, want one racer's own origin", raceDB, state.origin)
+		}
+		return
+	}
+
+	winner, loser := winners[0], losers[0]
+	t.Logf("%s won the identity race on %s; %s lost it", winner.name, raceDB, loser.name)
+
+	// The loser lost at the identity seed, not somewhere else: a refusal
+	// (another init identified the database first) or, when the two
+	// bootstrap transactions overlapped, the commit conflict that settles it.
+	if !strings.Contains(loser.out, "failed to record the workspace identity") {
+		t.Fatalf("%s failed outside the identity seed: %s: %v", loser.name, loser.out, loser.ranErr)
+	}
+	if strings.Contains(loser.out, "workspace already identified") && !strings.Contains(loser.out, "--database "+raceDB) {
+		t.Errorf("%s's refusal names no remedy (rerun with --database %s): %s", loser.name, raceDB, loser.out)
+	}
+	// The loser published nothing it minted: no metadata.json at all.
+	if _, err := os.Stat(filepath.Join(loser.dir, ".beads", "metadata.json")); !os.IsNotExist(err) {
+		t.Errorf("%s lost the race but wrote metadata.json (stat err %v)", loser.name, err)
+	}
+	// Nor did it leave its state in the winner's database: the origin and
+	// the repo_id there are the winner's own. A loser's origin there would
+	// send the winner's next `bd dolt push` into the loser's repository.
+	if !namesOrigin(state.origin, winner) {
+		t.Errorf("%s holds origin %q after %s won; want %s's own origin %s", raceDB, state.origin, winner.name, winner.name, winner.origin)
+	}
+	wantRepoID, err := beads.ComputeRepoIDForPath(winner.dir)
+	if err != nil {
+		t.Fatalf("compute %s's repo_id: %v", winner.name, err)
+	}
+	if state.repoID != wantRepoID {
+		t.Errorf("%s holds repo_id %q after %s won; want %s's own %q", raceDB, state.repoID, winner.name, winner.name, wantRepoID)
+	}
+
+	// The recovery: re-running the loser's init with the same --database
+	// adopts the winner's identity.
+	out, err := ssExec(ctx, bdBinary, loser.dir, baseEnv,
+		"init", "--shared-server", "--external", "--database", raceDB,
+		"--prefix", loser.prefix, "--quiet", "--non-interactive")
+	if err != nil {
+		t.Fatalf("%s init after losing the identity race: %s: %v", loser.name, out, err)
+	}
+	if id, _ := ssMetadataJSON(t, loser.dir)["project_id"].(string); id != state.projectID {
+		t.Errorf("%s re-init recorded identity %s, want the adopted winner identity %s", loser.name, id, state.projectID)
+	}
+	if out, err := ssExec(ctx, bdBinary, loser.dir, baseEnv, "list", "--json", "--flat"); err != nil {
+		t.Errorf("bd list in %s after adopting: %s: %v", loser.name, out, err)
+	}
+}
+
+// ssProvisionUnidentifiedDatabase creates database on the server at port
+// with the bd schema and no identity: the store open runs the migrations,
+// and nothing bootstraps.
+func ssProvisionUnidentifiedDatabase(t *testing.T, port int, database string) {
+	t.Helper()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", beadsDir, err)
+	}
+	st := ssOpenStore(t, port, database, beadsDir)
+	if err := st.Close(); err != nil {
+		t.Fatalf("close the %s provisioning store: %v", database, err)
+	}
+	if got := ssReadInitState(t, port, database); got.projectID != "" {
+		t.Fatalf("provisioned %s already carries identity %s", database, got.projectID)
+	}
+}
+
+// ssOpenStore opens database on the server at port as bd init's store does,
+// creating it with the bd schema when it is missing. The store is closed at
+// cleanup (closing it earlier is harmless).
+func ssOpenStore(t *testing.T, port int, database, beadsDir string) *dolt.DoltStore {
+	t.Helper()
+	doltNewMutex.Lock()
+	st, err := dolt.New(context.Background(), &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      port,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	doltNewMutex.Unlock()
+	if err != nil {
+		t.Fatalf("open %s: %v", database, err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+// TestSharedServerInitIdentityLoserLeavesNoState pins the loser of the
+// identity race deterministically, against real Dolt, where
+// TestSharedServerInitIdentityRace leaves the interleaving to scheduling:
+// two initializers both read the unidentified database BEFORE either seeds
+// (the race whenever both reads land before the winner's commit), then each
+// publishes in turn through init's own publishInitWorkspaceIdentity. The
+// first seed wins; the transactional Bootstrapper refuses the second, and
+// that refused init leaves nothing that names it: no metadata.json, and
+// none of its workspace state in the winner's database. The winner is a
+// project with no git origin, so any Dolt origin in the database afterwards
+// can only be the loser's (whose origin there would take the winner's next
+// `bd dolt push`), and the repo_id there must be the winner's own.
+func TestSharedServerInitIdentityLoserLeavesNoState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("not supported on Windows")
+	}
+	cp, err := testutil.NewContainerProvider()
+	if err != nil {
+		if os.Getenv(testutil.EnvRequireDoltContainer) == "1" {
+			t.Fatalf("cannot start Dolt server, but %s=1: %v", testutil.EnvRequireDoltContainer, err)
+		}
+		t.Skipf("cannot start Dolt container: %v", err)
+	}
+	t.Cleanup(func() { _ = cp.Stop() })
+	port := cp.Port()
+	const database = "ssloserstate"
+	ctx := context.Background()
+
+	type initializer struct {
+		name, prefix, repo, beadsDir string
+		cfg                          *configfile.Config
+		store                        *dolt.DoltStore
+		found                        issueops.VerifyIdentityResult
+		state                        initWorkspaceState
+	}
+	winner := &initializer{name: "winner", prefix: "win"}
+	loser := &initializer{name: "loser", prefix: "lose"}
+	for _, in := range []*initializer{winner, loser} {
+		in.repo = filepath.Join(t.TempDir(), in.name)
+		in.beadsDir = filepath.Join(in.repo, ".beads")
+		if err := os.MkdirAll(in.beadsDir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", in.beadsDir, err)
+		}
+		if err := gitInit(ctx, in.repo); err != nil {
+			t.Fatalf("git init %s: %v", in.repo, err)
+		}
+		in.cfg = configfile.DefaultConfig()
+		in.cfg.ProjectID = configfile.GenerateProjectID()
+		in.cfg.DoltDatabase = database
+		// The winner's open creates the database and its schema; the
+		// loser's finds it, as the second init on a shared server does.
+		in.store = ssOpenStore(t, port, database, in.beadsDir)
+		in.state = initWorkspaceState{tracking: true, quiet: true}
+	}
+	loserOrigin := filepath.Join(t.TempDir(), "loser-origin.git")
+	if out, err := exec.CommandContext(ctx, "git", "init", "--bare", loserOrigin).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare %s: %s: %v", loserOrigin, out, err)
+	}
+	addOrigin := exec.CommandContext(ctx, "git", "remote", "add", "origin", loserOrigin)
+	addOrigin.Dir = loser.repo
+	if out, err := addOrigin.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add origin in %s: %s: %v", loser.repo, out, err)
+	}
+	loser.state.remoteURL = doltRemoteURL(normalizeRemoteURL(loserOrigin))
+
+	// Both read the identity before either seeds.
+	for _, in := range []*initializer{winner, loser} {
+		verifier, err := in.store.InitVerifier()
+		if err != nil {
+			t.Fatalf("%s InitVerifier: %v", in.name, err)
+		}
+		if in.found, err = verifier.VerifyIdentity(ctx, issueops.VerifyIdentityRequest{}); err != nil {
+			t.Fatalf("%s VerifyIdentity: %v", in.name, err)
+		}
+		if in.found.Prefix != "" || in.found.ProjectID != "" {
+			t.Fatalf("%s read identity %+v from the fresh database, want none", in.name, in.found)
+		}
+	}
+
+	// Each records its fingerprints from its own repository, as each init
+	// process computes them from its own working directory.
+	t.Chdir(winner.repo)
+	if err := publishInitWorkspaceIdentity(ctx, winner.store, winner.found, winner.prefix, winner.cfg.ProjectID, winner.beadsDir, winner.cfg, true, winner.state); err != nil {
+		t.Fatalf("winner's publish: %v", err)
+	}
+	t.Chdir(loser.repo)
+	err = publishInitWorkspaceIdentity(ctx, loser.store, loser.found, loser.prefix, loser.cfg.ProjectID, loser.beadsDir, loser.cfg, true, loser.state)
+	var refused *issueops.AlreadyIdentifiedError
+	if !errors.As(err, &refused) || refused.ProjectID != winner.cfg.ProjectID {
+		t.Fatalf("loser's publish = %v; want the refusal naming the winner's identity %s", err, winner.cfg.ProjectID)
+	}
+	if hint := initIdentityRaceHint(err, database); !strings.Contains(hint, "--database "+database) {
+		t.Errorf("the refusal's hint %q does not name the rerun with --database %s", hint, database)
+	}
+
+	// The loser published nothing it minted.
+	if _, err := os.Stat(filepath.Join(loser.beadsDir, "metadata.json")); !os.IsNotExist(err) {
+		t.Errorf("the refused init wrote metadata.json (stat err %v)", err)
+	}
+	if id, _ := ssMetadataJSON(t, winner.repo)["project_id"].(string); id != winner.cfg.ProjectID {
+		t.Errorf("winner's metadata.json project_id = %q, want %s", id, winner.cfg.ProjectID)
+	}
+	// And the database names only the winner.
+	got := ssReadInitState(t, port, database)
+	if got.projectID != winner.cfg.ProjectID {
+		t.Errorf("%s identity = %q, want the winner's %s", database, got.projectID, winner.cfg.ProjectID)
+	}
+	if got.origin != "" {
+		t.Errorf("%s holds origin %q, which only the refused init could have written", database, got.origin)
+	}
+	wantRepoID, err := beads.ComputeRepoIDForPath(winner.repo)
+	if err != nil {
+		t.Fatalf("compute the winner's repo_id: %v", err)
+	}
+	if got.repoID != wantRepoID {
+		t.Errorf("%s repo_id = %q, want the winner's own %q", database, got.repoID, wantRepoID)
+	}
+}
+
+// TestSharedServerInitSameNameWaitsOutMigration pins GH#7122's same-name
+// interleaving end to end. A second `bd init --database <name>` that opens
+// the database while the init that created it is still migrating it must
+// wait for that migration pass, then adopt the identity the first init
+// records. Since ordinary shared-server inits stopped serializing on the
+// shared root, the second open read the first's half-applied, per-step
+// committed schema cursor and refused with #5920's migration-consent advice
+// ("refusing to auto-apply N pending schema migrations ..."), advice no
+// operator needed: the pass finishes on its own a few seconds later.
+//
+// The test plays the first init's migrating session itself, so the
+// interleaving is deterministic. It creates the database, holds the
+// database's migration lock as a migration pass does, applies and commits
+// the first migrations, and starts the second init. Once that init is seen
+// waiting for the lock, the session applies the rest, records the first
+// init's identity as its bootstrap would, and only then lets go.
+func TestSharedServerInitSameNameWaitsOutMigration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("not supported on Windows")
+	}
+
+	bdBinary := buildSharedServerTestBinary(t)
+
+	cp, err := testutil.NewContainerProvider()
+	if err != nil {
+		if os.Getenv(testutil.EnvRequireDoltContainer) == "1" {
+			t.Fatalf("cannot start Dolt server, but %s=1: %v", testutil.EnvRequireDoltContainer, err)
+		}
+		t.Skipf("cannot start Dolt container: %v", err)
+	}
+	t.Cleanup(func() { _ = cp.Stop() })
+	port := cp.Port()
+
+	sharedDir := t.TempDir()
+	if err := cp.WritePortFile(sharedDir); err != nil {
+		t.Fatalf("write port file: %v", err)
+	}
+	baseEnv := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"GOPATH=" + os.Getenv("GOPATH"),
+		"GOROOT=" + os.Getenv("GOROOT"),
+		"BEADS_SHARED_SERVER_DIR=" + sharedDir,
+		"BEADS_DOLT_SHARED_SERVER=1",
+		"BEADS_DOLT_SERVER_PORT=" + strconv.Itoa(port),
+		"BEADS_DOLT_AUTO_START=0",
+		"BEADS_TEST_MODE=1",
+		"BD_DISABLE_METRICS=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=",
+		"SSH_ASKPASS=",
+		"GT_ROOT=",
+	}
+
+	ctx := context.Background()
+	if dl, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, dl)
+		defer cancel()
+	}
+
+	const (
+		database = "sssamenamemigrating"
+		prefix   = "samename"
+		// How far the first init's pass has got when the second init opens
+		// the database: well into it, with the identity tables in place.
+		midPass = 22
+	)
+	firstID := configfile.GenerateProjectID()
+
+	// The first init's migrating session, on the server's only other client.
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root"}.String())
+	if err != nil {
+		t.Fatalf("open an admin connection: %v", err)
+	}
+	defer admin.Close()
+	migrator, err := admin.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin the migrating session: %v", err)
+	}
+	defer migrator.Close()
+	var migratorID int64
+	if err := migrator.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&migratorID); err != nil {
+		t.Fatalf("read the migrating session's connection id: %v", err)
+	}
+	run := func(query string, args ...any) {
+		t.Helper()
+		if _, err := migrator.ExecContext(ctx, query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	commit := func() {
+		t.Helper()
+		if err := schema.DrainCall(ctx, migrator, "CALL DOLT_COMMIT('-Am', 'first init: migrate and identify')"); err != nil {
+			t.Fatalf("commit the first init's work: %v", err)
+		}
+	}
+	lockName := schema.MigrationLockName(database)
+	setLock := func(query string) {
+		t.Helper()
+		var ok sql.NullInt64
+		if err := migrator.QueryRowContext(ctx, query, lockName).Scan(&ok); err != nil || !ok.Valid || ok.Int64 != 1 {
+			t.Fatalf("%s on %s = %v (err %v), want 1", query, lockName, ok, err)
+		}
+	}
+
+	run("CREATE DATABASE `" + database + "`")
+	run("USE `" + database + "`")
+	setLock("SELECT GET_LOCK(?, 0)")
+	if _, err := schema.MigrateUpTo(ctx, migrator, midPass); err != nil {
+		t.Fatalf("apply the first %d migrations: %v", midPass, err)
+	}
+	commit()
+
+	dir := filepath.Join(t.TempDir(), "second")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := gitInit(ctx, dir); err != nil {
+		t.Fatalf("git init %s: %v", dir, err)
+	}
+	type initResult struct {
+		out string
+		err error
+	}
+	done := make(chan initResult, 1)
+	go func() {
+		out, err := ssExec(ctx, bdBinary, dir, baseEnv,
+			"init", "--shared-server", "--external", "--database", database,
+			"--prefix", prefix, "--quiet", "--non-interactive")
+		done <- initResult{out: out, err: err}
+	}()
+
+	// The second init has read the half-applied cursor and is waiting for
+	// the pass to end. Before GH#7122's fix it had already refused.
+	waitStart := time.Now()
+	for !ssMigrationLockWaiterVisible(t, ctx, admin, migratorID) {
+		select {
+		case r := <-done:
+			t.Fatalf("the second init ended before it waited for the first init's migration pass: %v\n%s", r.err, r.out)
+		case <-time.After(50 * time.Millisecond):
+		}
+		if time.Since(waitStart) > 90*time.Second {
+			t.Fatal("the second init never waited for the migration lock")
+		}
+	}
+
+	// The pass finishes and the first init records its identity, all
+	// before the lock goes.
+	finishStart := time.Now()
+	if _, err := schema.MigrateUpTo(ctx, migrator, schema.LatestVersion()); err != nil {
+		t.Fatalf("apply the remaining migrations: %v", err)
+	}
+	run("REPLACE INTO config (`key`, value) VALUES ('issue_prefix', ?)", prefix)
+	run("REPLACE INTO metadata (`key`, value) VALUES ('_project_id', ?)", firstID)
+	commit()
+	setLock("SELECT RELEASE_LOCK(?)")
+	t.Logf("the first init's pass ran %s past the second init's wait", time.Since(finishStart))
+
+	var r initResult
+	select {
+	case r = <-done:
+	case <-time.After(2 * time.Minute):
+		t.Fatal("the second init did not finish after the first init's migration pass ended")
+	}
+	if strings.Contains(r.out, "refusing to auto-apply") {
+		t.Errorf("the second init was given migration-consent advice for a pass already in flight:\n%s", r.out)
+	}
+	if r.err != nil {
+		t.Fatalf("second init: %v\n%s", r.err, r.out)
+	}
+	if id, _ := ssMetadataJSON(t, dir)["project_id"].(string); id != firstID {
+		t.Errorf("the second init recorded identity %q, want the first init's %s", id, firstID)
+	}
+	if got := ssReadInitState(t, port, database); got.projectID != firstID {
+		t.Errorf("%s identity = %q, want the first init's %s", database, got.projectID, firstID)
+	}
+}
+
+// ssMigrationLockWaiterVisible reports whether a session other than holderID
+// is waiting in GET_LOCK on the server observer is connected to. Each test
+// here has a server of its own, so any such waiter is the init under test.
+func ssMigrationLockWaiterVisible(t *testing.T, ctx context.Context, observer *sql.DB, holderID int64) bool {
+	t.Helper()
+	rows, err := observer.QueryContext(ctx, "SHOW PROCESSLIST")
+	if err != nil {
+		t.Fatalf("SHOW PROCESSLIST: %v", err)
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		t.Fatalf("SHOW PROCESSLIST columns: %v", err)
+	}
+	idIndex, infoIndex := -1, -1
+	for i, column := range columns {
+		switch strings.ToLower(column) {
+		case "id":
+			idIndex = i
+		case "info":
+			infoIndex = i
+		}
+	}
+	if idIndex < 0 || infoIndex < 0 {
+		t.Fatalf("SHOW PROCESSLIST has no id/info column: %v", columns)
+	}
+	values := make([]sql.NullString, len(columns))
+	scanArgs := make([]any, len(columns))
+	for i := range values {
+		scanArgs[i] = &values[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(scanArgs...); err != nil {
+			t.Fatalf("scan SHOW PROCESSLIST: %v", err)
+		}
+		if id, err := strconv.ParseInt(values[idIndex].String, 10, 64); err == nil && id == holderID {
 			continue
 		}
-		// The loser did not publish its freshly minted identity: either no
-		// metadata.json at all, or one without a project id.
-		if raw, rerr := os.ReadFile(filepath.Join(r.dir, ".beads", "metadata.json")); rerr == nil {
-			var m map[string]any
-			if jerr := json.Unmarshal(raw, &m); jerr != nil {
-				t.Fatalf("parse %s metadata.json: %v\nraw: %s", r.name, jerr, raw)
-			}
-			if id, _ := m["project_id"].(string); id != "" && id != sharedID {
-				t.Errorf("%s lost the race but published its minted identity %s anyway", r.name, id)
-			}
+		if values[infoIndex].Valid && strings.Contains(strings.ToUpper(values[infoIndex].String), "GET_LOCK") {
+			return true
 		}
-		// The recovery: re-running the loser's init with the same
-		// --database adopts the winner's identity.
-		out, err := ssExec(ctx, bdBinary, r.dir, baseEnv,
-			"init", "--shared-server", "--external", "--database", "ssracetest",
-			"--prefix", r.prefix, "--quiet", "--non-interactive")
-		if err != nil {
-			t.Fatalf("%s init after losing the identity race: %s: %v", r.name, out, err)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read SHOW PROCESSLIST: %v", err)
+	}
+	return false
+}
+
+// ssInitState is what bd init leaves in a database that names a workspace.
+type ssInitState struct {
+	projectID string // metadata _project_id
+	repoID    string // metadata repo_id
+	origin    string // dolt_remotes origin URL
+}
+
+// ssReadInitState reads database's ssInitState over a fresh root connection;
+// an absent value reads as "".
+func ssReadInitState(t *testing.T, port int, database string) ssInitState {
+	t.Helper()
+	db, err := sql.Open("mysql", doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: database}.String())
+	if err != nil {
+		t.Fatalf("open %s: %v", database, err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	read := func(query, arg string) string {
+		var v string
+		if err := db.QueryRowContext(ctx, query, arg).Scan(&v); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("%s [%s] in %s: %v", query, arg, database, err)
 		}
-		id, _ := ssMetadataJSON(t, r.dir)["project_id"].(string)
-		if id != sharedID {
-			t.Errorf("%s re-init recorded identity %s, want the adopted winner identity %s", r.name, id, sharedID)
-		}
-		if out, err := ssExec(ctx, bdBinary, r.dir, baseEnv, "list", "--json", "--flat"); err != nil {
-			t.Errorf("bd list in %s after adopting: %s: %v", r.name, out, err)
-		}
+		return v
+	}
+	return ssInitState{
+		projectID: read("SELECT value FROM metadata WHERE `key` = ?", "_project_id"),
+		repoID:    read("SELECT value FROM metadata WHERE `key` = ?", "repo_id"),
+		origin:    read("SELECT url FROM dolt_remotes WHERE name = ?", "origin"),
 	}
 }

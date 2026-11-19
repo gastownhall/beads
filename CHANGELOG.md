@@ -1445,9 +1445,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an init whose `--db` names another root, and every init outside
   shared-server mode keep the exclusive gate; a refused reinit now says it
   needs the shared server free of other projects' commands, such as
-  `bd serve`. Two inits that pick the same database name now settle it in
-  the database: the one that loses writes no `metadata.json` (and leaves an
-  existing one unchanged), so rerun it with another `--database`.
+  `bd serve`. A bd that opens a database on the server while another bd is
+  still migrating it (the init that just created it, say) now waits for that
+  migration pass instead of refusing as if the migration needed consent.
+  When two inits claim the same database name before either has recorded an
+  identity in it, the database settles it: one records its identity, and the
+  other is refused and writes nothing that names it, neither a
+  `metadata.json` (an existing one stays unchanged) nor its Dolt remote or
+  repository fingerprint in the database. To share that database, rerun the
+  refused init with `--database` naming it, which adopts the other's
+  identity; for a separate project, rerun it with a different `--database`.
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
