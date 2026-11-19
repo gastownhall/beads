@@ -236,6 +236,40 @@ func TestProxiedServerEpic(t *testing.T) {
 		assertZeroChildEpicBlock(t, epicStatusAllHuman(t, dotted.ID), dotted.ID)
 	})
 
+	t.Run("status_eligible_only_lists_only_complete_epics", func(t *testing.T) {
+		// Beside the zero-child epics above: a partial epic (1 of 2 linked
+		// children closed) and a complete one (its only child closed).
+		partial := bdProxiedCreate(t, bd, pAll.dir, "Partial epic", "--type", "epic")
+		p1 := bdProxiedCreate(t, bd, pAll.dir, "Partial child one", "--type", "task", "--parent", partial.ID)
+		bdProxiedCreate(t, bd, pAll.dir, "Partial child two", "--type", "task", "--parent", partial.ID)
+		done := bdProxiedCreate(t, bd, pAll.dir, "Complete epic", "--type", "epic")
+		doneChild := bdProxiedCreate(t, bd, pAll.dir, "Done child", "--type", "task", "--parent", done.ID)
+		for _, id := range []string{p1.ID, doneChild.ID} {
+			if out, err := bdProxiedRun(t, bd, pAll.dir, "close", id); err != nil {
+				t.Fatalf("close %s: %v\n%s", id, err, out)
+			}
+		}
+
+		byID := epicStatusAll(t, "--eligible-only")
+		if ids := epicRowIDs(byID); len(ids) != 1 || ids[0] != done.ID {
+			t.Errorf("--eligible-only listed %v, want only %s", ids, done.ID)
+		}
+		assertEpicRow(t, byID, done.ID, 1, 1, true)
+
+		out, err := bdProxiedRun(t, bd, pAll.dir, "epic", "status", "--eligible-only")
+		if err != nil {
+			t.Fatalf("epic status --eligible-only: %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), done.ID) {
+			t.Errorf("--eligible-only should show complete epic %s: %s", done.ID, out)
+		}
+		for _, id := range []string{childless.ID, dotted.ID, partial.ID, linked.ID} {
+			if strings.Contains(string(out), id+" ") {
+				t.Errorf("--eligible-only must not show %s: %s", id, out)
+			}
+		}
+	})
+
 	// GH#5720: zero-child epics are listed by epic status but never
 	// eligible, so close-eligible neither selects nor closes a childless
 	// epic or one whose only dotted-ID issue (no parent-child edge) was

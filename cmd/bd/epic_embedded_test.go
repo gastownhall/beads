@@ -206,6 +206,34 @@ func TestEmbeddedEpicStatus(t *testing.T) {
 		assertZeroChildEpicBlock(t, epicStatusBlocks(t, bdEpic(t, bd, dirAll, "status"), dotted.ID), dotted.ID)
 	})
 
+	t.Run("status_eligible_only_lists_only_complete_epics", func(t *testing.T) {
+		// Beside the zero-child epics above: a partial epic (1 of 2 linked
+		// children closed) and a complete one (its only child closed).
+		partial := bdCreate(t, bd, dirAll, "Partial epic", "--type", "epic")
+		p1 := bdCreate(t, bd, dirAll, "Partial child one", "--type", "task", "--parent", partial.ID)
+		bdCreate(t, bd, dirAll, "Partial child two", "--type", "task", "--parent", partial.ID)
+		bdClose(t, bd, dirAll, p1.ID)
+		done := bdCreate(t, bd, dirAll, "Complete epic", "--type", "epic")
+		doneChild := bdCreate(t, bd, dirAll, "Done child", "--type", "task", "--parent", done.ID)
+		bdClose(t, bd, dirAll, doneChild.ID)
+
+		byID := epicStatusJSON(t, dirAll, "--eligible-only")
+		if ids := epicRowIDs(byID); len(ids) != 1 || ids[0] != done.ID {
+			t.Errorf("--eligible-only listed %v, want only %s", ids, done.ID)
+		}
+		assertEpicRow(t, byID, done.ID, 1, 1, true)
+
+		out := bdEpic(t, bd, dirAll, "status", "--eligible-only")
+		if !strings.Contains(out, done.ID) {
+			t.Errorf("--eligible-only should show complete epic %s: %s", done.ID, out)
+		}
+		for _, id := range []string{childless.ID, dotted.ID, partial.ID, linked.ID} {
+			if strings.Contains(out, id+" ") {
+				t.Errorf("--eligible-only must not show %s: %s", id, out)
+			}
+		}
+	})
+
 	t.Run("status_shows_progress", func(t *testing.T) {
 		out := bdEpic(t, bd, dir, "status")
 		if !strings.Contains(out, epic1.ID) {
