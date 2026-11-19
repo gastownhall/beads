@@ -6,6 +6,7 @@ import (
 	"context"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -215,6 +216,80 @@ func TestForeignPrefixLocalBlockerFromBatchImportGatesEmbeddedReady(t *testing.T
 		if !slices.Contains(got, want) {
 			t.Fatalf("ready IDs = %v, want %s among them", got, want)
 		}
+	}
+}
+
+// TestForeignPrefixAbsentTargetStillExternal pins the preservation half of
+// GH#6066: presence-based classification must not swallow the two target
+// shapes that are genuinely external — a cross-prefix id this database holds
+// no row for, and an explicit external: reference. Both keep their stored
+// external edge, neither gates ready through the local columns, and the
+// batch pass still skips a missing target with the unresolved-target
+// warning instead of storing an edge.
+func TestForeignPrefixAbsentTargetStillExternal(t *testing.T) {
+	store := openExternalDependencyStore(t, "demo")
+	ctx := t.Context()
+	source := &types.Issue{ID: "demo-preservation", Title: "preservation source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, source, "tester"); err != nil {
+		t.Fatalf("CreateIssue(%s): %v", source.ID, err)
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: source.ID, DependsOnID: "other-nonexistent", Type: types.DepBlocks},
+		{IssueID: source.ID, DependsOnID: "external:da:da-7eo", Type: types.DepRelated},
+	} {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("AddDependency(%s): %v", dep.DependsOnID, err)
+		}
+	}
+
+	records, err := store.GetDependencyRecords(ctx, source.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords: %v", err)
+	}
+	got := make(map[string]bool, len(records))
+	for _, r := range records {
+		got[r.DependsOnID] = true
+	}
+	if !got["other-nonexistent"] || !got["external:da:da-7eo"] {
+		t.Fatalf("dependency records = %v, want both the absent cross-prefix target and the explicit external reference", got)
+	}
+
+	if blocked, blockers, err := store.IsBlocked(ctx, source.ID); err != nil || blocked {
+		t.Fatalf("IsBlocked(%s) = (%v, %v, %v): an external edge must not gate ready through the local columns", source.ID, blocked, blockers, err)
+	}
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	if got := embeddedIssueIDs(ready); !slices.Contains(got, source.ID) {
+		t.Fatalf("ready IDs = %v, want %s among them: external targets must not gate the raw store", got, source.ID)
+	}
+
+	// The unresolved-target warning path is unchanged: a batch whose edge
+	// names a missing target skips that edge and reports it, storing nothing.
+	// (A same-prefix source: an absent cross-prefix target is external, not
+	// unresolved, and is covered by the edges stored above.)
+	var skipped []string
+	batchDep := &types.Issue{ID: "demo-preserve-batch", Title: "batch preservation", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{{DependsOnID: "demo-unresolved-target", Type: types.DepBlocks}},
+	}
+	if err := store.CreateIssuesWithFullOptions(ctx, []*types.Issue{batchDep}, "tester", storage.BatchCreateOptions{
+		SkipPrefixValidation: true,
+		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
+			skipped = append(skipped, issueID+" -> "+dependsOnID+": "+reason)
+		},
+	}); err != nil {
+		t.Fatalf("CreateIssuesWithFullOptions: %v", err)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "demo-unresolved-target") || !strings.Contains(skipped[0], "target not found") {
+		t.Fatalf("skipped = %#v, want the unresolved-target skip report", skipped)
+	}
+	records, err = store.GetDependencyRecords(ctx, batchDep.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(batch): %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("batch dependency records = %v, want none: the skipped edge must not be stored", records)
 	}
 }
 
