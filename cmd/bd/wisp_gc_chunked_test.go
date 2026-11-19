@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/pflag"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -308,4 +309,161 @@ func TestWispGCReportsPartialFailureAsOneAggregateAndOneError(t *testing.T) {
 		t.Errorf("%d wisps remain, want 250", left)
 	}
 	assertExportBookkeeping(t, rec.requests[0].IDs, rec.requests[1].IDs)
+}
+
+// TestWispGCReportsOneAggregateResult runs an age gc of 450 wisps on a real
+// store whose dependencies and text references cross the 200-id chunk
+// boundaries, and pins what the run leaves and what its one aggregate result
+// says:
+//
+//   - every selected wisp is gone, and the protected in_progress wisp and the
+//     durable issues survive;
+//   - no surviving row keeps a dependency on a deleted one;
+//   - blocked state agrees with the graph: the durable issue whose only
+//     blocker was a chunk-3 wisp is unblocked, the one with a surviving
+//     blocker too stays blocked, the in_progress wisp whose blocker sat in
+//     chunk 1 is unblocked, and the store's own consistency count is zero;
+//   - the durable text citing a chunk-1 wisp and a chunk-3 wisp is rewritten
+//     for both, and references_updated counts the two rewrite operations
+//     (one per chunk), not distinct rows;
+//   - the orphan report names each surviving dependent once, and not the
+//     chunk-2 wisp that chunk 1 orphaned before chunk 2 deleted it.
+func TestWispGCReportsOneAggregateResult(t *testing.T) {
+	ctx := context.Background()
+	s, rec := useWispGCRealStore(t)
+	seeded := seedWisps(t, s, 450, types.StatusOpen)
+
+	// The protected live step and the durable rows are created before the
+	// selection order is read, so creating them cannot reorder it.
+	live := &types.Issue{Title: "live patrol step", Status: types.StatusInProgress, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+	blocker := &types.Issue{Title: "durable blocker", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	freed := &types.Issue{Title: "durable follow-up", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	held := &types.Issue{Title: "durable held", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{live, blocker, freed, held} {
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("creating %q: %v", issue.Title, err)
+		}
+	}
+
+	seededSet := map[string]bool{}
+	for _, w := range seeded {
+		seededSet[w.ID] = true
+	}
+	ephemeral := true
+	found, err := s.SearchIssues(ctx, "", types.IssueFilter{Ephemeral: &ephemeral, Limit: 5000})
+	if err != nil {
+		t.Fatalf("listing wisps: %v", err)
+	}
+	var order []string
+	for _, issue := range found {
+		if seededSet[issue.ID] {
+			order = append(order, issue.ID)
+		}
+	}
+	if len(order) != 450 {
+		t.Fatalf("selection holds %d seeded wisps, want 450", len(order))
+	}
+	chunk1, chunk2, chunk3 := order[10], order[300], order[420]
+
+	freed.Description = "follows " + chunk1 + " and " + chunk3
+	if err := s.UpdateIssue(ctx, freed.ID, map[string]interface{}{"description": freed.Description}, "test"); err != nil {
+		t.Fatalf("citing wisps in %s: %v", freed.ID, err)
+	}
+	for _, dep := range []*types.Dependency{
+		// related, so the chunk-2 wisp stays unblocked and selected.
+		{IssueID: chunk2, DependsOnID: chunk1, Type: types.DepRelated},
+		{IssueID: live.ID, DependsOnID: chunk1, Type: types.DepBlocks},
+		{IssueID: freed.ID, DependsOnID: chunk3, Type: types.DepBlocks},
+		// The rewrite reaches the rows a deletion's own edges connect, so
+		// the text citing chunk 1 needs an edge to it.
+		{IssueID: freed.ID, DependsOnID: chunk1, Type: types.DepRelated},
+		{IssueID: held.ID, DependsOnID: chunk3, Type: types.DepBlocks},
+		{IssueID: held.ID, DependsOnID: blocker.ID, Type: types.DepBlocks},
+	} {
+		if err := s.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("adding %s -> %s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+	jsonOutput = true
+
+	stdout, stderr, err := runWispGCCommand(t, wispGCAgeFlags)
+	if err != nil {
+		t.Fatalf("gc: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if len(rec.requests) != 3 {
+		t.Fatalf("gc sent %d deletion requests (sizes %v), want 3 chunks so the fixture crosses chunk boundaries", len(rec.requests), rec.requestSizes())
+	}
+	for i, id := range []string{chunk1, chunk2, chunk3} {
+		if !slices.Contains(rec.requests[i].IDs, id) {
+			t.Fatalf("%s is not in request %d; the fixture's chunk positions are wrong", id, i+1)
+		}
+	}
+
+	if left := wispCount(t, s); left != 1 {
+		t.Errorf("%d wisps remain, want only the in_progress step", left)
+	}
+	survivors := []string{live.ID, blocker.ID, freed.ID, held.ID}
+	survivorSet := map[string]bool{}
+	for _, id := range survivors {
+		survivorSet[id] = true
+		if _, err := s.GetIssue(ctx, id); err != nil {
+			t.Errorf("%s did not survive: %v", id, err)
+		}
+		deps, err := s.GetDependencyRecords(ctx, id)
+		if err != nil {
+			t.Fatalf("dependencies of %s: %v", id, err)
+		}
+		for _, dep := range deps {
+			if seededSet[dep.DependsOnID] {
+				t.Errorf("%s still depends on deleted wisp %s", id, dep.DependsOnID)
+			}
+		}
+	}
+
+	blocked, err := s.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("blocked issues: %v", err)
+	}
+	var blockedIDs []string
+	for _, b := range blocked {
+		blockedIDs = append(blockedIDs, b.ID)
+	}
+	if !slices.Equal(blockedIDs, []string{held.ID}) {
+		t.Errorf("blocked = %v, want only %s (still blocked by %s)", blockedIDs, held.ID, blocker.ID)
+	}
+	if stale, err := storageissueops.CountIsBlockedInconsistenciesInTx(ctx, s.DB()); err != nil || stale != 0 {
+		t.Errorf("is_blocked inconsistencies = %d (err %v), want 0", stale, err)
+	}
+
+	got, err := s.GetIssue(ctx, freed.ID)
+	if err != nil {
+		t.Fatalf("reading %s: %v", freed.ID, err)
+	}
+	for _, id := range []string{chunk1, chunk3} {
+		if want := "[deleted:" + id + "]"; !bytes.Contains([]byte(got.Description), []byte(want)) {
+			t.Errorf("description %q lacks %s: its citation was not rewritten", got.Description, want)
+		}
+	}
+
+	obj := decodeSingleJSONObject(t, stdout)
+	if got := obj["deleted_count"]; got != float64(450) {
+		t.Errorf("deleted_count = %v, want 450", got)
+	}
+	if got := obj["references_updated"]; got != float64(2) {
+		t.Errorf("references_updated = %v, want 2 (one rewrite of %s in chunk 1, one in chunk 3)", got, freed.ID)
+	}
+	var orphans []string
+	for _, o := range obj["orphaned_issues"].([]interface{}) {
+		orphans = append(orphans, o.(string))
+	}
+	want := []string{live.ID, freed.ID, held.ID}
+	slices.Sort(want)
+	if !slices.Equal(orphans, want) {
+		t.Errorf("orphaned_issues = %v, want %v (each surviving dependent once, not %s)", orphans, want, chunk2)
+	}
+	for _, o := range orphans {
+		if !survivorSet[o] {
+			t.Errorf("orphaned_issues names %s, which this run deleted", o)
+		}
+	}
 }
