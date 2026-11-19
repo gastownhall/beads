@@ -215,6 +215,12 @@ func TestPersistentPostRunDirectMaintenanceSkipsPreview(t *testing.T) {
 	}{
 		{name: "create --dry-run", command: "create", flag: "dry-run", set: true, want: postRunMaintenanceCounts{}},
 		{name: "migrate --inspect", command: "migrate", flag: "inspect", set: true, want: postRunMaintenanceCounts{}},
+		// A classified read with a real --dry-run: export and push already
+		// skip read-only commands, but auto-backup had no such check.
+		{name: "duplicates --dry-run", command: "duplicates", flag: "dry-run", set: true, want: postRunMaintenanceCounts{}},
+		// Control: the flag is registered but unset, so this is an ordinary
+		// write and every step runs (auto-commit twice: the write, then the tip).
+		{name: "create without --dry-run", command: "create", flag: "dry-run", set: false, want: postRunMaintenanceCounts{commit: 1, tip: 1, backup: 1, export: 1, push: 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
