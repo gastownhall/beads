@@ -64,7 +64,10 @@ func TestApplyAdvice_Before(t *testing.T) {
 		},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice: %v", err)
+	}
 
 	if len(result) != 3 {
 		t.Fatalf("expected 3 steps, got %d", len(result))
@@ -103,7 +106,10 @@ func TestApplyAdvice_After(t *testing.T) {
 		},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice: %v", err)
+	}
 
 	if len(result) != 3 {
 		t.Fatalf("expected 3 steps, got %d", len(result))
@@ -145,7 +151,10 @@ func TestApplyAdvice_Around(t *testing.T) {
 		},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice: %v", err)
+	}
 
 	if len(result) != 3 {
 		t.Fatalf("expected 3 steps, got %d", len(result))
@@ -188,7 +197,10 @@ func TestApplyAdvice_GlobPattern(t *testing.T) {
 		},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice: %v", err)
+	}
 
 	// Should have: design, log-shiny.implement, shiny.implement, log-shiny.review, shiny.review
 	if len(result) != 5 {
@@ -222,7 +234,10 @@ func TestApplyAdvice_NoMatch(t *testing.T) {
 		},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice: %v", err)
+	}
 
 	// No changes expected
 	if len(result) != 2 {
@@ -239,7 +254,10 @@ func TestApplyAdvice_EmptyAdvice(t *testing.T) {
 		{ID: "design", Title: "Design"},
 	}
 
-	result := ApplyAdvice(steps, nil)
+	result, err := ApplyAdvice(steps, nil)
+	if err != nil {
+		t.Fatalf("ApplyAdvice: %v", err)
+	}
 
 	if len(result) != 1 || result[0].ID != "design" {
 		t.Errorf("empty advice should return original steps")
@@ -345,7 +363,10 @@ func TestApplyAdvice_SelfMatchingPrevention(t *testing.T) {
 		{ID: "implement", Title: "Implement"},
 	}
 
-	result := ApplyAdvice(steps, advice)
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice: %v", err)
+	}
 
 	// Without self-matching prevention, pattern "*" would match the inserted
 	// "implement-before" and "implement-after" steps, causing them to also

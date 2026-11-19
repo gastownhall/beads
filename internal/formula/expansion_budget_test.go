@@ -431,3 +431,154 @@ func TestApplyExpansionsWithBudget_MapRefusesBeforeOverdrawing(t *testing.T) {
 		t.Fatalf("budget holds %d steps after the refusal; want the 9 the first two expansions left", budget.Used())
 	}
 }
+
+// Inline expansions are charged like compose rules: 4000 steps that each
+// inline a 3-step template would grow to 12000.
+func TestApplyInlineExpansions_PastLimitFails(t *testing.T) {
+	dir := t.TempDir()
+	writeExpansionFormula(t, dir, "three", 3, 0)
+	steps := flatSteps("s", 4000)
+	for _, s := range steps {
+		s.Expand = "three"
+	}
+	result, err := ApplyInlineExpansions(steps, NewParser(dir))
+	if err == nil {
+		t.Fatalf("ApplyInlineExpansions grew 4000 steps to %d; want an expansion limit error", len(result))
+	}
+	for _, want := range []string{"expansion limit exceeded", `"three"`, "10000"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ApplyInlineExpansions error = %q; want it to contain %q", err, want)
+		}
+	}
+}
+
+// A standalone expansion formula whose template alone is over the limit is
+// refused before it is materialized into steps.
+func TestMaterializeExpansion_TemplatePastLimitFails(t *testing.T) {
+	f := &Formula{Formula: "huge", Type: TypeExpansion, Template: flatSteps("{target}.t", 5001)}
+	for _, s := range f.Template {
+		s.Children = []*Step{{ID: s.ID + ".c"}}
+	}
+	err := MaterializeExpansion(f, "main", nil)
+	if err == nil {
+		t.Fatalf("MaterializeExpansion built %d steps; want an expansion limit error", countAllSteps(f.Steps))
+	}
+	if !strings.Contains(err.Error(), "expansion limit exceeded") || !strings.Contains(err.Error(), `"huge"`) {
+		t.Fatalf("MaterializeExpansion error = %v; want an expansion limit error naming the formula", err)
+	}
+	if len(f.Steps) != 0 {
+		t.Fatalf("MaterializeExpansion left %d steps on the formula after refusing", len(f.Steps))
+	}
+}
+
+// Advice that wraps every step of a 6000-step formula would triple it.
+func TestApplyAdvice_PastLimitRefuses(t *testing.T) {
+	steps := flatSteps("s", 6000)
+	advice := []*AdviceRule{{
+		Target: "*",
+		Before: &AdviceStep{ID: "{step.id}.pre"},
+		After:  &AdviceStep{ID: "{step.id}.post"},
+	}}
+	result, err := ApplyAdvice(steps, advice)
+	if err == nil {
+		t.Fatalf("ApplyAdvice grew 6000 steps to %d; want an expansion limit error", len(result))
+	}
+	if !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyAdvice error = %v; want ErrExpansionLimit", err)
+	}
+	for _, want := range []string{"advice on step", "10000"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ApplyAdvice error = %q; want it to contain %q", err, want)
+		}
+	}
+}
+
+// Advice that lands exactly on the limit still applies.
+func TestApplyAdvice_AtLimitApplies(t *testing.T) {
+	steps := flatSteps("s", 5000)
+	advice := []*AdviceRule{{Target: "*", After: &AdviceStep{ID: "{step.id}.post"}}}
+	result, err := ApplyAdvice(steps, advice)
+	if err != nil {
+		t.Fatalf("ApplyAdvice at the limit: %v", err)
+	}
+	if len(result) != MaxExpandedSteps {
+		t.Fatalf("ApplyAdvice produced %d steps, want %d", len(result), MaxExpandedSteps)
+	}
+}
+
+// Advice is charged before its steps are built, including advice on
+// children, and aspects applied one after another share the budget.
+func TestApplyAdviceWithBudget_ChargesBeforeBuilding(t *testing.T) {
+	advice := []*AdviceRule{{
+		Target: "*",
+		Around: &AroundAdvice{
+			Before: []*AdviceStep{{ID: "{step.id}.a"}, {ID: "{step.id}.b"}},
+			After:  []*AdviceStep{{ID: "{step.id}.z"}},
+		},
+	}}
+
+	t.Run("children", func(t *testing.T) {
+		steps := []*Step{{ID: "p", Children: []*Step{{ID: "c1"}, {ID: "c2"}}}}
+		budget := newExpansionBudget(10, steps) // 3 used; p fits (+3), c1 does not
+		if _, err := ApplyAdviceWithBudget(steps, advice, budget); !errors.Is(err, ErrExpansionLimit) {
+			t.Fatalf("ApplyAdviceWithBudget error = %v; want ErrExpansionLimit", err)
+		}
+		if budget.Used() != 9 {
+			t.Fatalf("budget used = %d after refusal; want 9 (advice on p and c1, not c2)", budget.Used())
+		}
+	})
+
+	t.Run("aspects share the budget", func(t *testing.T) {
+		steps := flatSteps("s", 2)
+		budget := newExpansionBudget(10, steps)
+		first, err := ApplyAdviceWithBudget(steps, advice, budget) // 2 + 6 = 8
+		if err != nil {
+			t.Fatalf("first aspect: %v", err)
+		}
+		if budget.Used() != stepGraphSize(first) {
+			t.Fatalf("budget used = %d; want the graph's %d steps", budget.Used(), stepGraphSize(first))
+		}
+		if _, err := ApplyAdviceWithBudget(first, advice, budget); !errors.Is(err, ErrExpansionLimit) {
+			t.Fatalf("second aspect error = %v; want ErrExpansionLimit", err)
+		}
+	})
+}
+
+// Inline expansions charged to a shared budget: the budget tracks the graph
+// they produce, and an injected limit refuses before the template is built.
+func TestApplyInlineExpansionsWithBudget_TracksTheGraph(t *testing.T) {
+	dir := t.TempDir()
+	writeExpansionFormula(t, dir, "pair", 2, 1) // 2 steps with 1 child each
+	steps := flatSteps("s", 3)
+	steps[0].Expand = "pair"
+	steps[2].Children = []*Step{{ID: "s2.kid", Expand: "pair"}}
+
+	budget := NewExpansionBudget(steps)
+	result, err := ApplyInlineExpansionsWithBudget(steps, NewParser(dir), budget)
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansionsWithBudget: %v", err)
+	}
+	if budget.Used() != stepGraphSize(result) {
+		t.Fatalf("budget used = %d; want the graph's %d steps", budget.Used(), stepGraphSize(result))
+	}
+
+	small := newExpansionBudget(6, steps) // 4 used; s0 grows to 7
+	if _, err := ApplyInlineExpansionsWithBudget(steps, NewParser(dir), small); !errors.Is(err, ErrExpansionLimit) {
+		t.Fatalf("ApplyInlineExpansionsWithBudget error = %v; want ErrExpansionLimit", err)
+	}
+	if small.Used() != 4 {
+		t.Fatalf("budget used = %d after refusal; want it unchanged at 4", small.Used())
+	}
+}
+
+// ExpansionVarRefs does not walk a template MaterializeExpansion refuses.
+func TestExpansionVarRefs_TemplatePastLimitIsNil(t *testing.T) {
+	f := &Formula{Formula: "huge", Type: TypeExpansion, Template: flatSteps("{target}.t{x}", MaxExpandedSteps+1)}
+	if got := ExpansionVarRefs(f, "main"); got != nil {
+		t.Fatalf("ExpansionVarRefs = %v; want nil for an over-limit template", got)
+	}
+	f.Template = f.Template[:MaxExpandedSteps]
+	if got := ExpansionVarRefs(f, "main"); len(got) != 1 || got[0] != "x" {
+		t.Fatalf("ExpansionVarRefs at the limit = %v; want [x]", got)
+	}
+}

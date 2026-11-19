@@ -183,7 +183,11 @@ func loadAndResolveFormula(formulaPath string, searchPaths []string) (*formula.F
 
 	// Apply advice transformations
 	if len(resolved.Advice) > 0 {
-		resolved.Steps = formula.ApplyAdvice(resolved.Steps, resolved.Advice)
+		advisedSteps, err := formula.ApplyAdvice(resolved.Steps, resolved.Advice)
+		if err != nil {
+			return nil, fmt.Errorf("applying advice: %w", err)
+		}
+		resolved.Steps = advisedSteps
 	}
 
 	// Apply inline step expansions
@@ -213,7 +217,11 @@ func loadAndResolveFormula(formulaPath string, searchPaths []string) (*formula.F
 				return nil, fmt.Errorf("%q is not an aspect formula (type=%s)", aspectName, aspectFormula.Type)
 			}
 			if len(aspectFormula.Advice) > 0 {
-				resolved.Steps = formula.ApplyAdvice(resolved.Steps, aspectFormula.Advice)
+				advisedSteps, err := formula.ApplyAdvice(resolved.Steps, aspectFormula.Advice)
+				if err != nil {
+					return nil, fmt.Errorf("applying aspect %q: %w", aspectName, err)
+				}
+				resolved.Steps = advisedSteps
 			}
 		}
 	}
@@ -780,7 +788,11 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 
 	// Apply advice transformations
 	if len(resolved.Advice) > 0 {
-		resolved.Steps = formula.ApplyAdvice(resolved.Steps, resolved.Advice)
+		advisedSteps, err := formula.ApplyAdvice(resolved.Steps, resolved.Advice)
+		if err != nil {
+			return nil, fmt.Errorf("applying advice to %q: %w", formulaName, err)
+		}
+		resolved.Steps = advisedSteps
 	}
 
 	// Apply inline step expansions
@@ -810,7 +822,11 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 				return nil, fmt.Errorf("%q is not an aspect formula (type=%s)", aspectName, aspectFormula.Type)
 			}
 			if len(aspectFormula.Advice) > 0 {
-				resolved.Steps = formula.ApplyAdvice(resolved.Steps, aspectFormula.Advice)
+				advisedSteps, err := formula.ApplyAdvice(resolved.Steps, aspectFormula.Advice)
+				if err != nil {
+					return nil, fmt.Errorf("applying aspect %q: %w", aspectName, err)
+				}
+				resolved.Steps = advisedSteps
 			}
 		}
 	}
