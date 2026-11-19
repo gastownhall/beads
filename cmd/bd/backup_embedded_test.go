@@ -565,3 +565,88 @@ func TestEmbeddedAutoBackupDamagedDestination(t *testing.T) {
 		t.Errorf("last_success_at %v moved from the last good backup %v", status.Backup.LastSuccessAt, good.LastSuccessAt)
 	}
 }
+
+// TestEmbeddedAutoBackupDamagedDestinationRecoversAfterMoveAside completes
+// GH#4070's recovery story: after the damaged directory is moved aside (kept),
+// auto-backup writes a fresh full backup at the same path, status reports an
+// empty last_error and a newer last_success_at, and `bd backup restore
+// --force` from that fresh backup restores every issue — including the one
+// created while backups were failing.
+func TestEmbeddedAutoBackupDamagedDestinationRecoversAfterMoveAside(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt backup tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "bkdmgrec")
+	backup := filepath.Join(dir, ".beads", "backup")
+	autoEnv := []string{"BD_BACKUP_ENABLED=true", "BD_BACKUP_INTERVAL=1ms"}
+
+	createWithAuto := func(t *testing.T, title string) (id, stderr string) {
+		t.Helper()
+		stdout, stderr, code := bdRunBuffersWithBDEnv(t, bd, dir, autoEnv, "create", "--silent", title)
+		if code != 0 {
+			t.Fatalf("bd create %q exited %d\nstdout:\n%s\nstderr:\n%s", title, code, stdout, stderr)
+		}
+		return strings.TrimSpace(stdout), stderr
+	}
+
+	idA, _ := createWithAuto(t, "recovery A")
+	good := readEmbeddedBackupState(t, backup)
+	if good.LastSuccessAt.IsZero() || good.LastDoltCommit == "" {
+		t.Fatalf("first auto-backup recorded no success: %+v", good)
+	}
+
+	damageBackupDest(t, backup)
+	idB, _ := createWithAuto(t, "recovery B")
+	failing := readEmbeddedBackupState(t, backup)
+	if failing.LastError == "" {
+		t.Fatal("precondition: the damaged destination recorded no failure")
+	}
+
+	// Move the damaged directory aside — keep it — and let auto-backup
+	// start over at the same path.
+	broken := backup + ".broken"
+	if err := os.Rename(backup, broken); err != nil {
+		t.Fatalf("move the damaged backup dir aside: %v", err)
+	}
+	idC, stderr := createWithAuto(t, "recovery C")
+	if strings.Contains(stderr, "Warning: auto-backup failed") {
+		t.Errorf("auto-backup still fails after the damaged directory was moved aside:\n%s", stderr)
+	}
+	recovered := readEmbeddedBackupState(t, backup)
+	if recovered.LastError != "" {
+		t.Errorf("last_error = %q after the recovery, want empty", recovered.LastError)
+	}
+	if !recovered.LastSuccessAt.After(good.LastSuccessAt) {
+		t.Errorf("last_success_at %v is not newer than the last good backup %v", recovered.LastSuccessAt, good.LastSuccessAt)
+	}
+	if info, err := os.Stat(filepath.Join(backup, "manifest")); err != nil || !info.Mode().IsRegular() {
+		t.Errorf("the recovered destination holds no regular manifest: %v", err)
+	}
+
+	// With auto-backup off (no opt-in, no git remote), a further issue must
+	// not reach the backup.
+	idD := bdCreateSilent(t, bd, dir, "recovery D, never backed up")
+
+	stdout, stderr, code := bdRunBuffersWithBDEnv(t, bd, dir, nil, "backup", "restore", "--force", backup)
+	if code != 0 {
+		t.Fatalf("bd backup restore --force exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	got := map[string]bool{}
+	for _, issue := range bdListJSON(t, bd, dir) {
+		got[issue.ID] = true
+	}
+	for _, id := range []string{idA, idB, idC} {
+		if !got[id] {
+			t.Errorf("restored backup is missing issue %s: restored IDs = %v", id, got)
+		}
+	}
+	if got[idD] {
+		t.Errorf("restore brought back issue %s, which was created after the last backup", idD)
+	}
+	if len(got) != 3 {
+		t.Errorf("restored database holds %d issues, want the 3 the backup captured: %v", len(got), got)
+	}
+}
