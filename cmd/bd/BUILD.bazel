@@ -1286,6 +1286,7 @@ go_test(
         "show_comments_tail_test.go",
         "show_current_test.go",
         "show_details_json_test.go",
+        "show_display_unresolvable_test.go",
         "show_embedded_test.go",
         "show_foreign_prefix_miss_test.go",
         "show_foreign_prefix_routing_test.go",

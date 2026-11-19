@@ -190,10 +190,13 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 
 	// Dependencies (what this issue depends on)
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
-	// Counts first — see readDepCounts for why the order matters.
+	// Counts first — see readDepCounts for why the order matters. The
+	// combined read names the outgoing edges with no row here, which render
+	// in their sections (bd-uschhs).
 	depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
-	depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
-	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+	depsWithMeta, unresolvedDeps, depsErr := issueStore.GetDependenciesWithUnresolvable(ctx, issue.ID)
+	outSections, relatedUnresolved := withUnresolvedSections(groupDepSections(depsWithMeta, true, relatedSeen), unresolvedDeps, true)
+	for _, sec := range outSections {
 		printDepSection(sec)
 	}
 
@@ -209,11 +212,11 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 	// scope: they answer an alternate query with no count beside it to
 	// contradict.
 	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-		depListing{rows: len(depsWithMeta), err: depsErr},
+		depListing{rows: len(depsWithMeta), err: depsErr, named: true},
 		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
 	// Related (bidirectional, deduplicated)
-	printRelatedSection(relatedSeen)
+	printRelatedSection(relatedSeen, relatedUnresolved)
 
 	// Comments. watchCommentFormatTime hardcodes UTC — this path does not
 	// thread --local-time today (a pre-existing discrepancy from the
@@ -235,6 +238,10 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 type depListing struct {
 	rows int
 	err  error
+	// named reports that the read returned the stored record of every edge
+	// it could not resolve, which the render printed in its section
+	// (bd-uschhs). No count delta applies to such a listing.
+	named bool
 }
 
 // depCount is one direction's aggregate, carried with its own error for the
@@ -317,7 +324,7 @@ func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents
 		// SHORT listing from a FAILED one — each leaves an empty slice — and
 		// warning on the second turns a transient backend error into a claim
 		// about the data, which is the more expensive of the two mistakes.
-		if countErr != nil || listing.err != nil {
+		if countErr != nil || listing.err != nil || listing.named {
 			return false
 		}
 		missing := count - int64(listing.rows)

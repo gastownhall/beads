@@ -68,15 +68,18 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 					details["unresolvable_dependencies"])
 			}
 
-			// Text mode: the notice goes to stderr, so stdout stays
-			// byte-identical for scripts. Assert on stderr alone, or
-			// this passes on a build that prints nothing anywhere.
+			// Text mode (bd-uschhs AC-3): the edge renders in its own
+			// relation section, named exactly and marked as having no row
+			// here, even as the section's only entry; the outgoing count
+			// warning it replaces is gone from stderr.
 			stdout, stderr := runShowSplit(t, bd, dir, subject.ID)
-			if !strings.Contains(stderr, "no row in this database") {
-				t.Errorf("bd show stderr did not disclose the unrenderable edge:\nstderr:\n%s", stderr)
+			heading := map[string]string{"tracks": "TRACKS", "blocks": "DEPENDS ON"}[tc.depTyp]
+			wantLine := "→ " + tc.target + " (not in this database)"
+			if !strings.Contains(stdout, heading) || !strings.Contains(stdout, wantLine) {
+				t.Errorf("bd show stdout did not render %q under %s:\nstdout:\n%s", wantLine, heading, stdout)
 			}
-			if strings.Contains(stdout, "no row in this database") {
-				t.Errorf("the notice reached stdout, which must stay unchanged:\n%s", stdout)
+			if strings.Contains(stderr, "dependency edge(s)") || strings.Contains(stderr, "For raw edge records") {
+				t.Errorf("bd show still printed the redundant outgoing warning:\nstderr:\n%s", stderr)
 			}
 		})
 	}
