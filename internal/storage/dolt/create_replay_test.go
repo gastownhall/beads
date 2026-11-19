@@ -438,3 +438,126 @@ func TestCreateWispBatchReplayRemintsGeneratedIdentifiers(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateReplayPreservesExplicitIdentifiers (AC-3): the per-attempt reset
+// clears only identifiers the caller left empty. Caller-supplied issue IDs,
+// dependency sources and comment IDs survive a replay, and explicit-ID
+// creates keep their upsert behavior (the replayed loser's content lands on
+// the shared row).
+func TestCreateReplayPreservesExplicitIdentifiers(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	target := &types.Issue{Title: "replay-explicit-target", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, target, "tester"); err != nil {
+		t.Fatalf("create dependency target: %v", err)
+	}
+
+	explicitPair := func(id string) (loser, winner *types.Issue) {
+		loser = replayIssue("replay-explicit-loser", "loser")
+		loser.ID = id
+		winner = replayIssue("replay-explicit-winner", "winner")
+		winner.ID = id
+		return loser, winner
+	}
+	requireUpserted := func(t *testing.T, loser *types.Issue, id string) {
+		t.Helper()
+		if loser.ID != id {
+			t.Fatalf("explicit ID changed across the replay: %q, want %q", loser.ID, id)
+		}
+		if n := replayQueryInt(t, ctx, store, "SELECT COUNT(*) FROM issues WHERE id = ?", id); n != 1 {
+			t.Fatalf("issues rows with id %s = %d, want 1", id, n)
+		}
+		var title, notes string
+		if err := store.db.QueryRowContext(ctx, "SELECT title, notes FROM issues WHERE id = ?", id).Scan(&title, &notes); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if title != "replay-explicit-loser" || notes != "loser" {
+			t.Fatalf("%s = (%q, %q) after the replayed upsert, want the loser's (%q, %q)", id, title, notes, "replay-explicit-loser", "loser")
+		}
+	}
+
+	t.Run("single_explicit_upsert", func(t *testing.T) {
+		const id = "test-replayexp1"
+		loser, winner := explicitPair(id)
+		loser.Comments = []*types.Comment{{ID: "7289a001-0000-4000-8000-000000000001", Author: "loser", Text: "loser comment", CreatedAt: replayFixedCreatedAt}}
+		loserCtx, f := withForcedReplay(ctx, ctx, func() string { return loser.ID }, func(ctx context.Context) (string, error) {
+			err := store.CreateIssue(ctx, winner, replayActor)
+			return winner.ID, err
+		})
+		if err := store.CreateIssue(loserCtx, loser, replayActor); err != nil {
+			t.Fatalf("loser explicit CreateIssue: %v", err)
+		}
+		f.requireReplayed(t)
+		requireUpserted(t, loser, id)
+		if got := loser.Comments[0].ID; got != "7289a001-0000-4000-8000-000000000001" {
+			t.Fatalf("caller-supplied comment ID changed to %q", got)
+		}
+		requireOnlyComment(t, ctx, store, durablePlane, id, "7289a001-0000-4000-8000-000000000001", "loser comment")
+	})
+
+	t.Run("batch_explicit_upsert", func(t *testing.T) {
+		const id = "test-replayexp2"
+		loser, winner := explicitPair(id)
+		loser.Dependencies = []*types.Dependency{{IssueID: id, DependsOnID: target.ID, Type: types.DepBlocks}}
+		loser.Comments = []*types.Comment{{ID: "7289a001-0000-4000-8000-000000000002", Author: "loser", Text: "loser comment", CreatedAt: replayFixedCreatedAt}}
+		loserCtx, f := withForcedReplay(ctx, ctx, func() string { return loser.ID }, func(ctx context.Context) (string, error) {
+			err := store.CreateIssue(ctx, winner, replayActor)
+			return winner.ID, err
+		})
+		if err := store.CreateIssues(loserCtx, []*types.Issue{loser}, replayActor); err != nil {
+			t.Fatalf("loser explicit batch create: %v", err)
+		}
+		f.requireReplayed(t)
+		requireUpserted(t, loser, id)
+		if got := loser.Dependencies[0].IssueID; got != id {
+			t.Fatalf("caller-supplied dependency IssueID changed to %q", got)
+		}
+		requireDepTargets(t, ctx, store, durablePlane, id, target.ID)
+		requireOnlyComment(t, ctx, store, durablePlane, id, "7289a001-0000-4000-8000-000000000002", "loser comment")
+	})
+
+	t.Run("mixed_provenance_batch", func(t *testing.T) {
+		// The explicit member keeps every caller-supplied identifier; the
+		// generated member is the one that collides and must be re-minted.
+		const id = "test-replayexp3"
+		explicit := replayIssue("replay-mixed-explicit", "explicit")
+		explicit.ID = id
+		explicit.CreatedAt = replayFixedCreatedAt.Add(time.Hour)
+		explicit.Dependencies = []*types.Dependency{{IssueID: id, DependsOnID: target.ID, Type: types.DepBlocks}}
+		explicit.Comments = []*types.Comment{{ID: "7289a001-0000-4000-8000-000000000003", Author: "explicit", Text: "explicit comment", CreatedAt: replayFixedCreatedAt}}
+
+		const title = "replay-mixed-generated"
+		generated := replayIssue(title, "loser")
+		generated.Dependencies = []*types.Dependency{{DependsOnID: target.ID, Type: types.DepBlocks}}
+		generated.Comments = []*types.Comment{{Author: "loser", Text: "loser comment", CreatedAt: replayFixedCreatedAt}}
+		winner, runWinner := createReplayWinner(store, title)
+
+		loserCtx, f := withForcedReplay(ctx, ctx, func() string { return generated.ID }, runWinner)
+		if err := store.CreateIssues(loserCtx, []*types.Issue{explicit, generated}, replayActor); err != nil {
+			t.Fatalf("loser mixed batch create: %v", err)
+		}
+		f.requireReplayed(t)
+
+		if explicit.ID != id || explicit.Dependencies[0].IssueID != id || explicit.Comments[0].ID != "7289a001-0000-4000-8000-000000000003" {
+			t.Fatalf("caller-supplied identifiers changed across the replay: issue %q, dep source %q, comment %q",
+				explicit.ID, explicit.Dependencies[0].IssueID, explicit.Comments[0].ID)
+		}
+		requireReplayRow(t, ctx, store, durablePlane, id, "explicit")
+		requireDepTargets(t, ctx, store, durablePlane, id, target.ID)
+		requireOnlyComment(t, ctx, store, durablePlane, id, "7289a001-0000-4000-8000-000000000003", "explicit comment")
+
+		if generated.ID == winner.ID {
+			t.Fatalf("generated member reused the winner's ID %q across the replay", generated.ID)
+		}
+		requireReplayRow(t, ctx, store, durablePlane, generated.ID, "loser")
+		requireReplayRow(t, ctx, store, durablePlane, winner.ID, "winner")
+		if got := generated.Dependencies[0].IssueID; got != generated.ID {
+			t.Fatalf("generated dependency IssueID = %q, want %q", got, generated.ID)
+		}
+		requireOnlyComment(t, ctx, store, durablePlane, generated.ID, generated.Comments[0].ID, "loser comment")
+		requireOnlyComment(t, ctx, store, durablePlane, winner.ID, winner.Comments[0].ID, "winner comment")
+	})
+}
