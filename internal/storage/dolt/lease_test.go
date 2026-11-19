@@ -1109,4 +1109,27 @@ func TestClaimAssigneeOverrideLeasesTheFinalHolder(t *testing.T) {
 			t.Errorf("lease_expires_at = %v, want a future time", lease.expiresAt)
 		}
 	})
+
+	// AC-2: alice re-doles her own leased claim to bob with --claim. bob's
+	// lease is granted at the update's own time and runs a full LeaseTTL from
+	// it, replacing alice's row rather than inheriting her remaining hour.
+	t.Run("held claim re-doled to another holder", func(t *testing.T) {
+		seedClaimedIssue(t, ctx, store, "lease-ovr-redole", "alice", time.Hour)
+		claimFor(t, "lease-ovr-redole", "alice", "bob")
+
+		var updatedAt time.Time
+		if err := store.db.QueryRowContext(ctx, "SELECT updated_at FROM issues WHERE id = ?", "lease-ovr-redole").Scan(&updatedAt); err != nil {
+			t.Fatalf("read updated_at: %v", err)
+		}
+		lease := readClaimOverrideLease(t, ctx, store, "lease-ovr-redole")
+		if lease.rows != 1 || lease.holder != "bob" {
+			t.Fatalf("lease = %+v, want exactly one row held by bob", lease)
+		}
+		if !lease.grantedAt.Equal(updatedAt) {
+			t.Errorf("granted_at = %v, want the update time %v", lease.grantedAt, updatedAt)
+		}
+		if got := lease.expiresAt.Sub(lease.grantedAt); got != issueops.DefaultLeaseTTL {
+			t.Errorf("lease_expires_at - granted_at = %v, want LeaseTTL %v", got, issueops.DefaultLeaseTTL)
+		}
+	})
 }
