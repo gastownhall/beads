@@ -1444,21 +1444,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names `BD_AUDIT_ENABLED=1`** beside `bd config set audit.enabled true` as
   the per-process way to turn the interactions sidecar on. (#5787)
 
-- **`bd config set audit.enabled true` no longer warns that the key is not
-  recognized.** The key `bd audit --help` prescribes, like every other key
-  bd keeps in `config.yaml` (`list.*`, `mail.delegate`, `routing.*`,
-  `hierarchy.*` and the rest), drew `Warning: "audit.enabled" is not a
-  recognized config key` although bd stores and reads it. The recognizer now
-  accepts every key `config.yaml` holds. (#5787)
+- **`bd config set` recognizes every key bd keeps in `config.yaml`.** The
+  recognizer now accepts each key `config.yaml` holds (except `no-db`, which
+  `bd config set` refuses) instead of keeping a second list that drifts from
+  it, so `bd config set mail.delegate …` no longer warns that the key is not
+  recognized either. #7710 made the `audit.*` and `list.*` half of this fix
+  first (#6184). (#5787)
 
 - **`bd create --dry-run` validates the issue it previews.** A single-issue
   dry run printed a preview for an issue the real create would refuse, such as
-  an unknown `--type`. It now runs the same insert validation first, against
-  the destination's own types and statuses (the routed repository's for
-  `--repo` or a routed prefix, the database's custom types on a proxied
-  server), and fails with the create's error and no preview, in text and
-  `--json` mode. The dry run still writes nothing and still does not
-  initialize or migrate a routed target. (#5787)
+  an unknown `--type`. It now runs the same insert validation first and fails
+  with the create's error and no preview, in text and `--json` mode. A custom
+  type or status is checked against the vocabulary the create validates
+  against: the workspace's, an existing routed target's (`--repo` or
+  `routing.*`, opened read-only, or a remote target's cached clone), the
+  `config.yaml` types and statuses for a target the create would initialize,
+  or the database's on a proxied server. A `bd connect` client cannot see the
+  server's full vocabulary, so there a custom type or status is left to the
+  server's create and the rest is still checked. A dry run does not clone a
+  remote target, so with no cached clone it refuses a custom type or status
+  and says why. The dry run still writes nothing and still does not
+  initialize or migrate a routed target. The type check was first proposed
+  in #8206. (#5787)
 
 - **`bd create -t "a title"` now says that `-t` is `--type`.** `-t` is the
   shorthand for `--type`, not `--title`, so `bd create --type=bug -t "fix the
@@ -1467,7 +1474,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built-in type, the error keeps that first line and adds the parsed value,
   `-t is short for --type, not --title`, and how to give the title. A custom
   type is not called invalid here, since the database's types are not known
-  before the store opens. (#5787)
+  before the store opens. The hint was first proposed in #8206. (#5787)
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
@@ -4255,6 +4262,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under this node. For a Postgres port: the
   refresh now reads the issue row, so under SERIALIZABLE expect more retried
   serialization failures between a holder's own edits and its heartbeat.
+- **`bd config set` no longer warns that `audit.*` and `list.*` keys are
+  unrecognized.** `bd config set audit.enabled true`, the command
+  `bd audit --help` prints, took effect but warned that the key was unknown,
+  and `list.limit` was answered with "Did you mean `lint.limit`?" (#6184).
 - **`bd gate list` works over a connected HTTP workspace** (S20). The
   workspace-wide listing built a raw `SearchIssues` filter, which the HTTP
   backend refuses, so gc's `renudge-stale-human-gates` order failed on every

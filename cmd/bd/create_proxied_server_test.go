@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -408,5 +410,53 @@ func TestGraphApplyNodeIssue_StatusTimestampsDoNotPredateCreatedAt(t *testing.T)
 					status, *stamped, createdAt, issue.CreatedAt.IsZero())
 			}
 		})
+	}
+}
+
+// createContextConfigUC serves the create context and nothing else: a
+// proxied dry run reads nothing else from the config use case.
+type createContextConfigUC struct {
+	domain.ConfigUseCase
+	customTypes []string
+}
+
+func (c createContextConfigUC) LoadCreateContext(context.Context) (domain.CreateContext, error) {
+	return domain.CreateContext{CustomTypes: c.customTypes}, nil
+}
+
+// TestCreateDryRunTypeGH5787 pins that a proxied `bd create --dry-run`
+// refuses the type the create it previews would refuse, and still previews
+// built-in, alias and custom types. From #8206 (Andrew Steven Pierce), with
+// its fake moved from GetCustomTypes to the create context the preview reads.
+// It runs without Dolt, unlike the proxied integration subtests.
+func TestCreateDryRunTypeGH5787(t *testing.T) {
+	pinProxiedServerMode(t)
+	oldProvider, oldJSON := uowProvider, jsonOutput
+	uowProvider = configOnlyProvider{cfg: createContextConfigUC{customTypes: []string{"probe"}}}
+	jsonOutput = false
+	t.Cleanup(func() { uowProvider, jsonOutput = oldProvider, oldJSON })
+
+	dryRun := func(issueType string) createInput {
+		return createInput{title: "PROBE", issueType: issueType, priority: 2, dryRun: true}
+	}
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = runCreateProxiedSingle(nil, context.Background(), dryRun("a long human title"))
+	})
+	if err == nil {
+		t.Fatal("dry-run previewed an issue type the create would refuse")
+	}
+	if !strings.Contains(stderr, "invalid issue type: a long human title") {
+		t.Fatalf("stderr = %q, want the invalid issue type named", stderr)
+	}
+
+	for _, issueType := range []string{"bug", "feat", "probe"} {
+		out := captureStdout(t, func() error {
+			return runCreateProxiedSingle(nil, context.Background(), dryRun(issueType))
+		})
+		if !strings.Contains(out, "PROBE") {
+			t.Errorf("--type %s: dry-run output = %q, want the preview", issueType, out)
+		}
 	}
 }

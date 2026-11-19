@@ -1822,4 +1822,56 @@ func TestEmbeddedCreateDryRunUsesDestinationTypes(t *testing.T) {
 			}
 		})
 	}
+
+	// A target the create would initialize gets a new database, which holds
+	// no types of its own, so the create validates against config.yaml's
+	// alone; the preview does the same without opening the target.
+	cfgPath := filepath.Join(beadsDir, "config.yaml")
+	cfg, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains("\n"+string(cfg), "\ntypes:") {
+		t.Fatalf("fixture: config.yaml already has a types section:\n%s", cfg)
+	}
+	if err := os.WriteFile(cfgPath, append(cfg, "\ntypes:\n  custom: yamltype\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("target the create would initialize", func(t *testing.T) {
+		newTarget := filepath.Join(t.TempDir(), "new-repo")
+		create := []string{"create", "--title", "New", "--type", "yamltype", "--repo", newTarget, "--json"}
+		if preview := parseIssueJSON(t, []byte(mustRun(t, dir, append(create, "--dry-run")...))); preview.IssueType != "yamltype" {
+			t.Fatalf("preview type = %q, want config.yaml's yamltype", preview.IssueType)
+		}
+		stdout, stderr, err := run(t, dir, "create", "--title", "New", "--type", "srconly", "--repo", newTarget, "--dry-run")
+		if err == nil || !strings.Contains(stdout+stderr, "invalid issue type") {
+			t.Fatalf("a new database holds no srconly, so the preview must refuse it; got err=%v\n%s%s", err, stdout, stderr)
+		}
+		if _, err := os.Stat(newTarget); !os.IsNotExist(err) {
+			t.Fatalf("dry-run created the target (stat: %v)", err)
+		}
+		// The create the preview stands for accepts the same type.
+		if created := parseIssueJSON(t, []byte(mustRun(t, dir, create...))); created.IssueType != "yamltype" {
+			t.Fatalf("created type = %q, want yamltype", created.IssueType)
+		}
+	})
+
+	t.Run("remote target with no cached clone", func(t *testing.T) {
+		// A dry run reads a remote target only from its cached clone and
+		// never clones one, so it cannot check a custom type there and says
+		// why; a built-in type needs no vocabulary and still previews.
+		const remote = "https://example.invalid/org/planning.git"
+		stdout, stderr, err := run(t, dir, "create", "--title", "Remote", "--type", "yamltype", "--repo", remote, "--dry-run")
+		if err == nil || !strings.Contains(stdout+stderr, "only from its cached clone") {
+			t.Fatalf("custom type on an uncached remote: got err=%v\n%s%s", err, stdout, stderr)
+		}
+		if strings.Contains(stdout+stderr, "parent lookup") {
+			t.Fatalf("the refusal names a parent lookup, but no --parent was given:\n%s%s", stdout, stderr)
+		}
+		preview := parseIssueJSON(t, []byte(mustRun(t, dir, "create", "--title", "Remote", "--type", "bug", "--repo", remote, "--dry-run", "--json")))
+		if preview.IssueType != types.TypeBug {
+			t.Fatalf("built-in preview type = %q, want bug", preview.IssueType)
+		}
+	})
 }
