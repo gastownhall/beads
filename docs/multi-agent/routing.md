@@ -103,41 +103,6 @@ which is opened read-only for the lookup. How the lookup works:
   `bd close`, ...) too, which open the routed store for writing. Adding a
   route is broader than a shortcut for `bd show`.
 
-### Links and blockers across routed stores
-
-`bd relate` and `bd unrelate` resolve both IDs through routes too. Each half
-of the `relates-to` link is written to, or removed from, the store that holds
-its source bead, with a `dependency_added` or `dependency_removed` event
-there. The two stores share no transaction: bd writes the halves in argument
-order and commits each before the next, and if the second fails the error
-says which half is already committed. Rerun the same command to finish the
-link. An ID that resolves nowhere fails the command before either store is
-written.
-
-A `blocks` or `conditional-blocks` edge whose target has another prefix and
-lives in a routed store holds back its source in `bd ready`, the ready count,
-`bd list --ready`, and claims. It shows in `bd blocked`, and it refuses an
-unforced `bd close` or claim of the source (`bd close --force` still closes
-it). bd reads the target through the route each time it asks, so the source
-becomes ready on the next query after the target is closed or pinned; nothing
-is written to the source's store. Specifically:
-
-- A target that is closed or pinned does not block; any other status does.
-- A target its route's store does not hold does not block, and neither does
-  one with no matching route or one whose store is in proxied-server mode,
-  which bd does not open directly. bd prints no warning for these.
-- A route that is configured but fails (an unreadable `metadata.json`, a
-  store that will not open or read) keeps every source blocked on it
-  blocked, and bd prints one warning per prefix:
-
-  ```text
-  Warning: issues with prefix "gt-" are unavailable through their route; dependencies blocked on them remain blocking
-  ```
-
-Other edge types to another prefix, such as `waits-for` or `related`, are not
-checked this way. `bd serve`, and a workspace that uses a remote server's
-roles, do not follow routes for these checks.
-
 In an embedded or server-mode workspace, when no route or auto-route
 searched another store and the ID's prefix is not among the current store's
 configured prefixes (`issue_prefix` and `allowed_prefixes`), `bd show` says
@@ -150,6 +115,26 @@ Hint: the prefix "hq" is not among this store's configured prefixes (its issue p
 
 A proxied-server workspace, or one connected to `bd serve` over HTTP, prints
 the general not-found hint instead.
+
+### Links across routed stores
+
+`bd dep relate` and `bd dep unrelate` resolve both IDs through routes too.
+Each half of the `relates-to` link is written to, or removed from, the store
+that holds its source bead, with a `dependency_added` or
+`dependency_removed` event there. An ID that resolves nowhere fails the
+command before either store is written.
+
+When the two beads live in different stores, bd first reads the edge each
+holds to the other. A bead holds at most one edge to another, so when either
+edge has another type (a `blocks` edge, say), `bd dep relate` refuses and
+writes nothing, and `bd dep unrelate` removes only the `relates-to` half,
+leaving the other edge in place with a warning that names it.
+
+The two stores share no transaction: bd writes the halves in argument order
+and commits each before the next. If the second fails, the error says the
+first is already done and what to run next: the same command again to
+finish, or, when the store refused the second half, `bd dep unrelate` to
+remove the first.
 
 ## Role detection
 

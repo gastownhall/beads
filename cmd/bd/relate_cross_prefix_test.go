@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // relateRigs is a town workspace (prefix hq) whose routes.jsonl routes gt- to a
@@ -227,5 +230,180 @@ func TestRelateCrossPrefixUnresolvableEndpointWritesNothing(t *testing.T) {
 	}
 	if got := countEvents(t, r.ctx, rig, "gt-target1", types.EventDependencyAdded); got != 0 {
 		t.Errorf("rig dependency_added events for gt-target1 = %d, want 0", got)
+	}
+}
+
+// seedRigBlocksEdge stages gt-target1 -> hq-src1 as a blocks edge in the rig:
+// the cross-rig blocker a relates-to half in that direction cannot replace.
+func seedRigBlocksEdge(t *testing.T) func(context.Context, *dolt.DoltStore) {
+	t.Helper()
+	return func(ctx context.Context, rig *dolt.DoltStore) {
+		if err := rig.AddDependency(ctx, &types.Dependency{IssueID: "gt-target1", DependsOnID: "hq-src1", Type: types.DepBlocks}, "test"); err != nil {
+			t.Fatalf("seed rig blocks edge: %v", err)
+		}
+	}
+}
+
+// assertRigKeepsOnlyBlocksEdge fails unless the rig still holds exactly the
+// seeded gt-target1 -> hq-src1 blocks edge, with no dependency event of kind.
+func assertRigKeepsOnlyBlocksEdge(t *testing.T, r *relateRigs, kind types.EventType) {
+	t.Helper()
+	rig := r.openRig(t)
+	deps, err := rig.GetDependencyRecords(r.ctx, "gt-target1")
+	if err != nil {
+		t.Fatalf("rig GetDependencyRecords: %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != "hq-src1" || deps[0].Type != types.DepBlocks {
+		t.Errorf("rig gt-target1 edges = %+v, want only the seeded blocks edge to hq-src1", deps)
+	}
+	if got := countEvents(t, r.ctx, rig, "gt-target1", kind); got != 0 {
+		t.Errorf("rig %s events for gt-target1 = %d, want 0", kind, got)
+	}
+}
+
+// TestRelateCrossPrefixRefusesOverAnotherEdgeType: when the rig already holds
+// gt-target1 -> hq-src1 as a blocks edge, a cross-rig bd relate refuses before
+// writing either half, in either argument order, names that edge, and leaves
+// both stores as they were. Writing the town half first would leave a
+// one-sided link that no rerun completes: the rig half is refused every time.
+func TestRelateCrossPrefixRefusesOverAnotherEdgeType(t *testing.T) {
+	for _, args := range [][]string{{"hq-src1", "gt-target1"}, {"gt-target1", "hq-src1"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			r := setupRelateRigs(t, seedRigBlocksEdge(t))
+
+			err := runRelate(relateCmd, args)
+			if err == nil {
+				t.Fatalf("bd relate %s succeeded over a blocks edge; want a refusal", strings.Join(args, " "))
+			}
+			for _, want := range []string{`gt-target1 -> hq-src1 already exists with type "blocks"`, "nothing was written"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "rerun") {
+				t.Errorf("error = %q advises a rerun, which can never finish this link", err)
+			}
+
+			deps, err := r.town.GetDependencyRecords(r.ctx, "hq-src1")
+			if err != nil {
+				t.Fatalf("town GetDependencyRecords: %v", err)
+			}
+			if len(deps) != 0 {
+				t.Errorf("town hq-src1 gained edges after a refused relate: %+v", deps)
+			}
+			if got := countEvents(t, r.ctx, r.town, "hq-src1", types.EventDependencyAdded); got != 0 {
+				t.Errorf("town dependency_added events for hq-src1 = %d, want 0", got)
+			}
+			assertRigKeepsOnlyBlocksEdge(t, r, types.EventDependencyAdded)
+		})
+	}
+}
+
+// TestUnrelateCrossPrefixKeepsAnotherEdgeType: bd unrelate removes only the
+// relates-to halves of a cross-rig pair. With hq-src1 -> gt-target1 a
+// relates-to half in the town and gt-target1 -> hq-src1 a blocks edge in the
+// rig, it removes the town half, keeps the blocker, and names it on stderr,
+// never on stdout, which --json owns.
+func TestUnrelateCrossPrefixKeepsAnotherEdgeType(t *testing.T) {
+	r := setupRelateRigs(t, seedRigBlocksEdge(t))
+	if err := r.town.AddDependency(r.ctx, &types.Dependency{IssueID: "hq-src1", DependsOnID: "gt-target1", Type: types.DepRelatesTo}, "test"); err != nil {
+		t.Fatalf("seed town half: %v", err)
+	}
+
+	var runErr error
+	stdout, stderr := captureStdio(t, func() {
+		runErr = runUnrelate(unrelateCmd, []string{"hq-src1", "gt-target1"})
+	})
+	if runErr != nil {
+		t.Fatalf("bd unrelate hq-src1 gt-target1: %v", runErr)
+	}
+	if !strings.Contains(stdout, "Unlinked hq-src1 ↔ gt-target1") {
+		t.Errorf("stdout = %q, want the Unlinked hq-src1 ↔ gt-target1 line", stdout)
+	}
+	const kept = `gt-target1 -> hq-src1 is a "blocks" edge, not relates-to; left in place`
+	if !strings.Contains(stderr, kept) {
+		t.Errorf("stderr = %q, want it to name the kept edge: %q", stderr, kept)
+	}
+	if strings.Contains(stdout, "left in place") {
+		t.Errorf("stdout = %q carries the kept-edge warning; it belongs on stderr", stdout)
+	}
+
+	if hasRelatesTo(t, r.ctx, r.town, "hq-src1", "gt-target1") {
+		t.Errorf("town hq-src1 -> gt-target1 relates-to half survived bd unrelate")
+	}
+	if got := countEvents(t, r.ctx, r.town, "hq-src1", types.EventDependencyRemoved); got != 1 {
+		t.Errorf("town dependency_removed events for hq-src1 = %d, want 1", got)
+	}
+	assertRigKeepsOnlyBlocksEdge(t, r, types.EventDependencyRemoved)
+}
+
+// TestRelateHalfErrorAdvice: when the second cross-store half fails, the first
+// is already committed. A failure a rerun can get past advises the rerun; a
+// type conflict, which a rerun would meet again, advises undoing the first
+// half with bd dep unrelate instead, and stays matchable with errors.As.
+func TestRelateHalfErrorAdvice(t *testing.T) {
+	ends := [2]relateEndpoint{{id: "hq-src1"}, {id: "gt-target1"}}
+	conflict := &issueops.DependencyTypeConflictError{IssueID: "gt-target1", DependsOnID: "hq-src1", ExistingType: "blocks", RequestedType: "relates-to"}
+	cases := []struct {
+		name    string
+		half    int
+		remove  bool
+		err     error
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "first half fails", half: 0, err: errors.New("boom"),
+			want:    []string{"failed to add relates-to hq-src1 -> gt-target1: boom", "gt-target1 -> hq-src1 was not attempted"},
+			notWant: []string{"rerun", "unrelate"},
+		},
+		{
+			name: "second half fails", half: 1, err: errors.New("connection reset"),
+			want: []string{
+				"failed to add relates-to gt-target1 -> hq-src1: connection reset",
+				"hq-src1 -> gt-target1 is already committed in hq-src1's store",
+				"rerun bd dep relate hq-src1 gt-target1 to finish",
+			},
+			notWant: []string{"unrelate"},
+		},
+		{
+			name: "second half refused", half: 1, err: fmt.Errorf("editor: %w", conflict),
+			want: []string{
+				"hq-src1 -> gt-target1 is already committed in hq-src1's store",
+				"bd dep unrelate hq-src1 gt-target1 removes it",
+			},
+			notWant: []string{"rerun"},
+		},
+		{
+			name: "second removal fails", half: 1, remove: true, err: errors.New("connection reset"),
+			want: []string{
+				"failed to remove relates-to gt-target1 -> hq-src1: connection reset",
+				"hq-src1 holds no relates-to edge to gt-target1 any more",
+				"rerun bd dep unrelate hq-src1 gt-target1 to finish",
+			},
+			notWant: []string{"already committed"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := relateHalfError(ends, tc.half, tc.remove, tc.err)
+			for _, want := range tc.want {
+				if !strings.Contains(got.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", got, want)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(got.Error(), notWant) {
+					t.Errorf("error = %q, want no %q", got, notWant)
+				}
+			}
+			if !errors.Is(got, tc.err) {
+				t.Errorf("error = %q does not wrap the half's own error", got)
+			}
+		})
+	}
+	var asConflict *issueops.DependencyTypeConflictError
+	if !errors.As(relateHalfError(ends, 1, false, conflict), &asConflict) {
+		t.Errorf("a refused second half no longer unwraps to *DependencyTypeConflictError")
 	}
 }

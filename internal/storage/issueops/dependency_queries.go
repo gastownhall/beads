@@ -27,51 +27,29 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*ty
 	return result, nil
 }
 
-// GetExternalBlockingDependencyRecordsInTx returns every stored edge whose
-// target lives in depends_on_external and whose type can gate ready work under
-// the query-time policy (internal/storage/externaldeps):
-//
-//   - explicit external:<project>:<capability> refs of type blocks,
-//     conditional-blocks or waits-for, and
-//   - bare cross-prefix issue IDs (a target outside this database's issue
-//     namespace, GH#4647) of type blocks or conditional-blocks; waits-for
-//     gates on its target's children, which a foreign issue's status cannot
-//     answer, so it is not selected.
-//
-// Records keep every source status: the policy serves blocked inspection and
-// close guards as well as ready, and filters by source itself.
+// GetExternalBlockingDependencyRecordsInTx returns explicit external: edges
+// whose dependency type can block ready work. Cross-prefix issue IDs may share
+// depends_on_external storage, so the external: prefix check is intentional.
 func GetExternalBlockingDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*types.Dependency, error) {
 	result := make(map[string][]*types.Dependency)
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		for _, leg := range externalBlockingLegs {
-			if err := getExternalBlockingDependencyRecordsIntoFromTable(ctx, tx, depTable, leg, result); err != nil {
-				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
-					break
-				}
-				return nil, err
+		if err := getExternalBlockingDependencyRecordsIntoFromTable(ctx, tx, depTable, result); err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
 			}
+			return nil, err
 		}
 	}
 	return result, nil
 }
 
-// externalBlockingLegs are the WHERE clauses GetExternalBlockingDependencyRecordsInTx
-// reads depends_on_external through, one SELECT each: capability refs, then
-// bare cross-prefix issue IDs.
-var externalBlockingLegs = []string{
-	`depends_on_external LIKE 'external:%%'
-		  AND type IN ('blocks', 'conditional-blocks', 'waits-for')`,
-	`depends_on_external IS NOT NULL
-		  AND depends_on_external NOT LIKE 'external:%%'
-		  AND type IN ('blocks', 'conditional-blocks')`,
-}
-
-//nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller); where is one of externalBlockingLegs.
-func getExternalBlockingDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable, where string, result map[string][]*types.Dependency) error {
+//nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
+func getExternalBlockingDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, result map[string][]*types.Dependency) error {
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
 		FROM %s
-		WHERE `+where+`
+		WHERE depends_on_external LIKE 'external:%%'
+		  AND type IN ('blocks', 'conditional-blocks', 'waits-for')
 		ORDER BY issue_id
 	`, DepTargetExpr, depTable))
 	if err != nil {

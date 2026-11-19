@@ -1431,38 +1431,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Ready selection honors a cross-prefix blocker** (#4647). A bare
-  cross-prefix `blocks` or `conditional-blocks` edge — the shape
-  `bd dep add <source> <other-rig-target>` stores in
-  `depends_on_external` — was invisible to the ready policy, so a source
-  whose routed target was still open showed up in `bd ready`, `bd ready
-  --count` and `bd claim` anyway. The dependency query now reads those
-  edges alongside the permanent and wisp external ones, and the CLI's
-  dependency policy resolves each routed target through routes.jsonl
-  read-only (the same route resolution `bd dep add` uses) before every
-  ready evaluation: an open target excludes its source, and the next
-  query admits the source once the target closes or pins, with no write
-  to the source row. Only `blocks` and `conditional-blocks` edges block:
-  a bare cross-prefix `waits-for` or `relates-to` edge never excludes its
-  source. A target no route reaches, one in a proxied-server rig, and one
-  the owning rig answers but does not hold do not block, exactly as the
-  local missing-target join treats a dangling row; a CONFIGURED route that
-  cannot answer keeps every source it affects excluded with one warning
-  per prefix: `Warning: issues with prefix "gt-" are unavailable through
-  their route; dependencies blocked on them remain blocking`. `bd serve`,
-  the proxied-server chain and remote-role clients do not evaluate bare
-  cross-prefix edges at all, as before.
-
-- **`bd relate` and `bd unrelate` resolve cross-prefix endpoints through
-  routing** (#4647). `bd dep add` and `bd dep remove` route a cross-prefix
-  target through routes.jsonl (#3168), but the relates-to verbs resolved
-  both arguments against the local store only, so relating an issue to one
-  in another rig failed with "no issue found" for a target the dependency
-  verbs resolve. Both endpoints now resolve through the same cascade before
-  anything is written, each direction of the bidirectional link is written
-  to (and, for unrelate, removed from) the store that owns its source issue,
-  and a cross-rig pair records both halves with their own dependency_added
-  and dependency_removed events.
+- **`bd dep relate` and `bd dep unrelate` resolve cross-prefix endpoints
+  through routing** (#4647). `bd dep add` and `bd dep remove` route a
+  cross-prefix target through routes.jsonl (#3168), but the relates-to verbs
+  resolved both arguments against the local store only, so relating an issue
+  to one in another rig failed with "no issue found" for a target the
+  dependency verbs resolve. Both endpoints now resolve through the same
+  cascade before anything is written, each direction of the bidirectional
+  link is written to (and, for unrelate, removed from) the store that owns
+  its source issue, and a cross-rig pair records both halves with their own
+  dependency_added and dependency_removed events. A cross-rig relate refuses,
+  writing nothing, when either issue already holds an edge of another type to
+  the other, and a cross-rig unrelate removes only relates-to halves, leaving
+  such an edge in place with a warning.
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row

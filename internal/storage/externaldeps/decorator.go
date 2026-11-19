@@ -25,27 +25,18 @@ type Store struct {
 	warnProject   func(ProjectName)
 	warnMu        sync.Mutex
 	warned        map[ProjectName]struct{}
-	routeIssue    IssueRouter
-	warnRoute     func(prefix string)
-	warnedRoutes  map[string]struct{}
 }
 
 // New constructs an external-capability-aware storage decorator.
-func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener, opts ...Option) *Store {
-	s := &Store{
+func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener) *Store {
+	return &Store{
 		DoltStorage:   inner,
 		inner:         inner,
 		locateProject: locateProject,
 		openProject:   openProject,
 		warnProject:   defaultProjectWarning,
 		warned:        make(map[ProjectName]struct{}),
-		warnRoute:     defaultRouteWarning,
-		warnedRoutes:  make(map[string]struct{}),
 	}
-	for _, opt := range opts {
-		opt(s)
-	}
-	return s
 }
 
 // Unwrap exposes the decorated store to storage.UnwrapStore.
@@ -200,11 +191,10 @@ func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string
 	refsByIssue := make(map[string][]string)
 	for issueID, deps := range allDeps {
 		for _, dep := range deps {
-			ref, ok := s.policyReference(issueID, dep)
-			if !ok {
+			if dep == nil || !dep.Type.IsBlockingEdge() || !isExternalReference(dep.DependsOnID) {
 				continue
 			}
-			refs = append(refs, ref)
+			refs = append(refs, parseReference(dep.DependsOnID))
 			refsByIssue[issueID] = appendUnique(refsByIssue[issueID], dep.DependsOnID)
 		}
 	}
@@ -772,20 +762,18 @@ func (s *Store) IsBlocked(ctx context.Context, issueID string) (bool, []string, 
 		return false, nil, err
 	}
 	refs := make([]reference, 0)
-	names := make([]string, 0)
 	for _, dep := range deps[issueID] {
-		if ref, ok := s.policyReference(issueID, dep); ok {
-			refs = append(refs, ref)
-			names = append(names, blockerName(ref, dep))
+		if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
+			refs = append(refs, parseReference(dep.DependsOnID))
 		}
 	}
 	satisfied, err := s.resolveReferences(ctx, refs)
 	if err != nil {
 		return false, nil, err
 	}
-	for i, ref := range refs {
+	for _, ref := range refs {
 		if !satisfied[ref.raw] {
-			blockers = appendUnique(blockers, names[i])
+			blockers = appendUnique(blockers, ref.raw)
 		}
 	}
 	return blocked || len(blockers) > 0, blockers, nil
@@ -824,8 +812,8 @@ func (s *Store) blockedStates(ctx context.Context, ids []string) (map[string]blo
 	refs := make([]reference, 0)
 	for _, id := range distinct {
 		for _, dep := range deps[id] {
-			if ref, ok := s.policyReference(id, dep); ok {
-				refs = append(refs, ref)
+			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
+				refs = append(refs, parseReference(dep.DependsOnID))
 			}
 		}
 	}
@@ -836,8 +824,8 @@ func (s *Store) blockedStates(ctx context.Context, ids []string) (map[string]blo
 	for _, id := range distinct {
 		state := states[id]
 		for _, dep := range deps[id] {
-			if ref, ok := s.policyReference(id, dep); ok && !satisfied[ref.raw] {
-				state.blockers = appendUnique(state.blockers, blockerName(ref, dep))
+			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) && !satisfied[dep.DependsOnID] {
+				state.blockers = appendUnique(state.blockers, dep.DependsOnID)
 			}
 		}
 		state.blocked = state.blocked || len(state.blockers) > 0
@@ -893,10 +881,10 @@ func (s *Store) IsBlockedBatch(ctx context.Context, issueIDs []string) (map[stri
 		return nil, err
 	}
 	refs := make([]reference, 0)
-	for issueID, issueDeps := range deps {
+	for _, issueDeps := range deps {
 		for _, dep := range issueDeps {
-			if ref, ok := s.policyReference(issueID, dep); ok {
-				refs = append(refs, ref)
+			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
+				refs = append(refs, parseReference(dep.DependsOnID))
 			}
 		}
 	}
@@ -906,7 +894,7 @@ func (s *Store) IsBlockedBatch(ctx context.Context, issueIDs []string) (map[stri
 	}
 	for issueID, issueDeps := range deps {
 		for _, dep := range issueDeps {
-			if ref, ok := s.policyReference(issueID, dep); ok && !satisfied[ref.raw] {
+			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) && !satisfied[dep.DependsOnID] {
 				blocked[issueID] = true
 			}
 		}
@@ -1052,16 +1040,6 @@ func (s *Store) IterBlockedIssues(ctx context.Context, filter types.WorkFilter) 
 		return nil, err
 	}
 	return storage.NewSliceIter(issues), nil
-}
-
-// blockerName spells an unsatisfied policy reference the way the local
-// store's IsBlocked spells a blocker (publicops.Blocker.String), so a
-// cross-prefix blocker the local store also reports is listed once.
-func blockerName(ref reference, dep *types.Dependency) string {
-	if !ref.issue {
-		return ref.raw
-	}
-	return publicops.Blocker{ID: ref.raw, Type: dep.Type}.String()
 }
 
 func appendUnique(values []string, value string) []string {

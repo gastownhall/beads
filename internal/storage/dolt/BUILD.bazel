@@ -237,7 +237,6 @@ go_test(
         "events_since_test.go",
         "events_test.go",
         "expected_revision_contract_test.go",
-        "external_blocking_records_test.go",
         "external_gc_path_test.go",
         "external_port_advice_test.go",
         "federation_pull_settle_test.go",

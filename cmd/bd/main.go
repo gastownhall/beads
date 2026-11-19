@@ -45,7 +45,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	dbidentifier "github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
-	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
@@ -2505,13 +2504,7 @@ var rootCmd = &cobra.Command{
 		// BD_NO_HOOKS=1, which is useful for bulk imports, migrations, or
 		// environments where on_create/on_update/on_close hooks should not
 		// run). Order matters — see wireStorageDecorators in storage_chain.go.
-		// bd serve's chain does not route cross-prefix blockers: see
-		// crossPrefixBlockerRouting.
-		var policyOpts []externaldeps.Option
-		if cmd.Name() != serveCmdName {
-			policyOpts = append(policyOpts, crossPrefixBlockerRouting())
-		}
-		store = wireStorageDecorators(store, hookRunner, config.GetBool("no-hooks"), policyOpts...)
+		store = wireStorageDecorators(store, hookRunner, config.GetBool("no-hooks"))
 
 		// Warn if multiple databases detected in directory hierarchy
 		warnMultipleDatabases(dbPath)

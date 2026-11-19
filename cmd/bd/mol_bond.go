@@ -217,7 +217,7 @@ func reopenMolBondHome(plan *molBondPlan, reopen func() (*RoutedResult, error)) 
 	}
 	home := rr.Store
 	if !externaldeps.Applied(home) {
-		home = wireExternalDependencyPolicy(home, crossPrefixBlockerRouting())
+		home = wireExternalDependencyPolicy(home)
 	}
 	return home, rr.Close, nil
 }
