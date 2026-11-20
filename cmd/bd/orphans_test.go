@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -208,5 +209,110 @@ func TestFindOrphanedIssues_NoLabels(t *testing.T) {
 	}
 	if len(p.labels) != 0 || len(p.labelsAny) != 0 {
 		t.Fatalf("expected empty label filters, got labels=%v labelsAny=%v", p.labels, p.labelsAny)
+	}
+}
+
+// TestFindOrphanedIssues_EmptyResultIsEmptyArray pins the --json contract for the
+// no-orphans case: the slice must be non-nil so it marshals to [] rather than the
+// JSON literal null. Reverting the make() in findOrphanedIssuesWithProvider makes
+// this fail with "null".
+func TestFindOrphanedIssues_EmptyResultIsEmptyArray(t *testing.T) {
+	orig := doctorFindOrphanedIssues
+	doctorFindOrphanedIssues = func(path string, provider types.IssueProvider) ([]doctor.OrphanIssue, error) {
+		return []doctor.OrphanIssue{}, nil
+	}
+	t.Cleanup(func() { doctorFindOrphanedIssues = orig })
+
+	output, err := findOrphanedIssuesWithProvider(".", &mockProvider{})
+	if err != nil {
+		t.Fatalf("findOrphanedIssuesWithProvider returned error: %v", err)
+	}
+	if output == nil {
+		t.Fatal("output slice is nil; it must be non-nil so --json emits [] not null")
+	}
+	if len(output) != 0 {
+		t.Fatalf("expected 0 rows, got %d", len(output))
+	}
+
+	encoded, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if got := string(encoded); got != "[]" {
+		t.Fatalf("empty result marshalled to %q, want \"[]\"", got)
+	}
+}
+
+// TestFindOrphanedIssues_RowCarriesIDAndLabels pins the other half of the --json
+// contract: every row exposes the issue identifier under the `id` key that the
+// rest of bd's --json surfaces use, retains `issue_id` for existing consumers,
+// and reports the labels the --label/--label-any flags filter on.
+func TestFindOrphanedIssues_RowCarriesIDAndLabels(t *testing.T) {
+	orig := doctorFindOrphanedIssues
+	doctorFindOrphanedIssues = func(path string, provider types.IssueProvider) ([]doctor.OrphanIssue, error) {
+		return []doctor.OrphanIssue{{
+			IssueID: "bd-123",
+			Title:   "Fix login",
+			Status:  "open",
+			Labels:  []string{"theme:personal", "kind:bug"},
+		}}, nil
+	}
+	t.Cleanup(func() { doctorFindOrphanedIssues = orig })
+
+	output, err := findOrphanedIssuesWithProvider(".", &mockProvider{})
+	if err != nil {
+		t.Fatalf("findOrphanedIssuesWithProvider returned error: %v", err)
+	}
+	if len(output) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(output))
+	}
+	row := output[0]
+	if row.ID != "bd-123" {
+		t.Fatalf("row.ID = %q, want %q", row.ID, "bd-123")
+	}
+	if row.IssueID != row.ID {
+		t.Fatalf("issue_id %q and id %q must carry the same value", row.IssueID, row.ID)
+	}
+	if len(row.Labels) != 2 || row.Labels[0] != "theme:personal" {
+		t.Fatalf("labels not propagated: %#v", row.Labels)
+	}
+
+	var decoded map[string]any
+	encoded, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	for _, key := range []string{"id", "issue_id", "labels"} {
+		if _, ok := decoded[key]; !ok {
+			t.Fatalf("key %q absent from marshalled row: %s", key, encoded)
+		}
+	}
+}
+
+// TestFindOrphanedIssues_LabelsNeverNull keeps an unlabelled issue's labels as []
+// rather than null, so a consumer can range over the field unconditionally.
+func TestFindOrphanedIssues_LabelsNeverNull(t *testing.T) {
+	orig := doctorFindOrphanedIssues
+	doctorFindOrphanedIssues = func(path string, provider types.IssueProvider) ([]doctor.OrphanIssue, error) {
+		return []doctor.OrphanIssue{{IssueID: "bd-1", Title: "t", Status: "open"}}, nil
+	}
+	t.Cleanup(func() { doctorFindOrphanedIssues = orig })
+
+	output, err := findOrphanedIssuesWithProvider(".", &mockProvider{})
+	if err != nil {
+		t.Fatalf("findOrphanedIssuesWithProvider returned error: %v", err)
+	}
+	if output[0].Labels == nil {
+		t.Fatal("Labels is nil; an unlabelled issue must still marshal labels as []")
+	}
+	encoded, err := json.Marshal(output[0])
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"labels":[]`) {
+		t.Fatalf("expected \"labels\":[] in %s", encoded)
 	}
 }
