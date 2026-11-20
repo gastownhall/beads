@@ -9,33 +9,14 @@ import (
 	"strings"
 )
 
-// SweepOrphanedTestServers reaps `dolt sql-server` processes that are
-// provably leaked test debris: their working directory has been deleted, or
-// sits under one of suiteTempRoots. On Darwin, process candidates come from
-// ps and their working directories from lsof because /proc is unavailable.
-//
-// suiteTempRoots MUST be directories owned by the calling suite alone, never
-// a shared/global temp directory. This is best-effort: process-listing errors
-// and candidates whose cwd cannot be resolved are ignored.
-//
-// Deprecated: use SweepSuiteTestServers for suite shutdown and
-// SweepDeadSuiteRoots for abandoned runs. This global sweep can consume leak
-// evidence belonging to a still-running foreign suite; do not call it from
-// TestMain or pass its result to ApplyLeakPolicy.
-//
-// Returns the servers (pid + cwd) it sent a kill signal to.
-func SweepOrphanedTestServers(suiteTempRoots ...string) []SweptServer {
-	candidates := gatherDoltServerCandidates()
-	selected := selectOrphanTestServers(candidates, canonicalRoots(suiteTempRoots), tempDirRoots())
-	return reapServers(selected, isDoltServerProcess)
-}
-
 // sweepServersUnderRoots reaps only the dolt sql-servers whose working
-// directory sits under one of suiteTempRoots. It is SweepOrphanedTestServers
-// without the deleted-cwd arm, for callers that must not reach outside the
-// trees they name — see selectServersUnderRoots.
+// directory sits under one of suiteTempRoots, deleted or not. It never
+// reaches outside the trees the caller names — see selectServersUnderRoots.
+// On Darwin, process candidates come from ps and their working directories
+// from lsof because /proc is unavailable.
 //
-// Returns the servers (pid + cwd) it sent a kill signal to.
+// Returns the servers (pid + cwd) it sent a kill signal to. Process-listing
+// errors and candidates whose cwd cannot be resolved are ignored.
 func sweepServersUnderRoots(suiteTempRoots ...string) []SweptServer {
 	candidates := gatherDoltServerCandidates()
 	selected := selectServersUnderRoots(candidates, canonicalRoots(suiteTempRoots))
@@ -82,10 +63,9 @@ func readDarwinCwd(pid int) (cwd string, deleted bool, ok bool) {
 // unlinked — it prints the bare, now-dangling path. The suffix is still
 // honored (harmless, and it keeps this parser shaped like readProcCwd), but
 // when it is absent the path is stat'ed and ENOENT is the deletion signal.
-// Without that probe the deleted-cwd arm of selectOrphanTestServers could
-// never fire on darwin, so a `go test -timeout` panic — which skips every
-// t.Cleanup and TestMain defer — left its dolt sql-server running forever
-// even though the temp tree it served was long gone (wy-j2zc8q).
+// The suite sweeps select by cwd alone, so the probe only feeds
+// serverCandidate.cwdDeleted; it is kept so both platforms report the same
+// candidate shape.
 //
 // Any other stat error (a permission wall, an unreadable parent) is treated
 // as "not deleted": this sweep only ever escalates on positive proof, never

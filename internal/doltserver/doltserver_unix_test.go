@@ -308,3 +308,26 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 		})
 	}
 }
+
+// TestSweepPredicateIsSubsetOfProductionMatch documents how the two Unix
+// "is this a dolt sql-server" checks relate. The test-server sweep's
+// isDoltServerArgv is strict (argv[0] basename dolt, an exact sql-server
+// argument) because it gates SIGTERM/SIGKILL on processes it did not start;
+// parseDoltProcessPIDs keeps its ordered substring match for production
+// server management. Every invocation the sweep accepts, rendered as an
+// ordinary non-zombie ps row, must still be listed by production.
+func TestSweepPredicateIsSubsetOfProductionMatch(t *testing.T) {
+	var snapshot strings.Builder
+	var want []int
+	for i, argv := range doltServerArgvExamples {
+		if !isDoltServerArgv(argv) {
+			t.Fatalf("example %q is not accepted by isDoltServerArgv", argv)
+		}
+		pid := 1000 + i
+		want = append(want, pid)
+		snapshot.WriteString(strconv.Itoa(pid) + " S " + strings.Join(argv, " ") + "\n")
+	}
+	if got := parseDoltProcessPIDs([]byte(snapshot.String())); !reflect.DeepEqual(got, want) {
+		t.Errorf("parseDoltProcessPIDs() = %v, want every sweep example %v\n%s", got, want, snapshot.String())
+	}
+}
