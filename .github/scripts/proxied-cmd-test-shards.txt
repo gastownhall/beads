@@ -62,6 +62,7 @@
 
 34 5 TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix
 34 5 TestProxiedServerInfo
+34 5 TestProxiedServerInitStillRecordsVersionAndImportTime
 34 5 TestProxiedServerNote
 34 5 TestProxiedServerOutageReconnectAcceptanceMatrix
 34 5 TestProxiedServerUpdate3
@@ -144,6 +145,7 @@
 
 34 15 TestProxiedServerDepConcurrent
 34 15 TestProxiedServerImport
+34 15 TestProxiedServerInitBootstrapWritesNoCloneFingerprints
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
 34 15 TestProxiedServerReopenConcurrent
 34 15 TestProxiedServerSDKOpenBestAvailable
@@ -174,12 +176,14 @@
 34 18 TestProxiedServerWispCreateRejectsEnumViolatingVar
 
 34 19 TestProxiedServerCreate
+34 19 TestProxiedServerInitPrefixOnlyDatabaseKeepsLocalProjectID
 34 19 TestProxiedServerMolCurrent
 34 19 TestProxiedServerServeBatchClose
 34 19 TestProxiedServerShow3
 34 19 TestServerModeTypesAgreeWithCreate
 
 34 20 TestProxiedServerDelete
+34 20 TestProxiedServerInitKeepsExistingSharedFingerprints
 34 20 TestProxiedServerLint
 34 20 TestProxiedServerPriority
 34 20 TestProxiedServerShow2B
@@ -196,6 +200,7 @@
 34 21 TestProxiedServerUnclaimIfAssigneeParity
 
 34 22 TestProxiedServerGateCreateInheritsRepoMetadata
+34 22 TestProxiedServerInitSecondCloneAdoptsDatabaseProjectID
 34 22 TestProxiedServerRecomputeBlocked
 34 22 TestProxiedServerServeEdgeCounts
 34 22 TestProxiedServerTag
