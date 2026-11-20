@@ -591,6 +591,10 @@ func fixPendingMigrations(path string) error {
 				summary.RetiredCount,
 				summary.SkippedCount,
 			)
+			if len(summary.SkippedIntegrations) > 0 {
+				fmt.Printf("  bd integration skipped for non-shell hook(s): %s (call \"bd hooks run <hook>\" from them to integrate)\n",
+					strings.Join(summary.SkippedIntegrations, ", "))
+			}
 		default:
 			return fmt.Errorf("no automatic fix available for pending migration %q", migration.Name)
 		}

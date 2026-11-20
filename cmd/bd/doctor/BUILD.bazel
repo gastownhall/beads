@@ -23,6 +23,7 @@ go_library(
         "fresh_clone_server.go",
         "git.go",
         "gitignore.go",
+        "hook_section_shapes.go",
         "hooks_migration.go",
         "installation.go",
         "integrity.go",

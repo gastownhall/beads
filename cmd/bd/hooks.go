@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -480,6 +481,93 @@ func removeHookSection(content string) (string, bool) {
 	return result, true
 }
 
+// nonShellHookInstall is what installing into a non-shell hook does: write
+// content when write is true, and print warning (a skip) when it is set.
+type nonShellHookInstall struct {
+	content string
+	write   bool
+	warning string
+}
+
+// planNonShellHookInstall decides how an install treats an existing hook whose
+// shebang names a non-shell interpreter (GH#6348). nonShell is false for a
+// hook bd's shell section can share, which keeps the ordinary install path.
+//
+// A clean non-shell hook stays byte-identical. One that already calls
+// `bd hooks run` is a recognized integration and stays untouched and silent.
+// Complete bd sections an earlier install appended are removed; ambiguous
+// markers and binary content are left for a person to inspect, and a section
+// whose body is not bd's shell code (an edit, or a port of it to the hook's
+// language) is left alone. bd never restores a .backup over the hook: it may
+// predate the user's later edits.
+func planNonShellHookInstall(hookName, hookPath, content string) (out nonShellHookInstall, nonShell bool) {
+	interp, nonShell := doctor.NonShellHookInterpreter(content)
+	if !nonShell {
+		return out, false
+	}
+	advice := fmt.Sprintf("To integrate bd, have the hook call \"bd hooks run %s\", passing it the hook's arguments and stdin.", hookName)
+	if interp == "binary content" {
+		out.warning = fmt.Sprintf("Warning: left the %s hook at %s unchanged: it is binary content, which bd never rewrites; inspect it by hand. %s",
+			hookName, hookPath, advice)
+		return out, true
+	}
+	if !hookContentHasMarkers(content) {
+		if doctor.IsBdHookContent(content) {
+			return out, true // recognized integration: nothing to add, nothing to report
+		}
+		out.warning = fmt.Sprintf("Warning: skipped bd integration for the %s hook at %s: it runs under %s, which cannot run bd's shell section. %s",
+			hookName, hookPath, interp, advice)
+		return out, true
+	}
+	repaired, removed, problem, edited := removeNonShellHookSections(content)
+	switch {
+	case problem != "":
+		out.warning = fmt.Sprintf("Warning: left the %s hook at %s unchanged: it runs under %s and its bd markers need manual inspection (%s). "+
+			"Remove bd's shell section by hand. %s", hookName, hookPath, interp, problem, advice)
+		return out, true
+	case edited != "":
+		out.warning = fmt.Sprintf("Warning: left the %s hook at %s unchanged: it runs under %s and its bd section at %s is not the shell code bd writes "+
+			"(an edit, or a port of it to %s), so bd does not remove it. Remove that section by hand if it is not your own. %s",
+			hookName, hookPath, interp, edited, interp, advice)
+		return out, true
+	}
+	out.content, out.write = repaired, true
+	out.warning = fmt.Sprintf("Warning: removed %d bd shell section(s) from the %s hook at %s, which runs under %s; bd integration is skipped for it and no .backup was restored. %s",
+		removed, hookName, hookPath, interp, advice)
+	return out, true
+}
+
+// hookContentHasMarkers reports whether content holds any bd section marker text.
+func hookContentHasMarkers(content string) bool {
+	return strings.Contains(content, "BEGIN BEADS INTEGRATION") || strings.Contains(content, "END BEADS INTEGRATION")
+}
+
+// removeNonShellHookSections removes the complete bd sections from a non-shell
+// hook. Bytes outside the sections are kept as they are (no line-ending
+// normalization); removeHookSection also takes the blank separator line the
+// injector added before a section. When the markers are not complete, ordered,
+// non-nested whole-line pairs, it changes nothing and returns the problem.
+// When a pair encloses anything but bd's shell code, it changes nothing either
+// and edited names that section: the code there is not bd's to delete.
+func removeNonShellHookSections(content string) (repaired string, removed int, problem, edited string) {
+	pairs, problem, edited := doctor.NonShellHookSectionPairs(content)
+	if problem != "" || edited != "" {
+		return content, 0, problem, edited
+	}
+	result := content
+	for i := 0; i < pairs; i++ {
+		next, found := removeHookSection(result)
+		if !found || len(next) >= len(result) {
+			return content, 0, "a bd section could not be removed cleanly", ""
+		}
+		result = next
+	}
+	if hookContentHasMarkers(result) {
+		return content, 0, "bd marker text remains after removing the complete sections", ""
+	}
+	return result, pairs, "", ""
+}
+
 // isOnlyShebangOrEmpty reports whether the given hook content consists of
 // nothing meaningful — only an optional shebang line plus blank lines and
 // comments. Used by shouldPreserveHookContent to decide, after stripping a
@@ -518,16 +606,42 @@ func isOnlyShebangOrEmpty(content string) bool {
 //   - When fromHusky is true, sanitize the (possibly stripped) content so
 //     it doesn't depend on husky's helper-layout being mirrored into the
 //     target directory (GH#3132).
+//   - A hook whose shebang names a non-shell interpreter (GH#6348) is
+//     decided first, before any stripping, empty-content filtering or husky
+//     rewrite, all of which assume shell: it is preserved with only its
+//     complete bd sections removed, and unchanged when its markers are
+//     ambiguous, a section holds code other than bd's shell code, or it is
+//     binary content.
 //
 // The function is pure: no I/O, no global state.
 func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
+	preserved, keep, _ := preserveHookContent(content, fromHusky)
+	return preserved, keep
+}
+
+// preserveHookContent is shouldPreserveHookContent that also returns the
+// number of bd sections removed from a non-shell hook, for the caller to
+// report.
+func preserveHookContent(content string, fromHusky bool) (preserved string, keep bool, nonShellRemoved int) {
+	if interp, nonShell := doctor.NonShellHookInterpreter(content); nonShell {
+		if interp == "binary content" || !hookContentHasMarkers(content) {
+			return content, true, 0
+		}
+		repaired, removed, problem, edited := removeNonShellHookSections(content)
+		if problem != "" || edited != "" {
+			// Copied as-is; the install reports the markers or the edited
+			// section.
+			return content, true, 0
+		}
+		return repaired, true, removed
+	}
 	if strings.Contains(content, inlineHookMarker) {
-		return "", false
+		return "", false, 0
 	}
 	if strings.Contains(content, hookSectionBeginPrefix) {
 		stripped, _ := removeHookSection(content)
 		if isOnlyShebangOrEmpty(stripped) {
-			return "", false
+			return "", false, 0
 		}
 		// Normalize CRLF → LF on the preserved-and-stripped content so
 		// Windows / autocrlf=true repos don't end up with `\r\n` line
@@ -538,7 +652,7 @@ func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
 	if fromHusky {
 		content = sanitizeHuskyHook(content)
 	}
-	return content, true
+	return content, true, 0
 }
 
 // HookStatus represents the status of a single git hook
@@ -779,7 +893,8 @@ Installed hooks:
 		chain, _ := cmd.Flags().GetBool("chain")
 		beadsHooks, _ := cmd.Flags().GetBool("beads")
 
-		if err := installStandaloneHooks(managedHookNames, force, shared, chain, beadsHooks); err != nil {
+		skipped, err := installStandaloneHooks(managedHookNames, force, shared, chain, beadsHooks)
+		if err != nil {
 			return HandleErrorRespectJSON("installing hooks: %v", err)
 		}
 
@@ -790,6 +905,10 @@ Installed hooks:
 				"shared":     shared,
 				"chained":    chain,
 				"beadsHooks": beadsHooks,
+			}
+			if len(skipped) > 0 {
+				// The reasons were printed on stderr as the hooks were skipped.
+				output["skipped_hooks"] = skipped
 			}
 			jsonBytes, _ := json.MarshalIndent(output, "", "  ")
 			fmt.Println(string(jsonBytes))
@@ -809,7 +928,16 @@ Installed hooks:
 			}
 			fmt.Println("Installed hooks:")
 			for _, hookName := range managedHookNames {
-				fmt.Printf("  - %s\n", hookName)
+				if !slices.Contains(skipped, hookName) {
+					fmt.Printf("  - %s\n", hookName)
+				}
+			}
+			if len(skipped) > 0 {
+				fmt.Println()
+				fmt.Println("Skipped hooks (not a shell script; see the warnings above):")
+				for _, hookName := range skipped {
+					fmt.Printf("  - %s\n", hookName)
+				}
 			}
 		}
 		return nil
@@ -1106,14 +1234,17 @@ func resolveStandaloneHooksContext() (*initHooksContext, error) {
 	return &initHooksContext{workDir: paths.RepoRoot, paths: paths, env: clean, inheritedEnv: inherited}, nil
 }
 
-func installStandaloneHooks(hookNames []string, force, shared, chain, beadsHooks bool) error {
+// installStandaloneHooks installs the hooks for bd hooks install and returns
+// the names of the hooks it left without bd integration because they run under
+// a non-shell interpreter (GH#6348).
+func installStandaloneHooks(hookNames []string, force, shared, chain, beadsHooks bool) ([]string, error) {
 	selected, err := resolveStandaloneHooksContext()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if shared || beadsHooks {
 		if selected.paths.CommonDir == "" {
-			return fmt.Errorf("shared or beads hooks require a working Git repository")
+			return nil, fmt.Errorf("shared or beads hooks require a working Git repository")
 		}
 		if beadsHooks {
 			selected.beadsDir = beads.FindBeadsDir()
@@ -1127,17 +1258,22 @@ func installHooksWithContext(hookNames []string, force, shared, chain, beadsHook
 	if selected != nil && shared {
 		return fmt.Errorf("shared hooks mode is not supported by selected init")
 	}
-	return installHooksAt(hookNames, force, shared, chain, beadsHooks, selected)
+	// Skipped non-shell hooks are already reported on stderr.
+	_, err := installHooksAt(hookNames, force, shared, chain, beadsHooks, selected)
+	return err
 }
 
+// installHooksAt installs the managed hooks and returns the names of the hooks
+// it skipped because they run under a non-shell interpreter (GH#6348).
+//
 //nolint:unparam // force and chain remain accepted compatibility no-ops
-func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) error {
+func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) (skipped []string, err error) {
 	var hooksDir string
 	if selected != nil {
 		hooksDir = selected.paths.HooksDir
 		if beadsHooks {
 			if selected.beadsDir == "" {
-				return fmt.Errorf("%s", activeWorkspaceNotFoundError())
+				return nil, fmt.Errorf("%s", activeWorkspaceNotFoundError())
 			}
 			hooksDir = filepath.Join(selected.beadsDir, "hooks")
 		} else if shared {
@@ -1147,7 +1283,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		// Use .beads/hooks/ directory (preferred for Dolt backend)
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
-			return fmt.Errorf("%s", activeWorkspaceNotFoundError())
+			return nil, fmt.Errorf("%s", activeWorkspaceNotFoundError())
 		}
 		hooksDir = filepath.Join(beadsDir, "hooks")
 	} else if shared {
@@ -1159,17 +1295,16 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		}
 	} else {
 		// Use common git directory for hooks (shared across worktrees)
-		var err error
 		hooksDir, err = git.GetGitHooksDir()
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	// Check the destination itself before creating, preserving into, or
 	// writing any hook in it, and before configuring Git to use it.
 	if err := refuseSymlinkedHooksDir(hooksDir); err != nil {
-		return fmt.Errorf("refusing to install hooks: %w", err)
+		return nil, fmt.Errorf("refusing to install hooks: %w", err)
 	}
 
 	// Create hooks directory if it doesn't exist.
@@ -1180,7 +1315,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		hooksDirPerm = config.BeadsDirPerm
 	}
 	if err := os.MkdirAll(hooksDir, hooksDirPerm); err != nil {
-		return fmt.Errorf("failed to create hooks directory: %w", err)
+		return nil, fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
 	// When setting a local core.hooksPath (beads or shared mode), preserve any
@@ -1205,7 +1340,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 	// stopping midway through the loop would leave hooks half-installed.
 	for _, hookName := range hookNames {
 		if err := guardHookWritePathWithProbe(filepath.Join(hooksDir, hookName), shared, tracked); err != nil {
-			return fmt.Errorf("refusing to install %s hook: %w", hookName, err)
+			return nil, fmt.Errorf("refusing to install %s hook: %w", hookName, err)
 		}
 	}
 
@@ -1221,7 +1356,29 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		existing, readErr := os.ReadFile(hookPath)
 
 		if readErr != nil && !os.IsNotExist(readErr) {
-			return fmt.Errorf("failed to read %s: %w", hookName, readErr)
+			return nil, fmt.Errorf("failed to read %s: %w", hookName, readErr)
+		}
+
+		// A hook run by a non-shell interpreter (a pre-commit/prek Python
+		// pre-push, a Node or Ruby script) cannot run bd's POSIX-sh section:
+		// appended after the script's own exit it is at best unreachable
+		// and, for Python, a SyntaxError on every run (GH#6348). Classify
+		// before any marker refresh, legacy replacement, backup or
+		// normalization so such a hook keeps its bytes.
+		if readErr == nil {
+			if outcome, nonShell := planNonShellHookInstall(hookName, hookPath, string(existing)); nonShell {
+				if outcome.write {
+					// #nosec G306 -- git hooks must be executable for Git to run them
+					if err := os.WriteFile(hookPath, []byte(outcome.content), 0755); err != nil {
+						return nil, fmt.Errorf("failed to write %s: %w", hookName, err)
+					}
+				}
+				if outcome.warning != "" {
+					fmt.Fprintln(os.Stderr, outcome.warning)
+					skipped = append(skipped, hookName)
+				}
+				continue
+			}
 		}
 
 		var newContent string
@@ -1248,7 +1405,7 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 					if _, statErr := os.Lstat(backupPath); os.IsNotExist(statErr) {
 						// #nosec G306 -- keep executable so a rename restores a working hook
 						if backupErr := os.WriteFile(backupPath, existing, 0755); backupErr != nil {
-							return fmt.Errorf("failed to back up %s before injecting bd section: %w", hookName, backupErr)
+							return nil, fmt.Errorf("failed to back up %s before injecting bd section: %w", hookName, backupErr)
 						}
 					}
 					// Inject section, preserving existing content
@@ -1263,26 +1420,26 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		// Write hook file
 		// #nosec G306 -- git hooks must be executable for Git to run them
 		if err := os.WriteFile(hookPath, []byte(newContent), 0755); err != nil {
-			return fmt.Errorf("failed to write %s: %w", hookName, err)
+			return nil, fmt.Errorf("failed to write %s: %w", hookName, err)
 		}
 	}
 
 	// Configure git to use the hooks directory after writing, as in ordinary installs.
 	if selected != nil && (beadsHooks || shared) {
 		if err := selected.configureHooksPath(hooksDir); err != nil {
-			return fmt.Errorf("failed to configure git hooks path: %w", err)
+			return nil, fmt.Errorf("failed to configure git hooks path: %w", err)
 		}
 	} else if beadsHooks {
 		if err := configureBeadsHooksPath(); err != nil {
-			return fmt.Errorf("failed to configure git hooks path: %w", err)
+			return nil, fmt.Errorf("failed to configure git hooks path: %w", err)
 		}
 	} else if shared {
 		if err := configureSharedHooksPath(); err != nil {
-			return fmt.Errorf("failed to configure git hooks path: %w", err)
+			return nil, fmt.Errorf("failed to configure git hooks path: %w", err)
 		}
 	}
 
-	return nil
+	return skipped, nil
 }
 
 // preservePreexistingHooks copies non-beads hooks from the currently effective
@@ -1370,7 +1527,7 @@ func preservePreexistingHooksAt(targetDir, currentDir string, mainRoot func() st
 			continue
 		}
 
-		newContent, keep := shouldPreserveHookContent(string(content), fromHusky)
+		newContent, keep, nonShellRemoved := preserveHookContent(string(content), fromHusky)
 		if !keep {
 			continue
 		}
@@ -1388,6 +1545,10 @@ func preservePreexistingHooksAt(targetDir, currentDir string, mainRoot func() st
 			continue
 		}
 		fmt.Printf("  Preserving existing %s hook from %s\n", entry.Name(), currentDir)
+		if nonShellRemoved > 0 {
+			fmt.Fprintf(os.Stderr, "Warning: removed %d bd shell section(s) from the preserved %s hook (%s), which does not run under a shell; %s is unchanged\n",
+				nonShellRemoved, entry.Name(), dstPath, srcPath)
+		}
 	}
 
 	// GH#3132: Fix husky hook layout after copying.
