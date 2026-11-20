@@ -89,12 +89,16 @@ func reportsUpstreamOutage(s server.DatabaseServer) bool {
 
 // isUpstreamUnreachableDialError reports whether a backend dial failure means
 // nothing is accepting connections at the upstream right now, as opposed to
-// slow (timeout) or a local resource problem.
+// slow (timeout) or a local resource problem. Which errnos count is the
+// platform's business (unreachableDialErrnos): Windows reports these
+// conditions with Winsock codes, not the POSIX sentinels.
 func isUpstreamUnreachableDialError(err error) bool {
-	return errors.Is(err, syscall.ECONNREFUSED) ||
-		errors.Is(err, syscall.ENOENT) ||
-		errors.Is(err, syscall.EHOSTUNREACH) ||
-		errors.Is(err, syscall.ENETUNREACH)
+	for _, unreachable := range unreachableDialErrnos {
+		if errors.Is(err, unreachable.errno) {
+			return true
+		}
+	}
+	return false
 }
 
 // dialFailureMessage describes a refused/unreachable dial as
@@ -104,9 +108,26 @@ func dialFailureMessage(err error) string {
 	var opErr *net.OpError
 	var errno syscall.Errno
 	if errors.As(err, &opErr) && opErr.Addr != nil && errors.As(err, &errno) {
-		return fmt.Sprintf("upstream Dolt server unreachable: %s %s %s: %v", opErr.Op, opErr.Net, opErr.Addr, errno)
+		return fmt.Sprintf("upstream Dolt server unreachable: %s %s %s: %s",
+			opErr.Op, opErr.Net, opErr.Addr, dialFailureReason(errno))
 	}
 	return "upstream Dolt server unreachable: " + err.Error()
+}
+
+// dialFailureReason names the dial errno for the client. The platform tables
+// carry the wording both platforms agree on, so an unreachable upstream reads
+// the same on Windows as on Unix: raw Windows text ("No connection could be
+// made because the target machine actively refused it.") is not a reason a
+// bd user or a retry policy can act on. An errno outside the unreachable set
+// keeps its own text, which is what keeps a refusal distinct from a timeout or
+// a reset in the message.
+func dialFailureReason(errno syscall.Errno) string {
+	for _, unreachable := range unreachableDialErrnos {
+		if errno == unreachable.errno {
+			return unreachable.reason
+		}
+	}
+	return errno.Error()
 }
 
 // closedBeforeGreetingMessage describes a backend connection that reached EOF
