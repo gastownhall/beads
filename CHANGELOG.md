@@ -1473,6 +1473,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A proxied-server workspace whose database has a Dolt remote gets a
+  remote-migrate refusal it can act on** (bd-5hl9dg). `bd init
+  --proxied-server` adds a remote from the git `origin` by default, so a
+  1.3.x proxied workspace upgraded to 1.4 meets this refusal in the default
+  case. It offered `bd migrate --force`, `BD_ALLOW_REMOTE_MIGRATE=1 bd
+  migrate`, `bd dolt push` and `bd dolt pull`, which the proxied front door
+  refuses, and `bd bootstrap`, which creates a separate local database there.
+  It now names `bd migrate schema --force`, run on one clone of that remote
+  only with the proxy's library clients stopped, and sends the push and any
+  adopt to a workspace with direct access to the database. The
+  schema-mismatch error a read reports on such a workspace names the same
+  forced verb instead of the bare `bd migrate schema`, which refuses there.
+  The warning a forced migration prints there no longer says "then `bd dolt
+  push`", and names `bd migrate schema --force` as the consent instead of
+  `bd migrate --force`. The `--json` refusal says the same: its
+  `remote_migrate_gate.options` there hand out only `bd migrate schema
+  --force` (option `migrate`) and an `adopt-on-server-host` option with no
+  command, instead of `bd migrate --force`, `bd dolt push` and `bd
+  bootstrap`. What is refused, and the consent it takes, are unchanged;
+  server and embedded mode print, and emit as JSON, what they did before.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
