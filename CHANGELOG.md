@@ -1843,6 +1843,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration runs and with the same message as the main migrations, so
   `bd dolt commit` commits the working set and the next open migrates.
   Diagnosis by @marcodelpin.
+- **A `RunInTransaction` callback that writes both durable issues and wisps
+  now commits or rolls back as a whole on the Dolt server backend.** With the
+  events journal off (the default), the transaction ran wisp tables on a
+  second SQL session and committed it after the durable side and its Dolt
+  commit, so a conflict on a wisp row left the durable half committed and
+  returned `ErrCommitIndeterminate`; a wisp close that unblocked a durable
+  dependent published that `is_blocked` change in a second Dolt commit with
+  the same message; and the callback's own cross-tier reads
+  (`GetDependentRecords`, `CountDependentRecords`,
+  `GetDependentRecordsForIssues`, `CountIssuesByGroup`) did not see wisps it
+  had just written. Both planes now share the transaction's one pinned SQL
+  transaction, as they already did with the journal on and on the embedded
+  backend: a wisp conflict refuses the whole transaction determinately, the
+  durable side effects ride the callback's one Dolt commit, and every read is
+  read-your-writes. Wisps stay dolt-ignored and clone-local. `bd mol
+  squash`/`burn`/`bond`, `bd cook`, `bd batch` and SDK callers get this with
+  no change. (bd-z9b5y4, design from PR #6015 by jm2)
+
 - **Concurrent guarded deletes through `bd serve` have one winner.** A
   `POST /v0/beads/issues:delete` carrying `expected_version`, which is what
   `bd delete --if-revision` sends from a `bd connect` workspace, never took the

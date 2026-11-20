@@ -12,14 +12,14 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// These tests pin the two-session transaction seam: DoltStore.RunInTransaction
-// runs versioned tables on one SQL session (regularTx) and dolt-ignored wisp
-// tables on another (ignoredTx). A dependency whose write table lives on one
-// session and whose target issue lives on the other must still resolve targets
-// created earlier in the same logical transaction — the shape `bd create
-// --deps blocks:<other-tier-id>` produces since create+deps became one
-// transaction. Regression coverage for the red-team finding where such creates
-// hard-failed with "issue not found" on the Dolt server backend.
+// These tests pin the cross-tier transaction seam: DoltStore.RunInTransaction
+// runs durable tables and dolt-ignored wisp tables in one SQL transaction, so
+// a dependency whose write table lives in one tier and whose target issue
+// lives in the other resolves targets created earlier in the same logical
+// transaction — the shape `bd create --deps blocks:<other-tier-id>` produces
+// since create+deps became one transaction. Regression coverage for the
+// red-team finding where such creates hard-failed with "issue not found" on
+// the Dolt server backend back when the tiers ran on separate sessions.
 
 func crossTierRegularIssue(id, title string) *types.Issue {
 	return &types.Issue{
@@ -64,8 +64,8 @@ func assertDepEdge(ctx context.Context, t *testing.T, store *DoltStore, sourceID
 
 // New wisp created in the transaction blocks an existing regular issue
 // (`bd create "blocker" --ephemeral --deps blocks:<regular-id>`): the edge
-// writes to the regular tier while the target wisp is uncommitted on the
-// ignored session.
+// writes to the regular tier while its target wisp is uncommitted in this
+// same transaction.
 func TestRunInTransactionNewWispBlocksExistingRegular(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -99,8 +99,8 @@ func TestRunInTransactionNewWispBlocksExistingRegular(t *testing.T) {
 
 // New regular issue created in the transaction blocks an existing wisp
 // (`bd create "blocker" --deps blocks:<wisp-id>`): the edge writes to the
-// ignored tier while the target regular issue is uncommitted on the regular
-// session.
+// wisp tier while its target regular issue is uncommitted in this same
+// transaction.
 func TestRunInTransactionNewRegularBlocksExistingWisp(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -133,7 +133,7 @@ func TestRunInTransactionNewRegularBlocksExistingWisp(t *testing.T) {
 }
 
 // A closed cross-tier blocker must not mark the source blocked: the openness
-// gate has to consult the target's own session, not just existence.
+// gate has to consult the target's own table, not just existence.
 func TestRunInTransactionClosedCrossTierBlockerDoesNotBlock(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -192,7 +192,7 @@ func TestRunInTransactionCrossTierDepMissingTargetRollsBack(t *testing.T) {
 }
 
 // A blocking cycle closed across the two tiers inside one transaction must be
-// rejected even though each session sees only its own uncommitted edges.
+// rejected even though its edges span both dependency tables.
 func TestRunInTransactionCrossTierCycleRejected(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -237,17 +237,16 @@ func TestRunInTransactionCrossTierCycleRejected(t *testing.T) {
 	}
 }
 
-// A scheduling cycle whose CLOSING edge is same-tier must still be rejected when
-// an earlier edge in the same logical transaction is cross-tier and pending on
-// the other session. This is the create-time batch
-// `bd create R --deps blocks:<wisp W>,depends-on:<regular C>` with a committed
-// path C -> W: the `blocks:W` edge (W -> R) is uncommitted on the ignored
-// session, and the same-tier `depends-on:C` edge (R -> C) closes the cycle
-// R -> C -> W -> R. The per-edge cross-tier gate only ran the merged two-session
-// cycle check when the closing edge itself crossed tiers, so a same-tier closing
-// edge saw only the regular session and missed the pending W -> R edge, letting
-// the cycle commit. AddDependencyWithOptions now forces the merged check once
-// both dependency tiers are in play.
+// A scheduling cycle whose CLOSING edge is same-tier must still be rejected
+// when an earlier edge in the same logical transaction is cross-tier. This is
+// the create-time batch `bd create R --deps blocks:<wisp W>,depends-on:<regular
+// C>` with a committed path C -> W: the `blocks:W` edge (W -> R) is
+// uncommitted in this transaction, and the same-tier `depends-on:C` edge
+// (R -> C) closes the cycle R -> C -> W -> R. The in-tx cycle check scans BOTH
+// dependency tables in one recursive CTE on the one session, so it sees the
+// pending cross-tier edge — the historical defect (a per-edge cross-tier gate
+// that missed a same-tier closing edge when the tiers ran on separate
+// sessions) is pinned here as a regression guard.
 func TestRunInTransactionMixedTierCycleSameTierClosingEdgeRejected(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -276,15 +275,14 @@ func TestRunInTransactionMixedTierCycleSameTierClosingEdgeRejected(t *testing.T)
 	}
 
 	// Under-test transaction: create regular R, then add the cross-tier
-	// `blocks:W` edge (W -> R, pending on the ignored session) before the
+	// `blocks:W` edge (W -> R, uncommitted in this transaction) before the
 	// same-tier `depends-on:C` edge (R -> C) that closes the cycle.
 	regularR := crossTierRegularIssue("test-mixed-cycle-regular-r", "new regular R in mixed-tier cycle")
 	err := store.RunInTransaction(ctx, "create R with blocks:W then depends-on:C", func(tx storage.Transaction) error {
 		if err := tx.CreateIssue(ctx, regularR, "tester"); err != nil {
 			return err
 		}
-		// blocks:W -> W depends-on R: wisp source, regular target (cross-tier,
-		// pending on the ignored session).
+		// blocks:W -> W depends-on R: wisp source, regular target (cross-tier).
 		if err := tx.AddDependency(ctx, &types.Dependency{
 			IssueID:     wispW.ID,
 			DependsOnID: regularR.ID,
@@ -325,8 +323,8 @@ func TestRunInTransactionMixedTierCycleSameTierClosingEdgeRejected(t *testing.T)
 // THE SHAPE IS THE POINT, and it is why the edge type is the only difference
 // between this case and TestRunInTransactionCrossTierCycleRejected: a committed
 // scheduling edge R -> W already exists, and the edge under test runs W -> R.
-// Were the guard to stop excusing the type, the merged two-session probe would
-// find W -> R -> W and refuse — so this case fails the moment the arm stops
+// Were the guard to stop excusing the type, the in-tx cycle check would find
+// W -> R -> W and refuse — so this case fails the moment the arm stops
 // answering "not my edge type", which is what makes it worth its runtime.
 //
 // It is the arm worth pinning because it is the SILENT one. It refuses nothing

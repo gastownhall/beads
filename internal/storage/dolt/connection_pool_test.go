@@ -178,6 +178,10 @@ func registerMockDriver(t *testing.T) (*mockDriver, string) {
 	return drv, name
 }
 
+// unroutableConnStr is a DSN no server answers, for stores whose code path
+// must never dial a fresh connection.
+const unroutableConnStr = "root@tcp(127.0.0.1:1)/x"
+
 // openMockDB is a tiny helper that opens a *sql.DB backed by the mock driver.
 func openMockDB(t *testing.T) (*sql.DB, *mockDriver) {
 	t.Helper()
