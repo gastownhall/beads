@@ -830,6 +830,72 @@ func TestTrackerMultiTeamValidate(t *testing.T) {
 	}
 }
 
+// TestValidatePushStateMappingsHelpExample runs the mapping that
+// `bd linear --help` prints through push validation on a stock Linear team
+// (GH#3288). Its state_map lines alone leave open (Backlog, Todo) and closed
+// (Done, Canceled, Duplicate) ambiguous, which stops every push, and a plain
+// `bd linear sync` before it pulls; its two linear.outbound_state_map lines
+// resolve both.
+func TestValidatePushStateMappingsHelpExample(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req GraphQLRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !strings.Contains(req.Query, "TeamStates") {
+			http.Error(w, "unexpected query", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"team": map[string]interface{}{
+					"id": "team-1",
+					"states": map[string]interface{}{
+						"nodes": []map[string]interface{}{
+							{"id": "state-backlog", "name": "Backlog", "type": "backlog"},
+							{"id": "state-todo", "name": "Todo", "type": "unstarted"},
+							{"id": "state-progress", "name": "In Progress", "type": "started"},
+							{"id": "state-done", "name": "Done", "type": "completed"},
+							{"id": "state-canceled", "name": "Canceled", "type": "canceled"},
+							{"id": "state-duplicate", "name": "Duplicate", "type": "canceled"},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	// The state_map lines of `bd linear --help` (cmd/bd/linear.go).
+	config := map[string]string{
+		"linear.state_map.backlog":         "open",
+		"linear.state_map.unstarted":       "open",
+		"linear.state_map.started":         "in_progress",
+		"linear.state_map.completed":       "closed",
+		"linear.state_map.canceled":        "closed",
+		"linear.state_map.my_custom_state": "in_progress",
+	}
+	validate := func() error {
+		tr := &Tracker{
+			teamIDs: []string{"team-1"},
+			clients: map[string]*Client{"team-1": NewClient("key", "team-1").WithEndpoint(server.URL)},
+			config:  LoadMappingConfig(&mockConfigLoader{config: config}),
+		}
+		return tr.ValidatePushStateMappings(t.Context())
+	}
+
+	if err := validate(); err == nil || !strings.Contains(err.Error(), "Backlog, Todo") || !strings.Contains(err.Error(), "linear.outbound_state_map.open") {
+		t.Errorf("state_map lines only: ValidatePushStateMappings() = %v, want open ambiguous across Backlog, Todo naming linear.outbound_state_map.open", err)
+	}
+	// Its outbound lines, one at a time: validation reports one status per run.
+	config["linear.outbound_state_map.open"] = "Todo"
+	if err := validate(); err == nil || !strings.Contains(err.Error(), "Done, Canceled, Duplicate") || !strings.Contains(err.Error(), "linear.outbound_state_map.closed") {
+		t.Errorf("with outbound open: ValidatePushStateMappings() = %v, want closed ambiguous across Done, Canceled, Duplicate naming linear.outbound_state_map.closed", err)
+	}
+	config["linear.outbound_state_map.closed"] = "Done"
+	if err := validate(); err != nil {
+		t.Errorf("with both outbound lines: ValidatePushStateMappings() = %v, want nil", err)
+	}
+}
+
 func TestTrackerSetTeamIDs(t *testing.T) {
 	tr := &Tracker{}
 	ids := []string{"id-1", "id-2", "id-3"}
