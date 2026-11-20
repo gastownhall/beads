@@ -655,6 +655,19 @@ func TestRecoverPreV56IfNeeded_OnlySemverPredecessorsAreRecovered(t *testing.T) 
 
 func TestRecoverPreV56IfNeeded_ReinitializesWithRealDolt(t *testing.T) {
 	testutil.RequireDoltCLIOnly(t)
+	// Plain go test does not get the Bazel wrapper's Dolt identity. Keep
+	// this CLI fixture independent of the caller's global configuration.
+	doltRoot := t.TempDir()
+	t.Setenv("DOLT_ROOT_PATH", doltRoot)
+	t.Setenv("DOLT_DISABLE_EVENT_FLUSH", "1")
+	configDir := filepath.Join(doltRoot, ".dolt")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := `{"user.email":"test@beads.local","user.name":"beads-test","metrics.disabled":"true","versioncheck.disabled":"true"}` + "\n"
+	if err := os.WriteFile(filepath.Join(configDir, "config_global.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	doltDir, sentinel := writePreV56DoltFixture(t)
 
 	recoverPreV56IfNeeded("0.55.4", doltDir)
