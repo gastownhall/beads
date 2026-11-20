@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "dsn.go",
         "flock.go",
+        "flock_retire_other.go",
+        "flock_retire_windows.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/dbproxy/util",
     visibility = ["//:__subpackages__"],
@@ -12,14 +14,32 @@ go_library(
         "//internal/lockfile",
         "//internal/storage/doltutil",
         "@com_github_go_sql_driver_mysql//:mysql",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
     name = "util_test",
-    srcs = ["dsn_test.go"],
+    srcs = [
+        "dsn_test.go",
+        "flock_retire_test.go",
+        "flock_retire_windows_test.go",
+    ],
     embed = [":util"],
-    deps = ["@com_github_go_sql_driver_mysql//:mysql"],
+    deps = [
+        "//internal/lockfile",
+        "@com_github_go_sql_driver_mysql//:mysql",
+        "@com_github_stretchr_testify//require",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
