@@ -4,7 +4,7 @@ description: Show project statistics and progress
 
 Display statistics about the current beads project.
 
-Use the beads MCP `stats` tool to retrieve project metrics and present them clearly:
+Run `bd stats` to retrieve project metrics and present them clearly:
 - Total issues by status (open, in_progress, blocked, closed)
 - Issues by priority level
 - Issues by type (bug, feature, task, epic, chore)
