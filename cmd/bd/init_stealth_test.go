@@ -737,7 +737,7 @@ func TestCheckProjectExcludeStealthReadBoundaries(t *testing.T) {
 					t.Fatalf("non-ENOENT read-error precondition: %v", readErr)
 				}
 				want.Message = "Unable to read .git/info/exclude"
-				want.Detail = readErr.Error()
+				want.Detail = readErr.Error() + "; check the exclude file's type and read permissions, then rerun bd doctor"
 				if name == "directory" {
 					// The leak outranks the unreadable exclude in the headline, and --fix can
 					// still strip it, so the repair advice must survive the read failure.
@@ -847,5 +847,16 @@ func TestApplyFixListStealthRemovesLeakWhenExcludeUnreadable(t *testing.T) {
 	}
 	if !strings.Contains(out, "are ignored by neither .git/info/exclude nor the tracked .gitignore") {
 		t.Errorf("the lost project-pattern coverage was not reported:\n%s", out)
+	}
+
+	check := checkProjectExcludeStealth(dir)
+	if check.Status != doctor.StatusWarning || check.Fix != "" {
+		t.Errorf("unresolved read failure should warn without offering another automatic repair: %+v", check)
+	}
+	if !strings.Contains(check.Detail, excludePath) || !strings.Contains(check.Detail, "check the exclude file's type and read permissions, then rerun bd doctor") {
+		t.Errorf("recheck lost the exclude failure or manual recovery guidance: %+v", check)
+	}
+	if after, err := os.ReadFile(gitignorePath); err != nil || string(after) != string(got) {
+		t.Errorf("diagnostic changed the repaired gitignore: %q, %v", after, err)
 	}
 }
