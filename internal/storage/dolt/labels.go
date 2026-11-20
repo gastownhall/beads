@@ -98,7 +98,7 @@ func (s *DoltStore) RenameLabel(ctx context.Context, oldLabel, newLabel, actor s
 			return nil
 		}
 		return s.doltAddAndCommit(ctx, []string{"events", "labels"},
-			fmt.Sprintf("bd: label rename '%s' -> '%s' (%d issues)", oldLabel, newLabel, renamed))
+			fmt.Sprintf("bd: label rename '%s' -> '%s' (%d issues/wisps)", oldLabel, newLabel, renamed))
 	})
 	return renamed, merged, ids, err
 }
