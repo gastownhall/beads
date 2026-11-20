@@ -1190,13 +1190,31 @@ func renderNodeBox(node *GraphNode, width int) string {
 	return topBottom + "\n" + middle + "\n" + idLine + "\n" + bottom
 }
 
-// truncateTitle truncates a title to max length (rune-safe)
+// truncateTitle truncates a title to max length (rune-safe). The title is
+// rendered into a single terminal row elsewhere, so a stored title's own
+// control characters — a newline, tab or carriage return — are collapsed to
+// a single space first: left raw, each would add a row or shift columns the
+// surrounding box-drawing and padding never account for. This only affects
+// the rendered copy; storage, JSON and other exports keep the original title.
 func truncateTitle(title string, maxLen int) string {
+	title = sanitizeTitleForSingleLine(title)
 	runes := []rune(title)
 	if len(runes) <= maxLen {
 		return title
 	}
 	return string(runes[:maxLen-1]) + "…"
+}
+
+// sanitizeTitleForSingleLine replaces any ASCII control character (C0, plus
+// DEL) with a single space, so a title can never introduce a stray line
+// break or column shift into a one-line terminal render.
+func sanitizeTitleForSingleLine(title string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, title)
 }
 
 // padRight pads a string to the right with spaces (rune-safe)
