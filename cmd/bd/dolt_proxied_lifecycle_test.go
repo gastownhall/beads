@@ -27,6 +27,9 @@ func TestProxiedDoltStartRefusalContract(t *testing.T) {
 	if err.Mutates {
 		t.Error("mutates = true; a refused start changes nothing")
 	}
+	if err.Reason != ProxyReasonDesign {
+		t.Errorf("reason = %q, want %q; every registry refusal carries a reason a JSON consumer can branch on", err.Reason, ProxyReasonDesign)
+	}
 	for _, want := range []string{"proxied-server mode", "bd dolt status", "bd dolt stop"} {
 		if !strings.Contains(err.Message, want) {
 			t.Errorf("message does not mention %q: %q", want, err.Message)
