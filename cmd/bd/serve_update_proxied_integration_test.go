@@ -281,6 +281,9 @@ func TestProxiedServerServeUpdate(t *testing.T) {
 
 	// The rule-8 oracle against `bd update --json`[0], the claim's device: both
 	// surfaces marshal the same canonical struct, so the allowlist is empty.
+	// The CLI row carries the post-write revision on the row itself, where
+	// UpdateIssueResponse carries it beside the issue; the oracle folds the
+	// response's member onto its issue so the two tokens must agree too.
 	t.Run("the updated issue matches bd update --json element 0", func(t *testing.T) {
 		issue := bdProxiedCreate(t, bd, p.dir, "parity oracle", "-p", "1",
 			"-d", "described", "--acceptance", "accepted", "--label", "oracle")
@@ -293,6 +296,10 @@ func TestProxiedServerServeUpdate(t *testing.T) {
 		if !ok {
 			t.Fatalf("issue = %#v, want an object", body["issue"])
 		}
+		if _, ok := body["revision"].(string); !ok {
+			t.Fatalf("revision = %#v, want a decimal string", body["revision"])
+		}
+		fromHTTP["revision"] = body["revision"]
 
 		// A same-value update through the CLI writes nothing and reports the
 		// same row, so both sides describe one post-state snapshot.
