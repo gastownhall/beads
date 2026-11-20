@@ -200,7 +200,7 @@ Examples:
   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
   bd doctor --check=export             # Warn when the export file is missing store IDs
   bd doctor --check=pollution          # Show potential test issues
-  bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
+  bd doctor --check=pollution --clean  # Delete high-confidence test issues (with confirmation)
   bd doctor --check=validate         # Data-integrity checks only
   bd doctor --check=validate --fix   # Auto-fix data-integrity issues
   bd doctor --deep             # Full graph integrity validation
