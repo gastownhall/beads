@@ -149,7 +149,7 @@ func runConventionsLint() ([]doctorCheck, error) {
 	return []doctorCheck{{
 		Name:     "conventions.lint",
 		Status:   statusWarning,
-		Message:  fmt.Sprintf("%d of %d open issues missing recommended sections", warningCount, len(issues)),
+		Message:  fmt.Sprintf("%d of %d open issues have template warnings", warningCount, len(issues)),
 		Fix:      "bd lint",
 		Category: "Conventions",
 	}}, nil
