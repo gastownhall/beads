@@ -347,10 +347,13 @@ func TestRenderTypedOpenError(t *testing.T) {
 		if out != gate.UserMessage() {
 			t.Errorf("rendered output is not the full UserMessage:\n%s", out)
 		}
-		for _, want := range []string{"co-resident", "bd migrate schema", "Read commands keep working"} {
+		for _, want := range []string{"co-resident", "bd migrate schema", "so are reads that"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output missing %q:\n%s", want, out)
 			}
+		}
+		if strings.Contains(strings.ToLower(out), "keep working") {
+			t.Errorf("output promises reads keep working:\n%s", out)
 		}
 	})
 
