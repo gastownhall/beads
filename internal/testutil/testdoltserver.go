@@ -177,6 +177,13 @@ func startDoltContainer() error {
 		doltSingletonSrv = &doltServer{local: s}
 		return nil
 	}
+	// Callers reach here only via ensureSharedContainer, whose two entry
+	// points (EnsureDoltContainerForTestMain, RequireDoltContainer) have
+	// already confirmed checkDolt() == doltReady, or via
+	// RestartSharedDoltContainer, which checks it first. The local backend
+	// has returned above; only the container path needs Ryuk.
+	checkRyukEnabled()
+
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
 	defer cancel()
 
@@ -415,6 +422,7 @@ func StartIsolatedDoltContainerHandle(t *testing.T) *IsolatedDoltContainer {
 	if useLocalDoltServer() {
 		return startIsolatedLocalDoltServer(t)
 	}
+	checkRyukEnabled()
 	return startIsolatedDoltContainer(t)
 }
 
