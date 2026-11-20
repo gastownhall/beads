@@ -28,8 +28,11 @@ var trackedRuntimePatterns = []string{
 	"daemon.lock",
 	"dolt-server.pid",
 	"dolt-server.log",
+	"dolt-server.log.1",
 	"dolt-server.lock",
 	"dolt-server.port",
+	"dolt-server.binary",
+	".dolt-server.binary-*",
 	"dolt-server.activity",    // GH#6191: gitignored, but gitignore cannot untrack already-committed copies
 	"dolt-server-config.yaml", // GH#6191: absolute cfg_dir + per-machine port; a committed copy breaks other clones
 
