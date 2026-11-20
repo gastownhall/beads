@@ -133,6 +133,26 @@ if [[ -z "${BEADS_TEST_BD_BINARY:-}" ]]; then
     esac
 fi
 
+# Git hooks the tests install run bare `bd` from PATH. Put a private launcher
+# directory first, its `bd` linked to the binary under test whatever that
+# binary is named, so hooks run it and not whichever bd the caller has
+# installed. BEADS_TEST_BD_BINARY itself is left as is.
+if [[ -n "${BEADS_TEST_BD_BINARY:-}" ]]; then
+    if [[ -n "${BEADS_TEST_ENV_ROOT:-}" ]]; then
+        TEST_BD_LAUNCHER_DIR="$BEADS_TEST_ENV_ROOT/bd-launcher"
+    else
+        TEST_BD_LAUNCHER_DIR=$(mktemp -d "${TMPDIR:-/tmp}/beads-bd-launcher-XXXXXX")
+    fi
+    mkdir -p "$TEST_BD_LAUNCHER_DIR"
+    TEST_BD_TARGET="$(cd "$(dirname "$BEADS_TEST_BD_BINARY")" && pwd)/$(basename "$BEADS_TEST_BD_BINARY")"
+    TEST_BD_SUFFIX=""
+    if [[ "$TEST_BD_TARGET" == *.exe ]]; then
+        TEST_BD_SUFFIX=".exe"
+    fi
+    ln -sf -- "$TEST_BD_TARGET" "$TEST_BD_LAUNCHER_DIR/bd$TEST_BD_SUFFIX"
+    export PATH="$TEST_BD_LAUNCHER_DIR:$PATH"
+fi
+
 # Optional: start a single shared Dolt test server for all packages.
 # When BEADS_TEST_SHARED_SERVER=1, we start one dolt sql-server and export
 # BEADS_DOLT_PORT (plus BEADS_TEST_SHARED_DOLT_SERVER set to that same port,
