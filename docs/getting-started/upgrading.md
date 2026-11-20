@@ -146,6 +146,21 @@ bd migrate schema
 bd migrate --yes
 ```
 
+### Wisp blocked flags missing
+
+If closing or reopening a bead, `bd recompute-blocked`, or `bd doctor`'s
+blocked-state check fails with `table "p" does not have column "is_blocked"`,
+the wisps table on that clone has lost its blocked-state column even though
+the clone's migration record says it was added
+([#5257](https://github.com/gastownhall/beads/issues/5257)). Upgrade `bd`;
+the next migration pass notices the mismatch and repairs it on its own. On an
+embedded or local store that is the next command you run; a shared server is
+migrated the way [Shared servers](#shared-servers) describes. The repair re-adds the
+column and its index, then recomputes every wisp's blocked flag from the
+dependency graph without changing any wisp's `updated_at`. No manual edit of
+the database is needed, and the repair runs again if the column is ever lost
+again.
+
 ### Upgrading to 1.3.0
 
 A 1.2.2 or 1.1.x database sits at schema v53, and 1.3.0 knows v66. That is more
