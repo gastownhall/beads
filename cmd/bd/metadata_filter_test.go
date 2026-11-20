@@ -91,6 +91,16 @@ func TestMetadataFilterSuite(t *testing.T) {
 		IssueType: types.TypeTask, Status: types.StatusOpen,
 		Metadata: json.RawMessage(`{"jira/sprint":"Q2"}`),
 	}
+	hyphen1 := &types.Issue{
+		ID: "hyphen-1", Title: "Hyphen key match (hyphen)", Priority: 2,
+		IssueType: types.TypeTask, Status: types.StatusOpen,
+		Metadata: json.RawMessage(`{"drill-meta":"v"}`),
+	}
+	hyphen2 := &types.Issue{
+		ID: "hyphen-2", Title: "Hyphen key no match (hyphen)", Priority: 2,
+		IssueType: types.TypeTask, Status: types.StatusOpen,
+		Metadata: json.RawMessage(`{"drill-meta":"other"}`),
+	}
 
 	// --- MixedCaseKey data ---
 	// Regression coverage for case-sensitive metadata keys: two issues with
@@ -111,7 +121,7 @@ func TestMetadataFilterSuite(t *testing.T) {
 	// Bulk create all issues
 	allIssues := []*types.Issue{
 		mfm1, mfm2, hmk1, hmk2, and1, and2, nometa, withmeta, queryable,
-		slash1, slash2, mixedcase1, mixedcase2,
+		slash1, slash2, hyphen1, hyphen2, mixedcase1, mixedcase2,
 	}
 	for _, issue := range allIssues {
 		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
@@ -265,6 +275,18 @@ func TestMetadataFilterSuite(t *testing.T) {
 		}
 	})
 
+	t.Run("MetadataFieldMatchHyphenKey", func(t *testing.T) {
+		results, err := store.SearchIssues(ctx, "", types.IssueFilter{
+			MetadataFields: map[string]string{"drill-meta": "v"},
+		})
+		if err != nil {
+			t.Fatalf("SearchIssues: %v", err)
+		}
+		if len(results) != 1 || results[0].ID != hyphen1.ID {
+			t.Fatalf("hyphen metadata results = %v, want only %s", issueIDs(results), hyphen1.ID)
+		}
+	})
+
 	t.Run("MetadataFieldMatchMixedCaseKey", func(t *testing.T) {
 		results, err := store.SearchIssues(ctx, "", types.IssueFilter{
 			MetadataFields: map[string]string{"McTeam": "platform"},
@@ -315,7 +337,7 @@ func TestValidateMetadataKey(t *testing.T) {
 		{"a1b2c3", false},
 		{"", true},
 		{"bad key", true},
-		{"bad-key", true},       // hyphens not allowed
+		{"bad-key", false},
 		{"123start", true},      // must start with letter/underscore
 		{"key=value", true},     // equals not allowed
 		{"'; DROP TABLE", true}, // SQL injection
