@@ -1536,6 +1536,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `beads.SchemaSkewError`, `beads.RemoteMigrateGateError` and
   `beads.MigrateConsentError`. `Open`, `OpenFromConfig` and `OpenGated` are
   unchanged. See `engdocs/EMBEDDING_OVER_PROXIED_SERVER.md` §8.
+- **Version diagnostics compare large numeric prerelease identifiers correctly.**
+  All-digit identifiers retain numeric precedence even beyond the machine
+  integer range. Upgrade notices no longer mistake such a version for newer
+  alphanumeric text or reverse unequal-length numeric identifiers.
+
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that
