@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"golang.org/x/term"
 )
 
 func TestLastTouchedBasic(t *testing.T) {
@@ -116,6 +114,8 @@ func TestSetLastTouchedIDAdvancesMtime(t *testing.T) {
 // of the guard (bd-m00pb). The trailing stdin-TTY branch is exercised by the
 // default-deny case below and end-to-end in last_touched_guard_test.go.
 func TestAllowLastTouchedFallback_EnvPrecedence(t *testing.T) {
+	usePipedStdinForInteractionTest(t)
+
 	cases := []struct {
 		name           string
 		fallbackEnv    string
@@ -132,6 +132,11 @@ func TestAllowLastTouchedFallback_EnvPrecedence(t *testing.T) {
 		{"BD_NON_INTERACTIVE=true denies", "", "true", "", false},
 		{"CI=true denies", "", "", "true", false},
 		{"CI=1 denies", "", "", "1", false},
+		{"BD_NON_INTERACTIVE=0 does not override CI", "", "0", "true", false},
+		{"BD_NON_INTERACTIVE=false does not override CI", "", "false", "1", false},
+		{"BD_NON_INTERACTIVE=0 does not override piped stdin", "", "0", "", false},
+		{"BD_NON_INTERACTIVE=false does not override piped stdin", "", "false", "", false},
+		{"explicit fallback wins over zero and CI", "1", "0", "true", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -148,12 +153,10 @@ func TestAllowLastTouchedFallback_EnvPrecedence(t *testing.T) {
 // TestAllowLastTouchedFallback_DefaultDeniesNonTTY verifies the default
 // path denies when stdin is not a terminal and no env override is set.
 func TestAllowLastTouchedFallback_DefaultDeniesNonTTY(t *testing.T) {
+	usePipedStdinForInteractionTest(t)
 	t.Setenv(lastTouchedFallbackEnv, "")
 	t.Setenv("BD_NON_INTERACTIVE", "")
 	t.Setenv("CI", "")
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		t.Skip("stdin is a terminal; default-deny branch not observable")
-	}
 	if AllowLastTouchedFallback() {
 		t.Error("AllowLastTouchedFallback() = true with non-TTY stdin and no override, want false")
 	}
