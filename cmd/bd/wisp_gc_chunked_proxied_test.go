@@ -1,0 +1,197 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// The reads the age gc's selection (findAbandonedWisps) makes through a
+// proxied unit of work, answered for wispPurgeProxiedProvider: nothing is
+// blocked, no wisp has a dependent, and there are no custom statuses.
+
+func (s wispPurgeProxiedIssues) GetBlockedIssues(context.Context, types.WorkFilter) ([]*types.BlockedIssue, error) {
+	return nil, nil
+}
+
+func (s wispPurgeProxiedIssues) FindWispDependentsRecursive(context.Context, []string) (map[string]bool, error) {
+	return map[string]bool{}, nil
+}
+
+func (wispPurgeProxiedConfig) GetCustomStatuses(context.Context) ([]types.CustomStatus, error) {
+	return nil, nil
+}
+
+// wispGCProxiedSuccessKeys is every key the proxied gc's success object has
+// always printed: no deleted_ids, which only the direct route prints.
+var wispGCProxiedSuccessKeys = []string{
+	"deleted", "deleted_count", "dependencies_removed", "events_removed",
+	"labels_removed", "orphaned_issues", "references_updated", "schema_version",
+}
+
+// TestWispGCProxiedDeletesInChunks pins the proxied route's half of GH#6246
+// for both gc modes: every deletion unit of work carries at most 200 selected
+// ids (200, 200, 50 for 450), uncascaded with text references rewritten, each
+// committing on its own; the successful units are reported in one aggregate
+// object with the route's existing success keys; each committed unit's
+// deletions, and only those, are handed to post-run auto-export as the direct
+// route hands them (GH#5896, GH#8490); and when the second unit fails no third
+// is opened, and the first unit's committed progress is kept and reported.
+//
+// It runs on a stub provider, so it is named outside the TestProxiedServer*
+// pattern that enrolls a test in the proxied-server shards, as
+// TestWispPurgeClosedProxiedBoundsEachUnitOfWork is.
+func TestWispGCProxiedDeletesInChunks(t *testing.T) {
+	modes := []struct {
+		name       string
+		closedMode bool
+		// keys is the mode's success key set on this route.
+		keys []string
+	}{
+		{"closed", true, append(slices.Clone(wispGCProxiedSuccessKeys), "candidates_capped")},
+		// --age 0s --all: the stub's wisps are closed.
+		{"age", false, wispGCProxiedSuccessKeys},
+	}
+	run := func(closedMode bool) func() error {
+		return func() error {
+			return runWispGCProxiedServer(context.Background(), false, time.Duration(0), true, closedMode, true, nil)
+		}
+	}
+	for _, mode := range modes {
+		t.Run(mode.name+"/success", func(t *testing.T) {
+			p := useWispPurgeProxied(t, 450)
+			jsonOutput = true
+
+			stdout, stderr, err := captureWispGC(t, run(mode.closedMode))
+			if err != nil {
+				t.Fatalf("gc: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			units := p.deletionUnits()
+			var sizes []int
+			for i, u := range units {
+				sizes = append(sizes, len(u.params.IDs))
+				if !u.committed {
+					t.Errorf("deletion unit %d did not commit", i+1)
+				}
+				if u.params.Cascade || !u.params.UpdateTextReferences {
+					t.Errorf("deletion unit %d: cascade=%v update_text_references=%v, want false/true", i+1, u.params.Cascade, u.params.UpdateTextReferences)
+				}
+			}
+			if want := []int{200, 200, 50}; !slices.Equal(sizes, want) {
+				t.Errorf("deletion unit sizes = %v, want %v", sizes, want)
+			}
+			if len(p.deleted) != 450 {
+				t.Errorf("%d wisps deleted, want 450", len(p.deleted))
+			}
+			assertDeletionHandoff(t, p.closed, nil)
+			obj := decodeSingleJSONObject(t, stdout)
+			var keys []string
+			for k := range obj {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			want := slices.Clone(mode.keys)
+			sort.Strings(want)
+			if !slices.Equal(keys, want) {
+				t.Errorf("success keys = %v, want the route's existing %v", keys, want)
+			}
+			if got := obj["deleted_count"]; got != float64(450) {
+				t.Errorf("deleted_count = %v, want 450", got)
+			}
+			if got, _ := obj["deleted"].([]interface{}); len(got) != 450 {
+				t.Errorf("deleted names %d ids, want 450", len(got))
+			}
+		})
+
+		t.Run(mode.name+"/second unit fails", func(t *testing.T) {
+			p := useWispPurgeProxied(t, 450)
+			jsonOutput = true
+			boom := errors.New("injected deletion failure")
+			calls := 0
+			p.fail = func([]string) error {
+				calls++
+				if calls == 2 {
+					return boom
+				}
+				return nil
+			}
+
+			stdout, stderr, err := captureWispGC(t, run(mode.closedMode))
+			if err == nil || !isReportedExit(err) {
+				t.Fatalf("error = %v, want an already-reported nonzero exit\nstdout:\n%s", err, stdout)
+			}
+			units := p.deletionUnits()
+			if len(units) != 2 {
+				t.Fatalf("opened %d deletion units, want 2 (none after the failed one)", len(units))
+			}
+			if !units[0].committed || units[1].committed {
+				t.Errorf("committed = [%v %v], want only the first unit", units[0].committed, units[1].committed)
+			}
+			if len(p.deleted) != 200 {
+				t.Errorf("%d wisps deleted, want the 200 of the first unit", len(p.deleted))
+			}
+			assertDeletionHandoff(t, units[0].params.IDs, units[1].params.IDs)
+			obj := decodeSingleJSONObject(t, stdout)
+			if got := obj["deleted_count"]; got != float64(200) {
+				t.Errorf("deleted_count = %v, want 200", got)
+			}
+			if got, _ := obj["deleted"].([]interface{}); len(got) != 200 {
+				t.Errorf("deleted names %d ids, want the first unit's 200", len(got))
+			}
+			if got := obj["unconfirmed_count"]; got != float64(250) {
+				t.Errorf("unconfirmed_count = %v, want 250", got)
+			}
+			if msg, _ := decodeSingleJSONObject(t, stderr)["error"].(string); !strings.Contains(msg, boom.Error()) {
+				t.Errorf("stderr error = %q, want the cause", msg)
+			}
+		})
+	}
+}
+
+// assertDeletionHandoff checks the ids a gc handed to post-run auto-export as
+// proven deletions: every committed id, and no id of a unit that failed.
+func assertDeletionHandoff(t *testing.T, committed, notCommitted []string) {
+	t.Helper()
+	for _, id := range committed {
+		if !commandDeletedIssueIDs.has(id) {
+			t.Errorf("committed id %s was not handed to auto-export; its orphan guard would wedge on it", id)
+			break
+		}
+	}
+	for _, id := range notCommitted {
+		if commandDeletedIssueIDs.has(id) {
+			t.Errorf("id %s of a failed unit was handed to auto-export as deleted", id)
+			break
+		}
+	}
+}
+
+// TestDeleteBatchStaysOneRequest pins that chunking is gc's alone: an
+// ordinary forced multi-id delete (`bd delete --force a b ...`) still hands
+// its whole resolved selection to the deletion role as one atomic request.
+func TestDeleteBatchStaysOneRequest(t *testing.T) {
+	s := useWispPurgeStub(t, 250)
+
+	stdout, stderr, err := captureWispGC(t, func() error {
+		return deleteBatch(nil, s.closed, true, false, false, false, false, nil)
+	})
+	if err != nil {
+		t.Fatalf("deleteBatch: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if got := requestSizes(s.deleter.requests); !slices.Equal(got, []int{250}) {
+		t.Fatalf("request sizes = %v, want one request of all 250 ids", got)
+	}
+	req := s.deleter.requests[0]
+	if !slices.Equal(req.IDs, s.closed) || !req.Force || req.DryRun || req.Cascade {
+		t.Errorf("request = force %v dry_run %v cascade %v over %d ids, want a forced real delete of the whole selection in order", req.Force, req.DryRun, req.Cascade, len(req.IDs))
+	}
+	if len(s.deleter.deleted) != 250 {
+		t.Errorf("deleted %d, want 250", len(s.deleter.deleted))
+	}
+}
