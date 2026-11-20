@@ -625,6 +625,12 @@ func (e *RemoteMigrateGateError) EscapeHint() string {
 		}
 		return SharedConsentCommand
 	}
+	// bd-5hl9dg: the proxied front door refuses the bare `bd migrate` on
+	// every arm, so the forced two-word verb it lets through is the only
+	// escape command that workspace can run. Server and embedded keep theirs.
+	if e.Proxied {
+		return SharedConsentCommandForced
+	}
 	return "bd migrate --force"
 }
 
@@ -858,6 +864,9 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 		}
 		return []GateOption{migrate}
 	default:
+		if e.Proxied {
+			return e.proxiedBluntOptions(adopt.Risk)
+		}
 		return []GateOption{
 			{
 				ID:       "migrate",
@@ -867,6 +876,37 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 			},
 			adopt,
 		}
+	}
+}
+
+// proxiedBluntOptions is the blunt stop's migrate-or-adopt pair for a
+// proxied-server workspace (bd-5hl9dg), the JSON twin of proxiedBluntBody.
+// The ordinary pair hands out `bd migrate --force` and `bd dolt push`, which
+// that front door refuses (proxy.migrate.unsupported,
+// proxy.dolt_push.unsupported), and `bd bootstrap`, which does not adopt the
+// served database from there. Each option keeps its precondition and risk;
+// what moves is the one command the workspace can run, and where the rest of
+// the work happens. The adopt path carries no command because nothing run
+// from this workspace adopts: its id and precondition say where to do it.
+func (e *RemoteMigrateGateError) proxiedBluntOptions(adoptRisk string) []GateOption {
+	return []GateOption{
+		{
+			ID: "migrate",
+			When: "you are the single designated migrator (migrate on ONE clone of that remote only, confirmed with the operator) and no other clone has migrated yet, " +
+				"AND every library client connected to this proxy's backend is stopped first and restarted after it completes (the proxy does not track them). " +
+				"Then publish the migrated database with `bd dolt push` on the server host, from a workspace with direct access to the database: " +
+				"this proxied-server workspace refuses it (proxy.dolt_push.unsupported)",
+			Commands: []string{SharedConsentCommandForced},
+			Risk: "if another clone also migrates independently, the schema forks unrecoverably (#4259); library clients left running have the schema changed underneath them. " +
+				"The bare `bd migrate` is refused in proxied-server mode (proxy.migrate.unsupported)",
+		},
+		{
+			ID: "adopt-on-server-host",
+			When: "another clone has already migrated and pushed: do NOT migrate here. Adopt its database on the server host, from a workspace with direct access to the database — " +
+				"`bd bootstrap` does not adopt the served database from this proxied-server workspace",
+			Commands: []string{},
+			Risk:     adoptRisk,
+		},
 	}
 }
 

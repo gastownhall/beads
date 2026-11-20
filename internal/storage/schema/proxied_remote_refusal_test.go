@@ -113,3 +113,37 @@ func TestBluntRemoteRefusalProxied(t *testing.T) {
 		t.Errorf("proxied refusal dropped the smart gate note:\n%s", msg)
 	}
 }
+
+// TestRemoteRefusalEscapeHint pins the escape command off proxied-server mode
+// (unchanged by bd-5hl9dg) and checks that a proxied workspace is given the
+// one migrate verb its front door lets through. The proxied front door refuses
+// the bare `bd migrate` on every arm, so the forced two-word verb replaces it
+// on every remote-backed arm; shared-no-remote already did this.
+func TestRemoteRefusalEscapeHint(t *testing.T) {
+	arms := []struct {
+		name string
+		e    RemoteMigrateGateError
+	}{
+		{name: "blunt (shared store)", e: RemoteMigrateGateError{Shared: true, FallbackReason: fallbackReasonSharedStore}},
+		{name: "blunt (embedded)", e: RemoteMigrateGateError{FallbackReason: fallbackReasonUnreadableState}},
+		{name: "adopt", e: RemoteMigrateGateError{Shared: true, Decision: gateDecisionAdopt}},
+		{name: "adopt-ff", e: RemoteMigrateGateError{Shared: true, Decision: gateDecisionAdoptFastForward}},
+		{name: "fork-skew", e: RemoteMigrateGateError{Shared: true, Decision: gateDecisionForkSkew, SkewVersions: []int{70}}},
+		{name: "data-behind", e: RemoteMigrateGateError{Shared: true, FallbackReason: fallbackReasonDataBehind}},
+	}
+	for _, arm := range arms {
+		t.Run(arm.name+"/off proxied", func(t *testing.T) {
+			e := arm.e
+			if got := e.EscapeHint(); got != "bd migrate --force" {
+				t.Errorf("EscapeHint = %q, want %q (unchanged off proxied)", got, "bd migrate --force")
+			}
+		})
+		t.Run(arm.name+"/proxied", func(t *testing.T) {
+			e := arm.e
+			e.Proxied = true
+			if got := e.EscapeHint(); got != SharedConsentCommandForced {
+				t.Errorf("EscapeHint = %q, want %q", got, SharedConsentCommandForced)
+			}
+		})
+	}
+}

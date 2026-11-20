@@ -1487,8 +1487,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forced verb instead of the bare `bd migrate schema`, which refuses there.
   The warning a forced migration prints there no longer says "then `bd dolt
   push`", and names `bd migrate schema --force` as the consent instead of
-  `bd migrate --force`. What is refused, and the consent it takes, are
-  unchanged; server and embedded mode print what they did before.
+  `bd migrate --force`. The `--json` refusal says the same: its
+  `remote_migrate_gate.options` there hand out only `bd migrate schema
+  --force` (option `migrate`) and an `adopt-on-server-host` option with no
+  command, instead of `bd migrate --force`, `bd dolt push` and `bd
+  bootstrap`. What is refused, and the consent it takes, are unchanged;
+  server and embedded mode print, and emit as JSON, what they did before.
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
