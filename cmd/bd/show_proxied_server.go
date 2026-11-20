@@ -526,6 +526,10 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 
 	if jsonOutput {
 		if len(allDetails) > 0 {
+			// Same stderr nudge as the embedded route (show.go): the
+			// payload only signals the omission inside the JSON, so a
+			// proxied workspace must not keep the #5078 blind spot.
+			writeCommentsOmittedHints(allDetails)
 			_ = outputJSON(allDetails)
 		} else {
 			return HandleErrorWithHintRespectJSON("no issues found matching the provided IDs",
