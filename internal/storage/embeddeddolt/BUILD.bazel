@@ -166,6 +166,7 @@ go_test(
         "flatten_clone_local_fks_test.go",
         "get_issue_test.go",
         "git_ref_pin_test.go",
+        "git_ssh_remote_repro_test.go",
         "graph_counter_contract_test.go",
         "graph_walk_plan_test.go",
         "head_hashes_test.go",

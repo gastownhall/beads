@@ -13,12 +13,14 @@ You need two tools installed on every machine:
 |------|---------|---------|
 | **bd** (beads CLI) | 0.59.0+ | See [Installation](/getting-started/installation) |
 | **Dolt** | 2.6.0 or newer (`bd` refuses older); install the pinned version, not "latest" | See [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install) |
+| **Git** | a current release; an old Git rejects arguments Dolt's transport passes (see [the usage-banner entry](#usage-git-banner-on-push-pull-or-bootstrap) below) | [git-scm.com](https://git-scm.com/downloads) |
 
-Verify both are installed:
+Verify all three are installed:
 
 ```bash
 bd version     # must be 0.59.0+
 dolt version   # must match the pinned version (2.6.0 or newer)
+git --version  # a current release, found first on PATH
 ```
 
 Install a specific Dolt version rather than `releases/latest`. On Dolt 2.3.0
@@ -242,6 +244,77 @@ bd list                            # sees the closed task
 - **Do not use JSONL as sync** — `.beads/issues.jsonl` is an export for viewers and interchange. It is not the source of truth, not a full database backup, and cannot safely reconcile deletes or pruning.
 
 ## Troubleshooting
+
+### "usage: git" banner on push, pull or bootstrap
+
+`bd dolt push`, `bd dolt pull` and `bd bootstrap` reach the remote through
+Dolt's embedded git transport, which passes arguments an old Git rejects:
+
+```text
+usage: git ls-remote [--heads] [--tags] [-u <exec> | --upload-pack <exec>] [<repository> [<refs>...]]
+hint: dolt does not support interactive credential prompts
+hint: configure git credentials (credential helper, token) for HTTPS remotes
+```
+
+The banner is Git refusing the *arguments* — the `--` separator before the
+URL in the ls-remote probe, or `--force-with-lease=<ref>:<hash>` on push —
+before any authentication ran. The `hint:` lines around it are added by
+Dolt's wrapper to every git failure; they are not evidence of an
+authentication problem. `bd bootstrap` also checks a configured
+`sync.remote` with its own `git ls-remote -- <url> refs/dolt/data`, which an
+old Git refuses the same way, without the `hint:` lines. In our measurement
+these banners stop at Git 2.10 — an observed floor, not a supported-version
+matrix.
+
+Check which Git actually runs:
+
+```bash
+git --version
+where.exe git         # Windows
+Get-Command git -All  # PowerShell
+which -a git          # Unix
+```
+
+Install a current Git and make sure it is the one found **first on PATH**.
+The remote URL is not the problem: keep GitHub remotes in their
+`git+ssh://` form — Dolt uses it to route them over the git transport
+(a plain `ssh://` URL goes to Dolt's remotesapi client instead).
+
+In server mode the Dolt server runs the transport with the environment it
+started with, so the Git that runs is the one on the **server process's
+PATH** — check that environment, not your shell's — and a fixed PATH reaches
+it only after a restart. For a server bd manages, `bd dolt stop` is enough:
+the next bd command starts it again, unless `dolt.auto-start` is off.
+
+If a current Git still fails, trace git to a file and re-run the command
+that failed:
+
+```bash
+# Unix
+GIT_TRACE=/tmp/bd-git-trace.log GIT_TRACE2_EVENT=/tmp/bd-git-trace2.json bd dolt push
+```
+
+```powershell
+# PowerShell
+$env:GIT_TRACE="$env:TEMP\bd-git-trace.log"
+$env:GIT_TRACE2_EVENT="$env:TEMP\bd-git-trace2.json"
+bd dolt push
+Remove-Item Env:GIT_TRACE, Env:GIT_TRACE2_EVENT
+```
+
+The `GIT_TRACE` file lists each git command that ran, with its arguments.
+The `version` event in the `GIT_TRACE2_EVENT` file records the version of
+the Git that ran (`"exe":"2.56.1"`). Git older than 2.22 writes no trace2
+events at all, so a file that stays empty points at an old Git. In server
+mode, run `bd dolt stop` first so the server restarts with these variables
+set, and again once they are unset, so it stops tracing.
+
+A trace variable set to an absolute file path reaches the transport. bd
+removes the values that make git write to stderr or an inherited file
+descriptor — `1`, `true`, `2` to `9`, or a relative path — because those
+lines corrupt the git output Dolt parses, so `GIT_TRACE=1` traces nothing
+here. `GIT_SSH_COMMAND` and `SSH_AUTH_SOCK` do pass through to the
+transport, so your ssh agent and ssh config apply as usual.
 
 ### "no common ancestor" on push
 
