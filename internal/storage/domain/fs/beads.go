@@ -119,11 +119,18 @@ func (r *beadsDirFSRepositoryImpl) WriteBeadsGitignore(ctx context.Context) erro
 	return nil
 }
 
+// utf8BOM is the encoding marker an editor may write at byte zero of a UTF-8
+// file. It is not whitespace, so it would otherwise bind itself to the first
+// line and hide that line's pattern from the matcher (#6973).
+const utf8BOM = "\ufeff"
+
 // missingTemplatePatternLines returns the template's pattern lines (non-blank,
 // non-comment) that existing does not already contain as an exact trimmed line.
 func missingTemplatePatternLines(existing, template string) []string {
 	have := make(map[string]bool)
-	for _, line := range strings.Split(existing, "\n") {
+	// Only a BOM at byte zero is an encoding marker; an interior one is an
+	// ordinary character and keeps hiding its pattern.
+	for _, line := range strings.Split(strings.TrimPrefix(existing, utf8BOM), "\n") {
 		have[strings.TrimSpace(line)] = true
 	}
 	var missing []string
