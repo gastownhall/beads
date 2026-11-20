@@ -524,7 +524,13 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		// before the first of them. A behind database the shared-store check
 		// refuses (or reads through) never reaches this read.
 		schema.WithMigrationGate(func(ctx context.Context, c *sql.Conn) error {
-			if err := schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly)); err != nil {
+			// The proxied form decides identically; it only words the warning
+			// forced consent prints for the proxied front door (bd-5hl9dg).
+			gate := schema.CheckSharedStoreMigrateGate
+			if p.proxiedServerMode {
+				gate = schema.CheckProxiedSharedStoreMigrateGate
+			}
+			if err := gate(ctx, c, "", nil, dataBehindAdopter(p.readOnly)); err != nil {
 				return err
 			}
 			driftAsked = true
@@ -664,6 +670,14 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	// it is refused here as server mode's read-only open refuses it
 	// (dolt.Config.RequireReadableSchema).
 	if err := schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)); err != nil {
+		// On a proxied workspace whose database has a remote, the drift
+		// error's stock remedy (the bare `bd migrate schema`) is refused, so
+		// let it name the forced verb and the one-clone rule (bd-5hl9dg).
+		// Every decision but shared-no-remote is remote-backed.
+		var behind *schema.SchemaBehindError
+		if gateErr.Proxied && gateErr.Decision != "shared-no-remote" && errors.As(err, &behind) {
+			behind.ProxiedRemote = true
+		}
 		if isSerializationError(err) {
 			return err
 		}
