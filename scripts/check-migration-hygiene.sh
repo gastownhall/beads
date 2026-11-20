@@ -244,6 +244,20 @@ fi
 # the fresh-clone door. Data-only statements (UPDATE/INSERT/DELETE) don't
 # trigger this: clone-local data is clone-local by design.
 #
+# A clone whose MAIN cursor arrives BEHIND latest is different (#4176): the
+# pending main migrations run before the ignored pass, while the clone-local
+# tables are still absent, because dolt_ignore kept them out of the clone.
+# Every main-plane statement that reads or writes one of them, DDL and data
+# alike (a recompute's SELECT/UPDATE/DELETE fails the same way), must
+# tolerate its absence: guard new SQL on its existence (INFORMATION_SCHEMA),
+# or, for a frozen migration, register a keyed pre-migration repair that
+# creates the table first (preMigrationRepairs in
+# internal/storage/schema/migration_repairs.go, e.g. the one before 0047).
+# This check does not look for those; the Dolt-server regression test is
+# internal/storage/dolt/clone_skew_0047_wisps_test.go. Its cursor-47 clone
+# runs every main migration after 0047 without wisps or wisp_dependencies,
+# and its latest-minus-one clone runs the newest one without them.
+#
 # The table list mirrors internal/storage/schema/schema.go's
 # doltIgnorePatterns + versionGatedDoltIgnorePatterns. The engine-level
 # backstop for the same invariant is
