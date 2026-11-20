@@ -236,3 +236,80 @@ func TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus(t *testing.T) {
 		t.Fatalf("List(ExcludeStatus=reveiw) = %v, want ErrValidation", err)
 	}
 }
+
+// TestCounterInfraTypeMatchesList pins GH#6258 against a real store: for a
+// workspace-configured infra type, `bd count --type X` equals the length of
+// `bd list --type X` under every combination of --include-ephemeral and
+// --include-infra. The type is a CUSTOM infra type ("probe" in types.infra),
+// not a default one, so the case also proves the counter loads the
+// workspace's infra vocabulary when only IssueType names it; a zero
+// ListConfig would fall back to agent/role/message and miss it.
+//
+// Three probe rows: two ephemeral wisps, and a durable one — created as a
+// task and retyped, so it stays in the issues table — which naming the type
+// alone narrows away and --include-ephemeral admits. The wisps outnumber the
+// durable row so a count that read the durable plane instead of the wisps
+// tier (the pre-#6258 answer) cannot match the listing by coincidence.
+func TestCounterInfraTypeMatchesList(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "cntinf")
+	ctx := t.Context()
+
+	for key, value := range map[string]string{"types.custom": "probe", "types.infra": "probe"} {
+		if err := te.store.SetConfig(ctx, key, value); err != nil {
+			t.Fatalf("SetConfig(%s): %v", key, err)
+		}
+	}
+	const wispID, wisp2ID, durableID, taskID = "cntinf-wisp", "cntinf-wisp2", "cntinf-durable", "cntinf-task"
+	for _, seed := range []*types.Issue{
+		{ID: wispID, Title: wispID, Status: types.StatusOpen, Priority: 2, IssueType: "probe", Ephemeral: true},
+		{ID: wisp2ID, Title: wisp2ID, Status: types.StatusOpen, Priority: 2, IssueType: "probe", Ephemeral: true},
+		{ID: durableID, Title: durableID, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: taskID, Title: taskID, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := te.store.CreateIssue(ctx, seed, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", seed.ID, err)
+		}
+	}
+	if err := te.store.UpdateIssue(ctx, durableID, map[string]interface{}{"issue_type": "probe"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(%s) to probe: %v", durableID, err)
+	}
+	counter, err := te.store.Counter()
+	if err != nil {
+		t.Fatalf("Counter(): %v", err)
+	}
+	reader, err := te.store.IssueReader()
+	if err != nil {
+		t.Fatalf("IssueReader(): %v", err)
+	}
+
+	idFilter := wispID + "," + wisp2ID + "," + durableID + "," + taskID
+	for _, tt := range []struct {
+		name                    string
+		includeEphemeral, infra bool
+		want                    int64
+	}{
+		{"type", false, false, 2},
+		{"type + include-ephemeral", true, false, 3},
+		{"type + include-infra", false, true, 2},
+		{"type + include-infra + include-ephemeral", true, true, 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			count, err := counter.Count(ctx, publicops.CountRequest{
+				IDFilter: idFilter, IssueType: "probe", IncludeEphemeral: tt.includeEphemeral, IncludeInfra: tt.infra,
+			})
+			if err != nil {
+				t.Fatalf("Count: %v", err)
+			}
+			page, err := reader.List(ctx, publicops.ListRequest{
+				IDFilter: idFilter, IssueType: "probe", IncludeEphemeral: tt.includeEphemeral, IncludeInfra: tt.infra,
+			})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if got := int64(len(page.Items)); got != tt.want || count.Total != tt.want {
+				t.Errorf("Count = %d, len(List) = %d, want both %d", count.Total, got, tt.want)
+			}
+		})
+	}
+}

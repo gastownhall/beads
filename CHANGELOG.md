@@ -4196,6 +4196,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first) resolve as before. A connected HTTP workspace resolves exact ids
   only and was not affected.
 
+- **`bd count --type <infra type>` now agrees with `bd list --type <infra
+  type>`.** Naming an infra type (`agent`, `role`, `message`, or a type in
+  `types.infra`) makes `bd list` read the wisps tier, narrowed to ephemeral
+  rows. `bd count` read only the durable plane for the same filter, so it
+  answered 0 for freshly created agents that `bd list` returned. Both commands
+  now make that plane decision in one shared function, and they agree under
+  every combination of `--type`, `--include-ephemeral` and `--include-infra`,
+  embedded or proxied (#6258).
+
 - **`bd mol bond <A> <B>` ignored prefix routing** — operand resolution now uses
   the same routing fallback as `bd show`/`bd update`/`bd close`, so a bead that
   lives in a routed store (a prefix-routed rig via `routes.jsonl`, or the
