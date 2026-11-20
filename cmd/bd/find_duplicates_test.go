@@ -261,3 +261,70 @@ func TestIssueText(t *testing.T) {
 		t.Errorf("issueText() = %q, want %q", text2, "Just title")
 	}
 }
+
+func TestSummarizeDuplicates(t *testing.T) {
+	tests := []struct {
+		name          string
+		total, limit  int
+		wantShown     int
+		wantTruncated bool
+	}{
+		{
+			name:          "under the limit is not truncated",
+			total:         10,
+			limit:         50,
+			wantShown:     10,
+			wantTruncated: false,
+		},
+		{
+			name:          "exactly at the limit is not truncated",
+			total:         50,
+			limit:         50,
+			wantShown:     50,
+			wantTruncated: false,
+		},
+		{
+			name:          "over the limit is truncated (GH#7686)",
+			total:         110,
+			limit:         50,
+			wantShown:     50,
+			wantTruncated: true,
+		},
+		{
+			name:          "limit 0 means unlimited, never truncated",
+			total:         229,
+			limit:         0,
+			wantShown:     229,
+			wantTruncated: false,
+		},
+		{
+			name:          "negative limit also means unlimited",
+			total:         5,
+			limit:         -1,
+			wantShown:     5,
+			wantTruncated: false,
+		},
+		{
+			name:          "zero total is never truncated",
+			total:         0,
+			limit:         50,
+			wantShown:     0,
+			wantTruncated: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := summarizeDuplicates(tt.total, tt.limit)
+			if got.Total != tt.total {
+				t.Errorf("summarizeDuplicates(%d, %d).Total = %d, want %d", tt.total, tt.limit, got.Total, tt.total)
+			}
+			if got.Shown != tt.wantShown {
+				t.Errorf("summarizeDuplicates(%d, %d).Shown = %d, want %d", tt.total, tt.limit, got.Shown, tt.wantShown)
+			}
+			if got.Truncated != tt.wantTruncated {
+				t.Errorf("summarizeDuplicates(%d, %d).Truncated = %v, want %v", tt.total, tt.limit, got.Truncated, tt.wantTruncated)
+			}
+		})
+	}
+}

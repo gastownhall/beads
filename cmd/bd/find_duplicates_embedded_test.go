@@ -176,6 +176,55 @@ func TestEmbeddedFindDuplicates(t *testing.T) {
 		}
 	})
 
+	// ===== Truncation is reported, not hidden (GH#7686) =====
+
+	t.Run("truncated_result_reports_true_total", func(t *testing.T) {
+		m := bdFindDupsJSON(t, bd, dir, "--threshold", "0.0", "--limit", "1")
+		count, _ := m["count"].(float64)
+		if count != 1 {
+			t.Fatalf("expected count=1 with --limit 1, got %v", m["count"])
+		}
+		total, ok := m["total"].(float64)
+		if !ok {
+			t.Fatalf("expected numeric 'total' field in JSON output, got %T: %v", m["total"], m["total"])
+		}
+		if total <= count {
+			t.Errorf("expected total (%v) > capped count (%v) — the fixture must produce more pairs than the limit", total, count)
+		}
+		truncated, ok := m["truncated"].(bool)
+		if !ok || !truncated {
+			t.Errorf("expected truncated=true when total > limit, got %v (%T)", m["truncated"], m["truncated"])
+		}
+
+		out := bdFindDups(t, bd, dir, "--threshold", "0.0", "--limit", "1")
+		if !strings.Contains(out, "Showing 1 of") {
+			t.Errorf("expected human-readable output to say 'Showing 1 of ...' when truncated, got: %s", out)
+		}
+		if !strings.Contains(out, "--limit 0") {
+			t.Errorf("expected human-readable output to hint '--limit 0' when truncated, got: %s", out)
+		}
+	})
+
+	t.Run("untruncated_result_omits_showing_phrasing", func(t *testing.T) {
+		m := bdFindDupsJSON(t, bd, dir, "--threshold", "0.0", "--limit", "0")
+		count, _ := m["count"].(float64)
+		total, _ := m["total"].(float64)
+		if count != total {
+			t.Errorf("expected count == total with --limit 0 (unlimited), got count=%v total=%v", count, total)
+		}
+		if truncated, _ := m["truncated"].(bool); truncated {
+			t.Errorf("expected truncated=false with --limit 0, got true")
+		}
+
+		out := bdFindDups(t, bd, dir, "--threshold", "0.0", "--limit", "0")
+		if strings.Contains(out, "Showing") {
+			t.Errorf("expected plain 'Found N...' phrasing when not truncated, got: %s", out)
+		}
+		if !strings.Contains(out, "Found") {
+			t.Errorf("expected 'Found' in untruncated human-readable output: %s", out)
+		}
+	})
+
 	// ===== No duplicates found =====
 
 	t.Run("no_duplicates_distinct_issues", func(t *testing.T) {
