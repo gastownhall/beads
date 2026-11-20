@@ -2577,12 +2577,23 @@ paths:
 
 
         A count is DURABLE-PLANE ONLY unless `include_infra` or
-        `include_ephemeral` is set. The wisps tier — ephemeral wisps and the
-        `no_history` beads that are durable work stored in that tier — is not
-        counted by default. `include_ephemeral` admits that tier and changes
-        nothing else; `include_infra` admits it too but changes FOUR things at
-        once rather than one. See that parameter; it is the one place on this
-        operation where a single flag moves the set in more than one direction.
+        `include_ephemeral` is set, or `type` names one of this workspace's
+        infra types. The wisps tier — ephemeral wisps and the `no_history`
+        beads that are durable work stored in that tier — is not counted by
+        default. `include_ephemeral` admits that tier and takes no type
+        exclusion off; `include_infra` admits it too but changes FOUR things
+        at once rather than one. See that parameter; it is the one place on
+        this operation where a single flag moves the set in more than one
+        direction.
+
+
+        A `type` this workspace calls infra reads the wisps tier narrowed to
+        that type's ephemeral rows, with or without `include_infra`. That is
+        the plane and the narrowing `GET /v0/beads/issues?type=<infra>`
+        applies, not the rows it returns: a count keeps the closed and pinned
+        rows that listing hides. `include_ephemeral` is the one flag that
+        lifts the narrowing, and so the way to count the type's durable rows
+        too.
       parameters:
         - name: status
           in: query
@@ -2616,9 +2627,14 @@ paths:
             `GET /v0/beads/ready`'s `type`, which expands aliases.
 
 
-            It has a SECOND effect under `include_infra`: a type this workspace
-            calls infra routes the count to the ephemeral tier, unless
-            `include_ephemeral` is also set. See that parameter.
+            It has a SECOND effect: a type this workspace calls infra reads the
+            wisps tier narrowed to that type's ephemeral rows — the plane and
+            the narrowing `GET /v0/beads/issues?type=<infra>` applies, though
+            not its rows, since a count keeps the closed and pinned rows that
+            listing hides — unless `include_ephemeral` is also set, which lifts
+            the narrowing and counts the type's durable rows too. That is the
+            plane decision count and list share; it applies with or without
+            `include_infra`.
           schema:
             type: string
         - name: assignee
@@ -2794,10 +2810,12 @@ paths:
         - name: include_ephemeral
           in: query
           description: >-
-            Admit the EPHEMERAL PLANE — the wisps table — and nothing else.
-            Exactly the first of `include_infra`'s four changes, with none of
-            the other three: no type exclusion is taken off, so a row whose TYPE
-            a default count already excludes stays excluded.
+            Count BOTH PLANES in full — the wisps table as well as the durable
+            one — and take no type exclusion off, so a row whose TYPE a default
+            count already excludes stays excluded. For a count with no `type`,
+            or of a type this workspace does not call infra, that admits the
+            wisps table: exactly the first of `include_infra`'s four changes,
+            with none of the other three.
 
 
             It exists because there was no way to ask for that one thing. The
@@ -2807,9 +2825,14 @@ paths:
             the named type — one silent undercount traded for another.
 
 
-            Beside `include_infra` it also lifts the fourth change's routing of
-            an infra `type`, so that type's durable rows are counted along with
-            its ephemeral ones rather than instead of them.
+            For a `type` this workspace calls infra, which reads the wisps tier
+            narrowed to its ephemeral rows (see `type`), the flag lifts that
+            narrowing instead, with or without `include_infra`: the type's
+            durable rows (a promoted wisp, a retyped issue) are counted along
+            with its ephemeral ones rather than left out. It is the only flag
+            that lifts it — `include_infra` keeps the narrowing — so it is the
+            way to count those durable rows; sending `include_infra` beside it
+            also drops the type's template rows.
           schema:
             type: boolean
             default: false
@@ -2834,7 +2857,11 @@ paths:
             and a `type` this workspace calls infra ROUTES the count to the
             ephemeral tier instead of the durable one — unless
             `include_ephemeral` is also set, which keeps the durable tier as
-            well, as `GET /v0/beads/issues` does.
+            well, as `GET /v0/beads/issues` does. That routing is the plane
+            decision count and list share: it applies to a named infra type
+            with or without this flag, so it is listed here only because a
+            caller reading "include infra" expects the fourth change to be
+            this flag's.
 
 
             The infra vocabulary is the WORKSPACE's, read from its configuration
@@ -2845,7 +2872,9 @@ paths:
             Unset — and with `include_ephemeral` also unset — the count is
             durable-plane only and applies none of the four: the historical
             `bd count` answer, kept exactly so a scripted caller reads the same
-            number it read yesterday.
+            number it read yesterday. The one exception is a `type` this
+            workspace calls infra, which reads the wisps tier narrowed to its
+            ephemeral rows, as a listing of that type does.
           schema:
             type: boolean
             default: false
@@ -2967,6 +2996,16 @@ paths:
             bucket for rows carrying no label at all is `(no labels)`, and it is
             ABSENT rather than zero when every matching row has one; `status`
             and `type` buckets are the stored value verbatim.
+
+
+            A `type` bucket is a share of THIS request's set, NOT the count a
+            request naming that `type` returns. A request with no `type` reads
+            the durable plane by default, so the bucket of a type this
+            workspace calls infra counts that type's durable rows, while
+            `type=<infra>` counts its ephemeral rows (see `type`).
+            `include_ephemeral` is the one flag that makes the two agree, both
+            then counting both planes in full; `include_infra` admits the wisps
+            tier to the bucket and keeps the typed count's narrowing.
           schema:
             type: string
             enum: [status, priority, type, assignee, label]
