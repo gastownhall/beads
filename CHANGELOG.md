@@ -18,8 +18,8 @@ the workspace's bd proxy, as bd does. That fixes the `OpenBestAvailable` half
 of the [1.4.0-rc.2] known issue; `Open`, `OpenFromConfig` and `OpenGated`
 still go around the proxy (see **Known issues**). bd itself opens
 proxied-server workspaces as in rc.3, but on one whose database has a Dolt
-remote, the remote-migrate refusal now names commands that work there (see
-**Fixed**).
+remote, the default remote-migrate refusal now names only commands that
+work there, or where to run the rest (see **Fixed** and **Known issues**).
 
 ### Upgrade notes
 
@@ -50,8 +50,10 @@ remote, the remote-migrate refusal now names commands that work there (see
     which is one-way (see the [1.4.0-rc.1] **Upgrade notes**). If the
     database has a Dolt remote, which `bd init --proxied-server` adds by
     default when the repository has a git `origin`, `bd migrate schema`
-    refuses too: run `bd migrate schema --force` instead, on one clone of
-    that remote only. bd itself still stops such a proxy and starts its own.
+    refuses too. If that refusal is not an adopt, fork or pull-first stop,
+    run `bd migrate schema --force` instead, on one clone of that remote
+    only; otherwise follow the stop (see **Known issues**). bd itself still
+    stops such a proxy and starts its own.
   - No open creates an embedded store. An open refused with
     `ErrProxyUnavailable` also starts or stops no proxy; it may still create
     the server root directory and write the proxied sql-server config. An
@@ -86,8 +88,9 @@ remote, the remote-migrate refusal now names commands that work there (see
     exported `beads.SchemaSkewError`, `beads.RemoteMigrateGateError` and
     `beads.MigrateConsentError`. Once every client of the database is
     upgraded, run `bd migrate schema` in the workspace (if the database has
-    a Dolt remote, `bd migrate schema --force`, on one clone of that remote
-    only); the open then succeeds. A program that must migrate on open
+    a Dolt remote and that refuses without an adopt, fork or pull-first
+    stop, `bd migrate schema --force`, on one clone of that remote only);
+    the open then succeeds. A program that must migrate on open
     needs consent for both gates: `BD_ALLOW_REMOTE_MIGRATE=1` in its
     environment gives both.
     `beads.AllowSharedSchemaMigration(true)` clears only the shared-database
@@ -177,8 +180,9 @@ remote, the remote-migrate refusal now names commands that work there (see
 - **`Open`, `OpenFromConfig` and `OpenGated` still go around a
   proxied-server workspace's proxy**
   ([#8323](https://github.com/gastownhall/beads/issues/8323),
-  [#8412](https://github.com/gastownhall/beads/pull/8412)). Only
-  `OpenBestAvailable` and `OpenBestAvailableWith` changed in rc.4. On a
+  [#8412](https://github.com/gastownhall/beads/pull/8412)). Of the open
+  functions, only `OpenBestAvailable` and `OpenBestAvailableWith` changed in
+  rc.4. On a
   proxied-server workspace:
   - `Open` does not read the database name from `metadata.json`. Given the
     workspace's `.beads/dolt` while its proxy runs, it returns no error and
@@ -203,20 +207,29 @@ remote, the remote-migrate refusal now names commands that work there (see
   proxied-server mode). No dialer for the proxy's data port is exported yet
   ([#8412](https://github.com/gastownhall/beads/pull/8412)).
 
-- **On a proxied-server workspace, the adopt and fork stops still list
-  `bd bootstrap`.** When the database's Dolt remote already holds a newer
-  schema, `bd migrate schema` stops with "do NOT migrate here" and lists
-  `bd bootstrap` among the ways to adopt the remote. In proxied-server mode
-  `bd bootstrap` does not adopt: it creates a separate local database under
-  `.beads/embeddeddolt`, and the served database stays as it was. The
-  refusal's other adopt advice, a workspace with direct access to the
-  database, does not work either: no bd command adopts the remote there yet.
-  Do not migrate that clone. To adopt, run `bd dolt stop`, then
-  `dolt pull origin main` in `.beads/dolt/<database>`.
+- **On a proxied-server workspace, no bd command adopts a remote that
+  another clone has already migrated.** The default remote-migrate refusal
+  (see **Fixed**) sends the adopt to a workspace with direct access to the
+  database, but no bd command adopts there either. The adopt and fork stops,
+  and their `--json` options, still name `bd bootstrap`, which in
+  proxied-server mode creates a separate local database under
+  `.beads/embeddeddolt` and leaves the served database as it was; the adopt
+  stop also says to push first with `bd dolt push`, which is refused there.
+  bd shows those stops only when this clone's cached copy of the remote
+  already has the newer schema, and `bd dolt pull`, which refreshes that
+  copy, is refused in proxied-server mode, so the default refusal can appear
+  even after another clone has migrated and pushed: check with the other
+  clones before you migrate this one. If another clone has migrated and
+  pushed and this clone has nothing unpushed, a managed-local workspace can
+  adopt with a fast-forward: run `bd dolt stop` (pause anything that runs bd
+  in this workspace first: the next bd command restarts the proxy), then
+  `dolt pull origin main` in the database's directory under the root that
+  `bd dolt status` prints (by default `.beads/dolt/<database>`). On the fork
+  stop a pull cannot merge: do not pull or migrate that clone.
 
 The [1.4.0-rc.2] and [1.4.0-rc.1] **Known issues** still apply. The
 [1.4.0-rc.2] entry on Go programs and proxied-server workspaces is fixed for
-`OpenBestAvailable` only, and the entry above replaces it.
+`OpenBestAvailable` only, and the first entry above replaces it.
 
 ## [1.4.0-rc.3] - 2026-11-18
 
