@@ -110,7 +110,7 @@ func TestDoltNew_RequireReadableSchema(t *testing.T) {
 		}
 	})
 
-	t.Run("the escape hatch reads anyway", func(t *testing.T) {
+	t.Run("the escape hatch opens anyway", func(t *testing.T) {
 		t.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
 		if err := openWith(&Config{ReadOnly: true, RequireReadableSchema: true}); err != nil {
 			t.Fatalf("New (read-only, BD_IGNORE_SCHEMA_SKEW=1) = %v, want success", err)

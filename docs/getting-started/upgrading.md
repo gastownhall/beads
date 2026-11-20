@@ -613,9 +613,12 @@ configured, though the two cases consent differently
 Upgrade one server's clients like this:
 
 ```bash
-# 1. Upgrade bd on every client of the server. Reads keep working throughout —
-#    an upgraded client reads the old schema, it just cannot write to it
-#    (unless the server's schema is v53 or older; see below).
+# 0. With the bd you have now, back up each database:
+#    bd export --all -o backup-$(date +%Y%m%d).jsonl
+#    (once a client runs 1.4, its bd export and bd backup are refused until step 2)
+# 1. Upgrade bd on every client of the server. Until step 2 an upgraded
+#    client cannot write, and coming from bd 1.3.x or older it cannot read
+#    issues either (see below): do steps 1-3 in one sitting.
 bd version                     # on each client, confirm the new version
 
 # 2. Once, from a workspace already set up against this server: consent.
@@ -625,15 +628,20 @@ bd migrate schema              # add --global for the shared global database
 bd doctor
 ```
 
-Between steps 1 and 2, an upgraded client reads normally and its writes are
-refused with the gate's guidance. Nothing is silently promoted, so there is no
-deadline — but the window is a degraded one, so keep it short.
+Between steps 1 and 2, an upgraded client's writes are refused with the gate's
+guidance. Its reads keep working only while the old schema has every column
+the new `bd` reads. Coming from bd 1.3.x or older to 1.4, every issue read
+fails with `schema version mismatch` until step 2: 1.4 reads `arrival_seq`
+(migration 0073), which the old schema lacks, and `BD_IGNORE_SCHEMA_SKEW=1`
+does not help. Back up with the old `bd` first, since `bd export` and
+`bd backup` are refused too. Nothing is silently promoted, so there is no
+deadline, but plan steps 1-3 as one sitting.
 
-If the server's schema is v53 or older (1.1.x, or 1.2.2, the re-release of
-the 1.1 line), reads can fail too until step 2: `bd list` stops with
-`table not found: leases`
-([#6929](https://github.com/gastownhall/beads/issues/6929)). Run step 2 as
-soon as the clients are upgraded.
+That includes a server still at v53 or older (1.1.x, or 1.2.2, the
+re-release of the 1.1 line): 1.4 refuses its reads at open with the same
+`schema version mismatch` (bd 1.3 failed them later, with
+`table not found: leases`;
+[#6929](https://github.com/gastownhall/beads/issues/6929)).
 
 **If the shared server also has a Dolt remote**, step 2 is not enough. Two
 hazards now apply at once — the co-resident lockout above and the cross-clone
@@ -679,8 +687,10 @@ reached through a local proxy. Four differences worth knowing:
   then restart them. With a Dolt remote, that `--force` is also the
   designated-migrator consent described above. Because the bare command is
   refused, it is not a CI check here;
-- read commands print a warning and keep serving the current schema, rather
-  than the read simply not touching it;
+- read commands print the refusal as a warning and keep serving the current
+  schema only while it has every column this `bd` reads. Coming from bd 1.3.x
+  or older it does not, and they fail with `schema version mismatch` until
+  step 2, as in server mode;
 - `bd serve` refuses to start against a database with pending migrations,
   because a daemon has no operator to consent for it. Reconcile the schema
   first with step 2, then start the daemon — or, for an unattended service,

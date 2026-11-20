@@ -277,6 +277,14 @@ type SchemaBehindError struct {
 	// administrator's rather than `bd migrate schema`, the same line
 	// uow.checkTeamServerSchema draws for a beads-team-server schema.
 	Gateway bool
+	// ProxiedRemote marks a database a proxied-server workspace reads that
+	// syncs with a Dolt remote (bd-5hl9dg). There the bare
+	// `bd migrate schema` is refused, by the remote-migrate gate on a
+	// remote-backed database (#4259) and by the proxied front door
+	// (gastownhall/beads#6656), so the remedy names the forced verb and the
+	// one-clone rule it confirms. Set by
+	// the proxied provider, which knows both facts; the version check does not.
+	ProxiedRemote bool
 }
 
 func (e *SchemaBehindError) Error() string {
@@ -284,7 +292,11 @@ func (e *SchemaBehindError) Error() string {
 		return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; the gateway server owns this database's schema and bd never migrates it — ask the server administrator to upgrade the database, or keep using a bd release that matches schema v%d",
 			e.DBVersion, e.BinaryVersion, e.DBVersion)
 	}
-	return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to read anyway (queries touching newer schema may fail)",
+	if e.ProxiedRemote {
+		return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — this proxied-server workspace's database syncs with a Dolt remote, so the bare `bd migrate schema` refuses here: run `bd migrate schema --force` on ONE clone of that remote only, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
+			e.DBVersion, e.BinaryVersion, e.DBVersion)
+	}
+	return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
 		e.DBVersion, e.BinaryVersion, e.DBVersion)
 }
 

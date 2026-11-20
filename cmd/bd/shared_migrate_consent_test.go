@@ -107,6 +107,11 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 				t.Errorf("notice for %q must not prescribe %q (the verb does not unlock this arm):\n%s",
 					tt.decision, tt.absent, out)
 			}
+			// Coming from bd 1.3.x every issue read needs arrival_seq
+			// (0073), so no arm may promise reads keep working meanwhile.
+			if strings.Contains(out, "keep working") {
+				t.Errorf("notice for %q promises reads keep working:\n%s", tt.decision, out)
+			}
 		})
 	}
 
@@ -496,6 +501,9 @@ func TestNoticeSharedMigrateRefusalProxiedPrescribesTheForcedVerb(t *testing.T) 
 			}
 			if got := strings.Contains(out, "co-resident library clients are stopped"); got != tt.proxied {
 				t.Errorf("notice names the client-stop precondition = %t, want %t:\n%s", got, tt.proxied, out)
+			}
+			if strings.Contains(out, "keep working") {
+				t.Errorf("notice promises reads keep working:\n%s", out)
 			}
 		})
 	}

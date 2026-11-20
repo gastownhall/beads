@@ -214,7 +214,8 @@ type providerOptions struct {
 	// been served by the ordinary open. It changes exactly one thing — when
 	// the shared-store migration gate refuses, the open warns and attaches to
 	// the database at its current schema instead of failing, so reads keep
-	// working through the upgrade window. That is the same warn-and-continue
+	// working through the upgrade window while the current schema has every
+	// column this binary's reads select. That is the same warn-and-continue
 	// contract embeddeddolt gives its read-only-command intent.
 	readOnly bool
 	// workingSetReconcile opens for a command that commits the working set
@@ -524,7 +525,13 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		// before the first of them. A behind database the shared-store check
 		// refuses (or reads through) never reaches this read.
 		schema.WithMigrationGate(func(ctx context.Context, c *sql.Conn) error {
-			if err := schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly)); err != nil {
+			// The proxied form decides identically; it only words the warning
+			// forced consent prints for the proxied front door (bd-5hl9dg).
+			gate := schema.CheckSharedStoreMigrateGate
+			if p.proxiedServerMode {
+				gate = schema.CheckProxiedSharedStoreMigrateGate
+			}
+			if err := gate(ctx, c, "", nil, dataBehindAdopter(p.readOnly)); err != nil {
 				return err
 			}
 			driftAsked = true
@@ -639,8 +646,9 @@ func dataBehindAdopter(readOnly bool) *schema.FastForwardAdopter {
 // UserMessage body, and only the blunt fallback leads with the one-line
 // summary. Without the read-through, extending the gate to the proxied path
 // would newly brick every read on a workspace waiting for its operator to
-// consent — which is the opposite of the contract the gate's own message
-// promises ("read commands keep working against the current schema").
+// consent, even where this binary's reads can still query the current schema.
+// (The gate's message promises no more than that: reads that need a column
+// the pending migrations add are refused too.)
 // A read that cannot carry on, because this binary's reads cannot query the
 // current schema, still reports a stop the smart gate shaped
 // (reportsStopOnDrift) rather than only the drift.
@@ -664,6 +672,18 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	// it is refused here as server mode's read-only open refuses it
 	// (dolt.Config.RequireReadableSchema).
 	if err := schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)); err != nil {
+		// On a proxied workspace whose database has a remote, the drift
+		// error's stock remedy (the bare `bd migrate schema`) is refused, so
+		// let it name the forced verb and the one-clone rule (bd-5hl9dg).
+		// Only the plain undecided refusal gets it: shared-no-remote has no
+		// remote, and a smart-gate stop (adopt, adopt-ff, fork-skew) or the
+		// data-behind stop must keep the bare verb, which reaches the gate and
+		// prints the stop — `--force` is checked before the gate decides and
+		// would skip it.
+		var behind *schema.SchemaBehindError
+		if gateErr.Proxied && gateErr.Decision == "" && !gateErr.IsDataBehind() && errors.As(err, &behind) {
+			behind.ProxiedRemote = true
+		}
 		if isSerializationError(err) {
 			return err
 		}
@@ -709,9 +729,9 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 
 // reportsStopOnDrift reports whether a read that the drift check stops must
 // still report gateErr: a stop the smart gate shaped, by the predicate the
-// read-through warning keys on, except shared-no-remote. That body says read
-// commands keep working, which is false once the drift check has stopped
-// this one, and its remedy is the forced verb the proxied front door's
+// read-through warning keys on, except shared-no-remote. That body adds
+// nothing the drift error does not already say (such reads are refused until
+// the migration), and its remedy is the forced verb the proxied front door's
 // refusal names anyway. The blunt fallback is left out too. It is none of
 // the stops (adopt, pull first, forked schema) that the forced verb's caveat
 // sends the operator to look for, and its UserMessage body prescribes the
