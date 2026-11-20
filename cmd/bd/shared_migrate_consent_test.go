@@ -502,6 +502,9 @@ func TestNoticeSharedMigrateRefusalProxiedPrescribesTheForcedVerb(t *testing.T) 
 			if got := strings.Contains(out, "co-resident library clients are stopped"); got != tt.proxied {
 				t.Errorf("notice names the client-stop precondition = %t, want %t:\n%s", got, tt.proxied, out)
 			}
+			if strings.Contains(out, "keep working") {
+				t.Errorf("notice promises reads keep working:\n%s", out)
+			}
 		})
 	}
 }

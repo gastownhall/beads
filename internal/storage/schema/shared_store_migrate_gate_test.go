@@ -102,6 +102,11 @@ func TestSharedStoreGateNoRemote(t *testing.T) {
 		if directive := gateErr.AgentDirective(); !strings.Contains(directive, "do NOT auto-run") {
 			t.Errorf("AgentDirective must forbid auto-running the migration: %q", directive)
 		}
+		directive := gateErr.AgentDirective()
+		if strings.Contains(strings.ToLower(directive), "keep working") ||
+			!strings.Contains(directive, "do not count on reads meanwhile") {
+			t.Errorf("AgentDirective (the --json hint) must not promise that reads keep working: %q", directive)
+		}
 	})
 
 	t.Run("fresh database still migrates — creating a database is consent", func(t *testing.T) {

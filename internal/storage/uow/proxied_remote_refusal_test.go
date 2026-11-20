@@ -201,6 +201,7 @@ func TestSchemaBehindHintOnProxiedRemote(t *testing.T) {
 			"run `bd migrate schema` in that workspace",
 			// The front door refuses the env hatch on the bare verb (#6656).
 			schema.AllowRemoteMigrateEnv + "=1 " + schema.SharedConsentCommand,
+			"to read anyway",
 		} {
 			if strings.Contains(got, refused) {
 				t.Errorf("proxied remote-backed hint still names %q, which refuses there:\n%s", refused, got)
