@@ -64,3 +64,20 @@ func (c *commenter) AddComment(ctx context.Context, request publicops.AddComment
 			storageissueops.AddCommentCommitMessage(issue.ID), nil
 	})
 }
+
+func (c *commenter) DeleteComment(ctx context.Context, request publicops.DeleteCommentRequest) (publicops.DeleteCommentResult, error) {
+	if err := storageissueops.ValidateDeleteCommentRequest(request); err != nil {
+		return publicops.DeleteCommentResult{}, err
+	}
+	return RunTxResult(ctx, c.provider, func(ctx context.Context, uw UnitOfWork) (publicops.DeleteCommentResult, string, error) {
+		issue, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), request.IssueID)
+		if err != nil {
+			return publicops.DeleteCommentResult{}, "", err
+		}
+		comment, err := uw.CommentUseCase().DeleteComment(ctx, issue.ID, request.CommentID, request.Actor, isWisp)
+		if err != nil {
+			return publicops.DeleteCommentResult{}, "", err
+		}
+		return publicops.DeleteCommentResult{Comment: comment}, storageissueops.DeleteCommentCommitMessage(issue.ID, request.CommentID), nil
+	})
+}
