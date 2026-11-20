@@ -21,7 +21,7 @@ import (
 
 // THE NAME IS LOAD-BEARING for the same reason TestEmbeddedVersionedHistorySwitchRoundTrip's is:
 // .github/scripts/embedded-test-shard.sh selects the tests the embedded job runs by
-// `grep -rh '^func TestEmbedded' cmd/bd/*_test.go`, so a test that keeps this prefix runs in
+// `grep -h '^func TestEmbedded' cmd/bd/*_test.go`, so a test that keeps this prefix runs in
 // the one job that sets BEADS_TEST_EMBEDDED_DOLT=1.
 //
 // TestEmbeddedVersionedHistorySwitchRefusesUnversionableMetadata drives the REAL

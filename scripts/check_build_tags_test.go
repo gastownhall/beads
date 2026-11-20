@@ -18,10 +18,9 @@ func runCheckBuildTags(t *testing.T, files map[string]string) (string, error) {
 		t.Skip("checker is a Bash boundary")
 	}
 	requireHostTool(t, "git")
-	// The checker needs bash >= 4 (mapfile); macOS ships bash 3.2 as /bin/bash.
-	if err := exec.Command("bash", "-c", "type mapfile").Run(); err != nil {
-		skipOrFailWithoutHostTool(t, "bash lacks mapfile (bash >= 4 required)")
-	}
+	// No bash >= 4 gate: the checker must also run under macOS's /bin/bash 3.2,
+	// which is the bash //scripts/repochecks:build_tags_test gets there.
+	requireHostTool(t, "bash")
 	script, err := os.ReadFile(filepath.Join(sourceRepoRoot(t), "scripts", "check-build-tags.sh"))
 	if err != nil {
 		t.Fatalf("read check-build-tags.sh: %v", err)
