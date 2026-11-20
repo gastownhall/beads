@@ -95,23 +95,33 @@ git hook, or the Makefile contains a
   value contains `gms_pure_go`, AND
 - is not a third-party tool install (`go install X@version` / `go run X@version`).
 
-The required policy wrapper separately parses GitHub Actions YAML and checks
-the first recognizable direct first-party Go command on each logical line in
-`jobs.*.steps[*].run`. Each such command declares the literal `gms_pure_go` tag
-in its own `-tags` argument;
-sources and variables elsewhere in a workflow do not establish that source
-convention. This is deliberately not shell control-flow analysis: dynamic
-payloads, later compound-command segments, command substitutions, and
-sourced-script internals are outside the check's contract. The pinned-tool
-exception covers the repository's simple `go install path@version` and
-`go run path@version` source forms.
+The required policy wrapper separately parses only the top-level workflow YAML
+files immediately under `.github/workflows` and checks the first recognizable
+direct first-party Go command on each logical line in
+`jobs.*.steps[*].run`. It does not follow `uses:` targets or inspect composite
+actions, and it does no Bazel handling. Each command it does inspect declares
+the literal `gms_pure_go` tag in its own `-tags` argument; sources and variables
+elsewhere in a workflow do not establish that source convention. This is
+deliberately not shell control-flow analysis: dynamic payloads, later
+compound-command segments, command substitutions, and sourced-script internals
+are outside the check's contract. The pinned-tool exception covers the
+repository's simple `go install path@version` and `go run path@version` source
+forms.
+
+Workflow files still feed `scripts/check-build-tags.sh`'s separate Bazel-user
+census. That census only determines whether the committed `.bazelrc` must carry
+the `gms_pure_go` tag; it does not make workflows part of the shell guard's Go
+command scan.
 
 These source-time guards complement `scripts/verify-cgo.sh`, which checks the
 release binary at runtime.
 
-To intentionally opt a file out (e.g. because it tests the ICU path),
-add `# build-tags: allow-bare` within the first five lines of the file.
-`scripts/test-cgo.sh` and `scripts/test-icu-path.sh` are exempt by name.
+To intentionally opt a file out (e.g. because it tests the ICU path), add
+`# build-tags: allow-bare` within the first five physical lines of the file.
+For a workflow this opts its `run` steps out of the Go policy wrapper, but the
+file still participates in the separate Bazel-user census. Shell/Make files
+leave the shell guard entirely. `scripts/test-cgo.sh` and
+`scripts/test-icu-path.sh` are also exempt by name.
 
 ## Where `gms_pure_go` Is Intentionally Omitted
 
