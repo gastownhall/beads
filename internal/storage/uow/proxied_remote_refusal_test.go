@@ -120,7 +120,7 @@ func TestForcedRemoteMigrateWarning(t *testing.T) {
 // is pinned unchanged.
 func TestSchemaBehindHintOnProxiedRemote(t *testing.T) {
 	behind := schema.LatestVersion() - 1
-	stock := fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to read anyway (queries touching newer schema may fail)",
+	stock := fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
 		behind, schema.LatestVersion(), behind)
 
 	read := func(t *testing.T, gateErr *schema.RemoteMigrateGateError) string {
@@ -201,6 +201,7 @@ func TestSchemaBehindHintOnProxiedRemote(t *testing.T) {
 			"run `bd migrate schema` in that workspace",
 			// The front door refuses the env hatch on the bare verb (#6656).
 			schema.AllowRemoteMigrateEnv + "=1 " + schema.SharedConsentCommand,
+			"to read anyway",
 		} {
 			if strings.Contains(got, refused) {
 				t.Errorf("proxied remote-backed hint still names %q, which refuses there:\n%s", refused, got)

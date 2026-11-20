@@ -214,7 +214,8 @@ type providerOptions struct {
 	// been served by the ordinary open. It changes exactly one thing — when
 	// the shared-store migration gate refuses, the open warns and attaches to
 	// the database at its current schema instead of failing, so reads keep
-	// working through the upgrade window. That is the same warn-and-continue
+	// working through the upgrade window while the current schema has every
+	// column this binary's reads select. That is the same warn-and-continue
 	// contract embeddeddolt gives its read-only-command intent.
 	readOnly bool
 	// workingSetReconcile opens for a command that commits the working set
@@ -645,8 +646,9 @@ func dataBehindAdopter(readOnly bool) *schema.FastForwardAdopter {
 // UserMessage body, and only the blunt fallback leads with the one-line
 // summary. Without the read-through, extending the gate to the proxied path
 // would newly brick every read on a workspace waiting for its operator to
-// consent — which is the opposite of the contract the gate's own message
-// promises ("read commands keep working against the current schema").
+// consent, even where this binary's reads can still query the current schema.
+// (The gate's message promises no more than that: reads that need a column
+// the pending migrations add are refused too.)
 // A read that cannot carry on, because this binary's reads cannot query the
 // current schema, still reports a stop the smart gate shaped
 // (reportsStopOnDrift) rather than only the drift.
@@ -727,9 +729,9 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 
 // reportsStopOnDrift reports whether a read that the drift check stops must
 // still report gateErr: a stop the smart gate shaped, by the predicate the
-// read-through warning keys on, except shared-no-remote. That body says read
-// commands keep working, which is false once the drift check has stopped
-// this one, and its remedy is the forced verb the proxied front door's
+// read-through warning keys on, except shared-no-remote. That body adds
+// nothing the drift error does not already say (such reads are refused until
+// the migration), and its remedy is the forced verb the proxied front door's
 // refusal names anyway. The blunt fallback is left out too. It is none of
 // the stops (adopt, pull first, forked schema) that the forced verb's caveat
 // sends the operator to look for, and its UserMessage body prescribes the

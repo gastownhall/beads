@@ -437,7 +437,8 @@ func TestReadThroughRefusedMigrationWarning(t *testing.T) {
 // along with the drift, so cmd/bd prints that stop: a proxied read is where
 // the forced verb's caveat sends the operator to see it, and the drift error
 // alone names the bare verb the front door refuses. shared-no-remote, whose
-// body says reads keep working, and the blunt fallback keep the drift alone.
+// body already says such reads are refused, and the blunt fallback keep the
+// drift alone.
 func TestReadThroughRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 	behind := schema.LatestVersion() - 1
 	for _, tc := range []struct {

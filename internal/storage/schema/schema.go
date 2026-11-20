@@ -293,10 +293,10 @@ func (e *SchemaBehindError) Error() string {
 			e.DBVersion, e.BinaryVersion, e.DBVersion)
 	}
 	if e.ProxiedRemote {
-		return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — this proxied-server workspace's database syncs with a Dolt remote, so the bare `bd migrate schema` refuses here: run `bd migrate schema --force` on ONE clone of that remote only, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to read anyway (queries touching newer schema may fail)",
+		return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — this proxied-server workspace's database syncs with a Dolt remote, so the bare `bd migrate schema` refuses here: run `bd migrate schema --force` on ONE clone of that remote only, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
 			e.DBVersion, e.BinaryVersion, e.DBVersion)
 	}
-	return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to read anyway (queries touching newer schema may fail)",
+	return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
 		e.DBVersion, e.BinaryVersion, e.DBVersion)
 }
 
