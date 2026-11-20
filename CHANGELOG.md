@@ -2365,6 +2365,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `linear.state_map.blocked` to a "Blocked" state of type started). The push
   compared the issue's state the way a pull reads it back, by state type, so
   such an issue never matched the state the push had just set.
+- `bd linear sync` no longer adds another copy of a bead's acceptance
+  criteria, design and notes to its description on every pull and push
+  (#8506). A push writes those fields into the Linear description as
+  trailing `## Acceptance Criteria`, `## Design` and `## Notes` sections, and
+  a pull copied that whole text, with bd's `<!-- bd-idempotency: ... -->`
+  marker, into the bead's description, so the next push appended the
+  sections again. A pull now maps a final run of those sections back into
+  the fields and drops the marker; a heading inside a fenced code block
+  stays text. An edit to a section in Linear now reaches the bead's field,
+  and deleting the section clears it, except on a clone's first sync and
+  for a bead linked with `--external-ref` since the last sync, also when
+  the sync takes Linear's version of it: there the bead keeps the field and
+  the push adds it to Linear.
+  Linear descriptions that end in these exact headings now import into the
+  three fields too. Copies that earlier syncs added stay in the bead's
+  description: remove them, and any marker line, by hand
+  (`bd update <id> --description=-`), and the next sync pushes the cleaned
+  text.
 - `bd ado sync` no longer warns "Failed to resolve dependency" and counts
   a skipped issue for each link to a work item the pull did not import,
   such as one in another project. The dependency pass skips such a link

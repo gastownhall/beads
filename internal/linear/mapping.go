@@ -3,6 +3,7 @@ package linear
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -35,6 +36,189 @@ func BuildLinearDescription(issue *types.Issue) string {
 		description += "\n\n## Notes\n" + issue.Notes
 	}
 	return description
+}
+
+// DescriptionParts is a Linear description split back into the bead fields
+// BuildLinearDescription folds into it. It is comparable with ==.
+type DescriptionParts struct {
+	Description        string
+	AcceptanceCriteria string
+	Design             string
+	Notes              string
+}
+
+// descriptionSectionHeadings lists the headings BuildLinearDescription
+// emits, in the order it emits them; the index is the heading's rank.
+var descriptionSectionHeadings = [...]string{
+	"## Acceptance Criteria",
+	"## Design",
+	"## Notes",
+}
+
+// ParseLinearDescription inverts BuildLinearDescription (and the
+// bd-idempotency marker a create appends) for a Linear description.
+//
+// Every marker GenerateIdempotencyMarker makes that stands on a line of its
+// own, as AppendIdempotencyMarker puts it, is removed with the newline
+// before it; other text that only looks like a marker stays. Then, walking
+// up from the end, only a final run of non-empty "## Acceptance Criteria",
+// "## Design" and "## Notes" sections in that order is lifted into the
+// fields, which is exactly the shape BuildLinearDescription writes. A
+// heading inside a fenced code block (``` or ~~~) is code, not a section; a
+// fence that is never closed hides nothing, so text cut off inside a fence
+// keeps the sections a push folded after it. Any other line, including a
+// repeated, out-of-order or empty-body heading, stays in the part above it.
+// Section bodies drop the leading blank lines Linear inserts after a heading
+// and their trailing whitespace.
+//
+// When neither a marker nor a section is found, the text is returned as the
+// description unchanged.
+func ParseLinearDescription(text string) DescriptionParts {
+	stripped := idempotencyMarkerLine.ReplaceAllString(text, "")
+	markerRemoved := len(stripped) != len(text)
+	lines := strings.Split(stripped, "\n")
+	fenced := fencedLines(lines)
+
+	var fields [len(descriptionSectionHeadings)]string
+	limit := len(descriptionSectionHeadings)
+	end := len(lines) // the lines from end on belong to split sections
+	split := false
+	for i := len(lines) - 1; i >= 0 && limit > 0; i-- {
+		rank := descriptionHeadingRank(lines[i])
+		if rank < 0 || rank >= limit || fenced[i] {
+			continue
+		}
+		body := descriptionSectionBody(lines[i+1 : end])
+		if body == "" {
+			continue
+		}
+		fields[rank] = body
+		limit = rank
+		end = i
+		split = true
+	}
+
+	if !split && !markerRemoved {
+		return DescriptionParts{Description: text}
+	}
+	return DescriptionParts{
+		Description:        strings.TrimRight(strings.Join(lines[:end], "\n"), descriptionTrailingSpace),
+		AcceptanceCriteria: fields[0],
+		Design:             fields[1],
+		Notes:              fields[2],
+	}
+}
+
+const descriptionTrailingSpace = " \t\r\n"
+
+// descriptionHeadingRank returns the rank of a section heading line, or -1.
+func descriptionHeadingRank(line string) int {
+	line = strings.TrimRight(line, " \t\r")
+	for rank, heading := range descriptionSectionHeadings {
+		if line == heading {
+			return rank
+		}
+	}
+	return -1
+}
+
+// descriptionSectionBody joins a section's lines without its leading blank
+// lines and trailing whitespace; indentation is kept.
+func descriptionSectionBody(lines []string) string {
+	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+		lines = lines[1:]
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), descriptionTrailingSpace)
+}
+
+// idempotencyMarkerLine matches a marker GenerateIdempotencyMarker made (12
+// lowercase hex digits) standing on a line of its own, with the newline
+// AppendIdempotencyMarker put before it. It matches in one linear pass, and
+// never text that merely quotes the marker's prefix.
+var idempotencyMarkerLine = regexp.MustCompile(`(?m)\n?^` + regexp.QuoteMeta(idempotencyPrefix) +
+	`[0-9a-f]{12}` + regexp.QuoteMeta(idempotencySuffix) + `[ \t\r]*$`)
+
+// fencedLines reports, for each line, whether it lies in a fenced code
+// block, the fence lines included. A fence never closed hides nothing.
+func fencedLines(lines []string) []bool {
+	fenced := make([]bool, len(lines))
+	open, opener := -1, ""
+	for i, line := range lines {
+		if open < 0 {
+			if opener = openingFence(line); opener != "" {
+				open = i
+			}
+			continue
+		}
+		if closesFence(line, opener) {
+			for j := open; j <= i; j++ {
+				fenced[j] = true
+			}
+			open = -1
+		}
+	}
+	return fenced
+}
+
+// openingFence returns the fence a line opens, or "": a run of three or more
+// backticks or tildes after at most three spaces, where a backtick fence's
+// info string holds no backtick (CommonMark).
+func openingFence(line string) string {
+	run, rest := fenceRun(line)
+	if run == "" || (run[0] == '`' && strings.Contains(rest, "`")) {
+		return ""
+	}
+	return run
+}
+
+// closesFence reports whether line closes the fence opener began: a run of
+// the same character at least as long, after at most three spaces, with
+// only whitespace after it (CommonMark).
+func closesFence(line, opener string) bool {
+	run, rest := fenceRun(line)
+	return run != "" && run[0] == opener[0] && len(run) >= len(opener) && strings.TrimRight(rest, " \t\r") == ""
+}
+
+// fenceRun splits a line indented at most three spaces into its leading run
+// of three or more backticks or tildes and the text after it; it returns
+// two empty strings for any other line.
+func fenceRun(line string) (run, rest string) {
+	text := strings.TrimLeft(line, " ")
+	if len(line)-len(text) > 3 || text == "" || (text[0] != '`' && text[0] != '~') {
+		return "", ""
+	}
+	n := len(text) - len(strings.TrimLeft(text, text[:1]))
+	if n < 3 {
+		return "", ""
+	}
+	return text[:n], text[n:]
+}
+
+// DescriptionFieldsEqual reports whether a and b push the same Linear
+// description text: their descriptions, acceptance criteria, design and
+// notes, folded by BuildLinearDescription and parsed back, match up to
+// trailing whitespace. Either side may hold the sections folded into its
+// description or split into the fields.
+func DescriptionFieldsEqual(a, b *types.Issue) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return descriptionTextEqual(BuildLinearDescription(a), BuildLinearDescription(b))
+}
+
+// descriptionTextEqual reports whether two Linear description texts parse
+// to the same parts, up to trailing whitespace in each part.
+func descriptionTextEqual(x, y string) bool {
+	return canonicalDescriptionParts(x) == canonicalDescriptionParts(y)
+}
+
+func canonicalDescriptionParts(text string) DescriptionParts {
+	parts := ParseLinearDescription(text)
+	parts.Description = strings.TrimRight(parts.Description, descriptionTrailingSpace)
+	parts.AcceptanceCriteria = strings.TrimRight(parts.AcceptanceCriteria, descriptionTrailingSpace)
+	parts.Design = strings.TrimRight(parts.Design, descriptionTrailingSpace)
+	parts.Notes = strings.TrimRight(parts.Notes, descriptionTrailingSpace)
+	return parts
 }
 
 // NormalizeIssueForLinearHash returns a copy of the issue using Linear's description
@@ -621,7 +805,10 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig, l
 	if local.Title != remote.Title {
 		return false
 	}
-	if BuildLinearDescription(local) != remote.Description {
+	// Compare parsed forms: Linear stores a blank line after each heading
+	// and a create adds the idempotency marker, neither of which a push
+	// would change.
+	if !descriptionTextEqual(BuildLinearDescription(local), remote.Description) {
 		return false
 	}
 	if PriorityToLinear(local.Priority, config) != remote.Priority {
@@ -651,7 +838,9 @@ func PushFieldsEqualToBeads(local, remote *types.Issue) bool {
 	if local.Title != remote.Title {
 		return false
 	}
-	if BuildLinearDescription(local) != remote.Description {
+	// remote may carry the sections split into its fields (IssueToBeads) or
+	// folded into its description.
+	if !DescriptionFieldsEqual(local, remote) {
 		return false
 	}
 	if local.Priority != remote.Priority {
@@ -751,13 +940,19 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 		updatedAt = time.Now()
 	}
 
+	// A push folds acceptance criteria, design and notes into the
+	// description (BuildLinearDescription); split them back out.
+	parts := ParseLinearDescription(li.Description)
 	issue := &types.Issue{
-		Title:       li.Title,
-		Description: li.Description,
-		Priority:    PriorityToBeads(li.Priority, config),
-		IssueType:   LabelToIssueType(li.Labels, config),
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
+		Title:              li.Title,
+		Description:        parts.Description,
+		AcceptanceCriteria: parts.AcceptanceCriteria,
+		Design:             parts.Design,
+		Notes:              parts.Notes,
+		Priority:           PriorityToBeads(li.Priority, config),
+		IssueType:          LabelToIssueType(li.Labels, config),
+		CreatedAt:          createdAt,
+		UpdatedAt:          updatedAt,
 	}
 
 	// Map state using configurable mapping
@@ -855,8 +1050,13 @@ func BuildLinearToLocalUpdates(li *Issue, config *MappingConfig) map[string]inte
 	// Update title
 	updates["title"] = li.Title
 
-	// Update description
-	updates["description"] = li.Description
+	// Update description, splitting out the sections a push folded into it
+	// (BuildLinearDescription) and dropping bd's idempotency marker.
+	parts := ParseLinearDescription(li.Description)
+	updates["description"] = parts.Description
+	updates["acceptance_criteria"] = parts.AcceptanceCriteria
+	updates["design"] = parts.Design
+	updates["notes"] = parts.Notes
 
 	// Update priority using configured mapping
 	updates["priority"] = PriorityToBeads(li.Priority, config)
