@@ -56,6 +56,12 @@ type ContextInfo struct {
 	SyncRemote   string
 	Role         string
 	BdVersion    string
+	// RoleErr is a beads.role read git failed (a malformed or unreadable config
+	// file). Role is then empty and the rest of the snapshot stands: a role is
+	// one optional fact about the workspace, not a reason to refuse the rest.
+	// Surfaces report it on their own diagnostic channel; it is never
+	// published, and the tag keeps it out of accidental marshaling.
+	RoleErr error `json:"-"`
 }
 
 // PublishedContextFields is the workspace identity every context surface
@@ -163,10 +169,7 @@ func (u *contextUseCaseImpl) GetContextInfo(ctx context.Context) (ContextInfo, e
 		return ContextInfo{}, err
 	}
 
-	role, hasRole, err := u.repo.Role(ctx)
-	if err != nil {
-		return ContextInfo{}, err
-	}
+	role, hasRole, roleErr := u.repo.Role(ctx)
 
 	backend, err := u.repo.BackendConfig(ctx)
 	if err != nil {
@@ -182,10 +185,11 @@ func (u *contextUseCaseImpl) GetContextInfo(ctx context.Context) (ContextInfo, e
 		ProjectID:    backend.ProjectID,
 		DataDir:      backend.DataDir,
 		BdVersion:    u.version,
+		RoleErr:      roleErr,
 	}
 	info.SetBackendIdentity(backend.Backend, backend.DoltMode, backend.Database)
 
-	if hasRole {
+	if roleErr == nil && hasRole {
 		info.Role = role
 	}
 

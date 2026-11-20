@@ -95,9 +95,11 @@ Examples:
 		snapshot.IsRedirected = rc.IsRedirected
 		snapshot.IsWorktree = rc.IsWorktree
 
-		if role, ok := rc.Role(); ok {
+		role, ok, roleErr := rc.Role()
+		if roleErr == nil && ok {
 			snapshot.Role = string(role)
 		}
+		snapshot.RoleErr = roleErr
 
 		cfg, err := configfile.LoadForDiscovery(rc.BeadsDir)
 		if err != nil {
@@ -113,6 +115,7 @@ Examples:
 
 		snapshot.SyncRemote = resolveSyncRemoteFromDir(rc.BeadsDir)
 
+		warnContextRoleReadFailure(snapshot.RoleErr)
 		info := contextInfoView(snapshot)
 		if jsonOutput {
 			return outputJSON(info)

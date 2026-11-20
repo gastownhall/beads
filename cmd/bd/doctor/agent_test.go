@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -35,6 +37,29 @@ func TestEnrichFreshClone_WithSyncRemoteMentionsBootstrapAndFallback(t *testing.
 	}
 	if !strings.Contains(enrichment.commands[1], "sync.remote") {
 		t.Fatalf("expected sync.remote fallback command, got %#v", enrichment.commands)
+	}
+}
+
+// TestEnrichBeadsRoleReadFailureInspectsConfig pins the agent remediation for
+// a beads.role read failure (bd-a2qnf4): agents run these commands unattended,
+// so it must inspect the config files rather than write a role over a read git
+// could not complete, and say which route bd takes meanwhile. An unset role
+// keeps its role-write remediation.
+func TestEnrichBeadsRoleReadFailureInspectsConfig(t *testing.T) {
+	failed := enrichForAgent(checkBeadsRoleReadFailed(errors.New("exit status 128: fatal: bad config line 7 in file .git/config")))
+	if !reflect.DeepEqual(failed.Commands, []string{"git config --list --show-origin"}) {
+		t.Errorf("read failure commands = %q, want only the config inspection", failed.Commands)
+	}
+	if !strings.Contains(failed.Explanation, "routing.default") || strings.Contains(failed.Explanation, "URL heuristic") {
+		t.Errorf("read failure explanation does not describe the default-route fallback: %s", failed.Explanation)
+	}
+	if !strings.Contains(failed.Observed, "bad config line 7") {
+		t.Errorf("read failure observed %q lost git's diagnostic", failed.Observed)
+	}
+
+	unset := enrichForAgent(DoctorCheck{Name: "Role Configuration", Status: StatusWarning, Message: "beads.role not configured"})
+	if !reflect.DeepEqual(unset.Commands, []string{"bd config set beads.role maintainer"}) {
+		t.Errorf("unset role commands = %q, want the role write", unset.Commands)
 	}
 }
 

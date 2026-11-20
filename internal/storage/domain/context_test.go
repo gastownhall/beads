@@ -2,7 +2,9 @@ package domain
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -250,6 +252,40 @@ func TestContextUseCase_RoleUnset(t *testing.T) {
 	}
 }
 
+// TestContextUseCase_RoleReadFailureKeepsSnapshot pins bd-a2qnf4 (GH#6765):
+// a failed role read is recorded on the snapshot, which omits the role and
+// keeps every other field.
+func TestContextUseCase_RoleReadFailureKeepsSnapshot(t *testing.T) {
+	readErr := errors.New("read beads.role: exit status 128: fatal: bad config line 7")
+	repo := &fakeContextRepo{
+		paths:   RepoPaths{BeadsDir: "/repo/.beads", RepoRoot: "/repo"},
+		role:    "maintainer",
+		roleOK:  true,
+		roleErr: readErr,
+		backend: BackendConfig{Backend: "dolt", ProjectID: "proj"},
+	}
+
+	info, err := NewContextUseCase(repo, "v0").GetContextInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetContextInfo = %v, want a usable snapshot", err)
+	}
+	if !errors.Is(info.RoleErr, readErr) || info.Role != "" {
+		t.Errorf("RoleErr = %v, Role = %q; want the read error and no role", info.RoleErr, info.Role)
+	}
+	if info.BeadsDir != "/repo/.beads" || info.ProjectID != "proj" || info.BdVersion != "v0" {
+		t.Errorf("snapshot lost fields: %+v", info)
+	}
+
+	// The diagnostic is local: marshaling the snapshot never carries it.
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("json.Marshal(ContextInfo) = %v", err)
+	}
+	if strings.Contains(string(data), "RoleErr") || strings.Contains(string(data), "bad config") {
+		t.Errorf("marshaled ContextInfo carries the role read error: %s", data)
+	}
+}
+
 func TestContextUseCase_RoleNotEmittedWhenNotDetermined(t *testing.T) {
 	repo := &fakeContextRepo{role: "contributor", roleOK: false}
 
@@ -267,7 +303,6 @@ func TestContextUseCase_ErrorPropagation(t *testing.T) {
 
 	cases := map[string]*fakeContextRepo{
 		"repo_context": {pathsErr: sentinel},
-		"role":         {roleErr: sentinel},
 		"backend":      {backendErr: sentinel},
 		"server_port":  {backend: BackendConfig{IsServerMode: true}, portErr: sentinel},
 		"proxied_root": {backend: BackendConfig{IsProxiedServerMode: true}, proxiedErr: sentinel},

@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
+	storagegit "github.com/steveyegge/beads/internal/storage/git"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -628,13 +629,14 @@ var configGetCmd = &cobra.Command{
 		}
 
 		if key == "beads.role" {
-			// Same role-authority boundary as `bd config set` above.
-			cmd := exec.Command("git", "config", "--get", "beads.role")
-			cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
-			output, err := cmd.Output()
-			value := strings.TrimSpace(string(output))
+			// Same role-authority boundary as `bd config set` above: the domain
+			// adapter reads beads.role with routing and config suppression
+			// scrubbed, from the working directory. An unset key answers "not
+			// set"; a read git fails (a malformed or unreadable config file) is
+			// an error, never a "not set" answer.
+			value, _, err := storagegit.NewGitProvider("").GitUseCase().BeadsRole(getRootContext())
 			if err != nil {
-				value = ""
+				return HandleError("reading beads.role from git config: %v", err)
 			}
 			if jsonOutput {
 				return outputJSON(map[string]interface{}{
