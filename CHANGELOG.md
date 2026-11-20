@@ -7,17 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.0-rc.4] - 2026-11-19
+## [1.4.0-rc.4] - 2026-11-20
 
 Fourth release candidate for 1.4.0. It adds no schema migration, so upgrading
 from 1.4.0-rc.1, rc.2 or rc.3 is a binary swap. Coming from 1.3.x, the
 consented migration and the [1.4.0-rc.3], [1.4.0-rc.2] and [1.4.0-rc.1]
-**Upgrade notes** still apply. rc.4 makes one change, for Go programs that
-link beads: `beads.OpenBestAvailable` opens a proxied-server workspace through
+**Upgrade notes** still apply. rc.4 makes two changes. For Go programs that
+link beads, `beads.OpenBestAvailable` opens a proxied-server workspace through
 the workspace's bd proxy, as bd does. That fixes the `OpenBestAvailable` half
 of the [1.4.0-rc.2] known issue; `Open`, `OpenFromConfig` and `OpenGated`
 still go around the proxy (see **Known issues**). bd itself opens
-proxied-server workspaces as in rc.3.
+proxied-server workspaces as in rc.3, but on one whose database has a Dolt
+remote, the remote-migrate refusal now names commands that work there (see
+**Fixed**).
 
 ### Upgrade notes
 
@@ -158,7 +160,9 @@ proxied-server workspaces as in rc.3.
   only with the proxy's library clients stopped, and sends the push and any
   adopt to a workspace with direct access to the database. The
   schema-mismatch error a read reports on such a workspace names the same
-  forced verb instead of the bare `bd migrate schema`, which refuses there.
+  forced verb instead of the bare `bd migrate schema`, which refuses there
+  (an adopt, fork or pull-first stop keeps the bare verb, which shows that
+  stop).
   The warning a forced migration prints there no longer says "then `bd dolt
   push`", and names `bd migrate schema --force` as the consent instead of
   `bd migrate --force`. The `--json` refusal says the same: its
@@ -198,6 +202,17 @@ proxied-server workspaces as in rc.3.
   server (the error's `bd dolt start` hint does not apply: bd refuses it in
   proxied-server mode). No dialer for the proxy's data port is exported yet
   ([#8412](https://github.com/gastownhall/beads/pull/8412)).
+
+- **On a proxied-server workspace, the adopt and fork stops still list
+  `bd bootstrap`.** When the database's Dolt remote already holds a newer
+  schema, `bd migrate schema` stops with "do NOT migrate here" and lists
+  `bd bootstrap` among the ways to adopt the remote. In proxied-server mode
+  `bd bootstrap` does not adopt: it creates a separate local database under
+  `.beads/embeddeddolt`, and the served database stays as it was. The
+  refusal's other adopt advice, a workspace with direct access to the
+  database, does not work either: no bd command adopts the remote there yet.
+  Do not migrate that clone. To adopt, run `bd dolt stop`, then
+  `dolt pull origin main` in `.beads/dolt/<database>`.
 
 The [1.4.0-rc.2] and [1.4.0-rc.1] **Known issues** still apply. The
 [1.4.0-rc.2] entry on Go programs and proxied-server workspaces is fixed for
