@@ -199,6 +199,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recoverable with `CALL DOLT_UNDROP('<name>')` until the server's dropped
   databases are purged.
   ([#6099](https://github.com/gastownhall/beads/issues/6099))
+
+- **`bd supersede <old> --with <new> --ack` makes dependents acknowledge a
+  superseded issue.** Besides superseding `<old>`, it creates an
+  acknowledgement task that blocks every open issue with an edge of any type
+  to `<old>` (closed and pinned dependents and the replacement are skipped),
+  in one transaction. Those dependents leave `bd ready`, and `bd close`
+  refuses them without `--force`, until the acknowledgement is closed.
+  `--json` adds `acknowledgement` (its ID) and `blocked` (the issues it
+  blocks); when nothing open depends on `<old>`, no acknowledgement is
+  created and the output has `"blocked": []` and no `acknowledgement` key.
+  Without `--ack`, `bd supersede` is unchanged. (#8501)
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

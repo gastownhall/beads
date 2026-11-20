@@ -7040,8 +7040,15 @@ bd supersede
     | The superseded issue is automatically closed with a reference to the replacement.
     | Useful for design docs, specs, and evolving artifacts.
     |
+    | With --ack, the command also creates an acknowledgement issue that blocks
+    | every open issue depending on the superseded issue through an edge of any
+    | type. Those dependents leave bd ready, and bd close refuses them, until the
+    | acknowledgement issue is closed. All of it is written in one transaction.
+    |
     | Examples:
-    |   bd supersede bd-old --with bd-new    # Mark bd-old as superseded by bd-new
+    |   bd supersede bd-old --with bd-new          # Mark bd-old as superseded by bd-new
+    |   bd supersede bd-old --with bd-new --ack    # Also block bd-old's open dependents until acknowledged
+  flag --ack type=bool default="false" usage="Block the superseded issue's open dependents until a new acknowledgement issue is closed"
   flag --with type=string default="" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="Replacement issue ID (required)"
 
 bd swarm
