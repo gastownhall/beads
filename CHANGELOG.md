@@ -175,6 +175,22 @@ work there, or where to run the rest (see **Fixed** and **Known issues**).
   bootstrap`. What is refused, and the consent it takes, are unchanged;
   server and embedded mode print, and emit as JSON, what they did before.
 
+- **Refusals before a schema migration no longer promise that reads keep
+  working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
+  from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so until
+  the schema is migrated an upgraded client on a shared or external Dolt server,
+  or in a proxied-server workspace, can neither read nor write issues;
+  `bd export` and `bd backup` are refused too. The shared-server refusal and its
+  `--json` hint said read commands keep working meanwhile, and so did the
+  `bd upgraded to …: N schema migration(s) pending` notice that a server
+  workspace whose data is in `.beads/dolt` prints on the first command after the
+  upgrade. The refusal and the hint now say writes are refused and so are reads
+  that need a column the pending migrations add; the notice says reads may be
+  refused too; and the `BD_IGNORE_SCHEMA_SKEW=1` hint no longer says it lets you
+  read anyway. The upgrading guide says to back up with the old bd, then upgrade
+  every client and migrate in one sitting. Reported from a Gas City upgrade
+  drill.
+
 ### Known issues
 
 - **`Open`, `OpenFromConfig` and `OpenGated` still go around a

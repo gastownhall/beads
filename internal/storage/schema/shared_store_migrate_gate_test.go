@@ -69,12 +69,17 @@ func TestSharedStoreGateNoRemote(t *testing.T) {
 		for _, want := range []string{
 			"lock out every co-resident bd client",
 			"bd migrate schema",
-			"Read commands keep working",
+			"so are reads that\n  need a column the pending migrations add",
 			AllowRemoteMigrateEnv + "=1",
 		} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("UserMessage missing %q:\n%s", want, msg)
 			}
+		}
+		// Coming from bd 1.3.x every issue read needs arrival_seq (0073), so
+		// the refusal must not promise that reads keep working meanwhile.
+		if strings.Contains(strings.ToLower(msg), "keep working") {
+			t.Errorf("UserMessage promises reads keep working:\n%s", msg)
 		}
 		// The #4259 remedies do not apply with no remote: there is one copy of
 		// the database, so there is nothing to adopt and nothing to push.
@@ -96,6 +101,11 @@ func TestSharedStoreGateNoRemote(t *testing.T) {
 		}
 		if directive := gateErr.AgentDirective(); !strings.Contains(directive, "do NOT auto-run") {
 			t.Errorf("AgentDirective must forbid auto-running the migration: %q", directive)
+		}
+		directive := gateErr.AgentDirective()
+		if strings.Contains(strings.ToLower(directive), "keep working") ||
+			!strings.Contains(directive, "do not count on reads meanwhile") {
+			t.Errorf("AgentDirective (the --json hint) must not promise that reads keep working: %q", directive)
 		}
 	})
 
