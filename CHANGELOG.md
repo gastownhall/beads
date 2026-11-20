@@ -12,14 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Fourth release candidate for 1.4.0. It adds no schema migration, so upgrading
 from 1.4.0-rc.1, rc.2 or rc.3 is a binary swap. Coming from 1.3.x, the
 consented migration and the [1.4.0-rc.3], [1.4.0-rc.2] and [1.4.0-rc.1]
-**Upgrade notes** still apply. rc.4 makes two changes. For Go programs that
-link beads, `beads.OpenBestAvailable` opens a proxied-server workspace through
-the workspace's bd proxy, as bd does. That fixes the `OpenBestAvailable` half
-of the [1.4.0-rc.2] known issue; `Open`, `OpenFromConfig` and `OpenGated`
-still go around the proxy (see **Known issues**). bd itself opens
-proxied-server workspaces as in rc.3, but on one whose database has a Dolt
-remote, the default remote-migrate refusal now names only commands that
-work there, or where to run the rest (see **Fixed** and **Known issues**).
+**Upgrade notes** still apply, with the corrections under **Known issues**.
+rc.4 makes three changes. For Go programs that link beads,
+`beads.OpenBestAvailable` opens a proxied-server workspace through the
+workspace's bd proxy, as bd does. That fixes the `OpenBestAvailable` half of
+the [1.4.0-rc.2] known issue; `Open`, `OpenFromConfig` and `OpenGated` still
+go around the proxy (see **Known issues**). bd itself opens proxied-server
+workspaces as in rc.3, but on one whose database has a Dolt remote, the
+default remote-migrate refusal now names only commands that work there, or
+where to run the rest (see **Fixed** and **Known issues**). And the refusals
+a 1.3.x upgrade meets before `bd migrate schema`, and the pending-migration
+notice some server workspaces print, no longer promise that reads keep
+working: coming from 1.3.x they do not.
 
 ### Upgrade notes
 
@@ -243,9 +247,77 @@ work there, or where to run the rest (see **Fixed** and **Known issues**).
   `bd dolt status` prints (by default `.beads/dolt/<database>`). On the fork
   stop a pull cannot merge: do not pull or migrate that clone.
 
-The [1.4.0-rc.2] and [1.4.0-rc.1] **Known issues** still apply. The
-[1.4.0-rc.2] entry on Go programs and proxied-server workspaces is fixed for
-`OpenBestAvailable` only, and the first entry above replaces it.
+- **bd's upgrade reporting misses the upgrade from 1.3.x.** The first bd
+  command after installing that opens the workspace uses up bd's one-time
+  upgrade signal even when bd refuses it, and until the schema is migrated
+  bd refuses every command that opens the store. So `bd ready` prints no
+  upgrade notice, `bd upgrade status` reports `upgraded: false`, and
+  `bd upgrade review` prints `No previous version recorded`; at most, a
+  server workspace whose data is in `.beads/dolt` prints a
+  `bd upgraded to …: N schema migration(s) pending` notice on that first
+  command. Read these notes, or run `bd info --whats-new` after
+  `bd migrate schema` (bd refuses it before).
+- **A proxy data port closes other clients without a word.** Since 1.4.0-rc.1
+  only bd can use a proxied-server workspace's proxy data port. A plain MySQL
+  client, or a gc release that reads a proxied rig directly, is closed after 5
+  seconds with nothing sent (`ERROR 2013 (HY000): Lost connection to server at
+  'handshake: reading initial communication packet'`), and `proxy.log` records
+  it only if the proxy was started with `BD_DEBUG=1`. Run SQL with `bd sql`.
+
+**Corrections to earlier notes** (found in a 1.3.4 → rc.4 upgrade drill):
+
+- **Reads before the migration** ([1.4.0-rc.1] **Upgrade notes** and
+  **Changed**, consent entry). "(in embedded mode, reads included)" and "(in
+  embedded mode that includes reads)" should read: reads included: in
+  embedded mode the consent refusal stops them, and elsewhere every 1.2.x or
+  1.3.x store is refused with the schema-behind error. "Server-mode read
+  commands open without running migrations, so they keep reading at the
+  current schema" holds only while that schema has every column this bd
+  reads; a 1.2.x or 1.3.x store lacks `arrival_seq` (migration 0073), so
+  reads refuse until the migration. Upgrade every client and run
+  `bd migrate schema` in one sitting; this also amends the rc.1 **Shared and
+  gateway servers** note.
+- **The stale version marker after migrating**
+  ([#7283](https://github.com/gastownhall/beads/issues/7283); [1.4.0-rc.1]
+  **Upgrade notes** and **Known issues**). Proxied-server mode is not exempt:
+  the run of `bd migrate schema` that migrates can leave the recorded bd
+  version at the release you upgraded from in every mode. Any bd command run
+  first after the upgrade, even a refused one, uses up the one-time upgrade
+  signal, and in embedded and server mode the migrating run prints `Schema
+  already at v74`. The schema is migrated.
+  - Server mode: `bd doctor` and `bd doctor --check-health` report a version
+    mismatch (always in shared-server mode and on an external server whose
+    data is not in `.beads/dolt`; otherwise when another bd command ran
+    first). Run `bd migrate` (no subcommand), or `bd doctor --fix --yes`,
+    once per database.
+  - Embedded mode: it always stays stale, even when `bd migrate schema` runs
+    first, and nothing reports it; `bd migrate` (no subcommand) records the
+    new version.
+  - Proxied-server mode: it is recorded only when `bd migrate schema` is the
+    first bd command after the upgrade that opens the workspace (`bd version`,
+    `bd prime` and the refused `bd doctor` do not count). `bd migrate` and
+    `bd doctor` are refused there and nothing acts on the marker; the next
+    bd upgrade records it if the first command after that upgrade opens the
+    workspace without being refused. To record it now, write the version you
+    upgraded from (for example `1.3.4`) into `.beads/.local_version` and run
+    a bd command that opens the workspace, such as `bd ready`.
+- **Moving from a candidate to its release** ([1.4.0-rc.3] intro,
+  **Upgrade notes** and **Fixed**). The first bd command after the move
+  sees it even if bd refuses that command, and `bd ready` prints the
+  one-time notice, as does `bd list --flat` outside proxied-server mode; the
+  default `bd list` does not. If that first command opens the workspace, it
+  records the release over the candidate in the version marker in
+  proxied-server mode and on a Dolt server whose data is in `.beads/dolt`
+  (bd's own server, or an external one run over it). In shared-server mode
+  and on any other external server nothing records it: `bd doctor` shows
+  `Database: version 1.4.0-rc.N (CLI: 1.4.0)` and
+  `bd doctor --check-health` reports a version mismatch until you run
+  `bd migrate` (no subcommand) once per database. Embedded workspaces keep
+  the version they recorded, as on any upgrade.
+
+The [1.4.0-rc.2] and [1.4.0-rc.1] **Known issues** still apply, as corrected
+above. The [1.4.0-rc.2] entry on Go programs and proxied-server workspaces is
+fixed for `OpenBestAvailable` only, and the first entry above replaces it.
 
 ## [1.4.0-rc.3] - 2026-11-18
 
