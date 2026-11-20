@@ -1755,6 +1755,14 @@ func ClassifyError(err error) Result {
 // codes that carry identical static detail, so a miss costs a less useful
 // `code`, never a disclosure.
 func isUnavailable(err error) bool {
+	// A connection whose workspace proxy lookup failed reached no database at
+	// all: the proxy idled out and could not be brought back, or was stopped
+	// (gastownhall/beads#7295). It is checked before the deadline exclusion
+	// below because nothing in a failed lookup is this request's deadline: the
+	// resolver returns the caller's own cancellation and deadline unmarked.
+	if uow.IsEndpointUnavailable(err) {
+		return true
+	}
 	// context.DeadlineExceeded satisfies net.Error, so it must be excluded
 	// before the net.Error test below: a tripped per-request deadline is a
 	// generic 500, not a claim that the database is unreachable.

@@ -18,11 +18,19 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
 // dsn is the shape a driver or dial error takes in the wild: it names the
 // database user, host and port. No 5xx body may echo any of it.
 const dsn = "dial tcp 127.0.0.1:3306: connect: connection refused (bd_user@tcp(127.0.0.1:3306)/beads)"
+
+// proxyLookupFailed is a failed workspace proxy lookup as a unit of work
+// reports it: the resolver's ErrEndpointUnavailable over the lookup's cause,
+// under BeginTx's own wrap.
+func proxyLookupFailed(cause error) error {
+	return fmt.Errorf("uow: pin connection: %w", fmt.Errorf("%w: %w", uow.ErrEndpointUnavailable, cause))
+}
 
 func TestProblemMapping(t *testing.T) {
 	tests := []struct {
@@ -113,6 +121,27 @@ func TestProblemMapping(t *testing.T) {
 		{
 			name:       "invalid connection",
 			err:        fmt.Errorf("query %s: %w", dsn, mysql.ErrInvalidConn),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   CodeDBUnavailable,
+			retryAfter: retryAfterContention,
+		},
+		{
+			// The workspace proxy idled out and the lookup that would bring it
+			// back failed, here a cold start that overran the proxy's start
+			// deadline: the same retryable unreachability
+			// (gastownhall/beads#7295).
+			name:       "proxy lookup failed",
+			err:        proxyLookupFailed(errors.New("timeout waiting for proxy to become ready on its OS-assigned port")),
+			wantStatus: http.StatusServiceUnavailable,
+			wantCode:   CodeDBUnavailable,
+			retryAfter: retryAfterContention,
+		},
+		{
+			// A deadline inside a failed lookup's cause is the lookup's own,
+			// never this request's, which the resolver returns unmarked: the
+			// request-deadline exclusion must not turn it into a 500.
+			name:       "proxy lookup failed on a deadline of its own",
+			err:        proxyLookupFailed(&net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}),
 			wantStatus: http.StatusServiceUnavailable,
 			wantCode:   CodeDBUnavailable,
 			retryAfter: retryAfterContention,

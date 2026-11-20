@@ -350,9 +350,11 @@ func openResolverPool(t *testing.T, r *proxyEndpointResolver, d *recordingDialer
 }
 
 // TestProxyEndpointResolverErrors pins that a failed discovery fails the new
-// connection with the discovery error, wrapped so callers can still match it,
-// and never as driver.ErrBadConn or by dialing the construction address; a
-// later discovery that succeeds lets a connection through again.
+// connection with the discovery error, wrapped so callers can still match it
+// and marked ErrEndpointUnavailable, and never as driver.ErrBadConn or by
+// dialing the construction address; a later discovery that succeeds lets a
+// connection through again, and that connection's own dial failure is not
+// marked.
 func TestProxyEndpointResolverErrors(t *testing.T) {
 	mismatch := &proxy.ErrUpstreamMismatch{RootDir: "/workspace", Want: "upstream-a", Have: "upstream-b"}
 	results := []error{mismatch, fmt.Errorf("authenticate proxy: %w", proxy.ErrUnverifiableProcess), nil}
@@ -376,16 +378,20 @@ func TestProxyEndpointResolverErrors(t *testing.T) {
 	require.ErrorAs(t, err, &got)
 	assert.Same(t, mismatch, got)
 	assert.True(t, proxy.IsUpstreamMismatch(err))
+	assert.ErrorIs(t, err, ErrEndpointUnavailable)
+	assert.True(t, IsEndpointUnavailable(err))
 	assert.NotErrorIs(t, err, driver.ErrBadConn)
 
 	_, err = db.Conn(ctx)
 	require.ErrorIs(t, err, proxy.ErrUnverifiableProcess)
 	assert.True(t, strings.HasPrefix(err.Error(), "uow: rediscover proxy endpoint: "), "got %q", err)
+	assert.True(t, IsEndpointUnavailable(err))
 	assert.NotErrorIs(t, err, driver.ErrBadConn)
 	assert.Empty(t, d.dialed(), "a failed discovery must not fall back to the construction address")
 
 	_, err = db.Conn(ctx)
 	require.ErrorIs(t, err, errDialRecorded)
+	assert.False(t, IsEndpointUnavailable(err), "a dial after a successful discovery is not a failed lookup")
 	dialed := d.dialed()
 	require.Len(t, dialed, 1)
 	assert.Equal(t, "127.0.0.1:4321", dialed[0].addr)
@@ -429,6 +435,7 @@ func TestProxyEndpointResolverDiscoveryBudget(t *testing.T) {
 		start := time.Now()
 		_, err := db.Conn(ctx)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.False(t, IsEndpointUnavailable(err), "the caller's own deadline is not a failed lookup")
 		assert.Less(t, time.Since(start), 5*time.Second)
 		assert.Empty(t, d.dialed())
 	})
@@ -488,6 +495,7 @@ func TestProxyEndpointResolverErrorsShareFailedFlight(t *testing.T) {
 		err := receiveWithin(t, results, 10*time.Second, "a connection")
 		require.ErrorIs(t, err, refused, "connection %d", i)
 		assert.True(t, strings.HasPrefix(err.Error(), "uow: rediscover proxy endpoint: "), "connection %d: got %q", i, err)
+		assert.True(t, IsEndpointUnavailable(err), "connection %d", i)
 		assert.NotErrorIs(t, err, driver.ErrBadConn, "connection %d", i)
 	}
 	assert.Equal(t, int64(1), calls.Load(), "overlapping connections must share one failed discovery")
@@ -540,6 +548,7 @@ func TestProxyEndpointResolverClose(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:4000", cfg.Addr)
 	_, err := other.Conn(ctx)
 	require.ErrorIs(t, err, errProviderClosed)
+	assert.False(t, IsEndpointUnavailable(err), "a closed provider is not a failed lookup")
 	assert.Equal(t, int64(1), b.calls.Load(), "no discovery may start after Close")
 	assert.Empty(t, d.dialed(), "nothing may be dialed after Close")
 	require.NoError(t, p.Close(ctx), "Close is idempotent")
