@@ -473,7 +473,18 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 // connection and fans out to the team-server, preview, or migrating open path.
 // Each path returns a bare error for a serialization retry and backoff.Permanent
 // for a terminal failure.
-func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string, preparer *bootstrapPreparer) error {
+//
+// A failed attempt discards its pinned session instead of returning it to the
+// pool (gastownhall/beads#6504). The failure may have left that session
+// mid-script — a migration that died between `SET FOREIGN_KEY_CHECKS = 0` and
+// its paired restore — or pinned to its pre-statement catalog snapshot by the
+// failing statement (be-bv7x). The retry runs on this same pool, and on success
+// openAndInitSchema hands the pool to live queries, so neither may reuse it.
+// database/sql drops a driver connection only when it reports
+// driver.ErrBadConn, so the attempt reports exactly that through conn.Raw.
+// A successful attempt keeps its session: initialization must not force a
+// fresh connection on every open.
+func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string, preparer *bootstrapPreparer) (err error) {
 	conn, err := p.db.Conn(ctx)
 	if err != nil {
 		if isSerializationError(err) {
@@ -481,7 +492,15 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		}
 		return backoff.Permanent(fmt.Errorf("uow: pin connection: %w", err))
 	}
-	defer conn.Close()
+	defer func() {
+		if err != nil {
+			// The cleanup results are ignored: the attempt's verdict is err,
+			// and a session the lock release already discarded answers
+			// sql.ErrConnDone here, which changes nothing.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
 
 	if p.teamServer {
 		return p.verifyTeamServerSchema(ctx, conn, database)
@@ -1306,7 +1325,7 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 	// `SET FOREIGN_KEY_CHECKS = 0` and restore `= 1` (0041, 0043, 0047,
 	// 0050, 0053, 0058 under internal/storage/schema/migrations), and the
 	// guarded ones leave user variables (`SET @sql`, `SET @needs_add`) set.
-	// It is safe because of three narrower facts:
+	// It is safe because of four narrower facts:
 	//   - initSchemaAttempt pins ONE session per attempt (p.db.Conn), so a
 	//     script's SET and its restoring SET cannot land on different
 	//     sessions;
@@ -1314,15 +1333,18 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 	//     can report success, and a leftover user variable is inert: nothing
 	//     outside these scripts reads one, and each script assigns before it
 	//     reads;
-	//   - every initSchema failure below closes this whole pool, so a script
-	//     that died between the two SETs never hands its session back.
-	// That is a convention where it used to be structural: before this fast
-	// path the schema-init pool was always discarded, so a migration could
-	// leak session state with impunity. Now a migration that leaves a system
-	// session variable changed on the success path would leak it into live
-	// query sessions — and an attempt that dies mid-script returns its
-	// connection to the pool, so the restore has to be part of the script,
-	// not of the caller. See internal/storage/schema/migrations/README.md.
+	//   - every FAILED attempt discards its session (driver.ErrBadConn via
+	//     conn.Raw in initSchemaAttempt), so a script that died between the
+	//     two SETs — or a session a failing statement catalog-pinned
+	//     (be-bv7x) — is never reused by the retry, nor by the live queries
+	//     after a retry succeeds (gastownhall/beads#6504);
+	//   - every initSchema failure below also closes this whole pool.
+	// Failure is structural; success is a convention. Before this fast path
+	// the schema-init pool was always discarded, so a migration could leak
+	// session state with impunity. Now a migration that leaves a system
+	// session variable changed on the SUCCESS path would leak it into live
+	// query sessions, and only the script can restore it, so the paired SETs
+	// stay mandatory. See internal/storage/schema/migrations/README.md.
 	//
 	// Any connect failure — the database does not exist yet (1049), the
 	// server is down, bad credentials — falls through to the historical
