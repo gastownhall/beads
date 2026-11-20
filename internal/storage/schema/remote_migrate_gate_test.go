@@ -2,7 +2,9 @@ package schema
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -363,8 +365,170 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 		}
 	}
 
-	msg := e.UserMessage()
-	if !strings.Contains(msg, "losslessly") && !strings.Contains(msg, "loss-free") {
-		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
+	// The Error() prefix says "losslessly" on its own, so check the body: it
+	// must scope that guarantee to the Dolt history, not to a re-clone.
+	if body := e.userBody(); !strings.Contains(body, "no local commit would be lost") {
+		t.Errorf("userBody should explain the fast-forward loses no local commit:\n%s", body)
+	}
+}
+
+// TestRemoteMigrateGateAdoptGuidance pins the adoption remedy on every arm
+// that tells a clone to adopt (gastownhall/beads#6687). The gate only fires on
+// a clone that already has a database, and bare `bd bootstrap` reports
+// "Nothing to do." there, so no arm may hand it out as the remedy. The gate
+// does not know the active database's path or storage mode, so the guidance
+// links the adoption procedure instead of printing filesystem commands, and
+// the structured options carry no command an agent could run.
+func TestRemoteMigrateGateAdoptGuidance(t *testing.T) {
+	arms := []struct {
+		name     string
+		decision string
+		fallback string
+		optionID string
+		wantIDs  string
+	}{
+		{name: "blunt default", optionID: "adopt", wantIDs: "migrate|adopt"},
+		{name: "blunt shared-store", fallback: fallbackReasonSharedStore, optionID: "adopt", wantIDs: "migrate|adopt"},
+		{name: "adopt", decision: gateDecisionAdopt, optionID: "adopt", wantIDs: "adopt"},
+		{name: "adopt-ff", decision: gateDecisionAdoptFastForward, optionID: "adopt-fast-forward", wantIDs: "adopt-fast-forward"},
+		{name: "fork-skew", decision: gateDecisionForkSkew, optionID: "reconcile-fork", wantIDs: "reconcile-fork"},
+	}
+	for _, arm := range arms {
+		for _, shared := range []bool{false, true} {
+			if arm.fallback == fallbackReasonSharedStore && !shared {
+				continue // the shared-store fallback only exists on a shared store
+			}
+			t.Run(fmt.Sprintf("%s/shared=%v", arm.name, shared), func(t *testing.T) {
+				e := &RemoteMigrateGateError{CurrentVersion: 53, LatestVersion: 69, Pending: 16,
+					Decision: arm.decision, FallbackReason: arm.fallback, Shared: shared}
+				if arm.decision == gateDecisionForkSkew {
+					e.SkewVersions = []int{60}
+				}
+				msg := e.UserMessage()
+				// Prose checks ignore where the terminal block wraps.
+				flat := strings.Join(strings.Fields(msg), " ")
+
+				for _, want := range []string{
+					AdoptionGuideURL,
+					`"Nothing to do."`,
+					"For the adoption path:",
+					"previous-version export",
+					"server section",
+				} {
+					if !strings.Contains(flat, want) {
+						t.Errorf("UserMessage is missing %q:\n%s", want, msg)
+					}
+				}
+				for _, gone := range []string{
+					"Re-cloning replaces your local database",
+					"Push first (`bd dolt push`)",
+					"(`bd export --all -o backup.jsonl`)",
+					// The gate cannot name the active database, so no
+					// filesystem command may be printed for either mode.
+					"mv .beads",
+					"mkdir -p",
+				} {
+					if strings.Contains(msg, gone) {
+						t.Errorf("UserMessage still carries %q:\n%s", gone, msg)
+					}
+				}
+				for i, line := range strings.Split(msg, "\n") {
+					if strings.TrimSpace(line) == "bd bootstrap" {
+						t.Errorf("UserMessage prescribes bare `bd bootstrap` (line %d):\n%s", i+1, msg)
+					}
+				}
+				if shared {
+					if !strings.Contains(msg, "co-resident") {
+						t.Errorf("shared UserMessage must name the co-resident consequence:\n%s", msg)
+					}
+					// The shared-store fallback note already names #5920, so
+					// the adoption text must not repeat it there.
+					if n := strings.Count(msg, "#5920"); n != 1 {
+						t.Errorf("shared UserMessage names #5920 %d times, want once:\n%s", n, msg)
+					}
+				} else if !strings.Contains(flat, "no other bd process") {
+					t.Errorf("UserMessage is missing the no-other-process precondition:\n%s", msg)
+				}
+
+				opts := e.Options()
+				ids := make([]string, len(opts))
+				for i, o := range opts {
+					ids[i] = o.ID
+				}
+				if got := strings.Join(ids, "|"); got != arm.wantIDs {
+					t.Fatalf("option IDs = %q, want %q", got, arm.wantIDs)
+				}
+				var opt GateOption
+				for _, o := range opts {
+					switch o.ID {
+					case arm.optionID:
+						opt = o
+					case "migrate":
+						if strings.Join(o.Commands, "|") != "bd migrate --force|bd dolt push" {
+							t.Errorf("migrate option commands changed: %v", o.Commands)
+						}
+					}
+				}
+				raw, err := json.Marshal(opt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(raw), `"commands":[]`) {
+					t.Errorf("%s option must carry an empty, non-null commands array; got %s", arm.optionID, raw)
+				}
+				if !strings.Contains(opt.When, AdoptionGuideURL) {
+					t.Errorf("%s option When must point at the adoption procedure; got %q", arm.optionID, opt.When)
+				}
+				for _, want := range []string{"Nothing to do", "previous bd version"} {
+					if !strings.Contains(opt.Risk, want) {
+						t.Errorf("%s option Risk is missing %q; got %q", arm.optionID, want, opt.Risk)
+					}
+				}
+				if strings.HasPrefix(opt.Risk, "none") {
+					t.Errorf("%s option Risk must not claim no risk; got %q", arm.optionID, opt.Risk)
+				}
+				if got := strings.Contains(opt.Risk, "co-resident"); got != shared {
+					t.Errorf("%s option Risk names the co-resident consequence = %v, want %v; got %q", arm.optionID, got, shared, opt.Risk)
+				}
+
+				d := e.AgentDirective()
+				if arm.decision == "" {
+					// The blunt directive prescribes nothing; the options carry it.
+					if !strings.Contains(d, "remote_migrate_gate.options") {
+						t.Errorf("default directive must still point at the options; got %q", d)
+					}
+				} else {
+					for _, want := range []string{AdoptionGuideURL, "Nothing to do", "Do NOT move database files or run bd bootstrap yourself"} {
+						if !strings.Contains(d, want) {
+							t.Errorf("AgentDirective is missing %q; got %q", want, d)
+						}
+					}
+				}
+				if strings.Contains(d, "until an automatic fast-forward lands") {
+					t.Errorf("AgentDirective still says the automatic fast-forward has not landed; got %q", d)
+				}
+
+				switch arm.decision {
+				case "":
+					if !strings.Contains(opt.When, "another machine has already migrated and pushed") {
+						t.Errorf("the blunt stop has not proven another clone migrated, so its adopt option must stay conditional; got %q", opt.When)
+					}
+				case gateDecisionAdoptFastForward:
+					body := strings.Join(strings.Fields(e.userBody()), " ")
+					for _, want := range []string{"no local commit would be lost", "did not run on this open", "drops clone-local data such as wisps"} {
+						if !strings.Contains(body, want) {
+							t.Errorf("adopt-ff body is missing %q:\n%s", want, body)
+						}
+					}
+					if strings.Contains(body, "nothing local would be lost by adopting") {
+						t.Errorf("adopt-ff body still says adopting by re-clone loses nothing:\n%s", body)
+					}
+				case gateDecisionForkSkew:
+					if !strings.Contains(flat, "Pick ONE clone as canonical") || !strings.Contains(opt.When, "choose ONE clone as canonical") {
+						t.Errorf("fork-skew must keep the canonical-clone decision; body:\n%s\nwhen: %q", msg, opt.When)
+					}
+				}
+			})
+		}
 	}
 }
