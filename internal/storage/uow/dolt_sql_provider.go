@@ -211,7 +211,8 @@ type providerOptions struct {
 	// been served by the ordinary open. It changes exactly one thing — when
 	// the shared-store migration gate refuses, the open warns and attaches to
 	// the database at its current schema instead of failing, so reads keep
-	// working through the upgrade window. That is the same warn-and-continue
+	// working through the upgrade window while the current schema has every
+	// column this binary's reads select. That is the same warn-and-continue
 	// contract embeddeddolt gives its read-only-command intent.
 	readOnly bool
 	// workingSetReconcile opens for a command that commits the working set
