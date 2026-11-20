@@ -215,6 +215,18 @@ func TestReaderReadyParentScopesToItsTransitiveDescendants(t *testing.T) {
 	conformance.RunReaderReadyParentScopesToItsTransitiveDescendants(t, ctx, fixture)
 }
 
+func TestReaderReadyExcludeParentsWithOpenChildren(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyExcludeParentsWithOpenChildren(t, ctx, fixture)
+}
+
+func TestReaderReadyExcludeParentsPagesTheFilteredSet(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyExcludeParentsPagesTheFilteredSet(t, ctx, fixture)
+}
+
 func TestReaderListParentReachesEveryDescendantAndOnlyItsOwn(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()

@@ -87,6 +87,7 @@ go_library(
         "public_create.go",
         "public_hydration.go",
         "public_snapshot.go",
+        "ready_open_children.go",
         "ready_work.go",
         "ready_work_counts.go",
         "ready_work_probe.go",

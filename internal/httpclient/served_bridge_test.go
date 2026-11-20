@@ -365,6 +365,13 @@ func TestTheReadyBridgeRefusesAnInexpressibleFilter(t *testing.T) {
 			types.WorkFilter{Status: types.StatusOpen, ExcludeIDs: []string{"rdr-1"}},
 			"E-WorkFilter.ExcludeIDs",
 		},
+		{
+			// GH#6817: no ready parameter excludes containers with open
+			// children; dropping it would list the parents the caller hid.
+			"an exclude-parents request",
+			types.WorkFilter{Status: types.StatusOpen, ExcludeParentsWithOpenChildren: true},
+			"E-WorkFilter.ExcludeParentsWithOpenChildren",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := e.subject.GetReadyWork(t.Context(), tc.filter)

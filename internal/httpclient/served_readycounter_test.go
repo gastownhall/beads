@@ -80,3 +80,14 @@ func TestServedReadyCounterWritesNothing(t *testing.T) {
 func TestServedReadyCounterDoesNotMutateTheCallerRequest(t *testing.T) {
 	conformance.RunReadyCounterDoesNotMutateTheCallerRequest(t, t.Context(), servedReadyCounterFixture(t, "rc"))
 }
+
+// TestServedReadyCounterCountsTheExcludedSetTheListingLists is parked
+// (GH#6817): countReadyWork publishes no exclude-parents parameter, so this
+// client refuses the count before it dials rather than count the containers
+// the caller asked to leave out. It retires when the wire grows the parameter.
+func TestServedReadyCounterCountsTheExcludedSetTheListingLists(t *testing.T) {
+	skipKnownDivergence(t, "E-ReadyRequest.ExcludeParentsWithOpenChildren", readParkBead,
+		"the case's subject is ExcludeParentsWithOpenChildren, which countReadyWork publishes no parameter for; "+
+			"the refusal this wire answers with instead is pinned by TestReadyExcludeParentsRefusesBeforeDialing")
+	conformance.RunReadyCounterCountsTheExcludedSetTheListingLists(t, t.Context(), servedReadyCounterFixture(t, "rc"))
+}

@@ -1183,6 +1183,7 @@ go_test(
         "readonly_policy_test.go",
         "readonly_test.go",
         "ready_embedded_test.go",
+        "ready_exclude_parents_test.go",
         "ready_explain_ids_test.go",
         "ready_input_test.go",
         "ready_json_no_total_test.go",

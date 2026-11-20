@@ -2539,6 +2539,13 @@ type WorkFilter struct {
 	// query-time blockers that cannot be represented by local is_blocked state.
 	ExcludeIDs []string
 
+	// ExcludeParentsWithOpenChildren omits every issue that has at least one
+	// recorded parent-child child whose status is not closed, the same
+	// relationship the checked close gate refuses on (GH#6817). It is opt-in:
+	// false keeps the ready set unchanged. Children count whatever the rest of
+	// the filter would do with them (hidden types, other labels, wisps).
+	ExcludeParentsWithOpenChildren bool
+
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)

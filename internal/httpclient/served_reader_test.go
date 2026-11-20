@@ -111,6 +111,25 @@ func TestServedReaderReadyParentScopesToItsTransitiveDescendants(t *testing.T) {
 	conformance.RunReaderReadyParentScopesToItsTransitiveDescendants(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// The two exclude-parents cases (GH#6817) have the flag as their subject, and
+// listReadyWork publishes no parameter for it, so this client refuses the
+// request before it dials rather than list the containers the caller asked to
+// leave out. They retire when the wire grows the parameter.
+func TestServedReaderReadyExcludeParentsWithOpenChildren(t *testing.T) {
+	skipKnownDivergence(t, "E-ReadyRequest.ExcludeParentsWithOpenChildren", readParkBead,
+		"the case's subject is ExcludeParentsWithOpenChildren, which listReadyWork publishes no parameter for; "+
+			"the refusal this wire answers with instead is pinned by TestReadyExcludeParentsRefusesBeforeDialing")
+	conformance.RunReaderReadyExcludeParentsWithOpenChildren(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
+func TestServedReaderReadyExcludeParentsPagesTheFilteredSet(t *testing.T) {
+	skipKnownDivergence(t, "E-ReadyRequest.ExcludeParentsWithOpenChildren", readParkBead,
+		"the case pages and totals the set ExcludeParentsWithOpenChildren leaves, which listReadyWork publishes "+
+			"no parameter for; the refusal this wire answers with instead is pinned by "+
+			"TestReadyExcludeParentsRefusesBeforeDialing")
+	conformance.RunReaderReadyExcludeParentsPagesTheFilteredSet(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
 // TestServedReaderListParentReachesEveryDescendantAndOnlyItsOwn is the LIST
 // case that needs no id scope at all — `parent` is its scope, and listIssues
 // publishes it — so it is the one member of the List family here that runs

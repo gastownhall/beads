@@ -785,3 +785,147 @@ func TestAnyDeferredParentSQL(t *testing.T) {
 		}
 	}
 }
+
+// GH#6817: the open-child parent exclusion is opt-in. With the flag off the
+// WHERE and its args are exactly what they were, even when a caller hands the
+// builder a parent set; with it on, each family excludes only the set keyed by
+// its own main table, batched like every other id set.
+func TestBuildReadyWorkWhereExcludeParentsWithOpenChildren(t *testing.T) {
+	t.Parallel()
+
+	parents := make([]string, QueryBatchSize+1)
+	for i := range parents {
+		parents[i] = fmt.Sprintf("p-%d", i)
+	}
+	in := ReadyWorkWhereInputs{OpenChildParentIDs: map[string][]string{
+		IssuesFilterTables.Main: parents,
+		WispsFilterTables.Main:  {"w-parent"},
+	}}
+
+	for _, tables := range []FilterTables{IssuesFilterTables, WispsFilterTables} {
+		t.Run(tables.Main+"/flag_off_is_unchanged", func(t *testing.T) {
+			bareWhere, bareArgs, err := BuildReadyWorkWhere(types.WorkFilter{Status: types.StatusOpen}, tables, ReadyWorkWhereInputs{})
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			where, args, err := BuildReadyWorkWhere(types.WorkFilter{Status: types.StatusOpen}, tables, in)
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			if where != bareWhere || fmt.Sprint(args) != fmt.Sprint(bareArgs) {
+				t.Fatalf("flag off must ignore the parent set:\n got %s %v\nwant %s %v", where, args, bareWhere, bareArgs)
+			}
+		})
+	}
+
+	t.Run("flag_on_excludes_the_family_set", func(t *testing.T) {
+		filter := types.WorkFilter{Status: types.StatusOpen, ExcludeParentsWithOpenChildren: true}
+		bare, _, err := BuildReadyWorkWhere(types.WorkFilter{Status: types.StatusOpen}, IssuesFilterTables, ReadyWorkWhereInputs{})
+		if err != nil {
+			t.Fatalf("BuildReadyWorkWhere: %v", err)
+		}
+		where, args, err := BuildReadyWorkWhere(filter, IssuesFilterTables, in)
+		if err != nil {
+			t.Fatalf("BuildReadyWorkWhere: %v", err)
+		}
+		if got := strings.Count(where, "id NOT IN (?") - strings.Count(bare, "id NOT IN (?"); got != 2 {
+			t.Errorf("%d parents rendered %d extra NOT IN batches, want 2: %s", len(parents), got, where)
+		}
+		for _, p := range []string{parents[0], parents[len(parents)-1]} {
+			if !slicesContainsAny(args, p) {
+				t.Errorf("issues WHERE does not bind parent %q", p)
+			}
+		}
+		if slicesContainsAny(args, "w-parent") {
+			t.Errorf("issues WHERE binds the wisp family's parent: %v", args)
+		}
+
+		wispWhere, wispArgs, err := BuildReadyWorkWhere(filter, WispsFilterTables, in)
+		if err != nil {
+			t.Fatalf("BuildReadyWorkWhere: %v", err)
+		}
+		if !strings.Contains(wispWhere, "id NOT IN (?)") || !slicesContainsAny(wispArgs, "w-parent") || slicesContainsAny(wispArgs, parents[0]) {
+			t.Errorf("wisps WHERE must exclude only its own family's parent: %s %v", wispWhere, wispArgs)
+		}
+	})
+}
+
+func slicesContainsAny(args []any, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOpenChildParentIDsSQLKeepsEachFamilySeparate pins the open-child parent
+// query behind ExcludeParentsWithOpenChildren (GH#6817): one statement per
+// child family, each selecting only the target column of the parent family
+// it is asked about, never a COALESCE across the two, and with the wisp leg
+// skipping edges the durable table also holds. It is the same relationship
+// the close gate counts, so both renderers share their FROM ... WHERE body.
+func TestOpenChildParentIDsSQLKeepsEachFamilySeparate(t *testing.T) {
+	if got := ParentTargetColumn(IssuesFilterTables); got != IssueTargetColumn {
+		t.Errorf("ParentTargetColumn(issues) = %q, want %q", got, IssueTargetColumn)
+	}
+	if got := ParentTargetColumn(WispsFilterTables); got != WispTargetColumn {
+		t.Errorf("ParentTargetColumn(wisps) = %q, want %q", got, WispTargetColumn)
+	}
+	if len(OpenChildFamilies) != 2 ||
+		OpenChildFamilies[0] != (OpenChildFamily{Dependencies: "dependencies", Children: "issues"}) ||
+		OpenChildFamilies[1] != (OpenChildFamily{Dependencies: "wisp_dependencies", Children: "wisps", DedupeDurable: true}) {
+		t.Fatalf("OpenChildFamilies = %+v, want the durable leg then the deduped wisp leg", OpenChildFamilies)
+	}
+
+	for _, family := range OpenChildFamilies {
+		for _, column := range []string{IssueTargetColumn, WispTargetColumn} {
+			other := WispTargetColumn
+			if column == WispTargetColumn {
+				other = IssueTargetColumn
+			}
+			query, err := OpenChildParentIDsSQL(family, column)
+			if err != nil {
+				t.Fatalf("OpenChildParentIDsSQL(%s, %s): %v", family.Dependencies, column, err)
+			}
+			for _, want := range []string{
+				"SELECT DISTINCT dependency." + column,
+				"FROM " + family.Dependencies + " AS dependency",
+				"JOIN " + family.Children + " AS child ON child.id = dependency.issue_id",
+				"dependency.type = 'parent-child'",
+				"child.status != 'closed'",
+				"dependency." + column + " IS NOT NULL",
+			} {
+				if !strings.Contains(query, want) {
+					t.Errorf("%s/%s query lacks %q:\n%s", family.Dependencies, column, want, query)
+				}
+			}
+			if strings.Contains(query, other) || strings.Contains(strings.ToUpper(query), "COALESCE") {
+				t.Errorf("%s/%s query reads the other family's target column:\n%s", family.Dependencies, column, query)
+			}
+			if strings.Contains(query, "?") {
+				t.Errorf("%s/%s query has a placeholder; the set query binds nothing:\n%s", family.Dependencies, column, query)
+			}
+			if got := strings.Contains(query, "NOT EXISTS"); got != family.DedupeDurable {
+				t.Errorf("%s/%s dedupe against durable ids = %v, want %v", family.Dependencies, column, got, family.DedupeDurable)
+			}
+
+			count, err := OpenChildCountSQL(family, column)
+			if err != nil {
+				t.Fatalf("OpenChildCountSQL(%s, %s): %v", family.Dependencies, column, err)
+			}
+			if !strings.Contains(count, OpenChildEdgesSQL(family)) || !strings.HasSuffix(count, "dependency."+column+" = ?") {
+				t.Errorf("close-gate count no longer shares the open-edge body for %s/%s:\n%s", family.Dependencies, column, count)
+			}
+		}
+	}
+
+	for _, bad := range []string{"", "depends_on_external", "depends_on_issue_id; DROP TABLE issues"} {
+		if _, err := OpenChildParentIDsSQL(OpenChildFamilies[0], bad); err == nil {
+			t.Errorf("OpenChildParentIDsSQL accepted target column %q", bad)
+		}
+		if _, err := OpenChildCountSQL(OpenChildFamilies[0], bad); err == nil {
+			t.Errorf("OpenChildCountSQL accepted target column %q", bad)
+		}
+	}
+}

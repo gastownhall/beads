@@ -65,6 +65,8 @@ func BuildReadyFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 		ExcludeTypes:     normalizeExcludeTypes(in.ExcludeTypes),
 		HasMetadataKey:   in.HasMetadataKey,
 		Lite:             in.Brief,
+
+		ExcludeParentsWithOpenChildren: in.ExcludeParentsWithOpenChildren,
 	}
 
 	if in.Priority != nil {

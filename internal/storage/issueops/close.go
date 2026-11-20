@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -209,40 +210,29 @@ func countOpenChildrenForTargetInTx(ctx context.Context, tx DBTX, id, targetColu
 	if targetColumn != "depends_on_issue_id" && targetColumn != "depends_on_wisp_id" {
 		return 0, fmt.Errorf("count open children: unsupported target column %q", targetColumn)
 	}
-	var durableCount int
-	//nolint:gosec // G201: targetColumn is validated above against two hardcoded identifiers.
-	durableQuery := fmt.Sprintf(`
-		SELECT COUNT(DISTINCT dependency.issue_id)
-		FROM dependencies AS dependency
-		JOIN issues AS child ON child.id = dependency.issue_id
-		WHERE dependency.%s = ?
-		  AND dependency.type = 'parent-child'
-		  AND child.status != 'closed'
-	`, targetColumn)
-	if err := tx.QueryRowContext(ctx, durableQuery, id).Scan(&durableCount); err != nil {
-		return 0, fmt.Errorf("count open durable children for %s: %w", id, err)
-	}
-
-	var wispCount int
-	//nolint:gosec // G201: targetColumn is validated above against two hardcoded identifiers.
-	wispQuery := fmt.Sprintf(`
-		SELECT COUNT(DISTINCT dependency.issue_id)
-		FROM wisp_dependencies AS dependency
-		JOIN wisps AS child ON child.id = dependency.issue_id
-		WHERE dependency.%s = ?
-		  AND dependency.type = 'parent-child'
-		  AND child.status != 'closed'
-		  AND NOT EXISTS (
-			SELECT 1 FROM dependencies AS durable WHERE durable.id = dependency.id
-		  )
-	`, targetColumn)
-	if err := tx.QueryRowContext(ctx, wispQuery, id).Scan(&wispCount); err != nil {
-		if optionalBlockedTable("wisp_dependencies") && isTableNotExistError(err) {
-			return durableCount, nil
+	// The relationship (which edges, which children, the wisp leg's durable
+	// dedupe) is sqlbuild.OpenChildEdgesSQL, the same body ready work's
+	// --exclude-parents reads, so the two cannot disagree about what an open
+	// child is.
+	total := 0
+	for _, family := range sqlbuild.OpenChildFamilies {
+		query, err := sqlbuild.OpenChildCountSQL(family, targetColumn)
+		if err != nil {
+			return 0, err
 		}
-		return 0, fmt.Errorf("count open wisp children for %s: %w", id, err)
+		var count int
+		if err := tx.QueryRowContext(ctx, query, id).Scan(&count); err != nil {
+			if family.DedupeDurable {
+				if optionalBlockedTable("wisp_dependencies") && isTableNotExistError(err) {
+					return total, nil
+				}
+				return 0, fmt.Errorf("count open wisp children for %s: %w", id, err)
+			}
+			return 0, fmt.Errorf("count open durable children for %s: %w", id, err)
+		}
+		total += count
 	}
-	return durableCount + wispCount, nil
+	return total, nil
 }
 
 func createCloseCheckedSavepoint(ctx context.Context, tx DBTX) (string, error) {

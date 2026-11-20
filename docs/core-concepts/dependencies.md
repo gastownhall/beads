@@ -107,6 +107,15 @@ bd ready --type task               # By issue type
 bd ready --sort oldest             # Oldest first
 ```
 
+A parent with children is ready by the same rule, even when every child is
+blocked, deferred or pinned, although it cannot close until those children do.
+To list only issues you can finish now, hide such parents:
+
+```bash
+bd ready --exclude-parents         # Skip issues with non-closed children
+bd ready --claim --exclude-parents # Never claim one of them
+```
+
 ## Viewing Blocked Issues
 
 ```bash

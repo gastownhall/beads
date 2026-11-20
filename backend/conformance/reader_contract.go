@@ -2336,6 +2336,211 @@ func RunReaderReadyParentScopesToItsTransitiveDescendants(t *testing.T, ctx cont
 	assertReaderPageIDSet(t, "Ready --parent", page, []string{child, grandchild, dotted, adopted})
 }
 
+// RunReaderReadyExcludeParentsWithOpenChildren pins
+// ReadyRequest.ExcludeParentsWithOpenChildren (GH#6817): the flagged answer is
+// the ordinary ready answer minus every parent that has a recorded
+// parent-child edge to a non-closed child, in whichever family the edge and
+// the child live.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE. Every parent is ready on its own and
+// every child is out of the answer for a different reason — blocked, in
+// progress, pinned, deferred, or simply unlabelled — so the flag has to read
+// the edge rather than the child's readiness or its visibility in the query.
+// The four family shapes are all here: durable parent and child, wisp parent
+// and child, a durable parent with a wisp child (the edge lives in
+// wisp_dependencies and targets depends_on_issue_id) and a wisp parent with a
+// durable child (the edge lives in dependencies and targets
+// depends_on_wisp_id). A parent whose only child is closed stays, and so does
+// a parent with a dotted pseudo-child but no edge: the rule is the close
+// gate's, a recorded edge to a non-closed child, not an id prefix.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: nothing. The scope label is on the
+// parents and leaves only, so no child is ever a candidate row.
+func RunReaderReadyExcludeParentsWithOpenChildren(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope := readerLabel(fixture, "rdyxp")
+	id := func(name string) string { return readerID(fixture, "rdyxp", name) }
+	closedAt := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+
+	durable := func(name, label string, status types.Status) string {
+		issue := readerIssue(id(name), types.TypeTask, label)
+		issue.Status = status
+		if status == types.StatusClosed {
+			issue.ClosedAt = &closedAt
+		}
+		seedReaderIssue(t, ctx, fixture, issue)
+		return issue.ID
+	}
+	wisp := func(name, label string) string {
+		issue := readerIssue(id(name), types.TypeTask, label)
+		issue.Ephemeral = true
+		seedReaderWisp(t, ctx, fixture, issue)
+		return issue.ID
+	}
+	edge := func(from, to string, depType types.DependencyType) {
+		t.Helper()
+		if err := fixture.AddDependency(ctx, &types.Dependency{IssueID: from, DependsOnID: to, Type: depType}, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s (%s): %v", from, to, depType, err)
+		}
+	}
+
+	leaf := durable("leaf", scope, types.StatusOpen)
+	blocker := durable("blocker", scope, types.StatusOpen)
+
+	pBlocked := durable("p-blocked", scope, types.StatusOpen)
+	cBlocked := durable("c-blocked", "", types.StatusOpen)
+	edge(cBlocked, pBlocked, types.DepParentChild)
+	edge(cBlocked, blocker, types.DepBlocks)
+
+	pProgress := durable("p-progress", scope, types.StatusOpen)
+	edge(durable("c-progress", "", types.StatusInProgress), pProgress, types.DepParentChild)
+
+	pPinned := durable("p-pinned", scope, types.StatusOpen)
+	edge(durable("c-pinned", "", types.StatusPinned), pPinned, types.DepParentChild)
+
+	pDeferred := durable("p-deferred", scope, types.StatusOpen)
+	edge(durable("c-deferred", "", types.StatusDeferred), pDeferred, types.DepParentChild)
+
+	pDone := durable("p-done", scope, types.StatusOpen)
+	edge(durable("c-done", "", types.StatusClosed), pDone, types.DepParentChild)
+
+	pDotted := durable("p-dotted", scope, types.StatusOpen)
+	seedReaderIssue(t, ctx, fixture, readerIssue(pDotted+".1", types.TypeTask, ""))
+
+	wParent := wisp("w-parent", scope)
+	edge(wisp("w-child", ""), wParent, types.DepParentChild)
+
+	dParentWispChild := durable("d-parent-w", scope, types.StatusOpen)
+	edge(wisp("w-child-of-d", ""), dParentWispChild, types.DepParentChild)
+
+	wParentDurableChild := wisp("w-parent-d", scope)
+	edge(durable("d-child-of-w", "", types.StatusOpen), wParentDurableChild, types.DepParentChild)
+
+	excluded := []string{pBlocked, pProgress, pPinned, pDeferred, wParent, dParentWispChild, wParentDurableChild}
+	kept := []string{leaf, blocker, pDone, pDotted}
+
+	request := publicops.ReadyRequest{Labels: []string{scope}, IncludeEphemeral: true, Limit: readerLimit(0)}
+	ordinary, err := fixture.Reader.Ready(ctx, request)
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	// The baseline is what makes the flag's answer meaningful: every parent
+	// the flag drops is offered without it.
+	assertReaderPageIDSet(t, "Ready (flag off)", ordinary, append(slices.Clone(kept), excluded...))
+
+	request.ExcludeParentsWithOpenChildren = true
+	flagged, err := fixture.Reader.Ready(ctx, request)
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents: %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready --exclude-parents", flagged, kept)
+
+	// Durable-only answers apply the same rule: the durable parents with a
+	// wisp child are still dropped without IncludeEphemeral.
+	request.IncludeEphemeral = false
+	durableOnly, err := fixture.Reader.Ready(ctx, request)
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents (durable only): %v", err)
+	}
+	assertReaderPageIDSet(t, "Ready --exclude-parents (durable only)", durableOnly, kept)
+}
+
+// RunReaderReadyExcludeParentsPagesTheFilteredSet pins the exclusion's half of
+// the PAGING contracts (reader.go:85-100): a flagged page is the prefix of the
+// flagged unbounded answer, its has-more is about the filtered set, and an
+// offset walks the filtered rows — never stepping over an excluded parent as
+// if it had been delivered. The parent sits BETWEEN the two leaves in the
+// requested order, so the unfiltered page walk would deliver it on page two
+// and an offset that counted it would skip leaf-b; both failures are visible
+// here (GH#6817, AC-4).
+func RunReaderReadyExcludeParentsPagesTheFilteredSet(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope := readerLabel(fixture, "rdyxpp")
+	leafA := readerID(fixture, "rdyxpp", "leaf-a")
+	parent := readerID(fixture, "rdyxpp", "parent")
+	leafB := readerID(fixture, "rdyxpp", "leaf-b")
+	child := readerID(fixture, "rdyxpp", "child")
+
+	a := readerIssue(leafA, types.TypeTask, scope)
+	a.Priority = 1
+	p := readerIssue(parent, types.TypeTask, scope)
+	p.Priority = 2
+	b := readerIssue(leafB, types.TypeTask, scope)
+	b.Priority = 3
+	seedReaderIssue(t, ctx, fixture, a)
+	seedReaderIssue(t, ctx, fixture, p)
+	seedReaderIssue(t, ctx, fixture, b)
+	// The child takes no part in any answer's scoping: it exists to make the
+	// parent excluded, and nothing else.
+	seedReaderIssue(t, ctx, fixture, readerIssue(child, types.TypeTask, ""))
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed edge %s -> %s: %v", child, parent, err)
+	}
+
+	// The orders the two requests describe. Priority sort with distinct
+	// priorities has one unambiguous order each way.
+	unflaggedOrder := []string{leafA, parent, leafB}
+	flaggedOrder := []string{leafA, leafB}
+
+	flagged := func(offset, limit int) publicops.ReadyRequest {
+		return publicops.ReadyRequest{
+			Labels:                         []string{scope},
+			Sort:                           "priority",
+			Offset:                         offset,
+			Limit:                          &limit,
+			ExcludeParentsWithOpenChildren: true,
+		}
+	}
+
+	// The page walk the epilogue contract describes: page, then the row the
+	// position resumed at, then off the end.
+	page, err := fixture.Reader.Ready(ctx, flagged(0, 1))
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents --limit 1: %v", err)
+	}
+	assertReaderPageIDs(t, "Ready --exclude-parents --limit 1", page, flaggedOrder[:1])
+	if !page.HasMore {
+		t.Errorf("--limit 1 over a filtered set of 2 reported HasMore = false, want true — the filtered set, not the unfiltered one, is what has a second page")
+	}
+
+	page, err = fixture.Reader.Ready(ctx, flagged(1, 1))
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents --limit 1 --offset 1: %v", err)
+	}
+	assertReaderPageIDs(t, "Ready --exclude-parents --limit 1 --offset 1", page, flaggedOrder[1:])
+	if page.HasMore {
+		t.Errorf("--offset 1 --limit 1 reported HasMore = true over a filtered set of 2, want false")
+	}
+	// The excluded parent never occupied a delivered position: an offset that
+	// counted it would have skipped leaf-b here.
+	if containsID := slices.Contains(readerPageIDs(page), parent); containsID {
+		t.Errorf("the flagged offset walk delivered the excluded parent %s", parent)
+	}
+
+	page, err = fixture.Reader.Ready(ctx, flagged(2, 1))
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents --limit 1 --offset 2: %v", err)
+	}
+	assertReaderPageIDs(t, "Ready --exclude-parents --offset 2 (past the filtered end)", page, nil)
+
+	// Both orders, unpaged, so the walk above is shown to be a walk over the
+	// filtered answer and the exclusion did not quietly reorder anything.
+	page, err = fixture.Reader.Ready(ctx, flagged(0, 0))
+	if err != nil {
+		t.Fatalf("Ready --exclude-parents --limit 0: %v", err)
+	}
+	assertReaderPageIDs(t, "Ready --exclude-parents unbounded", page, flaggedOrder)
+	plain := flagged(0, 0)
+	plain.ExcludeParentsWithOpenChildren = false
+	page, err = fixture.Reader.Ready(ctx, plain)
+	if err != nil {
+		t.Fatalf("Ready (unflagged): %v", err)
+	}
+	assertReaderPageIDs(t, "Ready without the flag", page, unflaggedOrder)
+}
+
 // RunReaderListParentReachesEveryDescendantAndOnlyItsOwn is the same field on
 // the listing plane (reader.go:213), where it is rendered differently: one
 // clause with a parent-child subquery ORed against the id prefix

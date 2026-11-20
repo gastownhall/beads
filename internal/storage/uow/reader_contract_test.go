@@ -137,6 +137,17 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ReadyParentScopesToItsTransitiveDescendants", func(t *testing.T) {
 		conformance.RunReaderReadyParentScopesToItsTransitiveDescendants(t, ctx, fixture)
 	})
+	// The open-child parent set behind ExcludeParentsWithOpenChildren is this
+	// repository's own query, not the shared issueops one.
+	t.Run("ReadyExcludeParentsWithOpenChildren", func(t *testing.T) {
+		conformance.RunReaderReadyExcludeParentsWithOpenChildren(t, ctx, fixture)
+	})
+	// The paging half: this seam trims a natively bounded window, where the
+	// store-backed one drops an over-fetched probe row, and the filtered set
+	// is where those two arrangements can hand out different positions.
+	t.Run("ReadyExcludeParentsPagesTheFilteredSet", func(t *testing.T) {
+		conformance.RunReaderReadyExcludeParentsPagesTheFilteredSet(t, ctx, fixture)
+	})
 	t.Run("ListParentReachesEveryDescendantAndOnlyItsOwn", func(t *testing.T) {
 		conformance.RunReaderListParentReachesEveryDescendantAndOnlyItsOwn(t, ctx, fixture)
 	})
