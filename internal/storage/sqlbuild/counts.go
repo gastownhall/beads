@@ -140,8 +140,19 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	if byIDs {
 		labelWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		depBlocksExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
-		rcDepExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
-		rcWispExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
+		// depTargetInSQL OR-combines three direct-column IN-lists instead of
+		// wrapping DepTargetExpr's COALESCE around the filter (GH#7666):
+		// Dolt cannot use the index on depends_on_issue_id through a COALESCE
+		// expression, so this subquery's filter degraded into a full scan of
+		// `dependencies`/`wisp_dependencies` per page, growing with total
+		// dependency rows rather than the page size. DepTargetExpr itself is
+		// untouched below in the SELECT list (reverseBlockerSelect's dep_id
+		// projection): that position isn't filtered, so it isn't slow, and it
+		// still needs COALESCE's single-value-per-row resolution for the GROUP
+		// BY key. Each OR branch repeats idArgs once (see the args tail).
+		depTargetInSQL := fmt.Sprintf("(depends_on_issue_id IN (%s) OR depends_on_wisp_id IN (%s) OR depends_on_external IN (%s))", inSQL, inSQL, inSQL)
+		rcDepExtra = fmt.Sprintf(" AND %s", depTargetInSQL)
+		rcWispExtra = fmt.Sprintf(" AND %s", depTargetInSQL)
 		ccWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		pcExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
 		depWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
@@ -266,17 +277,22 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	}
 
 	// args follow the placeholder order in sqlText: labels join (unless
-	// skipped), dc, rc dependencies branch, rc wisp branch (if any), cc (all
-	// four unless the counts are skipped), pc, d, then the driver.
-	args := make([]any, 0, len(idArgs)*8)
+	// skipped), dc, rc dependencies branch (3x idArgs: one per OR'd target
+	// column, see depTargetInSQL above), rc wisp branch (if any, also 3x),
+	// cc, pc, d, then the driver.
+	args := make([]any, 0, len(idArgs)*12)
 	if !hyd.SkipLabels {
 		args = append(args, idArgs...)
 	}
 	if !hyd.SkipCounts {
 		args = append(args, idArgs...) // dc
-		args = append(args, idArgs...) // rc dependencies
+		args = append(args, idArgs...) // rc dependencies: depends_on_issue_id
+		args = append(args, idArgs...) // rc dependencies: depends_on_wisp_id
+		args = append(args, idArgs...) // rc dependencies: depends_on_external
 		if includeWispReverseDeps {
-			args = append(args, idArgs...) // rc wisp_dependencies
+			args = append(args, idArgs...) // rc wisp_dependencies: depends_on_issue_id
+			args = append(args, idArgs...) // rc wisp_dependencies: depends_on_wisp_id
+			args = append(args, idArgs...) // rc wisp_dependencies: depends_on_external
 		}
 		args = append(args, idArgs...) // cc
 	}
