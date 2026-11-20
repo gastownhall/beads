@@ -379,6 +379,14 @@ type initHooksContext struct {
 	workDir, beadsDir string
 	paths             git.HooksContext
 	env, inheritedEnv []string
+	// pinnedEnv is the GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE-pinned environment
+	// resolveStandaloneHooksContext used to compute paths, kept so a caller can
+	// re-resolve the hooks directory after a config change (e.g. clearing
+	// core.hooksPath) without falling back to ambient, ScrubRouting-only
+	// resolution — the same inherited-config risk this pinning exists to avoid
+	// in the first place. Nil for contexts with no repository config authority
+	// (the absolute-path fallback; see resolveStandaloneHooksContext).
+	pinnedEnv []string
 }
 
 func resolveInitHooksContext(workDir, beadsDir string) (*initHooksContext, error) {
@@ -422,6 +430,32 @@ func (c *initHooksContext) needsUpdate() bool {
 		return hooksNeedUpdate()
 	}
 	return hookStatusesNeedUpdate(checkGitHooksAt(c.paths.HooksDir))
+}
+
+// resolveEffectiveHooksDir re-resolves the hooks directory a selected
+// context's own repository config currently makes effective, using the same
+// pinned (not ambient-inherited) environment resolveStandaloneHooksContext
+// resolved paths with. A caller that changes a selected context's
+// core.hooksPath (e.g. uninstall clearing a beads-managed value) needs this
+// to find out whether a different directory becomes effective as a result,
+// without resorting to ambient resolution (git.GetGitHooksDir(), scoped only
+// by cwd/os.Environ()) that can pick up another repository's cached or
+// inherited config instead of this one's (GH#7531).
+func (c *initHooksContext) resolveEffectiveHooksDir() (string, error) {
+	if c == nil || c.pinnedEnv == nil {
+		// No repository config authority to re-resolve against (the
+		// absolute-path fallback in resolveStandaloneHooksContext) — the
+		// originally resolved directory is the only one there is.
+		if c == nil {
+			return "", nil
+		}
+		return c.paths.HooksDir, nil
+	}
+	paths, err := git.ResolveHooksContext(c.workDir, c.pinnedEnv)
+	if err != nil {
+		return "", err
+	}
+	return paths.HooksDir, nil
 }
 
 func (c *initHooksContext) configureHooksPath(hooksDir string) error {
