@@ -142,7 +142,9 @@ func (r *gitRepositoryImpl) GetConfig(ctx context.Context, key string) (string, 
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			// Git also uses exit 1 for invalid keys, with a diagnostic.
+			// Only exit 1 without diagnostics is treated as absent. This also
+			// includes some invalid keys (for example "bad..key") that Git rejects
+			// silently; diagnostic-bearing invalid keys remain errors.
 			if exitErr.ExitCode() == 1 && len(bytes.TrimSpace(exitErr.Stderr)) == 0 {
 				return "", false, nil
 			}
