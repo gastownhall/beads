@@ -90,18 +90,17 @@ Examples:
 
 		SetLastTouchedID(result.ResolvedID)
 
-		updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
-		title := ""
-		if updatedIssue != nil {
-			title = updatedIssue.Title
-		}
 		if jsonOutput {
+			updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
 			if updatedIssue != nil {
 				return outputJSON(updatedIssue)
 			}
 			return nil
 		}
-		fmt.Printf("%s Set priority of %s to P%d\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, title), priority)
+		// The title is as of the resolution read, a transaction before the
+		// write: a rename another process commits in between prints the old
+		// title. It only labels the confirmation, so no read after the write.
+		fmt.Printf("%s Set priority of %s to P%d\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, result.Issue.Title), priority)
 		return nil
 	},
 }
