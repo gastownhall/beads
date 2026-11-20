@@ -368,3 +368,39 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
 	}
 }
+
+// TestRemoteMigrateGateDefaultArmNamesCloneLocalSeries pins #7038's AC-7: the
+// default arm's several-machines guidance must send every consumer clone to
+// `bd migrate schema` for its own clone-local series. `bd dolt pull` syncs
+// only the shared (main) series — the clone-local series never replicates —
+// so the arm's old closer ("its upgrade then has nothing to migrate and needs
+// no re-clone") was exactly wrong for the clone-local lane: it is what a
+// pull-then-upgrade clone followed into a database whose shared schema was
+// current and whose lease table failed every issue read on the raw missing
+// column.
+func TestRemoteMigrateGateDefaultArmNamesCloneLocalSeries(t *testing.T) {
+	e := &RemoteMigrateGateError{CurrentVersion: 73, LatestVersion: 74, Pending: 1}
+	msg := e.UserMessage()
+	flat := strings.Join(strings.Fields(msg), " ")
+
+	for _, want := range []string{
+		"The clone-local migration series (leases and the other per-clone tables) never replicates",
+		"`bd dolt pull` cannot bring it",
+		"run `bd migrate schema` once on each consumer clone",
+		"may already have applied it, but that is not guaranteed",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("default-arm guidance does not say %q:\n%s", want, msg)
+		}
+	}
+	// The pull promise must stay scoped to the shared schema, never a blanket
+	// "nothing to migrate" over both lanes.
+	if strings.Contains(flat, "nothing to migrate") {
+		t.Errorf("default-arm guidance still promises there is nothing to migrate; the clone-local series does not arrive with the pull (#7038):\n%s", msg)
+	}
+	// And it must keep the pull's real value: the shared schema does arrive,
+	// and the consumer clone needs no re-clone.
+	if !strings.Contains(flat, "the pull brings the shared (main-series) schema") || !strings.Contains(flat, "needs no re-clone") {
+		t.Errorf("default-arm guidance no longer says the pull syncs the shared schema without a re-clone:\n%s", msg)
+	}
+}
