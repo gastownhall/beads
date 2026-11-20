@@ -191,55 +191,35 @@ func TestPullAutoResolveSkipsNonMetadataConflicts(t *testing.T) {
 	}
 }
 
-// TestAutoResolveConflictsAfterCLIPull_DependencyAuditOnly verifies the post-CLI-pull
-// resolver (used for git-protocol / credentialed remotes, #4259 finding 1) resolves an
-// audit-only dependency conflict left by an out-of-transaction merge. CLI `dolt pull`
-// performs the merge in a subprocess and leaves conflicts in the working set, so the
-// resolver never runs in the transaction that produced the merge — unlike the SQL
-// DOLT_PULL path. Here the conflict is persisted into the working set (what a CLI pull
-// leaves behind) and then resolved via finishCLIPull's helper on the store connection,
-// which stays on the pull's branch (a brand-new connection would default to the base
-// branch and miss the conflict).
-func TestAutoResolveConflictsAfterCLIPull_DependencyAuditOnly(t *testing.T) {
+// TestCLIPullMergeSettlesDependencyAuditOnlyConflict verifies that the CLI pull
+// route (git-protocol / credentialed remotes, #4259 finding 1) resolves an
+// audit-only dependency conflict. Its merge (mergeTrackingRefAfterCLIFetch)
+// runs on a long-timeout session of its own, pinned to the store's branch (a
+// brand-new connection would default to the base branch), and settles in that
+// transaction (settleMergeInTx), as the SQL route does, so the resolved merge
+// is committed and none is left open.
+func TestCLIPullMergeSettlesDependencyAuditOnlyConflict(t *testing.T) {
 	store, peerBranch := setupDependencyMergeConflict(t, "blocks", "alice", "blocks", "bob")
 
 	ctx, cancel := testContext(t)
 	defer cancel()
 	db := store.db
 
-	// Persist the merge conflict into the working set (mirroring a CLI pull), then
-	// resolve it from a brand-new connection rather than this transaction.
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("begin tx: %v", err)
+	if err := store.mergeTrackingRefAfterCLIFetch(ctx, peerBranch); err != nil {
+		t.Fatalf("CLI-route merge with an audit-only dependency conflict: %v", err)
 	}
-	if _, err := tx.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
-		_ = tx.Rollback()
-		t.Fatalf("allow commit conflicts: %v", err)
+	var merging, dirty int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_merge_status WHERE is_merging").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
 	}
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
-		t.Logf("merge returned: %v", err)
+	if merging != 0 {
+		t.Error("the CLI-route merge left a merge open after resolving it")
 	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("persist conflicted working set: %v", err)
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("count dolt_status: %v", err)
 	}
-
-	// A fresh connection must observe the persisted conflict, else this test would
-	// not be exercising the cross-connection (post-CLI-pull) resolver path.
-	var n int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts_dependencies").Scan(&n); err != nil {
-		t.Fatalf("count conflicts on fresh conn: %v", err)
-	}
-	if n == 0 {
-		t.Skip("merge auto-resolved without persisted conflicts — cannot exercise post-CLI-pull resolver")
-	}
-
-	resolved, err := store.autoResolveConflictsAfterCLIPull(ctx)
-	if err != nil {
-		t.Fatalf("autoResolveConflictsAfterCLIPull: %v", err)
-	}
-	if !resolved {
-		t.Fatal("expected audit-only dependency conflict to auto-resolve after a CLI pull")
+	if dirty != 0 {
+		t.Errorf("%d table(s) left uncommitted after the CLI-route merge settled", dirty)
 	}
 
 	var count int

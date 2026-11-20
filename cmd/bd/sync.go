@@ -73,14 +73,16 @@ type syncOutcome struct {
 	Attempts  int      `json:"attempts"`
 	Conflicts []string `json:"conflicts,omitempty"`
 	// ConflictsPreexisting distinguishes conflicts that were already live in
-	// the working set when sync started (an earlier halted sync or a hand-run
-	// merge) from ones this run's pull surfaced.
+	// the working set when sync started (a merge already open there: another
+	// client, a hand-run merge, or an older bd's halted sync) from ones this
+	// run's pull surfaced.
 	ConflictsPreexisting bool `json:"conflicts_preexisting,omitempty"`
 	// ConflictsLive reports whether the conflicts are sitting in the working
 	// set right now rather than having been aborted away. It is read from
-	// which detection source fired, never assumed: the SQL pull route aborts a
-	// conflicted merge and restores the working set, while the CLI/git-protocol
-	// route deliberately leaves the conflict rows live for the operator.
+	// which detection source fired, never assumed: every pull route aborts a
+	// merge it cannot settle and restores the working set (GH#7839), while a
+	// merge already open in the working set (another client, a hand-run merge,
+	// or an older bd) leaves its conflict rows live.
 	ConflictsLive bool `json:"conflicts_live,omitempty"`
 	RowsCorrected int  `json:"rows_corrected"`
 	// Pulled reports whether an earlier attempt in this run already completed a
@@ -201,8 +203,10 @@ func (o syncOps) report(format string, args ...interface{}) {
 //     a. the conflicts the merge itself captured — the settle pass aborts a
 //     merge it cannot auto-resolve and hands back a MergeConflictsError
 //     holding the conflict rows it read BEFORE the abort;
-//     b. live rows in dolt_conflicts, which is what a conflict left behind by
-//     some earlier operation (a hand-run merge, a halted sync) looks like.
+//     b. live rows in dolt_conflicts, which is what a merge already open in
+//     the working set looks like (another client, a hand-run merge, or an
+//     older bd's halted sync; no pull route leaves its own declined merge
+//     open, GH#7839).
 //
 //     Source (a) is why the check cannot just be a dolt_conflicts query: by
 //     the time a conflicted pull returns, its merge has been aborted and the
@@ -244,9 +248,10 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 	out := &syncOutcome{Status: syncStatusOK}
 	var evidence dirtyEvidence
 
-	// Pre-flight. A previous halted sync leaves its conflicts live, and Dolt
-	// refuses to merge over them — without this check that shows up as an
-	// opaque pull failure (exit 1) instead of the conflict it actually is.
+	// Pre-flight. A merge already open in the working set (another client, a
+	// hand-run merge, or an older bd's halted sync) leaves its conflicts live,
+	// and Dolt refuses to merge over them — without this check that shows up
+	// as an opaque pull failure (exit 1) instead of the conflict it actually is.
 	preConflicts, err := ops.conflicts(ctx)
 	if err != nil {
 		return out, fmt.Errorf("conflict check: %w", err)
@@ -281,12 +286,11 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 			out.Conflicts = conflicts
 			// Which source fired decides what the operator is told about the
 			// state of the database, and the two answers are opposites. Live
-			// rows mean the conflict is sitting in the working set right now:
-			// that is what the CLI/git-protocol pull route leaves behind, since
-			// it deliberately does not abort for the operator (see
-			// finishCLIPull). Captured-only means the settle pass aborted the
-			// merge and restored the working set. Guessing either way sends the
-			// operator looking in the wrong place.
+			// rows mean the conflict is sitting in the working set right now,
+			// left by a merge already open there: no pull route leaves its own
+			// declined merge open (GH#7839). Captured-only means the settle
+			// pass aborted the merge and restored the working set. Guessing
+			// either way sends the operator looking in the wrong place.
 			out.ConflictsLive = len(live) > 0
 			// pullErr only describes the conflict itself when the merge
 			// captured it (merged is non-empty). If merged is empty, this
@@ -681,8 +685,9 @@ recomputing or pushing and exits 2, and repeated runs keep halting the same way
 until an operator resolves the divergence. (The pull underneath does auto-settle
 the conflict classes it can settle convergently — machine-local metadata,
 audit-only dependency rows, and last-write-wins on issue cells. Anything beyond
-those halts here.) Whether the halted merge was aborted or left live in the
-working set depends on the pull route, so the halt message reports which.
+those halts here.) The pull aborts a merge it cannot settle and restores the
+working set; conflict rows already live in the working set come from a merge
+left open there, and the halt message reports which applies.
 
 Exit codes (a sync timer can branch on these without parsing output):
 
@@ -1008,22 +1013,25 @@ func syncConflictMessage(out *syncOutcome) []string {
 
 	// First: is the database conflicted RIGHT NOW, or was the conflicted merge
 	// aborted away? This is the part an operator acts on, and both answers are
-	// real — which one applies depends on the pull route, not on luck.
+	// real: the pull aborts a merge it cannot settle, while a merge already open
+	// in the working set leaves its conflict rows live.
 	switch {
 	case out.ConflictsPreexisting:
 		lines = append(lines,
 			"This replica was ALREADY in a conflicted state before this run: the conflict rows",
-			"above are live in the working set, left by an earlier halted sync or a hand-run",
-			"merge. Nothing was pulled, merged, or pushed this run. Resolve the live conflict",
-			"before sync can make progress — Dolt refuses to merge over an unresolved one.",
+			"above are live in the working set, left by a merge already open there (another",
+			"client, a hand-run merge, or an older bd's halted sync). Nothing was pulled, merged,",
+			"or pushed this run. Resolve the live conflict before sync can make progress — Dolt",
+			"refuses to merge over an unresolved one.",
 			"Inspect with: bd conflicts list / bd conflicts show",
 			conflictsResolveHint)
 	case out.ConflictsLive:
 		lines = append(lines,
-			"The conflict rows above are LIVE in the working set — this pull route leaves them",
-			"in place for you rather than aborting. The database is conflicted right now, and",
-			"Dolt will refuse to merge over it, so every later sync halts here until you resolve",
-			"it. Nothing was pushed.",
+			"The conflict rows above are LIVE in the working set. They come from a",
+			"merge already open in the working set (another client, a hand-run merge, or an",
+			"older bd), not one this pull left. The database is conflicted right now, and Dolt",
+			"will refuse to merge over it, so every later sync halts here until you resolve it.",
+			"Nothing was pushed.",
 			"Inspect with: bd conflicts list / bd conflicts show",
 			conflictsResolveHint)
 	default:
