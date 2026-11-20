@@ -28,7 +28,7 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 4. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
 5. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
 
-A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
+A `config.local.yaml` next to the project `config.yaml` is merged in after all of them, so a value there wins. bd writes this file itself for the handful of keys that describe one machine — see [Machine-local keys](#machine-local-keys) — and you can add your own overrides to it. It is never committed.
 
 On macOS, bd no longer reads `~/Library/Application Support/bd/config.yaml` or the global `~/Library/Application Support/beads/PRIME.md`: probing that folder can raise a macOS privacy prompt (GH#8113). The macOS user config directory is now `$XDG_CONFIG_HOME` when set, otherwise `~/.config`, for both `bd/config.yaml` and `beads/PRIME.md`. Move any settings in the old file to `bd/config.yaml`, and PRIME.md to `beads/PRIME.md`, in that directory; `bd doctor` lists the settings that differ and prints the commands. Apart from `bd doctor`, bd reads the old config only when the new one has no `metrics.disabled` (normally once, after upgrading). It then carries the metrics settings (`metrics.disabled`, `metrics.endpoint`, `metrics.notice_shown`) into the new config, keeping any value the new config already sets, and in the same write the per-machine settings `bd config set` writes there: `node_id` unless the new config sets it or `bd config unset` removed it, and `mail.delegate` and `dolt.remotesapi-port` only when bd creates the new config (bd read those two from `~/.config/bd/config.yaml` alone whenever it existed). When bd never reads the old file (`BD_DISABLE_METRICS` or `DO_NOT_TRACK` turns metrics off, the new config already has `metrics.disabled`, or one of the cases below keeps bd out of the old folder), nothing is carried; without `node_id`, the guard that keeps `bd reclaim` from reverting leases another replica granted is off. If the old file cannot be read or parsed, nothing is carried and metrics are left off. If the new config cannot be written, bd leaves the old folder alone and metrics stay off on macOS until the user config sets `metrics.disabled` or `BD_DISABLE_METRICS` is set (`BD_DISABLE_METRICS` set to `0`, `false` or empty turns metrics on). Metrics on macOS also stay off, silently, when the user config has a commented-out `metrics` block, unparseable YAML, a top level that is not a mapping (for example a file holding only `---`), a `metrics` key that is not a section, a dangling symlink or a non-bool `metrics.disabled`; `bd metrics on` or `bd metrics off` settles it (first fix unparseable YAML, a non-mapping top level or a non-section `metrics` key, and create the target folder of a dangling symlink). On macOS bd leaves a `.lock` file named after the user config (`config.yaml.lock`), or after its target when the config is a symlink to an existing file. Paths are unchanged on Linux and Windows.
 
@@ -86,7 +86,7 @@ bd config validate
 bd config unset jira.url
 ```
 
-`bd config set` automatically routes the write to the right location: keys in the YAML namespace (see below) are written to the project `config.yaml`; everything else is written to the Dolt database. `beads.role` is stored in git config.
+`bd config set` automatically routes the write to the right location: keys in the YAML namespace (see below) are written to the project `config.yaml`, except the few [machine-local keys](#machine-local-keys) that go to the untracked `config.local.yaml`; everything else is written to the Dolt database. `beads.role` is stored in git config.
 
 Unrecognized keys produce a warning with a did-you-mean suggestion; use the `custom.*` namespace for user-defined keys.
 
@@ -111,6 +111,44 @@ Plus these individual keys:
 Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `password` is treated as a secret: it is refused on git-tracked `config.yaml` files unless you pass `--force-git-tracked`. Prefer exporting the value as an environment variable instead (e.g. `LINEAR_API_KEY`).
 
 `bd config unset` on one of these secret keys clears the `config.yaml` entry and also deletes any copy an older bd stored in the database, reporting which of them it removed. Keys reached YAML routing at different points in bd's history, so a workspace configured before the move can still hold the value in a table that `bd dolt push` replicates. The database half is best effort: the command never creates a database to look in, so it is skipped where reaching the row would mean provisioning one — but not for a server-mode or proxied workspace whose database is real and simply not on local disk; a database that refuses the delete is reported as a row that is still stored. Deleting it locally does not unpublish it — rotate a secret that has already been pushed.
+
+### Machine-local Keys
+
+A few of those YAML keys answer a question about *this machine* rather than about the project: which Dolt this host talks to, and whether this host takes backups. Storing one host's answer in the tracked `config.yaml` costs twice. It travels to everyone who pulls, and because bd rewrites `config.yaml` as a side effect of ordinary work, `git status` reports a change nobody made — which a release script, a pre-commit hook, or a CI clean-tree check then refuses on.
+
+So bd writes these keys to `.beads/config.local.yaml` instead, and keeps git from seeing that file.
+Every command that persists one routes there: `bd config set`, `bd dolt set --update-config`, and
+`bd init --debug`.
+
+| Key | What it says about this host |
+|---|---|
+| `dolt.mode` | embedded or server |
+| `dolt.host`, `dolt.port`, `dolt.socket`, `dolt.user` | how to reach the Dolt server |
+| `dolt.data-dir` | where this host keeps Dolt data |
+| `dolt.debug` | whether to write pprof artifacts here |
+| `backup.enabled`, `backup.interval` | whether this host takes backups, and how often |
+
+The list is exact, not a namespace. The rest of `dolt.*` and `backup.*` — `dolt.auto-start`, `dolt.max-conns`, `dolt.shared-server`, `backup.git-repo` and the others — stay in `config.yaml` as shared project settings.
+
+```bash
+bd config set dolt.mode server
+# → Set dolt.mode = server (in config.local.yaml)
+
+# See everything this machine has overridden
+bd config show --source config.local.yaml
+# →   dolt.mode  = server  (config.local.yaml)
+```
+
+Because the sidecar is merged last, a value there overrides `config.yaml`. A committed value still works: it is a shared default that any machine can override locally.
+
+Two consequences worth knowing:
+
+- **The first machine-local write tidies `config.yaml` once.** If the tracked file already holds one of these keys, bd moves it into the sidecar and comments it out of `config.yaml` — one small diff, once per workspace, for you to review and commit.
+- **`bd config unset` on these keys clears them from both files.** It comments the key out of `config.local.yaml` and, when the tracked `config.yaml` carries it too, out of that file as well, so the key is unset afterwards instead of falling back to the committed value. The output names each file it changed (`--json` reports them in `location`, for example `config.local.yaml, config.yaml`); a value removed from `config.yaml` is a change for you to commit.
+
+<Note>
+bd never commits the sidecar. `bd init` lists `config.local.yaml` in `.beads/.gitignore`; in a checkout made before bd wrote that entry, bd adds a per-clone line to `.git/info/exclude` the first time it writes the file. Run `bd doctor --fix` to add the tracked entry.
+</Note>
 
 ## Tool-Level Settings (config.yaml)
 
@@ -702,7 +740,7 @@ output:
   title-length: 255
 ```
 
-For machine-specific overrides that should not be committed, drop them in `.beads/config.local.yaml`; it is merged in last.
+Machine-specific settings do not belong in this file. bd routes [machine-local keys](#machine-local-keys) to the untracked `.beads/config.local.yaml`, which is merged in last; you can add your own overrides there too.
 
 ## Per-Command Override
 
