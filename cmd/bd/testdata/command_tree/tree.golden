@@ -2292,6 +2292,12 @@ bd dolt status
     | connects through) and the dolt backend behind it separately, read from the
     | proxy's own process records. Reporting starts nothing: a quiesced workspace
     | is shown as not running, and the next bd command launches it.
+    |
+    | With --all, lists every dolt sql-server on this machine instead, from any
+    | directory: for each server bd manages, its workspace, PID, port, uptime and
+    | idle-stop setting; every other dolt sql-server (another tool's, such as a
+    | Gas City city's) is listed as not managed by bd.
+  flag --all type=bool default="false" usage="List every Dolt server on this machine, managed by bd or not (needs no workspace)"
 
 bd dolt stop
   use: "stop"
@@ -2304,12 +2310,18 @@ bd dolt stop
     | This sends a graceful shutdown signal. The server will restart automatically
     | on the next bd command unless auto-start is disabled.
     |
+    | With --all, stops every Dolt server bd manages on this machine, from any
+    | directory, and reports each one; dolt sql-servers bd does not manage are
+    | left running (see bd dolt status --all). It exits non-zero if any stop
+    | fails.
+    |
     | For a managed proxied server, --force can recover unverifiable or legacy
     | process records (both the proxy and its backend) only after each live process
     | executable is matched to bd or dolt and its command line ties it to this
     | workspace. In that recovery path, force still refuses to signal a process
     | whose executable identity cannot be matched to bd or dolt, or whose workspace
     | scope cannot be established.
+  flag --all type=bool default="false" usage="Stop every Dolt server bd manages on this machine (needs no workspace)"
   flag --force type=bool default="false" usage="Force stop (proxied recovery still requires a bd/dolt executable match)"
 
 bd dolt test
@@ -2325,6 +2337,21 @@ bd dolt test
     |   2. The connection can be established
     |
     | Use this before switching to server mode to ensure the server is running.
+
+bd dolt-idle-watch
+  use: "dolt-idle-watch"
+  short: "Internal: stop an auto-started dolt sql-server once it is idle"
+  hidden: true
+  runnable: true
+  long:
+    | dolt-idle-watch watches one dolt sql-server that bd auto-started and stops
+    | it once it has had no client for --timeout (dolt.idle-timeout). bd launches it
+    | beside each auto-started server; it is not intended to be invoked directly.
+  flag --host type=string default="" usage="host the server listens on"
+  flag --pid type=int default="0" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="PID of the dolt sql-server to watch"
+  flag --port type=int default="0" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="SQL port of the server"
+  flag --server-dir type=string default="" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="server directory holding dolt-server.pid"
+  flag --timeout type=duration default="0s" annotations={cobra_annotation_bash_completion_one_required_flag=["true"]} usage="idle window before the server is stopped"
 
 bd duplicate
   use: "duplicate <id> --of <canonical>"

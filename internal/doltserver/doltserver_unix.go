@@ -55,10 +55,29 @@ func readDoltProcessPIDs() ([]int, error) {
 	return parseDoltProcessPIDs(out), nil
 }
 
+// readDoltProcessRows is readDoltProcessPIDs with each process's command
+// line.
+func readDoltProcessRows() ([]doltProcessRow, error) {
+	out, err := exec.Command("ps", "-axo", "pid=,state=,command=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("listing processes: %w", err)
+	}
+	return parseDoltProcessRows(out), nil
+}
+
 // parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
 // `ps -axo pid=,state=,command=` snapshot. It preserves the source row order.
 func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
+	for _, row := range parseDoltProcessRows(snapshot) {
+		pids = append(pids, row.PID)
+	}
+	return pids
+}
+
+// parseDoltProcessRows is parseDoltProcessPIDs with each command line.
+func parseDoltProcessRows(snapshot []byte) []doltProcessRow {
+	var rows []doltProcessRow
 	for _, line := range strings.Split(string(snapshot), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -84,10 +103,10 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 
 		doltIndex := strings.Index(command, "dolt")
 		if doltIndex >= 0 && strings.Contains(command[doltIndex+len("dolt"):], "sql-server") {
-			pids = append(pids, pid)
+			rows = append(rows, doltProcessRow{PID: pid, Command: command})
 		}
 	}
-	return pids
+	return rows
 }
 
 // splitPSField separates the next whitespace-delimited ps field from the
@@ -124,6 +143,24 @@ func isProcessInDir(pid int, dir string) bool {
 		}
 	}
 	return false
+}
+
+// processCwd returns pid's working directory, or "" when it cannot be read:
+// /proc where there is one, else lsof.
+func processCwd(pid int) string {
+	if cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd")); err == nil {
+		return cwd
+	}
+	out, err := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "n") {
+			return strings.TrimSpace(line[1:])
+		}
+	}
+	return ""
 }
 
 // signalZero sends signal 0 to pid, which checks the process without

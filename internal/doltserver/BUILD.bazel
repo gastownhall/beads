@@ -3,11 +3,13 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "doltserver",
     srcs = [
+        "discover.go",
         "doltserver.go",
         "doltserver_unix.go",
         "doltserver_windows.go",
         "endpoint.go",
         "gc_config.go",
+        "idlewatch.go",
         "listenerowner_darwin.go",
         "listenerowner_linux.go",
         "listenerowner_other.go",
@@ -62,6 +64,7 @@ go_test(
     srcs = [
         "configport_test.go",
         "dirty_state_test.go",
+        "discover_test.go",
         "doltserver_test.go",
         "doltserver_unix_test.go",
         "doltserver_windows_test.go",
@@ -70,6 +73,10 @@ go_test(
         "fdleak_integration_test.go",
         "gc_config_test.go",
         "host_ownership_test.go",
+        "idlewatch_exit_test.go",
+        "idlewatch_integration_test.go",
+        "idlewatch_lifecycle_integration_test.go",
+        "idlewatch_test.go",
         "lifecycle_integration_test.go",
         "listenerowner_darwin_test.go",
         "listenerowner_linux_test.go",
