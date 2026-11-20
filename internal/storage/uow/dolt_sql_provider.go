@@ -645,8 +645,9 @@ func dataBehindAdopter(readOnly bool) *schema.FastForwardAdopter {
 // UserMessage body, and only the blunt fallback leads with the one-line
 // summary. Without the read-through, extending the gate to the proxied path
 // would newly brick every read on a workspace waiting for its operator to
-// consent — which is the opposite of the contract the gate's own message
-// promises ("read commands keep working against the current schema").
+// consent, even where this binary's reads can still query the current schema.
+// (The gate's message promises no more than that: reads that need a column
+// the pending migrations add are refused too.)
 // A read that cannot carry on, because this binary's reads cannot query the
 // current schema, still reports a stop the smart gate shaped
 // (reportsStopOnDrift) rather than only the drift.

@@ -613,9 +613,9 @@ configured, though the two cases consent differently
 Upgrade one server's clients like this:
 
 ```bash
-# 1. Upgrade bd on every client of the server. Reads keep working throughout —
-#    an upgraded client reads the old schema, it just cannot write to it
-#    (unless the server's schema is v53 or older; see below).
+# 1. Upgrade bd on every client of the server. Until step 2 an upgraded
+#    client cannot write, and coming from bd 1.3.x or older it cannot read
+#    issues either (see below): do steps 1-3 in one sitting.
 bd version                     # on each client, confirm the new version
 
 # 2. Once, from a workspace already set up against this server: consent.
@@ -625,9 +625,14 @@ bd migrate schema              # add --global for the shared global database
 bd doctor
 ```
 
-Between steps 1 and 2, an upgraded client reads normally and its writes are
-refused with the gate's guidance. Nothing is silently promoted, so there is no
-deadline — but the window is a degraded one, so keep it short.
+Between steps 1 and 2, an upgraded client's writes are refused with the gate's
+guidance. Its reads keep working only while the old schema has every column
+the new `bd` reads. Coming from bd 1.3.x or older to 1.4, every issue read
+fails with `schema version mismatch` until step 2: 1.4 reads `arrival_seq`
+(migration 0073), which the old schema lacks, and `BD_IGNORE_SCHEMA_SKEW=1`
+does not help. Back up with the old `bd` first, since `bd export` and
+`bd backup` are refused too. Nothing is silently promoted, so there is no
+deadline, but plan steps 1-3 as one sitting.
 
 If the server's schema is v53 or older (1.1.x, or 1.2.2, the re-release of
 the 1.1 line), reads can fail too until step 2: `bd list` stops with

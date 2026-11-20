@@ -107,6 +107,11 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 				t.Errorf("notice for %q must not prescribe %q (the verb does not unlock this arm):\n%s",
 					tt.decision, tt.absent, out)
 			}
+			// Coming from bd 1.3.x every issue read needs arrival_seq
+			// (0073), so no arm may promise reads keep working meanwhile.
+			if strings.Contains(out, "keep working") {
+				t.Errorf("notice for %q promises reads keep working:\n%s", tt.decision, out)
+			}
 		})
 	}
 

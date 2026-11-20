@@ -120,7 +120,7 @@ func TestForcedRemoteMigrateWarning(t *testing.T) {
 // is pinned unchanged.
 func TestSchemaBehindHintOnProxiedRemote(t *testing.T) {
 	behind := schema.LatestVersion() - 1
-	stock := fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to read anyway (queries touching newer schema may fail)",
+	stock := fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (any query that needs a column the pending migrations add still fails)",
 		behind, schema.LatestVersion(), behind)
 
 	read := func(t *testing.T, gateErr *schema.RemoteMigrateGateError) string {

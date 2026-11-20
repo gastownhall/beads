@@ -1473,6 +1473,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Refusals before a schema migration no longer promise that reads keep
+  working.** Coming from bd 1.3.x, every issue read needs `arrival_seq`
+  (migration 0073), so until `bd migrate schema` runs an upgraded client on a
+  shared or external Dolt server, or in a proxied-server workspace, can
+  neither read nor write issues. The shared-server refusal, its `--json` hint
+  and the one-time upgrade notice said read commands keep working meanwhile.
+  They now say writes are refused and so are reads that need a column the
+  pending migrations add, and the `BD_IGNORE_SCHEMA_SKEW=1` hint no longer
+  says it lets you read anyway. The upgrading guide says to upgrade every
+  client and migrate in one sitting, and to back up with the old bd first
+  (`bd export` and `bd backup` are refused too). Reported from a Gas City
+  upgrade drill.
+
 - **A proxied-server workspace whose database has a Dolt remote gets a
   remote-migrate refusal it can act on** (bd-5hl9dg). `bd init
   --proxied-server` adds a remote from the git `origin` by default, so a
