@@ -712,8 +712,8 @@ func TestInitGuard_UnreachableServerRefuses(t *testing.T) {
 //
 // --force is a deprecated alias for --reinit-local, and --reinit-local skips
 // checkExistingBeadsData entirely. The reinit path's own typed confirmation
-// keys on countExistingIssues, which returns 0 or an error in exactly the case
-// where the server-side database is missing — so before this fix,
+// proceeds without asking when countReinitTargetIssues proves the server-side
+// database absent — exactly the case this guard covers — so before this fix,
 // `bd init --force` against a lost database created a fresh empty one with no
 // prompt and no destroy token. That is the 2026-08-11 fleet-wide data-loss
 // reflex, reached through the flag an operator in a panic is most likely to
@@ -1198,10 +1198,12 @@ func TestInitGuard_ReinitLocal_NoProjectID_DataDirPresent_StillBlocks(t *testing
 }
 
 // TestInitGuard_ReinitLocal_NoProjectID_NoDataDir_Allows is the positive
-// control: with nothing local at all, this really is a fresh clone and
-// --reinit-local must still work. It pins the coarse-directory permit
-// condition, so the fix above cannot be over-applied into refusing every
-// pre-GH#2372 workspace.
+// control: with nothing local at all, this really is a fresh clone and this
+// guard must permit --reinit-local. It pins only the guard's coarse-directory
+// permit condition, so the fix above cannot be over-applied into refusing
+// every pre-GH#2372 workspace. The destroy confirmation that follows is not
+// this guard's: countReinitTargetIssues asks there unless --recreate-missing
+// is set and the reachable server reports the database absent.
 func TestInitGuard_ReinitLocal_NoProjectID_NoDataDir_Allows(t *testing.T) {
 	oldServerMode := serverMode
 	serverMode = true
