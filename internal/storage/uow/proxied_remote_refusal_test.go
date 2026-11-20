@@ -166,6 +166,26 @@ func TestSchemaBehindHintOnProxiedRemote(t *testing.T) {
 			t.Errorf("proxied no-remote hint changed.\n got: %s\nwant: %s", got, stock)
 		}
 	})
+	// A smart-gate stop or the data-behind stop keeps the stock remedy: the
+	// bare verb reaches the gate and prints the stop, while `--force` is
+	// checked before the gate decides and would skip it.
+	for _, tc := range []struct {
+		name    string
+		gateErr *schema.RemoteMigrateGateError
+	}{
+		{"adopt", &schema.RemoteMigrateGateError{Decision: "adopt", Proxied: true}},
+		{"adopt-ff", &schema.RemoteMigrateGateError{Decision: "adopt-ff", Proxied: true}},
+		{"fork-skew", &schema.RemoteMigrateGateError{Decision: "fork-skew", Proxied: true, SkewVersions: []int{schema.LatestVersion()}}},
+		{"data-behind", &schema.RemoteMigrateGateError{FallbackReason: "data-behind", Proxied: true}},
+	} {
+		t.Run("proxied "+tc.name+" stop keeps the stock remedy", func(t *testing.T) {
+			got := read(t, tc.gateErr)
+			if strings.Contains(got, schema.SharedConsentCommandForced) {
+				t.Errorf("%s stop: read hint prescribes %q, which skips this stop:\n%s",
+					tc.name, schema.SharedConsentCommandForced, got)
+			}
+		})
+	}
 	t.Run("proxied with a remote names the forced verb", func(t *testing.T) {
 		got := read(t, &schema.RemoteMigrateGateError{FallbackReason: "shared-store", Proxied: true})
 		for _, want := range []string{
