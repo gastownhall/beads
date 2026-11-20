@@ -491,19 +491,11 @@ class TestEdgeCases:
 
         assert "No beads workspace found" in str(exc_info.value)
 
-    def test_canonicalize_path_cached(self, temp_projects):
-        """Test path canonicalization is cached for performance."""
-        # Clear cache
-        _canonicalize_path.cache_clear()
-
-        # First call
-        result1 = _canonicalize_path(temp_projects["a"])
-
-        # Second call should hit cache
-        result2 = _canonicalize_path(temp_projects["a"])
-
-        assert result1 == result2
-
-        # Verify cache hit
-        cache_info = _canonicalize_path.cache_info()
-        assert cache_info.hits >= 1
+    def test_canonicalize_path_follows_retargeted_symlink(self, temp_projects):
+        """The same alias must follow a changed workspace, not its first target."""
+        alias = Path(temp_projects["a"]).parent / "active"
+        alias.symlink_to(temp_projects["a"], target_is_directory=True)
+        assert _canonicalize_path(str(alias)) == os.path.realpath(temp_projects["a"])
+        alias.unlink()
+        alias.symlink_to(temp_projects["b"], target_is_directory=True)
+        assert _canonicalize_path(str(alias)) == os.path.realpath(temp_projects["b"])

@@ -154,6 +154,17 @@ await beads_create_issue(
 )
 ```
 
+### Worktrees and changing aliases
+
+A worktree with its own `.beads` directory uses that workspace. A worktree
+without a local `.beads` keeps the main repository fallback. Supplied workspace
+paths are resolved against the current filesystem, while client connections
+remain pooled by the resolved workspace root.
+
+When using saved context, call `context(workspace_root=...)` again after
+retargeting an alias or creating a worktree-local database. Saved context keeps
+the workspace you previously selected.
+
 ### Architecture
 
 **Connection Pool**: The MCP server maintains a connection pool keyed by canonical workspace path:

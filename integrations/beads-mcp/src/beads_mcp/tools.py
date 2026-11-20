@@ -5,7 +5,6 @@ import logging
 import os
 from contextlib import suppress
 from contextvars import ContextVar
-from functools import lru_cache
 from typing import Annotated, Any
 
 from .bd_client import BdClientBase, BdError, create_bd_client
@@ -217,12 +216,14 @@ def _resolve_workspace_root(path: str) -> str:
     return _shared_resolve_workspace_root(path)
 
 
-@lru_cache(maxsize=128)
 def _canonicalize_path(path: str) -> str:
     """Canonicalize workspace path to handle symlinks and git repos.
 
     This ensures that different paths pointing to the same project
     (e.g., via symlinks) use the same client connection.
+    Resolve filesystem state on each call so retargeted symlinks and newly
+    created worktree-local databases select their current owner. The client
+    pool still deduplicates connections by the resolved workspace root.
 
     Args:
         path: Workspace directory path
