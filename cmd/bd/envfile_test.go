@@ -88,6 +88,7 @@ func TestLoadBeadsEnvFileRejectsCommands(t *testing.T) {
 		// the serve token file decides which bearers bd serve accepts.
 		{"BEADS_HTTP_ALLOW_INSECURE", "credential target settings must come from your shell environment or user config"},
 		{"BEADS_SERVE_TOKEN_FILE", "credential target settings must come from your shell environment or user config"},
+		{"BEADS_DOLT_SERVER_PROXY_ROOT", "credential target settings must come from your shell environment or user config"},
 		{"BEADS_DOLT_SERVER_HOST", "credential target settings must come from your shell environment or user config"},
 		{"BEADS_CREDENTIALS_FILE", "credential target settings must come from your shell environment or user config"},
 		{"BEADS_CENTRAL_CONFIG", "credential target settings must come from your shell environment or user config"},
