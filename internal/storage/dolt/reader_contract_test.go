@@ -200,6 +200,18 @@ func TestReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *testing.T
 	conformance.RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t, ctx, fixture)
 }
 
+func TestReaderListWiderThanTheHydrationBatchKeepsItsPageContracts(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts(t, ctx, fixture)
+}
+
+func TestReaderListOffsetPastTheHydrationBatchKeepsItsWindow(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListOffsetPastTheHydrationBatchKeepsItsWindow(t, ctx, fixture)
+}
+
 // The two count vocabularies reach two different store methods here: the page
 // rides sqlbuild's mega-query and the detail view rides CountDependencies /
 // CountDependents, which count every edge type.

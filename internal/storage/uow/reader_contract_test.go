@@ -125,6 +125,12 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ReadyPageWiderThanTheHydrationBatchIsStillThatPrefix", func(t *testing.T) {
 		conformance.RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t, ctx, fixture)
 	})
+	t.Run("ListWiderThanTheHydrationBatchKeepsItsPageContracts", func(t *testing.T) {
+		conformance.RunReaderListWiderThanTheHydrationBatchKeepsItsPageContracts(t, ctx, fixture)
+	})
+	t.Run("ListOffsetPastTheHydrationBatchKeepsItsWindow", func(t *testing.T) {
+		conformance.RunReaderListOffsetPastTheHydrationBatchKeepsItsWindow(t, ctx, fixture)
+	})
 	// The two count vocabularies are two bodies here rather than two store
 	// methods: the page's numbers come out of this backend's own by-ids counts
 	// query, the detail view's out of the dependency use case's CountByIssueID
