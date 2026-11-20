@@ -613,8 +613,9 @@ configured, though the two cases consent differently
 Upgrade one server's clients like this:
 
 ```bash
-# 0. With the bd you have now, back up (bd backup sync, or bd dolt push):
-#    once a client runs 1.4, bd export and bd backup are refused until step 2.
+# 0. With the bd you have now, back up each database:
+#    bd export --all -o backup-$(date +%Y%m%d).jsonl
+#    (once a client runs 1.4, its bd export and bd backup are refused until step 2)
 # 1. Upgrade bd on every client of the server. Until step 2 an upgraded
 #    client cannot write, and coming from bd 1.3.x or older it cannot read
 #    issues either (see below): do steps 1-3 in one sitting.

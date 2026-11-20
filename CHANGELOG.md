@@ -1479,8 +1479,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
   until the schema is migrated an upgraded client on a shared or external
-  Dolt server, or in a proxied-server workspace, can neither read nor write:
-  every command that opens the database refuses, export and backup included.
+  Dolt server, or in a proxied-server workspace, can neither read nor write
+  issues; `bd export` and `bd backup` are refused too.
   The shared-server refusal and its `--json` hint said read commands keep
   working meanwhile, and the one-time upgrade notice said reads keep working.
   The refusal and the hint now say writes are refused and so are reads that
@@ -5296,7 +5296,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on once the pull completes and the migration proceeds.
 
   Commands that keep working through the stop say the same thing. `bd list`,
-  `bd ready` and `bd show` succeed against the old schema, and `bd dolt commit`
+  `bd ready` and `bd show` succeed against the old schema while it has every
+  column this bd reads, and `bd dolt commit`
   still commits the working set; on embedded storage all of them used to print
   the blunt migrate-or-adopt coordination bullets while doing so — naming
   `bd migrate --force && bd dolt push`, which on a data-behind clone applies

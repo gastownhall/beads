@@ -529,8 +529,8 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"\n" +
 			"  Writes stay refused until the schema is migrated, and so are reads that\n" +
 			"  need a column the pending migrations add; they fail with\n" +
-			"  \"schema version mismatch\". Coming from bd 1.3.x that is every command\n" +
-			"  that opens the database, export and backup included.\n" +
+			"  \"schema version mismatch\". Coming from bd 1.3.x that is every read,\n" +
+			"  export and backup included.\n" +
 			"\n" +
 			"  If the migration then reports dirty tables, that working set has to be\n" +
 			"  committed first — see the recovery the dirty-table error names; do not\n" +
@@ -710,7 +710,7 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 			"until it is upgraded (#5920). Other clients' binary versions are not observable from this process, so " +
 			"do NOT auto-run the migration: surface remote_migrate_gate.options to the operator and let them confirm " +
 			"the fleet is upgraded first. Until the migration, writes are refused, and so are reads that need a " +
-			"column the pending migrations add (coming from bd 1.3.x, every command that opens the database), so do not count on reads meanwhile."
+			"column the pending migrations add (coming from bd 1.3.x, every read, export and backup included), so do not count on reads meanwhile."
 	default:
 		return "Coordination decision required: only ONE clone may migrate a shared remote; " +
 			"a second clone migrating independently forks the schema unrecoverably (#4259). " +
