@@ -1,5 +1,5 @@
 {
-  "recorded_from": "9e22efbb4 + fix/bd-n8984f",
+  "recorded_from": "2549ece6e + gastownhall/beads#7100",
   "steps": [
     "create a",
     "create b blocked by a",
@@ -169,7 +169,7 @@
         "id"
       ],
       "rows": 39,
-      "sha256": "3e7d84b529bc1fad81e4abefaeb4efa63a30fbfaf4265a6733b9ed56fcc5cfa8"
+      "sha256": "96f4df5d265fc9b03d65a8f2fbbc3010aa51d166cc6917b2f50a1f37048113db"
     },
     "federation_peers": {
       "columns": [
@@ -454,7 +454,7 @@
         "created_at"
       ],
       "rows": 27,
-      "sha256": "dd46c35aeb2dc13a5351683d40e5d1fb6b64272801fd2ed983c028e3c52bdb4d"
+      "sha256": "867803b83a26777ce11f9694cbd8cffe52ec2c4e5e20ddfb71343377754dc450"
     },
     "wisp_labels": {
       "columns": [

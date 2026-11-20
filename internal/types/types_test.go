@@ -775,6 +775,38 @@ func TestDependencyTypeIsValid(t *testing.T) {
 	}
 }
 
+func TestDependencyAddedEventDescription(t *testing.T) {
+	tests := []struct {
+		name string
+		dep  Dependency
+		want string
+	}{
+		{
+			name: "blocks reads blocker first",
+			dep:  Dependency{IssueID: "blocked", DependsOnID: "blocker", Type: DepBlocks},
+			want: "Added dependency: blocker blocks blocked",
+		},
+		{
+			name: "parent-child keeps stored direction",
+			dep:  Dependency{IssueID: "child", DependsOnID: "parent", Type: DepParentChild},
+			want: "Added dependency: child parent-child parent",
+		},
+		{
+			name: "custom relation keeps stored direction",
+			dep:  Dependency{IssueID: "source", DependsOnID: "target", Type: DependencyType("custom")},
+			want: "Added dependency: source custom target",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.dep.AddedEventDescription(); got != tt.want {
+				t.Fatalf("AddedEventDescription() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDependencyTypeIsWellKnown(t *testing.T) {
 	tests := []struct {
 		depType   DependencyType
