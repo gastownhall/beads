@@ -32,7 +32,14 @@ import (
 // issued inside the work func; a serialization failure from it surfaces as
 // the closure's error and retries against a fresh unit of work, exactly like
 // a commit issued by RunTxResult itself.
+//
+// A provider opened WithoutDeferWakeSweep sweeps nothing: every caller (the
+// reader's Ready and --ready List, the claimer, bd ready's own call) runs
+// through here, so the one check holds them all off together.
 func WakeExpiredDefers(ctx context.Context, p UnitOfWorkProvider) (int, error) {
+	if deferWakeSweepOff(p) {
+		return 0, nil
+	}
 	return RunTxResult(ctx, p, func(ctx context.Context, uw UnitOfWork) (int, string, error) {
 		issues, wisps, err := uw.IssueUseCase().WakeExpiredDefers(ctx)
 		if err != nil {
@@ -48,6 +55,22 @@ func WakeExpiredDefers(ctx context.Context, p UnitOfWorkProvider) (int, error) {
 		}
 		return 0, "", nil
 	})
+}
+
+// deferWakeSweepSwitch is the provider side of WithoutDeferWakeSweep.
+type deferWakeSweepSwitch interface {
+	deferWakeSweepDisabled() bool
+}
+
+func (p *doltSQLProvider) deferWakeSweepDisabled() bool { return p.noDeferWakeSweep }
+
+// deferWakeSweepOff reports whether the provider beneath p's decorators was
+// opened WithoutDeferWakeSweep. The decorators (hooks, external-dependency
+// policy) build their roles on themselves, so the switch is read through
+// them rather than asked of each.
+func deferWakeSweepOff(p UnitOfWorkProvider) bool {
+	s, ok := UnwrapProvider(p).(deferWakeSweepSwitch)
+	return ok && s.deferWakeSweepDisabled()
 }
 
 // advisoryAccessDeniedOnce rate-limits the access-denied advisory to one

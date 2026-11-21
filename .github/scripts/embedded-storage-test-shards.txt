@@ -273,6 +273,7 @@
 40 12 TestCounterExcludeStatusAcceptsAWorkspaceCustomStatusWithoutIncludeInfra
 40 12 TestEmbeddedClaimerAcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne
 40 12 TestEmbeddedClaimerRefusesAWispIDAsNotFound
+40 12 TestEmbeddedCommitAuthorDefaultsWithoutGitAuthor
 40 12 TestEmbeddedDependencyEditorVersionsOnlyARealAddOrRemove
 40 12 TestEmbeddedIgnoredMigration0023RepairsForkLineageJournalShape
 40 12 TestEmbeddedIgnoredMigration0031SkipsDeletedIssues
@@ -285,6 +286,7 @@
 40 12 TestReadyHidesChildrenOfUndatedDeferredParentAcrossTables
 
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
+40 13 TestEmbeddedDeferWakeSweepSwitch
 40 13 TestEmbeddedDepRekeyConvergesRenameChain
 40 13 TestEmbeddedDependencyEditorAppliesParentChildBeforeBlockingEdges
 40 13 TestEmbeddedDependencyEditorRefusesAGhostSource
@@ -328,6 +330,7 @@
 
 40 16 TestChildSuffixReservation
 40 16 TestDescendantWalkReachesEveryTargetKindAndStopsOnCycles
+40 16 TestEmbeddedCommitAuthorRetainedAfterEnvChange
 40 16 TestEmbeddedDeferredActivationRecordsFromTheFirstWrite
 40 16 TestEmbeddedDependencyEditorAddedEchoesTheRequestOrder
 40 16 TestEmbeddedDependencyEditorRemovesOnlyTheNamedEdge
@@ -344,6 +347,7 @@
 
 40 17 TestAddDependency
 40 17 TestEmbeddedBatchCloserWispItemClosesAndEarnsTheClaim
+40 17 TestEmbeddedCommitAuthorSkipsAnUnparseableGitAuthor
 40 17 TestEmbeddedDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion
 40 17 TestEmbeddedIgnoredMigration0031OpensAShallowClone
 40 17 TestEmbeddedIssueOperationsUpdateIssuePlaneOnlyRefusesWisps
@@ -539,6 +543,7 @@
 40 29 TestLeaseReclaimerContract
 40 29 TestLifecycleCreateContract
 
+40 30 TestBuildDSN_CarriesTheCommitter
 40 30 TestCounterContract
 40 30 TestCycleDetectorContract
 40 30 TestEmbeddedClaimerTakesAnOpenIssueTheActorAlreadyHolds
@@ -590,6 +595,7 @@
 40 32 TestWithPeerAuth_MissingRemoteFailsClosed
 
 40 33 TestEmbeddedBatchCloserDuplicateItemRecloseAtItsOwnIndex
+40 33 TestEmbeddedCommitAuthorFollowsGitAuthorEnv
 40 33 TestEmbeddedDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate
 40 33 TestEmbeddedDependencyEditorValidationRefusalsWriteNothing
 40 33 TestEmbeddedIgnoredCommittableDirtyRefusesBeforeMigrating

@@ -14,6 +14,9 @@ type EmbeddedDoltStore struct {
 	branch   string
 }
 
+// SetDeferWakeSweepEnabled is a no-op when CGO is not enabled.
+func (s *EmbeddedDoltStore) SetDeferWakeSweepEnabled(_ bool) {}
+
 var errNoCGO = errors.New("embeddeddolt: requires CGO (build with CGO_ENABLED=1)")
 
 // Open returns an error when CGO is not enabled.
