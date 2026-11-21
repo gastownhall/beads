@@ -411,6 +411,93 @@ func TestDoltServerMode(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("GetDoltServerUser_config_local_yaml", func(t *testing.T) {
+		// GH#8577: dolt.user resolves through the merged yaml layer.
+		// Precedence: env > config.local.yaml > config.yaml > metadata.json >
+		// default. Note the deliberate asymmetry vs GetDoltServerHost (where
+		// metadata beats yaml): the user is machine-local identity, and
+		// metadata.json is committed shared state.
+		t.Setenv("BEADS_DOLT_SERVER_USER", "")
+
+		configDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(configDir, "config.yaml"),
+			[]byte("dolt.user: yaml_user\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(configDir, "config.local.yaml"),
+			[]byte("dolt.user: local_user\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		// config.local.yaml beats metadata.json — the issue's core scenario:
+		// a tracked metadata.json pins the team's user; this machine needs its
+		// own without touching committed state or hijacking the whole shell.
+		metaCfg := &Config{DoltServerUser: "metadata_user"}
+		if got := metaCfg.GetDoltServerUser(); got != "local_user" {
+			t.Errorf("local over metadata: GetDoltServerUser() = %q, want local_user", got)
+		}
+
+		// env still beats config.local.yaml.
+		t.Setenv("BEADS_DOLT_SERVER_USER", "env_user")
+		if got := metaCfg.GetDoltServerUser(); got != "env_user" {
+			t.Errorf("env over local: GetDoltServerUser() = %q, want env_user", got)
+		}
+		t.Setenv("BEADS_DOLT_SERVER_USER", "")
+	})
+
+	t.Run("GetDoltServerUser_config_yaml_only", func(t *testing.T) {
+		// A workspace with only config.yaml (no local layer) honours dolt.user
+		// there, over metadata.json.
+		t.Setenv("BEADS_DOLT_SERVER_USER", "")
+
+		configDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(configDir, "config.yaml"),
+			[]byte("dolt.user: yaml_user\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		if got := (&Config{}).GetDoltServerUser(); got != "yaml_user" {
+			t.Errorf("config.yaml-only: GetDoltServerUser() = %q, want yaml_user", got)
+		}
+		if got := (&Config{DoltServerUser: "metadata_user"}).GetDoltServerUser(); got != "yaml_user" {
+			t.Errorf("config.yaml over metadata: GetDoltServerUser() = %q, want yaml_user", got)
+		}
+	})
+
+	t.Run("GetDoltServerUser_no_yaml_key_unchanged", func(t *testing.T) {
+		// No dolt.user in any yaml layer: metadata, then root — byte-for-byte
+		// the pre-GH#8577 behavior.
+		t.Setenv("BEADS_DOLT_SERVER_USER", "")
+
+		configDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(configDir, "config.yaml"),
+			[]byte("dolt.host: 127.0.0.1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		if got := (&Config{DoltServerUser: "metadata_user"}).GetDoltServerUser(); got != "metadata_user" {
+			t.Errorf("metadata unchanged: GetDoltServerUser() = %q, want metadata_user", got)
+		}
+		if got := (&Config{}).GetDoltServerUser(); got != DefaultDoltServerUser {
+			t.Errorf("default unchanged: GetDoltServerUser() = %q, want %q", got, DefaultDoltServerUser)
+		}
+	})
 }
 
 // TestIsDoltServerModeEnvVar tests env var overrides for IsDoltServerMode

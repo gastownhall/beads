@@ -606,9 +606,35 @@ func (c *Config) GetDoltServerSocket() string {
 }
 
 // GetDoltServerUser returns the Dolt server MySQL user.
-// Checks BEADS_DOLT_SERVER_USER env var first, then config, then default.
+//
+// Precedence, highest first (GH#8577):
+//
+//	BEADS_DOLT_SERVER_USER env
+//	  > .beads/config.local.yaml dolt.user
+//	  > .beads/config.yaml     dolt.user   (both via the merged yaml layer —
+//	                                       config.Initialize merges local LAST,
+//	                                       and the local file counts only when a
+//	                                       config.yaml sits beside it)
+//	  > .beads/metadata.json   dolt_server_user
+//	  > DefaultDoltServerUser (root)
+//
+// The yaml layer deliberately outranks metadata.json here — unlike
+// GetDoltServerHost, where metadata wins over yaml. metadata.json is committed
+// shared state: a user written there imposes one account on every clone and
+// machine, while the user is machine-local identity. The only pre-existing
+// override was the env var, which is process-global and hijacks every workspace
+// in the shell. This also completes the write/read pair for dolt.user:
+// `bd dolt set user --update-config` has always written the key (cmd/bd/dolt.go)
+// but nothing read it back.
+//
+// Note: the password is looked up by host:port (ServerPasswordFor), never by
+// user — a user override without a matching credentials entry fails with a
+// credentials-shaped error (1045) even though the user resolution worked.
 func (c *Config) GetDoltServerUser() string {
 	if u := os.Getenv("BEADS_DOLT_SERVER_USER"); u != "" {
+		return u
+	}
+	if u := config.GetYamlConfig("dolt.user"); u != "" {
 		return u
 	}
 	if c.DoltServerUser != "" {

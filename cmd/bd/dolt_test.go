@@ -286,6 +286,38 @@ func TestDoltSetConfigValidation(t *testing.T) {
 			t.Errorf("expected user 'admin', got %s", loadedCfg.DoltServerUser)
 		}
 	})
+
+	t.Run("set user --update-config round-trips through GetDoltServerUser (GH#8577)", func(t *testing.T) {
+		// The exact bug from the issue: `bd dolt set user X --update-config`
+		// wrote dolt.user to config.yaml and reported success, but no reader
+		// consumed the key — resolution only saw metadata.json. The getter
+		// change must close that write/read pair.
+		t.Setenv("BEADS_DOLT_SERVER_USER", "")
+		// A real workspace has config.yaml from `bd init`; SetYamlConfig
+		// requires it to exist in BEADS_DIR (findProjectConfigYaml stats it).
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(""), 0600); err != nil {
+			t.Fatal(err)
+		}
+		setDoltConfig("user", "roundtrip_user", true)
+
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		loadedCfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if got := loadedCfg.GetDoltServerUser(); got != "roundtrip_user" {
+			t.Errorf("GetDoltServerUser() = %q, want roundtrip_user", got)
+		}
+		// Prove the YAML layer is what answers (not the metadata field the
+		// set command also wrote): an empty Config has no metadata value.
+		if got := (&configfile.Config{}).GetDoltServerUser(); got != "roundtrip_user" {
+			t.Errorf("yaml-layer read: GetDoltServerUser() = %q, want roundtrip_user", got)
+		}
+	})
 }
 
 func TestDoltSetConfigJSONOutput(t *testing.T) {
