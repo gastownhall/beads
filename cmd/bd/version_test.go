@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/debug"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -213,6 +215,14 @@ func TestVersionOutputWithCommitAndBranch(t *testing.T) {
 func TestVersionFlag(t *testing.T) {
 	// Reset global state for test isolation
 	ensureCleanGlobalState(t)
+
+	// The "-v" subtest sets --verbose, and PersistentPreRunE copies it into
+	// the debug package. Restore both, or later tests see debug output on stderr.
+	prevVerbose := verboseFlag
+	t.Cleanup(func() {
+		verboseFlag = prevVerbose
+		debug.SetVerbose(prevVerbose)
+	})
 
 	// Ensure cleanup after running cobra commands
 	t.Cleanup(func() {
