@@ -60,14 +60,15 @@ func NewDoltServerUOWProvider(
 
 	resolved := applyProviderOptions(opts)
 	discover := workspaceProxyDiscovery(absServerRootDir, proxy.OpenOpts{
-		Backend:        backend,
-		ConfigFilePath: serverConfigFilePath,
-		LogFilePath:    serverLogFilePath,
-		RotateLogFile:  resolved.rotateServerLog,
-		DoltBinPath:    absDoltBinExec,
-		Database:       database,
-		IdleTimeout:    idleTimeout,
-		Port:           proxyPort,
+		Backend:           backend,
+		ConfigFilePath:    serverConfigFilePath,
+		LogFilePath:       serverLogFilePath,
+		RotateLogFile:     resolved.rotateServerLog,
+		DoltBinPath:       absDoltBinExec,
+		Database:          database,
+		IdleTimeout:       idleTimeout,
+		Port:              proxyPort,
+		ResolveExecutable: resolved.proxyExecutable,
 	})
 	ep, err := discover()
 	if err != nil {

@@ -418,10 +418,10 @@ func TestLegacyRecordFailClosed(t *testing.T) {
 		require.NoError(t, err)
 
 		previous := ResolveExecutable
-		ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+		ResolveExecutable = spawnReachedExecutable(t, "spawn-reached")
 		t.Cleanup(func() { ResolveExecutable = previous })
 		_, err = spawnAndHandoff(root, externalOpenOpts(root), time.Now().Add(time.Second), "", lock, discovery)
-		require.ErrorContains(t, err, "spawn reached")
+		require.ErrorContains(t, err, "spawn-reached")
 
 		assertHelperAlive(t, helper)
 		assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
@@ -439,7 +439,7 @@ func TestIdentityMismatchQuarantinesRecordWithoutKillingProcess(t *testing.T) {
 	require.NoError(t, err)
 
 	previous := ResolveExecutable
-	ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+	ResolveExecutable = spawnReachedExecutable(t, "spawn-reached")
 	t.Cleanup(func() { ResolveExecutable = previous })
 	_, err = spawnAndHandoff(
 		root,
@@ -453,7 +453,7 @@ func TestIdentityMismatchQuarantinesRecordWithoutKillingProcess(t *testing.T) {
 			err:     errors.New("foreign control listener"),
 		},
 	)
-	require.ErrorContains(t, err, "spawn reached")
+	require.ErrorContains(t, err, "spawn-reached")
 	assertHelperAlive(t, helper)
 	assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
 	assert.Len(t, quarantines(t, root, PIDFileName), 1)
@@ -469,7 +469,7 @@ func TestUnverifiableDiscoveryQuarantinesUnderLockWithoutKillingProcess(t *testi
 	require.NoError(t, err)
 
 	previous := ResolveExecutable
-	ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+	ResolveExecutable = spawnReachedExecutable(t, "spawn-reached")
 	t.Cleanup(func() { ResolveExecutable = previous })
 	_, err = spawnAndHandoff(
 		root,
@@ -483,7 +483,7 @@ func TestUnverifiableDiscoveryQuarantinesUnderLockWithoutKillingProcess(t *testi
 			err:     errors.New("identity probe denied"),
 		},
 	)
-	require.ErrorContains(t, err, "spawn reached")
+	require.ErrorContains(t, err, "spawn-reached")
 	assertHelperAlive(t, helper)
 	assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
 	assert.Len(t, quarantines(t, root, PIDFileName), 1)
@@ -498,10 +498,10 @@ func TestMalformedRecordQuarantinesBeforeSpawn(t *testing.T) {
 	require.NoError(t, err)
 
 	previous := ResolveExecutable
-	ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+	ResolveExecutable = spawnReachedExecutable(t, "spawn-reached")
 	t.Cleanup(func() { ResolveExecutable = previous })
 	_, err = spawnAndHandoff(root, externalOpenOpts(root), time.Now().Add(time.Second), "", lock, discovery)
-	require.ErrorContains(t, err, "spawn reached")
+	require.ErrorContains(t, err, "spawn-reached")
 	assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
 	assert.Len(t, quarantines(t, root, PIDFileName), 1)
 }
@@ -616,7 +616,7 @@ func TestCleanupOrphanBackendKillsVerifiedOrphanAndQuarantines(t *testing.T) {
 	proxyLock, err := util.TryLock(filepath.Join(root, LockFileName))
 	require.NoError(t, err)
 	previous := ResolveExecutable
-	ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached after orphan cleanup") }
+	ResolveExecutable = spawnReachedExecutable(t, "spawn-reached-after-orphan-cleanup")
 	t.Cleanup(func() { ResolveExecutable = previous })
 	_, err = spawnAndHandoff(
 		root,
@@ -626,7 +626,7 @@ func TestCleanupOrphanBackendKillsVerifiedOrphanAndQuarantines(t *testing.T) {
 		proxyLock,
 		adoptionResult{status: adoptionNoRecord},
 	)
-	require.ErrorContains(t, err, "spawn reached after orphan cleanup")
+	require.ErrorContains(t, err, "spawn-reached-after-orphan-cleanup")
 
 	assertHelperExited(t, helper)
 	assert.NoFileExists(t, pidfile.Path(root, server.PIDFileName))
@@ -897,4 +897,14 @@ func quarantines(t *testing.T, root, name string) []string {
 	matches, err := filepath.Glob(filepath.Join(root, name+".stale-*"))
 	require.NoError(t, err)
 	return matches
+}
+
+// spawnReachedExecutable is a resolver for tests that only need to see the
+// spawn path reach the fork: the executable resolves (spawnAndHandoff resolves
+// it before mutating anything) but does not exist, so the fork fails with an
+// error naming it.
+func spawnReachedExecutable(t *testing.T, name string) func() (string, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	return func() (string, error) { return path, nil }
 }

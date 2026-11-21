@@ -146,6 +146,7 @@
 34 15 TestProxiedServerImport
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
 34 15 TestProxiedServerReopenConcurrent
+34 15 TestProxiedServerSDKOpenBestAvailable
 34 15 TestProxiedServerSQL
 
 34 16 TestProxiedServerBackupRefusedOnExternalTopology

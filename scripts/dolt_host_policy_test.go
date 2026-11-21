@@ -60,8 +60,8 @@ var isLocalHostStringCallers = map[string]string{
 // isLoopbackFiles may call IsLoopback(): they check the bind address of a
 // listener bd itself opens, not a Dolt server host.
 var isLoopbackFiles = map[string]string{
-	"internal/httpapi/server.go": "bd serve bind-address policy",
-	"cmd/bd/proxied_server.go":   "listener of the proxy child bd launches itself",
+	"internal/httpapi/server.go":    "bd serve bind-address policy",
+	"internal/proxiedopen/paths.go": "listener of the proxy child bd launches itself",
 }
 
 // hostListFiles may list loopback literals: they are not Dolt hosts.

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -308,7 +309,7 @@ Examples:
 		// that reach into the database layer stay server-gated until the
 		// storage driver interface covers them (AGENTS.md "Storage Boundary").
 		if isEmbeddedMode() {
-			printEmbeddedUnsupported("doctor")
+			printEmbeddedUnsupportedWith("doctor", embeddedDoctorHostIssues())
 			return nil
 		}
 
@@ -485,6 +486,14 @@ func printLegacyUpgradeDiagnostic(err error) error {
 // a `code` field, and is wrapped with schema_version. Exit code stays 0 - a
 // benign refusal, not a failure.
 func printEmbeddedUnsupported(commandLabel string) {
+	printEmbeddedUnsupportedWith(commandLabel, nil)
+}
+
+// printEmbeddedUnsupportedWith is printEmbeddedUnsupported with store-free
+// host-level issues shown alongside the stub (GH#8113): in prose above the
+// "Note:" line, in JSON as "host_checks". With no issues the output is
+// exactly printEmbeddedUnsupported's.
+func printEmbeddedUnsupportedWith(commandLabel string, hostIssues []doctorCheck) {
 	hints := []string{
 		"Verify database exists:  ls -la .beads/embeddeddolt/",
 		"Check bd version:        bd version",
@@ -505,12 +514,21 @@ func printEmbeddedUnsupported(commandLabel string) {
 			"checks_unsupported_in_embedded_mode": unsupported,
 			"hints":                               hints,
 		}
+		if len(hostIssues) > 0 {
+			payload["host_checks"] = hostIssues
+		}
 		encoder := json.NewEncoder(os.Stderr)
 		encoder.SetIndent("", "  ")
 		_ = encoder.Encode(wrapWithSchemaVersion(payload))
 		return
 	}
 
+	if len(hostIssues) > 0 {
+		for _, check := range hostIssues {
+			fprintDoctorIssue(os.Stderr, check.printed())
+		}
+		fmt.Fprintln(os.Stderr, "")
+	}
 	fmt.Fprintf(os.Stderr, "Note: 'bd %s' is not yet supported in embedded mode.\n\n", commandLabel)
 	fmt.Fprintln(os.Stderr, "For embedded mode troubleshooting:")
 	for _, h := range hints {
@@ -522,6 +540,30 @@ func printEmbeddedUnsupported(commandLabel string) {
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=conventions")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=export")
 	fmt.Fprintln(os.Stderr, "  • bd doctor --check=pollution")
+}
+
+// fprintDoctorIssue writes one non-OK check to w the way printDiagnostics
+// renders an issue: icon and "Name: Message", muted Detail, then the Fix
+// lines under a muted tree branch. check should already be printed().
+func fprintDoctorIssue(w io.Writer, check doctorCheck) {
+	line := fmt.Sprintf("%s: %s", check.Name, check.Message)
+	if check.Status == statusError {
+		fmt.Fprintf(w, "  %s  %s\n", ui.RenderFailIcon(), ui.RenderFail(line))
+	} else {
+		fmt.Fprintf(w, "  %s  %s\n", ui.RenderWarnIcon(), line)
+	}
+	if check.Detail != "" {
+		fmt.Fprintf(w, "      %s\n", ui.RenderMuted(check.Detail))
+	}
+	if check.Fix != "" {
+		for j, fixLine := range strings.Split(check.Fix, "\n") {
+			if j == 0 {
+				fmt.Fprintf(w, "      %s%s\n", ui.MutedStyle.Render(ui.TreeLast), fixLine)
+			} else {
+				fmt.Fprintf(w, "        %s\n", fixLine)
+			}
+		}
+	}
 }
 
 func runDiagnostics(path string) doctorResult {
@@ -566,6 +608,12 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, doltHooksCheck)
 	if doltHooksCheck.Status == statusError {
 		result.OverallOK = false
+	}
+
+	// Legacy macOS user config (GH#8113): host-level and store-free, so it runs
+	// before the no-.beads early return. Warning-class; never flips OverallOK.
+	if macCheck, ok := macOSLegacyUserConfigCheck(); ok {
+		result.Checks = append(result.Checks, macCheck)
 	}
 
 	// If no .beads/, skip remaining checks

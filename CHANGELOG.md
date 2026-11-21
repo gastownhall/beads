@@ -837,6 +837,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row a wisp never has. The per-leg walk stays as the reference body the
   fast-vs-per-row equivalence tests compare against. Outcomes are unchanged.
 
+- **On macOS, bd no longer reads `~/Library/Application
+  Support/bd/config.yaml` or `~/Library/Application Support/beads/PRIME.md`.**
+  Probing those paths on every launch could raise a macOS 26 privacy prompt
+  ("would like to access data from other apps"). bd now resolves its macOS
+  user config directory as it does on Linux: `$XDG_CONFIG_HOME` when set,
+  otherwise `~/.config`. That directory holds both files, `bd/config.yaml` and
+  `beads/PRIME.md`, so the defaults are `~/.config/bd/config.yaml` and
+  `~/.config/beads/PRIME.md`, and a set `XDG_CONFIG_HOME` is now honored on
+  macOS for both. Apart from `bd doctor`, bd reads the old config only when
+  the new one has no `metrics.disabled` (normally once, after upgrading). It
+  then carries your metrics settings (`metrics.disabled`, `metrics.endpoint`,
+  `metrics.notice_shown`) into the new config, keeping any value the new
+  config already sets, and in the same write the per-machine settings
+  `bd config set` writes there: `node_id` unless the new config sets it or
+  `bd config unset` removed it, and `mail.delegate` and
+  `dolt.remotesapi-port` only when bd creates the new config (bd read those
+  two from `~/.config/bd/config.yaml` alone whenever it existed). If the old
+  file exists but cannot be read or parsed, nothing is carried, metrics are
+  left off and bd says so (`bd metrics on` re-enables them). If the new config
+  cannot be written (for example, a read-only `~/.config`), bd does not touch
+  the old folder and metrics stay off on macOS until the user config sets
+  `metrics.disabled` or `BD_DISABLE_METRICS` is set (`BD_DISABLE_METRICS` set
+  to `0`, `false` or empty turns metrics on). Metrics on macOS also stay off,
+  silently, when the user config has a commented-out `metrics` block,
+  unparseable YAML, a top level that is not a mapping (for example a file
+  holding only `---`), a `metrics` key that is not a section, a dangling
+  symlink or a non-bool `metrics.disabled`; `bd metrics on` or
+  `bd metrics off` settles it (first fix unparseable YAML, a non-mapping top
+  level or a non-section `metrics` key, and create the target folder of a
+  dangling symlink). On macOS bd leaves a `.lock` file named after the user
+  config (`config.yaml.lock`), or after its target when the config is a
+  symlink to an existing file. Other settings left in the old file stop
+  applying. So do the per-machine settings when bd never reads the old file:
+  `BD_DISABLE_METRICS` or `DO_NOT_TRACK` turns metrics off, the new config
+  already has `metrics.disabled`, or one of the cases above keeps bd out of
+  the old folder. Without `node_id`, the guard that keeps `bd reclaim` from
+  reverting leases another replica granted is off. Run `bd doctor` to list the
+  settings that differ and the commands to move them. On every platform, a
+  dangling `config.yaml` symlink no longer crashes bd at startup, and shell
+  completion no longer writes the user config. Paths and output are unchanged
+  on Linux and Windows.
+  ([#8113](https://github.com/gastownhall/beads/issues/8113))
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull
@@ -1249,7 +1291,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode that includes reads) now refuses with guidance instead, and the refused
   open performs ZERO writes (dolt_ignore seeding and clone-local migrations
   included). Server-mode read commands open without running migrations, so
-  they keep reading at the current schema. `bd dolt commit` and `bd vc commit`
+  they keep reading at the current schema while it has every column this bd
+  reads; coming from 1.3.x it does not (`arrival_seq`, migration 0073), and
+  they refuse with the schema-behind error until the migration. `bd dolt commit` and `bd vc commit`
   warn and commit at the current schema without migrating, so the dirty-table
   recovery (commit, then `bd migrate schema`) still works on a database that
   is both behind and dirty. Consent is any of: `bd migrate schema`, the verb
@@ -1449,6 +1493,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Refusals before a schema migration no longer promise that reads keep
+  working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
+  from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
+  until the schema is migrated an upgraded client on a shared or external
+  Dolt server, or in a proxied-server workspace, can neither read nor write
+  issues; `bd export` and `bd backup` are refused too.
+  The shared-server refusal and its `--json` hint said read commands keep
+  working meanwhile, and the one-time upgrade notice said reads keep working.
+  The refusal and the hint now say writes are refused and so are reads that
+  need a column the pending migrations add; the notice says reads may be
+  refused too; and the `BD_IGNORE_SCHEMA_SKEW=1` hint no longer says it lets
+  you read anyway. The upgrading guide says to back up with the old bd, then
+  upgrade every client and migrate in one sitting. Reported from a Gas City
+  upgrade drill.
+
+- **A proxied-server workspace whose database has a Dolt remote gets a
+  remote-migrate refusal it can act on** (bd-5hl9dg). `bd init
+  --proxied-server` adds a remote from the git `origin` by default, so a
+  1.3.x proxied workspace upgraded to 1.4 meets this refusal in the default
+  case. It offered `bd migrate --force`, `BD_ALLOW_REMOTE_MIGRATE=1 bd
+  migrate`, `bd dolt push` and `bd dolt pull`, which the proxied front door
+  refuses, and `bd bootstrap`, which creates a separate local database there.
+  It now names `bd migrate schema --force`, run on one clone of that remote
+  only with the proxy's library clients stopped, and sends the push and any
+  adopt to a workspace with direct access to the database. The
+  schema-mismatch error a read reports on such a workspace names the same
+  forced verb instead of the bare `bd migrate schema`, which refuses there.
+  The warning a forced migration prints there no longer says "then `bd dolt
+  push`", and names `bd migrate schema --force` as the consent instead of
+  `bd migrate --force`. The `--json` refusal says the same: its
+  `remote_migrate_gate.options` there hand out only `bd migrate schema
+  --force` (option `migrate`) and an `adopt-on-server-host` option with no
+  command, instead of `bd migrate --force`, `bd dolt push` and `bd
+  bootstrap`. What is refused, and the consent it takes, are unchanged;
+  server and embedded mode print, and emit as JSON, what they did before.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
@@ -1465,6 +1545,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction on that connection could keep merge conflicts or constraint
   violations in the working set instead of rolling back.
 
+- **The Go SDK opens a proxied-server workspace through its bd proxy**
+  (#8323). `beads.OpenBestAvailable` and `OpenBestAvailableWith` had no
+  proxied-server arm: a cgo build fell through to embedded Dolt and silently
+  created and migrated a second, empty database at `.beads/embeddeddolt`
+  beside the one the proxy serves, and a `CGO_ENABLED=0` build returned the
+  embedded-requires-CGO error. Both builds now open the workspace through the
+  bd proxy, as `bd` does, with the same identity check, fresh-store refusal,
+  events journal and versioned history. A running proxy is adopted; with
+  none, one is started from `bd` on `PATH`. With no `bd` there, or with a
+  running proxy that a bd older than 1.4 started (which the library leaves
+  running rather than stopping it under the older bd processes that share
+  it), the open fails with the new `beads.ErrProxyUnavailable`, having
+  created no embedded store and started or stopped no proxy. A managed-local
+  workspace also needs `dolt` on `PATH`, even to adopt a running proxy.
+  `Close` leaves the shared proxy running. The store serves the common issue,
+  label, dependency, comment, config, ready-work and claim methods and
+  `RunInTransaction` (whose callback runs once); the rest return a typed
+  `beads.ErrUnsupported`. Its Dolt commits carry no `--author`, unlike
+  `DoltStore`'s. An environment that forces server mode
+  (`BEADS_DOLT_SERVER_MODE` or `BEADS_DOLT_SHARED_SERVER`) and names the port
+  in `BEADS_DOLT_SERVER_PORT` still opens a proxied workspace on the direct
+  server arm, at that port; forced server mode without a named port now goes
+  through the proxy. Schema refusals are matchable with the newly exported
+  `beads.SchemaSkewError`, `beads.RemoteMigrateGateError` and
+  `beads.MigrateConsentError`. `Open`, `OpenFromConfig` and `OpenGated` are
+  unchanged. See `engdocs/EMBEDDING_OVER_PROXIED_SERVER.md` §8.
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that
@@ -5208,7 +5314,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on once the pull completes and the migration proceeds.
 
   Commands that keep working through the stop say the same thing. `bd list`,
-  `bd ready` and `bd show` succeed against the old schema, and `bd dolt commit`
+  `bd ready` and `bd show` succeed against the old schema while it has every
+  column this bd reads, and `bd dolt commit`
   still commits the working set; on embedded storage all of them used to print
   the blunt migrate-or-adopt coordination bullets while doing so — naming
   `bd migrate --force && bd dolt push`, which on a data-behind clone applies

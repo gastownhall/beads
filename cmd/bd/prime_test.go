@@ -913,17 +913,93 @@ func TestPrimeHelpMentionsAllFallbackTiers(t *testing.T) {
 		}
 	}
 
-	// Tier (3) resolves via os.UserConfigDir(), whose location differs per
-	// platform. The help text is static, so it must spell out every OS's
+	// Tier (3) resolves via config.UserConfigDir(), whose location differs
+	// per platform. The help text is static, so it must spell out every OS's
 	// path rather than pinning one platform's spelling as if it were
-	// universal.
+	// universal. macOS follows the Linux rule, so ~/Library/Application
+	// Support must not appear (GH#8113).
 	for _, configDirPath := range []string{
-		"~/.config/beads/",
-		"~/Library/Application Support/beads/",
+		"~/.config/beads/ on Linux and macOS",
 		`%AppData%\beads\`,
 	} {
 		if !strings.Contains(primeCmd.Long, configDirPath) {
 			t.Errorf("prime help tier (3) missing user config dir path %q", configDirPath)
 		}
+	}
+	if strings.Contains(primeCmd.Long, "Application Support") {
+		t.Errorf("prime help still mentions Application Support; bd no longer reads it (GH#8113)")
+	}
+}
+
+// TestResolveGlobalPrimePathUsesBdUserConfigDir proves production prime
+// resolves the global PRIME.md under config.UserConfigDir, not
+// os.UserConfigDir: the seam directory is one os.UserConfigDir never returns.
+func TestResolveGlobalPrimePathUsesBdUserConfigDir(t *testing.T) {
+	seamDir := filepath.Join(t.TempDir(), "bd-user-config")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "xdg-elsewhere"))
+	t.Setenv("APPDATA", filepath.Join(t.TempDir(), "appdata-elsewhere"))
+
+	t.Run("found", func(t *testing.T) {
+		t.Cleanup(config.SetUserConfigDirForTest(func() (string, error) { return seamDir, nil }))
+		want := filepath.Join(seamDir, "beads", "PRIME.md")
+		if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(want, []byte("# seam PRIME\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(seamDir, "beads")) })
+		if got := resolveGlobalPrimePath(""); got != want {
+			t.Fatalf("resolveGlobalPrimePath = %q, want %q", got, want)
+		}
+	})
+	t.Run("absent", func(t *testing.T) {
+		t.Cleanup(config.SetUserConfigDirForTest(func() (string, error) { return seamDir, nil }))
+		if got := resolveGlobalPrimePath(""); got != "" {
+			t.Fatalf("resolveGlobalPrimePath = %q, want empty", got)
+		}
+	})
+	t.Run("resolver error", func(t *testing.T) {
+		t.Cleanup(config.SetUserConfigDirForTest(func() (string, error) {
+			return "", errors.New("no user config dir")
+		}))
+		if got := resolveGlobalPrimePath(""); got != "" {
+			t.Fatalf("resolveGlobalPrimePath = %q, want empty on resolver error", got)
+		}
+	})
+}
+
+// TestReadCustomPrimeContentUsesBdUserConfigDir drives the full tier walk with
+// no local or redirected PRIME.md, so only tier (3) can answer, and plants the
+// global file under a seam directory distinct from XDG_CONFIG_HOME/APPDATA.
+func TestReadCustomPrimeContentUsesBdUserConfigDir(t *testing.T) {
+	workspace := t.TempDir()
+	seamDir := filepath.Join(t.TempDir(), "bd-user-config")
+	xdg := filepath.Join(t.TempDir(), "xdg-elsewhere")
+	appdata := filepath.Join(t.TempDir(), "appdata-elsewhere")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("APPDATA", appdata)
+	for _, decoy := range []string{xdg, appdata} {
+		path := filepath.Join(decoy, "beads", "PRIME.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("# stdlib decoy\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	t.Cleanup(config.SetUserConfigDirForTest(func() (string, error) { return seamDir, nil }))
+	want := "# seam PRIME\n"
+	path := filepath.Join(seamDir, "beads", "PRIME.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(want), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, ok := readCustomPrimeContent(workspace, filepath.Join(workspace, ".beads"))
+	if !ok || got != want {
+		t.Fatalf("readCustomPrimeContent = %q, %v; want the seam PRIME %q", got, ok, want)
 	}
 }
