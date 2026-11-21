@@ -46,11 +46,10 @@ re-pointed by removing and re-adding it, so it records the repair's actor and
 time, and one that storage refuses to re-add is left as it was and reported.
 
 To change only the prefix new issues mint, leaving existing IDs alone, use
-`bd rename-prefix <prefix> --mint-only`. A dependency between an old-prefix
-and a new-prefix issue then does not block: storage keeps an edge between
-two prefixes as a reference to another repository, so `bd ready` lists the
-dependent. A later `--repair` consolidates the prefixes and re-points those
-dependencies. See [bd rename-prefix](/cli-reference/rename-prefix).
+`bd rename-prefix <prefix> --mint-only`. Issues under both prefixes stay in
+this database, so a dependency between an old-prefix and a new-prefix issue
+blocks like any other. A later `--repair` consolidates the prefixes. See
+[bd rename-prefix](/cli-reference/rename-prefix).
 
 ## Duplicate Detection and Merge
 

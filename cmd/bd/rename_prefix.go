@@ -17,7 +17,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -59,10 +58,10 @@ refuses to re-add is left as it was and reported.
 Changing the prefix for new issues only:
 --mint-only makes new issues use the new prefix and leaves every existing ID
 and text reference as it is. The old prefix is added to allowed_prefixes, so
-explicit --id values and children of existing issues keep working. A
-dependency between an old-prefix and a new-prefix issue does not block: it is
-stored as a reference to another repository, which bd ready ignores. A later
---repair consolidates the prefixes and re-points those dependencies.
+explicit --id values and children of existing issues keep working. Both
+prefixes' issues stay in this database, so a dependency between an old-prefix
+and a new-prefix issue blocks like any other. A later --repair consolidates the
+prefixes.
 
 EXAMPLES:
   bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'
@@ -315,13 +314,6 @@ func runMintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, n
 	if yamlPrefix := strings.TrimRight(overlayYAMLPrefix(""), "-"); yamlPrefix != "" && yamlPrefix != newPrefix {
 		fmt.Fprintf(os.Stderr, "%s config.yaml sets issue-prefix: %s, which bd create uses before the database; set it to %s so new issues mint %s-*\n",
 			ui.RenderWarn("⚠"), yamlPrefix, newPrefix, newPrefix)
-	}
-	// Storage classifies an edge by the part of each ID before its first
-	// hyphen and ignores allowed_prefixes, so an edge between the two
-	// prefixes lands in the external column, which blocked state never reads.
-	if issueops.IsExternalDepTarget(oldPrefix+"-1", newPrefix+"-1") {
-		fmt.Fprintf(os.Stderr, "%s A dependency between a %s-* and a %s-* issue does not block: it is stored as a reference to another repository, which bd ready ignores. bd rename-prefix %s --repair consolidates the prefixes and re-points such dependencies.\n",
-			ui.RenderWarn("⚠"), oldPrefix, newPrefix, newPrefix)
 	}
 	if jsonOutput {
 		enc := json.NewEncoder(os.Stdout)
@@ -845,9 +837,10 @@ type unrepointedEdge struct {
 }
 
 // repointRepairedDependencies points each edge that still names a renamed
-// issue's old ID at its new one. Storage keeps an edge between two different
-// prefixes as a reference into another repository (issueops.
-// IsExternalDepTarget), so renaming its target never re-points it; once the
+// issue's old ID at its new one. Storage kept an edge between two different
+// prefixes as a reference into another repository (the external column)
+// before GH#8299, and still keeps one there when this database holds no row
+// for its target, so renaming its target never re-points it; once the
 // families share the target prefix the edge is re-added as an ordinary one.
 // The same holds for an edge whose SOURCE was renamed onto the target prefix
 // and whose target is an unrenamed target-prefix row (taxdb-x -> kb-hand
@@ -857,7 +850,8 @@ type unrepointedEdge struct {
 // family) is left alone. issues must hold the post-rename IDs.
 //
 // The column an edge is stored in is not visible here, so an edge between
-// two prefixes that already sits in the issue column (a database older than
+// two prefixes that already sits in the issue column (one storage wrote since
+// GH#8299 onto a target this database held, one from a database older than
 // the dependency-target split, or a bd rename) is re-added too and takes the
 // repair's actor and time.
 //
@@ -924,7 +918,7 @@ func (e *closesRefusedCycleError) Error() string {
 // storage accepts one of the parent-child moves it refused for a cycle
 // (cycleRefused) once m's edge is gone; the store is left as it was either
 // way. Storage's cycle walk follows an edge in any column, while blocked
-// state never reads one stored across prefixes, so such an edge can keep a
+// state never reads one in the external column, so such an edge can keep a
 // parent-child edge out while blocking nothing; re-pointed, it would start to
 // block while the child stays detached. Each probe removes m's edge and
 // retries one refused move in a transaction that always rolls back. Only a
@@ -1049,10 +1043,20 @@ func repairedDependencyTarget(source, dependsOn string, newID, oldID map[string]
 	if o, ok := oldID[dependsOn]; ok {
 		wasTarget = o
 	}
-	if !issueops.IsExternalDepTarget(was, wasTarget) || issueops.IsExternalDepTarget(source, dependsOn) {
+	if !crossPrefixEdge(was, wasTarget) || crossPrefixEdge(source, dependsOn) {
 		return "", false
 	}
 	return dependsOn, true
+}
+
+// crossPrefixEdge reports whether an edge's two IDs carry different prefixes
+// or its target is an "external:" reference: the edges storage filed in the
+// external column before GH#8299, and still files there when this database
+// holds no row for the target. It compares the IDs only; the column an edge
+// sits in is not visible to the repair (see repointRepairedDependencies).
+func crossPrefixEdge(sourceID, targetID string) bool {
+	return strings.HasPrefix(targetID, "external:") ||
+		types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
 }
 
 // repointDependency moves one edge stored on source onto target: the removal

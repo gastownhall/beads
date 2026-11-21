@@ -237,12 +237,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dry_run`, `allowed_prefixes_added`), `--repair` is refused alongside it,
   and a `config.yaml` `issue-prefix` that would still win for `bd create` is
   named on stderr. A dependency between an old-prefix and a new-prefix issue
-  does not block: storage keeps an edge between two prefixes as a reference
-  to another repository, which `bd ready` ignores, and the command says so on
-  stderr. A later `bd rename-prefix <new> --repair` consolidates the prefixes
-  and re-points those dependencies; while every issue still carries the old
-  prefix, it (like `bd rename-prefix <new>`) renames them all instead of
-  refusing `<new>` as the current prefix. (#6591)
+  blocks like any other, since both issues are in this database. A later
+  `bd rename-prefix <new> --repair` consolidates the prefixes; while every
+  issue still carries the old prefix, it (like `bd rename-prefix <new>`)
+  renames them all instead of refusing `<new>` as the current prefix. (#6591)
 
 - **Retention sweeps can retire the ids they delete** (BDP
   `idempotency-expired`). `issueops.SweepRequest.RetainIDs` — `bd prune
