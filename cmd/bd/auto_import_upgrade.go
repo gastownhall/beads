@@ -14,9 +14,10 @@ import (
 // jsonlImporter is implemented by stores that support single-transaction
 // JSONL import (currently EmbeddedDoltStore). Stores that don't implement
 // this fall back to the multi-call path. ImportJSONLData returns the issues
-// it wrote and the ids it skipped because a retaining sweep retired them.
+// it wrote, the ids it skipped because a retaining sweep retired them, and
+// the dependency edges it skipped because the batch refused them.
 type jsonlImporter interface {
-	ImportJSONLData(ctx context.Context, issues []*types.Issue, configEntries map[string]string, actor string) (int, []string, error)
+	ImportJSONLData(ctx context.Context, issues []*types.Issue, configEntries map[string]string, actor string) (imported int, retiredIDs, skippedDependencies []string, err error)
 }
 
 // fallbackImporter is the function maybeAutoImportJSONL invokes for stores
@@ -123,7 +124,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	// Prefer single-transaction import (embedded mode) to avoid
 	// DOLT_COMMIT races with concurrent writers.
 	if importer, ok := s.(jsonlImporter); ok {
-		imported, retiredIDs, err := importer.ImportJSONLData(ctx, issues, configEntries, "auto-import")
+		imported, retiredIDs, skippedDeps, err := importer.ImportJSONLData(ctx, issues, configEntries, "auto-import")
 		if err != nil {
 			writeAutoImportStamp(beadsDir, info)
 			fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
@@ -144,6 +145,11 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 			}
 			printAutoImportRetired(len(retiredIDs))
 			fmt.Fprintf(os.Stderr, " from %s\n", jsonlPath)
+		}
+		// Each edge the batch refused is named, in bd import's words, so a
+		// dependency the file holds but the database does not is visible.
+		for _, edge := range skippedDeps {
+			fmt.Fprintf(os.Stderr, "Skipped dependency: %s\n", edge)
 		}
 		return
 	}

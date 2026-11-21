@@ -83,6 +83,7 @@
 
 100 19 TestEmbeddedLabelConcurrent
 100 19 TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase
+100 19 TestEmbeddedRepoSyncSkipsAnEdgeAcrossTwoReposHierarchy
 
 100 20 TestEmbeddedDoctorExportCheckMissingFileWarns
 100 20 TestEmbeddedInitGitOriginAdoptionWithConsent
@@ -112,6 +113,7 @@
 100 25 TestEmbeddedMaxRowsListBasic
 100 25 TestEmbeddedRemovedBackendHealRejectionPerBackend
 
+100 26 TestEmbeddedAutoImportJSONLSkipsARefusedDependency
 100 26 TestEmbeddedDoltRemoteAdd_JSON_AllowGitOrigin_WarningOnStderr
 100 26 TestEmbeddedExternalMutationPolicy
 100 26 TestEmbeddedPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace

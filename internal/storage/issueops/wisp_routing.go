@@ -17,9 +17,25 @@ import (
 // prefer WispIDSetInTx + partitionByWispSet to amortize the per-ID
 // query cost into a single scoped query over the batch.
 func IsActiveWispInTx(ctx context.Context, tx DBTX, id string) bool {
+	exists, _ := LookupWispInTx(ctx, tx, id)
+	return exists
+}
+
+// LookupWispInTx checks for an active wisp and preserves unexpected database
+// errors, so dependency classification cannot mistake a failed read for an
+// absent local target. Older schemas without the optional wisps table remain
+// supported.
+func LookupWispInTx(ctx context.Context, tx DBTX, id string) (bool, error) {
 	var exists int
 	err := tx.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", id).Scan(&exists)
-	return err == nil
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows), isTableNotExistError(err):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 func wispsTableEmptyOrMissingInTx(ctx context.Context, tx DBTX) (bool, error) {

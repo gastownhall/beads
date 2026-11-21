@@ -395,9 +395,9 @@ type fakeJSONLImporterStore struct {
 	calls    atomic.Int32
 }
 
-func (f *fakeJSONLImporterStore) ImportJSONLData(_ context.Context, _ []*types.Issue, _ map[string]string, _ string) (int, []string, error) {
+func (f *fakeJSONLImporterStore) ImportJSONLData(_ context.Context, _ []*types.Issue, _ map[string]string, _ string) (int, []string, []string, error) {
 	f.calls.Add(1)
-	return f.imported, f.retired, nil
+	return f.imported, f.retired, nil, nil
 }
 
 // TestMaybeAutoImportJSONL_StampsAFileWhoseEveryRowWasRetired pins both

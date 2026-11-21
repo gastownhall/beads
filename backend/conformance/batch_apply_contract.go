@@ -491,11 +491,66 @@ func RunBatchApplyNeverReordersItsItems(t *testing.T, ctx context.Context, fixtu
 //
 // POSITIVE HALF: the same three edges with the first one non-blocking all land,
 // because a hierarchy is only a conflict for an edge that GATES.
+//
+// The case runs twice: once with every endpoint in the fixture's prefix, and
+// once with a grandparent of another prefix that this database holds. A local
+// issue is local whatever its prefix (GH#8299), so the end gate re-validates
+// the blocking edge onto it instead of passing it as another rig's.
+//
+// A third run pins the gate's one exemption, an edge filed external. The
+// request files the blocking edge while the grandparent, of another prefix, is
+// absent, so it is stored external; then it creates the grandparent and builds
+// the same hierarchy over it. Creating the target does not move the edge out of
+// depends_on_external, so the edge gates nothing and the request lands: the
+// gate exempts an edge by the column its row holds, not by whether its target
+// is present when the gate runs.
 func RunBatchApplyEndGateRefusesAHierarchyTheRequestBuilt(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
-	grand := fixture.IssuePrefix + "-endgate-grand"
-	parent := fixture.IssuePrefix + "-endgate-parent"
-	child := fixture.IssuePrefix + "-endgate-child"
+	for _, grandPrefix := range []string{fixture.IssuePrefix, "x" + fixture.IssuePrefix} {
+		endGateRefusesAHierarchyTheRequestBuilt(t, ctx, fixture, grandPrefix)
+	}
+	endGateExemptsAnEdgeFiledExternal(t, ctx, fixture)
+}
+
+func endGateExemptsAnEdgeFiledExternal(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	grand := "x" + fixture.IssuePrefix + "-endgate-late-grand"
+	parent := fixture.IssuePrefix + "-endgate-late-parent"
+	child := fixture.IssuePrefix + "-endgate-late-child"
+	for _, id := range []string{parent, child} {
+		batchApplySeedIssue(t, ctx, fixture, id, types.StatusOpen)
+	}
+
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor:         "apply-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: child}, publicops.Ref{ID: grand}, publicops.DepBlocks, ""),
+			batchApplyCreate("late-grand", batchApplyIssue(grand, "created after the edge onto it")),
+			batchApplyDepAdd(publicops.Ref{ID: child}, publicops.Ref{ID: parent}, publicops.DepParentChild, ""),
+			batchApplyDepAdd(publicops.Ref{ID: parent}, publicops.Ref{ID: grand}, publicops.DepParentChild, ""),
+		},
+	})
+
+	// The premise: the create left the blocking edge in the column it was
+	// filed in. A backend that moved it to the local column would have to
+	// refuse this request, as the runs above refuse theirs.
+	if got := batchApplyCount(t, ctx, fixture,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_external = ?",
+		[]any{child, grand}); got != 1 {
+		t.Errorf("edge %s -> %s is not in depends_on_external (%d row(s)); it was filed while its target was absent",
+			child, grand, got)
+	}
+	for _, edge := range [][2]string{{child, parent}, {parent, grand}} {
+		assertBatchApplyEdgeCount(t, ctx, fixture, edge[0], edge[1], 1)
+	}
+}
+
+func endGateRefusesAHierarchyTheRequestBuilt(t *testing.T, ctx context.Context, fixture BatchApplyFixture, grandPrefix string) {
+	t.Helper()
+	grand := grandPrefix + "-endgate-grand"
+	parent := fixture.IssuePrefix + "-endgate-parent-" + grandPrefix
+	child := fixture.IssuePrefix + "-endgate-child-" + grandPrefix
 	for _, id := range []string{grand, parent, child} {
 		batchApplySeedIssue(t, ctx, fixture, id, types.StatusOpen)
 	}

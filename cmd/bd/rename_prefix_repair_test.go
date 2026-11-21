@@ -544,18 +544,16 @@ func TestRepairPrefixesKeepsSuffixes(t *testing.T) {
 
 func TestRepairPrefixesRepointsEdgesOntoUnrenamedTargetRows(t *testing.T) {
 	// GH#6591 AC-1: an edge stored across prefixes (taxdb-x -> kb-hand) sits
-	// in the external column. Renaming its SOURCE onto the target prefix must
-	// leave kb-x blocked by kb-hand, not holding a dangling external edge
-	// blocked state never reads.
+	// in the external column, as an older store holds it. Renaming its SOURCE
+	// onto the target prefix must leave kb-x blocked by kb-hand, not holding a
+	// dangling external edge blocked state never reads.
 	ctx := context.Background()
 	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 	seedRepairIssues(t, ctx, testStore,
 		&types.Issue{ID: "taxdb-x", Title: "Blocked tax work"},
 		&types.Issue{ID: "kb-hand", Title: "Open blocker"},
 	)
-	if err := testStore.AddDependency(ctx, &types.Dependency{IssueID: "taxdb-x", DependsOnID: "kb-hand", Type: types.DepBlocks}, "test"); err != nil {
-		t.Fatalf("add dependency: %v", err)
-	}
+	seedOlderStoreEdges(t, ctx, testStore, &types.Dependency{IssueID: "taxdb-x", DependsOnID: "kb-hand", Type: types.DepBlocks})
 
 	if err := repairAll(t, ctx, testStore, "kb", false); err != nil {
 		t.Fatalf("repair failed: %v", err)
@@ -574,6 +572,29 @@ func TestRepairPrefixesRepointsEdgesOntoUnrenamedTargetRows(t *testing.T) {
 	}
 	if !blocked || !slices.Contains(blockers, "kb-hand") {
 		t.Errorf("IsBlocked(kb-x) = %v %v, want blocked by kb-hand", blocked, blockers)
+	}
+}
+
+// seedOlderStoreEdges stores deps as a store older than GH#8299 holds them.
+// That store classified a target by its prefix alone, so it kept an edge
+// between two prefixes in the external column, which blocked state never
+// reads and where no hierarchy check ran. Storage now files an edge onto an
+// issue this database holds in the issue column, so such an edge is inserted
+// directly; any other edge is added through storage.
+func seedOlderStoreEdges(t *testing.T, ctx context.Context, st *dolt.DoltStore, deps ...*types.Dependency) {
+	t.Helper()
+	for _, dep := range deps {
+		if !crossPrefixEdge(dep.IssueID, dep.DependsOnID) {
+			if err := st.AddDependency(ctx, dep, "seeder"); err != nil {
+				t.Fatalf("add %s -> %s: %v", dep.IssueID, dep.DependsOnID, err)
+			}
+			continue
+		}
+		if _, err := st.DB().ExecContext(ctx,
+			"INSERT INTO dependencies (id, issue_id, depends_on_external, type, created_at, created_by, metadata) VALUES (UUID(), ?, ?, ?, UTC_TIMESTAMP(), 'seeder', '{}')",
+			dep.IssueID, dep.DependsOnID, string(dep.Type)); err != nil {
+			t.Fatalf("seed %s -> %s in the external column: %v", dep.IssueID, dep.DependsOnID, err)
+		}
 	}
 }
 
@@ -660,11 +681,12 @@ func TestRepairPrefixesLeavesEdgesStorageAlreadyMoved(t *testing.T) {
 
 func TestRepairPrefixesKeepsAnEdgeStorageRefusesToRepoint(t *testing.T) {
 	// Re-pointing an edge re-adds it, and storage checks the re-add as it
-	// checks a new edge. taxdb-gc blocks on kb-p was accepted across
-	// prefixes, where no hierarchy check runs; once both ends are kb-*, kb-p
-	// is kb-gc's grandparent and the re-add is refused. The refused edge must
-	// stay as it was and be reported, and the run must still re-point the
-	// edges after it and set issue_prefix, instead of deleting it and stopping.
+	// checks a new edge. An older store accepted taxdb-gc blocks on kb-p
+	// across prefixes, where no hierarchy check ran; once both ends are kb-*,
+	// kb-p is kb-gc's grandparent and the re-add is refused. The refused edge
+	// must stay as it was and be reported, and the run must still re-point
+	// the edges after it and set issue_prefix, instead of deleting it and
+	// stopping.
 	ctx := context.Background()
 	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 	seedRepairIssues(t, ctx, testStore,
@@ -674,16 +696,12 @@ func TestRepairPrefixesKeepsAnEdgeStorageRefusesToRepoint(t *testing.T) {
 		&types.Issue{ID: "taxdb-z", Title: "Blocked across prefixes"},
 		&types.Issue{ID: "cre-y", Title: "Blocker"},
 	)
-	for _, dep := range []*types.Dependency{
-		{IssueID: "taxdb-c", DependsOnID: "kb-p", Type: types.DepParentChild},
-		{IssueID: "taxdb-gc", DependsOnID: "taxdb-c", Type: types.DepParentChild},
-		{IssueID: "taxdb-gc", DependsOnID: "kb-p", Type: types.DepBlocks},
-		{IssueID: "taxdb-z", DependsOnID: "cre-y", Type: types.DepBlocks},
-	} {
-		if err := testStore.AddDependency(ctx, dep, "seeder"); err != nil {
-			t.Fatalf("add %s -> %s: %v", dep.IssueID, dep.DependsOnID, err)
-		}
-	}
+	seedOlderStoreEdges(t, ctx, testStore,
+		&types.Dependency{IssueID: "taxdb-c", DependsOnID: "kb-p", Type: types.DepParentChild},
+		&types.Dependency{IssueID: "taxdb-gc", DependsOnID: "taxdb-c", Type: types.DepParentChild},
+		&types.Dependency{IssueID: "taxdb-gc", DependsOnID: "kb-p", Type: types.DepBlocks},
+		&types.Dependency{IssueID: "taxdb-z", DependsOnID: "cre-y", Type: types.DepBlocks},
+	)
 
 	result := repairAllJSON(t, ctx, testStore, "kb", false)
 
@@ -726,21 +744,14 @@ func TestRepairPrefixesRepointsTheHierarchyFirst(t *testing.T) {
 	// In the last two the close gate names two live issues before any edge
 	// moves, so the cycle walk, which reads every column, refuses the
 	// hierarchy edge through it. The gate must then stay where blocked state
-	// never reads it, instead of being re-added where it blocks.
+	// never reads it, instead of being re-added where it blocks. Every edge
+	// between two prefixes is seeded as an older store holds it.
 	type leftEdge struct {
 		// The edge's source, the target it keeps naming, the target it
 		// wanted, its type, and words of why it was left.
 		from, to, wanted string
 		typ              types.DependencyType
 		reason           string
-	}
-	seedEdges := func(t *testing.T, ctx context.Context, st *dolt.DoltStore, deps ...*types.Dependency) {
-		t.Helper()
-		for _, dep := range deps {
-			if err := st.AddDependency(ctx, dep, "seeder"); err != nil {
-				t.Fatalf("add %s -> %s: %v", dep.IssueID, dep.DependsOnID, err)
-			}
-		}
 	}
 	// bd dep add refuses an epic blocking on its own descendant, so the
 	// close gate is seeded across prefixes, as an older store holds it.
@@ -770,7 +781,7 @@ func TestRepairPrefixesRepointsTheHierarchyFirst(t *testing.T) {
 					&types.Issue{ID: "taxdb-m", Title: "Parent", IssueType: types.TypeEpic},
 					&types.Issue{ID: "taxdb-a", Title: "Grandchild"},
 				)
-				seedEdges(t, ctx, st,
+				seedOlderStoreEdges(t, ctx, st,
 					&types.Dependency{IssueID: "taxdb-m", DependsOnID: "cre-g", Type: types.DepParentChild},
 					&types.Dependency{IssueID: "taxdb-a", DependsOnID: "taxdb-m", Type: types.DepParentChild},
 					&types.Dependency{IssueID: "taxdb-a", DependsOnID: "cre-g", Type: types.DepBlocks},
@@ -787,7 +798,7 @@ func TestRepairPrefixesRepointsTheHierarchyFirst(t *testing.T) {
 					&types.Issue{ID: "cre-a", Title: "Epic", IssueType: types.TypeEpic},
 					&types.Issue{ID: "taxdb-z", Title: "Child"},
 				)
-				seedEdges(t, ctx, st, &types.Dependency{IssueID: "taxdb-z", DependsOnID: "cre-a", Type: types.DepParentChild})
+				seedOlderStoreEdges(t, ctx, st, &types.Dependency{IssueID: "taxdb-z", DependsOnID: "cre-a", Type: types.DepParentChild})
 				seedCloseGate(t, ctx, st, "cre-a", "taxdb-z")
 			},
 			left:  []leftEdge{{"kb-a", "taxdb-z", "kb-z", types.DepBlocks, "descendant"}},
@@ -802,7 +813,7 @@ func TestRepairPrefixesRepointsTheHierarchyFirst(t *testing.T) {
 					&types.Issue{ID: "taxdb-p", Title: "Epic", IssueType: types.TypeEpic},
 					&types.Issue{ID: "kb-x", Title: "Child"},
 				)
-				seedEdges(t, ctx, st, &types.Dependency{IssueID: "kb-x", DependsOnID: "taxdb-p", Type: types.DepParentChild})
+				seedOlderStoreEdges(t, ctx, st, &types.Dependency{IssueID: "kb-x", DependsOnID: "taxdb-p", Type: types.DepParentChild})
 				seedCloseGate(t, ctx, st, "taxdb-p", "kb-x")
 			},
 			left: []leftEdge{
@@ -820,7 +831,7 @@ func TestRepairPrefixesRepointsTheHierarchyFirst(t *testing.T) {
 					&types.Issue{ID: "kb-m", Title: "Parent", IssueType: types.TypeEpic},
 					&types.Issue{ID: "kb-gc", Title: "Grandchild"},
 				)
-				seedEdges(t, ctx, st,
+				seedOlderStoreEdges(t, ctx, st,
 					&types.Dependency{IssueID: "kb-m", DependsOnID: "taxdb-g", Type: types.DepParentChild},
 					&types.Dependency{IssueID: "kb-gc", DependsOnID: "kb-m", Type: types.DepParentChild},
 				)
@@ -1020,16 +1031,12 @@ func TestRepairPrefixesStopsOnAFailureThatIsNotARefusal(t *testing.T) {
 		&types.Issue{ID: "taxdb-z", Title: "Blocked across prefixes"},
 		&types.Issue{ID: "cre-y", Title: "Blocker"},
 	)
-	for _, dep := range []*types.Dependency{
-		{IssueID: "taxdb-c", DependsOnID: "kb-p", Type: types.DepParentChild},
-		{IssueID: "taxdb-gc", DependsOnID: "taxdb-c", Type: types.DepParentChild},
-		{IssueID: "taxdb-gc", DependsOnID: "kb-p", Type: types.DepBlocks},
-		{IssueID: "taxdb-z", DependsOnID: "cre-y", Type: types.DepBlocks},
-	} {
-		if err := testStore.AddDependency(ctx, dep, "seeder"); err != nil {
-			t.Fatalf("add %s -> %s: %v", dep.IssueID, dep.DependsOnID, err)
-		}
-	}
+	seedOlderStoreEdges(t, ctx, testStore,
+		&types.Dependency{IssueID: "taxdb-c", DependsOnID: "kb-p", Type: types.DepParentChild},
+		&types.Dependency{IssueID: "taxdb-gc", DependsOnID: "taxdb-c", Type: types.DepParentChild},
+		&types.Dependency{IssueID: "taxdb-gc", DependsOnID: "kb-p", Type: types.DepBlocks},
+		&types.Dependency{IssueID: "taxdb-z", DependsOnID: "cre-y", Type: types.DepBlocks},
+	)
 	st := &indeterminateRepointStore{DoltStorage: testStore, failSource: "kb-z"}
 
 	_, err := captureStdoutWithError(t, func() error { return repairAll(t, ctx, st, "kb", false) })

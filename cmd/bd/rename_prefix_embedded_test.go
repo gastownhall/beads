@@ -198,10 +198,11 @@ func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
 			fmt.Sprint(result.AllowedPrefixesAdded) != "[taxdb]" {
 			t.Errorf("result = %+v, want taxdb -> kb with taxdb added to allowed_prefixes", result)
 		}
-		// An edge between taxdb-* and kb-* is stored across prefixes and
-		// never blocks; the command must say so.
-		if !strings.Contains(stderr, "A dependency between a taxdb-* and a kb-* issue does not block") {
-			t.Errorf("stderr does not warn that taxdb-*/kb-* dependencies do not block:\n%s", stderr)
+		// Both prefixes' issues stay in this database, so an edge between
+		// taxdb-* and kb-* blocks (GH#8299); the command must not say it
+		// does not.
+		if strings.Contains(stderr, "does not block") {
+			t.Errorf("stderr warns that taxdb-*/kb-* dependencies do not block:\n%s", stderr)
 		}
 
 		if got := bdShow(t, bd, dir, "taxdb-u6ch"); got.Title != "Tax parent" {
@@ -210,8 +211,13 @@ func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
 		if got := bdShow(t, bd, dir, ref.ID); got.Description != "see taxdb-u6ch" {
 			t.Errorf("%s description = %q, want the text unchanged", ref.ID, got.Description)
 		}
-		if root := bdCreate(t, bd, dir, "New root", "--type", "task"); !strings.HasPrefix(root.ID, "kb-") {
+		root := bdCreate(t, bd, dir, "New root", "--type", "task")
+		if !strings.HasPrefix(root.ID, "kb-") {
 			t.Errorf("new root = %s, want a kb-* ID", root.ID)
+		}
+		bdDep(t, bd, dir, "add", root.ID, "taxdb-u6ch")
+		if ready := wakeReadyIDs(t, bd, dir); ready[root.ID] || !ready[ref.ID] {
+			t.Errorf("ready = %v, want %s ready and %s blocked by taxdb-u6ch", ready, ref.ID, root.ID)
 		}
 		if child := bdCreate(t, bd, dir, "Tax child", "--parent", "taxdb-u6ch"); !strings.HasPrefix(child.ID, "taxdb-u6ch.") {
 			t.Errorf("child = %s, want a taxdb-u6ch.N ID", child.ID)
@@ -267,12 +273,12 @@ func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
 	})
 
 	t.Run("repair_repoints_cross_prefix_edges", func(t *testing.T) {
-		// taxdb-x blocking on a kb-* issue is stored across prefixes, where
-		// it never blocks. --repair moves the edge in a transaction of its
-		// own once taxdb-x is kb-x, and the command's post-run commit still
-		// records every write, issue_prefix (taxdb -> kb) included: a Dolt
-		// commit of the edge's own would mark the command committed and
-		// leave the config row out.
+		// taxdb-x blocking on a kb-* issue crosses prefixes, so --repair,
+		// which cannot see the column an edge sits in, moves the edge in a
+		// transaction of its own once taxdb-x is kb-x, and the command's
+		// post-run commit still records every write, issue_prefix (taxdb ->
+		// kb) included: a Dolt commit of the edge's own would mark the
+		// command committed and leave the config row out.
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "taxdb")
 		blocker := bdCreate(t, bd, dir, "Open blocker", "--id", "kb-hand", "--type", "task", "--force")
 		bdCreate(t, bd, dir, "Tax work", "--id", "taxdb-x", "--type", "task")

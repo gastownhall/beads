@@ -23,6 +23,14 @@ type journalDependencyEdge struct {
 // (gc, source-repo wipe, the actorless storage.DeleteIssue surface) passes ""
 // explicitly, which the 0066 contract reads as system/unknown.
 func RecordDependencyRemovalsForIssuesInTx(ctx context.Context, tx DBTX, ids []string, actor string) error {
+	return recordDependencyRemovalsForIssuesExceptInTx(ctx, tx, ids, nil, actor)
+}
+
+// recordDependencyRemovalsForIssuesExceptInTx is
+// RecordDependencyRemovalsForIssuesInTx for a delete that keeps some of those
+// edges: an edge in kept, keyed by dependencyPairKey, outlives the delete and
+// records no removal.
+func recordDependencyRemovalsForIssuesExceptInTx(ctx context.Context, tx DBTX, ids []string, kept map[string]bool, actor string) error {
 	if !journalEnabled(ctx, tx) || len(ids) == 0 {
 		return nil
 	}
@@ -30,7 +38,13 @@ func RecordDependencyRemovalsForIssuesInTx(ctx context.Context, tx DBTX, ids []s
 	if err != nil {
 		return err
 	}
-	return recordDependencyRemovalsInTx(ctx, tx, edges, actor)
+	removed := make([]journalDependencyEdge, 0, len(edges))
+	for _, edge := range edges {
+		if !kept[dependencyPairKey(edge.source, edge.target)] {
+			removed = append(removed, edge)
+		}
+	}
+	return recordDependencyRemovalsInTx(ctx, tx, removed, actor)
 }
 
 // RecordDependencyRemovalsForTableInTx is the table-scoped variant used by
@@ -118,6 +132,13 @@ func dependencyEdgesInTableForIssueIDsInTx(ctx context.Context, tx DBTX, table s
 
 func dependencyEdgeKey(edge journalDependencyEdge) string {
 	return edge.source + "\x00" + edge.target + "\x00" + edge.kind + "\x00" + edge.metadata
+}
+
+// dependencyPairKey keys an edge by its endpoints alone: a dependency table
+// holds at most one row per source and target, whose id depid derives from
+// the two.
+func dependencyPairKey(source, target string) string {
+	return source + "\x00" + target
 }
 
 func sortedDependencyEdges(byKey map[string]journalDependencyEdge) []journalDependencyEdge {

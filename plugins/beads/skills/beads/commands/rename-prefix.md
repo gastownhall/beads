@@ -24,10 +24,9 @@ Updates all issue IDs and all text references across all fields.
   to `allowed_prefixes` to split it exactly (`cre-db-wxyz` -> `kb-wxyz`).
 - **New issues only**: `bd rename-prefix kb- --mint-only` makes new issues use
   `kb-` and keeps every existing ID; the old prefix stays valid, so children of
-  existing issues can still be created. Cannot be combined with `--repair`.
-  A dependency between an old-prefix and a new-prefix issue does not block
-  (`bd ready` lists the dependent) until a later `--repair` consolidates the
-  prefixes.
+  existing issues can still be created, and a dependency between an old-prefix
+  and a new-prefix issue blocks like any other. Cannot be combined with
+  `--repair`.
 
 Example: Rename from 'knowledge-work-' to 'kw-'
 
