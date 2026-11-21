@@ -32,6 +32,7 @@ go_library(
         "epoch_cas.go",
         "errors.go",
         "events.go",
+        "events_retention.go",
         "federation.go",
         "filters.go",
         "gateway_credential.go",
