@@ -7,6 +7,478 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-24
+
+First stable release of 1.4.0, the first minor release since 1.3. It ships the
+same code as [1.4.0-rc.4]; the only change since that candidate is the version
+stamp. The full notes are in the [1.4.0-rc.4], [1.4.0-rc.3], [1.4.0-rc.2] and
+[1.4.0-rc.1] sections below, which together cover everything since [1.3.4] and
+credit the contributors: rc.1 describes the release, rc.2, rc.3 and rc.4 add
+fixes and amend its notes, and the [1.4.0-rc.4] **Corrections to earlier
+notes** correct what rc.1 and rc.3 said about reads before the migration, the
+recorded bd version after it and moving from a candidate to its release.
+Coming from 1.3.x or older, 1.4.0 is a **one-way upgrade** (see **Before you
+install**). There is **no migration since 1.4.0-rc.1**, and the embedded Dolt
+engine is unchanged since then, so upgrading from any 1.4.0 release candidate
+is a binary swap. What ran against rc.4's code before the tag is under
+**Validation before promotion**, at the end of this section.
+
+### Release channels
+
+The candidates were GitHub prereleases only. With 1.4.0, npm (`@beads/bd`),
+PyPI (`beads-mcp`, the MCP server), the `install.sh` and `install.ps1` scripts
+and `go install github.com/steveyegge/beads/cmd/bd@latest` move to 1.4.0, and
+Homebrew's `beads` formula follows once homebrew-core updates it. A routine
+upgrade therefore takes a machine on 1.3.x or older to 1.4.0. bd then refuses
+that machine's existing stores until you consent to the migration, unless
+consent is already standing there: where `BD_ALLOW_MIGRATE=1` or
+`BD_ALLOW_REMOTE_MIGRATE=1` is set, the first 1.4.0 command can migrate a
+store, one-way, without asking (see **Before you install**). To stay on 1.3.4
+for now, run `brew pin beads` before your next `brew upgrade` (installing or
+upgrading `dolt` or `icu4c@79` can upgrade `beads` too), or
+`npm install -g @beads/bd@1.3.4`; the install scripts always install the
+latest release. A server-mode `bd doctor` of 1.3.x or older, or of
+1.4.0-rc.3 or rc.4, can now report 1.4.0 as an update when it runs in a
+terminal and GitHub's release API answers: read these notes before you run
+the upgrade command it prints.
+
+**If you run Gas City, keep bd on 1.3.x until your gc release supports bd
+1.4.0**, then follow that release's upgrade notes. gc v1.5.1 and earlier do
+not support it: v1.5.1 pins bd 1.3.2, links the beads 1.3.2 Go module and has
+no upper bound on the bd version it runs. With bd 1.4.0 on `PATH`, such a gc
+cannot use an existing city or rig, because bd refuses their stores until
+they are migrated and gc v1.5.1 never consents to the migration; and a
+migrated store, like the store of a city or rig created with bd 1.4.0, is at
+schema v74, which bd 1.3.x and gc's linked 1.3.2 library cannot open. Until
+your gc supports 1.4.0, do not migrate a city's or rig's stores, do not
+create a city or rig with bd 1.4.0 on `PATH`, and do not set
+`BD_ALLOW_MIGRATE` or `BD_ALLOW_REMOTE_MIGRATE` where gc runs. Builds of
+gc's `main` from between
+[gastownhall/gascity#7265](https://github.com/gastownhall/gascity/pull/7265)
+(2026-10-07) and
+[gastownhall/gascity#9273](https://github.com/gastownhall/gascity/pull/9273)
+(2026-11-18), such as a `brew install --HEAD gascity`, a source build or an
+`edge` pre-release from those weeks, run `bd migrate schema` on a city's
+Dolt-server stores at every `gc start` and `gc reload`, so with bd 1.4.0 on
+`PATH` they can migrate them, one-way, without asking: replace such a build
+before bd 1.4.0 reaches that machine. Pulls that gc makes itself
+(`gc dolt pull`) still write the remote URL, with any credentials in it, into
+merge commits ([#8434](https://github.com/gastownhall/beads/issues/8434)).
+
+Under Homebrew, the `gascity` formula depends on `beads` with no version, and
+homebrew-core updates `beads` within hours of a stable beads tag.
+From then on, `brew upgrade`, or installing or upgrading `dolt` or
+`icu4c@79`, can move bd to 1.4.0 under gc: run `brew pin beads` before any
+of them, and unpin it only when you move to a gc release that supports bd
+1.4.0, upgrading both together. A pinned `beads` that homebrew-core has moved
+past stops `brew install gascity` and `brew upgrade gascity` until you run
+`brew unpin beads`, and on a machine without `beads`, `brew install gascity`
+installs the current `beads` with it.
+
+If bd 1.4.0 reaches a machine whose gc does not support it anyway, stop the
+city (`gc stop`) before one of its agents runs the `bd migrate schema`, or
+sets the consent variable, that bd's refusals name, and migrate nothing: a
+command that bd refuses writes nothing to the store. Then upgrade gc to a
+release that supports bd 1.4.0, or go back to bd 1.3.4: run `bd dolt stop`
+with 1.4.0 in each proxied-server city or rig it opened (see the
+[1.4.0-rc.1] **Upgrade notes**), then make bd 1.3.4 the `bd` that gc runs
+again (`npm install -g @beads/bd@1.3.4`, or the v1.3.4 release archive
+checked against its `checksums.txt`).
+
+**Packagers:** build 1.4.0 with Go 1.27.4 or newer. `go.mod` keeps
+`go 1.27.3` and adds `toolchain go1.27.4`, and `go install ...@version`, Nix
+and Homebrew build with the installing Go. Outside embedded mode bd needs Dolt
+2.6.0 or newer at runtime. See the [1.4.0-rc.2] **Upgrade notes** and the
+[1.4.0-rc.1] **Packagers and maintainers** notes. If you package a tool that
+runs bd and its package depends on `beads` without a version, as AUR's
+`gascity-bin` does, hold that dependency below 1.4.0 (for pacman,
+`beads<1.4`) until the tool's release supports bd 1.4.0.
+
+### Upgrade notes
+
+#### Before you install
+
+Coming from 1.3.x or older; the [1.4.0-rc.1] **Upgrade notes** have the
+detail, as the [1.4.0-rc.4] **Corrections to earlier notes** amend them.
+- **Back up first, with the bd you have now, and keep the backup outside
+  `.beads/`.** Once 1.4.0 is installed, an unmigrated store refuses
+  `bd export` and `bd backup`, and in general `bd dolt push` and
+  `bd dolt pull` too, until you consent. On a store with a Dolt remote,
+  `bd dolt push` so the remote has all your work (a proxied-server workspace
+  refuses it, in 1.3.x too: push from a workspace with direct access to the
+  database); that is not a rollback point, because the migrating clone pushes
+  the migrated schema there. Then take a backup that the bd you have now can
+  restore: `bd backup sync` to a destination outside `.beads/` that you set
+  once with `bd backup init <path>`, or a copy of `.beads/` taken while
+  nothing writes to it. Back up a shared or external Dolt server's databases
+  on the server (`dolt backup`), once per database: there `bd backup init`
+  registers one destination on the database for every client, and the server
+  resolves its path on its own host. bd's automatic backup in `.beads/backup`
+  (on by default in an embedded workspace whose git repository has a remote,
+  and where `bd backup restore` looks by default) is not a rollback point:
+  from `bd migrate schema` on, a 1.4.0 command can replace it with the
+  migrated database. A JSONL export (`bd export --all`; without `--all` it
+  leaves out wisps) keeps no events and no Dolt history
+  ([#3884](https://github.com/gastownhall/beads/issues/3884)), but take one on
+  every clone of a remote-backed store as well: a clone that already has
+  1.4.0 re-imports it when it adopts the migrated remote. The migration is
+  one-way: bd 1.3.x and older refuse a migrated database, so they cannot
+  restore over it either. To go back, put the backup in place of the migrated
+  database before you reinstall the old bd: put the `.beads/` copy back while
+  nothing uses it; in embedded mode or on bd's own server, run
+  `bd backup restore --force <path>` with 1.4.0 on a `bd backup sync`
+  destination; restore a shared or external server's databases on the server.
+- **Unset standing consent first.** `BD_ALLOW_MIGRATE=1`, and
+  `BD_ALLOW_REMOTE_MIGRATE=1`, which 1.4.0 honors as an alias, consent for
+  every command that sees them. Where either is set, the first 1.4.0 command
+  can migrate the store without asking, and a run whose stderr is not a
+  terminal may print nothing about it. `BD_ALLOW_REMOTE_MIGRATE=1` also gets
+  past the shared-server and remote-migrate gates, and the 1.3.x upgrading
+  guide suggested keeping it in an unattended `bd serve`'s environment. Unset
+  both wherever bd runs until every bd that uses the store is ready for 1.4.0.
+  Keep agents from consenting for you too: outside `--json`, bd's refusals
+  print a migrate command and often a consent variable, and an agent that
+  runs either can migrate the store, one-way.
+- **Then upgrade Dolt, and restart the servers:** every `dolt sql-server` bd
+  talks to, and the `dolt` CLI on `PATH`, must be 2.6.0 or newer, and outside
+  embedded mode bd refuses older ones, with no override. bd does not restart
+  a running server for you
+  ([#6064](https://github.com/gastownhall/beads/issues/6064)), so restart each
+  one on the new Dolt before you migrate (`bd dolt stop && bd dolt start` for
+  bd's own server; a proxied-server workspace refuses `bd dolt start`, so
+  there run `bd dolt stop`, and the next bd command starts the proxy on the
+  new Dolt). Back each server up before you upgrade it, and treat that
+  upgrade as one-way too. Embedded mode links the 2.6.0 engine.
+- **Upgrade every bd that shares a store or a proxied workspace together**
+  (`which -a bd` finds stray binaries). Stop long-running `bd serve` processes
+  before you migrate and start them with 1.4.0 afterwards: a 1.4.0 `bd serve`
+  refuses to start on an unmigrated store, and a 1.3.x one keeps serving the
+  migrated store until it restarts.
+- **Installing migrates nothing, but bd refuses an unmigrated store, reads
+  included, until you consent** with `bd migrate schema`, with `--force` on
+  `bd migrate` or `bd migrate schema`, or with `BD_ALLOW_MIGRATE=1` (on a
+  shared or external Dolt server or in a proxied-server workspace, scripts
+  need `BD_ALLOW_REMOTE_MIGRATE=1`). The store then moves to schema v74, from
+  v66 (v53 from 1.2.2 or 1.1.x). On a shared or external Dolt server, and in
+  a proxied-server workspace, upgrade every client, then migrate once per
+  database, in one sitting: until the migration an upgraded client can
+  neither read nor write issues, because every issue read needs `arrival_seq`
+  (migration 0073).
+- **A store with a Dolt remote and several clones is migrated by one clone
+  only.** With the bd you have now, pull, commit and push on every clone. Then
+  one clone installs 1.4.0 and runs `bd migrate schema` (if the remote-migrate
+  gate stops it, follow the options it prints) and `bd dolt push`, and every
+  other clone runs `bd dolt pull` with its old bd before it installs 1.4.0.
+  Do not use `--force` or `BD_ALLOW_REMOTE_MIGRATE=1` to get another clone
+  past that gate: clones migrated separately can stop merging
+  ([#4259](https://github.com/gastownhall/beads/issues/4259)).
+  [Remote-backed databases and multiple clones](docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones)
+  has the full procedure, including how a clone that already has 1.4.0 adopts
+  the migrated database. A proxied-server workspace refuses `bd dolt push`
+  and `bd dolt pull`, in 1.3.x too: there the remote-migrate refusal names
+  `bd migrate schema --force` for the one clone that migrates, with the
+  proxy's library clients stopped, and sends the push to a workspace with
+  direct access to the database. No bd command adopts the migrated database
+  in a proxied-server workspace (see **Known issues**).
+
+#### Coming from 1.3.x
+
+- **Read the [1.4.0-rc.1] Upgrade notes**, then those of [1.4.0-rc.2],
+  [1.4.0-rc.3] and [1.4.0-rc.4]: `bd github` stops when a repository lookup
+  fails, a least-privilege server user needs EXECUTE on `dolt_fetch` and
+  `dolt_merge` for pulls, `bd backup restore` refuses a Dolt server on another
+  host, building from a checkout selects Go 1.27.4, telemetry's `bd.args`
+  holds only the command path and flag names, and a Go program's
+  `beads.OpenBestAvailable` reaches a proxied-server workspace through its bd
+  proxy (a `.beads/embeddeddolt` that an earlier `OpenBestAvailable` created
+  there is left on disk, unread: what was written to it is not in the
+  workspace's database; see the [1.4.0-rc.4] **Fixed** entry). Then read the
+  [1.4.0-rc.4] **Corrections to earlier notes**. From a release older than
+  1.3.4, the upgrade notes of the later 1.3.x releases apply too (from 1.3.2
+  or earlier, [1.3.3-rc.1]).
+- **Check the scripts, agents and CI jobs that drive bd** against **Security
+  changes you may notice** and **Changed behavior for scripts and agents**
+  under [1.4.0-rc.1]. In particular, bd withholds `BEADS_DOLT_PASSWORD` and AI
+  and tracker tokens from an endpoint named only in shared configuration
+  (`.beads/config.yaml`, `config.local.yaml`, `.env` or `metadata.json`, or the
+  Dolt `config` table) until you confirm it once in your shell environment
+  (for a Dolt server, `BEADS_DOLT_SERVER_HOST`) or `~/.config/bd/config.yaml`;
+  a Dolt server on a loopback address and the vendors' default endpoints are
+  exempt.
+- **After migrating, the recorded bd version can still say 1.3.x**
+  ([#7283](https://github.com/gastownhall/beads/issues/7283)). The schema is
+  migrated; only the version marker is stale. It happens in every mode unless
+  `bd migrate schema` is the first bd command after installing that opens the
+  workspace, and even then in embedded mode, in shared-server mode and on an
+  external Dolt server whose data is not in `.beads/dolt`. In embedded and
+  server mode, the run of `bd migrate schema` that migrates prints
+  `Schema already at v74`.
+  - Server mode: `bd doctor` warns `Database: version 1.3.4 (CLI: 1.4.0)`
+    (its advice to update bd does not help), and `bd doctor --check-health`
+    exits 1. Run `bd migrate` with no subcommand once per database.
+  - Embedded mode: nothing reports it; `bd migrate` with no subcommand
+    records the new version.
+  - Proxied-server mode: `bd migrate` and `bd doctor` are refused, and nothing
+    acts on the marker; the next bd upgrade records it if the first command
+    after it opens the workspace without being refused. To record it now,
+    write the version you upgraded from (for example `1.3.4`) into
+    `.beads/.local_version` and run a bd command that opens the workspace,
+    such as `bd ready`.
+- **Then follow the [1.4.0-rc.1] After upgrading notes:**
+  `bd recompute-blocked` and `bd hooks install` once per workspace, the agent
+  setup you used before (and `chmod 600` on the settings files that earlier
+  `bd setup` runs left at 0644), `bd cook --persist --force` for persisted
+  protos with gate steps, and the secret rotation those notes and the
+  [1.4.0-rc.2] **Security** notes name.
+
+#### Coming from 1.2.x or older
+
+Start with the [1.3.0] **Upgrade notes** and **Breaking changes for v1.2.2
+users** (1.2.2 re-shipped 1.1.2's code, so the [1.2.1] changes reach you too),
+then follow the 1.3.x path above. Two things in the [1.3.0] notes do not hold
+for 1.4.0: it does not migrate a store on its first command (one consented run
+takes a 1.2.2 or 1.1.x store from schema v53 to v74), and going back means
+restoring the backup you took first, not the schema-cursor rollback those
+notes describe. A store past migration 0062 cannot merge pre-0062 history from
+a clone it has not pulled
+([#6727](https://github.com/gastownhall/beads/issues/6727)): before migrating,
+have every clone push and the migrating clone pull with the old binary, and
+migrate every peer before merging pre-0062 history.
+
+#### Coming from a 1.4.0 release candidate
+
+- **From rc.1, rc.2 or rc.3:** read the sections of the candidates after
+  yours, through [1.4.0-rc.4]. rc.1 and rc.2 never report 1.4.0 as newer
+  ([#6595](https://github.com/gastownhall/beads/issues/6595)), so install it
+  by hand there.
+- **From rc.4:** only the version stamp changes.
+- **rc.3's and rc.4's server-mode `bd doctor`** can report 1.4.0 when it runs
+  in a terminal and GitHub answers; nothing reports it with `--json`, under an
+  agent, a script or CI, offline, or in an embedded or proxied-server
+  workspace.
+- **After the swap, from any candidate**, as the [1.4.0-rc.3] **Upgrade
+  notes** describe and the [1.4.0-rc.4] **Corrections to earlier notes**
+  correct: only the first bd command after the swap notices the upgrade, even
+  if bd refuses that command (`bd ready` prints a one-time notice, as does
+  `bd list --flat` outside proxied-server mode, but the default `bd list`
+  does not; `bd upgrade status` and `bd upgrade review` report it only if run
+  first). If that first command opens the workspace, it records 1.4.0 over
+  the candidate in the version marker in proxied-server mode and on a Dolt
+  server whose data is in `.beads/dolt`. In shared-server mode and on any
+  other external server nothing records it: `bd doctor` shows
+  `Database: version 1.4.0-rc.N (CLI: 1.4.0)`, and `bd doctor --check-health`
+  reports a version mismatch, until you run `bd migrate` (no subcommand) once
+  per database. Embedded workspaces keep the version they recorded.
+  Server-mode `bd doctor` reports hooks a candidate installed as outdated, so
+  run `bd hooks install` once, in any mode.
+
+### Notes added since the candidates
+
+Two 1.4.0 behavior changes, both already in rc.1, that its notes did not
+describe:
+- **A clone that loses its `wisp_id_tombstones` table gets it back empty,
+  with a warning** ([#7931](https://github.com/gastownhall/beads/pull/7931)).
+  The table is clone-local and holds the wisps-plane ids that `--retain-ids`
+  sweeps retired on the clone. If it is missing while the clone's
+  ignored-migration cursor is above 29, bd reads the cursor as 29 and, at the
+  next open that applies migrations (in embedded mode, almost any command),
+  replays ignored migrations 0030 and 0031. 0030 re-creates the table empty,
+  after a warning on stderr that is printed even when stderr is not a
+  terminal and starts
+  `WARNING: wisp_id_tombstones was missing and is being re-created EMPTY.`
+  0031 repeats the one-time
+  [#7039](https://github.com/gastownhall/beads/issues/7039) events check,
+  which adds only pre-upgrade events that the `events` table is missing. The
+  ids the lost table held can be created again, so treat the clone as a new
+  scope for wisps-plane idempotency keys. A fresh clone creates the table
+  empty, with no warning.
+- **In proxied-server mode, `bd mol burn` deletes only the molecule**
+  ([#8078](https://github.com/gastownhall/beads/pull/8078)). Burning a
+  persistent molecule there runs the delete cascade, which in 1.3.x followed
+  every dependency type, so it also deleted every issue that depended on the
+  molecule's root or steps, and their dependents. With the parent-child-only
+  cascade that [1.4.0-rc.1] describes for `bd delete --cascade` and
+  `bd admin cleanup --cascade`
+  ([#6301](https://github.com/gastownhall/beads/issues/6301)), it deletes the
+  root and its steps; the other issues survive and lose their edges to them,
+  as with `bd mol burn` in embedded and server mode. If you stay on 1.3.x in a
+  proxied-server workspace, its `bd mol burn` of a persistent molecule still
+  deletes those dependents, and its `--dry-run` lists only the molecule: check
+  what depends on the molecule's root and steps before you burn it there.
+
+### Known issues
+
+The [1.4.0-rc.1] **Known issues** still apply, as [1.4.0-rc.2] narrowed two
+of them and the [1.4.0-rc.4] **Corrections to earlier notes** correct the
+[#7283](https://github.com/gastownhall/beads/issues/7283) entry; no candidate
+fixed any other. The [1.4.0-rc.2] and [1.4.0-rc.4] **Known issues** apply
+too, except that rc.4 fixed rc.2's Go-library entry for `OpenBestAvailable`.
+Their workarounds are in those sections.
+
+Narrowed in rc.2:
+- **Credentials in merge commits** remain only for the cached clone of
+  `bd create --repo <remote-url>` and for other tools' pulls, such as
+  `gc dolt pull` ([#8434](https://github.com/gastownhall/beads/issues/8434)),
+  and the other redaction gaps of
+  [#8089](https://github.com/gastownhall/beads/pull/8089) are unchanged: keep
+  credentials out of remote URLs.
+- **`bd backup restore --force` can still drop the database of a Dolt server
+  in a container** reached at localhost: bd checks the backup on its own
+  filesystem, not the container's. Mount the backup at the same path in the
+  container and on the host before you pass `--force`.
+
+Most likely to matter:
+- **The stale version marker after migrating, in every mode, and the server
+  restarts** above
+  ([#7283](https://github.com/gastownhall/beads/issues/7283),
+  [#6064](https://github.com/gastownhall/beads/issues/6064)).
+- **Stores that crossed migration 0059 under 1.3.x can still hide ready work**
+  ([#7037](https://github.com/gastownhall/beads/issues/7037)) until
+  `bd recompute-blocked` runs once per workspace.
+- **`bd update --description ""` clears the field and exits 0**
+  ([#8149](https://github.com/gastownhall/beads/issues/8149)), as do
+  `--design ""` and `--acceptance ""`: guard command substitutions.
+- **`bd mol wisp gc` can delete wisps you still need**
+  ([#5152](https://github.com/gastownhall/beads/issues/5152),
+  [#8202](https://github.com/gastownhall/beads/issues/8202)): run it with
+  `--dry-run` first.
+- **A `blocks` edge onto a local issue with another prefix does not block
+  `bd ready`** ([#8299](https://github.com/gastownhall/beads/issues/8299)).
+- **Go programs that open a proxied-server workspace with `beads.Open`,
+  `OpenFromConfig` or `OpenGated` still go around its proxy**
+  ([#8412](https://github.com/gastownhall/beads/pull/8412)). `Open` can create
+  an empty `beads` database on the proxy's Dolt server, and with no proxy
+  running `OpenFromConfig` and `OpenGated` start a standalone
+  `dolt sql-server` that makes every bd command that opens the workspace fail
+  until you run `kill $(cat .beads/dolt-server.pid)` from the workspace root
+  (`BEADS_DOLT_AUTO_START=0` makes them fail instead). Use
+  `OpenBestAvailable`, which goes through the proxy since rc.4
+  ([#8323](https://github.com/gastownhall/beads/issues/8323), fixed). A
+  program that forces server mode (`BEADS_DOLT_SERVER_MODE=1` or
+  `BEADS_DOLT_SHARED_SERVER`) and names a port in `BEADS_DOLT_SERVER_PORT`
+  still dials that port as a plain MySQL client, `OpenBestAvailable`
+  included, so the port must be a plain Dolt server's: a 1.4 proxy's data
+  port accepts only bd, and no dialer for it is exported in 1.4.0.
+
+Found during the candidates:
+- **With the console trace exporter on, spans still carry paths and typed
+  input** ([#8509](https://github.com/gastownhall/beads/issues/8509)). With
+  telemetry on and `OTEL_TRACES_EXPORTER=console` (or the legacy
+  `BD_OTEL_STDOUT=true`), the spans bd writes to stderr carry `hook.path` (a
+  hook's absolute path), `bd.prov.ref` (the ref you looked up) and a failed
+  span's error message; otherwise bd records no spans. `SECURITY.md` still
+  says the codebase contains no telemetry, and describes neither this export
+  nor bd's anonymous usage metrics (`bd metrics`).
+- **`bd github` has no supported way past a linked repository that GitHub
+  refuses whatever the token**
+  ([#8436](https://github.com/gastownhall/beads/issues/8436)), such as one
+  behind an IP allow list: every sync, push and pull stops. Do not clear those
+  beads' links to get past it: the next sync or push creates each unlinked
+  bead as a new issue in the configured repository, which can publish the
+  other repository's content. Do not point them at the configured repository
+  either.
+- **bd's upgrade reporting misses the upgrade from 1.3.x.** Until the
+  migration, bd refuses the commands that would report it, and the first
+  command after installing that opens the workspace uses up bd's one-time
+  upgrade signal, whether bd refuses it or it is the `bd migrate schema` that
+  migrates. So `bd ready` prints no upgrade notice, `bd upgrade status`
+  reports `upgraded: false` and `bd upgrade review` prints
+  `No previous version recorded`; at most, a server workspace whose data is
+  in `.beads/dolt` prints a
+  `bd upgraded to …: N schema migration(s) pending` notice on that first
+  command. Read these notes, or run `bd info --whats-new` after
+  `bd migrate schema`.
+- **A proxied-server workspace's proxy data port closes other clients
+  without a word.** Only bd's own code (the bd CLI and
+  `beads.OpenBestAvailable`) can use it. A plain MySQL client, or a gc
+  release that reads a proxied rig directly, is closed after 5 seconds with
+  nothing sent (`ERROR 2013 (HY000): Lost connection to server at
+  'handshake: reading initial communication packet'`), and `proxy.log`
+  records it only if the proxy was started with `BD_DEBUG=1`. Run SQL with
+  `bd sql`.
+- **On a proxied-server workspace, no bd command adopts a remote that another
+  clone has already migrated**, and the adopt and fork stops name
+  `bd bootstrap`, which creates a separate local database there. Check with
+  the other clones before you migrate one; the [1.4.0-rc.4] **Known issues**
+  give a manual fast-forward for a managed-local workspace.
+
+The others, by area:
+- **Data:** `bd doctor --fix` adopting another project's database
+  ([#5576](https://github.com/gastownhall/beads/issues/5576)), concurrent
+  creates overwriting each other
+  ([#7289](https://github.com/gastownhall/beads/issues/7289)), edits to an id
+  in both issues and wisps
+  ([#5991](https://github.com/gastownhall/beads/issues/5991)), `bd import`
+  dropping edges to issues not yet loaded
+  ([#6113](https://github.com/gastownhall/beads/issues/6113)), concurrent
+  label writers ([#5657](https://github.com/gastownhall/beads/issues/5657)),
+  Dolt commits inside the SQL transaction
+  ([#5752](https://github.com/gastownhall/beads/issues/5752)), lossy JSONL
+  recovery ([#3884](https://github.com/gastownhall/beads/issues/3884)),
+  embedded mode silently not committing
+  ([#5433](https://github.com/gastownhall/beads/issues/5433)) and a sibling
+  embedded database ([#4381](https://github.com/gastownhall/beads/issues/4381)).
+- **Security:** a hostile checkout
+  ([#7888](https://github.com/gastownhall/beads/issues/7888)), untrusted
+  federation peers and `federation.exclude_types`
+  ([#7890](https://github.com/gastownhall/beads/issues/7890),
+  [#7873](https://github.com/gastownhall/beads/issues/7873)) and the
+  remotesapi listener on every interface
+  ([#6176](https://github.com/gastownhall/beads/issues/6176)).
+- **Operations:** server-mode `bd init` on a database a legacy SDK left dirty
+  ([#6089](https://github.com/gastownhall/beads/issues/6089)), a declined
+  conflict on a git-protocol pull
+  ([#7839](https://github.com/gastownhall/beads/issues/7839); the fix rc.1
+  named, [#7849](https://github.com/gastownhall/beads/pull/7849), was closed,
+  and [#8427](https://github.com/gastownhall/beads/pull/8427) replaces it), a
+  stalled `git+ssh` transfer
+  ([#7989](https://github.com/gastownhall/beads/issues/7989)), a missing
+  `issue_prefix` row ([#3494](https://github.com/gastownhall/beads/issues/3494))
+  and, for stores upgrading from 1.2.x or older, merging pre-0062 history
+  ([#6727](https://github.com/gastownhall/beads/issues/6727); see **Coming
+  from 1.2.x or older**).
+
+### Validation before promotion
+
+gascity's RC Gate ran against 1.4.0-rc.4 on `test/beads-1.4.0-rc.4`
+([gastownhall/gascity#9351](https://github.com/gastownhall/gascity/pull/9351)),
+a do-not-merge branch of gc's `main` that carries gc's adaptations to intended
+1.4.0 changes
+([run 44836557216](https://github.com/gastownhall/gascity/actions/runs/44836557216)).
+101 of the gate's 111 jobs passed, every acceptance lane among them, including
+gc's upgrade of a bd 1.3.1 store with `bd migrate schema` and its
+proxied-server tests. The 7 jobs that failed also failed, on the same tests,
+in a control run with bd 1.3.4 on the gc `main` commit that branch starts from
+([run 44290221643](https://github.com/gastownhall/gascity/actions/runs/44290221643)),
+among them gc's tutorial 01
+([gastownhall/gascity#9262](https://github.com/gastownhall/gascity/issues/9262)).
+In one of them, gc's macOS coverage job, a gc test of its git handling that
+runs no bd also timed out; it passed in the same run's other macOS test job.
+The gate's run against rc.3, on
+[gastownhall/gascity#9259](https://github.com/gastownhall/gascity/pull/9259)
+([run 44297788978](https://github.com/gastownhall/gascity/actions/runs/44297788978)),
+had the same result, job for job.
+
+gc's adaptations, first made for rc.3 on #9259, accept documented 1.4.0
+changes, such as the one-way migration, `bd ready` no longer trusting a stale
+`is_blocked` flag and a proxy data port that accepts only bd, and some of them
+change gc's own code, not only its tests. When the gate ran they were not on
+gc's `main`, and it tested no released gc: a gc release supports bd 1.4.0 only
+once it carries them, or equivalents (see **Release channels** if you run Gas
+City).
+
+On rc.4's code, the Nightly workflow
+([run 44837548869](https://github.com/gastownhall/beads/actions/runs/44837548869))
+and the rc.4 release workflow
+([run 44820771190](https://github.com/gastownhall/beads/actions/runs/44820771190),
+which passed on a re-run after its first attempt failed while installing
+build tools) passed. A goreleaser snapshot build passed, and with a binary
+stamped 1.4.0-rc.4 so did the npm package tests, the upgrade smoke test from
+v1.3.4, v1.3.3 and v1.2.2 (7 of 7 scenarios each; they cover only embedded
+and contributor workspaces, and their `bd doctor` check is vacuous:
+[#8424](https://github.com/gastownhall/beads/issues/8424)) and an upgrade of
+two projects on a v1.3.4 shared server (73 checks, none failed).
+
 ## [1.4.0-rc.4] - 2026-11-20
 
 Fourth release candidate for 1.4.0. It adds no schema migration, so upgrading
