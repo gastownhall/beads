@@ -504,7 +504,9 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		return nil, fmt.Errorf("failed to update issue: %w", err)
 	}
 
-	if clearLease {
+	// Wisps are never leased and never get a leases row (UpsertLeaseInTx), so
+	// there is nothing to delete for one.
+	if clearLease && !isWisp {
 		if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
 			return nil, err
 		}
@@ -532,22 +534,22 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		oldActive := oldIssue.Status != types.StatusClosed && oldIssue.Status != types.StatusPinned
 		newActive := newStatus != string(types.StatusClosed) && newStatus != string(types.StatusPinned)
 		if oldActive != newActive {
-			var affectedIssues, affectedWisps []string
-			var aerr error
-			if isWisp {
-				affectedIssues, affectedWisps, aerr = AffectedByStatusChangeForWispInTx(ctx, tx, id)
-			} else {
-				affectedIssues, affectedWisps, aerr = AffectedByStatusChangeInTx(ctx, tx, id)
-			}
+			affectedIssues, affectedWisps, blocked, aerr := AffectedByStatusChangeAndFlagInTx(ctx, tx, id, isWisp)
 			if aerr != nil {
 				return nil, fmt.Errorf("affected by status change for %s: %w", id, aerr)
 			}
 			// A change to closed or pinned settles the row itself without
-			// its union statements (planRecomputeInTx); a reactivation must
-			// recompute it, and its dependents are recomputed either way.
-			opts := recomputeOptions{}
+			// its union statements (planRecomputeInTx), and a row whose flag
+			// is already 0 needs no settling at all (DropSettledUnblockedRow);
+			// a reactivation must recompute it, and its dependents are
+			// recomputed either way.
+			var opts recomputeOptions
 			if !newActive {
-				opts = settledRowRecompute(id, isWisp)
+				if blocked {
+					opts = settledRowRecompute(id, isWisp)
+				} else {
+					affectedIssues, affectedWisps = DropSettledUnblockedRow(affectedIssues, affectedWisps, id, isWisp)
+				}
 			}
 			recompute, err := recomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, actor, opts)
 			if err != nil {
