@@ -396,7 +396,15 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 		}, nil
 	}
 
-	return doltVersionFloorCheck(version, "dolt sql-server at "+remedy.PrintedValue(doltutil.ServerAddr(host, port))), db
+	check := doltVersionFloorCheck(version, "dolt sql-server at "+remedy.PrintedValue(doltutil.ServerAddr(host, port)))
+	if check.Status == StatusOK && check.Detail == "" {
+		// Surface the effective server user (GH#8577): dolt.user resolves
+		// env > config.local.yaml > config.yaml > metadata.json, so the
+		// report shows the outcome instead of leaving operators to infer
+		// which layer answered.
+		check.Detail = fmt.Sprintf("connected as %s", remedy.PrintedValue(user))
+	}
+	return check, db
 }
 
 // doltVersionFloorCheck judges the version a server's dolt_version()

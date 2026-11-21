@@ -106,6 +106,11 @@ dolt-mode-migration.json
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 
+# Machine-local config layer (GH#8577): hand-authored overrides merged over
+# config.yaml at load (e.g. this machine's dolt.user). Per-machine by design —
+# never tracked; counts only when a config.yaml sits beside it.
+config.local.yaml
+
 # Legacy files (from pre-Dolt versions)
 *.db
 *.db?*
