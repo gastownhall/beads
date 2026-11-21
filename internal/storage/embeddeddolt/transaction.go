@@ -168,7 +168,7 @@ func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error 
 		t.dirty.MarkDirty(cascaded)
 	}
 	// storage.Tx.DeleteIssue carries no actor, so the journal rows record none.
-	result, err := issueops.DeleteIssueInTxWithResult(ctx, t.tx, id, "")
+	result, err := issueops.DeleteIssueInTxWithResult(ctx, t.tx, id, issueops.NoRequestActor)
 	if err != nil {
 		return err
 	}
@@ -176,6 +176,10 @@ func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error 
 	// with the delete (GH#6647).
 	if result.IssueRowsChanged {
 		t.dirty.MarkDirty("issues")
+	}
+	// The suffix reservation's counter (GH#4750).
+	for changed := range result.ChangedTables {
+		t.dirty.MarkDirty(changed)
 	}
 	return nil
 }

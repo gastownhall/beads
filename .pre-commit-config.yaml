@@ -1,3 +1,9 @@
+# third_party/bdp/spec/ is vendored byte for byte from gastownhall/bdp and
+# locked by third_party/bdp/bdp.pin: the whitespace and end-of-file fixers
+# would rewrite it, and a pin bump may add files over check-added-large-files'
+# 500 KB limit. scripts/bdp-vendor.sh is the only writer.
+exclude: ^third_party/bdp/spec/
+
 repos:
   # Lint and vet: nogo (//tools/nogo) over the changed files' Bazel packages,
   # the analyzers CI gates on (go test's vet checks plus the golangci-lint

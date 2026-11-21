@@ -186,6 +186,9 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	if notesOverwritten {
 		warnNotesReplacement(id)
 	}
+	// The same sidecar rows the direct route writes, against this route's
+	// advisory pre-read and under the canonical id (GH#6146).
+	logUpdateAuditChanges(updated.ID, currentActor(), updateAuditChanges(patch, in.claim, result.Changed, before, updated))
 	return updated, nil, nil
 }
 
@@ -263,9 +266,11 @@ func proxiedClaimPoolAliases(ctx context.Context) func() []string {
 // proxiedUpdateFailure sorts a refused update into the per-id verdicts. A guard
 // refusal sets GuardMismatch so the batch exits 13 rather than 1.
 //
-// A refused claim reads as the generic update failure, as it does on the direct
-// route: the external claim guard ignores --force but shares ErrCloseBlocked
-// with the close policy, so the hint could name an override that cannot work.
+// A claim refused by the external claim guard reads as the generic update
+// failure, as it does on the direct route: that guard ignores --force but
+// shares ErrCloseBlocked with the close policy, so the hint could name an
+// override that cannot work. A claim refused for a live local blocker
+// (ErrClaimBlocked) does honor --force, and says so (claimBlockedRefusal).
 //
 // The one verdict it cannot reproduce is stage attribution: "opening unit of
 // work" and "committing" were told apart by watching the provider this path no
@@ -273,6 +278,10 @@ func proxiedClaimPoolAliases(ctx context.Context) func() []string {
 // fails, loudly and non-zero.
 func proxiedUpdateFailure(id string, claim bool, err error) *updateIDFailure {
 	if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+		fmt.Fprintf(os.Stderr, "%s\n", refusal)
+		return &updateIDFailure{ID: id, Error: refusal.Error()}
+	}
+	if refusal, ok := claimBlockedRefusal(err); ok {
 		fmt.Fprintf(os.Stderr, "%s\n", refusal)
 		return &updateIDFailure{ID: id, Error: refusal.Error()}
 	}

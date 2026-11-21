@@ -73,7 +73,7 @@ func trackBdVersionFile(persist bool) {
 	// misfire is bounded — recoverPreV56IfNeeded refuses a non-semver
 	// predecessor, and the workspace's own version markers still refuse a
 	// genuine downgrade. (Those markers cannot arbitrate direction here: they
-	// compare with the same dotted scan and read HEAD stamps as 0.0.0 too.)
+	// use their own dotted comparison, which reads HEAD stamps as 0.0.0 too.)
 	if lastVersion != "" && lastVersion != Version {
 		if doctor.CompareVersions(Version, lastVersion) > 0 ||
 			doctor.IsBrewHeadVersion(Version) || doctor.IsBrewHeadVersion(lastVersion) {
@@ -391,14 +391,35 @@ func noticeSharedMigrateRefusal(err error) {
 	if globalFlag {
 		consent = schema.SharedConsentCommandGlobal
 	}
+	// GH#6656: on a proxied workspace the bare consent verb is refused at
+	// the front door, so the notice would have to prescribe the forced form,
+	// the one route through that refusal, with the client-close precondition
+	// that form declares. Defensive today: autoMigrateOnVersionBump, this
+	// notice's only caller, returns before opening anything on a
+	// proxied-server workspace (cfg.IsDoltProxiedServerMode), so no proxied
+	// refusal reaches here. The branch keeps the notice from naming the
+	// refused bare verb if that early return ever goes. usesProxiedServer()
+	// is read alongside the gate's marker because the dolt.NewFromConfig open
+	// that probe uses never sets gateErr.Proxied (only the uow provider does).
+	proxied := gateErr.Proxied || usesProxiedServer()
+	if proxied {
+		consent = schema.SharedConsentCommandForced
+		if globalFlag {
+			consent = schema.SharedConsentCommandForcedGlobal
+		}
+	}
 	var remedy string
 	switch gateErr.Decision {
 	case "shared-no-remote":
-		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
+		if proxied {
+			remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded and the co-resident library clients are stopped; until then writes are refused, and reads may be too.", consent)
+		} else {
+			remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; until then writes are refused, and reads may be too.", consent)
+		}
 	case "adopt", "adopt-ff":
 		// The remote is already migrated: migrating here would fork it, and
 		// the verb consent deliberately does not unlock this arm.
-		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here; reads keep working meanwhile."
+		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here."
 	case "fork-skew":
 		remedy = "This database and its remote already applied different content for the same migration (#4259) — run 'bd doctor' and follow its migration-content-skew guidance; do not migrate."
 	default:
@@ -406,7 +427,7 @@ func noticeSharedMigrateRefusal(err error) {
 		// first-mover suppression. Its full block names the designated-
 		// migrator and adopt paths with their preconditions, and picking one
 		// here would be guessing.
-		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing; reads keep working meanwhile."
+		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing."
 	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: %d schema migration(s) pending on this database — not auto-applying (#5920).\n%s\n",

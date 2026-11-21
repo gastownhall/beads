@@ -1,0 +1,226 @@
+{
+  "catalogVersion": 1,
+  "scenarios": [
+    {
+      "id": "issue.it-1",
+      "title": "Every Issue record's `type` is one identity of §2's Bead table; no `issue_type` member; `metadata` is an object",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "Every Issue record's `type` is one identity of §2's Bead table; no `issue_type` member; `metadata` is an object"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-2",
+      "title": "Every Dependency record's `type` is one identity of §2's Link table; no `dep_type` member; `source` is an in-Scope Bead",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "Every Dependency record's `type` is one identity of §2's Link table; no `dep_type` member; `source` is an in-Scope Bead URL and `target` an in-Scope Bead URL or an opaque external URI"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-3",
+      "title": "`createBead` with `type` of `issue/issue` or `dependency/dependency` as a Link Type is refused as `validation-failed` (a",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "`createBead` with `type` of `issue/issue` or `dependency/dependency` as a Link Type is refused as `validation-failed` (abstract)"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-4",
+      "title": "`createBead` with `type` of `issue/task` and properties lacking `title`, `status` or `priority` is refused as `validatio",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "`createBead` with `type` of `issue/task` and properties lacking `title`, `status` or `priority` is refused as `validation-failed`"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-5",
+      "title": "A property patch to a `service-managed` member is refused as `validation-failed`",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "A property patch to a `service-managed` member is refused as `validation-failed`"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-6",
+      "title": "`createLink` whose endpoints are the same Bead is refused",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "`createLink` whose endpoints are the same Bead is refused"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-7",
+      "title": "`createLink` on an occupied ordered pair, with any Dependency Type, is refused; the diagnostic names the occupying Link",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "`createLink` on an occupied ordered pair, with any Dependency Type, is refused; the diagnostic names the occupying Link"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-8",
+      "title": "`createLink` for `blocks` A→B serves a Link with `source` A and `target` B",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "`createLink` for `blocks` A→B serves a Link with `source` A and `target` B"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-9",
+      "title": "`deleteLink` of a pair's live Link then `createLink` with the same endpoints, Type and new metadata succeeds and serves",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "`deleteLink` of a pair's live Link then `createLink` with the same endpoints, Type and new metadata succeeds and serves a Link with a new `id`; a read of the first `id` answers `resource-not-found`; `createLink` supplying the first `id` is refused as `identity-taken`"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-10",
+      "title": "`updateLink` with `metadataChange` on a live Link keeps its `id` and serves a new `revision`",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "`updateLink` with `metadataChange` on a live Link keeps its `id` and serves a new `revision`"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-11",
+      "title": "`updateBead` that changes only `labels` serves a new `revision`",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "`updateBead` that changes only `labels` serves a new `revision`"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-12",
+      "title": "`deleteBead` on an Issue with a live incident Link is refused as `incident-links-exist`",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "`deleteBead` on an Issue with a live incident Link is refused as `incident-links-exist`"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-13",
+      "title": "The Bead inventory with `conformsTo` of `issue/issue` returns every Issue record of every concrete classification; with",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "The Bead inventory with `conformsTo` of `issue/issue` returns every Issue record of every concrete classification; with `type` of `issue/task` only tasks"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-14",
+      "title": "Issue records never carry `lease_expires_at`, `heartbeat_at`, `lease_granted_node` or `is_blocked`",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "Issue records never carry `lease_expires_at`, `heartbeat_at`, `lease_granted_node` or `is_blocked`"
+        }
+      ]
+    },
+    {
+      "id": "issue.it-15",
+      "title": "A Dependency whose native target is `external:<project>:<capability>` is served as a Link whose `target` is that opaque",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/issue.md",
+          "anchor": "#10-conformance-rows-for-preview-1",
+          "selectedText": "A Dependency whose native target is `external:<project>:<capability>` is served as a Link whose `target` is that opaque URI, and appears in `?view=links&direction=outbound` of its source"
+        }
+      ]
+    },
+    {
+      "id": "issue.ic-1",
+      "title": "Every name of §1 is invocable",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/callables.md",
+          "anchor": "#8-conformance-rows-for-preview-1",
+          "selectedText": "Every name of §1 is invocable"
+        }
+      ]
+    },
+    {
+      "id": "issue.ic-2",
+      "title": "Each invocation's arguments and result validate against its declaration",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/types/issue/callables.md",
+          "anchor": "#8-conformance-rows-for-preview-1",
+          "selectedText": "Each invocation's arguments and result validate against its declaration"
+        }
+      ]
+    }
+  ]
+}

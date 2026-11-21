@@ -101,6 +101,9 @@ func ValidateUpdateRequest(request publicops.UpdateRequest) error {
 	if request.ForceAssigneeTransfer && (request.Claim || !request.Patch.Assignee.Set || request.ExpectedAssignee != nil) {
 		return fmt.Errorf("%w: invalid forced assignee transfer", storage.ErrValidation)
 	}
+	if request.ForceClaimBlocked && !request.Claim {
+		return fmt.Errorf("%w: forced blocked claim requires claim", storage.ErrValidation)
+	}
 	if request.ForceNotesOverwrite && !request.Patch.Notes.Set {
 		return fmt.Errorf("%w: invalid forced notes overwrite", storage.ErrValidation)
 	}

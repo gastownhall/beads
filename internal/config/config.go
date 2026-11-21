@@ -132,7 +132,7 @@ func initialize(beadsDirSetting string) error {
 	//
 	// Precedence (highest to lowest):
 	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
-	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
+	//   <home>/.config/bd/config.yaml > native UserConfigDir()/bd/config.yaml
 	//   > legacy <home>/.beads/config.yaml
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),
@@ -1447,6 +1447,21 @@ func RetainedTypesYAMLWarning() string {
 	}
 	list := strings.Join(names, ",")
 	return fmt.Sprintf("types.retained in config.yaml (%s) is ignored: it is read from the workspace database only; set it with `bd config set types.retained %s`", list, list)
+}
+
+// NoDBObsoleteWarning is the warning for an effective no-db=true (any config
+// file Initialize merges, or BD_NO_DB), or "" when it is off. The JSONL-only
+// mode the key selected is gone and nothing reads it any more, so every
+// command still opens the Dolt database; the warning says so instead of
+// letting the key look like it took effect (GH#7387). Its remedy names every
+// file the key can come from: `bd config unset no-db` edits only the
+// workspace config.yaml, so a user-level or config.local.yaml entry would
+// survive it and keep the warning printing.
+func NoDBObsoleteWarning() string {
+	if !GetBool("no-db") {
+		return ""
+	}
+	return "no-db is obsolete and ignored: issues live in the Dolt database and .beads/issues.jsonl is only an export; remove it from the config.yaml or config.local.yaml that sets it (`bd config unset no-db` edits the workspace config.yaml), or unset BD_NO_DB"
 }
 
 // GetCustomStatusesFromYAML retrieves custom statuses from config.yaml.

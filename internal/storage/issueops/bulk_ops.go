@@ -222,6 +222,16 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		return 0, fmt.Errorf("journal dependency removals for source-repo delete: %w", err)
 	}
 
+	// GH#4750: a removed child's suffix stays used under a parent that
+	// survives this wipe (one in another source repo).
+	departing := make(map[string]bool, len(issueIDs))
+	for _, id := range issueIDs {
+		departing[id] = true
+	}
+	if _, err := ReserveChildSuffixesInTx(ctx, tx, issueIDs, departing); err != nil {
+		return 0, fmt.Errorf("source-repo delete: reserve child suffixes: %w", err)
+	}
+
 	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE source_repo = ?`, sourceRepo)
 	if err != nil {
 		return 0, fmt.Errorf("delete issues: %w", err)
@@ -242,10 +252,10 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		}
 	}
 
-	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps, NoRequestActor); err != nil {
 		return int(rowsAffected), fmt.Errorf("recompute is_blocked after source-repo delete: %w", err)
 	}
-	NoteDeleteBlockedRecheck(tx, issueIDs, "from "+sourceRepo, affectedIssues, affectedWisps)
+	NoteDeleteBlockedRecheck(tx, issueIDs, "from "+sourceRepo, NoRequestActor, affectedIssues, affectedWisps)
 
 	return int(rowsAffected), nil
 }
@@ -358,6 +368,12 @@ func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 		}
 	} else if err := updateIssueIDInTx(ctx, tx, oldID, newID, issue, actor); err != nil {
 		return err
+	}
+	// GH#4750: both ids' suffixes stay reserved under their parents. Renaming
+	// into P.9 raises P's counter to 9; renaming P.5 away keeps 5 used, so the
+	// next generated child of P is never P.5 again.
+	if _, err := ReserveChildSuffixesInTx(ctx, tx, []string{oldID, newID}, nil); err != nil {
+		return fmt.Errorf("rename %s -> %s: reserve child suffixes: %w", oldID, newID, err)
 	}
 	return recordRenameInJournal(ctx, tx, oldID, newID, actor, renameEdges)
 }

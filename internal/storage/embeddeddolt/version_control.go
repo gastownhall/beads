@@ -294,6 +294,22 @@ func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string)
 	return exists, err
 }
 
+var _ storage.StateHasher = (*EmbeddedDoltStore)(nil)
+
+// GetStateHash returns the hash of the working root. Implements
+// storage.StateHasher: under batch or off auto-commit an embedded write stays
+// in the working set and HEAD does not move, so auto-export's change detection
+// needs this hash to see it (GH#6955).
+func (s *EmbeddedDoltStore) GetStateHash(ctx context.Context) (string, error) {
+	var hash string
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var readErr error
+		hash, readErr = versioncontrolops.StateHash(ctx, db)
+		return readErr
+	})
+	return hash, err
+}
+
 var _ storage.HeadHasher = (*EmbeddedDoltStore)(nil)
 
 // GetHeadHashes returns the HEAD commit hash and the hash of its root value.

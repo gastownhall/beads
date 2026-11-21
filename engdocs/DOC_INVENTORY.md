@@ -75,6 +75,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `COPILOT_INTEGRATION.md` | Keep | User-facing integration guide. |
 | `DEPENDENCIES.md` | Keep | Behaviour doc for graph semantics. |
 | `design/bd-serve-v0.md` | Keep | `bd serve` v0 contract and the decisions behind it; defers to `internal/httpapi/spec/openapi.v0.yaml`, `internal/httpapi/doc.go` and `issueops/reader.go` as sources of truth. |
+| `design/bdp.md` | Keep | BDP bring-up: what changes for engineers, the vendored copy and pin in `third_party/bdp/`, and the pin-bump rules (#8319). States only what main has, and each BDP slice updates it. Defers to `openapi.v0.yaml` and `design/bd-serve-v0.md` for v0 and to gastownhall/bdp for the spec. |
 | `design/dolt-concurrency.md` | Keep | Design note for Dolt concurrency. |
 | `design/kv-store.md` | Keep | Draft design note; retain as design seam, not user reference. |
 | `design/otel/otel-architecture.md` | Keep | Architecture/design doc for telemetry; reference tables should defer to data model. |

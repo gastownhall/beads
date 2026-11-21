@@ -273,6 +273,12 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 		return fmt.Errorf("journal dependency removals for wisp %s: %w", id, err)
 	}
 
+	// GH#4750: the wisp's suffix stays used under its surviving parent.
+	reserved, err := issueops.ReserveChildSuffixesInTx(ctx, tx, []string{id}, map[string]bool{id: true})
+	if err != nil {
+		return fmt.Errorf("delete wisp %s: reserve child suffix: %w", id, err)
+	}
+
 	result, err := tx.ExecContext(ctx, "DELETE FROM wisps WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("failed to delete wisp: %w", err)
@@ -300,14 +306,14 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 		return fmt.Errorf("delete wisp aux rows for %s: %w", id, err)
 	}
 
-	recompute, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	recompute, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, issueops.NoRequestActor)
 	if err != nil {
 		return fmt.Errorf("recompute is_blocked after wisp delete for %s: %w", id, err)
 	}
-	issueops.NoteDeleteBlockedRecheck(tx, []string{id}, "", affectedIssues, affectedWisps)
+	issueops.NoteDeleteBlockedRecheck(tx, []string{id}, "", issueops.NoRequestActor, affectedIssues, affectedWisps)
 
 	return s.commitWispTxAndRecheck(ctx, "commit delete wisp", tx,
-		wispDurable{issues: recompute.IssueRowsChanged, dependencies: edgesDeleted}, fmt.Sprintf("bd: delete %s", id))
+		wispDurable{issues: recompute.IssueRowsChanged, dependencies: edgesDeleted, childCounters: reserved["child_counters"]}, fmt.Sprintf("bd: delete %s", id))
 }
 
 // deleteWispBatch permanently removes multiple wisps using one transaction per
@@ -380,6 +386,17 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 		return 0, fmt.Errorf("journal dependency removals for batched wisp delete: %w", err)
 	}
 
+	// GH#4750: each removed wisp's suffix stays used under a parent that
+	// survives this batch.
+	departing := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		departing[id] = true
+	}
+	reserved, err := issueops.ReserveChildSuffixesInTx(ctx, tx, deletedIDs, departing)
+	if err != nil {
+		return 0, fmt.Errorf("batched wisp delete: reserve child suffixes: %w", err)
+	}
+
 	inClause, args := doltBuildSQLInClause(ids)
 
 	//nolint:gosec // G201: inClause contains only ? markers
@@ -407,14 +424,14 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 		return 0, fmt.Errorf("delete wisp aux rows: %w", err)
 	}
 
-	recompute, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	recompute, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, issueops.NoRequestActor)
 	if err != nil {
 		return 0, fmt.Errorf("recompute is_blocked after batched wisp delete: %w", err)
 	}
-	issueops.NoteDeleteBlockedRecheck(tx, ids, "", affectedIssues, affectedWisps)
+	issueops.NoteDeleteBlockedRecheck(tx, ids, "", issueops.NoRequestActor, affectedIssues, affectedWisps)
 
 	if err := s.commitWispTxAndRecheck(ctx, "commit batch wisp delete", tx,
-		wispDurable{issues: recompute.IssueRowsChanged, dependencies: edgesDeleted},
+		wispDurable{issues: recompute.IssueRowsChanged, dependencies: edgesDeleted, childCounters: reserved["child_counters"]},
 		fmt.Sprintf("bd: delete %d wisp(s)", len(deletedIDs))); err != nil {
 		return 0, err
 	}
