@@ -1829,8 +1829,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   committed them as `beads <beads@local>`, and the pending-changes commit
   recorded the SQL user `root <root@%>` as its author. With neither variable
   set, commits are still authored by `beads <beads@local>`. Schema-migration,
-  compaction and flatten commits still record the SQL user, in both modes
-  (#7628).
+  compaction and flatten commits still record the SQL user, in both modes,
+  and so does the merge commit of an embedded `bd dolt pull` (#7628).
 
 - A `GIT_AUTHOR_NAME` or `GIT_AUTHOR_EMAIL` that Dolt cannot store in a
   commit author no longer fails or rewrites commits. Dolt rejects a name that
