@@ -108,7 +108,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 
 	targetKind := r.lazyDepTargetKind(ctx, dep)
 	if !opts.HierarchyValidated {
-		if err := r.validateBlockingHierarchy(ctx, dep, targetKind); err != nil {
+		if err := r.validateBlockingHierarchy(ctx, "ValidateBlockingHierarchy", dep, targetKind); err != nil {
 			return err
 		}
 	}
@@ -338,20 +338,56 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	return r.validateBlockingHierarchy(ctx, dep, r.lazyDepTargetKind(ctx, dep))
+	return r.validateBlockingHierarchy(ctx, "ValidateBlockingHierarchy", dep, r.lazyDepTargetKind(ctx, dep))
+}
+
+// ValidateWrittenBlockingHierarchy is ValidateBlockingHierarchy for an edge
+// this unit of work has already written. It exempts the target by the typed
+// column the edge's row holds, not by presence read now: a request can file an
+// edge onto an absent target of another prefix, which is stored external, and
+// then create that target. Creating it does not move the row, so the edge
+// gates nothing and has no hierarchy to conflict with. This is the rule the
+// store bodies' end gate applies with the kind their write reported.
+func (r *dependencySQLRepositoryImpl) ValidateWrittenBlockingHierarchy(ctx context.Context, dep *types.Dependency) error {
+	if dep == nil {
+		return errors.New("db: DependencySQLRepository.ValidateWrittenBlockingHierarchy: dep must not be nil")
+	}
+	return r.validateBlockingHierarchy(ctx, "ValidateWrittenBlockingHierarchy", dep, func() (issueops.DepTargetKind, error) {
+		return r.storedDepTargetKind(ctx, dep)
+	})
+}
+
+// storedDepTargetKind reads the typed column dep's row holds its target in,
+// from the dependency table of the source's plane: the table AddDependencies
+// routes an edge to.
+func (r *dependencySQLRepositoryImpl) storedDepTargetKind(ctx context.Context, dep *types.Dependency) (issueops.DepTargetKind, error) {
+	wisps, err := issueops.WispIDSetInTx(ctx, r.runner, []string{dep.IssueID})
+	if err != nil {
+		return issueops.DepTargetIssue, err
+	}
+	_, sourceIsWisp := wisps[dep.IssueID]
+	kind, found, err := issueops.StoredDepTargetKindInTx(ctx, r.runner, pickDepTable(sourceIsWisp), dep.IssueID, dep.DependsOnID)
+	if err != nil {
+		return issueops.DepTargetIssue, err
+	}
+	if !found {
+		return issueops.DepTargetIssue, fmt.Errorf("no stored dependency %s -> %s", dep.IssueID, dep.DependsOnID)
+	}
+	return kind, nil
 }
 
 // validateBlockingHierarchy refuses a blocking edge between endpoints on one
 // hierarchy line. Only a genuinely external target is exempt — it has no local
 // hierarchy — so a local target of another prefix is checked like any other.
-// The target is classified only for a blocking edge, the one kind checked.
-func (r *dependencySQLRepositoryImpl) validateBlockingHierarchy(ctx context.Context, dep *types.Dependency, targetKind func() (issueops.DepTargetKind, error)) error {
+// The target is classified only for a blocking edge, the one kind checked;
+// method names the caller in a classification error.
+func (r *dependencySQLRepositoryImpl) validateBlockingHierarchy(ctx context.Context, method string, dep *types.Dependency, targetKind func() (issueops.DepTargetKind, error)) error {
 	if dep.Type != types.DepBlocks && dep.Type != types.DepConditionalBlocks {
 		return nil
 	}
 	kind, err := targetKind()
 	if err != nil {
-		return fmt.Errorf("db: DependencySQLRepository.ValidateBlockingHierarchy: %w", err)
+		return fmt.Errorf("db: DependencySQLRepository.%s: %w", method, err)
 	}
 	if kind == issueops.DepTargetExternal {
 		return nil

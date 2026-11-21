@@ -1629,7 +1629,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remove` keeps an edge onto a removed repository's issue of another prefix as
   such an ID, as it did before. Edges written before the fix keep their
   external target; re-adding the same edge does not change it, so remove and
-  re-add one, with its dependency type and metadata, to make it block.
+  re-add one, with its dependency type and metadata, to make it block. Since
+  the hierarchy check now applies to such an edge, `bd repo sync`,
+  the JSONL import in `bd doctor --fix` and the automatic import of
+  `issues.jsonl` into an empty embedded database skip and name a dependency
+  they refuse (a cycle, or a blocker that is the issue's own ancestor or
+  descendant), as `bd import` does, instead of importing none of that
+  repository's or file's issues. `bd repo sync` imports each repository in
+  `repos.additional` order, so an edge onto an issue that a repository later
+  in that order brings in for the first time is classified before that issue
+  is here: it is stored as an unverified external ID, and later syncs leave
+  it so; remove and re-add it to make it block. `bd repo sync` also does not
+  refresh the issues that depend on an issue it updates, so after it brings
+  in a blocker closed in its own repository, an issue that depends on it can
+  stay blocked until you run `bd recompute-blocked`.
 - **Separately from GH#8299, `bd doctor` no longer flags cross-repository
   dependencies as orphans or deletes them under `--fix`** (#4647, #8400).
   `bd dep add` stores a bare target under another repository's prefix (`bd dep add bd-abc

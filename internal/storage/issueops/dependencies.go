@@ -75,6 +75,25 @@ const DepTargetExpr = sqlbuild.DepTargetExpr
 // its target in, as a DepTargetKind value.
 const storedDepTargetKindExpr = "CASE WHEN depends_on_issue_id IS NOT NULL THEN 0 WHEN depends_on_wisp_id IS NOT NULL THEN 1 ELSE 2 END"
 
+// StoredDepTargetKindInTx reports which typed column depTable's row for the
+// edge from issueID onto dependsOnID holds its target in; found is false when
+// depTable holds no such row. It is the kind the edge was filed as, which a
+// classification read now need not match: creating a target does not move an
+// edge onto it out of depends_on_external.
+func StoredDepTargetKindInTx(ctx context.Context, tx DBTX, depTable, issueID, dependsOnID string) (kind DepTargetKind, found bool, err error) {
+	//nolint:gosec // G201: depTable is one of the two fixed dependency tables; DepTargetExpr has no user input.
+	err = tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT %s FROM %s WHERE issue_id = ? AND %s = ?`, storedDepTargetKindExpr, depTable, DepTargetExpr),
+		issueID, dependsOnID).Scan(&kind)
+	switch {
+	case err == nil:
+		return kind, true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return DepTargetIssue, false, nil
+	default:
+		return DepTargetIssue, false, fmt.Errorf("read the stored target kind of %s -> %s: %w", issueID, dependsOnID, err)
+	}
+}
+
 func depTargetExpr(alias string) string {
 	if alias == "" {
 		return DepTargetExpr
@@ -763,8 +782,9 @@ func cycleDetectionTables() []string {
 }
 
 // CheckBlockingHierarchyInTx rejects blocking dependencies between an issue
-// and its own ancestor or descendant. Cross-prefix/external targets must be
-// filtered by the caller because no local hierarchy can connect them.
+// and its own ancestor or descendant. An external target must be filtered by
+// the caller because no local hierarchy can connect it; a local target of
+// another prefix is checked like any other (GH#8299).
 func CheckBlockingHierarchyInTx(ctx context.Context, tx DBTX, dep *types.Dependency, depTables []string) error {
 	if dep.Type != types.DepBlocks && dep.Type != types.DepConditionalBlocks {
 		return nil

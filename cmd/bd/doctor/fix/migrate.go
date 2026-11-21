@@ -306,11 +306,31 @@ func importJSONLIntoStore(ctx context.Context, store storage.DoltStorage, jsonlP
 	// Determine actor for the import
 	actor := detectActor()
 
+	// The whole file is one batch, so a dependency the batch refuses (a
+	// cycle, or a blocker in the issue's own hierarchy) is skipped and
+	// reported, as `bd import` does, instead of importing nothing. A database
+	// that held several prefixes before GH#8299 filed every cross-prefix edge
+	// as external and never hierarchy-checked it, so its export can carry such
+	// an edge.
+	var skipped []string
+	seen := make(map[string]bool)
 	err = store.CreateIssuesWithFullOptions(ctx, issues, actor, storage.BatchCreateOptions{
-		SkipPrefixValidation: true,
+		SkipPrefixValidation:           true,
+		SkipDependencyValidationErrors: true,
+		// The transaction may retry, so the same edge can be reported twice.
+		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
+			edge := fmt.Sprintf("%s -> %s: %s", issueID, dependsOnID, reason)
+			if !seen[edge] {
+				seen[edge] = true
+				skipped = append(skipped, edge)
+			}
+		},
 	})
 	if err != nil {
 		return 0, err
+	}
+	for _, edge := range skipped {
+		fmt.Printf("  Warning: skipped dependency %s\n", edge)
 	}
 
 	return len(issues), nil

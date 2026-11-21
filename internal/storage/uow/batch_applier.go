@@ -603,10 +603,13 @@ func (r *uowApplyRun) runEndGate(ctx context.Context) error {
 	if cyclePath != "" {
 		return domain.NewCycleError("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
 	}
-	// The repository's hierarchy check exempts a genuinely external target
-	// itself, so a local target of another prefix is checked like any other.
+	// The repository's check exempts an external target by the typed column the
+	// edge's row holds, as the store body's gate does with the kind its write
+	// reported: an edge filed external because its target was absent stays
+	// external when a later item creates that target, and gates nothing. A
+	// local target of another prefix is checked like any other.
 	for _, applied := range r.edges {
-		if err := r.uw.DependencyUseCase().ValidateBlockingHierarchy(ctx, applied.dep); err != nil {
+		if err := r.uw.DependencyUseCase().ValidateWrittenBlockingHierarchy(ctx, applied.dep); err != nil {
 			return &publicops.ItemError{
 				Index:   applied.index,
 				Kind:    publicops.ItemDepAdd,

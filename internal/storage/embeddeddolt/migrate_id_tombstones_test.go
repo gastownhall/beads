@@ -213,7 +213,7 @@ func TestEmbeddedImportJSONLDataSkipsRetiredRowsOnATombstoneOnlyDatabase(t *test
 		return &types.Issue{ID: id, Title: "imported " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
 	}
 	const fresh = "ij-fresh1"
-	imported, retiredIDs, err := te.store.ImportJSONLData(ctx, []*types.Issue{row(retired), row(fresh), row(retired)}, nil, "auto-import")
+	imported, retiredIDs, _, err := te.store.ImportJSONLData(ctx, []*types.Issue{row(retired), row(fresh), row(retired)}, nil, "auto-import")
 	if err != nil {
 		t.Fatalf("ImportJSONLData = %v, want nil: an import skips a retired row rather than failing", err)
 	}

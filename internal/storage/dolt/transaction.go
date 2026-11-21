@@ -993,10 +993,12 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 	// Classify the target on the session that owns each table it could live
 	// in: wisps on the ignored session, issues on the regular one, so a
 	// target created earlier in this logical transaction is seen whichever
-	// tier the edge is written on.
+	// tier the edge is written on. A failed wisp read is returned, not read
+	// as "not a wisp": a present cross-prefix wisp would then miss the issue
+	// probe too and be filed external, where it never blocks.
 	kind, err := issueops.ClassifyDepTargetFrom(dep.IssueID, dep.DependsOnID, issueops.DepTargetPresence{
 		IsWisp: func(id string) (bool, error) {
-			return t.isActiveWisp(ctx, id), nil
+			return issueops.LookupWispInTx(ctx, t.ignoredTx, id)
 		},
 		IsIssue: func(id string) (bool, error) {
 			return issueops.IssueExistsInTx(ctx, t.txFor("issues"), id)

@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -439,4 +442,48 @@ func TestTransaction_CrossPrefixTargetCreatedInSameTx(t *testing.T) {
 	}
 	assertCrossTierIsBlocked(ctx, t, store.db, "issues", issueSource.ID, true)
 	assertCrossTierIsBlocked(ctx, t, store.db, "wisps", wispSource.ID, true)
+}
+
+// TestTransaction_CrossPrefixWispProbeErrorFailsClosed pins the error half of
+// the same seam: the target's wisp probe runs on the ignored session, and when
+// it fails while the regular session still works, AddDependency must return
+// that error before anything reaches the regular session. Reading the failure
+// as "not a wisp" sends a present cross-prefix wisp target on to the issue
+// probe, which finds no row, so the edge would be filed in
+// depends_on_external, where it never blocks (GH#8299).
+func TestTransaction_CrossPrefixWispProbeErrorFailsClosed(t *testing.T) {
+	_, _, tx, regularMock, ignoredMock := newTransactionPhaseFixture(t)
+	wispProbe := regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")
+	// The source is a regular issue: its routing probe finds no wisp.
+	ignoredMock.ExpectQuery(wispProbe).WithArgs("test-xpwe-src").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	probeErr := errors.New("read wisps: invalid connection")
+	ignoredMock.ExpectQuery(wispProbe).WithArgs("xp-xpwe-wtarget").WillReturnError(probeErr)
+	// Then each session gets the rollback a failed callback gets.
+	regularMock.ExpectRollback()
+	ignoredMock.ExpectRollback()
+	t.Cleanup(func() {
+		// An open transaction would block the fixture's connection cleanup.
+		_ = tx.regularTx.Rollback()
+		_ = tx.ignoredTx.Rollback()
+	})
+
+	err := tx.AddDependency(context.Background(), &types.Dependency{
+		IssueID:     "test-xpwe-src",
+		DependsOnID: "xp-xpwe-wtarget",
+		Type:        types.DepBlocks,
+	}, "tester")
+	if !errors.Is(err, probeErr) {
+		t.Fatalf("AddDependency error = %v, want the wisp probe's error %q", err, probeErr)
+	}
+	if err := tx.regularTx.Rollback(); err != nil {
+		t.Fatalf("roll back the regular session: %v", err)
+	}
+	if err := tx.ignoredTx.Rollback(); err != nil {
+		t.Fatalf("roll back the ignored session: %v", err)
+	}
+	// regularMock expects only BEGIN and ROLLBACK: no issue probe and no
+	// edge write reached the regular session (an unexpected statement there
+	// would have been the error returned above).
+	requireTransactionPhaseMocks(t, regularMock, ignoredMock)
 }
