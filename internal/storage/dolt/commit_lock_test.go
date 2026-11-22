@@ -108,6 +108,39 @@ func (h *commitLockHolder) isFree(ctx context.Context, name string) bool {
 	return got.Valid && got.Int64 == 1
 }
 
+// usedBy reports IS_USED_LOCK(name): the connection id holding it, or 0.
+func (h *commitLockHolder) usedBy(ctx context.Context, name string) int64 {
+	h.t.Helper()
+	var got sql.NullInt64
+	if err := h.db.QueryRowContext(ctx, "SELECT IS_USED_LOCK(?)", name).Scan(&got); err != nil {
+		h.t.Fatalf("IS_USED_LOCK(%q): %v", name, err)
+	}
+	return got.Int64
+}
+
+// pendingTables lists the non-ignored tables dolt_status reports changed.
+func (h *commitLockHolder) pendingTables(ctx context.Context) []string {
+	h.t.Helper()
+	rows, err := h.db.QueryContext(ctx, `SELECT s.table_name FROM dolt_status s
+		WHERE NOT EXISTS (SELECT 1 FROM dolt_ignore di WHERE di.ignored = 1 AND s.table_name LIKE di.pattern)`)
+	if err != nil {
+		h.t.Fatalf("read dolt_status: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			h.t.Fatalf("scan dolt_status: %v", err)
+		}
+		out = append(out, name)
+	}
+	if err := rows.Err(); err != nil {
+		h.t.Fatalf("read dolt_status: %v", err)
+	}
+	return out
+}
+
 // commitLockTestIssue creates a committed issue to write to.
 func commitLockTestIssue(t *testing.T, ctx context.Context, store *DoltStore, id string) {
 	t.Helper()
@@ -316,5 +349,51 @@ func TestCommitLockReleasedOnEveryReturnPath(t *testing.T) {
 				t.Fatalf("IS_FREE_LOCK(%q) = 0 right after the call returned (err=%v): the commit lock leaked", name, err)
 			}
 		})
+	}
+}
+
+// TestCommitLockSkippedWhenNothingPending covers AC-5: a write that leaves
+// nothing pending returns without waiting for (or touching) the lock.
+func TestCommitLockSkippedWhenNothingPending(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	setMeta := func(ctx context.Context) error {
+		return store.RunInTransaction(ctx, "commit-lock no-op", func(tx storage.Transaction) error {
+			return tx.SetMetadata(ctx, "commit_lock_noop", "v")
+		})
+	}
+	if err := setMeta(ctx); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+	h := newCommitLockHolder(t, ctx, store)
+	// Settle whatever store setup left uncommitted, so the only change the
+	// write below could make is its own (a same-value metadata upsert).
+	if pending := h.pendingTables(ctx); len(pending) > 0 {
+		t.Logf("settling setup leftovers in the working set: %v", pending)
+		if _, err := store.CommitAll(ctx, "commit-lock settle setup"); err != nil {
+			t.Fatalf("settle working set: %v", err)
+		}
+	}
+	if pending := h.pendingTables(ctx); len(pending) > 0 {
+		t.Fatalf("working set still pending after settling: %v", pending)
+	}
+	name := versioncontrolops.CommitLockName(store.database)
+	h.hold(ctx, name)
+	defer h.release(ctx, name)
+
+	start := time.Now()
+	if err := setMeta(ctx); err != nil {
+		t.Fatalf("idempotent write: %v", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("idempotent write took %s with the lock held elsewhere, want well under the %s wait: it waited for the lock", took, versioncontrolops.DefaultCommitLockWait)
+	}
+	if got := h.usedBy(ctx, name); got != h.id {
+		t.Fatalf("IS_USED_LOCK = %d, want the holder %d", got, h.id)
+	}
+	if n := store.commitLockTimeouts.Load(); n != 0 {
+		t.Fatalf("commit_lock_timeouts = %d, want 0: the no-op write issued GET_LOCK", n)
 	}
 }
