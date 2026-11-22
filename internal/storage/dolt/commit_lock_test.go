@@ -425,3 +425,39 @@ func TestCommitLockScopedPerDatabase(t *testing.T) {
 		t.Fatalf("dolt_log has no commit %q", msg)
 	}
 }
+
+// TestCommitLockTimeoutCommitsUnlocked covers AC-7: past the store's wait the
+// commit lands unlocked, the timeout is counted, and the holder keeps its lock.
+func TestCommitLockTimeoutCommitsUnlocked(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	store.commitLockWait = time.Second
+	ctx, cancel := testContext(t)
+	defer cancel()
+	commitLockTestIssue(t, ctx, store, "test-to1")
+	h := newCommitLockHolder(t, ctx, store)
+	name := versioncontrolops.CommitLockName(store.database)
+	h.hold(ctx, name)
+	defer h.release(ctx, name)
+
+	const msg = "commit-lock timeout"
+	start := time.Now()
+	if err := store.RunInTransaction(ctx, msg, func(tx storage.Transaction) error {
+		return tx.UpdateIssue(ctx, "test-to1", map[string]interface{}{"title": "timed out"}, "tester")
+	}); err != nil {
+		t.Fatalf("RunInTransaction past the commit-lock wait = %v, want nil (fail open)", err)
+	}
+	took := time.Since(start)
+	if took < 900*time.Millisecond || took > 4*time.Second {
+		t.Errorf("RunInTransaction took %s, want about the 1s commit-lock wait", took)
+	}
+	if !h.logHas(ctx, msg) {
+		t.Fatalf("dolt_log has no commit %q: the unlocked commit did not land", msg)
+	}
+	if n := store.commitLockTimeouts.Load(); n != 1 {
+		t.Fatalf("commit_lock_timeouts = %d, want 1", n)
+	}
+	if got := h.usedBy(ctx, name); got != h.id {
+		t.Fatalf("IS_USED_LOCK = %d, want the holder's CONNECTION_ID %d", got, h.id)
+	}
+}
