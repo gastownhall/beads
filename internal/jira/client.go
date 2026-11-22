@@ -38,6 +38,21 @@ type IssueFields struct {
 	Created     string           `json:"created"`
 	Updated     string           `json:"updated"`
 	Resolution  *ResolutionField `json:"resolution"`
+	Parent      *ParentField     `json:"parent,omitempty"`
+}
+
+// ParentIssueFields holds minimal fields Jira includes inside a parent reference.
+type ParentIssueFields struct {
+	Summary   string          `json:"summary,omitempty"`
+	IssueType *IssueTypeField `json:"issuetype,omitempty"`
+}
+
+// ParentField represents a Jira parent issue reference.
+type ParentField struct {
+	ID     string             `json:"id,omitempty"`
+	Key    string             `json:"key,omitempty"`
+	Self   string             `json:"self,omitempty"`
+	Fields *ParentIssueFields `json:"fields,omitempty"`
 }
 
 // StatusField represents a Jira issue status.
@@ -160,7 +175,7 @@ func (c *Client) FetchIssueTimestamp(ctx context.Context, jiraKey string) (time.
 }
 
 // searchFields is the default set of fields to request in search/get queries.
-const searchFields = "summary,description,status,priority,issuetype,project,assignee,labels,created,updated,resolution"
+const searchFields = "summary,description,status,priority,issuetype,project,assignee,labels,created,updated,resolution,parent"
 
 // SearchIssues queries Jira using JQL and returns all matching issues, handling pagination.
 func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) {

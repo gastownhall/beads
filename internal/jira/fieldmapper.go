@@ -182,8 +182,23 @@ func (m *jiraFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.IssueC
 		issue.ExternalRef = &ref
 	}
 
+	var deps []tracker.DependencyInfo
+	if ji.Fields.Parent != nil && strings.TrimSpace(ji.Fields.Parent.Key) != "" {
+		fromID := extractBrowseURL(ji)
+		if fromID == "" {
+			fromID = ji.Key
+		}
+		deps = append(deps, tracker.DependencyInfo{
+			FromExternalID: fromID,
+			ToExternalID:   strings.TrimSpace(ji.Fields.Parent.Key),
+			Type:           string(types.DepParentChild),
+			Source:         tracker.DependencySourceParent,
+		})
+	}
+
 	return &tracker.IssueConversion{
-		Issue: issue,
+		Issue:        issue,
+		Dependencies: deps,
 	}
 }
 
