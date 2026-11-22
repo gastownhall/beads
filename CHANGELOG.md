@@ -1475,6 +1475,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd dep list` with many ids no longer costs a search and an issue read
+  per id** outside proxied-server mode. The multi-id listing resolved its
+  arguments one at a time before it read their edges: against a Dolt server,
+  5000 ids took about 20 seconds where a proxied-server workspace on the same
+  database took under one. It now settles every argument that names a stored
+  issue exactly as typed in the one read that brings its edges back, and
+  resolves only the rest one at a time (a partial id, an id routed to another
+  database, an id that names nothing). The output and the warnings are
+  unchanged.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
