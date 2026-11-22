@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -15,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 type doltServerTx struct {
@@ -37,6 +39,20 @@ type doltServerTx struct {
 	// transaction's unblocking writes record for the post-commit
 	// blocked-state recheck (gastownhall/beads#6716).
 	clearRecheckScope func()
+	// database names the database the pinned session commits to, for the
+	// commit lock's key (versioncontrolops.CommitLockName). Copied from the
+	// provider at BeginTx; when empty it is read from the session
+	// (SELECT DATABASE()) at the first acquisition.
+	database string
+	// serializeCommits makes this tx hold the commit lock across its Dolt
+	// commits; copied from the provider (doltSQLProvider.serializeCommits).
+	serializeCommits bool
+	// commitLockWait overrides the commit-lock wait (zero: the default).
+	commitLockWait time.Duration
+	// commitLockUnconfirmed records that a commit-lock release on the pinned
+	// session could not be confirmed, so releaseConn discards the session
+	// instead of returning it to the pool still holding the lock.
+	commitLockUnconfirmed bool
 }
 
 var _ Tx = (*doltServerTx)(nil)
@@ -62,7 +78,20 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 		// before release, or poison the connection.
 		return t.closeOpenTxAfterFailure(ctx, err)
 	}
+	// GH#8590: a DOLT_COMMIT moves the branch HEAD, so it runs under the
+	// commit lock, released right after the statement returns: DOLT_COMMIT
+	// publishes HEAD and ends the transaction inside the statement. A plain
+	// COMMIT (the ephemeral form) mints no Dolt commit and takes no lock.
+	releaseCommitLock := func() {}
+	if strings.HasPrefix(stmt, "CALL DOLT_COMMIT") {
+		release, lockErr := t.holdCommitLock(ctx)
+		if lockErr != nil {
+			return t.closeOpenTxAfterFailure(ctx, lockErr)
+		}
+		releaseCommitLock = release
+	}
 	_, err = t.conn.ExecContext(ctx, stmt, args...)
+	releaseCommitLock()
 	if err == nil {
 		t.done = true
 		// The write is durable. Settle the dependents its unblocking writes
@@ -211,6 +240,13 @@ func (t *doltServerTx) commitStagedTables(ctx context.Context, tables []string, 
 // stageAndCommitOnce is one attempt at commitStagedTables: stage each table,
 // then commit the staged set alone.
 func (t *doltServerTx) stageAndCommitOnce(ctx context.Context, tables []string, message string) error {
+	// GH#8590: hold the commit lock from the first DOLT_ADD until
+	// DOLT_COMMIT returns, on every return path.
+	releaseCommitLock, err := t.holdCommitLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseCommitLock()
 	for _, table := range tables {
 		if err := schema.DrainCall(ctx, t.conn, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
@@ -360,6 +396,10 @@ func (t *doltServerTx) rollbackConn(ctx context.Context) error {
 }
 
 func (t *doltServerTx) releaseConn() {
+	if t.commitLockUnconfirmed {
+		t.poisonConn()
+		return
+	}
 	t.releaseJournalScope()
 	t.releaseJournalShapeScope()
 	t.releaseVersionScope()
@@ -424,4 +464,31 @@ func (t *doltServerTx) poisonConn() {
 	_ = t.conn.Raw(func(any) error { return driver.ErrBadConn })
 	_ = t.conn.Close()
 	t.conn = nil
+}
+
+// holdCommitLock takes the server-mode commit lock
+// (versioncontrolops.CommitLockName of the session's database) on the pinned
+// session and returns its release. A release that cannot be confirmed marks
+// the session for discard at releaseConn, so it never returns to the pool
+// holding the lock; the commit's own result is unaffected.
+func (t *doltServerTx) holdCommitLock(ctx context.Context) (func(), error) {
+	if !t.serializeCommits {
+		return func() {}, nil
+	}
+	if t.database == "" {
+		var name sql.NullString
+		if err := t.conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&name); err != nil {
+			return nil, fmt.Errorf("acquire commit lock: read database: %w", err)
+		}
+		t.database = name.String
+	}
+	cfg := versioncontrolops.CommitLockConfig{Database: t.database, Wait: t.commitLockWait}
+	l, err := cfg.Acquire(ctx, t.conn)
+	if err != nil {
+		return nil, err
+	}
+	conn := t.conn
+	return func() {
+		cfg.ReleaseOrDiscard(l, conn, func() { t.commitLockUnconfirmed = true })
+	}, nil
 }
