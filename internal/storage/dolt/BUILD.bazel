@@ -185,6 +185,7 @@ go_test(
         "commit_lock_perdb_test.go",
         "commit_lock_test.go",
         "commit_lock_test_helpers_test.go",
+        "commit_lock_timeout_test.go",
         "compact_test.go",
         "concurrent_test.go",
         "conflicts_integration_test.go",
