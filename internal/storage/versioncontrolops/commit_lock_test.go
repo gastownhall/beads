@@ -140,6 +140,34 @@ func TestCommitLockSkippedWhenNothingPendingUnit(t *testing.T) {
 	}
 }
 
+// TestCommitLockNotTakenByStageAndCommit covers AC-8 at the unit level:
+// StageAndCommit, the entry point the embedded store's RunInTransaction and
+// version-control commits use, stages and commits without GET_LOCK or
+// RELEASE_LOCK.
+func TestCommitLockNotTakenByStageAndCommit(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(matchPendingQuery.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).WithArgs("issues").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(matchStagedQuery.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`CALL DOLT_COMMIT`).WithArgs("embedded", "tester").
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+
+	if err := StageAndCommit(context.Background(), db, map[string]bool{"issues": true}, "embedded", "tester"); err != nil {
+		t.Fatalf("StageAndCommit: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("statement sequence: %v", err)
+	}
+}
+
 // TestCommitLockName pins the lock key, a cross-version contract: bd
 // processes of different versions on one server serialize only if they
 // compute the same string, so these goldens must never change silently.
