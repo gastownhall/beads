@@ -65,6 +65,10 @@ func (c *slotCommitBoundaryConn) QueryContext(_ context.Context, query string, _
 	c.driver.mu.Lock()
 	defer c.driver.mu.Unlock()
 
+	if rows, ok := commitLockTestAnswer(query); ok {
+		return rows, nil
+	}
+
 	switch {
 	case strings.Contains(query, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1"):
 		if c.driver.activeWisp {

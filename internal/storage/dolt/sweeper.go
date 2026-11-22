@@ -80,6 +80,17 @@ func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueop
 		if result.Swept == 0 {
 			return nil
 		}
+		// Serializing lock (GH#8590): the add+commit pair below runs on this
+		// transaction's session inside the per-database commit lock's critical
+		// section, released on every return path through the write body (the
+		// closure runs while the *sql.Tx is still open). The BEGIN-to-grant
+		// window stays open — that residual is the post-tx migration's to
+		// close (NEXUS#92).
+		release, err := s.store.holdCommitLockInTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		defer release()
 		// Through the same funnel the deleter uses. A sweep mints nothing today
 		// — SweepInTx deletes through DeleteIssuesInTx, which rewrites no
 		// neighbor, so there is no surviving row to version — but it shares

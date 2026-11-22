@@ -35,6 +35,7 @@ func TestDoltAddAndCommitDrainsCallResultSets(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
+	expectCommitLockGrant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 		WithArgs("issues").
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
@@ -43,6 +44,7 @@ func TestDoltAddAndCommitDrainsCallResultSets(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 		WithArgs("bd: test commit", " <>").
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+	expectCommitLockRelease(mock)
 
 	store := &DoltStore{db: db}
 
@@ -73,9 +75,11 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 		{
 			name: "DOLT_ADD",
 			setup: func(mock sqlmock.Sqlmock) {
+				expectCommitLockGrant(mock)
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 					WithArgs("issues").
 					WillReturnError(testConnectionLoss)
+				expectCommitLockRelease(mock)
 			},
 			cause:       testConnectionLoss,
 			wantContext: "dolt add issues after SQL mutation",
@@ -83,6 +87,7 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 		{
 			name: "untyped DOLT_COMMIT",
 			setup: func(mock sqlmock.Sqlmock) {
+				expectCommitLockGrant(mock)
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 					WithArgs("issues").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
@@ -91,6 +96,8 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: test commit", " <>").
 					WillReturnError(testConnectionLoss)
+
+				expectCommitLockRelease(mock)
 			},
 			cause:       testConnectionLoss,
 			wantContext: "dolt commit after SQL mutation",
@@ -98,6 +105,7 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 		{
 			name: "typed deadlock DOLT_COMMIT",
 			setup: func(mock sqlmock.Sqlmock) {
+				expectCommitLockGrant(mock)
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 					WithArgs("issues").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
@@ -106,6 +114,8 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: test commit", " <>").
 					WillReturnError(&mysql.MySQLError{Number: 1213, Message: "deadlock"})
+
+				expectCommitLockRelease(mock)
 			},
 			mysqlNumber: 1213,
 			wantContext: "dolt commit after SQL mutation",
@@ -113,6 +123,7 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 		{
 			name: "typed lock wait DOLT_COMMIT",
 			setup: func(mock sqlmock.Sqlmock) {
+				expectCommitLockGrant(mock)
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 					WithArgs("issues").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
@@ -121,6 +132,8 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: test commit", " <>").
 					WillReturnError(&mysql.MySQLError{Number: 1205, Message: "lock wait timeout"})
+
+				expectCommitLockRelease(mock)
 			},
 			mysqlNumber: 1205,
 			wantContext: "dolt commit after SQL mutation",
@@ -173,9 +186,11 @@ func TestDoltAddAndCommitAmbiguousConnectionFailuresTripCircuitOnce(t *testing.T
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	for range circuitFailureThreshold {
+		expectCommitLockGrant(mock)
 		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 			WithArgs("issues").
 			WillReturnError(testConnectionLoss)
+		expectCommitLockRelease(mock)
 	}
 
 	breaker := newTestCircuitBreaker(t)
@@ -204,6 +219,7 @@ func TestDoltAddAndCommitTreatsNothingToCommitAsSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
+	expectCommitLockGrant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 		WithArgs("issues").
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
@@ -212,6 +228,7 @@ func TestDoltAddAndCommitTreatsNothingToCommitAsSuccess(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 		WithArgs("bd: test commit", " <>").
 		WillReturnError(errors.New("nothing to commit"))
+	expectCommitLockRelease(mock)
 
 	store := &DoltStore{db: db}
 	if err := store.doltAddAndCommit(context.Background(), []string{"issues"}, "bd: test commit"); err != nil {
@@ -229,9 +246,11 @@ func TestCommitWithConfigCommitResponseLossIsIndeterminate(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
+	expectCommitLockGrant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-Am', ?, '--author', ?)")).
 		WithArgs("bd: test config commit", " <>").
 		WillReturnError(testConnectionLoss)
+	expectCommitLockRelease(mock)
 
 	store := &DoltStore{db: db}
 	err = store.CommitWithConfig(context.Background(), "bd: test config commit")
@@ -255,12 +274,14 @@ func TestCommitCommitResponseLossIsIndeterminate(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).
 		WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
+	expectCommitLockGrant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 		WithArgs("issues").
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 		WithArgs("bd: test commit", " <>").
 		WillReturnError(testConnectionLoss)
+	expectCommitLockRelease(mock)
 
 	store := &DoltStore{db: db}
 	err = store.Commit(context.Background(), "bd: test commit")
@@ -285,9 +306,11 @@ func TestCommitPropagatesDoltAddFailureBeforeCommit(t *testing.T) {
 	stageErr := errors.New("stage issues failed")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).
 		WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
+	expectCommitLockGrant(mock)
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 		WithArgs("issues").
 		WillReturnError(stageErr)
+	expectCommitLockRelease(mock)
 
 	store := &DoltStore{db: db}
 	err = store.Commit(context.Background(), "bd: test commit")
@@ -314,12 +337,15 @@ func TestPublicCommitAmbiguousConnectionFailuresTripCircuit(t *testing.T) {
 			expect: func(mock sqlmock.Sqlmock) {
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).
 					WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
+				expectCommitLockGrant(mock)
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 					WithArgs("issues").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: test commit", " <>").
 					WillReturnError(testConnectionLoss)
+
+				expectCommitLockRelease(mock)
 			},
 			commit: func(store *DoltStore) error {
 				return store.Commit(context.Background(), "bd: test commit")
@@ -330,12 +356,15 @@ func TestPublicCommitAmbiguousConnectionFailuresTripCircuit(t *testing.T) {
 			expect: func(mock sqlmock.Sqlmock) {
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).
 					WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
+				expectCommitLockGrant(mock)
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 					WithArgs("issues").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: test merge commit", " <>").
 					WillReturnError(testConnectionLoss)
+
+				expectCommitLockRelease(mock)
 			},
 			commit: func(store *DoltStore) error {
 				return store.CommitMergeResolution(context.Background(), "bd: test merge commit")
@@ -344,9 +373,12 @@ func TestPublicCommitAmbiguousConnectionFailuresTripCircuit(t *testing.T) {
 		{
 			name: "CommitWithConfig",
 			expect: func(mock sqlmock.Sqlmock) {
+				expectCommitLockGrant(mock)
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-Am', ?, '--author', ?)")).
 					WithArgs("bd: test config commit", " <>").
 					WillReturnError(testConnectionLoss)
+
+				expectCommitLockRelease(mock)
 			},
 			commit: func(store *DoltStore) error {
 				return store.CommitWithConfig(context.Background(), "bd: test config commit")

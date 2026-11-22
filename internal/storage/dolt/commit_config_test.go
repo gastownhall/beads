@@ -344,6 +344,7 @@ func TestCommitConfigUserKVOnlyRefusalSQL(t *testing.T) {
 	stageAndRefuse := func(mock sqlmock.Sqlmock) {
 		mock.ExpectQuery(regexp.QuoteMeta(workingDiff)).
 			WillReturnRows(sqlmock.NewRows([]string{"key"}).AddRow("kv.memory.a"))
+		expectCommitLockGrant(mock)
 		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 			WithArgs("config").
 			WillReturnRows(sqlmock.NewRows([]string{"status"}))
@@ -369,6 +370,7 @@ func TestCommitConfigUserKVOnlyRefusalSQL(t *testing.T) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET(?)")).
 					WithArgs("config").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
+				expectCommitLockRelease(mock)
 			},
 		},
 		{
@@ -378,6 +380,7 @@ func TestCommitConfigUserKVOnlyRefusalSQL(t *testing.T) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET(?)")).
 					WithArgs("config").
 					WillReturnError(resetFailure)
+				expectCommitLockRelease(mock)
 			},
 			wantResetErr: true,
 		},

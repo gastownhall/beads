@@ -85,6 +85,18 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 		if storeops.VersionCommitDeferred(ctx) {
 			return nil
 		}
+		// Serializing lock (GH#8590): the add+commit pair below runs on this
+		// transaction's session inside the per-database commit lock's critical
+		// section, released on every return path through the write body (the
+		// closure runs while the *sql.Tx is still open; this delete already
+		// holds the per-id delete fence lock, taken before the commit lock and
+		// never the reverse). The BEGIN-to-grant window stays open — that
+		// residual is the post-tx migration's to close (NEXUS#92).
+		release, err := s.store.holdCommitLockInTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		defer release()
 		// The same tables a sweep stages; the neighbor rewrite lands in
 		// `issues`, which is already on the list.
 		//

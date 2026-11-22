@@ -56,6 +56,10 @@ func (c *reopenPromotionConn) QueryContext(_ context.Context, query string, args
 	c.driver.mu.Lock()
 	defer c.driver.mu.Unlock()
 
+	if rows, ok := commitLockTestAnswer(query); ok {
+		return rows, nil
+	}
+
 	if strings.Contains(query, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1") {
 		if !c.driver.inTx {
 			c.driver.preTxWispProbe = true

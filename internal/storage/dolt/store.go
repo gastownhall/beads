@@ -405,6 +405,13 @@ type DoltStore struct {
 	// skew-tolerant tests can tighten one store's wait without racing every
 	// other parallel test's commits on the shared default.
 	commitLockWait time.Duration
+
+	// commitLockSlots holds the tx-bound commit-lock bookkeeping
+	// (commitLockSlot) for each write transaction commitWriteTxOn minted from
+	// this store, keyed by the *sql.Tx it handed out, for the in-tx commit
+	// planes' holdCommitLockInTx (GH#8590). Entries are unbound by
+	// settleCommitLockSlot on the same call.
+	commitLockSlots sync.Map
 }
 
 // Config holds Dolt database configuration
@@ -1472,14 +1479,34 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 
 // commitWriteTxOn is commitWriteTx against a caller-chosen txBeginner — see
 // withRetryTxOn.
+//
+// Since GH#8590 it pins the pool's connection behind every transaction it
+// mints and binds a commitLockSlot to the tx, so the in-tx commit planes can
+// hold the per-database commit lock on the transaction's own session and the
+// cleanup here can release — or discard — that session once the transaction
+// has ended (see commit_lock_tx.go). A caller-pinned *sql.Conn beginner
+// (the delete fence) is used as its own session, unchanged.
 func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
+	}
+	conn, beginner, closePinned, err := s.pinCommitWriteTxConn(ctx, beginner)
+	if err != nil {
+		return issueops.BlockedRecheck{}, err
+	}
+	if closePinned {
+		defer conn.Close()
 	}
 	tx, err := beginner.BeginTx(ctx, nil)
 	if err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("begin write tx: %w", err)
 	}
+	var slot *commitLockSlot
+	if conn != nil {
+		slot = &commitLockSlot{conn: conn}
+		s.commitLockSlots.Store(tx, slot)
+	}
+	defer s.settleCommitLockSlot(tx, slot, conn)
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
 	clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
@@ -4245,6 +4272,17 @@ func (s *DoltStore) commitWorkingSet(ctx context.Context, message string, mode c
 		return nil // Nothing to commit (all changes were config-only or dolt_ignore'd)
 	}
 
+	// Serializing lock (GH#8590): the pre-commit screens above read only; from
+	// the first DOLT_ADD to the DOLT_COMMIT the pair mutates staging state, so
+	// it runs inside the per-database commit lock's critical section, released
+	// on every return path below. This is the pre-pull/merge auto-commit plane
+	// and CommitPending's, both on the caller's pinned connection.
+	release, err := s.holdCommitLockOn(ctx, conn)
+	if err != nil {
+		return s.wrapDoltPublicationFailure(ctx, "failed to acquire commit lock", err)
+	}
+	defer release()
+
 	for _, table := range tables {
 		if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("failed to stage %s before commit: %w", table, err)
@@ -4292,6 +4330,13 @@ func (s *DoltStore) concludeOpenMerge(ctx context.Context, conn *sql.Conn, messa
 	if !merging {
 		return nil
 	}
+	// Serializing lock (GH#8590): the DOLT_COMMIT that concludes the merge is
+	// the commit plane here; hold the per-database commit lock around it.
+	release, err := s.holdCommitLockOn(ctx, conn)
+	if err != nil {
+		return s.wrapDoltPublicationFailure(ctx, "failed to acquire commit lock", err)
+	}
+	defer release()
 	if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
 		if isDoltNothingToCommit(err) {
 			return nil
@@ -4371,6 +4416,14 @@ func (s *DoltStore) CommitWithConfig(ctx context.Context, message string) error 
 		}
 		defer conn.Close()
 
+		// Serializing lock (GH#8590): the whole-working-set '-Am' commit is a
+		// commit plane; hold the per-database commit lock around it.
+		release, err := s.holdCommitLockOn(ctx, conn)
+		if err != nil {
+			return s.wrapDoltPublicationFailure(ctx, "failed to commit", err)
+		}
+		defer release()
+
 		if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
 			if isDoltNothingToCommit(err) {
 				return nil
@@ -4411,6 +4464,14 @@ func (s *DoltStore) CommitAll(ctx context.Context, message string) (bool, error)
 			return fmt.Errorf("failed to acquire connection: %w", err)
 		}
 		defer conn.Close()
+
+		// Serializing lock (GH#8590): the whole-working-set '-Am' commit is a
+		// commit plane; hold the per-database commit lock around it.
+		release, cerr := s.holdCommitLockOn(ctx, conn)
+		if cerr != nil {
+			return s.wrapDoltPublicationFailure(ctx, "failed to commit", cerr)
+		}
+		defer release()
 
 		if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
 			if isDoltNothingToCommit(err) {
@@ -4538,6 +4599,23 @@ func (s *DoltStore) stageAndCommit(ctx context.Context, tables []string, commitM
 			}
 			afterStageCommitScreen()
 		}
+
+		// Serializing lock (GH#8590): everything from the first DOLT_ADD to the
+		// DOLT_COMMIT runs in the per-database commit lock's critical section,
+		// so a concurrent writer's HEAD move cannot land inside this commit's
+		// window. Taken after the pre-stage screen so tests that inject a
+		// concurrent write at afterStageCommitScreen still see the window they
+		// exist for, and so a screen refusal pays no lock round trips; released
+		// on every return path (defer), including unstageRefused. A lock that
+		// is not obtained in time fails this commit exactly like a DOLT_ADD
+		// failure here: the SQL mutation is durable, so the outcome is
+		// indeterminate rather than plain failure.
+		release, err := s.holdCommitLockOn(ctx, conn)
+		if err != nil {
+			return s.recordDoltPublicationFailure(ctx,
+				fmt.Errorf("acquire commit lock after SQL mutation: %w: %w", err, ErrCommitIndeterminate))
+		}
+		defer release()
 
 		for _, table := range tables {
 			if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {

@@ -396,6 +396,17 @@ func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables
 	if issueops.VersionCommitDeferred(ctx) {
 		return nil
 	}
+	// Serializing lock (GH#8590): the add+commit pair below runs on this
+	// transaction's session inside the per-database commit lock's critical
+	// section, released on every return path through the transaction (the
+	// release closure must run before the *sql.Tx ends; commitWriteTxOn's
+	// slot is the discard fallback after it). The BEGIN-to-grant window stays
+	// open — that residual is the post-tx migration's to close (NEXUS#92).
+	release, err := s.holdCommitLockInTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	for _, table := range s.withVersionedHistoryTables(ctx, tx, tables) {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)

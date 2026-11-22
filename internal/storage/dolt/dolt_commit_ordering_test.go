@@ -123,6 +123,9 @@ func (c *seqConn) QueryContext(_ context.Context, query string, _ []driver.Named
 			return rows, nil
 		}
 	}
+	if rows, ok := commitLockTestAnswer(query); ok {
+		return rows, nil
+	}
 	if strings.Contains(query, "FROM dolt_status") {
 		// doltAddAndCommit's empty-commit guard: report one staged row so the
 		// post-tx sequence under test still reaches DOLT_COMMIT.
