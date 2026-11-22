@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,6 +72,15 @@ type exportAutoState struct {
 	Issues         int       `json:"issues"`
 	Memories       int       `json:"memories"`
 
+	// LastExportSHA256 is the lowercase hex SHA-256 digest of the JSONL file
+	// last written by auto-export (empty when the last export wrote 0 records
+	// and removed the file). Used to detect external rewinds or edits (e.g.
+	// `git stash` restoring an older tracked JSONL without touching the
+	// gitignored export-state.json) so auto-export does not return early on
+	// an unchanged Dolt state hash and incremental export does not patch a
+	// stale file.
+	LastExportSHA256 string `json:"last_export_sha256,omitempty"`
+
 	// LastDiffAnchor is the real commit hash (never a working-set/state
 	// hash) used as tryIncrementalExport's fromCommit on the next cycle.
 	// dolt_diff() rejects non-commit values, so this must never be set from
@@ -125,19 +137,22 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		interval = 60 * time.Second
 	}
 
-	// Change detection via Dolt state hash. This is cheap, so do it before
-	// throttle: when there are no changes, there is nothing to throttle.
+	// Change detection via Dolt state hash + exported file digest. These are
+	// cheap compared to exporting, so do them before throttle: when neither the
+	// store nor the file on disk has changed, there is nothing to throttle.
 	currentCommit, err := storeStateHash(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
 		return nil
 	}
-	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
+	storeUnchanged := currentCommit == state.LastDoltCommit && state.LastDoltCommit != ""
+	fileMatches, fileDrifted := exportFileMatchesState(fullPath, state)
+	if storeUnchanged && fileMatches {
 		debug.Logf("auto-export: no changes since last export\n")
 		return nil
 	}
 
-	if !shouldExport(state, interval) {
+	if !fileDrifted && !shouldExport(state, interval) {
 		debug.Logf("auto-export: throttled (last export %s ago, interval %s)\n",
 			time.Since(state.Timestamp).Round(time.Second), interval)
 		return nil
@@ -198,11 +213,21 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	// preserve its stale JSONL line forever even though the guard just
 	// cleared the export to run. A full export needs nothing — it rewrites
 	// from the store.
-	issueCount, memoryCount, dirtyIDs, didIncremental, err := tryIncrementalExport(
-		ctx, fullPath, state.LastDiffAnchor, doltWorkingRef, state.LastDirtyIDs, provenDeleted,
+	var (
+		issueCount     int
+		memoryCount    int
+		dirtyIDs       []string
+		didIncremental bool
 	)
-	if err != nil {
-		debug.Logf("auto-export: incremental failed (%v); falling back to full\n", err)
+	if !fileDrifted {
+		issueCount, memoryCount, dirtyIDs, didIncremental, err = tryIncrementalExport(
+			ctx, fullPath, state.LastDiffAnchor, doltWorkingRef, state.LastDirtyIDs, provenDeleted,
+		)
+		if err != nil {
+			debug.Logf("auto-export: incremental failed (%v); falling back to full\n", err)
+		}
+	} else {
+		debug.Logf("auto-export: export file %s differs from saved state; forcing full export\n", fullPath)
 	}
 	if !didIncremental {
 		issueCount, memoryCount, err = exportToFile(ctx, fullPath, false)
@@ -271,16 +296,77 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	}
 
 	// Save state
+	exportSHA, exists, shaErr := exportFileSHA256(fullPath)
+	if shaErr != nil || !exists {
+		debug.Logf("auto-export: failed to hash written export %s (exists=%t): %v\n", fullPath, exists, shaErr)
+		exportSHA = ""
+	}
 	newState := exportAutoState{
-		LastDoltCommit: currentCommit,
-		LastDiffAnchor: anchorCommit,
-		LastDirtyIDs:   dirtyIDs,
-		Timestamp:      time.Now(),
-		Issues:         issueCount,
-		Memories:       memoryCount,
+		LastDoltCommit:   currentCommit,
+		LastDiffAnchor:   anchorCommit,
+		LastDirtyIDs:     dirtyIDs,
+		LastExportSHA256: exportSHA,
+		Timestamp:        time.Now(),
+		Issues:           issueCount,
+		Memories:         memoryCount,
 	}
 	saveExportAutoState(beadsDir, &newState)
 	return nil
+}
+
+// exportFileSHA256 computes the lowercase hex SHA-256 digest of path without
+// buffering the entire file in memory.
+func exportFileSHA256(path string) (hash string, exists bool, err error) {
+	f, err := os.Open(path) //nolint:gosec // path is resolved via autoExportJSONLPath
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", true, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), true, nil
+}
+
+// exportFileMatchesState reports whether the on-disk export file still matches
+// the last recorded auto-export state, and whether external drift was detected.
+//
+// When state has no prior export record (LastDoltCommit == ""), matches is false
+// and drifted is false. When state recorded an export:
+//   - If LastExportSHA256 is present, the file must exist with that exact digest.
+//   - If LastExportSHA256 is absent and the prior export was empty (0 issues and
+//     0 memories), the file must still be absent.
+//   - If LastExportSHA256 is absent on a non-empty legacy state file, parity cannot
+//     be verified without re-exporting, so drifted is true (forcing one full
+//     export that records LastExportSHA256 and avoiding incremental patches over a
+//     potentially stale file).
+func exportFileMatchesState(path string, state *exportAutoState) (matches bool, drifted bool) {
+	if state == nil || state.LastDoltCommit == "" {
+		return false, false
+	}
+
+	hash, exists, err := exportFileSHA256(path)
+	if err != nil {
+		debug.Logf("auto-export: failed to inspect %s: %v\n", path, err)
+		return false, true
+	}
+
+	if state.LastExportSHA256 != "" {
+		matches = exists && hash == state.LastExportSHA256
+		return matches, !matches
+	}
+
+	if state.Issues == 0 && state.Memories == 0 {
+		matches = !exists
+		return matches, !matches
+	}
+
+	return false, true
 }
 
 // storeStateHash returns the hash used for auto-export change detection.

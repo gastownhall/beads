@@ -430,6 +430,240 @@ func TestMaybeAutoExportFallsBackToHeadCommit(t *testing.T) {
 	}
 }
 
+type fakeRewindDiffStateStore struct {
+	fakeHeadOnlyStore
+	stateHash            string
+	changedIssueIDsCalls int
+	changedResult        storage.ChangedIssueIDs
+}
+
+func (f *fakeRewindDiffStateStore) GetStateHash(_ context.Context) (string, error) {
+	return f.stateHash, nil
+}
+
+func (f *fakeRewindDiffStateStore) CommitExists(_ context.Context, hash string) (bool, error) {
+	return hash == "head-commit-hash", nil
+}
+
+func (f *fakeRewindDiffStateStore) HistoricalIssueIDs(_ context.Context, _ []string) (map[string]struct{}, error) {
+	return nil, nil
+}
+
+func (f *fakeRewindDiffStateStore) ChangedIssueIDs(_ context.Context, _, _ string) (storage.ChangedIssueIDs, error) {
+	f.changedIssueIDsCalls++
+	return f.changedResult, nil
+}
+
+func (f *fakeRewindDiffStateStore) GetIssuesByIDs(_ context.Context, ids []string) ([]*types.Issue, error) {
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+	var out []*types.Issue
+	for _, iss := range f.issues {
+		if _, ok := want[iss.ID]; ok {
+			out = append(out, iss)
+		}
+	}
+	return out, nil
+}
+
+func TestMaybeAutoExportRebuildsRewoundJSONLWhenStoreUnchanged(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	config.Set("export.interval", "1h")
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeRewindDiffStateStore{
+		fakeHeadOnlyStore: fakeHeadOnlyStore{
+			issues: []*types.Issue{
+				{ID: "rw-1", Title: "Baseline issue", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+				{ID: "rw-2", Title: "Newer issue", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			},
+		},
+		stateHash: "state-hash-1",
+	}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	exportPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("initial maybeAutoExport: %v", err)
+	}
+	initialState := loadExportAutoState(beadsDir)
+	if initialState.LastExportSHA256 == "" {
+		t.Fatal("initial auto-export did not record LastExportSHA256")
+	}
+
+	// Steady state: unchanged store and unchanged JSONL stays a no-op.
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("steady-state maybeAutoExport: %v", err)
+	}
+	if fake.changedIssueIDsCalls != 0 {
+		t.Fatalf("steady-state run called ChangedIssueIDs %d times, want 0", fake.changedIssueIDsCalls)
+	}
+
+	// Simulate `git stash` rewinding issues.jsonl to an older tracked snapshot
+	// while leaving export-state.json untouched inside the throttle window.
+	writeJSONLLines(t, exportPath,
+		map[string]any{"_type": "issue", "id": "rw-1", "issue_type": "task", "title": "Baseline issue"},
+	)
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("repair maybeAutoExport: %v", err)
+	}
+
+	titles := loadIssueTitles(t, exportPath)
+	if titles["rw-1"] != "Baseline issue" || titles["rw-2"] != "Newer issue" {
+		t.Fatalf("rewound JSONL was not repaired: got titles=%v", titles)
+	}
+	if fake.changedIssueIDsCalls != 0 {
+		t.Fatalf("drifted file must bypass incremental patch and force full export, got ChangedIssueIDs calls=%d", fake.changedIssueIDsCalls)
+	}
+	repairedState := loadExportAutoState(beadsDir)
+	if repairedState.LastExportSHA256 == "" || repairedState.LastExportSHA256 == initialState.LastExportSHA256 {
+		// Both rw-1 and rw-2 are exported, so digest matches initial export.
+		if repairedState.LastExportSHA256 != initialState.LastExportSHA256 {
+			t.Fatalf("repaired LastExportSHA256 = %q, want %q", repairedState.LastExportSHA256, initialState.LastExportSHA256)
+		}
+	}
+}
+
+func TestMaybeAutoExportRebuildsDeletedJSONLWhenStoreUnchanged(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	config.Set("export.interval", "1h")
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeRewindDiffStateStore{
+		fakeHeadOnlyStore: fakeHeadOnlyStore{
+			issues: []*types.Issue{
+				{ID: "del-1", Title: "Issue one", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			},
+		},
+		stateHash: "state-hash-del",
+	}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	exportPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("initial maybeAutoExport: %v", err)
+	}
+	if err := os.Remove(exportPath); err != nil {
+		t.Fatalf("remove issues.jsonl: %v", err)
+	}
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("repair maybeAutoExport: %v", err)
+	}
+	titles := loadIssueTitles(t, exportPath)
+	if titles["del-1"] != "Issue one" {
+		t.Fatalf("deleted JSONL was not recreated, got %v", titles)
+	}
+}
+
+func TestMaybeAutoExportPreservesJSONLOnlyRecordOnRewoundJSONL(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	config.Set("export.interval", "1h")
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeRewindDiffStateStore{
+		fakeHeadOnlyStore: fakeHeadOnlyStore{
+			issues: []*types.Issue{
+				{ID: "rw-1", Title: "Store issue", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			},
+		},
+		stateHash: "state-hash-only",
+	}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	exportPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("initial maybeAutoExport: %v", err)
+	}
+	savedState := loadExportAutoState(beadsDir)
+
+	// Rewind to a file carrying a record absent from the store.
+	writeJSONLLines(t, exportPath,
+		map[string]any{"_type": "issue", "id": "rw-1", "issue_type": "task", "title": "Store issue"},
+		map[string]any{"_type": "issue", "id": "foreign-only", "issue_type": "task", "title": "Only in rewound JSONL"},
+	)
+
+	stderr := captureStderr(t, func() {
+		if err := maybeAutoExport(context.Background(), false); err != nil {
+			t.Fatalf("maybeAutoExport: %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "refusing to overwrite") || !strings.Contains(stderr, "foreign-only") {
+		t.Fatalf("expected refusal warning naming foreign-only, got %q", stderr)
+	}
+	titles := loadIssueTitles(t, exportPath)
+	if titles["foreign-only"] != "Only in rewound JSONL" {
+		t.Fatalf("JSONL-only record was lost: %v", titles)
+	}
+	if after := loadExportAutoState(beadsDir); after.LastExportSHA256 != savedState.LastExportSHA256 {
+		t.Fatalf("refusal must not advance LastExportSHA256: got %q, want %q", after.LastExportSHA256, savedState.LastExportSHA256)
+	}
+}
+
+func TestMaybeAutoExportForcesFullExportWhenDiffStoreFileRewound(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	config.Set("export.interval", "1h")
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeRewindDiffStateStore{
+		fakeHeadOnlyStore: fakeHeadOnlyStore{
+			issues: []*types.Issue{
+				{ID: "inc-1", Title: "One", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+				{ID: "inc-2", Title: "Two", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			},
+		},
+		stateHash: "hash-1",
+	}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	exportPath := filepath.Join(beadsDir, "issues.jsonl")
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("initial maybeAutoExport: %v", err)
+	}
+
+	// Rewind JSONL on disk so inc-2 is missing, while a new write inc-3 lands in Dolt.
+	writeJSONLLines(t, exportPath,
+		map[string]any{"_type": "issue", "id": "inc-1", "issue_type": "task", "title": "One"},
+	)
+	fake.issues = append(fake.issues, &types.Issue{
+		ID: "inc-3", Title: "Three", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	})
+	fake.stateHash = "hash-2"
+	fake.changedResult = storage.ChangedIssueIDs{Upserted: []string{"inc-3"}}
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("repair maybeAutoExport: %v", err)
+	}
+	if fake.changedIssueIDsCalls != 0 {
+		t.Fatalf("incremental diff must not run over a drifted JSONL (calls=%d)", fake.changedIssueIDsCalls)
+	}
+	titles := loadIssueTitles(t, exportPath)
+	for _, id := range []string{"inc-1", "inc-2", "inc-3"} {
+		if _, ok := titles[id]; !ok {
+			t.Fatalf("expected %s in repaired export, got %v", id, titles)
+		}
+	}
+}
+
 func TestGuardAutoExportOverwriteAllowsViewerScopedJSONL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "issues.jsonl")
 	writeJSONLLines(t, path,

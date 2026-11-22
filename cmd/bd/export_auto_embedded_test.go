@@ -3,7 +3,9 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,5 +109,91 @@ func TestEmbeddedAutoExportUncommittedWriteReachesJSONL(t *testing.T) {
 				t.Fatalf("issues.jsonl lost the baseline %s", baseline)
 			}
 		})
+	}
+}
+
+// TestEmbeddedAutoExportRepairsRewoundJSONLAfterGitStash reproduces GH#8585
+// end-to-end: `git stash` rewinds the tracked .beads/issues.jsonl without
+// touching the gitignored .beads/export-state.json. A subsequent non-read-only
+// `bd` command whose store state hash has not changed must still detect the
+// drifted export file, repair it (and restage it when export.git-add is on),
+// and leave `bd doctor --check=export` clean.
+func TestEmbeddedAutoExportRepairsRewoundJSONLAfterGitStash(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-export tests")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "stash")
+	bdCommand(t, bd, dir, "config", "set", "export.interval", "1ms")
+	bdCommand(t, bd, dir, "config", "set", "export.git-add", "true")
+	bdCommand(t, bd, dir, "config", "set", "export.auto", "true")
+
+	baseID := strings.TrimSpace(bdCreateSilent(t, bd, dir, "Baseline issue"))
+	runGit := func(args ...string) string {
+		t.Helper()
+		c := gitCommand(args...)
+		c.Dir = dir
+		out, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+	runGit("add", "-f", ".beads/issues.jsonl")
+	runGit("commit", "-qm", "Baseline export")
+
+	laterID := strings.TrimSpace(bdCreateSilent(t, bd, dir, "Post-commit issue"))
+	exportPath := filepath.Join(beadsDir, "issues.jsonl")
+	if !jsonlHasIssueID(t, exportPath, baseID) || !jsonlHasIssueID(t, exportPath, laterID) {
+		t.Fatalf("setup: expected both %s and %s in %s", baseID, laterID, exportPath)
+	}
+
+	// Re-arm a long throttle window and rewind only the tracked JSONL via git stash.
+	bdCommand(t, bd, dir, "config", "set", "export.interval", "1h")
+	stateBefore, err := os.ReadFile(filepath.Join(beadsDir, exportAutoStateFile))
+	if err != nil {
+		t.Fatalf("read export-state.json: %v", err)
+	}
+	runGit("stash", "push", "-m", "rewind export", "--", ".beads/issues.jsonl")
+	if jsonlHasIssueID(t, exportPath, laterID) {
+		t.Fatalf("setup: git stash did not rewind %s out of %s", laterID, exportPath)
+	}
+	stateAfterStash, err := os.ReadFile(filepath.Join(beadsDir, exportAutoStateFile))
+	if err != nil {
+		t.Fatalf("read export-state.json after stash: %v", err)
+	}
+	if string(stateAfterStash) != string(stateBefore) {
+		t.Fatalf("setup: git stash modified gitignored export-state.json")
+	}
+
+	// A non-read-only command that leaves the Dolt store unchanged must detect
+	// the rewound JSONL and repair it despite the unchanged state hash and active throttle.
+	bdCommand(t, bd, dir, "config", "set", "export.interval", "30m")
+
+	if !jsonlHasIssueID(t, exportPath, baseID) || !jsonlHasIssueID(t, exportPath, laterID) {
+		data, _ := os.ReadFile(exportPath)
+		t.Fatalf("rewound JSONL was not repaired (want %s and %s):\n%s", baseID, laterID, data)
+	}
+
+	staged := runGit("diff", "--cached", "--name-only")
+	if !strings.Contains(staged, ".beads/issues.jsonl") {
+		t.Fatalf("expected repaired .beads/issues.jsonl to be staged, got:\n%s", staged)
+	}
+
+	docOut := bdCommand(t, bd, dir, "doctor", "--check=export", "--json")
+	var doc struct {
+		Status  string `json:"status"`
+		Missing int    `json:"missing"`
+	}
+	if err := json.Unmarshal([]byte(docOut), &doc); err != nil {
+		t.Fatalf("parse doctor --check=export --json: %v\n%s", err, docOut)
+	}
+	if doc.Status != "ok" || doc.Missing != 0 {
+		t.Fatalf("doctor --check=export = %+v, want status=ok missing=0", doc)
 	}
 }
