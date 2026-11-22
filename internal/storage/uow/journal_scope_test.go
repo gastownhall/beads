@@ -118,7 +118,11 @@ func TestTxEndReleasesJournalScope(t *testing.T) {
 			name: "commit",
 			end: func(t *testing.T, mock sqlmock.Sqlmock, tx Tx) {
 				expectPendingChanges(mock, 1)
+				// The DOLT_COMMIT critical section takes the commit lock
+				// (GH#8590) on the pinned session and releases it after.
+				expectCommitLockGrant(mock)
 				mock.ExpectExec("DOLT_COMMIT").WillReturnResult(sqlmock.NewResult(0, 1))
+				expectCommitLockRelease(mock)
 				require.NoError(t, tx.Commit(context.Background(), "msg"))
 			},
 		},

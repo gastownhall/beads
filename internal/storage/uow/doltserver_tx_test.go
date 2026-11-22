@@ -31,7 +31,23 @@ func newMockTxProvider(t *testing.T) (*doltSQLProvider, sqlmock.Sqlmock) {
 	mockDB, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mockDB.Close() })
-	return &doltSQLProvider{defaultBranch: defaultBranch, db: mockDB}, mock
+	// The database name is set so the commit lock (GH#8590) does not discover
+	// it with a SELECT DATABASE() round trip first; the lock statements the
+	// tests then see are armed by expectCommitLockGrant/Release below.
+	return &doltSQLProvider{defaultBranch: defaultBranch, db: mockDB, database: "dolt"}, mock
+}
+
+// expectCommitLockGrant arms the serializing GET_LOCK a uow Dolt commit takes
+// on its pinned session (GH#8590) and answers it with a granted lock;
+// expectCommitLockRelease arms the matching RELEASE_LOCK, confirmed.
+func expectCommitLockGrant(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT GET_LOCK`).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+}
+
+func expectCommitLockRelease(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT RELEASE_LOCK`).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
 }
 
 // matchHasPending matches the dolt_status working-set check issued by
@@ -50,7 +66,9 @@ func TestDoltServerTxCommitFailureRollsBackBeforeRelease(t *testing.T) {
 	p, mock := newMockTxProvider(t)
 	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 	expectPendingChanges(mock, 1)
+	expectCommitLockGrant(mock)
 	mock.ExpectExec("DOLT_COMMIT").WillReturnError(errors.New("commit exploded"))
+	expectCommitLockRelease(mock)
 	mock.ExpectExec("ROLLBACK").WillReturnResult(sqlmock.NewResult(0, 0))
 
 	tx, err := p.BeginTx(context.Background())
@@ -66,7 +84,9 @@ func TestDoltServerTxCommitAndRollbackFailurePoisonsConn(t *testing.T) {
 	p, mock := newMockTxProvider(t)
 	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 	expectPendingChanges(mock, 1)
+	expectCommitLockGrant(mock)
 	mock.ExpectExec("DOLT_COMMIT").WillReturnError(errors.New("commit exploded"))
+	expectCommitLockRelease(mock)
 	mock.ExpectExec("ROLLBACK").WillReturnError(errors.New("rollback exploded too"))
 
 	tx, err := p.BeginTx(context.Background())
@@ -140,7 +160,9 @@ func TestDoltServerTxCommitIssuesDoltCommitWhenPending(t *testing.T) {
 	p, mock := newMockTxProvider(t)
 	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 	expectPendingChanges(mock, 3)
+	expectCommitLockGrant(mock)
 	mock.ExpectExec("DOLT_COMMIT").WithArgs("bd: real write").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectCommitLockRelease(mock)
 
 	tx, err := p.BeginTx(context.Background())
 	require.NoError(t, err)
@@ -175,7 +197,9 @@ func TestDoltServerTxCommitPropagatesNothingToCommit(t *testing.T) {
 	p, mock := newMockTxProvider(t)
 	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 	expectPendingChanges(mock, 1)
+	expectCommitLockGrant(mock)
 	mock.ExpectExec("DOLT_COMMIT").WillReturnError(errors.New("nothing to commit"))
+	expectCommitLockRelease(mock)
 	mock.ExpectExec("ROLLBACK").WillReturnResult(sqlmock.NewResult(0, 0))
 
 	tx, err := p.BeginTx(context.Background())
@@ -227,7 +251,9 @@ func TestDoltServerTxCommitDefersDoltCommitUnderDeferredContext(t *testing.T) {
 				mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
 			} else {
 				expectPendingChanges(mock, 1)
+				expectCommitLockGrant(mock)
 				mock.ExpectExec("DOLT_COMMIT").WithArgs("bd: real write").WillReturnResult(sqlmock.NewResult(0, 1))
+				expectCommitLockRelease(mock)
 			}
 
 			tx, err := p.BeginTx(context.Background())
@@ -257,7 +283,9 @@ func TestDoltServerTxCommitHonorsImmediateVersionCommit(t *testing.T) {
 	p, mock := newMockTxProvider(t)
 	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 	expectPendingChanges(mock, 1)
+	expectCommitLockGrant(mock)
 	mock.ExpectExec("DOLT_COMMIT").WithArgs("bd: batch 3 ops by tester").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectCommitLockRelease(mock)
 
 	tx, err := p.BeginTx(context.Background())
 	require.NoError(t, err)
@@ -295,12 +323,17 @@ const matchHasStaged = `SELECT COUNT\(\*\) FROM dolt_status WHERE staged = 1`
 // DOLT_ADD per table, the staged-set check reporting staged rows, and, when
 // something is staged, a DOLT_COMMIT('-m') answering commitErr.
 func expectScopedDoltCommit(mock sqlmock.Sqlmock, tables []string, staged int, message string, commitErr error) {
+	// The scoped stage-and-commit attempt runs under the commit lock
+	// (GH#8590): grant before the first DOLT_ADD, confirmed release after the
+	// commit (or the skip).
+	expectCommitLockGrant(mock)
 	for _, table := range tables {
 		mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).WithArgs(table).
 			WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(0))
 	}
 	mock.ExpectQuery(matchHasStaged).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(staged))
 	if staged == 0 {
+		expectCommitLockRelease(mock)
 		return
 	}
 	commit := mock.ExpectQuery(`CALL DOLT_COMMIT\('-m', \?\)`).WithArgs(message)
@@ -309,6 +342,7 @@ func expectScopedDoltCommit(mock sqlmock.Sqlmock, tables []string, staged int, m
 	} else {
 		commit.WillReturnRows(sqlmock.NewRows([]string{"hash"}).AddRow("c0ffee"))
 	}
+	expectCommitLockRelease(mock)
 }
 
 // TestDoltServerTxCommitScopedCommitsSQLBeforeDoltCommit pins the
@@ -340,7 +374,9 @@ func TestDoltServerTxCommitScopedSwallowsAFailedDoltCommit(t *testing.T) {
 	p, mock := newMockTxProvider(t)
 	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(matchPlainCommit).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectCommitLockGrant(mock)
 	mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).WithArgs("issues").WillReturnError(errors.New("dolt add exploded"))
+	expectCommitLockRelease(mock)
 
 	tx, err := p.BeginTx(context.Background())
 	require.NoError(t, err)

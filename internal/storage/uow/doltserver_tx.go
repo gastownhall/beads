@@ -15,11 +15,23 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 type doltServerTx struct {
 	conn *sql.Conn
 	done bool
+	// database is the workspace's database name, for the per-database commit
+	// lock (GH#8590) taken around this transaction's Dolt commits. Copied
+	// from the provider at BeginTx; empty (a provider whose open path did not
+	// know the name) falls back to SELECT DATABASE() on the pinned session.
+	database string
+	// commitLockUncertain records that some commit-lock release on this session
+	// could not be confirmed (versioncontrolops commit lock, GH#8590): the
+	// session's lock state is unknown, so it must be poisoned rather than
+	// returned to the pool, whatever else the commit concluded. Folded into
+	// the release-or-poison decision by Commit and CommitScoped.
+	commitLockUncertain bool
 	// clearJournalScope releases the events-journal activation BeginTx bound to
 	// conn. It is called from the two places the connection leaves this tx —
 	// releaseConn and poisonConn — so the activation entry cannot outlive the
@@ -62,7 +74,27 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 		// before release, or poison the connection.
 		return t.closeOpenTxAfterFailure(ctx, err)
 	}
+	// Serializing lock (GH#8590): DOLT_COMMIT('-Am') is the commit plane; the
+	// plain-COMMIT ephemeral form persists rows into the working set without
+	// minting a Dolt commit, so only the -Am statement takes the lock. Held
+	// just around the statement: DOLT_COMMIT publishes HEAD and ends the
+	// transaction inside itself, so releasing right after it returns is
+	// safe. An unconfirmed release poisons the session below, for the same
+	// reason a recheck failure does: its lock state is unknown, so it may not
+	// go back to the pool.
+	release := func() bool { return true }
+	if stmt == doltCommitAllStmt {
+		rl, lerr := t.holdCommitLock(ctx)
+		if lerr != nil {
+			return t.closeOpenTxAfterFailure(ctx, lerr)
+		}
+		release = rl
+	}
 	_, err = t.conn.ExecContext(ctx, stmt, args...)
+	uncertainRelease := !release()
+	if uncertainRelease {
+		t.commitLockUncertain = true
+	}
 	if err == nil {
 		t.done = true
 		// The write is durable. Settle the dependents its unblocking writes
@@ -70,7 +102,7 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 		// to the pool (gastownhall/beads#6716). A recheck failure is logged,
 		// never returned: the caller must not read a committed write as
 		// failed and replay it.
-		if t.recheckBlockedAfterCommit(ctx, issueops.TakeBlockedRecheck(t.conn)) {
+		if t.recheckBlockedAfterCommit(ctx, issueops.TakeBlockedRecheck(t.conn)) && !t.commitLockUncertain {
 			t.releaseConn()
 		} else {
 			t.poisonConn()
@@ -149,7 +181,7 @@ func (t *doltServerTx) CommitScoped(ctx context.Context, tables []string, messag
 		return t.closeOpenTxAfterFailure(ctx, err)
 	}
 	t.done = true
-	clean := t.commitStagedTables(ctx, staged, message)
+	clean := !t.commitLockUncertain && t.commitStagedTables(ctx, staged, message)
 	if t.recheckBlockedAfterCommit(ctx, issueops.TakeBlockedRecheck(t.conn)) && clean {
 		t.releaseConn()
 	} else {
@@ -208,9 +240,60 @@ func (t *doltServerTx) commitStagedTables(ctx context.Context, tables []string, 
 	return true
 }
 
+// holdCommitLock takes the per-database commit lock (GH#8590,
+// dolthub/dolt#12258) on this unit of work's pinned session, and returns the
+// release closure for it. Dolt merges a branch HEAD that moved between the
+// committing session's BEGIN and its DOLT_COMMIT into the staged root and
+// adopts the result unexamined, so with several bd front doors on one server
+// every Dolt commit has to run in the named lock's critical section. The
+// release closure returns whether the release was confirmed; an unconfirmed
+// one marks the session commitLockUncertain, and Commit/CommitScoped then
+// poison it instead of returning it to the pool — the server drops a
+// discarded session's locks on disconnect, so a possibly-still-held lock
+// cannot silently serialize the next writer.
+//
+// Fail-open matches the dolt planes: a lock not obtained in time logs and
+// proceeds unlocked; only a GET_LOCK query error is returned, handled by the
+// caller exactly like the DOLT_ADD failure beside it. wait 0 selects
+// versioncontrolops's default.
+func (t *doltServerTx) holdCommitLock(ctx context.Context) (release func() (confirmed bool), err error) {
+	database := t.database
+	if database == "" {
+		// The open path did not know the database name; the pinned session is
+		// connected to it, so discover it there rather than skip the lock.
+		var current sql.NullString
+		if err := t.conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&current); err == nil && current.Valid {
+			database = current.String
+		}
+	}
+	lock, err := versioncontrolops.AcquireCommitLock(ctx, t.conn, database, 0)
+	if err != nil {
+		return nil, err
+	}
+	if !lock.Held() {
+		return func() bool { return true }, nil
+	}
+	return func() bool {
+		confirmed := lock.Release(t.conn)
+		if !confirmed {
+			t.commitLockUncertain = true
+		}
+		return confirmed
+	}, nil
+}
+
 // stageAndCommitOnce is one attempt at commitStagedTables: stage each table,
 // then commit the staged set alone.
 func (t *doltServerTx) stageAndCommitOnce(ctx context.Context, tables []string, message string) error {
+	// Serializing lock (GH#8590): the add+commit pair below runs on the
+	// pinned session inside the per-database commit lock's critical section,
+	// released on every return path of the attempt (including the
+	// nothing-staged skip and a failed retry's errors).
+	release, err := t.holdCommitLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	for _, table := range tables {
 		if err := schema.DrainCall(ctx, t.conn, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
@@ -241,6 +324,11 @@ func (t *doltServerTx) stageAndCommitOnce(ctx context.Context, tables []string, 
 	return nil
 }
 
+// doltCommitAllStmt is the DOLT_COMMIT('-Am', …) commit form: the one
+// statement of Commit's two that mints a Dolt commit and therefore takes the
+// per-database commit lock (GH#8590); the other, plain COMMIT, does not.
+const doltCommitAllStmt = "CALL DOLT_COMMIT('-Am', ?);"
+
 // commitStatement picks the statement that ends the open transaction on the
 // pinned session for a commit named message.
 func (t *doltServerTx) commitStatement(ctx context.Context, message string) (string, []interface{}, error) {
@@ -269,7 +357,7 @@ func (t *doltServerTx) commitStatement(ctx context.Context, message string) (str
 	//     blanking just above (GH#4995). There the writes are ordinary versioned
 	//     rows and the ONLY-dolt_ignored-state rationale does not apply: the
 	//     working set is meant to hold them until the explicit flush point.
-	stmt, args := "CALL DOLT_COMMIT('-Am', ?);", []interface{}{message}
+	stmt, args := doltCommitAllStmt, []interface{}{message}
 	if message == "" {
 		stmt, args = "COMMIT;", nil
 	} else {

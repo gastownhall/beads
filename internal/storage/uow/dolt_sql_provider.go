@@ -47,6 +47,11 @@ type doltSQLProvider struct {
 	// connection. Fresh-bootstrap reset authority is bound to it together with
 	// the Dolt server UUID, database name, and initial HEAD.
 	serverEndpoint string
+	// database is the workspace's database name, for the per-database commit
+	// lock (GH#8590) this provider's transactions take around their Dolt
+	// commits. Set from the open path, which always knows it; empty falls back
+	// to SELECT DATABASE() on the committing session.
+	database string
 	// endpointResolver re-resolves the proxy endpoint for new physical
 	// connections of db once the provider is handed out; nil when the
 	// provider's pool keeps a fixed address. See proxyEndpointResolver.
@@ -388,7 +393,7 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// run scoped off (issueops.VersionedHistorySwitch.ResolveIn).
 	versioned, err := p.versionedHistory.ResolveIn(ctx, conn)
 	if err != nil {
-		return nil, (&doltServerTx{conn: conn}).closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: %w", err))
+		return nil, (&doltServerTx{conn: conn, database: p.database}).closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: %w", err))
 	}
 
 	// Bind journal and versioned-history activation to the connection this unit
@@ -408,6 +413,7 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// EventsJournalCursor has no enabled/disabled concept of its own.
 	return &doltServerTx{
 		conn:              conn,
+		database:          p.database,
 		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
 		clearJournalShape: issueops.ScopeEventsJournalShape(conn, p.journalShape.Load()),
 		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, versioned),
@@ -1272,6 +1278,7 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
 			db:                pool,
+			database:          database,
 			serverEndpoint:    "tcp:" + ep.Address(),
 			teamServer:        teamServer,
 			expectedProjectID: expectedProjectID,
