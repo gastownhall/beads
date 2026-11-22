@@ -310,6 +310,48 @@ concurrent status updates (e.g., one agent closes a bead while another
 also updates it). Mitigation: use optimistic concurrency checks where needed
 (check expected status before update).
 
+### Serialized commits on a shared server (GH#8590)
+
+Cell-level merging covers two SQL transactions committing. It does not
+cover a Dolt commit racing a HEAD move. When session B moves the branch HEAD
+while session A is inside `DOLT_COMMIT`, Dolt merges B's HEAD into A's
+staged root and adopts the result without a conflict check
+([dolthub/dolt#12258](https://github.com/dolthub/dolt/issues/12258)), so
+A's commit can contain conflict artifacts.
+
+In server mode bd therefore serializes commits per database with a named
+lock, `versioncontrolops.CommitLockName(db)`: `bd_commit:` plus the
+lowercased database name without any `/branch` suffix, replaced by an fnv64a
+hash when the result would be longer than 64 bytes. The name is a
+cross-version contract, so bd processes of different versions on one server
+serialize only while they agree on it.
+
+- **Scope.** The lock runs from just before the first `DOLT_ADD` until
+  `DOLT_COMMIT` returns, on every server-mode commit plane: the post-tx
+  `StageAndCommitSerialized` (`RunInTransaction`), the DOLT_ADD-per-table
+  funnel, `commitWorkingSet`, `CommitAll`/`CommitWithConfig`, open-merge
+  conclusion, the in-transaction helpers (update/claim/close/delete/sweep),
+  and the uow `Commit` (`DOLT_COMMIT('-Am')`) and `CommitScoped`.
+- **Session.** `GET_LOCK` is session-scoped, so each plane takes and releases
+  the lock on one pinned session. In-transaction planes take it through the
+  `*sql.Tx` and `commitWriteTxOn` keeps the transaction's pinned `*sql.Conn`
+  as a fallback that releases a lock the transaction did not (a canceled
+  context). A session whose release cannot be confirmed is discarded, never
+  returned to the pool.
+- **Skips.** A write that leaves nothing pending returns before the lock.
+  Embedded mode takes no lock (`StageAndCommit` is unchanged). Migration
+  commits do not take it.
+- **Order.** A guarded delete takes its `bd_delete` fence before the commit
+  lock, never the reverse.
+- **Fail open.** If the lock is not granted within 5s (capped at the
+  context deadline less 1s) the commit runs unlocked, logs a rate-limited
+  warning and counts `bd.db.commit_lock_timeouts`. `bd.db.commit_lock_wait`
+  records each wait.
+- **Residual risk.** An in-transaction plane's snapshot is taken at `BEGIN`,
+  before the lock. A HEAD move between `BEGIN` and the grant can still be
+  merged into its commit, so same-row in-transaction races are narrowed, not
+  closed. Moving those planes to post-tx commits (NEXUS#92) closes them.
+
 ### Guarded delete racing a comment
 
 A guarded delete (`ExpectedVersion` set, run under the per-id delete fence)

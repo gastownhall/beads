@@ -2,6 +2,7 @@ package versioncontrolops
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -96,7 +97,36 @@ func (t *DirtyTableTracker) MarkVersionedHistoryDirty(enabled bool) {
 // plane's normal discipline: its every other commit (uow.Tx.Commit) is
 // unauthored, and passing an empty --author would be a malformed commit rather
 // than an unattributed one.
+//
+// StageAndCommit takes no lock, so it is for embedded mode and admin paths.
+// A server-mode caller uses StageAndCommitSerialized, which holds the
+// per-database commit lock across the DOLT_ADD + DOLT_COMMIT pair (GH#8590).
 func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]bool, commitMsg, author string) error {
+	return stageAndCommit(ctx, conn, nil, dirtyTables, commitMsg, author)
+}
+
+// StageAndCommitSerialized is StageAndCommit for a Dolt sql-server: it holds
+// the commit lock (CommitLockName(cfg.Database)) on conn from just before the
+// first DOLT_ADD until DOLT_COMMIT returns, and releases it on every return
+// path. Concurrent writers on one server otherwise interleave their
+// add+commit pairs, and Dolt merges a HEAD that moved mid-commit into the
+// staged root and commits the conflict artifacts (GH#8590,
+// dolthub/dolt#12258).
+//
+// The lock is taken only after the HasPendingChanges fast path, so a write
+// that left nothing pending never touches it. conn is a *sql.Conn because the
+// lock is session-scoped: it must be acquired and released on one pinned
+// session. When the lock is not granted within cfg.Wait the commit proceeds
+// unlocked (see CommitLockConfig); a GET_LOCK query error is returned like a
+// DOLT_ADD failure.
+func StageAndCommitSerialized(ctx context.Context, conn *sql.Conn, cfg CommitLockConfig, dirtyTables map[string]bool, commitMsg, author string) error {
+	hold := func() (func(), error) { return HoldCommitLockOnConn(ctx, conn, cfg) }
+	return stageAndCommit(ctx, conn, hold, dirtyTables, commitMsg, author)
+}
+
+// stageAndCommit is the body of StageAndCommit; hold, when set, takes the
+// commit lock right before the first DOLT_ADD and returns its release.
+func stageAndCommit(ctx context.Context, conn DBConn, hold func() (func(), error), dirtyTables map[string]bool, commitMsg, author string) error {
 	if commitMsg == "" || len(dirtyTables) == 0 {
 		return nil
 	}
@@ -121,6 +151,14 @@ func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 	}
 	if !pending {
 		return nil
+	}
+
+	if hold != nil {
+		release, err := hold()
+		if err != nil {
+			return err
+		}
+		defer release()
 	}
 
 	for table := range dirtyTables {
