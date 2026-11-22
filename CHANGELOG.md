@@ -1475,6 +1475,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd show` no longer prints `Lease: expires expired` for a lapsed lease.**
+  An in_progress issue keeps its lease row after the lease runs out, until
+  `bd reclaim` sweeps it, and the lease line then printed the verb twice and
+  no time. It now reads `Lease: expired 3 hours ago`; a live lease still reads
+  `Lease: expires in 3 mins`.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
