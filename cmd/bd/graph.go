@@ -1201,11 +1201,7 @@ func truncateGraphTitle(title string, width int) string {
 		return title
 	}
 	const tail = "…"
-	tailWidth := ansi.StringWidth(tail)
-	if width < tailWidth {
-		return ""
-	}
-	return graphTextPrefix(title, width-tailWidth) + tail
+	return graphTextPrefix(title, width-ansi.StringWidth(tail)) + tail
 }
 
 // graphTextPrefix clips unstyled graph text at grapheme boundaries using
