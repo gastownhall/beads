@@ -98,6 +98,16 @@ func (h *commitLockHolder) logHas(ctx context.Context, message string) bool {
 	return n > 0
 }
 
+// isFree reports IS_FREE_LOCK(name) from a session other than the store's.
+func (h *commitLockHolder) isFree(ctx context.Context, name string) bool {
+	h.t.Helper()
+	var got sql.NullInt64
+	if err := h.db.QueryRowContext(ctx, "SELECT IS_FREE_LOCK(?)", name).Scan(&got); err != nil {
+		h.t.Fatalf("IS_FREE_LOCK(%q): %v", name, err)
+	}
+	return got.Valid && got.Int64 == 1
+}
+
 // commitLockTestIssue creates a committed issue to write to.
 func commitLockTestIssue(t *testing.T, ctx context.Context, store *DoltStore, id string) {
 	t.Helper()
@@ -235,6 +245,76 @@ func TestCommitLockSerializesStorePlanes(t *testing.T) {
 				tc.setup(ctx)
 			}
 			assertCommitWaitsForLock(t, ctx, store, h, tc.write)
+		})
+	}
+}
+
+// TestCommitLockReleasedOnEveryReturnPath covers AC-4: whichever way a commit
+// path returns, the lock is free from another session as soon as it does.
+func TestCommitLockReleasedOnEveryReturnPath(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	commitLockTestIssue(t, ctx, store, "test-rp1")
+	h := newCommitLockHolder(t, ctx, store)
+	name := versioncontrolops.CommitLockName(store.database)
+
+	cases := []struct {
+		name    string
+		run     func(ctx context.Context) error
+		wantErr bool
+	}{
+		{name: "success", run: func(ctx context.Context) error {
+			return store.RunInTransaction(ctx, "rp success", func(tx storage.Transaction) error {
+				return tx.UpdateIssue(ctx, "test-rp1", map[string]interface{}{"title": "rp success"}, "tester")
+			})
+		}},
+		{name: "nothing staged", run: func(ctx context.Context) error {
+			// Something unrelated is dirty, so the commit proceeds past any
+			// pending check, takes the lock, and stages nothing.
+			if _, err := store.db.ExecContext(ctx, "UPDATE issues SET notes = 'unrelated dirt' WHERE id = 'test-rp1'"); err != nil {
+				return err
+			}
+			return store.doltAddAndCommit(ctx, []string{"comments"}, "rp nothing staged")
+		}},
+		{name: "failed DOLT_ADD", wantErr: true, run: func(ctx context.Context) error {
+			return store.doltAddAndCommit(ctx, []string{"no_such_table_rp"}, "rp failed add")
+		}},
+		{name: "failed DOLT_COMMIT", wantErr: true, run: func(ctx context.Context) error {
+			// An author Dolt cannot parse fails DOLT_COMMIT after the lock
+			// is taken and the tables are staged.
+			saved := store.committerName
+			store.committerName = "Jane Doe (CI)"
+			defer func() { store.committerName = saved }()
+			return store.RunInTransaction(ctx, "rp failed commit", func(tx storage.Transaction) error {
+				return tx.UpdateIssue(ctx, "test-rp1", map[string]interface{}{"title": "rp failed commit"}, "tester")
+			})
+		}},
+		{name: "funnel screen refusal", wantErr: true, run: func(ctx context.Context) error {
+			if _, err := store.db.ExecContext(ctx, "REPLACE INTO config (`key`, value) VALUES ('rp.internal', 'x')"); err != nil {
+				return err
+			}
+			return store.CommitConfigUserKVOnly(ctx, "rp screen refusal")
+		}},
+		{name: "context canceled after in-tx grant", wantErr: true, run: func(ctx context.Context) error {
+			ctx, cancelWrite := context.WithCancel(ctx)
+			defer cancelWrite()
+			saved := afterInTxCommitLockGrant
+			afterInTxCommitLockGrant = cancelWrite
+			defer func() { afterInTxCommitLockGrant = saved }()
+			return store.UpdateIssue(ctx, "test-rp1", map[string]interface{}{"title": "rp canceled"}, "tester")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run(ctx)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("run err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !h.isFree(ctx, name) {
+				t.Fatalf("IS_FREE_LOCK(%q) = 0 right after the call returned (err=%v): the commit lock leaked", name, err)
+			}
 		})
 	}
 }

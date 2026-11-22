@@ -55,6 +55,11 @@ func (s *DoltStore) stageAndCommitSerialized(ctx context.Context, conn *sql.Conn
 	return versioncontrolops.StageAndCommitSerialized(ctx, conn, s.commitLockConfig(), dirtyTables, commitMsg, author)
 }
 
+// afterInTxCommitLockGrant runs right after holdCommitLockInTx records its
+// GET_LOCK attempt. It is a no-op outside tests, which cancel the write there
+// to prove the fallback release (bindCommitLockSlot) frees the lock.
+var afterInTxCommitLockGrant = func() {}
+
 // txCommitLock is the commit-lock slot of one write transaction begun by
 // commitWriteTxOn: the pinned connection the transaction runs on, and the
 // lock taken through the transaction, if any.
@@ -105,6 +110,7 @@ func (s *DoltStore) holdCommitLockInTx(ctx context.Context, tx *sql.Tx) (func(),
 		return nil, err
 	}
 	slot.lock = l
+	afterInTxCommitLockGrant()
 	// An unconfirmed release leaves l marked held, and the slot's fallback
 	// retries it on the pinned connection after tx ends.
 	return func() { _ = l.Release(tx) }, nil
