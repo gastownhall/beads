@@ -26,13 +26,13 @@ func userWorkspace(t *testing.T, yamlUser string) string {
 	return dir
 }
 
-// TestResolveServerUserForOpenUsesTargetWorkspace pins the GH#8577 review
+// TestResolveServerUserForWorkspaceScopesToTarget pins the GH#8577 review
 // blocker: a routed or cross-workspace open must resolve dolt.user against
 // the workspace being opened, never the launching workspace's merged yaml.
 // Real shape: several dolt servers in one fleet, a shared committed
 // config.yaml per repo, and personal/test overrides in the uncommitted
 // config.local.yaml of the workspace the operator happens to stand in.
-func TestResolveServerUserForOpenUsesTargetWorkspace(t *testing.T) {
+func TestResolveServerUserForWorkspaceScopesToTarget(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -53,25 +53,25 @@ func TestResolveServerUserForOpenUsesTargetWorkspace(t *testing.T) {
 
 	// The launcher's yaml user must not answer for the target: the target's
 	// own (absent) yaml falls through to its metadata.
-	if got := resolveServerUserForOpen(target, targetCfg); got != "target_meta_user" {
-		t.Errorf("cross-workspace: resolveServerUserForOpen() = %q, want target_meta_user", got)
+	if got := ResolveServerUserForWorkspace(target, targetCfg); got != "target_meta_user" {
+		t.Errorf("cross-workspace: ResolveServerUserForWorkspace() = %q, want target_meta_user", got)
 	}
 
 	// The target's own yaml layer outranks its metadata.
 	targetYaml := userWorkspace(t, "target_yaml_user")
-	if got := resolveServerUserForOpen(targetYaml, targetCfg); got != "target_yaml_user" {
-		t.Errorf("target yaml: resolveServerUserForOpen() = %q, want target_yaml_user", got)
+	if got := ResolveServerUserForWorkspace(targetYaml, targetCfg); got != "target_yaml_user" {
+		t.Errorf("target yaml: ResolveServerUserForWorkspace() = %q, want target_yaml_user", got)
 	}
 
 	// Same-workspace open keeps the established order (yaml over metadata).
-	if got := resolveServerUserForOpen(launcher, &configfile.Config{}); got != "launcher_user" {
-		t.Errorf("same workspace: resolveServerUserForOpen() = %q, want launcher_user", got)
+	if got := ResolveServerUserForWorkspace(launcher, &configfile.Config{}); got != "launcher_user" {
+		t.Errorf("same workspace: ResolveServerUserForWorkspace() = %q, want launcher_user", got)
 	}
 
 	// Env still wins everywhere.
 	t.Setenv("BEADS_DOLT_SERVER_USER", "env_user")
-	if got := resolveServerUserForOpen(target, targetCfg); got != "env_user" {
-		t.Errorf("env: resolveServerUserForOpen() = %q, want env_user", got)
+	if got := ResolveServerUserForWorkspace(target, targetCfg); got != "env_user" {
+		t.Errorf("env: ResolveServerUserForWorkspace() = %q, want env_user", got)
 	}
 
 	// WithBeadsDir restored the launcher's context: the global getter still

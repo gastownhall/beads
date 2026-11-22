@@ -2727,19 +2727,27 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 		return HandleError("saving config: %v", err)
 	}
 
-	// GH#8577: dolt.user in a workspace yaml layer outranks the metadata
-	// value just written, so a bare `set user` (no --update-config) would
-	// report success while the effective user does not change — the
-	// writer-without-a-reader defect this release closes, reborn on the
-	// metadata write. Name the winning layer instead of shadowing silently.
+	// GH#8577: dolt.user in a yaml layer outranks the metadata value just
+	// written, so a bare `set user` (no --update-config) would report success
+	// while the effective user does not change — the writer-without-a-reader
+	// defect this release closes, reborn on the metadata write. Name the
+	// winning layer instead of shadowing silently. The user-level file is
+	// checked too: it also outranks metadata, and a shadow the warning
+	// cannot see is the same defect moved one layer out (review F2).
 	shadowLayer, shadowValue := "", ""
 	if key == "user" && !updateConfig {
 		if v, present, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.user"); err == nil && present && v != "" && v != value {
 			shadowValue = v
-			shadowLayer = "config.yaml"
+			// Merged local+project read: name local when it demonstrably
+			// carries the winner; when both layers hold the same value the
+			// merged view cannot tell which answered (review F3) — say so.
+			shadowLayer = "config.yaml and/or config.local.yaml"
 			if pv, projPresent := config.WorkspaceYamlValue(beadsDir, "dolt.user"); !projPresent || pv != v {
 				shadowLayer = "config.local.yaml"
 			}
+		} else if uv := config.GetUserYamlConfig("dolt.user"); uv != "" && uv != value {
+			shadowValue = uv
+			shadowLayer = "user-level config (~/.config/bd/config.yaml)"
 		}
 	}
 

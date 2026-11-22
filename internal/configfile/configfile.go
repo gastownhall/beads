@@ -633,8 +633,11 @@ func (c *Config) GetDoltServerSocket() string {
 // The yaml read is process-global (the launching workspace's merged config),
 // as with GetDoltServerHost. Cross-workspace and routed opens must not
 // inherit the launcher's yaml user: they resolve through
-// resolveServerUserForOpen (internal/storage/dolt), which re-reads the yaml
-// layers scoped to the workspace being opened.
+// ResolveServerUserForWorkspace (internal/storage/dolt), which re-reads the
+// yaml layers scoped to the workspace being opened. A bare
+// `bd dolt set user` (metadata-only write) warns when ANY yaml layer —
+// workspace or user-level — holds a different dolt.user that outranks the
+// write, so the shadow is never silent.
 //
 // Note: the password is looked up by host:port (ServerPasswordFor), never by
 // user — a user override without a matching credentials entry fails with a

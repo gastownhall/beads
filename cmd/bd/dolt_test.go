@@ -348,6 +348,47 @@ func TestDoltSetConfigValidation(t *testing.T) {
 			t.Errorf("effective user = %q, want alice (yaml layer outranks the fresh metadata write)", got)
 		}
 	})
+
+	t.Run("set user without --update-config sees the user-level yaml shadow (GH#8577 F2)", func(t *testing.T) {
+		// The warning cannot stay limited to workspace files: the user-level
+		// ~/.config/bd/config.yaml also outranks metadata, so a shadow only
+		// it casts must be equally visible (review F2 — option (a): extend
+		// the check, keep the user-level layer counting).
+		t.Setenv("BEADS_DOLT_SERVER_USER", "")
+		t.Setenv("BD_DOLT_USER", "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+		userCfgPath, err := config.UserConfigYamlPath()
+		if err != nil {
+			t.Fatalf("UserConfigYamlPath: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(userCfgPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(userCfgPath, []byte("dolt.user: userlevel_user\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Empty the workspace yaml so only the user-level layer can shadow.
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(""), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		setDoltConfig("user", "bob2", false) // metadata-only write; shadowed
+
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		loadedCfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if got := loadedCfg.GetDoltServerUser(); got != "userlevel_user" {
+			t.Errorf("effective user = %q, want userlevel_user (user-level yaml outranks the metadata write; the warning must name it)", got)
+		}
+	})
 }
 
 func TestDoltSetConfigJSONOutput(t *testing.T) {

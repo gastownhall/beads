@@ -186,7 +186,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the launcher's yaml. This also completes an existing write/read pair:
   `bd dolt set user --update-config` and `bd config set dolt.user` always
   wrote the key, but nothing read it. A bare `bd dolt set user` now warns
-  (naming the winning layer) when a yaml value shadows the metadata write.
+  (naming the winning layer — workspace or user-level) when a yaml value
+  shadows the metadata write.
   `.beads/.gitignore` gains `config.local.yaml` (append-only: existing
   workspaces pick the line up at the next ensure), and `bd doctor`'s server
   report shows `connected as <user>`.
