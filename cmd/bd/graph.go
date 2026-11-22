@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -946,14 +947,14 @@ func renderGraph(out io.Writer, layout *GraphLayout, subgraph *TemplateSubgraph)
 	w.printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
 
 	// Calculate box width based on longest title
-	maxTitleLen := 0
+	maxTitleWidth := 0
 	for _, node := range layout.Nodes {
-		titleLen := len(truncateTitle(node.Issue.Title, 30))
-		if titleLen > maxTitleLen {
-			maxTitleLen = titleLen
+		titleWidth := ansi.StringWidth(truncateGraphTitle(node.Issue.Title, 30))
+		if titleWidth > maxTitleWidth {
+			maxTitleWidth = titleWidth
 		}
 	}
-	boxWidth := maxTitleLen + 4 // padding
+	boxWidth := maxTitleWidth + 4 // padding
 
 	// Render each layer
 	// For simplicity, we'll render layer by layer with arrows between them
@@ -1145,7 +1146,7 @@ func formatCompactNode(node *GraphNode) string {
 	priorityTag := ui.RenderPriority(node.Issue.Priority)
 
 	// Title - truncate if too long
-	title := truncateTitle(node.Issue.Title, 50)
+	title := truncateGraphTitle(node.Issue.Title, 50)
 
 	// Build line - apply status style to entire line for closed issues
 	style := ui.GetStatusStyle(status)
@@ -1163,7 +1164,7 @@ func formatCompactNode(node *GraphNode) string {
 // renderNodeBox renders a single node as an ASCII box
 // Uses semantic status styles from ui package for consistency
 func renderNodeBox(node *GraphNode, width int) string {
-	title := truncateTitle(node.Issue.Title, width-4)
+	title := truncateGraphTitle(node.Issue.Title, width-4)
 	paddedTitle := padRight(title, width-4)
 	status := string(node.Issue.Status)
 
@@ -1190,6 +1191,38 @@ func renderNodeBox(node *GraphNode, width int) string {
 	return topBottom + "\n" + middle + "\n" + idLine + "\n" + bottom
 }
 
+// truncateGraphTitle limits a terminal title to a number of display cells,
+// including the ellipsis, without splitting grapheme clusters.
+func truncateGraphTitle(title string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if ansi.StringWidth(title) <= width {
+		return title
+	}
+	const tail = "…"
+	tailWidth := ansi.StringWidth(tail)
+	if width < tailWidth {
+		return ""
+	}
+	return graphTextPrefix(title, width-tailWidth) + tail
+}
+
+// graphTextPrefix clips unstyled graph text at grapheme boundaries using
+// the same cluster widths as ansi.StringWidth, including ASCII-based emoji.
+func graphTextPrefix(s string, width int) string {
+	end := 0
+	for end < len(s) {
+		cluster, clusterWidth := ansi.FirstGraphemeCluster(s[end:], ansi.GraphemeWidth)
+		if clusterWidth > width {
+			break
+		}
+		width -= clusterWidth
+		end += len(cluster)
+	}
+	return s[:end]
+}
+
 // truncateTitle truncates a title to max length (rune-safe)
 func truncateTitle(title string, maxLen int) string {
 	runes := []rune(title)
@@ -1199,13 +1232,16 @@ func truncateTitle(title string, maxLen int) string {
 	return string(runes[:maxLen-1]) + "…"
 }
 
-// padRight pads a string to the right with spaces (rune-safe)
+// padRight fits a string to exactly width display cells. A wide grapheme
+// that does not fit is omitted and the remaining cells are filled with spaces.
 func padRight(s string, width int) string {
-	runes := []rune(s)
-	if len(runes) >= width {
-		return string(runes[:width])
+	if width <= 0 {
+		return ""
 	}
-	return s + strings.Repeat(" ", width-len(runes))
+	if ansi.StringWidth(s) > width {
+		s = graphTextPrefix(s, width)
+	}
+	return s + strings.Repeat(" ", width-ansi.StringWidth(s))
 }
 
 // computeDependencyCounts calculates how many issues each issue blocks and is blocked by
@@ -1249,7 +1285,7 @@ func computeDependencyCounts(subgraph *TemplateSubgraph) (blocks map[string]int,
 // Uses semantic status styles from ui package for consistency across commands
 // Design principle: only actionable states get color, closed items fade
 func renderNodeBoxWithDeps(node *GraphNode, width int, blocksCount int, blockedByCount int) string {
-	title := truncateTitle(node.Issue.Title, width-4)
+	title := truncateGraphTitle(node.Issue.Title, width-4)
 	paddedTitle := padRight(title, width-4)
 	status := string(node.Issue.Status)
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -55,6 +56,36 @@ func TestTruncateTitle(t *testing.T) {
 	}
 }
 
+func TestTruncateGraphTitle(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		title string
+		width int
+		want  string
+	}{
+		{name: "ASCII unchanged", title: "abcdefgh", width: 8, want: "abcdefgh"},
+		{name: "ASCII truncated", title: "abcdefgh", width: 5, want: "abcd…"},
+		{name: "Korean exact fit", title: "가나다", width: 6, want: "가나다"},
+		{name: "Korean truncated", title: "가나다라", width: 7, want: "가나다…"},
+		{name: "wide character leaves a cell", title: "가나다라", width: 6, want: "가나…"},
+		{name: "combining accents fit", title: strings.Repeat("e\u0301", 12), width: 12, want: strings.Repeat("e\u0301", 12)},
+		{name: "combining accent preserved", title: "e\u0301e\u0301e\u0301", width: 2, want: "e\u0301…"},
+		{name: "joined emoji preserved", title: "👩‍💻abc", width: 3, want: "👩‍💻…"},
+		{name: "keycap emoji preserved", title: "1️⃣1️⃣", width: 3, want: "1️⃣…"},
+		{name: "only ellipsis fits", title: "가", width: 1, want: "…"},
+		{name: "empty", width: 5, want: ""},
+		{name: "zero width", title: "가", width: 0, want: ""},
+		{name: "negative width", title: "가", width: -1, want: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := truncateGraphTitle(tt.title, tt.width); got != tt.want {
+				t.Errorf("truncateGraphTitle(%q, %d) = %q, want %q", tt.title, tt.width, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPadRight(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -90,8 +121,14 @@ func TestPadRight(t *testing.T) {
 			name:  "unicode safe",
 			s:     "日本",
 			width: 5,
-			want:  "日本   ",
+			want:  "日本 ",
 		},
+		{name: "wide character does not fit", s: "가나다", width: 5, want: "가나 "},
+		{name: "combining accent", s: "e\u0301", width: 3, want: "e\u0301  "},
+		{name: "joined emoji", s: "👩‍💻", width: 3, want: "👩‍💻 "},
+		{name: "keycap emoji", s: "1️⃣1️⃣", width: 3, want: "1️⃣ "},
+		{name: "zero width", s: "abc", width: 0, want: ""},
+		{name: "negative width", s: "abc", width: -1, want: ""},
 	}
 
 	for _, tt := range tests {

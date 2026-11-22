@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -153,11 +156,41 @@ func TestDAGNodeLine(t *testing.T) {
 
 func TestComputeDAGNodeWidth(t *testing.T) {
 	t.Parallel()
-	_, layout := makeTestSubgraph()
-
-	w := computeDAGNodeWidth(layout)
-	if w < 18 {
-		t.Errorf("DAG node width should be at least 18, got %d", w)
+	for _, tt := range []struct {
+		name   string
+		issues []*types.Issue
+		want   int
+	}{
+		{name: "minimum width", issues: []*types.Issue{{ID: "n", Title: "short"}}, want: 18},
+		{name: "ASCII title", issues: []*types.Issue{{ID: "n", Title: strings.Repeat("a", 20)}}, want: 25},
+		{name: "Korean title", issues: []*types.Issue{{ID: "n", Title: strings.Repeat("가", 10)}}, want: 25},
+		{name: "Japanese title", issues: []*types.Issue{{ID: "n", Title: strings.Repeat("あ", 10)}}, want: 25},
+		{name: "combining accents", issues: []*types.Issue{{ID: "n", Title: strings.Repeat("e\u0301", 12)}}, want: 18},
+		{name: "joined emoji", issues: []*types.Issue{{ID: "n", Title: strings.Repeat("👩‍💻", 8)}}, want: 21},
+		{name: "long ASCII title", issues: []*types.Issue{{ID: "n", Title: strings.Repeat("a", 40)}}, want: 27},
+		// A 22-cell limit fits ten Korean syllables and an ellipsis (21 cells).
+		{name: "long Korean title", issues: []*types.Issue{{ID: "n", Title: strings.Repeat("가", 20)}}, want: 26},
+		{name: "long keycap emoji title", issues: []*types.Issue{{ID: "n", Title: strings.Repeat("1️⃣", 24)}}, want: 26},
+		{name: "ID controls width", issues: []*types.Issue{{ID: strings.Repeat("i", 24), Title: "short"}}, want: 30},
+		{
+			name: "widest of mixed titles",
+			issues: []*types.Issue{
+				{ID: "a", Title: "short"},
+				{ID: "b", Title: strings.Repeat("가", 20)},
+				{ID: "c", Title: strings.Repeat("e\u0301", 12)},
+			},
+			want: 26,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			layout := &GraphLayout{Nodes: make(map[string]*GraphNode)}
+			for _, issue := range tt.issues {
+				layout.Nodes[issue.ID] = &GraphNode{Issue: issue}
+			}
+			if got := computeDAGNodeWidth(layout); got != tt.want {
+				t.Errorf("computeDAGNodeWidth() = %d cells, want %d", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -309,5 +342,114 @@ func TestCollectGutterEdges_SkipLayers(t *testing.T) {
 	// Gutter 0 should have edges for a->b and a->c
 	if len(edges[0]) < 2 {
 		t.Errorf("Gutter 0 should have at least 2 edges (a->b and a->c), got %d", len(edges[0]))
+	}
+}
+
+// Every box and its outgoing edge must occupy the same terminal columns,
+// including when a title ends before a wide grapheme that does not fit.
+func TestRenderGraphVisualDisplayWidth(t *testing.T) {
+	t.Parallel()
+	for _, title := range []string{
+		"ABCDEFGHIJKL",
+		"abcdefghijkl",
+		"012345678901",
+		"가나다라마바사아자차카타",
+		"あいうえおかきくけこさし",
+		"一二三四五六七八九十百千",
+		"ABC가나다123라마바",
+		strings.Repeat("e\u0301", 12),
+		strings.Repeat("😀🚀🎉", 4),
+		strings.Repeat("1️⃣", 24),
+		"Example 영문과 한글이 섞인 제목",
+		"가나다라마바사아자차카타파하가나다라마바사",
+		"日本語の長いタイトルと依存関係の確認",
+		"Cafe\u0301 👩‍💻 Example 한글이 섞인 긴 제목",
+	} {
+		t.Run(title, func(t *testing.T) {
+			subgraph, layout := makeTestSubgraph()
+			for _, node := range layout.Nodes {
+				node.Issue.Title = title
+			}
+			var output bytes.Buffer
+			if err := renderGraphVisual(&output, layout, subgraph); err != nil {
+				t.Fatalf("renderGraphVisual: %v", err)
+			}
+			var expectedColumns []int
+			rows := 0
+			for _, line := range strings.Split(ansi.Strip(output.String()), "\n") {
+				if !strings.HasPrefix(line, "  ┌") && !strings.HasPrefix(line, "  │") && !strings.HasPrefix(line, "  └") {
+					continue
+				}
+				columns := []int{}
+				for offset, r := range line {
+					if strings.ContainsRune("┌┐│└┘", r) {
+						columns = append(columns, ansi.StringWidth(line[:offset]))
+					}
+				}
+				if expectedColumns == nil {
+					expectedColumns = columns
+				}
+				// Later rows have fewer boxes than the first row of this fixture.
+				for i, col := range columns {
+					if i >= len(expectedColumns) || col != expectedColumns[i] {
+						t.Errorf("misaligned border columns %v, want prefix of %v: %s", columns, expectedColumns, line)
+						break
+					}
+				}
+				rows++
+			}
+			if rows == 0 {
+				t.Fatal("no graph box rows rendered")
+			}
+		})
+	}
+}
+
+func TestRenderGraphVisualMixedTitleWidths(t *testing.T) {
+	t.Parallel()
+	subgraph, layout := makeTestSubgraph()
+	subgraph.IssueMap["test-a"].Title = "Short"
+	subgraph.IssueMap["test-b"].Title = "가나다라마바사아자차카타"
+	subgraph.IssueMap["test-c"].Title = "👩‍💻 日本語"
+	subgraph.IssueMap["test-d"].Title = strings.Repeat("e\u0301", 12)
+
+	var output bytes.Buffer
+	if err := renderGraphVisual(&output, layout, subgraph); err != nil {
+		t.Fatalf("renderGraphVisual: %v", err)
+	}
+	got := ansi.Strip(output.String())
+	for _, title := range []string{
+		"Short", "가나다라마바사아자차…", "👩‍💻 日本語", strings.Repeat("e\u0301", 12),
+	} {
+		if !strings.Contains(got, title) {
+			t.Errorf("rendered graph missing expected title %q:\n%s", title, got)
+		}
+	}
+
+	// The long Korean title sets a 26-cell interior. With two borders and
+	// six-cell gutters, the three boxes must occupy these terminal columns.
+	// The second row contains only the disconnected closed node in layer 0.
+	rows := 0
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(line, "  ┌") && !strings.HasPrefix(line, "  │") && !strings.HasPrefix(line, "  └") {
+			continue
+		}
+		var columns []int
+		for offset, r := range line {
+			if strings.ContainsRune("┌┐│└┘", r) {
+				columns = append(columns, ansi.StringWidth(line[:offset]))
+			}
+		}
+		want := []int{2, 29, 36, 63, 70, 97}
+		if rows >= 4 {
+			want = []int{2, 29}
+		}
+		if !slices.Equal(columns, want) {
+			t.Errorf("box row %d has border columns %v, want %v: %s", rows, columns, want, line)
+		}
+		rows++
+	}
+	if rows != 8 {
+		t.Errorf("rendered %d box rows, want 8", rows)
 	}
 }

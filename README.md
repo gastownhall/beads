@@ -79,6 +79,8 @@ This project uses bd (beads) for issue tracking.
 | `bd remember "a project insight"` | Store project memory that `bd prime` injects later. |
 | `bd remember some-key` | Recall an exact key, including long and dotted ones like `api.v2`; a missing key fails without storing anything. Use `--key some-key` to write single-word content, and `bd recall` for keys with other characters. |
 
+Use `bd graph <id>` to view an issue's dependencies as a terminal graph. Long titles are shortened to fit the boxes, with wide characters, combining accents, and emoji kept aligned.
+
 ## 🔗 Hierarchy & Workflow
 
 Beads supports hierarchical IDs for epics:
