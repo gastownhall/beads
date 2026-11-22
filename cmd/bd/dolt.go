@@ -78,7 +78,8 @@ Remote server authentication (password + TLS) is NOT stored via 'bd dolt set'
 
   BEADS_DOLT_PASSWORD       Server password (highest priority)
   BEADS_DOLT_SERVER_TLS     Enable TLS (set to "1" or "true")
-  BEADS_DOLT_SERVER_USER    MySQL user override (else use 'bd dolt set user')
+  BEADS_DOLT_SERVER_USER    MySQL user override (else dolt.user in config.local.yaml /
+                            config.yaml, then 'bd dolt set user' metadata, then root)
   BEADS_CREDENTIALS_FILE    Optional path to credentials file
 
   Default credentials file: ~/.config/beads/credentials (Linux/macOS)
@@ -2726,6 +2727,22 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 		return HandleError("saving config: %v", err)
 	}
 
+	// GH#8577: dolt.user in a workspace yaml layer outranks the metadata
+	// value just written, so a bare `set user` (no --update-config) would
+	// report success while the effective user does not change — the
+	// writer-without-a-reader defect this release closes, reborn on the
+	// metadata write. Name the winning layer instead of shadowing silently.
+	shadowLayer, shadowValue := "", ""
+	if key == "user" && !updateConfig {
+		if v, present, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.user"); err == nil && present && v != "" && v != value {
+			shadowValue = v
+			shadowLayer = "config.yaml"
+			if pv, projPresent := config.WorkspaceYamlValue(beadsDir, "dolt.user"); !projPresent || pv != v {
+				shadowLayer = "config.local.yaml"
+			}
+		}
+	}
+
 	if jsonOutput {
 		result := map[string]interface{}{
 			"key":      key,
@@ -2735,6 +2752,10 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 		if updateConfig {
 			result["config_yaml_updated"] = true
 		}
+		if shadowValue != "" {
+			result["shadowed_by"] = shadowLayer
+			result["effective_value"] = shadowValue
+		}
 		if err := outputJSON(result); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
@@ -2742,6 +2763,13 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 	}
 
 	fmt.Printf("Set %s = %s (in metadata.json)\n", key, value)
+	if shadowValue != "" {
+		fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf(
+			"Warning: %s sets dolt.user = %s, which outranks metadata.json — the effective user remains %s.\n"+
+				"  For a per-machine user, config.local.yaml (untracked) is the right layer; to change the\n"+
+				"  shared value re-run with --update-config, or remove the yaml key first.",
+			shadowLayer, shadowValue, shadowValue)))
+	}
 
 	// Also update config.yaml if requested
 	if updateConfig && yamlKey != "" {

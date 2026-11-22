@@ -318,6 +318,36 @@ func TestDoltSetConfigValidation(t *testing.T) {
 			t.Errorf("yaml-layer read: GetDoltServerUser() = %q, want roundtrip_user", got)
 		}
 	})
+
+	t.Run("set user without --update-config is shadowed by yaml, visibly (GH#8577)", func(t *testing.T) {
+		// The reviewer's P5: a yaml dolt.user (here from the earlier
+		// --update-config write) outranks a later metadata-only write, so
+		// `set user bob` must not silently pretend to take effect — the
+		// command warns and names the winning layer. Pin the effective-user
+		// half of that contract here.
+		t.Setenv("BEADS_DOLT_SERVER_USER", "")
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(""), 0600); err != nil {
+			t.Fatal(err)
+		}
+		setDoltConfig("user", "alice", true) // writes metadata + config.yaml
+		setDoltConfig("user", "bob", false)  // metadata-only; shadowed by yaml
+
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		loadedCfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if loadedCfg.DoltServerUser != "bob" {
+			t.Errorf("metadata = %q, want bob (the write itself happened)", loadedCfg.DoltServerUser)
+		}
+		if got := loadedCfg.GetDoltServerUser(); got != "alice" {
+			t.Errorf("effective user = %q, want alice (yaml layer outranks the fresh metadata write)", got)
+		}
+	})
 }
 
 func TestDoltSetConfigJSONOutput(t *testing.T) {
