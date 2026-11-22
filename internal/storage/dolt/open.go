@@ -452,11 +452,17 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 // configuration afterwards. On a scoped-load error this falls back to the
 // process-global getter (pre-GH#8577 behavior) rather than failing the open.
 //
-// Concurrency: config.WithBeadsDir mutates package-global config state and
-// its contract forbids concurrent configuration reads — the same contract
-// the existing WithBeadsDir callers in bootstrap/init/create rely on. bd's
-// opens are serialized per process (CLI commands, and doctor's checks run
-// sequentially); callers must not invoke this from parallel store opens.
+// Concurrency: config.WithBeadsDir mutates package-global config state. The
+// invariant is broader than opens: NO configuration read may run while a
+// WithBeadsDir scope is active — a reader landing inside a foreign-open
+// scope reads the TARGET's config for launcher work. cmd/bd has background
+// goroutines that read config (dolt_autopush.go, events.go, main.go's
+// watch/daemon loops); this contract is pre-existing and shared with the 11
+// WithBeadsDir callers in bootstrap/init/create, all on serialized CLI
+// paths (doctor's checks run sequentially — no goroutine machinery in the
+// package). Callers must not invoke this from parallel store opens or
+// alongside concurrent config readers; locking package-global config is a
+// WithBeadsDir-wide concern beyond this fix.
 func ResolveServerUserForWorkspace(beadsDir string, fileCfg *configfile.Config) string {
 	var user string
 	if err := config.WithBeadsDir(beadsDir, func() {

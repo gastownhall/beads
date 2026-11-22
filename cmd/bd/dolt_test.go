@@ -389,6 +389,64 @@ func TestDoltSetConfigValidation(t *testing.T) {
 			t.Errorf("effective user = %q, want userlevel_user (user-level yaml outranks the metadata write; the warning must name it)", got)
 		}
 	})
+
+	t.Run("set user matching the workspace yaml must NOT warn about a losing user-level value (GH#8577 F2 false positive)", func(t *testing.T) {
+		// Reviewer repro: workspace config.yaml holds exactly the value being
+		// written while the user-level file holds a different one. Workspace
+		// outranks user-level, the write changes nothing — warning "effective
+		// user remains <user-level>" would name a LOSING layer and misreport
+		// the effective value.
+		t.Setenv("BEADS_DOLT_SERVER_USER", "")
+		t.Setenv("BD_DOLT_USER", "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+		userCfgPath, err := config.UserConfigYamlPath()
+		if err != nil {
+			t.Fatalf("UserConfigYamlPath: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(userCfgPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(userCfgPath, []byte("dolt.user: userlevel_loser\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+			[]byte("dolt.user: same_user\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// Capture stdout: the warning (like the success line) prints there.
+		oldStdout := os.Stdout
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Stdout = w
+		setDoltConfig("user", "same_user", false)
+		w.Close()
+		os.Stdout = oldStdout
+		var out bytes.Buffer
+		if _, err := io.Copy(&out, r); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), "outranks metadata.json") {
+			t.Errorf("unexpected shadow warning when the workspace yaml already holds the written value:\n%s", out.String())
+		}
+
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		loadedCfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		if got := loadedCfg.GetDoltServerUser(); got != "same_user" {
+			t.Errorf("effective user = %q, want same_user (workspace yaml outranks user-level)", got)
+		}
+	})
 }
 
 func TestDoltSetConfigJSONOutput(t *testing.T) {

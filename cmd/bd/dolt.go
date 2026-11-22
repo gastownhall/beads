@@ -2736,14 +2736,20 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 	// cannot see is the same defect moved one layer out (review F2).
 	shadowLayer, shadowValue := "", ""
 	if key == "user" && !updateConfig {
-		if v, present, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.user"); err == nil && present && v != "" && v != value {
-			shadowValue = v
-			// Merged local+project read: name local when it demonstrably
-			// carries the winner; when both layers hold the same value the
-			// merged view cannot tell which answered (review F3) — say so.
-			shadowLayer = "config.yaml and/or config.local.yaml"
-			if pv, projPresent := config.WorkspaceYamlValue(beadsDir, "dolt.user"); !projPresent || pv != v {
-				shadowLayer = "config.local.yaml"
+		// Precedence-aware: the user-level file is consulted ONLY when no
+		// workspace layer sets the key — if the workspace yaml holds the
+		// value being written, the write is a no-op against the winner and
+		// must not warn about a losing layer (review F2 false positive).
+		if wsVal, present, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "dolt.user"); err == nil && present && wsVal != "" {
+			if wsVal != value {
+				shadowValue = wsVal
+				// Merged local+project read: name local when it demonstrably
+				// carries the winner; when both layers hold the same value the
+				// merged view cannot tell which answered (review F3) — say so.
+				shadowLayer = "config.yaml and/or config.local.yaml"
+				if pv, projPresent := config.WorkspaceYamlValue(beadsDir, "dolt.user"); !projPresent || pv != wsVal {
+					shadowLayer = "config.local.yaml"
+				}
 			}
 		} else if uv := config.GetUserYamlConfig("dolt.user"); uv != "" && uv != value {
 			shadowValue = uv
