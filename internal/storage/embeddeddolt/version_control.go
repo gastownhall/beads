@@ -147,7 +147,10 @@ func commitAllInTx(ctx context.Context, tx *sql.Tx, message string, tolerateEmpt
 // stageAndCommitAfterSQLCommit preserves the no-replay boundary for version
 // publication after an already-visible SQL mutation.
 func stageAndCommitAfterSQLCommit(ctx context.Context, db versioncontrolops.DBConn, dirtyTables map[string]bool, commitMsg, author string) error {
-	if err := versioncontrolops.StageAndCommit(ctx, db, dirtyTables, commitMsg, author); err != nil {
+	// Embedded mode has no concurrent sessions to exclude (GH#8590), so its
+	// commit plane takes no lock: WithoutCommitLock makes StageAndCommit issue
+	// no GET_LOCK/RELEASE_LOCK.
+	if err := versioncontrolops.StageAndCommit(versioncontrolops.WithoutCommitLock(ctx), db, dirtyTables, commitMsg, author); err != nil {
 		return wrapCommitIndeterminate("embeddeddolt: stage and commit after SQL commit", err)
 	}
 	return nil

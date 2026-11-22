@@ -5,6 +5,7 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -27,6 +28,12 @@ const (
 	commitEmail = "beads@local"
 )
 
+// embeddedConnectorInterceptor is a test seam over every handle OpenSQL
+// hands out: each embedded transaction opens a fresh handle, so a pool-level
+// wrapper cannot observe a store's statements. Tests swap it to wrap the
+// connector with a recorder and restore it when done; the default is identity.
+var embeddedConnectorInterceptor = func(c driver.Connector) driver.Connector { return c }
+
 // OpenSQL opens an embedded Dolt database at dir. The returned cleanup
 // function closes both the *sql.DB and the underlying connector.
 func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
@@ -47,7 +54,10 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 		return nil, nil, err
 	}
 
-	db := sql.OpenDB(connector)
+	var wrapped driver.Connector = connector
+	wrapped = embeddedConnectorInterceptor(wrapped)
+
+	db := sql.OpenDB(wrapped)
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxIdleTime(0)
