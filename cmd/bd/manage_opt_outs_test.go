@@ -7,8 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/git"
+	storagefs "github.com/steveyegge/beads/internal/storage/fs"
+	storagegit "github.com/steveyegge/beads/internal/storage/git"
 	"github.com/stretchr/testify/require"
 )
 
@@ -322,4 +325,78 @@ func TestGitignoreManageFalseLeavesStealthCleanupAlone(t *testing.T) {
 	removed, err = removeBeadsProjectGitignoreSection(managed)
 	require.NoError(t, err)
 	require.True(t, removed, "with gitignore.manage unset the leaked section is still removed")
+}
+
+// TestHooksManageFalseDoctorRunReportsGitHooksNotManaged pins the bd doctor
+// run itself, not only the check it calls: the Git Hooks row of runDiagnostics
+// reads hooks.manage from the repository under diagnosis.
+func TestHooksManageFalseDoctorRunReportsGitHooksNotManaged(t *testing.T) {
+	clearManageEnvForTest(t)
+	gitHooksRow := func(t *testing.T, configYAML string) doctorCheck {
+		t.Helper()
+		// The user pre-commit hook carries no bd section, so a managed
+		// repository gets a warning for it.
+		repo, _, _ := manageHookRepo(t, configYAML)
+		var row *doctorCheck
+		runInDir(t, repo, func() {
+			result := runDiagnostics(repo)
+			for i := range result.Checks {
+				if result.Checks[i].Name == "Git Hooks" {
+					row = &result.Checks[i]
+				}
+			}
+		})
+		require.NotNil(t, row, "bd doctor reported no Git Hooks row")
+		return *row
+	}
+
+	off := gitHooksRow(t, manageHooksOff)
+	require.Equal(t, statusOK, off.Status, "Git Hooks under hooks.manage: false: %q", off.Message)
+	require.Contains(t, off.Message, "hooks.manage=false")
+	require.Empty(t, off.Fix, "a not-managed row must offer no fix")
+
+	unset := gitHooksRow(t, manageKeysUnset)
+	require.Equal(t, statusWarning, unset.Status, "Git Hooks with the key unset: %q", unset.Message)
+}
+
+// TestHooksManageFalseProxiedInitTailSkipsHooks pins the server-mode init
+// tail, which resolves and installs hooks on its own path: with hooks.manage
+// false in the storage it is initializing it prints the note and installs
+// nothing, and with the key unset it still installs.
+func TestHooksManageFalseProxiedInitTailSkipsHooks(t *testing.T) {
+	clearManageEnvForTest(t)
+	for _, tc := range []struct {
+		name, configYAML string
+		wantInstall      bool
+	}{
+		{"not managed", manageHooksOff, false},
+		{"key unset still installs", manageKeysUnset, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selected, _, storage, _ := newInitHooksFixture(t)
+			// An empty hooks directory: no bd hook is installed in the selected
+			// repository, so a managed tail has an install to do.
+			empty := t.TempDir()
+			initExcludeGit(t, selected, "config", "core.hooksPath", empty)
+			require.NoError(t, os.WriteFile(filepath.Join(storage, "config.yaml"), []byte(tc.configYAML), 0o600))
+
+			fs := storagefs.NewFileSystemProvider(selected, newBeadsDirTemplates(), newInitFileSystemAdapters(selected)).BeadsDirFSUseCase()
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("setup-exclude", true, "")
+			in := initProxiedServerInput{skipAgents: true, nonInteractive: true}
+			tail := runInitTailContext{workDir: selected, beadsDir: storage, remoteURL: "file:///unused-hooks-fixture-remote", fsUseCase: fs, gitUC: storagegit.NewGitProvider(selected).GitUseCase()}
+			out := captureStdout(t, func() error { return runInitProxiedServerTail(cmd, t.Context(), in, tail) })
+
+			installed := filepath.Join(storage, "hooks", "pre-commit")
+			if tc.wantInstall {
+				require.NotContains(t, out, hooksNotManagedNote)
+				require.Contains(t, string(readInitHooksFile(t, installed)), hookSectionBeginPrefix)
+				return
+			}
+			require.Contains(t, out, hooksNotManagedNote)
+			_, err := os.Stat(installed)
+			require.ErrorIs(t, err, os.ErrNotExist, "the tail installed hooks under hooks.manage: false")
+			require.Equal(t, empty, initExcludeGit(t, selected, "config", "--local", "--get", "core.hooksPath"), "core.hooksPath changed")
+		})
+	}
 }
