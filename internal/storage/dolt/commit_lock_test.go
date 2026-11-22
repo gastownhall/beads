@@ -397,3 +397,31 @@ func TestCommitLockSkippedWhenNothingPending(t *testing.T) {
 		t.Fatalf("commit_lock_timeouts = %d, want 0: the no-op write issued GET_LOCK", n)
 	}
 }
+
+// TestCommitLockScopedPerDatabase covers AC-6: a lock held for another
+// database on the same server does not delay this store's commit.
+func TestCommitLockScopedPerDatabase(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	commitLockTestIssue(t, ctx, store, "test-db1")
+	h := newCommitLockHolder(t, ctx, store)
+	other := versioncontrolops.CommitLockName("other_db")
+	h.hold(ctx, other)
+	defer h.release(ctx, other)
+
+	const msg = "commit-lock other db"
+	start := time.Now()
+	if err := store.RunInTransaction(ctx, msg, func(tx storage.Transaction) error {
+		return tx.UpdateIssue(ctx, "test-db1", map[string]interface{}{"title": "other db"}, "tester")
+	}); err != nil {
+		t.Fatalf("RunInTransaction: %v", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("commit took %s while only %q was held, want no wait", took, other)
+	}
+	if !h.logHas(ctx, msg) {
+		t.Fatalf("dolt_log has no commit %q", msg)
+	}
+}

@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -136,5 +137,38 @@ func TestCommitLockSkippedWhenNothingPendingUnit(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("statement sequence: %v", err)
+	}
+}
+
+// TestCommitLockName pins the lock key, a cross-version contract: bd
+// processes of different versions on one server serialize only if they
+// compute the same string, so these goldens must never change silently.
+func TestCommitLockName(t *testing.T) {
+	long := strings.Repeat("a", 64)
+	cases := []struct {
+		database string
+		want     string
+	}{
+		{"beads", "bd_commit:beads"},
+		{"Beads_Prod", "bd_commit:beads_prod"},
+		{"beads/feature-x", "bd_commit:beads"},
+		{"BEADS/Main", "bd_commit:beads"},
+		{long, "bd_commit:db007849f35ebbe5"},
+		{"Beads_" + strings.Repeat("x", 60) + "/branch", "bd_commit:5acf4ad27539d0a7"},
+	}
+	for _, tc := range cases {
+		got := CommitLockName(tc.database)
+		if got != tc.want {
+			t.Errorf("CommitLockName(%q) = %q, want %q", tc.database, got, tc.want)
+		}
+		if len(got) > commitLockNameMaxLength {
+			t.Errorf("CommitLockName(%q) is %d bytes, over the %d-byte GET_LOCK limit", tc.database, len(got), commitLockNameMaxLength)
+		}
+		if again := CommitLockName(tc.database); again != got {
+			t.Errorf("CommitLockName(%q) not deterministic: %q then %q", tc.database, got, again)
+		}
+	}
+	if CommitLockName("beads") == CommitLockName("other_db") {
+		t.Errorf("distinct databases share a commit lock name")
 	}
 }
