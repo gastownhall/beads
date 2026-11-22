@@ -182,6 +182,7 @@ go_test(
         "commit_lock_planes_test.go",
         "commit_lock_release_test.go",
         "commit_lock_noop_test.go",
+        "commit_lock_perdb_test.go",
         "commit_lock_test.go",
         "commit_lock_test_helpers_test.go",
         "compact_test.go",
