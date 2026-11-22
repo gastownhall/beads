@@ -91,6 +91,20 @@ func (t *DirtyTableTracker) MarkVersionedHistoryDirty(enabled bool) {
 // including the tolerated "nothing to commit", must not leave its result sets
 // unread on it (GH#5556).
 //
+// Server-mode concurrency (GH#8590, dolthub/dolt#12258): Dolt merges a branch
+// HEAD that moved between a writer's BEGIN and its DOLT_COMMIT into the staged
+// root and commits the result unexamined, so two bd processes sharing a
+// dolt sql-server can commit Dolt conflict artifacts into otherwise-identical
+// rows. StageAndCommit therefore holds the per-database commit lock
+// (CommitLockName, GET_LOCK on this conn's session) across the DOLT_ADD/DOLT_COMMIT
+// pair, taken after the pending fast path below so a no-op write pays no lock
+// round trips, released on every return path. The lock comes from the context:
+// a server-mode store threads its database and wait via WithCommitLock;
+// WithoutCommitLock (the embedded store's planes) skips it with no statements;
+// any other caller still gets it, discovering the database on the session. If
+// the lock is not obtained within the wait, the commit proceeds unlocked
+// exactly as it did before the lock existed.
+//
 // An empty author omits --author entirely, leaving attribution to the connected
 // session. That is not a fallback for a missing identity but the proxied-server
 // plane's normal discipline: its every other commit (uow.Tx.Commit) is
@@ -122,6 +136,15 @@ func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 	if !pending {
 		return nil
 	}
+
+	// Serializing lock (GH#8590): from here on the pair mutates Dolt's staging
+	// state, so it runs inside the per-database commit lock's critical
+	// section, released on every return path below.
+	release, err := holdStageAndCommitLock(ctx, conn)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	for table := range dirtyTables {
 		if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {

@@ -65,6 +65,9 @@ func TestStageAndCommitCommitsWhenPending(t *testing.T) {
 	// dolt_status reports a committable change — a real write.
 	mock.ExpectQuery(matchPendingQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	// The serializing commit lock (GH#8590) is taken once the fast path has
+	// passed, on the same session, and released after the DOLT_COMMIT.
+	mock.ExpectQuery(`GET_LOCK`).WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	// The real path must stage the dirty table...
 	mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).
 		WithArgs("metadata").
@@ -76,6 +79,7 @@ func TestStageAndCommitCommitsWhenPending(t *testing.T) {
 	mock.ExpectQuery(`CALL DOLT_COMMIT`).
 		WithArgs("real change", "tester").
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+	mock.ExpectQuery(`RELEASE_LOCK`).WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
 
 	err = StageAndCommit(context.Background(), db, map[string]bool{"metadata": true}, "real change", "tester")
 	if err != nil {
@@ -106,6 +110,8 @@ func TestStageAndCommitSkipsWhenOnlyUnrelatedTableDirty(t *testing.T) {
 	// Global status: something IS pending (an unrelated table like config).
 	mock.ExpectQuery(matchPendingQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	// The commit lock (GH#8590) is held across the add/skip, then released.
+	mock.ExpectQuery(`GET_LOCK`).WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	// We stage only the dirty-tracked table ("labels"), which is clean here.
 	mock.ExpectQuery(`CALL DOLT_ADD\(\?\)`).
 		WithArgs("labels").
@@ -114,6 +120,7 @@ func TestStageAndCommitSkipsWhenOnlyUnrelatedTableDirty(t *testing.T) {
 	// DOLT_COMMIT: if StageAndCommit issues it, sqlmock fails with "not expected".
 	mock.ExpectQuery(matchStagedQuery.String()).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`RELEASE_LOCK`).WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
 
 	err = StageAndCommit(context.Background(), db, map[string]bool{"labels": true}, "idempotent label add", "tester")
 	if err != nil {

@@ -178,6 +178,8 @@ go_test(
         "commit_all_test.go",
         "commit_config_test.go",
         "commit_dirty_wisp_test.go",
+        "commit_lock_test.go",
+        "commit_lock_test_helpers_test.go",
         "compact_test.go",
         "concurrent_test.go",
         "conflicts_integration_test.go",

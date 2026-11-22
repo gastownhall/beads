@@ -398,6 +398,13 @@ type DoltStore struct {
 	// createdDatabase reports whether this store's open created its database
 	// (serverConnFacts.created); see CreatedDatabase.
 	createdDatabase bool
+
+	// commitLockWait bounds how long this store's commit planes wait to
+	// acquire the per-database commit lock (GH#8590) before proceeding
+	// unlocked (fail-open). An unexported field, not a package var, so
+	// skew-tolerant tests can tighten one store's wait without racing every
+	// other parallel test's commits on the shared default.
+	commitLockWait time.Duration
 }
 
 // Config holds Dolt database configuration
@@ -624,6 +631,12 @@ const (
 	// unchanged (bd-vz0y9).
 	defaultPoolReadTimeout  = 10 * time.Second
 	defaultPoolWriteTimeout = 10 * time.Second
+	// defaultCommitLockWait bounds a commit's wait for the per-database
+	// commit lock (GH#8590) before it fails open, committing unlocked. It is
+	// the same order as schema's migration lock wait: long enough to queue
+	// behind another writer's ordinary commit, short enough that a wedged
+	// holder degrades serialization without wedging bd itself.
+	defaultCommitLockWait = 5 * time.Second
 )
 
 // cliExecTimeout is the default maximum time to wait for dolt CLI
@@ -2540,6 +2553,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		classifiedRead:         cfg.ClassifiedRead,
 		autoStartedServerDir:   autoStartedDir,
 		createdDatabase:        dbFacts.created,
+		commitLockWait:         defaultCommitLockWait,
 	}
 
 	// Forward-drift guard runs on read-only AND writable opens. A binary older

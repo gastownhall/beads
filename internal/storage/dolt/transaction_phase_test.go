@@ -65,8 +65,10 @@ func TestRunInTransactionStageFailureAfterRegularCommitIsIndeterminateAndNotRepl
 	regularMock.ExpectCommit()
 	regularMock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM dolt_status s").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	expectCommitLockGrant(regularMock)
 	regularMock.ExpectQuery("CALL DOLT_ADD\\(\\?\\)").WithArgs("issues").
 		WillReturnError(errors.New("invalid connection"))
+	expectCommitLockRelease(regularMock)
 	ignoredMock.ExpectRollback()
 
 	callbackCalls := 0

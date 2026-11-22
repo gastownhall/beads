@@ -36,8 +36,10 @@ func TestFinishDoltTransactionRecordingKeepsRecheckWhenDoltCommitFails(t *testin
 	regularMock.ExpectCommit()
 	regularMock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM dolt_status s").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	expectCommitLockGrant(regularMock)
 	regularMock.ExpectQuery("CALL DOLT_ADD\\(\\?\\)").WithArgs("issues").
 		WillReturnError(errors.New("invalid connection"))
+	expectCommitLockRelease(regularMock)
 	ignoredMock.ExpectRollback()
 
 	pending, err := store.finishDoltTransactionRecording(context.Background(), conn, tx, "test: dolt commit fails")

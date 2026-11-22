@@ -383,7 +383,7 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 	// commit. Marked here, once, rather than at each MarkDirty call site.
 	tx.dirty.MarkVersionedHistoryDirty(s.versionedHistory.Enabled())
 
-	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
+	if err := versioncontrolops.StageAndCommit(versioncontrolops.WithCommitLock(ctx, s.database, s.commitLockWait), conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
 		rollbackIgnored()
 		return fmt.Errorf("stage and commit after regular SQL commit: %w: %w", err, ErrCommitIndeterminate)
 	}
@@ -405,7 +405,11 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 // failure is counted and logged like the other post-commit history commits,
 // never returned: the rows ride the next Dolt commit on the branch.
 func (s *DoltStore) publishIgnoredDirty(ctx context.Context, conn *sql.Conn, tx *doltTransaction, commitMsg string) {
-	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.ignoredDirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
+	// A critical section of its own (not shared with the add+commit pair it
+	// follows): the ignored session's rows have already committed durably, and
+	// its commit need not exclude the regular plane's OWN pair — only other
+	// writers' moves of HEAD.
+	if err := versioncontrolops.StageAndCommit(versioncontrolops.WithCommitLock(ctx, s.database, s.commitLockWait), conn, tx.ignoredDirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
 		doltMetrics.postTxCommitDropped.Add(ctx, 1)
 		log.Printf("dolt: post-tx dolt commit failed for %q (data already committed; change rides the next dolt commit): %v", commitMsg, err)
 	}

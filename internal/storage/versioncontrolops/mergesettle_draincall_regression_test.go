@@ -211,9 +211,11 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 	t.Run("stage_and_commit_unauthored", func(t *testing.T) {
 		rec, mock := newDrainMock(t)
 		expectPendingChanges(mock)
+		expectCommitLock(mock)
 		expectDrainedCall(mock, "CALL DOLT_ADD(?)", "issues")
 		expectStagedChanges(mock)
 		expectDrainedCall(mock, "CALL DOLT_COMMIT('-m', ?)", "bd: write")
+		expectCommitLockRelease(mock)
 
 		if err := StageAndCommit(context.Background(), rec, map[string]bool{"issues": true}, "bd: write", ""); err != nil {
 			t.Fatalf("StageAndCommit: %v", err)
@@ -450,10 +452,14 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 				name: "StageAndCommit DOLT_COMMIT nothing to commit",
 				setup: func(mock sqlmock.Sqlmock, _ error) {
 					expectPendingChanges(mock)
+					expectCommitLock(mock)
 					expectDrainedCall(mock, "CALL DOLT_ADD(?)", "issues")
 					expectStagedChanges(mock)
 					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 						WithArgs("bd: write", testAuthor).WillReturnError(nothingToCommit)
+					// The tolerated "nothing to commit" still releases the
+					// commit lock on its way out (GH#8590).
+					expectCommitLockRelease(mock)
 				},
 				run: func(db DBConn) error {
 					return StageAndCommit(ctx, db, map[string]bool{"issues": true}, "bd: write", testAuthor)
@@ -800,6 +806,19 @@ func expectPendingChanges(mock sqlmock.Sqlmock) {
 func expectStagedChanges(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+}
+
+// expectCommitLock answers StageAndCommit's serializing GET_LOCK (GH#8590)
+// with a granted lock; expectCommitLockRelease answers the matching
+// RELEASE_LOCK with a confirmed release.
+func expectCommitLock(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+}
+
+func expectCommitLockRelease(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
 }
 
 // expectMergeSourceCommit answers stageMergeResult's read of the open merge's

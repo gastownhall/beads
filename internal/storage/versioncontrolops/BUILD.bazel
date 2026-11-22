@@ -10,6 +10,7 @@ go_library(
         "branches.go",
         "clone.go",
         "commit.go",
+        "commit_lock.go",
         "compact.go",
         "conflicts.go",
         "db.go",
@@ -32,6 +33,8 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/schema",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel_metric//:metric",
     ],
 )
 
@@ -42,6 +45,7 @@ go_test(
         "backup_test.go",
         "clone_test.go",
         "commit_empty_test.go",
+        "commit_lock_test.go",
         "compact_softreset_dolt_test.go",
         "compact_test.go",
         "compact_verify_test.go",
