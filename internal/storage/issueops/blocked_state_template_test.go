@@ -28,6 +28,20 @@ import (
 // and why the ? group below exists.
 const batchTemplateOccurrences = 6
 
+// unmarkTemplateOccurrences is batchTemplateOccurrences plus the one leg only
+// an unmark carries: the batch's rows holding a dependency on a wisp that is
+// not in this database, which the unmark must leave as found
+// (keepBlockedIDsSQL).
+const unmarkTemplateOccurrences = batchTemplateOccurrences + 1
+
+// templateOccurrences is the %s budget of one of batchedTemplates' entries.
+func templateOccurrences(name string) int {
+	if strings.HasPrefix(name, "unmark") {
+		return unmarkTemplateOccurrences
+	}
+	return batchTemplateOccurrences
+}
+
 // explainedFixture is a non-empty exogeneity set of each kind, so the bound-?
 // plumbing is exercised rather than degenerating to the empty case.
 func explainedFixture() subtreeExplainedParents {
@@ -49,13 +63,14 @@ func batchedTemplates(explained subtreeExplainedParents) map[string]string {
 func TestBatchedTemplatePercentBudget(t *testing.T) {
 	for name, tmpl := range batchedTemplates(explainedFixture()) {
 		t.Run(name, func(t *testing.T) {
-			if got := strings.Count(tmpl, "%s"); got != batchTemplateOccurrences {
-				t.Errorf("%%s count = %d, want %d — expandBatchTemplate binds one batch id group per occurrence, so a changed count must be a deliberate edit here", got, batchTemplateOccurrences)
+			want := templateOccurrences(name)
+			if got := strings.Count(tmpl, "%s"); got != want {
+				t.Errorf("%%s count = %d, want %d — expandBatchTemplate binds one batch id group per occurrence, so a changed count must be a deliberate edit here", got, want)
 			}
 			// The stray-percent guard: every percent sign in the finished
 			// template must belong to one of the %s verbs counted above.
-			if got := strings.Count(tmpl, "%"); got != batchTemplateOccurrences {
-				t.Errorf("total %% count = %d, want %d — a percent sign outside a %%s (LIKE 'x%%', %%d, %%%%) miscounts the template or corrupts the statement", got, batchTemplateOccurrences)
+			if got := strings.Count(tmpl, "%"); got != want {
+				t.Errorf("total %% count = %d, want %d — a percent sign outside a %%s (LIKE 'x%%', %%d, %%%%) miscounts the template or corrupts the statement", got, want)
 			}
 		})
 	}
@@ -98,10 +113,11 @@ func TestExpandBatchTemplateFillsEveryOccurrence(t *testing.T) {
 	placeholders, args := buildSQLInClause([]string{"issue-1", "issue-2"})
 	explained := explainedFixture()
 	bound := explained.args()
-	wantArgs := batchTemplateOccurrences*len(args) + len(bound)
 
 	for name, tmpl := range batchedTemplates(explained) {
 		t.Run(name, func(t *testing.T) {
+			occurrences := templateOccurrences(name)
+			wantArgs := occurrences*len(args) + len(bound)
 			stmt, stmtArgs, err := expandBatchTemplate(tmpl, placeholders, args, bound)
 			if err != nil {
 				t.Fatalf("expandBatchTemplate: %v", err)
@@ -118,9 +134,11 @@ func TestExpandBatchTemplateFillsEveryOccurrence(t *testing.T) {
 			}
 			// TEXT ORDER: the batch group for the outer filter and legs 1-2,
 			// then leg 3's batch group followed by the issue parents, then leg
-			// 4's batch group followed by the wisp parents, then leg 5's.
+			// 4's batch group followed by the wisp parents, then leg 5's, and
+			// in an unmark the dangling-wisp-edge leg's, which binds no ids of
+			// its own.
 			var want []interface{}
-			for k := 0; k < batchTemplateOccurrences; k++ {
+			for k := 0; k < occurrences; k++ {
 				want = append(want, args...)
 				if k == 3 {
 					want = append(want, "parent-1", "parent-2")

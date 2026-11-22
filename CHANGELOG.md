@@ -1475,6 +1475,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A clone no longer clears `is_blocked` on issues that are blocked by a
+  wisp it does not have.** Dependencies replicate and wisps do not, so a clone
+  holds the edge without the wisp. The recompute read the missing wisp as a
+  closed blocker, cleared the flag, and committed that to the versioned
+  `issues` table, where it replicated back and the two databases traded the
+  same rows on every sync. `bd recompute-blocked`, `bd doctor --fix` and the
+  recompute that follows a pull now leave such a row's flag as the last merge
+  set it. A blocker the clone can see still marks the row, and a closed row
+  is still cleared. `bd doctor` reports how many rows it left alone on its
+  Blocked State line.
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so

@@ -367,6 +367,10 @@ func markAllBlockedSQL(table, alias, depTable string, explained subtreeExplained
 // is why every leg of the union carries an explicit
 // d.issue_id IS NOT NULL guard.
 //
+// The set it subtracts is the union widened by the rows this database cannot
+// decide (keepBlockedIDsSQL): a row holding a dependency on a wisp that is not
+// here keeps the flag it has.
+//
 //nolint:gosec // G201: table, alias, and depTable are constants from the only two callers.
 func unmarkAllBlockedSQL(table, alias, depTable string, explained subtreeExplainedParents) string {
 	return fmt.Sprintf(`
@@ -374,7 +378,71 @@ func unmarkAllBlockedSQL(table, alias, depTable string, explained subtreeExplain
 		WHERE %[2]s.is_blocked = 1
 		  AND ( %[2]s.status = 'closed' OR %[2]s.status = 'pinned'
 		        OR %[2]s.id NOT IN (%[3]s) )
-	`, table, alias, shouldBeBlockedIDsUnionPrecomputedSQL(depTable, explained))
+	`, table, alias,
+		keepBlockedIDsSQL(shouldBeBlockedIDsUnionPrecomputedSQL(depTable, explained), depTable, ""))
+}
+
+// danglingWispEdgeSQL is the row-level spelling of "this dependency row names
+// a wisp this database has no row for", for a dependency row aliased rowAlias,
+// over the four edge types the should-be-blocked union reads a wisp for:
+// blocks and conditional-blocks (leg 2), parent-child (leg 4) and waits-for
+// (leg 5, the spawner).
+//
+// WHY SUCH A ROW EXISTS. dependencies is a versioned table and
+// depends_on_wisp_id replicates with it, but wisps and wisp_% are dolt_ignored
+// and stay on the database that minted them. A clone or a pull therefore
+// carries the edge and not the wisp. On the minting database the edge does not
+// outlive the wisp (deleting a wisp deletes its edges in the same transaction,
+// DeleteWispFromDependenciesInTx), so there a dangling edge means a delete
+// that went around that path.
+//
+// WHAT IT MEANS. An inner join to wisps drops the row, which reads "this
+// blocker is satisfied". That is a guess: the wisp may be open on the database
+// that has it. issues.is_blocked is versioned, so a recompute that writes the
+// guess replicates it, the minting database writes the true flag back, and the
+// two trade the same rows through every merge. The row is UNKNOWN here, and
+// the two callers treat it so: the unmark statements leave its holder's flag
+// as found (keepBlockedIDsSQL), and the exogeneity walk counts it as a reason
+// (blockingReasonSQL).
+//
+//nolint:gosec // G201: rowAlias is a constant from the two callers.
+func danglingWispEdgeSQL(rowAlias string) string {
+	return fmt.Sprintf(`( %[1]s.depends_on_wisp_id IS NOT NULL
+		      AND (%[1]s.type = 'blocks' OR %[1]s.type = 'conditional-blocks'
+		           OR %[1]s.type = 'parent-child' OR %[1]s.type = 'waits-for')
+		      AND NOT EXISTS (SELECT 1 FROM wisps dw WHERE dw.id = %[1]s.depends_on_wisp_id) )`,
+		rowAlias)
+}
+
+// danglingWispEdgeIssuesSQL selects every depTable issue_id that holds a
+// dangling wisp edge (danglingWispEdgeSQL). scope is the same per-leg predicate
+// the union takes: "" for the whole table, batchScopeSQL for a batch. It
+// carries the union legs' d.issue_id IS NOT NULL guard because it is read
+// through the same NOT IN.
+//
+//nolint:gosec // G201: depTable and scope are constants from the callers.
+func danglingWispEdgeIssuesSQL(depTable, scope string) string {
+	return fmt.Sprintf(`
+		SELECT d.issue_id FROM %[1]s d
+		WHERE d.issue_id IS NOT NULL %[2]s
+		  AND %[3]s
+	`, depTable, scope, danglingWispEdgeSQL("d"))
+}
+
+// keepBlockedIDsSQL is the set an UNMARK may not clear: the should-be-blocked
+// union it is handed, plus every row holding a dangling wisp edge.
+//
+// Only the unmark side takes it. The mark statements keep the plain union,
+// because an open blocker this database can see is evidence whatever else the
+// row holds: a row with one open blocker and one dangling edge is still marked.
+// So a holder's flag moves 0 to 1 on evidence and never 1 to 0 on a guess, and
+// with no evidence either way it stays as the last merge left it, which is the
+// minting database's answer.
+//
+// The doctor count subtracts the same set (countStaleIsBlockedSQL), so a row
+// the repair leaves alone is not a row the check reports as stale.
+func keepBlockedIDsSQL(union, depTable, scope string) string {
+	return union + " UNION " + danglingWispEdgeIssuesSQL(depTable, scope)
 }
 
 // subtreeExplainedParents is one read of parentsExplainedBySubtreeSQL, pruned
@@ -1212,9 +1280,9 @@ const subtreeWalkDepth = 4
 //     predicate is paid: once per candidate parent row, not once per
 //     parent-child edge in the leg.
 //
-// blockingReasonSQL mirrors union legs 1, 2 and 5 row by row; keep the three
-// in step or the "solely explained by its own subtree" reading silently
-// drifts.
+// blockingReasonSQL mirrors union legs 1, 2 and 5 row by row, and adds the
+// dangling wisp edge; keep them in step or the "solely explained by its own
+// subtree" reading silently drifts.
 //
 // parentTable/parentDepTable/parentCol describe the PARENT's kind (issues +
 // dependencies, or wisps + wisp_dependencies); cands name the tables the
@@ -1307,6 +1375,17 @@ func parentsExplainedBySubtreeCoreSQL(parentTable, parentDepTable, cand string) 
 // (an open blocks/conditional-blocks target, issue or wisp) and leg 5 (a
 // blocking waits-for gate), for a dependency row aliased rowAlias.
 //
+// A dangling wisp edge (danglingWispEdgeSQL) counts as a reason too, and an
+// exogenous one. Both callers ask about a parent whose bit is 1, and this
+// database cannot say the absent wisp is not what holds it: the walk finds no
+// ancestry for a wisp that is not here, so the row can never read as inside
+// the parent's own subtree, and the parent is neither explained nor
+// transparent. Its children therefore stay dark while its bit is 1. That is
+// exact when the dangling edge is the parent's only possible reason (the bit
+// came from the database that has the wisp), and it errs toward blocked in the
+// one case left: a parent that also blocks on its own subtree, whose wisp is
+// closed on the minting database and not yet deleted there.
+//
 // It is a per-ROW predicate, but both callers evaluate it in a set, over a
 // bounded list of parents' rows: parentsExplainedBySubtreeSQL's aggregate,
 // over the reason rows of the parents that statement can be asked about, once,
@@ -1324,8 +1403,9 @@ func blockingReasonSQL(rowAlias string) string {
 		               OR EXISTS (SELECT 1 FROM wisps bt
 		                          WHERE bt.id = %[1]s.depends_on_wisp_id
 		                            AND bt.status <> 'closed' AND bt.status <> 'pinned') ) )
-		          OR ( %[1]s.type = 'waits-for' AND (%[2]s) ) )
-	`, rowAlias, waitsForGateBlockedSQLFor(rowAlias))
+		          OR ( %[1]s.type = 'waits-for' AND (%[2]s) )
+		          OR %[3]s )
+	`, rowAlias, waitsForGateBlockedSQLFor(rowAlias), danglingWispEdgeSQL(rowAlias))
 }
 
 // CountIsBlockedInconsistenciesInTx reports how many issue and wisp rows carry a
@@ -1377,6 +1457,10 @@ func CountIsBlockedInconsistenciesInTx(ctx context.Context, tx DBTX) (int64, err
 //     (closed/pinned, or its id absent from the should-be-blocked union — the
 //     set-membership form of De Morgan over the shouldBeBlocked disjunction).
 //
+// The unmark branch subtracts the same widened set the unmark statements do
+// (keepBlockedIDsSQL): a row holding a dangling wisp edge is one the repair
+// leaves alone, so it is not one this counts.
+//
 // is_blocked is 0 or 1, so the branches are mutually exclusive and the count is
 // their sum. Built on the uncorrelated union for the same
 // reason as the full repair (bd-t9ypt): the correlated disjunction form ran per
@@ -1395,8 +1479,56 @@ func countStaleIsBlockedSQL(table, alias, depTable string, explained subtreeExpl
 		  OR
 		  ( %[2]s.is_blocked = 1
 		    AND ( %[2]s.status = 'closed' OR %[2]s.status = 'pinned'
-		          OR %[2]s.id NOT IN (%[3]s) ) )
-	`, table, alias, union)
+		          OR %[2]s.id NOT IN (%[4]s) ) )
+	`, table, alias, union, keepBlockedIDsSQL(union, depTable, ""))
+}
+
+// CountIsBlockedUndecidedInTx reports how many open issue and wisp rows hold a
+// dependency on a wisp this database has no row for (danglingWispEdgeSQL) and
+// have no blocker it can see: the rows whose is_blocked the recompute leaves
+// as found, because neither value can be derived here. It is the read behind
+// the second half of the bd doctor "Blocked State" line.
+//
+// Zero on a database that holds every wisp its edges name. Nonzero is the
+// ordinary state of a clone of a database that blocks issues on wisps, and on
+// the database that mints the wisps it names edges left behind by a delete
+// that bypassed the wisp-delete cascade.
+func CountIsBlockedUndecidedInTx(ctx context.Context, tx DBTX) (int64, error) {
+	explained, err := subtreeExplainedParentsInTx(ctx, tx)
+	if err != nil {
+		return 0, fmt.Errorf("count undecided is_blocked issues: %w", err)
+	}
+	var total int64
+	n, err := countRows(ctx, tx, countUndecidedIsBlockedSQL("issues", "i", "dependencies", explained), explained.args()...)
+	if err != nil {
+		return 0, fmt.Errorf("count undecided is_blocked issues: %w", err)
+	}
+	total += n
+
+	n, err = countRows(ctx, tx, countUndecidedIsBlockedSQL("wisps", "w", "wisp_dependencies", explained), explained.args()...)
+	if err != nil {
+		if isTableNotExistError(err) {
+			return total, nil
+		}
+		return 0, fmt.Errorf("count undecided is_blocked wisps: %w", err)
+	}
+	total += n
+	return total, nil
+}
+
+// countUndecidedIsBlockedSQL counts one table's rows for
+// CountIsBlockedUndecidedInTx. The dangling set comes first so the union's
+// bound ids are the statement's only placeholders, in the union's own order.
+//
+//nolint:gosec // G201: table, alias, and depTable are constants from the only two callers.
+func countUndecidedIsBlockedSQL(table, alias, depTable string, explained subtreeExplainedParents) string {
+	return fmt.Sprintf(`
+		SELECT COUNT(*) FROM %[1]s %[2]s
+		WHERE %[2]s.status <> 'closed' AND %[2]s.status <> 'pinned'
+		  AND %[2]s.id IN (%[3]s)
+		  AND %[2]s.id NOT IN (%[4]s)
+	`, table, alias, danglingWispEdgeIssuesSQL(depTable, ""),
+		shouldBeBlockedIDsUnionPrecomputedSQL(depTable, explained))
 }
 
 // countRows runs a single COUNT(*) query and returns the scalar.

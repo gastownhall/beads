@@ -60,18 +60,45 @@ func checkBlockedConsistencyDB(ctx context.Context, db *sql.DB) DoctorCheck {
 			Detail:  err.Error(),
 		}
 	}
+	// Rows the recompute cannot decide are reported beside the verdict and do
+	// not change it: they are not stale, and --fix leaves them as found. A
+	// failed read of them is not a reason to hide the stale count.
+	undecided, err := issueops.CountIsBlockedUndecidedInTx(ctx, db)
+	if err != nil {
+		undecided = 0
+	}
 	if stale == 0 {
-		return DoctorCheck{
+		check := DoctorCheck{
 			Name:    BlockedConsistencyCheckName,
 			Status:  StatusOK,
 			Message: "is_blocked flags consistent with dependency graph",
 		}
+		if undecided > 0 {
+			check.Message += fmt.Sprintf(" (%s)", undecidedBlockedNote(undecided))
+			check.Detail = undecidedBlockedDetail
+		}
+		return check
 	}
-	return DoctorCheck{
+	check := DoctorCheck{
 		Name:    BlockedConsistencyCheckName,
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d issue/wisp row(s) have a stale is_blocked flag — 'bd ready' may hide ready work or show blocked work", stale),
 		Detail:  "is_blocked is derived from the dependency graph; a skipped post-pull recompute can leave it stale",
 		Fix:     "Run: bd doctor --fix (or 'bd recompute-blocked', which also works in embedded mode)",
 	}
+	if undecided > 0 {
+		check.Detail += "; " + undecidedBlockedNote(undecided) + ". " + undecidedBlockedDetail
+	}
+	return check
 }
+
+// undecidedBlockedNote is the count half of the Blocked State line for rows
+// that depend on a wisp this database has no row for.
+func undecidedBlockedNote(n int64) string {
+	return fmt.Sprintf("%d row(s) depend on a wisp this database does not have; is_blocked left as found", n)
+}
+
+// undecidedBlockedDetail says why such a row is not a finding on a clone, and
+// when it is one.
+const undecidedBlockedDetail = "Wisps are local to the database that created them, so a clone has the dependency and not the wisp, and keeps the flag it last merged. " +
+	"On the database that created the wisp this names a dependency left behind by a delete that bypassed bd"

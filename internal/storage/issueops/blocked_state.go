@@ -353,7 +353,8 @@ func markIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) 
 // the number of bound ids is a property of the batch.
 //
 // The batch IN-list therefore appears more than once per statement — the
-// outer row filter and one per union leg (six occurrences today) — and the
+// outer row filter and one per union leg (six occurrences in a mark, and a
+// seventh in an unmark for its dangling-wisp-edge leg) — and the
 // exogeneity ids appear as already-rendered ? placeholders inside two of those
 // legs. expandBatchTemplate binds both groups in TEXT order.
 
@@ -412,6 +413,12 @@ func markBlockedTemplate(spec blockedTableSpec, explained subtreeExplainedParent
 // batch-scoped analog of unmarkAllBlockedSQL. NOT IN is null-hostile; the
 // union's d.issue_id IS NOT NULL guards keep it total.
 //
+// Like the unbatched form it subtracts the union widened by the batch's rows
+// that hold a dangling wisp edge (keepBlockedIDsSQL), which is one more batch
+// IN-list than the mark template carries. This is the statement the post-pull
+// recompute runs, so it is where a clone without the wisps would otherwise
+// clear the flags it has just merged.
+//
 //nolint:gosec // G201: the spec's fields are constants from the four callers above.
 func unmarkBlockedTemplate(spec blockedTableSpec, explained subtreeExplainedParents) string {
 	return fmt.Sprintf(`
@@ -421,7 +428,9 @@ func unmarkBlockedTemplate(spec blockedTableSpec, explained subtreeExplainedPare
 		  AND ( %[2]s.status = 'closed' OR %[2]s.status = 'pinned'
 		        OR %[2]s.id NOT IN (%[3]s) )
 	`, spec.table, spec.alias,
-		shouldBeBlockedIDsUnionScopedPrecomputedSQL(spec.depTable, batchScopeSQL, explained))
+		keepBlockedIDsSQL(
+			shouldBeBlockedIDsUnionScopedPrecomputedSQL(spec.depTable, batchScopeSQL, explained),
+			spec.depTable, batchScopeSQL))
 }
 
 // expandBatchTemplate finishes a batched template: every %s takes the batch's
