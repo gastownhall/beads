@@ -1493,7 +1493,24 @@ func countStaleIsBlockedSQL(table, alias, depTable string, explained subtreeExpl
 // ordinary state of a clone of a database that blocks issues on wisps, and on
 // the database that mints the wisps it names edges left behind by a delete
 // that bypassed the wisp-delete cascade.
+//
+// It asks first whether any dangling edge exists at all, one probe per
+// dependency table that stops at the first hit. The full repair calls this
+// after its last pass (versioncontrolops.GuardedRecomputeAllBlockedInTx), and
+// a database that holds every wisp its edges name, which is every database
+// that mints its own, then pays two probes and not a third exogeneity read.
 func CountIsBlockedUndecidedInTx(ctx context.Context, tx DBTX) (int64, error) {
+	issueEdges, err := hasDanglingWispEdgeInTx(ctx, tx, "dependencies")
+	if err != nil {
+		return 0, fmt.Errorf("count undecided is_blocked issues: %w", err)
+	}
+	wispEdges, err := hasDanglingWispEdgeInTx(ctx, tx, "wisp_dependencies")
+	if err != nil && !isTableNotExistError(err) {
+		return 0, fmt.Errorf("count undecided is_blocked wisps: %w", err)
+	}
+	if !issueEdges && !wispEdges {
+		return 0, nil
+	}
 	explained, err := subtreeExplainedParentsInTx(ctx, tx)
 	if err != nil {
 		return 0, fmt.Errorf("count undecided is_blocked issues: %w", err)
@@ -1529,6 +1546,26 @@ func countUndecidedIsBlockedSQL(table, alias, depTable string, explained subtree
 		  AND %[2]s.id NOT IN (%[4]s)
 	`, table, alias, danglingWispEdgeIssuesSQL(depTable, ""),
 		shouldBeBlockedIDsUnionPrecomputedSQL(depTable, explained))
+}
+
+// hasDanglingWispEdgeInTx reports whether depTable holds at least one dangling
+// wisp edge (danglingWispEdgeSQL) on a row with a holder. It is the same
+// predicate danglingWispEdgeIssuesSQL selects by, cut off at the first row.
+//
+//nolint:gosec // G201: depTable is a constant from the one caller.
+func hasDanglingWispEdgeInTx(ctx context.Context, tx DBTX, depTable string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT 1 FROM %[1]s d
+		WHERE d.issue_id IS NOT NULL
+		  AND %[2]s
+		LIMIT 1
+	`, depTable, danglingWispEdgeSQL("d")))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	found := rows.Next()
+	return found, rows.Err()
 }
 
 // countRows runs a single COUNT(*) query and returns the scalar.

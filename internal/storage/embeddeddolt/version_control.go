@@ -435,19 +435,27 @@ func (s *EmbeddedDoltStore) RecomputeBlockedAfterMerge(ctx context.Context, from
 // pass and returns the number of rows it corrected. This is the embedded path
 // of the mode-independent repair (bd-6dnrw.37); see DoltStore.RecomputeAllBlocked.
 func (s *EmbeddedDoltStore) RecomputeAllBlocked(ctx context.Context) (int, error) {
-	var changed int64
+	counts, err := s.RecomputeAllBlockedCounts(ctx)
+	return counts.Corrected, err
+}
+
+// RecomputeAllBlockedCounts is RecomputeAllBlocked with the count of rows the
+// repair left as found beside the count it corrected; see
+// DoltStore.RecomputeAllBlockedCounts.
+func (s *EmbeddedDoltStore) RecomputeAllBlockedCounts(ctx context.Context) (storage.BlockedRecomputeCounts, error) {
+	var counts storage.BlockedRecomputeCounts
 	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// One shared body across every mode: refuse to derive and commit
 		// is_blocked from a dirty graph (see DoltStore.RecomputeAllBlocked),
 		// checked inside the recompute tx so it sees the same working set the
 		// recompute will read (bd-6dnrw.37).
 		var e error
-		changed, e = versioncontrolops.GuardedRecomputeAllBlockedInTx(ctx, tx)
+		counts, e = versioncontrolops.GuardedRecomputeAllBlockedInTx(ctx, tx)
 		return e
 	}); err != nil {
-		return 0, err
+		return storage.BlockedRecomputeCounts{}, err
 	}
-	if changed > 0 {
+	if counts.Corrected > 0 {
 		// Stage only issues (wisps are dolt_ignore'd), matching the post-pull
 		// recompute, so an unrelated dirty working set is not swept in.
 		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
@@ -455,10 +463,10 @@ func (s *EmbeddedDoltStore) RecomputeAllBlocked(ctx context.Context) (int, error
 				versioncontrolops.BlockedRecomputeStagedTables(),
 				versioncontrolops.BlockedRecomputeCommitMsg, commitAuthor)
 		}); err != nil {
-			return int(changed), err
+			return counts, err
 		}
 	}
-	return int(changed), nil
+	return counts, nil
 }
 
 func (s *EmbeddedDoltStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error) {

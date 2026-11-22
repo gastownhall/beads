@@ -24,6 +24,10 @@ import (
 //   - CountIsBlockedInconsistenciesInTx — the read-only detection behind the
 //     doctor "Blocked State" check, over an ALREADY CONSISTENT store, which is
 //     the case an operator actually hits.
+//   - CountIsBlockedUndecidedInTx — the rows-left-as-found count the full
+//     repair reads after its last pass and doctor prints. This fixture has no
+//     dangling wisp edge, so the number is the cost every database that holds
+//     its own wisps pays: the two existence probes and nothing after them.
 //   - RecomputeIsBlockedForIDsInTx at 2, 20 and 200 ids — the batched
 //     mark/unmark the incremental write path runs, isolated from the dolt
 //     commit around it. 200 is queryBatchSize (the bulk/import shape); 2 is the
@@ -87,6 +91,14 @@ func TestBlockedStateScaleTiming(t *testing.T) {
 	changed := recomputeAllScale(ctx, t, store)
 	t.Logf("TIMING full-repair       %s (changed %d rows)",
 		time.Since(start).Round(time.Millisecond), changed)
+
+	start = time.Now()
+	undecided, err := issueops.CountIsBlockedUndecidedInTx(ctx, store.db)
+	if err != nil {
+		t.Fatalf("scale CountIsBlockedUndecidedInTx: %v", err)
+	}
+	t.Logf("TIMING abstained-count   %s (reported %d rows left as found)",
+		time.Since(start).Round(time.Microsecond), undecided)
 
 	// The write path's SQL on its own: the batched mark/unmark the incremental
 	// recompute runs, over a spread of ids, with no commit. CloseIssue below is

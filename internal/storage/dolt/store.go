@@ -6264,16 +6264,25 @@ func (s *DoltStore) recomputeBlockedAfterPullUnchecked(ctx context.Context, from
 // operator resolved by hand — leaves is_blocked stale until this full pass runs.
 // Idempotent: a consistent database corrects nothing.
 func (s *DoltStore) RecomputeAllBlocked(ctx context.Context) (int, error) {
-	var changed int
-	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
-		var err error
-		changed, err = s.recomputeAllBlocked(ctx)
-		return err
-	})
-	return changed, err
+	counts, err := s.RecomputeAllBlockedCounts(ctx)
+	return counts.Corrected, err
 }
 
-func (s *DoltStore) recomputeAllBlocked(ctx context.Context) (int, error) {
+// RecomputeAllBlockedCounts is RecomputeAllBlocked with the count of rows the
+// repair left as found beside the count it corrected
+// (storage.BlockedRecomputeCounter): open rows that depend on a wisp this
+// database has no row for and have no blocker it can see.
+func (s *DoltStore) RecomputeAllBlockedCounts(ctx context.Context) (storage.BlockedRecomputeCounts, error) {
+	var counts storage.BlockedRecomputeCounts
+	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		var err error
+		counts, err = s.recomputeAllBlocked(ctx)
+		return err
+	})
+	return counts, err
+}
+
+func (s *DoltStore) recomputeAllBlocked(ctx context.Context) (storage.BlockedRecomputeCounts, error) {
 	// The full pass runs unbatched whole-table semi-join UPDATEs, looped until
 	// the fixpoint converges; on a loaded shared server a single one can
 	// outlive the pool's per-I/O deadline (default 10s, see buildServerDSN),
@@ -6282,7 +6291,7 @@ func (s *DoltStore) recomputeAllBlocked(ctx context.Context) (int, error) {
 	// long-timeout connection like the other known-long maintenance ops.
 	db, err := s.openLongTimeoutConn()
 	if err != nil {
-		return 0, err
+		return storage.BlockedRecomputeCounts{}, err
 	}
 	defer db.Close()
 	// Pin a single physical connection for the whole operation (same
@@ -6296,11 +6305,11 @@ func (s *DoltStore) recomputeAllBlocked(ctx context.Context) (int, error) {
 	db.SetMaxIdleConns(0)
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("acquire long-timeout connection: %w", err)
+		return storage.BlockedRecomputeCounts{}, fmt.Errorf("acquire long-timeout connection: %w", err)
 	}
 	defer conn.Close()
 	if err := s.pinStoreBranch(ctx, conn); err != nil {
-		return 0, err
+		return storage.BlockedRecomputeCounts{}, err
 	}
 	return s.recomputeAllBlockedWithDB(ctx, conn)
 }
@@ -6316,32 +6325,32 @@ type txBeginner interface {
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
 }
 
-func (s *DoltStore) recomputeAllBlockedWithDB(ctx context.Context, db txBeginner) (int, error) {
+func (s *DoltStore) recomputeAllBlockedWithDB(ctx context.Context, db txBeginner) (storage.BlockedRecomputeCounts, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("begin is_blocked recompute: %w", err)
+		return storage.BlockedRecomputeCounts{}, fmt.Errorf("begin is_blocked recompute: %w", err)
 	}
 	// One shared body across every mode (guard a dirty graph, then recompute):
 	// the guard refuses to derive and commit is_blocked from uncommitted
 	// issue/dependency edits, and it runs inside THIS tx so it sees exactly the
 	// working set the recompute reads (bd-6dnrw.37).
-	changed, err := versioncontrolops.GuardedRecomputeAllBlockedInTx(ctx, tx)
+	counts, err := versioncontrolops.GuardedRecomputeAllBlockedInTx(ctx, tx)
 	if err != nil {
 		_ = tx.Rollback()
-		return 0, err
+		return storage.BlockedRecomputeCounts{}, err
 	}
 	if err := s.commitSQLTx(ctx, "commit is_blocked recompute", tx); err != nil {
-		return 0, err
+		return storage.BlockedRecomputeCounts{}, err
 	}
-	if changed > 0 {
+	if counts.Corrected > 0 {
 		// Stage only issues — the synced table is_blocked lives on (wisps are
 		// dolt_ignore'd) — so an unrelated dirty working set is not swept in.
 		if err := s.doltAddAndCommit(ctx, blockedRecomputeStagedTableList(),
 			versioncontrolops.BlockedRecomputeCommitMsg); err != nil {
-			return int(changed), err
+			return counts, err
 		}
 	}
-	return int(changed), nil
+	return counts, nil
 }
 
 // blockedRecomputeStagedTableList is versioncontrolops.BlockedRecomputeStagedTables

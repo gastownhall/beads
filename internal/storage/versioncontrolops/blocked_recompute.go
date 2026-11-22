@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
@@ -29,18 +30,36 @@ func BlockedRecomputeStagedTables() map[string]bool {
 // GuardedRecomputeAllBlockedInTx is the entire in-transaction body of the full
 // is_blocked repair, shared verbatim by every mode's wrapper: refuse a dirty
 // graph, then recompute every issue and wisp, returning the number of rows
-// corrected.
+// corrected and the number left as found.
 //
 // The guard runs as the FIRST statement inside the caller's transaction on
 // purpose — it must observe exactly the working set the recompute will read, or
 // it is guarding a different database than the one being repaired.
 //
-// Idempotent: a consistent database corrects nothing and returns 0.
-func GuardedRecomputeAllBlockedInTx(ctx context.Context, tx issueops.DBTX) (int64, error) {
+// The abstained count (issueops.CountIsBlockedUndecidedInTx) is read LAST and
+// in the same transaction, so it describes the rows as the repair left them.
+// The order matters for a child: the should-be-blocked union reads a parent's
+// stored flag, so a child that holds a dangling wisp edge under a parent this
+// repair has just marked is decided by that parent now, and was undecided
+// before the repair ran. A failed count fails the repair, because a caller
+// told "0 abstained" for a database that was never counted would read a clone
+// that cannot see its wisps as one that can.
+//
+// Idempotent: a consistent database corrects nothing and returns Corrected 0.
+// Abstained is a property of the database, not of this run, and repeats.
+func GuardedRecomputeAllBlockedInTx(ctx context.Context, tx issueops.DBTX) (storage.BlockedRecomputeCounts, error) {
 	if err := issueops.GuardBlockedRecomputeWorkingSet(ctx, tx); err != nil {
-		return 0, err
+		return storage.BlockedRecomputeCounts{}, err
 	}
-	return issueops.RecomputeAllIsBlockedInTx(ctx, tx)
+	changed, err := issueops.RecomputeAllIsBlockedInTx(ctx, tx)
+	if err != nil {
+		return storage.BlockedRecomputeCounts{Corrected: int(changed)}, err
+	}
+	abstained, err := issueops.CountIsBlockedUndecidedInTx(ctx, tx)
+	if err != nil {
+		return storage.BlockedRecomputeCounts{Corrected: int(changed)}, fmt.Errorf("recompute is_blocked (count abstained): %w", err)
+	}
+	return storage.BlockedRecomputeCounts{Corrected: int(changed), Abstained: int(abstained)}, nil
 }
 
 // BlockedRecomputeConn is a connection the whole repair can run on end to end:
@@ -54,7 +73,8 @@ type BlockedRecomputeConn interface {
 }
 
 // RecomputeAllBlockedOnConn runs the whole full is_blocked repair on conn and
-// returns the number of rows it corrected: guard + recompute inside one
+// returns the rows it corrected and the rows it left as found: guard +
+// recompute + count inside one
 // transaction, then — only when something actually changed — stage `issues`
 // alone and commit under BlockedRecomputeCommitMsg.
 //
@@ -63,27 +83,27 @@ type BlockedRecomputeConn interface {
 // proxied-server plane, whose every other commit (uow.Tx.Commit) is likewise
 // unauthored; a store that has a configured committer identity passes it.
 //
-// The returned count is meaningful even alongside a non-nil error from the
+// The returned counts are meaningful even alongside a non-nil error from the
 // staging step: the rows WERE corrected in the working set, only the history
 // entry failed, and a caller that reported 0 there would be lying about the
 // database it is looking at.
-func RecomputeAllBlockedOnConn(ctx context.Context, conn BlockedRecomputeConn, author string) (int64, error) {
+func RecomputeAllBlockedOnConn(ctx context.Context, conn BlockedRecomputeConn, author string) (storage.BlockedRecomputeCounts, error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("begin is_blocked recompute: %w", err)
+		return storage.BlockedRecomputeCounts{}, fmt.Errorf("begin is_blocked recompute: %w", err)
 	}
-	changed, err := GuardedRecomputeAllBlockedInTx(ctx, tx)
+	counts, err := GuardedRecomputeAllBlockedInTx(ctx, tx)
 	if err != nil {
 		_ = tx.Rollback()
-		return 0, err
+		return storage.BlockedRecomputeCounts{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit is_blocked recompute: %w", err)
+		return storage.BlockedRecomputeCounts{}, fmt.Errorf("commit is_blocked recompute: %w", err)
 	}
-	if changed > 0 {
+	if counts.Corrected > 0 {
 		if err := StageAndCommit(ctx, conn, BlockedRecomputeStagedTables(), BlockedRecomputeCommitMsg, author); err != nil {
-			return changed, err
+			return counts, err
 		}
 	}
-	return changed, nil
+	return counts, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -170,5 +171,118 @@ func TestRecomputeAllBlocked_RepairsAndCommitsWhenClean(t *testing.T) {
 	// Idempotent: a second pass corrects nothing and stays clean.
 	if again, err := store.RecomputeAllBlocked(ctx); err != nil || again != 0 {
 		t.Fatalf("recompute must be idempotent: got changed=%d err=%v", again, err)
+	}
+}
+
+// TestRecomputeAllBlocked_ReportsRowsLeftAsFound runs the store's repair, as
+// bd recompute-blocked reaches it (storage.RecomputeBlocked), over a database
+// that holds one stale flag and one issue blocked on a wisp it has no row for.
+// The stale flag is a correction. The other row is neither corrected nor
+// confirmed, and the result says so in RowsAbstained, on the run that repairs
+// and again on the run that has nothing to repair: the count describes the
+// database, not the run.
+func TestRecomputeAllBlocked_ReportsRowsLeftAsFound(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedBlockedPair(ctx, t, store, true)
+	createPerm(t, ctx, store, "ra-a")
+	createWisp(t, ctx, store, "ra-w")
+	addDependencyWithMeta(t, ctx, store, "ra-a", "ra-w", types.DepBlocks, "")
+	if !isBlocked(ctx, t, store.db, "ra-a") {
+		t.Fatal("precondition: ra-a should be blocked by open wisp ra-w")
+	}
+	commitGraph := func(msg string) {
+		t.Helper()
+		if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", msg); err != nil && !isDoltNothingToCommit(err) {
+			t.Fatalf("%s: %v", msg, err)
+		}
+	}
+	commitGraph("seed an issue blocked on a wisp")
+
+	// With the wisp here, every row is decided.
+	got, err := storage.RecomputeBlocked(ctx, store)
+	if err != nil || got != (storage.RecomputeBlockedResult{}) {
+		t.Fatalf("wisp present: RecomputeBlocked = (%+v, %v), want the zero result", got, err)
+	}
+
+	// The clone's state, plus one stale flag for the repair to correct.
+	loseWisp(ctx, t, store, "ra-w")
+	if _, err := store.db.ExecContext(ctx, "UPDATE issues SET is_blocked = 0 WHERE id = 'bm-w'"); err != nil {
+		t.Fatalf("corrupt is_blocked: %v", err)
+	}
+	commitGraph("commit stale flag")
+
+	got, err = storage.RecomputeBlocked(ctx, store)
+	if err != nil {
+		t.Fatalf("RecomputeBlocked: %v", err)
+	}
+	if want := (storage.RecomputeBlockedResult{RowsCorrected: 1, RowsAbstained: 1}); got != want {
+		t.Fatalf("RecomputeBlocked = %+v, want %+v", got, want)
+	}
+	if !isBlocked(ctx, t, store.db, "bm-w") {
+		t.Error("bm-w must read blocked again after repair")
+	}
+	if !isBlocked(ctx, t, store.db, "ra-a") {
+		t.Error("ra-a was cleared: the repair decided a row it reported as left alone")
+	}
+
+	got, err = storage.RecomputeBlocked(ctx, store)
+	if err != nil {
+		t.Fatalf("second RecomputeBlocked: %v", err)
+	}
+	if want := (storage.RecomputeBlockedResult{RowsAbstained: 1}); got != want {
+		t.Fatalf("second RecomputeBlocked = %+v, want %+v", got, want)
+	}
+	// The older entry point reports the same repair without the count.
+	if changed, err := store.RecomputeAllBlocked(ctx); err != nil || changed != 0 {
+		t.Fatalf("RecomputeAllBlocked = (%d, %v), want (0, nil)", changed, err)
+	}
+}
+
+// TestRecomputeAllBlocked_CountsRowsLeftAsFoundAfterTheRepair pins when the
+// count is read. A child holds an edge to a wisp this database does not have,
+// and its parent is blocked by an open issue but carries a stale 0. Before the
+// repair the child is undecided: nothing visible blocks it. The repair marks
+// the parent, the parent's flag then decides the child, and the result must
+// say two rows corrected and none left as found. A count read before the
+// repair would report the child as left alone in the same result that counts
+// it as corrected.
+func TestRecomputeAllBlocked_CountsRowsLeftAsFoundAfterTheRepair(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "rc-x")
+	createPerm(t, ctx, store, "rc-p")
+	createPerm(t, ctx, store, "rc-c")
+	createWisp(t, ctx, store, "rc-w")
+	addDependencyWithMeta(t, ctx, store, "rc-p", "rc-x", types.DepBlocks, "")
+	addDependencyWithMeta(t, ctx, store, "rc-c", "rc-p", types.DepParentChild, "")
+	addDependencyWithMeta(t, ctx, store, "rc-c", "rc-w", types.DepBlocks, "")
+	loseWisp(ctx, t, store, "rc-w")
+	if _, err := store.db.ExecContext(ctx, "UPDATE issues SET is_blocked = 0 WHERE id IN ('rc-p', 'rc-c')"); err != nil {
+		t.Fatalf("plant stale flags: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'commit stale parent and child')"); err != nil && !isDoltNothingToCommit(err) {
+		t.Fatalf("commit stale flags: %v", err)
+	}
+	if n := countUndecided(ctx, t, store.db); n != 1 {
+		t.Fatalf("precondition: %d undecided rows before the repair, want 1 (rc-c under an unmarked parent)", n)
+	}
+
+	got, err := storage.RecomputeBlocked(ctx, store)
+	if err != nil {
+		t.Fatalf("RecomputeBlocked: %v", err)
+	}
+	if want := (storage.RecomputeBlockedResult{RowsCorrected: 2}); got != want {
+		t.Fatalf("RecomputeBlocked = %+v, want %+v", got, want)
+	}
+	if !isBlocked(ctx, t, store.db, "rc-p") || !isBlocked(ctx, t, store.db, "rc-c") {
+		t.Errorf("after the repair: rc-p blocked %v, rc-c blocked %v; want both",
+			isBlocked(ctx, t, store.db, "rc-p"), isBlocked(ctx, t, store.db, "rc-c"))
 	}
 }
