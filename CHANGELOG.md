@@ -1511,10 +1511,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bootstrap`. What is refused, and the consent it takes, are unchanged;
   server and embedded mode print, and emit as JSON, what they did before.
 
-- **A pull over a git-protocol remote no longer leaves a declined merge
-  open** (#7849, #8503; thanks @rjgeng). When a server-mode pull went
-  through the dolt CLI (a git-protocol remote, or `bd federation sync` with
-  such a peer) and met a conflict bd does not auto-resolve, it committed the
 - **A pull through the dolt CLI no longer leaves a declined merge open**
   (#7839, #8503; supersedes #7849; thanks @rjgeng). In server mode,
   `bd dolt pull` and `bd sync` fetch a git-protocol remote, a remote with
