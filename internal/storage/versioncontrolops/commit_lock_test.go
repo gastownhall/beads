@@ -111,3 +111,30 @@ func TestCommitLockStageAndCommitSerializedReleasesOnEveryPath(t *testing.T) {
 		})
 	}
 }
+
+// TestCommitLockSkippedWhenNothingPendingUnit covers AC-5 at the unit level:
+// with nothing pending, StageAndCommitSerialized issues no GET_LOCK.
+func TestCommitLockSkippedWhenNothingPendingUnit(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin conn: %v", err)
+	}
+	defer conn.Close()
+
+	mock.ExpectQuery(matchPendingQuery.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// No GET_LOCK expectation: sqlmock fails an unexpected one.
+	cfg := CommitLockConfig{Database: commitLockTestDB}
+	if err := StageAndCommitSerialized(ctx, conn, cfg, map[string]bool{"metadata": true}, "noop", "tester"); err != nil {
+		t.Fatalf("StageAndCommitSerialized: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("statement sequence: %v", err)
+	}
+}
