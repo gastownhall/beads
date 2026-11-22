@@ -1475,6 +1475,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **bd's write commits on a shared Dolt sql-server now take turns**
+  ([#8590](https://github.com/gastownhall/beads/issues/8590)). When another
+  session moved the branch HEAD while a bd commit was in flight, Dolt merged
+  the moved HEAD into the committing session's staged root and committed the
+  result without checking it for conflicts
+  ([dolthub/dolt#12258](https://github.com/dolthub/dolt/issues/12258)), so a
+  commit could carry `dolt_conflicts` rows nobody created. bd's write commits
+  on a server now hold a per-database named lock,
+  `GET_LOCK('bd_commit:<database>')`, from just before their first
+  `DOLT_ADD` until `DOLT_COMMIT` returns: `RunInTransaction`, the per-table
+  commit after a write, the in-transaction update, claim, close, delete and
+  sweep commits, `bd dolt commit` and `bd vc commit`, proxied-server
+  unit-of-work commits and the blocked-state recheck after them, and the
+  proxied pre-backup commit. Databases sharing one server do not wait on each
+  other, and embedded mode is unchanged. If the lock is not granted within 5
+  seconds the commit proceeds unlocked, as before, logs a warning and counts
+  `bd.db.commit_lock_timeouts`. Two gaps remain. In-transaction commits still
+  begin their transaction before taking the lock, so same-row races there are
+  narrowed, not closed. Pulls and merges (with the commits that settle their
+  conflicts), `bd recompute-blocked`, compact and flatten, `bd doctor --fix`,
+  migrations, and bd versions without this change still commit without the
+  lock, so one of them overlapping a write can still hit the race. Reported
+  by olivierlefloch.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so

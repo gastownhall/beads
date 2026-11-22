@@ -87,6 +87,12 @@ func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueop
 		// and a staging list that carries the version tables on one and not the
 		// other is the asymmetry the wisp-arm scope comment refused: inert
 		// today, and silently wrong the day a sweep gains a surviving-row write.
+		// GH#8590: the commit lock spans the DOLT_ADDs and DOLT_COMMIT.
+		releaseCommitLock, err := s.store.holdCommitLockInTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		defer releaseCommitLock()
 		for _, table := range s.store.withVersionedHistoryTables(ctx, tx, sweptTables) {
 			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}

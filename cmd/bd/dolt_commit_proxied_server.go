@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // runDoltCommitProxiedServer is the proxied dual of `bd dolt commit`: the
@@ -22,7 +22,9 @@ import (
 // no-op. It runs DOLT_COMMIT('-Am') on a pinned maintenance connection instead,
 // which is the uow-side equivalent of DoltStorage.CommitAll: "everything in the
 // working set", including out-of-band and config-table dirt, attributed to the
-// same actor with '--author'.
+// same actor with '--author'. Like CommitAll on the direct route, it holds the
+// server-mode commit lock across the DOLT_COMMIT (GH#8590): under batch/off it
+// is this route's only commit point.
 func runDoltCommitProxiedServer(ctx context.Context, message string) (bool, error) {
 	committed := false
 	// runProxiedNonTx, not an open-coded provider assertion: it is the shared
@@ -31,24 +33,13 @@ func runDoltCommitProxiedServer(ctx context.Context, message string) (bool, erro
 	// commit` keeps emitting the JSON error envelope the rest of the proxied
 	// surface emits.
 	err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
-		// The same gate doltServerTx.Commit uses, and for the same reason: an
-		// empty DOLT_COMMIT is rejected server-side with "nothing to commit"
-		// and floods the server log.
-		pending, err := issueops.HasPendingChanges(ctx, conn)
-		if err != nil {
-			return err
-		}
-		if !pending {
-			return nil
-		}
-		if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?);", message, proxiedCommitAuthor()); err != nil {
-			if isDoltNothingToCommit(err) {
-				return nil
-			}
-			return err
-		}
-		committed = true
-		return nil
+		// CommitAllSerialized skips the commit when nothing is pending, the
+		// same gate doltServerTx.Commit uses and for the same reason: an empty
+		// DOLT_COMMIT is rejected server-side with "nothing to commit" and
+		// floods the server log.
+		var err error
+		committed, err = versioncontrolops.CommitAllSerialized(ctx, conn, versioncontrolops.CommitLockConfig{}, message, proxiedCommitAuthor)
+		return err
 	})
 	return committed, err
 }

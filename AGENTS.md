@@ -106,7 +106,15 @@ directory is served, and covers no other lock (the test-only
 `testutil.HoldDoltDatabaseLock` is outside it). The same proof also reads
 Dolt's `.dolt/sql-server.info` for the port and PID it names, as the dolt CLI
 does, the way bd already reads the remotes in Dolt's repo state file
-(`PersistedRemoteInfos`). `bd doctor` support for
+(`PersistedRemoteInfos`). A second maintainer-granted exception, as narrow:
+the server-mode commit lock (GH#8590), one SQL named lock per database
+(`bd_commit:<db>`, `versioncontrolops.CommitLockName`) that bd's write
+commits on a Dolt sql-server hold from their first `DOLT_ADD` until
+`DOLT_COMMIT` returns, failing open on timeout, because Dolt merges a HEAD
+that moves mid-commit without a conflict check (dolthub/dolt#12258). It
+covers no other lock, and it ends when the oldest Dolt version bd supports
+carries that fix or Dolt or its driver serializes commits itself; see
+[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md). `bd doctor` support for
 embedded mode is enabled one subcommand at a time, each human-vetted
 (GH#3794): do not lift the embedded-mode gate in
 `cmd/bd/doctor.go` wholesale, and keep database-layer checks and fixes

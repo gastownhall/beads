@@ -390,6 +390,18 @@ type DoltStore struct {
 	remotePassword string // Remote auth password for Hosted Dolt push/pull (optional)
 	serverMode     bool   // true when connected to external dolt sql-server (not embedded)
 
+	// commitLockWait overrides how long a server-mode commit waits for the
+	// per-database commit lock before committing unlocked (zero means
+	// versioncontrolops.DefaultCommitLockWait). Tests shorten it per store.
+	commitLockWait time.Duration
+	// commitLockTimeouts counts this store's commits that ran unlocked
+	// because the commit lock was not granted in time (also exported as the
+	// bd.db.commit_lock_timeouts metric).
+	commitLockTimeouts atomic.Int64
+	// commitLockTx binds an in-transaction commit-lock slot to each write
+	// transaction commitWriteTxOn begins (see holdCommitLockInTx).
+	commitLockTx sync.Map // *sql.Tx -> *txCommitLock
+
 	// autoStartedServerDir is set when this store triggered a dolt sql-server
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
@@ -990,6 +1002,10 @@ var doltMetrics struct {
 	claimVerifyLost      metric.Int64Counter
 	claimVerifyRecovered metric.Int64Counter
 	ignoredTxFreshPool   metric.Int64Counter
+
+	commitLockWait               metric.Float64Histogram
+	commitLockTimeouts           metric.Int64Counter
+	commitLockReleaseUnconfirmed metric.Int64Counter
 }
 
 func init() {
@@ -1045,6 +1061,18 @@ func init() {
 	doltMetrics.ignoredTxFreshPool, _ = m.Int64Counter("bd.db.ignored_tx_fresh_pool",
 		metric.WithDescription("ignored-tx transactions that fell back to a dedicated single-connection pool instead of borrowing from the main pool"),
 		metric.WithUnit("{tx}"),
+	)
+	doltMetrics.commitLockWait, _ = m.Float64Histogram("bd.db.commit_lock_wait",
+		metric.WithDescription("Time a server-mode Dolt commit waited for the per-database commit lock (GH#8590)"),
+		metric.WithUnit("ms"),
+	)
+	doltMetrics.commitLockTimeouts, _ = m.Int64Counter("bd.db.commit_lock_timeouts",
+		metric.WithDescription("Server-mode Dolt commits that ran unlocked because the commit lock was not granted within the wait"),
+		metric.WithUnit("{commit}"),
+	)
+	doltMetrics.commitLockReleaseUnconfirmed, _ = m.Int64Counter("bd.db.commit_lock_release_unconfirmed",
+		metric.WithDescription("Commit-lock releases that could not be confirmed; the session was discarded"),
+		metric.WithUnit("{release}"),
 	)
 }
 
@@ -1463,9 +1491,32 @@ func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
 	}
+	// Server mode pins the session the transaction runs on, so an in-tx
+	// commit's commit lock (holdCommitLockInTx) can still be released on it
+	// after the transaction ends, and the session discarded if that release
+	// is unconfirmed (GH#8590). A *sql.Conn beginner is already pinned.
+	var pinned *sql.Conn
+	if s.serverMode {
+		switch b := beginner.(type) {
+		case *sql.Conn:
+			pinned = b
+		case *sql.DB:
+			conn, err := b.Conn(ctx)
+			if err != nil {
+				return issueops.BlockedRecheck{}, fmt.Errorf("begin write tx: %w", err)
+			}
+			defer conn.Close()
+			pinned, beginner = conn, conn
+		}
+	}
 	tx, err := beginner.BeginTx(ctx, nil)
 	if err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("begin write tx: %w", err)
+	}
+	if pinned != nil {
+		// Deferred after conn.Close above, so it runs first: the fallback
+		// release needs the session still pinned.
+		defer s.bindCommitLockSlot(tx, pinned)()
 	}
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
@@ -4231,6 +4282,14 @@ func (s *DoltStore) commitWorkingSet(ctx context.Context, message string, mode c
 		return nil // Nothing to commit (all changes were config-only or dolt_ignore'd)
 	}
 
+	// GH#8590: hold the commit lock from the first DOLT_ADD until
+	// DOLT_COMMIT returns.
+	releaseCommitLock, err := s.holdCommitLockOnConn(ctx, conn)
+	if err != nil {
+		return err
+	}
+	defer releaseCommitLock()
+
 	for _, table := range tables {
 		if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("failed to stage %s before commit: %w", table, err)
@@ -4278,6 +4337,11 @@ func (s *DoltStore) concludeOpenMerge(ctx context.Context, conn *sql.Conn, messa
 	if !merging {
 		return nil
 	}
+	releaseCommitLock, err := s.holdCommitLockOnConn(ctx, conn)
+	if err != nil {
+		return err
+	}
+	defer releaseCommitLock()
 	if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
 		if isDoltNothingToCommit(err) {
 			return nil
@@ -4357,6 +4421,12 @@ func (s *DoltStore) CommitWithConfig(ctx context.Context, message string) error 
 		}
 		defer conn.Close()
 
+		releaseCommitLock, err := s.holdCommitLockOnConn(ctx, conn)
+		if err != nil {
+			return err
+		}
+		defer releaseCommitLock()
+
 		if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
 			if isDoltNothingToCommit(err) {
 				return nil
@@ -4397,6 +4467,12 @@ func (s *DoltStore) CommitAll(ctx context.Context, message string) (bool, error)
 			return fmt.Errorf("failed to acquire connection: %w", err)
 		}
 		defer conn.Close()
+
+		releaseCommitLock, err := s.holdCommitLockOnConn(ctx, conn)
+		if err != nil {
+			return err
+		}
+		defer releaseCommitLock()
 
 		if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
 			if isDoltNothingToCommit(err) {
@@ -4524,6 +4600,17 @@ func (s *DoltStore) stageAndCommit(ctx context.Context, tables []string, commitM
 			}
 			afterStageCommitScreen()
 		}
+
+		// GH#8590: hold the commit lock from the first DOLT_ADD until
+		// DOLT_COMMIT returns, so another session's commit cannot move HEAD
+		// inside this one. Taken after the working-set screen and its test
+		// hook; the staged screen, unstageRefused and the commit run under it.
+		releaseCommitLock, err := s.holdCommitLockOnConn(ctx, conn)
+		if err != nil {
+			return s.recordDoltPublicationFailure(ctx,
+				fmt.Errorf("%w after SQL mutation: %w", err, ErrCommitIndeterminate))
+		}
+		defer releaseCommitLock()
 
 		for _, table := range tables {
 			if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {

@@ -310,6 +310,83 @@ concurrent status updates (e.g., one agent closes a bead while another
 also updates it). Mitigation: use optimistic concurrency checks where needed
 (check expected status before update).
 
+### Serialized commits on a shared server (GH#8590)
+
+Cell-level merging covers two SQL transactions committing. It does not
+cover a Dolt commit racing a HEAD move. When session B moves the branch HEAD
+while session A is inside `DOLT_COMMIT`, Dolt merges B's HEAD into A's
+staged root and adopts the result without a conflict check
+([dolthub/dolt#12258](https://github.com/dolthub/dolt/issues/12258)), so
+A's commit can contain conflict artifacts.
+
+In server mode bd's write commits therefore serialize per database on a
+named lock, `versioncontrolops.CommitLockName(db)`: `bd_commit:` plus the
+lowercased database name without any `/branch` suffix, replaced by an fnv64a
+hash when the result would be longer than 64 bytes. The name is a
+cross-version contract, so bd processes of different versions on one server
+serialize only while they agree on it. The lock is a bd-side workaround for a
+Dolt bug, and [the charter](../PROJECT_CHARTER.md#storage-boundary) records
+it as a storage-boundary exception that ends when the oldest Dolt version bd
+supports carries the fix for dolthub/dolt#12258, or when Dolt or its driver
+serializes commits itself.
+
+- **Scope.** The lock runs from just before the first `DOLT_ADD` until
+  `DOLT_COMMIT` returns, on these commit planes:
+  - after the SQL transaction has committed: the post-tx
+    `StageAndCommitSerialized` (`RunInTransaction`), the DOLT_ADD-per-table
+    funnel, `commitWorkingSet`, `CommitAll`/`CommitWithConfig`
+    (`bd dolt commit` and `bd vc commit` on a direct store), open-merge
+    conclusion, the uow `CommitScoped`, and `CommitAllSerialized`, the
+    working-set commit that the proxied `bd dolt commit` and the proxied
+    pre-backup commit make on a maintenance session (keyed on that session's
+    `DATABASE()`);
+  - inside an open transaction: the in-transaction helpers
+    (update/claim/close/delete/sweep), the uow `Commit`
+    (`DOLT_COMMIT('-Am')`, which most proxied CLI writes end in), and the
+    uow post-commit blocked-state recheck, which shares `Commit`'s statement
+    runner.
+- **Session.** `GET_LOCK` is session-scoped, so each plane takes and releases
+  the lock on one pinned session. In-transaction planes take it through the
+  `*sql.Tx` and `commitWriteTxOn` keeps the transaction's pinned `*sql.Conn`
+  as a fallback that releases a lock the transaction did not (a canceled
+  context). A session whose release cannot be confirmed is discarded, never
+  returned to the pool. The uow `Commit` and recheck run `COMMIT` after a
+  locked `DOLT_COMMIT`: `DOLT_COMMIT` ends the transaction that
+  `START TRANSACTION` began but not the explicit-transaction mode it set, so
+  the `RELEASE_LOCK` begins a transaction that would never commit, and the
+  pooled session would keep reading a snapshot from before every later write.
+- **No-op writes.** `RunInTransaction`, the uow `Commit`, the recheck,
+  `commitWorkingSet` and `CommitAllSerialized` check for pending changes
+  first and take no lock when there are none. The other planes take the lock
+  and then find nothing to stage, so a no-op write on them still waits its
+  turn.
+- **Not covered.** These still move HEAD without the lock, so one of them
+  overlapping a locked commit can still produce the artifacts:
+  - pulls, fetch-merges and branch merges (`DOLT_MERGE` in `bd dolt pull`,
+    sync, federation and `bd vc merge`) and the commits that settle a
+    merge's conflicts;
+  - admin and repair commands: `bd recompute-blocked` (`StageAndCommit`),
+    compact and flatten, and `bd doctor --fix`;
+  - schema migrations and schema initialization, which run under
+    `bd_schema_init`;
+  - the auto-flush commit `FlushWorkingSet` makes before bd stops a server;
+  - bd processes without this change.
+
+  A pull's merge runs in a transaction that also settles its conflicts, so
+  locking it means holding the lock across that transaction; that is
+  follow-up work. Embedded mode takes no lock (`StageAndCommit` is
+  unchanged): it has no concurrent sessions.
+- **Order.** A guarded delete takes its `bd_delete` fence before the commit
+  lock, never the reverse.
+- **Fail open.** If the lock is not granted within 5s (capped at the
+  context deadline less 1s) the commit runs unlocked, logs a rate-limited
+  warning and counts `bd.db.commit_lock_timeouts`. `bd.db.commit_lock_wait`
+  records each wait.
+- **Residual risk.** An in-transaction plane's snapshot is taken at `BEGIN`,
+  before the lock. A HEAD move between `BEGIN` and the grant can still be
+  merged into its commit, so same-row in-transaction races are narrowed, not
+  closed. Moving those planes to post-tx commits (NEXUS#92) closes them.
+
 ### Guarded delete racing a comment
 
 A guarded delete (`ExpectedVersion` set, run under the per-id delete fence)

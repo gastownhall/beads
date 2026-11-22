@@ -38,6 +38,18 @@ const (
 
 type doltSQLProvider struct {
 	defaultBranch string
+	// database is the database this provider's sessions commit to; it keys
+	// the server-mode commit lock (versioncontrolops.CommitLockName). Empty
+	// for a provider built without one: the tx then reads SELECT DATABASE().
+	database string
+	// serializeCommits makes this provider's units of work hold the
+	// server-mode commit lock across their Dolt commits (GH#8590). Set by the
+	// real open path (openAndInitSchema); a provider built by hand over a
+	// mock leaves it off and issues no lock statements.
+	serializeCommits bool
+	// commitLockWait overrides the commit-lock wait for this provider's units
+	// of work (zero: versioncontrolops.DefaultCommitLockWait). Tests only.
+	commitLockWait time.Duration
 	// dbMu guards db against Close: a library host (internal/storage/uowstore)
 	// may begin a unit of work or read the pool on one goroutine while another
 	// closes the provider. Readers go through pool().
@@ -408,6 +420,9 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// EventsJournalCursor has no enabled/disabled concept of its own.
 	return &doltServerTx{
 		conn:              conn,
+		database:          p.database,
+		serializeCommits:  p.serializeCommits,
+		commitLockWait:    p.commitLockWait,
 		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
 		clearJournalShape: issueops.ScopeEventsJournalShape(conn, p.journalShape.Load()),
 		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, versioned),
@@ -1271,6 +1286,8 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 	newProvider := func(pool *sql.DB) *doltSQLProvider {
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
+			database:          database,
+			serializeCommits:  true,
 			db:                pool,
 			serverEndpoint:    "tcp:" + ep.Address(),
 			teamServer:        teamServer,
