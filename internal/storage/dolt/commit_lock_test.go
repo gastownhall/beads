@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // GH#8590 (bd-72i8dp): every server-mode commit plane holds
@@ -169,5 +171,70 @@ func TestCommitLockSerializesRunInTransaction(t *testing.T) {
 	})
 	if !h.logHas(ctx, msg) {
 		t.Fatalf("dolt_log has no commit %q after the lock release", msg)
+	}
+}
+
+// TestCommitLockSerializesStorePlanes covers AC-2: each other DoltStore
+// commit plane waits for the commit lock too.
+func TestCommitLockSerializesStorePlanes(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	for _, id := range []string{"test-cp1", "test-cp2", "test-cp3", "test-cp4"} {
+		commitLockTestIssue(t, ctx, store, id)
+	}
+	if err := store.CloseIssue(ctx, "test-cp4", "done", "tester", ""); err != nil {
+		t.Fatalf("close test-cp4: %v", err)
+	}
+	h := newCommitLockHolder(t, ctx, store)
+
+	cases := []struct {
+		name  string
+		setup func(ctx context.Context)
+		write func(ctx context.Context) error
+	}{
+		{name: "funnel AddLabel", write: func(ctx context.Context) error {
+			return store.AddLabel(ctx, "test-cp1", "locked", "tester")
+		}},
+		{name: "in-tx UpdateIssue", write: func(ctx context.Context) error {
+			return store.UpdateIssue(ctx, "test-cp2", map[string]interface{}{"title": "locked update"}, "tester")
+		}},
+		{name: "in-tx ClaimIssue", write: func(ctx context.Context) error {
+			return store.ClaimIssue(ctx, "test-cp3", "claimer")
+		}},
+		{name: "sweeper", write: func(ctx context.Context) error {
+			sweeper, err := store.Sweeper()
+			if err != nil {
+				return err
+			}
+			res, err := sweeper.Sweep(ctx, issueops.SweepRequest{Tier: issueops.SweepDurable, IDPattern: "test-cp4"})
+			if err != nil {
+				return err
+			}
+			if res.Swept == 0 {
+				return errors.New("sweep swept nothing; the case needs a closed bead to sweep")
+			}
+			return nil
+		}},
+		{name: "CommitAll", setup: func(ctx context.Context) {
+			if _, err := store.db.ExecContext(ctx, "UPDATE issues SET notes = 'out of band' WHERE id = 'test-cp1'"); err != nil {
+				t.Fatalf("dirty the working set: %v", err)
+			}
+		}, write: func(ctx context.Context) error {
+			committed, err := store.CommitAll(ctx, "commit-lock commit all")
+			if err == nil && !committed {
+				return errors.New("CommitAll committed nothing")
+			}
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setup != nil {
+				tc.setup(ctx)
+			}
+			assertCommitWaitsForLock(t, ctx, store, h, tc.write)
+		})
 	}
 }

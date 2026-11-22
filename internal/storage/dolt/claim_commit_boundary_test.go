@@ -85,6 +85,10 @@ func (c *claimCommitBoundaryConn) QueryContext(_ context.Context, query string, 
 	defer c.driver.mu.Unlock()
 
 	switch {
+	case strings.Contains(query, "GET_LOCK(") || strings.Contains(query, "RELEASE_LOCK("):
+		// A serverMode store takes the commit lock around each Dolt commit
+		// (GH#8590); the fake grants and releases it.
+		return &claimCommitBoundaryRows{columns: []string{"lock"}, values: [][]driver.Value{{int64(1)}}}, nil
 	case strings.Contains(query, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1"):
 		if c.driver.activeWisp {
 			return &claimCommitBoundaryRows{columns: []string{"exists"}, values: [][]driver.Value{{int64(1)}}}, nil
