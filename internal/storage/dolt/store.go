@@ -390,6 +390,18 @@ type DoltStore struct {
 	remotePassword string // Remote auth password for Hosted Dolt push/pull (optional)
 	serverMode     bool   // true when connected to external dolt sql-server (not embedded)
 
+	// commitLockWait overrides how long a server-mode commit waits for the
+	// per-database commit lock before committing unlocked (zero means
+	// versioncontrolops.DefaultCommitLockWait). Tests shorten it per store.
+	commitLockWait time.Duration
+	// commitLockTimeouts counts this store's commits that ran unlocked
+	// because the commit lock was not granted in time (also exported as the
+	// bd.db.commit_lock_timeouts metric).
+	commitLockTimeouts atomic.Int64
+	// commitLockTx binds an in-transaction commit-lock slot to each write
+	// transaction commitWriteTxOn begins (see holdCommitLockInTx).
+	commitLockTx sync.Map // *sql.Tx -> *txCommitLock
+
 	// autoStartedServerDir is set when this store triggered a dolt sql-server
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
@@ -990,6 +1002,10 @@ var doltMetrics struct {
 	claimVerifyLost      metric.Int64Counter
 	claimVerifyRecovered metric.Int64Counter
 	ignoredTxFreshPool   metric.Int64Counter
+
+	commitLockWait               metric.Float64Histogram
+	commitLockTimeouts           metric.Int64Counter
+	commitLockReleaseUnconfirmed metric.Int64Counter
 }
 
 func init() {
@@ -1045,6 +1061,18 @@ func init() {
 	doltMetrics.ignoredTxFreshPool, _ = m.Int64Counter("bd.db.ignored_tx_fresh_pool",
 		metric.WithDescription("ignored-tx transactions that fell back to a dedicated single-connection pool instead of borrowing from the main pool"),
 		metric.WithUnit("{tx}"),
+	)
+	doltMetrics.commitLockWait, _ = m.Float64Histogram("bd.db.commit_lock_wait",
+		metric.WithDescription("Time a server-mode Dolt commit waited for the per-database commit lock (GH#8590)"),
+		metric.WithUnit("ms"),
+	)
+	doltMetrics.commitLockTimeouts, _ = m.Int64Counter("bd.db.commit_lock_timeouts",
+		metric.WithDescription("Server-mode Dolt commits that ran unlocked because the commit lock was not granted within the wait"),
+		metric.WithUnit("{commit}"),
+	)
+	doltMetrics.commitLockReleaseUnconfirmed, _ = m.Int64Counter("bd.db.commit_lock_release_unconfirmed",
+		metric.WithDescription("Commit-lock releases that could not be confirmed; the session was discarded"),
+		metric.WithUnit("{release}"),
 	)
 }
 
