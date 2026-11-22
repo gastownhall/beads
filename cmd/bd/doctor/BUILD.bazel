@@ -136,6 +136,7 @@ go_test(
         "macos_user_config_test.go",
         "maintenance_cgo_test.go",
         "maintenance_test.go",
+        "manage_opt_outs_test.go",
         "managed_handoff_test.go",
         "migration_hooks_test.go",
         "migration_skew_dolt_test.go",

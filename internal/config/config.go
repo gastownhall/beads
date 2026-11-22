@@ -328,6 +328,11 @@ func initialize(beadsDirSetting string) error {
 	v.SetDefault("versioned-history.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
+	// Per-repository opt-outs for bd's management of git hooks and of
+	// .beads/.gitignore. Read them through HooksManaged and GitignoreManaged,
+	// which also answer for a workspace this process did not load.
+	v.SetDefault(HooksManageKey, true)
+	v.SetDefault(GitignoreManageKey, true)
 	v.SetDefault("db", "")
 	v.SetDefault("actor", "")
 	v.SetDefault("issue-prefix", "")
@@ -1062,6 +1067,80 @@ func GetBool(key string) bool {
 		return false
 	}
 	return v.GetBool(key)
+}
+
+// HooksManageKey and GitignoreManageKey are the per-repository opt-outs a
+// repository sets in its tracked .beads/config.yaml when it manages its own git
+// hooks or its own .beads/.gitignore. Both default to true.
+const (
+	HooksManageKey     = "hooks.manage"
+	GitignoreManageKey = "gitignore.manage"
+)
+
+// HooksManaged reports whether bd may install, reinstall, inject into or
+// migrate git hooks. It is false only when hooks.manage is set to false.
+//
+// beadsDir names the .beads directory of the workspace being acted on, for a
+// caller handed a workspace other than the one this process loaded its
+// configuration from (bd doctor <path>, bd init's target). An empty beadsDir
+// answers for the loaded workspace. See manageSetting for the precedence.
+func HooksManaged(beadsDir string) bool {
+	return manageSetting(beadsDir, HooksManageKey)
+}
+
+// GitignoreManaged reports whether bd may create, append to or rewrite
+// .beads/.gitignore, and add its patterns to the project .gitignore. It is
+// false only when gitignore.manage is set to false. beadsDir is read as for
+// HooksManaged.
+func GitignoreManaged(beadsDir string) bool {
+	return manageSetting(beadsDir, GitignoreManageKey)
+}
+
+// manageSetting resolves one of the manage keys, with the precedence bd's
+// merged configuration uses: the BD_ environment variable (BD_HOOKS_MANAGE,
+// BD_GITIGNORE_MANAGE), then the project config, then the user config, then
+// the default, true.
+//
+// With an empty beadsDir the merged configuration Initialize loaded answers.
+// With a beadsDir, that workspace's config.local.yaml and config.yaml answer in
+// place of the loaded project config, so a command acting on another workspace
+// never applies the launching workspace's choice to it.
+//
+// A value that strconv.ParseBool does not accept reads as the default. The
+// keys are opt-outs, so only an unambiguous false stops bd from writing; `bd
+// config set` refuses any other value.
+func manageSetting(beadsDir, key string) bool {
+	if raw, ok := os.LookupEnv(manageEnvVar(key)); ok {
+		if managed, ok := ParseUserConfigBool(raw); ok {
+			return managed
+		}
+	}
+	if beadsDir == "" {
+		if v != nil {
+			if raw := v.Get(key); raw != nil {
+				if managed, ok := ParseUserConfigBool(fmt.Sprint(raw)); ok {
+					return managed
+				}
+			}
+		}
+		return true
+	}
+	if raw, present, err := WorkspaceYamlSettingWithLocal(beadsDir, key); err == nil && present {
+		if managed, ok := ParseUserConfigBool(raw); ok {
+			return managed
+		}
+	}
+	if raw, ok := readUserGlobalYamlValue(key); ok {
+		if managed, ok := ParseUserConfigBool(raw); ok {
+			return managed
+		}
+	}
+	return true
+}
+
+// manageEnvVar is the variable viper's AutomaticEnv binds to key.
+func manageEnvVar(key string) string {
+	return "BD_" + strings.ToUpper(strings.NewReplacer(".", "_", "-", "_").Replace(key))
 }
 
 // GetInt retrieves an integer configuration value

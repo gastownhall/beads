@@ -269,3 +269,40 @@ func TestAttachConnectAndSaveTargetRefuseAHistoricalSQLiteWorkspace(t *testing.T
 		}
 	}
 }
+
+// TestAttachLeavesAnUnmanagedGitignoreAlone pins gitignore.manage: false
+// (bd-cxm9r): a workspace that owns its .beads/.gitignore keeps it
+// byte-identical through Attach, while one that leaves the key unset still
+// gets both per-user files covered.
+func TestAttachLeavesAnUnmanagedGitignoreAlone(t *testing.T) {
+	t.Setenv("BD_GITIGNORE_MANAGE", "")
+	os.Unsetenv("BD_GITIGNORE_MANAGE")
+	target := bdhttp.Target{BaseURL: mustAttachTestURL(t, "http://127.0.0.1:8080")}
+
+	owned := t.TempDir()
+	const ownGitignore = "# ours\n*.tmp\n"
+	if err := os.WriteFile(filepath.Join(owned, "config.yaml"), []byte("gitignore:\n  manage: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(owned, ".gitignore"), []byte(ownGitignore), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := bdhttp.Attach(owned, target); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(owned, ".gitignore")); err != nil || string(got) != ownGitignore {
+		t.Fatalf(".gitignore changed under gitignore.manage: false (err %v):\n%s", err, got)
+	}
+
+	managed := t.TempDir()
+	if err := os.WriteFile(filepath.Join(managed, "config.yaml"), []byte("issue-prefix: demo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := bdhttp.Attach(managed, target); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(managed, ".gitignore"))
+	if err != nil || !strings.Contains(string(got), httpclient.TargetFileName) {
+		t.Fatalf("with gitignore.manage unset Attach must still cover %s (err %v):\n%s", httpclient.TargetFileName, err, got)
+	}
+}

@@ -75,6 +75,9 @@ type hookMigrationExecutionPlan struct {
 	RetireOps      []hookMigrationRetireOp `json:"retire_ops"`
 	NoopHooks      []string                `json:"noop_hooks"`
 	BlockingErrors []string                `json:"blocking_errors"`
+	// RepoPath is the path the plan was built for; its workspace's
+	// hooks.manage decides whether the plan may be applied.
+	RepoPath string `json:"-"`
 }
 
 type hookMigrationOutputOperation struct {
@@ -128,6 +131,7 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 		RetireOps:      make([]hookMigrationRetireOp, 0, plan.NeedsMigrationCount*2),
 		NoopHooks:      make([]string, 0, plan.TotalHooks),
 		BlockingErrors: make([]string, 0),
+		RepoPath:       plan.Path,
 	}
 
 	for _, hook := range plan.Hooks {
@@ -232,7 +236,20 @@ type preparedHookWrite struct {
 	Content  []byte
 }
 
+// hookMigrationBeadsDir is the .beads directory whose hooks.manage governs a
+// migration of the hooks at repoPath ("" for the loaded workspace).
+func hookMigrationBeadsDir(repoPath string) string {
+	if repoPath == "" {
+		return ""
+	}
+	return doctor.ResolveBeadsDirForRepo(repoPath)
+}
+
 func applyHookMigrationExecution(execPlan hookMigrationExecutionPlan) (hookMigrationApplySummary, error) {
+	// Before any write or sidecar rename: a migration rewrites hook files.
+	if err := refuseUnmanagedHooks(hookMigrationBeadsDir(execPlan.RepoPath)); err != nil {
+		return hookMigrationApplySummary{}, err
+	}
 	if len(execPlan.BlockingErrors) > 0 {
 		return hookMigrationApplySummary{}, fmt.Errorf(
 			"hook migration blocked by %d issue(s): %s",

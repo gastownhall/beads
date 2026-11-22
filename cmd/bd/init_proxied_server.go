@@ -655,7 +655,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				if !in.quiet {
 					fmt.Fprintf(os.Stderr, "\n%s Failed to resolve git hooks: %v\n", ui.RenderWarn("⚠"), err)
 				}
-			} else if !hooks.installed() || hooks.needsUpdate() {
+			} else if !skipUnmanagedInitHooks(hooks, in.quiet) && (!hooks.installed() || hooks.needsUpdate()) {
 				if hooks.installed() && !in.quiet {
 					fmt.Printf("  Updating hooks to version %s...\n", Version)
 				}

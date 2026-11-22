@@ -60,6 +60,14 @@ Examples:
 			return HandleErrorRespectJSON("resolving path: %v", err)
 		}
 
+		// Refuse before planning or asking for consent; the apply step checks
+		// again, since bd doctor --fix reaches it without this command.
+		if mode.RequestedApply {
+			if err := refuseUnmanagedHooks(hookMigrationBeadsDir(absPath)); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+		}
+
 		plan, err := doctor.PlanHookMigration(absPath)
 		if err != nil {
 			return HandleErrorRespectJSON("building hook migration plan: %v", err)

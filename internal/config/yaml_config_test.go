@@ -1967,3 +1967,126 @@ func TestCheckSecretGitTracked_QuotesThePathInTheRemedy(t *testing.T) {
 		}
 	}
 }
+
+// writeManageConfig writes a .beads directory holding config.yaml content and
+// returns its path.
+func writeManageConfig(t *testing.T, content string) string {
+	t.Helper()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if content != "" {
+		if err := os.WriteFile(filepath.Join(beadsDir, ProjectConfigFileName), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return beadsDir
+}
+
+// clearManageEnv unsets the manage keys' environment overrides for one test.
+func clearManageEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"BD_HOOKS_MANAGE", "BD_GITIGNORE_MANAGE"} {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
+}
+
+func TestManageKeysReadFromTheNamedWorkspace(t *testing.T) {
+	clearManageEnv(t)
+
+	unset := writeManageConfig(t, "issue-prefix: demo\n")
+	if !HooksManaged(unset) || !GitignoreManaged(unset) {
+		t.Fatalf("unset keys must default to managed: hooks=%v gitignore=%v", HooksManaged(unset), GitignoreManaged(unset))
+	}
+	noFile := writeManageConfig(t, "")
+	if !HooksManaged(noFile) || !GitignoreManaged(noFile) {
+		t.Fatal("a workspace with no config.yaml must default to managed")
+	}
+
+	nested := writeManageConfig(t, "hooks:\n  manage: false\n")
+	if HooksManaged(nested) {
+		t.Error("nested hooks.manage: false must read as not managed")
+	}
+	if !GitignoreManaged(nested) {
+		t.Error("hooks.manage must not change gitignore.manage")
+	}
+
+	flat := writeManageConfig(t, "gitignore.manage: false\n")
+	if GitignoreManaged(flat) {
+		t.Error("flat gitignore.manage: false must read as not managed")
+	}
+	if !HooksManaged(flat) {
+		t.Error("gitignore.manage must not change hooks.manage")
+	}
+
+	garbage := writeManageConfig(t, "hooks:\n  manage: nope\n")
+	if !HooksManaged(garbage) {
+		t.Error("a value ParseBool refuses must read as the default (managed)")
+	}
+
+	local := writeManageConfig(t, "hooks:\n  manage: false\n")
+	if err := os.WriteFile(filepath.Join(local, LocalConfigFileName), []byte("hooks:\n  manage: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !HooksManaged(local) {
+		t.Error("config.local.yaml must override config.yaml, as Initialize merges it")
+	}
+
+	t.Setenv("BD_HOOKS_MANAGE", "true")
+	if !HooksManaged(nested) {
+		t.Error("BD_HOOKS_MANAGE must override the workspace file")
+	}
+	t.Setenv("BD_GITIGNORE_MANAGE", "false")
+	if GitignoreManaged(unset) {
+		t.Error("BD_GITIGNORE_MANAGE=false must turn management off")
+	}
+}
+
+func TestManageKeysReadFromTheLoadedConfig(t *testing.T) {
+	clearManageEnv(t)
+	previous := v
+	t.Cleanup(func() { v = previous })
+
+	v = nil
+	if !HooksManaged("") || !GitignoreManaged("") {
+		t.Fatal("with no configuration loaded both keys must default to managed")
+	}
+
+	v = viper.New()
+	v.SetDefault(HooksManageKey, true)
+	v.SetDefault(GitignoreManageKey, true)
+	if !HooksManaged("") || !GitignoreManaged("") {
+		t.Fatal("the registered defaults must read as managed")
+	}
+	v.Set(HooksManageKey, false)
+	v.Set(GitignoreManageKey, "false")
+	if HooksManaged("") || GitignoreManaged("") {
+		t.Fatalf("false in the loaded config must read as not managed: hooks=%v gitignore=%v", HooksManaged(""), GitignoreManaged(""))
+	}
+}
+
+func TestManageKeysAreYamlOnlyAndValidated(t *testing.T) {
+	for _, key := range []string{HooksManageKey, GitignoreManageKey} {
+		if !IsYamlOnlyKey(key) {
+			t.Errorf("%s must be yaml-only so bd config set writes config.yaml", key)
+		}
+		if err := validateYamlConfigValue(key, "false"); err != nil {
+			t.Errorf("%s=false refused: %v", key, err)
+		}
+		if err := validateYamlConfigValue(key, "nope"); err == nil {
+			t.Errorf("%s=nope accepted; it would read as the default and do nothing", key)
+		}
+	}
+
+	beadsDir := writeManageConfig(t, "issue-prefix: demo\n")
+	clearManageEnv(t)
+	if err := SetYamlConfigInDir(beadsDir, HooksManageKey, "false"); err != nil {
+		t.Fatalf("SetYamlConfigInDir: %v", err)
+	}
+	if HooksManaged(beadsDir) {
+		data, _ := os.ReadFile(filepath.Join(beadsDir, ProjectConfigFileName))
+		t.Fatalf("hooks.manage written by SetYamlConfigInDir is not read back:\n%s", data)
+	}
+}

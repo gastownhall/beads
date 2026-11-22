@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/remedy"
 )
@@ -178,7 +179,11 @@ var requiredPatterns = []string{
 // CheckGitignore checks if .beads/.gitignore is up to date.
 // repoPath is the project root directory.
 func CheckGitignore(repoPath string) DoctorCheck {
-	gitignorePath := filepath.Join(ResolveBeadsDirForRepo(repoPath), ".gitignore")
+	beadsDir := ResolveBeadsDirForRepo(repoPath)
+	if !config.GitignoreManaged(beadsDir) {
+		return notManagedCheck("Gitignore", config.GitignoreManageKey)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
 
 	// Check if file exists
 	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- path is constructed from known parts
@@ -251,7 +256,15 @@ var chmodBeadsGitignore = os.Chmod
 // Permissions: the file must grant no group or other access. A file bd creates
 // or must modify ends at the canonical 0600; owner bits stricter than 0600
 // (e.g. 0400) on a file bd does not write are preserved.
+//
+// A workspace that sets gitignore.manage: false owns the file: this returns nil
+// without reading, creating, appending to or changing the mode of it. Every
+// .beads/.gitignore write in cmd/bd (init, bootstrap, connect, doctor --fix)
+// goes through here, and writeGitignoreTemplate has no other caller.
 func EnsureGitignoreForBeadsDir(beadsDir string) error {
+	if !config.GitignoreManaged(beadsDir) {
+		return nil
+	}
 	gitignorePath := filepath.Join(beadsDir, ".gitignore")
 
 	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- caller supplies the active .beads dir
@@ -798,6 +811,9 @@ func FixLastTouchedTracking(repoPath string) error {
 // to prevent accidentally committing Dolt database files and credential keys.
 // repoPath is the project root directory.
 func CheckProjectGitignore(repoPath string) DoctorCheck {
+	if !config.GitignoreManaged(ResolveBeadsDirForRepo(repoPath)) {
+		return notManagedCheck("Project Gitignore", config.GitignoreManageKey)
+	}
 	gitignorePath := filepath.Join(repoPath, ".gitignore")
 
 	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- path is hardcoded
@@ -848,8 +864,12 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 // nonempty files retain their bytes and receive a blank separator before it.
 // This prevents users from accidentally committing
 // Dolt database files or the credential encryption key.
-// repoPath is the project root directory.
+// repoPath is the project root directory. Under gitignore.manage: false for
+// the workspace at repoPath it returns nil and writes nothing.
 func EnsureProjectGitignore(repoPath string) error {
+	if !config.GitignoreManaged(ResolveBeadsDirForRepo(repoPath)) {
+		return nil
+	}
 	gitignorePath := filepath.Join(repoPath, ".gitignore")
 
 	// #nosec G304 -- path is hardcoded
