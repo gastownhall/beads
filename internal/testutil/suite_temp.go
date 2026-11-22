@@ -50,11 +50,27 @@ func PathUnderSuiteRoot(dir, root string) bool {
 	return strings.HasPrefix(dir, strings.TrimRight(root, sep)+sep)
 }
 
-// evalOrSelf resolves symlinks in p, falling back to p itself when the path
-// cannot be resolved (it may not exist yet, or a parent may be unreadable).
+// evalOrSelf resolves symlinks in p. When p itself cannot be resolved (it may
+// not exist yet, or a parent may be unreadable), it resolves the nearest
+// ancestor that can be and re-joins the unresolved tail, so a path that does
+// not exist yet is still spelled the way its resolved parent is. Without that,
+// a missing path under macOS's /var keeps the /var spelling while an existing
+// root resolves to /private/var, and the prefix test answers false for a path
+// that is under the root. It returns p unchanged when no ancestor resolves.
 func evalOrSelf(p string) string {
 	if r, err := filepath.EvalSymlinks(p); err == nil {
 		return r
 	}
-	return p
+	rest := ""
+	for dir := filepath.Clean(p); ; {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+		if r, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(r, rest)
+		}
+		dir = parent
+	}
 }
