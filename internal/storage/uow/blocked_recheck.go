@@ -18,9 +18,10 @@ import (
 // recompute over the same ids after commit sees both writes.
 //
 // It runs no SQL when nothing was recorded. It commits the way the unit of
-// work did (commitStatement): a Dolt commit named for the writes when it
-// changed an issues row and version commits are not deferred, a plain COMMIT
-// otherwise. A serialization loss is retried on a new transaction.
+// work did (commitStatement, execCommitStatement): a Dolt commit named for the
+// writes, under the commit lock, when it changed an issues row and version
+// commits are not deferred, a plain COMMIT otherwise. A serialization loss is
+// retried on a new transaction.
 //
 // The write it follows is durable, so a failure is reported through
 // issueops.ReportBlockedRecheckFailure (the counter and warning the store
@@ -75,6 +76,9 @@ func (t *doltServerTx) recheckBlockedOnce(ctx context.Context, pending issueops.
 	if err != nil {
 		return err
 	}
-	_, err = t.conn.ExecContext(ctx, stmt, args...)
-	return err
+	// The same statement runner as Commit, so a recheck that commits holds
+	// the commit lock too (GH#8590). It commits only when a concurrent writer
+	// made the in-transaction recompute stale, which is when another session
+	// is most likely to be committing as well.
+	return t.execCommitStatement(ctx, stmt, args)
 }

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // Server-mode commit serialization (GH#8590, dolthub/dolt#12258).
@@ -18,10 +20,13 @@ import (
 // session. When another session moves the branch HEAD while that commit is in
 // flight, Dolt 3-way-merges the moved HEAD into the committing session's
 // staged root and adopts the result without checking it for conflicts, so the
-// commit can carry conflict artifacts even though nothing diverged. bd closes
-// that window by holding a per-database named lock, CommitLockName(db), from
-// just before the first DOLT_ADD until DOLT_COMMIT returns, on every
-// server-mode commit plane.
+// commit can carry conflict artifacts even though nothing diverged. bd's write
+// commits close that window by holding a per-database named lock,
+// CommitLockName(db), from just before the first DOLT_ADD until DOLT_COMMIT
+// returns. Pulls, merges, admin repairs and migrations still move HEAD without
+// it; engdocs/design/dolt-concurrency.md lists both sides. The lock is a
+// storage-boundary exception that engdocs/PROJECT_CHARTER.md records, together
+// with the condition that retires it.
 //
 // GET_LOCK/RELEASE_LOCK are session-scoped, so the lock is always taken and
 // released on one pinned session, and a session whose release cannot be
@@ -122,6 +127,18 @@ func (l *CommitLock) Name() string {
 }
 
 var commitLockLastWarn atomic.Int64
+
+// SessionDatabase returns the database q's session is using (SELECT
+// DATABASE()), which is the database its DOLT_COMMIT commits to. It keys the
+// commit lock for a caller that holds a session but no store's database name:
+// a uow unit of work built without one, or a proxied maintenance connection.
+func SessionDatabase(ctx context.Context, q CommitLockQuerier) (string, error) {
+	var current sql.NullString
+	if err := q.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&current); err != nil {
+		return "", fmt.Errorf("acquire commit lock: read database: %w", err)
+	}
+	return current.String, nil
+}
 
 // AcquireCommitLock runs GET_LOCK(CommitLockName(database), wait) on q's
 // session. A 0 or NULL result is not an error: the returned lock is not held
@@ -227,4 +244,48 @@ func HoldCommitLockOnConn(ctx context.Context, conn *sql.Conn, cfg CommitLockCon
 		return nil, err
 	}
 	return func() { cfg.ReleaseOrDiscard(l, conn, func() { DiscardConn(conn) }) }, nil
+}
+
+// CommitAllSerialized commits everything pending in the working set
+// (DOLT_COMMIT('-Am')) on conn, a pinned sql-server session, under the commit
+// lock. It is the commit of a maintenance connection that no store owns: the
+// proxied `bd dolt commit` and the proxied pre-backup commit. author, when
+// set, is called once there is something to commit and before the lock is
+// taken (resolving an author can shell out to git), and its result is passed
+// as --author.
+//
+// When nothing is pending it takes no lock and makes no commit. An empty
+// cfg.Database keys the lock on the session's own database (SessionDatabase).
+// It reports whether it made a commit. A "nothing to commit" refusal is no
+// error: it means another session's commit took the pending change while this
+// one waited for the lock.
+func CommitAllSerialized(ctx context.Context, conn *sql.Conn, cfg CommitLockConfig, message string, author func() string) (bool, error) {
+	pending, err := issueops.HasPendingChanges(ctx, conn)
+	if err != nil {
+		return false, fmt.Errorf("check pending changes: %w", err)
+	}
+	if !pending {
+		return false, nil
+	}
+	if cfg.Database == "" {
+		if cfg.Database, err = SessionDatabase(ctx, conn); err != nil {
+			return false, err
+		}
+	}
+	query, args := "CALL DOLT_COMMIT('-Am', ?)", []any{message}
+	if author != nil {
+		query, args = "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", []any{message, author()}
+	}
+	release, err := HoldCommitLockOnConn(ctx, conn, cfg)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	if _, err := conn.ExecContext(ctx, query, args...); err != nil {
+		if issueops.IsNothingToCommitError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }

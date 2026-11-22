@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -224,7 +225,7 @@ func TestCommitLockSerializesStorePlanes(t *testing.T) {
 	defer cleanup()
 	ctx, cancel := testContext(t)
 	defer cancel()
-	for _, id := range []string{"test-cp1", "test-cp2", "test-cp3", "test-cp4"} {
+	for _, id := range []string{"test-cp1", "test-cp2", "test-cp3", "test-cp4", "test-cp5"} {
 		commitLockTestIssue(t, ctx, store, id)
 	}
 	if err := store.CloseIssue(ctx, "test-cp4", "done", "tester", ""); err != nil {
@@ -271,6 +272,28 @@ func TestCommitLockSerializesStorePlanes(t *testing.T) {
 			}
 			return err
 		}},
+		{name: "deleter", write: func(ctx context.Context) error {
+			deleter, err := store.Deleter()
+			if err != nil {
+				return err
+			}
+			_, err = deleter.Delete(ctx, issueops.DeleteRequest{IDs: []string{"test-cp5"}, Actor: "tester"})
+			return err
+		}},
+		{name: "commitWorkingSet (Commit)", setup: func(ctx context.Context) {
+			if _, err := store.db.ExecContext(ctx, "UPDATE issues SET notes = 'out of band commit' WHERE id = 'test-cp2'"); err != nil {
+				t.Fatalf("dirty the working set: %v", err)
+			}
+		}, write: func(ctx context.Context) error {
+			return store.Commit(ctx, "commit-lock commit working set")
+		}},
+		{name: "CommitWithConfig", setup: func(ctx context.Context) {
+			if _, err := store.db.ExecContext(ctx, "UPDATE issues SET notes = 'out of band with config' WHERE id = 'test-cp3'"); err != nil {
+				t.Fatalf("dirty the working set: %v", err)
+			}
+		}, write: func(ctx context.Context) error {
+			return store.CommitWithConfig(ctx, "commit-lock commit with config")
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -292,11 +315,18 @@ func TestCommitLockReleasedOnEveryReturnPath(t *testing.T) {
 	commitLockTestIssue(t, ctx, store, "test-rp1")
 	h := newCommitLockHolder(t, ctx, store)
 	name := versioncontrolops.CommitLockName(store.database)
+	// Keep released sessions in the pool. With no idle connections
+	// (setupConcurrentTestStore), database/sql closes each session as the call
+	// returns and the server frees every lock it held, so a path that never
+	// released the lock would still read as free.
+	store.db.SetMaxIdleConns(2)
 
 	cases := []struct {
 		name    string
 		run     func(ctx context.Context) error
 		wantErr bool
+		// check, when set, vets the returned error further.
+		check func(t *testing.T, err error)
 	}{
 		{name: "success", run: func(ctx context.Context) error {
 			return store.RunInTransaction(ctx, "rp success", func(tx storage.Transaction) error {
@@ -324,7 +354,34 @@ func TestCommitLockReleasedOnEveryReturnPath(t *testing.T) {
 				return tx.UpdateIssue(ctx, "test-rp1", map[string]interface{}{"title": "rp failed commit"}, "tester")
 			})
 		}},
-		{name: "funnel screen refusal", wantErr: true, run: func(ctx context.Context) error {
+		{name: "funnel staged-screen refusal", wantErr: true, run: func(ctx context.Context) error {
+			// The working-set screen passes. A key another session writes
+			// right after it is staged by DOLT_ADD, so the staged screen
+			// refuses under the lock and unstageRefused runs before the
+			// release. Setup leaves issue_prefix uncommitted, which the
+			// working-set screen would refuse first, so commit it.
+			if err := store.CommitWithConfig(ctx, "rp: settle setup config"); err != nil {
+				return err
+			}
+			if err := store.SetConfig(ctx, "kv.memory.rp-staged", "memory"); err != nil {
+				return err
+			}
+			var raceErr error
+			saved := afterStageCommitScreen
+			afterStageCommitScreen = func() {
+				_, raceErr = h.db.ExecContext(ctx, "INSERT INTO config (`key`, value) VALUES ('rp_staged_internal', 'x')")
+			}
+			defer func() { afterStageCommitScreen = saved }()
+			err := store.CommitConfigUserKVOnly(ctx, "rp staged screen refusal")
+			return errors.Join(raceErr, err)
+		}, check: func(t *testing.T, err error) {
+			var refused *storage.ConfigCommitRefusedError
+			if !errors.As(err, &refused) || !slices.Equal(refused.Keys, []string{"rp_staged_internal"}) {
+				t.Fatalf("CommitConfigUserKVOnly = %v, want the staged screen's refusal of rp_staged_internal", err)
+			}
+		}},
+		{name: "funnel working-set screen refusal", wantErr: true, run: func(ctx context.Context) error {
+			// Refused before the lock is taken: nothing to release.
 			if _, err := store.db.ExecContext(ctx, "REPLACE INTO config (`key`, value) VALUES ('rp.internal', 'x')"); err != nil {
 				return err
 			}
@@ -344,6 +401,9 @@ func TestCommitLockReleasedOnEveryReturnPath(t *testing.T) {
 			err := tc.run(ctx)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("run err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.check != nil {
+				tc.check(t, err)
 			}
 			if !h.isFree(ctx, name) {
 				t.Fatalf("IS_FREE_LOCK(%q) = 0 right after the call returned (err=%v): the commit lock leaked", name, err)

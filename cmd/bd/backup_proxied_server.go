@@ -239,23 +239,13 @@ func runBackupSyncProxied(ctx context.Context) error {
 //
 // It is normally a no-op: every proxied write transaction ends in
 // DOLT_COMMIT('-Am') (uow doltServerTx.Commit), so the working set is already
-// clean. The pending check is what keeps this from minting an empty commit on
-// every sync — Dolt rejects those server-side and logs each one.
+// clean. CommitAllSerialized's pending check is what keeps this from minting
+// an empty commit on every sync — Dolt rejects those server-side and logs each
+// one — and when it does commit, it holds the server-mode commit lock
+// (GH#8590).
 func commitWorkingSetBeforeBackup(ctx context.Context, conn *sql.Conn) error {
-	pending, err := issueops.HasPendingChanges(ctx, conn)
-	if err != nil {
-		return fmt.Errorf("check pending changes: %w", err)
-	}
-	if !pending {
-		return nil
-	}
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", "bd: pre-backup commit"); err != nil {
-		if issueops.IsNothingToCommitError(err) {
-			return nil
-		}
-		return err
-	}
-	return nil
+	_, err := versioncontrolops.CommitAllSerialized(ctx, conn, versioncontrolops.CommitLockConfig{}, "bd: pre-backup commit", nil)
+	return err
 }
 
 // runBackupRemoveProxied unregisters the destination and drops the local

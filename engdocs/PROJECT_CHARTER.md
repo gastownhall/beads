@@ -73,6 +73,22 @@ test-only `testutil.HoldDoltDatabaseLock` is outside it). The same proof also
 reads Dolt's `.dolt/sql-server.info` for the port and PID it names, as the
 dolt CLI does, the way bd already reads `repo_state.json`.
 
+A second exception is granted, as narrowly: the server-mode commit lock
+(GH#8590). On a Dolt sql-server, Dolt merges a branch HEAD that moves while a
+`DOLT_COMMIT` is in flight into the committing session's staged root without
+a conflict check (dolthub/dolt#12258), so concurrent writers can commit
+conflict artifacts. Until Dolt fixes that, bd's write commits on a server take
+one SQL named lock per database, `GET_LOCK` on
+`versioncontrolops.CommitLockName(db)` (`bd_commit:<db>`), on the session
+that commits, from just before its first `DOLT_ADD` until `DOLT_COMMIT`
+returns. The lock does not retry and inspects no engine state; it fails open,
+so a commit that does not get it within its wait runs unlocked, as it did
+before. It covers that one lock on the commit paths that
+[engdocs/design/dolt-concurrency.md](design/dolt-concurrency.md) lists, and
+no other lock or retry. The exception ends, and the lock is removed, when the
+oldest Dolt version bd supports (`doltversion.RequiredMin`) carries the fix
+for dolthub/dolt#12258, or when Dolt or its driver serializes commits itself.
+
 This boundary is mechanically enforced for non-test code by a `depguard`
 rule in `.golangci.yml` that denies `github.com/dolthub/` imports outside
 `internal/storage/` and `internal/doltserver/` (the linter config does not

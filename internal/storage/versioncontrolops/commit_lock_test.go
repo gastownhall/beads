@@ -226,3 +226,99 @@ func TestCommitLockWaitSecondsPinsTheDeadlineCap(t *testing.T) {
 		t.Errorf("sub-second configured wait = %ds, want a single try (0)", limit)
 	}
 }
+
+// TestCommitAllSerializedHoldsTheLockAroundTheCommit pins the maintenance
+// commit of the proxied `bd dolt commit` and pre-backup commit: the lock is
+// taken after the pending check, keyed on the session's own database when the
+// config names none, and released after DOLT_COMMIT on every return path. With
+// nothing pending there is no lock and the author is never resolved.
+func TestCommitAllSerializedHoldsTheLockAroundTheCommit(t *testing.T) {
+	commitErr := errors.New("invalid author")
+	cases := []struct {
+		name          string
+		database      string // CommitLockConfig.Database; "" reads it from the session
+		sessionDB     string // what SELECT DATABASE() returns
+		pending       int
+		author        bool
+		commitErr     error
+		wantCommitted bool
+		wantErr       error
+	}{
+		{name: "commit with author", database: commitLockTestDB, pending: 1, author: true, wantCommitted: true},
+		{name: "commit without author", database: commitLockTestDB, pending: 1, wantCommitted: true},
+		{name: "session database keys the lock", sessionDB: "Beads/main", pending: 1, wantCommitted: true},
+		{name: "nothing to commit after the wait", database: commitLockTestDB, pending: 1,
+			commitErr: errors.New("nothing to commit"), wantCommitted: false},
+		{name: "failed commit", database: commitLockTestDB, pending: 1, commitErr: commitErr, wantErr: commitErr},
+		{name: "nothing pending", database: commitLockTestDB, pending: 0, author: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			ctx := context.Background()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("pin conn: %v", err)
+			}
+			defer conn.Close()
+
+			mock.ExpectQuery(matchPendingQuery.String()).
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(tc.pending))
+			if tc.pending > 0 {
+				lockName := CommitLockName(commitLockTestDB)
+				if tc.database == "" {
+					mock.ExpectQuery(`SELECT DATABASE\(\)`).
+						WillReturnRows(sqlmock.NewRows([]string{"db"}).AddRow(tc.sessionDB))
+					lockName = CommitLockName(tc.sessionDB)
+				}
+				mock.ExpectQuery(`SELECT GET_LOCK\(\?, \?\)`).
+					WithArgs(lockName, int64(DefaultCommitLockWait.Seconds())).
+					WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+				var commit *sqlmock.ExpectedExec
+				if tc.author {
+					commit = mock.ExpectExec(`CALL DOLT_COMMIT\('-Am', \?, '--author', \?\)`).
+						WithArgs("flush", "Ann <ann@example.com>")
+				} else {
+					commit = mock.ExpectExec(`CALL DOLT_COMMIT\('-Am', \?\)`).WithArgs("flush")
+				}
+				if tc.commitErr != nil {
+					commit.WillReturnError(tc.commitErr)
+				} else {
+					commit.WillReturnResult(sqlmock.NewResult(0, 0))
+				}
+				mock.ExpectQuery(`SELECT RELEASE_LOCK\(\?\)`).WithArgs(lockName).
+					WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+			}
+
+			var author func() string
+			resolved := 0
+			if tc.author {
+				author = func() string { resolved++; return "Ann <ann@example.com>" }
+			}
+			committed, err := CommitAllSerialized(ctx, conn, CommitLockConfig{Database: tc.database}, "flush", author)
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("CommitAllSerialized: %v", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("CommitAllSerialized err = %v, want %v", err, tc.wantErr)
+			}
+			if committed != tc.wantCommitted {
+				t.Fatalf("committed = %v, want %v", committed, tc.wantCommitted)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("statement sequence: %v", err)
+			}
+			wantResolved := 0
+			if tc.author && tc.pending > 0 {
+				wantResolved = 1
+			}
+			if resolved != wantResolved {
+				t.Fatalf("author resolved %d times, want %d", resolved, wantResolved)
+			}
+		})
+	}
+}
