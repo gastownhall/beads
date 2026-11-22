@@ -148,7 +148,7 @@ func writeLocalDoltGlobalConfig(root string) error {
 // localDoltServer is one `dolt sql-server` owned by this test process.
 type localDoltServer struct {
 	bin     string
-	root    string // owned tree: data/, home/, sfp/, server.yaml, server.log, owner.pid
+	root    string // owned tree: data/, home/, sfp/, server.yaml, server.log, owner.pid, server.pid
 	dataDir string
 	logPath string
 
@@ -292,12 +292,17 @@ func (s *localDoltServer) launch(port int) error {
 	cmd.Stderr = logf
 	// Same process group as the test: `bazel test` (test-setup.sh) kills the
 	// group when the test exits or times out, which reaps a server that every
-	// cleanup missed. Pdeathsig covers plain `go test`.
+	// cleanup missed. Pdeathsig covers plain `go test` on Linux; the PID
+	// recorded below lets a later process's sweepDeadLocalServerRoots kill a
+	// server that outlived its owner anywhere.
 	cmd.SysProcAttr = localServerSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		_ = logf.Close()
 		return fmt.Errorf("start dolt sql-server: %w", err)
 	}
+	// Best effort: without the record the server is only as reapable as it
+	// was before there was one.
+	_ = writeLocalRootPID(s.root, localServerPIDFile, cmd.Process.Pid)
 	done := make(chan struct{})
 	s.mu.Lock()
 	s.cmd, s.done, s.port, s.waitErr = cmd, done, port, nil
@@ -320,6 +325,11 @@ func (s *localDoltServer) launch(port int) error {
 
 func (s *localDoltServer) secureFilePrivDir() string { return filepath.Join(s.root, "sfp") }
 
+// localServerConfigPath is the --config file of the server whose state tree
+// is root. It is the server's last argument, which is how
+// isLocalServerProcess recognizes the process.
+func localServerConfigPath(root string) string { return filepath.Join(root, "server.yaml") }
+
 // writeServerConfig writes the server's --config file for port. dolt ignores
 // every other flag when --config is given, so it carries the listener too.
 // Its only other setting is secure_file_priv: the image runs with "" (any
@@ -330,7 +340,7 @@ func (s *localDoltServer) secureFilePrivDir() string { return filepath.Join(s.ro
 // one deliberate difference from the container (TestDoltServerFingerprint
 // normalizes it).
 func (s *localDoltServer) writeServerConfig(port int) (string, error) {
-	path := filepath.Join(s.root, "server.yaml")
+	path := localServerConfigPath(s.root)
 	cfg := fmt.Sprintf("listener:\n  host: 127.0.0.1\n  port: %d\nsystem_variables:\n  secure_file_priv: %s\n",
 		port, strconv.Quote(s.secureFilePrivDir()))
 	return path, os.WriteFile(path, []byte(cfg), 0o600)
@@ -512,28 +522,38 @@ func (s *localDoltServer) execInDataDir(ctx context.Context, argv []string) (int
 	return 0, string(out), nil
 }
 
-// Local state roots are removed by terminate, but nothing runs it when the
-// test binary dies (panic, -timeout, SIGKILL) or when a package's TestMain
-// never calls TerminateDoltContainer: the container backend has Ryuk for
-// that, the local backend has these. Every root records its owning PID, and
-// the first use of the backend in a later process removes the roots whose
+// Local state roots are removed by terminate, and their servers stopped,
+// but nothing runs it when the test binary dies (panic, -timeout, SIGKILL)
+// or when a package's TestMain never calls TerminateDoltContainer: the
+// container backend has Ryuk for that, the local backend has these. Every
+// root records its owning PID and its server's PID, and the first use of the
+// backend in a later process kills the servers and removes the roots whose
 // owner is gone (the doltserver.SweepDeadSuiteRoots rule, copied because
 // doltserver's own tests import this package).
 const (
 	localRootOwnerFile   = "owner.pid"
+	localServerPIDFile   = "server.pid"
 	localServerRootGlob  = "bdt-dolt-*"
 	localVersionRootGlob = "bdt-doltver-*"
 )
 
 func writeLocalRootOwner(root string) error {
-	return os.WriteFile(filepath.Join(root, localRootOwnerFile), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	return writeLocalRootPID(root, localRootOwnerFile, os.Getpid())
+}
+
+func writeLocalRootPID(root, name string, pid int) error {
+	return os.WriteFile(filepath.Join(root, name), []byte(strconv.Itoa(pid)+"\n"), 0o600)
 }
 
 // readLocalRootOwner returns the PID in root's owner marker; ok is false
 // when there is none or it does not hold a PID, which means "owner unknown",
 // never "owner dead".
 func readLocalRootOwner(root string) (pid int, ok bool) {
-	b, err := os.ReadFile(filepath.Join(root, localRootOwnerFile)) // #nosec G304 -- fixed name under a root this user owns
+	return readLocalRootPID(root, localRootOwnerFile)
+}
+
+func readLocalRootPID(root, name string) (pid int, ok bool) {
+	b, err := os.ReadFile(filepath.Join(root, name)) // #nosec G304 -- fixed name under a root this user owns
 	if err != nil {
 		return 0, false
 	}
@@ -551,13 +571,60 @@ func processAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
+// processCommandLine returns pid's arguments joined by spaces, from /proc
+// where there is one and from ps elsewhere; ok is false when neither can
+// say.
+func processCommandLine(pid int) (cmdline string, ok bool) {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if err == nil {
+		return strings.TrimSpace(strings.ReplaceAll(string(b), "\x00", " ")), true
+	}
+	// #nosec G204 -- fixed command; the only variable argument is an int
+	out, err := exec.Command("ps", "-ww", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+// isLocalServerProcess reports whether pid is, right now, the server that
+// launch started for root: its command line still ends in root's --config
+// file. A root is a fresh MkdirTemp name, so no other process carries it.
+func isLocalServerProcess(pid int, root string) bool {
+	cmdline, ok := processCommandLine(pid)
+	return ok && strings.HasSuffix(cmdline, " sql-server --config "+localServerConfigPath(root))
+}
+
+// localOrphanStopTimeout bounds the wait for a killed orphan to be gone.
+const localOrphanStopTimeout = 5 * time.Second
+
+// stopOrphanLocalServer kills the server that root's dead owner left running
+// and waits for it to be gone. The PID in server.pid is not trusted on its
+// own: that server may have exited long ago and the number may name another
+// process by now, so nothing is signaled unless isLocalServerProcess says
+// the process is still root's server. It gets SIGKILL: its owner is dead and
+// its data directory is removed next, so there is nothing to shut down
+// cleanly.
+func stopOrphanLocalServer(root string) {
+	pid, ok := readLocalRootPID(root, localServerPIDFile)
+	if !ok || !isLocalServerProcess(pid, root) {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	deadline := time.Now().Add(localOrphanStopTimeout)
+	for time.Now().Before(deadline) && isLocalServerProcess(pid, root) {
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 // sweepDeadLocalServerRoots removes base's local-backend state roots whose
 // owner marker names a dead process and returns them. A root without a
 // marker (a pre-marker leftover, or one whose owner is still between
 // MkdirTemp and writing it), with a live owner, not a real directory, or not
-// owned by this user is left alone. Only directories are reclaimed: on
-// Linux Pdeathsig already killed the dead owner's servers; elsewhere a
-// surviving server keeps serving its deleted directory until it is killed.
+// owned by this user is left alone. A dead owner's server is killed before
+// its root is removed (stopOrphanLocalServer): on Linux Pdeathsig has usually
+// done that already, elsewhere nothing has, and a surviving server would keep
+// serving its deleted directory until someone killed it by hand.
 func sweepDeadLocalServerRoots(base string, alive func(int) bool) []string {
 	var swept []string
 	for _, glob := range []string{localServerRootGlob, localVersionRootGlob} {
@@ -574,6 +641,7 @@ func sweepDeadLocalServerRoots(base string, alive func(int) bool) []string {
 			if !ok || alive(pid) {
 				continue
 			}
+			stopOrphanLocalServer(root)
 			if os.RemoveAll(root) == nil {
 				swept = append(swept, root)
 			}
