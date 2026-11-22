@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -198,5 +199,30 @@ func TestCommitLockName(t *testing.T) {
 	}
 	if CommitLockName("beads") == CommitLockName("other_db") {
 		t.Errorf("distinct databases share a commit lock name")
+	}
+}
+
+// TestCommitLockWaitSecondsPinsTheDeadlineCap pins how the GET_LOCK wait is
+// derived: the configured wait by default, and never closer than one second to
+// the caller's own deadline, so the driver does not kill the connection
+// mid-wait.
+func TestCommitLockWaitSecondsPinsTheDeadlineCap(t *testing.T) {
+	if got := commitLockWaitSeconds(context.Background(), 0); got != 5 {
+		t.Errorf("default wait = %ds, want 5s", got)
+	}
+	if got := commitLockWaitSeconds(context.Background(), 3*time.Second); got != 3 {
+		t.Errorf("configured 3s wait = %ds, want 3s", got)
+	}
+	// A 3s deadline leaves ~2s after the 1s reservation. A configured
+	// sub-second wait with no deadline truncates to whole seconds: one try (0).
+	ctxShort, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	short := commitLockWaitSeconds(ctxShort, 10*time.Second)
+	limit := commitLockWaitSeconds(context.Background(), 500*time.Millisecond)
+	if short < 1 || short > 2 {
+		t.Errorf("capped wait = %ds, want 1-2s for a 3s deadline", short)
+	}
+	if limit != 0 {
+		t.Errorf("sub-second configured wait = %ds, want a single try (0)", limit)
 	}
 }
