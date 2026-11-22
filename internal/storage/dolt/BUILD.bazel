@@ -180,6 +180,7 @@ go_test(
         "commit_config_test.go",
         "commit_dirty_wisp_test.go",
         "commit_lock_planes_test.go",
+        "commit_lock_release_test.go",
         "commit_lock_test.go",
         "commit_lock_test_helpers_test.go",
         "compact_test.go",
