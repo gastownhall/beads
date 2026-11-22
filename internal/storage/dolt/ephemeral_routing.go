@@ -396,6 +396,15 @@ func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables
 	if issueops.VersionCommitDeferred(ctx) {
 		return nil
 	}
+	// GH#8590: hold the commit lock through tx's session from the first
+	// DOLT_ADD until DOLT_COMMIT returns. This plane's own race window opens
+	// at BEGIN, which the lock does not cover, but taking it keeps this
+	// commit's HEAD move out of every locked post-tx commit's window.
+	releaseCommitLock, err := s.holdCommitLockInTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	defer releaseCommitLock()
 	for _, table := range s.withVersionedHistoryTables(ctx, tx, tables) {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
