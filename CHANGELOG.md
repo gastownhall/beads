@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Concurrent bd writers on one Dolt sql-server no longer commit Dolt merge
+  conflict artifacts** ([#8590](https://github.com/gastownhall/beads/issues/8590),
+  reported by @olivierlefloch;
+  [dolthub/dolt#12258](https://github.com/dolthub/dolt/issues/12258)). Dolt
+  does not reject a commit whose branch HEAD moved since the committing
+  transaction began: it merges the moved HEAD into the staged root and
+  commits the result unexamined, so two bd processes sharing a dolt
+  sql-server and committing within ~100ms of each other stored conflict
+  artifacts in the second commit even though both staged the same rows (0-8
+  commits a day out of a few thousand; `bd compact` stopped at each affected
+  commit). Every server-mode commit plane now holds a per-database named
+  lock (`bd_commit:<database>`, the same `GET_LOCK` discipline schema
+  migrations and the delete fence already use) across its `DOLT_ADD`/`DOLT_COMMIT`
+  pair, on the session it is already pinned to, released on every return
+  path. Embedded mode issues no lock statements. A lock not obtained within
+  5 seconds (counted on `bd.db.commit_lock_timeouts`) commits unlocked
+  exactly as before, so serialization degrades, never throughput.
+
 ### Security
 
 - **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and

@@ -534,6 +534,44 @@ far below the hundreds-per-second ceiling.
    hit the same issues. Document as unsupported, or add transaction
    discipline to embedded mode too?
 
+## The Commit Lock: serializing HEAD-moving commits (GH#8590)
+
+Dolt does not reject a commit whose branch HEAD moved since the committing
+transaction began: `prepareDoltCommit` three-way-merges the moved HEAD into
+the staged root and commits the result unexamined, so two concurrent bd
+writers on one dolt sql-server can store merge conflict artifacts in
+otherwise-identical commits (dolthub/dolt#12258). Nearly all of bd's
+server-mode commit planes were exposed — `StageAndCommit`, the publication
+funnel (`stageAndCommit`), the in-transaction planes
+(`doltAddAndCommitInTx`, the role deleter, the tier sweeper), the explicit
+`-Am` commits, and the uow proxied planes (`stageAndCommitOnce`, `Commit`).
+
+Since GH#8590 those planes take a **per-database named lock** around their
+`DOLT_ADD`/`DOLT_COMMIT` pair:
+
+- **Name**: `versioncontrolops.CommitLockName(database)` → `bd_commit:` +
+  lowercased database name (revision suffixes dropped, fnv64a past the
+  64-byte `GET_LOCK` limit). The name is a cross-version contract: an
+  upgraded client must serialize against an unupgraded one.
+- **Session discipline**: the lock rides the session the commit is already
+  pinned to (pool-pinned by `commitWriteTxOn` for the in-tx planes), and is
+  released on that same session on every return path. A release that cannot
+  be confirmed discards the session — the server drops its locks on
+  disconnect — instead of returning a lock-suspect connection to the pool.
+  Embedded mode issues no lock statements at all (no concurrent sessions).
+- **Lock order**: the per-id delete fence (`bd_delete:…`) is taken before
+  `bd_commit:…`, never the reverse; schema migrations keep their own
+  `bd_schema_init:` lock. There is no cycle.
+- **Wait and failure mode**: 5s by default
+  (`dolt.DoltStore.commitLockWait`), capped 1s inside the caller's own
+  deadline. A lock not obtained in time is **not** an error: the commit
+  proceeds unlocked as it did before the lock existed, counted on
+  `bd.db.commit_lock_timeouts` and warned rate-limited. A `GET_LOCK` query
+  error is an error, handled like the `DOLT_ADD` failure beside it.
+- **Residual window**: the in-tx planes' exposure still begins at `BEGIN`;
+  the lock narrows it to the add+commit pair. Closing it fully is the
+  post-tx migration's work (NEXUS#92 — `doltAddAndCommitPostTx` ordering).
+
 ## References
 
 - [Dolt Concurrency Architecture (DoltHub blog, 2026-02-18)](https://www.dolthub.com/blog/2026-02-18-dolt-concurrency/)
