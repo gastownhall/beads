@@ -285,6 +285,18 @@ func TestReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
 	conformance.RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
 }
 
+func TestReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, ctx, fixture)
+}
+
+func TestReaderListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, ctx, fixture)
+}
+
 // newDoltReaderFixture composes the shared role kit with the reader accessor.
 // One store per case here rather than one per suite: setupTestStore gives each
 // test its own copy-on-write branch and costs a fraction of a second, so the

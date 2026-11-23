@@ -667,6 +667,8 @@ var roleContractCases = []roleContract{
 		RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse,
 		RunReaderListTimeBoundsAreStrictAndWholeSecond,
 		RunReaderListFilterFamiliesNarrowToTheirRows,
+		RunReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy,
+		RunReaderListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy,
 	),
 
 	roleCases("ReadyClaimer", "ReadyClaimer() and IssueReader()", oncePerRole,

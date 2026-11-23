@@ -179,6 +179,12 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ReadyBriefDropsTheFreeFormTextAndNothingElse", func(t *testing.T) {
 		conformance.RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
 	})
+	t.Run("ReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy", func(t *testing.T) {
+		conformance.RunReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, ctx, fixture)
+	})
+	t.Run("ListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy", func(t *testing.T) {
+		conformance.RunReaderListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, ctx, fixture)
+	})
 	// Last on purpose: the backend-failure half runs a request on a dead
 	// context, and this backend's provider is shared by every case above it.
 	t.Run("GetMissIsNotFoundAndBackendFailureDoesNotDecay", func(t *testing.T) {

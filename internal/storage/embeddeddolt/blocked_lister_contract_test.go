@@ -21,7 +21,7 @@ func TestBlockedListerContract(t *testing.T) {
 		t.Fatalf("BlockedLister(): %v", err)
 	}
 	kit := newEmbeddedRoleFixtureKit(te, "blk")
-	conformance.RunBlockedLister(t, t.Context(), conformance.BlockedListerFixture{
+	fixture := conformance.BlockedListerFixture{
 		IssuePrefix:   kit.IssuePrefix,
 		BlockedLister: lister,
 		CreateIssue:   kit.CreateIssue,
@@ -42,5 +42,9 @@ func TestBlockedListerContract(t *testing.T) {
 			}
 			return nil
 		},
+	}
+	conformance.RunBlockedLister(t, t.Context(), fixture)
+	t.Run("CtxHidesTheRowsTheDeclaredContextDoesNotSatisfy", func(t *testing.T) {
+		conformance.RunBlockedListerCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, t.Context(), fixture)
 	})
 }

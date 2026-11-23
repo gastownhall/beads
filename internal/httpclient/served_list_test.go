@@ -1479,6 +1479,7 @@ func TestServedReaderRefusesTheFiltersTheWireCannotCarry(t *testing.T) {
 		{"ReadyFlag", issueops.ListRequest{ReadyFlag: true}},
 		{"Offset", issueops.ListRequest{Offset: 1}},
 		{"IncludeComments", issueops.ListRequest{IncludeComments: true}},
+		{"Ctx", issueops.ListRequest{Ctx: []string{}}},
 	} {
 		page, err := reader.List(ctx, test.req)
 		if err == nil {
@@ -1493,6 +1494,11 @@ func TestServedReaderRefusesTheFiltersTheWireCannotCarry(t *testing.T) {
 		t.Error("Ready with an Offset answered instead of refusing")
 	} else {
 		assertServedRefusal(t, "Ready with an Offset", err, "Offset")
+	}
+	if _, err := reader.Ready(ctx, issueops.ReadyRequest{Ctx: []string{"gpu"}}); err == nil {
+		t.Error("Ready with a declared context answered instead of refusing")
+	} else {
+		assertServedRefusal(t, "Ready with a declared context", err, "Ctx")
 	}
 }
 

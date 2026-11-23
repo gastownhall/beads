@@ -21,11 +21,15 @@ func TestBlockedListerContract(t *testing.T) {
 		t.Fatalf("BlockedLister(): %v", err)
 	}
 	kit := newUOWRoleFixtureKit(provider, "blk")
-	conformance.RunBlockedLister(t, ctx, conformance.BlockedListerFixture{
+	fixture := conformance.BlockedListerFixture{
 		IssuePrefix:   kit.IssuePrefix,
 		BlockedLister: lister,
 		CreateIssue:   kit.CreateIssue,
 		CreateWisp:    kit.CreateWisp,
 		AddDependency: kit.AddDependency,
+	}
+	conformance.RunBlockedLister(t, ctx, fixture)
+	t.Run("CtxHidesTheRowsTheDeclaredContextDoesNotSatisfy", func(t *testing.T) {
+		conformance.RunBlockedListerCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, ctx, fixture)
 	})
 }

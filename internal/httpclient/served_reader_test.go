@@ -272,6 +272,28 @@ func TestServedReaderListFilterFamiliesNarrowToTheirRows(t *testing.T) {
 	conformance.RunReaderListFilterFamiliesNarrowToTheirRows(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// The two Ctx cases park on their ledger rows: the predicate hides every row
+// carrying a `requires:` label the declared context does not satisfy, no
+// published label parameter composes that negative predicate, and the client
+// refuses a declared context (even an empty one) before the dial rather than
+// drop it. The refusals themselves are asserted in
+// TestServedReaderRefusesTheFiltersTheWireCannotCarry.
+
+func TestServedReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t *testing.T) {
+	skipKnownDivergence(t, "E-ReadyRequest.Ctx", readParkBead,
+		"the case's subject is ReadyRequest.Ctx, and listReadyWork publishes no ctx parameter; the client "+
+			"refuses a declared context rather than answer with the rows the caller said it cannot run")
+	conformance.RunReaderReadyCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
+func TestServedReaderListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t *testing.T) {
+	skipKnownDivergence(t, "E-ListRequest.Ctx", readParkBead,
+		"the case's subject is ListRequest.Ctx, and listIssues publishes no ctx parameter; the client "+
+			"refuses a declared context rather than answer with the rows the caller said it cannot run "+
+			"(its --ready arm also parks on E-ListRequest.ReadyFlag)")
+	conformance.RunReaderListCtxHidesTheRowsTheDeclaredContextDoesNotSatisfy(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
 func TestServedReaderListStatusAcceptsACommaSeparatedORSet(t *testing.T) {
 	conformance.RunReaderListStatusAcceptsACommaSeparatedORSet(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
