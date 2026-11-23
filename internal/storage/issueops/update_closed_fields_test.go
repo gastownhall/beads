@@ -53,35 +53,35 @@ func TestManageClosedAtMatchesCloseSemantics(t *testing.T) {
 			name:            "crossing into closed defaults reason and session to empty",
 			oldIssue:        openIssue,
 			updates:         map[string]interface{}{"status": "closed"},
-			want:            map[string]interface{}{"close_reason": "", "closed_by_session": ""},
+			want:            map[string]interface{}{"close_reason": "", "closed_by_session": "", "closed_by": "closer-a"},
 			wantClosedAtNow: true,
 		},
 		{
 			name:            "typed status crosses the same way",
 			oldIssue:        openIssue,
 			updates:         map[string]interface{}{"status": types.StatusClosed},
-			want:            map[string]interface{}{"close_reason": "", "closed_by_session": ""},
+			want:            map[string]interface{}{"close_reason": "", "closed_by_session": "", "closed_by": "closer-a"},
 			wantClosedAtNow: true,
 		},
 		{
 			name:            "explicit close_reason wins over its default",
 			oldIssue:        openIssue,
 			updates:         map[string]interface{}{"status": "closed", "close_reason": "shipped"},
-			want:            map[string]interface{}{"closed_by_session": ""},
+			want:            map[string]interface{}{"closed_by_session": "", "closed_by": "closer-a"},
 			wantClosedAtNow: true,
 		},
 		{
 			name:            "explicit closed_by_session wins over its default",
 			oldIssue:        openIssue,
 			updates:         map[string]interface{}{"status": "closed", "closed_by_session": "sess-9"},
-			want:            map[string]interface{}{"close_reason": ""},
+			want:            map[string]interface{}{"close_reason": "", "closed_by": "closer-a"},
 			wantClosedAtNow: true,
 		},
 		{
 			name:     "explicit closed_at suppresses only the closed_at default",
 			oldIssue: openIssue,
 			updates:  map[string]interface{}{"status": "closed", "closed_at": closedAt},
-			want:     map[string]interface{}{"close_reason": "", "closed_by_session": ""},
+			want:     map[string]interface{}{"close_reason": "", "closed_by_session": "", "closed_by": "closer-a"},
 		},
 		{
 			name:     "reopen clears closed_at, reason and session",
@@ -106,7 +106,7 @@ func TestManageClosedAtMatchesCloseSemantics(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			before := time.Now().UTC()
-			clauses, args := ManageClosedAt(tt.oldIssue, tt.updates, nil, nil)
+			clauses, args := ManageClosedAt(tt.oldIssue, tt.updates, "closer-a", nil, nil)
 			got := clauseValues(t, clauses, args)
 
 			if tt.wantClosedAtNow {

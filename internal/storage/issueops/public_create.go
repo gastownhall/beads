@@ -97,6 +97,13 @@ func PreparePublicCreateRequest(request publicops.CreateRequest, context PublicC
 	if issue.CreatedBy == "" {
 		issue.CreatedBy = request.Actor
 	}
+	// closed_by is stamped the same way: a create that lands closed was
+	// closed by the request's actor unless the caller names the closer. Import
+	// never prepares through this function, so it keeps a row's closed_by
+	// verbatim and never stamps the importer.
+	if issue.Status == types.StatusClosed && issue.ClosedBy == "" {
+		issue.ClosedBy = request.Actor
+	}
 	if issue.ID != "" && !request.ForceIDPrefix {
 		// The caller's prefix wins when it supplied one; see
 		// CreateRequest.IDPrefix for why a front door may know better than the
@@ -172,7 +179,7 @@ func publicCreateIssue(source *types.Issue) *types.Issue {
 		Status: source.Status, Priority: source.Priority, IssueType: source.IssueType,
 		Assignee: source.Assignee, Owner: source.Owner, EstimatedMinutes: cloneInt(source.EstimatedMinutes),
 		CreatedAt: source.CreatedAt, CreatedBy: source.CreatedBy, UpdatedAt: source.UpdatedAt,
-		StartedAt: cloneTime(source.StartedAt), ClosedAt: cloneTime(source.ClosedAt), CloseReason: source.CloseReason, ClosedBySession: source.ClosedBySession,
+		StartedAt: cloneTime(source.StartedAt), ClosedAt: cloneTime(source.ClosedAt), CloseReason: source.CloseReason, ClosedBySession: source.ClosedBySession, ClosedBy: source.ClosedBy,
 		DueAt: cloneTime(source.DueAt), DeferUntil: cloneTime(source.DeferUntil), ExternalRef: cloneString(source.ExternalRef), SourceSystem: source.SourceSystem, SourceRepo: source.SourceRepo,
 		Metadata: cloneRawMessage(source.Metadata), Labels: append([]string(nil), source.Labels...), Sender: source.Sender,
 		Ephemeral: source.Ephemeral, NoHistory: source.NoHistory, WispType: source.WispType, StorageClass: source.StorageClass,

@@ -344,7 +344,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	// started_at from the status transition unless the caller set them
 	// explicitly.
 	if statusChanging {
-		setClauses, args = issueops.ManageClosedAt(oldIssue, updates, setClauses, args)
+		setClauses, args = issueops.ManageClosedAt(oldIssue, updates, actor, setClauses, args)
 		setClauses, args = issueops.ManageStartedAt(oldIssue, updates, setClauses, args)
 	}
 	clearLease := issueops.ManageLeaseOnUpdate(oldIssue, updates)

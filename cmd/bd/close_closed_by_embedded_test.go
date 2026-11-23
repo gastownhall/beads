@@ -164,6 +164,47 @@ func TestEmbeddedCloseStampsClosedBy(t *testing.T) {
 	}
 }
 
+// TestEmbeddedCloseRoutesStampClosedBy pins AC-2 of GH#8617: every other write
+// that lands a closed row records that write's actor — update -s closed, a
+// multi-id close (one stamp per id), a bd batch close, a create that starts
+// closed, and a wisp close.
+func TestEmbeddedCloseRoutesStampClosedBy(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cb")
+
+	viaUpdate := bdCreate(t, bd, dir, "Closed by update", "--type", "task", "--actor", "creator")
+	bdUpdate(t, bd, dir, viaUpdate.ID, "-s", "closed", "--actor", "updater-b")
+	assertClosedBy(t, "update -s closed", closedByShow(t, bd, dir, viaUpdate.ID), "updater-b")
+
+	first := bdCreate(t, bd, dir, "Multi close one", "--type", "task", "--actor", "creator")
+	second := bdCreate(t, bd, dir, "Multi close two", "--type", "task", "--actor", "creator")
+	bdClose(t, bd, dir, first.ID, second.ID, "--actor", "multi-m")
+	assertClosedBy(t, "multi-id close (first)", closedByShow(t, bd, dir, first.ID), "multi-m")
+	assertClosedBy(t, "multi-id close (second)", closedByShow(t, bd, dir, second.ID), "multi-m")
+
+	viaBatch := bdCreate(t, bd, dir, "Closed by batch", "--type", "task", "--actor", "creator")
+	batch := exec.Command(bd, "batch", "--actor", "batcher")
+	batch.Dir = dir
+	batch.Env = bdEnv(dir)
+	batch.Stdin = strings.NewReader("close " + viaBatch.ID + " batched\n")
+	if out, err := batch.CombinedOutput(); err != nil {
+		t.Fatalf("bd batch close failed: %v\n%s", err, out)
+	}
+	assertClosedBy(t, "bd batch close", closedByShow(t, bd, dir, viaBatch.ID), "batcher")
+
+	created := bdCreate(t, bd, dir, "Created closed", "--type", "task", "-s", "closed", "--actor", "creator-c")
+	assertClosedBy(t, "create -s closed", closedByShow(t, bd, dir, created.ID), "creator-c")
+
+	wisp := bdCreate(t, bd, dir, "Wisp closed", "--type", "task", "--ephemeral", "--actor", "creator")
+	bdClose(t, bd, dir, wisp.ID, "--actor", "wisp-w")
+	assertClosedBy(t, "wisp close", closedByShow(t, bd, dir, wisp.ID), "wisp-w")
+}
+
 // TestEmbeddedExportImportKeepsClosedBy pins AC-4 of GH#8617: export carries
 // closed_by, import into a fresh workspace keeps it, and an imported closed
 // row with no closer stays empty — import never stamps the importer.

@@ -236,7 +236,11 @@ func RunBatchCloserPerItemRefusalIsAResultAndSurvivorsCommit(t *testing.T, ctx c
 			t.Errorf("outcome %d (%s) snapshot ClosedBySession = %q, want %q — the session is recorded against every item",
 				survivor.index, survivor.id, outcome.Issue.ClosedBySession, session)
 		}
-		assertBatchCloserClosedRow(t, ctx, fixture, survivor.id, survivor.reason, session)
+		if outcome.Issue.ClosedBy != "closer" {
+			t.Errorf("outcome %d (%s) snapshot ClosedBy = %q, want the batch's actor %q (GH#8617)",
+				survivor.index, survivor.id, outcome.Issue.ClosedBy, "closer")
+		}
+		assertBatchCloserClosedRow(t, ctx, fixture, survivor.id, survivor.reason, session, "closer")
 	}
 
 	if !errors.Is(result.Outcomes[1].Err, publicops.ErrNotFound) {
@@ -648,7 +652,7 @@ func RunBatchCloserDuplicateItemRecloseAtItsOwnIndex(t *testing.T, ctx context.C
 	if result.Outcomes[1].Changed {
 		t.Errorf("outcome 1 (%s) Changed = true, want false — the second occurrence is an idempotent re-close of the first", duplicated)
 	}
-	assertBatchCloserClosedRow(t, ctx, fixture, duplicated, firstReason, session)
+	assertBatchCloserClosedRow(t, ctx, fixture, duplicated, firstReason, session, "closer")
 	after, err := fixture.CountHistory(ctx)
 	if err != nil {
 		t.Fatalf("CountHistory after: %v", err)
@@ -1294,12 +1298,12 @@ func assertBatchCloserStatus(t *testing.T, ctx context.Context, fixture BatchClo
 // assertBatchCloserClosedRow reads the close back off the row rather than out
 // of the result, because a result snapshot composed in memory can report a
 // reason the transaction never wrote.
-func assertBatchCloserClosedRow(t *testing.T, ctx context.Context, fixture BatchCloserFixture, id, wantReason, wantSession string) {
+func assertBatchCloserClosedRow(t *testing.T, ctx context.Context, fixture BatchCloserFixture, id, wantReason, wantSession, wantCloser string) {
 	t.Helper()
-	var status, reason, session string
+	var status, reason, session, closer string
 	if err := fixture.QueryScalar(ctx,
-		"SELECT status, COALESCE(close_reason, ''), COALESCE(closed_by_session, '') FROM issues WHERE id = ?",
-		[]any{id}, &status, &reason, &session); err != nil {
+		"SELECT status, COALESCE(close_reason, ''), COALESCE(closed_by_session, ''), COALESCE(closed_by, '') FROM issues WHERE id = ?",
+		[]any{id}, &status, &reason, &session, &closer); err != nil {
 		t.Fatalf("read the closed row %s: %v", id, err)
 	}
 	if types.Status(status) != types.StatusClosed {
@@ -1310,6 +1314,12 @@ func assertBatchCloserClosedRow(t *testing.T, ctx context.Context, fixture Batch
 	}
 	if session != wantSession {
 		t.Errorf("durable closed_by_session of %s = %q, want %q", id, session, wantSession)
+	}
+	// GH#8617: the batch's actor is the closer recorded against every row the
+	// batch closed — one shared value, like the session, not a per-item one like
+	// the reason.
+	if closer != wantCloser {
+		t.Errorf("durable closed_by of %s = %q, want %q — the batch's Actor is who closed it", id, closer, wantCloser)
 	}
 }
 

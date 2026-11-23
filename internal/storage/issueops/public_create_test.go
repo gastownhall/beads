@@ -78,7 +78,7 @@ func TestPublicCreateIssueFieldClassificationIsComplete(t *testing.T) {
 	accepted := map[string]bool{
 		"ID": true, "Title": true, "Description": true, "Design": true, "AcceptanceCriteria": true, "Notes": true, "SpecID": true,
 		"Status": true, "Priority": true, "IssueType": true, "Assignee": true, "Owner": true, "EstimatedMinutes": true,
-		"CreatedAt": true, "CreatedBy": true, "UpdatedAt": true, "StartedAt": true, "ClosedAt": true, "CloseReason": true, "ClosedBySession": true,
+		"CreatedAt": true, "CreatedBy": true, "UpdatedAt": true, "StartedAt": true, "ClosedAt": true, "CloseReason": true, "ClosedBy": true, "ClosedBySession": true,
 		"DueAt": true, "DeferUntil": true, "ExternalRef": true, "SourceSystem": true, "SourceRepo": true, "Metadata": true, "Labels": true,
 		"Sender": true, "Ephemeral": true, "NoHistory": true, "WispType": true, "StorageClass": true, "Pinned": true, "IsTemplate": true,
 		"BondedFrom": true, "AwaitType": true, "AwaitID": true, "Timeout": true, "Waiters": true, "SourceFormula": true, "SourceLocation": true,
