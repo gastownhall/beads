@@ -1,5 +1,5 @@
 {
-  "recorded_from": "f35aef51b + gastownhall/beads#8024",
+  "recorded_from": "786241099046 + bd-birq18 closed_by (GH#8617)",
   "steps": [
     "create a",
     "create b blocked by a",
@@ -320,10 +320,11 @@
         "is_blocked",
         "row_lock",
         "storage_class",
-        "current_revision"
+        "current_revision",
+        "closed_by"
       ],
       "rows": 15,
-      "sha256": "1f81df40f4c4d458f20cfb6535ca13468fa03fbd10276c44752977813a4b7e20"
+      "sha256": "0a50131a964598de0224cf47943868f2101495804e92d8b35735cd792bd8fdd1"
     },
     "labels": {
       "columns": [
@@ -530,10 +531,11 @@
         "row_lock",
         "storage_class",
         "current_revision",
+        "closed_by",
         "is_blocked"
       ],
       "rows": 6,
-      "sha256": "f28b157579dedd4373778dc6050b2d1995e1fe30e545e5c70c6b6ccf08ed75bf"
+      "sha256": "9965dadee6cc18b9acc83cdd90908efa6886ecce8ca1a4228843a920de8d930e"
     }
   }
 }
