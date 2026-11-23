@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -120,12 +122,16 @@ func warnLeaseTTLNotApplied(id string, before *types.Issue, claimant string, ttl
 	}
 	if before.Ephemeral {
 		fmt.Fprintf(os.Stderr, "%s --ttl %s not applied to %s: it is a wisp, and a wisp claim has no lease\n",
-			ui.RenderWarn("!"), ttl, id)
+			ui.RenderWarn("!"), ttl, printedIssueID(id))
 		return
 	}
 	if before.Status != types.StatusInProgress || !storageissueops.ActorMatches(before.Assignee, claimant) {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s --ttl %s not applied to %s: you already held it, and a re-claim leaves the lease as it was; run 'bd heartbeat --ttl %s %s' to set its length\n",
-		ui.RenderWarn("!"), ttl, id, ttl, id)
+	// The ID is the store's: it goes into the bd heartbeat command as one
+	// shell word, or as a placeholder named escaped after it
+	// (remedy.CommandArg), and the prose names it as printedIssueID spells it.
+	idArg, note := remedy.CommandArg(runtime.GOOS, id, "<issue-id>")
+	fmt.Fprintf(os.Stderr, "%s --ttl %s not applied to %s: you already held it, and a re-claim leaves the lease as it was (bd heartbeat --ttl %s %s sets its length)%s\n",
+		ui.RenderWarn("!"), ttl, printedIssueID(id), ttl, idArg, note)
 }

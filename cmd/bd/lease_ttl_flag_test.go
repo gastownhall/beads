@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
@@ -319,6 +321,33 @@ func TestWarnLeaseTTLNotApplied(t *testing.T) {
 				t.Errorf("the wisp warning names bd heartbeat, which has no lease to refresh on a wisp:\n%s", stderr)
 			}
 		})
+	}
+}
+
+// The ID in the warnings is the store's, and the re-claim warning pastes it
+// into a bd heartbeat command. An ID that is no plain word goes into the
+// command the way every remedy spells a pasted value (remedy.CommandArg):
+// quoted for the shell, or as a placeholder named escaped after the command.
+// The prose names it escaped, so it cannot redraw the line.
+func TestWarnLeaseTTLNotAppliedSpellsTheIDForAShell(t *testing.T) {
+	held := &types.Issue{Status: types.StatusInProgress, Assignee: "agent"}
+	wisp := &types.Issue{Status: types.StatusOpen, Ephemeral: true}
+	for _, id := range []string{"bd-1", "bd-1 $(touch x)", "bd-1\r\x1b[2K"} {
+		arg, note := remedy.CommandArg(runtime.GOOS, id, "<issue-id>")
+		if plain := id == "bd-1"; (arg == id) != plain {
+			t.Fatalf("remedy.CommandArg(%q) = %q: the case is not the one this test means", id, arg)
+		}
+		stderr := captureStderrDuring(t, func() { warnLeaseTTLNotApplied(id, held, "agent", time.Hour) })
+		if want := "(bd heartbeat --ttl 1h0m0s " + arg + " sets its length)" + note + "\n"; !strings.HasSuffix(stderr, want) {
+			t.Errorf("re-claim warning for %q does not end with %q:\n%q", id, want, stderr)
+		}
+		if want := "not applied to " + remedy.PrintedWord(id) + ": you already held it"; !strings.Contains(stderr, want) {
+			t.Errorf("re-claim warning for %q does not say %q:\n%q", id, want, stderr)
+		}
+		stderr = captureStderrDuring(t, func() { warnLeaseTTLNotApplied(id, wisp, "agent", time.Hour) })
+		if want := "not applied to " + remedy.PrintedWord(id) + ": it is a wisp"; !strings.Contains(stderr, want) {
+			t.Errorf("wisp warning for %q does not say %q:\n%q", id, want, stderr)
+		}
 	}
 }
 
