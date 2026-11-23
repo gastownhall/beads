@@ -493,3 +493,122 @@ func readyWorkPageTotalFilterMatrix(t *testing.T, prefix string, undated bool) {
 		})
 	}
 }
+
+// TestReadyWorkMolTypeFilter pins GH#8298: WorkFilter.MolType must filter
+// durable and wisp rows identically across GetReadyWork,
+// GetReadyWorkWithCounts, GetReadyWorkWithCountsAndTotal, and
+// CountReadyWorkInTx, with exact column semantics (matching bd list and
+// readyWorkWispIssueFilter) for patrol, swarm, explicit work, and empty "".
+func TestReadyWorkMolTypeFilter(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	const prefix = "rmt"
+	te := newTestEnv(t, prefix)
+	ctx := t.Context()
+
+	seed := []struct {
+		suffix    string
+		ephemeral bool
+		molType   types.MolType
+	}{
+		{"dur-empty", false, ""},
+		{"dur-work", false, types.MolTypeWork},
+		{"dur-patrol", false, types.MolTypePatrol},
+		{"dur-swarm", false, types.MolTypeSwarm},
+		{"wisp-empty", true, ""},
+		{"wisp-work", true, types.MolTypeWork},
+		{"wisp-patrol", true, types.MolTypePatrol},
+		{"wisp-swarm", true, types.MolTypeSwarm},
+	}
+	for _, s := range seed {
+		iss := &types.Issue{
+			ID:        prefix + "-" + s.suffix,
+			Title:     s.suffix,
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: s.ephemeral,
+			MolType:   s.molType,
+		}
+		if err := te.store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", iss.ID, err)
+		}
+	}
+
+	ptr := func(m types.MolType) *types.MolType { return &m }
+	cases := []struct {
+		name             string
+		molType          *types.MolType
+		includeEphemeral bool
+		want             []string
+	}{
+		{"patrol_durable_only", ptr(types.MolTypePatrol), false, []string{"dur-patrol"}},
+		{"patrol_with_wisps", ptr(types.MolTypePatrol), true, []string{"dur-patrol", "wisp-patrol"}},
+		{"swarm_with_wisps", ptr(types.MolTypeSwarm), true, []string{"dur-swarm", "wisp-swarm"}},
+		{"explicit_work_durable_only", ptr(types.MolTypeWork), false, []string{"dur-work"}},
+		{"explicit_work_with_wisps", ptr(types.MolTypeWork), true, []string{"dur-work", "wisp-work"}},
+		{"empty_durable_only", ptr(types.MolType("")), false, []string{"dur-empty"}},
+		{"empty_with_wisps", ptr(types.MolType("")), true, []string{"dur-empty", "wisp-empty"}},
+		{"nil_durable_only", nil, false, []string{"dur-empty", "dur-patrol", "dur-swarm", "dur-work"}},
+		{"nil_with_wisps", nil, true, []string{"dur-empty", "dur-patrol", "dur-swarm", "dur-work", "wisp-empty", "wisp-patrol", "wisp-swarm", "wisp-work"}},
+	}
+
+	issueIDs := func(items []*types.Issue) []string {
+		ids := make([]string, 0, len(items))
+		for _, it := range items {
+			ids = append(ids, it.ID)
+		}
+		return ids
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			filter := types.WorkFilter{
+				Status:           types.StatusOpen,
+				MolType:          tc.molType,
+				IncludeEphemeral: tc.includeEphemeral,
+			}
+			want := prefixed(prefix, tc.want)
+
+			plain, err := te.store.GetReadyWork(ctx, filter)
+			if err != nil {
+				t.Fatalf("GetReadyWork: %v", err)
+			}
+			if got := sortedIDs(issueIDs(plain)); strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Errorf("GetReadyWork = %v, want %v", got, want)
+			}
+
+			withCounts, err := te.store.GetReadyWorkWithCounts(ctx, filter)
+			if err != nil {
+				t.Fatalf("GetReadyWorkWithCounts: %v", err)
+			}
+			if got := sortedIDs(readyIDs(withCounts)); strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Errorf("GetReadyWorkWithCounts = %v, want %v", got, want)
+			}
+
+			capped := filter
+			capped.Limit = 1
+			page, total, err := te.store.GetReadyWorkWithCountsAndTotal(ctx, capped)
+			if err != nil {
+				t.Fatalf("GetReadyWorkWithCountsAndTotal: %v", err)
+			}
+			if total != len(want) {
+				t.Errorf("GetReadyWorkWithCountsAndTotal total = %d, want %d", total, len(want))
+			}
+			if len(page) != min(1, len(want)) {
+				t.Errorf("GetReadyWorkWithCountsAndTotal page len = %d, want %d", len(page), min(1, len(want)))
+			}
+			if len(page) == 1 && !slices.Contains(want, page[0].Issue.ID) {
+				t.Errorf("GetReadyWorkWithCountsAndTotal page[0] = %s, want one of %v", page[0].Issue.ID, want)
+			}
+
+			counted, err := te.store.CountReadyWork(ctx, filter)
+			if err != nil {
+				t.Fatalf("CountReadyWork: %v", err)
+			}
+			if counted != len(want) {
+				t.Errorf("CountReadyWork = %d, want %d", counted, len(want))
+			}
+		})
+	}
+}

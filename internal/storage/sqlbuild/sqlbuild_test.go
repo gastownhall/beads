@@ -511,6 +511,80 @@ func TestBuildReadyWorkWhereLabelRegex(t *testing.T) {
 	}
 }
 
+// GH#8298: WorkFilter.MolType was absent from BuildReadyWorkWhere, so
+// `bd ready --mol-type` filtered only the wisp leg of text listings (via
+// readyWorkWispIssueFilter -> BuildIssueFilterClauses) and filtered neither
+// table in `--json` or counts. BuildReadyWorkWhere must emit the same exact
+// `mol_type = ?` predicate as BuildIssueFilterClauses for both table families.
+func TestBuildReadyWorkWhereMolType(t *testing.T) {
+	t.Parallel()
+
+	ptr := func(m types.MolType) *types.MolType { return &m }
+	tablesList := []struct {
+		name   string
+		tables FilterTables
+	}{
+		{"issues", IssuesFilterTables},
+		{"wisps", WispsFilterTables},
+	}
+
+	for _, tbl := range tablesList {
+		t.Run(tbl.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("nil_omits_clause", func(t *testing.T) {
+				where, _, err := BuildReadyWorkWhere(types.WorkFilter{}, tbl.tables, ReadyWorkWhereInputs{})
+				if err != nil {
+					t.Fatalf("BuildReadyWorkWhere: %v", err)
+				}
+				if strings.Contains(where, "mol_type") {
+					t.Errorf("nil MolType must not emit mol_type clause.\n where = %s", where)
+				}
+			})
+
+			for _, tc := range []struct {
+				name string
+				val  types.MolType
+			}{
+				{"patrol", types.MolTypePatrol},
+				{"swarm", types.MolTypeSwarm},
+				{"explicit_work", types.MolTypeWork},
+				{"empty_string", types.MolType("")},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					where, args, err := BuildReadyWorkWhere(
+						types.WorkFilter{MolType: ptr(tc.val)},
+						tbl.tables,
+						ReadyWorkWhereInputs{},
+					)
+					if err != nil {
+						t.Fatalf("BuildReadyWorkWhere: %v", err)
+					}
+					if !strings.Contains(where, "mol_type = ?") {
+						t.Errorf("mol_type clause missing.\n where = %s", where)
+					}
+					if len(args) == 0 || args[len(args)-1] != string(tc.val) {
+						t.Errorf("args tail = %v, want last arg %q", args, string(tc.val))
+					}
+
+					// Parity with BuildIssueFilterClauses (used by bd list and
+					// GetReadyWorkInTx's wisp leg via readyWorkWispIssueFilter).
+					listClauses, listArgs, err := BuildIssueFilterClauses("", types.IssueFilter{MolType: ptr(tc.val)}, tbl.tables)
+					if err != nil {
+						t.Fatalf("BuildIssueFilterClauses: %v", err)
+					}
+					if len(listClauses) != 1 || listClauses[0] != "mol_type = ?" {
+						t.Fatalf("BuildIssueFilterClauses clauses = %v, want [mol_type = ?]", listClauses)
+					}
+					if len(listArgs) != 1 || listArgs[0] != string(tc.val) {
+						t.Fatalf("BuildIssueFilterClauses args = %v, want [%q]", listArgs, string(tc.val))
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestSearchCountsSQLShape(t *testing.T) {
 	t.Parallel()
 

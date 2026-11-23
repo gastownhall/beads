@@ -704,3 +704,4 @@
 40 40 TestEmbeddedOpenForRemoteSync_OtherRefusalsStayFatal
 40 40 TestEmbeddedRelationsSeparatesNoNeighborsFromNoSuchIssue
 40 40 TestEmbeddedReopenCustomDoneFallsBackWhenNormalizedTableMissing
+40 40 TestReadyWorkMolTypeFilter

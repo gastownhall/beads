@@ -304,6 +304,83 @@ func TestEmbeddedReadyDefaultJSONAndFlags(t *testing.T) {
 			t.Errorf("expected ready work in output, got: %s", stdout.String())
 		}
 	})
+
+	t.Run("ready_mol_type_filter", func(t *testing.T) {
+		molDir, _, _ := bdInit(t, bd, "--prefix", "mt")
+		patrolWisp := bdCreate(t, bd, molDir, "patrol wisp", "--ephemeral", "--mol-type", "patrol")
+		workWisp := bdCreate(t, bd, molDir, "work wisp", "--ephemeral", "--mol-type", "work")
+		untypedWisp := bdCreate(t, bd, molDir, "untyped wisp", "--ephemeral")
+		patrolDurable := bdCreate(t, bd, molDir, "durable patrol issue", "--mol-type", "patrol")
+		workDurable := bdCreate(t, bd, molDir, "durable work issue", "--mol-type", "work")
+		untypedDurable := bdCreate(t, bd, molDir, "durable untyped issue")
+
+		// Plain text listing for --mol-type patrol must include both patrol rows
+		// and exclude work and untyped rows in both durable and wisp tables.
+		cmd := exec.Command(bd, "ready", "--plain", "--include-ephemeral", "--mol-type", "patrol")
+		cmd.Dir = molDir
+		cmd.Env = bdEnv(molDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready --plain --mol-type patrol failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		plainOut := stdout.String()
+		for _, want := range []string{patrolWisp.ID, patrolDurable.ID} {
+			if !strings.Contains(plainOut, want) {
+				t.Errorf("plain patrol output missing %s:\n%s", want, plainOut)
+			}
+		}
+		for _, reject := range []string{workWisp.ID, untypedWisp.ID, workDurable.ID, untypedDurable.ID} {
+			if strings.Contains(plainOut, reject) {
+				t.Errorf("plain patrol output unexpectedly included %s:\n%s", reject, plainOut)
+			}
+		}
+
+		// JSON listing and `bd list --ready --json` must return the exact same set.
+		for _, args := range [][]string{
+			{"ready", "--json", "--include-ephemeral", "--mol-type", "patrol"},
+			{"list", "--ready", "--json", "--include-ephemeral", "--mol-type", "patrol"},
+		} {
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = molDir
+			cmd.Env = bdEnv(molDir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd %v failed: %v\nstdout:\n%s\nstderr:\n%s", args, err, stdout.String(), stderr.String())
+			}
+			var got []types.IssueWithCounts
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+				t.Fatalf("parse JSON for bd %v: %v\n%s", args, err, stdout.String())
+			}
+			gotIDs := make(map[string]bool, len(got))
+			for _, item := range got {
+				gotIDs[item.ID] = true
+			}
+			if len(gotIDs) != 2 || !gotIDs[patrolWisp.ID] || !gotIDs[patrolDurable.ID] {
+				t.Errorf("bd %v returned %v, want {%s, %s}", args, gotIDs, patrolWisp.ID, patrolDurable.ID)
+			}
+		}
+
+		// Explicit --mol-type work matches explicit work rows only (not untyped ""),
+		// identically across durable and wisp rows and across text and JSON.
+		cmd = exec.Command(bd, "ready", "--json", "--include-ephemeral", "--mol-type", "work")
+		cmd.Dir = molDir
+		cmd.Env = bdEnv(molDir)
+		stdout, stderr, err = runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready --json --mol-type work failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		var workGot []types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &workGot); err != nil {
+			t.Fatalf("parse work JSON: %v\n%s", err, stdout.String())
+		}
+		workIDs := make(map[string]bool, len(workGot))
+		for _, item := range workGot {
+			workIDs[item.ID] = true
+		}
+		if len(workIDs) != 2 || !workIDs[workWisp.ID] || !workIDs[workDurable.ID] {
+			t.Errorf("bd ready --json --mol-type work returned %v, want {%s, %s}", workIDs, workWisp.ID, workDurable.ID)
+		}
+	})
 }
 
 func TestEmbeddedReadyBlockersAndLabels(t *testing.T) {
