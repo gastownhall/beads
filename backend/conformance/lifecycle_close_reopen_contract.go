@@ -631,6 +631,104 @@ func RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t *testing.T, ctx contex
 	}
 }
 
+// RunLifecycleCloseStampsTheWritingActorIntoClosedBy pins the fourth member of
+// the close record (GH#8617): closed_by, the actor whose write closed the row —
+// beside closed_at, close_reason and closed_by_session, and under the same
+// first-close-wins rule they already answer to.
+//
+// The snapshot half matters as much as the row half: CloseResult.Issue is what
+// a caller renders without re-querying, and on the served leg it is decoded off
+// the HTTP response body — so a wire that dropped the member would fail here
+// and only here. Each actor is DISTINCT, so a body that stamped the creator,
+// the assignee or the row's created_by instead of the request's Actor fails
+// every leg it does it on.
+//
+// The reopen half is the negative arm: a reopened row has no closer, and the
+// next close records ITS actor rather than inheriting the earlier one.
+func RunLifecycleCloseStampsTheWritingActorIntoClosedBy(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-lcr-closer"
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+
+	first, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+		Actor: "first-closer", IssueID: id, Reason: "first",
+	})
+	if err != nil {
+		t.Fatalf("close %s: %v", id, err)
+	}
+	if first.Issue == nil || first.Issue.ClosedBy != "first-closer" {
+		t.Errorf("CloseResult.Issue.ClosedBy = %q, want %q — the snapshot is where a caller reads the closer without re-querying",
+			closedByOf(first.Issue), "first-closer")
+	}
+	if row := lifecycleCloseReopenReadRow(t, ctx, fixture, id); row.ClosedBy != "first-closer" {
+		t.Errorf("stored closed_by of %s = %q, want %q (the close request's Actor)", id, row.ClosedBy, "first-closer")
+	}
+
+	// The re-close by ANOTHER actor is the idempotent no-op, and the first
+	// close's attribution survives it — first close wins for closed_by exactly
+	// as it does for reason and session.
+	again, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+		Actor: "second-closer", IssueID: id, Reason: "second",
+	})
+	if err != nil {
+		t.Fatalf("re-close %s: %v", id, err)
+	}
+	if again.Changed {
+		t.Errorf("re-close of %s reported Changed = true, want the idempotent no-op", id)
+	}
+	if row := lifecycleCloseReopenReadRow(t, ctx, fixture, id); row.ClosedBy != "first-closer" {
+		t.Errorf("stored closed_by of %s after the re-close = %q, want %q — THE FIRST CLOSE WINS",
+			id, row.ClosedBy, "first-closer")
+	}
+
+	// The reopen clears the closer with the rest of the closure record, and the
+	// next close records ITS actor, not the earlier one.
+	if _, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: "reopener", IssueID: id}); err != nil {
+		t.Fatalf("reopen %s: %v", id, err)
+	}
+	if row := lifecycleCloseReopenReadRow(t, ctx, fixture, id); row.ClosedBy != "" {
+		t.Errorf("stored closed_by of %s after the reopen = %q, want empty — a reopened row has no closer", id, row.ClosedBy)
+	}
+	reclosed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "third-closer", IssueID: id})
+	if err != nil {
+		t.Fatalf("re-close %s after the reopen: %v", id, err)
+	}
+	if reclosed.Issue == nil || reclosed.Issue.ClosedBy != "third-closer" {
+		t.Errorf("CloseResult.Issue.ClosedBy after the re-close = %q, want %q — the SECOND closure records ITS actor",
+			closedByOf(reclosed.Issue), "third-closer")
+	}
+	if row := lifecycleCloseReopenReadRow(t, ctx, fixture, id); row.ClosedBy != "third-closer" {
+		t.Errorf("stored closed_by of %s after the re-close = %q, want %q", id, row.ClosedBy, "third-closer")
+	}
+
+	// The wisps plane closes through the same close body; its closer must ride
+	// it too. Read off the wisps table rather than through a role read, so the
+	// assertion is the stored cell and not a hydration decision.
+	wisp := fixture.IssuePrefix + "-lcr-closer-wisp"
+	lifecycleCloseReopenSeedWisp(t, ctx, fixture, wisp)
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "wisp-closer", IssueID: wisp}); err != nil {
+		t.Fatalf("close the wisp %s: %v", wisp, err)
+	}
+	var wispClosedBy string
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COALESCE(closed_by, '') FROM wisps WHERE id = ?", []any{wisp}, &wispClosedBy); err != nil {
+		t.Fatalf("read closed_by of the wisp %s: %v", wisp, err)
+	}
+	if wispClosedBy != "wisp-closer" {
+		t.Errorf("wisp %s closed_by = %q, want %q — the wisps plane stamps through the same close body", wisp, wispClosedBy, "wisp-closer")
+	}
+}
+
+// closedByOf reads the closer off a snapshot for an error message, tolerating
+// the nil an implementation may answer beside a committed close.
+func closedByOf(issue *types.Issue) string {
+	if issue == nil {
+		return "<nil snapshot>"
+	}
+	return issue.ClosedBy
+}
+
 // RunLifecycleCloseAndReopenKeepTheClaimHolder pins the second half of the
 // agent loop against the state the first half leaves: an in_progress row a named
 // actor holds is CLOSEABLE, and the holder survives both the close and a later
@@ -1772,6 +1870,7 @@ type lifecycleCloseReopenRow struct {
 	RowLock         int64
 	ClosedAt        string
 	CloseReason     string
+	ClosedBy        string
 	ClosedBySession string
 }
 
@@ -1779,8 +1878,8 @@ func lifecycleCloseReopenReadRow(t *testing.T, ctx context.Context, fixture Life
 	t.Helper()
 	var row lifecycleCloseReopenRow
 	if err := fixture.QueryScalar(ctx,
-		"SELECT status, COALESCE(assignee, ''), row_lock, COALESCE(CAST(closed_at AS CHAR), ''), COALESCE(close_reason, ''), COALESCE(closed_by_session, '') FROM issues WHERE id = ?",
-		[]any{id}, &row.Status, &row.Assignee, &row.RowLock, &row.ClosedAt, &row.CloseReason, &row.ClosedBySession); err != nil {
+		"SELECT status, COALESCE(assignee, ''), row_lock, COALESCE(CAST(closed_at AS CHAR), ''), COALESCE(close_reason, ''), COALESCE(closed_by, ''), COALESCE(closed_by_session, '') FROM issues WHERE id = ?",
+		[]any{id}, &row.Status, &row.Assignee, &row.RowLock, &row.ClosedAt, &row.CloseReason, &row.ClosedBy, &row.ClosedBySession); err != nil {
 		t.Fatalf("read close-lifecycle row for %s: %v", id, err)
 	}
 	return row

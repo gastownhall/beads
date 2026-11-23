@@ -7775,6 +7775,11 @@ components:
           format: date-time
         close_reason:
           type: string
+        closed_by:
+          type: string
+          description: >-
+            Actor whose write closed this issue (GH#8617). Read-only: stamped
+            by the server from the close request's actor, never writable.
         closed_by_session:
           type: string
         lease_expires_at:
@@ -8007,6 +8012,11 @@ components:
           format: date-time
         close_reason:
           type: string
+        closed_by:
+          type: string
+          description: >-
+            Actor whose write closed this issue (GH#8617). Read-only: stamped
+            by the server from the close request's actor, never writable.
         closed_by_session:
           type: string
         lease_expires_at:
@@ -8189,6 +8199,7 @@ components:
         started_at: { type: string, format: date-time }
         closed_at: { type: string, format: date-time }
         close_reason: { type: string }
+        closed_by: { type: string }
         closed_by_session: { type: string }
         lease_expires_at: { type: string, format: date-time }
         heartbeat_at: { type: string, format: date-time }
@@ -8301,6 +8312,7 @@ components:
         started_at: { type: string, format: date-time }
         closed_at: { type: string, format: date-time }
         close_reason: { type: string }
+        closed_by: { type: string }
         closed_by_session: { type: string }
         lease_expires_at: { type: string, format: date-time }
         heartbeat_at: { type: string, format: date-time }
@@ -8540,6 +8552,7 @@ components:
         started_at: { type: string, format: date-time }
         closed_at: { type: string, format: date-time }
         close_reason: { type: string }
+        closed_by: { type: string }
         closed_by_session: { type: string }
         lease_expires_at: { type: string, format: date-time }
         heartbeat_at: { type: string, format: date-time }
@@ -8627,6 +8640,7 @@ components:
         started_at: { type: string, format: date-time }
         closed_at: { type: string, format: date-time }
         close_reason: { type: string }
+        closed_by: { type: string }
         closed_by_session: { type: string }
         lease_expires_at: { type: string, format: date-time }
         heartbeat_at: { type: string, format: date-time }
@@ -10269,6 +10283,7 @@ components:
         started_at: { type: string, format: date-time }
         closed_at: { type: string, format: date-time }
         close_reason: { type: string }
+        closed_by: { type: string }
         closed_by_session: { type: string }
         lease_expires_at: { type: string, format: date-time }
         heartbeat_at: { type: string, format: date-time }
