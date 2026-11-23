@@ -1475,6 +1475,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd ready --mol-type` and `bd list --ready --mol-type` now filter durable issues and JSON output** ([#8298](https://github.com/gastownhall/beads/issues/8298)). `sqlbuild.BuildReadyWorkWhere` previously ignored `WorkFilter.MolType`, so text `bd ready --mol-type` only filtered wisps while `--json`, `bd list --ready`, and ready counts returned unfiltered rows across both tables. Ready queries now apply an exact `mol_type = ?` filter (matching `bd list --mol-type`), so `--mol-type work` returns issues created with `--mol-type work` and does not match untyped rows.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
