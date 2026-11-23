@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestEmbeddedShowJSONReportsClosedBy reproduces GH#8617: bd records the actor
@@ -236,5 +240,77 @@ func TestEmbeddedReopenClearsClosedByAndReCloseRestamps(t *testing.T) {
 	if !present || got != "bob" {
 		t.Errorf("after re-close: closed_by = %v (present=%v), want %q (the SECOND closer, not alice)\nJSON: %s",
 			got, present, "bob", obj)
+	}
+}
+
+// TestEmbeddedExportImportPreservesClosedBy pins the snapshot half of
+// GH#8617: `bd export` carries closed_by, an import into a fresh workspace
+// restores the ORIGINAL closer, and a legacy closed row with no closed_by
+// member imports empty — the importing user is never stamped as the closer
+// (the import path writes the snapshot's fields through PrepareIssueForInsert,
+// never through the create default that would stamp the request's actor).
+func TestEmbeddedExportImportPreservesClosedBy(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	srcDir, _, _ := bdInit(t, bd, "--prefix", "cb")
+
+	closed := bdCreate(t, bd, srcDir, "Round trip closer", "--type", "task")
+	bdClose(t, bd, srcDir, closed.ID, "--actor", "alice", "--reason", "rt")
+
+	// The export carries the closer on the closed row.
+	export := bdExport(t, bd, srcDir)
+	var exportedLine string
+	for _, line := range strings.Split(strings.TrimSpace(export), "\n") {
+		if strings.Contains(line, `"id":"`+closed.ID+`"`) {
+			exportedLine = line
+		}
+	}
+	if exportedLine == "" {
+		t.Fatalf("bd export does not carry %s:\n%s", closed.ID, export)
+	}
+	if !strings.Contains(exportedLine, `"closed_by":"alice"`) {
+		t.Errorf("export line for %s missing closed_by=alice:\n%s", closed.ID, exportedLine)
+	}
+
+	// Import into a fresh workspace: the ORIGINAL closer survives.
+	exportPath := filepath.Join(t.TempDir(), "export.jsonl")
+	if err := os.WriteFile(exportPath, []byte(export), 0644); err != nil {
+		t.Fatalf("write export file: %v", err)
+	}
+	dstDir, _, _ := bdInit(t, bd, "--prefix", "cb")
+	bdImport(t, bd, dstDir, exportPath)
+
+	obj, got, present := showJSONClosedBy(t, bd, dstDir, closed.ID)
+	if obj["status"] != "closed" {
+		t.Fatalf("imported %s: status = %v, want closed\nJSON: %s", closed.ID, obj["status"], obj)
+	}
+	if !present || got != "alice" {
+		t.Errorf("imported %s: closed_by = %v (present=%v), want %q (the exported closer, not the importer)\nJSON: %s",
+			closed.ID, got, present, "alice", obj)
+	}
+
+	// A legacy closed row (exported before the column existed) carries no
+	// closed_by member; importing it must leave the closer empty rather than
+	// stamping whoever ran bd import.
+	now := time.Now().UTC().Truncate(time.Second)
+	legacy := types.Issue{
+		ID: "cb-legacy", Title: "Legacy closed row", Status: types.StatusClosed,
+		IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now, ClosedAt: &now,
+	}
+	legacyPath := filepath.Join(t.TempDir(), "legacy.jsonl")
+	writeJSONLFile(t, legacyPath, []types.Issue{legacy})
+	bdImport(t, bd, dstDir, legacyPath)
+
+	obj, got, present = showJSONClosedBy(t, bd, dstDir, legacy.ID)
+	if obj["status"] != "closed" {
+		t.Fatalf("imported legacy %s: status = %v, want closed\nJSON: %s", legacy.ID, obj["status"], obj)
+	}
+	if present && got != "" {
+		t.Errorf("imported legacy %s: closed_by = %v (present=%v), want absent/empty (import never stamps the importer)\nJSON: %s",
+			legacy.ID, got, present, obj)
 	}
 }
