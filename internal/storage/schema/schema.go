@@ -1127,6 +1127,28 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	for name := range auxRekeyExempt {
 		delete(dirtyBefore, name)
 	}
+	// A pass killed between a step's cursor row and its commitMigrationStep
+	// left that one step in the working set, and the guard below would refuse
+	// its debris on every later open. When the working set is provably nothing
+	// but that step (findStrandedStep names the conditions), finish it with
+	// the commit it missed and go on; any other dirty set reaches the guard
+	// unchanged. Counted in the total because it moves HEAD, for the reason
+	// the cursor heal above is.
+	_, cursorDirty := dirtyBeforeAll[mainSource.cursorTable]
+	stranded, err := mainSource.findStrandedStep(ctx, db, cursorDirty, dirtyBefore)
+	if err != nil {
+		return 0, fmt.Errorf("checking for a stranded migration step: %w", err)
+	}
+	finished := 0
+	if stranded != nil {
+		if err := mainSource.finishStrandedStep(ctx, db, stranded); err != nil {
+			return 0, err
+		}
+		for _, table := range stranded.tables {
+			delete(dirtyBefore, table)
+		}
+		finished = 1
+	}
 	touchedDirtyTables, err := mainSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
 	if err != nil {
 		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
@@ -1160,10 +1182,11 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
-		return 0, fmt.Errorf("reading pre-migration dirty table diffs: %w", err)
+		return finished, fmt.Errorf("reading pre-migration dirty table diffs: %w", err)
 	}
 
 	applied, mainColumnAdded, err := mainSource.migrate(ctx, db, 0)
+	applied += finished
 	if err != nil {
 		return applied, err
 	}
@@ -2328,11 +2351,14 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 // as it applies (see commitMigrationStep): its ALTERs and cursor row land in a
 // Dolt commit before the next migration runs, so a crash/kill/timeout anywhere
 // in MigrateUp's later backfill/rekey/ignored tail cannot strand this pass's
-// applied migrations uncommitted for a retry to trip over (#4566). A residual
-// window remains within a single step: a kill between a migration's SQL and
-// its commitMigrationStep still leaves that one step's debris in the working
-// set for the dirty-table guard to refuse. The window shrinks from the whole
-// pass tail to one step; it does not close entirely.
+// applied migrations uncommitted for a retry to trip over (#4566). A kill
+// inside a single step still leaves that step's work in the working set. When
+// the kill came after the step's cursor row, the next MigrateUp recognises the
+// working set as that step alone (findStrandedStep) and finishes it with the
+// commit it missed (finishStrandedStep) before the dirty-table guard runs. A
+// kill before the cursor row leaves a body of unknown completeness, and a
+// working set that holds anything beyond the step's own tables cannot be told
+// apart from user writes; both still reach the guard and are refused.
 //
 // An error returned while a numbered step is selected, from its snapshots,
 // pre-repair, body, updated_at restore, cursor row or step commit, that carries
