@@ -59,6 +59,7 @@ func TestPathUnderSuiteRootResolvesMissingPathThroughSymlink(t *testing.T) {
 		{"missing child, root via the link", filepath.Join(target, "x"), link, true},
 		{"missing path under a sibling of the link", filepath.Join(link+"-other", "x"), target, false},
 		{"missing path under a sibling of the target", filepath.Join(target+"-other", "x"), link, false},
+		{"missing sibling of a missing root", filepath.Join(link, "x"), filepath.Join(link, "y"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := PathUnderSuiteRoot(tc.dir, tc.root); got != tc.want {

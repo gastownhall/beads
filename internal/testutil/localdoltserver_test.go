@@ -397,7 +397,11 @@ func TestLocalDoltServer_StateOutsideSuiteRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(root)
-	if !PathUnderSuiteRoot(filepath.Join(os.TempDir(), "x"), root) {
+	// Check os.TempDir() itself, the directory PinSuiteTempRoot re-pointed.
+	// A child of it that was never created would also test how
+	// PathUnderSuiteRoot spells a missing path, which
+	// TestPathUnderSuiteRootResolvesMissingPathThroughSymlink covers.
+	if !PathUnderSuiteRoot(os.TempDir(), root) {
 		t.Fatalf("PinSuiteTempRoot did not re-point os.TempDir() under %s", root)
 	}
 
