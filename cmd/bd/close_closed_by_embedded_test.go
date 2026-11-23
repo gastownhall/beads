@@ -200,3 +200,41 @@ func TestEmbeddedClosePathsStampClosedBy(t *testing.T) {
 		t.Errorf("wisp close: closed_by = %v (present=%v), want %q\nJSON: %s", got, present, "erin", obj)
 	}
 }
+
+// TestEmbeddedReopenClearsClosedByAndReCloseRestamps pins the reopen half of
+// GH#8617: reopening forgets who closed the issue (the row is no longer
+// closed, so the closer of the previous close must not linger), and the next
+// close records ITS actor — not the earlier closer.
+func TestEmbeddedReopenClearsClosedByAndReCloseRestamps(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cb")
+
+	issue := bdCreate(t, bd, dir, "Reopen clears closer", "--type", "task")
+	bdClose(t, bd, dir, issue.ID, "--actor", "alice", "--reason", "first")
+
+	bdReopen(t, bd, dir, issue.ID, "--reason", "not done")
+
+	obj, got, present := showJSONClosedBy(t, bd, dir, issue.ID)
+	if obj["status"] != "open" {
+		t.Fatalf("after reopen: status = %v, want open\nJSON: %s", obj["status"], obj)
+	}
+	if present && got != "" {
+		t.Errorf("after reopen: closed_by = %v (present=%v), want absent/empty; a reopened issue has no closer\nJSON: %s",
+			got, present, obj)
+	}
+
+	bdClose(t, bd, dir, issue.ID, "--actor", "bob", "--reason", "second")
+	obj, got, present = showJSONClosedBy(t, bd, dir, issue.ID)
+	if obj["status"] != "closed" {
+		t.Fatalf("after re-close: status = %v, want closed\nJSON: %s", obj["status"], obj)
+	}
+	if !present || got != "bob" {
+		t.Errorf("after re-close: closed_by = %v (present=%v), want %q (the SECOND closer, not alice)\nJSON: %s",
+			got, present, "bob", obj)
+	}
+}
