@@ -1496,7 +1496,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the "no beads database found" error of every other command now adds a note
   that `BEADS_DIR` is set to a directory with no workspace and names the
   `.beads` directory inside it. A `BEADS_DIR` that names a new or empty
-  directory is initialized as before.
+  directory is initialized as before. `bd import` with `BEADS_DIR` at such a
+  project root gets the same "no beads database found" refusal and note,
+  the project roots with files of their own included: it used to create an
+  empty `embeddeddolt` store in the project root, fail with "issue_prefix
+  config is missing", and leave the store behind, where every later command
+  run with the same `BEADS_DIR` took it for the database. With `--json` the
+  refusal is on stderr, as for the other commands. `bd import` does not
+  refuse a project root that already holds such a store.
 
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming

@@ -191,6 +191,30 @@ func testInitRefusesBeadsDirAtProjectRoot(t *testing.T, bd string, mode explicit
 		t.Fatalf("project workspace metadata changed: cfg=%+v err=%v", cfg, err)
 	}
 
+	// bd import sets a workspace up where discovery finds none, so it too
+	// could write into the project root. It refuses before it opens a store:
+	// an import that set one up and then failed for want of a prefix left an
+	// empty store behind, which discovery took for a database on every later
+	// command.
+	importFile := filepath.Join(t.TempDir(), "issues.jsonl")
+	if err := os.WriteFile(importFile, []byte(`{"id":"real-1","title":"imported","status":"open","priority":2,"issue_type":"task"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	importIsRefused := func(shape string) {
+		t.Helper()
+		before := rootEntries()
+		stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, project, project, "import", importFile)
+		if err == nil {
+			t.Errorf("bd import with BEADS_DIR=%s (the project root, %s) succeeded; want a refusal\nstdout:\n%s\nstderr:\n%s", project, shape, stdout, stderr)
+		} else if !strings.Contains(stderr, "no beads database found") || !strings.Contains(stderr, "BEADS_DIR is set to") {
+			t.Errorf("bd import with BEADS_DIR=%s (the project root, %s): want \"no beads database found\" and the BEADS_DIR note, got stderr:\n%s", project, shape, stderr)
+		}
+		if after := rootEntries(); strings.Join(after, " ") != strings.Join(before, " ") {
+			t.Fatalf("bd import with BEADS_DIR=%s (the project root, %s) changed the project root\nbefore: %v\nafter:  %v", project, shape, before, after)
+		}
+	}
+	importIsRefused("holding nothing else")
+
 	// A data command still finds no workspace in the project root, and now
 	// says that BEADS_DIR is the cause.
 	stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, project, project, "list", "--json")
@@ -199,6 +223,14 @@ func testInitRefusesBeadsDirAtProjectRoot(t *testing.T, bd string, mode explicit
 	} else if !strings.Contains(stderr, "no beads database found") || !strings.Contains(stderr, "BEADS_DIR is set to") {
 		t.Errorf("bd list with BEADS_DIR=%s: want \"no beads database found\" and the BEADS_DIR note, got stderr:\n%s", project, stderr)
 	}
+
+	// A project root with a config.yaml of its own is one discovery reads as
+	// a workspace, so the import refusal must not wait for discovery to find
+	// nothing there.
+	if err := os.WriteFile(filepath.Join(project, "config.yaml"), []byte("name: my-app\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	importIsRefused("holding its own config.yaml")
 }
 
 func TestEmbeddedInitExplicitBeadsDirIsAuthoritative(t *testing.T) {

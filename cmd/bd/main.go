@@ -1883,6 +1883,22 @@ var rootCmd = &cobra.Command{
 					// which follows redirect files. Without this, a redirected .beads
 					// would create a local database instead of using the redirect target.
 					// (GH#bd-0qel)
+					//
+					// GH#7034: a BEADS_DIR that names the project root of an
+					// initialized workspace is a slip for its .beads, not a choice
+					// of where to set a workspace up. Setting one up there leaves
+					// an empty store in the project root when the import then
+					// fails for want of a prefix, and discovery takes that store
+					// for a database on every later command. bd import refuses as
+					// every other command run there does, with the note that names
+					// the directory meant. The check comes before FindBeadsDir,
+					// which returns a project root that holds a config.yaml, a
+					// metadata.json or a database file of its own as if it were
+					// the workspace.
+					if _, slip := beads.ProjectRootNamedAsBeadsDir(os.Getenv("BEADS_DIR")); slip {
+						printNoDatabaseRefusal()
+						return SilentExit()
+					}
 					targetBeadsDir := beads.FindBeadsDir()
 					if targetBeadsDir == "" {
 						// An explicit BEADS_DIR is authoritative even
