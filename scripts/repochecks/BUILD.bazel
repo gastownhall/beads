@@ -199,7 +199,7 @@ repo_subset(
 
 # check-migration-hygiene.sh's tree half (checks A and B: duplicate versions,
 # nondeterministic SQL and its allowlist). The delta half (C, D and E, which
-# diff against the PR's base) stays in pr.yml's pr-diff-checks job.
+# diff against the PR's base) stays in pr.yml's fast-checks job.
 sh_test(
     name = "migration_hygiene_test",
     srcs = ["run_check.sh"],

@@ -1958,14 +1958,19 @@ workflows run on that commit like a same-repo PR, but only the fast set.
   call reports `dolt-tiers` `off`. A Dolt-tier lane that ran anyway and
   failed still reds the gate.
 - Diff bases: a merge group has no `pull_request` payload and no
-  `base_ref`. The migration-hygiene `BASE_SHA`, the package gates'
+  `base_ref`. The migration-hygiene step, the package gates'
   `PR_BASE_SHA`/`PR_HEAD_SHA`, the `.beads/issues.jsonl` guard and the
   CLI-docs drift attribution (`BD_DOCS_DIFF_BASE`; without a base it would
-  fail every entry on drift already on `main`) fall back to
-  `github.event.merge_group.base_sha`/`head_sha`; every other
+  fail every entry on drift already on `main`) take
+  `github.event.merge_group.base_sha`/`head_sha` there; every other
   `github.event.pull_request.*` read is classified in
   `TestMergeQueuePullRequestFieldsHandleMergeGroup` (null is correct
-  there: fork facts, the rbe-fork PR number, autofix metadata). With
+  there: fork facts, the rbe-fork PR number, autofix metadata). On
+  `pull_request` the migration-hygiene step and the `.beads/issues.jsonl`
+  guard diff against `origin/<base branch>`, the tip the checkout is merged
+  into, and not `pull_request.base.sha`, which stays behind when the base
+  branch moves: from there the base branch's own migration changes count
+  as the pull request's (#6588, `TestMergeQueueMigrationHygieneBase`). With
   ALLGREEN every entry must pass, so each entry's own diff from its base
   commit is enough (the base is `main` or the entry ahead of it). With
   HEADGREEN only the batch head would have to pass and a path-filtered
