@@ -45,6 +45,9 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("CloseAndReopenKeepTheClaimHolder", func(t *testing.T) {
 		conformance.RunLifecycleCloseAndReopenKeepTheClaimHolder(t, ctx, fixture)
 	})
+	t.Run("CloseStampsTheWritingActorIntoClosedBy", func(t *testing.T) {
+		conformance.RunLifecycleCloseStampsTheWritingActorIntoClosedBy(t, ctx, fixture)
+	})
 	t.Run("ReopenLeavesNonDoneStatusesUnchanged", func(t *testing.T) {
 		conformance.RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t, ctx, fixture)
 	})
