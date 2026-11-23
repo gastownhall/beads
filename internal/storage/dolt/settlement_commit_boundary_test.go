@@ -57,10 +57,10 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"id"}))
 		// The abstained count's two probes for a dangling wisp edge; with
 		// none, the count reads nothing else.
-		mock.ExpectQuery(`SELECT 1 FROM dependencies d\s`).
-			WillReturnRows(sqlmock.NewRows([]string{"1"}))
-		mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies d\s`).
-			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectQuery(`d\.issue_id FROM dependencies d\s+LEFT JOIN wisps dw`).
+			WillReturnRows(sqlmock.NewRows([]string{"issue_id"}))
+		mock.ExpectQuery(`d\.issue_id FROM wisp_dependencies d\s+LEFT JOIN wisps dw`).
+			WillReturnRows(sqlmock.NewRows([]string{"issue_id"}))
 		responseLoss := errors.New("full recompute commit response lost")
 		mock.ExpectCommit().WillReturnError(responseLoss)
 

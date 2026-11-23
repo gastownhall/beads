@@ -45,6 +45,30 @@ package issueops
 // under which a stale column is admissible, and no role method can produce that
 // state.
 //
+// THE ABSENT-WISP CLAUSE — what a database cannot see, it leaves as found.
+// Wisps live only in the database that created them, while the edges onto them
+// replicate, so a database can hold a dependency on a wisp it has no row for:
+// every clone of a database that blocks issues on wisps does. Such an edge is
+// UNKNOWN, neither a reason nor the absence of one, because the wisp may be
+// open where it lives. A row is UNDECIDED when its value hangs on one:
+//
+//   - it holds such an edge, of a kind the predicate reads a wisp for (blocks,
+//     conditional-blocks, parent-child, waits-for); or
+//   - it is the parent-child child of a blocked parent that holds one and has
+//     no reason the database can see placing its blockedness outside its own
+//     subtree, or of a parent below such a parent with nothing plainly
+//     exogenous between them. Such a parent darkens no child by inheritance,
+//     and brightens none either.
+//
+// An undecided row that is closed or pinned is still never blocked. Otherwise
+// it is blocked when the predicate, read over what the database can see after
+// every decided row has settled, finds a reason for it, and else it KEEPS THE
+// VALUE IT HAD, whoever set it: the last merge, or a local blocker that has
+// since closed. Settling never clears an undecided row on a guess, and never
+// marks one on a value it would itself have cleared. A database that holds
+// every wisp its edges name has no undecided row, and the predicate decides
+// every row exactly as above.
+//
 // THE NON-PERTURBATION CLAUSES. Settling blocked state is not a user edit: it
 // never bumps a row's updated_at, so a flip does not make a synced row look
 // hand-edited to a stale-guard or a conflict-guard. It is idempotent on a

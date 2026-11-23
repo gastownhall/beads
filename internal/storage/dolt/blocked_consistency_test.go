@@ -1593,3 +1593,199 @@ func TestDanglingWispEdge_WaitsForAbsentSpawner(t *testing.T) {
 	loseWisp(ctx, t, store, "dwf-s")
 	assertLeftAsFound(ctx, t, store, "waiting, spawner absent", map[string]bool{"dwf-a": true}, "dwf-a")
 }
+
+// The gate-parent shapes of the review of gastownhall/beads#8597. A parent P
+// that blocks on its own child C, and on a wisp, is blocked for C from outside
+// its subtree or not depending on where that wisp sits, and a database without
+// the wisp cannot tell: the wisp's own parent-child row lives in
+// wisp_dependencies, which no clone has. So P is undecided for C, and C keeps
+// the flag the minting database gave it, bright as well as dark. Each test
+// computes the minting database's flags with the wisp present, loses the wisp
+// (loseWisp, which takes the wisp's own wisp_dependencies rows with it, as a
+// clone has none), and requires every recompute to leave them alone.
+// TestDanglingWispEdge_IsAnExogenousReasonForChildren is the dark twin of A.
+
+// A: P's wisp blocker is closed but not yet purged on the minting database, so
+// P's only open reason is its own child and C is bright.
+func TestDanglingWispEdge_GateParentOverAClosedWispLeavesChildBright(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "dga-p")
+	createPerm(t, ctx, store, "dga-c")
+	createWisp(t, ctx, store, "dga-w")
+	addDependencyWithMeta(t, ctx, store, "dga-p", "dga-w", types.DepBlocks, "")
+	addDependencyWithMeta(t, ctx, store, "dga-p", "dga-c", types.DepBlocks, "")
+	addDepSkippingCycleCheck(ctx, t, store, "dga-c", "dga-p", types.DepParentChild)
+	if err := store.CloseIssue(ctx, "dga-w", "done", "tester", ""); err != nil {
+		t.Fatalf("close wisp: %v", err)
+	}
+	minting := map[string]bool{"dga-p": true, "dga-c": false}
+	assertBlockedFlags(ctx, t, store, "minting database, wisp closed", minting)
+	assertConvergedAndStable(ctx, t, store)
+
+	loseWisp(ctx, t, store, "dga-w")
+	assertLeftAsFound(ctx, t, store, "wisp absent", minting, "dga-p", "dga-c")
+	recomputeScoped(ctx, t, store.db, "dga-c")
+	assertBlockedFlags(ctx, t, store, "scoped recompute of the child alone", minting)
+	if n := countUndecided(ctx, t, store.db); n != 1 {
+		t.Errorf("wisp absent: %d undecided rows, want 1 (dga-c; dga-p has a blocker it can see)", n)
+	}
+}
+
+// B: durable P is a child of an open wisp WP and blocks on its own child C.
+// WP is blocked from outside (dark arm) or not at all (bright arm), so on the
+// minting database C is dark or bright with it. Without WP the database
+// cannot see which: P holds a parent-child edge onto a wisp that is not here.
+func TestDanglingWispEdge_GateParentUnderAnAbsentWispParent(t *testing.T) {
+	for _, arm := range []struct {
+		name, prefix string
+		dark         bool
+	}{
+		{"bright", "dgb", false},
+		{"dark", "dgd", true},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+			// x is the outside blocker that darkens wp in the dark arm.
+			wp, p, c, x := arm.prefix+"-wp", arm.prefix+"-p", arm.prefix+"-c", arm.prefix+"-x"
+
+			createWisp(t, ctx, store, wp)
+			createPerm(t, ctx, store, p)
+			createPerm(t, ctx, store, c)
+			if arm.dark {
+				createPerm(t, ctx, store, x)
+				addDependencyWithMeta(t, ctx, store, wp, x, types.DepBlocks, "")
+			}
+			addDependencyWithMeta(t, ctx, store, p, wp, types.DepParentChild, "")
+			addDependencyWithMeta(t, ctx, store, p, c, types.DepBlocks, "")
+			addDepSkippingCycleCheck(ctx, t, store, c, p, types.DepParentChild)
+			minting := map[string]bool{p: true, c: arm.dark}
+			assertBlockedFlags(ctx, t, store, "minting database", minting)
+			assertConvergedAndStable(ctx, t, store)
+
+			loseWisp(ctx, t, store, wp)
+			assertLeftAsFound(ctx, t, store, "wisp parent absent", minting, p, c)
+			recomputeScoped(ctx, t, store.db, c)
+			assertBlockedFlags(ctx, t, store, "scoped recompute of the child alone", minting)
+		})
+	}
+}
+
+// D: P closes over a mix of children, a durable C and an open wisp W, and
+// blocks on both. On the minting database both reasons are inside P's
+// subtree, so C is bright. Without W the database sees an edge onto a wisp it
+// cannot place, and must not darken C on the guess that W is outside.
+func TestDanglingWispEdge_GateParentOverAnOpenWispChildLeavesChildBright(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "dgw-p")
+	createPerm(t, ctx, store, "dgw-c")
+	createWisp(t, ctx, store, "dgw-w")
+	addDependencyWithMeta(t, ctx, store, "dgw-p", "dgw-c", types.DepBlocks, "")
+	addDependencyWithMeta(t, ctx, store, "dgw-p", "dgw-w", types.DepBlocks, "")
+	addDepSkippingCycleCheck(ctx, t, store, "dgw-c", "dgw-p", types.DepParentChild)
+	addDepSkippingCycleCheck(ctx, t, store, "dgw-w", "dgw-p", types.DepParentChild)
+	minting := map[string]bool{"dgw-p": true, "dgw-c": false}
+	assertBlockedFlags(ctx, t, store, "minting database, wisp child open", minting)
+	assertConvergedAndStable(ctx, t, store)
+
+	loseWisp(ctx, t, store, "dgw-w")
+	assertLeftAsFound(ctx, t, store, "wisp child absent", minting, "dgw-p", "dgw-c")
+}
+
+// An undecided parent decides nothing below it either: Q blocks on a wisp and
+// P, a close gate on its own child C, hangs under Q. On the minting database
+// C is dark when the wisp is outside Q's subtree (Q is blocked from outside, so
+// P is blocked from above) and bright when it is Q's own wisp child (Q is a
+// close gate too). P carries no dependency on a wisp itself, so only the walk
+// above it can find that it is undecided. The scoped recompute of C alone
+// reaches Q through the by-id read of the parents above the batch.
+func TestDanglingWispEdge_UndecidedAncestorLeavesAGateParentsChildAsFound(t *testing.T) {
+	for _, arm := range []struct {
+		name   string
+		inside bool
+		prefix string
+	}{
+		{"wisp outside the ancestor's subtree", false, "dqo"},
+		{"wisp inside the ancestor's subtree", true, "dqi"},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+			q, p, c, w := arm.prefix+"-q", arm.prefix+"-p", arm.prefix+"-c", arm.prefix+"-w"
+
+			createPerm(t, ctx, store, q)
+			createPerm(t, ctx, store, p)
+			createPerm(t, ctx, store, c)
+			createWisp(t, ctx, store, w)
+			addDependencyWithMeta(t, ctx, store, q, w, types.DepBlocks, "")
+			addDependencyWithMeta(t, ctx, store, p, c, types.DepBlocks, "")
+			addDependencyWithMeta(t, ctx, store, p, q, types.DepParentChild, "")
+			addDepSkippingCycleCheck(ctx, t, store, c, p, types.DepParentChild)
+			if arm.inside {
+				addDepSkippingCycleCheck(ctx, t, store, w, q, types.DepParentChild)
+			}
+			minting := map[string]bool{q: true, p: true, c: !arm.inside}
+			assertBlockedFlags(ctx, t, store, "minting database", minting)
+			assertConvergedAndStable(ctx, t, store)
+
+			loseWisp(ctx, t, store, w)
+			assertLeftAsFound(ctx, t, store, "wisp absent", minting, q, p, c)
+			recomputeScoped(ctx, t, store.db, c)
+			assertBlockedFlags(ctx, t, store, "scoped recompute of the child alone", minting)
+		})
+	}
+}
+
+// TestDanglingWispEdge_LocalMarkOutlivesItsBlocker pins a trade-off rather
+// than an ideal (probe C of the review of gastownhall/beads#8597). An undecided
+// row keeps the flag it has whoever set it, and is_blocked carries no record
+// of who did. Here the merged 0 is replaced by a local blocker's 1 on
+// evidence, and when that blocker closes the 1 stays: nothing this database
+// can see says whether the absent wisp still holds the row. It clears when a
+// merge brings the minting database's 0, or when the dangling edge goes.
+func TestDanglingWispEdge_LocalMarkOutlivesItsBlocker(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "dlm-a")
+	createPerm(t, ctx, store, "dlm-x")
+	createWisp(t, ctx, store, "dlm-w")
+	addDependencyWithMeta(t, ctx, store, "dlm-a", "dlm-w", types.DepBlocks, "")
+	if err := store.CloseIssue(ctx, "dlm-w", "done", "tester", ""); err != nil {
+		t.Fatalf("close wisp: %v", err)
+	}
+	assertBlockedFlags(ctx, t, store, "wisp closed", map[string]bool{"dlm-a": false})
+	loseWisp(ctx, t, store, "dlm-w")
+
+	addDependencyWithMeta(t, ctx, store, "dlm-a", "dlm-x", types.DepBlocks, "")
+	assertBlockedFlags(ctx, t, store, "a local blocker marks on evidence", map[string]bool{"dlm-a": true})
+	if err := store.CloseIssue(ctx, "dlm-x", "done", "tester", ""); err != nil {
+		t.Fatalf("close local blocker: %v", err)
+	}
+	assertLeftAsFound(ctx, t, store, "local blocker closed", map[string]bool{"dlm-a": true}, "dlm-a")
+	if n := countUndecided(ctx, t, store.db); n != 1 {
+		t.Errorf("local blocker closed: %d undecided rows, want 1", n)
+	}
+
+	// Removing the dangling edge decides the row again.
+	if err := store.RemoveDependency(ctx, "dlm-a", "dlm-w", "tester"); err != nil {
+		t.Fatalf("remove dangling edge: %v", err)
+	}
+	recomputeScoped(ctx, t, store.db, "dlm-a")
+	assertBlockedFlags(ctx, t, store, "dangling edge removed", map[string]bool{"dlm-a": false})
+	assertConvergedAndStable(ctx, t, store)
+}

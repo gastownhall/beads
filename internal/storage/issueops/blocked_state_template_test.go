@@ -28,20 +28,6 @@ import (
 // and why the ? group below exists.
 const batchTemplateOccurrences = 6
 
-// unmarkTemplateOccurrences is batchTemplateOccurrences plus the one leg only
-// an unmark carries: the batch's rows holding a dependency on a wisp that is
-// not in this database, which the unmark must leave as found
-// (keepBlockedIDsSQL).
-const unmarkTemplateOccurrences = batchTemplateOccurrences + 1
-
-// templateOccurrences is the %s budget of one of batchedTemplates' entries.
-func templateOccurrences(name string) int {
-	if strings.HasPrefix(name, "unmark") {
-		return unmarkTemplateOccurrences
-	}
-	return batchTemplateOccurrences
-}
-
 // explainedFixture is a non-empty exogeneity set of each kind, so the bound-?
 // plumbing is exercised rather than degenerating to the empty case.
 func explainedFixture() subtreeExplainedParents {
@@ -63,14 +49,13 @@ func batchedTemplates(explained subtreeExplainedParents) map[string]string {
 func TestBatchedTemplatePercentBudget(t *testing.T) {
 	for name, tmpl := range batchedTemplates(explainedFixture()) {
 		t.Run(name, func(t *testing.T) {
-			want := templateOccurrences(name)
-			if got := strings.Count(tmpl, "%s"); got != want {
-				t.Errorf("%%s count = %d, want %d — expandBatchTemplate binds one batch id group per occurrence, so a changed count must be a deliberate edit here", got, want)
+			if got := strings.Count(tmpl, "%s"); got != batchTemplateOccurrences {
+				t.Errorf("%%s count = %d, want %d — expandBatchTemplate binds one batch id group per occurrence, so a changed count must be a deliberate edit here", got, batchTemplateOccurrences)
 			}
 			// The stray-percent guard: every percent sign in the finished
 			// template must belong to one of the %s verbs counted above.
-			if got := strings.Count(tmpl, "%"); got != want {
-				t.Errorf("total %% count = %d, want %d — a percent sign outside a %%s (LIKE 'x%%', %%d, %%%%) miscounts the template or corrupts the statement", got, want)
+			if got := strings.Count(tmpl, "%"); got != batchTemplateOccurrences {
+				t.Errorf("total %% count = %d, want %d — a percent sign outside a %%s (LIKE 'x%%', %%d, %%%%) miscounts the template or corrupts the statement", got, batchTemplateOccurrences)
 			}
 		})
 	}
@@ -113,11 +98,10 @@ func TestExpandBatchTemplateFillsEveryOccurrence(t *testing.T) {
 	placeholders, args := buildSQLInClause([]string{"issue-1", "issue-2"})
 	explained := explainedFixture()
 	bound := explained.args()
+	wantArgs := batchTemplateOccurrences*len(args) + len(bound)
 
 	for name, tmpl := range batchedTemplates(explained) {
 		t.Run(name, func(t *testing.T) {
-			occurrences := templateOccurrences(name)
-			wantArgs := occurrences*len(args) + len(bound)
 			stmt, stmtArgs, err := expandBatchTemplate(tmpl, placeholders, args, bound)
 			if err != nil {
 				t.Fatalf("expandBatchTemplate: %v", err)
@@ -134,11 +118,9 @@ func TestExpandBatchTemplateFillsEveryOccurrence(t *testing.T) {
 			}
 			// TEXT ORDER: the batch group for the outer filter and legs 1-2,
 			// then leg 3's batch group followed by the issue parents, then leg
-			// 4's batch group followed by the wisp parents, then leg 5's, and
-			// in an unmark the dangling-wisp-edge leg's, which binds no ids of
-			// its own.
+			// 4's batch group followed by the wisp parents, then leg 5's.
 			var want []interface{}
-			for k := 0; k < occurrences; k++ {
+			for k := 0; k < batchTemplateOccurrences; k++ {
 				want = append(want, args...)
 				if k == 3 {
 					want = append(want, "parent-1", "parent-2")
@@ -146,6 +128,60 @@ func TestExpandBatchTemplateFillsEveryOccurrence(t *testing.T) {
 				if k == 4 {
 					want = append(want, "wisp-parent-1")
 				}
+			}
+			for i, arg := range stmtArgs {
+				if arg != want[i] {
+					t.Errorf("arg %d = %v, want %v", i, arg, want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestExpandBatchTemplateBindsHeldRowsAfterTheUnion pins the two groups a
+// chunk with undecided rows adds (undecidedRows): the undecided parents, which
+// each parent-child leg subtracts after its explained ones, and the held ids,
+// which both statements exclude after the union. Both are already-rendered ?
+// placeholders, so a misplaced group would bind an id to the wrong IN-list
+// without changing any count.
+func TestExpandBatchTemplateBindsHeldRowsAfterTheUnion(t *testing.T) {
+	placeholders, args := buildSQLInClause([]string{"issue-1", "issue-2"})
+	explained := explainedFixture()
+	explained.undecidedIssueParents = []string{"parent-u"}
+	explained.undecidedWispParents = []string{"wisp-parent-u"}
+	held := []string{"issue-2"}
+	bound := explained.args()
+	for _, id := range held {
+		bound = append(bound, id)
+	}
+	for name, tmpl := range map[string]string{
+		"mark":   markBlockedTemplate(issuesBlockedSpec, explained, len(held)),
+		"unmark": unmarkBlockedTemplate(issuesBlockedSpec, explained, len(held)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := strings.Count(tmpl, "%s"); got != batchTemplateOccurrences {
+				t.Errorf("%%s count = %d, want %d: the held ids are bound, not a batch group", got, batchTemplateOccurrences)
+			}
+			stmt, stmtArgs, err := expandBatchTemplate(tmpl, placeholders, args, bound)
+			if err != nil {
+				t.Fatalf("expandBatchTemplate: %v", err)
+			}
+			if !strings.Contains(stmt, "AND i.id NOT IN (?)") {
+				t.Errorf("statement does not hold the undecided row out:\n%s", stmt)
+			}
+			var want []interface{}
+			for k := 0; k < batchTemplateOccurrences; k++ {
+				want = append(want, args...)
+				if k == 3 {
+					want = append(want, "parent-1", "parent-2", "parent-u")
+				}
+				if k == 4 {
+					want = append(want, "wisp-parent-1", "wisp-parent-u")
+				}
+			}
+			want = append(want, "issue-2")
+			if len(stmtArgs) != len(want) {
+				t.Fatalf("arg count = %d, want %d", len(stmtArgs), len(want))
 			}
 			for i, arg := range stmtArgs {
 				if arg != want[i] {
@@ -226,6 +262,38 @@ func TestWaitsForGateSplitsSpawnerColumns(t *testing.T) {
 	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id"} {
 		if got := strings.Count(waitsForGateBlockedSQL, "cd."+col+" = d."+col); got != 4 {
 			t.Errorf("gate matches cd.%s in %d EXISTS, want 4", col, got)
+		}
+	}
+}
+
+// TestUndecidedRowsSelectIsTwoMembers pins the shape the engine needs to keep
+// `id IN (set)` a cached subquery (danglingBlockerTypesSQL): whatever the set
+// holds, its select is exactly two members of one UNION, and it binds exactly
+// what selectArgs supplies, the scope once per member and the undecided
+// parents after the second.
+func TestUndecidedRowsSelectIsTwoMembers(t *testing.T) {
+	placeholders, scopeArgs := buildSQLInClause([]string{"issue-1", "issue-2"})
+	scope := "AND d.issue_id IN (" + placeholders + ")"
+	for _, u := range []undecidedRows{
+		{holders: true},
+		{issueParents: []string{"p-1"}},
+		{wispParents: []string{"wp-1", "wp-2"}},
+		{holders: true, issueParents: []string{"p-1"}, wispParents: []string{"wp-1"}},
+	} {
+		for _, sc := range []struct {
+			scope string
+			args  []any
+		}{{"", nil}, {scope, scopeArgs}} {
+			q := u.selectSQL("dependencies", sc.scope)
+			if got := strings.Count(q, "UNION"); got != 1 {
+				t.Errorf("%+v scope %q: %d UNIONs, want 1:\n%s", u, sc.scope, got, q)
+			}
+			if got := strings.Count(q, "SELECT"); got != 2 {
+				t.Errorf("%+v scope %q: %d SELECTs, want 2:\n%s", u, sc.scope, got, q)
+			}
+			if got, want := strings.Count(q, "?"), len(u.selectArgs(sc.args)); got != want {
+				t.Errorf("%+v scope %q: %d placeholders, selectArgs binds %d:\n%s", u, sc.scope, got, want, q)
+			}
 		}
 	}
 }

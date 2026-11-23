@@ -286,3 +286,57 @@ func TestRecomputeAllBlocked_CountsRowsLeftAsFoundAfterTheRepair(t *testing.T) {
 			isBlocked(ctx, t, store.db, "rc-p"), isBlocked(ctx, t, store.db, "rc-c"))
 	}
 }
+
+// TestRecomputeAllBlocked_StaleParentDoesNotDarkenAnUndecidedChild is the
+// other direction (the review of gastownhall/beads#8597): the parent has no
+// blocker at all but carries a stale 1, and the child, which holds an edge to
+// a wisp this database does not have, carries the merged 0. The parent's
+// stale flag must not leave a mark on the child on its way out: a fixpoint
+// that marked the child from it and cleared the parent afterwards could never
+// clear the child again, because nothing this database sees decides it. The
+// repair corrects the parent alone and leaves the child as found, and the
+// scoped recompute a write runs does the same.
+func TestRecomputeAllBlocked_StaleParentDoesNotDarkenAnUndecidedChild(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "rs-p")
+	createPerm(t, ctx, store, "rs-c")
+	createWisp(t, ctx, store, "rs-w")
+	addDependencyWithMeta(t, ctx, store, "rs-c", "rs-p", types.DepParentChild, "")
+	addDependencyWithMeta(t, ctx, store, "rs-c", "rs-w", types.DepBlocks, "")
+	loseWisp(ctx, t, store, "rs-w")
+	plantStale := func() {
+		t.Helper()
+		plantIsBlocked(ctx, t, store, "rs-p", true)
+		plantIsBlocked(ctx, t, store, "rs-c", false)
+		if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'commit stale parent')"); err != nil && !isDoltNothingToCommit(err) {
+			t.Fatalf("commit stale flags: %v", err)
+		}
+	}
+	plantStale()
+	// The doctor's single pass reads rs-p's stale 1 and so counts rs-c too;
+	// the repair clears rs-p first and leaves rs-c alone (countStaleIsBlockedSQL).
+	if n := countInconsistencies(ctx, t, store.db); n != 2 {
+		t.Errorf("precondition: doctor counts %d stale rows, want 2 (rs-p, and rs-c through it)", n)
+	}
+
+	got, err := storage.RecomputeBlocked(ctx, store)
+	if err != nil {
+		t.Fatalf("RecomputeBlocked: %v", err)
+	}
+	if want := (storage.RecomputeBlockedResult{RowsCorrected: 1, RowsAbstained: 1}); got != want {
+		t.Errorf("RecomputeBlocked = %+v, want %+v", got, want)
+	}
+	want := map[string]bool{"rs-p": false, "rs-c": false}
+	assertBlockedFlags(ctx, t, store, "after the full repair", want)
+	if n := countInconsistencies(ctx, t, store.db); n != 0 {
+		t.Errorf("after the full repair: doctor counts %d stale rows, want 0", n)
+	}
+
+	plantStale()
+	recomputeScoped(ctx, t, store.db, "rs-p", "rs-c")
+	assertBlockedFlags(ctx, t, store, "after the scoped recompute", want)
+}

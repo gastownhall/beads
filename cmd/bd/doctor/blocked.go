@@ -62,18 +62,19 @@ func checkBlockedConsistencyDB(ctx context.Context, db *sql.DB) DoctorCheck {
 	}
 	// Rows the recompute cannot decide are reported beside the verdict and do
 	// not change it: they are not stale, and --fix leaves them as found. A
-	// failed read of them is not a reason to hide the stale count.
-	undecided, err := issueops.CountIsBlockedUndecidedInTx(ctx, db)
-	if err != nil {
-		undecided = 0
-	}
+	// failed read of them is not a reason to hide the stale count, and is not
+	// a count of none either: Detail says it could not be read.
+	undecided, undecidedErr := issueops.CountIsBlockedUndecidedInTx(ctx, db)
 	if stale == 0 {
 		check := DoctorCheck{
 			Name:    BlockedConsistencyCheckName,
 			Status:  StatusOK,
 			Message: "is_blocked flags consistent with dependency graph",
 		}
-		if undecided > 0 {
+		switch {
+		case undecidedErr != nil:
+			check.Detail = undecidedBlockedReadFailure(undecidedErr)
+		case undecided > 0:
 			check.Message += fmt.Sprintf(" (%s)", undecidedBlockedNote(undecided))
 			check.Detail = undecidedBlockedDetail
 		}
@@ -86,19 +87,30 @@ func checkBlockedConsistencyDB(ctx context.Context, db *sql.DB) DoctorCheck {
 		Detail:  "is_blocked is derived from the dependency graph; a skipped post-pull recompute can leave it stale",
 		Fix:     "Run: bd doctor --fix (or 'bd recompute-blocked', which also works in embedded mode)",
 	}
-	if undecided > 0 {
+	switch {
+	case undecidedErr != nil:
+		check.Detail += "; " + undecidedBlockedReadFailure(undecidedErr)
+	case undecided > 0:
 		check.Detail += "; " + undecidedBlockedNote(undecided) + ". " + undecidedBlockedDetail
 	}
 	return check
 }
 
 // undecidedBlockedNote is the count half of the Blocked State line for rows
-// that depend on a wisp this database has no row for.
+// that depend on a wisp this database has no row for, their own dependency or
+// their parent's (issueops.CountIsBlockedUndecidedInTx).
 func undecidedBlockedNote(n int64) string {
 	return fmt.Sprintf("%d row(s) depend on a wisp this database does not have; is_blocked left as found", n)
 }
 
+// undecidedBlockedReadFailure is the Detail for a count of those rows that
+// could not be read.
+func undecidedBlockedReadFailure(err error) string {
+	return "could not count the rows that depend on a wisp this database does not have: " + err.Error()
+}
+
 // undecidedBlockedDetail says why such a row is not a finding on a clone, and
-// when it is one.
-const undecidedBlockedDetail = "Wisps are local to the database that created them, so a clone has the dependency and not the wisp, and keeps the flag it last merged. " +
-	"On the database that created the wisp this names a dependency left behind by a delete that bypassed bd"
+// when it is one, with its remedy.
+const undecidedBlockedDetail = "Wisps are local to the database that created them, so a clone has the dependency and not the wisp, and keeps the flag it has. " +
+	"On the database that created the wisp this names a dependency left behind by a delete that bypassed bd: " +
+	"remove it there ('bd dep remove <issue> <wisp-id>') and the row's flag is derived again"

@@ -25,9 +25,10 @@ import (
 //     doctor "Blocked State" check, over an ALREADY CONSISTENT store, which is
 //     the case an operator actually hits.
 //   - CountIsBlockedUndecidedInTx — the rows-left-as-found count the full
-//     repair reads after its last pass and doctor prints. This fixture has no
-//     dangling wisp edge, so the number is the cost every database that holds
-//     its own wisps pays: the two existence probes and nothing after them.
+//     repair reads after its last pass and doctor prints. Until the clone
+//     phase below, the fixture has no dangling wisp edge, so the number is
+//     the cost every database that holds its own wisps pays: the two
+//     existence probes and nothing after them.
 //   - RecomputeIsBlockedForIDsInTx at 2, 20 and 200 ids — the batched
 //     mark/unmark the incremental write path runs, isolated from the dolt
 //     commit around it. 200 is queryBatchSize (the bulk/import shape); 2 is the
@@ -39,8 +40,15 @@ import (
 // short-circuit on `p.is_blocked = 1`, so a plane with no blocked rows
 // measures nothing at all. This one carries a realistic mix — exogenously
 // blocked epics that really do cascade, close-gate epics that (since #6506)
-// must not, one depth-2 gate over a grandchild, and a large population of
-// ordinary leaf-to-leaf blocks edges.
+// must not, one depth-2 gate over a grandchild, a large population of
+// ordinary leaf-to-leaf blocks edges, and leaves blocked on wisps, so every
+// statement that reads a wisp edge has rows to read (an empty left side
+// hid a full scan of wisps once: the review of gastownhall/beads#8597).
+//
+// The CLONE phase then deletes some of those wisps by hand, which leaves
+// their edges dangling, the state of a clone of this database, and times the
+// same reads and repairs over it: they now hold the undecided rows out of the
+// fixpoint and settle them after it.
 //
 // Skipped under -short. It is a measurement, not an assertion: it has no
 // pass/fail threshold, because a threshold in wall-clock time on shared CI
@@ -51,6 +59,18 @@ import (
 const (
 	scaleEpics  = 100 // bs-0000..bs-0099; 0..9 are roots, 10..99 hang under them
 	scaleIssues = 1000
+	// Wisps bs-w-0000.. are all open. Leaves bs-0100..bs-0299 carry
+	// scaleWispEdgesPerLeaf blocks edges onto them, and the close-gate epics
+	// bs-0050..bs-0059 one each. The clone phase deletes every
+	// scaleLostWispStride-th wisp. The first scaleUndecidedLeaves leaves and
+	// those epics block only on such wisps, so on the clone they hold nothing
+	// but dangling wisp edges: undecided leaves, unless a leaf-to-leaf edge
+	// blocks them, and undecided parents over their children.
+	scaleWisps            = 2000
+	scaleWispLeaves       = 200
+	scaleWispEdgesPerLeaf = 3
+	scaleLostWispStride   = 5
+	scaleUndecidedLeaves  = 40
 	// Leaves bs-0100..bs-0699 carry blocks edges; bs-0700..bs-0999 are their
 	// targets, of which all but the last scaleOpenTargets are closed.
 	scaleFirstTarget   = 700
@@ -63,6 +83,17 @@ const (
 
 func scaleID(n int) string { return fmt.Sprintf(scaleBenchIDFormat, n) }
 
+func scaleWispID(n int) string { return fmt.Sprintf("bs-w-%04d", n) }
+
+// scaleWispTarget is the k-th wisp leaf i blocks on: a wisp the clone phase
+// deletes for the first scaleUndecidedLeaves leaves, any wisp after them.
+func scaleWispTarget(i, k int) string {
+	if i < 100+scaleUndecidedLeaves {
+		return scaleWispID(((i-100)*scaleWispEdgesPerLeaf + k) * scaleLostWispStride)
+	}
+	return scaleWispID((i*31 + k*577) % scaleWisps)
+}
+
 func TestBlockedStateScaleTiming(t *testing.T) {
 	if testing.Short() {
 		t.Skip("scale timing: skipped under -short")
@@ -74,36 +105,80 @@ func TestBlockedStateScaleTiming(t *testing.T) {
 
 	built := time.Now()
 	deps := buildScaleFixture(ctx, t, store)
-	t.Logf("fixture: %d issues, %d dependency edges, built in %s",
-		scaleIssues, deps, time.Since(built).Round(time.Millisecond))
+	t.Logf("fixture: %d issues, %d wisps, %d dependency edges, built in %s",
+		scaleIssues, scaleWisps, deps, time.Since(built).Round(time.Millisecond))
 
+	scaleTimeReadsAndRepairs(ctx, t, store, "")
+
+	// The clone phase: the same store with some of its wisps gone and their
+	// edges dangling. Deleting a wisp row by hand takes its own
+	// wisp_dependencies rows with it and leaves every dependencies row that
+	// names it, which is what a clone holds.
+	lost := 0
+	for i := 0; i < scaleWisps; i += scaleLostWispStride {
+		if _, err := store.db.ExecContext(ctx, "DELETE FROM wisps WHERE id = ?", scaleWispID(i)); err != nil {
+			t.Fatalf("delete wisp %s by hand: %v", scaleWispID(i), err)
+		}
+		lost++
+	}
+	t.Logf("clone phase: %d of %d wisps deleted by hand", lost, scaleWisps)
+	scaleTimeReadsAndRepairs(ctx, t, store, "clone ")
+
+	// The write path end to end, last, because it commits: close
+	// scaleClosesTimed open leaves one at a time, each through the store's own
+	// CloseIssue, which recomputes the affected batch and commits.
+	targets := make([]string, 0, scaleClosesTimed)
+	for i := scaleFirstTarget + scaleOpenTargets; len(targets) < scaleClosesTimed && i < scaleIssues; i++ {
+		targets = append(targets, scaleID(i))
+	}
+	for i := 100; len(targets) < scaleClosesTimed && i < scaleFirstTarget; i++ {
+		targets = append(targets, scaleID(i))
+	}
+	start := time.Now()
+	for _, id := range targets {
+		if err := store.CloseIssue(ctx, id, "scale timing", "tester", ""); err != nil {
+			t.Fatalf("close %s: %v", id, err)
+		}
+	}
+	elapsed := time.Since(start)
+	t.Logf("TIMING write-path        %s for %d CloseIssue (%s each)",
+		elapsed.Round(time.Millisecond), len(targets),
+		(elapsed / time.Duration(len(targets))).Round(time.Microsecond))
+}
+
+// scaleTimeReadsAndRepairs converges the store, untimed, and then times the
+// doctor count, the full repair, the undecided count and the batched
+// recompute over it, each line labelled with phase.
+func scaleTimeReadsAndRepairs(ctx context.Context, t *testing.T, store *DoltStore, phase string) {
+	t.Helper()
 	// Converge once, untimed: every timing below is over a CONSISTENT store,
 	// which is the state a real clone is in when doctor or a pull runs.
 	recomputeAllScale(ctx, t, store)
-	t.Logf("blocked rows: %d of %d issues", scaleBlockedCount(ctx, t, store), scaleIssues)
+	t.Logf("%sblocked rows: %d of %d issues", phase, scaleBlockedCount(ctx, t, store), scaleIssues)
 
 	start := time.Now()
 	n := scaleCountInconsistencies(ctx, t, store)
-	t.Logf("TIMING doctor-count      %s (reported %d inconsistencies)",
-		time.Since(start).Round(time.Millisecond), n)
+	t.Logf("TIMING %sdoctor-count      %s (reported %d inconsistencies)",
+		phase, time.Since(start).Round(time.Millisecond), n)
 
 	start = time.Now()
 	changed := recomputeAllScale(ctx, t, store)
-	t.Logf("TIMING full-repair       %s (changed %d rows)",
-		time.Since(start).Round(time.Millisecond), changed)
+	t.Logf("TIMING %sfull-repair       %s (changed %d rows)",
+		phase, time.Since(start).Round(time.Millisecond), changed)
 
 	start = time.Now()
 	undecided, err := issueops.CountIsBlockedUndecidedInTx(ctx, store.db)
 	if err != nil {
 		t.Fatalf("scale CountIsBlockedUndecidedInTx: %v", err)
 	}
-	t.Logf("TIMING abstained-count   %s (reported %d rows left as found)",
-		time.Since(start).Round(time.Microsecond), undecided)
+	t.Logf("TIMING %sabstained-count   %s (reported %d rows left as found)",
+		phase, time.Since(start).Round(time.Microsecond), undecided)
 
 	// The write path's SQL on its own: the batched mark/unmark the incremental
-	// recompute runs, over a spread of ids, with no commit. CloseIssue below is
-	// the honest end-to-end number, but most of it is a dolt commit, which on a
-	// loaded box swings further than the thing being measured.
+	// recompute runs, over a spread of ids, with no commit. The CloseIssue run
+	// at the end of the test is the honest end-to-end number, but most of it
+	// is a dolt commit, which on a loaded box swings further than the thing
+	// being measured.
 	//
 	// THREE batch sizes, because the batched path's cost per statement and its
 	// cost per id pull in opposite directions and one size hides the other. 200
@@ -132,31 +207,10 @@ func TestBlockedStateScaleTiming(t *testing.T) {
 		}
 		elapsedBatch := time.Since(start)
 		_ = txb.Rollback()
-		t.Logf("TIMING batched-recompute-%03d %s for %d x %d ids (%s each)",
-			bs.size, elapsedBatch.Round(time.Millisecond), bs.reps, len(batchIDs),
+		t.Logf("TIMING %sbatched-recompute-%03d %s for %d x %d ids (%s each)",
+			phase, bs.size, elapsedBatch.Round(time.Millisecond), bs.reps, len(batchIDs),
 			(elapsedBatch / time.Duration(bs.reps)).Round(time.Microsecond))
 	}
-
-	// The write path end to end: close scaleClosesTimed open leaves one at a
-	// time, each through the store's own CloseIssue, which recomputes the
-	// affected batch and commits.
-	targets := make([]string, 0, scaleClosesTimed)
-	for i := scaleFirstTarget + scaleOpenTargets; len(targets) < scaleClosesTimed && i < scaleIssues; i++ {
-		targets = append(targets, scaleID(i))
-	}
-	for i := 100; len(targets) < scaleClosesTimed && i < scaleFirstTarget; i++ {
-		targets = append(targets, scaleID(i))
-	}
-	start = time.Now()
-	for _, id := range targets {
-		if err := store.CloseIssue(ctx, id, "scale timing", "tester", ""); err != nil {
-			t.Fatalf("close %s: %v", id, err)
-		}
-	}
-	elapsed := time.Since(start)
-	t.Logf("TIMING write-path        %s for %d CloseIssue (%s each)",
-		elapsed.Round(time.Millisecond), len(targets),
-		(elapsed / time.Duration(len(targets))).Round(time.Microsecond))
 }
 
 // buildScaleFixture writes the graph and returns the number of dependency
@@ -185,6 +239,22 @@ func buildScaleFixture(ctx context.Context, t *testing.T, store *DoltStore) int 
 		return tx.CreateIssues(ctx, issues, "tester")
 	}); err != nil {
 		t.Fatalf("create scale issues: %v", err)
+	}
+	wisps := make([]*types.Issue, 0, scaleWisps)
+	for i := 0; i < scaleWisps; i++ {
+		wisps = append(wisps, &types.Issue{
+			ID:        scaleWispID(i),
+			Title:     "scale wisp " + scaleWispID(i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		})
+	}
+	if err := store.RunInTransaction(ctx, "scale fixture: wisps", func(tx storage.Transaction) error {
+		return tx.CreateIssues(ctx, wisps, "tester")
+	}); err != nil {
+		t.Fatalf("create scale wisps: %v", err)
 	}
 
 	type edge struct {
@@ -222,6 +292,18 @@ func buildScaleFixture(ctx context.Context, t *testing.T, store *DoltStore) int 
 		for k := 0; k < scaleEdgesPerLeaf; k++ {
 			tgt := scaleFirstTarget + (i*strides[k]+7*k+3)%(scaleIssues-scaleFirstTarget)
 			edges = append(edges, edge{scaleID(i), scaleID(tgt), types.DepBlocks})
+		}
+	}
+	// Leaves blocked on wisps, which every statement that reads a wisp edge
+	// reads, on this database and on its clone, and close-gate epics blocked
+	// on one too, which this database sees as blocked from outside their
+	// subtree and its clone as undecided.
+	for e := 50; e < 60; e++ {
+		edges = append(edges, edge{scaleID(e), scaleWispID(1000 + (e-50)*scaleLostWispStride), types.DepBlocks})
+	}
+	for i := 100; i < 100+scaleWispLeaves; i++ {
+		for k := 0; k < scaleWispEdgesPerLeaf; k++ {
+			edges = append(edges, edge{scaleID(i), scaleWispTarget(i, k), types.DepBlocks})
 		}
 	}
 	// The hierarchy, last: leaves under epics, epics under roots.

@@ -29,13 +29,14 @@ func newBlockedStateResultMock(t *testing.T) (sqlmock.Sqlmock, DBTX) {
 // pass now runs before its statements: first the parent-kind guard, and then
 // one read per kind the batch actually names. Answering the guard with no
 // parents of either kind is also the pin on the guard itself — a batch with no
-// parent-child row must not run either read.
+// parent-child row must not run either read — and answering that no row holds
+// a dangling wisp edge pins that such a batch reads no undecided rows either.
 //
 // Ordered before the execs because sqlmock is ordered and the runner reads
 // once per batch, then binds the ids into both statements.
 func expectBatchExogeneityRead(mock sqlmock.Sqlmock, depTable string) {
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(d.depends_on_issue_id), COUNT(d.depends_on_wisp_id)")).
-		WillReturnRows(sqlmock.NewRows([]string{"issue_parents", "wisp_parents"}).AddRow(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("COUNT(CASE WHEN d.type = 'parent-child' THEN d.depends_on_issue_id END)")).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_parents", "wisp_parents", "dangling"}).AddRow(0, 0, 0))
 }
 
 // expectOwnEdgesProbe expects planRecomputeInTx's probe of depTable and
@@ -126,7 +127,7 @@ func TestRunMarkUnmarkBatchedInTxPropagatesRowsAffectedErrors(t *testing.T) {
 					WillReturnResult(sqlmock.NewErrorResult(sentinel))
 			}
 
-			_, err := runMarkUnmarkBatchedInTx(
+			_, _, err := runMarkUnmarkBatchedInTx(
 				context.Background(), db, issuesBlockedSpec, []string{"issue-1"},
 			)
 			if !errors.Is(err, sentinel) {
