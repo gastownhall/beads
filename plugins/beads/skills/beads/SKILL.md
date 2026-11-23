@@ -6,12 +6,13 @@ description: >
   or needs context recovery after compaction. Trigger with "create task", "what's
   ready", "track this work", "resume after compaction". Make sure to use this skill
   whenever managing multi-session work, tracking dependencies, or recovering context.
-allowed-tools: "Read,Bash(bd:*)"
-version: "0.60.0"
-author: "Steve Yegge <steve.yegge@gmail.com>"
+allowed-tools: "Read Bash(bd:*)"
 license: "MIT"
-compatible-with: [claude-code, codex]
-tags: [issue-tracking, task-management, multi-session, dependencies]
+compatibility: "Designed for Claude Code and Codex. Requires the bd CLI on PATH."
+metadata:
+  version: "0.60.0"
+  author: "Steve Yegge <steve.yegge@gmail.com>"
+  tags: "issue-tracking, task-management, multi-session, dependencies"
 ---
 
 # Beads - Persistent Task Memory for AI Agents

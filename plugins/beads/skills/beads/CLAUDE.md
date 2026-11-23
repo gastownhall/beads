@@ -27,7 +27,7 @@ ADRs in `adr/` document key decisions. These are NOT loaded during skill invocat
 ### When bd releases new version:
 
 1. **Check for new features**: `bd --help` for new commands
-2. **Update SKILL.md frontmatter**: `version: "X.Y.Z"`
+2. **Update SKILL.md frontmatter**: `metadata.version: "X.Y.Z"`
 3. **Add resources for conceptual features** (agents, gates, chemistry patterns)
 4. **Don't add CLI reference** — that's `bd prime`'s job
 
