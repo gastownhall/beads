@@ -110,20 +110,57 @@ func TestHooksManageFalseRefusesEveryInstaller(t *testing.T) {
 	})
 }
 
+// TestHooksManageFalseExplicitInstallRefusesNonZero pins the refusal of an
+// explicit bd hooks install: it exits non-zero, writes nothing, and names the
+// layer that turns hooks.manage off with the change that undoes it there.
+// `bd config set` writes only the tracked config.yaml, so only that layer
+// advises it.
 func TestHooksManageFalseExplicitInstallRefusesNonZero(t *testing.T) {
 	clearManageEnvForTest(t)
-	repo, hooksDir, _ := manageHookRepo(t, manageKeysUnset)
-	runInDir(t, repo, func() {
-		setStandaloneHookMode(t, "")
-		t.Setenv("BD_HOOKS_MANAGE", "false")
-		before := manageTreeSnapshot(t, hooksDir)
-		var runErr error
-		stderr := captureStderr(t, func() { runErr = hooksInstallCmd.RunE(hooksInstallCmd, nil) })
-		require.Error(t, runErr, "an explicit install under hooks.manage: false must exit non-zero")
-		require.Contains(t, stderr, "hooks.manage")
-		require.Contains(t, stderr, "bd config set hooks.manage true")
-		require.Equal(t, before, manageTreeSnapshot(t, hooksDir))
-	})
+	isolateBeadsDirForTest(t)
+	for _, tc := range []struct {
+		name, configYAML, localYAML, env string
+		want, wantNot                    []string
+	}{
+		{
+			name: "tracked config.yaml", configYAML: manageHooksOff,
+			want: []string{"hooks.manage is false in", "config.yaml", "bd config set hooks.manage true"},
+		},
+		{
+			name: "config.local.yaml", configYAML: manageKeysUnset, localYAML: manageHooksOff,
+			want: []string{"hooks.manage is false in", "config.local.yaml", "set it to true there"}, wantNot: []string{"bd config set"},
+		},
+		{
+			name: "environment", configYAML: manageKeysUnset, env: "false",
+			want: []string{"BD_HOOKS_MANAGE=false", "unset BD_HOOKS_MANAGE"}, wantNot: []string{"bd config set"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, hooksDir, beadsDir := manageHookRepo(t, tc.configYAML)
+			if tc.localYAML != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.local.yaml"), []byte(tc.localYAML), 0o600))
+			}
+			runInDir(t, repo, func() {
+				initConfigForTest(t)
+				setStandaloneHookMode(t, "")
+				if tc.env != "" {
+					t.Setenv("BD_HOOKS_MANAGE", tc.env)
+				}
+				before := manageTreeSnapshot(t, hooksDir)
+				var runErr error
+				stderr := captureStderr(t, func() { runErr = hooksInstallCmd.RunE(hooksInstallCmd, nil) })
+				require.Error(t, runErr, "an explicit install under hooks.manage: false must exit non-zero")
+				require.Contains(t, stderr, "not managed by bd")
+				for _, want := range tc.want {
+					require.Contains(t, stderr, want)
+				}
+				for _, wantNot := range tc.wantNot {
+					require.NotContains(t, stderr, wantNot)
+				}
+				require.Equal(t, before, manageTreeSnapshot(t, hooksDir))
+			})
+		})
+	}
 }
 
 func TestHooksManageUnsetStillInstalls(t *testing.T) {
@@ -273,8 +310,15 @@ func TestHooksManageFalseRefusesHookMigration(t *testing.T) {
 	})
 }
 
-func TestHooksManageFalseMigrateHooksApplyRefusesBeforePlanning(t *testing.T) {
+// TestHooksManageFalseMigrateHooksApplyRefuses pins bd migrate hooks --apply
+// under hooks.manage: false. It refuses before it prints the plan or asks for
+// consent, and leaves the hooks alone, whether it is pointed at the repository
+// root, run from a subdirectory with or without a path (the plan finds the
+// repository's hooks from either), or run against a workspace named by
+// BEADS_DIR. With the key unset the same subdirectory run migrates.
+func TestHooksManageFalseMigrateHooksApplyRefuses(t *testing.T) {
 	clearManageEnvForTest(t)
+	isolateBeadsDirForTest(t)
 	oldJSON := jsonOutput
 	jsonOutput = false
 	t.Cleanup(func() { jsonOutput = oldJSON })
@@ -288,16 +332,92 @@ func TestHooksManageFalseMigrateHooksApplyRefusesBeforePlanning(t *testing.T) {
 		require.NoError(t, migrateHooksCmd.Flags().Set(flag, "true"))
 	}
 
-	repo, hooksDir := manageMigrationRepo(t, manageHooksOff)
-	before := manageTreeSnapshot(t, hooksDir)
-	var runErr error
-	out := captureStdout(t, func() error {
-		runErr = migrateHooksCmd.RunE(migrateHooksCmd, []string{repo})
-		return nil
+	// migrate runs bd migrate hooks --apply --yes in dir, with the
+	// configuration loaded there, and returns its error, stdout and stderr.
+	migrate := func(t *testing.T, dir string, args []string) (runErr error, stdout, stderr string) {
+		t.Helper()
+		runInDir(t, dir, func() {
+			initConfigForTest(t)
+			stdout, stderr = captureStdio(t, func() { runErr = migrateHooksCmd.RunE(migrateHooksCmd, args) })
+		})
+		return runErr, stdout, stderr
+	}
+	requireRefused := func(t *testing.T, hooksDir, dir string, args []string) {
+		t.Helper()
+		before := manageTreeSnapshot(t, hooksDir)
+		runErr, stdout, stderr := migrate(t, dir, args)
+		require.Error(t, runErr, "bd migrate hooks --apply under hooks.manage: false must exit non-zero")
+		require.Contains(t, stderr, "not managed by bd")
+		require.NotContains(t, stdout, "Hook migration plan", "the refusal comes before the plan is printed")
+		require.Equal(t, before, manageTreeSnapshot(t, hooksDir))
+	}
+	subdirectory := func(t *testing.T, repo string) string {
+		t.Helper()
+		sub := filepath.Join(repo, "sub")
+		require.NoError(t, os.MkdirAll(sub, 0o755))
+		return sub
+	}
+
+	t.Run("repository root path", func(t *testing.T) {
+		repo, hooksDir := manageMigrationRepo(t, manageHooksOff)
+		requireRefused(t, hooksDir, t.TempDir(), []string{repo})
 	})
-	require.Error(t, runErr, "bd migrate hooks --apply under hooks.manage: false must exit non-zero")
-	require.NotContains(t, out, "Hook migration plan", "the refusal comes before the plan is built or printed")
-	require.Equal(t, before, manageTreeSnapshot(t, hooksDir))
+	t.Run("from a subdirectory", func(t *testing.T) {
+		repo, hooksDir := manageMigrationRepo(t, manageHooksOff)
+		requireRefused(t, hooksDir, subdirectory(t, repo), nil)
+	})
+	t.Run("subdirectory path from outside", func(t *testing.T) {
+		// Nothing loaded from the launching directory: only the repository's
+		// own workspace can refuse.
+		repo, hooksDir := manageMigrationRepo(t, manageHooksOff)
+		requireRefused(t, hooksDir, t.TempDir(), []string{subdirectory(t, repo)})
+	})
+	t.Run("workspace named by BEADS_DIR", func(t *testing.T) {
+		repo, hooksDir := manageMigrationRepo(t, manageKeysUnset)
+		workspace := filepath.Join(t.TempDir(), ".beads")
+		require.NoError(t, os.MkdirAll(workspace, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(workspace, "config.yaml"), []byte(manageHooksOff), 0o600))
+		t.Setenv("BEADS_DIR", workspace)
+		requireRefused(t, hooksDir, repo, nil)
+	})
+	t.Run("key unset still migrates from a subdirectory", func(t *testing.T) {
+		repo, hooksDir := manageMigrationRepo(t, manageKeysUnset)
+		runErr, _, stderr := migrate(t, subdirectory(t, repo), nil)
+		require.NoError(t, runErr, stderr)
+		require.Contains(t, mustReadHookMigrationFile(t, filepath.Join(hooksDir, "pre-commit")), hookSectionBeginPrefix)
+	})
+}
+
+// TestHooksManageFalseCheckHealthReportsNoHooks pins bd doctor --check-health
+// under hooks.manage: false: bd never refreshes those hooks, so an outdated bd
+// section in one is not reported. With the key unset it still is.
+func TestHooksManageFalseCheckHealthReportsNoHooks(t *testing.T) {
+	clearManageEnvForTest(t)
+	isolateBeadsDirForTest(t)
+	for _, tc := range []struct {
+		name, configYAML string
+		wantHint         bool
+	}{
+		{"not managed", manageHooksOff, false},
+		{"key unset still reported", manageKeysUnset, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, hooksDir, _ := manageHookRepo(t, tc.configYAML)
+			outdated := "#!/bin/sh\n# bd-hooks-version: 0.0.1\nbd hooks run pre-commit \"$@\"\n"
+			require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte(outdated), 0o755))
+			runInDir(t, repo, func() {
+				var runErr error
+				stderr := captureStderr(t, func() { runErr = runCheckHealth(repo) })
+				if tc.wantHint {
+					require.Error(t, runErr)
+					require.Contains(t, stderr, "pre-commit outdated")
+					return
+				}
+				require.NoError(t, runErr)
+				require.Empty(t, stderr)
+			})
+		})
+	}
 }
 
 func TestGitignoreManageFalseLeavesStealthCleanupAlone(t *testing.T) {
@@ -399,4 +519,95 @@ func TestHooksManageFalseProxiedInitTailSkipsHooks(t *testing.T) {
 			require.Equal(t, empty, initExcludeGit(t, selected, "config", "--local", "--get", "core.hooksPath"), "core.hooksPath changed")
 		})
 	}
+}
+
+// TestGitignoreManageFalseInitCommitStagesOnlyBdFiles pins bd init's bootstrap
+// commit under gitignore.manage: false, set in the workspace or in the user
+// config. bd did not write that .beads/.gitignore and cannot tell that it keeps
+// the database out, so both init paths stage bd's own files by name: never the
+// database, a machine-local file, another file of the repository's, or the
+// project .gitignore bd did not change. With the key unset the commit still
+// stages the whole directory through the .beads/.gitignore bd wrote.
+func TestGitignoreManageFalseInitCommitStagesOnlyBdFiles(t *testing.T) {
+	clearManageEnvForTest(t)
+	isolateBeadsDirForTest(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	userConfig := filepath.Join(home, ".config", "bd", "config.yaml")
+
+	bdFiles := []string{".beads/README.md", ".beads/config.yaml", ".beads/hooks/pre-commit", ".beads/metadata.json"}
+	managedFiles := []string{".beads/.gitignore", ".beads/README.md", ".beads/config.yaml", ".beads/extra.txt",
+		".beads/hooks/pre-commit", ".beads/metadata.json", ".gitignore"}
+
+	// initCommitRepo is a repository holding what bd init leaves in .beads,
+	// configYAML as its config.yaml, beadsGitignore as its .beads/.gitignore
+	// ("" for none), and an untracked project .gitignore.
+	initCommitRepo := func(t *testing.T, configYAML, beadsGitignore string) string {
+		t.Helper()
+		repo := newGitRepo(t)
+		files := map[string]string{
+			".beads/config.yaml":                           configYAML,
+			".beads/metadata.json":                         "{}\n",
+			".beads/README.md":                             "# beads\n",
+			".beads/hooks/pre-commit":                      "#!/bin/sh\n",
+			".beads/embeddeddolt/demo/.dolt/noms/manifest": "database\n",
+			".beads/.local_version":                        "1.0.0\n",
+			".beads/extra.txt":                             "the repository's own\n",
+			".gitignore":                                   "node_modules/\n",
+		}
+		if beadsGitignore != "" {
+			files[".beads/.gitignore"] = beadsGitignore
+		}
+		for name, content := range files {
+			path := filepath.Join(repo, filepath.FromSlash(name))
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		}
+		return repo
+	}
+	committed := func(t *testing.T, repo string) []string {
+		t.Helper()
+		cmd := exec.Command("git", "show", "--name-only", "--format=", "HEAD")
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", out)
+		return strings.Fields(string(out))
+	}
+	commitEmbedded := func(t *testing.T, repo string) []string {
+		t.Helper()
+		commitEmbeddedInitArtifacts(repo, true)
+		return committed(t, repo)
+	}
+	commitProxied := func(t *testing.T, repo string) []string {
+		t.Helper()
+		_, err := storagegit.NewGitProvider(repo).GitUseCase().CommitInitArtifacts(t.Context(), proxiedInitCommitParams(repo))
+		require.NoError(t, err)
+		return committed(t, repo)
+	}
+
+	for _, path := range []struct {
+		name   string
+		commit func(*testing.T, string) []string
+	}{{"embedded", commitEmbedded}, {"proxied", commitProxied}} {
+		t.Run(path.name, func(t *testing.T) {
+			t.Run("workspace opt-out", func(t *testing.T) {
+				require.Equal(t, bdFiles, path.commit(t, initCommitRepo(t, manageGitignoreOff, "")))
+			})
+			t.Run("user config opt-out", func(t *testing.T) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(userConfig), 0o700))
+				require.NoError(t, os.WriteFile(userConfig, []byte(manageGitignoreOff), 0o600))
+				t.Cleanup(func() { require.NoError(t, os.Remove(userConfig)) })
+				require.Equal(t, bdFiles, path.commit(t, initCommitRepo(t, manageKeysUnset, "")))
+			})
+			t.Run("key unset", func(t *testing.T) {
+				require.Equal(t, managedFiles, path.commit(t, initCommitRepo(t, manageKeysUnset, doctor.GitignoreTemplate)))
+			})
+		})
+	}
+
+	t.Run("embedded: a bd file the repository ignores stays out", func(t *testing.T) {
+		repo := initCommitRepo(t, manageGitignoreOff, "README.md\n")
+		require.Equal(t, []string{".beads/config.yaml", ".beads/hooks/pre-commit", ".beads/metadata.json"}, commitEmbedded(t, repo))
+	})
 }

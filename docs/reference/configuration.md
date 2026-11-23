@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-11-22
+Last reviewed: 2026-11-23
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -194,27 +194,38 @@ gitignore:
 With `hooks.manage: false`:
 
 - `bd hooks install` and `bd migrate hooks --apply` refuse with an error that
-  names the key, and exit non-zero.
+  names where the key is set and how to undo it there, and exit non-zero.
+  `bd migrate hooks` checks the repository whose hooks it would rewrite, from
+  any of its subdirectories, as well as the workspace it runs in.
 - `bd init` and `bd config apply` skip hook installation with one informational
   line; `bd config drift` reports the hooks check as skipped, not as drift.
 - `bd doctor` reports the Git Hooks and Git Hooks Dolt Compatibility checks as
   "Not managed by bd (hooks.manage=false)" with status ok, reports no pending
-  hook migration, and `bd doctor --fix` leaves the hooks alone. `bd info` stops
-  printing its hook warning.
-- `bd hooks uninstall` and `bd hooks run` are unchanged.
+  hook migration, and `bd doctor --fix` leaves the hooks alone, so a legacy
+  inline bd hook the compatibility check would flag is yours to fix.
+  `bd doctor --check-health` and `bd info` stop reporting hooks.
+- `bd hooks uninstall` and `bd hooks run` are unchanged, and `bd doctor --fix`
+  still clears a `core.hooksPath` left pointing at a missing bd hooks directory.
 
 With `gitignore.manage: false`, `bd init`, `bd bootstrap`, `bd connect` and
 `bd doctor --fix` leave `.beads/.gitignore` and the project `.gitignore`
 byte-for-byte as they are (the `bd init --stealth` and `bd doctor --fix` removal
-of bd's section from the project `.gitignore` included), and `bd doctor` reports
-the Gitignore and Project Gitignore checks as not managed. It does not cover
+of bd's section from the project `.gitignore` included). Your own ignore rules
+must then keep the database and the machine-local files under `.beads` out of
+git: `bd init` commits only its own files there (`config.yaml`,
+`metadata.json`, `README.md` and `hooks/`), and `bd doctor` warns, with no fix,
+while `.beads/.gitignore` is missing or lacks a pattern bd requires. It reports
+the Project Gitignore check as not managed. The key does not cover
 `.git/info/exclude`, which `bd init --stealth` and fork protection still update,
 or the `.gitignore` entry `bd worktree create` adds for the worktree it creates.
 
 Unlike `doctor.suppress.*`, which only hides a `bd doctor` warning and lives in
-the database, these keys stop the writes themselves. Any value other than `true`
-or `false` is refused by `bd config set` and read as the default, `true`. Set
-`BD_HOOKS_MANAGE` or `BD_GITIGNORE_MANAGE` to override the file for one process.
+the database, these keys stop the writes themselves. bd reads them in this
+order: `BD_HOOKS_MANAGE` or `BD_GITIGNORE_MANAGE`, the workspace's
+`config.local.yaml` and `config.yaml`, then your user-level `config.yaml`. A
+user-level `false` applies to every repository you run bd in, including the one
+a `bd init` creates. Any value other than `true` or `false` is refused by
+`bd config set` and read as the default, `true`.
 
 <Warning>
 **JSONL export is opt-in**

@@ -170,6 +170,12 @@ func TestHooksManageFalseReportsNoPendingHookMigration(t *testing.T) {
 	}
 }
 
+// TestGitignoreManageFalseLeavesBeadsGitignoreAlone pins .beads/.gitignore
+// under gitignore.manage: false. Neither bd init's writer nor bd doctor --fix
+// touches the file, whatever it holds. The Gitignore check still warns, with no
+// fix, while the file is missing or lacks a required pattern, since whatever
+// it misses (the database among it) goes into the next whole-directory git add,
+// and reports a complete file as not managed.
 func TestGitignoreManageFalseLeavesBeadsGitignoreAlone(t *testing.T) {
 	clearManageEnv(t)
 	const own = "# ours\n*.tmp\n"
@@ -177,9 +183,17 @@ func TestGitignoreManageFalseLeavesBeadsGitignoreAlone(t *testing.T) {
 	repo := manageRepo(t, gitignoreOff)
 	beadsDir := filepath.Join(repo, ".beads")
 	gitignorePath := filepath.Join(beadsDir, ".gitignore")
-	if check := CheckGitignore(repo); check.Status != StatusOK || !strings.Contains(check.Message, "gitignore.manage=false") {
-		t.Errorf("missing file: got %s %q, want ok and not managed", check.Status, check.Message)
+	requireReadOnlyWarning := func(t *testing.T, check DoctorCheck, want string) {
+		t.Helper()
+		if check.Status != StatusWarning || !strings.Contains(check.Message, "gitignore.manage=false") || !strings.Contains(check.Message+" "+check.Detail, want) {
+			t.Errorf("got %s %q (%q), want a warning naming gitignore.manage=false and %q", check.Status, check.Message, check.Detail, want)
+		}
+		if check.Fix != "" {
+			t.Errorf("bd doctor --fix must not write a file the repository owns, got fix %q", check.Fix)
+		}
 	}
+
+	requireReadOnlyWarning(t, CheckGitignore(repo), "not found")
 	before := treeSnapshot(t, gitignorePath)
 	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
 		t.Fatalf("EnsureGitignoreForBeadsDir: %v", err)
@@ -197,18 +211,25 @@ func TestGitignoreManageFalseLeavesBeadsGitignoreAlone(t *testing.T) {
 	if err := os.Chmod(gitignorePath, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if check := CheckGitignore(repo); check.Status != StatusOK {
-		t.Errorf("outdated file: got %s %q, want ok", check.Status, check.Message)
-	}
+	requireReadOnlyWarning(t, CheckGitignore(repo), "embeddeddolt/")
 	before = treeSnapshot(t, gitignorePath)
 	if err := FixGitignore(repo); err != nil {
 		t.Fatalf("FixGitignore: %v", err)
 	}
 	requireSameTree(t, before, treeSnapshot(t, gitignorePath))
 
+	// A file that ignores every required pattern is the repository's to keep,
+	// loose permissions and all.
+	if err := os.WriteFile(gitignorePath, []byte(own+GitignoreTemplate), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if check := CheckGitignore(repo); check.Status != StatusOK || !strings.Contains(check.Message, "gitignore.manage=false") || check.Fix != "" {
+		t.Errorf("complete file: got %s %q fix %q, want ok and not managed", check.Status, check.Message, check.Fix)
+	}
+
 	managed := manageRepo(t, keysUnset)
-	if check := CheckGitignore(managed); check.Status != StatusWarning {
-		t.Errorf("key unset: got %s %q, want a warning for the missing file", check.Status, check.Message)
+	if check := CheckGitignore(managed); check.Status != StatusWarning || check.Fix == "" {
+		t.Errorf("key unset: got %s %q fix %q, want a fixable warning for the missing file", check.Status, check.Message, check.Fix)
 	}
 	if err := FixGitignore(managed); err != nil {
 		t.Fatalf("FixGitignore: %v", err)

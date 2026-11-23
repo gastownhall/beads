@@ -2044,26 +2044,192 @@ func TestManageKeysReadFromTheNamedWorkspace(t *testing.T) {
 	}
 }
 
+// isolateManageUserConfig points HOME and XDG_CONFIG_HOME at fresh
+// directories, so no real user config answers, and returns the user-level
+// config files bd merges, lowest priority first (legacy, native, documented).
+func isolateManageUserConfig(t *testing.T) []string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "xdg"))
+	paths := UserConfigYamlSearchPaths()
+	if len(paths) != 3 {
+		t.Skipf("want distinct legacy, native and documented user config paths, got %q", paths)
+	}
+	return paths
+}
+
+func writeManageUserConfig(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestManageKeysReadFromTheLoadedConfig pins the empty-beadsDir form: it
+// answers from the workspace Initialize loaded, through the same files and
+// layers as naming that workspace.
 func TestManageKeysReadFromTheLoadedConfig(t *testing.T) {
 	clearManageEnv(t)
-	previous := v
-	t.Cleanup(func() { v = previous })
+	isolateManageUserConfig(t)
+	t.Cleanup(ResetForTesting)
 
-	v = nil
+	ResetForTesting()
 	if !HooksManaged("") || !GitignoreManaged("") {
 		t.Fatal("with no configuration loaded both keys must default to managed")
 	}
 
-	v = viper.New()
-	v.SetDefault(HooksManageKey, true)
-	v.SetDefault(GitignoreManageKey, true)
-	if !HooksManaged("") || !GitignoreManaged("") {
-		t.Fatal("the registered defaults must read as managed")
+	unset := writeManageConfig(t, "issue-prefix: demo\n")
+	off := writeManageConfig(t, "hooks:\n  manage: false\ngitignore:\n  manage: false\n")
+	local := writeManageConfig(t, "hooks:\n  manage: false\n")
+	if err := os.WriteFile(filepath.Join(local, LocalConfigFileName), []byte("hooks:\n  manage: true\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	v.Set(HooksManageKey, false)
-	v.Set(GitignoreManageKey, "false")
-	if HooksManaged("") || GitignoreManaged("") {
-		t.Fatalf("false in the loaded config must read as not managed: hooks=%v gitignore=%v", HooksManaged(""), GitignoreManaged(""))
+	for _, tc := range []struct {
+		name                   string
+		beadsDir               string
+		wantHooks, wantIgnores bool
+	}{
+		{"keys unset", unset, true, true},
+		{"both false", off, false, false},
+		{"config.local.yaml overrides", local, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := WithBeadsDir(tc.beadsDir, func() {
+				if got := HooksManaged(""); got != tc.wantHooks {
+					t.Errorf("HooksManaged(\"\") = %v, want %v", got, tc.wantHooks)
+				}
+				if got := GitignoreManaged(""); got != tc.wantIgnores {
+					t.Errorf("GitignoreManaged(\"\") = %v, want %v", got, tc.wantIgnores)
+				}
+				if HooksManaged("") != HooksManaged(tc.beadsDir) || GitignoreManaged("") != GitignoreManaged(tc.beadsDir) {
+					t.Error("the loaded workspace and the same workspace named must resolve alike")
+				}
+			}); err != nil {
+				t.Fatalf("WithBeadsDir: %v", err)
+			}
+		})
+	}
+}
+
+// TestManageKeysMergeUserConfigsLikeInitialize pins the user layer: an opt-out
+// in a lower-priority user file holds when a higher-priority one exists but
+// does not set the key, as Initialize's merge reads it, for the loaded
+// workspace and for a named one alike.
+func TestManageKeysMergeUserConfigsLikeInitialize(t *testing.T) {
+	clearManageEnv(t)
+	t.Cleanup(ResetForTesting)
+
+	for _, lower := range []int{0, 1} {
+		t.Run(fmt.Sprintf("opt-out in user file %d of 3", lower+1), func(t *testing.T) {
+			paths := isolateManageUserConfig(t)
+			writeManageUserConfig(t, paths[lower], "hooks:\n  manage: false\ngitignore:\n  manage: false\n")
+			// The documented file, which outranks both, sets an unrelated key.
+			writeManageUserConfig(t, paths[2], "actor: someone\n")
+
+			workspace := writeManageConfig(t, "issue-prefix: demo\n")
+			if HooksManaged(workspace) || GitignoreManaged(workspace) {
+				t.Errorf("named workspace: a lower-priority user opt-out was dropped: hooks=%v gitignore=%v",
+					HooksManaged(workspace), GitignoreManaged(workspace))
+			}
+			if got := ResolveManageSetting(workspace, HooksManageKey); got.Layer != ManageUser || got.Source != paths[lower] {
+				t.Errorf("answered by %v %q, want the user file %q", got.Layer, got.Source, paths[lower])
+			}
+			if err := WithBeadsDir(workspace, func() {
+				// Initialize's merged value is the oracle.
+				if GetBool(HooksManageKey) || GetBool(GitignoreManageKey) {
+					t.Fatal("fixture: Initialize's merge does not read the opt-out")
+				}
+				if HooksManaged("") || GitignoreManaged("") {
+					t.Error("loaded workspace: a lower-priority user opt-out was dropped")
+				}
+			}); err != nil {
+				t.Fatalf("WithBeadsDir: %v", err)
+			}
+
+			// The workspace's own setting still outranks the user layer.
+			own := writeManageConfig(t, "hooks:\n  manage: true\n")
+			if !HooksManaged(own) {
+				t.Error("the workspace's hooks.manage: true must outrank a user-level false")
+			}
+		})
+	}
+}
+
+// TestManageKeysReadAnInvalidValueAsTheDefault pins that the highest layer
+// that sets a key answers even with a value strconv.ParseBool refuses, so an
+// invalid value reads as the default (managed) on both forms instead of
+// uncovering a lower layer's false.
+func TestManageKeysReadAnInvalidValueAsTheDefault(t *testing.T) {
+	clearManageEnv(t)
+	paths := isolateManageUserConfig(t)
+	t.Cleanup(ResetForTesting)
+
+	off := writeManageConfig(t, "hooks:\n  manage: false\n")
+	t.Setenv("BD_HOOKS_MANAGE", "no")
+	if !HooksManaged(off) {
+		t.Error("named workspace: BD_HOOKS_MANAGE=no must read as the default, not uncover the file's false")
+	}
+	if err := WithBeadsDir(off, func() {
+		if !HooksManaged("") {
+			t.Error("loaded workspace: BD_HOOKS_MANAGE=no must read as the default")
+		}
+	}); err != nil {
+		t.Fatalf("WithBeadsDir: %v", err)
+	}
+	if got := ResolveManageSetting(off, HooksManageKey); got.Layer != ManageEnv || got.Source != "BD_HOOKS_MANAGE" || got.Value != "no" {
+		t.Errorf("got %+v, want the environment layer holding %q", got, "no")
+	}
+	clearManageEnv(t)
+
+	writeManageUserConfig(t, paths[2], "hooks:\n  manage: false\n")
+	for _, value := range []string{"nope", "{nested: true}"} {
+		garbage := writeManageConfig(t, "hooks:\n  manage: "+value+"\n")
+		if !HooksManaged(garbage) {
+			t.Errorf("workspace hooks.manage: %s must read as the default, not uncover the user file's false", value)
+		}
+	}
+}
+
+// TestResolveManageSettingNamesTheAnsweringLayer pins the layer and source
+// each answer reports, which the hooks.manage refusal names.
+func TestResolveManageSettingNamesTheAnsweringLayer(t *testing.T) {
+	clearManageEnv(t)
+	paths := isolateManageUserConfig(t)
+
+	unset := writeManageConfig(t, "issue-prefix: demo\n")
+	if got := ResolveManageSetting(unset, HooksManageKey); got != (ManageSetting{Managed: true, Layer: ManageDefault}) {
+		t.Errorf("unset: got %+v, want the default", got)
+	}
+
+	tracked := writeManageConfig(t, "hooks:\n  manage: false\n")
+	want := ManageSetting{Layer: ManageWorkspace, Source: filepath.Join(tracked, ProjectConfigFileName), Value: "false"}
+	if got := ResolveManageSetting(tracked, HooksManageKey); got != want {
+		t.Errorf("config.yaml: got %+v, want %+v", got, want)
+	}
+
+	if err := os.WriteFile(filepath.Join(unset, LocalConfigFileName), []byte("hooks:\n  manage: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want = ManageSetting{Layer: ManageWorkspaceLocal, Source: filepath.Join(unset, LocalConfigFileName), Value: "false"}
+	if got := ResolveManageSetting(unset, HooksManageKey); got != want {
+		t.Errorf("config.local.yaml: got %+v, want %+v", got, want)
+	}
+
+	writeManageUserConfig(t, paths[2], "gitignore:\n  manage: false\n")
+	want = ManageSetting{Layer: ManageUser, Source: paths[2], Value: "false"}
+	if got := ResolveManageSetting(tracked, GitignoreManageKey); got != want {
+		t.Errorf("user config: got %+v, want %+v", got, want)
+	}
+
+	t.Setenv("BD_GITIGNORE_MANAGE", "0")
+	want = ManageSetting{Layer: ManageEnv, Source: "BD_GITIGNORE_MANAGE", Value: "0"}
+	if got := ResolveManageSetting(tracked, GitignoreManageKey); got != want {
+		t.Errorf("environment: got %+v, want %+v", got, want)
 	}
 }
 

@@ -181,7 +181,7 @@ var requiredPatterns = []string{
 func CheckGitignore(repoPath string) DoctorCheck {
 	beadsDir := ResolveBeadsDirForRepo(repoPath)
 	if !config.GitignoreManaged(beadsDir) {
-		return notManagedCheck("Gitignore", config.GitignoreManageKey)
+		return checkOwnedGitignore(beadsDir)
 	}
 	gitignorePath := filepath.Join(beadsDir, ".gitignore")
 
@@ -227,6 +227,34 @@ func CheckGitignore(repoPath string) DoctorCheck {
 		Status:  "ok",
 		Message: "Up to date",
 	}
+}
+
+// checkOwnedGitignore is CheckGitignore for a workspace that sets
+// gitignore.manage: false, whose .beads/.gitignore bd never writes. A file that
+// ignores every required pattern is reported as not managed. A missing file, or
+// one that lacks a required pattern, is still a warning, because whatever it
+// misses (the database among it) goes into the next whole-directory git add, but
+// a warning with no fix: bd doctor --fix does not write the file, and the
+// repository adds the patterns itself.
+func checkOwnedGitignore(beadsDir string) DoctorCheck {
+	content, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore")) // #nosec G304 -- path is constructed from known parts
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Gitignore",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf(".beads/.gitignore not found, and bd does not write it (%s=false)", config.GitignoreManageKey),
+			Detail:  "Nothing keeps the database and the machine-local files under .beads out of git. Add a .beads/.gitignore with the patterns bd requires, or set gitignore.manage to true and run bd doctor --fix.",
+		}
+	}
+	if missing := missingGitignorePatterns(string(content)); len(missing) > 0 {
+		return DoctorCheck{
+			Name:    "Gitignore",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf(".beads/.gitignore misses required patterns, and bd does not add them (%s=false)", config.GitignoreManageKey),
+			Detail:  "Missing: " + strings.Join(missing, ", "),
+		}
+	}
+	return notManagedCheck("Gitignore", config.GitignoreManageKey)
 }
 
 // beadsGitignoreTooLoose reports whether .beads/.gitignore grants any group or

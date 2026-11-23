@@ -180,13 +180,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hides a `bd doctor` warning. Set either key to `false` in the tracked
   `.beads/config.yaml` (`bd config set hooks.manage false`). With
   `hooks.manage: false`, `bd hooks install` and `bd migrate hooks --apply`
-  refuse with a message naming the key and exit non-zero, while `bd init`,
-  `bd config apply` and `bd doctor --fix` skip the hooks; `bd config drift`,
-  `bd doctor` and `bd info` stop reporting them. With `gitignore.manage:
-  false`, `bd init`, `bd bootstrap`, `bd connect` and `bd doctor --fix` leave
-  `.beads/.gitignore` and the project `.gitignore` untouched, and `bd doctor`
-  reports both checks as not managed. Both keys default to `true`
-  (bd-cxm9r).
+  refuse with a message naming where the key is set and exit non-zero, while
+  `bd init`, `bd config apply` and `bd doctor --fix` skip the hooks;
+  `bd config drift`, `bd doctor` (`--check-health` too) and `bd info` stop
+  reporting them. With `gitignore.manage: false`, `bd init`, `bd bootstrap`,
+  `bd connect` and `bd doctor --fix` leave `.beads/.gitignore` and the project
+  `.gitignore` untouched; `bd init` then commits only its own files under
+  `.beads`, never the database, and `bd doctor` still warns, with no fix,
+  while `.beads/.gitignore` lacks a pattern bd requires. A user-level `false`
+  applies to every repository. Both keys default to `true` (bd-cxm9r).
 
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or

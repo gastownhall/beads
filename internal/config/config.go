@@ -329,8 +329,9 @@ func initialize(beadsDirSetting string) error {
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
 	// Per-repository opt-outs for bd's management of git hooks and of
-	// .beads/.gitignore. Read them through HooksManaged and GitignoreManaged,
-	// which also answer for a workspace this process did not load.
+	// .beads/.gitignore. Read them through HooksManaged and GitignoreManaged
+	// (ResolveManageSetting), which read the files themselves, so they also
+	// answer for a workspace this process did not load.
 	v.SetDefault(HooksManageKey, true)
 	v.SetDefault(GitignoreManageKey, true)
 	v.SetDefault("db", "")
@@ -1083,9 +1084,9 @@ const (
 // beadsDir names the .beads directory of the workspace being acted on, for a
 // caller handed a workspace other than the one this process loaded its
 // configuration from (bd doctor <path>, bd init's target). An empty beadsDir
-// answers for the loaded workspace. See manageSetting for the precedence.
+// answers for the loaded workspace. See ResolveManageSetting for the layers.
 func HooksManaged(beadsDir string) bool {
-	return manageSetting(beadsDir, HooksManageKey)
+	return ResolveManageSetting(beadsDir, HooksManageKey).Managed
 }
 
 // GitignoreManaged reports whether bd may create, append to or rewrite
@@ -1093,49 +1094,107 @@ func HooksManaged(beadsDir string) bool {
 // false only when gitignore.manage is set to false. beadsDir is read as for
 // HooksManaged.
 func GitignoreManaged(beadsDir string) bool {
-	return manageSetting(beadsDir, GitignoreManageKey)
+	return ResolveManageSetting(beadsDir, GitignoreManageKey).Managed
 }
 
-// manageSetting resolves one of the manage keys, with the precedence bd's
-// merged configuration uses: the BD_ environment variable (BD_HOOKS_MANAGE,
-// BD_GITIGNORE_MANAGE), then the project config, then the user config, then
-// the default, true.
+// ManageLayer names the configuration layer a manage key was read from.
+type ManageLayer int
+
+const (
+	// ManageDefault: no layer sets the key, so the default, true, applies.
+	ManageDefault ManageLayer = iota
+	// ManageEnv: the BD_ environment variable (BD_HOOKS_MANAGE,
+	// BD_GITIGNORE_MANAGE).
+	ManageEnv
+	// ManageWorkspaceLocal: the workspace's machine-local config.local.yaml.
+	ManageWorkspaceLocal
+	// ManageWorkspace: the workspace's tracked config.yaml, the file
+	// `bd config set` writes.
+	ManageWorkspace
+	// ManageUser: a user-level config.yaml, which applies in every workspace.
+	ManageUser
+)
+
+// ManageSetting is a resolved hooks.manage or gitignore.manage value.
+type ManageSetting struct {
+	Managed bool
+	Layer   ManageLayer
+	// Source names what answered: the environment variable, or the path of
+	// the config file. Value is the raw value it holds. Both are empty for
+	// ManageDefault.
+	Source string
+	Value  string
+}
+
+// ResolveManageSetting resolves key (HooksManageKey or GitignoreManageKey) for
+// the workspace whose .beads directory is beadsDir. An empty beadsDir means the
+// workspace this process loaded its configuration from (the project config
+// Initialize found, by walking up or through BEADS_DIR). Both forms read the
+// same files the same way, so every caller in one process gets one answer for
+// one workspace, and a command acting on another workspace (bd doctor <path>,
+// bd init's target) never applies the launching workspace's choice to it.
 //
-// With an empty beadsDir the merged configuration Initialize loaded answers.
-// With a beadsDir, that workspace's config.local.yaml and config.yaml answer in
-// place of the loaded project config, so a command acting on another workspace
-// never applies the launching workspace's choice to it.
+// The layers, highest first, are the ones Initialize merges: the BD_
+// environment variable, the workspace's config.local.yaml (read only beside a
+// config.yaml, as Initialize merges it) and config.yaml, then the user-level
+// config files from the documented one down to the legacy one
+// (UserConfigYamlSearchPaths reversed). No layer setting the key leaves the
+// default, true.
 //
-// A value that strconv.ParseBool does not accept reads as the default. The
-// keys are opt-outs, so only an unambiguous false stops bd from writing; `bd
-// config set` refuses any other value.
-func manageSetting(beadsDir, key string) bool {
-	if raw, ok := os.LookupEnv(manageEnvVar(key)); ok {
-		if managed, ok := ParseUserConfigBool(raw); ok {
-			return managed
+// The highest layer that sets the key answers, even with a value
+// strconv.ParseBool does not accept: such a value reads as the default, never
+// as a reason to fall through to a lower layer's false. The keys are opt-outs,
+// so only an unambiguous false stops bd from writing; `bd config set` refuses
+// any other value. A file that cannot be read or parsed sets nothing.
+func ResolveManageSetting(beadsDir, key string) ManageSetting {
+	envVar := manageEnvVar(key)
+	if raw, ok := os.LookupEnv(envVar); ok && raw != "" {
+		return newManageSetting(ManageEnv, envVar, raw)
+	}
+	if beadsDir == "" && projectConfigPath != "" {
+		beadsDir = filepath.Dir(projectConfigPath)
+	}
+	for _, file := range manageLayerFiles(beadsDir) {
+		raw, present, err := yamlValueAtPath(file.path, key, true)
+		if !present {
+			continue
+		}
+		if err != nil {
+			// A map or a list at the key: set, but not to a bool.
+			raw = ""
+		}
+		return newManageSetting(file.layer, file.path, raw)
+	}
+	return ManageSetting{Managed: true, Layer: ManageDefault}
+}
+
+func newManageSetting(layer ManageLayer, source, raw string) ManageSetting {
+	managed, ok := ParseUserConfigBool(raw)
+	return ManageSetting{Managed: managed || !ok, Layer: layer, Source: source, Value: raw}
+}
+
+type manageLayerFile struct {
+	layer ManageLayer
+	path  string
+}
+
+// manageLayerFiles lists the files a manage key is read from, highest priority
+// first; see ResolveManageSetting.
+func manageLayerFiles(beadsDir string) []manageLayerFile {
+	var files []manageLayerFile
+	if beadsDir != "" {
+		project := filepath.Join(beadsDir, ProjectConfigFileName)
+		if _, err := os.Stat(project); err == nil {
+			files = append(files,
+				manageLayerFile{ManageWorkspaceLocal, filepath.Join(beadsDir, LocalConfigFileName)},
+				manageLayerFile{ManageWorkspace, project})
 		}
 	}
-	if beadsDir == "" {
-		if v != nil {
-			if raw := v.Get(key); raw != nil {
-				if managed, ok := ParseUserConfigBool(fmt.Sprint(raw)); ok {
-					return managed
-				}
-			}
-		}
-		return true
+	userPaths := UserConfigYamlSearchPaths()
+	for i := len(userPaths) - 1; i >= 0; i-- {
+		files = append(files, manageLayerFile{ManageUser, userPaths[i]})
 	}
-	if raw, present, err := WorkspaceYamlSettingWithLocal(beadsDir, key); err == nil && present {
-		if managed, ok := ParseUserConfigBool(raw); ok {
-			return managed
-		}
-	}
-	if raw, ok := readUserGlobalYamlValue(key); ok {
-		if managed, ok := ParseUserConfigBool(raw); ok {
-			return managed
-		}
-	}
-	return true
+	return files
 }
 
 // manageEnvVar is the variable viper's AutomaticEnv binds to key.
