@@ -399,6 +399,58 @@ func TestMergeIssuesConflictRow_CloseGroupIsAtomic(t *testing.T) {
 	})
 }
 
+// TestMergeIssuesConflictRow_ClosedBySettlesWithTheCloseGroup pins that
+// closed_by (GH#8617) is part of the close group: the closer always comes from
+// the same LWW winner as status, closed_at and close_reason.
+func TestMergeIssuesConflictRow_ClosedBySettlesWithTheCloseGroup(t *testing.T) {
+	t.Run("concurrent closes by different actors", func(t *testing.T) {
+		row := conflictRowFor(t, map[string][3]any{
+			"id":           {"bd-16", "bd-16", "bd-16"},
+			"status":       {"open", "closed", "closed"},
+			"closed_at":    {nil, "2026-07-10 11:00:00", "2026-07-10 12:00:00"},
+			"close_reason": {"", "ours", "theirs"},
+			"closed_by":    {"", "closer-a", "closer-b"},
+			"updated_at":   {tsBase, tsOurs, tsTheirs}, // theirs newer
+		})
+		m, ok := mergeIssuesConflictRow(row)
+		if !ok {
+			t.Fatal("expected the concurrent closes to merge by LWW")
+		}
+		for col, want := range map[string]any{
+			"closed_at": "2026-07-10 12:00:00", "close_reason": "theirs", "closed_by": "closer-b",
+		} {
+			if v, written := m.merged(col); !written || v != want {
+				t.Errorf("%s = %v (written=%v), want the LWW winner's %v", col, v, written, want)
+			}
+		}
+	})
+	t.Run("closer follows the winning close even where only the loser changed it", func(t *testing.T) {
+		// Both sides reopened and re-closed an issue "closer-a" had closed:
+		// ours as "closer-b", theirs (newer) as "closer-a" again. Cell by cell
+		// closed_by changed only on our side, so per-cell merge would keep
+		// "closer-b" beside THEIR closed_at and reason: a close attributed to
+		// an actor who did not make it.
+		row := conflictRowFor(t, map[string][3]any{
+			"id":           {"bd-17", "bd-17", "bd-17"},
+			"status":       {"closed", "closed", "closed"},
+			"closed_at":    {"2026-07-10 09:00:00", "2026-07-10 11:00:00", "2026-07-10 12:00:00"},
+			"close_reason": {"first", "ours", "theirs"},
+			"closed_by":    {"closer-a", "closer-b", "closer-a"},
+			"updated_at":   {tsBase, tsOurs, tsTheirs}, // theirs newer
+		})
+		m, ok := mergeIssuesConflictRow(row)
+		if !ok {
+			t.Fatal("expected the close-group conflict to merge by LWW")
+		}
+		if v, written := m.merged("closed_by"); !written || v != "closer-a" {
+			t.Errorf("closed_by = %v (written=%v), want the winning close's closer-a", v, written)
+		}
+		if v, written := m.merged("closed_at"); !written || v != "2026-07-10 12:00:00" {
+			t.Errorf("closed_at = %v (written=%v), want theirs", v, written)
+		}
+	})
+}
+
 // TestMergeIssuesConflictRow_NonScalarColumnsDecline pins that the columns bd
 // merges structurally are never settled by per-cell LWW: `notes` is
 // append-only (bd note = --append-notes) and `metadata` is a JSON object
