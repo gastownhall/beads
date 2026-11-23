@@ -233,6 +233,125 @@ func testInitRefusesBeadsDirAtProjectRoot(t *testing.T, bd string, mode explicit
 	importIsRefused("holding its own config.yaml")
 }
 
+// testBootstrapRefusesBeadsDirAtProjectRoot covers bd bootstrap under the
+// same slip (GH#7034). The layout is the one where bootstrap acted on the
+// project root: a workspace in the directory above, whose metadata it read,
+// and the project with its own workspace beneath it. What it did there
+// depended on what else the project root held, so each shape is a row:
+// nothing else (refused, but with no word about BEADS_DIR), a config.yaml
+// (a database created in the root, named for the workspace above), and a
+// config.json that is not beads metadata (taken for legacy metadata and
+// replaced by a metadata.json, by --dry-run too). The fourth shape, an
+// origin that carries refs/dolt/data, is not built here.
+func testBootstrapRefusesBeadsDirAtProjectRoot(t *testing.T, bd string, mode explicitBeadsDirMode) {
+	t.Helper()
+	home := t.TempDir()
+	outer := t.TempDir()
+	initGitRepoAt(t, outer)
+	project := filepath.Join(outer, "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, project)
+	outerWorkspace := filepath.Join(outer, ".beads")
+	workspace := filepath.Join(project, ".beads")
+	if mode.proxied {
+		// The refused bootstrap must start nothing under the project root;
+		// the cleanup covers a regression that does.
+		for _, root := range []string{filepath.Join(outerWorkspace, "dolt"), filepath.Join(workspace, "dolt"), filepath.Join(project, "dolt")} {
+			root := root
+			t.Cleanup(func() {
+				if _, err := os.Stat(root); err != nil {
+					return
+				}
+				if err := proxy.Shutdown(root); err != nil {
+					t.Logf("proxy.Shutdown(%s): %v", root, err)
+				}
+			})
+			shutdownProxyOnInterrupt(t, root)
+		}
+	}
+
+	initArgs := append([]string{"init", "--quiet", "--non-interactive", "--skip-agents", "--skip-hooks"}, mode.initArgs...)
+	if stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, outer, "", append(initArgs, "--prefix", "outer")...); err != nil {
+		t.Fatalf("outer bd init: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, project, "", append(initArgs, "--prefix", "real")...); err != nil {
+		t.Fatalf("project bd init: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	rootEntries := func() []string {
+		t.Helper()
+		entries, err := os.ReadDir(project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		return names
+	}
+	// refused runs bd bootstrap with BEADS_DIR at the project root and wants
+	// an exit of 1, each mark in the stream named, and the root's
+	// entries as they were.
+	refused := func(shape, stream string, marks []string, args ...string) {
+		t.Helper()
+		before := rootEntries()
+		stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, project, project, args...)
+		got := stderr
+		if stream == "stdout" {
+			got = stdout
+		}
+		if err == nil {
+			t.Errorf("bd %s with BEADS_DIR=%s (the project root, %s) succeeded; want a refusal\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), project, shape, stdout, stderr)
+		} else {
+			for _, mark := range marks {
+				if !strings.Contains(got, mark) {
+					t.Errorf("bd %s with BEADS_DIR=%s (the project root, %s): want %q on %s, got:\n%s", strings.Join(args, " "), project, shape, mark, stream, got)
+				}
+			}
+		}
+		if after := rootEntries(); strings.Join(after, " ") != strings.Join(before, " ") {
+			t.Errorf("bd %s with BEADS_DIR=%s (the project root, %s) changed the project root\nbefore: %v\nafter:  %v", strings.Join(args, " "), project, shape, before, after)
+		}
+	}
+	note := []string{"no beads database found", "BEADS_DIR is set to"}
+	// The --json form is the no-workspace payload, with a suggestion that
+	// names the directory meant, for a caller that reads stdout alone.
+	payload := []string{`"action": "none"`, "BEADS_DIR is set to", ".beads, or unset it"}
+
+	refused("holding nothing else", "stderr", note, "bootstrap", "--yes")
+
+	// A project root with a config.yaml of its own is one discovery reads as
+	// a workspace. Here --dry-run printed a plan against the project root and
+	// exited 0, and the run itself created the database.
+	if err := os.WriteFile(filepath.Join(project, "config.yaml"), []byte("name: my-app\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused("holding its own config.yaml", "stdout", payload, "bootstrap", "--dry-run", "--json")
+	refused("holding its own config.yaml", "stderr", note, "bootstrap", "--yes")
+
+	// A config.json of the project's own, beside the config.yaml, was loaded
+	// as legacy beads metadata: bootstrap wrote a metadata.json from it and
+	// removed it, before the plan and so under --dry-run as well.
+	ownConfig := []byte(`{"port": 8080, "debug": true}` + "\n")
+	ownConfigPath := filepath.Join(project, "config.json")
+	if err := os.WriteFile(ownConfigPath, ownConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused("holding its own config.yaml and config.json", "stderr", note, "bootstrap", "--dry-run")
+	if got, err := os.ReadFile(ownConfigPath); err != nil || !bytes.Equal(got, ownConfig) {
+		t.Errorf("bd bootstrap --dry-run with BEADS_DIR=%s changed the project's own config.json: got %q, err=%v", project, got, err)
+	}
+
+	for dir, want := range map[string]string{workspace: "real", outerWorkspace: "outer"} {
+		cfg, err := configfile.Load(dir)
+		if err != nil || cfg == nil || cfg.DoltDatabase != want {
+			t.Errorf("workspace metadata in %s changed: want database %q, got cfg=%+v err=%v", dir, want, cfg, err)
+		}
+	}
+}
+
 func TestEmbeddedInitExplicitBeadsDirIsAuthoritative(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
@@ -242,6 +361,7 @@ func TestEmbeddedInitExplicitBeadsDirIsAuthoritative(t *testing.T) {
 	mode := explicitBeadsDirMode{env: bdEnv}
 	testExplicitBeadsDirIsAuthoritative(t, bd, mode)
 	testInitRefusesBeadsDirAtProjectRoot(t, bd, mode)
+	testBootstrapRefusesBeadsDirAtProjectRoot(t, bd, mode)
 }
 
 func TestProxiedServerInitExplicitBeadsDirIsAuthoritative(t *testing.T) {
@@ -254,4 +374,5 @@ func TestProxiedServerInitExplicitBeadsDirIsAuthoritative(t *testing.T) {
 	}
 	testExplicitBeadsDirIsAuthoritative(t, bd, mode)
 	testInitRefusesBeadsDirAtProjectRoot(t, bd, mode)
+	testBootstrapRefusesBeadsDirAtProjectRoot(t, bd, mode)
 }

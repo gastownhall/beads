@@ -1503,7 +1503,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config is missing", and leave the store behind, where every later command
   run with the same `BEADS_DIR` took it for the database. With `--json` the
   refusal is on stderr, as for the other commands. `bd import` does not
-  refuse a project root that already holds such a store.
+  refuse a project root that already holds such a store. `bd bootstrap` with
+  `BEADS_DIR` at such a project root gets the same refusal and note, with
+  exit 1, `--dry-run` included. A project root that held nothing but its
+  `.beads`, with no `refs/dolt/data` on `origin`, was refused before, with
+  "No active beads workspace found" and no word about `BEADS_DIR`. In the
+  other shapes bootstrap took the project root as its target and read the
+  metadata of the workspace in the directory above it. Where that directory held one, bootstrap cloned a database into
+  the project root when `origin` carried `refs/dolt/data`, and created a
+  fresh one there, named for the workspace above, when the project root held
+  a file of its own that discovery reads as a workspace file; `--dry-run`
+  printed that plan and exited 0. Where the directory above held none,
+  bootstrap failed with "not a beads workspace: .beads directory not found"
+  for that directory. A `config.json` of the project's own beside such a
+  file was taken for legacy beads metadata, replaced by a `metadata.json`
+  and removed, by `--dry-run` too. With `--json`, `bd bootstrap` prints its
+  no-workspace payload with a `suggestion` that names the `.beads` directory
+  meant.
 
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
