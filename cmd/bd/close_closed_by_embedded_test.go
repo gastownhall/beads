@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -161,4 +162,50 @@ func TestEmbeddedCloseStampsClosedBy(t *testing.T) {
 	if openText := bdShowRaw(t, bd, dir, open.ID); strings.Contains(openText, "Closed by:") {
 		t.Errorf("bd show of an open issue prints a closer:\n%s", openText)
 	}
+}
+
+// TestEmbeddedExportImportKeepsClosedBy pins AC-4 of GH#8617: export carries
+// closed_by, import into a fresh workspace keeps it, and an imported closed
+// row with no closer stays empty — import never stamps the importer.
+func TestEmbeddedExportImportKeepsClosedBy(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	src, _, _ := bdInit(t, bd, "--prefix", "cb")
+
+	closed := bdCreate(t, bd, src, "Exported closed", "--type", "task", "--actor", "creator")
+	bdClose(t, bd, src, closed.ID, "--actor", "closer-a", "--reason", "done")
+
+	exported := bdExport(t, bd, src)
+	if !strings.Contains(exported, `"closed_by":"closer-a"`) {
+		t.Fatalf("bd export does not carry closed_by:\n%s", exported)
+	}
+
+	// A closed row from a writer that never recorded a closer: the import
+	// must leave its closed_by empty rather than stamp the importer.
+	legacy := `{"id":"cb-legacy1","title":"Closed before closed_by","status":"closed","priority":2,` +
+		`"issue_type":"task","created_at":"2025-01-02T03:04:05Z","updated_at":"2025-01-02T03:04:05Z",` +
+		`"closed_at":"2025-01-02T03:04:05Z","close_reason":"old"}`
+	jsonl := filepath.Join(t.TempDir(), "issues.jsonl")
+	if err := os.WriteFile(jsonl, []byte(strings.TrimRight(exported, "\n")+"\n"+legacy+"\n"), 0o644); err != nil {
+		t.Fatalf("write JSONL: %v", err)
+	}
+
+	dst, _, _ := bdInit(t, bd, "--prefix", "cb")
+	cmd := exec.Command(bd, "import", jsonl, "--actor", "importer")
+	cmd.Dir = dst
+	cmd.Env = bdEnv(dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd import failed: %v\n%s", err, out)
+	}
+
+	assertClosedBy(t, "imported closed issue", closedByShow(t, bd, dst, closed.ID), "closer-a")
+	legacyRow := closedByShow(t, bd, dst, "cb-legacy1")
+	if legacyRow["status"] != "closed" {
+		t.Fatalf("imported legacy row status = %v, want closed", legacyRow["status"])
+	}
+	assertClosedBy(t, "imported closed row without a closer", legacyRow, "")
 }
