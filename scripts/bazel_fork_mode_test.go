@@ -294,6 +294,13 @@ func TestSetupBazelForkCredential(t *testing.T) {
 			if got, want := forkMintSleeps(m.log(t)), map[bool]string{false: "", true: "10"}[strings.Contains(answer, "-then-")]; got != want {
 				t.Errorf("mint %s: slept %q, want %q:\n%s", answer, got, want, m.log(t))
 			}
+			// Each retry is named in the step's log, with the answer that caused it.
+			if got, want := strings.Count(logs, " on attempt 1 of 4; asking again in 10 s\n"), calls-1; got != want || strings.Count(logs, "asking again") != want {
+				t.Errorf("mint %s: %d retry lines for attempt 1, want %d:\n%s", answer, got, want, logs)
+			}
+			if code, _, retried := strings.Cut(answer, "-"); retried && !strings.Contains(logs, "rbe-fork mint answered HTTP "+code+" on attempt 1 of 4") {
+				t.Errorf("mint %s: the retry line does not name HTTP %s:\n%s", answer, code, logs)
+			}
 			if got := strings.Count(m.log(t), "timeouts connect=5 max=60\n"); got != calls {
 				t.Errorf("mint %s: %d of %d requests with --connect-timeout 5 --max-time 60:\n%s", answer, got, calls, m.log(t))
 			}
@@ -347,6 +354,10 @@ func TestSetupBazelForkCredential(t *testing.T) {
 		// Backoff between attempts only: nothing after the last one.
 		if got, want := forkMintSleeps(m.log(t)), map[int]string{1: "", 4: "10 20 30"}[c.calls]; got != want {
 			t.Errorf("mint %s: slept %q, want %q", c.answer, got, want)
+		}
+		// One log line per retry, none after the last attempt.
+		if got := strings.Count(logs, "; asking again in "); got != c.calls-1 {
+			t.Errorf("mint %s: %d retry lines, want %d\n%s", c.answer, got, c.calls-1, logs)
 		}
 	}
 	// cert needs every fact it sends.

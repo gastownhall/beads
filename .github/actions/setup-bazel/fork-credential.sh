@@ -74,7 +74,11 @@ cert)
 		403) artifact_not_served_yet || break ;;
 		*) break ;;
 		esac
-		[ "$attempt" -eq 4 ] || sleep $((attempt * 10))
+		[ "$attempt" -eq 4 ] && break
+		# Say so in the log: a lane that got its certificate on a later attempt
+		# is otherwise told apart from one that got it at once only by timing.
+		echo "setup-bazel: rbe-fork mint answered HTTP $code on attempt $attempt of 4; asking again in $((attempt * 10)) s" >&2
+		sleep $((attempt * 10))
 	done
 	if [ "$code" != 200 ]; then
 		echo "::error title=rbe-fork mint refused (HTTP $code)::$(jq -r '.error // empty' "$reply" 2>/dev/null || true)"
