@@ -26,6 +26,7 @@ Use --by-* flags to group counts by different attributes.
 Examples:
   bd count                          # Count all issues
   bd count --status open            # Count open issues
+  bd count --status open,in_progress  # Count open OR in_progress issues (comma-separated, as in bd list)
   bd count --by-status              # Group count by status
   bd count --by-priority            # Group count by priority
   bd count --by-type                # Group count by issue type

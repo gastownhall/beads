@@ -43,17 +43,24 @@ const (
 // checks, so it is left off rather than published untested; TitleSearch and
 // the three *Contains fields are the substring matches that ARE reachable.
 type CountRequest struct {
-	// Status restricts to one stored status. Empty and the literal "all" both
-	// mean every status, which is what makes a bare count answer for closed
-	// rows as well as open ones.
+	// Status restricts by status. Empty and the literal "all" both mean every
+	// status, which is what makes a bare count answer for closed rows as well
+	// as open ones. A comma-separated value is a status OR set — the same
+	// spelling ListRequest.Status documents for `bd list --status` — so
+	// `bd count --status open,in_progress` answers the rows `bd list --status
+	// open,in_progress` returns (GH#8502); BuildCountFilter splits the set and
+	// each part is kept as written.
 	//
-	// It is NOT validated against the workspace vocabulary and NOT a
-	// comma-separated OR set: an unrecognized name matches nothing and returns
-	// zero rather than failing, exactly as ReadyRequest.IssueType does. That is
-	// the shipped behavior of both front doors and it is stated here rather
-	// than quietly tightened, because a scripted caller that counts a status
-	// its workspace has since dropped currently reads 0 and would start reading
-	// an error.
+	// No part is validated against the workspace vocabulary: an unrecognized
+	// name matches nothing and returns zero rather than failing, exactly as
+	// ReadyRequest.IssueType does. That is the shipped behavior of both front
+	// doors and it is stated here rather than quietly tightened, because a
+	// scripted caller that counts a status its workspace has since dropped
+	// currently reads 0 and would start reading an error. The same
+	// match-nothing treatment applies per part inside a comma set, so a set
+	// with an unknown part — and a stray "all" inside a set, which
+	// ListRequest would refuse — still answers the count of the parts that do
+	// name real statuses, never a wider one.
 	//
 	// "all" is this field's one well-defined non-literal spelling, and it is
 	// NOT ErrValidation: it is equivalent to leaving Status empty, and
