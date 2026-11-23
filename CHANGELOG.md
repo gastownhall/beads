@@ -170,6 +170,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remote URL. See
   [Sync failures](docs/recovery/sync-failures.md#credentials-in-a-remote-url-and-merge-commits).
 
+- **The Dolt server bd launches no longer lets SQL read and write any file.**
+  bd left Dolt's `secure_file_priv` at its default, the empty string, so
+  `LOAD_FILE`, `LOAD DATA INFILE` and `SELECT ... INTO OUTFILE` reached every
+  path the server process could. That server runs as you, and its
+  passwordless `root` holds the FILE privilege, so any local process able to
+  open the loopback port could read and write your files through SQL, even
+  one sandboxed away from the file system. The config bd generates now sets
+  `secure_file_priv` to `dolt-server-files` beside it
+  (`.beads/dolt-server-files`, or `~/.beads/shared-server/dolt-server-files`
+  for the shared server). bd does not create that directory, and while it
+  does not exist the server refuses those statements; bd itself never uses
+  them. To use them, create the directory and keep the files in it. A running
+  server keeps the old setting until it restarts (`bd dolt stop`, then
+  `bd dolt start`). Servers you configure and run yourself, and the proxied
+  server's config, which bd writes once and you may edit, are unchanged. See
+  [Server config file](docs/architecture/dolt.md).
+
 ### Added
 
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
