@@ -184,6 +184,67 @@ func TestAttachGitignoresBothPerUserFiles(t *testing.T) {
 	}
 }
 
+func TestAttachGitignoreFailureLeavesNoSidecar(t *testing.T) {
+	t.Run("fresh workspace", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		cfg := &configfile.Config{Backend: "dolt", Database: "beads.db"}
+		if err := cfg.Save(beadsDir); err != nil {
+			t.Fatalf("seed metadata.json: %v", err)
+		}
+		if err := os.Mkdir(filepath.Join(beadsDir, ".gitignore"), 0o700); err != nil {
+			t.Fatalf("create blocking .gitignore dir: %v", err)
+		}
+
+		err := bdhttp.Attach(beadsDir, bdhttp.Target{BaseURL: mustAttachTestURL(t, "http://127.0.0.1:8080")})
+		if err == nil {
+			t.Fatal("Attach succeeded with .gitignore as a directory, want error")
+		}
+		if !strings.Contains(err.Error(), "gitignored") {
+			t.Errorf("Attach error = %q, want gitignore failure context", err)
+		}
+		if _, statErr := os.Stat(bdhttp.TargetPath(beadsDir)); !os.IsNotExist(statErr) {
+			t.Errorf("http_target.json stat after failed Attach = %v, want os.ErrNotExist", statErr)
+		}
+		if _, loadErr := bdhttp.LoadTarget(beadsDir); !errors.Is(loadErr, bdhttp.ErrNotConnected) {
+			t.Errorf("LoadTarget after failed Attach = %v, want ErrNotConnected", loadErr)
+		}
+		after, loadCfgErr := configfile.Load(beadsDir)
+		if loadCfgErr != nil {
+			t.Fatalf("reload metadata.json: %v", loadCfgErr)
+		}
+		if after.Backend != "dolt" {
+			t.Errorf("metadata.json backend = %q after failed Attach, want %q", after.Backend, "dolt")
+		}
+	})
+
+	t.Run("reconnect preserves prior sidecar", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		firstURL := "http://127.0.0.1:8080"
+		if err := bdhttp.Attach(beadsDir, bdhttp.Target{BaseURL: mustAttachTestURL(t, firstURL)}); err != nil {
+			t.Fatalf("initial Attach: %v", err)
+		}
+		gitignorePath := filepath.Join(beadsDir, ".gitignore")
+		if err := os.Remove(gitignorePath); err != nil {
+			t.Fatalf("remove .gitignore: %v", err)
+		}
+		if err := os.Mkdir(gitignorePath, 0o700); err != nil {
+			t.Fatalf("create blocking .gitignore dir: %v", err)
+		}
+
+		err := bdhttp.Attach(beadsDir, bdhttp.Target{BaseURL: mustAttachTestURL(t, "http://127.0.0.1:9090")})
+		if err == nil {
+			t.Fatal("reconnect Attach succeeded with .gitignore as a directory, want error")
+		}
+		got, loadErr := bdhttp.LoadTarget(beadsDir)
+		if loadErr != nil {
+			t.Fatalf("LoadTarget after failed reconnect: %v", loadErr)
+		}
+		if got.BaseURL.String() != firstURL {
+			t.Errorf("BaseURL after failed reconnect = %q, want original %q preserved", got.BaseURL.String(), firstURL)
+		}
+	})
+}
+
 // workspaceTreeDigest maps every path under root to "dir" or its file's
 // content, so a refusal can be checked to have left the workspace, and
 // anything beside it, byte-identical.

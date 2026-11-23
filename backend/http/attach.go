@@ -6,6 +6,7 @@ package bdhttp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -77,26 +78,27 @@ func Attach(beadsDir string, target Target) error {
 	// the same as a workspace with nothing to restore. The check reads the
 	// raw field: in a process that never ran Register, GetBackend() reports an
 	// http workspace as the dolt default, and the reconnect would record that.
+	priorTarget, priorTargetErr := httpclient.LoadTarget(beadsDir)
 	if target.PreviousBackend == "" {
 		if cfg.Backend == httpclient.Backend {
-			if prior, err := httpclient.LoadTarget(beadsDir); err == nil {
-				target.PreviousBackend = prior.PreviousBackend
+			if priorTargetErr == nil {
+				target.PreviousBackend = priorTarget.PreviousBackend
 			}
 		} else {
 			target.PreviousBackend = cfg.GetBackend()
 		}
 	}
-	// The encoder itself: the workspace is checked above.
-	if err := httpclient.SaveTarget(beadsDir, target); err != nil {
-		return fmt.Errorf("writing %s: %w", httpclient.TargetFileName, err)
-	}
-	// Both of this backend's per-user files: the sidecar just written, and
+	// Both of this backend's per-user files: the sidecar written below, and
 	// the local metadata file the store itself writes on first use, which
 	// never passes through here and so must be covered in advance.
 	for _, name := range []string{httpclient.TargetFileName, httpclient.LocalMetadataFileName} {
 		if err := gitignore.EnsurePatternIgnored(beadsDir, name); err != nil {
 			return fmt.Errorf("ensuring %s is gitignored: %w", name, err)
 		}
+	}
+	// The encoder itself: the workspace is checked above.
+	if err := httpclient.SaveTarget(beadsDir, target); err != nil {
+		return fmt.Errorf("writing %s: %w", httpclient.TargetFileName, err)
 	}
 	// Only the backend SELECTION changes here. cfg.Database/cfg.ProjectID (if
 	// an existing metadata.json carried them for a different, prior backend)
@@ -106,6 +108,11 @@ func Attach(beadsDir string, target Target) error {
 	// `bd connect --clear` back to a different backend.
 	cfg.Backend = httpclient.Backend
 	if err := cfg.Save(beadsDir); err != nil {
+		if errors.Is(priorTargetErr, httpclient.ErrNotConnected) {
+			_, _ = httpclient.RemoveTarget(beadsDir)
+		} else if priorTargetErr == nil {
+			_ = httpclient.SaveTarget(beadsDir, priorTarget)
+		}
 		return fmt.Errorf("writing %s: %w", configfile.ConfigFileName, err)
 	}
 	return nil
