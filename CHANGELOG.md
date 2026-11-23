@@ -1475,6 +1475,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A proxied-server workspace with no Dolt remote now names `bd migrate schema --force` in its schema-behind refusal** ([#8573](https://github.com/gastownhall/beads/issues/8573)). When a read hits a pending schema migration in proxied-server mode without a Dolt remote, the error previously suggested the bare `bd migrate schema` command, which the proxied front door refuses. It now names `bd migrate schema --force` and keeps the precondition to stop co-resident library clients connected to the proxy backend before migrating and restart them afterward.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
