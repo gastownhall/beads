@@ -98,6 +98,23 @@ func printNoDatabaseRefusal() {
 	if note := skippedUserGlobalBeadsNote(); note != "" {
 		fmt.Fprintln(os.Stderr, remedy.PrintedText(note))
 	}
+	if note := beadsDirAtProjectRootNote(os.Getenv("BEADS_DIR")); note != "" {
+		fmt.Fprintln(os.Stderr, note)
+	}
+}
+
+// beadsDirAtProjectRootNote returns the note for a BEADS_DIR that names a
+// project root whose .beads directory holds the workspace (GH#7034), or ""
+// for any other value. The hint above it says to set BEADS_DIR, which here is
+// already set and is the cause, so the note names the value that was meant.
+func beadsDirAtProjectRootNote(named string) string {
+	workspace, ok := beads.ProjectRootNamedAsBeadsDir(named)
+	if !ok {
+		return ""
+	}
+	return "Note: BEADS_DIR is set to " + remedy.PrintedValue(named) + ", which holds no beads workspace;\n" +
+		"      " + remedy.PrintedValue(workspace) + " does. BEADS_DIR names the .beads directory itself:\n" +
+		"      set it to that path, or unset it."
 }
 
 func workspaceDiagHint(includeWhere bool) string {

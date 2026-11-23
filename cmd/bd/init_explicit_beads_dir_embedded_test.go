@@ -128,19 +128,98 @@ func testExplicitBeadsDirIsAuthoritative(t *testing.T, bd string, mode explicitB
 	}
 }
 
+// testInitRefusesBeadsDirAtProjectRoot covers the other side of an
+// authoritative BEADS_DIR (GH#7034): naming the project root of an initialized
+// workspace, instead of its .beads, must not make `bd init` write a second
+// workspace into the project root. Init refuses and leaves the root as it
+// was, and a data command says which directory BEADS_DIR should have named.
+func testInitRefusesBeadsDirAtProjectRoot(t *testing.T, bd string, mode explicitBeadsDirMode) {
+	t.Helper()
+	home := t.TempDir()
+	project := t.TempDir()
+	initGitRepoAt(t, project)
+	workspace := filepath.Join(project, ".beads")
+	if mode.proxied {
+		// The refused init must start nothing under the project root either;
+		// the cleanup covers a regression that does.
+		for _, root := range []string{filepath.Join(workspace, "dolt"), filepath.Join(project, "dolt")} {
+			root := root
+			t.Cleanup(func() {
+				if _, err := os.Stat(root); err != nil {
+					return
+				}
+				if err := proxy.Shutdown(root); err != nil {
+					t.Logf("proxy.Shutdown(%s): %v", root, err)
+				}
+			})
+			shutdownProxyOnInterrupt(t, root)
+		}
+	}
+
+	initArgs := append([]string{"init", "--quiet", "--non-interactive", "--skip-agents", "--skip-hooks"}, mode.initArgs...)
+	if stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, project, "", append(initArgs, "--prefix", "real")...); err != nil {
+		t.Fatalf("project bd init: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	rootEntries := func() []string {
+		t.Helper()
+		entries, err := os.ReadDir(project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		return names
+	}
+	before := rootEntries()
+
+	for _, extra := range [][]string{nil, {"--force"}} {
+		args := append(append(append([]string{}, initArgs...), "--prefix", "oops"), extra...)
+		stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, project, project, args...)
+		if err == nil {
+			t.Errorf("bd %s with BEADS_DIR=%s (the project root) succeeded; want a refusal\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), project, stdout, stderr)
+		} else if !strings.Contains(stderr, "bd init refuses: BEADS_DIR names") {
+			t.Errorf("bd %s with BEADS_DIR=%s: want the project-root refusal, got stderr:\n%s", strings.Join(args, " "), project, stderr)
+		}
+		if after := rootEntries(); strings.Join(after, " ") != strings.Join(before, " ") {
+			t.Fatalf("bd %s with BEADS_DIR=%s changed the project root\nbefore: %v\nafter:  %v", strings.Join(args, " "), project, before, after)
+		}
+	}
+	cfg, err := configfile.Load(workspace)
+	if err != nil || cfg == nil || cfg.DoltDatabase != "real" {
+		t.Fatalf("project workspace metadata changed: cfg=%+v err=%v", cfg, err)
+	}
+
+	// A data command still finds no workspace in the project root, and now
+	// says that BEADS_DIR is the cause.
+	stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, project, project, "list", "--json")
+	if err == nil {
+		t.Errorf("bd list with BEADS_DIR=%s (the project root) should fail; stdout:\n%s", project, stdout)
+	} else if !strings.Contains(stderr, "no beads database found") || !strings.Contains(stderr, "BEADS_DIR is set to") {
+		t.Errorf("bd list with BEADS_DIR=%s: want \"no beads database found\" and the BEADS_DIR note, got stderr:\n%s", project, stderr)
+	}
+}
+
 func TestEmbeddedInitExplicitBeadsDirIsAuthoritative(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
 	}
 	t.Parallel()
-	testExplicitBeadsDirIsAuthoritative(t, buildEmbeddedBD(t), explicitBeadsDirMode{env: bdEnv})
+	bd := buildEmbeddedBD(t)
+	mode := explicitBeadsDirMode{env: bdEnv}
+	testExplicitBeadsDirIsAuthoritative(t, bd, mode)
+	testInitRefusesBeadsDirAtProjectRoot(t, bd, mode)
 }
 
 func TestProxiedServerInitExplicitBeadsDirIsAuthoritative(t *testing.T) {
 	requireProxiedServerEnv(t)
-	testExplicitBeadsDirIsAuthoritative(t, buildEmbeddedBD(t), explicitBeadsDirMode{
+	bd := buildEmbeddedBD(t)
+	mode := explicitBeadsDirMode{
 		initArgs: []string{"--proxied-server"},
 		env:      bdProxiedEnv,
 		proxied:  true,
-	})
+	}
+	testExplicitBeadsDirIsAuthoritative(t, bd, mode)
+	testInitRefusesBeadsDirAtProjectRoot(t, bd, mode)
 }

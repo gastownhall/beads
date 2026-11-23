@@ -1481,6 +1481,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no time. It now reads `Lease: expired 3 hours ago`; a live lease still reads
   `Lease: expires in 3 mins`.
 
+- **`bd init` refuses a `BEADS_DIR` that names the project root of an
+  initialized workspace** ([#7034](https://github.com/gastownhall/beads/issues/7034)).
+  Since an explicit `BEADS_DIR` became authoritative (#6938), `bd init` with
+  `BEADS_DIR` set to the project root, instead of to its `.beads`, exited 0
+  and wrote `metadata.json`, `config.yaml`, `README.md` and a second database
+  into the project root, beside the real workspace. Init now refuses with
+  exit 1 before it creates anything, `--force` included, and names the
+  `.beads` directory that was meant. A project root whose `.beads` holds only
+  a redirect to a workspace is refused the same way. In the same situation
+  the "no beads database found" error of every other command now adds a note
+  that `BEADS_DIR` is set to a directory with no workspace and names the
+  `.beads` directory inside it. A `BEADS_DIR` that names a new or empty
+  directory is initialized as before.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so

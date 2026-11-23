@@ -1327,6 +1327,39 @@ func ExplicitBeadsDir() string {
 	return FollowRedirect(canonicalizeBeadsDirPath(beadsDir))
 }
 
+// ProjectRootNamedAsBeadsDir reports the mistake of pointing BEADS_DIR at a
+// project root instead of at the .beads directory inside it: beadsDir holds
+// no workspace of its own, and the .beads directory directly inside it does
+// (or redirects to one). It returns that .beads directory, the path the
+// caller most likely meant.
+//
+// An explicit BEADS_DIR is authoritative, so discovery does not look inside
+// or above the directory it names. That is right for every command that uses
+// a workspace, which then reports that none was found. `bd init` creates
+// one, so without this check it writes a second workspace into the project
+// root, beside the real one (GH#7034).
+//
+// A beadsDir that is itself a workspace is never reported, whatever it
+// contains: the caller named a real workspace, and init has its own answer
+// for one that is already initialized.
+func ProjectRootNamedAsBeadsDir(beadsDir string) (string, bool) {
+	if beadsDir == "" {
+		return "", false
+	}
+	named := utils.CanonicalizePath(beadsDir)
+	if hasBeadsProjectFiles(FollowRedirect(named)) {
+		return "", false
+	}
+	nested := filepath.Join(named, ".beads")
+	if info, err := os.Stat(nested); err != nil || !info.IsDir() {
+		return "", false
+	}
+	if !hasBeadsProjectFiles(FollowRedirect(nested)) {
+		return "", false
+	}
+	return nested, true
+}
+
 // FindBeadsDir finds the .beads/ directory in the current directory tree.
 // Returns empty string if not found.
 //
