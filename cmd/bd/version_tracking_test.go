@@ -3,11 +3,16 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestGetVersionsSince(t *testing.T) {
@@ -583,11 +588,11 @@ func writePreV56DoltFixture(t *testing.T) (doltDir, sentinel string) {
 }
 
 // TestRecoverPreV56IfNeeded_OnlySemverPredecessorsAreRecovered pins the
-// destructive edge from #5603/#5625/#5650: only a release older than 0.56.0
-// may hand its workspace to the path that deletes .dolt.
+// destructive edge from #5603/#5625/#5650: only a release series older than
+// 0.56 may hand its workspace to the path that deletes .dolt.
 //
-//   - CompareVersions reads any unparsable version part as 0, so the Homebrew
-//     --HEAD stamp compares as pre-0.56 and must fail the validity check.
+//   - A Homebrew --HEAD stamp does not identify an old release and must fail
+//     the validity check before numeric release-series parsing.
 //   - A Go pseudo-version passes the validity check since the GH#6152 fix,
 //     and a major-0 one can compare below 0.56.0, but its numbers only bound
 //     the build from below. It must be refused on its own, with or without
@@ -614,9 +619,16 @@ func TestRecoverPreV56IfNeeded_OnlySemverPredecessorsAreRecovered(t *testing.T) 
 		{name: "pre-0.56 release", previous: "0.55.4", wantRecovery: true},
 		{name: "v-prefixed pre-0.56 release", previous: "v0.55.4", wantRecovery: true},
 		{name: "pre-0.56 pre-release", previous: "0.55.4-rc.1", wantRecovery: true},
-		// Semver puts a 0.56.0 pre-release before 0.56.0 (#6596). No official
-		// build was ever stamped this way; the row pins the choice.
-		{name: "0.56.0 pre-release", previous: "0.56.0-rc.1", wantRecovery: true},
+		// Diagnostic SemVer precedence must not authorize deleting a database
+		// whose witness identifies the 0.56 release series.
+		{name: "0.56.0 pre-release", previous: "0.56.0-rc.1"},
+		{name: "v-prefixed 0.56.0 pre-release", previous: "v0.56.0-rc.1"},
+		{name: "0.56.0 pre-release with build metadata", previous: "0.56.0-rc.1+build.1"},
+		{name: "0.56 release with build metadata", previous: "0.56.0+build.1"},
+		{name: "later 0.56 prerelease", previous: "0.56.1-rc.1"},
+		{name: "suffix on major must not hide a later minor", previous: "0-rc.99.0"},
+		{name: "metadata on major must not hide a later minor", previous: "0+build.99"},
+		{name: "pre-0.56 release with build metadata", previous: "0.55.4+build.1", wantRecovery: true},
 	}
 
 	for _, tt := range tests {
@@ -638,6 +650,50 @@ func TestRecoverPreV56IfNeeded_OnlySemverPredecessorsAreRecovered(t *testing.T) 
 				t.Fatalf("predecessor %q: pre-v56 recovery deleted a live .dolt: %v", tt.previous, err)
 			}
 		})
+	}
+}
+
+func TestRecoverPreV56IfNeeded_ReinitializesWithRealDolt(t *testing.T) {
+	testutil.RequireDoltCLIOnly(t)
+	// Plain go test does not get the Bazel wrapper's Dolt identity. Keep
+	// this CLI fixture independent of the caller's global configuration.
+	doltRoot := t.TempDir()
+	t.Setenv("DOLT_ROOT_PATH", doltRoot)
+	t.Setenv("DOLT_DISABLE_EVENT_FLUSH", "1")
+	configDir := filepath.Join(doltRoot, ".dolt")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := `{"user.email":"test@beads.local","user.name":"beads-test","metrics.disabled":"true","versioncheck.disabled":"true"}` + "\n"
+	if err := os.WriteFile(filepath.Join(configDir, "config_global.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doltDir, sentinel := writePreV56DoltFixture(t)
+
+	recoverPreV56IfNeeded("0.55.4", doltDir)
+
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("legacy fixture was not replaced: %v", err)
+	}
+	marker, err := os.ReadFile(filepath.Join(doltDir, ".bd-dolt-ok"))
+	if err != nil || string(marker) != "ok\n" {
+		t.Fatalf("reinitialization did not write the compatibility marker: %q, %v", marker, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "dolt", "sql", "-r", "csv", "-q", "SELECT 1 AS recovery_ready")
+	cmd.Dir = doltDir
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "recovery_ready\n1") {
+		t.Fatalf("reinitialized database is not queryable: %v\n%s", err, out)
+	}
+
+	if err := os.WriteFile(sentinel, []byte("current database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recoverPreV56IfNeeded("0.55.4", doltDir)
+	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "current database" {
+		t.Fatalf("compatibility marker did not prevent a second recovery: %q, %v", got, err)
 	}
 }
 

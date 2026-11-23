@@ -310,13 +310,15 @@ func autoMigrateOnVersionBump(beadsDir string) {
 
 // recoverPreV56IfNeeded rebuilds a Dolt database left behind by the pre-0.56
 // embedded mode (GH#2137) — which means deleting .dolt — but only when the
-// recorded predecessor is a release older than 0.56.0.
+// recorded predecessor belongs to a release series older than 0.56.
 //
-// Neither refusal below is redundant with the comparison:
+// Diagnostic SemVer precedence is not permission to delete a database: a
+// 0.56.0 prerelease still identifies the 0.56 series. Preserve the original
+// dotted numeric recovery boundary, independently of diagnostic ordering.
+// Neither refusal below is redundant with that boundary:
 //
-//   - CompareVersions scans every dot-separated part with %d and leaves
-//     whatever it cannot read at 0, so a stamp it cannot parse compares as
-//     pre-0.56: Homebrew's "HEAD-<shortsha>" from a --HEAD install (#5603).
+//   - An unordered stamp is no evidence of a pre-0.56 release: Homebrew's
+//     "HEAD-<shortsha>" from a --HEAD install (#5603) must be refused.
 //     IsValidSemver rejects those shapes.
 //   - A Go pseudo-version parses, but its numbers do not name a release.
 //     "v0.55.5-0.<timestamp>-<hash>" is some commit after v0.55.4, and
@@ -336,7 +338,10 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 	if !doctor.IsValidSemver(previousVersion) || isGoPseudoVersion(previousVersion) {
 		return
 	}
-	if doctor.CompareVersions(previousVersion, "0.56.0") >= 0 {
+	// Parse the witness as recorded. Stripping suffixes would newly admit
+	// tolerated spellings such as "0-rc.99.0" or "0+build.99".
+	parts := doctor.ParseVersionParts(previousVersion)
+	if len(parts) == 0 || parts[0] != 0 || (len(parts) > 1 && parts[1] >= 56) {
 		return
 	}
 
