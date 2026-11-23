@@ -855,6 +855,12 @@
     },
     {
       "schema": "BatchGetIssue",
+      "member": "closed_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
       "member": "closed_by_session",
       "type": "string",
       "required": false
@@ -1249,6 +1255,12 @@
       "member": "closed_at",
       "type": "string",
       "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BlockedIssue",
+      "member": "closed_by",
+      "type": "string",
       "required": false
     },
     {
@@ -2534,6 +2546,12 @@
     },
     {
       "schema": "Issue",
+      "member": "closed_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
       "member": "closed_by_session",
       "type": "string",
       "required": false
@@ -2934,6 +2952,12 @@
       "member": "closed_at",
       "type": "string",
       "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "closed_by",
+      "type": "string",
       "required": false
     },
     {
@@ -3541,6 +3565,12 @@
     },
     {
       "schema": "IssueWithCounts",
+      "member": "closed_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
       "member": "closed_by_session",
       "type": "string",
       "required": false
@@ -3925,6 +3955,12 @@
       "member": "closed_at",
       "type": "string",
       "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "closed_by",
+      "type": "string",
       "required": false
     },
     {
@@ -5118,6 +5154,12 @@
       "member": "closed_at",
       "type": "string",
       "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "closed_by",
+      "type": "string",
       "required": false
     },
     {

@@ -69,7 +69,9 @@ func TestCreateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		// create that dropped either is a row the caller believes they wrote.
 		// CreatedBy stays here because only a value NAMING THE ACTOR rides the
 		// server's stamp — see "a CreatedBy naming the actor" below.
-		for _, name := range []string{"CreatedAt", "CreatedBy", "SpecID", "StorageClass", "MolType", "Pinned"} {
+		// ClosedBy is server-stamped from the closing write's actor (GH#8617);
+		// no request schema publishes it.
+		for _, name := range []string{"CreatedAt", "CreatedBy", "SpecID", "StorageClass", "MolType", "Pinned", "ClosedBy"} {
 			if !slices.Contains(refused, name) {
 				t.Errorf("Issue.%s is not in the refused population; a create that dropped it is data loss", name)
 			}

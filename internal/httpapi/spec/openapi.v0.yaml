@@ -7777,6 +7777,8 @@ components:
           type: string
         closed_by_session:
           type: string
+        closed_by:
+          type: string
         lease_expires_at:
           type: string
           format: date-time
@@ -8009,6 +8011,8 @@ components:
           type: string
         closed_by_session:
           type: string
+        closed_by:
+          type: string
         lease_expires_at:
           type: string
           format: date-time
@@ -8190,6 +8194,7 @@ components:
         closed_at: { type: string, format: date-time }
         close_reason: { type: string }
         closed_by_session: { type: string }
+        closed_by: { type: string }
         lease_expires_at: { type: string, format: date-time }
         heartbeat_at: { type: string, format: date-time }
         lease_granted_node: { type: string }
@@ -8302,6 +8307,7 @@ components:
         closed_at: { type: string, format: date-time }
         close_reason: { type: string }
         closed_by_session: { type: string }
+        closed_by: { type: string }
         lease_expires_at: { type: string, format: date-time }
         heartbeat_at: { type: string, format: date-time }
         lease_granted_node: { type: string }
@@ -8541,6 +8547,7 @@ components:
         closed_at: { type: string, format: date-time }
         close_reason: { type: string }
         closed_by_session: { type: string }
+        closed_by: { type: string }
         lease_expires_at: { type: string, format: date-time }
         heartbeat_at: { type: string, format: date-time }
         lease_granted_node: { type: string }
@@ -8628,6 +8635,7 @@ components:
         closed_at: { type: string, format: date-time }
         close_reason: { type: string }
         closed_by_session: { type: string }
+        closed_by: { type: string }
         lease_expires_at: { type: string, format: date-time }
         heartbeat_at: { type: string, format: date-time }
         lease_granted_node: { type: string }
@@ -10270,6 +10278,7 @@ components:
         closed_at: { type: string, format: date-time }
         close_reason: { type: string }
         closed_by_session: { type: string }
+        closed_by: { type: string }
         lease_expires_at: { type: string, format: date-time }
         heartbeat_at: { type: string, format: date-time }
         lease_granted_node: { type: string }
