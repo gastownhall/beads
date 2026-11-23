@@ -1475,6 +1475,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A clone no longer clears `is_blocked` on issues that are blocked by a
+  wisp it does not have.** Dependencies replicate and wisps do not, so a clone
+  holds the edge without the wisp. The recompute read the missing wisp as a
+  closed blocker, cleared the flag, and committed that to the versioned
+  `issues` table, where it replicated back and the two databases traded the
+  same rows on every sync. `bd recompute-blocked`, `bd doctor --fix` and the
+  recompute that follows a pull now leave such a row's flag as they find it,
+  whoever set it. So they do for the children of a blocked epic that depends
+  on such a wisp and has no blocker outside its own children otherwise,
+  because the clone cannot tell whether that wisp lies inside the epic. A
+  blocker the clone can see still marks the row, and a closed row is still
+  cleared. A flag a local blocker set therefore stays set after that blocker
+  closes, until a pull brings the other database's value or the dependency on
+  the missing wisp is removed. `bd doctor` reports how many rows it left alone
+  on its Blocked State line, and `bd recompute-blocked` reports the same
+  count: a line of text when it is not zero, and a `rows_abstained` member
+  beside `rows_corrected` in `--json`. A workspace connected to a `bd serve`
+  backend answers `rows_abstained: 0` beside its `maintained_by: "server"`,
+  so the member is present in every answer.
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so

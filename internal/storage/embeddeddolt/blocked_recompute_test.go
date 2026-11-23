@@ -62,6 +62,47 @@ func TestEmbeddedRecomputeAllBlockedWiring(t *testing.T) {
 	if again, err := rc.RecomputeAllBlocked(ctx); err != nil || again != 0 {
 		t.Fatalf("recompute must stay a no-op: got changed=%d err=%v", again, err)
 	}
+
+	// The same repair through the library entry bd recompute-blocked uses
+	// (storage.RecomputeBlocked), which also asks the store how many rows it
+	// left as found. rcb-a is blocked on a wisp; with the wisp's row deleted
+	// by hand and its edge kept, which is what a clone of this database
+	// holds, the repair leaves rcb-a's flag alone and counts it.
+	if _, ok := storage.UnwrapStore(te.store).(storage.BlockedRecomputeCounter); !ok {
+		t.Fatal("embedded store must implement storage.BlockedRecomputeCounter")
+	}
+	for _, iss := range []*types.Issue{
+		{ID: "rcb-a", Title: "rcb-a", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "rcb-wisp", Title: "rcb-wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true},
+	} {
+		if err := te.store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", iss.ID, err)
+		}
+	}
+	if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: "rcb-a", DependsOnID: "rcb-wisp", Type: types.DepBlocks}, "tester"); err != nil {
+		t.Fatalf("add dependency on the wisp: %v", err)
+	}
+	if err := te.store.Commit(ctx, "seed an issue blocked on a wisp"); err != nil {
+		t.Fatalf("commit wisp seed: %v", err)
+	}
+	if got, err := storage.RecomputeBlocked(ctx, te.store); err != nil || got != (storage.RecomputeBlockedResult{}) {
+		t.Fatalf("wisp present: RecomputeBlocked = (%+v, %v), want the zero result", got, err)
+	}
+
+	te.exec(t, ctx, "DELETE FROM wisps WHERE id = ?", "rcb-wisp")
+	te.assertRowNotExists(t, ctx, "wisps", "rcb-wisp")
+	got, err := storage.RecomputeBlocked(ctx, te.store)
+	if err != nil {
+		t.Fatalf("wisp absent: RecomputeBlocked: %v", err)
+	}
+	if want := (storage.RecomputeBlockedResult{RowsAbstained: 1}); got != want {
+		t.Fatalf("wisp absent: RecomputeBlocked = %+v, want %+v", got, want)
+	}
+	var flag bool
+	te.queryScalar(t, ctx, "SELECT is_blocked FROM issues WHERE id = ?", []any{"rcb-a"}, &flag)
+	if !flag {
+		t.Error("rcb-a was cleared on a guess about a wisp this database does not have")
+	}
 }
 
 // TestEmbeddedRecomputeAllBlockedDirtyGraphIsTyped pins the EMBEDDED half of

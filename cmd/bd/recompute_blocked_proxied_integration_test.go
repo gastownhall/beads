@@ -32,7 +32,10 @@ type bdRunner struct {
 type blockedRepairObservation struct {
 	repairText string
 	repairRows int
-	noopText   string
+	// abstainedRows is rows_abstained on the same --json run. The scenario
+	// has no wisp edges, so it is 0, and reading it requires the member.
+	abstainedRows int
+	noopText      string
 }
 
 // runBlockedRepairScenario commits a database whose is_blocked column disagrees
@@ -59,7 +62,9 @@ func runBlockedRepairScenario(t *testing.T, r bdRunner) blockedRepairObservation
 	obs.repairText = strings.TrimSpace(r.run(t, "recompute-blocked"))
 
 	r.setIsBlocked(t, blocked.ID, 0)
-	obs.repairRows = recomputeRowsCorrected(t, r.run(t, "recompute-blocked", "--json"))
+	repairJSON := r.run(t, "recompute-blocked", "--json")
+	obs.repairRows = recomputeRowsCorrected(t, repairJSON)
+	obs.abstainedRows = recomputeRowsAbstained(t, repairJSON)
 
 	// Idempotency is the property wh-bridge-sync's 3x retry rides on.
 	obs.noopText = strings.TrimSpace(r.run(t, "recompute-blocked"))
@@ -67,6 +72,19 @@ func runBlockedRepairScenario(t *testing.T, r bdRunner) blockedRepairObservation
 }
 
 func recomputeRowsCorrected(t *testing.T, out string) int {
+	t.Helper()
+	return recomputeBlockedMember(t, out, "rows_corrected")
+}
+
+func recomputeRowsAbstained(t *testing.T, out string) int {
+	t.Helper()
+	return recomputeBlockedMember(t, out, "rows_abstained")
+}
+
+// recomputeBlockedMember reads one numeric member of recompute-blocked --json
+// and fatals when it is absent: both counts are part of the shape on every
+// local run, zero included.
+func recomputeBlockedMember(t *testing.T, out, member string) int {
 	t.Helper()
 	start := strings.Index(out, "{")
 	if start < 0 {
@@ -76,9 +94,9 @@ func recomputeRowsCorrected(t *testing.T, out string) int {
 	if err := json.Unmarshal([]byte(out[start:]), &payload); err != nil {
 		t.Fatalf("parse recompute-blocked JSON: %v\nraw: %s", err, out[start:])
 	}
-	n, ok := payload["rows_corrected"].(float64)
+	n, ok := payload[member].(float64)
 	if !ok {
-		t.Fatalf("rows_corrected missing or not a number in %v", payload)
+		t.Fatalf("%s missing or not a number in %v", member, payload)
 	}
 	return int(n)
 }
@@ -166,6 +184,9 @@ func TestProxiedServerRecomputeBlocked(t *testing.T) {
 		if proxied.repairRows != 1 {
 			t.Errorf("rows_corrected: got %d, want 1", proxied.repairRows)
 		}
+		if proxied.abstainedRows != 0 {
+			t.Errorf("rows_abstained: got %d, want 0 (no wisp edges in this scenario)", proxied.abstainedRows)
+		}
 		if !strings.Contains(proxied.repairText, "Recomputed is_blocked: 2 row(s) corrected") {
 			t.Errorf("repair line: got %q", proxied.repairText)
 		}
@@ -207,6 +228,55 @@ func TestProxiedServerRecomputeBlocked(t *testing.T) {
 		}
 		if !readIsBlocked(t, db, blocked.ID) {
 			t.Errorf("%s: is_blocked still 0 after repair", blocked.ID)
+		}
+	})
+
+	// The clone's case (a database that carries an edge to a wisp and not the
+	// wisp): the repair leaves the holder's flag as found and says how many
+	// rows it left, in the JSON and in the text.
+	t.Run("reports_rows_left_as_found", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rba")
+		run := proxiedBDRunner(t, bd, p)
+		wisp := bdProxiedCreate(t, bd, p.dir, "Blocking wisp", "--ephemeral")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked on a wisp", "--deps", "blocked-by:"+wisp.ID)
+
+		db := openProxiedDB(t, p)
+		if !readIsBlocked(t, db, blocked.ID) {
+			t.Fatalf("fixture: %s should start blocked by wisp %s", blocked.ID, wisp.ID)
+		}
+		withWisp := run.run(t, "recompute-blocked", "--json")
+		if c, a := recomputeRowsCorrected(t, withWisp), recomputeRowsAbstained(t, withWisp); c != 0 || a != 0 {
+			t.Fatalf("wisp present: rows_corrected %d, rows_abstained %d; want 0 and 0", c, a)
+		}
+
+		// Empty the wisps table and keep the edge. wisps is dolt_ignored, so
+		// this is what a clone of the database holds, and it leaves the graph
+		// tables clean for the repair's guard.
+		res, err := db.ExecContext(context.Background(), "DELETE FROM wisps")
+		if err != nil {
+			t.Fatalf("empty the wisps table: %v", err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			t.Fatalf("empty the wisps table: %d rows, err %v; want 1", n, err)
+		}
+
+		before := readDoltHead(t, db)
+		withoutWisp := run.run(t, "recompute-blocked", "--json")
+		if c, a := recomputeRowsCorrected(t, withoutWisp), recomputeRowsAbstained(t, withoutWisp); c != 0 || a != 1 {
+			t.Errorf("wisp absent: rows_corrected %d, rows_abstained %d; want 0 and 1", c, a)
+		}
+		if !readIsBlocked(t, db, blocked.ID) {
+			t.Errorf("%s: is_blocked cleared on a guess about a wisp this database does not have", blocked.ID)
+		}
+		if got := readDoltLogCountSince(t, db, before); got != 0 {
+			t.Errorf("a repair that only abstained created %d dolt commit(s), want 0", got)
+		}
+
+		text := run.run(t, "recompute-blocked")
+		if !strings.Contains(text, "is_blocked already consistent") ||
+			!strings.Contains(text, "1 row(s) depend on a wisp this database does not have; is_blocked left as found.") {
+			t.Errorf("text output: got %q", text)
 		}
 	})
 

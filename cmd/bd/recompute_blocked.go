@@ -28,14 +28,21 @@ It is idempotent: on a consistent database it changes nothing. Works in every
 storage mode — embedded, server, and proxied-server (unlike 'bd doctor', which
 is server-mode only).
 
+A row that depends on a wisp this database has no row for, and has no blocker
+it can see, keeps the flag it has: wisps are not synced, so a clone cannot
+tell whether that wisp is still open where it lives. The command reports how
+many rows it left that way (rows_abstained); they are not corrections and not
+errors.
+
 On a workspace connected to a bd serve backend ('bd connect') it is a no-op
 that exits 0: the server maintains is_blocked on every write, and the column
 lives in the server's database, so the repair is run there, by the server's
-operator. --json then reports {"rows_corrected": 0, "maintained_by": "server"}.
+operator. --json then reports
+{"rows_corrected": 0, "rows_abstained": 0, "maintained_by": "server"}.
 
 Examples:
   bd recompute-blocked          # Repair stale is_blocked flags
-  bd recompute-blocked --json   # Machine-parseable {"rows_corrected": N}`,
+  bd recompute-blocked --json   # Machine-parseable {"rows_corrected": N, "rows_abstained": M}`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(_ *cobra.Command, _ []string) error {
@@ -70,23 +77,33 @@ Examples:
 		if result.MaintainedBy == storage.BlockedMaintainedByServer {
 			return renderRecomputeBlockedServerMaintained()
 		}
-		return renderRecomputeBlocked(result.RowsCorrected)
+		return renderRecomputeBlocked(result.RowsCorrected, result.RowsAbstained)
 	},
 }
 
 // renderRecomputeBlocked writes the command's whole result, and is shared by
 // every mode so the text and the JSON shape downstream callers read cannot
 // drift between them. wh-bridge-sync only reads the exit code, but a human
-// repairing a stale graph reads these two lines.
-func renderRecomputeBlocked(changed int) error {
+// repairing a stale graph reads these lines.
+//
+// abstained is the number of open rows the repair left as found because they
+// depend on a wisp this database has no row for
+// (storage.RecomputeBlockedResult.RowsAbstained). rows_abstained is always
+// present in the JSON, zero included, so a caller can require the member. The
+// text line is printed only when there is something to say, which keeps the
+// output of a database that holds all its wisps as it was.
+func renderRecomputeBlocked(changed, abstained int) error {
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{"rows_corrected": changed})
+		return outputJSON(map[string]interface{}{"rows_corrected": changed, "rows_abstained": abstained})
 	}
 	if changed == 0 {
 		fmt.Println("is_blocked already consistent — nothing to recompute.")
-		return nil
+	} else {
+		fmt.Printf("Recomputed is_blocked: %d row(s) corrected.\n", changed)
 	}
-	fmt.Printf("Recomputed is_blocked: %d row(s) corrected.\n", changed)
+	if abstained > 0 {
+		fmt.Printf("%d row(s) depend on a wisp this database does not have; is_blocked left as found.\n", abstained)
+	}
 	return nil
 }
 
@@ -100,9 +117,13 @@ func renderRecomputeBlocked(changed int) error {
 // BdStore.RecomputeBlocked requires the member, and wh-bridge-sync reads the
 // exit code), and it carries `maintained_by: "server"` so a caller that cares
 // can tell "nothing was stale" from "nothing was checked here".
+//
+// rows_abstained (0) is here for the same reason as rows_corrected: the local
+// renderer promises the member in every answer, and a caller that requires it
+// must not fail only because the workspace is connected to a server.
 func renderRecomputeBlockedServerMaintained() error {
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{"rows_corrected": 0, "maintained_by": storage.BlockedMaintainedByServer})
+		return outputJSON(map[string]interface{}{"rows_corrected": 0, "rows_abstained": 0, "maintained_by": storage.BlockedMaintainedByServer})
 	}
 	fmt.Println("is_blocked is maintained by the bd serve backend on every write; nothing to recompute from this client.")
 	fmt.Println("To repair a stale flag on the server's database, run bd recompute-blocked in the server's workspace.")

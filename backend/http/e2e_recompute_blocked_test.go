@@ -11,7 +11,9 @@ import (
 // TestE2E_RecomputeBlockedOverHTTP is S25. On a remote backend
 // `bd recompute-blocked` is a no-op that exits 0: the server maintains
 // is_blocked on every write and the column lives in its database. --json still
-// carries rows_corrected (gc parses it) and says the server maintains the flag.
+// carries rows_corrected (gc parses it) and rows_abstained (the local answer
+// always has it, so a caller may require it) and says the server maintains the
+// flag.
 func TestE2E_RecomputeBlockedOverHTTP(t *testing.T) {
 	bd := connectE2EWorkspace(t, "worker")
 
@@ -24,6 +26,7 @@ func TestE2E_RecomputeBlockedOverHTTP(t *testing.T) {
 	r := mustRun(t, bd, "recompute-blocked", "--json")
 	var body struct {
 		RowsCorrected *int   `json:"rows_corrected"`
+		RowsAbstained *int   `json:"rows_abstained"`
 		MaintainedBy  string `json:"maintained_by"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(r.stdout)), &body); err != nil {
@@ -31,6 +34,9 @@ func TestE2E_RecomputeBlockedOverHTTP(t *testing.T) {
 	}
 	if body.RowsCorrected == nil || *body.RowsCorrected != 0 || body.MaintainedBy != "server" {
 		t.Fatalf("recompute-blocked --json = %s, want rows_corrected 0 and maintained_by server", r.stdout)
+	}
+	if body.RowsAbstained == nil || *body.RowsAbstained != 0 {
+		t.Errorf("recompute-blocked --json = %s, want rows_abstained 0 beside rows_corrected", r.stdout)
 	}
 
 	text := mustRun(t, bd, "recompute-blocked")

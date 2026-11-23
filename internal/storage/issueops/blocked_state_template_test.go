@@ -138,6 +138,60 @@ func TestExpandBatchTemplateFillsEveryOccurrence(t *testing.T) {
 	}
 }
 
+// TestExpandBatchTemplateBindsHeldRowsAfterTheUnion pins the two groups a
+// chunk with undecided rows adds (undecidedRows): the undecided parents, which
+// each parent-child leg subtracts after its explained ones, and the held ids,
+// which both statements exclude after the union. Both are already-rendered ?
+// placeholders, so a misplaced group would bind an id to the wrong IN-list
+// without changing any count.
+func TestExpandBatchTemplateBindsHeldRowsAfterTheUnion(t *testing.T) {
+	placeholders, args := buildSQLInClause([]string{"issue-1", "issue-2"})
+	explained := explainedFixture()
+	explained.undecidedIssueParents = []string{"parent-u"}
+	explained.undecidedWispParents = []string{"wisp-parent-u"}
+	held := []string{"issue-2"}
+	bound := explained.args()
+	for _, id := range held {
+		bound = append(bound, id)
+	}
+	for name, tmpl := range map[string]string{
+		"mark":   markBlockedTemplate(issuesBlockedSpec, explained, len(held)),
+		"unmark": unmarkBlockedTemplate(issuesBlockedSpec, explained, len(held)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := strings.Count(tmpl, "%s"); got != batchTemplateOccurrences {
+				t.Errorf("%%s count = %d, want %d: the held ids are bound, not a batch group", got, batchTemplateOccurrences)
+			}
+			stmt, stmtArgs, err := expandBatchTemplate(tmpl, placeholders, args, bound)
+			if err != nil {
+				t.Fatalf("expandBatchTemplate: %v", err)
+			}
+			if !strings.Contains(stmt, "AND i.id NOT IN (?)") {
+				t.Errorf("statement does not hold the undecided row out:\n%s", stmt)
+			}
+			var want []interface{}
+			for k := 0; k < batchTemplateOccurrences; k++ {
+				want = append(want, args...)
+				if k == 3 {
+					want = append(want, "parent-1", "parent-2", "parent-u")
+				}
+				if k == 4 {
+					want = append(want, "wisp-parent-1", "wisp-parent-u")
+				}
+			}
+			want = append(want, "issue-2")
+			if len(stmtArgs) != len(want) {
+				t.Fatalf("arg count = %d, want %d", len(stmtArgs), len(want))
+			}
+			for i, arg := range stmtArgs {
+				if arg != want[i] {
+					t.Errorf("arg %d = %v, want %v", i, arg, want[i])
+				}
+			}
+		})
+	}
+}
+
 // TestExpandBatchTemplateRefusesABoundMismatch is the guard that keeps a
 // miscounted bound group from reaching the engine as an opaque argument-count
 // error: the template's ? placeholders and the bound ids must agree exactly.
@@ -208,6 +262,38 @@ func TestWaitsForGateSplitsSpawnerColumns(t *testing.T) {
 	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id"} {
 		if got := strings.Count(waitsForGateBlockedSQL, "cd."+col+" = d."+col); got != 4 {
 			t.Errorf("gate matches cd.%s in %d EXISTS, want 4", col, got)
+		}
+	}
+}
+
+// TestUndecidedRowsSelectIsTwoMembers pins the shape the engine needs to keep
+// `id IN (set)` a cached subquery (danglingBlockerTypesSQL): whatever the set
+// holds, its select is exactly two members of one UNION, and it binds exactly
+// what selectArgs supplies, the scope once per member and the undecided
+// parents after the second.
+func TestUndecidedRowsSelectIsTwoMembers(t *testing.T) {
+	placeholders, scopeArgs := buildSQLInClause([]string{"issue-1", "issue-2"})
+	scope := "AND d.issue_id IN (" + placeholders + ")"
+	for _, u := range []undecidedRows{
+		{holders: true},
+		{issueParents: []string{"p-1"}},
+		{wispParents: []string{"wp-1", "wp-2"}},
+		{holders: true, issueParents: []string{"p-1"}, wispParents: []string{"wp-1"}},
+	} {
+		for _, sc := range []struct {
+			scope string
+			args  []any
+		}{{"", nil}, {scope, scopeArgs}} {
+			q := u.selectSQL("dependencies", sc.scope)
+			if got := strings.Count(q, "UNION"); got != 1 {
+				t.Errorf("%+v scope %q: %d UNIONs, want 1:\n%s", u, sc.scope, got, q)
+			}
+			if got := strings.Count(q, "SELECT"); got != 2 {
+				t.Errorf("%+v scope %q: %d SELECTs, want 2:\n%s", u, sc.scope, got, q)
+			}
+			if got, want := strings.Count(q, "?"), len(u.selectArgs(sc.args)); got != want {
+				t.Errorf("%+v scope %q: %d placeholders, selectArgs binds %d:\n%s", u, sc.scope, got, want, q)
+			}
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -33,10 +34,10 @@ import (
 // — an unreachable server, a dirty graph, a killed query — is a nonzero HandleError.
 // Nothing here invents a green.
 func runRecomputeBlockedProxiedServer(ctx context.Context) error {
-	var changed int64
+	var counts storage.BlockedRecomputeCounts
 	if err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		var rerr error
-		changed, rerr = versioncontrolops.RecomputeAllBlockedOnConn(ctx, conn, "")
+		counts, rerr = versioncontrolops.RecomputeAllBlockedOnConn(ctx, conn, "")
 		return rerr
 	}); err != nil {
 		// runProxiedNonTx reports its own provider failures and returns an
@@ -46,5 +47,5 @@ func runRecomputeBlockedProxiedServer(ctx context.Context) error {
 		}
 		return HandleError("recompute is_blocked: %v", err)
 	}
-	return renderRecomputeBlocked(int(changed))
+	return renderRecomputeBlocked(counts.Corrected, counts.Abstained)
 }

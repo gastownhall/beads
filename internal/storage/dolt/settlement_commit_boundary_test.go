@@ -55,13 +55,19 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"id"}))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM wisps")).
 			WillReturnRows(sqlmock.NewRows([]string{"id"}))
+		// The abstained count's two probes for a dangling wisp edge; with
+		// none, the count reads nothing else.
+		mock.ExpectQuery(`d\.issue_id FROM dependencies d\s+LEFT JOIN wisps dw`).
+			WillReturnRows(sqlmock.NewRows([]string{"issue_id"}))
+		mock.ExpectQuery(`d\.issue_id FROM wisp_dependencies d\s+LEFT JOIN wisps dw`).
+			WillReturnRows(sqlmock.NewRows([]string{"issue_id"}))
 		responseLoss := errors.New("full recompute commit response lost")
 		mock.ExpectCommit().WillReturnError(responseLoss)
 
 		store := &DoltStore{db: db}
-		changed, err := store.recomputeAllBlockedWithDB(t.Context(), db)
-		if changed != 0 {
-			t.Fatalf("recomputeAllBlockedWithDB() changed = %d, want 0", changed)
+		counts, err := store.recomputeAllBlockedWithDB(t.Context(), db)
+		if counts != (storage.BlockedRecomputeCounts{}) {
+			t.Fatalf("recomputeAllBlockedWithDB() counts = %+v, want zero", counts)
 		}
 		assertPublicCommitIndeterminate(t, err, responseLoss)
 		if err := mock.ExpectationsWereMet(); err != nil {
