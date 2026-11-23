@@ -112,12 +112,13 @@ func TestForcedRemoteMigrateWarning(t *testing.T) {
 }
 
 // TestSchemaBehindHintOnProxiedRemote covers the schema-mismatch hint a read
-// gets when it cannot query a remote-backed database's current schema
-// (bd-5hl9dg, the reviewer's `bd list` on a default proxied init). Its stock
-// remedy, the bare `bd migrate schema`, refuses on a remote-backed database;
-// on a proxied workspace it has to name the forced verb and the one-clone
-// rule. Off proxied mode, and on a proxied database with no remote, the text
-// is pinned unchanged.
+// gets when it cannot query a database's current schema (bd-5hl9dg,
+// gastownhall/beads#8573). Its stock remedy, the bare `bd migrate schema`,
+// refuses on a proxied-server workspace without `--force` (#6656): on a
+// remote-backed database it has to name the forced verb and the one-clone
+// rule, and on a no-remote database it has to name the forced verb with the
+// stop/restart library-client precondition. Off proxied mode (with or without
+// a remote), the text is pinned unchanged.
 func TestSchemaBehindHintOnProxiedRemote(t *testing.T) {
 	behind := schema.LatestVersion() - 1
 	stock := fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
@@ -160,10 +161,38 @@ func TestSchemaBehindHintOnProxiedRemote(t *testing.T) {
 			t.Errorf("server-mode hint changed.\n got: %s\nwant: %s", got, stock)
 		}
 	})
-	t.Run("proxied without a remote unchanged", func(t *testing.T) {
+	t.Run("server mode without a remote unchanged", func(t *testing.T) {
+		if got := read(t, &schema.RemoteMigrateGateError{Decision: "shared-no-remote"}); got != stock {
+			t.Errorf("server-mode no-remote hint changed.\n got: %s\nwant: %s", got, stock)
+		}
+	})
+	t.Run("proxied without a remote names the forced verb", func(t *testing.T) {
 		got := read(t, &schema.RemoteMigrateGateError{Decision: "shared-no-remote", Proxied: true})
-		if got != stock {
-			t.Errorf("proxied no-remote hint changed.\n got: %s\nwant: %s", got, stock)
+		for _, want := range []string{
+			fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d", behind, schema.LatestVersion()),
+			"`" + schema.SharedConsentCommandForced + "`",
+			"proxied-server",
+			"stop every co-resident library client",
+			"restart them",
+			fmt.Sprintf("keep using a bd release that matches schema v%d", behind),
+			"BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("proxied no-remote hint missing %q:\n%s", want, got)
+			}
+		}
+		for _, refused := range []string{
+			"run `bd migrate schema` in that workspace",
+			// The front door refuses the env hatch on the bare verb (#6656).
+			schema.AllowRemoteMigrateEnv + "=1 " + schema.SharedConsentCommand,
+			// No remote is configured, so the remote-clone rule does not apply.
+			"ONE clone of that remote",
+			"Dolt remote",
+			"to read anyway",
+		} {
+			if strings.Contains(got, refused) {
+				t.Errorf("proxied no-remote hint still names %q:\n%s", refused, got)
+			}
 		}
 	})
 	// A smart-gate stop or the data-behind stop keeps the stock remedy: the

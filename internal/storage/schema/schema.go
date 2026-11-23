@@ -285,6 +285,14 @@ type SchemaBehindError struct {
 	// one-clone rule it confirms. Set by
 	// the proxied provider, which knows both facts; the version check does not.
 	ProxiedRemote bool
+	// ProxiedNoRemote marks a database a proxied-server workspace reads that
+	// has no Dolt remote (gastownhall/beads#8573). There the proxied front door
+	// still refuses the bare `bd migrate schema` without --force
+	// (gastownhall/beads#6656), so the remedy names the forced verb with the
+	// precondition to stop co-resident library clients before migrating and
+	// restart them after. Set by the proxied provider; the version check does
+	// not know the workspace topology.
+	ProxiedNoRemote bool
 }
 
 func (e *SchemaBehindError) Error() string {
@@ -294,6 +302,10 @@ func (e *SchemaBehindError) Error() string {
 	}
 	if e.ProxiedRemote {
 		return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — this proxied-server workspace's database syncs with a Dolt remote, so the bare `bd migrate schema` refuses here: run `bd migrate schema --force` on ONE clone of that remote only, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
+			e.DBVersion, e.BinaryVersion, e.DBVersion)
+	}
+	if e.ProxiedNoRemote {
+		return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — this proxied-server workspace refuses the bare `bd migrate schema` without --force: stop every co-resident library client connected to this proxy's backend, run `bd migrate schema --force`, then restart them; keep using a bd release that matches schema v%d; or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
 			e.DBVersion, e.BinaryVersion, e.DBVersion)
 	}
 	return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to open it anyway (queries that need what the pending migrations add still fail)",
