@@ -492,6 +492,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleCloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed,
 		RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked,
 		RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose,
+		RunLifecycleCloseStampsTheWritingActorIntoClosedBy,
 		RunLifecycleCloseAndReopenKeepTheClaimHolder,
 		RunLifecycleReopenLeavesNonDoneStatusesUnchanged,
 		RunLifecycleCloseAndReopenSpanTheConfiguredDoneCategory,
