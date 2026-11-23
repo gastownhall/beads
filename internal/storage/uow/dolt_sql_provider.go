@@ -672,17 +672,23 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	// it is refused here as server mode's read-only open refuses it
 	// (dolt.Config.RequireReadableSchema).
 	if err := schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)); err != nil {
-		// On a proxied workspace whose database has a remote, the drift
-		// error's stock remedy (the bare `bd migrate schema`) is refused, so
-		// let it name the forced verb and the one-clone rule (bd-5hl9dg).
-		// Only the plain undecided refusal gets it: shared-no-remote has no
-		// remote, and a smart-gate stop (adopt, adopt-ff, fork-skew) or the
-		// data-behind stop must keep the bare verb, which reaches the gate and
-		// prints the stop — `--force` is checked before the gate decides and
-		// would skip it.
+		// On a proxied workspace, the drift error's stock remedy (the bare
+		// `bd migrate schema`) is refused at the front door without --force
+		// (gastownhall/beads#6656). The plain undecided remote-backed refusal
+		// gets the forced verb and one-clone rule (bd-5hl9dg); shared-no-remote
+		// gets the forced verb with the stop/restart library-client
+		// precondition (gastownhall/beads#8573). Smart-gate stops (adopt,
+		// adopt-ff, fork-skew) and the data-behind stop keep the bare verb,
+		// which reaches the gate and prints the stop — `--force` is checked
+		// before the gate decides and would skip it.
 		var behind *schema.SchemaBehindError
-		if gateErr.Proxied && gateErr.Decision == "" && !gateErr.IsDataBehind() && errors.As(err, &behind) {
-			behind.ProxiedRemote = true
+		if gateErr.Proxied && errors.As(err, &behind) {
+			switch {
+			case gateErr.Decision == "" && !gateErr.IsDataBehind():
+				behind.ProxiedRemote = true
+			case gateErr.Decision == "shared-no-remote":
+				behind.ProxiedNoRemote = true
+			}
 		}
 		if isSerializationError(err) {
 			return err
