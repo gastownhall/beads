@@ -193,6 +193,11 @@ func formatIssueMetadataWithGates(issue *types.Issue, gates []*types.Issue) stri
 	// a section on that byte alone.
 	closeReasonSection := ""
 	if issue.Status == types.StatusClosed {
+		// Who closed it (GH#8617), the close-side twin of "Created by" above.
+		// Rows closed before the closer was recorded carry none and print none.
+		if issue.ClosedBy != "" {
+			lines = append(lines, ui.RenderMuted("Closed by: "+issue.ClosedBy))
+		}
 		if reason := strings.TrimSpace(issue.CloseReason); reason != "" {
 			if line := "Close reason: " + reason; fitsMetadataLine(line) {
 				lines = append(lines, ui.RenderMuted(line))

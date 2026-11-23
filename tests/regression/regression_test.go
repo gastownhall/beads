@@ -621,6 +621,8 @@ var versionSpecificFields = []string{
 	"_type", "deleted_at", "deleted_by", "delete_reason", "original_type",
 	"comment_count", "dependency_count", "dependent_count",
 	"epic_total_children", "epic_closed_children", "epic_closeable",
+	// closed_by (GH#8617) records who closed an issue; the baseline predates it.
+	"closed_by",
 }
 
 // normalizeJSONL parses JSONL, normalizes each issue, applies ID canonicalization,
