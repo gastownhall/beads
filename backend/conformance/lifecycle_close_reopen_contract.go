@@ -593,9 +593,9 @@ func RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t *testing.T, ctx contex
 		t.Fatalf("reopen %s: %v", id, err)
 	}
 	reopenedRow := lifecycleCloseReopenReadRow(t, ctx, fixture, id)
-	if reopenedRow.CloseReason != "" || reopenedRow.ClosedBySession != "" {
-		t.Errorf("close attribution after reopening %s = (%q, %q), want both cleared",
-			id, reopenedRow.CloseReason, reopenedRow.ClosedBySession)
+	if reopenedRow.CloseReason != "" || reopenedRow.ClosedBySession != "" || reopenedRow.ClosedBy != "" {
+		t.Errorf("close attribution after reopening %s = (%q, %q, %q), want all cleared",
+			id, reopenedRow.CloseReason, reopenedRow.ClosedBySession, reopenedRow.ClosedBy)
 	}
 	if reopenedRow.ClosedAt != "" {
 		t.Errorf("closed_at after reopening %s = %q, want it cleared — an open row has no completion date",

@@ -84,10 +84,10 @@ func TestManageClosedAtMatchesCloseSemantics(t *testing.T) {
 			want:     map[string]interface{}{"close_reason": "", "closed_by_session": "", "closed_by": "closer-a"},
 		},
 		{
-			name:     "reopen clears closed_at, reason and session",
+			name:     "reopen clears closed_at, reason, session and closer",
 			oldIssue: closedIssue,
 			updates:  map[string]interface{}{"status": "open"},
-			want:     map[string]interface{}{"closed_at": nil, "close_reason": "", "closed_by_session": ""},
+			want:     map[string]interface{}{"closed_at": nil, "close_reason": "", "closed_by_session": "", "closed_by": ""},
 		},
 		{
 			name:     "no status update writes nothing",

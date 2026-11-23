@@ -205,6 +205,35 @@ func TestEmbeddedCloseRoutesStampClosedBy(t *testing.T) {
 	assertClosedBy(t, "wisp close", closedByShow(t, bd, dir, wisp.ID), "wisp-w")
 }
 
+// TestEmbeddedReopenClearsClosedBy pins AC-3 of GH#8617: a reopen, by bd
+// reopen or by update -s open, clears the closer, and the next close records
+// its own actor.
+func TestEmbeddedReopenClearsClosedBy(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cb")
+
+	issue := bdCreate(t, bd, dir, "Reopened", "--type", "task", "--actor", "creator")
+	bdClose(t, bd, dir, issue.ID, "--actor", "closer-a")
+	assertClosedBy(t, "first close", closedByShow(t, bd, dir, issue.ID), "closer-a")
+
+	bdRunOK(t, bd, dir, "reopen", issue.ID, "--actor", "reopener")
+	assertClosedBy(t, "after bd reopen", closedByShow(t, bd, dir, issue.ID), "")
+
+	bdClose(t, bd, dir, issue.ID, "--actor", "closer-b")
+	assertClosedBy(t, "close after reopen", closedByShow(t, bd, dir, issue.ID), "closer-b")
+
+	bdUpdate(t, bd, dir, issue.ID, "-s", "open", "--actor", "reopener")
+	assertClosedBy(t, "after update -s open", closedByShow(t, bd, dir, issue.ID), "")
+
+	bdUpdate(t, bd, dir, issue.ID, "-s", "closed", "--actor", "closer-c")
+	assertClosedBy(t, "update -s closed after reopen", closedByShow(t, bd, dir, issue.ID), "closer-c")
+}
+
 // TestEmbeddedExportImportKeepsClosedBy pins AC-4 of GH#8617: export carries
 // closed_by, import into a fresh workspace keeps it, and an imported closed
 // row with no closer stays empty — import never stamps the importer.

@@ -48,7 +48,7 @@ func IsAllowedUpdateField(key string) bool {
 // closeIssueInTx stamps it, so `bd update -s closed --actor a` records a as
 // the closer. It is not an allowlisted update key, so nothing suppresses it.
 //
-// The reopen branch clears all three, mirroring ReopenIssueInTx. Both branches
+// The reopen branch clears all four, mirroring ReopenIssueInTx. Both branches
 // stay keyed on the LITERAL closed status; category-aware reopen keying is
 // ga-ktn9pe.4.15.
 func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, actor string, setClauses []string, args []interface{}) ([]string, []interface{}) {
@@ -88,6 +88,7 @@ func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, actor
 		appendDefault("closed_at", nil)
 		appendDefault("close_reason", "")
 		appendDefault("closed_by_session", "")
+		appendDefault("closed_by", "")
 	}
 
 	return setClauses, args
