@@ -309,6 +309,14 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 		args = append(args, filter.MoleculeID, filter.MoleculeID)
 	}
 
+	if filter.MolType != nil {
+		// Exact match on the column, matching BuildIssueFilterClauses (filter.go)
+		// and readyWorkWispIssueFilter so durable and wisp rows, text and JSON
+		// ready output, counts, and bd list all apply one MolType predicate.
+		whereClauses = append(whereClauses, "mol_type = ?")
+		args = append(args, string(*filter.MolType))
+	}
+
 	var err error
 	whereClauses, args, err = AppendMetadataClauses(whereClauses, args, filter.HasMetadataKey, filter.MetadataFields)
 	if err != nil {
