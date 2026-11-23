@@ -206,7 +206,11 @@ Required fields per item:
 - `created_at` (string): RFC3339 timestamp
 
 Optional fields:
-- `description`, `owner`, `updated_at`, `closed_at`
+- `description`, `owner`, `updated_at`, `closed_at`, `close_reason`
+- `closed_by` (string): The actor whose write closed the issue. Read-only —
+  stamped by the server from the actor of the closing write, never set by the
+  caller, preserved verbatim by export/import, and cleared on reopen (so a
+  re-close records its own actor). Absent on open issues. (#8617)
 - `labels` (string[]): Attached labels
 - `dependencies` (object[]): Dependency records
 - `dependency_count`, `dependent_count`, `comment_count` (number)
@@ -261,8 +265,9 @@ items, plus:
 
 Returns a top-level JSON array with one entry per closed issue, in the order
 the IDs were given; an issue that was already closed is reported too. Each
-entry is the closed issue (`status` is `closed`, with `closed_at` and
-`close_reason`) without its `dependencies`, plus two optional members present
+entry is the closed issue (`status` is `closed`, with `closed_at`,
+`close_reason`, and the `closed_by` actor of the closing write) without its
+`dependencies`, plus two optional members present
 only when that close completed a molecule (see
 [Molecules](/workflows/molecules)):
 - `auto_closed_molecule` (object, optional): The molecule root the close also

@@ -172,6 +172,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`closed_by`: who closed an issue is now recorded and shown.** `bd close`
+  stamps the acting user into a durable `closed_by` column (schema migration
+  0075) on every close path — single close, batch closer, born-closed creates,
+  and wisp closes — and `bd reopen` clears it, so a re-close records its own
+  actor. `bd show --json`, `bd list --json` and every other issue-shaped JSON
+  output carry `closed_by` (empty on open issues, omitted by `omitempty`);
+  `bd show` prints a muted `Closed by: <actor>` line on closed issues.
+  `bd export`/`bd import` round-trip it verbatim — the importer never stamps
+  itself as the closer — and conflict merges settle it atomically with
+  status/closed_at/close_reason from the same last-write-winner. Read-only:
+  it is the server's stamp, so an issue create or update supplying `closed_by`
+  is refused naming the member. Per-op Dolt commit authorship remains
+  out of scope (see #7628). (#8617)
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,
