@@ -117,6 +117,36 @@ func beadsDirAtProjectRootNote(named string) string {
 		"      set it to that path, or unset it."
 }
 
+// importRefusesBeadsDirAtProjectRoot reports whether bd import must refuse
+// because BEADS_DIR names the project root of an initialized workspace
+// instead of its .beads (GH#7034, beads.ProjectRootNamedAsBeadsDir).
+//
+// The root pre-run asks it before discovery, because discovery can route
+// such a root as a workspace with no store in it, and import's fallback,
+// which runs only when discovery finds nothing, is then never reached. In
+// server mode (BEADS_DOLT_SERVER_MODE, BEADS_DOLT_SHARED_SERVER, or
+// dolt.mode: server in the user's config) a config.json or metadata.json of
+// the project's own routes the root as a server workspace, and so does a
+// config.yaml of its own when the server host is not local; the metadata
+// load that follows moves such a config.json into a metadata.json and
+// removes it. Where discovery finds nothing, the fallback sets a workspace
+// up in the directory BEADS_DIR names, and an import that then fails for
+// want of a prefix leaves the empty store behind. Either way the import
+// lands in the project root, beside the real workspace.
+//
+// A store directory in the project root, an embeddeddolt an earlier import
+// left there or a dolt directory, makes no exception. Unless beads metadata
+// sits beside it, which already keeps ProjectRootNamedAsBeadsDir from
+// reporting the root, it is no workspace: an import let through there
+// landed in the real .beads, failed on the legacy-workspace guard, or moved
+// a config.json of the project's own into a metadata.json, removed it, and
+// failed on the empty store. Import refuses every root the helper reports,
+// as init and bootstrap do.
+func importRefusesBeadsDirAtProjectRoot() bool {
+	_, slip := beads.ProjectRootNamedAsBeadsDir(os.Getenv("BEADS_DIR"))
+	return slip
+}
+
 func workspaceDiagHint(includeWhere bool) string {
 	if includeWhere {
 		if !usesSQLServer() {

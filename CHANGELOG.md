@@ -1482,7 +1482,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Lease: expires in 3 mins`.
 
 - **`bd init` refuses a `BEADS_DIR` that names the project root of an
-  initialized workspace** ([#7034](https://github.com/gastownhall/beads/issues/7034)).
+  initialized workspace** ([#7034](https://github.com/gastownhall/beads/issues/7034),
+  first fixed for `bd init` by @rjgeng in #7047).
   Since an explicit `BEADS_DIR` became authoritative (#6938), `bd init` with
   `BEADS_DIR` set to the project root, instead of to its `.beads`, exited 0
   and wrote `metadata.json`, `config.yaml`, `README.md` and a second database
@@ -1492,18 +1493,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a redirect to a workspace is refused the same way, and so is a project root
   that holds files of its own which discovery reads as workspace files (a
   `config.yaml`, a `metadata.json` that is not beads metadata, a `*.db`
-  file). In the same situation
+  file). A `metadata.json` or `config.json` of the project's own is not
+  taken for beads metadata because it has a `database` or `backend` setting
+  (`{"database": "postgres://localhost/app"}`). In the same situation
   the "no beads database found" error of every other command now adds a note
   that `BEADS_DIR` is set to a directory with no workspace and names the
   `.beads` directory inside it. A `BEADS_DIR` that names a new or empty
   directory is initialized as before. `bd import` with `BEADS_DIR` at such a
   project root gets the same "no beads database found" refusal and note,
-  the project roots with files of their own included: it used to create an
-  empty `embeddeddolt` store in the project root, fail with "issue_prefix
-  config is missing", and leave the store behind, where every later command
-  run with the same `BEADS_DIR` took it for the database. With `--json` the
-  refusal is on stderr, as for the other commands. `bd import` does not
-  refuse a project root that already holds such a store. `bd bootstrap` with
+  the project roots with files of their own included, and in server mode
+  as well: it used to create an empty `embeddeddolt` store in the project
+  root, fail with "issue_prefix config is missing", and leave the store
+  behind, after which the other commands run with the same `BEADS_DIR`
+  were no longer refused. In server mode (`BEADS_DOLT_SERVER_MODE=1`, for
+  example, or `dolt.mode: server` in the user's config), and in any mode
+  once the project root held such a store, it took a `config.json` of the
+  project's own for the workspace's metadata instead, moved it into a
+  `metadata.json` and removed it. A store directory in the project root
+  (`embeddeddolt`, or `dolt`) does not turn the refusal off. With `--json`
+  the refusal is on stderr, as for the other commands. `bd bootstrap` with
   `BEADS_DIR` at such a project root gets the same refusal and note, with
   exit 1, `--dry-run` included. A project root that held nothing but its
   `.beads`, with no `refs/dolt/data` on `origin`, was refused before, with

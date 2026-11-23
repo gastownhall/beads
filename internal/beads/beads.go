@@ -1340,13 +1340,14 @@ func ExplicitBeadsDir() string {
 // root, beside the real one (GH#7034).
 //
 // What makes beadsDir a beads directory of its own, and so never reported:
-// it is named .beads, it holds a redirect, or it holds beads metadata. The
-// looser test discovery uses (any config.yaml, metadata.json, *.db, dolt or
-// embeddeddolt entry) is not used for it, because a project root often holds
-// a config.yaml, a metadata.json or a database file of its own, and an
-// earlier bd command run with the same slip can leave an embeddeddolt
-// directory there. None of those says the root was meant as the workspace
-// while a real one sits in its .beads.
+// it is named .beads, it holds a redirect, or it holds beads metadata
+// (holdsBeadsMetadata). The looser test discovery uses (any config.yaml,
+// metadata.json, *.db, dolt or embeddeddolt entry) is not used for it,
+// because a project root often holds a config.yaml, a metadata.json, a
+// config.json or a database file of its own, and an earlier bd command run
+// with the same slip can leave an embeddeddolt directory there. None of
+// those says the root was meant as the workspace while a real one sits in
+// its .beads.
 func ProjectRootNamedAsBeadsDir(beadsDir string) (string, bool) {
 	if beadsDir == "" {
 		return "", false
@@ -1369,15 +1370,30 @@ func ProjectRootNamedAsBeadsDir(beadsDir string) (string, bool) {
 }
 
 // holdsBeadsMetadata reports whether dir holds a metadata.json (or the legacy
-// config.json) that beads wrote: one that parses and names a backend, a
-// database or a Dolt mode. A file of that name with none of them belongs to
-// something else. It reads without migrating, so asking has no effect.
+// config.json) that beads wrote. A project keeps files of those names for
+// settings of its own, often under the keys beads uses ({"database":
+// "postgres://localhost/app"}, {"backend": "http://localhost:3000"}), so a
+// key alone does not count. Only what beads alone writes does: a Dolt mode or
+// a Dolt database name; a backend this bd selects storage by (dolt, or one
+// this build registers), which bd init records in every metadata.json it
+// writes; or a database named as beads names it, "dolt", or "beads.db", the
+// default of every bd before Dolt. The name of a removed backend (sqlite,
+// postgres, mysql), a project_id, and a database named for a *.db file beside
+// the metadata are not counted: other tools write those too, and a project's
+// own config must not make ProjectRootNamedAsBeadsDir stand aside. It reads
+// without migrating, so asking has no effect.
 func holdsBeadsMetadata(dir string) bool {
 	cfg, err := configfile.LoadForDiscovery(dir)
 	if err != nil || cfg == nil {
 		return false
 	}
-	return cfg.Backend != "" || cfg.Database != "" || cfg.DoltMode != "" || cfg.DoltDatabase != ""
+	if cfg.DoltMode != "" || cfg.DoltDatabase != "" {
+		return true
+	}
+	if cfg.Backend != "" && configfile.IsSupportedBackend(cfg.Backend) {
+		return true
+	}
+	return cfg.Database == "dolt" || cfg.Database == CanonicalDatabaseName
 }
 
 // FindBeadsDir finds the .beads/ directory in the current directory tree.

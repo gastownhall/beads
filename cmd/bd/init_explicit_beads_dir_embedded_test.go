@@ -4,9 +4,11 @@ package main
 
 import (
 	"bytes"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -172,20 +174,26 @@ func testInitRefusesBeadsDirAtProjectRoot(t *testing.T, bd string, mode explicit
 		}
 		return names
 	}
-	before := rootEntries()
-
-	for _, extra := range [][]string{nil, {"--force"}} {
-		args := append(append(append([]string{}, initArgs...), "--prefix", "oops"), extra...)
-		stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, project, project, args...)
-		if err == nil {
-			t.Errorf("bd %s with BEADS_DIR=%s (the project root) succeeded; want a refusal\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), project, stdout, stderr)
-		} else if !strings.Contains(stderr, "bd init refuses: BEADS_DIR names") {
-			t.Errorf("bd %s with BEADS_DIR=%s: want the project-root refusal, got stderr:\n%s", strings.Join(args, " "), project, stderr)
-		}
-		if after := rootEntries(); strings.Join(after, " ") != strings.Join(before, " ") {
-			t.Fatalf("bd %s with BEADS_DIR=%s changed the project root\nbefore: %v\nafter:  %v", strings.Join(args, " "), project, before, after)
+	// initIsRefused runs bd init, plain and with --force, with BEADS_DIR at
+	// the project root, and wants the project-root refusal and the root's
+	// entries as they were.
+	initIsRefused := func(shape string) {
+		t.Helper()
+		before := rootEntries()
+		for _, extra := range [][]string{nil, {"--force"}} {
+			args := append(append(append([]string{}, initArgs...), "--prefix", "oops"), extra...)
+			stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, project, project, args...)
+			if err == nil {
+				t.Errorf("bd %s with BEADS_DIR=%s (the project root, %s) succeeded; want a refusal\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), project, shape, stdout, stderr)
+			} else if !strings.Contains(stderr, "bd init refuses: BEADS_DIR names") {
+				t.Errorf("bd %s with BEADS_DIR=%s (the project root, %s): want the project-root refusal, got stderr:\n%s", strings.Join(args, " "), project, shape, stderr)
+			}
+			if after := rootEntries(); strings.Join(after, " ") != strings.Join(before, " ") {
+				t.Fatalf("bd %s with BEADS_DIR=%s (the project root, %s) changed the project root\nbefore: %v\nafter:  %v", strings.Join(args, " "), project, shape, before, after)
+			}
 		}
 	}
+	initIsRefused("holding nothing else")
 	cfg, err := configfile.Load(workspace)
 	if err != nil || cfg == nil || cfg.DoltDatabase != "real" {
 		t.Fatalf("project workspace metadata changed: cfg=%+v err=%v", cfg, err)
@@ -200,10 +208,17 @@ func testInitRefusesBeadsDirAtProjectRoot(t *testing.T, bd string, mode explicit
 	if err := os.WriteFile(importFile, []byte(`{"id":"real-1","title":"imported","status":"open","priority":2,"issue_type":"task"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	importIsRefused := func(shape string) {
+	// importIsRefused runs bd import with BEADS_DIR at the project root and
+	// env added to the mode's environment, and wants the refusal with the
+	// note and the root's entries as they were.
+	importIsRefused := func(shape string, env ...string) {
 		t.Helper()
+		importMode := mode
+		if len(env) > 0 {
+			importMode.env = func(dir string) []string { return append(mode.env(dir), env...) }
+		}
 		before := rootEntries()
-		stdout, stderr, err := runExplicitBeadsDirBD(t, bd, mode, home, project, project, "import", importFile)
+		stdout, stderr, err := runExplicitBeadsDirBD(t, bd, importMode, home, project, project, "import", importFile)
 		if err == nil {
 			t.Errorf("bd import with BEADS_DIR=%s (the project root, %s) succeeded; want a refusal\nstdout:\n%s\nstderr:\n%s", project, shape, stdout, stderr)
 		} else if !strings.Contains(stderr, "no beads database found") || !strings.Contains(stderr, "BEADS_DIR is set to") {
@@ -231,6 +246,77 @@ func testInitRefusesBeadsDirAtProjectRoot(t *testing.T, bd string, mode explicit
 		t.Fatal(err)
 	}
 	importIsRefused("holding its own config.yaml")
+
+	// A config.json of the project's own that keeps a database setting under
+	// the key beads metadata uses is not beads metadata either. With one in
+	// the project root, init wrote a workspace there and import set a store
+	// up there, and each took the file for legacy metadata, moved it into a
+	// metadata.json and removed it.
+	if err := os.Remove(filepath.Join(project, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	ownConfig := []byte(`{"database": "postgres://localhost/app", "port": 8080}` + "\n")
+	ownConfigPath := filepath.Join(project, "config.json")
+	if err := os.WriteFile(ownConfigPath, ownConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initIsRefused("holding its own config.json with a database key")
+	importIsRefused("holding its own config.json with a database key")
+	if got, err := os.ReadFile(ownConfigPath); err != nil || !bytes.Equal(got, ownConfig) {
+		t.Errorf("bd init or bd import with BEADS_DIR=%s changed the project's own config.json: got %q, err=%v", project, got, err)
+	}
+
+	// In server mode, discovery routes a project root with a config.json of
+	// its own as a server workspace with no store in it, so import never
+	// reached a refusal that waited for discovery to find nothing: the
+	// metadata load that followed moved the project's config.json into a
+	// metadata.json and removed it. Server mode comes from the environment
+	// or from the user's config. Nothing listens on the port, so a
+	// regression fails on the dial instead of reaching a server. The check
+	// is in the root pre-run, which both routes share, so these rows run on
+	// the embedded route only.
+	var deadPort string
+	if !mode.proxied {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve a port: %v", err)
+		}
+		deadPort = "BEADS_DOLT_SERVER_PORT=" + strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close the reserved port: %v", err)
+		}
+		importIsRefused("holding its own config.json with a database key, BEADS_DOLT_SERVER_MODE=1", "BEADS_DOLT_SERVER_MODE=1", deadPort)
+		userConfig := filepath.Join(home, ".config", "bd", "config.yaml")
+		if err := os.MkdirAll(filepath.Dir(userConfig), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(userConfig, []byte("dolt:\n  mode: server\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		importIsRefused("holding its own config.json with a database key, dolt.mode: server in the user's config", deadPort)
+		if err := os.Remove(userConfig); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(ownConfigPath); err != nil || !bytes.Equal(got, ownConfig) {
+			t.Errorf("bd import in server mode with BEADS_DIR=%s changed the project's own config.json: got %q, err=%v", project, got, err)
+		}
+	}
+
+	// An import that set a store up in the project root and then failed
+	// left an embeddeddolt directory there. It holds no workspace, so it
+	// does not turn the refusal off: let through, import took the project's
+	// config.json for the workspace's metadata, moved it into a
+	// metadata.json and removed it, in embedded and in server mode alike.
+	if err := os.MkdirAll(filepath.Join(project, "embeddeddolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	importIsRefused("holding its own config.json with a database key and a stray embeddeddolt directory")
+	if !mode.proxied {
+		importIsRefused("holding its own config.json with a database key and a stray embeddeddolt directory, BEADS_DOLT_SERVER_MODE=1", "BEADS_DOLT_SERVER_MODE=1", deadPort)
+	}
+	if got, err := os.ReadFile(ownConfigPath); err != nil || !bytes.Equal(got, ownConfig) {
+		t.Errorf("bd import with BEADS_DIR=%s (a stray embeddeddolt directory in the project root) changed the project's own config.json: got %q, err=%v", project, got, err)
+	}
 }
 
 // testBootstrapRefusesBeadsDirAtProjectRoot covers bd bootstrap under the
@@ -333,15 +419,24 @@ func testBootstrapRefusesBeadsDirAtProjectRoot(t *testing.T, bd string, mode exp
 
 	// A config.json of the project's own, beside the config.yaml, was loaded
 	// as legacy beads metadata: bootstrap wrote a metadata.json from it and
-	// removed it, before the plan and so under --dry-run as well.
-	ownConfig := []byte(`{"port": 8080, "debug": true}` + "\n")
+	// removed it, before the plan and so under --dry-run as well. That holds
+	// for one that keeps a database setting under the key beads metadata
+	// uses too.
 	ownConfigPath := filepath.Join(project, "config.json")
-	if err := os.WriteFile(ownConfigPath, ownConfig, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	refused("holding its own config.yaml and config.json", "stderr", note, "bootstrap", "--dry-run")
-	if got, err := os.ReadFile(ownConfigPath); err != nil || !bytes.Equal(got, ownConfig) {
-		t.Errorf("bd bootstrap --dry-run with BEADS_DIR=%s changed the project's own config.json: got %q, err=%v", project, got, err)
+	for _, own := range []struct {
+		shape   string
+		content []byte
+	}{
+		{"holding its own config.yaml and config.json", []byte(`{"port": 8080, "debug": true}` + "\n")},
+		{"holding its own config.yaml and a config.json with a database key", []byte(`{"database": "postgres://localhost/app", "port": 8080}` + "\n")},
+	} {
+		if err := os.WriteFile(ownConfigPath, own.content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		refused(own.shape, "stderr", note, "bootstrap", "--dry-run")
+		if got, err := os.ReadFile(ownConfigPath); err != nil || !bytes.Equal(got, own.content) {
+			t.Errorf("bd bootstrap --dry-run with BEADS_DIR=%s (the project root, %s) changed the project's own config.json: got %q, err=%v", project, own.shape, got, err)
+		}
 	}
 
 	for dir, want := range map[string]string{workspace: "real", outerWorkspace: "outer"} {

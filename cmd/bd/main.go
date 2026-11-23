@@ -1776,6 +1776,17 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// GH#7034: bd import with BEADS_DIR at the project root of an
+		// initialized workspace refuses as every other command run there
+		// does, with the note that names the directory meant. It asks before
+		// discovery, which in server mode routes such a root as a workspace
+		// with no store in it, past the import fallback below; see
+		// importRefusesBeadsDirAtProjectRoot.
+		if dbPath == "" && cmd.Name() == "import" && importRefusesBeadsDirAtProjectRoot() {
+			printNoDatabaseRefusal()
+			return SilentExit()
+		}
+
 		// Capture redirect info BEFORE FindDatabasePath() follows the redirect.
 		// When .beads/redirect points to a shared directory with a different
 		// dolt_database, the source's database name would be lost. Capture it
@@ -1884,21 +1895,9 @@ var rootCmd = &cobra.Command{
 					// would create a local database instead of using the redirect target.
 					// (GH#bd-0qel)
 					//
-					// GH#7034: a BEADS_DIR that names the project root of an
-					// initialized workspace is a slip for its .beads, not a choice
-					// of where to set a workspace up. Setting one up there leaves
-					// an empty store in the project root when the import then
-					// fails for want of a prefix, and discovery takes that store
-					// for a database on every later command. bd import refuses as
-					// every other command run there does, with the note that names
-					// the directory meant. The check comes before FindBeadsDir,
-					// which returns a project root that holds a config.yaml, a
-					// metadata.json or a database file of its own as if it were
-					// the workspace.
-					if _, slip := beads.ProjectRootNamedAsBeadsDir(os.Getenv("BEADS_DIR")); slip {
-						printNoDatabaseRefusal()
-						return SilentExit()
-					}
+					// A BEADS_DIR that names the project root of an initialized
+					// workspace never gets here: bd import refused it ahead of
+					// discovery (importRefusesBeadsDirAtProjectRoot, GH#7034).
 					targetBeadsDir := beads.FindBeadsDir()
 					if targetBeadsDir == "" {
 						// An explicit BEADS_DIR is authoritative even
