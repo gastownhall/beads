@@ -67,6 +67,7 @@ go_test(
     srcs = [
         "backend_dial_timeout_test.go",
         "control_test.go",
+        "endpoint_executable_unix_test.go",
         "endpoint_mismatch_test.go",
         "endpoint_no_data_probe_test.go",
         "endpoint_security_test.go",

@@ -219,6 +219,17 @@ database, and `"rows_corrected"` greater than zero means the database was hit.
 It works in embedded, server and proxied-server mode, so run it even where
 `bd doctor` cannot check blocked state.
 
+#### If a migration stops on a value it cannot read
+
+A database written under an older Dolt can hold values the new engine cannot
+decode. A migration that hits one stops and bd refuses with `stopped: a stored
+value could not be read`, naming the migration and the engine symptom. Make no
+further writes, preserve a full copy of the store, and follow
+[Schema-Encoding Drift](/recovery/schema-encoding-drift). If a later run
+reports `pending schema migrations alter pre-existing dirty tables` instead,
+do not run the `bd dolt commit` it suggests: those tables hold the stopped
+migration's partial changes.
+
 #### Upgrade every client that shares a store, together
 
 A bd binary refuses a database migrated past the schema it knows, rather than
@@ -573,15 +584,17 @@ apply, but they run from two places. The workspace refuses `bd dolt pull`
 (`proxy.dolt_pull.unsupported`) and `bd conflicts`, so the pull, and any
 conflict resolution it needs, runs where the database lives: on the server
 host, from a workspace with direct database access. The consent step can then
-be run from the proxied workspace, but only once that pull has landed:
+be run from the proxied workspace, but only once that pull has landed, and
+with the library clients of the proxy's backend stopped (see
+[Shared servers](#shared-servers)):
 
 ```bash
 bd dolt pull                     # on the server host, with direct database access
-bd migrate schema --force        # then, from the proxied workspace
+bd migrate schema --force        # then, from the proxied workspace; restart the clients after
 ```
 
 Nothing in the proxied workspace enforces that order. It refuses the bare
-`bd migrate` verb but not `bd migrate schema --force`, and
+`bd migrate` and `bd migrate schema` verbs but not `bd migrate schema --force`, and
 `BD_ALLOW_REMOTE_MIGRATE=1` grants the same consent to any command. Both are
 honored before this stop is reached, so the stop never sees them: run either
 one before the pull and it migrates the database while it is still behind.
@@ -600,9 +613,12 @@ configured, though the two cases consent differently
 Upgrade one server's clients like this:
 
 ```bash
-# 1. Upgrade bd on every client of the server. Reads keep working throughout —
-#    an upgraded client reads the old schema, it just cannot write to it
-#    (unless the server's schema is v53 or older; see below).
+# 0. With the bd you have now, back up each database:
+#    bd export --all -o backup-$(date +%Y%m%d).jsonl
+#    (once a client runs 1.4, its bd export and bd backup are refused until step 2)
+# 1. Upgrade bd on every client of the server. Until step 2 an upgraded
+#    client cannot write, and coming from bd 1.3.x or older it cannot read
+#    issues either (see below): do steps 1-3 in one sitting.
 bd version                     # on each client, confirm the new version
 
 # 2. Once, from a workspace already set up against this server: consent.
@@ -612,15 +628,20 @@ bd migrate schema              # add --global for the shared global database
 bd doctor
 ```
 
-Between steps 1 and 2, an upgraded client reads normally and its writes are
-refused with the gate's guidance. Nothing is silently promoted, so there is no
-deadline — but the window is a degraded one, so keep it short.
+Between steps 1 and 2, an upgraded client's writes are refused with the gate's
+guidance. Its reads keep working only while the old schema has every column
+the new `bd` reads. Coming from bd 1.3.x or older to 1.4, every issue read
+fails with `schema version mismatch` until step 2: 1.4 reads `arrival_seq`
+(migration 0073), which the old schema lacks, and `BD_IGNORE_SCHEMA_SKEW=1`
+does not help. Back up with the old `bd` first, since `bd export` and
+`bd backup` are refused too. Nothing is silently promoted, so there is no
+deadline, but plan steps 1-3 as one sitting.
 
-If the server's schema is v53 or older (1.1.x, or 1.2.2, the re-release of
-the 1.1 line), reads can fail too until step 2: `bd list` stops with
-`table not found: leases`
-([#6929](https://github.com/gastownhall/beads/issues/6929)). Run step 2 as
-soon as the clients are upgraded.
+That includes a server still at v53 or older (1.1.x, or 1.2.2, the
+re-release of the 1.1 line): 1.4 refuses its reads at open with the same
+`schema version mismatch` (bd 1.3 failed them later, with
+`table not found: leases`;
+[#6929](https://github.com/gastownhall/beads/issues/6929)).
 
 **If the shared server also has a Dolt remote**, step 2 is not enough. Two
 hazards now apply at once — the co-resident lockout above and the cross-clone
@@ -633,6 +654,14 @@ migrating, as described under
 `bd bootstrap` alone does not replace an existing database. On a shared
 server, adopting also promotes the schema for every client of that server, so
 step 1 still comes first either way.
+
+In proxied-server mode, which refuses `bd migrate` and `bd dolt push`, the
+designated migrator stops every library client connected to the proxy's
+backend, runs `bd migrate schema --force` instead, restarts the clients, and
+pushes from the server host. That `--force` skips the adopt and pull-first
+stops just as `bd migrate --force` does, so run a read command such as
+`bd list` first: if it prints one of those stops, follow it instead of
+forcing.
 
 <Warning>
 Migrating is one-way for the fleet: after step 2, a client still on the older
@@ -647,10 +676,21 @@ there: do step 2 from a client that is already set up, or join and migrate in
 one step with `BD_ALLOW_REMOTE_MIGRATE=1 bd init …`.
 
 The same rules apply in **proxied-server mode**, which is a shared server
-reached through a local proxy. Three differences worth knowing:
+reached through a local proxy. Four differences worth knowing:
 
-- read commands print a warning and keep serving the current schema, rather
-  than the read simply not touching it;
+- step 2 is `bd migrate schema --force`. The bare `bd migrate schema` is
+  refused (`proxy.migrate.unsupported`), and `BD_ALLOW_REMOTE_MIGRATE=1` does
+  not get past that refusal: in this mode opening the store applies the
+  migration, which changes the schema underneath every library client
+  connected to the proxy's backend, and the proxy does not track those
+  clients. Stop them, run the forced command (it prints a reminder to stderr),
+  then restart them. With a Dolt remote, that `--force` is also the
+  designated-migrator consent described above. Because the bare command is
+  refused, it is not a CI check here;
+- read commands print the refusal as a warning and keep serving the current
+  schema only while it has every column this `bd` reads. Coming from bd 1.3.x
+  or older it does not, and they fail with `schema version mismatch` until
+  step 2, as in server mode;
 - `bd serve` refuses to start against a database with pending migrations,
   because a daemon has no operator to consent for it. Reconcile the schema
   first with step 2, then start the daemon — or, for an unattended service,

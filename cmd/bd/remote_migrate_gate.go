@@ -110,6 +110,14 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 		if globalFlag {
 			sharedConsent = schema.SharedConsentCommandGlobal
 		}
+		// A proxied front door refuses the bare verb (gastownhall/beads#6656);
+		// the options already carry the forced one.
+		if e.Proxied {
+			sharedConsent = schema.SharedConsentCommandForced
+			if globalFlag {
+				sharedConsent = schema.SharedConsentCommandForcedGlobal
+			}
+		}
 		// The #6575 data-behind stop on a SHARED store carries a consent verb in
 		// its second option (migrate-shared-after-pulling) too — the forced one,
 		// since that stop is always remote-backed — so it needs the same

@@ -231,9 +231,9 @@ func TestResolveProxiedServerUOWTopology_AbsentFilesResolveDefaults(t *testing.T
 
 	topology, err := resolveProxiedServerUOWTopology(beadsDir, "", assertWorkspaceIdentity)
 	require.NoError(t, err, "absent metadata.json and sidecar must not be an error")
-	assert.Equal(t, configfile.DefaultDoltDatabase, topology.database)
-	assert.False(t, topology.teamServer)
-	assert.Nil(t, topology.external)
+	assert.Equal(t, configfile.DefaultDoltDatabase, topology.Database)
+	assert.False(t, topology.TeamServer)
+	assert.Nil(t, topology.External)
 }
 
 func TestNewExternalProxiedServerUOWProvider_CreatesRootDir(t *testing.T) {
@@ -241,8 +241,8 @@ func TestNewExternalProxiedServerUOWProvider_CreatesRootDir(t *testing.T) {
 	external := &configfile.ExternalDoltConfig{Host: "db.invalid"}
 
 	_, err := newExternalProxiedServerUOWProvider(context.Background(), beadsDir, sqlServerUOWTopology{
-		database: "beads_test",
-		external: external,
+		Database: "beads_test",
+		External: external,
 	})
 	require.Error(t, err, "invalid external config must surface a validation error")
 
@@ -368,13 +368,13 @@ func TestNewProxiedServerUOWProvider_TeamServerEmptyRootNamesNoInitRemedy(t *tes
 }
 
 func TestProxiedFreshStoreRefusal(t *testing.T) {
-	managed := sqlServerUOWTopology{database: configfile.DefaultDoltDatabase}
+	managed := sqlServerUOWTopology{Database: configfile.DefaultDoltDatabase}
 
 	t.Run("external topology never creates a store and is exempt", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		external := sqlServerUOWTopology{
-			database: configfile.DefaultDoltDatabase,
-			external: &configfile.ExternalDoltConfig{Host: "db.invalid", Port: 3306},
+			Database: configfile.DefaultDoltDatabase,
+			External: &configfile.ExternalDoltConfig{Host: "db.invalid", Port: 3306},
 		}
 		assert.NoError(t, proxiedFreshStoreRefusal(beadsDir, external))
 	})
@@ -512,7 +512,7 @@ func TestProxiedFreshStoreRefusal(t *testing.T) {
 	// clone's way back is its sidecar.
 	t.Run("a team-server workspace is offered no init remedy", func(t *testing.T) {
 		beadsDir := t.TempDir()
-		teamServer := sqlServerUOWTopology{database: configfile.DefaultDoltDatabase, teamServer: true}
+		teamServer := sqlServerUOWTopology{Database: configfile.DefaultDoltDatabase, TeamServer: true}
 		err := proxiedFreshStoreRefusal(beadsDir, teamServer)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "refusing to start a proxied Dolt server")
@@ -574,22 +574,22 @@ func TestResolveProxiedServerUOWTopology_ExcursionIdentity_ConfiguredDatabaseAss
 	for _, override := range []string{"", "beads_mine", "BEADS_Mine"} {
 		topology, err := resolveProxiedServerUOWTopology(beadsDir, override, assertWorkspaceIdentity)
 		require.NoError(t, err)
-		assert.Empty(t, topology.expectedProjectID,
+		assert.Empty(t, topology.ExpectedProjectID,
 			"override %q opens the configured database: no identity comparison", override)
 		want := "beads_mine"
 		if override != "" {
 			want = override
 		}
-		assert.Equal(t, want, topology.database, "the resolved database itself is unchanged")
-		assert.False(t, topology.teamServer)
+		assert.Equal(t, want, topology.Database, "the resolved database itself is unchanged")
+		assert.False(t, topology.TeamServer)
 	}
 
 	// Positive control: the clearing is scoped, not blanket. An excursion to
 	// a different database keeps the identity for the open to assert.
 	topology, err := resolveProxiedServerUOWTopology(beadsDir, "beads_theirs", assertWorkspaceIdentity)
 	require.NoError(t, err)
-	assert.Equal(t, "proj-stale-local", topology.expectedProjectID)
-	assert.Equal(t, "beads_theirs", topology.database)
+	assert.Equal(t, "proj-stale-local", topology.ExpectedProjectID)
+	assert.Equal(t, "beads_theirs", topology.Database)
 }
 
 // BEADS_SKIP_IDENTITY_CHECK=1 is the deliberate hatch for a plain cross-project
@@ -600,16 +600,16 @@ func TestResolveProxiedServerUOWTopology_ExcursionIdentity_SkipEnvBypassesPlainO
 	plain := writePlainProxiedWorkspace(t, "proj-mine")
 	topology, err := resolveProxiedServerUOWTopology(plain, "beads_theirs", assertWorkspaceIdentity)
 	require.NoError(t, err)
-	assert.Empty(t, topology.expectedProjectID, "the plain excursion is deliberately unchecked")
-	assert.Equal(t, "beads_theirs", topology.database)
+	assert.Empty(t, topology.ExpectedProjectID, "the plain excursion is deliberately unchecked")
+	assert.Equal(t, "beads_theirs", topology.Database)
 
 	team := t.TempDir()
 	require.NoError(t, os.WriteFile(configfile.ConfigPath(team), []byte(
 		`{"backend": "dolt", "dolt_mode": "proxied-server", "dolt_database": "team", "project_id": "proj-team", "dolt_team_server": true}`), 0o644))
 	topology, err = resolveProxiedServerUOWTopology(team, "team_other", assertWorkspaceIdentity)
 	require.NoError(t, err)
-	assert.True(t, topology.teamServer)
-	assert.Equal(t, "proj-team", topology.expectedProjectID, "team-server keeps asserting under the env var")
+	assert.True(t, topology.TeamServer)
+	assert.Equal(t, "proj-team", topology.ExpectedProjectID, "team-server keeps asserting under the env var")
 
 	noID := t.TempDir()
 	require.NoError(t, os.WriteFile(configfile.ConfigPath(noID), []byte(

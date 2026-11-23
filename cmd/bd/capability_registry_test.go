@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -164,6 +165,18 @@ func assertCapabilityRuleInvariants(t *testing.T, where string, rule proxyCapabi
 			t.Errorf("%s: an unimplemented refusal needs a Tracking item naming who closes it", where)
 		}
 	}
+
+	// A force opt-in is a way past a gate refusal, so it means nothing on any
+	// other outcome, and a way past with no warning is a silent bypass.
+	if (rule.ForceFlag == "") != (rule.ForceWarning == "") {
+		t.Errorf("%s: ForceFlag %q and ForceWarning %q must be set together", where, rule.ForceFlag, rule.ForceWarning)
+	}
+	if rule.ForceFlag != "" && rule.Outcome != ProxyOutcomeRefused {
+		t.Errorf("%s: ForceFlag on a %q rule; only a gate refusal can be forced past", where, rule.Outcome)
+	}
+	if strings.Contains(rule.ForceWarning, "is not supported in proxied-server mode") {
+		t.Errorf("%s: ForceWarning %q reads as the refusal; the forced pass is not refused", where, rule.ForceWarning)
+	}
 }
 
 // inlineProxiedRefusal matches the untyped refusals commands raise from their
@@ -284,7 +297,11 @@ func TestProxyCapabilityRegistryReasonsAreAssignedIndividually(t *testing.T) {
 		// it unimplemented with a tracking item, not design.
 		"migrate": true, "migrate sync": true, "migrate issues": true,
 		"migrate-issues": true, "migrate-personal": true,
-		"admin cleanup": true, "admin reset": true,
+		// `migrate schema` is design with a way past it: the danger is the
+		// clients sharing the backend, which the operator can stop and bd
+		// cannot see, so --force carries it through (gastownhall/beads#6656).
+		"migrate schema": true,
+		"admin cleanup":  true, "admin reset": true,
 		// The backup family's DEFAULT rule is the design refusal; managed-local
 		// overrides it to honored (TestProxiedBackupHonoredOnlyOnManagedLocal).
 		// It is design because a backup remote is registered on the SERVER,
@@ -419,5 +436,308 @@ func TestProxiedStoreUnroutedIsTyped(t *testing.T) {
 	}
 	if typed.Reason != ProxyReasonUnimplemented {
 		t.Fatalf("store backstop reason = %q, want unimplemented", typed.Reason)
+	}
+}
+
+// setMigrateSchemaForce puts `bd migrate schema --force` into the state one
+// command line would leave it in: value "" is the flag omitted (unchanged,
+// false), anything else is `--force=<value>`. The shared command is restored to
+// omitted when the test ends, Changed bit included, so a later test does not
+// inherit a forced migrate.
+func setMigrateSchemaForce(t *testing.T, value string) {
+	t.Helper()
+	flag := migrateSchemaCmd.Flags().Lookup("force")
+	if flag == nil {
+		t.Fatal("bd migrate schema no longer registers --force")
+	}
+	reset := func() {
+		_ = flag.Value.Set("false")
+		flag.Changed = false
+	}
+	t.Cleanup(reset)
+	reset()
+	if value == "" {
+		return
+	}
+	if err := migrateSchemaCmd.Flags().Set("force", value); err != nil {
+		t.Fatalf("set migrate schema --force=%s: %v", value, err)
+	}
+}
+
+// runProxyRegistryGate runs the path-keyed front door under --json and returns
+// what it wrote to each stream. Holding stdioMutex keeps it off any other
+// test's redirected stdio.
+func runProxyRegistryGate(t *testing.T, cmd *cobra.Command, topology ProxyTopology) (stdout, stderr string, err error) {
+	t.Helper()
+	t.Setenv("BD_JSON_ENVELOPE", "")
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+	stdout, stderr = captureStdio(t, func() {
+		err = validateProxyRegistryBeforeProvider(cmd, topology)
+	})
+	return stdout, stderr, err
+}
+
+// allProxiedTopologies is every shape the gate can be asked about, unknown
+// included: a refusal that holds on every proxied workspace has to hold on one
+// bd cannot classify too.
+var allProxiedTopologies = []ProxyTopology{
+	ProxyTopologyManagedLocal, ProxyTopologyExternalTCP, ProxyTopologyExternalUnix,
+	ProxyTopologyTeamServer, ProxyTopologyUnknown,
+}
+
+// TestProxyMigrateSchemaRefusedUnlessForced pins gastownhall/beads#6656 at the
+// front door. On a proxied-server workspace the provider open is the
+// migration, and it promotes the schema underneath every library client of the
+// proxy's backend, none of which the proxy tracks. So the bare verb is refused,
+// typed, before the provider is built — and the refusal is not a dead end: it
+// names the route (stop the clients, force, restart), and only a true --force
+// is let through to take it.
+//
+// The route's --force is also the remote-migrate gate's designated-migrator
+// override, which skips the gate's adopt, pull-first and fork stops on a
+// remote-backed store (TestSharedStoreGateForcedVerbSkipsTheAdoptStop). The
+// front door cannot see remotes, so every refusal that prescribes the force
+// says so. Team-server is refused with its own words: its open only verifies,
+// so there is no migration to stop clients for and no gate to skip.
+func TestProxyMigrateSchemaRefusedUnlessForced(t *testing.T) {
+	migratingText := []string{
+		"migrate schema is not supported in proxied-server mode without --force",
+		"Stop those clients",
+		"bd migrate schema --force",
+		"restart them",
+		"If this database has a Dolt remote, --force also confirms you are its single designated migrator",
+		"(adopt, pull first, forked schema)",
+		"run a read command such as `bd list` first",
+	}
+	teamServerText := []string{
+		"migrate schema is not supported in proxied-server mode without --force",
+		"the team server owns the schema",
+		"only verifies it and migrates nothing",
+		"bd migrate schema --force",
+		"no client needs to stop",
+	}
+	refusedCases := []struct {
+		name   string
+		force  []string // the --force values set in order; empty = omitted
+		envVar bool     // BD_ALLOW_REMOTE_MIGRATE=1 in the environment
+	}{
+		{name: "force omitted"},
+		{name: "force=false", force: []string{"false"}},
+		{name: "force=true then force=false", force: []string{"true", "false"}},
+		// The env hatch is standing configuration, not this invocation's
+		// consent; it unlocks the gate below, never this one.
+		{name: "env consent without force", envVar: true},
+	}
+	for _, topology := range allProxiedTopologies {
+		for _, tc := range refusedCases {
+			t.Run(string(topology)+"/"+tc.name, func(t *testing.T) {
+				if tc.envVar {
+					t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "1")
+				}
+				setMigrateSchemaForce(t, "")
+				for _, v := range tc.force {
+					setMigrateSchemaForce(t, v)
+				}
+
+				stdout, _, err := runProxyRegistryGate(t, migrateSchemaCmd, topology)
+				code, ok := exitCodeFromError(err)
+				if !ok || code != 1 {
+					t.Fatalf("gate returned %#v; want a rendered refusal exiting 1 before the provider opens", err)
+				}
+				var got refusalJSONForTest
+				if decodeErr := json.Unmarshal([]byte(stdout), &got); decodeErr != nil {
+					t.Fatalf("refusal is not one JSON object on stdout: %v\n%s", decodeErr, stdout)
+				}
+				if got.Code != "proxy.migrate.unsupported" || got.Mutates || got.Reason != string(ProxyReasonDesign) {
+					t.Fatalf("refusal = %+v; want code proxy.migrate.unsupported, mutates false, reason design", got)
+				}
+				wantText, absent := migratingText, []string{"team server"}
+				if topology == ProxyTopologyTeamServer {
+					wantText, absent = teamServerText, []string{"Stop those clients", "Dolt remote", "promotes the schema"}
+				}
+				for _, want := range wantText {
+					if !strings.Contains(got.Error, want) {
+						t.Errorf("refusal message %q lacks %q", got.Error, want)
+					}
+				}
+				for _, notWant := range absent {
+					if strings.Contains(got.Error, notWant) {
+						t.Errorf("refusal message %q on %s says %q, which is not true there", got.Error, topology, notWant)
+					}
+				}
+			})
+		}
+
+		t.Run(string(topology)+"/force=true", func(t *testing.T) {
+			setMigrateSchemaForce(t, "true")
+			stdout, _, err := runProxyRegistryGate(t, migrateSchemaCmd, topology)
+			if err != nil {
+				t.Fatalf("forced migrate schema was refused before the provider: %v\n%s", err, stdout)
+			}
+			if stdout != "" {
+				t.Fatalf("the forced pass wrote to stdout, where the command's single JSON report goes:\n%s", stdout)
+			}
+		})
+	}
+}
+
+// refusalJSONForTest is the frozen {code, error, mutates} refusal contract
+// plus its additive reason.
+type refusalJSONForTest struct {
+	Code    string `json:"code"`
+	Error   string `json:"error"`
+	Mutates bool   `json:"mutates"`
+	Reason  string `json:"reason"`
+}
+
+// TestProxyMigrateSchemaForceWarnsBeforeTheOpen pins what --force buys on a
+// proxied workspace: the gate lets it through to the provider open, and before
+// that open — the gate is the last thing to run ahead of it — it prints one
+// generic warning to close co-resident library clients, and says once more
+// that on a remote-backed store the same flag skips the remote-migrate gate's
+// adopt and pull-first checks. stderr only, so a --json caller's stdout still
+// carries the command's single report and nothing else. Generic on purpose:
+// the proxy does not track its clients, so there are none to name. On
+// team-server, whose open only verifies, the note says that instead.
+func TestProxyMigrateSchemaForceWarnsBeforeTheOpen(t *testing.T) {
+	const migrating = "Warning: before forcing schema migration, close co-resident library clients; " +
+		"restart them after this command completes.\n" +
+		"  If this database has a Dolt remote, --force also confirms you are its single designated migrator, " +
+		"so the remote-migrate gate's adopt and pull-first checks do not run.\n"
+	const teamServer = "Note: the team server owns this workspace's schema; " +
+		"--force only verifies it and migrates nothing.\n"
+	for _, topology := range allProxiedTopologies {
+		want := migrating
+		if topology == ProxyTopologyTeamServer {
+			want = teamServer
+		}
+		t.Run(string(topology), func(t *testing.T) {
+			setMigrateSchemaForce(t, "true")
+			stdout, stderr, err := runProxyRegistryGate(t, migrateSchemaCmd, topology)
+			if err != nil {
+				t.Fatalf("forced migrate schema was refused before the provider: %v", err)
+			}
+			if stdout != "" {
+				t.Errorf("the forced pass wrote to stdout, where the command's single JSON report goes:\n%s", stdout)
+			}
+			if stderr != want {
+				t.Errorf("stderr = %q, want exactly one warning %q", stderr, want)
+			}
+			if strings.Contains(stderr, "is not supported in proxied-server mode") {
+				t.Errorf("the warning reads as a refusal: %q", stderr)
+			}
+		})
+	}
+
+	// The refusal itself carries no warning: it is the route, not a pass.
+	t.Run("unforced", func(t *testing.T) {
+		setMigrateSchemaForce(t, "")
+		_, stderr, _ := runProxyRegistryGate(t, migrateSchemaCmd, ProxyTopologyManagedLocal)
+		if strings.Contains(stderr, "close co-resident library clients") {
+			t.Errorf("the refused invocation printed the force warning: %q", stderr)
+		}
+	})
+}
+
+// TestProxyCapabilityRegistryForceOptInsAreScoped keeps the force opt-in to the
+// one path #6656 decided: `bd migrate schema`. Every rule naming a ForceFlag,
+// topology overrides included, must name a bool flag the real command
+// registers — forcedPastRefusal fails closed on anything else, so a typo would
+// silently turn the route the refusal prescribes into a dead end.
+func TestProxyCapabilityRegistryForceOptInsAreScoped(t *testing.T) {
+	optIns := map[string]bool{}
+	for _, row := range proxyCapabilityRegistry {
+		rules := map[string]proxyCapabilityRule{row.display(): row.Rule}
+		for topology, rule := range row.Topology {
+			rules[row.display()+" on "+string(topology)] = rule
+		}
+		for where, rule := range rules {
+			if rule.ForceFlag == "" {
+				continue
+			}
+			optIns[row.display()] = true
+			flag := realCommandAtPath(t, row.Path).Flags().Lookup(rule.ForceFlag)
+			switch {
+			case flag == nil:
+				t.Errorf("%s: ForceFlag --%s is not a flag `bd %s` registers", where, rule.ForceFlag, row.Path)
+			case flag.Value.Type() != "bool":
+				t.Errorf("%s: ForceFlag --%s is a %s flag; only a bool can say \"forced\"", where, rule.ForceFlag, flag.Value.Type())
+			}
+		}
+	}
+	got := sortedKeys(optIns)
+	if want := []string{"migrate schema"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("rows with a force opt-in = %q, want %q; a new one is a policy change that needs its own design", got, want)
+	}
+}
+
+// TestProxyForceDoesNotBypassSiblingRefusals proves the opt-in is the row's,
+// not the flag's. Every other gate-refused command that accepts a bool --force
+// — `bd migrate` itself among them — is run with --force=true on each
+// topology it refuses, and must still get its own typed refusal and no force
+// warning.
+func TestProxyForceDoesNotBypassSiblingRefusals(t *testing.T) {
+	tried := map[string]bool{}
+	for _, row := range proxyCapabilityRegistry {
+		// An arg-set row is keyed on another flag too; its bare sibling row
+		// carries the same path and gets tried here.
+		if row.ArgSet != "" || row.Path == "migrate schema" {
+			continue
+		}
+		cmd := realCommandAtPath(t, row.Path)
+		flag := cmd.Flags().Lookup("force")
+		if flag == nil || flag.Value.Type() != "bool" {
+			continue
+		}
+		for _, topology := range allProxiedTopologies {
+			rule := row.ruleFor(topology)
+			if rule.Outcome != ProxyOutcomeRefused {
+				continue
+			}
+			tried[row.Path] = true
+			t.Run(row.Path+"/"+string(topology), func(t *testing.T) {
+				setCommandFlag(t, cmd, "force", "true")
+				stdout, stderr, err := runProxyRegistryGate(t, cmd, topology)
+				var exit *exitError
+				if !errors.As(err, &exit) || exit.Code != rule.ExitCode {
+					t.Fatalf("`bd %s --force` on %s: err = %v, want its refusal (exit %d)", row.Path, topology, err, rule.ExitCode)
+				}
+				var got refusalJSONForTest
+				if err := json.Unmarshal([]byte(stdout), &got); err != nil || got.Code != rule.Code {
+					t.Errorf("refusal JSON = %q (%v), want code %q", stdout, err, rule.Code)
+				}
+				if strings.Contains(stderr, "close co-resident library clients") {
+					t.Errorf("a sibling refusal printed the migrate schema force warning: %q", stderr)
+				}
+			})
+		}
+	}
+	// Vacuity guard: the parent verb is the sibling a misplaced opt-in would
+	// most likely catch, so it has to be among the ones tried.
+	if !tried["migrate"] {
+		t.Errorf("`bd migrate --force` was not tried (tried %q); the guard no longer covers the parent verb", sortedKeys(tried))
+	}
+}
+
+// setCommandFlag sets one flag on a shared command for the test and restores
+// both its value and its Changed bit afterwards.
+func setCommandFlag(t *testing.T, cmd *cobra.Command, name, value string) {
+	t.Helper()
+	flag := cmd.Flags().Lookup(name)
+	if flag == nil {
+		t.Fatalf("`bd %s` registers no --%s", commandRegistryPath(cmd), name)
+	}
+	oldValue, oldChanged := flag.Value.String(), flag.Changed
+	t.Cleanup(func() {
+		_ = flag.Value.Set(oldValue)
+		flag.Changed = oldChanged
+	})
+	if err := cmd.Flags().Set(name, value); err != nil {
+		t.Fatalf("set `bd %s` --%s=%s: %v", commandRegistryPath(cmd), name, value, err)
 	}
 }

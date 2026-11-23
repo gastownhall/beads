@@ -366,3 +366,55 @@ func TestIssueOperationsWispAggregateLifecycleAndResultDetachment(t *testing.T) 
 		t.Fatalf("lifecycle result aliases store %#v, %v", stored, err)
 	}
 }
+
+// TestIssueOperationsCreateCounterModeWalksPastAnExplicitID pins GH#8456 on
+// the create-only route bd create takes (ExecuteCreate). An explicit test-2
+// sits ahead of a counter that has minted only test-1. A counter mint that
+// trusted its next value would hand out test-2 and the create-only guard would
+// refuse it as ErrAlreadyExists, on every retry, because the rollback also
+// undoes the counter bump. The mint walks past the live row instead.
+func TestIssueOperationsCreateCounterModeWalksPastAnExplicitID(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	operations, err := NewIssueOperations(store)
+	if err != nil {
+		t.Fatalf("NewIssueOperations: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("enable counter mode: %v", err)
+	}
+
+	first, err := operations.Create(ctx, publicops.CreateRequest{
+		Actor: "writer",
+		Issue: &types.Issue{Title: "first auto", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	})
+	if err != nil {
+		t.Fatalf("first auto Create: %v", err)
+	}
+	if first.Issue.ID != "test-1" {
+		t.Fatalf("first auto Create = %q, want test-1", first.Issue.ID)
+	}
+	if err := store.CreateIssue(ctx, &types.Issue{ID: "test-2", Title: "explicit", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "seed"); err != nil {
+		t.Fatalf("explicit create test-2: %v", err)
+	}
+
+	result, err := operations.Create(ctx, publicops.CreateRequest{
+		Actor: "writer",
+		Issue: &types.Issue{Title: "second auto", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	})
+	if err != nil {
+		t.Fatalf("auto Create with an explicit test-2 ahead of the counter = %v, want test-3", err)
+	}
+	if result.Issue.ID != "test-3" {
+		t.Errorf("auto Create = %q, want test-3 past the explicit test-2", result.Issue.ID)
+	}
+	explicit, err := store.GetIssue(ctx, "test-2")
+	if err != nil {
+		t.Fatalf("GetIssue(test-2): %v", err)
+	}
+	if explicit.Title != "explicit" {
+		t.Errorf("test-2 title = %q, want %q", explicit.Title, "explicit")
+	}
+}

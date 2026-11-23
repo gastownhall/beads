@@ -132,6 +132,14 @@ var ErrPrefixMismatch = errors.New("prefix mismatch")
 // or an open blocking gate). Bypass with CloseIssueOptions.Force.
 var ErrCloseBlocked = errors.New("cannot close blocked issue")
 
+// ErrClaimBlocked is returned by a lifecycle update that claims an issue still
+// blocked by a live local blocker (an open blocks, waits-for or
+// conditional-blocks edge) — the same refusal close applies, carried by a
+// BlockedError. Bypass with UpdateRequest.ForceClaimBlocked. It is distinct
+// from the external-dependency guard's claim refusal, which wraps
+// ErrCloseBlocked and has no override.
+var ErrClaimBlocked = errors.New("cannot claim blocked issue")
+
 // Blocker is one live blocker named by a BlockedError: a local issue id, or an
 // `external:<project>:<capability>` reference, with the blocking edge's type
 // when the refusal knew it.
@@ -190,8 +198,8 @@ func ParseBlocker(s string) Blocker {
 // refusal elsewhere (the HTTP surface's `blockers` member) reads the typed list
 // instead of parsing that prose.
 //
-// Err is ErrCloseBlocked for a close-policy refusal. The type is not
-// close-specific: any refusal whose subject is "this issue is blocked by these"
+// Err is ErrCloseBlocked for a close-policy refusal and ErrClaimBlocked for a
+// blocked claim. The type is not close-specific: any refusal whose subject is "this issue is blocked by these"
 // can carry its own sentinel.
 type BlockedError struct {
 	// IssueID names the issue that was refused.
@@ -210,6 +218,15 @@ func NewCloseBlockedError(issueID string, blockers []string) *BlockedError {
 		parsed = append(parsed, ParseBlocker(blocker))
 	}
 	return &BlockedError{IssueID: issueID, Blockers: parsed, Err: ErrCloseBlocked}
+}
+
+// NewClaimBlockedError builds the blocked-claim refusal for issueID from the
+// []string blocker list a store's IsBlocked reports (see ParseBlocker). An
+// engine with the edges in hand builds BlockedError directly instead.
+func NewClaimBlockedError(issueID string, blockers []string) *BlockedError {
+	blocked := NewCloseBlockedError(issueID, blockers)
+	blocked.Err = ErrClaimBlocked
+	return blocked
 }
 
 func (e *BlockedError) Error() string {

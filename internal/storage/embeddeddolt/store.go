@@ -131,8 +131,9 @@ const (
 	// open. Used by Open.
 	openStrict openIntent = iota
 	// openReadOnlyCommand relaxes both refusals for read-only commands: they
-	// must keep working on the current schema until the operator makes the
-	// migrate-or-adopt decision (bd-578h9.5), and must not be bricked by
+	// must keep working on the current schema (while it has every column this
+	// binary's reads select) until the operator makes the migrate-or-adopt
+	// decision (bd-578h9.5), and must not be bricked by
 	// dirty tables either. Used by OpenForReadOnlyCommand.
 	openReadOnlyCommand
 	// openWorkingSetReconcile relaxes both refusals for working-set-reconcile

@@ -38,6 +38,12 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra and wisp types get marked ephemeral (legacy behavior)
 	}
 
+	// A create that rolls back must hand the caller's struct back with the
+	// IDs it left empty still empty, so a retry mints afresh instead of
+	// upserting a rolled-back ID a peer may now own (GH#8457). The reset wraps
+	// only the SQL transaction: after it commits, the row exists and the ID
+	// stays even if the Dolt commit below fails.
+	resetMintedIDs := issueops.SnapshotUnsetCreateIDs([]*types.Issue{issue})
 	var result issueops.CreateIssueResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
@@ -51,7 +57,7 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		result, err = issueops.CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
 		return err
 	}); err != nil {
-		return err
+		return issueops.ResetCreateIDsIfRolledBack(err, resetMintedIDs)
 	}
 
 	// Dolt versioning — wisps and no-history issues skip DOLT_COMMIT.
@@ -103,6 +109,9 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 	if len(issues) == 0 {
 		return nil
 	}
+	// As in createIssue: a batch that rolls back empties the ID fields the
+	// caller left empty (GH#8457); one that committed keeps them.
+	resetMintedIDs := issueops.SnapshotUnsetCreateIDs(issues)
 
 	// All-wisps fast path: one SQL transaction, no Dolt versioning.
 	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
@@ -120,7 +129,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 			return err
 		}); err != nil {
-			return err
+			return issueops.ResetCreateIDsIfRolledBack(err, resetMintedIDs)
 		}
 		s.commitWispDurable(ctx, wispDurable{issues: result.ChangedTables["issues"]},
 			fmt.Sprintf("bd: create %d issue(s)", len(issues)))
@@ -133,7 +142,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 		return err
 	}); err != nil {
-		return err
+		return issueops.ResetCreateIDsIfRolledBack(err, resetMintedIDs)
 	}
 
 	// GH#2455: Stage only the tables we modified, then commit without -A.
