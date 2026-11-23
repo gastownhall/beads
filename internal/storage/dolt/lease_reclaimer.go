@@ -26,6 +26,10 @@ func (s *DoltStore) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
 // context (dolt.auto-commit batch/off), which a role a front door calls has to,
 // and a sweep that reverted nothing composes no staged set and so records no
 // entry describing a no-op.
+//
+// A dry run takes a read transaction, the Sweeper's path: it writes nothing by
+// construction, and a write transaction with an empty commit would make the
+// preview look like a mutation to everything watching the store.
 type leaseReclaimer struct{ store *DoltStore }
 
 var _ issueops.LeaseReclaimer = (*leaseReclaimer)(nil)
@@ -35,6 +39,16 @@ func (l *leaseReclaimer) Reclaim(ctx context.Context, request issueops.ReclaimRe
 		return issueops.ReclaimResult{}, err
 	}
 	var result issueops.ReclaimResult
+	if request.DryRun {
+		if err := l.store.withReadTx(ctx, func(tx *sql.Tx) error {
+			var err error
+			result, err = storeops.ExecuteReclaimInTx(ctx, tx, request)
+			return err
+		}); err != nil {
+			return issueops.ReclaimResult{}, err
+		}
+		return result, nil
+	}
 	if err := l.store.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storeops.ChangedTables, string, error) {
 		var err error
 		result, err = storeops.ExecuteReclaimInTx(ctx, tx, request)

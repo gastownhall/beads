@@ -93,28 +93,36 @@ func ExecuteReclaimInTx(ctx context.Context, tx DBTX, request publicops.ReclaimR
 		return publicops.ReclaimResult{}, err
 	}
 	cutoff := time.Now().UTC().Add(-request.OlderThan)
-	reclaimed, err := ReclaimExpiredLeasesInTx(ctx, tx, cutoff, request.Filter, strings.TrimSpace(request.Actor))
+	var reclaimed []publicops.ReclaimedLease
+	var err error
+	if request.DryRun {
+		reclaimed, err = previewExpiredLeasesInTx(ctx, tx, cutoff, request.Filter)
+	} else {
+		reclaimed, err = ReclaimExpiredLeasesInTx(ctx, tx, cutoff, request.Filter, strings.TrimSpace(request.Actor))
+	}
 	if err != nil {
 		return publicops.ReclaimResult{}, fmt.Errorf("reclaim: %w", err)
 	}
 	if reclaimed == nil {
 		reclaimed = []publicops.ReclaimedLease{}
 	}
-	return publicops.ReclaimResult{Reclaimed: reclaimed}, nil
+	return publicops.ReclaimResult{DryRun: request.DryRun, Reclaimed: reclaimed}, nil
 }
 
 // ReclaimVersionCommit composes the version-control entry for a finished sweep:
 // the durable tables it changed and the message to record them under. A sweep
 // that reverted nothing composes neither, which every leg's commit funnel reads
 // as "write nothing to history", so a no-op reaper tick leaves no entry
-// describing a no-op.
+// describing a no-op. A dry run composes neither either, whatever it found: it
+// changed no table, and an entry describing a revert that never ran would be
+// false.
 //
 // It is ONE helper the three legs share so the message cannot drift between
 // them: the same "bd: reclaim N expired lease(s)" the raw ReclaimExpiredLeases
 // has always recorded. The staged set is the one the release records, issues
 // and events, because a reclaim is the same revert applied by a clock.
 func ReclaimVersionCommit(result publicops.ReclaimResult) (ChangedTables, string) {
-	if len(result.Reclaimed) == 0 {
+	if result.DryRun || len(result.Reclaimed) == 0 {
 		return nil, ""
 	}
 	tables := ChangedTables{}

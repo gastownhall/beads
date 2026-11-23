@@ -109,3 +109,15 @@ func TestServedLeaseReclaimerAcceptsExactlyTheCap(t *testing.T) {
 func TestServedLeaseReclaimerDoesNotMutateTheCallerRequest(t *testing.T) {
 	conformance.RunLeaseReclaimerDoesNotMutateTheCallerRequest(t, t.Context(), newServedLeaseReclaimerFixture(t, "hlr11"))
 }
+
+func TestServedLeaseReclaimerDryRunNamesTheRowsAndChangesNothing(t *testing.T) {
+	conformance.RunLeaseReclaimerDryRunNamesTheRowsAndChangesNothing(t, t.Context(), newServedLeaseReclaimerFixture(t, "hlr13"))
+}
+
+func TestServedLeaseReclaimerDryRunRefusesWhereTheSweepRefuses(t *testing.T) {
+	conformance.RunLeaseReclaimerDryRunRefusesWhereTheSweepRefuses(t, t.Context(), newServedLeaseReclaimerFixture(t, "hlr14"))
+}
+
+func TestServedLeaseReclaimerDryRunFiresNoHook(t *testing.T) {
+	conformance.RunLeaseReclaimerDryRunFiresNoHook(t, t.Context(), newServedLeaseReclaimerFixture(t, "hlr15"))
+}

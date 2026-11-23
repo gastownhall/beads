@@ -44,7 +44,8 @@ func TestReclaimIssuesMapsEveryMemberOntoTheRole(t *testing.T) {
 		"labels": ["lane-a"],
 		"labels_any": ["x", "y"],
 		"exclude_labels": ["pinned"],
-		"any_replica": true
+		"any_replica": true,
+		"dry_run": true
 	}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
@@ -64,6 +65,7 @@ func TestReclaimIssuesMapsEveryMemberOntoTheRole(t *testing.T) {
 			ExcludeLabels: []string{"pinned"},
 			AnyReplica:    true,
 		},
+		DryRun: true,
 	}
 	if !reflect.DeepEqual(calls[0], want) {
 		t.Fatalf("role request = %+v, want %+v", calls[0], want)
@@ -71,7 +73,8 @@ func TestReclaimIssuesMapsEveryMemberOntoTheRole(t *testing.T) {
 }
 
 // TestReclaimIssuesDefaultsToAnUnscopedZeroGraceSweep pins the absent members:
-// no grace window is zero, no scope is no scope, and any_replica is off.
+// no grace window is zero, no scope is no scope, and any_replica and dry_run
+// are off.
 func TestReclaimIssuesDefaultsToAnUnscopedZeroGraceSweep(t *testing.T) {
 	reclaimer := &roleLeaseReclaimer{result: issueops.ReclaimResult{Reclaimed: []issueops.ReclaimedLease{}}}
 	ts := newReclaimServer(t, reclaimer)
@@ -119,6 +122,35 @@ func TestReclaimIssuesAnswersEveryReclaimedLeaseWithItsRevision(t *testing.T) {
 	}
 }
 
+// TestReclaimIssuesEchoesDryRunOnTheResult pins the result's dry_run member,
+// which the wire always carries: false for a real sweep and true for a
+// preview, whose entries carry the empty revision the role left on them.
+func TestReclaimIssuesEchoesDryRunOnTheResult(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result issueops.ReclaimResult
+		want   string
+	}{
+		{"a real sweep", issueops.ReclaimResult{Reclaimed: []issueops.ReclaimedLease{}}, `"dry_run":false`},
+		{"a preview", issueops.ReclaimResult{DryRun: true, Reclaimed: []issueops.ReclaimedLease{{ID: "bd-1", PreviousOwner: "w1"}}}, `"dry_run":true`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newReclaimServer(t, &roleLeaseReclaimer{result: tc.result})
+			resp := ts.claim(t, reclaimPath, `{"actor":"reaper"}`)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			raw := readAll(t, resp)
+			if !strings.Contains(raw, tc.want) {
+				t.Errorf("body = %s, want it to carry %s", raw, tc.want)
+			}
+			if tc.result.DryRun && !strings.Contains(raw, `"revision":""`) {
+				t.Errorf("body = %s, want the previewed entry's empty revision on the wire", raw)
+			}
+		})
+	}
+}
+
 // TestReclaimIssuesAnswersAnEmptyArrayNotNull pins `reclaimed: []` when the
 // sweep found nothing, whatever the role handed back.
 func TestReclaimIssuesAnswersAnEmptyArrayNotNull(t *testing.T) {
@@ -153,6 +185,8 @@ func TestReclaimIssuesRefusesAMalformedBodyByName(t *testing.T) {
 		{"empty assignees", `{"actor":"r","assignees":[]}`, "assignees", string(ReasonInvalidValue)},
 		{"null exclude", `{"actor":"r","exclude_labels":null}`, "exclude_labels", string(ReasonInvalidValue)},
 		{"any_replica not a bool", `{"actor":"r","any_replica":"yes"}`, "any_replica", string(ReasonInvalidValue)},
+		{"dry_run not a bool", `{"actor":"r","dry_run":"yes"}`, "dry_run", string(ReasonInvalidValue)},
+		{"null dry_run", `{"actor":"r","dry_run":null}`, "dry_run", string(ReasonInvalidValue)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reclaimer := &roleLeaseReclaimer{}

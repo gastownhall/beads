@@ -1067,7 +1067,8 @@ func (u *recordingIssueUC) RenewLease(ctx context.Context, request publicops.Hea
 	return result, nil
 }
 
-// Reclaim records an update for every lease the sweep reverted.
+// Reclaim records an update for every lease the sweep reverted. A dry run
+// reverted nothing and so records nothing.
 //
 // It is DECLARED for the same reason ReleaseIssue above is: an inherited
 // accessor would compile and record nothing, silently dropping the hook the
@@ -1077,7 +1078,7 @@ func (u *recordingIssueUC) RenewLease(ctx context.Context, request publicops.Hea
 // plane snap.issue rather than anyPlane.
 func (u *recordingIssueUC) Reclaim(ctx context.Context, request publicops.ReclaimRequest) (publicops.ReclaimResult, error) {
 	result, err := u.IssueUseCase.Reclaim(ctx, request)
-	if err != nil {
+	if err != nil || result.DryRun {
 		return result, err
 	}
 	for _, r := range result.Reclaimed {

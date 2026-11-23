@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/httpclient/wire"
 	storeops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -624,6 +625,110 @@ func TestReclaimSendsAnyReplicaOnlyWhenAsked(t *testing.T) {
 				t.Error("a sweep that disarmed the replica guard sent no any_replica; the server would keep it armed")
 			case anyReplica && !*body.AnyReplica:
 				t.Error("a sweep that disarmed the replica guard sent any_replica=false, want true")
+			}
+		})
+	}
+}
+
+// TestReclaimSendsDryRunOnlyWhenAsked pins the preview member on the way out:
+// absent from a real sweep's body, so a request that never asked for it stays
+// the request every server has accepted, and true when asked, because a client
+// that dropped it would run the real sweep a caller meant to preview.
+func TestReclaimSendsDryRunOnlyWhenAsked(t *testing.T) {
+	for name, dryRun := range map[string]bool{"unasked": false, "asked": true} {
+		t.Run(name, func(t *testing.T) {
+			store, w := recordingStore(t)
+			role, err := store.LeaseReclaimer()
+			if err != nil {
+				t.Fatalf("LeaseReclaimer(): %v", err)
+			}
+			if _, err := role.Reclaim(context.Background(), issueops.ReclaimRequest{
+				Actor:  "reaper",
+				Filter: issueops.ReclaimFilter{IDs: []string{"bd-1"}},
+				DryRun: dryRun,
+			}); err != nil {
+				t.Fatalf("Reclaim(): %v", err)
+			}
+			if len(w.requests) != 1 {
+				t.Fatalf("dialed %d times, want 1", len(w.requests))
+			}
+			body, ok := w.requests[0].Body.(apigen.ReclaimIssuesRequest)
+			if !ok {
+				t.Fatalf("the body is %T, want the generated ReclaimIssuesRequest", w.requests[0].Body)
+			}
+			switch {
+			case !dryRun && body.DryRun != nil:
+				t.Errorf("an unasked sweep sent dry_run=%v", *body.DryRun)
+			case dryRun && (body.DryRun == nil || !*body.DryRun):
+				t.Error("a preview did not send dry_run=true; the server would run the real sweep")
+			}
+		})
+	}
+}
+
+// reclaimAnswerWire answers a reclaim dial with a canned result, over the
+// recording double the other cases here use.
+type reclaimAnswerWire struct {
+	recordingWire
+	answer apigen.ReclaimIssuesResult
+}
+
+func (w *reclaimAnswerWire) Do(ctx context.Context, req wire.Request, out any) error {
+	if err := w.recordingWire.Do(ctx, req, out); err != nil {
+		return err
+	}
+	if body, ok := out.(*apigen.ReclaimIssuesResult); ok {
+		*body = w.answer
+	}
+	return nil
+}
+
+// TestReclaimReadsAPreviewsEmptyRevision pins the answer half of a dry run: the
+// server mints no revision for a previewed row, so the empty string is a valid
+// answer to a preview and the result echoes DryRun, while the same empty
+// string on a real sweep is still the malformed token this client refuses, and
+// a previewed row that does carry a token is held to the token's own rules.
+func TestReclaimReadsAPreviewsEmptyRevision(t *testing.T) {
+	row := func(revision string) apigen.ReclaimIssuesResult {
+		return apigen.ReclaimIssuesResult{Reclaimed: []types.ReclaimedLease{{ID: "bd-1", PreviousOwner: "w1", Revision: revision}}}
+	}
+	preview := row("")
+	preview.DryRun = true
+	badToken := row("007")
+	badToken.DryRun = true
+
+	for _, tc := range []struct {
+		name    string
+		dryRun  bool
+		answer  apigen.ReclaimIssuesResult
+		wantErr bool
+	}{
+		{"a preview with no revision", true, preview, false},
+		{"a real sweep with a revision", false, row("42"), false},
+		{"a real sweep with no revision", false, row(""), true},
+		{"a preview with a malformed revision", true, badToken, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &reclaimAnswerWire{answer: tc.answer}
+			role, err := New(testTarget(t), w, &apigen.ContextResponse{}).LeaseReclaimer()
+			if err != nil {
+				t.Fatalf("LeaseReclaimer(): %v", err)
+			}
+			result, err := role.Reclaim(context.Background(), issueops.ReclaimRequest{
+				Actor:  "reaper",
+				DryRun: tc.dryRun,
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Reclaim error = %v, want error %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if result.DryRun != tc.dryRun {
+				t.Errorf("result.DryRun = %v, want %v", result.DryRun, tc.dryRun)
+			}
+			if len(result.Reclaimed) != 1 || result.Reclaimed[0] != tc.answer.Reclaimed[0] {
+				t.Errorf("Reclaimed = %+v, want %+v", result.Reclaimed, tc.answer.Reclaimed)
 			}
 		})
 	}

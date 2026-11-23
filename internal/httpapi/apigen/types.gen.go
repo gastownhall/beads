@@ -1941,6 +1941,9 @@ type ReclaimIssuesRequest struct {
 	// Assignees Only leases held by one of these owners are eligible.
 	Assignees *[]string `json:"assignees,omitempty"`
 
+	// DryRun Report which leases the sweep would revert and change nothing. The refusals, the scope and the replica guard are the same ones the real sweep applies, computed against the same snapshot, and nothing is recorded in history either. Absent means `false`.
+	DryRun *bool `json:"dry_run,omitempty"`
+
 	// ExcludeLabels An issue carrying ANY of these labels is never eligible.
 	ExcludeLabels *[]string `json:"exclude_labels,omitempty"`
 
@@ -1957,9 +1960,12 @@ type ReclaimIssuesRequest struct {
 	OlderThanSeconds *float64 `json:"older_than_seconds,omitempty"`
 }
 
-// ReclaimIssuesResult Every row the sweep reverted, in the order the sweep found them.
+// ReclaimIssuesResult Every row the sweep reverted, in the order the sweep found them; under `dry_run`, every row it would revert.
 type ReclaimIssuesResult struct {
-	// Reclaimed One entry per reverted row. Empty array (never null) when nothing was stale in scope.
+	// DryRun Echoes the request, so a result carries whether its rows were reverted or would be.
+	DryRun bool `json:"dry_run"`
+
+	// Reclaimed One entry per reverted row (under `dry_run`, per row that would be reverted, each with an empty `revision`). Empty array (never null) when nothing was stale in scope.
 	Reclaimed []ReclaimedLease `json:"reclaimed"`
 }
 

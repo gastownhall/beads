@@ -66,6 +66,10 @@ func (l *httpLeaseReclaimer) Reclaim(ctx context.Context, req issueops.ReclaimRe
 		anyReplica := true
 		body.AnyReplica = &anyReplica
 	}
+	if req.DryRun {
+		dryRun := true
+		body.DryRun = &dryRun
+	}
 
 	var out apigen.ReclaimIssuesResult
 	if err := l.store.dispatch(ctx, wire.Request{
@@ -82,12 +86,18 @@ func (l *httpLeaseReclaimer) Reclaim(ctx context.Context, req issueops.ReclaimRe
 		// The revision is carried as the wire's decimal string, the role's own
 		// spelling; it is read here only to refuse an answer whose token no
 		// guarded write could use.
-		if _, err := parseRevision("LeaseReclaimer.Reclaim", entry.Revision); err != nil {
-			return issueops.ReclaimResult{}, err
+		//
+		// A dry run minted no revision, so its rows carry the empty string and
+		// the token check is for a real sweep only. A previewed row that does
+		// carry one is still checked, so a malformed token is never passed on.
+		if !req.DryRun || entry.Revision != "" {
+			if _, err := parseRevision("LeaseReclaimer.Reclaim", entry.Revision); err != nil {
+				return issueops.ReclaimResult{}, err
+			}
 		}
 		reclaimed = append(reclaimed, entry)
 	}
-	return issueops.ReclaimResult{Reclaimed: reclaimed}, nil
+	return issueops.ReclaimResult{DryRun: out.DryRun, Reclaimed: reclaimed}, nil
 }
 
 // validateReclaimRequest restates the role's refusals, in the role's order and

@@ -104,16 +104,32 @@ type ReclaimRequest struct {
 	// MORE THAN MaxReclaimIDs ENTRIES IN Filter.IDs IS A REFUSAL: a
 	// *TooManyReclaimIDsError, counted as sent, before deduplication.
 	Filter ReclaimFilter
+	// DryRun reports which leases the sweep would revert and changes nothing:
+	// no lease row is deleted, no issue is touched, and no recovery event,
+	// journal entry, version row or version-control commit is written. The
+	// result is otherwise the same result, computed from the same scoped
+	// snapshot the real sweep would have started from, with the same
+	// validation, the same filter and the same replica guard, which is what
+	// makes a preview worth reading. A lease a concurrent heartbeat rescues
+	// after the preview is still reverted or not by the real sweep on its own
+	// terms, so a preview is a forecast and not a promise.
+	DryRun bool
 }
 
 // ReclaimResult reports every issue a reclaim reverted, in the order the sweep
 // found them.
 type ReclaimResult struct {
-	// Reclaimed names every issue the sweep reverted, together with the owner
-	// each lease was taken from and the fresh revision the revert minted on
-	// each row. Never nil for a successful call, even when it is empty: a
-	// sweep that finds nothing stale answers with an empty, non-nil slice, the
-	// same promise GetManyResult.Issues makes.
+	// DryRun echoes the request. It is here so a result value carries whether
+	// Reclaimed names rows that were reverted or rows that would be, without
+	// the caller having to keep the request beside it.
+	DryRun bool
+	// Reclaimed names every issue the sweep reverted, or, under DryRun, would
+	// revert, together with the owner each lease was taken from and the fresh
+	// revision the revert minted on each row. Under DryRun no revision was
+	// minted, so every row's Revision is empty. Never nil for a successful
+	// call, even when it is empty: a sweep that finds nothing stale answers
+	// with an empty, non-nil slice, the same promise GetManyResult.Issues
+	// makes.
 	Reclaimed []ReclaimedLease
 }
 
@@ -133,7 +149,9 @@ type ReclaimResult struct {
 // assignee and status on each row it reverts, which is an update and is
 // already how the journal classifies it — see Releaser's identical
 // reasoning. There is no on_reclaim to fire and inventing one is not this
-// role's job.
+// role's job. A request with DryRun set is the one exception: it only reads,
+// so it writes nothing, records nothing, mints no version-control entry and
+// fires no hook.
 //
 // Reclaim only ever touches the permanent issues table: wisps are ephemeral
 // and are never leased work (see internal/storage/issueops.
@@ -162,6 +180,11 @@ type LeaseReclaimer interface {
 	// the snapshot and its row's revert is simply skipped — it never appears
 	// in Reclaimed, and is not an error.
 	//
+	// Under DryRun it only reads. The transaction takes the same scoped
+	// snapshot and reports it as Reclaimed, with an empty Revision on each
+	// row, and goes no further: nothing is deleted, updated or recorded, so
+	// the leases and the issues are as the call found them.
+	//
 	// REFUSALS:
 	//
 	//   - an empty or all-blank Actor, or one longer than types.MaxFieldLen
@@ -175,7 +198,7 @@ type LeaseReclaimer interface {
 	//     caller meant to name.
 	//
 	// Every ErrValidation refusal but the cap is a *ReclaimFieldError naming
-	// its field.
+	// its field. A dry run refuses exactly where the real sweep would.
 	//
 	// A sweep that finds no stale leases is not a refusal: it answers an empty,
 	// non-nil Reclaimed.

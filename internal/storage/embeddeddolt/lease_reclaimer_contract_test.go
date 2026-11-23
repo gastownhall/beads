@@ -61,6 +61,15 @@ func TestLeaseReclaimerContract(t *testing.T) {
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunLeaseReclaimerDoesNotMutateTheCallerRequest(t, ctx, fixture)
 	})
+	t.Run("DryRunNamesTheRowsAndChangesNothing", func(t *testing.T) {
+		conformance.RunLeaseReclaimerDryRunNamesTheRowsAndChangesNothing(t, ctx, fixture)
+	})
+	t.Run("DryRunRefusesWhereTheSweepRefuses", func(t *testing.T) {
+		conformance.RunLeaseReclaimerDryRunRefusesWhereTheSweepRefuses(t, ctx, fixture)
+	})
+	t.Run("DryRunFiresNoHook", func(t *testing.T) {
+		conformance.RunLeaseReclaimerDryRunFiresNoHook(t, ctx, fixture)
+	})
 }
 
 func newEmbeddedLeaseReclaimerFixture(t *testing.T, te *testEnv, prefix string) conformance.LeaseReclaimerFixture {

@@ -29,10 +29,13 @@ type hookLeaseReclaimer struct {
 	hooks issueOperationHooks
 }
 
-// Reclaim fires the update hook once for every row the sweep reverted.
+// Reclaim fires the update hook once for every row the sweep reverted. A dry
+// run reverted nothing, so it fires nothing: the rows it names are still
+// leased and still assigned, and an on_update for them would announce a change
+// that did not happen.
 func (r *hookLeaseReclaimer) Reclaim(ctx context.Context, request issueops.ReclaimRequest) (issueops.ReclaimResult, error) {
 	result, err := r.inner.Reclaim(ctx, request)
-	if err != nil {
+	if err != nil || result.DryRun {
 		return result, err
 	}
 	for _, reclaimed := range result.Reclaimed {

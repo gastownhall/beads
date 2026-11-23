@@ -939,6 +939,23 @@ func reclaimReplicaSQL(filter types.ReclaimFilter, localNode string) (string, []
 // label removed mid-reclaim cannot smuggle an out-of-scope issue into the
 // revert.
 func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
+	return reclaimExpiredLeasesInTx(ctx, tx, cutoff, filter, actor, false)
+}
+
+// previewExpiredLeasesInTx answers what ReclaimExpiredLeasesInTx would revert
+// for the same cutoff and filter, and changes nothing. It is the dry-run
+// sibling ExecuteReclaimInTx calls for a request with DryRun set: the same
+// scoped snapshot SELECT, the same replica guard and the same foreign-replica
+// skip summary, then it stops. No lease row is deleted, no issue is updated,
+// and no event, journal row or version row is recorded, so the rows it returns
+// carry no Revision.
+func previewExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter) ([]types.ReclaimedLease, error) {
+	return reclaimExpiredLeasesInTx(ctx, tx, cutoff, filter, "", true)
+}
+
+// reclaimExpiredLeasesInTx is the one body behind both. dryRun stops it after
+// the snapshot and the skip summary, which are the only reads it makes.
+func reclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter, actor string, dryRun bool) ([]types.ReclaimedLease, error) {
 	// Snapshot the stale set first so we can report exactly which issues we
 	// reverted and record per-issue recovery events. The DELETE below repeats
 	// the expiry predicate, so an issue that a concurrent heartbeat rescued
@@ -992,6 +1009,11 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 
 	if len(stale) == 0 {
 		return nil, nil
+	}
+	if dryRun {
+		// The snapshot is the preview: every write below is what a real sweep
+		// adds to it, and none of them may run here.
+		return stale, nil
 	}
 
 	var reclaimed []types.ReclaimedLease

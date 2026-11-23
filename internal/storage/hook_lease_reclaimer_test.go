@@ -20,7 +20,7 @@ func (f *fakeLeaseReclaimer) Reclaim(context.Context, issueops.ReclaimRequest) (
 
 // TestHookLeaseReclaimerFiresOncePerReclaimedRow is the decorator's whole
 // subject: one on_update completion for every row the sweep reverted, in the
-// sweep's order, and none at all for a refusal — even a refusal that somehow
+// sweep's order, none for a dry run, and none at all for a refusal — even a refusal that somehow
 // carries rows, because the role leaves its result unspecified on error.
 func TestHookLeaseReclaimerFiresOncePerReclaimedRow(t *testing.T) {
 	for _, test := range []struct {
@@ -38,6 +38,14 @@ func TestHookLeaseReclaimerFiresOncePerReclaimedRow(t *testing.T) {
 		{
 			name:  "a sweep that reverted nothing fires nothing",
 			inner: &fakeLeaseReclaimer{result: issueops.ReclaimResult{Reclaimed: []issueops.ReclaimedLease{}}},
+		},
+		{
+			// The rows a preview names are still leased and assigned, so an
+			// on_update for them would announce a change that never happened.
+			name: "a dry run fires nothing",
+			inner: &fakeLeaseReclaimer{result: issueops.ReclaimResult{DryRun: true, Reclaimed: []issueops.ReclaimedLease{
+				{ID: "bd-1"}, {ID: "bd-2"},
+			}}},
 		},
 		{
 			name:  "a refusal fires nothing",
