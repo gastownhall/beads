@@ -194,6 +194,17 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// the wisp tables must use the frozen source text instead -- see
 		// cliSubstituteAssumesWispTables.
 		return cliMigration0073AddArrivalSeq
+	case "0075_add_closed_by.up.sql":
+		// Direct DDL for the same reason as 0073: the source migration's
+		// PREPARE guards (INFORMATION_SCHEMA probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. Both planes always
+		// need the column here -- a fresh bundle runs the whole main series
+		// in order, so `issues` and `wisps` both exist and neither carries
+		// closed_by yet. Replays over a database that never synced the wisp
+		// tables must use the frozen source text instead -- see
+		// cliSubstituteAssumesWispTables.
+		return cliMigration0075AddClosedBy
 	default:
 		return sqlText
 	}
@@ -238,6 +249,10 @@ func cliSubstituteAssumesWispTables(name string) bool {
 	case "0073_add_arrival_seq.up.sql":
 		// cliMigration0073AddArrivalSeq drops the source's @has_wisps
 		// table-exists guard and ALTERs and indexes wisps directly.
+		return true
+	case "0075_add_closed_by.up.sql":
+		// cliMigration0075AddClosedBy drops the source's wisps table-exists
+		// guard and ALTERs wisps directly.
 		return true
 	default:
 		return false
@@ -359,6 +374,11 @@ const cliMigration0071AddRemovedRestriction = `ALTER TABLE issue_versions ADD CO
 const cliMigration0073AddArrivalSeq = `ALTER TABLE issues ADD COLUMN arrival_seq BIGINT;
 ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT;
 CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);`
+
+// cliMigration0075AddClosedBy is 0075 with its two guarded PREPARE blocks
+// replaced by the direct ALTERs they would run on a fresh database.
+const cliMigration0075AddClosedBy = `ALTER TABLE issues ADD COLUMN closed_by VARCHAR(255) DEFAULT '';
+ALTER TABLE wisps ADD COLUMN closed_by VARCHAR(255) DEFAULT '';`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');
