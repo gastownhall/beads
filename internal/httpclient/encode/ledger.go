@@ -1115,6 +1115,20 @@ func commandRows() []Row {
 		}
 		return Row{ID: id, Kind: KindRefuse, Command: command, Flag: flag, What: what, Why: why, SpecRow: "D7", PinnedBy: pinned}
 	}
+	// The three --ttl rows are one refusal on three commands, pinned where it
+	// is raised: the test drives the real cobra commands against a remote
+	// store and requires the refusal before any role is reached. operation is
+	// the wire operation that would have carried the length.
+	leaseTTLRow := func(id, command, what, operation string) Row {
+		return Row{
+			ID: id, Kind: KindRefuse, Command: command, Flag: "--ttl",
+			What: what,
+			Why: "the lease is granted in the server process and " + operation + " has no member for its length: locally the length rides a context value (internal/storage/issueops WithLeaseTTL), which does not cross the wire. " +
+				"Sending the request without it would grant the server's default lease to a worker that asked for a longer one, and `bd reclaim` would take the claim away while that worker still holds it",
+			SpecRow:  "D7",
+			PinnedBy: "TestLeaseTTLIsRefusedOnTheRemoteBackendRoute",
+		}
+	}
 	return []Row{
 		row("F-ready-explain", "ready", "--explain", "`bd ready --explain` refuses",
 			"it dispatches onto raw GetBlockedIssues/GetIssuesByIDs/GetDependencyCounts/DetectCycles, three of which are on the unsupported allowlist"),
@@ -1130,6 +1144,9 @@ func commandRows() []Row {
 			"showIssueChildren's --json marshals the full GetDependentsWithMetadata rows, the same collectDependents shallow projection as --refs, so created_at/assignee/description come back zeroed over http. `bd children` is NOT this flag: it is a `bd list --parent` listing, served through the reader role (S6c)"),
 		row("F-mol-ready", "mol ready", "", "`bd mol ready` refuses",
 			"it is the same runMolReadyGatedCore body as `bd ready --gated`"),
+		leaseTTLRow("F-update-ttl", "update", "`bd update --claim --ttl` refuses", "claimIssue"),
+		leaseTTLRow("F-ready-ttl", "ready", "`bd ready --claim --ttl` refuses", "claimNextIssue"),
+		leaseTTLRow("F-heartbeat-ttl", "heartbeat", "`bd heartbeat --ttl` refuses", "heartbeatIssue"),
 		{
 			ID: "F-blocked", Kind: KindRetired, Command: "blocked",
 			What:    "RETIRED — `bd blocked` is SERVED whole",

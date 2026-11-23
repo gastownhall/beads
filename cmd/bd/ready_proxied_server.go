@@ -184,7 +184,7 @@ func runReadyProxiedClaim(ctx context.Context, in readyInput) error {
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	res, err := claimer.ClaimNext(ctx, claimNextRequest(in))
+	res, err := claimer.ClaimNext(withLeaseTTL(ctx, in.leaseTTL), claimNextRequest(in))
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}

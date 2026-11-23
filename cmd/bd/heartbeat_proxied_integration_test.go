@@ -243,4 +243,47 @@ func TestProxiedServerHeartbeat(t *testing.T) {
 			t.Errorf("refresh heartbeat minted Dolt commits: %d -> %d, want none", commitsAfter, commitsRefresh)
 		}
 	})
+
+	t.Run("ttl_sets_the_lease_per_call", func(t *testing.T) {
+		// --ttl on the proxied route: the context value reaches the lease
+		// code in this process, through the provider's own roles. Each step
+		// asserts the expiry lands at now plus the length that call was
+		// given, widened by the second the DATETIME column rounds to.
+		requireExpiry := func(t *testing.T, step, id string, start, end time.Time, ttl time.Duration) {
+			t.Helper()
+			_, expires, _, ok := leaseRow(t, id)
+			if !ok {
+				t.Fatalf("%s: %s has no lease row", step, id)
+			}
+			lo, hi := start.Add(ttl).Add(-time.Second), end.Add(ttl).Add(time.Second)
+			if expires.Before(lo) || expires.After(hi) {
+				t.Errorf("%s: %s lease expires at %s, want now + %v (between %s and %s)", step, id, expires, ttl, lo, hi)
+			}
+		}
+		run := func(t *testing.T, args ...string) (time.Time, time.Time) {
+			t.Helper()
+			start := time.Now().UTC()
+			out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, append([]string{"--actor", "ttl-worker"}, args...)...)
+			if err != nil {
+				t.Fatalf("bd %v: %v\nstdout:\n%s\nstderr:\n%s", args, err, out, stderr)
+			}
+			return start, time.Now().UTC()
+		}
+
+		issue := bdProxiedCreate(t, bd, p.dir, "TTL claim", "--type", "task")
+		start, end := run(t, "update", issue.ID, "--claim", "--ttl", "2h")
+		requireExpiry(t, "update --claim --ttl 2h", issue.ID, start, end, 2*time.Hour)
+
+		start, end = run(t, "heartbeat", issue.ID, "--ttl", "4h")
+		requireExpiry(t, "heartbeat --ttl 4h", issue.ID, start, end, 4*time.Hour)
+
+		// The TTL is per call: a heartbeat without --ttl resets the expiry
+		// to now plus the default.
+		start, end = run(t, "heartbeat", issue.ID)
+		requireExpiry(t, "heartbeat without --ttl", issue.ID, start, end, 5*time.Minute)
+
+		ready := bdProxiedCreate(t, bd, p.dir, "TTL ready claim", "--type", "task", "--labels", "ttl-ready-proxied")
+		start, end = run(t, "ready", "--claim", "--ttl", "3h", "--label", "ttl-ready-proxied", "--json")
+		requireExpiry(t, "ready --claim --ttl 3h", ready.ID, start, end, 3*time.Hour)
+	})
 }

@@ -172,6 +172,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--ttl <duration>` on `bd update --claim`, `bd ready --claim` and
+  `bd heartbeat`: a worker chooses its lease length.** A claim's lease
+  expired five minutes after the claim or the last heartbeat, and only an
+  in-process caller could change that; a worker that shells out to bd had to
+  heartbeat inside five minutes or lose its claim to `bd reclaim`. `--ttl`
+  takes a Go duration (`30m`, `2h`) and sets the lease the command arms or
+  refreshes to expire that long from now. The length is per call: a
+  heartbeat without `--ttl` resets the expiry to now plus the default, so a
+  worker that claimed with `--ttl 2h` passes `--ttl 2h` on every heartbeat. A
+  zero or negative duration, and `--ttl` without `--claim` on `bd update` or
+  `bd ready`, are usage errors. A re-claim of an issue the actor already
+  holds leaves the lease as it was and says so on stderr, and so does a claim
+  of a wisp, which has no lease. The flag is honored on the embedded, Dolt
+  server and proxied-server routes, and refused on the remote `bd serve`
+  backend, whose claim and heartbeat requests carry no lease length
+  (divergence ledger rows `F-update-ttl`, `F-ready-ttl` and
+  `F-heartbeat-ttl`). Without the flag nothing changes.
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,

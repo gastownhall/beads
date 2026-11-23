@@ -42,6 +42,9 @@ type updateInput struct {
 	// --if-assignee guard rides the command; it also opts into the notes
 	// overwrite and close-policy bypasses (runCommandUpdateMutation).
 	force bool
+	// leaseTTL is --ttl, the lease length a --claim arms; 0 keeps the store's
+	// default.
+	leaseTTL time.Duration
 }
 
 // normalizeAssigneeInput folds the hidden-empty spellings of an assignee
@@ -273,6 +276,9 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	in.unsetMetadata = unsetMetadataFlags
 
 	in.claim, _ = cmd.Flags().GetBool("claim")
+	// Already validated by updateCmd's RunE above the route dispatch
+	// (leaseTTLFromFlags); an absent --ttl reads as 0, the store's default.
+	in.leaseTTL, _ = cmd.Flags().GetDuration(leaseTTLFlagName)
 
 	// bd-wsqvw conditional-update guards, mirroring the non-proxied path's
 	// updateGuardsFromFlags rules: Changed()-detected presence (so

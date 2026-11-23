@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -51,6 +52,12 @@ func newReadyFlagsCommand(t *testing.T, args ...string) *cobra.Command {
 				t.Fatalf("--%s has a non-empty array default %q, which this clone does not reproduce", f.Name, f.DefValue)
 			}
 			cmd.Flags().StringArray(f.Name, nil, f.Usage)
+		case "duration":
+			d, err := time.ParseDuration(f.DefValue)
+			if err != nil {
+				t.Fatalf("--%s has non-duration default %q: %v", f.Name, f.DefValue, err)
+			}
+			cmd.Flags().Duration(f.Name, d, f.Usage)
 		default:
 			t.Fatalf("--%s has unhandled flag type %q", f.Name, f.Value.Type())
 		}

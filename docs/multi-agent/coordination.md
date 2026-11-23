@@ -26,6 +26,31 @@ bd assign bd-42 ""              # clear the assignee
 bd update bd-42 --status open   # make it claimable again
 ```
 
+### Claim Leases and Heartbeats
+
+A claim carries a lease. The worker keeps the lease alive with `bd heartbeat`;
+a worker that dies stops heartbeating, its lease expires, and `bd reclaim`
+puts the issue back on the ready list for another worker. The lease lasts five
+minutes from the claim or the last heartbeat unless the command is given
+`--ttl`:
+
+```bash
+# Claim with a two-hour lease
+bd update bd-42 --claim --ttl 2h
+bd ready --claim --ttl 2h --json
+
+# Keep it alive: each heartbeat sets the expiry to now plus its own --ttl
+bd heartbeat bd-42 --ttl 2h
+```
+
+The length is per call. A heartbeat without `--ttl` resets the expiry to now
+plus the five-minute default, even on a claim made with a longer `--ttl`, so
+pass the same `--ttl` on every heartbeat. A re-claim of an issue you already
+hold leaves its lease as it was (bd says so on stderr); use
+`bd heartbeat --ttl` to change it. A wisp has no lease, so `--ttl` on a wisp
+claim is reported on stderr as not applied. `--ttl` is refused on a remote
+`bd serve` backend, whose requests carry no lease length.
+
 ### Checking Assigned Work
 
 ```bash

@@ -40,6 +40,7 @@ go_test(
     # own BUILD.bazel.
     data = [
         "//:engdocs/design/http-divergence-ledger.md",
+        "//cmd/bd:lease_ttl_flag_test.go",
         "//cmd/bd:serve_test.go",
         "//internal/httpapi/spec:openapi.v0.yaml",
         "//internal/httpclient:bulk_roles_test.go",

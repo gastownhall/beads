@@ -48,6 +48,10 @@ type commandUpdateMutation struct {
 	// backend's default, which is what the direct route wants; the proxied
 	// route spells the message it has always written.
 	provenance string
+	// leaseTTL is --ttl: the length of the lease a claim arms, or 0 for the
+	// store's default. It rides the context (withLeaseTTL), which reaches the
+	// lease code on every route this function serves.
+	leaseTTL time.Duration
 }
 
 // runCommandUpdateMutation maps a command update into its lifecycle request and
@@ -61,7 +65,7 @@ type commandUpdateMutation struct {
 // deliberately independent of ExpectedAssignee — so --force paired with
 // --if-assignee still drives the notes and close-policy halves.
 func runCommandUpdateMutation(ctx context.Context, updater commandIssueUpdater, mutation commandUpdateMutation) (issueops.UpdateResult, error) {
-	return updater.Update(ctx, issueops.UpdateRequest{
+	return updater.Update(withLeaseTTL(ctx, mutation.leaseTTL), issueops.UpdateRequest{
 		Actor:                 mutation.actor,
 		IssueID:               mutation.issueID,
 		Patch:                 mutation.patch,
@@ -126,6 +130,15 @@ pointless).`,
 		// update. See bd-5247.
 		if err := errStrayFlagValuePositional(args); err != nil {
 			return HandleErrorRespectJSON("%s", err)
+		}
+
+		// --ttl is decided above the route dispatch, so both routes refuse
+		// the same misuse before anything is read or written. The proxied
+		// route reads the validated value back in gatherUpdateInput.
+		claimForTTL, _ := cmd.Flags().GetBool("claim")
+		leaseTTL, err := leaseTTLFromFlags(cmd, "--claim", claimForTTL)
+		if err != nil {
+			return err
 		}
 
 		if usesProxiedServer() {
@@ -511,6 +524,15 @@ pointless).`,
 			issue := result.Issue
 			issueStore := result.Store
 
+			// Checked per id against the store that owns the issue, because a
+			// routed id can live behind a different backend than the local one.
+			if err := leaseTTLRemoteRefusal(issueStore, leaseTTL, "claim"); err != nil {
+				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+				recordFailure(id, err.Error())
+				closeIfUnmutated(result)
+				continue
+			}
+
 			// The template guard is the role's (issueops.Lifecycle.Update),
 			// enforced inside the mutation on every route; its refusal is
 			// printed below as the line this command always printed.
@@ -588,6 +610,7 @@ pointless).`,
 				expectedAssignee: ifAssignee,
 				expectedStatus:   expectedStatus,
 				expectedVersion:  ifRevision,
+				leaseTTL:         leaseTTL,
 			})
 			if updateErr != nil {
 				// A8 (beads#4682): an active --if-revision guard reports
@@ -631,6 +654,9 @@ pointless).`,
 			}
 			updatedIssue := updateResult.Issue
 			trackMutation(result)
+			if claimFlag {
+				warnLeaseTTLNotApplied(result.ResolvedID, issue, currentActor(), leaseTTL)
+			}
 			if notesOverwritten {
 				notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
 			}
@@ -1123,6 +1149,7 @@ func init() {
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too; refused while the issue has an open local blocker unless --force)")
+	addLeaseTTLFlag(updateCmd, claimLeaseTTLUsage)
 	// Overrides the live-claim reassign fence (bd-98s5c), close policy and the
 	// blocked-claim refusal.
 	updateCmd.Flags().Bool("force", false, "Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead), and let --claim take an issue that still has an open local blocker (an unresolved external dependency still refuses the claim)")

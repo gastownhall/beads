@@ -82,6 +82,7 @@
 100 18 TestEmbeddedPrune_protectsBeadCitedByCustomStatusBead
 
 100 19 TestEmbeddedLabelConcurrent
+100 19 TestEmbeddedLeaseTTLFlagArmsTheLease
 100 19 TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase
 
 100 20 TestEmbeddedDoctorExportCheckMissingFileWarns
