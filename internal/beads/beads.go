@@ -1328,10 +1328,10 @@ func ExplicitBeadsDir() string {
 }
 
 // ProjectRootNamedAsBeadsDir reports the mistake of pointing BEADS_DIR at a
-// project root instead of at the .beads directory inside it: beadsDir holds
-// no workspace of its own, and the .beads directory directly inside it does
-// (or redirects to one). It returns that .beads directory, the path the
-// caller most likely meant.
+// project root instead of at the .beads directory inside it: beadsDir is not
+// a beads directory itself, and the .beads directory directly inside it holds
+// a workspace (or redirects to one). It returns that .beads directory, the
+// path the caller most likely meant.
 //
 // An explicit BEADS_DIR is authoritative, so discovery does not look inside
 // or above the directory it names. That is right for every command that uses
@@ -1339,15 +1339,20 @@ func ExplicitBeadsDir() string {
 // one, so without this check it writes a second workspace into the project
 // root, beside the real one (GH#7034).
 //
-// A beadsDir that is itself a workspace is never reported, whatever it
-// contains: the caller named a real workspace, and init has its own answer
-// for one that is already initialized.
+// What makes beadsDir a beads directory of its own, and so never reported:
+// it is named .beads, it holds a redirect, or it holds beads metadata. The
+// looser test discovery uses (any config.yaml, metadata.json, *.db, dolt or
+// embeddeddolt entry) is not used for it, because a project root often holds
+// a config.yaml, a metadata.json or a database file of its own, and an
+// earlier bd command run with the same slip can leave an embeddeddolt
+// directory there. None of those says the root was meant as the workspace
+// while a real one sits in its .beads.
 func ProjectRootNamedAsBeadsDir(beadsDir string) (string, bool) {
 	if beadsDir == "" {
 		return "", false
 	}
 	named := utils.CanonicalizePath(beadsDir)
-	if hasBeadsProjectFiles(FollowRedirect(named)) {
+	if filepath.Base(named) == ".beads" {
 		return "", false
 	}
 	nested := filepath.Join(named, ".beads")
@@ -1357,7 +1362,22 @@ func ProjectRootNamedAsBeadsDir(beadsDir string) (string, bool) {
 	if !hasBeadsProjectFiles(FollowRedirect(nested)) {
 		return "", false
 	}
+	if FollowRedirect(named) != named || holdsBeadsMetadata(named) {
+		return "", false
+	}
 	return nested, true
+}
+
+// holdsBeadsMetadata reports whether dir holds a metadata.json (or the legacy
+// config.json) that beads wrote: one that parses and names a backend, a
+// database or a Dolt mode. A file of that name with none of them belongs to
+// something else. It reads without migrating, so asking has no effect.
+func holdsBeadsMetadata(dir string) bool {
+	cfg, err := configfile.LoadForDiscovery(dir)
+	if err != nil || cfg == nil {
+		return false
+	}
+	return cfg.Backend != "" || cfg.Database != "" || cfg.DoltMode != "" || cfg.DoltDatabase != ""
 }
 
 // FindBeadsDir finds the .beads/ directory in the current directory tree.

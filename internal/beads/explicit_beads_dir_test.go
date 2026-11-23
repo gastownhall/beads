@@ -116,7 +116,8 @@ func TestFindBeadsDir_UnsetBEADS_DIRStillWalksUp(t *testing.T) {
 }
 
 // TestProjectRootNamedAsBeadsDir pins the one shape the helper reports: a
-// directory that holds no workspace itself and whose .beads does (GH#7034).
+// directory that is not a beads directory itself and whose .beads holds a
+// workspace (GH#7034).
 // Every neighbouring shape is a BEADS_DIR that `bd init` may initialize, or
 // one init already answers for, so it must not be reported.
 func TestProjectRootNamedAsBeadsDir(t *testing.T) {
@@ -126,6 +127,12 @@ func TestProjectRootNamedAsBeadsDir(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"backend":"dolt","dolt_database":"real"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	foreignFile := func(t *testing.T, path, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -175,6 +182,49 @@ func TestProjectRootNamedAsBeadsDir(t *testing.T) {
 		{name: "a workspace that also contains a .beads workspace", setup: func(t *testing.T, root string) string {
 			workspaceAt(t, root)
 			workspaceAt(t, filepath.Join(root, ".beads"))
+			return root
+		}},
+		{name: "directory holding a redirect that also contains a .beads workspace", setup: func(t *testing.T, root string) string {
+			real := filepath.Join(t.TempDir(), ".beads")
+			workspaceAt(t, real)
+			if err := os.WriteFile(filepath.Join(root, RedirectFileName), []byte(real+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			workspaceAt(t, filepath.Join(root, ".beads"))
+			return root
+		}},
+		{name: "a .beads directory with a stray .beads workspace nested in it", setup: func(t *testing.T, root string) string {
+			outer := filepath.Join(root, ".beads")
+			workspaceAt(t, filepath.Join(outer, ".beads"))
+			return outer
+		}},
+		// A project root holds files of its own. None of these makes it the
+		// workspace while the real one sits in its .beads.
+		{name: "project root with its own config.yaml", want: true, setup: func(t *testing.T, root string) string {
+			workspaceAt(t, filepath.Join(root, ".beads"))
+			foreignFile(t, filepath.Join(root, "config.yaml"), "server:\n  port: 8080\n")
+			return root
+		}},
+		{name: "project root with a metadata.json that is not beads metadata", want: true, setup: func(t *testing.T, root string) string {
+			workspaceAt(t, filepath.Join(root, ".beads"))
+			foreignFile(t, filepath.Join(root, "metadata.json"), `{"name":"app","version":"1.0"}`)
+			return root
+		}},
+		{name: "project root with a metadata.json that is not JSON", want: true, setup: func(t *testing.T, root string) string {
+			workspaceAt(t, filepath.Join(root, ".beads"))
+			foreignFile(t, filepath.Join(root, "metadata.json"), "not json")
+			return root
+		}},
+		{name: "project root with an application database file", want: true, setup: func(t *testing.T, root string) string {
+			workspaceAt(t, filepath.Join(root, ".beads"))
+			foreignFile(t, filepath.Join(root, "app.db"), "x")
+			return root
+		}},
+		{name: "project root with a stray embeddeddolt directory", want: true, setup: func(t *testing.T, root string) string {
+			workspaceAt(t, filepath.Join(root, ".beads"))
+			if err := os.MkdirAll(filepath.Join(root, "embeddeddolt", "beads"), 0o700); err != nil {
+				t.Fatal(err)
+			}
 			return root
 		}},
 	}

@@ -1489,7 +1489,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into the project root, beside the real workspace. Init now refuses with
   exit 1 before it creates anything, `--force` included, and names the
   `.beads` directory that was meant. A project root whose `.beads` holds only
-  a redirect to a workspace is refused the same way. In the same situation
+  a redirect to a workspace is refused the same way, and so is a project root
+  that holds files of its own which discovery reads as workspace files (a
+  `config.yaml`, a `metadata.json` that is not beads metadata, a `*.db`
+  file). In the same situation
   the "no beads database found" error of every other command now adds a note
   that `BEADS_DIR` is set to a directory with no workspace and names the
   `.beads` directory inside it. A `BEADS_DIR` that names a new or empty

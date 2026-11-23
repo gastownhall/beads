@@ -503,8 +503,9 @@ func guardInitInHomeDir() (keepHomeClean bool, err error) {
 //
 // It reads the live BEADS_DIR, the same value RunE resolves init's target
 // from, so it judges exactly the directory init is about to write into. A
-// beads dir the root pre-run exported for itself always holds a workspace, so
-// it is never refused here.
+// beads dir the root pre-run exported for itself came from discovery, which
+// returns a directory named .beads or a redirect's target, and the helper
+// never reports a directory named .beads or one holding beads metadata.
 //
 // Like guardInitInHomeDir this runs ahead of everything with an effect, the
 // proxied dispatch included, so both init routes refuse before they create
