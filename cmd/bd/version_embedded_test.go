@@ -85,9 +85,11 @@ var versionLinePattern = regexp.MustCompile(`^bd version (\S+) \(([^):]+)(?:: (?
 // one:
 //   - with no arguments it exits 0 and prints exactly one line on stdout,
 //     "bd version <version> (<build>...)";
-//   - --json prints one object with version, build and schema_version, plus
-//     commit and branch when known, and no other key; its version and build
-//     agree with the text line, and --format json prints the same document;
+//   - --json prints one object with version, build, schema_version,
+//     latest_schema_migration and latest_ignored_schema_migration (each a
+//     number of at least 1), plus commit and branch when known, and no other
+//     key; its version and build agree with the text line, and --format json
+//     prints the same document;
 //   - an argument is refused with exit 1 and points at `bd versions <arg>`
 //     (#6661): on stderr in text mode, as the JSON error on stdout with
 //     --json, and without the version line either way.

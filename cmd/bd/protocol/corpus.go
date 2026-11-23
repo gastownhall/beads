@@ -327,15 +327,23 @@ var provenanceValueKeys = map[string]string{
 // source tree: `bd version --json` reports the newest migration the binary
 // embeds in each series. Pinning the literal would make every pull request
 // that adds a migration regenerate the corpus, so the corpus pins that the
-// fields exist and are numbers, and replaces the number with a placeholder.
-// Only a JSON number is replaced: a string or null under one of these keys is
-// a wire change and must show in the diff. Same bare-key-name scope caveat as
-// the provenance transforms below: both keys are emitted only by
-// `bd version --json`.
-var migrationNumberKeys = map[string]string{
-	"latest_schema_migration":         "<MIGRATION>",
-	"latest_ignored_schema_migration": "<MIGRATION>",
+// fields exist and are numbers, and replaces the number with
+// migrationPlaceholder. Only a JSON number is replaced: a string or null under
+// one of these keys is a wire change and must show in the diff. Same
+// bare-key-name scope caveat as the provenance transforms below: both keys are
+// emitted only by `bd version --json`.
+var migrationNumberKeys = map[string]json.Number{
+	"latest_schema_migration":         migrationPlaceholder,
+	"latest_ignored_schema_migration": migrationPlaceholder,
 }
+
+// migrationPlaceholder stands in for a migration number. Unlike the other
+// placeholders it is not a string: bd emits these fields as JSON numbers, and a
+// consumer that replays the corpus through a decoder with integer fields must
+// accept the blob as it accepts live output. Its value means nothing; 1 is the
+// first migration number of each series, so the blob still holds a number live
+// output can carry.
+const migrationPlaceholder = json.Number("1")
 
 // revisionPlaceholder is the canonical stand-in for a guarded-write revision
 // (row_lock) token value.
@@ -513,9 +521,9 @@ func canonValue(v any, pr projector) any {
 					continue
 				}
 			}
-			// Replace the binary's migration numbers with a placeholder: pin
-			// that bd version reports them as numbers, not how many migrations
-			// the tree holds today.
+			// Replace the binary's migration numbers with a numeric
+			// placeholder: pin that bd version reports them as numbers, not
+			// how many migrations the tree holds today.
 			if ph, ok := migrationNumberKeys[k]; ok {
 				if _, isNum := child.(json.Number); isNum {
 					t[k] = ph

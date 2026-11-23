@@ -34,13 +34,20 @@ so a `bd` release can never silently change a wire shape the consumer parses.
   `TestCorpusDoubleRunByteIdentical`, the determinism backstop that generates
   the corpus twice and asserts byte-identity.
 
-Regenerate after any deliberate wire change: `make corpus-regen`, review the
-diff, **and bump `JSONSchemaVersion` (`cmd/bd/output.go`)** — the `schema_version`
-field in every blob is the coordination canary a downstream consumer keys its
-pinned-decoder migration off. Adding a capture is not a wire change: it adds
-blobs and leaves every existing one byte-identical, so it does not bump
-`JSONSchemaVersion`. New captures go after the existing ones
-(`TestCorpusPlanIsWellFormed` holds the order).
+Regenerate after any deliberate wire change: `make corpus-regen`, then review
+the diff. **Bump `JSONSchemaVersion` (`cmd/bd/output.go`) when the change
+renames or removes a field, changes a field's type, or changes the output
+structure (nesting depth)** — the `schema_version` field in every blob is the
+coordination canary a downstream consumer keys its pinned-decoder migration
+off. Adding a field to an existing blob does not bump it, following the rule
+in `docs/reference/json-schema.md` that additive changes (new optional fields)
+do not bump the version: releases before the change never emit the field, so
+a consumer must already treat it as optional. #5353 added `revision` to `show`
+and #8604 added the migration numbers to `version`, neither with a bump.
+Adding a capture is not a wire change either: it adds blobs and leaves every
+existing one byte-identical, so it does not bump `JSONSchemaVersion`. New
+captures go after the existing ones (`TestCorpusPlanIsWellFormed` holds the
+order).
 
 ## Coverage
 
@@ -57,7 +64,7 @@ blobs and leaves every existing one byte-identical, so it does not bump
 | `dep_remove` | `bd dep remove … --json` | dependency-edge removal confirmation |
 | `delete` | `bd delete --force … --json` | delete confirmation shape |
 | `count` | `bd count --json` | json-output-shapes (scalar) |
-| `version` | `bd version --json` | version-compat, the `schema_version` canary, the binary's migration numbers (presence only) |
+| `version` | `bd version --json` | version-compat, the `schema_version` canary, the binary's migration numbers (presence and number type; the value is the placeholder `1`) |
 | `error` | `bd show <missing> --json` | exit-codes-and-errors (`{error, schema_version}`) |
 
 ### Native-fix captures

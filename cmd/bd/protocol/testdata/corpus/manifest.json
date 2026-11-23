@@ -193,7 +193,7 @@
     },
     "envelope/version": {
       "cmd": "bd version --json",
-      "sha256": "cef200c4660954740e153bf92f6f6129297ddc0d30de8cd6f5187503cc048466"
+      "sha256": "7d7a15ac287cf165b28bb111de5c2e84a77c388e978157baaecee4f2f3e86d18"
     },
     "flat/close": {
       "cmd": "bd close --force --json --reason \"corpus close reason exceeding twenty chars\" corpus-closed",
@@ -385,7 +385,7 @@
     },
     "flat/version": {
       "cmd": "bd version --json",
-      "sha256": "b042e7d348ceeb908657e840e68a44f4aaa46c0a9f6c7de2583086e0564c4894"
+      "sha256": "f13d469034d2f152ab209a5a37892835b69694d2a04ed9cbaa1c1dbdf8cc47ef"
     }
   }
 }

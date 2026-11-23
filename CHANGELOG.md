@@ -182,7 +182,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command of that binary runs against the database; until now the numbers
   could only be read from the source tree. They are not the existing
   `schema_version` field, which is the version of the JSON output contract and
-  is unchanged. The text form of `bd version` is unchanged.
+  is unchanged. The text form of `bd version` is unchanged. Binaries released
+  before this change do not print the two fields, so a script should treat a
+  missing field as unknown, not as 0.
 
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or

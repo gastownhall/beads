@@ -115,10 +115,12 @@ func TestCanonicalizeDropsProvenance(t *testing.T) {
 			t.Errorf("%s: schema_version must be preserved, not dropped", label)
 		}
 		// The binary's migration numbers grow with the tree: the corpus pins
-		// their presence, not their value.
+		// their presence, not their value. The placeholder must stay a JSON
+		// number (float64 here), because a consumer replays the blob through
+		// a decoder with integer fields.
 		for _, key := range []string{"latest_schema_migration", "latest_ignored_schema_migration"} {
-			if got, _ := obj[key].(string); got != "<MIGRATION>" {
-				t.Errorf("%s: %s = %#v, want placeholder %q", label, key, obj[key], "<MIGRATION>")
+			if got, ok := obj[key].(float64); !ok || got != 1 {
+				t.Errorf("%s: %s = %#v, want the number placeholder 1", label, key, obj[key])
 			}
 		}
 	}
