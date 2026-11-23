@@ -14,14 +14,14 @@ import (
 
 const ignoredMigration0031Up = "0031_restore_preflip_events.up.sql"
 
-// TestLatestIgnoredVersionIncludesMigration0031 pins the ignored slot the
-// pre-upgrade events restore claims (gastownhall/beads#7039), directly above
-// wisp_id_tombstones' (ignored 0030), and that the slot carries its repair.
-func TestLatestIgnoredVersionIncludesMigration0031(t *testing.T) {
+// TestLatestIgnoredVersionIncludesMigration0031's version pin (31) is
+// superseded by TestLatestIgnoredVersionIncludesMigration0032
+// (migration_0075_add_closed_by_test.go) now that ignored 0032 claims the
+// next free slot. The repair half of the pin lives on below: the marker
+// alone restores nothing, so 0031 must stay registered whatever the cursor
+// says.
+func TestMigration0031RepairRegistered(t *testing.T) {
 	const wantIgnored = 31
-	if got := LatestIgnoredVersion(); got != wantIgnored {
-		t.Fatalf("LatestIgnoredVersion() = %d, want %d (pre-upgrade events restore)", got, wantIgnored)
-	}
 	if _, ok := preMigrationRepairs[repairKey{ignoredSource.cursorTable, wantIgnored}]; !ok {
 		t.Fatalf("ignored 0031 has no pre-migration repair registered; the marker alone restores nothing")
 	}

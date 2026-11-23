@@ -352,10 +352,10 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 	// than silently cell-merging a revert-to-ready over a completed close (see
 	// lease.go). The lease row is deleted below: a closed issue holds no lease.
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		UPDATE %s SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?, closed_by_session = ?,
+		UPDATE %s SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?, closed_by = ?, closed_by_session = ?,
 			row_lock = ?
 		WHERE id = ? AND status != ?
-	`, issueTable), types.StatusClosed, now, now, reason, session, freshRowLock(), id, types.StatusClosed)
+	`, issueTable), types.StatusClosed, now, now, reason, actor, session, freshRowLock(), id, types.StatusClosed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to close issue: %w", err)
 	}
@@ -402,8 +402,8 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// recordEvent gates the human audit event, never the journal — nor the
-	// version row: a close changes status, closed_at, close_reason and
-	// closed_by_session, all durable state, so it mints whether or not the
+	// version row: a close changes status, closed_at, close_reason, closed_by
+	// and closed_by_session, all durable state, so it mints whether or not the
 	// audit event was suppressed (as update.go already does). The rows == 0
 	// return above (already closed) wrote nothing and mints nothing.
 	if err := RecordEventInTx(ctx, tx, EventClose, id, actor); err != nil {

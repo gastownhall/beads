@@ -52,6 +52,7 @@ type Issue struct {
 	StartedAt       *time.Time `json:"started_at,omitempty"` // When this issue transitioned to in_progress (GH#2796)
 	ClosedAt        *time.Time `json:"closed_at,omitempty"`
 	CloseReason     string     `json:"close_reason,omitempty"`      // Reason provided when closing
+	ClosedBy        string     `json:"closed_by,omitempty"`         // Actor whose write closed this issue (migration 0075; GH#8617)
 	ClosedBySession string     `json:"closed_by_session,omitempty"` // Claude Code session that closed this issue
 
 	// ===== Leasing (claim TTL + heartbeat; migrations 0054/0055) =====

@@ -182,6 +182,16 @@ func formatIssueMetadataWithGates(issue *types.Issue, gates []*types.Issue) stri
 		lines = append(lines, ui.RenderMuted(leaseLine))
 	}
 
+	// Line 3: Closed by (if closed and known). The close-side twin of "Created
+	// by:" above: the actor whose write closed the issue (migration 0075,
+	// GH#8617). Muted, like Close reason below, because it is attribution a
+	// reader scans past rather than state they act on. Empty means the close
+	// predates the column or was made by an actor-less write; silence then is
+	// the honest answer, not "Closed by: unknown".
+	if issue.Status == types.StatusClosed && issue.ClosedBy != "" {
+		lines = append(lines, ui.RenderMuted("Closed by: "+issue.ClosedBy))
+	}
+
 	// Line 3: Close reason (if closed). A reason too long or too structured to
 	// sit on a metadata line is body text, not metadata, so it gets the same
 	// markdown section treatment as DESCRIPTION — `bd close --reason-file`
