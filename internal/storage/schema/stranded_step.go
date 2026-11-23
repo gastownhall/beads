@@ -6,12 +6,13 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log"
 )
 
 // strandedStep is one numbered migration whose SQL and cursor row reached the
 // working set but whose per-step commit never ran: a pass killed (crash, kill,
 // open timeout) between the cursor INSERT in runMigrations and its
-// commitMigrationStep. tables are the committable dirty tables recognised as
+// commitMigrationStep. tables are the committable dirty tables recognized as
 // that step's own work.
 type strandedStep struct {
 	file   migrationFile
@@ -20,11 +21,12 @@ type strandedStep struct {
 
 // findStrandedStep reports the stranded step when the working set is provably
 // nothing but one of this series' own steps left uncommitted, and nil
-// otherwise. dirty is the pass's committable dirty set (cursor tables and
-// pass-owned exemptions already removed). Every condition must hold, because
-// a recognised step is committed without the pre-existing-dirty-table guard,
-// and that guard exists to keep a user's uncommitted rows out of a migration
-// commit (#4566):
+// otherwise. dirty is the pass's committable dirty set with the cursor tables
+// and dolt_ignore removed; the aux tables the aux-rekey exemption drops later
+// are still in it, so a step's change to one of them is committed with the
+// step. Every condition must hold, because a recognized step is committed
+// without the pre-existing-dirty-table guard, and that guard exists to keep a
+// user's uncommitted rows out of a migration commit (#4566):
 //
 //   - the cursor table exists at HEAD, and its versions in the working set
 //     are HEAD's versions plus exactly one;
@@ -35,9 +37,13 @@ type strandedStep struct {
 //     the value runMigrations writes and nothing else does;
 //   - every committable dirty table is one that migration's SQL touches.
 //
-// Any other shape returns nil, and the caller's guard refuses as it always
+// Any other shape returns nil, and the caller's guard handles it as it always
 // has. The reads run only when the cursor table is dirty, so a clean or
 // user-dirty open issues no extra statement.
+//
+// Recognition is by table, not by row: an uncommitted write that landed in
+// one of the step's tables after the kill cannot be told apart from the
+// step's own change, so it is committed with the step.
 func (m migrationSource) findStrandedStep(ctx context.Context, db DBConn, cursorDirty bool, dirty map[string]dirtyTableState) (*strandedStep, error) {
 	if !cursorDirty {
 		return nil, nil
@@ -119,15 +125,19 @@ func (m migrationSource) findStrandedStep(ctx context.Context, db DBConn, cursor
 	return &strandedStep{file: *next, tables: tables}, nil
 }
 
-// finishStrandedStep commits a step findStrandedStep recognised, through the
+// finishStrandedStep commits a step findStrandedStep recognized, through the
 // same commitMigrationStep a pass that had not been interrupted would have
 // run: the step's tables and the cursor table are staged by name, every other
 // dirty table is left where it is, and the commit carries the step's own
 // message.
 func (m migrationSource) finishStrandedStep(ctx context.Context, db DBConn, step *strandedStep) (err error) {
 	defer func() { err = classifyMigrationDrift(err, m, step.file) }()
-	fmt.Fprintf(stderr, "Finishing migration %04d: %s (applied by an interrupted pass, not yet committed)…\n",
-		step.file.version, humanMigrationName(step.file.name))
+	// Logged rather than written to the TTY-gated stderr: this moves HEAD on
+	// the user's behalf under the step's ordinary commit message, so it must
+	// leave a trace under bd serve, agents and CI too, as the #4356 untrack
+	// heal does.
+	log.Printf("schema migration: an interrupted pass applied %s but did not commit it; committing it now",
+		step.file.name)
 	leave, err := dirtyTables(ctx, db, true)
 	if err != nil {
 		return fmt.Errorf("reading dirty tables before finishing %s: %w", step.file.name, err)
