@@ -267,14 +267,16 @@ func parseConflictTimestamp(v any) (time.Time, bool) {
 }
 
 // issuesCloseGroup are the columns beads always writes together: `bd close`
-// sets status/closed_at/close_reason/closed_by_session in one statement and
-// `bd reopen` clears them in one statement (issueops/close.go, reopen.go), and
-// types.Issue.Validate enforces the biconditional "closed iff closed_at". Cell
-// independence is wrong for them: our close and their status change would
-// otherwise merge into `status='in_progress' AND closed_at=<t>`, a row no
-// write path can produce and validation rejects. When any of them is
-// contested the whole group is settled from the LWW winner, atomically.
-var issuesCloseGroup = []string{"status", "closed_at", "close_reason", "closed_by_session"}
+// sets status/closed_at/close_reason/closed_by/closed_by_session in one
+// statement and `bd reopen` clears them in one statement (issueops/close.go,
+// reopen.go), and types.Issue.Validate enforces the biconditional "closed iff
+// closed_at". Cell independence is wrong for them: our close and their status
+// change would otherwise merge into `status='in_progress' AND closed_at=<t>`,
+// a row no write path can produce and validation rejects — and, since
+// GH#8617, a closer left standing on the winner's open row (or the loser's
+// closer written onto ours). When any of them is contested the whole group is
+// settled from the LWW winner, atomically.
+var issuesCloseGroup = []string{"status", "closed_at", "close_reason", "closed_by", "closed_by_session"}
 
 // issuesNonScalarColumns are columns whose contents are structurally merged by
 // bd's own write paths, so per-cell LWW would silently destroy one side's

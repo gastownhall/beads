@@ -397,6 +397,71 @@ func TestMergeIssuesConflictRow_CloseGroupIsAtomic(t *testing.T) {
 			t.Error("a contested close group with equal timestamps must go to the operator")
 		}
 	})
+	t.Run("the losing close's closer does not survive the winner's open state", func(t *testing.T) {
+		// GH#8617: we closed (stamping our closer into closed_by); they moved
+		// the issue to in_progress, and their write is newer. The group
+		// settles whole from their side, so their open state must carry THEIR
+		// closed_by (''): our closer cell left standing by the per-cell rule
+		// would claim someone closed a row no write path can produce
+		// (closed_by set on an in_progress row).
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-16", "bd-16", "bd-16"},
+			"status":     {"open", "closed", "in_progress"},
+			"closed_at":  {nil, "2026-07-10 11:00:00", nil},
+			"closed_by":  {"", "alice-closer", ""},
+			"updated_at": {tsBase, tsOurs, tsTheirs}, // theirs newer
+		})
+		m, ok := mergeIssuesConflictRow(row)
+		if !ok {
+			t.Fatal("expected the close-group conflict to merge by LWW")
+		}
+		if v, written := m.merged("closed_by"); !written || v != "" {
+			t.Errorf("closed_by must follow status to the winner (their '' clears it), got %v (written=%v)", v, written)
+		}
+	})
+	t.Run("the winning open state does not inherit the loser's closer", func(t *testing.T) {
+		// The mirror image: they closed (stamping their closer); we moved the
+		// issue to in_progress, and our write is newer. Our open state wins
+		// the group, so their closed_by must NOT ride the settled row as a
+		// lone their-side edit — it is part of their losing close state, and
+		// writing it would forge their closer on a row we never closed.
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-17", "bd-17", "bd-17"},
+			"status":     {"open", "in_progress", "closed"},
+			"closed_at":  {nil, nil, "2026-07-10 11:00:00"},
+			"closed_by":  {"", "", "bob-closer"},
+			"updated_at": {tsBase, tsTheirs, tsOurs}, // ours newer
+		})
+		m, ok := mergeIssuesConflictRow(row)
+		if !ok {
+			t.Fatal("expected the close-group conflict to merge by LWW")
+		}
+		if v, written := m.merged("closed_by"); written {
+			t.Errorf("their closed_by must not survive their losing close state, got %v", v)
+		}
+	})
+	t.Run("both closed by different closers: the winner's closer wins with its closed_at", func(t *testing.T) {
+		// Both sides closed, each stamping its own actor. The whole group —
+		// including who closed it — settles from the same LWW winner, so the
+		// merged row never mixes one side's closed_at with the other's closer.
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-18", "bd-18", "bd-18"},
+			"status":     {"open", "closed", "closed"},
+			"closed_at":  {nil, "2026-07-10 11:00:00", "2026-07-10 11:30:00"},
+			"closed_by":  {"", "alice-closer", "bob-closer"},
+			"updated_at": {tsBase, tsOurs, tsTheirs}, // theirs newer
+		})
+		m, ok := mergeIssuesConflictRow(row)
+		if !ok {
+			t.Fatal("expected the close-group conflict to merge by LWW")
+		}
+		if v, written := m.merged("closed_at"); !written || v != "2026-07-10 11:30:00" {
+			t.Fatalf("closed_at must come from the LWW winner, got %v (written=%v)", v, written)
+		}
+		if v, written := m.merged("closed_by"); !written || v != "bob-closer" {
+			t.Errorf("closed_by must come from the SAME LWW winner as closed_at, got %v (written=%v)", v, written)
+		}
+	})
 }
 
 // TestMergeIssuesConflictRow_NonScalarColumnsDecline pins that the columns bd
