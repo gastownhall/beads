@@ -1,11 +1,13 @@
 package doctor
 
 import (
+	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 func TestConfigValidationStoreOptionsAreStrictReadOnly(t *testing.T) {
@@ -29,7 +31,7 @@ func setupDoctorSharedWorktree(t *testing.T) (mainRepoDir, worktreeDir string) {
 
 	run := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
@@ -48,13 +50,13 @@ func setupDoctorSharedWorktree(t *testing.T) (mainRepoDir, worktreeDir string) {
 	run(mainRepoDir, "commit", "-m", "Initial commit")
 
 	worktreeDir = filepath.Join(tmpDir, "worktree")
-	addWorktree := exec.Command("git", "worktree", "add", worktreeDir, "HEAD")
+	addWorktree := gitCommand("worktree", "add", worktreeDir, "HEAD")
 	addWorktree.Dir = mainRepoDir
 	if out, err := addWorktree.CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add failed: %v\n%s", err, out)
 	}
 	t.Cleanup(func() {
-		removeWorktree := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		removeWorktree := gitCommand("worktree", "remove", "--force", worktreeDir)
 		removeWorktree.Dir = mainRepoDir
 		_ = removeWorktree.Run()
 	})
@@ -667,6 +669,58 @@ repos:
 		// Should be OK because maintainer="." doesn't need hydration
 		if check.Status != "ok" {
 			t.Errorf("expected ok status, got %s: %s", check.Status, check.Detail)
+		}
+	})
+}
+
+// TestFindConfigPathUsesBdUserConfigDir proves the doctor config-values check
+// finds the user config through config.UserConfigDir (GH#8113): the seam
+// directory is one os.UserConfigDir never returns, and the stdlib locations
+// hold decoys that must not be picked.
+func TestFindConfigPathUsesBdUserConfigDir(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	repo := filepath.Join(root, "repo")
+	seamDir := filepath.Join(root, "bd-user-config")
+	xdg := filepath.Join(root, "xdg-elsewhere")
+	appdata := filepath.Join(root, "appdata-elsewhere")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("APPDATA", appdata)
+	t.Setenv("BEADS_DIR", "")
+	write := func(path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("actor: test\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	write(filepath.Join(xdg, "bd", "config.yaml"))
+	write(filepath.Join(appdata, "bd", "config.yaml"))
+	legacy := filepath.Join(home, ".beads", "config.yaml")
+	write(legacy)
+
+	t.Run("seam directory config is found", func(t *testing.T) {
+		t.Cleanup(config.SetUserConfigDirForTest(func() (string, error) { return seamDir, nil }))
+		want := filepath.Join(seamDir, "bd", "config.yaml")
+		write(want)
+		t.Cleanup(func() { _ = os.Remove(want) })
+		if got := findConfigPath(repo); got != want {
+			t.Fatalf("findConfigPath = %q, want %q", got, want)
+		}
+	})
+	t.Run("seam error falls through to the legacy home config", func(t *testing.T) {
+		t.Cleanup(config.SetUserConfigDirForTest(func() (string, error) {
+			return "", errors.New("no user config dir")
+		}))
+		if got := findConfigPath(repo); got != legacy {
+			t.Fatalf("findConfigPath = %q, want %q", got, legacy)
 		}
 	})
 }

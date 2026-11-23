@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -44,9 +45,10 @@ func runPourProxiedServer(ctx context.Context, in pourInput) error {
 		if sg.Phase == "vapor" {
 			warnPourVaporFormula(in.protoArg, in.varFlags)
 		}
-	} else if errors.Is(err, formula.ErrVarValidation) {
-		// in.protoArg IS a formula; the --var values it was given fail
-		// enum/pattern/required-empty constraints. Report that directly
+	} else if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
+		// in.protoArg IS a formula; either the formula itself does not
+		// validate, or the --var values it was given fail enum/pattern/
+		// required-empty constraints. Report that directly
 		// instead of falling through to the proto-ID lookup below, which
 		// would otherwise mask this as "not found as formula or proto ID".
 		return HandleError("%v", err)
@@ -123,7 +125,7 @@ func runPourProxiedServer(ctx context.Context, in pourInput) error {
 		spawnResult, err := cloneSubgraphInto(ctx, w, subgraph, CloneOptions{
 			Vars:     vars,
 			Assignee: in.assignee,
-			Actor:    actor,
+			Actor:    currentActor(),
 			Prefix:   types.IDPrefixMol,
 		})
 		if err != nil {
@@ -137,7 +139,7 @@ func runPourProxiedServer(ctx context.Context, in pourInput) error {
 				return pourProxiedResult{}, "", fmt.Errorf("loading spawned mol: %w", err)
 			}
 			for _, attach := range attachments {
-				bondResult, err := bondProtoMolAttachInto(ctx, w, attach.subgraph, attach.issue, spawnedMol, in.attachType, vars, "", actor, false, true)
+				bondResult, err := bondProtoMolAttachInto(ctx, w, attach.subgraph, attach.issue, spawnedMol, in.attachType, vars, "", currentActor(), false, true)
 				if err != nil {
 					return pourProxiedResult{}, "", fmt.Errorf("attaching %s: %w", attach.id, err)
 				}
@@ -159,158 +161,55 @@ func runPourProxiedServer(ctx context.Context, in pourInput) error {
 }
 
 func runMolShowProxiedServer(ctx context.Context, arg string) error {
-	uw, err := proxiedOpenReadUOW(ctx)
+	moleculeID, err := proxiedResolvePartialID(ctx, arg)
 	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	r := uowMolReader{uw: uw}
-	moleculeID, err := utils.ResolvePartialID(ctx, r, arg)
-	if err != nil {
-		return HandleErrorRespectJSON("molecule '%s' not found", arg)
+		return moleculeNotResolved(arg, err)
 	}
 
-	subgraph, err := loadTemplateSubgraph(ctx, r, moleculeID)
+	roles, err := proxiedMoleculeRoles()
 	if err != nil {
 		return HandleErrorRespectJSON("loading molecule: %v", err)
 	}
-
-	if molShowParallel {
-		return showMoleculeWithParallel(subgraph)
-	}
-	return showMolecule(subgraph)
+	return runMolShow(ctx, roles, moleculeID)
 }
 
 func runMolCurrentProxiedServer(ctx context.Context, args []string, agent string, limit int, rangeStr string) error {
-	uw, err := proxiedOpenReadUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	r := uowMolReader{uw: uw}
-
-	var rangeStart, rangeEnd int
-	if rangeStr != "" {
-		rangeStart, rangeEnd, err = parseRange(rangeStr)
-		if err != nil {
-			return HandleErrorRespectJSON("invalid range '%s': %v", rangeStr, err)
-		}
-	}
-	explicitSteps := limit > 0 || rangeStr != ""
-
-	var molecules []*MoleculeProgress
-
-	if len(args) == 1 {
-		moleculeID, err := utils.ResolvePartialID(ctx, r, args[0])
-		if err != nil {
-			return HandleErrorRespectJSON("molecule '%s' not found", args[0])
-		}
-
-		stats, err := r.GetMoleculeProgress(ctx, moleculeID)
-		if err != nil {
-			return HandleErrorRespectJSON("loading molecule: %v", err)
-		}
-		if stats.Total > LargeMoleculeThreshold && !explicitSteps && !jsonOutput {
-			printLargeMoleculeSummary(stats)
-			return nil
-		}
-
-		progress, err := getMoleculeProgress(ctx, r, moleculeID)
-		if err != nil {
-			return HandleErrorRespectJSON("loading molecule: %v", err)
-		}
-		if rangeStr != "" {
-			progress.Steps = filterStepsByRange(progress.Steps, rangeStart, rangeEnd)
-		} else if limit > 0 && len(progress.Steps) > limit {
-			progress.Steps = progress.Steps[:limit]
-		}
-		molecules = append(molecules, progress)
-	} else {
-		molecules = findInProgressMolecules(ctx, r, agent)
-		if len(molecules) == 0 {
-			molecules = findHookedMolecules(ctx, r, agent)
-		}
-		if len(molecules) == 0 {
-			if jsonOutput {
-				return outputJSON([]interface{}{})
-			}
-			fmt.Printf("No molecules in progress")
-			if agent != "" {
-				fmt.Printf(" for %s", agent)
-			}
-			fmt.Println(".")
-			fmt.Println("\nTo start work on a molecule:")
-			fmt.Println("  bd mol wisp create <proto-id>  # Instantiate as ephemeral wisp")
-			fmt.Println("  bd update <step-id> --claim  # Claim a step")
-			return nil
-		}
-	}
-
-	if jsonOutput {
-		return outputJSON(molecules)
-	}
-	for i, mol := range molecules {
-		if i > 0 {
-			fmt.Println()
-		}
-		printMoleculeProgress(mol)
-	}
-	return nil
+	return runMolCurrent(ctx, nil, proxiedResolvePartialID, args, agent, limit, rangeStr)
 }
 
 func runMolProgressProxiedServer(ctx context.Context, args []string) error {
+	return runMolProgress(ctx, nil, proxiedResolvePartialID, args)
+}
+
+// proxiedResolvePartialID resolves a partial id inside a read unit of work of
+// its own. A unit of work that cannot be opened is reported as itself
+// (proxiedOpenReadUOW) and answered as a reportedResolveError, so the caller
+// does not report a connection failure as a molecule that was not found.
+func proxiedResolvePartialID(ctx context.Context, arg string) (string, error) {
 	uw, err := proxiedOpenReadUOW(ctx)
 	if err != nil {
-		return err
+		return "", reportedResolveError{err: err}
 	}
 	defer uw.Close(ctx)
+	return utils.ResolvePartialID(ctx, uowMolReader{uw: uw}, arg)
+}
 
-	r := uowMolReader{uw: uw}
+// reportedResolveError is an id resolution that failed before it could look
+// the id up, and whose failure was already reported.
+type reportedResolveError struct{ err error }
 
-	var moleculeID string
-	if len(args) == 1 {
-		resolved, err := utils.ResolvePartialID(ctx, r, args[0])
-		if err != nil {
-			return HandleErrorRespectJSON("molecule '%s' not found", args[0])
-		}
-		moleculeID = resolved
-	} else {
-		moleculeIDs := findInProgressMoleculeIDs(ctx, r, actor)
-		if len(moleculeIDs) == 0 {
-			if jsonOutput {
-				return outputJSON([]interface{}{})
-			}
-			fmt.Println("No molecules in progress.")
-			fmt.Println("\nUse: bd mol progress <molecule-id>")
-			return nil
-		}
-		moleculeID = moleculeIDs[0]
+func (e reportedResolveError) Error() string { return e.err.Error() }
+func (e reportedResolveError) Unwrap() error { return e.err }
+
+// moleculeNotResolved reports a molecule id argument that did not resolve:
+// "not found" when the lookup ran, and the failure as already reported when
+// the lookup never ran (reportedResolveError).
+func moleculeNotResolved(arg string, err error) error {
+	var reported reportedResolveError
+	if errors.As(err, &reported) {
+		return reported.err
 	}
-
-	stats, err := r.GetMoleculeProgress(ctx, moleculeID)
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
-	}
-
-	if jsonOutput {
-		output := map[string]interface{}{
-			"molecule_id":     stats.MoleculeID,
-			"molecule_title":  stats.MoleculeTitle,
-			"total":           stats.Total,
-			"completed":       stats.Completed,
-			"in_progress":     stats.InProgress,
-			"current_step_id": stats.CurrentStepID,
-		}
-		if stats.Total > 0 {
-			output["percent"] = float64(stats.Completed) * 100 / float64(stats.Total)
-		}
-		return outputJSON(output)
-	}
-
-	printMoleculeProgressStats(stats)
-	return nil
+	return HandleErrorRespectJSON("molecule '%s' not found", arg)
 }
 
 func runMolLastActivityProxiedServer(ctx context.Context, arg string) error {
@@ -371,6 +270,17 @@ func runMolReadyGatedProxiedServer(ctx context.Context) error {
 	return renderGatedReadyMolecules(molecules)
 }
 
+// proxiedServedHomeKey is the logical home of an issue the proxied-server
+// launcher's own database serves. It is no store's dependencyStoreKey, so a
+// served issue and a routed one never pass as one home.
+const proxiedServedHomeKey = "proxied-server:launcher"
+
+// molBondReopenRoutedHome reopens a planned routed bond home writable. It is a
+// variable so a test can hand back a handle onto another store.
+var molBondReopenRoutedHome = func(ctx context.Context, id string) (*RoutedResult, error) {
+	return resolveViaPrefixRoutingWithAccess(ctx, id, true, true)
+}
+
 func runMolBondProxiedServer(ctx context.Context, in molBondInput) error {
 	if uowProvider == nil {
 		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
@@ -379,24 +289,36 @@ func runMolBondProxiedServer(ctx context.Context, in molBondInput) error {
 	// the direct route (GH#4995).
 	ctx = explicitCommitPointContext(ctx)
 
-	if in.dryRun {
-		uw, err := proxiedOpenReadUOW(ctx)
-		if err != nil {
+	// Plan read-only, as the direct route does: both operands are discovered
+	// (served database, then prefix routes, then formulas) and must share one
+	// home before anything is opened for writing.
+	plan, err := planMolBondProxied(ctx, in)
+	if err != nil {
+		if isReportedExit(err) {
+			// A provider-open failure reported itself (proxiedOpenReadUOW).
 			return err
 		}
-		defer uw.Close(ctx)
-		r := uowMolReader{uw: uw}
+		return HandleErrorRespectJSON("%v", err)
+	}
+	defer plan.Close()
 
-		issueA, formulaA, err := resolveOrDescribe(ctx, r, in.argA, in.vars)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		issueB, formulaB, err := resolveOrDescribe(ctx, r, in.argB, in.vars)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		renderMolBondDryRun(in, issueA, formulaA, issueB, formulaB)
+	if in.dryRun {
+		renderMolBondDryRun(in, plan.a.issue, plan.a.formula, plan.b.issue, plan.b.formula)
 		return nil
+	}
+	plan.Close()
+
+	if plan.targetStoreKey != proxiedServedHomeKey {
+		// A routed rig owns the bond: write it there, in that store's own
+		// transaction, never through the launcher's unit of work.
+		home, closeHome, err := reopenMolBondHome(plan, func() (*RoutedResult, error) {
+			return molBondReopenRoutedHome(ctx, plan.targetID)
+		})
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		defer closeHome()
+		return executeMolBond(ctx, home, plan, in)
 	}
 
 	type bondTxResult struct {
@@ -408,30 +330,31 @@ func runMolBondProxiedServer(ctx context.Context, in molBondInput) error {
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (bondTxResult, string, error) {
 		w := newUOWMolWriter(uw)
 
-		subgraphA, cookedA, err := resolveOrCookToSubgraph(ctx, w, in.argA, in.vars)
+		opA, err := materializeServedMolBondOperand(ctx, w, plan.a, in.vars)
 		if err != nil {
 			return bondTxResult{}, "", err
 		}
-		subgraphB, cookedB, err := resolveOrCookToSubgraph(ctx, w, in.argB, in.vars)
+		opB, err := materializeServedMolBondOperand(ctx, w, plan.b, in.vars)
 		if err != nil {
 			return bondTxResult{}, "", err
 		}
 
+		subgraphA, subgraphB := opA.subgraph, opB.subgraph
 		issueA := subgraphA.Root
 		issueB := subgraphB.Root
-		aIsProto := issueA.IsTemplate || cookedA
-		bIsProto := issueB.IsTemplate || cookedB
+		aIsProto := opA.bondsAsProto()
+		bIsProto := opB.bondsAsProto()
 
 		var result *BondResult
 		switch {
 		case aIsProto && bIsProto:
-			result, err = bondProtoProtoInto(ctx, w, issueA, issueB, in.bondType, in.customTitle, actor)
+			result, err = bondProtoProtoInto(ctx, w, issueA, issueB, in.bondType, in.customTitle, currentActor())
 		case aIsProto && !bIsProto:
-			result, err = bondProtoMolAttachInto(ctx, w, subgraphA, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMolAttachInto(ctx, w, subgraphA, issueA, issueB, in.bondType, in.vars, in.childRef, currentActor(), in.ephemeral, in.pour)
 		case !aIsProto && bIsProto:
-			result, err = bondProtoMolAttachInto(ctx, w, subgraphB, issueB, issueA, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMolAttachInto(ctx, w, subgraphB, issueB, issueA, in.bondType, in.vars, in.childRef, currentActor(), in.ephemeral, in.pour)
 		default:
-			result, err = bondMolMolInto(ctx, w, issueA, issueB, in.bondType, actor)
+			result, err = bondMolMolInto(ctx, w, issueA, issueB, in.bondType, currentActor())
 		}
 		if err != nil {
 			return bondTxResult{}, "", fmt.Errorf("bonding: %w", err)
@@ -444,6 +367,87 @@ func runMolBondProxiedServer(ctx context.Context, in molBondInput) error {
 	}
 
 	return renderMolBondResult(res.result, res.idA, res.idB, in.ephemeral, in.pour)
+}
+
+// planMolBondProxied is planMolBond for a proxied-server launcher, which has
+// no local store: a formula-only bond stays in the served database.
+func planMolBondProxied(ctx context.Context, in molBondInput) (*molBondPlan, error) {
+	return planMolBondWith(in, proxiedServedHomeKey, func(operand string) (*molBondDiscovery, error) {
+		return discoverMolBondOperandProxied(ctx, operand, in.vars)
+	})
+}
+
+// discoverMolBondOperandProxied resolves an operand issue-first: in the served
+// database through a short-lived read unit of work, then, when the served
+// database does not have it, through a prefix route opened read-only. A read
+// that will not open fails the bond; any other miss goes to the formula
+// fallback, which keeps an actionable route error when no formula matches.
+func discoverMolBondOperandProxied(ctx context.Context, operand string, vars map[string]string) (*molBondDiscovery, error) {
+	uw, err := proxiedOpenReadUOW(ctx)
+	if err != nil {
+		return nil, err
+	}
+	issue, issueErr := resolveServedMolBondIssue(ctx, uowMolReader{uw: uw}, operand)
+	uw.Close(ctx)
+	if issueErr == nil {
+		return &molBondDiscovery{operand: operand, issue: issue, storeKey: proxiedServedHomeKey}, nil
+	}
+
+	if isNotFoundErr(issueErr) {
+		rr, routeErr := resolveViaPrefixRoutingWithAccess(ctx, operand, false, false)
+		if routeErr == nil {
+			return &molBondDiscovery{
+				operand:  operand,
+				issue:    rr.Issue,
+				store:    rr.Store,
+				storeKey: dependencyStoreKey(rr.Store),
+				closeFn:  rr.Close,
+			}, nil
+		}
+		if isRoutingFailure(routeErr) {
+			issueErr = routeErr
+		}
+	}
+	return discoverMolBondFormula(operand, vars, issueErr)
+}
+
+// resolveServedMolBondIssue resolves operand to an issue in the served
+// database. An ID the served database does not match reads as not found
+// (isNotFoundErr), so a prefix route may still have it.
+func resolveServedMolBondIssue(ctx context.Context, r molReader, operand string) (*types.Issue, error) {
+	id, err := utils.ResolvePartialID(ctx, r, operand)
+	if err != nil {
+		return nil, err
+	}
+	return r.GetIssue(ctx, id)
+}
+
+// materializeServedMolBondOperand re-reads a planned operand inside the
+// served write transaction by its exact planned ID, or cooks its formula. A
+// planned issue that is gone fails the bond: it is not re-resolved and never
+// falls back to a same-named formula.
+func materializeServedMolBondOperand(ctx context.Context, r molReader, d *molBondDiscovery, vars map[string]string) (*molBondOperand, error) {
+	if d.issue == nil {
+		return cookMolBondFormulaOperand(d.operand, vars)
+	}
+	issue, err := r.GetIssue(ctx, d.issue.ID)
+	if err != nil {
+		return nil, err
+	}
+	if isProto(issue) {
+		subgraph, err := loadTemplateSubgraph(ctx, r, issue.ID)
+		if err != nil {
+			return nil, fmt.Errorf("loading proto subgraph '%s': %w", issue.ID, err)
+		}
+		return &molBondOperand{subgraph: subgraph}, nil
+	}
+	return &molBondOperand{
+		subgraph: &TemplateSubgraph{
+			Root:     issue,
+			Issues:   []*types.Issue{issue},
+			IssueMap: map[string]*types.Issue{issue.ID: issue},
+		},
+	}, nil
 }
 
 func runMolSquashProxiedServer(ctx context.Context, in molSquashInput) error {
@@ -500,7 +504,7 @@ func runMolSquashProxiedServer(ctx context.Context, in molSquashInput) error {
 			return &SquashResult{MoleculeID: moleculeID, SquashedCount: 0}, "", nil
 		}
 
-		result, err := squashMoleculeInto(ctx, w, subgraph.Root, wispChildren, in.keepChildren, in.summary, actor)
+		result, err := squashMoleculeInto(ctx, w, subgraph.Root, wispChildren, in.keepChildren, in.summary, currentActor())
 		if err != nil {
 			return nil, "", fmt.Errorf("squashing molecule: %w", err)
 		}
@@ -549,7 +553,7 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 		resolvedID, err := utils.ResolvePartialID(ctx, r, moleculeID)
 		if err != nil {
 			if !jsonOutput {
-				fmt.Fprintf(os.Stderr, "Warning: failed to resolve %s: %v\n", moleculeID, err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to resolve %s: %s\n", moleculeID, remedy.PrintedMessage(err))
 			}
 			failedResolve = append(failedResolve, moleculeID)
 			continue
@@ -557,7 +561,7 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 		issue, err := r.GetIssue(ctx, resolvedID)
 		if err != nil {
 			if !jsonOutput {
-				fmt.Fprintf(os.Stderr, "Warning: failed to load %s: %v\n", resolvedID, err)
+				fmt.Fprintf(os.Stderr, "Warning: failed to load %s: %s\n", resolvedID, remedy.PrintedMessage(err))
 			}
 			failedResolve = append(failedResolve, moleculeID)
 			continue
@@ -566,7 +570,7 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 			subgraph, err := loadTemplateSubgraph(ctx, r, resolvedID)
 			if err != nil {
 				if !jsonOutput {
-					fmt.Fprintf(os.Stderr, "Warning: failed to load wisp subgraph for %s: %v\n", resolvedID, err)
+					fmt.Fprintf(os.Stderr, "Warning: failed to load wisp subgraph for %s: %s\n", resolvedID, remedy.PrintedMessage(err))
 				}
 				failedResolve = append(failedResolve, moleculeID)
 				continue
@@ -637,7 +641,7 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 	if len(wispIDs) > 0 {
 		// The wisp half's direct twin is burnWisps -> `transact`.
 		result, err := uow.RunTxResult(explicitCommitPointContext(ctx), uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*BurnResult, string, error) {
-			r, err := burnWispsInto(ctx, newUOWMolWriter(uw), wispIDs, actor)
+			r, err := burnWispsInto(ctx, newUOWMolWriter(uw), wispIDs, currentActor())
 			if err != nil {
 				return nil, "", err
 			}
@@ -671,7 +675,7 @@ func runMolBurnProxiedServer(ctx context.Context, args []string, dryRun, force b
 				IDs:                  issueIDs,
 				Cascade:              true,
 				UpdateTextReferences: true,
-			}, actor)
+			}, currentActor())
 			if err != nil {
 				return BurnResult{}, "", fmt.Errorf("burning %s: %w", id, err)
 			}

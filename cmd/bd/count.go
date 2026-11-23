@@ -33,6 +33,7 @@ Examples:
   bd count --by-label               # Group count by label
   bd count --assignee alice --by-status  # Count alice's issues by status
   bd count --include-infra          # Count issues + wisps tier (matches 'bd list --include-infra --all' cardinality)
+  bd count --type task --include-ephemeral  # Count tasks in the durable AND wisps tiers
 `,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -91,6 +92,14 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 	noLabels, _ := cmd.Flags().GetBool("no-labels")
 	includeInfra, _ := cmd.Flags().GetBool("include-infra")
 	metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
+	includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
+	parentID, _ := cmd.Flags().GetString("parent")
+	noParent, _ := cmd.Flags().GetBool("no-parent")
+	if parentID != "" && noParent {
+		return issueops.CountRequest{}, "", HandleErrorRespectJSON("--parent and --no-parent are mutually exclusive")
+	}
+	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
+	excludeStatus, _ := cmd.Flags().GetStringSlice("exclude-status")
 
 	request := issueops.CountRequest{
 		Status:        status,
@@ -107,6 +116,12 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 		NoAssignee:    noAssignee,
 		NoLabels:      noLabels,
 		IncludeInfra:  includeInfra,
+
+		IncludeEphemeral: includeEphemeral,
+		ParentID:         parentID,
+		NoParent:         noParent,
+		ExcludeTypes:     excludeTypes,
+		ExcludeStatus:    excludeStatus,
 	}
 	if len(metadataFieldFlags) > 0 {
 		request.MetadataFields = make(map[string]string, len(metadataFieldFlags))
@@ -120,6 +135,12 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 			}
 			request.MetadataFields[k] = v
 		}
+	}
+	if k, _ := cmd.Flags().GetString("has-metadata-key"); k != "" {
+		if err := storage.ValidateMetadataKey(k); err != nil {
+			return issueops.CountRequest{}, "", HandleErrorRespectJSON("invalid --has-metadata-key: %v", err)
+		}
+		request.HasMetadataKey = k
 	}
 
 	if cmd.Flags().Changed("priority") {
@@ -261,6 +282,18 @@ func registerCountFlags(cmd *cobra.Command) {
 	cmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	cmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated)")
 
+	// Hierarchy and exclusions (same spelling as `bd list`'s flags of the same
+	// name, GH#4387's count/list parity): --parent and --no-parent restrict to
+	// a parent's children or to rows with no parent-child edge (an edge-less
+	// dotted-id child still counts as top-level, as in `bd list --no-parent`);
+	// --exclude-type and --exclude-status narrow the predicate by type and by
+	// status, composing with --include-infra's own exclusions rather than
+	// replacing them.
+	cmd.Flags().String("parent", "", "Filter by parent issue ID (count children of specified issue)")
+	cmd.Flags().Bool("no-parent", false, "Count only top-level issues (exclude child issues)")
+	cmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from the count (comma-separated or repeatable)")
+	cmd.Flags().StringSlice("exclude-status", nil, "Exclude statuses from the count (comma-separated or repeatable)")
+
 	// Pattern matching
 	cmd.Flags().String("title-contains", "", "Filter by title substring")
 	cmd.Flags().String("desc-contains", "", "Filter by description substring")
@@ -279,6 +312,7 @@ func registerCountFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("no-assignee", false, "Filter issues with no assignee")
 	cmd.Flags().Bool("no-labels", false, "Filter issues with no labels")
 	cmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
+	cmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
 
 	// Priority ranges
 	cmd.Flags().Int("priority-min", 0, "Filter by minimum priority (inclusive)")
@@ -288,6 +322,18 @@ func registerCountFlags(cmd *cobra.Command) {
 	// `bd count --include-infra <filters>` returns exactly the cardinality of
 	// `bd list --include-infra <filters> --all`.
 	cmd.Flags().Bool("include-infra", false, "Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)")
+
+	// The plane knob alone: admits the wisps tier WITHOUT lifting any type
+	// exclusion, which --include-infra cannot do (it bundles four changes, and
+	// its template exclusion silently drops template rows of a named type).
+	//
+	// The sibling on `bd list` landed in #6098 (cmd/bd/list.go); the name and
+	// the help text deliberately follow its shape so the two halves of the
+	// pair read alike. The trailing clause is the one addition: on `bd count`
+	// the wider `--include-infra` sits right beside this flag and advertises
+	// cardinality matching, so the contrast has to be legible in `--help` and
+	// not only in this comment.
+	cmd.Flags().Bool("include-ephemeral", false, "Include ephemeral wisp-plane rows in the count (normally hidden), without lifting type exclusions")
 
 	// Grouping flags
 	cmd.Flags().Bool("by-status", false, "Group count by status")

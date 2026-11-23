@@ -24,8 +24,8 @@ Detailed step-by-step workflows for common bd usage patterns with checklists.
 ## Session Start Workflow {#session-start}
 
 **bd is available when**:
-- Project has `.beads/` directory (project-local), OR
-- `~/.beads/` exists (global fallback for any directory)
+- The working directory (or an ancestor up to the repository root) has a `.beads/` directory (project-local), OR
+- `BEADS_DIR` names a workspace explicitly (for example the user-level `~/.beads`)
 
 **Automatic checklist at session start:**
 
@@ -33,14 +33,14 @@ Detailed step-by-step workflows for common bd usage patterns with checklists.
 Session Start (when bd is available):
 - [ ] Run bd ready --json
 - [ ] Report: "X items ready to work on: [summary]"
-- [ ] If using global ~/.beads, note this in report
+- [ ] If the workspace was named (BEADS_DIR), note this in report
 - [ ] If none ready, check bd blocked --json
 - [ ] Suggest next action based on findings
 ```
 
 **Pattern**: Always run `bd ready` when starting work where bd is available. Report status immediately to establish shared context.
 
-**Database selection**: bd auto-discovers which database to use (project-local `.beads/` takes precedence over global `~/.beads/`).
+**Database selection**: bd auto-discovers which database to use by walking up from the working directory. The user-level `~/.beads` is never picked up implicitly — it is used only when named for the command (`BEADS_DIR=~/.beads bd ready --json`) or when the home directory itself is the repository root. Do not export `BEADS_DIR` for this: an exported `BEADS_DIR` overrides every project's own `.beads`.
 
 ---
 
@@ -66,7 +66,7 @@ After Compaction:
 
 **Good note (enables recovery):**
 ```
-bd update issue-42 --notes "COMPLETED: User authentication - added JWT token
+bd update issue-42 --append-notes "COMPLETED: User authentication - added JWT token
 generation with 1hr expiry, implemented refresh token endpoint using rotating
 tokens pattern. IN PROGRESS: Password reset flow. Email service integration
 working. NEXT: Need to add rate limiting to reset endpoint (currently unlimited
@@ -76,7 +76,7 @@ recommendations, tech lead concerned about response time but benchmarks show <10
 
 **Bad note (insufficient for recovery):**
 ```
-bd update issue-42 --notes "Working on auth feature. Made some progress.
+bd update issue-42 --append-notes "Working on auth feature. Made some progress.
 More to do later."
 ```
 
@@ -342,7 +342,7 @@ Session End Handoff:
 - [ ] Prompt user: "We just completed X and started Y on <issue-id>.
        Should I update the beads notes for next session?"
 - [ ] If yes, suggest command:
-       bd update <issue-id> --notes "COMPLETED: X. IN PROGRESS: Y. NEXT: Z"
+       bd update <issue-id> --append-notes "COMPLETED: X. IN PROGRESS: Y. NEXT: Z"
 - [ ] User reviews and confirms
 - [ ] Claude executes the update
 - [ ] Notes saved for next session's resumption
@@ -404,7 +404,7 @@ User Tips:
 
 **At End of Session 1:**
 ```bash
-bd update workspace-mcp-server-2 --notes "COMPLETED: Set up skeleton with Docs
+bd update workspace-mcp-server-2 --append-notes "COMPLETED: Set up skeleton with Docs
 API connection verified. Markdown parsing logic 80% done (handles *, _ modifiers).
 IN PROGRESS: Testing edge cases for nested formatting. NEXT: Implement
 batchUpdate call structure for text insertion. REFERENCE: Reference pattern at

@@ -91,6 +91,55 @@ func TestTreeCarriesTheRolesAnswerToTheWire(t *testing.T) {
 	}
 }
 
+// TestTreeCarriesADedupedStubToTheWire pins the one member a stub adds: the
+// row that records a second parent's edge into an already-expanded issue says
+// `"deduped": true`, no other row carries the key at all, and the stub's other
+// keys are exactly the ones every row already had.
+func TestTreeCarriesADedupedStubToTheWire(t *testing.T) {
+	stub := treeNode("bd-shared", 1, "bd-root", types.DepBlocks)
+	stub.Deduped = true
+	ts := treeServer(t, &roleTreeWalker{result: issueops.TreeResult{Nodes: []*types.TreeNode{
+		treeNode("bd-root", 0, "", ""),
+		treeNode("bd-mid", 1, "bd-root", types.DepBlocks),
+		treeNode("bd-shared", 2, "bd-mid", types.DepBlocks),
+		stub,
+	}}})
+
+	resp := ts.get(t, treePath+"?root_id=bd-root")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	items, ok := decodeBody(t, resp)["items"].([]any)
+	if !ok || len(items) != 4 {
+		t.Fatalf("items = %#v, want the role's four rows", items)
+	}
+	for i, item := range items[:3] {
+		node, _ := item.(map[string]any)
+		if _, present := node["deduped"]; present {
+			t.Errorf("item %d (%v) carries a deduped key (%#v); only a stub does", i, node["id"], node["deduped"])
+		}
+	}
+	got, _ := items[3].(map[string]any)
+	if got["deduped"] != true {
+		t.Fatalf("stub deduped = %#v, want true", got["deduped"])
+	}
+	if got["id"] != "bd-shared" || got["parent_id"] != "bd-root" || got["depth"] != float64(1) || got["edge_from_parent"] != string(types.DepBlocks) {
+		t.Errorf("stub = id %v parent %v depth %v edge %v, want bd-shared/bd-root/1/blocks",
+			got["id"], got["parent_id"], got["depth"], got["edge_from_parent"])
+	}
+	expanded, _ := items[2].(map[string]any)
+	for key := range expanded {
+		if _, present := got[key]; !present {
+			t.Errorf("stub lacks key %q the expanded row carries", key)
+		}
+	}
+	for key := range got {
+		if _, present := expanded[key]; !present && key != "deduped" {
+			t.Errorf("stub carries key %q the expanded row lacks; only deduped is new", key)
+		}
+	}
+}
+
 // TestTreeHandsTheWiresParametersToTheRoleUnchanged is the half that proves the
 // handler decides nothing: every parameter the document publishes arrives on the
 // request, spelled as the role spells it.

@@ -79,10 +79,10 @@ func TestNewListBlockingKeysTheDecorationByID(t *testing.T) {
 	if got := blocking.blocks["bd-4"]; len(got) != 1 || got[0] != "bd-1" {
 		t.Errorf("blocks[bd-4] = %v, want [bd-1]", got)
 	}
-	if got := formatDependencyInfo(blocking.blockedBy["bd-5"], blocking.blocks["bd-5"], blocking.parent["bd-5"]); got != "" {
+	if got := formatDependencyInfo(blocking.blockedBy["bd-5"], blocking.blocks["bd-5"], blocking.parent["bd-5"], nil); got != "" {
 		t.Errorf("a bare entry rendered %q, want no decoration at all", got)
 	}
-	if got := formatDependencyInfo(blocking.blockedBy["bd-absent"], blocking.blocks["bd-absent"], blocking.parent["bd-absent"]); got != "" {
+	if got := formatDependencyInfo(blocking.blockedBy["bd-absent"], blocking.blocks["bd-absent"], blocking.parent["bd-absent"], nil); got != "" {
 		t.Errorf("an id the role did not mention rendered %q, want no decoration at all", got)
 	}
 }

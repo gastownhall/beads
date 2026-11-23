@@ -27,8 +27,17 @@ GO_TEST_PARALLEL="${GO_TEST_PARALLEL:-4}"
 # just under). No single test is at fault, so the panic names whichever one was
 # in flight and reads like a hang when it is really the whole package running out
 # of clock. 30m is what every other -race lane here already gives this same code:
-# main.yml's integration package and cmd/bd shards, ci-measurements.yml,
-# nightly.yml. Splitting or de-slowing cmd/bd is the real fix and belongs on main
+# main.yml's macOS test job. Splitting or de-slowing cmd/bd is the real fix and belongs on main
 # — this only stops the clock from being the thing that fails.
+# BEADS_PR_CORE_GO_TEST_JSON=<file>: same run, `go test -json` output to <file>
+# (for tools/bazel/equivalence.py --go-test-json, the skip-parity check).
+go_test() {
+    if [[ -n "${BEADS_PR_CORE_GO_TEST_JSON:-}" ]]; then
+        go test -json "$@" >"$BEADS_PR_CORE_GO_TEST_JSON"
+    else
+        go test "$@"
+    fi
+}
+
 ci_time "pr-core go test" -- \
-    go test -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL" -race -short -timeout=30m -skip '^TestEmbedded' ./...
+    go_test -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL" -race -short -timeout=30m -skip '^TestEmbedded' ./...

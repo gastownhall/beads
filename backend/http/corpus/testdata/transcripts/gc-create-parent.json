@@ -1,0 +1,8 @@
+{
+  "shape": "gc-create-parent",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-ep","status":200},
+    {"method":"POST","operation_id":"createIssue","path":"/v0/beads/issues","body":["actor","inherit_labels_from_parent","issue_type","parent_id","priority","status","title"],"status":200}
+  ]
+}

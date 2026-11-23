@@ -1,10 +1,15 @@
 package dolt
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -3169,6 +3174,143 @@ func TestCounterMode_AlreadySeeded(t *testing.T) {
 	}
 }
 
+// TestCreateIssue_CounterModeWalksPastExplicitIDs pins GH#8456: in counter
+// mode an explicit create ahead of the counter (here test-2..test-4, which
+// never move it) must not be handed out again by the next auto create. The
+// upsert create path would silently overwrite the explicit row and return nil;
+// the counter walks past every id a live row holds instead. Ported from
+// #6831's TestCreateIssue_CounterModeJumpsPastExplicitIDs.
+func TestCreateIssue_CounterModeWalksPastExplicitIDs(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+	auto := func(title string) string {
+		t.Helper()
+		issue := &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("auto create %q: %v", title, err)
+		}
+		return issue.ID
+	}
+
+	if id := auto("first auto"); id != "test-1" {
+		t.Fatalf("first auto create = %q, want test-1", id)
+	}
+	explicitTitles := map[string]string{"test-2": "explicit two", "test-3": "explicit three", "test-4": "explicit four"}
+	for _, id := range []string{"test-2", "test-3", "test-4"} {
+		issue := &types.Issue{ID: id, Title: explicitTitles[id], Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("explicit create %s: %v", id, err)
+		}
+	}
+
+	if id := auto("second auto"); id != "test-5" {
+		t.Errorf("second auto create = %q, want test-5 past the explicit test-2..test-4", id)
+	}
+	if id := auto("third auto"); id != "test-6" {
+		t.Errorf("third auto create = %q, want test-6", id)
+	}
+	for id, title := range explicitTitles {
+		got, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", id, err)
+		}
+		if got.Title != title {
+			t.Errorf("explicit row %s title = %q, want %q: an auto create overwrote it", id, got.Title, title)
+		}
+	}
+	var lastID int
+	if err := store.db.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", "test").Scan(&lastID); err != nil {
+		t.Fatalf("read issue_counter: %v", err)
+	}
+	if lastID != 6 {
+		t.Errorf("issue_counter last_id = %d, want 6", lastID)
+	}
+}
+
+// TestCreateIssue_CounterModeSkipsARunLongerThanTheWalk pins the long lag of
+// GH#8456 on the server store. An import left a held run ahead of the counter
+// longer than two walks probe (the walk, then the one after the skip):
+// test-2..test-2102, rows written without moving the counter, with a wisp and
+// a tombstone extending the run. Giving up at the bound failed every auto
+// create for good, because the rollback undoes the bumps. The mint skips the
+// rest of the run in one read and hands out the first free number: not one
+// past the far-ahead test-5000, and not past the child test-2105.1, which
+// holds no counter value. Every held row keeps its content.
+func TestCreateIssue_CounterModeSkipsARunLongerThanTheWalk(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+	auto := func(title string) string {
+		t.Helper()
+		issue := &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("auto create %q: %v", title, err)
+		}
+		return issue.ID
+	}
+	if id := auto("first auto"); id != "test-1" {
+		t.Fatalf("first auto create = %q, want test-1", id)
+	}
+
+	held := make([]string, 0, 2103)
+	for n := 2; n <= 2102; n++ {
+		held = append(held, fmt.Sprintf("test-%d", n))
+	}
+	held = append(held, "test-2105.1", "test-5000")
+	values := make([]string, 0, len(held))
+	args := make([]any, 0, 2*len(held))
+	for _, id := range held {
+		values = append(values, "(?, ?, '', '', '', '')")
+		args = append(args, id, "imported "+id)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES "+strings.Join(values, ", "), args...); err != nil {
+		t.Fatalf("import the held run: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "INSERT INTO wisps (id, title) VALUES (?, ?)", "test-2103", "imported test-2103"); err != nil {
+		t.Fatalf("hold test-2103 with a wisp: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "INSERT INTO id_tombstones (id, closed_at) VALUES (?, ?)", "test-2104", time.Now().UTC()); err != nil {
+		t.Fatalf("hold test-2104 with a tombstone: %v", err)
+	}
+
+	if id := auto("past the run"); id != "test-2105" {
+		t.Errorf("auto create past a held run of 2103 = %q, want test-2105", id)
+	}
+	if id := auto("next"); id != "test-2106" {
+		t.Errorf("next auto create = %q, want test-2106", id)
+	}
+	for _, id := range []string{"test-2", "test-2102", "test-5000"} {
+		got, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", id, err)
+		}
+		if got.Title != "imported "+id {
+			t.Errorf("held row %s title = %q, want %q: an auto create overwrote it", id, got.Title, "imported "+id)
+		}
+	}
+	var lastID int
+	if err := store.db.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", "test").Scan(&lastID); err != nil {
+		t.Fatalf("read issue_counter: %v", err)
+	}
+	if lastID != 2106 {
+		t.Errorf("issue_counter last_id = %d, want 2106", lastID)
+	}
+}
+
 // TestSearchIssues_NoDuplicatesWithMultipleBlockers verifies that
 // SearchIssues returns an issue exactly once even when it has multiple
 // blocks dependencies. GH#3567.
@@ -3299,4 +3441,165 @@ func TestSearchIssues_StableOrdering(t *testing.T) {
 			t.Errorf("run %d: ordering changed from %q to %q", i, firstOrder, order)
 		}
 	}
+}
+
+// =============================================================================
+// GetMoleculeProgress truncated-read tests
+// =============================================================================
+
+var (
+	moleculeProgressDepQuery    = regexp.QuoteMeta("SELECT issue_id FROM dependencies")
+	moleculeProgressStatusQuery = regexp.QuoteMeta("SELECT id, status FROM issues WHERE id IN (")
+)
+
+// newMoleculeProgressMock returns a sqlmock-backed DoltStore primed with the
+// reads GetMoleculeProgress issues before the child-ID query for mol-1: the
+// wisp probe (no rows, so routing stays on issues/dependencies) and the title.
+func newMoleculeProgressMock(t *testing.T) (*DoltStore, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT title FROM issues WHERE id = ?")).
+		WillReturnRows(sqlmock.NewRows([]string{"title"}).AddRow("Molecule"))
+	return &DoltStore{db: db}, mock
+}
+
+// fourChildMoleculeRows returns the child-ID and status result sets for a
+// molecule whose children are c1 closed, c2 closed, c3 in_progress, c4 open.
+// Cutting either read after two rows leaves only the closed children, which
+// reads as a finished molecule (Total=2 Completed=2).
+func fourChildMoleculeRows() (children, statuses *sqlmock.Rows) {
+	children = sqlmock.NewRows([]string{"issue_id"}).
+		AddRow("c1").AddRow("c2").AddRow("c3").AddRow("c4")
+	statuses = sqlmock.NewRows([]string{"id", "status"}).
+		AddRow("c1", "closed").AddRow("c2", "closed").
+		AddRow("c3", "in_progress").AddRow("c4", "open")
+	return children, statuses
+}
+
+// twoBatchMoleculeRows returns the child-ID result set for a molecule with
+// queryBatchSize+1 open children, so its status read takes two batches, and
+// the full first status batch. The caller builds the one-row second batch.
+func twoBatchMoleculeRows() (children, firstBatch *sqlmock.Rows) {
+	children = sqlmock.NewRows([]string{"issue_id"})
+	firstBatch = sqlmock.NewRows([]string{"id", "status"})
+	for i := 0; i < queryBatchSize; i++ {
+		id := fmt.Sprintf("c%03d", i)
+		children.AddRow(id)
+		firstBatch.AddRow(id, "open")
+	}
+	children.AddRow(fmt.Sprintf("c%03d", queryBatchSize))
+	return children, firstBatch
+}
+
+// requireTruncatedReadError fails unless GetMoleculeProgress reported the
+// mid-iteration driver error instead of a rollup built from partial rows.
+func requireTruncatedReadError(t *testing.T, stats *types.MoleculeProgressStats, err, cause error) {
+	t.Helper()
+	if stats != nil {
+		t.Errorf("GetMoleculeProgress on a truncated read returned stats Total=%d Completed=%d (err=%v), want nil stats",
+			stats.Total, stats.Completed, err)
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("GetMoleculeProgress on a truncated read: err=%v, want errors.Is(err, %q)", err, cause)
+	}
+	if !errors.Is(err, ErrQuery) {
+		t.Errorf("GetMoleculeProgress on a truncated read: err=%v, want errors.Is(err, ErrQuery)", err)
+	}
+}
+
+// TestGetMoleculeProgressReportsTruncatedReads pins that a result set which
+// ends early (the driver reports an error after some rows) surfaces as an
+// error instead of a progress total built from the rows that arrived. A read
+// that comes after the failed one is primed with healthy rows even though the
+// fixed code returns before it, so a missing check fails as the skewed rollup
+// the bug produced, not as an unexpected query.
+func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
+	lost := errors.New("connection lost mid-iteration")
+
+	t.Run("children truncated", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, statuses := fourChildMoleculeRows()
+		children.RowError(2, lost)
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+	})
+
+	t.Run("status truncated", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, statuses := fourChildMoleculeRows()
+		statuses.RowError(2, lost)
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	// The status read is batched, so a failure in any batch must surface.
+	// Here the second batch is healthy: a check of only the last batch's
+	// Rows.Err misses the failure and returns Total=2 Completed=1 for the
+	// molecule's queryBatchSize+1 children.
+	t.Run("status truncated in an earlier batch", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, firstBatch := twoBatchMoleculeRows()
+		firstBatch.RowError(1, lost)
+		secondBatch := sqlmock.NewRows([]string{"id", "status"}).
+			AddRow(fmt.Sprintf("c%03d", queryBatchSize), "closed")
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(firstBatch)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(secondBatch)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+	})
+
+	t.Run("status truncated in the last batch", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, firstBatch := twoBatchMoleculeRows()
+		secondBatch := sqlmock.NewRows([]string{"id", "status"}).
+			AddRow(fmt.Sprintf("c%03d", queryBatchSize), "open").
+			RowError(0, lost)
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(firstBatch)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(secondBatch)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		requireTruncatedReadError(t, stats, err, lost)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	// A read that completes keeps today's rollup, which also proves the
+	// fixture is faithful: the truncation subtests fail for the right reason.
+	t.Run("complete read", func(t *testing.T) {
+		store, mock := newMoleculeProgressMock(t)
+		children, statuses := fourChildMoleculeRows()
+		mock.ExpectQuery(moleculeProgressDepQuery).WillReturnRows(children)
+		mock.ExpectQuery(moleculeProgressStatusQuery).WillReturnRows(statuses)
+
+		stats, err := store.GetMoleculeProgress(context.Background(), "mol-1")
+		if err != nil {
+			t.Fatalf("GetMoleculeProgress on a complete read: %v", err)
+		}
+		if stats.Total != 4 || stats.Completed != 2 || stats.InProgress != 1 || stats.CurrentStepID != "c3" {
+			t.Errorf("GetMoleculeProgress on a complete read: Total=%d Completed=%d InProgress=%d CurrentStepID=%q, want Total=4 Completed=2 InProgress=1 CurrentStepID=\"c3\"",
+				stats.Total, stats.Completed, stats.InProgress, stats.CurrentStepID)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet sqlmock expectations: %v", err)
+		}
+	})
 }

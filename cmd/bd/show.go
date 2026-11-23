@@ -1,18 +1,139 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/issueops"
 )
+
+// showNotFoundHintIn is the hint the direct route prints for an id that
+// resolved to no issue. When no routed store was searched for the id
+// (routedSearched, from resolveAndGetIssueWithRoutingSearchScope), its prefix
+// is not one this workspace's store issues (issue_prefix or allowed_prefixes)
+// and no routes.jsonl route in beadsDir names it, the miss says nothing about
+// whether the issue exists: no route sent the lookup to the store that issues
+// that prefix, so the hint says so instead of suggesting the id never existed
+// (GH#5259). Any other miss gets showNotFoundHint.
+func showNotFoundHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id string, routedSearched bool) string {
+	if hint, ok := foreignPrefixMissHintIn(ctx, s, beadsDir, id, routedSearched); ok {
+		return hint
+	}
+	return showNotFoundHint(id)
+}
+
+// foreignPrefixMissHintIn returns foreignPrefixMissHint for a miss on id when
+// showNotFoundHintIn would print it, and ok false for any other miss.
+func foreignPrefixMissHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id string, routedSearched bool) (string, bool) {
+	if routedSearched {
+		return "", false
+	}
+	storePrefix, idPrefix, ok := unroutedForeignPrefix(ctx, s, beadsDir, id)
+	if !ok {
+		return "", false
+	}
+	return foreignPrefixMissHint(storePrefix, idPrefix, beadsDir), true
+}
+
+// printForeignPrefixMissHint follows bd show --refs and --children's line for
+// a miss on id with the direct route's foreign-prefix hint, when that hint
+// applies; any other miss keeps its line alone.
+func printForeignPrefixMissHint(ctx context.Context, id string, routedSearched bool) {
+	if hint, ok := foreignPrefixMissHintIn(ctx, missHintConfigReader(store), resolveCommandBeadsDir(dbPath), id, routedSearched); ok {
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
+	}
+}
+
+// foreignPrefixMissHint states what a miss on an unrouted foreign prefix
+// shows: only this workspace's store was searched. It names the requested and
+// configured prefixes and the two remedies, without claiming a store named
+// after the prefix exists or that the issue is absent anywhere.
+func foreignPrefixMissHint(storePrefix, idPrefix, beadsDir string) string {
+	route := "no workspace is resolved here, so no routes.jsonl route is available"
+	if beadsDir != "" {
+		route = "or add a matching prefix route to " + remedy.PrintedValue(filepath.Join(beadsDir, "routes.jsonl"))
+	}
+	return fmt.Sprintf("the prefix %q is not among this store's configured prefixes (its issue prefix is %s) and no configured route searched another store for this ID, so this miss does not mean the issue is absent elsewhere — run the command from a workspace attached to the store that issues %q IDs, %s", idPrefix, remedy.PrintedValue(storePrefix), idPrefix, route)
+}
+
+// prefixConfigReader is the one store read showNotFoundHintIn needs.
+type prefixConfigReader interface {
+	GetConfig(ctx context.Context, key string) (string, error)
+}
+
+// missHintConfigReader is the reader bd show chooses a miss's hint with: s,
+// or nil when choosing it must read nothing. A remote backend pays a round
+// trip for every config read, and a miss on a served store is one issue
+// lookup and nothing else (S6b), so its misses keep showNotFoundHint, as the
+// not-found fallback keeps its routing settings local (routingSettingsStore).
+func missHintConfigReader(s storage.DoltStorage) prefixConfigReader {
+	if s == nil || storeIsRemoteBackend(s) {
+		return nil
+	}
+	return s
+}
+
+// unroutedForeignPrefix reports the store's issue_prefix and the id's prefix
+// when id carries a prefix the store does not issue and no route names it. It
+// answers false whenever it cannot tell: no store, no prefix in id, an
+// issue_prefix or allowed_prefixes it cannot read, no configured
+// issue_prefix, or a routes.jsonl it cannot read. It reads config and
+// routes.jsonl and nothing else: it never looks the id up or opens a store.
+//
+// An id with no prefix (a bare hash) cannot be foreign, so it answers before
+// any read. For any other id both config keys are read before anything is
+// matched, so an own-prefix and a foreign-prefix miss make the same store
+// reads. Known prefixes are matched as a leading "<prefix>-" of the whole id,
+// not against its extracted prefix, so a multi-hyphen allowed prefix
+// ("claude-os" for "claude-os-abcd", extracted as "claude") is never mistaken
+// for a foreign one.
+func unroutedForeignPrefix(ctx context.Context, s prefixConfigReader, beadsDir, id string) (storePrefix, idPrefix string, ok bool) {
+	idPrefix = utils.ExtractIssuePrefix(id)
+	if s == nil || idPrefix == "" {
+		return "", "", false
+	}
+	issuePrefix, err := s.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		return "", "", false
+	}
+	allowed, err := s.GetConfig(ctx, "allowed_prefixes")
+	if err != nil {
+		return "", "", false
+	}
+	storePrefix = strings.TrimSuffix(strings.TrimSpace(issuePrefix), "-")
+	if storePrefix == "" {
+		return "", "", false
+	}
+	for _, p := range append([]string{storePrefix}, strings.Split(allowed, ",")...) {
+		if p = strings.TrimSuffix(strings.TrimSpace(p), "-"); p != "" && strings.HasPrefix(id, p+"-") {
+			return "", "", false
+		}
+	}
+	if beadsDir != "" {
+		routes, err := loadPrefixRoutes(beadsDir)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", "", false
+		}
+		if matchPrefixRoute(routes, id) != nil {
+			return "", "", false
+		}
+	}
+	return storePrefix, idPrefix, true
+}
 
 // showNotFoundHint explains that an unresolved issue ID is not proof the ID
 // never existed: bd delete and wisp purge both remove a row (and its
@@ -59,6 +180,10 @@ var showCmd = &cobra.Command{
 		includeDepends, _ := cmd.Flags().GetBool("include-dependents")
 		includeComments, _ := cmd.Flags().GetBool("include-comments")
 		briefDeps, _ := cmd.Flags().GetBool("brief-deps")
+		commentsTail, _ := cmd.Flags().GetInt("comments-tail")
+		if err := validateCommentsTail(commentsTail); err != nil {
+			return err
+		}
 		ctx := rootCtx
 
 		// Helper to format timestamp based on --local-time flag
@@ -77,7 +202,10 @@ var showCmd = &cobra.Command{
 			if len(args) > 0 {
 				return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
 			}
-			currentID := resolveCurrentIssueID(ctx)
+			currentID, err := resolveCurrentIssueID(ctx)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			if currentID == "" {
 				return HandleErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
 			}
@@ -99,8 +227,7 @@ var showCmd = &cobra.Command{
 			if len(args) != 1 {
 				return HandleErrorRespectJSON("watch mode requires exactly one issue ID")
 			}
-			watchIssue(ctx, args[0])
-			return nil
+			return watchIssue(ctx, args[0], commentsTail)
 		}
 
 		if showThread {
@@ -128,16 +255,16 @@ var showCmd = &cobra.Command{
 		foundCount := 0
 		for idx, id := range args {
 			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
-			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+			result, routedSearched, err := resolveAndGetIssueWithRoutingSearchScope(ctx, store, id)
 			if err != nil {
 				if result != nil {
 					result.Close()
 				}
 				if isNotFoundErr(err) {
 					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
+					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, missHintConfigReader(store), resolveCommandBeadsDir(dbPath), id, routedSearched))
 				} else {
-					fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+					fmt.Fprintf(os.Stderr, "Error fetching %s: %s\n", id, remedy.PrintedMessage(err))
 				}
 				continue
 			}
@@ -146,7 +273,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, missHintConfigReader(store), resolveCommandBeadsDir(dbPath), id, routedSearched))
 				continue
 			}
 			issue := result.Issue
@@ -188,15 +315,30 @@ var showCmd = &cobra.Command{
 				result.Close()
 				continue
 			}
+			// Dependencies are read here rather than at the DEPENDS ON
+			// section below because the header needs them: the derived GATED
+			// marker (wy-j2upyy) is the gate-typed subset of this very set,
+			// so hoisting the read decorates the header and the meta block
+			// without a second query. Best effort, as it always was: a failed
+			// read renders the issue undecorated rather than not at all.
+			//
+			// Counts first — see readDepCounts for why the order matters. The
+			// listing's error is KEPT, not discarded: rendering stays best
+			// effort, but a FAILED listing and a SHORT one both leave the
+			// slice empty, and only the second is an unresolvable edge.
+			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
+			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
+			gates := types.GatesHolding(issue, depsWithMeta)
+
 			if idx > 0 {
 				fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))
-				fmt.Printf("\n%s\n", formatIssueHeader(issue))
+				fmt.Printf("\n%s\n", formatIssueHeaderWithGates(issue, gates))
 			} else {
-				fmt.Printf("%s\n", formatIssueHeader(issue))
+				fmt.Printf("%s\n", formatIssueHeaderWithGates(issue, gates))
 			}
 
 			// Metadata: Owner · Type | Created · Updated
-			fmt.Println(formatIssueMetadata(issue))
+			fmt.Println(formatIssueMetadataWithGates(issue, gates))
 
 			// Content sections — always show DESCRIPTION header so the user
 			// can distinguish "empty" from "hidden" (GH#3336).
@@ -231,13 +373,13 @@ var showCmd = &cobra.Command{
 			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
 			// Show dependencies - grouped by dependency type for clarity
-			depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
+			// (read above, with the header's gate decoration).
 			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
 				printDepSection(sec)
 			}
 
 			// Show dependents - grouped by dependency type for clarity
-			dependentsWithMeta, _ := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
+			dependentsWithMeta, dependentsErr := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
 			for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
 				printDepSection(sec)
 				if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
@@ -245,21 +387,21 @@ var showCmd = &cobra.Command{
 				}
 			}
 
+			// Both listings above drop every edge whose far end has no row in
+			// this database, so a cross-repo or `external:` dependency renders
+			// as no dependency at all — indistinguishable from having none
+			// (be-lpi). --json says so in unresolvable_dependencies; say it
+			// here too, or `bd dep add x liveop-y` reports success and then
+			// `bd show x` shows nothing.
+			warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
+				depListing{rows: len(depsWithMeta), err: depsErr},
+				depListing{rows: len(dependentsWithMeta), err: dependentsErr})
+
 			printRelatedSection(relatedSeen)
 
 			// Show comments
 			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
-			if len(comments) > 0 {
-				fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
-				for _, comment := range comments {
-					fmt.Printf("  %s %s\n", ui.RenderMuted(formatTime(comment.CreatedAt)), comment.Author)
-					rendered := uimd.RenderMarkdown(comment.Text)
-					// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
-					for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
-						fmt.Printf("    %s\n", line)
-					}
-				}
-			}
+			printComments(comments, commentsTail, formatTime, issue.ID)
 
 			// Long mode: show all extended fields
 			if longMode {
@@ -303,12 +445,15 @@ func init() {
 	showCmd.Flags().Bool("children", false, "Show only the children of this issue")
 	showCmd.Flags().String("as-of", "", "Show issue as it existed at a specific commit hash or branch (requires Dolt; commit hashes must be the full 32-character hash from 'bd history', not a prefix)")
 	showCmd.Flags().StringArray("id", nil, "Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)")
-	showCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC")
+	showCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC (date-only fields are always local)")
 	showCmd.Flags().BoolP("watch", "w", false, "Watch for changes and auto-refresh display")
 	showCmd.Flags().Bool("current", false, "Show the currently active issue (in-progress, hooked, or last touched)")
 	showCmd.Flags().Bool("include-dependents", false, "Stream full dependent issues in JSON output (--json only; may be slow on hub beads)")
-	showCmd.Flags().Bool("include-comments", false, "Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments)")
+	showCmd.Flags().Bool("include-comments", false, "Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments). "+
+		"Without it the comments field is absent entirely, not truncated: an issue with comments carries "+
+		"comment_count and comments_omitted=true, so check those before reading an absent comments field as none.")
 	showCmd.Flags().Bool("brief-deps", false, "Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)")
+	showCmd.Flags().Int("comments-tail", 0, "Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only; 0, the default, renders every comment unchanged; N must be >= 0)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
 }

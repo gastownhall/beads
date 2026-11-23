@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"regexp"
 
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -97,8 +96,8 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 	}
 
 	// The guard runs only when the request did not already say what to do
-	// about dependents. Under Cascade there is nothing outside the set by
-	// construction, which is why the expansion below is not asked about it.
+	// about dependents. Under Cascade it is not asked: the dependents that
+	// survive a cascade are reported once the whole deletion set is known.
 	//
 	// IT ASKS ABOUT EVERY NAMED ID, IN BOTH PLANES: the leaf says "a NAMED ROW
 	// that some row OUTSIDE the request depends on is refused" with no wisp
@@ -120,13 +119,7 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 				}
 			}
 		} else {
-			orphaned := make(map[string]bool)
-			for _, deps := range external {
-				for _, id := range deps {
-					orphaned[id] = true
-				}
-			}
-			result.Orphaned = workapi.SortedDeleteIDs(orphaned)
+			result.Orphaned = orphanedIDs(external)
 		}
 	}
 
@@ -138,6 +131,23 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 	set, err := ResolveDeletionSetInTx(ctx, tx, ids, req.Cascade)
 	if err != nil {
 		return publicops.DeleteResult{}, fmt.Errorf("delete: %w", err)
+	}
+
+	// A CASCADE ORPHANS TOO, now that it follows containment only (GH#6301):
+	// a row joined to the tree by any other edge survives and loses that edge.
+	// It is asked about the WHOLE set, not the named ids, because a row
+	// blocked by a cascade-deleted descendant is orphaned as surely as one
+	// blocked by the root.
+	if req.Cascade {
+		deletedSet := make(map[string]bool, len(set.All))
+		for _, id := range set.All {
+			deletedSet[id] = true
+		}
+		external, err := ExternalDependentsBySourceInTx(ctx, tx, set.All, deletedSet)
+		if err != nil {
+			return publicops.DeleteResult{}, fmt.Errorf("delete: check dependents: %w", err)
+		}
+		result.Orphaned = orphanedIDs(external)
 	}
 
 	// The neighborhood is read BEFORE the deletion, because after it the
@@ -162,6 +172,7 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 	result.Dependencies = deleted.DependenciesCount
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
+	result.DeletedIDs = sortedUniqueIDs(set.All)
 
 	if req.DryRun {
 		return result, nil
@@ -237,6 +248,18 @@ func ExternalDependentsBySourceInTx(ctx context.Context, tx DBTX, ids []string, 
 	return out, nil
 }
 
+// orphanedIDs flattens ExternalDependentsBySourceInTx's answer into the
+// ascending, duplicate-free list DeleteResult.Orphaned carries.
+func orphanedIDs(external map[string][]string) []string {
+	orphaned := make(map[string]bool)
+	for _, deps := range external {
+		for _, id := range deps {
+			orphaned[id] = true
+		}
+	}
+	return workapi.SortedDeleteIDs(orphaned)
+}
+
 // deleteNeighborsInTx hydrates the SURVIVING rows joined to the deletion set
 // by a dependency edge in either direction — the rows whose text the deletion
 // rewrites.
@@ -309,21 +332,20 @@ func deleteNeighborsInTx(ctx context.Context, tx DBTX, ids []string) ([]*types.I
 	return issues, nil
 }
 
-// RewriteDeletedReferencesInTx replaces every word-boundary occurrence of a
-// deleted id with `[deleted:<id>]` in each neighbor's description, notes,
-// design and acceptance criteria, and reports how many ROWS it changed.
+// RewriteDeletedReferencesInTx replaces every citation of a deleted id with
+// `[deleted:<id>]` in each neighbor's description, notes, design and
+// acceptance criteria, and reports how many ROWS it changed.
 //
-// Exported because the unit-of-work body needs the same rule and neither
-// implementation may own it: a route that spelled the pattern differently
-// would rewrite a different set of citations for the same deletion.
+// The citation rule itself lives in internal/types (CitesID,
+// RewriteDeletedReferences), which this body, the unit-of-work body and the
+// CLI preview all call: a route that spelled the rule differently would
+// rewrite a different set of citations for the same deletion.
 func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []string, neighbors []*types.Issue, actor string) (int, error) {
 	if len(neighbors) == 0 {
 		return 0, nil
 	}
 	touched := make(map[string]bool)
 	for _, id := range deletedIDs {
-		re := DeletedReferencePattern(id)
-		replacement := `$1[deleted:` + id + `]$3`
 		for _, neighbor := range neighbors {
 			if neighbor == nil {
 				continue
@@ -338,10 +360,13 @@ func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []str
 				{"design", &neighbor.Design},
 				{"acceptance_criteria", &neighbor.AcceptanceCriteria},
 			} {
-				if *field.value == "" || !re.MatchString(*field.value) {
+				if *field.value == "" {
 					continue
 				}
-				rewritten := re.ReplaceAllString(*field.value, replacement)
+				rewritten, changed := types.RewriteDeletedReferences(*field.value, id)
+				if !changed {
+					continue
+				}
 				updates[field.column] = rewritten
 				// Write the rewrite back onto the in-memory row so a second
 				// deleted id in the same field sees the first one's result
@@ -360,10 +385,15 @@ func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []str
 	return len(touched), nil
 }
 
-// DeletedReferencePattern is the citation rule, in one place: a literal id at
-// ASCII word boundaries, where a word character includes the hyphen an id is
-// full of. It matches `be-1` in "see (be-1)." and not inside `xbe-1` or
-// `be-12`.
-func DeletedReferencePattern(id string) *regexp.Regexp {
-	return regexp.MustCompile(`(^|[^A-Za-z0-9_-])(` + regexp.QuoteMeta(id) + `)($|[^A-Za-z0-9_-])`)
+// sortedUniqueIDs returns ids in ascending order without duplicates, the
+// shape DeleteResult.DeletedIDs promises.
+func sortedUniqueIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return workapi.SortedDeleteIDs(set)
 }

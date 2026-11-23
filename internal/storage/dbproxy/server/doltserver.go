@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -23,9 +25,11 @@ import (
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -36,11 +40,79 @@ const (
 	LockFileName = "proxy-child.lock"
 )
 
+// errBackendExited is the result of the supervising goroutine when the dolt
+// sql-server exits on its own with status 0 (for example dolt's graceful
+// shutdown on SIGTERM). errgroup cancels egCtx only for a non-nil result, and
+// Running reads egCtx, so without it a cleanly exited backend would be
+// reported as running forever.
+var errBackendExited = errors.New("dolt sql-server exited")
+
+// startReadyTimeout is a var so tests can shorten it.
+var startReadyTimeout = 30 * time.Second
+
 const (
-	startReadyTimeout      = 30 * time.Second
 	startReadyPollInterval = 50 * time.Millisecond
 	startReadyDialTimeout  = 250 * time.Millisecond
 )
+
+// maxStartPortAttempts bounds how many listener ports one Start tries when
+// its PortConflictPolicy lets it move off ports another process holds.
+const maxStartPortAttempts = 5
+
+// RuntimeConfigFileName is the config Start writes in the root directory when
+// it runs the dolt sql-server on a different port than the operator config
+// names (see SetPortConflictPolicy). It is the operator config with only
+// listener.port changed, it exists only while that server runs, and the
+// operator config itself is never modified. dolt sql-server has no
+// command-line port override: with --config, -P/--port is silently ignored
+// (verified against dolt 2.1.8 and 2.2.0), so the override has to be a file.
+const RuntimeConfigFileName = "proxy-child.runtime-config.yaml"
+
+// LaunchConfigFileName is the private snapshot of the operator config used
+// for every dolt sql-server attempt.
+const LaunchConfigFileName = "proxy-child.launch-config.yaml"
+
+// ErrPortInUse reports that the dolt sql-server Start launched exited before
+// it was ready because another process holds its listener port. Start
+// returns it, wrapped, when no PortConflictPolicy is set, when the policy
+// declines, or after maxStartPortAttempts ports.
+var ErrPortInUse = doltserver.ErrPortInUse
+
+// PortConflictPolicy decides whether Start may run the server on another port
+// when the port configPath names (inUsePort) is held by another process. It
+// returns nil to allow it, or an error saying why the port is pinned and what
+// the operator can do; Start then fails with ErrPortInUse and that reason.
+// Start asks once per Start, on the first conflict; ports it picked itself
+// are its own to move again without asking.
+type PortConflictPolicy func(configPath string, inUsePort int) error
+
+// ConfigValidator checks the managed server configuration before launch.
+type ConfigValidator func(servercfg.ServerConfig) error
+
+// captureBirth is procid.Capture; tests replace it to make the capture lose
+// the race with a child that exits at once.
+var captureBirth = procid.Capture
+
+// exitedOnItsOwn reports whether a reaped child ended by itself rather than
+// by the Kill failSpawn sends. A killed child reports exit code -1 on unix;
+// Windows reports an ordinary code for a killed process, so there an exit
+// cannot be told from a kill and this reports false.
+func exitedOnItsOwn(ps *os.ProcessState) bool {
+	return ps != nil && runtime.GOOS != "windows" && ps.ExitCode() >= 0
+}
+
+// pickFreePort returns a loopback port that was free a moment ago. Tests
+// replace it. (proxy.PickFreePort is the same allocator; this package cannot
+// import proxy.)
+var pickFreePort = func() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port, nil
+}
 
 type DoltServer struct {
 	id              string
@@ -49,13 +121,25 @@ type DoltServer struct {
 	configPath      string
 	database        string
 	config          servercfg.ServerConfig
+	configRaw       []byte
+	configValidator ConfigValidator
 	keepAlivePeriod time.Duration
 
 	logFile *os.File
-	eg      *errgroup.Group
-	egCtx   context.Context
-	cancel  context.CancelFunc
-	pid     int
+	// listenerOwner is doltserver.ClassifyListener and ownerProvable is
+	// doltserver.ListenerOwnershipProvable; tests replace them.
+	listenerOwner func(pid, port int) doltserver.Ownership
+	ownerProvable func() bool
+	// portPolicy, when set, lets Start recover from a listener port another
+	// process holds. See SetPortConflictPolicy.
+	portPolicy PortConflictPolicy
+	// launchConfigPath is the --config the current attempt passes to dolt:
+	// configPath, or the runtime config when Start moved the port.
+	launchConfigPath string
+	eg               *errgroup.Group
+	egCtx            context.Context
+	cancel           context.CancelFunc
+	pid              int
 }
 
 var _ DatabaseServer = (*DoltServer)(nil)
@@ -86,6 +170,10 @@ func NewDoltServer(doltBinExec, rootDir, configPath, logFilePath string, keepAli
 	if err != nil {
 		return nil, fmt.Errorf("server: NewDoltServer: parse config %q: %w", configPath, err)
 	}
+	configRaw, err := os.ReadFile(configPath) //nolint:gosec // configPath is the operator-provided Dolt config
+	if err != nil {
+		return nil, fmt.Errorf("server: NewDoltServer: read config %q: %w", configPath, err)
+	}
 	var logFile *os.File
 	if logFilePath != "" {
 		absLogFilePath, err := filepath.Abs(logFilePath)
@@ -108,8 +196,11 @@ func NewDoltServer(doltBinExec, rootDir, configPath, logFilePath string, keepAli
 		configPath:      absConfigPath,
 		database:        database,
 		config:          cfg,
+		configRaw:       configRaw,
 		keepAlivePeriod: keepAlivePeriod,
 		logFile:         logFile,
+		listenerOwner:   doltserver.ClassifyListener,
+		ownerProvable:   doltserver.ListenerOwnershipProvable,
 	}, nil
 }
 
@@ -215,29 +306,209 @@ func (s *DoltServer) doltInitWithRetries(ctx context.Context) error {
 	return backoff.Retry(op, backoff.WithMaxRetries(backoff.WithContext(bo, ctx), maxRetries))
 }
 
+// SetPortConflictPolicy installs fn to recover from a listener port another
+// process holds. When the dolt sql-server Start launched exits because its
+// port is in use and fn allows it, Start picks a free port, writes
+// RuntimeConfigFileName (the config with only listener.port changed), and
+// launches again from that file, up to maxStartPortAttempts ports. The
+// operator config is never modified. Without a policy Start returns
+// ErrPortInUse. Call it before Start.
+func (s *DoltServer) SetPortConflictPolicy(fn PortConflictPolicy) {
+	s.portPolicy = fn
+}
+
+func (s *DoltServer) runtimeConfigPath() string {
+	return filepath.Join(s.rootDir, RuntimeConfigFileName)
+}
+
+func (s *DoltServer) launchSnapshotPath() string {
+	return filepath.Join(s.rootDir, LaunchConfigFileName)
+}
+
+// SetConfigValidator installs a validation step for the launch snapshot.
+func (s *DoltServer) SetConfigValidator(fn ConfigValidator) {
+	s.configValidator = fn
+}
+
 func (s *DoltServer) Start(ctx context.Context) error {
 	if s.eg != nil || s.egCtx != nil {
 		return fmt.Errorf("server: DoltServer.Start: server already started")
 	}
-
+	if err := os.MkdirAll(s.rootDir, 0o755); err != nil {
+		return fmt.Errorf("server: DoltServer.Start: create root %q: %w", s.rootDir, err)
+	}
 	lock, err := util.TryLock(filepath.Join(s.rootDir, LockFileName))
 	if err != nil {
 		return fmt.Errorf("server: DoltServer.Start: acquire %s: %w", LockFileName, err)
 	}
-
-	if err := s.doltConfigure(ctx); err != nil {
+	// A runtime config left by an earlier run is stale: every Start begins
+	// from the operator config's own port and a fresh launch snapshot.
+	_ = os.Remove(s.runtimeConfigPath())
+	_ = os.Remove(s.launchSnapshotPath())
+	raw, err := os.ReadFile(s.configPath) //nolint:gosec // s.configPath is the operator-provided Dolt config
+	if err != nil {
 		lock.Unlock()
+		return fmt.Errorf("server: DoltServer.Start: read config %q: %w", s.configPath, err)
+	}
+	if err := writeFileAtomic(s.launchSnapshotPath(), raw); err != nil {
+		lock.Unlock()
+		return fmt.Errorf("server: DoltServer.Start: snapshot config %q: %w", s.configPath, err)
+	}
+	cfg, err := servercfg.YamlConfigFromFile(filesys.LocalFS, s.launchSnapshotPath())
+	if err != nil {
+		_ = os.Remove(s.launchSnapshotPath())
+		lock.Unlock()
+		return fmt.Errorf("server: DoltServer.Start: parse config %q: %w", s.configPath, err)
+	}
+	if s.configValidator != nil {
+		if err := s.configValidator(cfg); err != nil {
+			_ = os.Remove(s.launchSnapshotPath())
+			lock.Unlock()
+			return fmt.Errorf("server: DoltServer.Start: validate config %q: %w", s.configPath, err)
+		}
+	}
+	s.configRaw = raw
+	s.config = cfg
+	s.launchConfigPath = s.launchSnapshotPath()
+	err = s.startWithPortRecovery(ctx, lock)
+	if err != nil {
+		cleanupLock, lockErr := util.TryLock(filepath.Join(s.rootDir, LockFileName))
+		if lockErr == nil {
+			_ = os.Remove(s.runtimeConfigPath())
+			_ = os.Remove(s.launchSnapshotPath())
+			cleanupLock.Unlock()
+		}
+	}
+	return err
+}
+
+func (s *DoltServer) startWithPortRecovery(ctx context.Context, lock *util.Lock) error {
+	// The policy judges the operator config, so it is asked once, about the
+	// port that config names. Later conflicts are on ports Start picked
+	// itself, which are Start's to move again.
+	operatorPort := s.config.Port()
+	for attempt := 1; ; attempt++ {
+		keepLockOnPortConflict := s.portPolicy != nil && attempt < maxStartPortAttempts
+		err := s.startAttempt(ctx, attempt == 1, lock, keepLockOnPortConflict)
+		if err == nil || !errors.Is(err, ErrPortInUse) {
+			return err
+		}
+		inUse := s.config.Port()
+		if s.portPolicy == nil {
+			return fmt.Errorf("%w; %s", err, portInUseRemedy(s.configPath, inUse))
+		}
+		if attempt >= maxStartPortAttempts {
+			return fmt.Errorf("%w (gave up after %d ports, the last %d; something on this host keeps taking them)", err, attempt, inUse)
+		}
+		if attempt == 1 {
+			if perr := s.portPolicy(s.configPath, operatorPort); perr != nil {
+				lock.Unlock()
+				return fmt.Errorf("%w; not moving off port %d: %v", err, inUse, perr)
+			}
+		}
+		if rerr := s.useRuntimePort(inUse); rerr != nil {
+			lock.Unlock()
+			return fmt.Errorf("%w; could not move off port %d: %v", err, inUse, rerr)
+		}
+	}
+}
+
+// portInUseRemedy says what an operator can do about a pinned port.
+func portInUseRemedy(configPath string, port int) string {
+	return fmt.Sprintf("free port %d, or set listener.port in %s to a free port", port, configPath)
+}
+
+// useRuntimePort writes RuntimeConfigFileName: the operator config with
+// listener.port moved to a fresh port (never inUse), and makes it the config
+// the next attempt launches with and the server dials.
+func (s *DoltServer) useRuntimePort(inUse int) error {
+	// Parse the raw bytes, not YamlConfigFromFile's env-interpolated text:
+	// dolt interpolates the runtime file when it reads it, so placeholders
+	// (and "$$" escapes) must reach it unexpanded, and their values never
+	// land on disk.
+	yc, err := servercfg.NewYamlConfig(s.configRaw)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", s.configPath, err)
+	}
+	port := inUse
+	for port == inUse {
+		if port, err = pickFreePort(); err != nil {
+			return fmt.Errorf("pick free port: %w", err)
+		}
+	}
+	rcfg := *yc
+	rcfg.ListenerConfig.PortNumber = &port
+	body := []byte("# Written by Beads: " + s.configPath + " with listener.port moved to a free port for this run\n" +
+		"# because another process held " + strconv.Itoa(inUse) + ". Removed when the server stops; edit the file above, not this one.\n" +
+		rcfg.String())
+	cfg, err := servercfg.NewYamlConfig(body)
+	if err != nil {
+		return fmt.Errorf("render runtime config: %w", err)
+	}
+	if cfg.Port() != port {
+		return fmt.Errorf("render runtime config: port %d, want %d", cfg.Port(), port)
+	}
+	if err := writeFileAtomic(s.runtimeConfigPath(), body); err != nil {
+		return fmt.Errorf("write %s: %w", s.runtimeConfigPath(), err)
+	}
+	// Dial and DSN need the values dolt will see, so read the file back the
+	// way dolt does, with interpolation.
+	effective, err := servercfg.YamlConfigFromFile(filesys.LocalFS, s.runtimeConfigPath())
+	if err != nil {
+		return fmt.Errorf("re-read %s: %w", s.runtimeConfigPath(), err)
+	}
+	s.config = effective
+	s.launchConfigPath = s.runtimeConfigPath()
+	return nil
+}
+
+// writeFileAtomic writes body to path (mode 0600) through a temp file and a
+// rename, so dolt never reads a partial config.
+func writeFileAtomic(path string, body []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-
-	if err := s.doltInitWithRetries(ctx); err != nil {
-		lock.Unlock()
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
 		return err
+	}
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// startAttempt launches dolt sql-server once and waits until it is ready.
+// Only the first attempt runs the dolt config/init preparation; a retry after
+// a port conflict reuses it.
+//
+// lock is Start's root lock. startAttempt returns with it still held only
+// when it succeeds (the supervising goroutine then releases it when the
+// child exits) or when keepLockOnPortConflict is set and it fails with
+// ErrPortInUse (Start retries under it); every other return releases it.
+func (s *DoltServer) startAttempt(ctx context.Context, prepare bool, lock *util.Lock, keepLockOnPortConflict bool) error {
+	if prepare {
+		if err := s.doltConfigure(ctx); err != nil {
+			lock.Unlock()
+			return err
+		}
+
+		if err := s.doltInitWithRetries(ctx); err != nil {
+			lock.Unlock()
+			return err
+		}
 	}
 
 	args := []string{
 		"sql-server",
-		"--config", s.configPath,
+		"--config", s.launchConfigPath,
 	}
 
 	managedCtx, cancel := context.WithCancel(context.Background())
@@ -249,10 +520,18 @@ func (s *DoltServer) Start(ctx context.Context) error {
 	cmd := exec.CommandContext(managedCtx, s.doltBinExec, args...)
 	cmd.Dir = s.rootDir
 	cmd.Stdin = nil
-	if s.logFile != nil {
-		cmd.Stdout = s.logFile
-		cmd.Stderr = s.logFile
-	}
+	// Both streams go through one watcher, which forwards to the log file
+	// and spots the ready line and a port conflict for waitReady.
+	//
+	// The streams are a pipe into this process rather than the log file
+	// itself, so a dolt sql-server whose proxy died takes SIGPIPE on its next
+	// write; the proxy's shutdown and force-stop paths reap such a backend
+	// anyway. WaitDelay keeps a grandchild that inherited the pipe from
+	// holding cmd.Wait (and so Stop) open.
+	watch := newStartupWatch(s.logFile, s.config.Port())
+	cmd.Stdout = watch
+	cmd.Stderr = watch
+	cmd.WaitDelay = 5 * time.Second
 
 	// The proxied server runs CALL DOLT_PUSH/FETCH in-process; see
 	// doltserver.ServerSpawnEnv for the guards it needs (GH#4272).
@@ -266,23 +545,43 @@ func (s *DoltServer) Start(ctx context.Context) error {
 	}
 
 	s.pid = cmd.Process.Pid
-	birth, err := procid.Capture(s.pid)
-	if err != nil {
+	// failSpawn tears down a child that Start gave up on before handing it
+	// to the supervising goroutine. A dolt sql-server that finds its port
+	// taken can exit within milliseconds, before the identity capture or
+	// pid record below gets to it, and then those steps fail only because
+	// the child is already gone. So once the child is reaped (cmd.Wait also
+	// drains its output into the watcher), its own exit decides the error:
+	// ErrPortInUse when it reported its port taken, so Start's normal
+	// recovery runs; "exited before ready" when it exited by itself; the
+	// step's error only when the child was still alive and we killed it.
+	failSpawn := func(step string, stepErr error) error {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
+		_ = cmd.Wait()
+		s.eg, s.egCtx, s.cancel = nil, nil, nil
 		cancel()
+		if watch.SawPortInUse() {
+			if !keepLockOnPortConflict {
+				lock.Unlock()
+			}
+			s.pid = 0
+			return fmt.Errorf("server: DoltServer.Start: %w", s.exitedBeforeReady(watch))
+		}
 		lock.Unlock()
-		return fmt.Errorf("server: DoltServer.Start: capture child birth identity: %w", err)
+		if exitedOnItsOwn(cmd.ProcessState) {
+			code := cmd.ProcessState.ExitCode()
+			s.pid = 0
+			return fmt.Errorf("server: DoltServer.Start: dolt sql-server exited (status %d) before startup completed (%s: %v)", code, step, stepErr)
+		}
+		s.pid = 0
+		return fmt.Errorf("server: DoltServer.Start: %s: %w", step, stepErr)
+	}
+	birth, err := captureBirth(s.pid)
+	if err != nil {
+		return failSpawn("capture child birth identity", err)
 	}
 	rootID, err := identity.RootID(s.rootDir)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
-		cancel()
-		lock.Unlock()
-		return fmt.Errorf("server: DoltServer.Start: resolve proxy root identity: %w", err)
+		return failSpawn("resolve proxy root identity", err)
 	}
 
 	if err := pidfile.Write(s.rootDir, PIDFileName, pidfile.PidFile{
@@ -293,34 +592,90 @@ func (s *DoltServer) Start(ctx context.Context) error {
 		Birth:  string(birth),
 		RootID: rootID,
 	}); err != nil {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
-		cancel()
-		lock.Unlock()
-		return fmt.Errorf("server: DoltServer.Start: write pidfile: %w", err)
+		return failSpawn("write pidfile", err)
 	}
 
+	// The root lock has one owner at a time, so it is released exactly once.
+	// Until waitReady settles, this attempt owns it, whenever the child
+	// exits: on failure it either releases it or, for a port conflict Start
+	// retries (the child saying its port is taken, or waitReady proving the
+	// listener another process's, which the child never reports), keeps it
+	// for the next attempt. Once the server is ready, the supervising
+	// goroutine owns it and releases it when the child exits.
+	var (
+		lockMu       sync.Mutex
+		handedOff    bool // the server is ready: the goroutine releases the lock
+		exitedBefore bool // the child exited before the hand-off
+	)
 	eg.Go(func() error {
-		defer lock.Unlock()
-		return cmd.Wait()
+		defer func() {
+			lockMu.Lock()
+			defer lockMu.Unlock()
+			if handedOff {
+				lock.Unlock()
+				return
+			}
+			exitedBefore = true
+		}()
+		if err := cmd.Wait(); err != nil {
+			return err
+		}
+		return errBackendExited
 	})
 
-	if err := s.waitReady(ctx); err != nil {
+	if err := s.waitReady(ctx, watch); err != nil {
 		cancel()
 		_ = s.eg.Wait()
 		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
 		_ = pidfile.Remove(s.rootDir, PIDFileName)
+		if !keepLockOnPortConflict || !errors.Is(err, ErrPortInUse) {
+			lock.Unlock()
+		}
 		return fmt.Errorf("server: DoltServer.Start: %w", err)
 	}
+	lockMu.Lock()
+	handedOff = true
+	if exitedBefore {
+		// The child exited between waitReady's last look and here; Running
+		// reports it, and nothing is left to release the lock but this.
+		lock.Unlock()
+	}
+	lockMu.Unlock()
 	return nil
 }
 
-func (s *DoltServer) waitReady(ctx context.Context) error {
+// waitReady waits until the dolt sql-server this Start launched is accepting
+// connections on its configured listener.
+//
+// A successful dial is not enough on its own: the port is chosen before dolt
+// binds it, and if another process takes it in between, the dial reaches that
+// process while dolt fails to bind and exits. So when the config's log level
+// lets dolt log its ready line (info or more verbose), the dial only counts
+// after that line has appeared on this child's own output. Under a quieter
+// log level (warning, which Beads generates only where it can prove
+// listener ownership, so dolt does not log every connection) there is no
+// such line, and the dial counts once the listener is shown to belong to the
+// child's process tree (doltserver.ClassifyListener); a listener shown to
+// be another process's (see ownsListener) ends the wait with ErrPortInUse,
+// and where ownership cannot be told the dial alone decides. The quieter
+// level is also the escape hatch for a dolt whose output never carries the
+// line (a wrapper that filters it, a reworded release), which otherwise
+// fails after startReadyTimeout with an error naming the missing line.
+// Either way, a child that exits first is reported, as ErrPortInUse when it
+// said its port was taken.
+//
+// There is deliberately no "answered for a while, accept anyway" fallback:
+// dolt only reaches its port check after its own startup, which under load
+// can take longer than any grace period, and until then a foreign listener
+// answers exactly like a ready server.
+func (s *DoltServer) waitReady(ctx context.Context, watch *doltserver.StartupWatch) error {
+	needReadyLine := doltserver.LogLevelEmitsReadyLine(s.config.LogLevel())
 	deadline := time.Now().Add(startReadyTimeout)
+	var lastErr error
+	answered := false
 	for {
 		if s.egCtx.Err() != nil {
-			return errors.New("dolt sql-server exited before listener became ready")
+			return s.exitedBeforeReady(watch)
 		}
 
 		dctx, dcancel := context.WithTimeout(ctx, startReadyDialTimeout)
@@ -328,21 +683,107 @@ func (s *DoltServer) waitReady(ctx context.Context) error {
 		dcancel()
 		if err == nil {
 			_ = conn.Close()
+			answered = true
+		}
+		switch {
+		case err == nil && needReadyLine && watch.IsReady():
+			if s.egCtx.Err() != nil {
+				return s.exitedBeforeReady(watch)
+			}
 			return nil
+		case err == nil && !needReadyLine:
+			owned, known := s.ownsListener()
+			if s.egCtx.Err() != nil {
+				return s.exitedBeforeReady(watch)
+			}
+			if owned || !known {
+				return nil
+			}
+			return fmt.Errorf("%w: another process (not dolt sql-server pid %d) holds %s", ErrPortInUse, s.pid, remedy.PrintedValue(s.listenAddr()))
+		case err != nil:
+			lastErr = err
+		default:
+			lastErr = nil
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("listener not ready after %s: %w", startReadyTimeout, err)
+			if needReadyLine && !watch.IsReady() {
+				what := "and nothing answered on " + remedy.PrintedValue(s.listenAddr())
+				if answered {
+					what = "although something answered on " + remedy.PrintedValue(s.listenAddr())
+				}
+				return fmt.Errorf("dolt sql-server (pid %d) never logged %q within %s %s; readiness needs that line on dolt's own output: "+
+					"if a wrapper filters dolt's stdout/stderr or this dolt words it differently, set log_level to warning in %s: readiness then needs the listener to belong to this dolt's process tree, or only the dial where that cannot be determined",
+					s.pid, doltserver.DoltReadyLine, startReadyTimeout, what, s.configPath)
+			}
+			return fmt.Errorf("listener not ready after %s: %w", startReadyTimeout, lastErr)
 		}
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.egCtx.Done():
-			return errors.New("dolt sql-server exited before listener became ready")
+			return s.exitedBeforeReady(watch)
+		case <-watch.ReadyCh():
 		case <-time.After(startReadyPollInterval):
 		}
 	}
+}
+
+// ownsListener reports whether the TCP listener the dial reached belongs to
+// the launched child. A unix socket listener has no port to look up, so its
+// ownership is unknown.
+//
+// A listener the host lists no holder for (doltserver.OwnershipUnlisted)
+// counts as another process's where the host is shown to list this
+// process's own listeners (doltserver.ListenerOwnershipProvable): the child
+// runs as this user in this network namespace, so its listener would be
+// listed, and what answered is another user's socket (darwin) or a listener
+// reached through a forward (WSL2's mirrored networking), which dolt cannot
+// bind past. Where the host lists no sockets at all (WSL1, some sandboxes),
+// such a listener's ownership is unknown. Only this rare path runs the probe.
+func (s *DoltServer) ownsListener() (owned, known bool) {
+	if s.config.Socket() != "" || s.listenerOwner == nil {
+		return false, false
+	}
+	switch s.listenerOwner(s.pid, s.config.Port()) {
+	case doltserver.OwnershipOwned:
+		return true, true
+	case doltserver.OwnershipForeign:
+		return false, true
+	case doltserver.OwnershipUnlisted:
+		return false, s.ownerProvable != nil && s.ownerProvable()
+	}
+	return false, false
+}
+
+// listenAddr is the address Dial and the DSN reach the server at, joined by
+// doltutil.ServerAddr as they join it, so a listener.host written "[::1]"
+// names [::1]:port, not [[::1]]:port.
+func (s *DoltServer) listenAddr() string {
+	if sock := s.config.Socket(); sock != "" {
+		return sock
+	}
+	return doltutil.ServerAddr(s.config.Host(), s.config.Port())
+}
+
+// exitedBeforeReady is waitReady's error for a child that exited first. The
+// supervising goroutine's cmd.Wait returns only after the output copy has
+// finished, so by the time egCtx is done the watcher has seen everything the
+// child wrote.
+func (s *DoltServer) exitedBeforeReady(watch *doltserver.StartupWatch) error {
+	if watch.SawPortInUse() {
+		return fmt.Errorf("%w: dolt sql-server could not bind %s and exited", ErrPortInUse, remedy.PrintedValue(s.listenAddr()))
+	}
+	return errors.New("dolt sql-server exited before listener became ready")
+}
+
+// newStartupWatch watches the child's output, forwarding it to logFile.
+func newStartupWatch(logFile *os.File, port int) *doltserver.StartupWatch {
+	if logFile == nil {
+		return doltserver.NewStartupWatch(nil, port)
+	}
+	return doltserver.NewStartupWatch(logFile, port)
 }
 
 func (s *DoltServer) Stop(ctx context.Context) error {
@@ -358,7 +799,7 @@ func (s *DoltServer) Stop(ctx context.Context) error {
 	if s.eg != nil {
 		waitErr = s.eg.Wait()
 		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) || errors.Is(waitErr, context.Canceled) {
+		if errors.As(waitErr, &exitErr) || errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, errBackendExited) {
 			waitErr = nil
 		}
 	}
@@ -377,6 +818,12 @@ func (s *DoltServer) Stop(ctx context.Context) error {
 	if s.pid != 0 {
 		rmErr = pidfile.Remove(s.rootDir, PIDFileName)
 		s.pid = 0
+	}
+	if err := os.Remove(s.runtimeConfigPath()); err != nil && !os.IsNotExist(err) {
+		rmErr = errors.Join(rmErr, err)
+	}
+	if err := os.Remove(s.launchSnapshotPath()); err != nil && !os.IsNotExist(err) {
+		rmErr = errors.Join(rmErr, err)
 	}
 	if rmErr != nil {
 		rmErr = fmt.Errorf("server: DoltServer.Stop: remove pidfile: %w", rmErr)
@@ -417,7 +864,7 @@ func (s *DoltServer) Running(_ context.Context) bool {
 }
 
 func (s *DoltServer) Dial(ctx context.Context) (net.Conn, error) {
-	network, addr := "tcp", net.JoinHostPort(s.config.Host(), strconv.Itoa(s.config.Port()))
+	network, addr := "tcp", doltutil.ServerAddr(s.config.Host(), s.config.Port())
 	if sock := s.config.Socket(); sock != "" {
 		network, addr = "unix", sock
 	}

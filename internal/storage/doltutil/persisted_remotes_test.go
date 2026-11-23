@@ -3,8 +3,11 @@ package doltutil
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // PersistedRemotes must distinguish three states (bd-6dnrw.33): definitely no
@@ -82,6 +85,29 @@ func TestPersistedRemotes(t *testing.T) {
 		}
 		if got, _ := FindCLIRemoteRef(dir, "absent"); got != "" {
 			t.Errorf("FindCLIRemoteRef(absent) = %q, want empty", got)
+		}
+	})
+
+	// The dolt CLI records its aws-* and oss-* options beside git_ref, and an
+	// add over SQL cannot set them: they are named apart from the ref, so a
+	// re-registration can tell it would erase them.
+	t.Run("parameters other than git_ref are named as CLIOnlyParams", func(t *testing.T) {
+		dir := writeState(t, `{"remotes":{
+			"awsr":{"name":"awsr","url":"aws://[tbl:bucket]/db","fetch_specs":[],"params":{"aws-region":"us-west-2","aws-creds-type":"file","aws-creds-file":"/x/creds"}},
+			"branch":{"name":"branch","url":"git+https://example.com/repo.git","fetch_specs":[],"params":{"git_ref":"refs/heads/issue-data"}},
+			"plain":{"name":"plain","url":"file:///tmp/p","fetch_specs":[],"params":{}}
+		}}`)
+		remotes, err := PersistedRemotes(dir)
+		if err != nil {
+			t.Fatalf("PersistedRemotes: %v", err)
+		}
+		want := []storage.RemoteInfo{
+			{Name: "awsr", URL: "aws://[tbl:bucket]/db", CLIOnlyParams: []string{"aws-creds-file", "aws-creds-type", "aws-region"}},
+			{Name: "branch", URL: "git+https://example.com/repo.git", Ref: "refs/heads/issue-data"},
+			{Name: "plain", URL: "file:///tmp/p"},
+		}
+		if !reflect.DeepEqual(remotes, want) {
+			t.Fatalf("PersistedRemotes = %+v, want %+v", remotes, want)
 		}
 	})
 

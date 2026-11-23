@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/sqlclass"
 )
 
 var sqlCmd = &cobra.Command{
@@ -25,14 +26,21 @@ Examples:
   bd sql 'DELETE FROM dirty_issues WHERE issue_id = "bd-abc123"'
   bd sql --csv 'SELECT id, title, status FROM issues'
 
-The query is passed directly to the database. SELECT queries return results as a
-table (or JSON/CSV with --json/--csv). Non-SELECT queries (INSERT, UPDATE, DELETE)
-report the number of rows affected.
+The query is passed directly to the database. Reads (SELECT, WITH ... SELECT,
+SHOW, EXPLAIN) return results as a table (or JSON/CSV with --json/--csv). Writes
+(INSERT, UPDATE, DELETE, DDL) report the number of rows affected. Statements
+that may both write and return rows, such as CALL, are committed and print any
+rows they return (or "OK").
 
 In proxied-server mode, multiple statements separated by ';' run as a single
 committed batch and report "OK", and --database runs the query against a
 different server database (equivalent to a session USE) without changing the
-project's configured database.
+project's configured database. A --database that holds another beads project
+is refused with PROJECT IDENTITY MISMATCH before any statement runs; a database
+with no beads project identity (such as a non-beads database) is allowed. Set
+BEADS_SKIP_IDENTITY_CHECK=1 to reach another beads project deliberately.
+Team-server workspaces always check identity, and the variable does not relax
+that check.
 
 WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 	Args:          cobra.ExactArgs(1),
@@ -71,15 +79,13 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 
 		ctx := rootCtx
 
-		trimmed := strings.TrimSpace(strings.ToUpper(query))
-		isRead := strings.HasPrefix(trimmed, "SELECT") ||
-			strings.HasPrefix(trimmed, "EXPLAIN") ||
-			strings.HasPrefix(trimmed, "PRAGMA") ||
-			strings.HasPrefix(trimmed, "SHOW") ||
-			strings.HasPrefix(trimmed, "DESCRIBE") ||
-			strings.HasPrefix(trimmed, "WITH")
-
-		if isRead {
+		// Reads and statements that may return rows go through Query so a
+		// result set is always rendered; only plain writes use Exec.
+		kind := sqlclass.Classify(query)
+		if kind != sqlclass.Write {
+			if kind == sqlclass.Mixed {
+				CheckReadonly("sql")
+			}
 			rows, err := db.QueryContext(ctx, query)
 			if err != nil {
 				return HandleErrorRespectJSON("query error: %v", err)
@@ -89,6 +95,9 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 			columns, err := rows.Columns()
 			if err != nil {
 				return HandleErrorRespectJSON("getting columns: %v", err)
+			}
+			if kind == sqlclass.Mixed && len(columns) == 0 {
+				return printSQLStatusOK()
 			}
 
 			allRows := make([]map[string]interface{}, 0)

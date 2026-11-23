@@ -137,6 +137,46 @@ func TestShow_NotFoundJSON(t *testing.T) {
 	}
 }
 
+// TestShow_AsOfFoundNothingExitsNonZero holds --as-of to the contract the two
+// tests above pin for plain show, on the server leg's direct route: when no
+// issue can be read at the ref (a ref the Dolt AS OF read does not take, or an
+// issue absent at it) the command exits non-zero, with show's JSON error
+// envelope on stdout under --json. Both used to exit 0 with nothing on stdout.
+func TestShow_AsOfFoundNothingExitsNonZero(t *testing.T) {
+	tmpDir := setupCLITestDB(t)
+
+	out := runBDInProcess(t, tmpDir, "create", "AsOf server", "-p", "1", "--json")
+	jsonStart := strings.Index(out, "{")
+	if jsonStart < 0 {
+		t.Fatalf("no JSON found in create output: %s", out)
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+		t.Fatalf("failed to parse create output: %v, output: %s", err, out)
+	}
+	id := issue["id"].(string)
+
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "show", id, "--as-of", "asof:"+id+":1")
+	if err == nil || stdout != "" || !strings.Contains(stderr, "invalid ref") {
+		t.Errorf("bd show %s --as-of asof:%s:1 returned %v, want an error with empty stdout and 'invalid ref' on stderr\nstdout: %s\nstderr: %s", id, id, err, stdout, stderr)
+	}
+
+	stdout, stderr, err = runBDInProcessAllowError(t, tmpDir, "show", "test-nonexistent", "--as-of", "main", "--json")
+	if err == nil {
+		t.Errorf("expected error for an issue absent at the ref with --json, but command succeeded\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+	var errResp map[string]interface{}
+	if jsonErr := json.Unmarshal([]byte(stdout), &errResp); jsonErr != nil {
+		t.Fatalf("expected show's JSON error envelope on stdout, got parse error: %v\nStdout: %s", jsonErr, stdout)
+	}
+	if errField, _ := errResp["error"].(string); errField != "no issues found matching the provided IDs" {
+		t.Errorf("expected plain show's 'error' text, got: %s", stdout)
+	}
+	if !strings.Contains(stderr, "test-nonexistent") {
+		t.Errorf("expected the failed lookup reported on stderr, got: %s", stderr)
+	}
+}
+
 // TestShow_NotFoundHintExplainsAmbiguity guards ga-m6inyb: a never-existed ID
 // and a deleted/purged ID currently print the identical "not found" text, so
 // a reader has no way to know the two are different situations (deleted

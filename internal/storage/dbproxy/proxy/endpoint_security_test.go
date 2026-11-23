@@ -418,10 +418,10 @@ func TestLegacyRecordFailClosed(t *testing.T) {
 		require.NoError(t, err)
 
 		previous := ResolveExecutable
-		ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+		ResolveExecutable = spawnReachedExecutable(t, "spawn-reached")
 		t.Cleanup(func() { ResolveExecutable = previous })
 		_, err = spawnAndHandoff(root, externalOpenOpts(root), time.Now().Add(time.Second), "", lock, discovery)
-		require.ErrorContains(t, err, "spawn reached")
+		require.ErrorContains(t, err, "spawn-reached")
 
 		assertHelperAlive(t, helper)
 		assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
@@ -439,7 +439,7 @@ func TestIdentityMismatchQuarantinesRecordWithoutKillingProcess(t *testing.T) {
 	require.NoError(t, err)
 
 	previous := ResolveExecutable
-	ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+	ResolveExecutable = spawnReachedExecutable(t, "spawn-reached")
 	t.Cleanup(func() { ResolveExecutable = previous })
 	_, err = spawnAndHandoff(
 		root,
@@ -453,7 +453,7 @@ func TestIdentityMismatchQuarantinesRecordWithoutKillingProcess(t *testing.T) {
 			err:     errors.New("foreign control listener"),
 		},
 	)
-	require.ErrorContains(t, err, "spawn reached")
+	require.ErrorContains(t, err, "spawn-reached")
 	assertHelperAlive(t, helper)
 	assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
 	assert.Len(t, quarantines(t, root, PIDFileName), 1)
@@ -469,7 +469,7 @@ func TestUnverifiableDiscoveryQuarantinesUnderLockWithoutKillingProcess(t *testi
 	require.NoError(t, err)
 
 	previous := ResolveExecutable
-	ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+	ResolveExecutable = spawnReachedExecutable(t, "spawn-reached")
 	t.Cleanup(func() { ResolveExecutable = previous })
 	_, err = spawnAndHandoff(
 		root,
@@ -483,7 +483,7 @@ func TestUnverifiableDiscoveryQuarantinesUnderLockWithoutKillingProcess(t *testi
 			err:     errors.New("identity probe denied"),
 		},
 	)
-	require.ErrorContains(t, err, "spawn reached")
+	require.ErrorContains(t, err, "spawn-reached")
 	assertHelperAlive(t, helper)
 	assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
 	assert.Len(t, quarantines(t, root, PIDFileName), 1)
@@ -498,10 +498,10 @@ func TestMalformedRecordQuarantinesBeforeSpawn(t *testing.T) {
 	require.NoError(t, err)
 
 	previous := ResolveExecutable
-	ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached") }
+	ResolveExecutable = spawnReachedExecutable(t, "spawn-reached")
 	t.Cleanup(func() { ResolveExecutable = previous })
 	_, err = spawnAndHandoff(root, externalOpenOpts(root), time.Now().Add(time.Second), "", lock, discovery)
-	require.ErrorContains(t, err, "spawn reached")
+	require.ErrorContains(t, err, "spawn-reached")
 	assert.NoFileExists(t, pidfile.Path(root, PIDFileName))
 	assert.Len(t, quarantines(t, root, PIDFileName), 1)
 }
@@ -616,7 +616,7 @@ func TestCleanupOrphanBackendKillsVerifiedOrphanAndQuarantines(t *testing.T) {
 	proxyLock, err := util.TryLock(filepath.Join(root, LockFileName))
 	require.NoError(t, err)
 	previous := ResolveExecutable
-	ResolveExecutable = func() (string, error) { return "", errors.New("spawn reached after orphan cleanup") }
+	ResolveExecutable = spawnReachedExecutable(t, "spawn-reached-after-orphan-cleanup")
 	t.Cleanup(func() { ResolveExecutable = previous })
 	_, err = spawnAndHandoff(
 		root,
@@ -626,7 +626,7 @@ func TestCleanupOrphanBackendKillsVerifiedOrphanAndQuarantines(t *testing.T) {
 		proxyLock,
 		adoptionResult{status: adoptionNoRecord},
 	)
-	require.ErrorContains(t, err, "spawn reached after orphan cleanup")
+	require.ErrorContains(t, err, "spawn-reached-after-orphan-cleanup")
 
 	assertHelperExited(t, helper)
 	assert.NoFileExists(t, pidfile.Path(root, server.PIDFileName))
@@ -812,6 +812,8 @@ func TestControlFilePathsIncludesSecretAndQuarantines(t *testing.T) {
 	backendStale := pidfile.Path(root, server.PIDFileName) + ".stale-200"
 	require.NoError(t, os.WriteFile(proxyStale, []byte("proxy"), 0o600))
 	require.NoError(t, os.WriteFile(backendStale, []byte("backend"), 0o600))
+	rotatedLog := filepath.Join(root, LogFileName+".1")
+	require.NoError(t, os.WriteFile(rotatedLog, []byte("rotated"), 0o600))
 	_, err := identity.WriteSecret(root)
 	require.NoError(t, err)
 
@@ -819,11 +821,63 @@ func TestControlFilePathsIncludesSecretAndQuarantines(t *testing.T) {
 	assert.Contains(t, paths, filepath.Join(root, identity.SecretFileName))
 	assert.Contains(t, paths, proxyStale)
 	assert.Contains(t, paths, backendStale)
+	assert.Contains(t, paths, rotatedLog)
 
 	assert.Empty(t, PurgeControlFiles(root))
 	assert.NoFileExists(t, filepath.Join(root, identity.SecretFileName))
 	assert.NoFileExists(t, proxyStale)
 	assert.NoFileExists(t, backendStale)
+	assert.NoFileExists(t, rotatedLog)
+}
+
+func TestStopVerifiedPreMACProxyStopsVerifiedProcess(t *testing.T) {
+	root := t.TempDir()
+	helper := startHelperProcess(t)
+	pf := v2Record(t, root, pidfile.KindProxy, helper)
+	require.NoError(t, pidfile.Write(root, PIDFileName, pf))
+
+	require.NoError(t, stopVerifiedPreMACProxy(root, &pf))
+	assertHelperExited(t, helper)
+}
+
+func TestIsPreMACIdentRefusal(t *testing.T) {
+	unmarked := &pidfile.PidFile{Schema: pidfile.SchemaV2, Kind: pidfile.KindProxy, Pid: 1, Port: 3307}
+	marked := &pidfile.PidFile{Schema: pidfile.SchemaV2, Kind: pidfile.KindProxy, Pid: 1, Port: 3307, ControlProto: pidfile.ControlProtoIdentMAC}
+	for _, tc := range []struct {
+		name      string
+		discovery adoptionResult
+		want      bool
+	}{
+		{
+			name:      "unmarked record refusing IDENT is pre-upgrade",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, pidfile: unmarked, err: identity.ErrIdentRefused},
+			want:      true,
+		},
+		{
+			name:      "marked record refusing IDENT is a transient refusal",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, pidfile: marked, err: identity.ErrIdentRefused},
+			want:      false,
+		},
+		{
+			name:      "refusal without a record has nothing to stop",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, err: identity.ErrIdentRefused},
+			want:      false,
+		},
+		{
+			name:      "non-refusal mismatch on an unmarked record is not a stop signal",
+			discovery: adoptionResult{status: adoptionIdentityMismatch, pidfile: unmarked, err: errors.New("reply authentication failed")},
+			want:      false,
+		},
+		{
+			name:      "non-mismatch status with refusal error is not a stop signal",
+			discovery: adoptionResult{status: adoptionUnverifiable, pidfile: unmarked, err: identity.ErrIdentRefused},
+			want:      false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isPreMACIdentRefusal(tc.discovery))
+		})
+	}
 }
 
 // N-process cold-start convergence remains intentionally deferred to the
@@ -843,4 +897,14 @@ func quarantines(t *testing.T, root, name string) []string {
 	matches, err := filepath.Glob(filepath.Join(root, name+".stale-*"))
 	require.NoError(t, err)
 	return matches
+}
+
+// spawnReachedExecutable is a resolver for tests that only need to see the
+// spawn path reach the fork: the executable resolves (spawnAndHandoff resolves
+// it before mutating anything) but does not exist, so the fork fails with an
+// error naming it.
+func spawnReachedExecutable(t *testing.T, name string) func() (string, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	return func() (string, error) { return path, nil }
 }

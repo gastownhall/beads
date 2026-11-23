@@ -1,6 +1,8 @@
 package db
 
 import (
+	"fmt"
+
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -18,6 +20,43 @@ func (s *testSuite) TestIssueGetReadyWorkWithCounts() {
 	s.Run("SortByPriority", s.readyCountsSortByPriority)
 	s.Run("LimitRespected", s.readyCountsLimit)
 	s.Run("CollisionAcrossTablesKeepsTheWispCopy", s.readyCountsCollision)
+	s.Run("PagesExcludeChildrenOfUndatedDeferredParent", s.readyCountsPagesExcludeUndatedDeferredChild)
+}
+
+// readyCountsPagesExcludeUndatedDeferredChild pages the counts listing over a
+// front holding the child of an undated deferred parent (GH#7300): the child is
+// on no page, and the pages together are exactly the expected ready set.
+func (s *testSuite) readyCountsPagesExcludeUndatedDeferredChild() {
+	const label = "rdyc-udf-isolate"
+	s.insertUndatedDeferredFamily("bd-rdyc-udf-p", "bd-rdyc-udf-c", "bd-rdyc-udf-free")
+	want := []string{"bd-rdyc-udf-free"}
+	for i := 0; i < 4; i++ {
+		id := fmt.Sprintf("bd-rdyc-udf-r%d", i)
+		s.Require().NoError(s.issueRepo().Insert(s.Ctx(), newTestIssue(id, id), "tester", domain.InsertIssueOpts{}))
+		want = append(want, id)
+	}
+	labels := NewLabelSQLRepository(s.Runner())
+	for _, id := range append([]string{"bd-rdyc-udf-p", "bd-rdyc-udf-c"}, want...) {
+		s.Require().NoError(labels.Insert(s.Ctx(), id, label, "tester", domain.LabelOpts{}))
+	}
+	base := types.WorkFilter{Labels: []string{label}, SortPolicy: types.SortPolicyOldest}
+
+	all, err := s.issueRepo().GetReadyWorkWithCounts(s.Ctx(), base)
+	s.Require().NoError(err)
+	s.ElementsMatch(want, iwcIDs(all), "unbounded ready set")
+
+	var walked []string
+	for page := 0; page <= len(want); page++ {
+		out, err := s.issueRepo().GetReadyWorkWithCounts(s.Ctx(), withOffsetLimit(base, page*2, 2))
+		s.Require().NoError(err)
+		got := iwcIDs(out)
+		s.NotContains(got, "bd-rdyc-udf-c", "page %d", page)
+		walked = append(walked, got...)
+		if !out.HasMore {
+			break
+		}
+	}
+	s.ElementsMatch(want, walked, "pages together")
 }
 
 func (s *testSuite) readyCountsReturnsReady() {
@@ -140,10 +179,15 @@ func (s *testSuite) readyCountsExcludesPinned() {
 
 func (s *testSuite) readyCountsExcludesBlocked() {
 	r := s.issueRepo()
+	blocker := newTestIssue("bd-rdyc-blk-by-1", "open blocker")
+	s.Require().NoError(r.Insert(s.Ctx(), blocker, "tester", domain.InsertIssueOpts{}))
 	blocked := newTestIssue("bd-rdyc-blk-1", "blocked")
 	s.Require().NoError(r.Insert(s.Ctx(), blocked, "tester", domain.InsertIssueOpts{}))
-	_, err := s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", "bd-rdyc-blk-1")
-	s.Require().NoError(err)
+	// A real blocks edge, so the recompute sets the flag: a flag planted on an
+	// edgeless row is stale and ready reads around it (GH#3268).
+	depUC := domain.NewDependencyUseCase(NewDependencySQLRepository(s.Runner()))
+	s.Require().NoError(depUC.AddDependency(s.Ctx(),
+		&types.Dependency{IssueID: "bd-rdyc-blk-1", DependsOnID: "bd-rdyc-blk-by-1", Type: types.DepBlocks}, "tester"))
 
 	out, err := r.GetReadyWorkWithCounts(s.Ctx(), types.WorkFilter{})
 	s.Require().NoError(err)

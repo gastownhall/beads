@@ -43,6 +43,10 @@ type listInput struct {
 func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in := listInput{}
 
+	// The custom filter values persist across in-process Execute() calls;
+	// clear them once this read has copied them out.
+	defer resetListFilterFlags(cmd.Flags())
+
 	in.Status, _ = cmd.Flags().GetString("status")
 	if in.Status == "" {
 		in.Status, _ = cmd.Flags().GetString("state")
@@ -146,6 +150,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.IncludeGates, _ = cmd.Flags().GetBool("include-gates")
 	in.IncludeInfra, _ = cmd.Flags().GetBool("include-infra")
 	in.IncludeEphemeral, _ = cmd.Flags().GetBool("include-ephemeral")
+	in.IncludeAllTypes, _ = cmd.Flags().GetBool("include-all-types")
 	in.ExcludeTypes, _ = cmd.Flags().GetStringSlice("exclude-type")
 
 	in.ParentID, _ = cmd.Flags().GetString("parent")
@@ -187,7 +192,11 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		// by itself, so the request may be satisfiable and this cannot tell
 		// without the workspace's infra vocabulary, which this layer does not
 		// load.
-		if !in.IncludeEphemeral && !in.IncludeInfra && in.IssueType == "" {
+		//
+		// --include-all-types is the union of the plane knobs (workapi skips every
+		// default suppression for it, the plane decision included), so it
+		// admits the ephemeral plane too.
+		if !in.IncludeEphemeral && !in.IncludeInfra && !in.IncludeAllTypes && in.IssueType == "" {
 			return in, HandleErrorWithHint(
 				fmt.Sprintf("--wisp-type %s cannot match anything here: it filters the wisp_type column, and this listing admits only durable rows, which never carry one", s),
 				"add --include-ephemeral to admit the ephemeral plane (or --include-infra, which admits it as part of a wider bundle)")
@@ -276,7 +285,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	// issueops.Reader.List, whose query reads types.IssueFilter.Lite; the three
 	// below leave that query.
 	//
-	//   --watch re-queries on a ticker through loadWatchedIssues, whose --ready
+	//   --watch re-queries every poll interval through loadWatchedIssues, whose --ready
 	//   arm calls the bare GetReadyWork and whose --parent arm walks the tree;
 	//   neither reads Lite.
 	//

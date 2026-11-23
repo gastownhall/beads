@@ -3,7 +3,10 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +15,9 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/memoryapi"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	storagememoryops "github.com/steveyegge/beads/internal/storage/memoryops"
 )
 
 // countMemoryDoltCommits reads dolt_log for an embedded workspace. It is how
@@ -36,6 +41,30 @@ func countMemoryDoltCommits(t *testing.T, beadsDir string) int {
 		t.Fatalf("query dolt_log: %v", err)
 	}
 	return count
+}
+
+// storeMemoryValueOutOfBand overwrites a memory row's value with SQL, beneath
+// every bd code path. It is the only way a test gets an empty-valued memory:
+// `bd remember` refuses empty content, so such a row always arrives out of band.
+func storeMemoryValueOutOfBand(t *testing.T, beadsDir, key, value string) {
+	t.Helper()
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	res, err := db.ExecContext(t.Context(), "UPDATE config SET value = ? WHERE `key` = ?", value, storagememoryops.StorageKey(key))
+	if err != nil {
+		t.Fatalf("update memory %q: %v", key, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("update memory %q: %d rows affected (err %v), want 1", key, n, err)
+	}
 }
 
 // bdRemember runs "bd remember" with the given args and returns stdout.
@@ -199,6 +228,60 @@ func TestEmbeddedMemory(t *testing.T) {
 		}
 	})
 
+	// GH#7275: read-shaped arguments are reads even when the key does not
+	// round-trip through the key derivation (nine-plus segments, over 60
+	// bytes, or a dot). The whole corpus is compared before and after every
+	// call, so a junk row minted by a stray write -- or a derived-key
+	// collision overwritten by one -- fails the test. Adapted from PR #7278.
+	t.Run("remember_noncanonical_keys_are_read_only", func(t *testing.T) {
+		for _, key := range []string{
+			"bd-list-silent-partial-rows-take-decision-counts-with-json",
+			strings.Repeat("x", 61),
+			"memory.v2",
+		} {
+			t.Run(key, func(t *testing.T) {
+				derived := memoryapi.DeriveKey(key)
+				bdRemember(t, bd, dir, "exact memory content", "--key", key)
+				bdRemember(t, bd, dir, "derived memory content", "--key", derived)
+				before := bdMemories(t, bd, dir, "--json")
+				if out := bdRemember(t, bd, dir, key); out != "exact memory content\n" {
+					t.Errorf("bare recall of the exact key = %q, want the exact memory content", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("read changed memories:\nbefore: %s\nafter:  %s", before, after)
+				}
+
+				// The exact key gone, its derived collision still there: the
+				// refusal names the derived key, whose content never
+				// substitutes for the missing memory's.
+				bdForget(t, bd, dir, key)
+				before = bdMemories(t, bd, dir, "--json")
+				out := bdRememberFail(t, bd, dir, key)
+				if !strings.Contains(out, "no memory named") || !strings.Contains(out, "did you mean "+derived) {
+					t.Errorf("missing exact key must refuse with a derived-key hint: %s", out)
+				}
+				if strings.Contains(out, "derived memory content") {
+					t.Errorf("the hint must not substitute the derived memory's content: %s", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("miss changed memories:\nbefore: %s\nafter:  %s", before, after)
+				}
+
+				// Both gone: the same refusal, with no hint, and no write
+				// under either key.
+				bdForget(t, bd, dir, derived)
+				before = bdMemories(t, bd, dir, "--json")
+				out = bdRememberFail(t, bd, dir, key, "--json")
+				if !strings.Contains(out, "no memory named") || strings.Contains(out, "did you mean") {
+					t.Errorf("both keys missing must refuse without a hint: %s", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("miss changed memories:\nbefore: %s\nafter:  %s", before, after)
+				}
+			})
+		}
+	})
+
 	t.Run("remember_bare_slug_without_memory_refuses", func(t *testing.T) {
 		// A bare slug naming NO existing memory is a mistyped read (or junk content) --
 		// refuse rather than silently creating a memory whose content is its own key.
@@ -210,19 +293,17 @@ func TestEmbeddedMemory(t *testing.T) {
 		bdRecallFail(t, bd, dir, "brand-new-slug-memory")
 	})
 
-	// The two refusals that sit either side of the desire path, and the reason
-	// the bare-slug test is `derived != "" && derived == insight` rather than
-	// the shipped `slugify(insight) == insight`: DeriveKey("") is "", so empty
-	// and underivable content satisfies derived == insight and would be routed
-	// into a "recall" of the empty key instead of being refused. The shipped
-	// code was saved from that by an empty-content check that ran BEFORE the
-	// branch; that check belongs to the role now, so the branch has to exclude
-	// the empty key itself.
+	// The two refusals that sit either side of the desire path. Empty,
+	// whitespace and separator-only arguments are not bare keys
+	// (isBareMemoryKey), so they reach the role and get its refusal instead of
+	// being routed into a "recall" of a key nothing could ever store. A lone
+	// dot is the case a dotted-key grammar could get wrong (GH#7275).
 	t.Run("remember_refuses_content_no_key_derives_from", func(t *testing.T) {
 		for _, tc := range []struct{ insight, want string }{
 			{"", "memory content cannot be empty"},
 			{"   ", "memory content cannot be empty"},
 			{"!!!", "could not generate key from content"},
+			{".", "could not generate key from content"},
 		} {
 			out := bdRememberFail(t, bd, dir, tc.insight)
 			if !strings.Contains(out, tc.want) {
@@ -278,6 +359,29 @@ func TestEmbeddedMemory(t *testing.T) {
 		bdForget(t, bd, dir, "forget-me")
 		// After forget, recall should fail
 		bdRecallFail(t, bd, dir, "forget-me")
+	})
+
+	// AN EMPTY-VALUED MEMORY IS PRESENT (#5963). These run the real commands, so
+	// they pin each RunE's wiring and not only its renderer: a call site that
+	// went back to deciding presence from value != "" fails here while
+	// TestPrintRecallResult and TestRememberBareKeyPath stay green. Its own
+	// workspace, because the row is emptied beneath bd.
+	t.Run("empty_valued_memory_is_present", func(t *testing.T) {
+		edir, ebeads, _ := bdInit(t, bd, "--prefix", "em")
+		bdRemember(t, bd, edir, "placeholder the test empties", "--key", "stored-empty")
+		storeMemoryValueOutOfBand(t, ebeads, "stored-empty", "")
+
+		// The placeholder check proves bd sees the emptied row. Without it, a
+		// write bd never read would leave this test green on a reverted fix.
+		if out := bdRecall(t, bd, edir, "stored-empty"); strings.Contains(out, "placeholder") {
+			t.Fatalf("bd recall still sees the placeholder, so the row was not emptied: %s", out)
+		}
+		// A bare key naming the empty-valued memory recalls it instead of refusing.
+		if out := bdRemember(t, bd, edir, "stored-empty"); strings.Contains(out, "placeholder") {
+			t.Fatalf("bd remember <bare-key> still sees the placeholder: %s", out)
+		}
+		bdForget(t, bd, edir, "stored-empty")
+		bdRecallFail(t, bd, edir, "stored-empty")
 	})
 
 	// THE AUTO-COMMIT EPILOGUE, which is the trap this convergence was most
@@ -342,6 +446,96 @@ func TestEmbeddedMemory(t *testing.T) {
 	t.Run("forget_no_args", func(t *testing.T) {
 		bdForgetFail(t, bd, dir)
 	})
+}
+
+// TestEmbeddedMemoryBareKeyRecallsKeysDeriveKeyChanges pins GH#7275: a bare
+// `bd remember <exact-key>` recalls an existing memory even when the key does
+// not round-trip through DeriveKey (more than eight segments, over 60 bytes,
+// or a dot), and never writes a memory. A different memory under the derived
+// key is the one the old gate overwrote; it must neither answer nor change.
+func TestEmbeddedMemoryBareKeyRecallsKeysDeriveKeyChanges(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tk")
+
+	for _, key := range []string{
+		"one-two-three-four-five-six-seven-eight-nine",
+		strings.Repeat("k", 61), // one segment, so the 60-byte cap is what changes it
+		"config.v2",
+	} {
+		t.Run(key, func(t *testing.T) {
+			content := "keep this content for " + key
+			derivedContent := "the derived-key memory beside " + key
+			bdRemember(t, bd, dir, content, "--key", key)
+			bdRemember(t, bd, dir, derivedContent, "--key", memoryapi.DeriveKey(key))
+			before := bdMemories(t, bd, dir, "--json")
+
+			out := bdRemember(t, bd, dir, key)
+			if !strings.Contains(out, content) {
+				t.Errorf("bare `bd remember %s` should recall %q, got: %s", key, content, out)
+			}
+			if strings.Contains(out, derivedContent) {
+				t.Errorf("bare `bd remember %s` answered with the derived key's memory: %s", key, out)
+			}
+			if after := bdMemories(t, bd, dir, "--json"); after != before {
+				t.Errorf("bare `bd remember %s` changed the memories:\nbefore: %s\nafter:  %s", key, before, after)
+			}
+		})
+	}
+}
+
+// TestEmbeddedMemoryBareKeyMissesNeverWrite pins GH#7275's misses: a bare
+// key the derivation changes that names no memory is refused, and when its
+// derived key names one the refusal hints at that key without printing its
+// content. Neither miss may create or change a memory.
+func TestEmbeddedMemoryBareKeyMissesNeverWrite(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tk")
+	bdRemember(t, bd, dir, "an unrelated memory", "--key", "unrelated")
+
+	for _, key := range []string{
+		"one-two-three-four-five-six-seven-eight-nine",
+		strings.Repeat("k", 61), // one segment, so the 60-byte cap is what changes it
+		"config.v2",
+	} {
+		derived := memoryapi.DeriveKey(key)
+		t.Run(key+"/neither exists", func(t *testing.T) {
+			before := bdMemories(t, bd, dir, "--json")
+			out := bdRememberFail(t, bd, dir, key)
+			if !strings.Contains(out, "no memory named") || strings.Contains(out, "Hint:") {
+				t.Errorf("bare `bd remember %s` = %s, want the refusal with no hint", key, out)
+			}
+			if after := bdMemories(t, bd, dir, "--json"); after != before {
+				t.Errorf("bare `bd remember %s` changed the memories:\nbefore: %s\nafter:  %s", key, before, after)
+			}
+		})
+		t.Run(key+"/derived exists", func(t *testing.T) {
+			derivedContent := "the derived-key memory beside " + key
+			bdRemember(t, bd, dir, derivedContent, "--key", derived)
+			t.Cleanup(func() { bdForget(t, bd, dir, derived) })
+			before := bdMemories(t, bd, dir, "--json")
+			out := bdRememberFail(t, bd, dir, key)
+			if !strings.Contains(out, "no memory named") || !strings.Contains(out, "Hint: did you mean "+derived+"?") ||
+				!strings.Contains(out, "bd recall "+derived) {
+				t.Errorf("bare `bd remember %s` = %s, want the refusal with a hint naming %s", key, out, derived)
+			}
+			if strings.Contains(out, derivedContent) {
+				t.Errorf("bare `bd remember %s` printed the derived key's memory: %s", key, out)
+			}
+			if after := bdMemories(t, bd, dir, "--json"); after != before {
+				t.Errorf("bare `bd remember %s` changed the memories:\nbefore: %s\nafter:  %s", key, before, after)
+			}
+		})
+	}
 }
 
 // TestEmbeddedMemoryConcurrent exercises memory operations concurrently.
@@ -485,4 +679,225 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 	if successCount == 0 {
 		t.Fatal("expected at least 1 worker to succeed")
 	}
+}
+
+// bdRememberBuffers runs "bd remember" and hands back stdout, stderr and the
+// error separately. The budget's lines are STDERR by contract — that is what
+// keeps them out of --json output — so a helper that folds the two streams
+// together cannot test them.
+func bdRememberBuffers(t *testing.T, bd, dir string, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := exec.Command(bd, append([]string{"remember"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	return stdout.String(), stderr.String(), err
+}
+
+// TestEmbeddedMemoryCorpusBudget exercises memories.budget-chars against a REAL
+// store, end to end: the config key routed through `bd config set`, the corpus
+// measured from rows that are actually there, the refusal's nonzero exit, and
+// the fact that a refused write leaves NOTHING behind.
+//
+// The arithmetic below is exact and deliberate — every content length is chosen
+// so the projected corpus lands on a named boundary — because a budget test
+// that only asserts "some line appeared" would pass with an off-by-one budget.
+// The pure branch coverage lives in memory_budget_pure_test.go; this is the
+// wiring.
+func TestEmbeddedMemoryCorpusBudget(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// ===== Budget OFF: byte-identical to the pre-budget command =====
+	t.Run("budget_off_is_silent", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "mb")
+		stdout, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("x", 5000), "--key", "big")
+		if err != nil {
+			t.Fatalf("remember with no budget failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Remembered [big]") {
+			t.Errorf("expected the shipped success line, got %q", stdout)
+		}
+		if strings.Contains(stderr, "memory corpus") {
+			t.Errorf("budget off must print no budget line, got stderr %q", stderr)
+		}
+	})
+
+	// ===== Budget ON =====
+	dir, _, _ := bdInit(t, bd, "--prefix", "mb")
+
+	// The arithmetic below assumes a fresh, empty corpus. Say so out loud, so
+	// a future `bd init` that seeds a memory fails HERE instead of failing as
+	// an inscrutable off-by-N in the assertions.
+	if out := bdMemories(t, bd, dir); !strings.Contains(out, "No memories stored") {
+		t.Fatalf("budget arithmetic needs an empty corpus after init, got:\n%s", out)
+	}
+
+	cfg := exec.Command(bd, "config", "set", "memories.budget-chars", "100")
+	cfg.Dir = dir
+	cfg.Env = bdEnv(dir)
+	if out, err := cfg.CombinedOutput(); err != nil {
+		t.Fatalf("bd config set memories.budget-chars failed: %v\n%s", err, out)
+	} else if strings.Contains(string(out), "not a recognized") || strings.Contains(string(out), "Unrecognized") {
+		t.Fatalf("memories.budget-chars must be a recognized config key, got:\n%s", out)
+	}
+
+	// 3 ("pad") + 90 = 93 of 100 -> writes, warns at 93%.
+	t.Run("warn_band_writes_and_warns", func(t *testing.T) {
+		_, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("a", 90), "--key", "pad")
+		if err != nil {
+			t.Fatalf("a write inside the budget must succeed: %v\nstderr:\n%s", err, stderr)
+		}
+		if want := "bd remember: memory corpus at 93 of 100 chars (93%)"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want the warn line %q", stderr, want)
+		}
+		if out := bdRecall(t, bd, dir, "pad"); !strings.Contains(out, strings.Repeat("a", 90)) {
+			t.Errorf("the warned write must still have landed, got %q", out)
+		}
+	})
+
+	// An OVERWRITE of the same size is a no-op on the corpus (delta, not sum).
+	// Were it summed, the projection would be 186 and this would be refused.
+	t.Run("overwrite_counts_delta_not_sum", func(t *testing.T) {
+		_, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("b", 90), "--key", "pad")
+		if err != nil {
+			t.Fatalf("a same-size overwrite must not be refused: %v\nstderr:\n%s", err, stderr)
+		}
+		if want := "bd remember: memory corpus at 93 of 100 chars (93%)"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q (an overwrite must not add to the sum)", stderr, want)
+		}
+		if out := bdRecall(t, bd, dir, "pad"); !strings.Contains(out, strings.Repeat("b", 90)) {
+			t.Errorf("overwrite did not land: %q", out)
+		}
+	})
+
+	// 93 + 2 ("ab") + 5 = exactly 100. Exactly AT the budget writes.
+	t.Run("exactly_at_budget_writes", func(t *testing.T) {
+		_, stderr, err := bdRememberBuffers(t, bd, dir, "ccccc", "--key", "ab")
+		if err != nil {
+			t.Fatalf("a write landing exactly on the budget must succeed: %v\nstderr:\n%s", err, stderr)
+		}
+		if want := "bd remember: memory corpus at 100 of 100 chars (100%)"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+	})
+
+	// Overwriting "pad" with one more byte projects 101 — exactly ONE over.
+	t.Run("one_byte_over_refuses_and_writes_nothing", func(t *testing.T) {
+		stdout, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("d", 91), "--key", "pad")
+		if err == nil {
+			t.Fatalf("a write one byte over the budget must exit nonzero; stdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		want := "bd remember: memory corpus would be 101 chars, budget is 100 (101%) — refused; use --force to override"
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+		// A terminal user is offered the same ways out as the --json envelope.
+		if hint := "Hint: raise memories.budget-chars, forget a memory, or pass --force"; !strings.Contains(stderr, hint) {
+			t.Errorf("stderr = %q, want the hint %q", stderr, hint)
+		}
+		if strings.Contains(stdout, "Remembered") || strings.Contains(stdout, "Updated") {
+			t.Errorf("a refused write must print no success line, got stdout %q", stdout)
+		}
+		if out := bdRecall(t, bd, dir, "pad"); !strings.Contains(out, strings.Repeat("b", 90)) {
+			t.Errorf("a refused write must leave the old content intact, got %q", out)
+		}
+	})
+
+	// The commonest call passes no --key, so the write lands under the key
+	// derived from the content, and that is the key the budget must measure:
+	// 100 + 22 ("derived-keys-count-too") + 24 (the content) projects 146.
+	t.Run("derived_key_write_is_budgeted", func(t *testing.T) {
+		stdout, stderr, err := bdRememberBuffers(t, bd, dir, "Derived keys count, too!")
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("a write with no --key over the budget must exit 1, got %v; stdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		want := "bd remember: memory corpus would be 146 chars, budget is 100 (146%) — refused; use --force to override"
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+		if strings.Contains(stdout, "Remembered") || strings.Contains(stdout, "Updated") {
+			t.Errorf("a refused write must print no success line, got stdout %q", stdout)
+		}
+		bdRecallFail(t, bd, dir, "derived-keys-count-too")
+	})
+
+	// A whitespace-only --key names nothing, so the role refuses the write with
+	// its own validation sentence. The budget must not answer first: on this
+	// full corpus it would call the write over budget and point at --force,
+	// and the --force retry would only then meet the validation error.
+	t.Run("blank_key_gets_the_validation_error_not_the_budget", func(t *testing.T) {
+		stdout, stderr, err := bdRememberBuffers(t, bd, dir, "some content", "--key", "   ")
+		if err == nil {
+			t.Fatalf("a whitespace-only --key must be refused; stdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "memory key must not be empty") {
+			t.Errorf("stderr = %q, want the role's validation error", stderr)
+		}
+		if strings.Contains(stderr, "memory corpus") {
+			t.Errorf("a write the role refuses must not be measured against the budget, got stderr %q", stderr)
+		}
+	})
+
+	// The same refusal under --json is said ONCE, and only on stdout: the
+	// machine-readable envelope, nothing else. Printing the prose to stderr as
+	// well would deliver one refusal twice to a caller reading both streams.
+	t.Run("json_refusal_is_said_once", func(t *testing.T) {
+		stdout, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("d", 91), "--key", "pad", "--json")
+		if err == nil {
+			t.Fatalf("a --json write one byte over the budget must exit nonzero; stdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+
+		// Exactly ONE JSON document on stdout — no second envelope, no prose
+		// before or after it.
+		dec := json.NewDecoder(strings.NewReader(stdout))
+		var doc map[string]interface{}
+		if decErr := dec.Decode(&doc); decErr != nil {
+			t.Fatalf("stdout is not a JSON document (%v):\n%s", decErr, stdout)
+		}
+		if decErr := dec.Decode(new(json.RawMessage)); !errors.Is(decErr, io.EOF) {
+			t.Errorf("stdout carries more than one JSON document (second Decode = %v):\n%s", decErr, stdout)
+		}
+
+		// The envelope carries the refusal sentence, under either the enveloped
+		// or the flat error shape.
+		inner := doc
+		if data, ok := doc["data"].(map[string]interface{}); ok {
+			inner = data
+		}
+		msg, _ := inner["error"].(string)
+		want := "bd remember: memory corpus would be 101 chars, budget is 100 (101%) — refused; use --force to override"
+		if msg != want {
+			t.Errorf("JSON error = %q, want %q (full stdout:\n%s)", msg, want, stdout)
+		}
+
+		// ...and stderr says nothing, so the refusal arrived exactly once.
+		if strings.Contains(stderr, "memory corpus") || strings.Contains(stderr, "Hint:") {
+			t.Errorf("--json refusal must not also print the prose line to stderr, got stderr %q", stderr)
+		}
+
+		// A refused --json write still leaves the old content intact.
+		if out := bdRecall(t, bd, dir, "pad"); !strings.Contains(out, strings.Repeat("b", 90)) {
+			t.Errorf("a refused --json write must leave the old content intact, got %q", out)
+		}
+	})
+
+	// The same write with --force lands, and still says so.
+	t.Run("force_writes_over_budget", func(t *testing.T) {
+		_, stderr, err := bdRememberBuffers(t, bd, dir, strings.Repeat("d", 91), "--key", "pad", "--force")
+		if err != nil {
+			t.Fatalf("--force must write over the budget: %v\nstderr:\n%s", err, stderr)
+		}
+		if want := "bd remember: memory corpus at 101 of 100 chars (101%) — over budget, written anyway (--force)"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+		if out := bdRecall(t, bd, dir, "pad"); !strings.Contains(out, strings.Repeat("d", 91)) {
+			t.Errorf("--force did not land the write, got %q", out)
+		}
+	})
 }

@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 const (
@@ -83,7 +85,7 @@ func TestWorktreeRemoveProcessHelper(t *testing.T) {
 }
 
 func runWorktreeRemoveHookGit(dir string, args ...string) error {
-	command := exec.Command("git", args...)
+	command := gitCommand(args...)
 	command.Dir = dir
 	command.Env = append(scrubWorktreeGitRoutingEnv(os.Environ()), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
 	output, err := command.CombinedOutput()
@@ -295,7 +297,7 @@ func runWorktreeRemoveProcess(t *testing.T, dir string, extraEnv []string, args 
 	}
 	command := exec.Command(executable, "-test.run=^TestWorktreeRemoveProcessHelper$")
 	command.Dir = dir
-	command.Env = overrideWorktreeRemoveEnv(os.Environ(), append([]string{worktreeRemoveHelperEnv + "=1", worktreeRemoveHelperArgsEnv + "=" + string(encodedArgs), "BD_DISABLE_METRICS=1"}, extraEnv...))
+	command.Env = overrideWorktreeRemoveEnv(bazeltest.ShardFreeEnv(os.Environ()), append([]string{worktreeRemoveHelperEnv + "=1", worktreeRemoveHelperArgsEnv + "=" + string(encodedArgs), "BD_DISABLE_METRICS=1"}, extraEnv...))
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err = command.Run()
@@ -442,7 +444,7 @@ func (fixture *worktreeRemovalFixture) assertRemovedAndCleaned(t *testing.T) {
 }
 func (fixture *worktreeRemovalFixture) git(t *testing.T, directory string, args ...string) string {
 	t.Helper()
-	command := exec.Command("git", args...)
+	command := gitCommand(args...)
 	command.Dir = directory
 	command.Env = append(scrubWorktreeGitRoutingEnv(os.Environ()), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
 	output, err := command.CombinedOutput()

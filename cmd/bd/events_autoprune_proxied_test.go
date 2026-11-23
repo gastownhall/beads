@@ -10,7 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// TestAutoPruneProxiedServer is the auto-prune guard for bd's SECOND write
+// TestProxiedServerAutoPrune is the auto-prune guard for bd's SECOND write
 // plumbing.
 //
 // It is not a duplicate of the embedded test. Proxied mode opens no store at
@@ -20,7 +20,7 @@ import (
 // topology where the journal's writer is a short-lived CLI process against a
 // long-lived SQL server, so a missing trigger here means a workspace that
 // journals fast and never prunes.
-func TestAutoPruneProxiedServer(t *testing.T) {
+func TestProxiedServerAutoPrune(t *testing.T) {
 	requireProxiedServerEnv(t)
 	t.Parallel()
 

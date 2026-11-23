@@ -17,10 +17,11 @@ func CloneCreateBatchRequest(request publicops.CreateBatchRequest) publicops.Cre
 	clone := request
 	clone.Items = make([]publicops.BatchCreateItem, len(request.Items))
 	for i, item := range request.Items {
-		clone.Items[i] = publicops.BatchCreateItem{
-			Issue:        clonePublicIssue(item.Issue),
-			Dependencies: append([]publicops.CreateDependency(nil), item.Dependencies...),
-		}
+		// Start from the item itself so every scalar member (DefaultPriority
+		// today) survives the clone; only the reference members are deepened.
+		clone.Items[i] = item
+		clone.Items[i].Issue = clonePublicIssue(item.Issue)
+		clone.Items[i].Dependencies = append([]publicops.CreateDependency(nil), item.Dependencies...)
 	}
 	return clone
 }
@@ -53,10 +54,11 @@ func ValidateCreateBatchRequest(request publicops.CreateBatchRequest) error {
 // an item through it, so no item restates CreateRequest's field rules.
 func CreateBatchItemRequest(request publicops.CreateBatchRequest, item publicops.BatchCreateItem) publicops.CreateRequest {
 	return publicops.CreateRequest{
-		Actor:         request.Actor,
-		Issue:         item.Issue,
-		Dependencies:  item.Dependencies,
-		ForceIDPrefix: request.ForceIDPrefix,
+		Actor:           request.Actor,
+		Issue:           item.Issue,
+		Dependencies:    item.Dependencies,
+		ForceIDPrefix:   request.ForceIDPrefix,
+		DefaultPriority: item.DefaultPriority,
 	}
 }
 
@@ -133,6 +135,17 @@ func ExecuteCreateBatch(ctx context.Context, tx *sql.Tx, request publicops.Creat
 	}
 	infraTypes := ResolveInfraTypesInTx(ctx, tx)
 
+	// EVERY ID IS ASSIGNED BEFORE ANY ROW IS WRITTEN, so the generator's probe
+	// cannot see an id this batch has already spoken for. claimed is that set:
+	// every explicit id an item names, up front, and each id as it is minted.
+	// Without it two items can be handed one id and the second refused at
+	// insert as ErrAlreadyExists, on a create that named no id.
+	claimed := make(map[string]bool, len(attempt.Items))
+	for _, item := range attempt.Items {
+		if item.Issue.ID != "" {
+			claimed[item.Issue.ID] = true
+		}
+	}
 	issues := make([]*types.Issue, len(attempt.Items))
 	for i, item := range attempt.Items {
 		prepared, err := PreparePublicCreateRequest(CreateBatchItemRequest(attempt, item), createContext)
@@ -151,9 +164,10 @@ func ExecuteCreateBatch(ctx context.Context, tx *sql.Tx, request publicops.Creat
 		if !issue.Ephemeral && !issue.NoHistory && issue.WispType != "" {
 			issue.Ephemeral = true
 		}
-		if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor); err != nil {
+		if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor, claimed); err != nil {
 			return publicops.CreateBatchResult{}, nil, CreateBatchItemError(i, ClassifyPublicCreateError(err))
 		}
+		claimed[issue.ID] = true
 		issue.Dependencies = storage.CreatePublicCreateDependencies(issue.ID, prepared)
 		issues[i] = issue
 	}

@@ -68,6 +68,22 @@ func humanDecisionRequired(e *schema.RemoteMigrateGateError) bool {
 	return !(e.IsDataBehind() && !e.DataDiverged && !e.Shared)
 }
 
+// dataBehindExpectedField renders the data-behind stop's `expected` field.
+//
+// On a proxied workspace the remedy is the same command in a different PLACE,
+// and `expected` is what a single-field agent reader keys on. The option id,
+// its when/risk and the hint all carry that qualifier, so leaving it off here
+// alone would hand such a reader a command its own front door refuses
+// (proxy.dolt_pull.unsupported). Kept out of handleRemoteMigrateGateJSON so
+// the qualifier does not add another branch to that already-deep switch.
+func dataBehindExpectedField(proxied bool) string {
+	const tail = "; the migration is only allowed once this clone has nothing left to pull"
+	if proxied {
+		return "run `" + schema.DataBehindRemedyCommand + "` on the machine that hosts this database first — this workspace is in proxied-server mode, where it is refused (proxy.dolt_pull.unsupported)" + tail
+	}
+	return "run `" + schema.DataBehindRemedyCommand + "` first" + tail
+}
+
 // handleRemoteMigrateGateJSON renders the #4259 remote-migrate gate error as a
 // structured JSON error block for agent consumption.
 //
@@ -93,6 +109,14 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 		sharedConsent := schema.SharedConsentCommand
 		if globalFlag {
 			sharedConsent = schema.SharedConsentCommandGlobal
+		}
+		// A proxied front door refuses the bare verb (gastownhall/beads#6656);
+		// the options already carry the forced one.
+		if e.Proxied {
+			sharedConsent = schema.SharedConsentCommandForced
+			if globalFlag {
+				sharedConsent = schema.SharedConsentCommandForcedGlobal
+			}
 		}
 		// The #6575 data-behind stop on a SHARED store carries a consent verb in
 		// its second option (migrate-shared-after-pulling) too — the forced one,
@@ -208,7 +232,7 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 					gate["data_behind_shape"] = "fast-forward"
 				}
 				gate["observed"] = observed
-				gate["expected"] = "run `" + schema.DataBehindRemedyCommand + "` first; the migration is only allowed once this clone has nothing left to pull"
+				gate["expected"] = dataBehindExpectedField(e.Proxied)
 				// The docs pointer is set once above alongside the blunt
 				// observed/expected pair, and has to move with them: the section it
 				// names tells the reader `bd dolt pull` is refused on every

@@ -59,7 +59,7 @@ func TestDoctorConventionsMaxRows_EnvOnly_Exits2(t *testing.T) {
 	}
 
 	// BEADS_MAX_ROWS=3 with 6 open issues → cap fires → exit 2.
-	out, code := bdRunRaw(t, bdBin, tmpDir, []string{"BEADS_MAX_ROWS=3"}, "doctor", "--check=conventions")
+	out, code := bdRunRaw(t, bdBin, tmpDir, doctorMaxRowsEnv("BEADS_MAX_ROWS=3"), "doctor", "--check=conventions")
 	if code != 2 {
 		t.Fatalf("be-pc8c: expected exit 2 (cap exceeded), got %d\n%s", code, out)
 	}
@@ -97,11 +97,21 @@ func TestDoctorPollutionMaxRows_EnvOnly_Exits2(t *testing.T) {
 		}
 	}
 
-	out, code := bdRunRaw(t, bdBin, tmpDir, []string{"BEADS_MAX_ROWS=3"}, "doctor", "--check=pollution")
+	out, code := bdRunRaw(t, bdBin, tmpDir, doctorMaxRowsEnv("BEADS_MAX_ROWS=3"), "doctor", "--check=pollution")
 	if code != 2 {
 		t.Fatalf("be-pc8c: expected exit 2 (cap exceeded), got %d\n%s", code, out)
 	}
 	if !strings.Contains(out, "BEADS_MAX_ROWS=3") {
 		t.Errorf("be-pc8c: stderr missing BEADS_MAX_ROWS=3 source attribution:\n%s", out)
 	}
+}
+
+// doctorMaxRowsEnv is the subprocess env for the doctor max-rows tests on
+// top of bdRunRaw's bdEnv, which drops every BEADS_* variable: the
+// workspace's database is a testdb_* on the suite's dedicated test server,
+// which dolt.New's test-database firewall opens only with BEADS_TEST_SERVER=1
+// (else "refusing to connect test database ... set BEADS_TEST_SERVER=1" and
+// exit 1 before the cap is ever checked).
+func doctorMaxRowsEnv(extra ...string) []string {
+	return append([]string{"BEADS_TEST_SERVER=1"}, extra...)
 }

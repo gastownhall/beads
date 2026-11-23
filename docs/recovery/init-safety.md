@@ -3,11 +3,11 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-09-27
+Last reviewed: 2026-11-10
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
-`cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
-`cmd/bd/dolt.go`.
+`cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`,
+`cmd/bd/dolt.go`, and `cmd/bd/dolt_drop_database.go`.
 
 This document lives next to the ADRs and matches the structure of `bd`'s
 error messages: each named refusal in `bd init` and `bd dolt push`/`pull`
@@ -23,8 +23,11 @@ See also: `bd help init-safety`, and
 ## Table of contents
 
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
+- [init-adoption-refused — `bd init` refused to adopt the Dolt history of a remote derived from git origin](#init-adoption-refused)
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
+- [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
+- [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
@@ -45,9 +48,11 @@ bd init refuses: remote 'origin' already has Dolt history (refs/dolt/data).
 **Why this happens**
 
 `bd init --force` (or `--reinit-local`) tells `bd` to bypass the local
-data-safety guard. `bd init --from-jsonl` selects a local JSONL export as
-the source. But the remote already has project history. Proceeding would
-create an orphan local Dolt branch with no common ancestor on origin. The
+data-safety guard, and only that guard: neither flag bypasses this refusal
+or the [missing server-side database refusal](#init-missing-server-db).
+`bd init --from-jsonl` selects a local JSONL export as the source. But the
+remote already has project history. Proceeding would create an orphan local
+Dolt branch with no common ancestor on origin. The
 next `bd dolt push` would either fail (no common ancestor) or — worse, if
 force-pushed — destroy the team's data.
 
@@ -89,6 +94,115 @@ See `bd help init-safety` for the token format.
 After `bd init --reinit-local --discard-remote`, your next
 `bd dolt push` must be a history-replacing push. Coordinate with your
 team before doing this.
+
+---
+
+## init-adoption-refused
+
+**Exit code:** `1`
+
+**Symptom**
+
+```
+bd init refuses: git origin already has Dolt history, and bd will not adopt it without consent.
+
+  Derived from git origin: <url>
+  ...
+```
+
+or, after you answer anything but `y` at the `[y/N]` prompt:
+
+```
+bd init stopped: adoption of git origin's Dolt history was declined.
+```
+
+**Why this happens**
+
+No Dolt remote was configured (no `--remote`, no `sync.remote`), so `bd init`
+derived one from `git origin`, and that remote has Dolt history
+(`refs/dolt/data`). Adopting it imports the remote's entire issue history and
+project identity, adds it as Dolt remote `origin` and writes `sync.remote`. On
+a fork-less clone, `origin` is the upstream project, so `bd init` adopts only
+with consent: it asks once when it can, and otherwise refuses.
+`--non-interactive` and `--json` are not consent. A decline or a refusal
+writes nothing, unless the refusal comes from the late check (origin changed
+during init), which says the workspace was scaffolded and no history was
+imported.
+
+Consent is bound to the URL it named. `bd init` checks the origin twice:
+once before it writes anything, where it may ask, and once after it has
+scaffolded the workspace, where it never asks. A `y` at the first check
+covers only that URL. If the origin's URL changed in between, or its Dolt
+history first appeared after the first check found none (or could not
+probe), the second check refuses (exit 1) instead of adopting a remote you
+were never shown. Nothing was imported and no remote was wired; re-run with
+`--yes` or `--no-adopt`. `--yes` covers any URL. Ctrl-C at the prompt exits
+`130`.
+
+**Recovery paths**
+
+### 1. You want the remote's history
+
+```
+bd init --yes
+```
+
+`--yes` consents ahead of time; `bd init` prints the URL it adopts from
+(unless `--quiet`). `bd bootstrap` adopts it too.
+
+### 2. You want a fresh local database
+
+```
+bd init --no-adopt
+```
+
+or set `BD_NO_REMOTE_ADOPT=1`. `bd` then derives nothing from `git origin`:
+no probe, no clone, no Dolt remote and no `sync.remote`. It wins over
+`--yes`. Add a remote later with `bd dolt remote add`.
+
+### 3. You want a different remote
+
+```
+bd init --remote <url>
+```
+
+A remote you name is not derived, so `bd init` adopts its history without
+asking. The same holds for a `sync.remote` in `.beads/config.yaml`,
+including one committed to the repository you cloned (a plain `bd init` in a
+repository with a git origin writes it there): `bd init` adopts from it
+without a prompt, even with `--no-adopt`. To start fresh in such a clone,
+remove `sync.remote` from `.beads/config.yaml` and run `bd init --no-adopt`.
+
+`--yes` consents to adoption only. It does not bypass the divergence guard
+(exit `10`), the destroy-token guard (exit `12`) or the existing-workspace
+guard: a plain `bd init` over an initialized workspace still refuses, and
+declining the destroy confirmation for existing local data exits `11`.
+
+### 4. The adoption already happened and you want it gone
+
+If an earlier `bd init` (or a bd from before this consent check) already
+adopted the origin's history and wired the remote, removing the workspace is
+not enough on a server: deleting a workspace's `.beads` directory never
+removes its database from a Dolt server (see
+[Shared Server Mode](/architecture/dolt#shared-server-mode); in shared-server
+mode every project's database lives in the server's data directory). Note
+the workspace's database name first: it is `dolt_database` in
+`.beads/metadata.json`, and `bd sql 'SHOW DATABASES'` lists every database
+the server holds. Remove the workspace's `.beads` directory, then drop the
+database explicitly from another workspace on the same server:
+
+```bash
+bd dolt drop-database <database-name>          # asks for confirmation
+bd dolt drop-database <database-name> --yes    # scripts and agents
+```
+
+It refuses the databases no invocation should drop (the server's system
+databases, the shared `beads_global`, the workspace's own database, the one
+`--database` selects, and test databases, which `bd dolt clean-databases`
+owns), and it never purges: the database stays recoverable with
+`CALL DOLT_UNDROP('<database-name>')` until the server's dropped databases
+are purged. Then re-run `bd init --no-adopt` (or `bd init --remote <url>`)
+in the first workspace.
 
 ---
 
@@ -208,6 +322,237 @@ re-init won't fix.
 
 ---
 
+## init-home-refused
+
+**Exit code:** `15` (`ExitHomeDirRefused`)
+
+**Symptom**
+
+```
+bd init refuses: /Users/you is your home directory, and it is not itself a git repository.
+  Why: init sets up the directory it runs in as a project: it runs
+       'git init' there unless it finds a repository, and installs agent
+       files ...
+```
+
+**Why this happens**
+
+`bd init` sets up the directory it runs in as a project: it creates a git
+repository there unless it finds one, then writes agent scaffolding next to it:
+`CLAUDE.md`, `AGENTS.md`, `.gitignore`, `.claude/`, `.codex/`, `.cursor/`,
+`.agents/`. Run in your home directory, that turns everything you own into one
+git working tree, and most of those agent files are your agents' user-wide
+settings there: `~/.claude/settings.json` is the file Claude Code reads in every
+project, so bd's hooks would run everywhere. A project is virtually never the
+home directory itself, so `bd init` refuses rather than ask.
+
+The refusal is deliberately narrow. It fires only when **all** of these hold:
+
+- the working directory is exactly your home directory (a subdirectory of home
+  is an ordinary project and is never refused);
+- your home directory is not itself a git repository — if you deliberately
+  track your dotfiles in a repository at your home directory, nothing changes.
+  A home that only sits inside some enclosing repository, or a `GIT_DIR`
+  inherited from the environment, does not count, because init would still
+  write its files into your home;
+- you did not name a beads directory yourself by exporting `BEADS_DIR`. A
+  `BEADS_DIR` that bd reads from a `.beads/.env` it discovered does not count:
+  from your home directory that file is the legacy `~/.beads/.env`.
+
+`--force` and `--reinit-local` do **not** override it. They bypass the local
+data-safety guard, which is a different question from "is this the right
+directory".
+
+**Recovery paths**
+
+Pick the one that matches your intent.
+
+*You meant to initialize a project.* This is almost always the case — the
+working directory was simply not what you thought:
+
+```bash
+cd ~/some-project
+bd init
+```
+
+*You want a beads workspace in a directory you name, without setting up your
+home directory as a project.* Name the beads directory explicitly. Its parent
+directory has to exist first:
+
+```bash
+mkdir -p ~/workspaces/notes
+BEADS_DIR=~/workspaces/notes/.beads bd init
+```
+
+Note this is a **different** init, not the refused one with the guard lifted.
+An explicit `BEADS_DIR` skips the `git init`, and from your home directory
+`bd init` also skips the agent files and the `.gitignore` it would otherwise
+write there (it prints a note saying so). It also treats your home directory
+as outside every repository. If your home sits inside one, such as a dotfiles
+or monorepo checkout above it, init installs no hooks in it, records no
+`beads.role` there, takes no Dolt remote from its origin, and makes no
+bootstrap commit to it. Flags that ask for a change there still make it:
+`--stealth` and `--setup-exclude` add their patterns to that repository's
+`.git/info/exclude`, the interactive `--contributor` wizard records
+`beads.role` in it, and the interactive `--team` wizard can create a sync
+branch in it. Your home directory is not set up as
+a project; the workspace lives in `~/workspaces/notes`. That is the point, but
+it also means you get no agent integration. To install one for every project
+on purpose, use the global form of `bd setup`, for example
+`bd setup claude --global`.
+
+*You really do want your home directory tracked by git and scaffolded.* Make it
+a git repository first, deliberately, and the guard stands aside:
+
+```bash
+cd ~
+git init
+bd init
+```
+
+**How to detect this in a script**
+
+The refusal exits `15` and prints to stderr, so branch on the code rather than
+the text:
+
+```bash
+bd init || case $? in
+  15) echo "wrong directory — cd into the project first" ;;
+esac
+```
+
+---
+
+## init-missing-server-db
+
+**Symptom**
+
+```
+⚠ Database "myproject" not found on server at 127.0.0.1:3306 (or the server could not be reached to confirm).
+This workspace was already initialized (metadata.json has a project_id from a prior
+bd init), so this looks like a recovery situation, not a fresh clone
+...
+bd init will NOT create an empty database here — that would strand any existing
+issue data behind a new, empty database of the same name.
+```
+
+**What happened**
+
+This workspace is in server mode and shows evidence of a prior `bd init`:
+`.beads/metadata.json` carries a `project_id`, or (under `--reinit-local` or
+`--force`) a workspace that predates `project_id` still has a local Dolt data
+directory, in which case the message cites that instead of `metadata.json`.
+Yet its configured database is not on the server, or the server could not be
+reached to confirm.
+
+That is treated as a **recovery** situation, not a fresh clone, and the two are
+otherwise indistinguishable from the local filesystem alone: this project's own
+database directory is absent either way, because it was never created here or
+because it was lost with the local storage. `bd init` used to resolve the
+ambiguity by assuming "fresh clone" and creating the database. When the
+assumption was wrong, the result was a new, empty database sitting at the name
+the real one used to occupy — the 2026-08-11 fleet-wide data loss.
+
+`bd init` now refuses instead, and the refusal is **not** bypassed by
+`--force` or `--reinit-local`. Those flags authorize destroying a database
+that exists; they do not authorize inventing an empty one where the configured
+database has gone missing.
+
+### 1. Find out where the database went (do this first)
+
+```
+bd doctor          # check project health
+bd dolt status     # inspect Dolt server state
+```
+
+A stopped server, a server started on the wrong port, or a wrong `--data-dir`
+all present exactly like this — and none of them need a re-init. Fixing the
+server brings the data back untouched.
+
+### 2. Restore from an export
+
+```
+bd backup restore                  # if a local backup snapshot exists
+```
+
+Also check `.beads/backup/` for a JSONL export you can import manually.
+
+### 3. Create a fresh empty database at this name
+
+**Destructive to any unrecovered data.**
+
+Only when you are certain no recoverable data exists:
+
+```
+bd init --recreate-missing --prefix myproject
+```
+
+`--recreate-missing` is per-invocation only. It is deliberately never implied
+by `--force`, `--reinit-local`, a config key, or an environment variable,
+because it authorizes the one thing this guard exists to prevent.
+
+The refusal names `--recreate-missing` but does not print this command: it also
+fires when the server merely could not be reached, so it sends you through
+steps 1 and 2 here instead of handing you a line to paste. See
+[ADR 0002 — Invariant 4](https://github.com/gastownhall/beads/blob/main/engdocs/adr/0002-init-safety-invariants.md).
+
+**Limits worth knowing**
+
+Whether a workspace meets this refusal depends on two pieces of local
+evidence: whether this project's own database directory
+(`<dolt-data-dir>/<database>/.dolt`) exists, and whether `metadata.json`
+carries a `project_id` (introduced by GH#2372). With the configured database
+missing from the server, or the server unreachable:
+
+| Local Dolt storage | `project_id` | `bd init` | `bd init --reinit-local` / `--force` |
+|---|---|---|---|
+| This project's database directory present | Either | Refused as already initialized, not by this guard | Not this guard; the ordinary re-init path |
+| Data dir present, database directory absent | Present | This refusal | This refusal |
+| Data dir present, database directory absent | Absent | Refused as already initialized, not by this guard | This refusal |
+| No Dolt data dir | Present | This refusal | This refusal |
+| No Dolt data dir | Absent | Proceeds, as for a fresh clone | Proceeds, as for a fresh clone |
+
+Adding `--recreate-missing` lifts every refusal in the last four rows,
+including the third row's "already initialized". It changes nothing in the
+first row, where this project's database is still on local disk. In
+shared-server mode the data dir is machine-global (see below), so the last two
+rows rarely apply there.
+
+- `project_id` is also inherited by a **fresh clone**, because
+  `.beads/metadata.json` is git-tracked by default. Cloning a beads-managed
+  repo whose server-side database does not exist yet therefore meets this
+  refusal rather than a plain first init. It fails in the safe direction —
+  nothing is created silently, and no existing data can be stranded — and
+  `--recreate-missing` above is the supported way through it. This is settled,
+  not pending: `engdocs/adr/0004-missing-database-guard-signal.md` records why
+  no purely-local signal can replace `project_id` here (absence of local state
+  cannot tell "never initialized here" from "initialized here, storage since
+  lost"), and why `--recreate-missing` is the permanent resolution path rather
+  than a stopgap.
+- Server mode only, and shared-server mode counts as server mode — the guard
+  tests for *this project's* database directory under the resolved Dolt data
+  dir, not for the data dir itself, which in shared mode is the machine-global
+  `~/.beads/shared-server/dolt` that is created on demand.
+- Proxied-server mode does not reach the `--reinit-local`/`--force` guard —
+  the `--proxied-server` dispatch in `runInit` (`cmd/bd/init.go`) returns
+  before it. It does reach the plain-init guard, because
+  `runInitProxiedServer` calls `checkExistingBeadsData`, so
+  **`--recreate-missing` works under `--proxied-server` too**: the flag is
+  assigned beside its flag read, upstream of every dispatch in `runInit`.
+  Keep it there. It was previously assigned next to the guard it gates, which
+  is downstream of the proxied dispatch, and the flag was therefore inert on
+  that one route while the refusal still told the operator to pass it.
+- `bd bootstrap` has its own separate create path. When the workspace's own
+  `metadata.json` selects a Dolt server (the server-mode test workspace
+  discovery uses), its init and jsonl-import actions create the database on
+  that server (resolved as later commands resolve it) and write nothing to a
+  database the server already holds; its restore action refuses in server
+  mode before creating anything, and does not restore over a database the
+  server already holds. Elsewhere, including shared-server mode named only
+  by `dolt.shared-server` in a config.yaml, it uses the embedded store.
+
+---
+
 ## pk-fork-refused
 
 **Symptom**
@@ -291,22 +636,26 @@ skipping straight to `bd list`) can hit either of two live gotchas — see
 
 ### Prevention (upgrades across PK-reshaping migrations)
 
-- **Sync before upgrading**: `bd dolt push` + `bd dolt pull` on every clone
-  while all clones still run the *old* version, then stop editing. Once the new
-  binary is installed, `bd dolt push`/`bd dolt pull` are gated too, so this must
-  happen first. The one exception is the *data-behind* stop — a clone level on
-  schema but missing commits the remote has — where `bd dolt pull` **is** the
-  remedy and is allowed through; the gate says so when it fires, and
+- **Sync before upgrading**: `bd dolt pull`, `bd dolt commit` and
+  `bd dolt push` on every clone while all clones still run the *old* version,
+  then stop editing. Once the new binary is installed,
+  `bd dolt push`/`bd dolt pull` are gated too, so this must happen first. The
+  one exception is the *data-behind* stop — a clone level on schema but
+  missing commits the remote has — where `bd dolt pull` **is** the remedy and
+  is allowed through (a proxied-server workspace refuses it, so there the pull
+  runs on the server host); the gate says so when it fires, and
   [Clone behind the remote](/getting-started/upgrading#clone-behind-the-remote)
   has the recipe. Plan for the rule, not the exception.
 - **One designated migrator**: upgrade one machine, let it migrate, then
   `bd dolt push`.
-- **Every other clone adopts, does not pull**: after the migrator pushes, each
-  other clone upgrades the binary and runs `bd bootstrap` to adopt the migrated
-  database. `bd dolt pull` is *refused* while the clone still has pending
-  migrations, so do not rely on it; the "sync before" step above is what
-  preserves these clones' work, because `bd bootstrap` replaces the local
-  database.
+- **Every other clone takes the migrated database, does not migrate**: after
+  the migrator pushes, each other clone runs `bd dolt pull` while still on the
+  *old* binary, then upgrades. Once the new binary is installed that pull is
+  *refused* while the clone has pending migrations, and `bd bootstrap` never
+  replaces an existing database — on its own it reports `Nothing to do.` — so
+  a clone that upgraded first must move its local database aside before
+  `bd bootstrap` can re-clone. The recipe is in
+  [Remote-backed databases and multiple clones](/getting-started/upgrading#remote-backed-databases-and-multiple-clones).
 
 ---
 

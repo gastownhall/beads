@@ -46,11 +46,21 @@ var _ publicops.Importer = (*importer)(nil)
 // request: RunTxResult retries the whole attempt on a serialization failure,
 // and result state declared inside the attempt cannot leak between retries
 // the way a caller's callback accumulator would.
+//
+// The request's issue structs are NOT attempt-local: the engine mints
+// Issue.ID, Dependency.IssueID and Comment.ID onto them in place. The fields
+// the caller left empty are snapshotted once, before the retry loop, and
+// cleared at the top of every attempt, so a replay mints again instead of
+// reading the rolled-back attempt's ids as caller-supplied and upserting under
+// them (bd-8qq0ho, GH#8455). The committed attempt's ids stay on the structs:
+// the proxied `bd import` builds ImportedIDs from them.
 func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatchRequest) (publicops.ImportBatchResult, error) {
 	if request.Actor == "" {
 		return publicops.ImportBatchResult{}, fmt.Errorf("import batch: actor must not be empty")
 	}
+	resetMintedIDs := storageissueops.SnapshotUnsetCreateIDs(request.Issues)
 	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ImportBatchResult, string, error) {
+		resetMintedIDs()
 		var result publicops.ImportBatchResult
 
 		// Seed issue_prefix before CreateIssuesInTxWithResult needs it (via
@@ -88,6 +98,7 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 				return publicops.ImportBatchResult{}, "", err
 			}
 			staleRejected := make(map[string]struct{})
+			retired := make(map[string]struct{})
 			skippedSeen := make(map[string]struct{})
 			opts := storage.BatchCreateOptions{
 				SkipPrefixValidation:           request.SkipPrefixValidation,
@@ -112,11 +123,30 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 					staleRejected[issueID] = struct{}{}
 					result.StaleRejectedIDs = append(result.StaleRejectedIDs, issueID)
 				},
+				// An import never resurrects a row a retaining sweep retired:
+				// the row is skipped and reported.
+				OnRetiredID: func(issueID string) {
+					if _, ok := retired[issueID]; ok {
+						return
+					}
+					retired[issueID] = struct{}{}
+					result.RetiredIDs = append(result.RetiredIDs, issueID)
+				},
 			}
 			if _, err := storageissueops.CreateIssuesInTxWithResult(ctx, runner, request.Issues, request.Actor, opts); err != nil {
 				return publicops.ImportBatchResult{}, "", err
 			}
-			result.Created = len(request.Issues) - len(staleRejected)
+			// A retired id is skipped on every row that carries it, so Created
+			// drops each such row, not each distinct id: a request may carry
+			// an id more than once. The set is the committed attempt's, so a
+			// replayed hook does not count twice.
+			retiredRows := 0
+			for _, issue := range request.Issues {
+				if _, ok := retired[issue.ID]; ok {
+					retiredRows++
+				}
+			}
+			result.Created = len(request.Issues) - len(staleRejected) - retiredRows
 		}
 
 		for _, memory := range request.Memories {

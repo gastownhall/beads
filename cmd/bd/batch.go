@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // Scope note:
@@ -54,6 +55,7 @@ Grammar (one command per line):
   #comment  (blank lines and '# ...' comments are ignored)
 
 Supported 'update' keys: status, priority, title, assignee, force
+'assignee=', 'assignee=-' and a whitespace-only assignee clear the assignee.
 Supported dependency types: see 'bd dep add --help' (default: blocks)
 
 'force' is not a field. An update whose status moves the issue into closed
@@ -417,27 +419,14 @@ func runBatchOp(ctx context.Context, tx storage.Transaction, op batchOp) (batchO
 		return result, nil
 
 	case "dep.add":
-		if len(op.args) < 2 {
-			return result, fmt.Errorf("dep add requires <from-id> <to-id>")
-		}
-		from, to := op.args[0], op.args[1]
-		depType := "blocks"
-		if len(op.args) >= 3 {
-			depType = op.args[2]
-		}
-		dt := types.DependencyType(depType)
-		if !dt.IsValid() {
-			return result, fmt.Errorf("dep add: invalid dependency type %q", depType)
-		}
-		dep := &types.Dependency{
-			IssueID:     from,
-			DependsOnID: to,
-			Type:        dt,
+		dep, err := batchDepAddEdge(op.args)
+		if err != nil {
+			return result, err
 		}
 		if err := tx.AddDependency(ctx, dep, actorName); err != nil {
 			return result, err
 		}
-		result.Target = fmt.Sprintf("%s->%s", from, to)
+		result.Target = fmt.Sprintf("%s->%s", dep.IssueID, dep.DependsOnID)
 		return result, nil
 
 	case "dep.remove":
@@ -452,6 +441,38 @@ func runBatchOp(ctx context.Context, tx storage.Transaction, op batchOp) (batchO
 		return result, nil
 	}
 	return result, fmt.Errorf("internal: unhandled batch op %q", op.cmd)
+}
+
+// batchDepAddEdge builds the edge a `dep add <from-id> <to-id> [type]` line
+// asks for. Both backends' dispatch switches call it, so the default type, the
+// arity and type errors, and the dotted-id hierarchy rule cannot drift between
+// them.
+// Neither backend writes the edge through the DependencyEditor role that
+// enforces that rule (storage.Transaction.AddDependency and the unit of work's
+// AddDependencies verb do not), so batch asks the role's rule directly, the
+// way bd link does: a script line `dep add bd-abc.1 bd-abc` is refused, and
+// rolls the batch back, exactly as `bd dep add bd-abc.1 bd-abc` is.
+func batchDepAddEdge(args []string) (*types.Dependency, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("dep add requires <from-id> <to-id>")
+	}
+	from, to := args[0], args[1]
+	depType := "blocks"
+	if len(args) >= 3 {
+		depType = args[2]
+	}
+	dt := types.DependencyType(depType)
+	if !dt.IsValid() {
+		return nil, fmt.Errorf("dep add: invalid dependency type %q", depType)
+	}
+	if err := publicops.CheckDottedChildDependency(from, to, dt); err != nil {
+		return nil, err
+	}
+	return &types.Dependency{
+		IssueID:     from,
+		DependsOnID: to,
+		Type:        dt,
+	}, nil
 }
 
 // parseUpdateKVs walks a slice of "key=value" tokens and builds the updates
@@ -489,7 +510,7 @@ func parseUpdateKVs(kvs []string) (map[string]interface{}, error) {
 			}
 			updates["title"] = value
 		case "assignee":
-			updates["assignee"] = value
+			updates["assignee"] = normalizeAssigneeInput(value)
 		case "force":
 			// Not a field: the override for close policy on a status that
 			// crosses into done, spelled as a token because a batch script has

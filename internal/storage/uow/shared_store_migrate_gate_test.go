@@ -8,8 +8,10 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/cenkalti/backoff/v4"
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 )
 
 // expectSharedGateProbe mocks the shared-store gate's read sequence on an
@@ -58,6 +60,22 @@ func expectLockRelease(mock sqlmock.Sqlmock, lockName string) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
 		WithArgs(lockName).
 		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+}
+
+// expectIssuesProjection mocks the read-through's schema.CheckReadableDrift on
+// a database at version, behind the binary: the cursor read, then the listing
+// of issues, which carries every column the shared projection selects except
+// omit (none when omit is empty).
+func expectIssuesProjection(mock sqlmock.Sqlmock, version int, omit string) {
+	expectVersionQuery(mock, version)
+	expectCursorProbe(mock, "issues", true)
+	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
+	for _, column := range sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns) {
+		if column != omit {
+			rows.AddRow(column, "text", "YES", "", nil, "")
+		}
+	}
+	mock.ExpectQuery(`^SHOW COLUMNS FROM issues$`).WillReturnRows(rows)
 }
 
 // TestInitSchemaSharedStoreGate covers the proxied/`bd serve` open path's half
@@ -117,10 +135,11 @@ func TestInitSchemaSharedStoreGate(t *testing.T) {
 		lockName := expectBehindDatabaseThroughPreparation(mock, "beads", 1)
 		expectSharedGateProbe(mock, 1, 0)
 		expectLockRelease(mock, lockName)
-		// The read-through: attach at the current schema and carry on. Still
-		// no migration statement anywhere.
+		// The read-through: attach at the current schema, which the reads can
+		// still query, and carry on. Still no migration statement anywhere.
 		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
+		expectIssuesProjection(mock, 1, "")
 
 		p := &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", readOnly: true}
 		var initErr error
@@ -194,6 +213,8 @@ func TestInitSchemaSharedStoreGate(t *testing.T) {
 
 		lockName := expectBehindDatabaseThroughPreparation(mock, "beads", 1)
 		expectSharedGateProbe(mock, 1, 0)
+		// The gate passed, so it asks forward drift too: behind, so allowed.
+		expectVersionQuery(mock, 1)
 		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 			WithArgs(sqlmock.AnyArg()).
 			WillReturnError(errors.New("reached the first migration statement"))
@@ -235,4 +256,257 @@ func TestInitSchemaSharedStoreGate(t *testing.T) {
 			t.Fatalf("unmet SQL expectations: %v", err)
 		}
 	})
+}
+
+// TestReadThroughRefusedMigrationWarning pins the composed stderr of the
+// proxied read-through (bd-mfsky, the uow leg of #6660). Every refusal the
+// smart gate shaped — a non-empty Decision, or the #6575 data-behind stop —
+// must lead with the gate's own UserMessage body, as embedded's
+// lenientGateWarningBody and server mode's warnLenientOpenRefusal render it.
+// Only the blunt fallback keeps the one-line summary plus the consent
+// sentence. It drives the real function, so it pins what an operator reads.
+func TestReadThroughRefusedMigrationWarning(t *testing.T) {
+	const modeLine = "  Read-only command: continuing on schema v65 without migrating.\n"
+	for _, tc := range []struct {
+		name    string
+		gateErr *schema.RemoteMigrateGateError
+		// marker is text only this refusal's own body produces, so a
+		// Decision literal that drifts from the schema constant lands on a
+		// different body and fails here instead of passing vacuously.
+		marker string
+		// shaped rows must render UserMessage; the blunt fallback keeps
+		// Error() and the consent sentence.
+		shaped bool
+		// consentVerbOK marks the rows whose text legitimately names the
+		// bare consent verb: shared-no-remote has no remote, so that verb is
+		// the consent there, and the blunt fallback's sentence is unchanged.
+		consentVerbOK bool
+		// forceOK marks data-behind, whose "Do NOT use `bd migrate --force`"
+		// paragraph names the command it forbids.
+		forceOK bool
+		// also and absent are further text the warning must and must not
+		// carry, beyond the marker.
+		also, absent []string
+	}{
+		{
+			name: "fork-skew",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				Decision: "fork-skew", SkewVersions: []int{66}, Shared: true, Proxied: true,
+			},
+			marker: "cannot un-fork it",
+			shaped: true,
+		},
+		{
+			name: "adopt",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				Decision: "adopt", Shared: true, Proxied: true,
+			},
+			marker: "adopt the remote's migrated database instead",
+			shaped: true,
+		},
+		{
+			name: "shared-no-remote",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				Decision: "shared-no-remote", Shared: true, Proxied: true,
+			},
+			marker:        "Upgrade bd on every client of this server first",
+			shaped:        true,
+			consentVerbOK: true,
+		},
+		{
+			name: "data-behind",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				FallbackReason: "data-behind", DataDiverged: true, Shared: true, Proxied: true,
+			},
+			marker:  "Pull first",
+			shaped:  true,
+			forceOK: true,
+		},
+		{
+			// gastownhall/beads#6656: the proxied front door refuses the bare
+			// verb, and the forced one is also the designated-migrator
+			// override this remote-backed stop is about, so the warning names
+			// the forced verb with the client-stop step, the adopt branch,
+			// and the push the proxied workspace cannot run.
+			name: "blunt shared-store fallback",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				FallbackReason: "shared-store", Shared: true, Proxied: true,
+			},
+			marker: "run '" + schema.SharedConsentCommandForced + "'",
+			also: []string{
+				"adopt its database instead of migrating here",
+				"only as the single designated migrator",
+				"stop every library client connected to this",
+				"restart them",
+				"'bd dolt push' from a workspace with direct access to the database",
+			},
+		},
+		{
+			// Off the proxy the template is unchanged.
+			name: "blunt shared-store fallback, not proxied",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				FallbackReason: "shared-store", Shared: true,
+			},
+			marker:        "Run '" + schema.SharedConsentCommand + "'",
+			consentVerbOK: true,
+			absent:        []string{"--force", "library client", "bd dolt push"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if want := tc.name == "data-behind"; tc.gateErr.IsDataBehind() != want {
+				t.Fatalf("IsDataBehind() = %v, want %v — the fixture's FallbackReason literal drifted", !want, want)
+			}
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+			ctx := context.Background()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("pin connection: %v", err)
+			}
+			defer conn.Close()
+			mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+			expectIssuesProjection(mock, tc.gateErr.CurrentVersion, "")
+
+			var readErr error
+			stderr := captureStderr(t, func() {
+				readErr = readThroughRefusedMigration(ctx, conn, "beads", tc.gateErr)
+			})
+			if readErr != nil {
+				t.Fatalf("readThroughRefusedMigration() = %v, want nil — the read proceeds on the old schema", readErr)
+			}
+			for _, want := range append([]string{tc.marker}, tc.also...) {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("warning missing %q:\n%s", want, stderr)
+				}
+			}
+			for _, unwanted := range tc.absent {
+				if strings.Contains(stderr, unwanted) {
+					t.Errorf("warning carries %q:\n%s", unwanted, stderr)
+				}
+			}
+			// Body first, then the mode line, as on embedded: the shaped body
+			// leads the warning rather than being replaced by the summary.
+			lead := "Warning: " + tc.gateErr.Error() + "\n" + modeLine
+			if tc.shaped {
+				lead = "Warning: " + tc.gateErr.UserMessage() + modeLine
+			}
+			if !strings.HasPrefix(stderr, lead) {
+				t.Errorf("warning does not open with\n%s\ngot:\n%s", lead, stderr)
+			}
+			if !strings.HasSuffix(stderr, "\n") {
+				t.Errorf("warning is unterminated:\n%q", stderr)
+			}
+			if !tc.forceOK && strings.Contains(stderr, "bd migrate --force") {
+				t.Errorf("warning prescribes `bd migrate --force`:\n%s", stderr)
+			}
+			// adopt and fork-skew are remote-backed, where the bare verb's
+			// consent is never read (schema.SharedConsentCommandForced), and
+			// their bodies say not to migrate at all. Scrub the forced forms
+			// first: each contains the bare verb.
+			scrubbed := strings.ReplaceAll(stderr, schema.SharedConsentCommandForcedGlobal, "")
+			scrubbed = strings.ReplaceAll(scrubbed, schema.SharedConsentCommandForced, "")
+			if !tc.consentVerbOK && strings.Contains(scrubbed, schema.SharedConsentCommand) {
+				t.Errorf("warning prescribes the bare consent verb %q:\n%s", schema.SharedConsentCommand, stderr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestReadThroughRefusesASchemaItsReadsCannotQuery pins the read-through's
+// limit. It serves reads at the current schema only while this binary's issue
+// reads can query it; on a database that lacks a column the shared projection
+// selects (arrival_seq, on one the previous release migrated) every read would
+// fail on the unknown column. So the open refuses, permanently, with
+// SchemaBehindError, and never prints that the read carries on.
+//
+// What else the refusal carries depends on the stop (gastownhall/beads#6656).
+// A stop the smart gate shaped (adopt, adopt-ff, fork-skew, data-behind) rides
+// along with the drift, so cmd/bd prints that stop: a proxied read is where
+// the forced verb's caveat sends the operator to see it, and the drift error
+// alone names the bare verb the front door refuses. shared-no-remote, whose
+// body already says such reads are refused, and the blunt fallback keep the
+// drift alone.
+func TestReadThroughRefusesASchemaItsReadsCannotQuery(t *testing.T) {
+	behind := schema.LatestVersion() - 1
+	for _, tc := range []struct {
+		name    string
+		gateErr *schema.RemoteMigrateGateError
+		// reportsStop marks the refusals the failed open must carry.
+		reportsStop bool
+	}{
+		{name: "adopt", gateErr: &schema.RemoteMigrateGateError{Decision: "adopt"}, reportsStop: true},
+		{name: "adopt-ff", gateErr: &schema.RemoteMigrateGateError{Decision: "adopt-ff"}, reportsStop: true},
+		{name: "fork-skew", gateErr: &schema.RemoteMigrateGateError{Decision: "fork-skew", SkewVersions: []int{behind}}, reportsStop: true},
+		{name: "data-behind", gateErr: &schema.RemoteMigrateGateError{FallbackReason: "data-behind", DataDiverged: true}, reportsStop: true},
+		{name: "shared-no-remote", gateErr: &schema.RemoteMigrateGateError{Decision: "shared-no-remote"}},
+		{name: "blunt shared-store fallback", gateErr: &schema.RemoteMigrateGateError{FallbackReason: "shared-store"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gateErr := tc.gateErr
+			gateErr.CurrentVersion, gateErr.LatestVersion, gateErr.Pending = behind, schema.LatestVersion(), 1
+			gateErr.Shared, gateErr.Proxied = true, true
+			// The literals must land on the arms they name, or a drifted one
+			// passes here while production takes the other branch.
+			if want := tc.name == "data-behind"; gateErr.IsDataBehind() != want {
+				t.Fatalf("IsDataBehind() = %v, want %v: the fixture's FallbackReason literal drifted", !want, want)
+			}
+			if want := tc.name == "shared-no-remote"; strings.Contains(gateErr.Error(), "shared server database") != want {
+				t.Fatalf("Error() = %q: the shared-no-remote literal drifted from the schema's decision", gateErr.Error())
+			}
+
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+			ctx := context.Background()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("pin connection: %v", err)
+			}
+			defer conn.Close()
+			mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+			expectIssuesProjection(mock, behind, "arrival_seq")
+
+			var readErr error
+			stderr := captureStderr(t, func() {
+				readErr = readThroughRefusedMigration(ctx, conn, "beads", gateErr)
+			})
+			var permanent *backoff.PermanentError
+			if !errors.As(readErr, &permanent) {
+				t.Fatalf("readThroughRefusedMigration() = %T (%v), want a permanent refusal: a retry reads the same schema", readErr, readErr)
+			}
+			var behindErr *schema.SchemaBehindError
+			if !errors.As(readErr, &behindErr) || behindErr.DBVersion != behind {
+				t.Fatalf("readThroughRefusedMigration() = %v, want *schema.SchemaBehindError at v%d", readErr, behind)
+			}
+			var reported *schema.RemoteMigrateGateError
+			if got := errors.As(readErr, &reported); got != tc.reportsStop {
+				t.Fatalf("refusal carries the gate stop = %v, want %v: %v", got, tc.reportsStop, readErr)
+			}
+			if tc.reportsStop && reported != gateErr {
+				t.Errorf("refusal carries %+v, want the gate's own stop %+v", reported, gateErr)
+			}
+			if strings.Contains(stderr, "continuing on schema") {
+				t.Errorf("the refused read-through still announced that the read carries on:\n%s", stderr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
 }

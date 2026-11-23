@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // Wisp commands - manage ephemeral molecules
@@ -210,9 +211,10 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	if err == nil {
 		subgraph = sg
 		protoID = sg.Root.ID
-	} else if errors.Is(err, formula.ErrVarValidation) {
-		// args[0] IS a formula; the --var values it was given fail
-		// enum/pattern/required-empty constraints. Report that directly
+	} else if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
+		// args[0] IS a formula; either the formula itself does not
+		// validate, or the --var values it was given fail enum/pattern/
+		// required-empty constraints. Report that directly
 		// instead of falling through to the legacy proto-ID lookup below,
 		// which would otherwise mask this as "not found as formula or proto".
 		return HandleError("%v", err)
@@ -269,7 +271,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	vars = applyVariableDefaults(vars, subgraph)
 
 	if err := checkRequiredVars(subgraph, vars); err != nil {
-		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", firstMissingVar(subgraph, vars)))
+		return handleVarErrorWithHint(err, firstMissingVar(subgraph, vars))
 	}
 
 	if dryRun {
@@ -279,7 +281,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 
 	result, err := spawnMoleculeWithOptions(ctx, store, subgraph, CloneOptions{
 		Vars:      vars,
-		Actor:     actor,
+		Actor:     currentActor(),
 		Ephemeral: true,
 		Prefix:    types.IDPrefixWisp,
 		RootOnly:  rootOnly,
@@ -301,7 +303,7 @@ func checkRequiredVars(subgraph *TemplateSubgraph, vars map[string]string) error
 	if len(missingVars) > 0 {
 		return fmt.Errorf("missing required variables: %s", strings.Join(missingVars, ", "))
 	}
-	return nil
+	return checkUnknownVars(subgraph, nil, vars)
 }
 
 func firstMissingVar(subgraph *TemplateSubgraph, vars map[string]string) string {
@@ -620,12 +622,26 @@ A wisp is considered abandoned if:
     are age-reclaimable. If the blocked set or the custom-status list cannot be
     read, the GC aborts rather than risk reclaiming live steps.
 
+Wisps that depend on an abandoned wisp are deleted with it, closed ones
+included even without --all, but only if they too haven't been updated in
+--age duration and are not live work. A dependent that is too young is
+spared and loses its edge to the deleted wisp: an open one is collected once
+it ages out, a closed one only by --all, --closed or 'bd purge'.
+
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
 
 Use --closed to purge ALL closed wisps (regardless of age). This is the
 fastest way to reclaim space from accumulated wisp bloat. Safe by default:
 requires --force to actually delete.
+
+--closed --force deletes in batches of 200 wisps, each committed on its own,
+so a failure keeps the batches already committed. The summary then reports
+only the deletions that committed, plus remaining_count, error and hint in
+--json output, and the command exits nonzero; rerun it to delete the rest.
+A scan reads at most 5000 closed wisps: when it reaches that limit the output
+says more may remain (candidates_capped in --json), even if every wisp it
+read was excluded.
 
 Note: This uses time-based cleanup, appropriate for ephemeral wisps.
 For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
@@ -809,17 +825,42 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		ids[i] = issue.ID
 	}
 	// Cascade must stay OFF here too. findAbandonedWisps has already expanded
-	// dependents and kept only the unprotected ones, so a deleteBatch cascade
-	// would re-expand from that set to ALL transitive dependents — including
-	// blocked/in-progress steps that isProtectedWisp just excluded (GH#4394's
-	// protection is only enforced in the pre-filter; cascade bypasses it).
+	// dependents and kept only the unprotected ones that meet --age, so a
+	// deleteBatch cascade would re-expand from that set to ALL transitive
+	// dependents — including blocked/in-progress steps that isProtectedWisp
+	// just excluded (GH#4394's protection is only enforced in the pre-filter;
+	// cascade bypasses it) and fresh steps the --age check just spared.
 	// Without cascade the list is deleted exactly as filtered and live
 	// dependents are orphaned (edges dropped, is_blocked recomputed).
-	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, "wisp gc"); err != nil {
+	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, nil, "wisp gc"); err != nil {
 		return HandleError("%v", err)
 	}
 	return nil
 }
+
+// wispIsAbandoned reports whether a wisp counts as abandoned for GC
+// purposes: it has not been updated within ageThreshold of now.
+//
+// ageThreshold <= 0 (--age 0s and below) always reports true, bypassing
+// the clock comparison entirely — this matches the GC's own documented
+// contract ("hasn't been updated in --age duration"): nothing has been
+// updated in the last zero seconds. It also matters for a reason the
+// comparison alone does not handle: Dolt's DATETIME(0) column rounds
+// fractional seconds half-up on write rather than truncating (#7236), so
+// a wisp created in the second half of a wall-clock second can read back
+// with updatedAt up to 0.5s in the future. now.Sub(updatedAt) is then
+// negative, failing a strict > comparison for a wisp that is, by
+// definition, not yet one second old — exactly what --age 0s's "every
+// wisp qualifies" contract exists to avoid depending on in the first
+// place.
+func wispIsAbandoned(now, updatedAt time.Time, ageThreshold time.Duration) bool {
+	return ageThreshold <= 0 || now.Sub(updatedAt) > ageThreshold
+}
+
+// wispGCNow is the clock seam for findAbandonedWisps' age check, swappable in
+// tests. Both gc routes read it, so a test that swaps it must not call
+// t.Parallel().
+var wispGCNow = time.Now
 
 func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, error) {
 	ephemeralFlag := true
@@ -847,7 +888,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		return nil, err
 	}
 
-	now := time.Now()
+	now := wispGCNow()
 	var abandoned []*types.Issue
 	for _, issue := range issues {
 		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
@@ -859,7 +900,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		if isProtectedWisp(issue, blockedSet, protectedStatuses) {
 			continue
 		}
-		if now.Sub(issue.UpdatedAt) > ageThreshold {
+		if wispIsAbandoned(now, issue.UpdatedAt, ageThreshold) {
 			abandoned = append(abandoned, issue)
 		}
 	}
@@ -878,12 +919,18 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		for id := range childIDs {
 			childIDSlice = append(childIDSlice, id)
 		}
+		// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc
+		// and the importIssueLookup TODO in import_shared.go for why this is
+		// not yet routed through the role.
 		childIssues, fetchErr := r.GetIssuesByIDs(ctx, childIDSlice)
 		if fetchErr == nil {
 			abandonedSet := make(map[string]bool, len(abandoned))
 			for _, issue := range abandoned {
 				abandonedSet[issue.ID] = true
 			}
+			// Dependents skip the parent scan's not-closed clause: an
+			// abandoned molecule's finished steps go with it, even without
+			// --all.
 			for _, child := range childIssues {
 				if abandonedSet[child.ID] {
 					continue
@@ -892,6 +939,12 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 					continue
 				}
 				if isProtectedWisp(child, blockedSet, protectedStatuses) {
+					continue
+				}
+				// Children are held to the same --age contract as parents. One
+				// spared here is detached when its parent is deleted, so a
+				// closed one is left for --all, --closed or bd purge.
+				if !wispIsAbandoned(now, child.UpdatedAt, ageThreshold) {
 					continue
 				}
 				abandoned = append(abandoned, child)
@@ -908,13 +961,14 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		Status:       &statusClosed,
 		Ephemeral:    &ephemeralTrue,
 		ExcludeTypes: excludeTypes,
-		Limit:        5000,
+		Limit:        wispPurgeScanLimit,
 	}
 
 	closedIssues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return HandleError("listing closed wisps: %v", err)
 	}
+	scanCapped := len(closedIssues) >= wispPurgeScanLimit
 
 	// Filter out pinned and infra issues (protected from cleanup)
 	pinnedCount := 0
@@ -941,14 +995,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	}
 
 	if len(closedIssues) == 0 {
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"deleted_count": 0,
-				"message":       "No closed wisps to delete",
-			})
-		}
-		fmt.Println("No closed wisps to delete")
-		return nil
+		return renderNoClosedWisps(force && !dryRun && scanCapped)
 	}
 
 	ids := make([]string, len(closedIssues))
@@ -985,24 +1032,273 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	// Without cascade, closed wisps are deleted and live dependents are
 	// orphaned (edges dropped, is_blocked recomputed) — the same semantics as
 	// a plain `bd delete`.
-	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, "wisp gc --closed"); err != nil {
-		return HandleError("%v", err)
+	if dryRun {
+		if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
+			return HandleError("%v", err)
+		}
+		return nil
 	}
 
-	if !dryRun && force && !jsonOutput {
+	outcome, err := purgeClosedWispsDirect(ctx, ids)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	if err := renderWispPurgeOutcome(outcome, scanCapped, true); err != nil {
+		return err
+	}
+	if !jsonOutput {
 		fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
+	}
+	return nil
+}
+
+// wispPurgeScanLimit caps how many closed wisps one `bd mol wisp gc --closed`
+// scans. A scan that comes back full may have left more behind; a forced run
+// says so (candidates_capped) without claiming how many.
+const wispPurgeScanLimit = 5000
+
+// wispPurgeCappedHint is what a forced run says when its scan was full. It
+// says only that more MAY remain: the cap is a scan window, not a total, and
+// a rerun cannot promise to get past a window that protected rows fill.
+var wispPurgeCappedHint = fmt.Sprintf("candidate scan reached the %d-wisp limit; more closed wisps may remain", wispPurgeScanLimit)
+
+// renderNoClosedWisps prints the empty-selection answer. capped is set only
+// for a forced run whose full scan held nothing deletable (every row pinned or
+// infra), which is not the same as nothing being left.
+func renderNoClosedWisps(capped bool) error {
+	if jsonOutput {
+		answer := map[string]interface{}{
+			"deleted_count": 0,
+			"message":       "No closed wisps to delete",
+		}
+		if capped {
+			answer["candidates_capped"] = true
+			answer["hint"] = wispPurgeCappedHint
+		}
+		return outputJSON(answer)
+	}
+	fmt.Println("No closed wisps to delete")
+	if capped {
+		fmt.Printf("Note: %s.\n", wispPurgeCappedHint)
+	}
+	return nil
+}
+
+// wispPurgeChunkSize bounds each deletion request a forced
+// `bd mol wisp gc --closed` sends (bd-d2zqqc, GH#4684). The role runs a
+// request as one transaction, so a whole 5000-wisp selection in one request
+// is one transaction that does all the work or none of it. The same bound as
+// the store's own deleteWispBatch.
+const wispPurgeChunkSize = 200
+
+// wispPurgeChunk is what one committed deletion request reported.
+type wispPurgeChunk struct {
+	deletedIDs        []string
+	deleted           int
+	dependencies      int
+	labels            int
+	events            int
+	referencesUpdated int
+	orphaned          []string
+}
+
+// wispPurgeOutcome sums the chunks a forced closed purge committed. confirmed
+// names the selected ids whose request committed; err is the failure that
+// stopped the purge before the rest of the selection, nil when none did.
+type wispPurgeOutcome struct {
+	selected          int
+	err               error
+	confirmed         []string
+	deletedIDs        []string
+	deleted           int
+	dependencies      int
+	labels            int
+	events            int
+	referencesUpdated int
+	orphaned          []string
+}
+
+// runWispPurgeChunks sends ids to deleteChunk in sequential chunks of
+// wispPurgeChunkSize, in selection order, and stops at the first error. The
+// chunks committed before it stay committed and stay counted: a later failure
+// no longer takes every deletion of the run with it, and a rerun reselects
+// whatever is still there. No chunk is retried here; retrying a transaction is
+// the role's business.
+func runWispPurgeChunks(ctx context.Context, ids []string, deleteChunk func(context.Context, []string) (wispPurgeChunk, error)) wispPurgeOutcome {
+	out := wispPurgeOutcome{selected: len(ids), confirmed: []string{}, deletedIDs: []string{}, orphaned: []string{}}
+	for chunk := range slices.Chunk(ids, wispPurgeChunkSize) {
+		// A canceled command sends no further chunk, whether or not the
+		// role it would reach checks the context itself.
+		if err := ctx.Err(); err != nil {
+			out.err = err
+			break
+		}
+		res, err := deleteChunk(ctx, chunk)
+		if err != nil {
+			out.err = err
+			break
+		}
+		out.confirmed = append(out.confirmed, chunk...)
+		out.deletedIDs = append(out.deletedIDs, res.deletedIDs...)
+		out.deleted += res.deleted
+		out.dependencies += res.dependencies
+		out.labels += res.labels
+		out.events += res.events
+		out.referencesUpdated += res.referencesUpdated
+		out.orphaned = append(out.orphaned, res.orphaned...)
+	}
+	// The role names one request's deletions in ascending id order without
+	// duplicates, and so does the whole run, whatever order its chunks went
+	// in: the selection is not id order, and a forced run's deleted_ids must
+	// still equal the dry run's would_delete_ids for the same rows (GH#6301).
+	slices.Sort(out.deletedIDs)
+	out.deletedIDs = slices.Compact(out.deletedIDs)
+	out.orphaned = survivingOrphans(out.orphaned, out.confirmed, out.deletedIDs)
+	return out
+}
+
+// survivingOrphans is the orphan report of a chunked purge: each chunk names
+// the survivors that depended on what it deleted, and a selected wisp whose
+// dependency sat in an earlier chunk is one of them until its own chunk
+// deletes it. Anything this run deleted leaves the report, and a row two
+// chunks orphaned is named once, in ascending order as the role names them.
+func survivingOrphans(orphaned []string, deleted ...[]string) []string {
+	gone := make(map[string]bool)
+	for _, ids := range deleted {
+		for _, id := range ids {
+			gone[id] = true
+		}
+	}
+	out := []string{}
+	for _, id := range orphaned {
+		if !gone[id] {
+			out = append(out, id)
+			gone[id] = true
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// remaining is how many selected ids no committed chunk confirmed.
+func (o wispPurgeOutcome) remaining() int {
+	return o.selected - len(o.confirmed)
+}
+
+// wispPurgeRerunHint is how a stopped purge tells its caller to continue. It
+// names no command line, so the caller keeps its own flags (--type, --json),
+// and it does not promise the failed chunk wrote nothing: a rerun reselects.
+const wispPurgeRerunHint = "Rerun the same command to reselect current data and delete the remaining closed wisps."
+
+// purgeClosedWispsDirect deletes ids, which this store's own scan just
+// selected, through its deletion role. The ids go to the role as they are: the
+// front door's per-id resolution (deleteBatch) would re-read each one to learn
+// what the scan already said.
+func purgeClosedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutcome, error) {
+	deleter, err := store.Deleter()
+	if err != nil {
+		return wispPurgeOutcome{}, err
+	}
+	opsCtx, err := issueOpsContext(ctx)
+	if err != nil {
+		return wispPurgeOutcome{}, err
+	}
+	requestActor := currentActor()
+	return runWispPurgeChunks(opsCtx, ids, func(ctx context.Context, chunk []string) (wispPurgeChunk, error) {
+		res, err := deleter.Delete(ctx, issueops.DeleteRequest{
+			Actor: requestActor,
+			IDs:   chunk,
+			Force: true,
+		})
+		if err != nil {
+			return wispPurgeChunk{}, err
+		}
+		// The bookkeeping deleteBatch does for a successful request, done per
+		// committed chunk: see the comment there (GH#5896).
+		commandDidWrite.Store(true)
+		commandDeletedIssueIDs.add(chunk...)
+		return wispPurgeChunk{
+			deletedIDs:        res.DeletedIDs,
+			deleted:           res.Deleted,
+			dependencies:      res.Dependencies,
+			labels:            res.Labels,
+			events:            res.Events,
+			referencesUpdated: res.ReferencesUpdated,
+			orphaned:          res.Orphaned,
+		}, nil
+	}), nil
+}
+
+// renderWispPurgeOutcome prints a forced closed purge's result with the keys
+// each route has always printed, plus candidates_capped (scanCapped: the scan
+// came back full, so more may remain); withDeletedIDs adds the direct route's
+// deleted_ids. A purge a failure stopped prints the same summary of what its
+// committed chunks deleted, then the cause and the rerun hint, and returns an
+// already-reported exit: under --json all of it is one stdout object
+// (remaining_count, error and hint beside the success keys), so a caller that
+// reads one JSON value still gets the progress.
+func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs bool) error {
+	if jsonOutput {
+		answer := map[string]interface{}{
+			"deleted":              out.confirmed,
+			"deleted_count":        out.deleted,
+			"dependencies_removed": out.dependencies,
+			"labels_removed":       out.labels,
+			"events_removed":       out.events,
+			"references_updated":   out.referencesUpdated,
+			"orphaned_issues":      out.orphaned,
+			"candidates_capped":    scanCapped,
+		}
+		if withDeletedIDs {
+			answer["deleted_ids"] = out.deletedIDs
+		}
+		if out.err != nil {
+			answer["remaining_count"] = out.remaining()
+			answer["error"] = out.err.Error()
+			answer["hint"] = wispPurgeRerunHint
+		}
+		if err := outputJSON(answer); err != nil {
+			return err
+		}
+		if out.err != nil {
+			return SilentExit()
+		}
+		return nil
+	}
+	mark := ui.RenderPass("✓")
+	if out.err != nil {
+		mark = ui.RenderWarn("⚠")
+	}
+	fmt.Printf("%s Deleted %d issue(s)\n", mark, out.deleted)
+	fmt.Printf("  Removed %d dependency link(s)\n", out.dependencies)
+	fmt.Printf("  Removed %d label(s)\n", out.labels)
+	fmt.Printf("  Removed %d event(s)\n", out.events)
+	fmt.Printf("  Updated text references in %d issue(s)\n", out.referencesUpdated)
+	if len(out.orphaned) > 0 {
+		fmt.Printf("  %s Orphaned %d issue(s): %s\n",
+			ui.RenderWarn("⚠"), len(out.orphaned), strings.Join(out.orphaned, ", "))
+	}
+	if scanCapped {
+		fmt.Printf("\nNote: %s.\n", wispPurgeCappedHint)
+	}
+	if out.err != nil {
+		// The counts above are what committed chunks confirmed. The failed
+		// chunk is not claimed either way: an error at a commit boundary does
+		// not prove nothing was written, which is why the hint reselects.
+		return HandleErrorWithHint(fmt.Sprintf("wisp gc --closed stopped after deleting %d of %d selected wisp(s); %d not confirmed deleted: %v",
+			len(out.confirmed), out.selected, out.remaining(), out.err), wispPurgeRerunHint)
 	}
 	return nil
 }
 
 func init() {
 	// Wisp command flags (for direct create: bd mol wisp <proto>)
-	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 
 	// Wisp create command flags (kept for backwards compat: bd mol wisp create <proto>)
-	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCreateCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 

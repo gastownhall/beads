@@ -18,7 +18,23 @@ const (
 	shutdownConfirmDeadline = 5 * time.Second
 	shutdownConfirmPoll     = 50 * time.Millisecond
 	shutdownPostKillMinimum = 2 * time.Second
+
+	// shutdownSpawnWaitDeadline bounds how long Shutdown waits for a live
+	// starter's spawn marker. The marker is only treated as active while its
+	// owner's verified identity is alive, and a live starter resolves it
+	// within its own budgets: openDeadline to see the child take proxy.lock
+	// (which clears the marker) or give up, then killSpawnedChild and
+	// clearOwnSpawnMarker, each bounded by shutdownConfirmDeadline. Waiting
+	// that long means a stop racing a slow (loaded, -race, cold-cache) start
+	// stops it instead of reporting "proxy left running" for a start that
+	// is still making progress. A dead owner's marker is removed on sight.
+	shutdownSpawnWaitDeadline = openDeadline + 2*shutdownConfirmDeadline
 )
+
+// afterSpawnMarkerLockFreeCheck is a deterministic test hook for the window
+// between stopAndAcquire's lock-free spawn-marker check and its TryLock, in
+// which a start can still publish a marker. Production leaves it as a no-op.
+var afterSpawnMarkerLockFreeCheck = func() {}
 
 type killRecordChecks struct {
 	VerifyRoot       bool
@@ -78,9 +94,11 @@ func CanForceStopUnverified(err error) bool {
 // Advancing the stop epoch first makes every start attempt which began before
 // this call terminally abort instead of retrying after its child is stopped.
 // The proxy spawn marker covers the smaller release-lock-before-exec window:
-// Shutdown waits for that marked attempt to either acquire proxy.lock or fail,
-// then verifies and stops whatever it published. All waits are bounded by
-// shutdownConfirmDeadline.
+// Shutdown waits, without holding proxy.lock, for that marked attempt to
+// either acquire proxy.lock or fail and clear its marker, then verifies and
+// stops whatever it published. The marker wait is bounded by the live
+// starter's own budgets (shutdownSpawnWaitDeadline); every other wait is
+// bounded by shutdownConfirmDeadline.
 func Shutdown(rootDir string) error {
 	if err := advanceStopEpoch(rootDir); err != nil {
 		return fmt.Errorf("proxy.Shutdown: publish stop epoch: %w", err)
@@ -124,6 +142,7 @@ func ControlFilePaths(rootDir string) []string {
 		filepath.Join(rootDir, PIDFileName),
 		filepath.Join(rootDir, LockFileName),
 		filepath.Join(rootDir, LogFileName),
+		filepath.Join(rootDir, LogFileName+".1"), // startup rotation's single generation
 		filepath.Join(rootDir, identity.SecretFileName),
 		filepath.Join(rootDir, spawnMarkerFileName),
 		filepath.Join(rootDir, stopEpochFileName),
@@ -162,13 +181,51 @@ func stopAndAcquire(
 	lockPath := filepath.Join(rootDir, lockName)
 	recordPath := pidfile.Path(rootDir, pidName)
 	deadline := time.Now().Add(shutdownConfirmDeadline)
+	// spawnDeadline starts when an in-progress start is first observed.
+	var spawnDeadline time.Time
 	var stopped *pidfile.PidFile
 
+	// waitForStart polls once more for an in-progress start's live spawn
+	// marker, or reports that the start outlived shutdownSpawnWaitDeadline.
+	waitForStart := func() error {
+		now := time.Now()
+		if spawnDeadline.IsZero() {
+			spawnDeadline = now.Add(shutdownSpawnWaitDeadline)
+		}
+		if now.After(spawnDeadline) {
+			return fmt.Errorf(
+				"timeout (%s) waiting for spawn marker %s; wait for the in-progress start to finish, then retry",
+				shutdownSpawnWaitDeadline,
+				filepath.Join(rootDir, spawnMarkerFileName),
+			)
+		}
+		// Time spent waiting on the starter must not eat the budget for
+		// stopping whatever it publishes.
+		deadline = now.Add(shutdownConfirmDeadline)
+		time.Sleep(shutdownConfirmPoll)
+		return nil
+	}
+
 	for {
+		if checks.CheckSpawnMarker {
+			// Wait on a live start without proxy.lock: the start needs the
+			// lock to clear its own marker (see spawnMarkerLive).
+			if spawnMarkerLive(rootDir) {
+				if waitErr := waitForStart(); waitErr != nil {
+					return nil, waitErr
+				}
+				continue
+			}
+			afterSpawnMarkerLockFreeCheck()
+		}
+
 		lock, err := util.TryLock(lockPath)
 		switch {
 		case err == nil:
 			if checks.CheckSpawnMarker {
+				// Re-check under the lock: a start may have published its
+				// marker since the lock-free check, and a dead owner's marker
+				// is removed only here.
 				active, markerErr := inspectSpawnMarkerLocked(rootDir)
 				if markerErr != nil {
 					lock.Unlock()
@@ -176,14 +233,9 @@ func stopAndAcquire(
 				}
 				if active {
 					lock.Unlock()
-					if time.Now().After(deadline) {
-						return nil, fmt.Errorf(
-							"timeout (%s) waiting for spawn marker %s; wait for the in-progress start to finish, then retry",
-							shutdownConfirmDeadline,
-							filepath.Join(rootDir, spawnMarkerFileName),
-						)
+					if waitErr := waitForStart(); waitErr != nil {
+						return nil, waitErr
 					}
-					time.Sleep(shutdownConfirmPoll)
 					continue
 				}
 			}

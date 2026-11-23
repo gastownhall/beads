@@ -1,6 +1,6 @@
 ---
 title: "bd cook"
-description: "Cook transforms a .formula.json file into a proto."
+description: "Compile a formula into a proto (ephemeral by default)"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

@@ -25,21 +25,52 @@ source is ambiguous, bd init refuses.
 FLAG SURFACE
 
   bd init                       Mint a new identity. Bootstraps from
-                                origin if it has refs/dolt/data.
+                                --remote or sync.remote if it has
+                                refs/dolt/data. A remote derived from git
+                                origin with refs/dolt/data is adopted only
+                                with consent: bd init asks once, and
+                                refuses (exit 1) when it cannot ask.
+
+  bd init --yes                 Consent to adopting git origin's Dolt
+                                history. --non-interactive and --json are
+                                never consent.
+
+  bd init --no-adopt            Never derive a remote from git origin: no
+                                probe, no clone, no remote wiring. Also
+                                BD_NO_REMOTE_ADOPT=1. Wins over --yes.
 
   bd init --reinit-local        Re-initialize local .beads/ over existing
                                 local data. Does NOT authorize discarding
                                 remote history. If origin has Dolt data
                                 this will refuse — pair with
-                                --discard-remote to override.
+                                --discard-remote to override. Nor does it
+                                authorize recreating a missing server-mode
+                                database; that takes --recreate-missing.
 
   bd init --reinit-local \      Discard the remote's Dolt history and
       --discard-remote          replace it with the local reinit. First
                                 bd dolt push after this will be a
                                 history-replacing force-push.
 
-  bd init --force               Deprecated alias for --reinit-local.
-                                Kept working for ≥2 releases.
+  bd init --force               Deprecated alias for --reinit-local, with
+                                the same limits. Kept working for ≥2
+                                releases.
+
+  bd init --recreate-missing    Authorize creating a fresh, empty database
+                                when this project's configured server-mode
+                                database is missing or unreachable. Opt-in
+                                per invocation only: never implied by
+                                --force/--reinit-local, config, or env.
+                                Without it, bd init REFUSES rather than
+                                silently recreating a lost database as
+                                empty (be-5up5). First rule out a stopped
+                                server or a wrong port or data dir, and
+                                restore if you can; the playbook is
+                                init-missing-server-db in
+                                docs/recovery/init-safety.md. Only when
+                                nothing is recoverable:
+
+                                  bd init --recreate-missing --prefix <prefix>
 
   bd init --from-jsonl          Import from configured import.path. If
                                 origin has Dolt data, this refuses unless
@@ -52,7 +83,8 @@ ADOPTING A REMOTE
 
       bd bootstrap
 
-  bd init will automatically suggest this when a remote is detected.
+  or, for git origin, bd init --yes. bd init will automatically suggest
+  these when a remote is detected.
 
 DESTROY-TOKEN (non-interactive only)
 
@@ -74,6 +106,8 @@ DESTROY-TOKEN (non-interactive only)
 
 EXIT CODES
 
+  1     refused: git origin has Dolt history and adoption was declined,
+        or not consented to with --yes where bd init cannot ask
   10    refused: remote has Dolt history and you selected local history
         without --discard-remote
   11    refused: existing local data and you declined the destroy confirm
@@ -82,6 +116,8 @@ EXIT CODES
         over existing issues) without a valid --destroy-token
         (non-interactive mode); also returned when the interactive
         --discard-remote typed-token confirmation is declined
+  15    refused: run directly in your home directory, which is not itself
+        a git repository, with no BEADS_DIR named by the caller
 
 RECOVERY
 

@@ -133,6 +133,12 @@ func TestEmbeddedBatchCloserSettlesTheDependersOfWhatItClosed(t *testing.T) {
 	conformance.RunBatchCloserSettlesTheDependersOfWhatItClosed(t, ctx, newEmbeddedBatchCloserFixture(t, "bcblocked"))
 }
 
+func TestEmbeddedBatchCloserItemsAnswerToTheCloseGuards(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunBatchCloserItemsAnswerToTheCloseGuards(t, ctx, newEmbeddedBatchCloserFixture(t, "bcguard"))
+}
+
 func newEmbeddedBatchCloserFixture(t *testing.T, prefix string) conformance.BatchCloserFixture {
 	t.Helper()
 	te := newTestEnv(t, prefix)

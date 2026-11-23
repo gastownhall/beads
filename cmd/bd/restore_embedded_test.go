@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdRestore runs "bd restore" with extra args. Returns combined output.
@@ -145,12 +147,16 @@ func TestEmbeddedRestore(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "rstjs")
 		id := simulateCompaction(t, bd, dir, beadsDir, "rstjs")
 
-		// NOTE: bd restore has a known issue where its local --json flag
-		// conflicts with the root command's --json persistent flag.
-		// Just verify the command runs successfully.
-		out := bdRestore(t, bd, dir, id)
-		if !strings.Contains(out, "long description") {
-			t.Errorf("expected restored description in output, got: %s", out)
+		out := bdRestore(t, bd, dir, id, "--json")
+		var restored types.Issue
+		if err := json.Unmarshal([]byte(out), &restored); err != nil {
+			t.Fatalf("bd restore --json must print a JSON issue, got error %v:\n%s", err, out)
+		}
+		if restored.ID != id {
+			t.Errorf("expected restored issue %s, got %q", id, restored.ID)
+		}
+		if !strings.Contains(restored.Description, "long description") {
+			t.Errorf("expected restored description in JSON, got: %q", restored.Description)
 		}
 	})
 }

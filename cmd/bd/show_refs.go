@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -27,9 +28,12 @@ func showIssueRefs(ctx context.Context, args []string, jsonOut bool) error {
 
 	// Process each arg via routing-aware resolution
 	for _, id := range args {
-		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+		result, routedSearched, err := resolveAndGetIssueWithRoutingSearchScope(ctx, store, id)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+			fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
+			if isNotFoundErr(err) {
+				printForeignPrefixMissHint(ctx, id, routedSearched)
+			}
 			continue
 		}
 		if result == nil || result.Issue == nil {
@@ -37,6 +41,7 @@ func showIssueRefs(ctx context.Context, args []string, jsonOut bool) error {
 				result.Close()
 			}
 			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+			printForeignPrefixMissHint(ctx, id, routedSearched)
 			continue
 		}
 		if err := processIssue(result.ResolvedID, result.Store); err != nil {

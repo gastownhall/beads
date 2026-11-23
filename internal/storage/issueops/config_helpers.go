@@ -2,13 +2,13 @@ package issueops
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // ParseStatusFallback converts legacy []string status names (from YAML) to []CustomStatus.
@@ -30,20 +30,9 @@ func ParseStatusFallback(names []string) []types.CustomStatus {
 }
 
 // ParseCommaSeparatedList splits a comma-separated string into a slice of
-// trimmed, non-empty entries.
+// trimmed, non-empty entries. It is workapi.ParseCommaSeparatedList.
 func ParseCommaSeparatedList(value string) []string {
-	if value == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		trimmed := strings.TrimSpace(p)
-		if trimmed != "" {
-			result = append(result, trimmed)
-		}
-	}
-	return result
+	return workapi.ParseCommaSeparatedList(value)
 }
 
 func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.CustomStatus, customTypes []string, err error) {
@@ -56,7 +45,7 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 		return nil, nil, err
 	}
 	if statusesFromTable && typesFromTable {
-		return statuses, customTypes, nil
+		return statuses, ComposeCustomTypes(customTypes, "", config.GetCustomTypesFromYAML()), nil
 	}
 
 	cfg, err := getConfigKeysInTx(ctx, tx, "status.custom", "types.custom")
@@ -66,12 +55,8 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 				statuses = ParseStatusFallback(yamlStatuses)
 			}
 		}
-		if !typesFromTable {
-			if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
-				customTypes = yamlTypes
-			}
-		}
-		return statuses, customTypes, nil
+		// The types.custom row is unreadable; the remaining layers still compose.
+		return statuses, ComposeCustomTypes(customTypes, "", config.GetCustomTypesFromYAML()), nil
 	}
 
 	if !statusesFromTable {
@@ -83,14 +68,7 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 			statuses = ParseStatusFallback(yamlStatuses)
 		}
 	}
-	if !typesFromTable {
-		if v := cfg["types.custom"]; v != "" {
-			customTypes = ParseTypesConfigValue(v)
-		} else if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
-			customTypes = yamlTypes
-		}
-	}
-	return statuses, customTypes, nil
+	return statuses, ComposeCustomTypes(customTypes, cfg["types.custom"], config.GetCustomTypesFromYAML()), nil
 }
 
 func resolveCustomStatusesFromTableInTx(ctx context.Context, tx DBTX) ([]types.CustomStatus, bool, error) {
@@ -280,21 +258,42 @@ func ResolveCustomTypesInTx(ctx context.Context, tx DBTX) ([]string, error) {
 	// fallback. The table-empty case is intentional: schema migration creates the
 	// table but may not have populated it from the existing types.custom config
 	// string yet.
+	var configValue string
 	if len(fromDB) == 0 {
 		value, err := GetConfigInTx(ctx, tx, "types.custom")
 		if err != nil {
 			return customTypesYAMLFallback(config.GetCustomTypesFromYAML, err)
 		}
-		if value != "" {
-			fromDB = ParseTypesConfigValue(value)
-		}
+		configValue = value
 	}
+	return ComposeCustomTypes(fromDB, configValue, config.GetCustomTypesFromYAML()), nil
+}
 
-	// Overlay-union with YAML types.custom regardless of the DB-side result.
-	// gastownhall/beads#4024: project-extension types declared in .beads/config.yaml
-	// must validate server-side even when the database side hasn't been migrated
-	// or populated with those types.
-	return mergeWithYAMLCustomTypes(fromDB, config.GetCustomTypesFromYAML), nil
+// ComposeCustomTypes is the single rule for which custom issue types a
+// workspace has. Every reader of the three sources — the resolvers here, the
+// proxied-server config repository, and therefore both `bd types` and
+// create/update validation in every mode — composes them through this
+// function, so the listed set and the accepted set cannot drift apart:
+//
+//  1. the custom_types table, when it has rows;
+//  2. otherwise the types.custom config row (CSV or JSON array), which covers
+//     databases whose table has not been populated yet;
+//  3. always unioned with config.yaml types.custom, the project-extension
+//     overlay (gastownhall/beads#4024).
+//
+// Names are trimmed, empties dropped and duplicates removed; database types
+// keep their order and YAML-only types are appended in declared order.
+// Returns nil when no layer supplies a type.
+func ComposeCustomTypes(fromTable []string, configValue string, yamlTypes []string) []string {
+	fromDB := dedupePreservingOrder(fromTable)
+	if len(fromDB) == 0 && configValue != "" {
+		fromDB = dedupePreservingOrder(ParseTypesConfigValue(configValue))
+	}
+	merged := mergeWithYAMLCustomTypes(fromDB, func() []string { return yamlTypes })
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 // mergeWithYAMLCustomTypes returns the union of dbTypes and the YAML-declared
@@ -422,25 +421,24 @@ func syncCustomTypesTable(ctx context.Context, tx DBTX, value string) error {
 // ParseTypesConfigValue parses a types.custom config value, accepting both
 // the JSON-array form written by bd config set / pour (e.g. ["duty","ops"])
 // and the legacy comma-separated form (duty,ops). Elements are trimmed and
-// empties dropped.
+// empties dropped. It is workapi.ParseTypeList, the one parser of that form,
+// which the sweep's read of types.retained shares.
 func ParseTypesConfigValue(value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	// Try JSON array first (e.g. '["gate","convoy"]')
-	var jsonTypes []string
-	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
-		var out []string
-		for _, t := range jsonTypes {
-			if t = strings.TrimSpace(t); t != "" {
-				out = append(out, t)
-			}
-		}
-		return out
-	}
-	// Fall back to comma-separated
-	return ParseCommaSeparatedList(value)
+	return workapi.ParseTypeList(value)
+}
+
+// RetainedTypesFromSetting is workapi.RetainedTypesFromSetting, the one
+// canonicalizing read of types.retained, for a caller that may not import
+// internal/workapi (the HTTP client).
+func RetainedTypesFromSetting(value string) map[string]bool {
+	return workapi.RetainedTypesFromSetting(value)
+}
+
+// ValidateRetainedTypesValue is workapi.ValidateRetainedTypesValue, the
+// syntax check of a types.retained write, for a caller that may not import
+// internal/workapi (the HTTP client, which refuses before the dial).
+func ValidateRetainedTypesValue(value string) error {
+	return workapi.ValidateRetainedTypesValue(value)
 }
 
 // SyncConfigTables re-syncs the normalized lookup table backing a config
@@ -449,6 +447,7 @@ func ParseTypesConfigValue(value string) []string {
 // path must keep the projection in step with the string value or stale
 // table rows win forever. Returns the name of the synced table ("" when
 // the key has no projection) so transactional callers can mark it dirty.
+// ConfigProjectionTables must list every table it can return.
 func SyncConfigTables(ctx context.Context, tx DBTX, key, value string) (string, error) {
 	switch key {
 	case "status.custom":
@@ -463,6 +462,14 @@ func SyncConfigTables(ctx context.Context, tx DBTX, key, value string) (string, 
 		return "custom_types", nil
 	}
 	return "", nil
+}
+
+// ConfigProjectionTables lists every table SyncConfigTables can write, for a
+// caller that commits config writes without knowing which keys they touched:
+// a config row committed without its projection is the split the projection
+// exists to prevent.
+func ConfigProjectionTables() []string {
+	return []string{"custom_statuses", "custom_types"}
 }
 
 // ResolveInfraTypesInTx reads infrastructure types from the database,

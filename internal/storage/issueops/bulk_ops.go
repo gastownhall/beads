@@ -187,6 +187,9 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		issueIDs = append(issueIDs, id)
 	}
 	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("delete issues by source repo: issue rows: %w", err)
+	}
 
 	if len(issueIDs) == 0 {
 		return 0, nil
@@ -211,6 +214,16 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		return 0, fmt.Errorf("journal dependency removals for source-repo delete: %w", err)
 	}
 
+	// GH#4750: a removed child's suffix stays used under a parent that
+	// survives this wipe (one in another source repo).
+	departing := make(map[string]bool, len(issueIDs))
+	for _, id := range issueIDs {
+		departing[id] = true
+	}
+	if _, err := ReserveChildSuffixesInTx(ctx, tx, issueIDs, departing); err != nil {
+		return 0, fmt.Errorf("source-repo delete: reserve child suffixes: %w", err)
+	}
+
 	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE source_repo = ?`, sourceRepo)
 	if err != nil {
 		return 0, fmt.Errorf("delete issues: %w", err)
@@ -231,16 +244,26 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		}
 	}
 
-	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps, NoRequestActor); err != nil {
 		return int(rowsAffected), fmt.Errorf("recompute is_blocked after source-repo delete: %w", err)
 	}
-	noteBlockedRecheck(tx, deleteRecheckLabel(issueIDs, "from "+sourceRepo), issueIDs, affectedIssues, affectedWisps)
+	NoteDeleteBlockedRecheck(tx, issueIDs, "from "+sourceRepo, NoRequestActor, affectedIssues, affectedWisps)
 
 	return int(rowsAffected), nil
 }
 
+// UpdateIssueIDInTx renames the live row oldID to newID, in whichever plane
+// holds it, carrying its edges and lease and journaling the change. A newID a
+// retaining sweep retired is refused with *IdempotencyExpiredError before
+// anything is written: the rename takes newID's create-coordination cell and
+// probes the tombstones first, so it cannot commit a live row beside a
+// tombstone, racing sweep or not.
+//
 //nolint:gosec // G201: table names are hardcoded
 func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
+	if err := RefuseRetiredIDInTx(ctx, tx, newID); err != nil {
+		return err
+	}
 	// Capture the edges under the OLD id before the rename rewrites them; they
 	// are what the journal replays as a remove/re-add pair around the identity
 	// change.
@@ -258,6 +281,12 @@ func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 		}
 	} else if err := updateIssueIDInTx(ctx, tx, oldID, newID, issue, actor); err != nil {
 		return err
+	}
+	// GH#4750: both ids' suffixes stay reserved under their parents. Renaming
+	// into P.9 raises P's counter to 9; renaming P.5 away keeps 5 used, so the
+	// next generated child of P is never P.5 again.
+	if _, err := ReserveChildSuffixesInTx(ctx, tx, []string{oldID, newID}, nil); err != nil {
+		return fmt.Errorf("rename %s -> %s: reserve child suffixes: %w", oldID, newID, err)
 	}
 	return recordRenameInJournal(ctx, tx, oldID, newID, actor, renameEdges)
 }

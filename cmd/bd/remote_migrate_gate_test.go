@@ -347,10 +347,43 @@ func TestRenderTypedOpenError(t *testing.T) {
 		if out != gate.UserMessage() {
 			t.Errorf("rendered output is not the full UserMessage:\n%s", out)
 		}
-		for _, want := range []string{"co-resident", "bd migrate schema", "Read commands keep working"} {
+		for _, want := range []string{"co-resident", "bd migrate schema", "so are reads that"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output missing %q:\n%s", want, out)
 			}
+		}
+		if strings.Contains(strings.ToLower(out), "keep working") {
+			t.Errorf("output promises reads keep working:\n%s", out)
+		}
+	})
+
+	t.Run("a proxied read the drift stopped renders the gate's stop, not the drift", func(t *testing.T) {
+		// uow's readThroughRefusedMigration joins a shaped stop to the
+		// SchemaBehindError when this binary's reads cannot query the old
+		// schema. A proxied read is where the forced verb's caveat sends the
+		// operator to see that stop (gastownhall/beads#6656), and the drift's
+		// own remedy names the bare `bd migrate schema` the front door
+		// refuses, so the stop is what renders.
+		pinJSONOutput(t, false)
+		gate := &schema.RemoteMigrateGateError{
+			CurrentVersion: 66, LatestVersion: 74, Pending: 8,
+			Decision: "adopt", Shared: true, Proxied: true,
+		}
+		drift := &schema.SchemaBehindError{DBVersion: 66, BinaryVersion: 74}
+		out, handled := capture(func() bool {
+			return renderTypedOpenError(fmt.Errorf("uow: init schema: %w", errors.Join(gate, drift)))
+		})
+		if !handled {
+			t.Fatal("renderTypedOpenError = false, want true for a gate refusal joined to the drift")
+		}
+		if out != gate.UserMessage() {
+			t.Errorf("rendered output is not the stop's full UserMessage:\n%s", out)
+		}
+		if !strings.Contains(out, "adopt the remote's migrated database instead") {
+			t.Errorf("output missing the adopt stop:\n%s", out)
+		}
+		if strings.Contains(out, "schema version mismatch") {
+			t.Errorf("output carries the drift error instead of only the stop:\n%s", out)
 		}
 	})
 

@@ -39,7 +39,7 @@ func (d *Diagnostics) CaptureOnFailure() {
 func (d *Diagnostics) dumpStateFiles() {
 	for _, name := range []string{"dolt-server.pid", "dolt-server.port", "dolt-server.log"} {
 		path := filepath.Join(d.beadsDir, name)
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // G304: a fixed state-file name under the test's own .beads dir
 		if err != nil {
 			d.t.Logf("  %s: not found", name)
 			continue
@@ -69,7 +69,7 @@ func (d *Diagnostics) dumpProcessList() {
 		if pid[0] < '0' || pid[0] > '9' {
 			continue
 		}
-		cmdline, err := os.ReadFile(filepath.Join("/proc", pid, "cmdline"))
+		cmdline, err := os.ReadFile(filepath.Join("/proc", pid, "cmdline")) //nolint:gosec // G304: /proc/<numeric pid>/cmdline
 		if err != nil {
 			continue
 		}

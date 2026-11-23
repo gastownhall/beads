@@ -26,8 +26,8 @@ Usage: historical-dolt-upgrade-test.sh [--version VERSION]
 
 Runs the authentic historical SQLite bridges (v0.9.1, v0.17.0, v0.49.6, v0.50.3), historical server-Dolt corpus
 (v0.55.4, v0.56.1, v0.57.0, v0.62.0), and direct embedded-Dolt corpus
-(v0.63.3, v1.0.0, v1.0.1, v1.1.0, v1.1.2, v1.2.2) against CANDIDATE_BIN. Every release archive is pinned and verified.
-The wisp-capable sources (v1.0.1, v1.1.0, v1.1.2, v1.2.2) additionally run a wisp-plane lane in a fresh workspace,
+(v0.63.3, v1.0.0, v1.0.1, v1.1.0, v1.1.2, v1.2.2, v1.3.3, v1.3.4) against CANDIDATE_BIN. Every release archive is pinned and verified.
+The wisp-capable sources (v1.0.1, v1.1.0, v1.1.2, v1.2.2, v1.3.3, v1.3.4) additionally run a wisp-plane lane in a fresh workspace,
 which needs the pinned external Dolt runtime as a read-only oracle.
 EOF
 }
@@ -1007,7 +1007,9 @@ verify_post_bridge_semantics() {
     local version="$1" kind="$2" task blocker task_after ready
     task=$(sed -n '1p' "$workspace/fixture-ids")
     blocker=$(sed -n '2p' "$workspace/fixture-ids")
-    run_in_workspace "$candidate" update "$task" --notes 'Post-upgrade bridge mutation persisted.' >/dev/null ||
+    # --force: the fixture task carries historical notes, and the candidate now
+    # fences an unforced non-empty replacement; the replacement is the point here.
+    run_in_workspace "$candidate" update "$task" --notes 'Post-upgrade bridge mutation persisted.' --force >/dev/null ||
         die "$version: candidate mutation failed after explicit bridge"
     task_after=$(run_in_workspace "$candidate" show "$task" --json --include-comments) ||
         die "$version: candidate could not reopen bridged data"
@@ -1036,6 +1038,18 @@ run_embedded_dolt_upgrade() {
     jq -e '.backend == "dolt" and .dolt_mode == "embedded"' "$metadata" >/dev/null ||
         die "$version: source metadata does not select embedded Dolt"
     metadata_sha=$(sha256_file "$metadata") || die "$version: could not fingerprint source metadata"
+    # Migration-consent gate (Beads 1.2 remediation): the candidate no longer
+    # migrates an existing database from ordinary commands, so the explicit
+    # schema migration is now the FIRST candidate step — previously it ran
+    # later and was already a no-op because the first candidate open had
+    # silently migrated. Same effective sequence, now stated. Before
+    # consenting, assert the gate actually refuses an ordinary command.
+    if run_in_workspace "$candidate" list >/dev/null 2>"$workspace/consent-refusal.err"; then
+        die "$version: candidate operated an un-migrated database without consent"
+    fi
+    grep -q 'bd migrate schema' "$workspace/consent-refusal.err" ||
+        die "$version: consent refusal did not carry migration guidance"
+    migrate_schema_current "$version" first
     verify_surviving_fixture "$version" direct
     if [ "$version" = v1.0.0 ]; then
         [ "$(run_in_workspace "$candidate" config get status.custom)" = review:active ] || die "$version: candidate did not preserve custom status config"
@@ -1043,7 +1057,8 @@ run_embedded_dolt_upgrade() {
     fi
     [ "$(sha256_file "$metadata")" = "$metadata_sha" ] || die "$version: candidate startup rewrote metadata"
     task=$(sed -n '1p' "$workspace/fixture-ids")
-    run_in_workspace "$candidate" update "$task" --notes 'Post-upgrade direct mutation persisted.' >/dev/null ||
+    # --force: same fence as verify_post_bridge_semantics — the fixture task has notes.
+    run_in_workspace "$candidate" update "$task" --notes 'Post-upgrade direct mutation persisted.' --force >/dev/null ||
         die "$version: candidate mutation failed after direct upgrade"
     task_after=$(run_in_workspace "$candidate" show "$task" --json --include-comments) ||
         die "$version: candidate could not reopen mutated data"
@@ -1053,7 +1068,6 @@ run_embedded_dolt_upgrade() {
     blocker=$(sed -n '2p' "$workspace/fixture-ids")
     run_in_workspace "$candidate" show "$blocker" --json > "$workspace/after-first.json"
     jq -S . "$workspace/after-first.json" > "$workspace/after-first-canonical.json"
-    migrate_schema_current "$version" first
     verify_idempotent_migration "$version" direct
     run_in_workspace "$candidate" show "$task" --json --include-comments |
         jq -S . > "$workspace/direct-after-noops.json"
@@ -1146,17 +1160,17 @@ run_v0554_default_embedded_dolt_upgrade() {
 # Old-binary capabilities, probed against each pinned release rather than
 # assumed, so the lane can stay one shape across both regimes:
 #
-#   v1.0.1  v1.1.0  v1.1.2
-#     yes     yes     yes    bd create --ephemeral
-#     yes     yes     yes    dep add: wisp->issue, wisp->wisp, conditional-blocks
-#     yes     yes     yes    dep add: issue->wisp (main dependencies table)
-#     yes     yes     yes    comments add / label add on a wisp
-#     yes     yes     yes    bd mol wisp list --all --json
-#     yes     yes     yes    bd dolt remote add / push over file://
-#      no     yes     yes    a pre-upgrade remote the candidate will still migrate
-#      no     yes     yes    wisps.is_blocked column
-#      no     yes     yes    post-split wisp_dependencies target columns
-#      no     yes     yes    ignored_schema_migrations cursor
+#   v1.0.1  v1.1.0  v1.1.2  v1.3.3  v1.3.4
+#     yes     yes     yes     yes     yes    bd create --ephemeral
+#     yes     yes     yes     yes     yes    dep add: wisp->issue, wisp->wisp, conditional-blocks
+#     yes     yes     yes     yes     yes    dep add: issue->wisp (main dependencies table)
+#     yes     yes     yes     yes     yes    comments add / label add on a wisp
+#     yes     yes     yes     yes     yes    bd mol wisp list --all --json
+#     yes     yes     yes     yes     yes    bd dolt remote add / push over file://
+#      no     yes     yes     yes     yes    a pre-upgrade remote the candidate will still migrate
+#      no     yes     yes     yes     yes    wisps.is_blocked column
+#      no     yes     yes     yes     yes    post-split wisp_dependencies target columns
+#      no     yes     yes     yes     yes    ignored_schema_migrations cursor
 #
 # The two "no" rows in the last block are the point of keeping v1.0.1: it is the
 # only regime that makes the candidate perform the split and bootstrap the
@@ -1689,10 +1703,12 @@ run_wisp_plane_upgrade() {
 
     # First candidate touch runs the full MigrateUp under the standard per-op
     # timeout. A dirty-table refusal or a migration error here is the headline
-    # failure class for this lane.
+    # failure class for this lane. The migration-consent gate makes an ordinary
+    # command refuse an un-migrated database, so the explicit schema migration
+    # is that first touch (as in run_embedded_dolt_upgrade); the open follows.
+    migrate_schema_current "$version" wisp-first
     run_in_workspace "$candidate" list --json -n 0 --all > "$workspace/wisp-first-open.json" ||
         die "$version: candidate could not open the seeded wisp workspace"
-    migrate_schema_current "$version" wisp-first
     snapshot_wisp_plane "$version" after
 
     # Read-only assertions first: the events count must be observed before any
@@ -1764,8 +1780,10 @@ run_dirty_tracked_wisp_scenario() {
     before=$(oracle_count "$version" 'SELECT COUNT(*) FROM wisps')
     output="$workspace/dirty-tracked-open.out"
     # run_in_workspace already wraps every call in `timeout`, so a hard-lock
-    # surfaces as a timeout kill rather than hanging the job.
-    if run_in_workspace "$candidate" list --json -n 0 --all > "$output" 2>&1; then
+    # surfaces as a timeout kill rather than hanging the job. The open is the
+    # consented `migrate schema`: an ordinary command now stops at the
+    # migration-consent gate before MigrateUp ever reaches the dirty tables.
+    if run_in_workspace "$candidate" migrate schema > "$output" 2>&1; then
         printf '  · candidate accepted the dirty tracked wisp tables\n'
     else
         grep -Fq 'dirty tables' "$output" ||

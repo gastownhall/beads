@@ -7,21 +7,10 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
-
-// depTargetExpr resolves a dependency row's target id from the split physical
-// columns instead of the STORED generated `depends_on_id` column. Both
-// `dependencies` and `wisp_dependencies` define depends_on_id as
-// GENERATED ALWAYS AS (COALESCE(depends_on_issue_id, depends_on_wisp_id,
-// depends_on_external)). Count queries must filter on the base columns: inside
-// a count(*) (which projects no real columns) the pure-Go GMS analyzer can
-// prune the base columns the generated column derives from and then fail with
-// "column depends_on_id could not be found in any table in scope". The slice
-// path projects real columns, so it can use depends_on_id directly. This
-// matches issueops.DepTargetExpr on main.
-const depTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)"
 
 // CountIssues returns the number of issues matching query and filter.
 // Filter.Limit and Filter.Offset are ignored; all other fields apply.
@@ -52,51 +41,31 @@ func (s *EmbeddedDoltStore) CountIssuesByGroup(ctx context.Context, filter types
 	return result, err
 }
 
-// CountDependents counts both dependency tables so the total matches
-// GetDependentsWithMetadata: a dependent may be a permanent issue (edge in
-// `dependencies`) or a wisp (edge in `wisp_dependencies`). Counted in separate
-// top-level queries and summed in Go.
-//
-// Both tables' targets are resolved via depTargetExpr (the split physical
-// columns) rather than the STORED generated depends_on_id, which a count(*)
-// can fail to resolve under the pure-Go GMS analyzer.
+// CountDependents returns the number of issues that depend on issueID: one per
+// distinct dependent across `dependencies` and `wisp_dependencies`, so the
+// total matches GetDependentsWithMetadata (bd-cif6y4). An edge held in both
+// planes counts once, and a database with no `wisp_dependencies` counts the
+// durable plane alone. The body is issueops.CountDependencyEdgesInTx, the one
+// the proxied path runs.
 func (s *EmbeddedDoltStore) CountDependents(ctx context.Context, issueID string) (int64, error) {
 	var n int64
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var perm, wisp int64
-		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM dependencies WHERE `+depTargetExpr+` = ?`, issueID).Scan(&perm); err != nil {
-			return err
-		}
-		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM wisp_dependencies WHERE `+depTargetExpr+` = ?`, issueID).Scan(&wisp); err != nil {
-			return err
-		}
-		n = perm + wisp
-		return nil
+		var err error
+		n, err = issueops.CountDependencyEdgesInTx(ctx, tx, issueID, domain.DepDirectionIn, nil)
+		return err
 	})
 	return n, err
 }
 
-// CountDependencies counts both dependency tables so the total matches
-// GetDependenciesWithMetadata: a wisp's outgoing edges live in
-// `wisp_dependencies`, a permanent issue's in `dependencies`. Counted as two
-// separate queries summed in Go (see CountDependents for why a single combined
-// query is avoided).
+// CountDependencies returns the number of issues that issueID depends on: one
+// per distinct dependency across both planes, matching
+// GetDependenciesWithMetadata (see CountDependents).
 func (s *EmbeddedDoltStore) CountDependencies(ctx context.Context, issueID string) (int64, error) {
 	var n int64
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var perm, wisp int64
-		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM dependencies WHERE issue_id = ?`, issueID).Scan(&perm); err != nil {
-			return err
-		}
-		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM wisp_dependencies WHERE issue_id = ?`, issueID).Scan(&wisp); err != nil {
-			return err
-		}
-		n = perm + wisp
-		return nil
+		var err error
+		n, err = issueops.CountDependencyEdgesInTx(ctx, tx, issueID, domain.DepDirectionOut, nil)
+		return err
 	})
 	return n, err
 }
@@ -135,8 +104,10 @@ func (s *EmbeddedDoltStore) CountEvents(ctx context.Context, issueID string, lim
 // CountDependentsByStatus counts both dependency tables, joining each to its
 // home issue table (dependencies→issues, wisp_dependencies→wisps), so wisp
 // dependents are included the same way GetDependentsWithMetadata includes them.
-// Counted as two separate queries summed in Go (see CountDependents for why a
-// single combined query is avoided).
+// Counted as two separate queries summed in Go. Each matches the target on the
+// split physical columns (a COALESCE, as sqlbuild.DepTargetExpr) rather than
+// the STORED generated depends_on_id, which a count(*) can fail to resolve
+// under the pure-Go GMS analyzer.
 func (s *EmbeddedDoltStore) CountDependentsByStatus(ctx context.Context, issueID string, status types.Status) (int64, error) {
 	var n int64
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {

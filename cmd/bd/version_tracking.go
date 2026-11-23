@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/issueops"
+	"golang.org/x/mod/module"
 )
 
 // localVersionFile is the gitignored file that stores the last bd version used locally.
@@ -72,7 +73,7 @@ func trackBdVersionFile(persist bool) {
 	// misfire is bounded — recoverPreV56IfNeeded refuses a non-semver
 	// predecessor, and the workspace's own version markers still refuse a
 	// genuine downgrade. (Those markers cannot arbitrate direction here: they
-	// compare with the same dotted scan and read HEAD stamps as 0.0.0 too.)
+	// use their own dotted comparison, which reads HEAD stamps as 0.0.0 too.)
 	if lastVersion != "" && lastVersion != Version {
 		if doctor.CompareVersions(Version, lastVersion) > 0 ||
 			doctor.IsBrewHeadVersion(Version) || doctor.IsBrewHeadVersion(lastVersion) {
@@ -309,22 +310,30 @@ func autoMigrateOnVersionBump(beadsDir string) {
 
 // recoverPreV56IfNeeded rebuilds a Dolt database left behind by the pre-0.56
 // embedded mode (GH#2137) — which means deleting .dolt — but only when the
-// recorded predecessor is an actual semantic version older than 0.56.0.
+// recorded predecessor is a release older than 0.56.0.
 //
-// The validity check is not redundant with the comparison. CompareVersions
-// scans every dot-separated part with %d and leaves whatever it cannot read at
-// 0, so any non-semver string writeLocalVersion has recorded compares as
-// pre-0.56 and routes a current workspace into this destructive path:
-// Homebrew's "HEAD-<shortsha>" from a --HEAD install (#5603), and the
-// v-prefixed Go pseudo-version a `go install`-built bd stamps (#5650). Neither
-// is a pre-0.56 workspace; both would lose their database.
+// Neither refusal below is redundant with the comparison:
 //
-// IsValidSemver rejects exactly the shapes CompareVersions misreads, so this
-// gate can only remove predecessors from the recovery set, never add one: a
-// stamp that reaches RecoverPreV56DoltDir today and still parses keeps its
-// recovery unchanged.
+//   - CompareVersions scans every dot-separated part with %d and leaves
+//     whatever it cannot read at 0, so a stamp it cannot parse compares as
+//     pre-0.56: Homebrew's "HEAD-<shortsha>" from a --HEAD install (#5603).
+//     IsValidSemver rejects those shapes.
+//   - A Go pseudo-version parses, but its numbers do not name a release.
+//     "v0.55.5-0.<timestamp>-<hash>" is some commit after v0.55.4, and
+//     "v0.0.0-<timestamp>-<hash>" a build with no tag in reach at all: the
+//     prefix bounds the build from below, never from above, so it cannot show
+//     that the workspace predates 0.56. IsValidSemver used to refuse the
+//     v-prefixed ones some build paths stamp (#5650) only because it read
+//     the "v" as a malformed part. Since it accepts a leading "v" (GH#6152),
+//     a major-0 one can compare below 0.56.0, so pseudo-versions are refused
+//     here explicitly, however they are spelled.
+//
+// A v-prefixed release ("v0.55.4") is compared numerically and still
+// recovers. The .bd-dolt-ok marker RecoverPreV56DoltDir checks is the last
+// gate, but only bd 0.58.0 and later write it: a database that only 0.56.x or
+// 0.57.x has served has none, so for it these refusals are the only gate.
 func recoverPreV56IfNeeded(previousVersion, dbPath string) {
-	if !doctor.IsValidSemver(previousVersion) {
+	if !doctor.IsValidSemver(previousVersion) || isGoPseudoVersion(previousVersion) {
 		return
 	}
 	if doctor.CompareVersions(previousVersion, "0.56.0") >= 0 {
@@ -338,6 +347,14 @@ func recoverPreV56IfNeeded(previousVersion, dbPath string) {
 	if recovered {
 		debug.Logf("auto-migrate: rebuilt pre-v56 dolt database at %s", dbPath)
 	}
+}
+
+// isGoPseudoVersion reports whether a version stamp is a Go pseudo-version,
+// with or without the leading "v". The module parser requires the "v", so the
+// stamp is normalized the way the doctor version helpers read it (trimmed, one
+// optional "v") and then given one.
+func isGoPseudoVersion(version string) bool {
+	return module.IsPseudoVersion("v" + strings.TrimPrefix(strings.TrimSpace(version), "v"))
 }
 
 // noticeSharedMigrateRefusal turns the one failure autoMigrateOnVersionBump
@@ -374,14 +391,35 @@ func noticeSharedMigrateRefusal(err error) {
 	if globalFlag {
 		consent = schema.SharedConsentCommandGlobal
 	}
+	// GH#6656: on a proxied workspace the bare consent verb is refused at
+	// the front door, so the notice would have to prescribe the forced form,
+	// the one route through that refusal, with the client-close precondition
+	// that form declares. Defensive today: autoMigrateOnVersionBump, this
+	// notice's only caller, returns before opening anything on a
+	// proxied-server workspace (cfg.IsDoltProxiedServerMode), so no proxied
+	// refusal reaches here. The branch keeps the notice from naming the
+	// refused bare verb if that early return ever goes. usesProxiedServer()
+	// is read alongside the gate's marker because the dolt.NewFromConfig open
+	// that probe uses never sets gateErr.Proxied (only the uow provider does).
+	proxied := gateErr.Proxied || usesProxiedServer()
+	if proxied {
+		consent = schema.SharedConsentCommandForced
+		if globalFlag {
+			consent = schema.SharedConsentCommandForcedGlobal
+		}
+	}
 	var remedy string
 	switch gateErr.Decision {
 	case "shared-no-remote":
-		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
+		if proxied {
+			remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded and the co-resident library clients are stopped; until then writes are refused, and reads may be too.", consent)
+		} else {
+			remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; until then writes are refused, and reads may be too.", consent)
+		}
 	case "adopt", "adopt-ff":
 		// The remote is already migrated: migrating here would fork it, and
 		// the verb consent deliberately does not unlock this arm.
-		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here; reads keep working meanwhile."
+		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here."
 	case "fork-skew":
 		remedy = "This database and its remote already applied different content for the same migration (#4259) — run 'bd doctor' and follow its migration-content-skew guidance; do not migrate."
 	default:
@@ -389,7 +427,7 @@ func noticeSharedMigrateRefusal(err error) {
 		// first-mover suppression. Its full block names the designated-
 		// migrator and adopt paths with their preconditions, and picking one
 		// here would be guessing.
-		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing; reads keep working meanwhile."
+		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing."
 	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: %d schema migration(s) pending on this database — not auto-applying (#5920).\n%s\n",

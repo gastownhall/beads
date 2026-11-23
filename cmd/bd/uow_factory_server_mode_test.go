@@ -56,11 +56,11 @@ func TestResolveServerModeUOWTopology_ProxyNeverIdlesOut(t *testing.T) {
 	topology, err := resolveServerModeUOWTopology(context.Background(), beadsDir)
 	require.NoError(t, err)
 
-	assert.Equal(t, proxy.IdleTimeoutNever, topology.proxyIdle,
+	assert.Equal(t, proxy.IdleTimeoutNever, topology.ProxyIdle,
 		"a finite idle timeout lets the proxy exit during a quiet period and strands serve on a dead port")
 	// A zero timeout is the specific value that reads as "use the default"
 	// downstream, so pin that it is not what we send.
-	assert.NotZero(t, topology.proxyIdle,
+	assert.NotZero(t, topology.ProxyIdle,
 		"zero is the sentinel NewExternalDoltServerUOWProvider replaces with the 30s default")
 }
 
@@ -81,7 +81,7 @@ func TestResolveServerModeUOWTopology_GlobalSelectsTheGlobalDatabase(t *testing.
 
 	topology, err := resolveServerModeUOWTopology(context.Background(), beadsDir)
 	require.NoError(t, err)
-	assert.Equal(t, "beads_global", topology.database)
+	assert.Equal(t, "beads_global", topology.Database)
 }
 
 // The no-metadata.json corner. The CLI store open in this same process takes
@@ -102,7 +102,7 @@ func TestResolveServerModeUOWTopology_NoMetadataMatchesTheCLIDatabase(t *testing
 
 	topology, err := resolveServerModeUOWTopology(context.Background(), beadsDir)
 	require.NoError(t, err)
-	assert.Equal(t, configfile.DefaultDoltDatabase, topology.database,
+	assert.Equal(t, configfile.DefaultDoltDatabase, topology.Database,
 		"serve must open the database the CLI opens in this corner; main.go's cfg == nil branch ignores the env var")
 }
 
@@ -130,10 +130,44 @@ func TestResolveServerModeUOWTopology_FallsBackToTCPWhenTheSocketIsDead(t *testi
 	topology, err := resolveServerModeUOWTopology(context.Background(), beadsDir)
 	require.NoError(t, err)
 
-	assert.Empty(t, topology.external.Socket,
+	assert.Empty(t, topology.External.Socket,
 		"a dead socket must not win over a live TCP port; the CLI falls back and serve has to agree")
-	assert.Equal(t, port, topology.external.Port)
-	assert.Equal(t, "127.0.0.1", topology.external.Host)
+	assert.Equal(t, port, topology.External.Port)
+	assert.Equal(t, "127.0.0.1", topology.External.Host)
+}
+
+// An IPv6 host may be configured bracketed ("[::1]") as well as bare, in
+// metadata.json or BEADS_DOLT_SERVER_HOST, and the CLI store dials both. Serve
+// shares this resolution, so it must hand its proxy the bare host:
+// ExternalDoltServer joins it with net.JoinHostPort, which turned a bracketed
+// host into "[[::1]]:P" and left serve unable to reach a server the CLI used.
+func TestResolveServerModeUOWTopology_UnbracketsAnIPv6Host(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata string
+		env      string
+	}{
+		{name: "metadata bracketed", metadata: "[::1]"},
+		{name: "metadata bare", metadata: "::1"},
+		{name: "env bracketed", metadata: "127.0.0.1", env: "[::1]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := serverModeBeadsDir(t, &configfile.Config{
+				DoltServerHost: tc.metadata,
+				DoltServerPort: 3521,
+				DoltDatabase:   "beads_serve",
+			})
+			if tc.env != "" {
+				t.Setenv("BEADS_DOLT_SERVER_HOST", tc.env)
+			}
+
+			topology, err := resolveServerModeUOWTopology(context.Background(), beadsDir)
+			require.NoError(t, err)
+			assert.Empty(t, topology.External.Socket)
+			assert.Equal(t, "::1", topology.External.Host)
+			assert.Equal(t, 3521, topology.External.Port)
+		})
+	}
 }
 
 // Socket selection belongs to the Dolt transport policy. The UOW topology
@@ -160,9 +194,9 @@ func TestResolveServerModeUOWTopology_KeepsSocketSelectedByTransportPolicy(t *te
 		})
 	require.NoError(t, err)
 	require.Equal(t, 1, resolverCalls, "transport policy must be invoked exactly once")
-	assert.Equal(t, socket, topology.external.Socket)
-	assert.Zero(t, topology.external.Host, "a selected socket is the transport; host must stay unset")
-	assert.Zero(t, topology.external.Port, "a selected socket is the transport; port must stay unset")
+	assert.Equal(t, socket, topology.External.Socket)
+	assert.Zero(t, topology.External.Host, "a selected socket is the transport; host must stay unset")
+	assert.Zero(t, topology.External.Port, "a selected socket is the transport; port must stay unset")
 }
 
 // The gateway refusal must be decided from the CONFIGURATION, never from the

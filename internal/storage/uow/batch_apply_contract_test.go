@@ -115,6 +115,18 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("NormalizesTheWaitsForGate", func(t *testing.T) {
 		conformance.RunBatchApplyNormalizesTheWaitsForGate(t, ctx, fixture)
 	})
+	t.Run("StampsSpawnerIDOnlyWhenNamed", func(t *testing.T) {
+		conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, ctx, fixture)
+	})
+	t.Run("CarriesThreadIDOntoTheStoredEdge", func(t *testing.T) {
+		conformance.RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t, ctx, fixture)
+	})
+	t.Run("CarriesThreadIDOntoAnExistingEdge", func(t *testing.T) {
+		conformance.RunBatchApplyCarriesThreadIDOntoAnExistingEdge(t, ctx, fixture)
+	})
+	t.Run("RefusesAThreadIDLongerThanItsColumn", func(t *testing.T) {
+		conformance.RunBatchApplyRefusesAThreadIDLongerThanItsColumn(t, ctx, fixture)
+	})
 	t.Run("SplicesAForwardMetadataRef", func(t *testing.T) {
 		conformance.RunBatchApplySplicesAForwardMetadataRef(t, ctx, fixture)
 	})
@@ -144,6 +156,24 @@ func TestBatchApplyContract(t *testing.T) {
 	})
 	t.Run("RefusesAnUnusableRequest", func(t *testing.T) {
 		conformance.RunBatchApplyRefusesAnUnusableRequest(t, ctx, fixture)
+	})
+	t.Run("UpdateItemsRefuseATemplate", func(t *testing.T) {
+		conformance.RunBatchApplyUpdateItemsRefuseATemplate(t, ctx, fixture)
+	})
+	t.Run("SplicesTheMetadataOfATemplateItCreates", func(t *testing.T) {
+		conformance.RunBatchApplySplicesTheMetadataOfATemplateItCreates(t, ctx, fixture)
+	})
+	t.Run("CloseItemsAnswerToTheCloseGuards", func(t *testing.T) {
+		conformance.RunBatchApplyCloseItemsAnswerToTheCloseGuards(t, ctx, fixture)
+	})
+	t.Run("RefusesADottedChildGatedOnItsOwnParent", func(t *testing.T) {
+		conformance.RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t, ctx, fixture)
+	})
+	t.Run("AppliesTheDefaultPriority", func(t *testing.T) {
+		conformance.RunBatchApplyAppliesTheDefaultPriority(t, ctx, fixture)
+	})
+	t.Run("CarriesTheGateMembers", func(t *testing.T) {
+		conformance.RunBatchApplyCarriesTheGateMembers(t, ctx, fixture)
 	})
 }
 

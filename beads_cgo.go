@@ -17,12 +17,53 @@ import (
 // configured mode:
 //
 //   - Embedded Dolt (default): Opens via the CGo embedded Dolt engine.
+//   - Proxied server (dolt_mode "proxied-server"): Opens through the
+//     workspace's bd proxy, as the bd CLI does. A running proxy is adopted;
+//     with none, one is started from `bd` on PATH; with no bd there, or with
+//     a proxy an older bd (before 1.4) started, the open fails with
+//     ErrProxyUnavailable, having created no embedded store and started or
+//     stopped no proxy. A managed-local workspace (no external upstream)
+//     also needs `dolt` on PATH, even to adopt a running proxy. The store
+//     covers the common issue, label, dependency, comment and config methods
+//     and RunInTransaction; the rest return a typed ErrUnsupported. Close
+//     leaves the proxy running. The one exception is an environment that
+//     forces server mode (BEADS_DOLT_SERVER_MODE or BEADS_DOLT_SHARED_SERVER)
+//     and names the port (BEADS_DOLT_SERVER_PORT): that open takes the Dolt
+//     server arm below and dials the named port as a plain MySQL client.
 //   - Dolt server: Connects to a dolt sql-server via OpenFromConfig.
 //
 // The returned Storage must be closed when no longer needed.
 //
 // beadsDir is the path to the .beads directory.
+//
+// OpenBestAvailable is OpenBestAvailableWith with a zero OpenOptions; see that
+// function for per-open injections into a registered backend.
 func OpenBestAvailable(ctx context.Context, beadsDir string) (Storage, error) {
+	return OpenBestAvailableWith(ctx, beadsDir, OpenOptions{})
+}
+
+// OpenBestAvailableWith is OpenBestAvailable plus per-open injections
+// (Credential, HTTPClient, UserAgent) for a registered backend that
+// implements Backend.OpenWith. It exists for an embedder whose single
+// process serves many workspaces with distinct credentials (gc, Gas City is
+// the motivating case) against a backend whose dialer would otherwise be
+// process-global, making per-workspace credentials impossible through plain
+// OpenBestAvailable.
+//
+// A zero OpenOptions behaves IDENTICALLY to OpenBestAvailable for every
+// backend, registered or not: Dolt and embedded Dolt have no OpenWith and
+// never see opts; a registered backend without OpenWith falls back to its
+// Open exactly as OpenBestAvailable always has. The one exception across
+// every path is a non-nil opts.Credential, non-nil opts.HTTPClient, or
+// non-empty opts.UserAgent with nothing able to honor it — that is always a
+// typed refusal (the matching ErrXWithoutOpenWith sentinel), never a silent
+// open with the field ignored.
+func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOptions) (Storage, error) {
+	// Before Load, which can migrate a legacy config.json, and before any
+	// backend is chosen; IsSupportedBackend below re-checks the loaded config.
+	if err := checkDiscoveredBackend(beadsDir); err != nil {
+		return nil, err
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("loading storage metadata: %w", err)
@@ -36,9 +77,38 @@ func OpenBestAvailable(ctx context.Context, beadsDir string) (Storage, error) {
 
 	// Dispatch to a registered extension backend before any Dolt path, mirroring
 	// the CLI store factories so SDK callers get the backend they registered
-	// instead of a silently-opened embedded Dolt store.
+	// instead of a silently-opened embedded Dolt store. OpenWithOptions calls
+	// OpenWith when the backend has one, else falls back to Open — except a
+	// non-nil Credential, non-nil HTTPClient, or non-empty UserAgent, which it
+	// refuses rather than silently drops.
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
-		return backend.Open(ctx, beadsDir)
+		return backend.OpenWithOptions(ctx, beadsDir, opts)
+	}
+
+	// No registered backend claims this workspace: it is plain Dolt
+	// (embedded or server), which has no per-open seam at all. Silently
+	// dropping a caller-supplied Credential, HTTPClient, or UserAgent here
+	// would be the same silent-loss hazard OpenWithOptions refuses for a
+	// registered backend without OpenWith (L2: fail closed on all three,
+	// not just Credential).
+	if opts.Credential != nil {
+		return nil, fmt.Errorf("beads: OpenOptions.Credential is not supported for backend %q (Dolt has no per-open credential seam): %w", cfg.GetBackend(), backends.ErrCredentialWithoutOpenWith)
+	}
+	if opts.HTTPClient != nil {
+		return nil, fmt.Errorf("beads: OpenOptions.HTTPClient is not supported for backend %q (Dolt has no per-open transport seam): %w", cfg.GetBackend(), backends.ErrHTTPClientWithoutOpenWith)
+	}
+	if opts.UserAgent != "" {
+		return nil, fmt.Errorf("beads: OpenOptions.UserAgent is not supported for backend %q (Dolt has no per-open transport seam): %w", cfg.GetBackend(), backends.ErrUserAgentWithoutOpenWith)
+	}
+
+	if routesThroughProxy(cfg) {
+		// Before the server arm, which BEADS_DOLT_SERVER_MODE or
+		// BEADS_DOLT_SHARED_SERVER would otherwise select ahead of dolt_mode
+		// (unless BEADS_DOLT_SERVER_PORT names the port to dial, which
+		// keeps that arm: see routesThroughProxy), and before the embedded
+		// arm, which would create .beads/embeddeddolt: a proxied workspace
+		// is served through its bd proxy, as on the bd CLI (GH#8323).
+		return openProxiedServer(ctx, beadsDir)
 	}
 
 	if cfg.IsDoltServerMode() {

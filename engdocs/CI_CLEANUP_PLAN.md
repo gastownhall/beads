@@ -1,10 +1,10 @@
 # CI Cleanup Plan
 
-Last reviewed: 2026-08-10
+Last reviewed: 2026-09-03
 
 Freshness source: `engdocs/CI_TEST_SURFACE_AUDIT.md`, `.github/workflows/*.yml`,
-`.buildflags`, `.golangci.yml`, `scripts/ci/pr-lint.sh`, `Makefile`, package test
-manifests, and maintainer decision review.
+`.buildflags`, `.golangci.yml`, `scripts/ci/pr-lint.sh`, `scripts/pr-lint/`,
+`Makefile`, package test manifests, and maintainer decision review.
 
 This document records the agreed target shape for CI cleanup. It is the policy
 and roadmap layer; the current inventory remains in
@@ -51,8 +51,11 @@ Every PR, including docs-only PRs, should run the required Linux baseline:
 
 ## Wrapper Conventions
 
-Shell scripts under `scripts/ci/` are the source of truth. Make targets should
-be aliases for discoverability, not a second implementation of command policy.
+Repository-owned wrappers under `scripts/ci/` are the supported tier
+entrypoints. Make targets should be aliases for discoverability, not a second
+implementation of command policy. A wrapper may delegate shared policy to one
+repository-owned Go driver when production tooling also needs the same
+shell-free contract.
 
 Wrapper rules:
 
@@ -167,8 +170,15 @@ easy to identify and rerun. It includes:
   downloads, a five-minute timeout, and the `gms_pure_go` build tag.
 - A second non-CGO Windows cross-lint pass when the native target does not
   already cover that build tuple.
+- A third non-CGO darwin (arm64) cross-lint pass under the same rule. Both
+  cross-lints are compile-only passes on the Linux runner; they add no macOS or
+  Windows runner and do not change the platform column above.
 
-Both passes are SCOPED BY LANE. On a PR the wrapper takes
+All three lint passes and their target selection are owned by the
+checkout-local `scripts/pr-lint` Go driver. The Bash wrapper retains formatting,
+direct invocation, and aggregate timing without duplicating that policy.
+
+All three passes are SCOPED BY LANE. On a PR the wrapper takes
 `BD_LINT_NEW_FROM_MERGE_BASE` and reports only the findings that PR introduces,
 matching the `only-new-issues` setting on the sibling `lint` job; on a push to
 `main`, and for anyone running `make ci-pr-lint` by hand, it is unset and the
@@ -764,7 +774,7 @@ artifacts, so `postinstall` URLs are populated before the package is published.
    where practical so branch-protection migration can be handled separately.
 10. Add stable aggregate required-check candidates after the split.
     Initial aggregate jobs exist on branch `ci/bd-am3.1-wrapper-commands` as
-    `PR / CI Gate / Required` and `PR Risk / CI Gate / Required`, backed by
+    `PR / CI Gate / Required` and `PR Risk / PR Risk Gate / Required`, backed by
     `.github/scripts/ci-gate.sh`.
 
 ## Deferred Decisions

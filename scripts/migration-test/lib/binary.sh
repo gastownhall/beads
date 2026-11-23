@@ -126,9 +126,28 @@ verify_release_binary_version() (
     fi
 )
 
+# HISTORICAL_RELEASE_DIR (set by the Bazel targets in tests/migration) holds
+# the pinned release binaries as <dir>/<version>, each already verified
+# against the release catalog's sha256 when Bazel fetched it, so nothing is
+# downloaded. A version the directory lacks is an error, never a download.
+prepinned_release_binary() {
+    local version="$1" binary
+    binary="$HISTORICAL_RELEASE_DIR/$version"
+    if [ ! -f "$binary" ]; then
+        echo "ERROR: HISTORICAL_RELEASE_DIR has no pinned $version binary (declare it in the target's releases)" >&2
+        return 1
+    fi
+    verify_release_binary_version "$version" "$binary" || return 1
+    resolve_existing_path "$binary"
+}
+
 download_verified_release_binary() {
     local version="$1"
     local asset expected release_dir archive binary
+    if [ -n "${HISTORICAL_RELEASE_DIR:-}" ]; then
+        prepinned_release_binary "$version"
+        return
+    fi
     asset=$(strict_release_asset "$version" "$OS" "$ARCH") || {
         echo "ERROR: no strict release manifest for $version ($OS/$ARCH)" >&2
         return 1
@@ -180,6 +199,13 @@ download_verified_release_binary() {
 # v0.9.1 has no release asset. Its historical CLI reports 0.9.0 (dev), so
 # qualification is the module checksum and VCS origin, never self-reporting.
 build_verified_v091_source_binary() (
+    # SOURCE_TAG_SQLITE_BIN (set by //tests/migration's v0.9.1 target) is
+    # this same build, done offline by Bazel from the sha256-pinned module
+    # files with the same toolchain (//tests/migration:bd_source_tag).
+    if [ -n "${SOURCE_TAG_SQLITE_BIN:-}" ]; then
+        resolve_existing_path "$SOURCE_TAG_SQLITE_BIN"
+        return
+    fi
     local scratch module_json source_dir build_dir binary temporary toolchain_root toolchain_go toolchain
     scratch=$(mktemp -d) || return 1
     # Canonicalize immediately: macOS's default TMPDIR (/var/folders/...) is

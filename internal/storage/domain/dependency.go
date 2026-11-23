@@ -131,6 +131,19 @@ type DepTreeOpts struct {
 
 type BulkAddDepsOpts struct {
 	SkipPerEdgeCycleCheck bool
+	// SuppressEvents writes each edge without its dependency_added events-table
+	// row (the journal entry is still written). Storage.Transaction's
+	// AddDependency is quiet by default on every store, so the uow-backed
+	// Storage adapter (internal/storage/uowstore) sets it unless the caller
+	// asked for an event.
+	SuppressEvents bool
+}
+
+// RemoveDepBySourceOpts tunes RemoveDependencyBySourceWithOptions.
+type RemoveDepBySourceOpts struct {
+	// SuppressEvent removes the edge without its dependency_removed
+	// events-table row, as BulkAddDepsOpts.SuppressEvents does for an add.
+	SuppressEvent bool
 }
 
 type BulkAddDepsResult struct {
@@ -151,6 +164,10 @@ type DependencySQLRepository interface {
 	GetBlockingInfo(ctx context.Context, issueIDs []string, opts DepListOpts) (BlockingInfo, error)
 	GetBlockingInfoAcrossIssuesAndWisps(ctx context.Context, issueIDs []string) (BlockingInfo, error)
 	IsBlocked(ctx context.Context, issueID string, opts DepListOpts) (bool, []string, error)
+	// IsBlockedBatch reads the stored transitive is_blocked flag for ids across
+	// both planes (issues win a cross-table collision); an id naming no row is
+	// absent from the map.
+	IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error)
 
 	// DeleteAllForIDs takes actor for the same reason Delete above does: the
 	// edges it drops are journaled as dep_remove rows, and a cascade removal
@@ -161,8 +178,9 @@ type DependencySQLRepository interface {
 	// DetectCycleReport answers the same walk in the shape issueops.CycleDetector
 	// publishes: canonically ordered, and carrying every member of a cycle
 	// whether or not this database can describe it. DetectCycles above is the
-	// lossy legacy shape.
-	DetectCycleReport(ctx context.Context) (issueops.CycleReport, error)
+	// lossy legacy shape. req.IncludeTracks widens the walk; see
+	// issueops.DetectCyclesRequest.
+	DetectCycleReport(ctx context.Context, req issueops.DetectCyclesRequest) (issueops.CycleReport, error)
 
 	GetTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error)
 	// WalkDependencyTree answers the tree walk in the shape issueops.TreeWalker
@@ -194,6 +212,9 @@ type DependencyUseCase interface {
 	// cannot put an edge anywhere, so reading the plane is always safer than
 	// pinning it.
 	RemoveDependencyBySource(ctx context.Context, sourceID, dependsOnID, actor string) (bool, error)
+	// RemoveDependencyBySourceWithOptions is RemoveDependencyBySource with
+	// control over the dependency_removed event.
+	RemoveDependencyBySourceWithOptions(ctx context.Context, sourceID, dependsOnID, actor string, opts RemoveDepBySourceOpts) (bool, error)
 	Reparent(ctx context.Context, childID, newParentID, actor string) error
 	ListByIssueIDs(ctx context.Context, issueIDs []string, filter DepListFilter) (DepBulkResult, error)
 	ListWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) ([]*types.IssueWithDependencyMetadata, error)
@@ -202,11 +223,14 @@ type DependencyUseCase interface {
 	CountsByIssueIDs(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error)
 	GetBlockingInfo(ctx context.Context, issueIDs []string) (BlockingInfo, error)
 	IsBlocked(ctx context.Context, issueID string) (bool, []string, error)
+	// IsBlockedBatch is the repository read of the same name: the stored
+	// transitive is_blocked flag per id, both planes, absent = no row.
+	IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error)
 	GetForIssueIDs(ctx context.Context, ids []string) (map[string][]*types.Dependency, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
 	// DetectCycleReport is the shape issueops.CycleDetector publishes; see the
 	// repository method of the same name.
-	DetectCycleReport(ctx context.Context) (issueops.CycleReport, error)
+	DetectCycleReport(ctx context.Context, req issueops.DetectCyclesRequest) (issueops.CycleReport, error)
 
 	GetDependencyTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error)
 	// WalkDependencyTree is the shape issueops.TreeWalker publishes; see the
@@ -349,6 +373,12 @@ func (u *dependencyUseCaseImpl) RemoveWispDependency(ctx context.Context, wispID
 // the verdict, the way the store-backed body reads it off RemoveDependencyInTx
 // rather than from a separate lookup.
 func (u *dependencyUseCaseImpl) RemoveDependencyBySource(ctx context.Context, sourceID, dependsOnID, actor string) (bool, error) {
+	return u.RemoveDependencyBySourceWithOptions(ctx, sourceID, dependsOnID, actor, RemoveDepBySourceOpts{})
+}
+
+// RemoveDependencyBySourceWithOptions is RemoveDependencyBySource with control
+// over the dependency_removed event.
+func (u *dependencyUseCaseImpl) RemoveDependencyBySourceWithOptions(ctx context.Context, sourceID, dependsOnID, actor string, opts RemoveDepBySourceOpts) (bool, error) {
 	if sourceID == "" || dependsOnID == "" {
 		return false, fmt.Errorf("remove dep: sourceID and dependsOnID must not be empty")
 	}
@@ -357,7 +387,7 @@ func (u *dependencyUseCaseImpl) RemoveDependencyBySource(ctx context.Context, so
 		return false, fmt.Errorf("remove dep: classify source: %w", err)
 	}
 	_, sourceIsWisp := wispSources[sourceID]
-	res, err := u.depRepo.Delete(ctx, sourceID, dependsOnID, actor, DepInsertOpts{UseWispsTable: sourceIsWisp, EmitEvent: true})
+	res, err := u.depRepo.Delete(ctx, sourceID, dependsOnID, actor, DepInsertOpts{UseWispsTable: sourceIsWisp, EmitEvent: !opts.SuppressEvent})
 	if err != nil {
 		return false, fmt.Errorf("remove dep %s -> %s: %w", sourceID, dependsOnID, err)
 	}
@@ -616,6 +646,17 @@ func (u *dependencyUseCaseImpl) GetBlockingInfo(ctx context.Context, issueIDs []
 	return out, nil
 }
 
+func (u *dependencyUseCaseImpl) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
+	if len(ids) == 0 {
+		return map[string]bool{}, nil
+	}
+	out, err := u.depRepo.IsBlockedBatch(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("IsBlockedBatch: %w", err)
+	}
+	return out, nil
+}
+
 func (u *dependencyUseCaseImpl) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
 	return u.isBlocked(ctx, issueID, false)
 }
@@ -643,8 +684,8 @@ func (u *dependencyUseCaseImpl) DetectCycles(ctx context.Context) ([][]*types.Is
 	return out, nil
 }
 
-func (u *dependencyUseCaseImpl) DetectCycleReport(ctx context.Context) (issueops.CycleReport, error) {
-	out, err := u.depRepo.DetectCycleReport(ctx)
+func (u *dependencyUseCaseImpl) DetectCycleReport(ctx context.Context, req issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
+	out, err := u.depRepo.DetectCycleReport(ctx, req)
 	if err != nil {
 		return issueops.CycleReport{}, fmt.Errorf("DetectCycleReport: %w", err)
 	}
@@ -748,13 +789,14 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 			// dependency_added event for each genuine new edge — unlike
 			// create-with-deps, which calls depRepo.Insert directly without
 			// EmitEvent. UseWispsTable routes both the edge and that event to
-			// the source's own pair of tables.
+			// the source's own pair of tables. SuppressEvents opts out, for
+			// callers whose contract is a quiet edge write.
 			_, sourceIsWisp := wispSources[dep.IssueID]
 			if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{
 				UseWispsTable:      sourceIsWisp,
 				HierarchyValidated: true,
 				CycleValidated:     true,
-				EmitEvent:          true,
+				EmitEvent:          !opts.SuppressEvents,
 			}); err != nil {
 				var hierarchyConflict *DependencyHierarchyConflictError
 				if errors.As(err, &hierarchyConflict) {

@@ -59,7 +59,10 @@ func EntryKey(entry string) string {
 // repository the caller is standing in, which is the same loss of working-
 // directory authority. Removing it therefore widens the upward search as well,
 // so a caller whose working directory is not itself a repository can resolve a
-// containing one.
+// containing one. That is the intended trade, and pinning an explicit working
+// directory does not opt out of it: -C or cmd.Dir fixes where the search
+// starts, not where it stops, so once the ceiling is gone the walk above that
+// directory is unbounded.
 func IsRoutingKeyForOS(key, goos string) bool {
 	keys := routingKeys
 	prefix := "GIT_CONFIG"

@@ -52,6 +52,18 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("ConditionalGuardsGateOrdinaryEdits", func(t *testing.T) {
 		conformance.RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits(t, ctx, fixture)
 	})
+	t.Run("ExpectedVersionSingleWinnerUnderConcurrency", func(t *testing.T) {
+		conformance.RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency(t, ctx, fixture)
+	})
+	t.Run("ExpectedVersionSingleWinnerWithDisjointColumnsUnderConcurrency", func(t *testing.T) {
+		conformance.RunLifecycleUpdateExpectedVersionSingleWinnerWithDisjointColumnsUnderConcurrency(t, ctx, fixture)
+	})
+	t.Run("CloseExpectedVersionSingleWinnerUnderConcurrency", func(t *testing.T) {
+		conformance.RunLifecycleCloseExpectedVersionSingleWinnerUnderConcurrency(t, ctx, fixture)
+	})
+	t.Run("ExpectedVersionSingleWinnerAcrossUpdateAndCloseUnderConcurrency", func(t *testing.T) {
+		conformance.RunLifecycleUpdateExpectedVersionSingleWinnerAcrossUpdateAndCloseUnderConcurrency(t, ctx, fixture)
+	})
 	t.Run("ConditionalGuardAcceptsRespelledAssignee", func(t *testing.T) {
 		conformance.RunLifecycleUpdateConditionalGuardAcceptsRespelledAssignee(t, ctx, fixture)
 	})
@@ -60,6 +72,21 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	})
 	t.Run("ClosePolicy", func(t *testing.T) {
 		conformance.RunLifecycleUpdateClosePolicy(t, ctx, fixture)
+	})
+	t.Run("ClaimRefusesALiveBlocker", func(t *testing.T) {
+		conformance.RunLifecycleUpdateClaimRefusesALiveBlocker(t, ctx, fixture)
+	})
+	t.Run("ForceClaimBlockedClaimsPastALiveBlocker", func(t *testing.T) {
+		conformance.RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker(t, ctx, fixture)
+	})
+	t.Run("ReclaimByTheHolderIgnoresANewBlocker", func(t *testing.T) {
+		conformance.RunLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker(t, ctx, fixture)
+	})
+	t.Run("ClaimIgnoresAnInheritedBlockedFlag", func(t *testing.T) {
+		conformance.RunLifecycleUpdateClaimIgnoresAnInheritedBlockedFlag(t, ctx, fixture)
+	})
+	t.Run("ForceClaimBlockedRequiresAClaim", func(t *testing.T) {
+		conformance.RunLifecycleUpdateForceClaimBlockedRequiresAClaim(t, ctx, fixture)
 	})
 	t.Run("AssigneeTransferFence", func(t *testing.T) {
 		conformance.RunLifecycleUpdateAssigneeTransferFence(t, ctx, fixture)
@@ -76,8 +103,26 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("PersistentPreservesUnversionedClass", func(t *testing.T) {
 		conformance.RunLifecycleUpdatePersistentPreservesUnversionedClass(t, ctx, fixture)
 	})
+	t.Run("WispModesRefuseAnUnversionedRow", func(t *testing.T) {
+		conformance.RunLifecycleUpdateWispModesRefuseAnUnversionedRow(t, ctx, fixture)
+	})
+	t.Run("PersistentPromotesAWisp", func(t *testing.T) {
+		conformance.RunLifecycleUpdatePersistentPromotesAWisp(t, ctx, fixture)
+	})
 	t.Run("ProvenanceLabelsHistory", func(t *testing.T) {
 		conformance.RunLifecycleUpdateProvenanceLabelsHistory(t, ctx, fixture)
+	})
+	t.Run("RefusesATemplate", func(t *testing.T) {
+		conformance.RunLifecycleUpdateRefusesATemplate(t, ctx, fixture)
+	})
+	t.Run("AllowTemplateEditsATemplate", func(t *testing.T) {
+		conformance.RunLifecycleUpdateAllowTemplateEditsATemplate(t, ctx, fixture)
+	})
+	t.Run("PatchesTheGateMembers", func(t *testing.T) {
+		conformance.RunLifecycleUpdatePatchesTheGateMembers(t, ctx, fixture)
+	})
+	t.Run("BoundsTheGateMembers", func(t *testing.T) {
+		conformance.RunLifecycleUpdateBoundsTheGateMembers(t, ctx, fixture)
 	})
 }
 
@@ -99,6 +144,7 @@ func newEmbeddedLifecycleUpdateFixture(t *testing.T, te *testEnv, prefix string)
 		AddDependency:        kit.AddDependency,
 		SetConfig:            kit.SetConfig,
 		CountHistoryMatching: kit.CountHistoryMatching,
+		StoredIsBlocked:      conformance.StoredIsBlockedThrough(kit.QueryScalar),
 		// The frozen kit reads through QueryScalar. This block reads its
 		// post-state through the store's own reads instead, so no case in it
 		// depends on raw SQL.

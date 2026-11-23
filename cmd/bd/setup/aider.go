@@ -77,7 +77,7 @@ For detailed docs: see AGENTS.md, QUICKSTART.md, or run ` + "`bd --help`" + `
 
 const aiderReadmeTemplate = `# Aider + Beads Integration
 
-This project uses [Beads (bd)](https://github.com/steveyegge/beads) for issue tracking.
+This project uses [Beads (bd)](https://github.com/gastownhall/beads) for issue tracking.
 
 ## How This Works with Aider
 
@@ -204,6 +204,7 @@ func RemoveAider() error {
 	fmt.Println("Removing Aider integration...")
 
 	removed := false
+	removedFromDir := false // took one of bd's files out of .aider
 
 	if err := os.Remove(configPath); err != nil {
 		if !os.IsNotExist(err) {
@@ -218,7 +219,7 @@ func RemoveAider() error {
 			return HandleError("failed to remove instructions: %v", err)
 		}
 	} else {
-		removed = true
+		removed, removedFromDir = true, true
 	}
 
 	if err := os.Remove(readmePath); err != nil {
@@ -226,10 +227,14 @@ func RemoveAider() error {
 			return HandleError("failed to remove README: %v", err)
 		}
 	} else {
-		removed = true
+		removed, removedFromDir = true, true
 	}
 
-	_ = os.Remove(aiderDir)
+	// Only a .aider this run took a file out of, and only if that left it
+	// empty; never a symlinked one (RemoveEmptyDir).
+	if removedFromDir {
+		_ = RemoveEmptyDir(aiderDir)
+	}
 
 	if !removed {
 		fmt.Println("No Aider integration files found")

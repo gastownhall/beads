@@ -397,6 +397,44 @@ func TestPrimeClaimGuidanceUsesAtomicClaim(t *testing.T) {
 	}
 }
 
+// TestPrimeMemoryGuidanceDoesNotProhibitHarnessMemory guards GH#6111: both
+// renderings used to emit "Do NOT use MEMORY.md files", which contradicts
+// harnesses that ship a first-party memory whose index file has exactly that
+// name. The guidance now names the store each content class belongs in, so
+// neither rendering may name the file again. The assertion is negative on the
+// old prohibition rather than positive on the new prose, so it survives any
+// future rewording; the bd remember check keeps it from passing vacuously if
+// the memory bullet is dropped altogether.
+func TestPrimeMemoryGuidanceDoesNotProhibitHarnessMemory(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
+	defer stubIsEphemeralBranch(false)()
+	defer stubPrimeHasGitRemote(true)()
+	defer stubPrimeAgentProfile(config.ProfileConservative)()
+
+	for _, tc := range []struct {
+		name    string
+		mcpMode bool
+	}{
+		{name: "CLI", mcpMode: false},
+		{name: "MCP", mcpMode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := outputPrimeContext(&buf, tc.mcpMode, false); err != nil {
+				t.Fatalf("outputPrimeContext failed: %v", err)
+			}
+
+			output := buf.String()
+			if !strings.Contains(output, "bd remember") {
+				t.Fatalf("prime output should still teach bd remember; output:\n%s", output)
+			}
+			if strings.Contains(output, "MEMORY.md") {
+				t.Errorf("prime output should not name MEMORY.md; output:\n%s", output)
+			}
+		})
+	}
+}
+
 func TestPrimeStartsWithTruncationDirective(t *testing.T) {
 	defer stubPrimeStoreUnavailable()()
 	defer stubIsEphemeralBranch(false)()
@@ -452,6 +490,38 @@ func TestFormatMemoriesForPrimeTimesOutOpeningStore(t *testing.T) {
 	}
 	if !strings.Contains(out, "stale storage lock") {
 		t.Fatalf("expected stale-lock guidance in prime memory output, got %q", out)
+	}
+}
+
+// TestFormatMemoriesForPrimeTimesOutOpeningRegisteredBackend is the unstubbed
+// twin of TestFormatMemoriesForPrimeTimesOutOpeningStore, which replaces
+// ensureStoreActiveForPrime and so cannot see how the real open frames its
+// error. Here the real open dials a registered remote backend that outlives
+// BEADS_PRIME_TIMEOUT, and the timeout banner must still win over the generic
+// "storage unavailable" one.
+func TestFormatMemoriesForPrimeTimesOutOpeningRegisteredBackend(t *testing.T) {
+	const backend = "contract-prime-open-timeout"
+	registerContractBlockingBackend(t, backend, true)
+	t.Setenv("BEADS_DIR", writeContractBackendConfig(t, backend))
+	t.Setenv(primeStoreTimeoutEnv, "50ms")
+	oldStore := store
+	oldStoreActive := storeActive
+	oldEnsure := ensureStoreActiveForPrime
+	oldProxied := proxiedServerMode
+	store = nil
+	storeActive = false
+	ensureStoreActiveForPrime = ensureStoreActiveWithContext
+	proxiedServerMode = false
+	t.Cleanup(func() {
+		store = oldStore
+		storeActive = oldStoreActive
+		ensureStoreActiveForPrime = oldEnsure
+		proxiedServerMode = oldProxied
+	})
+
+	out := formatMemoriesForPrime(false)
+	if !strings.Contains(out, "timed out after 50ms") {
+		t.Fatalf("expected the store-open timeout banner in prime memory output, got %q", out)
 	}
 }
 
@@ -810,5 +880,126 @@ func TestPrime_RawMarkdown_NotJSON_WithoutFlag(t *testing.T) {
 	var envelope map[string]interface{}
 	if err := json.Unmarshal([]byte(output), &envelope); err == nil {
 		t.Fatal("prime output without --hook-json should not be valid JSON (regression guard)")
+	}
+}
+
+// GH#6095: bd prime --help must document all three PRIME.md resolution
+// tiers (current-directory, resolved workspace .beads, global config) in
+// their actual lookup order, not just the first tier.
+func TestPrimeHelpMentionsAllFallbackTiers(t *testing.T) {
+	// Each needle carries its (N) label so that swapping only the labels,
+	// not the descriptions, is caught by the presence check below: the swap
+	// drives every strings.Index to -1, which the ordering loop explicitly
+	// skips.
+	needles := []string{
+		"(1) .beads/PRIME.md relative to the current directory",
+		"(2) PRIME.md in the .beads directory bd resolves for this workspace",
+		"(3) the global PRIME.md in bd's user config dir",
+	}
+	positions := make([]int, len(needles))
+	for i, needle := range needles {
+		pos := strings.Index(primeCmd.Long, needle)
+		if pos == -1 {
+			t.Errorf("prime help missing %q", needle)
+		}
+		positions[i] = pos
+	}
+	for i := 1; i < len(positions); i++ {
+		if positions[i-1] == -1 || positions[i] == -1 {
+			continue
+		}
+		if positions[i] <= positions[i-1] {
+			t.Errorf("prime help documents fallback tiers out of order: %q at %d should come before %q at %d", needles[i-1], positions[i-1], needles[i], positions[i])
+		}
+	}
+
+	// Tier (3) resolves via config.UserConfigDir(), whose location differs
+	// per platform. The help text is static, so it must spell out every OS's
+	// path rather than pinning one platform's spelling as if it were
+	// universal. macOS follows the Linux rule, so ~/Library/Application
+	// Support must not appear (GH#8113).
+	for _, configDirPath := range []string{
+		"~/.config/beads/ on Linux and macOS",
+		`%AppData%\beads\`,
+	} {
+		if !strings.Contains(primeCmd.Long, configDirPath) {
+			t.Errorf("prime help tier (3) missing user config dir path %q", configDirPath)
+		}
+	}
+	if strings.Contains(primeCmd.Long, "Application Support") {
+		t.Errorf("prime help still mentions Application Support; bd no longer reads it (GH#8113)")
+	}
+}
+
+// TestResolveGlobalPrimePathUsesBdUserConfigDir proves production prime
+// resolves the global PRIME.md under config.UserConfigDir, not
+// os.UserConfigDir: the seam directory is one os.UserConfigDir never returns.
+func TestResolveGlobalPrimePathUsesBdUserConfigDir(t *testing.T) {
+	seamDir := filepath.Join(t.TempDir(), "bd-user-config")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "xdg-elsewhere"))
+	t.Setenv("APPDATA", filepath.Join(t.TempDir(), "appdata-elsewhere"))
+
+	t.Run("found", func(t *testing.T) {
+		t.Cleanup(config.SetUserConfigDirForTest(func() (string, error) { return seamDir, nil }))
+		want := filepath.Join(seamDir, "beads", "PRIME.md")
+		if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(want, []byte("# seam PRIME\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(seamDir, "beads")) })
+		if got := resolveGlobalPrimePath(""); got != want {
+			t.Fatalf("resolveGlobalPrimePath = %q, want %q", got, want)
+		}
+	})
+	t.Run("absent", func(t *testing.T) {
+		t.Cleanup(config.SetUserConfigDirForTest(func() (string, error) { return seamDir, nil }))
+		if got := resolveGlobalPrimePath(""); got != "" {
+			t.Fatalf("resolveGlobalPrimePath = %q, want empty", got)
+		}
+	})
+	t.Run("resolver error", func(t *testing.T) {
+		t.Cleanup(config.SetUserConfigDirForTest(func() (string, error) {
+			return "", errors.New("no user config dir")
+		}))
+		if got := resolveGlobalPrimePath(""); got != "" {
+			t.Fatalf("resolveGlobalPrimePath = %q, want empty on resolver error", got)
+		}
+	})
+}
+
+// TestReadCustomPrimeContentUsesBdUserConfigDir drives the full tier walk with
+// no local or redirected PRIME.md, so only tier (3) can answer, and plants the
+// global file under a seam directory distinct from XDG_CONFIG_HOME/APPDATA.
+func TestReadCustomPrimeContentUsesBdUserConfigDir(t *testing.T) {
+	workspace := t.TempDir()
+	seamDir := filepath.Join(t.TempDir(), "bd-user-config")
+	xdg := filepath.Join(t.TempDir(), "xdg-elsewhere")
+	appdata := filepath.Join(t.TempDir(), "appdata-elsewhere")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("APPDATA", appdata)
+	for _, decoy := range []string{xdg, appdata} {
+		path := filepath.Join(decoy, "beads", "PRIME.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("# stdlib decoy\n"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	t.Cleanup(config.SetUserConfigDirForTest(func() (string, error) { return seamDir, nil }))
+	want := "# seam PRIME\n"
+	path := filepath.Join(seamDir, "beads", "PRIME.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(want), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, ok := readCustomPrimeContent(workspace, filepath.Join(workspace, ".beads"))
+	if !ok || got != want {
+		t.Fatalf("readCustomPrimeContent = %q, %v; want the seam PRIME %q", got, ok, want)
 	}
 }

@@ -42,8 +42,9 @@ func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
 }
 
 // buildReadyWorkPredicates computes the ID sets the ready-work WHERE clause
-// needs (children of deferred parents, parent descendants), then delegates
-// the clause text to sqlbuild so both stacks share ready semantics.
+// needs (children of deferred parents, parent descendants, the family's
+// stale-flagged rows), then delegates the clause text to sqlbuild so both
+// stacks share ready semantics.
 func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFilter, tables FilterTables) (*readyWorkPredicates, error) {
 	var inputs sqlbuild.ReadyWorkWhereInputs
 	if !filter.IncludeDeferred {
@@ -64,6 +65,11 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 		}
 		inputs.ParentDescendantIDs = descendantIDs
 	}
+	staleIDs, err := queryIDs(ctx, tx, sqlbuild.StaleBlockedIDsSQL(tables))
+	if err != nil {
+		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
+	}
+	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
 	return buildReadyWorkPredicatesFrom(filter, tables, inputs)
 }
 
@@ -182,6 +188,10 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 	if empty {
 		return nil, nil
 	}
+	stale, err := staleBlockedWispSetInTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
 
 	wispFilter := readyWorkWispIssueFilter(filter)
 	if filter.Limit <= 0 {
@@ -193,7 +203,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 			}
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
-		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs)
+		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs, stale)
 	}
 
 	pageSize := readyWorkPageSize(filter.Limit)
@@ -215,7 +225,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 		if err != nil {
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
-		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs)
+		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs, stale)
 		if err != nil {
 			return nil, err
 		}
@@ -230,6 +240,21 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 		}
 	}
 	return ready, nil
+}
+
+// staleBlockedWispSetInTx reads the wisp family's stale-flagged rows
+// (sqlbuild.StaleBlockedIDsSQL). A database without wisp_dependencies has none
+// to read around, so the flag decides there as it always did.
+func staleBlockedWispSetInTx(ctx context.Context, tx DBTX) (map[string]bool, error) {
+	ids, err := queryIDs(ctx, tx, sqlbuild.StaleBlockedIDsSQL(WispsFilterTables))
+	if err != nil && !missingOptionalWispTable(err) {
+		return nil, fmt.Errorf("search wisps (ready work): stale blocked flags: %w", err)
+	}
+	stale := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		stale[id] = true
+	}
+	return stale, nil
 }
 
 func queryReadyWispIssueIDPage(ctx context.Context, tx DBTX, filter types.IssueFilter, excludeDeferred bool, orderBy sqlbuild.ReadyWorkOrder, limit, offset int) ([]string, error) {
@@ -360,7 +385,9 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 	return wispFilter
 }
 
-func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs []string) ([]*types.Issue, error) {
+// filterReadyWispsInTx applies the ready predicates the wisp page query does
+// not. stale is the wisp family's stale-flagged rows (excludeBlockedWispsInTx).
+func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs []string, stale map[string]bool) ([]*types.Issue, error) {
 	if len(wisps) == 0 {
 		return wisps, nil
 	}
@@ -410,31 +437,8 @@ func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter,
 		}
 	}
 
-	for start := 0; start < len(wispIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(wispIDs) {
-			end = len(wispIDs)
-		}
-		placeholders, args := buildSQLInClause(wispIDs[start:end])
-		//nolint:gosec // G201: only IN-clause placeholders are formatted in.
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-			SELECT id FROM wisps WHERE id IN (%s) AND is_blocked = 1
-		`, placeholders), args...)
-		if err != nil {
-			return nil, fmt.Errorf("get ready work: filter blocked wisps: %w", err)
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("scan blocked wisp: %w", err)
-			}
-			excluded[id] = struct{}{}
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("blocked wisp rows: %w", err)
-		}
+	if err := excludeBlockedWispsInTx(ctx, tx, wispIDs, stale, excluded); err != nil {
+		return nil, err
 	}
 
 	ready := wisps[:0]
@@ -448,6 +452,42 @@ func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter,
 		ready = append(ready, wisp)
 	}
 	return ready, nil
+}
+
+// excludeBlockedWispsInTx adds to excluded the ids among wispIDs whose
+// is_blocked flag hides them from ready work: set, and not in stale, the wisp
+// family's sqlbuild.StaleBlockedIDsSQL set, which the ready WHERE reads around
+// on every other ready path (GH#3268).
+func excludeBlockedWispsInTx(ctx context.Context, tx DBTX, wispIDs []string, stale map[string]bool, excluded map[string]struct{}) error {
+	for start := 0; start < len(wispIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(wispIDs) {
+			end = len(wispIDs)
+		}
+		placeholders, args := buildSQLInClause(wispIDs[start:end])
+		//nolint:gosec // G201: only IN-clause placeholders are formatted in.
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT id FROM wisps WHERE id IN (%s) AND is_blocked = 1
+		`, placeholders), args...)
+		if err != nil {
+			return fmt.Errorf("get ready work: filter blocked wisps: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan blocked wisp: %w", err)
+			}
+			if !stale[id] {
+				excluded[id] = struct{}{}
+			}
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("blocked wisp rows: %w", err)
+		}
+	}
+	return nil
 }
 
 func sortReadyIssues(issues []*types.Issue, policy types.SortPolicy) {
@@ -519,8 +559,8 @@ var (
 	deferredChildIssueTables = []string{"issues", "wisps"}
 )
 
-// deferredChildrenQuery selects the children, recorded in depTable, of parents
-// in issueTable whose defer_until is still in the future.
+// deferredChildrenQuery selects the children, recorded in depTable, of
+// deferred parents in issueTable (sqlbuild.DeferredParentPredicate).
 func deferredChildrenQuery(depTable, issueTable string) string {
 	targetCol := "depends_on_issue_id"
 	if issueTable == "wisps" {
@@ -531,9 +571,8 @@ func deferredChildrenQuery(depTable, issueTable string) string {
 				FROM %s dep
 				JOIN %s parent ON parent.id = dep.%s
 				WHERE dep.type = 'parent-child'
-				  AND parent.defer_until IS NOT NULL
-				  AND parent.defer_until > UTC_TIMESTAMP()
-			`, depTable, issueTable, targetCol)
+				  AND %s
+			`, depTable, issueTable, targetCol, sqlbuild.DeferredParentPredicate("parent"))
 }
 
 // getDeferredChildrenAllTablesInTx is getChildrenOfDeferredParentsInTx's
@@ -568,24 +607,23 @@ func getDeferredChildrenAllTablesInTx(ctx context.Context, tx DBTX) ([]string, e
 	return childIDs, nil
 }
 
-// getChildrenOfDeferredParentsInTx returns IDs of issues whose parent has a
-// future defer_until. Works within an existing transaction.
+// getChildrenOfDeferredParentsInTx returns IDs of issues whose parent is
+// deferred (sqlbuild.DeferredParentPredicate). Works within an existing
+// transaction.
 //
 //nolint:gosec // G201: depTable is selected from a hardcoded list below.
 func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, error) {
 	hasDeferredParent := false
 	for _, issueTable := range []string{"issues", "wisps"} {
-		//nolint:gosec // G201: issueTable is hardcoded to "issues" or "wisps"
-		var exists int
-		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT 1 FROM %s
-			WHERE defer_until IS NOT NULL
-			  AND defer_until > UTC_TIMESTAMP()
-			LIMIT 1
-		`, issueTable)).Scan(&exists)
+		// issueTable is hardcoded to "issues" or "wisps".
+		var found bool
+		err := tx.QueryRowContext(ctx, "SELECT "+sqlbuild.AnyDeferredParentSQL(issueTable)).Scan(&found)
 		if err == nil {
-			hasDeferredParent = true
-			break
+			if found {
+				hasDeferredParent = true
+				break
+			}
+			continue
 		}
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
@@ -593,7 +631,7 @@ func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, e
 		if issueTable == "wisps" && isTableNotExistError(err) {
 			continue
 		}
-		return nil, fmt.Errorf("deferred parents: check future-deferred parents from %s: %w", issueTable, err)
+		return nil, fmt.Errorf("deferred parents: check deferred parents from %s: %w", issueTable, err)
 	}
 	if !hasDeferredParent {
 		return nil, nil

@@ -1,0 +1,22 @@
+[
+  {
+    "created_at": "<TS>",
+    "created_by": "protocol-test",
+    "defer_until": "<TS>",
+    "description": "deterministic corpus-deferred",
+    "id": "corpus-deferred",
+    "issue_type": "task",
+    "labels": [
+      "corpus-native"
+    ],
+    "metadata": {
+      "corpus": "native"
+    },
+    "notes": "corpus-deferred notes\ncorpus defer reason",
+    "owner": "test@protocol.test",
+    "priority": 3,
+    "status": "deferred",
+    "title": "Corpus deferred subject",
+    "updated_at": "<TS>"
+  }
+]

@@ -1,11 +1,15 @@
 package doctor
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -270,7 +274,10 @@ func TestFixGitignore_DoesNotLoosenPermissions(t *testing.T) {
 		t.Errorf("File has too-permissive permissions after fix: %o", afterPerms)
 	}
 
-	// Document that we replace with 0600 (which is more permissive than 0400 but still secure)
+	// Document that we replace with 0600 (which is more permissive than 0400 but still secure).
+	// "old content" is pattern-incomplete, so this is the append path: the
+	// write needs owner-write. A pattern-complete 0400 file is left alone
+	// (TestEnsureGitignoreForBeadsDir_LeavesStricterCompleteFileAlone).
 	if afterPerms != 0600 {
 		t.Errorf("Expected 0600 permissions, got %o", afterPerms)
 	}
@@ -408,6 +415,115 @@ func TestEnsureGitignoreForBeadsDir_AppendsMissingRuntimePatterns(t *testing.T) 
 	}
 	if missing := missingGitignorePatterns(contentStr); len(missing) > 0 {
 		t.Fatalf("expected .beads/.gitignore to be complete after ensure, missing: %s", strings.Join(missing, ", "))
+	}
+}
+
+// TestEnsureGitignoreForBeadsDir_TightensPermsWhenPatternComplete covers the
+// regression flagged (but not fixed) in PR #5285: a pattern-complete
+// .beads/.gitignore with loose permissions (0644) must still be tightened to
+// 0600. Before the fix, the early return for "no missing patterns" skipped
+// the chmod entirely.
+func TestEnsureGitignoreForBeadsDir_TightensPermsWhenPatternComplete(t *testing.T) {
+	// Skip on Windows as it doesn't support Unix-style file permissions
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile's mode is filtered by umask; force the loose mode explicitly
+	// so the scenario holds under restrictive umasks (e.g. 077).
+	if err := os.Chmod(gitignorePath, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir failed: %v", err)
+	}
+
+	info, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatalf("Failed to stat .gitignore: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("expected permissions 0600 for pattern-complete file, got %o", perm)
+	}
+
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("Failed to read .gitignore: %v", err)
+	}
+	if string(content) != GitignoreTemplate {
+		t.Errorf("content changed when only permissions should have been tightened.\nGot:\n%s", content)
+	}
+}
+
+// TestFixGitignore_IdempotentNoDuplication ensures calling the fix twice in a
+// row does not append duplicate pattern blocks: content must be byte-identical
+// between the first and second invocation.
+func TestFixGitignore_IdempotentNoDuplication(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(oldDir); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	initialContent := "# Local additions\ncustom-local/\n*.db\ndaemon.log\n"
+	gitignorePath := filepath.Join(".beads", ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(initialContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore (first call) failed: %v", err)
+	}
+	firstContent, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("Failed to read gitignore after first fix: %v", err)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore (second call) failed: %v", err)
+	}
+	secondContent, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("Failed to read gitignore after second fix: %v", err)
+	}
+
+	if !bytes.Equal(firstContent, secondContent) {
+		t.Errorf("content changed between first and second FixGitignore call (duplicate append?).\nFirst:\n%s\n\nSecond:\n%s", firstContent, secondContent)
+	}
+
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(gitignorePath)
+		if err != nil {
+			t.Fatalf("Failed to stat .gitignore: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Errorf("expected permissions 0600 after idempotent fix, got %o", perm)
+		}
 	}
 }
 
@@ -951,7 +1067,7 @@ func TestCheckGitignore_VariousStatuses(t *testing.T) {
 				// Don't create .beads directory
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd init (safe to re-run) or bd doctor --fix",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning when .beads directory doesn't exist",
 		},
 		{
@@ -963,7 +1079,7 @@ func TestCheckGitignore_VariousStatuses(t *testing.T) {
 				}
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd init (safe to re-run) or bd doctor --fix",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning when .gitignore doesn't exist",
 		},
 		{
@@ -999,7 +1115,7 @@ daemon.log
 				}
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd doctor --fix or bd init (safe to re-run)",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning when missing required patterns like dolt/ and redirect",
 		},
 		{
@@ -1018,7 +1134,7 @@ daemon.log
 				}
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd doctor --fix or bd init (safe to re-run)",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning when missing multiple patterns",
 		},
 		{
@@ -1034,7 +1150,7 @@ daemon.log
 				}
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd doctor --fix or bd init (safe to re-run)",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning for empty file",
 		},
 		{
@@ -1054,7 +1170,7 @@ daemon.log
 				}
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd doctor --fix or bd init (safe to re-run)",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning for comments-only file",
 		},
 		{
@@ -1329,7 +1445,7 @@ func TestCheckRedirectNotTracked_FileTracked(t *testing.T) {
 	}
 
 	// Stage (track) the redirect file
-	gitAdd := exec.Command("git", "add", redirectPath)
+	gitAdd := gitCommand("add", redirectPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
@@ -1388,13 +1504,13 @@ func TestFixRedirectTracking(t *testing.T) {
 	}
 
 	// Stage (track) the redirect file
-	gitAdd := exec.Command("git", "add", redirectPath)
+	gitAdd := gitCommand("add", redirectPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
 
 	// Verify it's tracked
-	lsFiles := exec.Command("git", "ls-files", redirectPath)
+	lsFiles := gitCommand("ls-files", redirectPath)
 	output, _ := lsFiles.Output()
 	if strings.TrimSpace(string(output)) == "" {
 		t.Fatal("redirect file should be tracked before fix")
@@ -1406,7 +1522,7 @@ func TestFixRedirectTracking(t *testing.T) {
 	}
 
 	// Verify it's no longer tracked
-	lsFiles = exec.Command("git", "ls-files", redirectPath)
+	lsFiles = gitCommand("ls-files", redirectPath)
 	output, _ = lsFiles.Output()
 	if strings.TrimSpace(string(output)) != "" {
 		t.Error("redirect file should be untracked after fix")
@@ -1555,6 +1671,36 @@ func TestGitignore_ContainsDoltServerConfig(t *testing.T) {
 	}
 }
 
+// TestGitignore_ContainsHTTPTarget verifies that the http backend's activation
+// sidecar is ignored like proxied_server_client_info.json, the per-user
+// sidecar it follows. It names the server the bearer ladder authorizes
+// against, so a committed copy would point every clone at that server. It
+// must be in requiredPatterns too, so bd doctor --fix heals an existing
+// .beads/.gitignore.
+func TestGitignore_ContainsHTTPTarget(t *testing.T) {
+	// Keep this in sync with httpclient.TargetFileName; cmd/bd/doctor does not
+	// import the client for a string constant.
+	const pattern = "http_target.json"
+
+	if !containsGitignorePattern(GitignoreTemplate, pattern) {
+		t.Errorf("GitignoreTemplate should contain %q", pattern)
+	}
+	if missing := missingGitignorePatterns(GitignoreTemplate); len(missing) != 0 {
+		t.Errorf("GitignoreTemplate is missing required patterns %v", missing)
+	}
+
+	found := false
+	for _, p := range requiredPatterns {
+		if p == pattern {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("requiredPatterns should include %q", pattern)
+	}
+}
+
 // TestCheckLastTouchedNotTracked_NoFile verifies that check passes when no last-touched file exists
 func TestCheckLastTouchedNotTracked_NoFile(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -1679,7 +1825,7 @@ func TestCheckLastTouchedNotTracked_FileTracked(t *testing.T) {
 	}
 
 	// Stage (track) the last-touched file
-	gitAdd := exec.Command("git", "add", lastTouchedPath)
+	gitAdd := gitCommand("add", lastTouchedPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
@@ -1738,7 +1884,7 @@ func TestFixLastTouchedTracking(t *testing.T) {
 	}
 
 	// Stage (track) the last-touched file
-	gitAdd := exec.Command("git", "add", lastTouchedPath)
+	gitAdd := gitCommand("add", lastTouchedPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
@@ -1921,6 +2067,36 @@ func TestEnsureProjectGitignore_CreatesFile(t *testing.T) {
 	}
 	if !strings.Contains(contentStr, ProjectGitignoreHeader) {
 		t.Error("Expected section comment in .gitignore")
+	}
+}
+
+func TestEnsureProjectGitignore_LeadingSeparatorOnlyAfterExistingContent(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing string
+		want     string
+	}{
+		{name: "fresh file", existing: "", want: ProjectGitignoreHeader + "\n"},
+		{name: "existing content", existing: "build/\n", want: "build/\n\n" + ProjectGitignoreHeader + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if tc.existing != "" {
+				if err := os.WriteFile(".gitignore", []byte(tc.existing), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := EnsureProjectGitignore("."); err != nil {
+				t.Fatalf("EnsureProjectGitignore() error = %v", err)
+			}
+			content, err := os.ReadFile(".gitignore")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(content); !strings.HasPrefix(got, tc.want) {
+				t.Errorf(".gitignore starts with %q, want prefix %q", got[:min(len(got), len(tc.want)+16)], tc.want)
+			}
+		})
 	}
 }
 
@@ -2345,7 +2521,7 @@ func setupBareParentWorktreeForGitignoreTest(t *testing.T) (string, string) {
 func runGitInDirForGitignoreTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2806,7 +2982,7 @@ func TestCheckNoVestigialSyncWorktrees_WithRedirectNoWorktree(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create a git repo so the git root detection works
-	cmd := exec.Command("git", "init", tmpDir)
+	cmd := gitCommand("init", tmpDir)
 	if err := cmd.Run(); err != nil {
 		t.Skipf("git init failed: %v", err)
 	}
@@ -2845,7 +3021,7 @@ func TestCheckNoVestigialSyncWorktrees_VestigialDetected(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create a git repo
-	cmd := exec.Command("git", "init", tmpDir)
+	cmd := gitCommand("init", tmpDir)
 	if err := cmd.Run(); err != nil {
 		t.Skipf("git init failed: %v", err)
 	}
@@ -2879,5 +3055,558 @@ func TestCheckNoVestigialSyncWorktrees_VestigialDetected(t *testing.T) {
 	}
 	if !strings.Contains(check.Message, "Vestigial") {
 		t.Errorf("Message = %q, want it to contain 'Vestigial'", check.Message)
+	}
+}
+
+func TestCheckGitignore_WarnsOnLoosePermsWhenPatternComplete(t *testing.T) {
+	// Skip on Windows as it doesn't support Unix-style file permissions
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0644); err != nil { // #nosec G306 -- loose perms are the scenario under test
+		t.Fatal(err)
+	}
+	// WriteFile's mode is filtered by umask; force the loose mode explicitly
+	// so the scenario holds under restrictive umasks (e.g. 077).
+	if err := os.Chmod(gitignorePath, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckGitignore(tmpDir)
+	if check.Status != "warning" {
+		t.Fatalf("Status = %q, want %q (pattern-complete file at 0644 must warn so doctor --fix schedules FixGitignore)", check.Status, "warning")
+	}
+	// Pin the warning to the permission branch. CheckGitignore also warns for a
+	// missing file and for missing patterns, so asserting only that *a* warning
+	// fired would keep this test green for the wrong reason if GitignoreTemplate
+	// ever drifted out of requiredPatterns and the pattern branch returned first.
+	if check.Message != "Unexpected permissions on .beads/.gitignore" {
+		t.Errorf("Message = %q, want the permission-branch warning", check.Message)
+	}
+	if !strings.Contains(check.Detail, "0644") {
+		t.Errorf("Detail = %q, want the observed mode 0644", check.Detail)
+	}
+	// Pin the exact hint: re-running bd init is not a safe repair to suggest
+	// (be-5up5), and FixGitignore below is what actually restores the mode.
+	if check.Fix != "Run: bd doctor --fix" {
+		t.Errorf("Fix = %q, want %q", check.Fix, "Run: bd doctor --fix")
+	}
+
+	// After the fix runs, the check must go green.
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore: %v", err)
+	}
+	if check := CheckGitignore(tmpDir); check.Status != "ok" {
+		t.Fatalf("post-fix Status = %q, want ok", check.Status)
+	}
+}
+
+// writeCompleteBeadsGitignore writes a pattern-complete .beads/.gitignore under
+// a fresh repo root and forces mode perm (WriteFile's mode is umask-filtered).
+// It returns the repo root and the .gitignore path.
+func writeCompleteBeadsGitignore(t *testing.T, perm os.FileMode) (string, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitignorePath, perm); err != nil {
+		t.Fatal(err)
+	}
+	return tmpDir, gitignorePath
+}
+
+// TestCheckGitignore_PermissionPredicate pins #6225 finding 1: only group or
+// other bits make a pattern-complete .beads/.gitignore loose. Owner bits
+// stricter than 0600 are not a problem to report (or to "fix").
+func TestCheckGitignore_PermissionPredicate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tests := []struct {
+		perm      os.FileMode
+		wantLoose bool
+	}{
+		{0600, false},
+		{0400, false},
+		{0700, false},
+		{0644, true},
+		{0640, true},
+		{0604, true},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%04o", tt.perm), func(t *testing.T) {
+			tmpDir, _ := writeCompleteBeadsGitignore(t, tt.perm)
+
+			check := CheckGitignore(tmpDir)
+			if !tt.wantLoose {
+				if check.Status != "ok" {
+					t.Fatalf("Status = %q (%s: %s), want ok", check.Status, check.Message, check.Detail)
+				}
+				return
+			}
+			if check.Status != "warning" {
+				t.Fatalf("Status = %q, want warning", check.Status)
+			}
+			if check.Message != "Unexpected permissions on .beads/.gitignore" {
+				t.Errorf("Message = %q, want the permission-branch warning", check.Message)
+			}
+			if want := fmt.Sprintf("%04o", tt.perm); !strings.Contains(check.Detail, want) {
+				t.Errorf("Detail = %q, want the observed mode %s", check.Detail, want)
+			}
+		})
+	}
+}
+
+// stubChmodBeadsGitignore replaces the chmod seam for the test's duration.
+func stubChmodBeadsGitignore(t *testing.T, fn func(string, os.FileMode) error) {
+	t.Helper()
+	orig := chmodBeadsGitignore
+	chmodBeadsGitignore = fn
+	t.Cleanup(func() { chmodBeadsGitignore = orig })
+}
+
+// TestGitignore_StricterThan0600IsNotLoose pins #6225 finding 1: a
+// pattern-complete .beads/.gitignore that is stricter than 0600 (0400) has no
+// group/other bits, so CheckGitignore must report it ok and
+// EnsureGitignoreForBeadsDir must not add owner-write to it.
+func TestGitignore_StricterThan0600IsNotLoose(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gitignorePath, 0400); err != nil {
+		t.Fatal(err)
+	}
+
+	if check := CheckGitignore(tmpDir); check.Status != "ok" {
+		t.Errorf("CheckGitignore on a 0400 file: status %q (%s: %s), want ok", check.Status, check.Message, check.Detail)
+	}
+
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir failed: %v", err)
+	}
+	info, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0400 {
+		t.Errorf("EnsureGitignoreForBeadsDir loosened 0400 to %04o", perm)
+	}
+}
+
+// TestEnsureGitignoreForBeadsDir_LeavesStricterCompleteFileAlone pins #6225
+// finding 1 on the write side: a pattern-complete file with no group/other
+// bits needs nothing, so Ensure and FixGitignore must not even try to chmod
+// it (a chmod there is what could fail on a hostile mount, finding 2).
+func TestEnsureGitignoreForBeadsDir_LeavesStricterCompleteFileAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tmpDir, gitignorePath := writeCompleteBeadsGitignore(t, 0400)
+	beadsDir := filepath.Dir(gitignorePath)
+
+	calls := 0
+	stubChmodBeadsGitignore(t, func(name string, mode os.FileMode) error {
+		calls++
+		return os.Chmod(name, mode)
+	})
+
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir: %v", err)
+	}
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("chmod called %d times on a complete 0400 file, want 0", calls)
+	}
+
+	info, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0400 {
+		t.Errorf("mode = %04o, want 0400 kept", perm)
+	}
+	got, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != GitignoreTemplate {
+		t.Errorf("content changed:\n%s", got)
+	}
+}
+
+// TestEnsureGitignoreForBeadsDir_WindowsKeepsReadOnlyCompleteFile pins #6225
+// finding 3: Windows modes are synthetic, so a pattern-complete file must not
+// be chmod'ed on every call (each call was one more way to fail bootstrap).
+func TestEnsureGitignoreForBeadsDir_WindowsKeepsReadOnlyCompleteFile(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only: synthetic file modes")
+	}
+
+	_, gitignorePath := writeCompleteBeadsGitignore(t, 0400) // sets the read-only attribute
+	t.Cleanup(func() { _ = os.Chmod(gitignorePath, 0600) })  // let TempDir cleanup remove it
+
+	calls := 0
+	stubChmodBeadsGitignore(t, func(name string, mode os.FileMode) error {
+		calls++
+		return os.Chmod(name, mode)
+	})
+
+	if err := EnsureGitignoreForBeadsDir(filepath.Dir(gitignorePath)); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("chmod called %d times on a complete file, want 0", calls)
+	}
+	info, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0200 != 0 {
+		t.Errorf("read-only attribute cleared (mode %04o)", info.Mode().Perm())
+	}
+}
+
+// TestEnsureGitignoreForBeadsDir_TightenFailureIsPermissionOnly pins #6225
+// finding 2 at its source: when only the final tightening chmod fails, the
+// required patterns are already in place, so the error is classified as
+// ErrGitignorePermissions (callers may warn). Failures that leave patterns
+// unwritten must not carry that classification.
+func TestEnsureGitignoreForBeadsDir_TightenFailureIsPermissionOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	failChmod := func(t *testing.T) *int {
+		calls := 0
+		stubChmodBeadsGitignore(t, func(name string, _ os.FileMode) error {
+			calls++
+			return &os.PathError{Op: "chmod", Path: name, Err: syscall.EPERM}
+		})
+		return &calls
+	}
+	isPermissionOnly := func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrGitignorePermissions) {
+			t.Fatalf("err = %v, want ErrGitignorePermissions", err)
+		}
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || !errors.Is(err, syscall.EPERM) {
+			t.Errorf("err = %v, want it to wrap the chmod *os.PathError (EPERM)", err)
+		}
+	}
+	notPermissionOnly := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("err = nil, want a failure")
+		}
+		if errors.Is(err, ErrGitignorePermissions) {
+			t.Errorf("err = %v classified as permission-only, but patterns were not written", err)
+		}
+	}
+	setup := func(t *testing.T, content string, perm os.FileMode) (string, string) {
+		t.Helper()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.Mkdir(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(beadsDir, ".gitignore")
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, perm); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir, path
+	}
+
+	t.Run("incomplete 0644 appends then reports permissions", func(t *testing.T) {
+		beadsDir, path := setup(t, "old content\n", 0644)
+		failChmod(t)
+
+		isPermissionOnly(t, EnsureGitignoreForBeadsDir(beadsDir))
+
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(got), "old content\n") {
+			t.Errorf("local content not preserved:\n%s", got)
+		}
+		if missing := missingGitignorePatterns(string(got)); len(missing) != 0 {
+			t.Errorf("patterns still missing after append: %v", missing)
+		}
+
+		// A rerun finds the patterns in place: same classification, no second block.
+		isPermissionOnly(t, EnsureGitignoreForBeadsDir(beadsDir))
+		got, err = os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := strings.Count(string(got), "# Added by bd"); n != 1 {
+			t.Errorf("found %d '# Added by bd' blocks, want 1:\n%s", n, got)
+		}
+	})
+
+	t.Run("complete 0644 reports permissions and keeps bytes", func(t *testing.T) {
+		beadsDir, path := setup(t, GitignoreTemplate, 0644)
+		failChmod(t)
+
+		isPermissionOnly(t, EnsureGitignoreForBeadsDir(beadsDir))
+
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != GitignoreTemplate {
+			t.Errorf("content changed:\n%s", got)
+		}
+	})
+
+	t.Run("incomplete 0400 owner-write restore failure is not permission-only", func(t *testing.T) {
+		beadsDir, path := setup(t, "old content\n", 0400)
+		failChmod(t)
+
+		notPermissionOnly(t, EnsureGitignoreForBeadsDir(beadsDir))
+
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "old content\n" {
+			t.Errorf("content changed after a failed restore:\n%s", got)
+		}
+	})
+
+	t.Run("unreadable .gitignore is not permission-only", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(filepath.Join(beadsDir, ".gitignore"), 0750); err != nil {
+			t.Fatal(err)
+		}
+		failChmod(t)
+
+		notPermissionOnly(t, EnsureGitignoreForBeadsDir(beadsDir))
+	})
+
+	t.Run("missing file is created without a chmod", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.Mkdir(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		calls := failChmod(t)
+
+		if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+			t.Fatalf("EnsureGitignoreForBeadsDir: %v", err)
+		}
+		if *calls != 0 {
+			t.Errorf("chmod called %d times creating a 0600 file, want 0", *calls)
+		}
+		got, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != GitignoreTemplate {
+			t.Errorf("template not written:\n%s", got)
+		}
+	})
+}
+
+// machineLocalStateFiles are the per-clone files bd writes at the top level of
+// .beads/ after init (GH#8318): the bd backup init/sync destination and
+// last-sync state, the bd dolt set audit log, the JSONL auto-import stamp and
+// the resume journal of the bd migrate from-<mode>-to-<mode> switches. Kept as
+// a literal list so a test never derives its expectation from the production
+// lists it checks.
+var machineLocalStateFiles = []string{
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+	"dolt-mode-migration.json",
+}
+
+// TestGitignoreTemplate_IgnoresMachineLocalStateFiles checks with real git
+// matching that the .beads/.gitignore bd init writes ignores every
+// machine-local state file, while the tracked issue data and config stay
+// visible (GH#8318). backup/ only matches that directory, not files beside it.
+func TestGitignoreTemplate_IgnoresMachineLocalStateFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping git-based test on Windows")
+	}
+
+	dir := setupGitRepo(t)
+	disableGlobalGitIgnore(t, dir)
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte(GitignoreTemplate), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tracked := []string{"issues.jsonl", "metadata.json", "config.yaml"}
+	for _, name := range append(append([]string{}, machineLocalStateFiles...), tracked...) {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	checkIgnore := func(name string) int {
+		t.Helper()
+		cmd := gitCommand("check-ignore", "-q", "--", ".beads/"+name)
+		cmd.Dir = dir
+		err := cmd.Run()
+		if err == nil {
+			return 0
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		t.Fatalf("git check-ignore .beads/%s: %v", name, err)
+		return -1
+	}
+
+	for _, name := range machineLocalStateFiles {
+		switch code := checkIgnore(name); code {
+		case 0:
+		case 1:
+			t.Errorf(".beads/%s is not ignored by GitignoreTemplate", name)
+		default:
+			t.Errorf("git check-ignore .beads/%s exited %d", name, code)
+		}
+	}
+	for _, name := range tracked {
+		switch code := checkIgnore(name); code {
+		case 1:
+		case 0:
+			t.Errorf(".beads/%s is ignored by GitignoreTemplate but must stay tracked", name)
+		default:
+			t.Errorf("git check-ignore .beads/%s exited %d", name, code)
+		}
+	}
+}
+
+// preMachineLocalStateTemplate returns GitignoreTemplate as it was before
+// GH#8318: every line naming a machine-local state file removed, with a
+// local custom rule on top as an existing workspace would have.
+func preMachineLocalStateTemplate(t *testing.T) string {
+	t.Helper()
+	drop := make(map[string]bool, len(machineLocalStateFiles))
+	for _, name := range machineLocalStateFiles {
+		drop[name] = true
+	}
+	var kept []string
+	for _, line := range strings.Split(GitignoreTemplate, "\n") {
+		if !drop[strings.TrimSpace(line)] {
+			kept = append(kept, line)
+		}
+	}
+	old := "# local rule kept by the user\nscratch-notes.md\n\n" + strings.Join(kept, "\n")
+	for _, name := range machineLocalStateFiles {
+		if containsGitignorePattern(old, name) {
+			t.Fatalf("test setup: stripped template still contains %q", name)
+		}
+	}
+	return old
+}
+
+// TestCheckGitignore_FlagsMissingMachineLocalStatePatterns checks that an
+// existing .beads/.gitignore written before GH#8318 is reported outdated, and
+// that the missing list is exactly the five machine-local state files.
+func TestCheckGitignore_FlagsMissingMachineLocalStatePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte(preMachineLocalStateTemplate(t)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckGitignore(tmpDir)
+	if check.Status != StatusWarning {
+		t.Fatalf("CheckGitignore status = %q, want %q (detail: %s)", check.Status, StatusWarning, check.Detail)
+	}
+	got := strings.Split(strings.TrimPrefix(check.Detail, "Missing: "), ", ")
+	if !strings.HasPrefix(check.Detail, "Missing: ") || strings.Join(got, "\n") != strings.Join(machineLocalStateFiles, "\n") {
+		t.Errorf("CheckGitignore Detail = %q, want Missing: %s", check.Detail, strings.Join(machineLocalStateFiles, ", "))
+	}
+}
+
+// TestFixGitignore_AppendsMissingMachineLocalStatePatterns checks that
+// bd doctor --fix heals a pre-GH#8318 .beads/.gitignore append-only: the
+// user's content survives as a prefix, each machine-local state name is
+// added once, the check then passes, and a second fix changes nothing.
+func TestFixGitignore_AppendsMissingMachineLocalStatePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	old := preMachineLocalStateTemplate(t)
+	if err := os.WriteFile(gitignorePath, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore: %v", err)
+	}
+	fixed, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(fixed), old) {
+		t.Errorf("FixGitignore rewrote the existing content; want it kept as a prefix, got:\n%s", fixed)
+	}
+	lines := strings.Split(string(fixed), "\n")
+	for _, name := range machineLocalStateFiles {
+		n := 0
+		for _, line := range lines {
+			if strings.TrimSpace(line) == name {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("fixed .gitignore has %d lines for %q, want 1", n, name)
+		}
+	}
+	if check := CheckGitignore(tmpDir); check.Status != StatusOK {
+		t.Errorf("CheckGitignore after fix = %q, want %q (detail: %s)", check.Status, StatusOK, check.Detail)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("second FixGitignore: %v", err)
+	}
+	again, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again, fixed) {
+		t.Errorf("second FixGitignore changed the file:\nbefore:\n%s\nafter:\n%s", fixed, again)
 	}
 }

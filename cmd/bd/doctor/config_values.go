@@ -6,12 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"gopkg.in/yaml.v3"
 )
@@ -98,7 +101,9 @@ func findConfigPath(repoPath string) string {
 	if _, err := os.Stat(configPath); err == nil {
 		return configPath
 	}
-	if configDir, err := os.UserConfigDir(); err == nil {
+	// config.UserConfigDir, not os.UserConfigDir: on macOS bd never touches
+	// ~/Library/Application Support (GH#8113).
+	if configDir, err := config.UserConfigDir(); err == nil {
 		userConfigPath := filepath.Join(configDir, "bd", "config.yaml")
 		if _, err := os.Stat(userConfigPath); err == nil {
 			return userConfigPath
@@ -244,23 +249,29 @@ func checkYAMLConfigValues(repoPath string) []string {
 						additionalSet[expandPath(path)] = true
 					}
 
+					// A routing repo comes from the committed config.yaml,
+					// so it goes into the bd repo add command through the
+					// remedy printer: one shell word, or a <path>
+					// placeholder with the value named escaped beside it.
 					if contributorRepo != "" {
 						expandedContributor := expandPath(contributorRepo)
 						if !additionalSet[expandedContributor] {
+							arg, note := remedy.CommandArg(runtime.GOOS, contributorRepo, "<path>")
 							issues = append(issues, fmt.Sprintf(
-								"routing.contributor=%q is not in repos.additional. "+
-									"Run 'bd repo add %s' to make routed issues visible.",
-								contributorRepo, contributorRepo))
+								"routing.contributor=%s is not in repos.additional. "+
+									"Run bd repo add %s%s to make routed issues visible.",
+								remedy.EscapedValue(contributorRepo), arg, note))
 						}
 					}
 
 					if maintainerRepo != "" && maintainerRepo != "." {
 						expandedMaintainer := expandPath(maintainerRepo)
 						if !additionalSet[expandedMaintainer] {
+							arg, note := remedy.CommandArg(runtime.GOOS, maintainerRepo, "<path>")
 							issues = append(issues, fmt.Sprintf(
-								"routing.maintainer=%q is not in repos.additional. "+
-									"Run 'bd repo add %s' to make routed issues visible.",
-								maintainerRepo, maintainerRepo))
+								"routing.maintainer=%s is not in repos.additional. "+
+									"Run bd repo add %s%s to make routed issues visible.",
+								remedy.EscapedValue(maintainerRepo), arg, note))
 						}
 					}
 				}

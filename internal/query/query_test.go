@@ -1,6 +1,9 @@
 package query
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,10 +14,11 @@ import (
 
 func TestLexer(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		expected []TokenType
-		values   []string
+		name      string
+		input     string
+		expected  []TokenType
+		values    []string
+		positions []int
 	}{
 		{
 			name:     "simple equality",
@@ -177,6 +181,180 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"label", "=", "30MIN", ""},
 		},
+		// Units are lowercase in the shared grammar, so an uppercase one is
+		// not a duration: it reaches the evaluator as typed and fails there as
+		// an unparseable time instead of as a negated compact duration.
+		{
+			name:     "uppercase months unit stays an identifier",
+			input:    "updated>30M",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "30M", ""},
+		},
+		{
+			name:     "uppercase hours unit stays an identifier",
+			input:    "updated>30H",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "30H", ""},
+		},
+		{
+			name:     "uppercase days unit on a non-time field stays an identifier",
+			input:    "label=30D",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "30D", ""},
+		},
+		{
+			name:     "lowercase months unit is a duration",
+			input:    "updated>30m",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
+			values:   []string{"updated", ">", "30m", ""},
+		},
+		{
+			name:     "signed lowercase days unit is a duration",
+			input:    "updated>+30d",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
+			values:   []string{"updated", ">", "+30d", ""},
+		},
+		{
+			name:     "quoted multi-byte value round-trips",
+			input:    `title="größe test"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "größe test", ""},
+		},
+		{
+			name:     "quoted multi-byte label round-trips",
+			input:    `label="größe"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"label", "=", "größe", ""},
+		},
+		{
+			name:     "quoted CJK value round-trips",
+			input:    `title="日本語"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "日本語", ""},
+		},
+		{
+			name:     "single-quoted multi-byte value round-trips",
+			input:    `title='naïve café'`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "naïve café", ""},
+		},
+		{
+			name:     "quoted four-byte rune round-trips",
+			input:    `title="🐛 bug"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "🐛 bug", ""},
+		},
+		{
+			name:     "quoted literal replacement character round-trips",
+			input:    "title=\"a\uFFFDb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "a\uFFFDb", ""},
+		},
+		// Malformed UTF-8 inside quotes is copied byte for byte, not
+		// replaced with U+FFFD, so a query never silently becomes one for
+		// different (valid) text.
+		{
+			name:     "invalid byte in a quoted value passes through",
+			input:    "title=\"a\xffb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "a\xffb", ""},
+		},
+		{
+			name:      "truncated lead byte in a quoted value passes through",
+			input:     "label=\"a\xc3\" AND x=1",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenString, TokenAnd, TokenIdent, TokenEquals, TokenNumber, TokenEOF},
+			values:    []string{"label", "=", "a\xc3", "AND", "x", "=", "1", ""},
+			positions: []int{0, 5, 6, 11, 15, 16, 17, 18},
+		},
+		{
+			name:     "unknown escape before an invalid byte keeps the byte",
+			input:    "title=\"\\\xff\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "\xff", ""},
+		},
+		{
+			name:     "unknown escape keeps a raw byte",
+			input:    "label=\"a\\\xffb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"label", "=", "a\xffb", ""},
+		},
+		{
+			name:     "unknown escape before a multi-byte rune",
+			input:    `title="\é"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "é", ""},
+		},
+		{
+			name:     "bare multi-byte value is one identifier",
+			input:    "title=größe",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"title", "=", "größe", ""},
+		},
+		{
+			name:     "bare value with a multi-byte letter",
+			input:    "label=fête",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "fête", ""},
+		},
+		{
+			name:     "bare value starting with a multi-byte letter",
+			input:    "label=été",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "été", ""},
+		},
+		{
+			name:     "bare CJK value is one identifier",
+			input:    "label=日本語",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "日本語", ""},
+		},
+		{
+			name:     "bare non-ASCII digit is a number",
+			input:    "label=٣",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenNumber, TokenEOF},
+			values:   []string{"label", "=", "٣", ""},
+		},
+		{
+			name:     "no-break space after a bare multi-byte value",
+			input:    "label=fête\u00a0AND status=open",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "fête", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "ideographic space separates tokens",
+			input:    "status=open\u3000AND\u3000label=x",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"status", "=", "open", "AND", "label", "=", "x", ""},
+		},
+		// The duration lookahead scans by decoded rune, so a multi-byte rune
+		// right after a number ends the unit run or joins it whole instead of
+		// being read byte by byte (#7539).
+		{
+			name:     "no-break space after a duration keeps the duration",
+			input:    "updated>7d\u00a0AND status=open",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "7d", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "multi-byte rune after a duration prefix keeps it one identifier",
+			input:    "label=7dש",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "7dש", ""},
+		},
+		{
+			name:      "positions after a multi-byte value are byte offsets",
+			input:     "label=größe AND status=open",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:    []string{"label", "=", "größe", "AND", "status", "=", "open", ""},
+			positions: []int{0, 5, 6, 14, 18, 24, 25, 29},
+		},
+		{
+			name:      "positions after a quoted multi-byte value are byte offsets",
+			input:     "label=\"f\u00eate\" AND status=open",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenString, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:    []string{"label", "=", "f\u00eate", "AND", "status", "=", "open", ""},
+			positions: []int{0, 5, 6, 14, 18, 24, 25, 29},
+		},
 	}
 
 	for _, tt := range tests {
@@ -198,6 +376,9 @@ func TestLexer(t *testing.T) {
 				if tt.values != nil && tok.Value != tt.values[i] {
 					t.Errorf("token %d: got value %q, want %q", i, tok.Value, tt.values[i])
 				}
+				if tt.positions != nil && tok.Pos != tt.positions[i] {
+					t.Errorf("token %d: got pos %d, want %d", i, tok.Pos, tt.positions[i])
+				}
 			}
 		})
 	}
@@ -210,6 +391,8 @@ func TestLexerErrors(t *testing.T) {
 	}{
 		{"unterminated string", `title="hello`},
 		{"invalid character", "status@open"},
+		{"symbol is not an identifier character", "label=🐛"},
+		{"invalid UTF-8 in a bare value", "label=gr\xf6\xdfe"},
 	}
 
 	for _, tt := range tests {
@@ -218,6 +401,31 @@ func TestLexerErrors(t *testing.T) {
 			_, err := lexer.Tokenize()
 			if err == nil {
 				t.Error("expected error, got nil")
+			}
+		})
+	}
+}
+
+// TestLexerErrorMessages pins that a lexical error names the decoded rune at
+// its byte offset, not the raw input byte (#7539).
+func TestLexerErrorMessages(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"multi-byte symbol in a bare value", "label=a€b", "unexpected character '€' at position 7"},
+		{"invalid byte in a bare value", "label=gr\xf6\xdfe", "unexpected character '\ufffd' at position 8"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewLexer(tt.input).Tokenize()
+			if err == nil {
+				t.Fatalf("Tokenize(%q) expected an error, got nil", tt.input)
+			}
+			if err.Error() != tt.expected {
+				t.Errorf("Tokenize(%q) error = %q, want %q", tt.input, err.Error(), tt.expected)
 			}
 		})
 	}
@@ -268,6 +476,16 @@ func TestParser(t *testing.T) {
 			name:     "NOT with parentheses",
 			input:    "NOT (status=closed OR status=deferred)",
 			expected: "NOT (status=closed OR status=deferred)",
+		},
+		{
+			name:     "quoted multi-byte label keeps its value",
+			input:    `label="größe"`,
+			expected: "label=größe",
+		},
+		{
+			name:     "single-quoted multi-byte title keeps its value",
+			input:    `title='naïve café'`,
+			expected: "title=naïve café",
 		},
 	}
 
@@ -401,6 +619,34 @@ func TestEvaluatorSimpleQueries(t *testing.T) {
 			query: "label=none",
 			expectFilter: func(f *types.IssueFilter) bool {
 				return f.NoLabels
+			},
+		},
+		{
+			name:  "quoted multi-byte label",
+			query: `label="größe"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return len(f.Labels) == 1 && f.Labels[0] == "größe"
+			},
+		},
+		{
+			name:  "bare multi-byte label",
+			query: "label=größe",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return len(f.Labels) == 1 && f.Labels[0] == "größe"
+			},
+		},
+		{
+			name:  "bare multi-byte title",
+			query: "title=fête",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.TitleContains == "fête"
+			},
+		},
+		{
+			name:  "title contains a multi-byte value",
+			query: `title="größe test"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.TitleContains == "größe test"
 			},
 		},
 		{
@@ -764,44 +1010,207 @@ func TestQueryMinutesUnitResolvesAgo(t *testing.T) {
 	}
 }
 
+// TestQueryRejectsUppercaseDurationUnits pins how an uppercase duration unit
+// fails on a time field. Units are lowercase in the shared grammar, so "30M"
+// is not a duration: it reaches ParseRelativeTime as typed, fails there, and
+// the error quotes what the user wrote. It must never be the internal
+// "not a compact duration" error, which quoted the negated "-30M" the
+// evaluator builds for a duration token. "30MIN" and "30Min" always took the
+// ParseRelativeTime path; they are controls for the expected error.
+func TestQueryRejectsUppercaseDurationUnits(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	values := []string{"30M", "30D", "30W", "30Y", "30H", "1H", "30MIN", "30Min"}
+	shapes := []string{
+		"created>%s",
+		"updated<%s",
+		"closed>=%s",
+		"started<=%s",
+		"created>%s OR status=open",
+	}
+
+	for _, value := range values {
+		for _, shape := range shapes {
+			query := fmt.Sprintf(shape, value)
+			t.Run(query, func(t *testing.T) {
+				_, err := EvaluateAt(query, now)
+				if err == nil {
+					t.Fatalf("EvaluateAt(%q) succeeded, want an unparseable-time error", query)
+				}
+				msg := err.Error()
+				if want := "cannot parse time expression: " + strconv.Quote(value); !strings.Contains(msg, want) {
+					t.Errorf("EvaluateAt(%q) error = %q, want it to contain %q", query, msg, want)
+				}
+				if strings.Contains(msg, "not a compact duration") {
+					t.Errorf("EvaluateAt(%q) error = %q, want no internal compact-duration error", query, msg)
+				}
+				if negated := strconv.Quote("-" + value); strings.Contains(msg, negated) {
+					t.Errorf("EvaluateAt(%q) error = %q quotes %s, a value the user never typed", query, msg, negated)
+				}
+			})
+		}
+	}
+}
+
+// TestQuerySignedUppercaseDurationUnitStopsAtTheParser pins how a signed
+// uppercase unit fails. A signed digit run has no identifier fallback (the
+// user has to quote "-3-foo"), so with "M" not a unit, "+30M" lexes as the
+// number "+30" and then the identifier "M", and the parser rejects that stray
+// token as it already rejects the "x" of "+30x". It must not reach the
+// evaluator as a duration and fail there with the internal
+// "not a compact duration" error.
+func TestQuerySignedUppercaseDurationUnitStopsAtTheParser(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		query   string
+		wantErr string
+	}{
+		{"created>+30M", `unexpected token "M" at position 11 (expected end of query)`},
+		{"created>-30M", `unexpected token "M" at position 11 (expected end of query)`},
+		// Control: an unknown lowercase unit already fails this way.
+		{"created>+30x", `unexpected token "x" at position 11 (expected end of query)`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			if _, err := Parse(tt.query); err == nil || err.Error() != tt.wantErr {
+				t.Errorf("Parse(%q) error = %v, want %q", tt.query, err, tt.wantErr)
+			}
+			if _, err := EvaluateAt(tt.query, now); err == nil || err.Error() != tt.wantErr {
+				t.Errorf("EvaluateAt(%q) error = %v, want %q", tt.query, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestQueryKeepsLowercaseUnitsAndLiteralValues pins, at a fixed now, what
+// rejecting uppercase units leaves alone: a signed lowercase unit still
+// resolves as N ago, a natural-language time still resolves through
+// ParseRelativeTime, and on a non-time field "30M" is still the literal string
+// it always was. TestQueryMinutesUnitResolvesAgo pins created>30m (30 months
+// ago) and created>30min (30 minutes ago).
+func TestQueryKeepsLowercaseUnitsAndLiteralValues(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	bounds := []struct {
+		query string
+		want  time.Time
+		bound func(*types.IssueFilter) *time.Time
+	}{
+		{
+			query: "created>+30d",
+			want:  now.AddDate(0, 0, -30),
+			bound: func(f *types.IssueFilter) *time.Time { return f.CreatedAfter },
+		},
+		{
+			query: "updated>5pm",
+			want:  time.Date(2025, 2, 4, 17, 0, 0, 0, time.UTC),
+			bound: func(f *types.IssueFilter) *time.Time { return f.UpdatedAfter },
+		},
+	}
+	for _, tt := range bounds {
+		t.Run(tt.query, func(t *testing.T) {
+			result, err := EvaluateAt(tt.query, now)
+			if err != nil {
+				t.Fatalf("EvaluateAt(%q) error = %v", tt.query, err)
+			}
+			got := tt.bound(&result.Filter)
+			if got == nil {
+				t.Fatalf("EvaluateAt(%q) left the time bound unset, filter=%+v", tt.query, result.Filter)
+			}
+			if !got.Equal(tt.want) {
+				t.Errorf("EvaluateAt(%q) = %s, want %s", tt.query, got.Format(time.RFC3339), tt.want.Format(time.RFC3339))
+			}
+		})
+	}
+
+	t.Run("label=30M", func(t *testing.T) {
+		result, err := EvaluateAt("label=30M", now)
+		if err != nil {
+			t.Fatalf("EvaluateAt(label=30M) error = %v", err)
+		}
+		if len(result.Filter.Labels) != 1 || result.Filter.Labels[0] != "30M" {
+			t.Errorf("EvaluateAt(label=30M) Labels = %v, want [%q]", result.Filter.Labels, "30M")
+		}
+	})
+	t.Run("title=30M", func(t *testing.T) {
+		result, err := EvaluateAt("title=30M", now)
+		if err != nil {
+			t.Fatalf("EvaluateAt(title=30M) error = %v", err)
+		}
+		if result.Filter.TitleContains != "30M" {
+			t.Errorf("EvaluateAt(title=30M) TitleContains = %q, want %q", result.Filter.TitleContains, "30M")
+		}
+	})
+}
+
 // TestCompactDurationGrammarReachesQueryPlane binds this package's duration
-// grammar to the shared one in internal/timeparsing, which owns it. The lexer
-// keeps a second copy of the unit set — isDurationSuffix for single runes,
-// durationWords for whole words — and nothing outside this test holds the two
-// in sync. A unit added to the shared grammar but missed here lexes as
-// TokenIdent, skips the evaluator's TokenDuration arm, and resolves through
-// ParseRelativeTime as a *future* offset: the "30min meant 30 minutes from now"
-// inversion this PR fixed, reproduced silently for the next unit.
+// grammar to the shared one in internal/timeparsing, which owns it, in both
+// directions. The lexer classifies a duration with
+// timeparsing.IsCompactDuration instead of keeping its own copy of the unit
+// set; this test holds it to that. A unit the shared grammar accepts but the
+// lexer types as TokenIdent skips the evaluator's TokenDuration arm and
+// resolves through ParseRelativeTime as a *future* offset: the "30min meant 30
+// minutes from now" inversion, reproduced silently for the next unit. A suffix
+// the shared grammar rejects but the lexer types as TokenDuration reaches
+// ParseCompactDuration in the evaluator and fails with that parser's internal
+// error about a negated value the user never typed: while the lexer took
+// "H D W M Y", "created>30M" failed with `not a compact duration: "-30M"`.
 //
-// The shared pattern is unexported, so ParseCompactDuration is the oracle:
-// whatever suffix it accepts must lex as a duration here. Candidates are
-// exhaustive over lowercase ASCII up to three runes, so plausible future
-// spellings ("sec", "hr", "mo", "yr") are covered alongside today's six.
-//
-// Only this direction is asserted. The reverse — everything the lexer accepts
-// being valid in the shared grammar — is already false at base: isDurationSuffix
-// also takes "H D W M Y", which the case-sensitive pattern rejects, so
-// "created>30M" lexes as a duration and then fails in ParseCompactDuration.
-// That asymmetry predates this PR and is not what this test is for.
+// ParseCompactDuration is the oracle: a suffix must lex as a duration here if
+// and only if it accepts it. Candidates are exhaustive over one- and
+// two-letter ASCII in either case and three-letter lowercase ASCII, plus every
+// case spelling of an accepted three-letter unit, so plausible future
+// spellings ("sec", "hr", "mo", "yr") are covered alongside today's six and
+// their uppercase forms.
 func TestCompactDurationGrammarReachesQueryPlane(t *testing.T) {
 	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
 
-	const letters = "abcdefghijklmnopqrstuvwxyz"
+	accepts := func(unit string) bool {
+		_, err := timeparsing.ParseCompactDuration("1"+unit, now)
+		return err == nil
+	}
+
+	const lower = "abcdefghijklmnopqrstuvwxyz"
+	const letters = lower + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	var candidates []string
 	for _, a := range letters {
 		candidates = append(candidates, string(a))
 		for _, b := range letters {
 			candidates = append(candidates, string(a)+string(b))
-			for _, c := range letters {
-				candidates = append(candidates, string(a)+string(b)+string(c))
+		}
+	}
+	for _, a := range lower {
+		for _, b := range lower {
+			for _, c := range lower {
+				unit := string(a) + string(b) + string(c)
+				candidates = append(candidates, unit)
+				if !accepts(unit) {
+					continue
+				}
+				// The lowercase sweep reaches only this spelling of an
+				// accepted three-letter unit; add the others ("MIN", "Min", ...).
+				for mask := 1; mask < 1<<len(unit); mask++ {
+					var spelling strings.Builder
+					for i := 0; i < len(unit); i++ {
+						if mask&(1<<i) != 0 {
+							spelling.WriteString(strings.ToUpper(unit[i : i+1]))
+						} else {
+							spelling.WriteByte(unit[i])
+						}
+					}
+					candidates = append(candidates, spelling.String())
+				}
 			}
 		}
 	}
 
-	var accepted []string
+	var accepted, rejected []string
 	isAccepted := make(map[string]bool)
 	for _, unit := range candidates {
-		if _, err := timeparsing.ParseCompactDuration("1"+unit, now); err != nil {
+		if !accepts(unit) {
+			rejected = append(rejected, unit)
 			continue
 		}
 		accepted = append(accepted, unit)
@@ -829,7 +1238,7 @@ func TestCompactDurationGrammarReachesQueryPlane(t *testing.T) {
 			}
 			if tokens[2].Type != TokenDuration || tokens[2].Value != value {
 				t.Errorf("timeparsing accepts %q but the query lexer typed it %v(%q), want %v(%q); "+
-					"add the unit to durationWords/isDurationSuffix or it resolves as a future offset",
+					"classify durations with timeparsing.IsCompactDuration or the unit resolves as a future offset",
 					value, tokens[2].Type, tokens[2].Value, TokenDuration, value)
 			}
 
@@ -844,6 +1253,29 @@ func TestCompactDurationGrammarReachesQueryPlane(t *testing.T) {
 				t.Errorf("EvaluateAt(label=%s) Labels = %v, want [%q]", value, result.Filter.Labels, value)
 			}
 		})
+	}
+
+	// The reverse direction is one sweep with one report rather than a
+	// subtest per suffix: there are over 20,000 of them.
+	var typedDuration []string
+	for _, unit := range rejected {
+		value := "1" + unit
+		tokens, err := NewLexer("updated>" + value).Tokenize()
+		if err != nil {
+			t.Errorf("Tokenize(updated>%s) error = %v", value, err)
+			continue
+		}
+		for _, tok := range tokens {
+			if tok.Type == TokenDuration {
+				typedDuration = append(typedDuration, unit)
+				break
+			}
+		}
+	}
+	if len(typedDuration) > 0 {
+		t.Errorf("timeparsing rejects these suffixes but the query lexer typed them %v: %v; "+
+			"classify durations with timeparsing.IsCompactDuration or the evaluator fails on them "+
+			"with an internal error", TokenDuration, typedDuration)
 	}
 }
 
@@ -1086,5 +1518,35 @@ func TestMetadataPredicateEvaluation(t *testing.T) {
 	}
 	if !result.Predicate(issueClosed) {
 		t.Error("predicate should match closed issue via OR")
+	}
+}
+
+// TestLexerNonASCIIValues pins that non-ASCII query values reach the parser
+// unchanged, both quoted and bare (GitHub #7539).
+func TestLexerNonASCIIValues(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []Token
+	}{
+		{`label="größe"`, []Token{{TokenIdent, "label", 0}, {TokenEquals, "=", 5}, {TokenString, "größe", 6}, {TokenEOF, "", 15}}},
+		{`title='日本語'`, []Token{{TokenIdent, "title", 0}, {TokenEquals, "=", 5}, {TokenString, "日本語", 6}, {TokenEOF, "", 17}}},
+		{`label=größe`, []Token{{TokenIdent, "label", 0}, {TokenEquals, "=", 5}, {TokenIdent, "größe", 6}, {TokenEOF, "", 13}}},
+		{`label=fête`, []Token{{TokenIdent, "label", 0}, {TokenEquals, "=", 5}, {TokenIdent, "fête", 6}, {TokenEOF, "", 11}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			tokens, err := NewLexer(tt.input).Tokenize()
+			if err != nil {
+				t.Fatalf("Tokenize(%q) error = %v", tt.input, err)
+			}
+			if len(tokens) != len(tt.want) {
+				t.Fatalf("Tokenize(%q) = %+v, want %+v", tt.input, tokens, tt.want)
+			}
+			for i := range tokens {
+				if tokens[i] != tt.want[i] {
+					t.Errorf("Tokenize(%q)[%d] = %+v (value bytes % x), want %+v", tt.input, i, tokens[i], tokens[i].Value, tt.want[i])
+				}
+			}
+		})
 	}
 }

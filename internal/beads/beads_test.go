@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -593,6 +594,33 @@ func TestAncestorDirWalkEndsAtOSTempRoot(t *testing.T) {
 	}
 }
 
+// TestAncestorDirWalkStopsBelowBeadsCeiling pins that BEADS_CEILING_DIRECTORIES
+// ends every FindBeadsDir-style walk below the ceiling, so a .beads at or
+// above it is never found.
+func TestAncestorDirWalkStopsBelowBeadsCeiling(t *testing.T) {
+	sandbox := t.TempDir()
+	ceilingDir := filepath.Join(sandbox, "ceiling")
+	start := filepath.Join(ceilingDir, "project", "nested")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", filepath.Join(sandbox, "elsewhere"))
+	t.Setenv(ceiling.EnvVar, ceilingDir)
+
+	var got []string
+	walk := NewAncestorDirWalk(start, start)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
+		got = append(got, dir)
+	}
+	want := []string{
+		canonicalizeAncestorWalkPath(start),
+		canonicalizeAncestorWalkPath(filepath.Join(ceilingDir, "project")),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("walk yielded %q, want %q", got, want)
+	}
+}
+
 // TestAncestorDirWalkYieldsFilesystemRoot pins the documented choice that the
 // walk includes the filesystem root. Most of the hand-rolled loops this type
 // replaced stopped before "/"; the unified walk does not, so the behavior is
@@ -603,8 +631,10 @@ func TestAncestorDirWalkYieldsFilesystemRoot(t *testing.T) {
 	if err := os.MkdirAll(start, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Point the ceiling somewhere off this walk so it can reach the root.
+	// Point the ceiling somewhere off this walk so it can reach the root, and
+	// lift any BEADS_CEILING_DIRECTORIES the test runner set.
 	t.Setenv("TMPDIR", filepath.Join(sandbox, "tmp"))
+	t.Setenv(ceiling.EnvVar, "")
 
 	fsRoot := canonicalizeAncestorWalkPath(start)
 	for {
@@ -842,10 +872,23 @@ func setupRegularWorktreeRepo(t *testing.T) (string, string) {
 	return mainRepoDir, worktreeDir
 }
 
+// noAutoMaintenance keeps a fixture's git commit from starting the detached
+// "git maintenance run --auto" (gc --auto on git before 2.29). Its worktree-prune
+// task removes a worktree admin dir that has neither gitdir nor locked yet, which
+// is exactly the window between "git worktree add"'s mkdir and its locked write,
+// so a later "git worktree add" in the same repo can die with "could not open
+// .git/worktrees/<name>/locked for writing". Seen on ubuntu-latest with git 2.55.0.
+var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}
+
+// gitCommand builds a git command for a fixture with noAutoMaintenance applied.
+func gitCommand(args ...string) *exec.Cmd {
+	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
+}
+
 func runGitInDir(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1424,7 +1467,7 @@ func TestFindGitRoot_Worktree(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -1545,7 +1588,7 @@ func TestFindBeadsDir_Worktree(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -1646,7 +1689,7 @@ func TestFindBeadsDir_WorktreeRedirectOverride(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -1755,7 +1798,7 @@ func TestFindDatabasePath_WorktreeRedirectOverride(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -1878,7 +1921,7 @@ func TestFindBeadsDir_SiblingWorktree(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -1999,7 +2042,7 @@ func TestFindDatabasePath_Worktree(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -2104,7 +2147,7 @@ func TestFindDatabasePath_WorktreeSeparateDB(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -2220,7 +2263,7 @@ func TestFindDatabasePath_WorktreeNoLocalDB(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)

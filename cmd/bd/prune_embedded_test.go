@@ -46,7 +46,12 @@ func createAndClose(t *testing.T, bd, dir, title string) string {
 	return issue.ID
 }
 
-func TestEmbeddedPrune(t *testing.T) {
+// TestEmbeddedPruneSafetyAndScope was split from TestEmbeddedPrune
+// (originally ~256.67s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedPruneSafetyAndScope(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -94,6 +99,11 @@ func TestEmbeddedPrune(t *testing.T) {
 
 	t.Run("prune_last_issue_removes_gitignored_auto_export", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pjx")
+		// Create and close the issue before export.auto and export.git-add
+		// are on: with .beads/ ignored, an auto-export that writes issues
+		// fails its command at git add (GH#3970). Prune's empty export
+		// removes the file without staging anything.
+		target := createAndClose(t, bd, dir, "Closed exported task")
 		if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".beads/\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -109,7 +119,6 @@ func TestEmbeddedPrune(t *testing.T) {
 			}
 		}
 
-		target := createAndClose(t, bd, dir, "Closed exported task")
 		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
 		cmd := exec.Command(bd, "export", "-o", jsonlPath)
 		cmd.Dir = dir
@@ -145,6 +154,20 @@ func TestEmbeddedPrune(t *testing.T) {
 			t.Errorf("expected prune to skip closed ephemeral %s; got: %s", wispID, out)
 		}
 	})
+}
+
+// TestEmbeddedPruneDryRunAndFilters was split from TestEmbeddedPrune
+// (originally ~256.67s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedPruneDryRunAndFilters(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// ===== Scope: must NOT touch open beads =====
 
@@ -219,12 +242,12 @@ func TestEmbeddedPrune(t *testing.T) {
 	})
 }
 
-// TestPrune_protectsBeadCitedByCustomStatusBead is a regression test for the
+// TestEmbeddedPrune_protectsBeadCitedByCustomStatusBead is a regression test for the
 // maphew review of PR #4023 (be-e2nb): reference-aware prune must scan beads in
 // active *custom* statuses, not only the built-in non-closed statuses. A closed
 // bead cited by a bead in an active custom status must be protected from prune,
 // exactly like one cited by a built-in open bead.
-func TestPrune_protectsBeadCitedByCustomStatusBead(t *testing.T) {
+func TestEmbeddedPrune_protectsBeadCitedByCustomStatusBead(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

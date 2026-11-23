@@ -565,6 +565,20 @@ func TestAddDependenciesMapsTheGraphsTypedRefusals(t *testing.T) {
 			wantMembers: map[string]any{"param": "edges[0].depends_on_id"},
 		},
 		{
+			// The dotted-id hierarchy rule (issueops.CheckDottedChildDependency)
+			// is the role's validation, so it is the 400 below and never the
+			// hierarchy conflict's dependency_cycle members.
+			name: "a dotted child gated on its own parent is a 400 on edges",
+			body: oneEdge,
+			err: &issueops.DottedChildDependencyError{
+				IssueID: "bd-1.1", DependsOnID: "bd-1", Type: issueops.DepBlocks,
+			},
+			wantStatus:    http.StatusBadRequest,
+			wantCode:      CodeInvalidArgument,
+			wantMembers:   map[string]any{"param": "edges"},
+			absentMembers: []string{"issue_id", "blocker_id", "blocker_is_ancestor"},
+		},
+		{
 			name:        "the role's own validation refusal is a 400 on edges",
 			body:        oneEdge,
 			err:         fmt.Errorf("%w: add dependencies requires a dependency type", storage.ErrValidation),

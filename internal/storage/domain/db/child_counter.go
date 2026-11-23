@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 func NewChildCounterSQLRepository(runner Runner) domain.ChildCounterSQLRepository {
@@ -50,26 +51,16 @@ func (r *childCounterSQLRepositoryImpl) NextChildID(ctx context.Context, parentI
 		return "", fmt.Errorf("db: ChildCounterSQLRepository.NextChildID: read counter for %s: %w", parentID, err)
 	}
 
-	rows, err := r.runner.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id FROM %s
-		WHERE id LIKE CONCAT(?, '.%%')
-		  AND id NOT LIKE CONCAT(?, '.%%.%%')
-	`, issueTable), parentID, parentID) //nolint:gosec // G201: issueTable is one of two hardcoded constants
+	// The live children AND the retired ones: a retired child suffix is taken
+	// (issueops.UsedChildIDsInTx says why the counter alone is not enough).
+	usedIDs, err := issueops.UsedChildIDsInTx(ctx, r.runner, issueTable, parentID)
 	if err != nil {
 		return "", fmt.Errorf("db: ChildCounterSQLRepository.NextChildID: scan existing children of %s: %w", parentID, err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return "", fmt.Errorf("db: ChildCounterSQLRepository.NextChildID: scan: %w", err)
-		}
+	for _, id := range usedIDs {
 		if n, ok := parseChildSuffix(id); ok && n > lastChild {
 			lastChild = n
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("db: ChildCounterSQLRepository.NextChildID: rows: %w", err)
 	}
 
 	next := lastChild + 1

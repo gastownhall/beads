@@ -1,0 +1,6 @@
+{
+  "shape": "gc-ready-unlimited",
+  "requests": [
+    {"method":"GET","operation_id":"listReadyWork","path":"/v0/beads/ready","query":["limit","sort"],"status":200}
+  ]
+}

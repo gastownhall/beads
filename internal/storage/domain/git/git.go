@@ -129,7 +129,13 @@ func (r *gitRepositoryImpl) GetConfig(ctx context.Context, key string) (string, 
 		return "", false, fmt.Errorf("git: GetConfig: key must not be empty")
 	}
 	cmd := r.gitCmd(ctx, "config", "--get", key)
-	if key == domain.BeadsRoleConfigKey {
+	// Git config key names are case-insensitive, so match its rule: a caller
+	// spelling "Beads.Role" reads the same key and must take the same
+	// role-authority environment, not slip through on the inherited one. ToLower
+	// rather than EqualFold, following execenv.keyIdentityForWindows: EqualFold
+	// also collapses Unicode near-collisions such as s and ſ, while git folds
+	// ASCII only and rejects beadſ.role as an invalid key.
+	if strings.ToLower(key) == domain.BeadsRoleConfigKey {
 		cmd.Env = r.roleAuthorityEnv()
 	}
 	out, err := cmd.Output()
@@ -156,7 +162,10 @@ func (r *gitRepositoryImpl) SetConfig(ctx context.Context, key, value string) er
 		return fmt.Errorf("git: SetConfig: key must not be empty")
 	}
 	cmd := r.gitCmd(ctx, "config", key, value)
-	if key == domain.BeadsRoleConfigKey {
+	// Case-insensitive for the same reason as GetConfig, and with the same
+	// ToLower rule: git resolves key names case-insensitively over ASCII, so
+	// every spelling must take the role-authority environment.
+	if strings.ToLower(key) == domain.BeadsRoleConfigKey {
 		cmd.Env = r.roleAuthorityEnv()
 	}
 	out, err := cmd.CombinedOutput()

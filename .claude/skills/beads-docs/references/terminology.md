@@ -8,7 +8,7 @@ the binary still prints, the docs now lie.
 ## The discipline
 
 1. **Survey first.** Count occurrences in `docs/`, `engdocs/`, `README.md`,
-   `AGENTS.md`, `AGENT_INSTRUCTIONS.md`, and `*.go`. Read enough to tell
+   every `AGENTS.md` (root and nested), and `*.go`. Read enough to tell
    *prose* (the concept) from *literals*.
 2. **Rename prose only**, with judgment per occurrence — fix articles and
    grammar so it reads naturally.

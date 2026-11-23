@@ -10,8 +10,9 @@ import (
 // wisps tables. Such dups arise from the message→wisp dual-write window
 // (be-iabdi) and block every id-resolver lookup until removed.
 //
-// This check does not require CGO: it queries via MySQL wire protocol using
-// the same dolt-server connection as the fix package.
+// This check does not require CGO: it queries via MySQL wire protocol the
+// dolt server its fix writes, or the socket of a server only a unix socket
+// names, where the fix does not run (fix.CountCrossTableDuplicates).
 func CheckCrossTableDuplicates(path string) DoctorCheck {
 	count, err := fix.CountCrossTableDuplicates(path)
 	if err != nil {

@@ -7,15 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- beads-mcp now requires Python 3.11 or newer (`requires-python = ">=3.11"`),
+  and `uv.lock` resolves only `dnspython` 2.9.0. dnspython below 2.9.0 is
+  affected by GHSA-45c3-73f7-pv4m (CVE-2026-114605, high); it reaches
+  beads-mcp through `fastmcp` -> `pydantic[email]` -> `email-validator`.
+  dnspython 2.9.0 itself requires Python 3.11, so the lock kept 2.8.0 for
+  Python 3.10 and that environment could not be fixed without dropping it.
+  Python 3.10 users should upgrade their interpreter (or install with `uv`,
+  which fetches a supported one).
+
 ### Added
 - New `comment`, `comments`, and `note` MCP tools, wrapping the existing
   `bd comment` / `bd comments` / `bd note` CLI commands. Previously the MCP
   server exposed no way to add or read comments, so MCP-only agents could only
-  overwrite the single `notes` field — `show()` reports `comment_count` but not
-  the bodies. `comment` leaves a durable, timestamped work trail, `comments`
-  reads them back, and `note` appends to the notes field.
+  overwrite the single `notes` field. `comment` leaves a durable, timestamped
+  work trail, `comments` reads them back, and `note` appends to the notes field.
+- `show(include_comments=True)` returns the comment bodies in CLI order, and
+  `fields=["comments"]` fetches them for a projection; `show` stays count-only
+  by default, and `brief=True` never returns bodies. Both need bd 1.0.5 or
+  later (`bd show --include-comments`). `fields=` also accepts
+  `comment_count` and `comments_omitted`.
 
 ### Fixed
+- `show`, `list` and `ready` no longer drop the CLI's `comment_count` and
+  `comments_omitted`, so a response whose comment bodies were left out no
+  longer looks complete. `list`/`ready` rows and compacted previews carry both
+  fields, and the MCP derives what the CLI leaves out (`bd ready` sends a
+  count without the marker). `null` means the CLI did not report it (as on
+  `blocked`), not "no comments". (first proposed by mark-miyagi in GH#5982)
+- `update(status="open")` no longer drops the other fields of the call or fails
+  with "Invalid response for reopen" on an issue that is not closed. A closed
+  issue is still reopened through `bd reopen` (`notes` become the reason), then
+  the other fields are applied, and an error from that second step says the
+  issue was already reopened. An open, deferred or blocked issue gets an
+  ordinary `bd update` that also clears `defer_until`, so a dated defer shows in
+  `ready` again. Either way the call returns one issue. `reopen` on an issue
+  that is not closed now fails with a clear "not closed" error. (GH#6872)
 - `mcp__beads__show()` no longer crashes with `pydantic literal_error` when an
   issue has dependency types beyond the original four (`blocks`, `related`,
   `parent-child`, `discovered-from`). `DependencyType` is now `str`, matching

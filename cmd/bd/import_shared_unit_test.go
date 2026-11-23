@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -422,6 +423,75 @@ func TestClassifyDryRunImport(t *testing.T) {
 	})
 }
 
+// retiredImportLookupStore is fakeImportIssueLookupStore with the optional
+// importRetiredLookup seam: retired lists the ids a retaining sweep retired.
+type retiredImportLookupStore struct {
+	fakeImportIssueLookupStore
+	retired map[string]time.Time
+	asked   [][]string
+}
+
+func (f *retiredImportLookupStore) RetiredIssueIDs(_ context.Context, ids []string) (map[string]time.Time, error) {
+	f.asked = append(f.asked, append([]string(nil), ids...))
+	found := map[string]time.Time{}
+	for _, id := range ids {
+		if closedAt, ok := f.retired[id]; ok {
+			found[id] = closedAt
+		}
+	}
+	return found, nil
+}
+
+// TestClassifyDryRunImportReportsRetiredRows pins that a dry run agrees with
+// the real import about a row whose id a retaining sweep retired: the real
+// import skips it and lists it in retired_ids, so the preview must too —
+// never count it as a create.
+func TestClassifyDryRunImportReportsRetiredRows(t *testing.T) {
+	base := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	for _, allowStale := range []bool{false, true} {
+		t.Run(map[bool]string{false: "stale_guarded", true: "allow_stale"}[allowStale], func(t *testing.T) {
+			store := &retiredImportLookupStore{
+				fakeImportIssueLookupStore: fakeImportIssueLookupStore{issues: []*types.Issue{
+					{ID: "bd-live", Title: "live", Status: types.StatusOpen, UpdatedAt: base},
+				}},
+				retired: map[string]time.Time{"bd-retired": base, "bd-live": base},
+			}
+			incoming := []*types.Issue{
+				{ID: "bd-retired", Title: "swept op", Status: types.StatusOpen, UpdatedAt: base},
+				{ID: "bd-new", Title: "brand new", Status: types.StatusOpen, UpdatedAt: base},
+				{ID: "bd-retired", Title: "swept op again", Status: types.StatusOpen, UpdatedAt: base},
+				{ID: "bd-live", Title: "live", Status: types.StatusOpen, UpdatedAt: base},
+			}
+			result, err := classifyDryRunImport(context.Background(), store, incoming, allowStale)
+			if err != nil {
+				t.Fatalf("classifyDryRunImport: %v", err)
+			}
+			if result.Created != 1 || len(result.ImportedIDs) != 1 || result.ImportedIDs[0] != "bd-new" {
+				t.Fatalf("Created = %d, ImportedIDs = %#v; want only bd-new", result.Created, result.ImportedIDs)
+			}
+			if len(result.RetiredIDs) != 1 || result.RetiredIDs[0] != "bd-retired" {
+				t.Fatalf("RetiredIDs = %#v, want [bd-retired] (deduplicated; a live row wins over its tombstone)", result.RetiredIDs)
+			}
+			if got := result.Created + result.Updated + result.Unchanged; got != 2 {
+				t.Fatalf("Created+Updated+Unchanged = %d, want 2: the retired rows are not considered for writing", got)
+			}
+			if len(store.asked) != 1 || len(store.asked[0]) != 2 {
+				t.Fatalf("asked the store about %v; want one read of the two would-create ids", store.asked)
+			}
+		})
+	}
+}
+
+// TestImportDryRunRenderingCountsRetiredRows pins the preview's JSON and text:
+// retired rows ride retired_ids and the text names how many would be skipped.
+func TestImportDryRunRenderingCountsRetiredRows(t *testing.T) {
+	result := importResultJSON{DryRun: true}
+	applyImportDryRunClassification(&result, &ImportResult{Created: 1, ImportedIDs: []string{"bd-new"}, RetiredIDs: []string{"bd-retired"}})
+	if len(result.RetiredIDs) != 1 || result.RetiredIDs[0] != "bd-retired" {
+		t.Fatalf("RetiredIDs = %#v, want [bd-retired]", result.RetiredIDs)
+	}
+}
+
 func TestImportRowChangeSummary(t *testing.T) {
 	local := &types.Issue{
 		Title: "t", Status: types.StatusClosed, Priority: 1,
@@ -719,6 +789,65 @@ func TestFilterStaleImportIssuesSkipsProvenUnchangedRowsOnResume(t *testing.T) {
 	}
 }
 
+// bd-413ovu: import keeps a comment whose id is already stored on the issue
+// (PersistComments matches by id after a content miss), so a tie row whose
+// only difference is that comment's content is provably a no-op write. The id
+// proves only on its own issue; an id-less or unknown-id comment still needs
+// the timestamp/content proof, and other aux rows still have to be stored.
+func TestFilterStaleImportIssuesProvesStoredCommentIDUnchanged(t *testing.T) {
+	base := time.Date(2026, 8, 31, 14, 0, 0, 0, time.UTC)
+	commentAt := base.Add(-time.Hour)
+	stored := func(issueID string) *types.Comment {
+		return &types.Comment{ID: "c-" + issueID, IssueID: issueID, Author: "cat", Text: "stored text", CreatedAt: commentAt}
+	}
+	cases := []struct {
+		id      string
+		comment *types.Comment
+		labels  []string
+		lease   bool // local row carries an orphaned lease reconcile would drop
+		proven  bool
+	}{
+		{id: "bd-edited", comment: &types.Comment{ID: "c-bd-edited", Author: "dog", Text: "edited text", CreatedAt: commentAt.Add(time.Minute)}, proven: true},
+		{id: "bd-notime", comment: &types.Comment{ID: "c-bd-notime", Author: "cat", Text: "edited text"}, proven: true},
+		{id: "bd-noid-notime", comment: &types.Comment{Author: "cat", Text: "stored text"}, proven: false},
+		{id: "bd-otherowner", comment: &types.Comment{ID: "c-bd-elsewhere", Author: "cat", Text: "edited text", CreatedAt: commentAt}, proven: false},
+		{id: "bd-otherid", comment: &types.Comment{ID: "c-legacy-7", Author: "cat", Text: "stored text", CreatedAt: commentAt}, proven: true},
+		{id: "bd-newlabel", comment: &types.Comment{ID: "c-bd-newlabel", Author: "cat", Text: "edited text", CreatedAt: commentAt}, labels: []string{"new"}, proven: false},
+		{id: "bd-lease", comment: &types.Comment{ID: "c-bd-lease", Author: "cat", Text: "edited text", CreatedAt: commentAt}, lease: true, proven: false},
+	}
+	var incoming, local []*types.Issue
+	comments := map[string][]*types.Comment{"bd-elsewhere": {stored("bd-elsewhere")}}
+	var want []string
+	for _, tc := range cases {
+		incoming = append(incoming, &types.Issue{ID: tc.id, Title: "t", UpdatedAt: base, Labels: tc.labels, Comments: []*types.Comment{tc.comment}})
+		l := &types.Issue{ID: tc.id, Title: "t", UpdatedAt: base}
+		if tc.lease {
+			expires := base.Add(time.Hour)
+			l.LeaseExpiresAt = &expires
+		}
+		local = append(local, l)
+		comments[tc.id] = []*types.Comment{stored(tc.id)}
+		if tc.proven {
+			want = append(want, tc.id)
+		}
+	}
+	store := &fakeImportRelationStore{
+		fakeImportIssueLookupStore: fakeImportIssueLookupStore{issues: local},
+		comments:                   comments,
+	}
+
+	_, _, plan, err := filterStaleImportIssues(context.Background(), store, incoming)
+	if err != nil {
+		t.Fatalf("filterStaleImportIssues: %v", err)
+	}
+	got := append([]string(nil), plan.Unchanged...)
+	slices.Sort(got)
+	slices.Sort(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("plan.Unchanged = %v, want %v", got, want)
+	}
+}
+
 // A fresh import (no local match) must not pay for the aux loads at all, and
 // a store without the bulk loaders keeps the pre-wy-sbgucn behavior: every
 // tie row stays in the write set.
@@ -887,5 +1016,30 @@ func TestImportLeaseAlreadyReconciledComparesAtSecondGranularity(t *testing.T) {
 	incoming.LeaseExpiresAt = &nextSecond
 	if importLeaseAlreadyReconciled(incoming, local) {
 		t.Fatalf("a lease expiry one second apart is a different lease row")
+	}
+}
+
+// TestAssembleImportResultDedupesRetiredRowsAndDropsTheirUpdates pins the
+// real import's report when the batch skips retired rows. A file can carry a
+// retired id more than once, and RetiredIDs lists it once. A row the
+// pre-filter planned as an update (it was live then) that a retaining sweep
+// retired before the write is reported retired only: it is not in
+// UpdatedIssues and Updated does not count it.
+func TestAssembleImportResultDedupesRetiredRowsAndDropsTheirUpdates(t *testing.T) {
+	issues := []*types.Issue{
+		{ID: "bd-retired"}, {ID: "bd-swept"}, {ID: "bd-retired"}, {ID: "bd-kept"}, {ID: "bd-new"},
+	}
+	plan := importChangePlan{Updates: []ImportChange{{ID: "bd-swept"}, {ID: "bd-kept"}}}
+	retired := map[string]struct{}{"bd-retired": {}, "bd-swept": {}}
+	result := assembleImportResult(issues, nil, plan, map[string]struct{}{}, retired, nil)
+
+	if !slices.Equal(result.RetiredIDs, []string{"bd-retired", "bd-swept"}) {
+		t.Errorf("RetiredIDs = %v, want [bd-retired bd-swept]: deduplicated, in file order", result.RetiredIDs)
+	}
+	if result.Updated != 1 || len(result.UpdatedIssues) != 1 || result.UpdatedIssues[0].ID != "bd-kept" {
+		t.Errorf("Updated = %d, UpdatedIssues = %v; want only bd-kept: a retired row was not rewritten", result.Updated, result.UpdatedIssues)
+	}
+	if !slices.Equal(result.ImportedIDs, []string{"bd-kept", "bd-new"}) || result.Created != 2 {
+		t.Errorf("Created = %d, ImportedIDs = %v; want 2, [bd-kept bd-new]", result.Created, result.ImportedIDs)
 	}
 }

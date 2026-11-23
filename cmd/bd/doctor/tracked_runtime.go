@@ -30,6 +30,17 @@ var trackedRuntimePatterns = []string{
 	"dolt-server.log",
 	"dolt-server.lock",
 	"dolt-server.port",
+	"dolt-server.activity",    // GH#6191: gitignored, but gitignore cannot untrack already-committed copies
+	"dolt-server-config.yaml", // GH#6191: absolute cfg_dir + per-machine port; a committed copy breaks other clones
+
+	// GH#8318: gitignored, but gitignore cannot untrack already-committed copies.
+	// dolt-backup.json, dolt-config.log and dolt-mode-migration.json hold
+	// absolute paths; git rm --cached keeps an unfinished migration's journal.
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+	"dolt-mode-migration.json",
 
 	// Socket files
 	"bd.sock",

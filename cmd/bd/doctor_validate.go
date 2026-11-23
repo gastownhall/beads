@@ -78,12 +78,17 @@ func runValidateCheckInner(path string) (bool, error) {
 	return overallOK, nil
 }
 
-// collectValidateChecks runs the data-integrity checks.
+// collectValidateChecks runs the data-integrity checks. Orphaned Dependencies
+// asks the shared store whether the workspace has a database when it cannot
+// read the server its repair writes, so it never reports a database it did
+// not read as "N/A (no database)" and validate never passes it.
 func collectValidateChecks(path string) []validateCheckResult {
+	sharedStore := doctor.NewSharedStore(path)
+	defer sharedStore.Close()
 	return []validateCheckResult{
 		{check: convertDoctorCheck(doctor.CheckCrossTableDuplicates(path)), fixable: true},
 		{check: convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorOrchestrator, orchestratorDuplicatesThreshold))},
-		{check: convertDoctorCheck(doctor.CheckOrphanedDependencies(path)), fixable: true},
+		{check: convertDoctorCheck(doctor.CheckOrphanedDependencies(path, sharedStore)), fixable: true},
 		{check: convertDoctorCheck(doctor.CheckTestPollution(path))},
 		{check: convertDoctorCheck(doctor.CheckGitConflicts(path))},
 	}
@@ -104,6 +109,7 @@ func printValidateChecks(checks []validateCheckResult) {
 
 	var passCount, warnCount, failCount int
 	for _, cr := range checks {
+		cr.check = cr.check.printed()
 		var statusIcon string
 		switch cr.check.Status {
 		case statusOK:
@@ -164,7 +170,8 @@ func applyValidateFixes(path string, checks []validateCheckResult) {
 
 		fmt.Println("\nFixable issues:")
 		for i, check := range fixable {
-			fmt.Printf("  %d. %s: %s\n", i+1, check.Name, check.Message)
+			shown := check.printed()
+			fmt.Printf("  %d. %s: %s\n", i+1, shown.Name, shown.Message)
 		}
 		fmt.Printf("\nThis will attempt to fix %d issue(s). Continue? (Y/n): ", len(fixable))
 		reader := bufio.NewReader(os.Stdin)

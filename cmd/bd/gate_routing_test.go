@@ -14,7 +14,8 @@ import (
 // TestCheckBeadGateCrossRigPrefixRoute proves the full evaluator seam: the
 // historical rig:id value is reduced to the target bead ID, the current
 // routes.jsonl prefix router opens the foreign store read-only, and target
-// lifecycle state determines whether the gate resolves.
+// lifecycle state determines whether the gate resolves. A routed rig that
+// cannot be read leaves the gate pending: its bead is not proven gone.
 //
 // NOTE: This test uses os.Chdir and cannot run in parallel with other tests.
 func TestCheckBeadGateCrossRigPrefixRoute(t *testing.T) {
@@ -62,16 +63,31 @@ func TestCheckBeadGateCrossRigPrefixRoute(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
 
 	getter := routedBeadGateGetter{localStore: townStore}
-	resolved, reason := checkBeadGate(ctx, getter, "rig:gt-closed")
+	resolved, reason, _ := checkBeadGate(ctx, getter, "rig:gt-closed")
 	if !resolved {
 		t.Fatalf("closed cross-rig target did not resolve gate: %s", reason)
 	}
 
-	resolved, reason = checkBeadGate(ctx, getter, "rig:gt-open")
+	resolved, reason, _ = checkBeadGate(ctx, getter, "rig:gt-open")
 	if resolved {
 		t.Fatalf("open cross-rig target unexpectedly resolved gate: %s", reason)
 	}
 	if !gateTestContainsIgnoreCase(reason, "open") {
 		t.Fatalf("pending reason %q does not report target status", reason)
+	}
+
+	// Point the rig at a database that does not exist: the route still
+	// matches, but the rig's store cannot be opened, so its open bead must not
+	// read as deleted.
+	writeTestMetadata(t, filepath.Join(rigBeadsDir, "dolt"), "gate_routing_missing_db")
+	resolved, reason, err = checkBeadGate(ctx, getter, "rig:gt-open")
+	if err != nil {
+		t.Fatalf("an unreadable routed rig is a pending gate, not an error: %v", err)
+	}
+	if resolved {
+		t.Fatalf("open target in an unreadable routed rig resolved the gate: %s", reason)
+	}
+	if !gateTestContainsIgnoreCase(reason, "cannot confirm") {
+		t.Fatalf("pending reason %q does not say the absence is unconfirmed", reason)
 	}
 }

@@ -1,0 +1,852 @@
+//go:build cgo
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/memoryops"
+)
+
+type fakeConfigCommitStore struct {
+	storage.DoltStorage
+	configOnlyCalls int
+	userKVCalls     int
+	messages        []string
+	err             error
+}
+
+func (f *fakeConfigCommitStore) CommitConfigOnly(_ context.Context, message string) error {
+	f.configOnlyCalls++
+	f.messages = append(f.messages, message)
+	return f.err
+}
+
+func (f *fakeConfigCommitStore) CommitConfigUserKVOnly(_ context.Context, message string) error {
+	f.userKVCalls++
+	f.messages = append(f.messages, message)
+	return f.err
+}
+
+// GH#4078: server-mode config writes (bd remember, bd config set) must be
+// committed immediately and scoped — maybeAutoCommit skips server mode
+// entirely and generic Commit() excludes config, so nothing else ever
+// commits them.
+func TestCommitConfigWriteServerModeCommitsScoped(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	fake := &fakeConfigCommitStore{}
+	if err := commitConfigWrite(context.Background(), fake, "remember"); err != nil {
+		t.Fatalf("commitConfigWrite: %v", err)
+	}
+	if fake.configOnlyCalls != 1 {
+		t.Fatalf("CommitConfigOnly calls = %d, want 1 in server mode", fake.configOnlyCalls)
+	}
+	if fake.userKVCalls != 0 {
+		t.Fatalf("CommitConfigUserKVOnly calls = %d, want 0 for a config write", fake.userKVCalls)
+	}
+	if !strings.HasPrefix(fake.messages[0], "bd: remember (auto-commit) by ") {
+		t.Fatalf("commit message = %q, want prefix %q", fake.messages[0], "bd: remember (auto-commit) by ")
+	}
+}
+
+// A memory write commits through the kv.*-screened variant, so a concurrent
+// writer's dirty internal config key is refused instead of swept in.
+func TestCommitMemoryWriteServerModeCommitsUserKVScreened(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	fake := &fakeConfigCommitStore{}
+	if err := commitMemoryWrite(context.Background(), fake, "remember"); err != nil {
+		t.Fatalf("commitMemoryWrite: %v", err)
+	}
+	if fake.userKVCalls != 1 {
+		t.Fatalf("CommitConfigUserKVOnly calls = %d, want 1 in server mode", fake.userKVCalls)
+	}
+	if fake.configOnlyCalls != 0 {
+		t.Fatalf("CommitConfigOnly calls = %d, want 0 for a memory write", fake.configOnlyCalls)
+	}
+}
+
+// GH#7523: a kv write is user kv.* data, so like a memory write its commit
+// goes through the kv.*-screened variant, never the unscreened config commit,
+// and its message names the kv verb.
+func TestCommitKVWriteServerModeCommitsUserKVScreened(t *testing.T) {
+	for _, command := range []string{"kv set", "kv clear"} {
+		t.Run(command, func(t *testing.T) {
+			saveStorageMode(t)
+			serverMode = true
+
+			fake := &fakeConfigCommitStore{}
+			if err := commitKVWrite(context.Background(), fake, command); err != nil {
+				t.Fatalf("commitKVWrite: %v", err)
+			}
+			if fake.userKVCalls != 1 {
+				t.Fatalf("CommitConfigUserKVOnly calls = %d, want 1 in server mode", fake.userKVCalls)
+			}
+			if fake.configOnlyCalls != 0 {
+				t.Fatalf("CommitConfigOnly calls = %d, want 0 for a kv write", fake.configOnlyCalls)
+			}
+			if want := "bd: " + command + " (auto-commit) by "; !strings.HasPrefix(fake.messages[0], want) {
+				t.Fatalf("commit message = %q, want prefix %q", fake.messages[0], want)
+			}
+		})
+	}
+}
+
+// The screen's refusal reaches the user rather than being taken for a
+// nothing-to-commit no-op, and keeps its type through the wrap: the --json
+// payload names the refused keys from it.
+func TestCommitMemoryWriteSurfacesScreenRefusal(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	fake := &fakeConfigCommitStore{err: &storage.ConfigCommitRefusedError{Keys: []string{"issue_prefix"}}}
+	err := commitMemoryWrite(context.Background(), fake, "forget")
+	var refused *storage.ConfigCommitRefusedError
+	if !errors.As(err, &refused) || !slices.Equal(refused.Keys, []string{"issue_prefix"}) {
+		t.Fatalf("commitMemoryWrite error = %v, want the screen's refusal naming issue_prefix", err)
+	}
+}
+
+// memoryCommitFields is how --json learns that a memory write landed but was
+// not committed, which the exit code no longer says. A committed write adds
+// nothing, so its payload keeps the shipped shape. A commit that may have
+// landed is qualified, not reported as committed: committed stays false.
+func TestMemoryCommitFields(t *testing.T) {
+	refusal := fmt.Errorf("committing memory write: %w",
+		&storage.ConfigCommitRefusedError{Keys: []string{"issue_prefix", "sync.branch"}})
+	failure := errors.New("committing memory write: connection refused")
+	indeterminate := fmt.Errorf("committing memory write: %w", errIndeterminateCommit)
+	for _, tc := range []struct {
+		name      string
+		commitErr error
+		want      map[string]interface{}
+	}{
+		{name: "committed", want: map[string]interface{}{"key": "k"}},
+		{name: "refused by the kv.* screen", commitErr: refusal, want: map[string]interface{}{
+			"key":               "k",
+			"committed":         false,
+			"commit_error":      refusal.Error(),
+			"dirty_config_keys": []string{"issue_prefix", "sync.branch"},
+		}},
+		{name: "failed for another reason", commitErr: failure, want: map[string]interface{}{
+			"key":          "k",
+			"committed":    false,
+			"commit_error": failure.Error(),
+		}},
+		{name: "may have landed", commitErr: indeterminate, want: map[string]interface{}{
+			"key":                  "k",
+			"committed":            false,
+			"commit_error":         indeterminate.Error(),
+			"commit_indeterminate": true,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]interface{}{"key": "k"}
+			memoryCommitFields(payload, tc.commitErr)
+			if !reflect.DeepEqual(payload, tc.want) {
+				t.Fatalf("payload = %#v, want %#v", payload, tc.want)
+			}
+		})
+	}
+}
+
+// errIndeterminateCommit is what the SQL-server store returns when the
+// connection drops during DOLT_COMMIT: the commit may or may not have landed.
+var errIndeterminateCommit = fmt.Errorf("dolt commit after SQL mutation: %w: %w",
+	errors.New("invalid connection"), storage.ErrCommitIndeterminate)
+
+// refusingMemoryStore is a SQL-server store on which a memory write lands and
+// its kv.*-screened commit is refused: what a dirty internal key, such as the
+// issue_prefix `bd rename-prefix` leaves, makes of every remember and forget.
+type refusingMemoryStore struct {
+	storage.DoltStorage
+	memories  *landingMemories
+	commitErr error
+	commits   int
+}
+
+func (s *refusingMemoryStore) Memories() (memoryops.Memories, error) { return s.memories, nil }
+
+func (s *refusingMemoryStore) CommitConfigUserKVOnly(context.Context, string) error {
+	s.commits++
+	return s.commitErr
+}
+
+type landingMemories struct {
+	memoryops.Memories
+	stored map[string]string
+}
+
+func (m *landingMemories) Remember(_ context.Context, req memoryops.RememberRequest) (memoryops.RememberResult, error) {
+	_, replaced := m.stored[req.Key]
+	m.stored[req.Key] = req.Content
+	return memoryops.RememberResult{Key: req.Key, Value: req.Content, Replaced: replaced}, nil
+}
+
+func (m *landingMemories) Forget(_ context.Context, req memoryops.ForgetRequest) (memoryops.ForgetResult, error) {
+	value, found := m.stored[req.Key]
+	delete(m.stored, req.Key)
+	return memoryops.ForgetResult{Key: req.Key, Value: value, Found: found}, nil
+}
+
+// A refused memory commit must not turn a write that landed into exit 1:
+// remember and forget warn on stderr, print their normal result and, under
+// --json, add committed:false and the refused keys. v1.0.1 (#3052) warned and
+// carried on the same way.
+func TestMemoryCommandsWarnAndSucceedWhenTheCommitIsRefused(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%v", asJSON), func(t *testing.T) {
+			t.Setenv("BEADS_DIR", t.TempDir())
+			saveAndRestoreGlobals(t)
+			saveStorageMode(t)
+			serverMode = true
+			fake := &refusingMemoryStore{
+				memories:  &landingMemories{stored: map[string]string{}},
+				commitErr: &storage.ConfigCommitRefusedError{Keys: []string{"issue_prefix"}},
+			}
+			store = fake
+			setStoreActive(true)
+			savedKey, savedJSON, savedConfigInt := memoryKeyFlag, jsonOutput, memoryConfigInt
+			t.Cleanup(func() { memoryKeyFlag, jsonOutput, memoryConfigInt = savedKey, savedJSON, savedConfigInt })
+			memoryKeyFlag, jsonOutput = "gh4078", asJSON
+			memoryConfigInt = func(string) int { return 0 }
+
+			for _, step := range []struct {
+				cmd  string
+				run  func() error
+				text string
+				json map[string]interface{}
+			}{
+				{
+					cmd:  "remember",
+					run:  func() error { return rememberCmd.RunE(rememberCmd, []string{"a memory that lands"}) },
+					text: "Remembered [gh4078]: a memory that lands",
+					json: map[string]interface{}{"key": "gh4078", "value": "a memory that lands", "action": "remembered"},
+				},
+				{
+					cmd:  "forget",
+					run:  func() error { return forgetCmd.RunE(forgetCmd, []string{"gh4078"}) },
+					text: "Forgot [gh4078]: a memory that lands",
+					json: map[string]interface{}{"key": "gh4078", "deleted": "true"},
+				},
+			} {
+				var runErr error
+				stdout, stderr := captureStdio(t, func() { runErr = step.run() })
+				if runErr != nil {
+					t.Fatalf("bd %s returned %v after its write landed, want success with a warning", step.cmd, runErr)
+				}
+				if !strings.Contains(stderr, "Warning: committing memory write: refusing to commit") ||
+					!strings.Contains(stderr, "issue_prefix") {
+					t.Errorf("bd %s stderr does not warn about the refused commit naming issue_prefix:\n%s", step.cmd, stderr)
+				}
+				if !asJSON {
+					if !strings.Contains(stdout, step.text) {
+						t.Errorf("bd %s stdout = %q, want the normal result %q", step.cmd, stdout, step.text)
+					}
+					continue
+				}
+				var got map[string]interface{}
+				if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+					t.Fatalf("bd %s --json stdout is not one JSON object: %v\n%s", step.cmd, err, stdout)
+				}
+				want := step.json
+				want["schema_version"] = float64(JSONSchemaVersion)
+				want["committed"] = false
+				want["commit_error"] = "committing memory write: " + fake.commitErr.Error()
+				want["dirty_config_keys"] = []interface{}{"issue_prefix"}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("bd %s --json = %#v, want %#v", step.cmd, got, want)
+				}
+			}
+			if fake.commits != 2 {
+				t.Errorf("CommitConfigUserKVOnly calls = %d, want one per command", fake.commits)
+			}
+			if len(fake.memories.stored) != 0 {
+				t.Errorf("stored memories = %v, want the forget to have landed too", fake.memories.stored)
+			}
+		})
+	}
+}
+
+// The proxied route's role commits each config write inside its own unit of
+// work, so committing again here would be a second commit for the same write.
+func TestCommitConfigWriteProxiedServerModeIsNoOp(t *testing.T) {
+	saveStorageMode(t)
+	proxiedServerMode = true
+
+	fake := &fakeConfigCommitStore{}
+	if err := commitConfigWrite(context.Background(), fake, "config set"); err != nil {
+		t.Fatalf("commitConfigWrite: %v", err)
+	}
+	if fake.configOnlyCalls != 0 {
+		t.Fatalf("CommitConfigOnly calls = %d, want 0 in proxied server mode", fake.configOnlyCalls)
+	}
+}
+
+// batch and off defer server-mode version commits to `bd dolt commit`, whose
+// CommitAll includes config, so a config write must defer with them.
+func TestCommitConfigWriteHonorsBatchAndOffModes(t *testing.T) {
+	for _, mode := range []doltAutoCommitMode{doltAutoCommitBatch, doltAutoCommitOff} {
+		t.Run(string(mode), func(t *testing.T) {
+			saveStorageMode(t)
+			serverMode = true
+			doltAutoCommit = string(mode)
+
+			fake := &fakeConfigCommitStore{}
+			if err := commitConfigWrite(context.Background(), fake, "remember"); err != nil {
+				t.Fatalf("commitConfigWrite: %v", err)
+			}
+			if fake.configOnlyCalls != 0 {
+				t.Fatalf("CommitConfigOnly calls = %d, want 0 in %s mode", fake.configOnlyCalls, mode)
+			}
+		})
+	}
+}
+
+// Embedded mode already commits config through the PersistentPostRun
+// auto-commit, so the helper must not double-commit there.
+func TestCommitConfigWriteEmbeddedModeIsNoOp(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = false
+	proxiedServerMode = false
+
+	fake := &fakeConfigCommitStore{}
+	if err := commitConfigWrite(context.Background(), fake, "remember"); err != nil {
+		t.Fatalf("commitConfigWrite: %v", err)
+	}
+	if fake.configOnlyCalls != 0 {
+		t.Fatalf("CommitConfigOnly calls = %d, want 0 in embedded mode", fake.configOnlyCalls)
+	}
+}
+
+// A real commit failure must surface — silently losing the commit is the
+// exact bug class this helper exists to fix (GH#4078's silent no-op half).
+func TestCommitConfigWriteSurfacesCommitError(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	fake := &fakeConfigCommitStore{err: errors.New("connection refused")}
+	err := commitConfigWrite(context.Background(), fake, "remember")
+	if err == nil {
+		t.Fatal("commitConfigWrite returned nil, want the commit error surfaced")
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("error = %q, want it to wrap %q", err.Error(), "connection refused")
+	}
+}
+
+// "Nothing to commit" is a benign race (e.g. the same key re-written to an
+// identical value) and must not fail the user's write.
+func TestCommitConfigWriteSwallowsNothingToCommit(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	fake := &fakeConfigCommitStore{err: errors.New("nothing to commit")}
+	if err := commitConfigWrite(context.Background(), fake, "remember"); err != nil {
+		t.Fatalf("commitConfigWrite: %v, want nothing-to-commit swallowed", err)
+	}
+	if fake.configOnlyCalls != 1 {
+		t.Fatalf("CommitConfigOnly calls = %d, want 1", fake.configOnlyCalls)
+	}
+}
+
+// The yaml-only secret branch of `bd config unset` deletes a credential row an
+// older bd left in the config table. On the SQL-server route only this commit
+// takes the delete to HEAD, the commit `bd dolt push` publishes, so it must
+// happen; and since the delete has landed by then, a failed commit warns
+// rather than failing the command.
+func TestConfigUnsetCommitsTheLeakedRowDelete(t *testing.T) {
+	setup := func(t *testing.T, stored map[string]string, commitErr error) *leakedRowStore {
+		t.Helper()
+		newLeakedSecretWorkspace(t, "notion:\n  token: yaml-copy\n", true)
+		installLeakedRowSettings(t, &recordingWorkspaceConfig{stored: stored})
+		saveStorageMode(t)
+		serverMode = true
+		fake := store.(*leakedRowStore)
+		fake.commitErr = commitErr
+		return fake
+	}
+
+	t.Run("a removed row is committed", func(t *testing.T) {
+		fake := setup(t, map[string]string{"notion.token": "leaked-db-value"}, nil)
+		stdout, stderr, err := runConfigUnset(t, "notion.token", false)
+		if err != nil {
+			t.Fatalf("config unset notion.token: %v", err)
+		}
+		if len(fake.commits) != 1 || !strings.HasPrefix(fake.commits[0], "bd: config unset (auto-commit) by ") {
+			t.Fatalf("commits = %q, want one config unset auto-commit — HEAD still publishes the credential", fake.commits)
+		}
+		if !strings.Contains(stdout, "Also removed a stored notion.token row") {
+			t.Errorf("the removal was not reported; stdout:\n%s", stdout)
+		}
+		if strings.Contains(stderr, "not committed") {
+			t.Errorf("a committed removal was reported as uncommitted; stderr:\n%s", stderr)
+		}
+	})
+
+	t.Run("no row: nothing to commit", func(t *testing.T) {
+		fake := setup(t, map[string]string{}, nil)
+		if _, _, err := runConfigUnset(t, "notion.token", false); err != nil {
+			t.Fatalf("config unset notion.token: %v", err)
+		}
+		if len(fake.commits) != 0 {
+			t.Errorf("commits = %q, want none when no row was removed", fake.commits)
+		}
+	})
+
+	t.Run("a failed commit warns and the unset still succeeds", func(t *testing.T) {
+		fake := setup(t, map[string]string{"notion.token": "leaked-db-value"}, errors.New("connection refused"))
+		stdout, stderr, err := runConfigUnset(t, "notion.token", false)
+		if err != nil {
+			t.Fatalf("config unset notion.token returned %v, want success: the delete and the YAML unset both landed", err)
+		}
+		if len(fake.commits) != 1 {
+			t.Fatalf("commits = %q, want the one attempt", fake.commits)
+		}
+		if !strings.Contains(stdout, "Also removed a stored notion.token row") {
+			t.Errorf("the removal was not reported; stdout:\n%s", stdout)
+		}
+		for _, want := range []string{"The removal is not committed", "connection refused", "bd dolt commit"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr does not carry %q:\n%s", want, stderr)
+			}
+		}
+	})
+
+	t.Run("--json reports a failed commit", func(t *testing.T) {
+		setup(t, map[string]string{"notion.token": "leaked-db-value"}, errors.New("connection refused"))
+		stdout, _, err := runConfigUnset(t, "notion.token", true)
+		if err != nil {
+			t.Fatalf("config unset notion.token --json: %v", err)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+			t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+		}
+		if got["database_row_removed"] != true {
+			t.Errorf("database_row_removed = %v, want true", got["database_row_removed"])
+		}
+		if msg, _ := got["database_commit_failed"].(string); !strings.Contains(msg, "connection refused") {
+			t.Errorf("database_commit_failed = %v, want the commit error", got["database_commit_failed"])
+		}
+		if v, ok := got["database_commit_indeterminate"]; ok {
+			t.Errorf("database_commit_indeterminate = %v for a commit that failed outright, want it absent", v)
+		}
+	})
+
+	// After storage.ErrCommitIndeterminate the commit may have landed, so the
+	// report must not assert that HEAD still carries the row; and --json keeps
+	// database_commit_failed beside the qualifier, so a script that reads only
+	// that field is still told to commit.
+	t.Run("an indeterminate commit is hedged, not reported as failed", func(t *testing.T) {
+		setup(t, map[string]string{"notion.token": "leaked-db-value"}, errIndeterminateCommit)
+		_, stderr, err := runConfigUnset(t, "notion.token", false)
+		if err != nil {
+			t.Fatalf("config unset notion.token returned %v, want success: the delete and the YAML unset both landed", err)
+		}
+		for _, want := range []string{"The removal may not be committed", "write commit result indeterminate", "bd dolt commit"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr does not carry %q:\n%s", want, stderr)
+			}
+		}
+		if strings.Contains(stderr, "The removal is not committed") {
+			t.Errorf("a commit that may have landed was reported as not committed; stderr:\n%s", stderr)
+		}
+	})
+
+	t.Run("--json qualifies an indeterminate commit", func(t *testing.T) {
+		setup(t, map[string]string{"notion.token": "leaked-db-value"}, errIndeterminateCommit)
+		stdout, _, err := runConfigUnset(t, "notion.token", true)
+		if err != nil {
+			t.Fatalf("config unset notion.token --json: %v", err)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+			t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+		}
+		if msg, _ := got["database_commit_failed"].(string); !strings.Contains(msg, "write commit result indeterminate") {
+			t.Errorf("database_commit_failed = %v, want the commit error kept beside the qualifier", got["database_commit_failed"])
+		}
+		if got["database_commit_indeterminate"] != true {
+			t.Errorf("database_commit_indeterminate = %v, want true", got["database_commit_indeterminate"])
+		}
+	})
+}
+
+// rowNote folds the database half into the error a failed YAML unset returns,
+// so it hedges an indeterminate commit the same way describe does.
+func TestSecretRowCleanupRowNoteHedgesAnIndeterminateCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		commitErr     error
+		want, notWant string
+	}{
+		{name: "failed", commitErr: errors.New("connection refused"),
+			want: "the removal is not committed", notWant: "may not be committed"},
+		{name: "indeterminate", commitErr: errIndeterminateCommit,
+			want: "the removal may not be committed", notWant: "is not committed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			note := secretRowCleanup{present: true, removed: true, commitErr: tc.commitErr}.rowNote("notion.token")
+			if !strings.Contains(note, tc.want) || strings.Contains(note, tc.notWant) {
+				t.Errorf("rowNote = %q, want %q and not %q", note, tc.want, tc.notWant)
+			}
+		})
+	}
+}
+
+func TestCommitConfigWriteNilStoreIsNoOp(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	if err := commitConfigWrite(context.Background(), nil, "remember"); err != nil {
+		t.Fatalf("commitConfigWrite with nil store: %v, want no-op", err)
+	}
+}
+
+// kvCommitStore is a SQL-server store for the direct `bd kv set`/`clear`
+// route: the config rows live in a map, and every version commit is recorded.
+type kvCommitStore struct {
+	storage.DoltStorage
+	rows            map[string]string
+	writeErr        error
+	commitErr       error
+	userKVMessages  []string
+	configOnlyCalls int
+}
+
+func (s *kvCommitStore) SetConfig(_ context.Context, key, value string) error {
+	if s.writeErr != nil {
+		return s.writeErr
+	}
+	s.rows[key] = value
+	return nil
+}
+
+func (s *kvCommitStore) DeleteConfig(_ context.Context, key string) error {
+	if s.writeErr != nil {
+		return s.writeErr
+	}
+	delete(s.rows, key)
+	return nil
+}
+
+func (s *kvCommitStore) CommitConfigUserKVOnly(_ context.Context, message string) error {
+	s.userKVMessages = append(s.userKVMessages, message)
+	return s.commitErr
+}
+
+func (s *kvCommitStore) CommitConfigOnly(context.Context, string) error {
+	s.configOnlyCalls++
+	return nil
+}
+
+// useKVCommitStore makes fake the active direct SQL-server store for the kv
+// commands, with auto-commit on and the write flag cleared.
+func useKVCommitStore(t *testing.T, fake *kvCommitStore, asJSON bool) {
+	t.Helper()
+	t.Setenv("BEADS_DIR", t.TempDir())
+	saveAndRestoreGlobals(t)
+	saveStorageMode(t)
+	serverMode = true
+	proxiedServerMode = false
+	store = fake
+	setStoreActive(true)
+	savedJSON, savedWrote := jsonOutput, commandDidWrite.Load()
+	t.Cleanup(func() {
+		jsonOutput = savedJSON
+		commandDidWrite.Store(savedWrote)
+	})
+	jsonOutput = asJSON
+	commandDidWrite.Store(false)
+}
+
+type kvWriteStep struct {
+	verb string
+	run  func() error
+	text string
+	json map[string]interface{}
+}
+
+func kvWriteSteps() []kvWriteStep {
+	return []kvWriteStep{
+		{
+			verb: "kv set",
+			run:  func() error { return kvSetCmd.RunE(kvSetCmd, []string{"gh7523", "landed"}) },
+			text: "Set gh7523 = landed",
+			json: map[string]interface{}{"key": "gh7523", "value": "landed"},
+		},
+		{
+			verb: "kv clear",
+			run:  func() error { return kvClearCmd.RunE(kvClearCmd, []string{"gh7523"}) },
+			text: "Cleared gh7523",
+			json: map[string]interface{}{"key": "gh7523", "deleted": "true"},
+		},
+	}
+}
+
+// GH#7523: on the direct SQL-server route nothing but the command itself
+// version-commits a kv write. Each verb takes exactly one commit, through the
+// kv.*-screened variant, with a message naming the verb.
+func TestKVCommandsCommitThroughTheUserKVScreen(t *testing.T) {
+	fake := &kvCommitStore{rows: map[string]string{}}
+	useKVCommitStore(t, fake, false)
+
+	for i, step := range kvWriteSteps() {
+		commandDidWrite.Store(false)
+		var runErr error
+		stdout, stderr := captureStdio(t, func() { runErr = step.run() })
+		if runErr != nil {
+			t.Fatalf("bd %s: %v", step.verb, runErr)
+		}
+		if !strings.Contains(stdout, step.text) {
+			t.Errorf("bd %s stdout = %q, want %q", step.verb, stdout, step.text)
+		}
+		if strings.Contains(stderr, "Warning") {
+			t.Errorf("bd %s warned on a commit that succeeded:\n%s", step.verb, stderr)
+		}
+		if !commandDidWrite.Load() {
+			t.Errorf("bd %s did not mark the command as having written", step.verb)
+		}
+		if len(fake.userKVMessages) != i+1 {
+			t.Fatalf("after bd %s: CommitConfigUserKVOnly calls = %d, want %d (one per command)",
+				step.verb, len(fake.userKVMessages), i+1)
+		}
+		if want := "bd: " + step.verb + " (auto-commit) by "; !strings.HasPrefix(fake.userKVMessages[i], want) {
+			t.Errorf("bd %s commit message = %q, want prefix %q", step.verb, fake.userKVMessages[i], want)
+		}
+	}
+	if fake.configOnlyCalls != 0 {
+		t.Errorf("CommitConfigOnly calls = %d, want 0: a kv write must not sweep in internal config", fake.configOnlyCalls)
+	}
+	if len(fake.rows) != 0 {
+		t.Errorf("config rows = %v, want the set row cleared again", fake.rows)
+	}
+}
+
+// The screen's refusal keeps its type through the kv wrap, and an ordinary
+// commit failure is attributed to the kv commit, not to the write.
+func TestCommitKVWriteSurfacesScreenRefusal(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	fake := &fakeConfigCommitStore{err: &storage.ConfigCommitRefusedError{Keys: []string{"issue_prefix"}}}
+	err := commitKVWrite(context.Background(), fake, "kv set")
+	var refused *storage.ConfigCommitRefusedError
+	if !errors.As(err, &refused) || !slices.Equal(refused.Keys, []string{"issue_prefix"}) {
+		t.Fatalf("commitKVWrite error = %v, want the screen's refusal naming issue_prefix", err)
+	}
+	if !strings.HasPrefix(err.Error(), "committing kv write: ") {
+		t.Fatalf("commitKVWrite error = %q, want the kv commit prefix", err)
+	}
+
+	fake = &fakeConfigCommitStore{err: errors.New("connection refused")}
+	err = commitKVWrite(context.Background(), fake, "kv clear")
+	if err == nil || err.Error() != "committing kv write: connection refused" {
+		t.Fatalf("commitKVWrite error = %v, want %q", err, "committing kv write: connection refused")
+	}
+}
+
+// GH#7523: the kv write has landed by the time its commit runs, so a commit
+// the kv.* screen refuses (a dirty internal key such as `bd rename-prefix`
+// leaves) or that fails outright is a stderr warning, not exit 1, and the
+// text and --json results keep their shipped shape: no commit-status fields.
+func TestKVCommandsWarnAndSucceedWhenTheCommitIsRefused(t *testing.T) {
+	refusal := &storage.ConfigCommitRefusedError{Keys: []string{"issue_prefix"}}
+	for _, tc := range []struct {
+		name      string
+		commitErr error
+		warning   []string
+	}{
+		{name: "refused", commitErr: refusal,
+			warning: []string{"Warning: committing kv write: refusing to commit", "issue_prefix"}},
+		{name: "failed", commitErr: errors.New("connection refused"),
+			warning: []string{"Warning: committing kv write: connection refused"}},
+		{name: "indeterminate", commitErr: errIndeterminateCommit,
+			warning: []string{"Warning: committing kv write: ", "write commit result indeterminate"}},
+	} {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", tc.name, asJSON), func(t *testing.T) {
+				fake := &kvCommitStore{rows: map[string]string{}, commitErr: tc.commitErr}
+				useKVCommitStore(t, fake, asJSON)
+
+				for i, step := range kvWriteSteps() {
+					commandDidWrite.Store(false)
+					var runErr error
+					stdout, stderr := captureStdio(t, func() { runErr = step.run() })
+					if runErr != nil {
+						t.Fatalf("bd %s returned %v after its write landed, want success with a warning", step.verb, runErr)
+					}
+					for _, want := range tc.warning {
+						if !strings.Contains(stderr, want) {
+							t.Errorf("bd %s stderr does not carry %q:\n%s", step.verb, want, stderr)
+						}
+					}
+					if !commandDidWrite.Load() {
+						t.Errorf("bd %s did not mark the command as having written", step.verb)
+					}
+					if len(fake.userKVMessages) != i+1 {
+						t.Errorf("after bd %s: CommitConfigUserKVOnly calls = %d, want %d (one attempt per command, no retry)",
+							step.verb, len(fake.userKVMessages), i+1)
+					}
+					if !asJSON {
+						if strings.TrimSpace(stdout) != step.text {
+							t.Errorf("bd %s stdout = %q, want only the normal result %q", step.verb, stdout, step.text)
+						}
+						continue
+					}
+					var got map[string]interface{}
+					if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+						t.Fatalf("bd %s --json stdout is not one JSON object: %v\n%s", step.verb, err, stdout)
+					}
+					want := map[string]interface{}{"schema_version": float64(JSONSchemaVersion)}
+					for k, v := range step.json {
+						want[k] = v
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("bd %s --json = %#v, want the shipped shape %#v", step.verb, got, want)
+					}
+				}
+				if len(fake.rows) != 0 {
+					t.Errorf("config rows = %v, want the set and the clear both landed", fake.rows)
+				}
+			})
+		}
+	}
+}
+
+// A kv write that fails never landed: there is nothing to commit, so the
+// command neither arms the write flag nor attempts a commit.
+func TestKVCommandsDoNotCommitAFailedWrite(t *testing.T) {
+	fake := &kvCommitStore{rows: map[string]string{}, writeErr: errors.New("connection refused")}
+	useKVCommitStore(t, fake, false)
+
+	for _, step := range kvWriteSteps() {
+		commandDidWrite.Store(false)
+		var runErr error
+		captureStdio(t, func() { runErr = step.run() })
+		if runErr == nil {
+			t.Fatalf("bd %s succeeded on a failed write, want its error", step.verb)
+		}
+		if commandDidWrite.Load() {
+			t.Errorf("bd %s marked a failed write as having written", step.verb)
+		}
+	}
+	if len(fake.userKVMessages) != 0 || fake.configOnlyCalls != 0 {
+		t.Errorf("commits attempted after failed writes: user kv %d, config only %d, want none",
+			len(fake.userKVMessages), fake.configOnlyCalls)
+	}
+}
+
+type closedConfigCommitStore struct{ fakeConfigCommitStore }
+
+func (*closedConfigCommitStore) IsClosed() bool { return true }
+
+// commitKVWrite commits nothing where something else owns that commit: the
+// embedded end-of-command auto-commit, the proxied role's unit of work, and
+// dolt.auto-commit batch/off, which defer it to `bd dolt commit`. A nil or
+// closed store has nothing to commit, and nothing-to-commit is no failure.
+func TestCommitKVWriteIsNoOpWhereSomethingElseOwnsTheCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func()
+		store func() *fakeConfigCommitStore
+		calls int
+	}{
+		{name: "embedded", setup: func() { serverMode, proxiedServerMode = false, false }},
+		{name: "proxied", setup: func() { proxiedServerMode = true }},
+		{name: "batch", setup: func() { serverMode, doltAutoCommit = true, string(doltAutoCommitBatch) }},
+		{name: "off", setup: func() { serverMode, doltAutoCommit = true, string(doltAutoCommitOff) }},
+		{name: "nothing to commit", setup: func() { serverMode = true }, calls: 1,
+			store: func() *fakeConfigCommitStore {
+				return &fakeConfigCommitStore{err: errors.New("nothing to commit")}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saveStorageMode(t)
+			tc.setup()
+			fake := &fakeConfigCommitStore{}
+			if tc.store != nil {
+				fake = tc.store()
+			}
+			if err := commitKVWrite(context.Background(), fake, "kv set"); err != nil {
+				t.Fatalf("commitKVWrite: %v, want a no-op", err)
+			}
+			if fake.userKVCalls != tc.calls || fake.configOnlyCalls != 0 {
+				t.Fatalf("commit calls: user kv %d, config only %d; want %d and 0",
+					fake.userKVCalls, fake.configOnlyCalls, tc.calls)
+			}
+		})
+	}
+
+	t.Run("nil store", func(t *testing.T) {
+		saveStorageMode(t)
+		serverMode = true
+		if err := commitKVWrite(context.Background(), nil, "kv clear"); err != nil {
+			t.Fatalf("commitKVWrite with nil store: %v, want no-op", err)
+		}
+	})
+
+	t.Run("closed store", func(t *testing.T) {
+		saveStorageMode(t)
+		serverMode = true
+		closed := &closedConfigCommitStore{}
+		if err := commitKVWrite(context.Background(), closed, "kv clear"); err != nil {
+			t.Fatalf("commitKVWrite with a closed store: %v, want no-op", err)
+		}
+		if closed.userKVCalls != 0 {
+			t.Fatalf("CommitConfigUserKVOnly calls = %d on a closed store, want 0", closed.userKVCalls)
+		}
+	})
+}
+
+// Under dolt.auto-commit batch or off a server-mode kv write still lands but
+// makes no version commit and no warning: it stays in the working set for
+// `bd dolt commit`, like every other deferred server-mode write. Each verb
+// must still arm the write flag: unwired code also commits nothing, but only
+// because it arms nothing, so the deferral has to come from the policy.
+func TestKVCommandsDeferTheCommitUnderBatchAndOff(t *testing.T) {
+	for _, mode := range []doltAutoCommitMode{doltAutoCommitBatch, doltAutoCommitOff} {
+		t.Run(string(mode), func(t *testing.T) {
+			fake := &kvCommitStore{rows: map[string]string{}}
+			useKVCommitStore(t, fake, false)
+			doltAutoCommit = string(mode)
+
+			for _, step := range kvWriteSteps() {
+				commandDidWrite.Store(false)
+				var runErr error
+				_, stderr := captureStdio(t, func() { runErr = step.run() })
+				if runErr != nil {
+					t.Fatalf("bd %s: %v", step.verb, runErr)
+				}
+				if !commandDidWrite.Load() {
+					t.Errorf("bd %s under %s did not arm the write flag; the deferral must come from the policy, not from missing wiring", step.verb, mode)
+				}
+				if strings.Contains(stderr, "Warning") {
+					t.Errorf("bd %s warned under %s:\n%s", step.verb, mode, stderr)
+				}
+				if step.verb == "kv set" && fake.rows["kv.gh7523"] != "landed" {
+					t.Errorf("bd kv set under %s did not land the row: %v", mode, fake.rows)
+				}
+			}
+			if len(fake.rows) != 0 {
+				t.Errorf("config rows = %v, want the clear landed", fake.rows)
+			}
+			if len(fake.userKVMessages) != 0 || fake.configOnlyCalls != 0 {
+				t.Errorf("version commits under %s: user kv %d, config only %d; want none",
+					mode, len(fake.userKVMessages), fake.configOnlyCalls)
+			}
+		})
+	}
+}

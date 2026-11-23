@@ -88,11 +88,16 @@ func (m *memories) Recall(ctx context.Context, req memoryops.RecallRequest) (mem
 		return memoryops.RecallResult{}, err
 	}
 	return RunTxRead(ctx, m.provider, func(ctx context.Context, uw UnitOfWork) (memoryops.RecallResult, error) {
-		value, err := uw.ConfigUseCase().GetConfig(ctx, storagememoryops.StorageKey(key))
+		// The same whole-table probe as Remember, for the reason given there:
+		// Found is about the ROW, GetConfig answers "" for a missing row and an
+		// empty one alike, and the map's key set is the only place the
+		// difference survives. It is one query on a table of tens of rows.
+		all, err := uw.ConfigUseCase().GetAllConfig(ctx)
 		if err != nil {
 			return memoryops.RecallResult{}, err
 		}
-		return memoryops.RecallResult{Key: key, Value: value, Found: value != ""}, nil
+		value, found := all[storagememoryops.StorageKey(key)]
+		return memoryops.RecallResult{Key: key, Value: value, Found: found}, nil
 	})
 }
 
@@ -111,11 +116,14 @@ func (m *memories) Forget(ctx context.Context, req memoryops.ForgetRequest) (mem
 	storageKey := storagememoryops.StorageKey(key)
 	result, err := RunTxResult(ctx, m.provider, func(ctx context.Context, uw UnitOfWork) (memoryops.ForgetResult, string, error) {
 		cfg := uw.ConfigUseCase()
-		previous, err := cfg.GetConfig(ctx, storageKey)
+		// The row probe Remember and Recall use: gating on GetConfig's "" is
+		// what left a memory stored empty unforgettable.
+		all, err := cfg.GetAllConfig(ctx)
 		if err != nil {
 			return memoryops.ForgetResult{}, "", err
 		}
-		if previous == "" {
+		previous, found := all[storageKey]
+		if !found {
 			return memoryops.ForgetResult{Key: key}, "", nil
 		}
 		if err := cfg.DeleteConfig(ctx, storageKey); err != nil {

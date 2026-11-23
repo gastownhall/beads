@@ -40,10 +40,11 @@ type CloseBatchRequest struct {
 	Items []BatchCloseItem
 	// Session records the closing session against every item.
 	Session string
-	// Force bypasses only blocker and open-child close policy, for every item.
-	// It never bypasses validation, and it never bypasses existence: an id that
-	// names nothing refuses whether or not force is set. It is request-wide
-	// because the flag that spells it is.
+	// Force bypasses blocker and open-child close policy, the pin and the
+	// assignee fence, for every item — exactly CloseRequest.Force. It never
+	// bypasses the template guard or validation, and it never bypasses
+	// existence: an id that names nothing refuses whether or not force is set.
+	// It is request-wide because the flag that spells it is.
 	//
 	// It would not bypass a per-item LIFECYCLE PRECONDITION either, but no
 	// batch item carries one: there is no counterpart here to the
@@ -68,6 +69,15 @@ type CloseBatchRequest struct {
 	// rule, the same nil-means-nothing-eligible outcome. Restating them here
 	// is how the two would come apart.
 	ClaimNext *ReadyRequest
+	// AutoCloseMolecule is CloseRequest.AutoCloseMolecule for every item
+	// that closed or was already closed. It runs after all the closes and
+	// before ClaimNext, inside the same transaction, so a batch that closes
+	// several steps of one molecule decides its root once, after every close:
+	// the root it closed, or its refusal, is reported on the outcome of the
+	// first item under that root whose Err is nil. An auto-closed root is a
+	// landing: it is named in the batch's history entry. It does not earn
+	// ClaimNext's claim on its own.
+	AutoCloseMolecule bool
 }
 
 // CloseOutcome is what happened to ONE requested item.
@@ -84,9 +94,14 @@ type CloseOutcome struct {
 	// OpenChildren is the number of open children observed by a forced close
 	// of this item. It is reported even for an idempotent re-close.
 	OpenChildren int
+	// AutoClosedMolecule and MoleculeAutoCloseRefusal are
+	// CloseResult's, for this item, under CloseBatchRequest.AutoCloseMolecule.
+	AutoClosedMolecule       *Issue
+	MoleculeAutoCloseRefusal string
 	// Err is this item's refusal, and NEVER aborts the rest of the batch. It
 	// carries the same typed close vocabulary Lifecycle.Close returns —
-	// ErrNotFound, ErrCloseBlocked, *CloseOpenChildrenError — so a caller
+	// ErrNotFound, ErrCloseBlocked, *CloseOpenChildrenError,
+	// *TemplateReadOnlyError, *PinnedError, *CloseNotAssigneeError — so a caller
 	// classifies it with errors.Is and errors.As rather than by reading prose.
 	Err error
 }

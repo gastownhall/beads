@@ -13,7 +13,11 @@ type MaintenanceProvider interface {
 var _ MaintenanceProvider = (*doltSQLProvider)(nil)
 
 func (p *doltSQLProvider) RunNonTx(ctx context.Context, fn func(ctx context.Context, conn *sql.Conn) error) error {
-	conn, err := p.db.Conn(ctx)
+	db, err := p.pool()
+	if err != nil {
+		return err
+	}
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("uow: pin connection: %w", err)
 	}

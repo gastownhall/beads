@@ -292,5 +292,9 @@ func deleteResponse(result issueops.DeleteResult) apigen.DeleteIssuesResult {
 		ids := append([]string(nil), result.Orphaned...)
 		body.Orphaned = &ids
 	}
+	if len(result.DeletedIDs) > 0 {
+		ids := append([]string(nil), result.DeletedIDs...)
+		body.DeletedIds = &ids
+	}
 	return body
 }

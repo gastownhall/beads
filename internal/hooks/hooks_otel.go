@@ -7,19 +7,16 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// addHookOutputEvents adds stdout/stderr from a hook execution as span events.
-// Each buffer is only recorded if non-empty; output is truncated to maxOutputBytes.
+// addHookOutputEvents records that a hook wrote to stdout or stderr as span
+// events carrying the byte count only, each added only when its stream is
+// non-empty. The text itself is not recorded: a hook receives the issue as JSON
+// on stdin and commonly echoes or logs it, so its output is issue content
+// (#8505).
 func addHookOutputEvents(span trace.Span, stdout, stderr *bytes.Buffer) {
 	if n := stdout.Len(); n > 0 {
-		span.AddEvent("hook.stdout", trace.WithAttributes(
-			attribute.String("output", truncateOutput(stdout.String())),
-			attribute.Int("bytes", n),
-		))
+		span.AddEvent("hook.stdout", trace.WithAttributes(attribute.Int("bytes", n)))
 	}
 	if n := stderr.Len(); n > 0 {
-		span.AddEvent("hook.stderr", trace.WithAttributes(
-			attribute.String("output", truncateOutput(stderr.String())),
-			attribute.Int("bytes", n),
-		))
+		span.AddEvent("hook.stderr", trace.WithAttributes(attribute.Int("bytes", n)))
 	}
 }

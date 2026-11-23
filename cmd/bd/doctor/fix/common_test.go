@@ -1,7 +1,9 @@
 package fix
 
 import (
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -161,4 +163,42 @@ func TestLocalWorkspaceBeadsDir(t *testing.T) {
 			t.Fatalf("localWorkspaceBeadsDir() = %q, want %q", got, want)
 		}
 	})
+}
+
+// noAutoMaintenance keeps a fixture's git commit from spawning the detached
+// "git maintenance run --auto" child whose worktree-prune races the fixture's
+// next "git worktree add" (gastownhall/beads#7314, #7349). Flags ride the
+// command line, never env config: the routing-key scrub drops env config.
+var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}
+
+// gitCommand builds a git command for a fixture with noAutoMaintenance applied.
+func gitCommand(args ...string) *exec.Cmd {
+	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
+}
+
+// captureFixStdout runs fn with os.Stdout redirected and returns what it
+// printed there, which is where a fix handler reports.
+func captureFixStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	printed := make(chan string)
+	go func() {
+		b, _ := io.ReadAll(r)
+		printed <- string(b)
+	}()
+	orig := os.Stdout
+	os.Stdout = w
+	func() {
+		defer func() {
+			os.Stdout = orig
+			_ = w.Close()
+		}()
+		fn()
+	}()
+	out := <-printed
+	_ = r.Close()
+	return out
 }

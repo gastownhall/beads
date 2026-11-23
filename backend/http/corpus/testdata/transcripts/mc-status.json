@@ -1,0 +1,7 @@
+{
+  "shape": "mc-status",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getStats","path":"/v0/beads/stats","status":200}
+  ]
+}
