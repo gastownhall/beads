@@ -236,6 +236,10 @@ func RunBatchCloserPerItemRefusalIsAResultAndSurvivorsCommit(t *testing.T, ctx c
 			t.Errorf("outcome %d (%s) snapshot ClosedBySession = %q, want %q — the session is recorded against every item",
 				survivor.index, survivor.id, outcome.Issue.ClosedBySession, session)
 		}
+		if outcome.Issue.ClosedBy != "closer" {
+			t.Errorf("outcome %d (%s) snapshot ClosedBy = %q, want the batch's actor %q (GH#8617)",
+				survivor.index, survivor.id, outcome.Issue.ClosedBy, "closer")
+		}
 		assertBatchCloserClosedRow(t, ctx, fixture, survivor.id, survivor.reason, session)
 	}
 

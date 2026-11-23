@@ -145,7 +145,7 @@
     },
     "envelope/show_refs": {
       "cmd": "bd show corpus-canonical --refs --json",
-      "sha256": "1991173107a007e128fbd6a239dbd9ec5be6b1d67a98e2868a9ed01abfef32bd"
+      "sha256": "76c9255f7acfa6fe9d5a6dacbc7ca2c815487def3fa9f53be4022207b1189c60"
     },
     "envelope/supersede": {
       "cmd": "bd supersede corpus-superseded --with corpus-canonical --json",
@@ -337,7 +337,7 @@
     },
     "flat/show_refs": {
       "cmd": "bd show corpus-canonical --refs --json",
-      "sha256": "b93096272ff260b4c096d873fc5efe53b078da528dd2ad0bc62734e3f35b6b6d"
+      "sha256": "a81702424a3878d67f7f63ca8c2d6409d9b4e4daea84b3da78c58d969fcddb4d"
     },
     "flat/supersede": {
       "cmd": "bd supersede corpus-superseded --with corpus-canonical --json",
