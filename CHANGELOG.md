@@ -1517,6 +1517,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bootstrap`. What is refused, and the consent it takes, are unchanged;
   server and embedded mode print, and emit as JSON, what they did before.
 
+- **A close, a batch close, a dependency removal or an update to a non-active
+  status that races another unblocking write keeps its own Dolt commit**
+  ([#7035](https://github.com/gastownhall/beads/issues/7035)).
+  On a server-mode store the post-commit blocked-state recheck published
+  before the operation's own Dolt commit. The recheck stages the whole
+  `issues` table, so the operation's row went into the commit named
+  `bd: recheck blocked after ...` and the operation's commit, whose message
+  carries its provenance, had nothing left to stage and never reached
+  `dolt log`. The operation's commit is now minted first and the recheck's
+  follows it, the order the dependency-removal and wisp paths already keep.
+  No row was lost before; only the history line was.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
