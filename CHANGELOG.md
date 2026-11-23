@@ -1483,7 +1483,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issue exactly as typed in the one read that brings its edges back, and
   resolves only the rest one at a time (a partial id, an id routed to another
   database, an id that names nothing). The output and the warnings are
-  unchanged.
+  unchanged. A workspace connected to a `bd serve` backend gains the same way:
+  the batch sends one `listDependencies` request where it also sent a
+  `getIssue` per id.
 
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
