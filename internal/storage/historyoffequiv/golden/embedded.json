@@ -1,5 +1,5 @@
 {
-  "recorded_from": "f35aef51b + gastownhall/beads#8024",
+  "recorded_from": "7862410990 + GH#8617 closed_by (bd-birq18)",
   "steps": [
     "create a",
     "create b blocked by a",
@@ -199,8 +199,8 @@
         "applied_at",
         "content_hash"
       ],
-      "rows": 27,
-      "sha256": "7164db2c129cbaafbd9c426d27e809d043cafc77e8aef1f68d1760905a685acb"
+      "rows": 28,
+      "sha256": "8c664625afbde266c4415a375a2aa8606bcc24daac651e1c25874591632f7a19"
     },
     "interactions": {
       "columns": [
@@ -320,10 +320,11 @@
         "is_blocked",
         "row_lock",
         "storage_class",
-        "current_revision"
+        "current_revision",
+        "closed_by"
       ],
       "rows": 15,
-      "sha256": "1f81df40f4c4d458f20cfb6535ca13468fa03fbd10276c44752977813a4b7e20"
+      "sha256": "0a50131a964598de0224cf47943868f2101495804e92d8b35735cd792bd8fdd1"
     },
     "labels": {
       "columns": [
@@ -402,8 +403,8 @@
         "version",
         "content_hash"
       ],
-      "rows": 69,
-      "sha256": "1d7a6ae809f330f8b4c3516af50ce7604c1db3cd4c1177af3e5c2f1991d74e14"
+      "rows": 70,
+      "sha256": "c2db9d988941da86f8678794cf9eeb51e410c79b58d6a21a4c82cb3192449d38"
     },
     "store_epoch": {
       "columns": [
@@ -530,10 +531,11 @@
         "row_lock",
         "storage_class",
         "current_revision",
+        "closed_by",
         "is_blocked"
       ],
       "rows": 6,
-      "sha256": "f28b157579dedd4373778dc6050b2d1995e1fe30e545e5c70c6b6ccf08ed75bf"
+      "sha256": "9965dadee6cc18b9acc83cdd90908efa6886ecce8ca1a4228843a920de8d930e"
     }
   }
 }
