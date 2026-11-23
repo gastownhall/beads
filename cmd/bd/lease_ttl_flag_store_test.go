@@ -48,9 +48,10 @@ func TestEmbeddedLeaseTTLFlagArmsTheLease(t *testing.T) {
 // runLeaseTTLFlagJourney runs the three commands on the direct route against
 // the store open returns and reads the lease each one left: --ttl sets the
 // expiry to now plus the duration, the default is unchanged without it, a
-// re-claim leaves the lease alone and says so, and a heartbeat without --ttl
-// cuts a longer lease back to the default (the per-call answer the --ttl help
-// gives).
+// re-claim leaves the lease alone and says so, a heartbeat without --ttl cuts
+// a longer lease back to the default (the per-call answer the --ttl help
+// gives), and a claim of a wisp (a no-history issue here) arms no lease and
+// says so.
 func runLeaseTTLFlagJourney(t *testing.T, open func(beadsDir string) storage.DoltStorage) {
 	ensureCleanGlobalState(t)
 	saveAndRestoreGlobals(t)
@@ -70,11 +71,10 @@ func runLeaseTTLFlagJourney(t *testing.T, open func(beadsDir string) storage.Dol
 	rootCtx, actor = ctx, "ttl-worker"
 	t.Cleanup(func() { rootCtx, actor = oldCtx, oldActor })
 
-	create := func(title string, labels ...string) string {
+	createIssue := func(issue *types.Issue, labels ...string) string {
 		t.Helper()
-		issue := &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
 		if err := s.CreateIssue(ctx, issue, "tester"); err != nil {
-			t.Fatalf("create %q: %v", title, err)
+			t.Fatalf("create %q: %v", issue.Title, err)
 		}
 		for _, label := range labels {
 			if err := s.AddLabel(ctx, issue.ID, label, "tester"); err != nil {
@@ -82,6 +82,16 @@ func runLeaseTTLFlagJourney(t *testing.T, open func(beadsDir string) storage.Dol
 			}
 		}
 		return issue.ID
+	}
+	create := func(title string, labels ...string) string {
+		t.Helper()
+		return createIssue(&types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, labels...)
+	}
+	// createNoHistory creates a no-history issue: a wisp, which the ready set
+	// offers without --include-ephemeral.
+	createNoHistory := func(title string, labels ...string) string {
+		t.Helper()
+		return createIssue(&types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, NoHistory: true}, labels...)
 	}
 
 	// run executes one command with flags set for that run alone, and
@@ -164,4 +174,31 @@ func runLeaseTTLFlagJourney(t *testing.T, open func(beadsDir string) storage.Dol
 	readyPlain := create("taken by ready --claim", "ttl-ready-plain")
 	_, start, end = run(readyCmd, nil, map[string]string{"claim": "true", "label": "ttl-ready-plain"})
 	requireExpiry("ready --claim", readyPlain, start, end, storageissueops.DefaultLeaseTTL)
+
+	// A wisp is never leased, so a claim of one given --ttl says the length
+	// was not applied, through bd update --claim and bd ready --claim alike,
+	// and leaves no lease behind.
+	requireWispNotLeased := func(step, id, shown string) {
+		t.Helper()
+		if !strings.Contains(shown, "not applied to "+id+": it is a wisp") {
+			t.Errorf("%s: no wisp warning for %s:\n%s", step, id, shown)
+		}
+		issue, err := s.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("%s: get %s: %v", step, id, err)
+		}
+		if issue.Status != types.StatusInProgress || issue.Assignee != "ttl-worker" {
+			t.Errorf("%s: %s is %s/%q, want it claimed by ttl-worker", step, id, issue.Status, issue.Assignee)
+		}
+		if issue.LeaseExpiresAt != nil {
+			t.Errorf("%s: wisp %s has a lease expiring at %s, want none", step, id, issue.LeaseExpiresAt)
+		}
+	}
+	wisp := createNoHistory("no-history claimed with --ttl")
+	shown, _, _ = run(updateCmd, []string{wisp}, map[string]string{"claim": "true", "ttl": "2h"})
+	requireWispNotLeased("update --claim --ttl 2h on a no-history issue", wisp, shown)
+
+	readyWisp := createNoHistory("no-history taken by ready --claim --ttl", "ttl-ready-wisp")
+	shown, _, _ = run(readyCmd, nil, map[string]string{"claim": "true", "ttl": "3h", "label": "ttl-ready-wisp"})
+	requireWispNotLeased("ready --claim --ttl 3h on a no-history issue", readyWisp, shown)
 }

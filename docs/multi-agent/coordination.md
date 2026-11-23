@@ -30,9 +30,10 @@ bd update bd-42 --status open   # make it claimable again
 
 A claim carries a lease. The worker keeps the lease alive with `bd heartbeat`;
 a worker that dies stops heartbeating, its lease expires, and `bd reclaim`
-puts the issue back on the ready list for another worker. The lease lasts five
-minutes from the claim or the last heartbeat unless the command is given
-`--ttl`:
+puts the issue back on the ready list for another worker. A claim or a
+heartbeat sets the lease to expire the default lease length from now, unless
+it is given `--ttl`, which `bd update --claim`, `bd ready --claim` and
+`bd heartbeat` take:
 
 ```bash
 # Claim with a two-hour lease
@@ -44,10 +45,12 @@ bd heartbeat bd-42 --ttl 2h
 ```
 
 The length is per call. A heartbeat without `--ttl` resets the expiry to now
-plus the five-minute default, even on a claim made with a longer `--ttl`, so
-pass the same `--ttl` on every heartbeat. A re-claim of an issue you already
-hold leaves its lease as it was (bd says so on stderr); use
-`bd heartbeat --ttl` to change it. A wisp has no lease, so `--ttl` on a wisp
+plus the default length, even on a claim made with a longer `--ttl`, so pass
+the same `--ttl` on every heartbeat. A claim made another way, such as
+`bd close --claim-next`, takes the default length; a `bd heartbeat --ttl`
+right after it sets yours. A re-claim of an issue you already hold leaves its
+lease as it was (bd says so on stderr); use `bd heartbeat --ttl` to change it.
+A wisp (an ephemeral or no-history issue) has no lease, so `--ttl` on a wisp
 claim is reported on stderr as not applied. `--ttl` is refused on a remote
 `bd serve` backend, whose requests carry no lease length.
 

@@ -201,6 +201,7 @@ func runReadyProxiedClaim(ctx context.Context, in readyInput) error {
 	// As on the direct route: the claimed post-state, no pre-image (GH#6146).
 	audit.LogClaimed(res.Claimed.ID, currentActor(), string(res.Claimed.Status), res.Claimed.Assignee)
 	SetLastTouchedID(res.Claimed.ID)
+	warnLeaseTTLNotAppliedToReadyClaim(res.Claimed.Issue, in.leaseTTL)
 
 	if in.jsonOut {
 		_ = outputJSON([]*types.IssueWithCounts{res.Claimed})

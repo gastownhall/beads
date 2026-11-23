@@ -57,7 +57,7 @@ Flags:
   -s, --status string                New status
       --stdin                        Read description from stdin (alias for --body-file -)
       --title string                 New title
-      --ttl duration                 With --claim: the claim's lease expires this long from now (a Go duration such as 30m or 2h) instead of the default 5m0s. Each bd heartbeat resets the expiry to now plus its own --ttl, or the default without one, so pass the same --ttl on every heartbeat. A re-claim of an issue you already hold leaves its lease unchanged, and a wisp has no lease. Refused on a remote bd serve backend
+      --ttl duration                 With --claim: the claim's lease expires this long from now (a Go duration such as 30m or 2h) instead of after the default lease length. Each bd heartbeat resets the expiry to now plus its own --ttl, or the default length without one, so pass the same --ttl on every heartbeat. A re-claim of an issue you already hold leaves its lease unchanged, and a wisp has no lease. Refused on a remote bd serve backend
   -t, --type string                  New type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision
       --unset-metadata stringArray   Remove metadata key (repeatable, e.g., --unset-metadata team)
 

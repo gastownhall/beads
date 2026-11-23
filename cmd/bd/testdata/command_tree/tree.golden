@@ -3424,7 +3424,7 @@ bd heartbeat
     |   bd heartbeat bd-123
     |   bd hb bd-123
     |   bd heartbeat --ttl 2h bd-123
-  flag --ttl type=duration default="0s" usage="The refreshed lease expires this long from now (a Go duration such as 30m or 2h) instead of the default 5m0s. The length is per call: a heartbeat without --ttl resets the expiry to now plus the default, even on a claim armed with a longer --ttl, so pass it on every heartbeat. Refused on a remote bd serve backend"
+  flag --ttl type=duration default="0s" usage="The refreshed lease expires this long from now (a Go duration such as 30m or 2h) instead of after the default lease length. The length is per call: a heartbeat without --ttl resets the expiry to now plus the default length, even on a claim armed with a longer --ttl, so pass it on every heartbeat. Refused on a remote bd serve backend"
 
 bd help
   use: "help [command]"
@@ -6183,7 +6183,7 @@ bd ready
   flag --pretty type=bool default="true" usage="Display issues in a tree format with status/priority symbols"
   flag --priority -p type=int default="0" usage="Filter by priority"
   flag --sort -s type=string default="priority" usage="Sort policy: priority (default), hybrid, oldest"
-  flag --ttl type=duration default="0s" usage="With --claim: the claim's lease expires this long from now (a Go duration such as 30m or 2h) instead of the default 5m0s. Each bd heartbeat resets the expiry to now plus its own --ttl, or the default without one, so pass the same --ttl on every heartbeat. A re-claim of an issue you already hold leaves its lease unchanged, and a wisp has no lease. Refused on a remote bd serve backend"
+  flag --ttl type=duration default="0s" usage="With --claim: the claim's lease expires this long from now (a Go duration such as 30m or 2h) instead of after the default lease length. Each bd heartbeat resets the expiry to now plus its own --ttl, or the default length without one, so pass the same --ttl on every heartbeat. A re-claim of an issue you already hold leaves its lease unchanged, and a wisp has no lease. Refused on a remote bd serve backend"
   flag --type -t type=string default="" usage="Filter by issue type (task, bug, feature, epic, decision, merge-request). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision"
   flag --unassigned -u type=bool default="false" usage="Show only unassigned issues"
 
@@ -7424,7 +7424,7 @@ bd update
   flag --status -s type=string default="" usage="New status"
   flag --stdin type=bool default="false" annotations={cobra_annotation_mutually_exclusive=["stdin body-file" "stdin description-file" "stdin description" "stdin body" "stdin message"]} usage="Read description from stdin (alias for --body-file -)"
   flag --title type=string default="" usage="New title"
-  flag --ttl type=duration default="0s" usage="With --claim: the claim's lease expires this long from now (a Go duration such as 30m or 2h) instead of the default 5m0s. Each bd heartbeat resets the expiry to now plus its own --ttl, or the default without one, so pass the same --ttl on every heartbeat. A re-claim of an issue you already hold leaves its lease unchanged, and a wisp has no lease. Refused on a remote bd serve backend"
+  flag --ttl type=duration default="0s" usage="With --claim: the claim's lease expires this long from now (a Go duration such as 30m or 2h) instead of after the default lease length. Each bd heartbeat resets the expiry to now plus its own --ttl, or the default length without one, so pass the same --ttl on every heartbeat. A re-claim of an issue you already hold leaves its lease unchanged, and a wisp has no lease. Refused on a remote bd serve backend"
   flag --type -t type=string default="" usage="New type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision"
   flag --unset-metadata type=stringArray default="[]" usage="Remove metadata key (repeatable, e.g., --unset-metadata team)"
 

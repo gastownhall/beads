@@ -191,6 +191,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			// claimed post-state, not a transition (GH#6146).
 			audit.LogClaimed(claimed.ID, currentActor(), string(claimed.Status), claimed.Assignee)
 			SetLastTouchedID(claimed.ID)
+			warnLeaseTTLNotAppliedToReadyClaim(claimed.Issue, in.leaseTTL)
 			if jsonOutput {
 				return outputJSON([]*types.IssueWithCounts{claimed})
 			}

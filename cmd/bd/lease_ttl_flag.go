@@ -31,20 +31,23 @@ const leaseTTLFlagName = "ttl"
 
 // claimLeaseTTLUsage is --ttl's help on `bd update` and `bd ready`.
 //
-// The heartbeat sentence is the behavior TestPlainHeartbeatResetsALongerLease
-// pins: a heartbeat sets the expiry to now plus its OWN lease length, so a
-// lease armed with --ttl 2h is cut back to the default by the first heartbeat
-// that does not pass --ttl again.
-var claimLeaseTTLUsage = fmt.Sprintf("With --claim: the claim's lease expires this long from now (a Go duration such as 30m or 2h) instead of the default %s. "+
-	"Each bd heartbeat resets the expiry to now plus its own --ttl, or the default without one, so pass the same --ttl on every heartbeat. "+
-	"A re-claim of an issue you already hold leaves its lease unchanged, and a wisp has no lease. Refused on a remote bd serve backend",
-	storageissueops.DefaultLeaseTTL)
+// Neither usage names the default's length: it is whatever the lease code
+// resolves when no --ttl is given (storageissueops.LeaseTTL), so a number
+// printed here would go stale the day that default changes.
+//
+// The heartbeat sentence is the behavior runLeaseTTLFlagJourney's "heartbeat
+// without --ttl" step and TestProxiedServerHeartbeat's
+// ttl_sets_the_lease_per_call subtest pin: a heartbeat sets the expiry to now
+// plus its OWN lease length, so a lease armed with --ttl 2h is cut back to the
+// default by the first heartbeat that does not pass --ttl again.
+const claimLeaseTTLUsage = "With --claim: the claim's lease expires this long from now (a Go duration such as 30m or 2h) instead of after the default lease length. " +
+	"Each bd heartbeat resets the expiry to now plus its own --ttl, or the default length without one, so pass the same --ttl on every heartbeat. " +
+	"A re-claim of an issue you already hold leaves its lease unchanged, and a wisp has no lease. Refused on a remote bd serve backend"
 
 // heartbeatLeaseTTLUsage is --ttl's help on `bd heartbeat`.
-var heartbeatLeaseTTLUsage = fmt.Sprintf("The refreshed lease expires this long from now (a Go duration such as 30m or 2h) instead of the default %s. "+
-	"The length is per call: a heartbeat without --ttl resets the expiry to now plus the default, even on a claim armed with a longer --ttl, so pass it on every heartbeat. "+
-	"Refused on a remote bd serve backend",
-	storageissueops.DefaultLeaseTTL)
+const heartbeatLeaseTTLUsage = "The refreshed lease expires this long from now (a Go duration such as 30m or 2h) instead of after the default lease length. " +
+	"The length is per call: a heartbeat without --ttl resets the expiry to now plus the default length, even on a claim armed with a longer --ttl, so pass it on every heartbeat. " +
+	"Refused on a remote bd serve backend"
 
 // addLeaseTTLFlag registers --ttl on cmd. The zero default means "not given":
 // leaseTTLFromFlags tells an absent flag from an explicit 0 by Changed.
@@ -106,8 +109,9 @@ func leaseTTLRemoteRefusal(s storage.DoltStorage, ttl time.Duration, command str
 // without arming a lease of that length, so the worker is told instead of
 // believing it holds the longer lease. There are two such claims:
 //
-//   - A wisp. A wisp is never leased (it is not reclaimable work), so there is
-//     no expiry for --ttl to set.
+//   - A wisp: an issue on the wisp plane (storageissueops.IsWisp, an
+//     ephemeral or a no-history issue). The claim never leases one (it is not
+//     reclaimable work), so there is no expiry for --ttl to set.
 //   - An idempotent re-claim. A re-claim of an issue the actor already holds
 //     returns before the lease is touched, so the lease keeps the expiry it
 //     had. The warning names the command that does set it.
@@ -120,9 +124,8 @@ func warnLeaseTTLNotApplied(id string, before *types.Issue, claimant string, ttl
 	if ttl <= 0 || before == nil {
 		return
 	}
-	if before.Ephemeral {
-		fmt.Fprintf(os.Stderr, "%s --ttl %s not applied to %s: it is a wisp, and a wisp claim has no lease\n",
-			ui.RenderWarn("!"), ttl, printedIssueID(id))
+	if storageissueops.IsWisp(before) {
+		warnLeaseTTLNotAppliedToWisp(id, ttl)
 		return
 	}
 	if before.Status != types.StatusInProgress || !storageissueops.ActorMatches(before.Assignee, claimant) {
@@ -134,4 +137,27 @@ func warnLeaseTTLNotApplied(id string, before *types.Issue, claimant string, ttl
 	idArg, note := remedy.CommandArg(runtime.GOOS, id, "<issue-id>")
 	fmt.Fprintf(os.Stderr, "%s --ttl %s not applied to %s: you already held it, and a re-claim leaves the lease as it was (bd heartbeat --ttl %s %s sets its length)%s\n",
 		ui.RenderWarn("!"), ttl, printedIssueID(id), ttl, idArg, note)
+}
+
+// warnLeaseTTLNotAppliedToReadyClaim is warnLeaseTTLNotApplied for
+// `bd ready --claim --ttl`, on either route. The ready set can hand the claim
+// a wisp (no-history issues always, ephemeral ones under --include-ephemeral),
+// and the claim leases none.
+//
+// claimed is the row the claim returned, so only its plane is read: the claim
+// has just made it in_progress with the actor as assignee, which
+// warnLeaseTTLNotApplied would take for a re-claim. A ready claim never is
+// one, because it takes only an open, unassigned issue.
+func warnLeaseTTLNotAppliedToReadyClaim(claimed *types.Issue, ttl time.Duration) {
+	if ttl <= 0 || claimed == nil || !storageissueops.IsWisp(claimed) {
+		return
+	}
+	warnLeaseTTLNotAppliedToWisp(claimed.ID, ttl)
+}
+
+// warnLeaseTTLNotAppliedToWisp prints the wisp warning. It names no command:
+// a wisp has no lease for bd heartbeat to refresh either.
+func warnLeaseTTLNotAppliedToWisp(id string, ttl time.Duration) {
+	fmt.Fprintf(os.Stderr, "%s --ttl %s not applied to %s: it is a wisp (an ephemeral or no-history issue), and a wisp claim has no lease\n",
+		ui.RenderWarn("!"), ttl, printedIssueID(id))
 }

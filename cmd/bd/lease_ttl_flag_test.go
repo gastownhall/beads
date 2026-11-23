@@ -197,6 +197,8 @@ type ttlProxiedProvider struct {
 	lifecycle *ttlRecordingLifecycle
 	details   *types.IssueDetails
 	claimTTL  time.Duration
+	// claimed is the row the ready claimer hands back; nil is an empty front.
+	claimed *types.IssueWithCounts
 }
 
 func (p *ttlProxiedProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
@@ -219,7 +221,7 @@ type ttlRecordingReadyClaimer struct{ p *ttlProxiedProvider }
 
 func (c ttlRecordingReadyClaimer) ClaimNext(ctx context.Context, _ issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
 	c.p.claimTTL = storageissueops.LeaseTTL(ctx)
-	return issueops.ClaimNextResult{}, nil
+	return issueops.ClaimNextResult{Claimed: c.p.claimed}, nil
 }
 
 func withTTLProxiedProvider(t *testing.T, before *types.Issue) *ttlProxiedProvider {
@@ -282,6 +284,47 @@ func TestProxiedClaimsCarryTheLeaseTTL(t *testing.T) {
 			t.Errorf("the proxied ready claimer saw a lease TTL of %v, want 3h", p.claimTTL)
 		}
 	})
+	// bd ready --claim can take a wisp, which the claim leases no more than
+	// bd update --claim does: a no-history issue (always in the ready set) or
+	// an ephemeral one (under --include-ephemeral) draws the wisp warning. A
+	// durable claim draws none, though the row it returns is in_progress and
+	// the actor's: a ready claim is never a re-claim.
+	for _, tc := range []struct {
+		name  string
+		issue types.Issue
+		warns bool
+	}{
+		{"ready --claim of a no-history issue warns", types.Issue{ID: "bd-nh", NoHistory: true}, true},
+		{"ready --claim of an ephemeral issue warns", types.Issue{ID: "bd-eph", Ephemeral: true}, true},
+		{"ready --claim of a durable issue does not warn", types.Issue{ID: "bd-dur"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The claim's last-touched and audit writes find no workspace to
+			// land in.
+			t.Setenv("BEADS_DIR", t.TempDir())
+			t.Setenv("BD_AUDIT_ENABLED", "0")
+			p := withTTLProxiedProvider(t, &types.Issue{ID: "bd-1", Status: types.StatusOpen})
+			claimed := tc.issue
+			claimed.Status, claimed.Assignee = types.StatusInProgress, "agent"
+			p.claimed = &types.IssueWithCounts{Issue: &claimed}
+			stdioMutex.Lock()
+			defer stdioMutex.Unlock()
+			var err error
+			_, stderr := captureStdio(t, func() {
+				err = runReadyProxiedClaim(context.Background(), readyInput{claim: true, leaseTTL: 3 * time.Hour})
+			})
+			if err != nil {
+				t.Fatalf("runReadyProxiedClaim: %v", err)
+			}
+			warned := strings.Contains(stderr, "--ttl 3h0m0s not applied to "+tc.issue.ID+": it is a wisp")
+			if warned != tc.warns {
+				t.Errorf("wisp warning printed = %v, want %v; stderr:\n%s", warned, tc.warns, stderr)
+			}
+			if strings.Contains(stderr, "you already held it") {
+				t.Errorf("a ready claim drew the re-claim warning:\n%s", stderr)
+			}
+		})
+	}
 }
 
 // TestWarnLeaseTTLNotApplied pins the two claims that succeed without arming
@@ -303,6 +346,11 @@ func TestWarnLeaseTTLNotApplied(t *testing.T) {
 		{"fresh claim of a wisp", &types.Issue{Status: types.StatusOpen, Ephemeral: true}, time.Hour, wispWords},
 		{"re-claim of a held wisp", &types.Issue{Status: types.StatusInProgress, Assignee: "agent", Ephemeral: true}, time.Hour, wispWords},
 		{"claim of a wisp without --ttl", &types.Issue{Status: types.StatusOpen, Ephemeral: true}, 0, ""},
+		// A no-history issue lives on the wisp plane too, and its claim arms
+		// no lease either (storageissueops.IsWisp).
+		{"fresh claim of a no-history issue", &types.Issue{Status: types.StatusOpen, NoHistory: true}, time.Hour, wispWords},
+		{"re-claim of a held no-history issue", &types.Issue{Status: types.StatusInProgress, Assignee: "agent", NoHistory: true}, time.Hour, wispWords},
+		{"claim of a no-history issue without --ttl", &types.Issue{Status: types.StatusOpen, NoHistory: true}, 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stderr := captureStderrDuring(t, func() {
@@ -348,6 +396,42 @@ func TestWarnLeaseTTLNotAppliedSpellsTheIDForAShell(t *testing.T) {
 		if want := "not applied to " + remedy.PrintedWord(id) + ": it is a wisp"; !strings.Contains(stderr, want) {
 			t.Errorf("wisp warning for %q does not say %q:\n%q", id, want, stderr)
 		}
+	}
+}
+
+// TestWarnLeaseTTLNotAppliedToReadyClaim pins the warning `bd ready --claim
+// --ttl` prints on either route over the row its claim returned: the wisp
+// warning for a row on the wisp plane, and nothing for a durable one, though
+// that row is in_progress and the claimant's (a ready claim is never a
+// re-claim).
+func TestWarnLeaseTTLNotAppliedToReadyClaim(t *testing.T) {
+	claimedRow := func(ephemeral, noHistory bool) *types.Issue {
+		return &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "agent", Ephemeral: ephemeral, NoHistory: noHistory}
+	}
+	for _, tc := range []struct {
+		name    string
+		claimed *types.Issue
+		ttl     time.Duration
+		warns   bool
+	}{
+		{"durable claim", claimedRow(false, false), time.Hour, false},
+		{"ephemeral claim", claimedRow(true, false), time.Hour, true},
+		{"no-history claim", claimedRow(false, true), time.Hour, true},
+		{"no-history claim without --ttl", claimedRow(false, true), 0, false},
+		{"empty front", nil, time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr := captureStderrDuring(t, func() { warnLeaseTTLNotAppliedToReadyClaim(tc.claimed, tc.ttl) })
+			if !tc.warns {
+				if stderr != "" {
+					t.Errorf("printed a warning, want none; stderr:\n%s", stderr)
+				}
+				return
+			}
+			if !strings.Contains(stderr, "--ttl 1h0m0s not applied to bd-1: it is a wisp") {
+				t.Errorf("stderr does not carry the wisp warning for bd-1:\n%s", stderr)
+			}
+		})
 	}
 }
 
