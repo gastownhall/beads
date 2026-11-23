@@ -43,6 +43,7 @@ go_test(
         "//:engdocs/design/http-divergence-ledger.md",
         "//cmd/bd:serve_test.go",
         "//internal/httpapi/spec:openapi.v0.yaml",
+        "//internal/httpclient:blockedlister_test.go",
         "//internal/httpclient:bulk_roles_test.go",
         "//internal/httpclient:gate_fields_test.go",
     ] + glob(["*.go"]),
