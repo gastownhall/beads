@@ -1,9 +1,15 @@
 package schema
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // Migration 0075 (+ ignored/0032) adds closed_by, the durable close-actor
@@ -127,5 +133,143 @@ func TestMigration0075AddsClosedByToBothPlanes(t *testing.T) {
 	// what makes it idempotent.
 	if !strings.Contains(ignoredSQL, "INFORMATION_SCHEMA.TABLES") {
 		t.Error("ignored/0032 must guard on the wisps table existing (0013/0029 precedent)")
+	}
+}
+
+// migrationsThrough builds the bundle AllMigrationsSQL() produces, cut at
+// maxVersion: bootstrap plus every migration file up to and including it, so a
+// test can stand up a store at an older schema and drive a later migration by
+// hand.
+func migrationsThrough(t *testing.T, maxVersion int) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString(mainSource.bootstrapSQL())
+	b.WriteString(";\n")
+	for _, f := range mainSource.list() {
+		if f.version > maxVersion {
+			continue
+		}
+		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + f.name)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", f.name, err)
+		}
+		b.WriteString(cliCompatibleMigrationSQL(f.name, string(data)))
+		sum := sha256.Sum256(data)
+		fmt.Fprintf(&b, "\nINSERT IGNORE INTO %s (version, content_hash) VALUES (%d, '%s');\n",
+			mainSource.cursorTable, f.version, hex.EncodeToString(sum[:]))
+	}
+	return b.String()
+}
+
+// TestMigration0075PreservesExistingRowsAndReplaysNoOp drives the real dolt
+// engine through the 0074 -> 0075 upgrade (GH#8617): a store at 0074 with rows
+// on both planes gains the closed_by column on both planes, every pre-existing
+// row keeps its stored cells byte for byte (content_hash and updated_at
+// included -- ADD COLUMN rewrites no row), reads closed_by as the column's
+// empty-string default rather than NULL, and applying the same guarded SQL a
+// second time is a no-op: the probes find the column, the PREPARE blocks skip,
+// the cursor insert is INSERT IGNORE, and nothing about the rows changes.
+func TestMigration0075PreservesExistingRowsAndReplaysNoOp(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "m0075")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create store dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, migrationsThrough(t, 74))
+
+	issueHash := strings.Repeat("5a", 32)
+	wispHash := strings.Repeat("6b", 32)
+	runDoltSQL(t, dir, fmt.Sprintf(`
+		INSERT INTO issues (id, content_hash, title, description, design, acceptance_criteria, notes, updated_at)
+			VALUES ('m75-i1', '%s', 'pre-upgrade issue', 'd', 'de', 'ac', 'n', '2001-02-03 04:05:06');
+		INSERT INTO wisps (id, content_hash, title, updated_at)
+			VALUES ('m75-w1', '%s', 'pre-upgrade wisp', '2001-02-03 04:05:07');
+	`, issueHash, wispHash))
+
+	closedByColumns := func(table string) string {
+		rows := queryDoltCSV(t, dir, fmt.Sprintf(
+			"SELECT COUNT(*) AS n FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s' AND COLUMN_NAME = 'closed_by'", table))
+		if len(rows) != 1 {
+			t.Fatalf("count closed_by columns on %s: got %d rows", table, len(rows))
+		}
+		return rows[0]["n"]
+	}
+
+	// Pre-upgrade: neither plane has the column yet.
+	for _, table := range []string{"issues", "wisps"} {
+		if got := closedByColumns(table); got != "0" {
+			t.Fatalf("store at 0074 already has %s.closed_by (%s columns)", table, got)
+		}
+	}
+
+	// The identity the upgrade must not touch.
+	identity := func(table, id string) string {
+		rows := queryDoltCSV(t, dir, fmt.Sprintf(
+			"SELECT CONCAT(content_hash, '|', updated_at, '|', title) AS ident FROM %s WHERE id = '%s'", table, id))
+		if len(rows) != 1 {
+			t.Fatalf("read %s %s: got %d rows", table, id, len(rows))
+		}
+		return rows[0]["ident"]
+	}
+	issueIdentity := identity("issues", "m75-i1")
+	wispIdentity := identity("wisps", "m75-w1")
+
+	upSQL, err := MigrationSQL(migration0075Up)
+	if err != nil {
+		t.Fatalf("MigrationSQL(%s): %v", migration0075Up, err)
+	}
+	upBytes, err := os.ReadFile("migrations/" + migration0075Up)
+	if err != nil {
+		t.Fatalf("read %s: %v", migration0075Up, err)
+	}
+	sum := sha256.Sum256(upBytes)
+	upgrade := upSQL + fmt.Sprintf("\nINSERT IGNORE INTO %s (version, content_hash) VALUES (75, '%s');\n",
+		mainSource.cursorTable, hex.EncodeToString(sum[:]))
+	runDoltSQL(t, dir, upgrade)
+
+	// Both planes carry the column, in the created_by shape.
+	for _, table := range []string{"issues", "wisps"} {
+		if got := closedByColumns(table); got != "1" {
+			t.Errorf("%s.closed_by column count = %s, want 1 after the 0075 upgrade", table, got)
+		}
+		rows := queryDoltCSV(t, dir, fmt.Sprintf(
+			"SELECT DATA_TYPE AS dt, CHARACTER_MAXIMUM_LENGTH AS len, IF(COLUMN_DEFAULT IS NULL, '<null>', COLUMN_DEFAULT) AS dflt FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s' AND COLUMN_NAME = 'closed_by'", table))
+		if len(rows) != 1 || rows[0]["dt"] != "varchar" || rows[0]["len"] != "255" || rows[0]["dflt"] != "" {
+			t.Errorf("%s.closed_by shape = %#v, want varchar(255) with the '' default", table, rows)
+		}
+	}
+
+	// The pre-existing rows are untouched, and closed_by reads as the empty
+	// default (not NULL).
+	if got := identity("issues", "m75-i1"); got != issueIdentity {
+		t.Errorf("issues m75-i1 identity changed by the upgrade: %q, want %q", got, issueIdentity)
+	}
+	if got := identity("wisps", "m75-w1"); got != wispIdentity {
+		t.Errorf("wisps m75-w1 identity changed by the upgrade: %q, want %q", got, wispIdentity)
+	}
+	for _, probe := range []struct{ table, id string }{
+		{"issues", "m75-i1"}, {"wisps", "m75-w1"},
+	} {
+		rows := queryDoltCSV(t, dir, fmt.Sprintf(
+			"SELECT IF(closed_by IS NULL, '<null>', CONCAT('<', closed_by, '>')) AS tag FROM %s WHERE id = '%s'", probe.table, probe.id))
+		if len(rows) != 1 || rows[0]["tag"] != "<>" {
+			t.Errorf("%s %s closed_by after upgrade = %#v, want the empty default <> (not NULL)", probe.table, probe.id, rows)
+		}
+	}
+
+	// Replay the same SQL: a no-op on every observable.
+	runDoltSQL(t, dir, upgrade)
+	for _, table := range []string{"issues", "wisps"} {
+		if got := closedByColumns(table); got != "1" {
+			t.Errorf("%s.closed_by column count = %s after replay, want 1", table, got)
+		}
+	}
+	if got := identity("issues", "m75-i1"); got != issueIdentity {
+		t.Errorf("issues m75-i1 identity changed by the replay: %q, want %q", got, issueIdentity)
+	}
+	if got := identity("wisps", "m75-w1"); got != wispIdentity {
+		t.Errorf("wisps m75-w1 identity changed by the replay: %q, want %q", got, wispIdentity)
 	}
 }
