@@ -543,6 +543,14 @@ func RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t *testing.T, ctx contex
 	if closedRow.ClosedAt == "" {
 		t.Fatalf("stored closed_at is empty after closing %s", id)
 	}
+	// closed_by is the closing write's actor (GH#8617), stored beside the
+	// reason and session and read back on the result.
+	if closedRow.ClosedBy != "writer" {
+		t.Errorf("stored closed_by = %q, want the closing actor %q", closedRow.ClosedBy, "writer")
+	}
+	if first.Issue.ClosedBy != "writer" {
+		t.Errorf("CloseResult.Issue.ClosedBy = %q, want the closing actor %q", first.Issue.ClosedBy, "writer")
+	}
 	// The RESULT is the caller-visible half of the same clause: a caller that
 	// never queries the row still reads the attribution it just wrote.
 	if first.Issue.CloseReason != "first pass" || first.Issue.ClosedBySession != "session-one" {
@@ -554,8 +562,10 @@ func RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t *testing.T, ctx contex
 	}
 
 	events := newLifecycleCloseReopenEventCounter(t, ctx, fixture, id)
+	// A different actor re-closes: the row assertion below also proves the
+	// first closer is kept.
 	again, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
-		Actor: "writer", IssueID: id, Reason: "second pass", Session: "session-two",
+		Actor: "second-writer", IssueID: id, Reason: "second pass", Session: "session-two",
 	})
 	if err != nil {
 		t.Fatalf("re-close %s: %v", id, err)
@@ -1773,14 +1783,15 @@ type lifecycleCloseReopenRow struct {
 	ClosedAt        string
 	CloseReason     string
 	ClosedBySession string
+	ClosedBy        string
 }
 
 func lifecycleCloseReopenReadRow(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, id string) lifecycleCloseReopenRow {
 	t.Helper()
 	var row lifecycleCloseReopenRow
 	if err := fixture.QueryScalar(ctx,
-		"SELECT status, COALESCE(assignee, ''), row_lock, COALESCE(CAST(closed_at AS CHAR), ''), COALESCE(close_reason, ''), COALESCE(closed_by_session, '') FROM issues WHERE id = ?",
-		[]any{id}, &row.Status, &row.Assignee, &row.RowLock, &row.ClosedAt, &row.CloseReason, &row.ClosedBySession); err != nil {
+		"SELECT status, COALESCE(assignee, ''), row_lock, COALESCE(CAST(closed_at AS CHAR), ''), COALESCE(close_reason, ''), COALESCE(closed_by_session, ''), COALESCE(closed_by, '') FROM issues WHERE id = ?",
+		[]any{id}, &row.Status, &row.Assignee, &row.RowLock, &row.ClosedAt, &row.CloseReason, &row.ClosedBySession, &row.ClosedBy); err != nil {
 		t.Fatalf("read close-lifecycle row for %s: %v", id, err)
 	}
 	return row

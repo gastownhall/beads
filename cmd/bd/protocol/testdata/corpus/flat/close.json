@@ -2,6 +2,7 @@
   {
     "close_reason": "corpus close reason exceeding twenty chars",
     "closed_at": "<TS>",
+    "closed_by": "protocol-test",
     "created_at": "<TS>",
     "created_by": "protocol-test",
     "description": "deterministic corpus closeable",

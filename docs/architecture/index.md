@@ -74,6 +74,7 @@ Core fields on every issue, as stored in Dolt and emitted in `bd export` JSONL. 
 | `created_at` / `updated_at` | RFC3339 | Creation and last-modification times |
 | `created_by` | string | Who created the issue (optional) |
 | `closed_at` / `close_reason` | RFC3339 / string | Set when the issue is closed (optional) |
+| `closed_by` | string | Actor that closed the issue; cleared on reopen (optional) |
 | `external_ref` | string | External reference such as `gh-9` or `jira-ABC` (optional) |
 | `metadata` | JSON | Arbitrary extension data — see [Issue Metadata](/core-concepts/metadata) |
 | `labels` | []string | Tags attached to the issue (optional) |

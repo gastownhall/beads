@@ -112,6 +112,7 @@
 100 25 TestEmbeddedMaxRowsListBasic
 100 25 TestEmbeddedRemovedBackendHealRejectionPerBackend
 
+100 26 TestEmbeddedCloseStampsClosedBy
 100 26 TestEmbeddedDoltRemoteAdd_JSON_AllowGitOrigin_WarningOnStderr
 100 26 TestEmbeddedExternalMutationPolicy
 100 26 TestEmbeddedPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace
@@ -393,6 +394,7 @@
 100 71 TestEmbeddedPrimeChangeDirRedirectNoticeFollowsTarget
 100 71 TestEmbeddedRoutedCreateHonorsTheEnvOverrideOverTheTargetsConfig
 100 71 TestEmbeddedSearchRoutesAgree
+100 71 TestEmbeddedShowJSONReportsClosedBy
 
 100 72 TestEmbeddedContributorCreateMultiple
 100 72 TestEmbeddedCreateWithGitRemote
