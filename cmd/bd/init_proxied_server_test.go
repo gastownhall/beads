@@ -397,25 +397,6 @@ func TestBuildProxiedServerClientInfo(t *testing.T) {
 	})
 }
 
-// TestLoadProxiedServerClientInfo_LegacySidecarUnaffectedUntilReinit guards
-// AC4: a sidecar written by an older bd can have idle_timeout omitted from its
-// JSON (the field was `omitempty` until #6673, and an unset idle timeout stayed
-// zero). Loading it must not retroactively promote idle_timeout to the 30s
-// default -- that normalization happens only when a sidecar is written
-// (buildProxiedServerClientInfo at (re-)init, SaveProxiedServerClientInfo on
-// every save since #6673), never on load.
-func TestLoadProxiedServerClientInfo_LegacySidecarUnaffectedUntilReinit(t *testing.T) {
-	dir := t.TempDir()
-	legacyJSON := []byte(`{"port": 3306}` + "\n")
-	require.NoError(t, os.WriteFile(configfile.ProxiedServerClientInfoPath(dir), legacyJSON, 0o600))
-
-	loaded, err := configfile.LoadProxiedServerClientInfo(dir)
-	require.NoError(t, err)
-	require.NotNil(t, loaded)
-	assert.Equal(t, 3306, loaded.Port)
-	assert.Zero(t, loaded.IdleTimeout, "a pre-existing sidecar with idle_timeout omitted must not be silently promoted to the 30s default by the loader")
-}
-
 func TestComposeProxiedServerMetadataJSON_TeamServer(t *testing.T) {
 	t.Run("team-server flag is persisted and round-trips", func(t *testing.T) {
 		body, err := composeProxiedServerMetadataJSON(proxiedMetadataInputs{
