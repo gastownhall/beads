@@ -6,7 +6,6 @@ package bdhttp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -78,11 +77,10 @@ func Attach(beadsDir string, target Target) error {
 	// the same as a workspace with nothing to restore. The check reads the
 	// raw field: in a process that never ran Register, GetBackend() reports an
 	// http workspace as the dolt default, and the reconnect would record that.
-	priorTarget, priorTargetErr := httpclient.LoadTarget(beadsDir)
 	if target.PreviousBackend == "" {
 		if cfg.Backend == httpclient.Backend {
-			if priorTargetErr == nil {
-				target.PreviousBackend = priorTarget.PreviousBackend
+			if prior, err := httpclient.LoadTarget(beadsDir); err == nil {
+				target.PreviousBackend = prior.PreviousBackend
 			}
 		} else {
 			target.PreviousBackend = cfg.GetBackend()
@@ -108,11 +106,6 @@ func Attach(beadsDir string, target Target) error {
 	// `bd connect --clear` back to a different backend.
 	cfg.Backend = httpclient.Backend
 	if err := cfg.Save(beadsDir); err != nil {
-		if errors.Is(priorTargetErr, httpclient.ErrNotConnected) {
-			_, _ = httpclient.RemoveTarget(beadsDir)
-		} else if priorTargetErr == nil {
-			_ = httpclient.SaveTarget(beadsDir, priorTarget)
-		}
 		return fmt.Errorf("writing %s: %w", configfile.ConfigFileName, err)
 	}
 	return nil
