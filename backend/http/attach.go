@@ -86,17 +86,17 @@ func Attach(beadsDir string, target Target) error {
 			target.PreviousBackend = cfg.GetBackend()
 		}
 	}
-	// The encoder itself: the workspace is checked above.
-	if err := httpclient.SaveTarget(beadsDir, target); err != nil {
-		return fmt.Errorf("writing %s: %w", httpclient.TargetFileName, err)
-	}
-	// Both of this backend's per-user files: the sidecar just written, and
+	// Both of this backend's per-user files: the sidecar written below, and
 	// the local metadata file the store itself writes on first use, which
 	// never passes through here and so must be covered in advance.
 	for _, name := range []string{httpclient.TargetFileName, httpclient.LocalMetadataFileName} {
 		if err := gitignore.EnsurePatternIgnored(beadsDir, name); err != nil {
 			return fmt.Errorf("ensuring %s is gitignored: %w", name, err)
 		}
+	}
+	// The encoder itself: the workspace is checked above.
+	if err := httpclient.SaveTarget(beadsDir, target); err != nil {
+		return fmt.Errorf("writing %s: %w", httpclient.TargetFileName, err)
 	}
 	// Only the backend SELECTION changes here. cfg.Database/cfg.ProjectID (if
 	// an existing metadata.json carried them for a different, prior backend)

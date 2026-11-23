@@ -1475,6 +1475,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd connect` and `bdhttp.Attach` no longer leave `http_target.json`
+  behind when updating `.gitignore` fails** ([#8592](https://github.com/gastownhall/beads/issues/8592), [#8608](https://github.com/gastownhall/beads/pull/8608)).
+  `bdhttp.Attach` previously wrote `.beads/http_target.json` before ensuring
+  `http_target.json` and `http_local_metadata.json` were covered by
+  `.beads/.gitignore`, so a `.gitignore` update failure returned an error
+  while leaving an orphan sidecar on a fresh attach or overwriting the prior
+  sidecar on a reconnect. `Attach` now updates `.gitignore` first so a
+  `.gitignore` failure leaves the workspace sidecar untouched.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
