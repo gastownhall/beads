@@ -323,6 +323,20 @@ var provenanceValueKeys = map[string]string{
 	"build":   "<BUILD>",
 }
 
+// migrationNumberKeys have a stable presence but a number that grows with the
+// source tree: `bd version --json` reports the newest migration the binary
+// embeds in each series. Pinning the literal would make every pull request
+// that adds a migration regenerate the corpus, so the corpus pins that the
+// fields exist and are numbers, and replaces the number with a placeholder.
+// Only a JSON number is replaced: a string or null under one of these keys is
+// a wire change and must show in the diff. Same bare-key-name scope caveat as
+// the provenance transforms below: both keys are emitted only by
+// `bd version --json`.
+var migrationNumberKeys = map[string]string{
+	"latest_schema_migration":         "<MIGRATION>",
+	"latest_ignored_schema_migration": "<MIGRATION>",
+}
+
 // revisionPlaceholder is the canonical stand-in for a guarded-write revision
 // (row_lock) token value.
 const revisionPlaceholder = "<REVISION>"
@@ -495,6 +509,15 @@ func canonValue(v any, pr projector) any {
 			// a placeholder: pin the version command's shape, not its identity.
 			if ph, ok := provenanceValueKeys[k]; ok {
 				if _, isStr := child.(string); isStr {
+					t[k] = ph
+					continue
+				}
+			}
+			// Replace the binary's migration numbers with a placeholder: pin
+			// that bd version reports them as numbers, not how many migrations
+			// the tree holds today.
+			if ph, ok := migrationNumberKeys[k]; ok {
+				if _, isNum := child.(json.Number); isNum {
 					t[k] = ph
 					continue
 				}

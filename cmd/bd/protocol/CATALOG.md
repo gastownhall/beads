@@ -57,7 +57,7 @@ blobs and leaves every existing one byte-identical, so it does not bump
 | `dep_remove` | `bd dep remove … --json` | dependency-edge removal confirmation |
 | `delete` | `bd delete --force … --json` | delete confirmation shape |
 | `count` | `bd count --json` | json-output-shapes (scalar) |
-| `version` | `bd version --json` | version-compat, the `schema_version` canary |
+| `version` | `bd version --json` | version-compat, the `schema_version` canary, the binary's migration numbers (presence only) |
 | `error` | `bd show <missing> --json` | exit-codes-and-errors (`{error, schema_version}`) |
 
 ### Native-fix captures

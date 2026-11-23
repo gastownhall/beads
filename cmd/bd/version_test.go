@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -80,6 +82,20 @@ func TestVersionCommand(t *testing.T) {
 		// cgo field removed — server-only operation, no CGO bifurcation
 		if _, ok := result["cgo"]; ok {
 			t.Error("cgo field should no longer be present in version output")
+		}
+		// The binary's own migration numbers, read from the embedded
+		// migration files with no store open.
+		for key, want := range map[string]int{
+			"latest_schema_migration":         schema.LatestVersion(),
+			"latest_ignored_schema_migration": schema.LatestIgnoredVersion(),
+		} {
+			if want <= 0 {
+				t.Fatalf("the schema package reports %d for %s; this binary embeds migrations in both series", want, key)
+			}
+			got, ok := result[key].(float64)
+			if !ok || int(got) != want {
+				t.Errorf("%s = %#v, want the number %d", key, result[key], want)
+			}
 		}
 	})
 

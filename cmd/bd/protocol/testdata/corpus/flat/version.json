@@ -1,6 +1,8 @@
 {
   "branch": "<BRANCH>",
   "build": "<BUILD>",
+  "latest_ignored_schema_migration": "<MIGRATION>",
+  "latest_schema_migration": "<MIGRATION>",
   "schema_version": 1,
   "version": "<VERSION>"
 }

@@ -125,13 +125,19 @@ func TestEmbeddedVersionOutputShape(t *testing.T) {
 			}
 			for key := range fields {
 				switch key {
-				case "version", "build", "schema_version", "commit", "branch":
+				case "version", "build", "schema_version", "commit", "branch",
+					"latest_schema_migration", "latest_ignored_schema_migration":
 				default:
 					t.Errorf("bd version --json has an unexpected key %q:\n%s", key, doc)
 				}
 			}
 			if _, ok := fields["schema_version"].(float64); !ok {
 				t.Errorf("bd version --json has no numeric schema_version:\n%s", doc)
+			}
+			for _, key := range []string{"latest_schema_migration", "latest_ignored_schema_migration"} {
+				if v, ok := fields[key].(float64); !ok || v < 1 {
+					t.Errorf("bd version --json %s = %#v, want this binary's newest migration number:\n%s", key, fields[key], doc)
+				}
 			}
 			if fields["version"] != line[1] || fields["build"] != line[2] {
 				t.Errorf("bd version --json says version %v build %v, the text line says %s and %s:\n%s", fields["version"], fields["build"], line[1], line[2], doc)

@@ -114,10 +114,17 @@ func TestCanonicalizeDropsProvenance(t *testing.T) {
 		if _, ok := obj["schema_version"]; !ok {
 			t.Errorf("%s: schema_version must be preserved, not dropped", label)
 		}
+		// The binary's migration numbers grow with the tree: the corpus pins
+		// their presence, not their value.
+		for _, key := range []string{"latest_schema_migration", "latest_ignored_schema_migration"} {
+			if got, _ := obj[key].(string); got != "<MIGRATION>" {
+				t.Errorf("%s: %s = %#v, want placeholder %q", label, key, obj[key], "<MIGRATION>")
+			}
+		}
 	}
 
 	t.Run("flat", func(t *testing.T) {
-		in := []byte(`{"version":"1.2.3","branch":"main","build":"cgo","commit":"abc1234","schema_version":6}`)
+		in := []byte(`{"version":"1.2.3","branch":"main","build":"cgo","commit":"abc1234","latest_schema_migration":74,"latest_ignored_schema_migration":31,"schema_version":6}`)
 		out, err := CanonicalizeJSON(in)
 		if err != nil {
 			t.Fatalf("canonicalize: %v", err)
@@ -133,7 +140,7 @@ func TestCanonicalizeDropsProvenance(t *testing.T) {
 		// Envelope mode nests the version payload under "data"; the transform is
 		// explicitly documented as not scopable to "top level only", so the nested
 		// block must be canonicalized the same way as the flat one.
-		in := []byte(`{"data":{"version":"1.2.3","branch":"main","build":"cgo","commit":"abc1234","schema_version":6},"schema_version":6}`)
+		in := []byte(`{"data":{"version":"1.2.3","branch":"main","build":"cgo","commit":"abc1234","latest_schema_migration":74,"latest_ignored_schema_migration":31,"schema_version":6},"schema_version":6}`)
 		out, err := CanonicalizeJSON(in)
 		if err != nil {
 			t.Fatalf("canonicalize: %v", err)
@@ -148,6 +155,26 @@ func TestCanonicalizeDropsProvenance(t *testing.T) {
 		}
 		assertProvenance(t, "envelope", data)
 	})
+}
+
+// TestCanonicalizeKeepsANonNumberMigrationField pins the limit of the migration
+// number transform: it replaces a JSON number only. If bd version ever reported
+// one of these fields as a string or null, the corpus diff must show it.
+func TestCanonicalizeKeepsANonNumberMigrationField(t *testing.T) {
+	out, err := CanonicalizeJSON([]byte(`{"latest_schema_migration":"74","latest_ignored_schema_migration":null}`))
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal canonical output: %v\n%s", err, out)
+	}
+	if got["latest_schema_migration"] != "74" {
+		t.Errorf("a string latest_schema_migration became %#v, want it left as \"74\"", got["latest_schema_migration"])
+	}
+	if v, ok := got["latest_ignored_schema_migration"]; !ok || v != nil {
+		t.Errorf("a null latest_ignored_schema_migration became %#v (present=%v), want it left as null", v, ok)
+	}
 }
 
 // TestCorpusDoubleRunByteIdentical proves the generator normalizes two raw
@@ -344,7 +371,7 @@ func scriptedCaptureJSON(c Capture, envelope bool, variant int) []byte {
 			payload = fmt.Sprintf(`[{"id":"a","created_at":%q},{"id":"b","created_at":%q}]`, timestamp, timestamp)
 		}
 	case "version":
-		payload = fmt.Sprintf(`{"version":"v%d","branch":"branch-%d","build":"build-%d","commit":"commit-%d","schema_version":1}`, variant, variant, variant, variant)
+		payload = fmt.Sprintf(`{"version":"v%d","branch":"branch-%d","build":"build-%d","commit":"commit-%d","latest_schema_migration":%d,"latest_ignored_schema_migration":%d,"schema_version":1}`, variant, variant, variant, variant, 70+variant, 30+variant)
 	case errorCaptureName:
 		payload = fmt.Sprintf(`{"error":"missing","at":%q,"schema_version":1}`, timestamp)
 	default:
