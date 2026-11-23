@@ -1481,6 +1481,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no time. It now reads `Lease: expired 3 hours ago`; a live lease still reads
   `Lease: expires in 3 mins`.
 
+- **`bd gc` and `bd doctor --fix` no longer skip a delete that collides with
+  a concurrent write.** On a Dolt sql-server, deleting an issue while another
+  client commits a write to that same issue loses Dolt's commit-time merge:
+  the server rolls the delete back with a serialization failure (Error 1213).
+  The store's `DeleteIssue` and `DeleteIssues` were the last issue writes
+  that ran as a single attempt, so the error reached the caller. `bd gc`'s
+  decay phase and the `bd doctor --fix` stale-closed and patrol-pollution
+  cleanups print it as a warning, leave the issue in place and exit 0. Both
+  entry points now replay the rolled-back delete, as create, update, close,
+  claim and sweep already do.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
