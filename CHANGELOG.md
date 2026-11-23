@@ -1486,7 +1486,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still cleared. `bd doctor` reports how many rows it left alone on its
   Blocked State line, and `bd recompute-blocked` reports the same count: a
   line of text when it is not zero, and a `rows_abstained` member beside
-  `rows_corrected` in `--json`.
+  `rows_corrected` in `--json`. A workspace connected to a `bd serve` backend
+  answers `rows_abstained: 0` beside its `maintained_by: "server"`, so the
+  member is present in every answer.
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so

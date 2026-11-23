@@ -62,3 +62,29 @@ func TestRenderRecomputeBlocked(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderRecomputeBlockedServerMaintained pins the answer a workspace
+// connected to a bd serve backend gives. Nothing was recomputed there, and the
+// answer still carries both counts, at zero, beside maintained_by: a caller
+// that requires rows_abstained from a local repair must be able to require it
+// here too.
+func TestRenderRecomputeBlockedServerMaintained(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	out := captureStdout(t, renderRecomputeBlockedServerMaintained)
+	jsonOutput = oldJSON
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &payload); err != nil {
+		t.Fatalf("parse --json output: %v\nraw: %s", err, out)
+	}
+	for _, member := range []string{"rows_corrected", "rows_abstained"} {
+		got, ok := payload[member].(float64)
+		if !ok || got != 0 {
+			t.Errorf("%s = %v, want 0 in %s", member, payload[member], out)
+		}
+	}
+	if got := payload["maintained_by"]; got != "server" {
+		t.Errorf("maintained_by = %v, want server in %s", got, out)
+	}
+}

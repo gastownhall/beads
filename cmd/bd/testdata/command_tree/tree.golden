@@ -6297,7 +6297,8 @@ bd recompute-blocked
     | On a workspace connected to a bd serve backend ('bd connect') it is a no-op
     | that exits 0: the server maintains is_blocked on every write, and the column
     | lives in the server's database, so the repair is run there, by the server's
-    | operator. --json then reports {"rows_corrected": 0, "maintained_by": "server"}.
+    | operator. --json then reports
+    | {"rows_corrected": 0, "rows_abstained": 0, "maintained_by": "server"}.
     |
     | Examples:
     |   bd recompute-blocked          # Repair stale is_blocked flags

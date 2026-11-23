@@ -350,7 +350,7 @@ children (not its whole subtree).
 server's boolean query. `bd recompute-blocked` is a no-op that exits 0: the
 server maintains `is_blocked` on every write, and repairing a stale flag is
 done in the server's own workspace (`--json` reports
-`{"rows_corrected": 0, "maintained_by": "server"}`).
+`{"rows_corrected": 0, "rows_abstained": 0, "maintained_by": "server"}`).
 
 An embedding program that links beads as a library rather than running
 `cmd/bd` registers this backend itself through the public

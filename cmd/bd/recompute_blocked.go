@@ -37,7 +37,8 @@ errors.
 On a workspace connected to a bd serve backend ('bd connect') it is a no-op
 that exits 0: the server maintains is_blocked on every write, and the column
 lives in the server's database, so the repair is run there, by the server's
-operator. --json then reports {"rows_corrected": 0, "maintained_by": "server"}.
+operator. --json then reports
+{"rows_corrected": 0, "rows_abstained": 0, "maintained_by": "server"}.
 
 Examples:
   bd recompute-blocked          # Repair stale is_blocked flags
@@ -116,9 +117,13 @@ func renderRecomputeBlocked(changed, abstained int) error {
 // BdStore.RecomputeBlocked requires the member, and wh-bridge-sync reads the
 // exit code), and it carries `maintained_by: "server"` so a caller that cares
 // can tell "nothing was stale" from "nothing was checked here".
+//
+// rows_abstained (0) is here for the same reason as rows_corrected: the local
+// renderer promises the member in every answer, and a caller that requires it
+// must not fail only because the workspace is connected to a server.
 func renderRecomputeBlockedServerMaintained() error {
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{"rows_corrected": 0, "maintained_by": storage.BlockedMaintainedByServer})
+		return outputJSON(map[string]interface{}{"rows_corrected": 0, "rows_abstained": 0, "maintained_by": storage.BlockedMaintainedByServer})
 	}
 	fmt.Println("is_blocked is maintained by the bd serve backend on every write; nothing to recompute from this client.")
 	fmt.Println("To repair a stale flag on the server's database, run bd recompute-blocked in the server's workspace.")
