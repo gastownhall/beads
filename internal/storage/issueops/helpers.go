@@ -73,7 +73,7 @@ var issueUpsertColumns = []string{
 	"content_hash", "title", "description", "design", "acceptance_criteria",
 	"notes", "status", "priority", "issue_type", "assignee",
 	"estimated_minutes", "started_at", "closed_at", "external_ref",
-	"source_repo", "close_reason", "closed_by_session", "metadata",
+	"source_repo", "close_reason", "closed_by", "closed_by_session", "metadata",
 	"row_lock", "updated_at",
 }
 
@@ -138,7 +138,7 @@ func issueInsertSQL(table string, rows int, suffix string) string {
 			created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
 			compaction_level, compacted_at, compacted_at_commit, original_size,
 			sender, ephemeral, no_history, wisp_type, pinned, is_template,
-			mol_type, work_type, source_system, source_repo, close_reason, closed_by_session,
+			mol_type, work_type, source_system, source_repo, close_reason, closed_by, closed_by_session,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
@@ -155,7 +155,7 @@ const issueInsertRow = `(
 			?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?,
@@ -171,7 +171,7 @@ func issueInsertArgs(issue *types.Issue) []any {
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
 		issue.CompactionLevel, issue.CompactedAt, NullStringPtr(issue.CompactedAtCommit), NullIntVal(issue.OriginalSize),
 		issue.Sender, issue.Ephemeral, issue.NoHistory, issue.WispType, issue.Pinned, issue.IsTemplate,
-		issue.MolType, issue.WorkType, issue.SourceSystem, issue.SourceRepo, issue.CloseReason, issue.ClosedBySession,
+		issue.MolType, issue.WorkType, issue.SourceSystem, issue.SourceRepo, issue.CloseReason, issue.ClosedBy, issue.ClosedBySession,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
@@ -190,7 +190,7 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 
 // issueInsertRowsPerStatement and issueInsertBytesPerStatement bound a
 // multi-row issue INSERT. The row cap keeps a statement far below the
-// 65535-placeholder protocol limit (49 bound columns per row); the byte budget
+// 65535-placeholder protocol limit (50 bound columns per row); the byte budget
 // keeps rows with long text (description and notes are LONGTEXT) from
 // building a statement that a lowered max_allowed_packet or a server read
 // timeout would refuse where the single-row inserts would not.
@@ -204,7 +204,7 @@ const (
 func issueInsertRowBytes(issue *types.Issue) int {
 	n := 1024 + len(issue.Title) + len(issue.Description) + len(issue.Design) +
 		len(issue.AcceptanceCriteria) + len(issue.Notes) + len(issue.Metadata) +
-		len(issue.Payload) + len(issue.CloseReason) + len(issue.Target)
+		len(issue.Payload) + len(issue.CloseReason) + len(issue.ClosedBy) + len(issue.Target)
 	for _, w := range issue.Waiters {
 		n += len(w) + 3
 	}

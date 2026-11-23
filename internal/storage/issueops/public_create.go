@@ -97,6 +97,15 @@ func PreparePublicCreateRequest(request publicops.CreateRequest, context PublicC
 	if issue.CreatedBy == "" {
 		issue.CreatedBy = request.Actor
 	}
+	// closed_by defaults to the request's actor for a closed create, the
+	// same door created_by uses: a create that lands already closed records
+	// who closed it, which for a create IS the creator. An explicit ClosedBy
+	// is kept (an import-shaped caller may carry one). Keyed on the literal
+	// closed status, exactly as the close-lifecycle writers are
+	// (ManageClosedAt).
+	if issue.Status == types.StatusClosed && issue.ClosedBy == "" {
+		issue.ClosedBy = request.Actor
+	}
 	if issue.ID != "" && !request.ForceIDPrefix {
 		// The caller's prefix wins when it supplied one; see
 		// CreateRequest.IDPrefix for why a front door may know better than the
@@ -172,7 +181,7 @@ func publicCreateIssue(source *types.Issue) *types.Issue {
 		Status: source.Status, Priority: source.Priority, IssueType: source.IssueType,
 		Assignee: source.Assignee, Owner: source.Owner, EstimatedMinutes: cloneInt(source.EstimatedMinutes),
 		CreatedAt: source.CreatedAt, CreatedBy: source.CreatedBy, UpdatedAt: source.UpdatedAt,
-		StartedAt: cloneTime(source.StartedAt), ClosedAt: cloneTime(source.ClosedAt), CloseReason: source.CloseReason, ClosedBySession: source.ClosedBySession,
+		StartedAt: cloneTime(source.StartedAt), ClosedAt: cloneTime(source.ClosedAt), CloseReason: source.CloseReason, ClosedBy: source.ClosedBy, ClosedBySession: source.ClosedBySession,
 		DueAt: cloneTime(source.DueAt), DeferUntil: cloneTime(source.DeferUntil), ExternalRef: cloneString(source.ExternalRef), SourceSystem: source.SourceSystem, SourceRepo: source.SourceRepo,
 		Metadata: cloneRawMessage(source.Metadata), Labels: append([]string(nil), source.Labels...), Sender: source.Sender,
 		Ephemeral: source.Ephemeral, NoHistory: source.NoHistory, WispType: source.WispType, StorageClass: source.StorageClass,

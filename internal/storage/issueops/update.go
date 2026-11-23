@@ -35,19 +35,24 @@ func IsAllowedUpdateField(key string) bool {
 // transition, so a generic update that crosses into closed lands the same row
 // `bd close` would and a reopen leaves nothing of the old close behind.
 //
-// closeIssueInTx writes closed_at, close_reason and closed_by_session on EVERY
-// close, including the empty reason and session a caller that supplied neither
-// produces. The update funnels write a column only when the caller names its
-// key, so without these defaults a generic close inherits whatever the previous
-// close left: a re-close after a generic reopen keeps the old session and
-// `bd show` reports the new close as the old session's work (ga-kjkv1). Each
-// default is suppressed by its own explicit key, so a caller that names the
-// column still wins — the CLI's own closed_by_session pass-through included.
+// closeIssueInTx writes closed_at, close_reason, closed_by and
+// closed_by_session on EVERY close, including the empty reason and session a
+// caller that supplied neither produces. The update funnels write a column
+// only when the caller names its key, so without these defaults a generic
+// close inherits whatever the previous close left: a re-close after a generic
+// reopen keeps the old session and `bd show` reports the new close as the old
+// session's work (ga-kjkv1). Each default is suppressed by its own explicit
+// key, so a caller that names the column still wins — the CLI's own
+// closed_by_session pass-through included.
 //
-// The reopen branch clears all three, mirroring ReopenIssueInTx. Both branches
+// closed_by's default is the update's actor, the same stamp
+// closeIssueInTx lands for the close verbs; no CLI or wire surface allowlists
+// the key, so only a raw-map caller that names it can suppress the default.
+//
+// The reopen branch clears all four, mirroring ReopenIssueInTx. Both branches
 // stay keyed on the LITERAL closed status; category-aware reopen keying is
 // ga-ktn9pe.4.15.
-func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}) ([]string, []interface{}) {
+func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}, actor string) ([]string, []interface{}) {
 	statusVal, hasStatus := updates["status"]
 	if !hasStatus {
 		return setClauses, args
@@ -78,10 +83,12 @@ func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setCl
 	if newStatus == string(types.StatusClosed) {
 		appendDefault("closed_at", time.Now().UTC())
 		appendDefault("close_reason", "")
+		appendDefault("closed_by", actor)
 		appendDefault("closed_by_session", "")
 	} else if oldIssue.Status == types.StatusClosed {
 		appendDefault("closed_at", nil)
 		appendDefault("close_reason", "")
+		appendDefault("closed_by", "")
 		appendDefault("closed_by_session", "")
 	}
 
@@ -479,7 +486,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 
 	// Auto-manage closed_at (set on close, clear on reopen).
-	setClauses, args = ManageClosedAt(oldIssue, updates, setClauses, args)
+	setClauses, args = ManageClosedAt(oldIssue, updates, setClauses, args, actor)
 
 	// Auto-manage started_at (set on transition to in_progress). (GH#2796)
 	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)
