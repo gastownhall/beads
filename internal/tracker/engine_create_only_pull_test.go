@@ -225,3 +225,51 @@ func TestEngineCreateOnlyPullDryRunPreviewsNoUpdate(t *testing.T) {
 			live.PullStats.Created, live.PullStats.Updated, live.PullStats.Skipped)
 	}
 }
+
+// TestEngineCreateOnlyPullHoldsMapperMatchedBead pins the mapper-ID tier, the
+// only one that can match an unlinked local (Notion's "Beads ID"): the
+// link-repair update is held under --create-only, so neither the bead's
+// content nor its external_ref is written, and no bead is created.
+func TestEngineCreateOnlyPullHoldsMapperMatchedBead(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		return &IssueConversion{
+			Issue: &types.Issue{
+				ID:        "bd-fresh",
+				Title:     ti.Title,
+				Priority:  2,
+				Status:    types.StatusOpen,
+				IssueType: types.TypeTask,
+			},
+		}
+	}}
+	tracker.issues = []TrackerIssue{{
+		ID:         "ext-fresh",
+		Identifier: "EXT-FRESH",
+		Title:      "Fresh remote title",
+		State:      types.StatusOpen,
+		Priority:   2,
+	}}
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	fresh := state.issues["bd-fresh"]
+	if fresh.Title != "Not yet linked" {
+		t.Errorf("mapper-matched bead title = %q, want %q (left alone)", fresh.Title, "Not yet linked")
+	}
+	if fresh.ExternalRef != nil {
+		t.Errorf("mapper-matched bead external_ref = %q, want none (no link repair under --create-only)", *fresh.ExternalRef)
+	}
+	if len(state.issues) != 2 {
+		t.Errorf("issues = %d rows, want 2: no bead may be created for a matched remote issue", len(state.issues))
+	}
+	if result.PullStats.Created != 0 || result.PullStats.Updated != 0 || result.PullStats.Skipped != 1 {
+		t.Errorf("PullStats = {Created:%d Updated:%d Skipped:%d}, want {0 0 1}",
+			result.PullStats.Created, result.PullStats.Updated, result.PullStats.Skipped)
+	}
+}
