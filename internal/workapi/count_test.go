@@ -432,11 +432,6 @@ func TestBuildCountFilterTakesStatusAndTypeAsWritten(t *testing.T) {
 	}
 }
 
-// TestValidateCountGroupClosesTheDimensionSet pins the five published
-// dimensions and the typed refusal for everything else. The refusal has to be
-// ErrValidation rather than a bare string because both front doors classify it,
-// and because an empty GroupBy reaching storage comes back as an "unsupported
-// groupBy" that no caller can match on.
 // TestBuildCountFilterSplitsTheStatusSet pins the --status spelling `bd list`
 // documents (GH#8502): a comma-separated value is a status OR set on the count
 // plane too, instead of one status name no row carries — which made
@@ -457,6 +452,7 @@ func TestBuildCountFilterSplitsTheStatusSet(t *testing.T) {
 	}{
 		{"empty stays no predicate", "", nil, nil},
 		{"single name keeps the pointer shape", "open", statusPtr(types.StatusOpen), nil},
+		{"single name is trimmed like list reads it", " open ", statusPtr(types.StatusOpen), nil},
 		{"all stays the no-filter spelling", "all", nil, nil},
 		{"comma set becomes the OR set", "open,in_progress", nil, []types.Status{types.StatusOpen, types.StatusInProgress}},
 		{"set parts are trimmed", " open , in_progress ", nil, []types.Status{types.StatusOpen, types.StatusInProgress}},
@@ -509,6 +505,11 @@ func TestCountAndListStatusSetAgreement(t *testing.T) {
 
 func statusPtr(s types.Status) *types.Status { return &s }
 
+// TestValidateCountGroupClosesTheDimensionSet pins the five published
+// dimensions and the typed refusal for everything else. The refusal has to be
+// ErrValidation rather than a bare string because both front doors classify it,
+// and because an empty GroupBy reaching storage comes back as an "unsupported
+// groupBy" that no caller can match on.
 func TestValidateCountGroupClosesTheDimensionSet(t *testing.T) {
 	for group, want := range map[issueops.CountGroup]string{
 		issueops.CountGroupStatus:   "status",

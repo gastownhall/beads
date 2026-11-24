@@ -274,7 +274,7 @@ func init() {
 // real command and into the next test.
 func registerCountFlags(cmd *cobra.Command) {
 	// Filter flags (same as list command)
-	cmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'")
+	cmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress. Note: dependency-blocked issues use 'bd blocked'")
 	cmd.Flags().IntP("priority", "p", 0, "Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)")
 	cmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	cmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")

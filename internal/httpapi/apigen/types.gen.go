@@ -2494,7 +2494,7 @@ type CountDependencyEdgesParams struct {
 	//
 	// IT IS LEGAL ONLY WITH `direction=in`. Sending it beside `direction=out` is a 400 `invalid_argument` with `param: "status"` and `reason: "invalid_value"`, rather than a filter that is quietly ignored. The asymmetry is the substrate's and `issueops.EdgeCountRequest.Status` states why: narrowing by status joins the far end of the edge to the row holding its status, and an OUTBOUND edge's far end may be an `external:` reference or an id belonging to another repository — rows this database does not hold — so the filter would silently drop every dangling edge.
 	//
-	// It is ONE status, not a comma-separated OR set, and it is NOT validated against the workspace vocabulary: an unrecognized name matches nothing and counts 0 rather than failing, exactly as `GET /v0/beads/issues:count`'s `status` does. A scripted caller counting a status its workspace has since dropped reads 0 and should keep reading 0.
+	// It is ONE status, not a comma-separated OR set, and it is NOT validated against the workspace vocabulary: an unrecognized name matches nothing and counts 0 rather than failing. A comma-separated value is matched as written here and answers 0 — the edge count does not split it into a set the way `GET /v0/beads/issues:count`'s `status` does. A scripted caller counting a status its workspace has since dropped reads 0 and should keep reading 0.
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 }
 
@@ -2895,11 +2895,7 @@ type ClaimNextIssueParamsSort string
 
 // CountIssuesParams defines parameters for CountIssues.
 type CountIssuesParams struct {
-	// Status One stored status. The empty value and the literal `all` both mean EVERY status, which is what makes a bare count answer for closed rows as well as open ones.
-	//
-	// IT IS ONE STATUS, NOT A COMMA-SEPARATED SET, and that is the one parameter name this operation shares with `GET /v0/beads/issues` while meaning something narrower — that one takes a comma-separated OR set. It is stated here rather than quietly reconciled, because a client that assumed otherwise would read a plausible number instead of an error.
-	//
-	// It is NOT validated against this workspace's configured vocabulary. An unrecognized name matches nothing and the answer is `0`, not a refusal — the shipped behavior of `bd count`, published rather than tightened, because a scripted caller counting a status its workspace has since dropped currently reads 0 and would otherwise start reading an error.
+	// Status One status name, or a comma-separated OR set — the spelling `GET /v0/beads/issues`' `status` takes, applied here too: `status=open,in_progress` counts rows in either state, so the count answers the same rows the listing returns for the same filter. The empty value and the literal `all` still mean EVERY status, which is what makes a bare count answer for closed rows as well as open ones. Parts are matched as written and are NOT validated against this workspace's configured vocabulary: a part no row's status equals — including a stray `all` inside a set — matches nothing, and an unrecognized name answers `0`, not a refusal; the shipped match-nothing behavior of `bd count`, published rather than tightened, because a scripted caller counting a status its workspace has since dropped currently reads 0 and would otherwise start reading an error.
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 
 	// Type One issue type, with `status`'s match-nothing-rather-than-fail treatment and NO shorthand alias expansion at all — unlike `GET /v0/beads/ready`'s `type`, which expands aliases.

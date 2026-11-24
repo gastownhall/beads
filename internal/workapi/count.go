@@ -84,14 +84,16 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 	// A comma-separated value is a status OR set, the spelling bd list
 	// documents (GH#8502); parts stay as written, so an unknown part — and a
 	// stray "all" inside a set — contributes nothing rather than widening the
-	// count.
+	// count. The value passes through the list selector's splitter, so a
+	// single name comes back trimmed the way bd list reads it.
 	if in.Status != "" && in.Status != "all" {
-		if parts := splitStatusSelector(in.Status); len(parts) > 1 {
+		parts := splitStatusSelector(in.Status)
+		if len(parts) > 1 {
 			for _, part := range parts {
 				filter.Statuses = append(filter.Statuses, types.Status(part))
 			}
 		} else {
-			status := types.Status(in.Status)
+			status := types.Status(parts[0])
 			filter.Status = &status
 		}
 	}

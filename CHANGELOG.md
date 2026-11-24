@@ -1561,6 +1561,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry points now replay the rolled-back delete, as create, update, close,
   claim and sweep already do.
 
+- **`bd count --status` now accepts the comma-separated set `bd list`
+  documents** ([#8589](https://github.com/gastownhall/beads/pull/8589)). The
+  count took the whole value as one status name, so
+  `bd count --status open,in_progress` printed `0` while
+  `bd list --status open,in_progress` returned the issues, and a script
+  that gated a release on the count form read `0` forever (#8502). The
+  count now splits the value the way the listing does, on both front
+  doors (embedded store and proxied server). Single names behave as
+  before; an unrecognized name — or a part inside a set — still matches
+  nothing and answers `0` rather than erroring, so a bad selector
+  undercounts instead of widening the count.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
