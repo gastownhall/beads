@@ -164,3 +164,64 @@ func TestEngineCreateOnlyPullUpdatesLinkedWithoutFlag(t *testing.T) {
 		t.Errorf("PullStats.Updated = %d, want 1", result.PullStats.Updated)
 	}
 }
+
+// TestEngineCreateOnlyPullDryRunPreviewsNoUpdate pins the AC-2 contract: a
+// --create-only dry run previews no update for a matched bead, still previews
+// the import of the unmatched issue, writes nothing, and reports the same
+// stats as the real run.
+func TestEngineCreateOnlyPullDryRunPreviewsNoUpdate(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.fieldMapper = createOnlyPullMapper()
+	tracker.issues = []TrackerIssue{
+		{
+			ID:         "ext-linked",
+			Identifier: "EXT-LINKED",
+			Title:      "Retitled remotely",
+			State:      types.StatusOpen,
+			Priority:   2,
+		},
+		{
+			ID:         "ext-new",
+			Identifier: "EXT-NEW",
+			Title:      "Brand new remote",
+			State:      types.StatusOpen,
+			Priority:   2,
+		},
+	}
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+	var msgs []string
+	engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+
+	dry, err := engine.Sync(ctx, SyncOptions{Pull: true, DryRun: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() dry-run error: %v", err)
+	}
+	joined := strings.Join(msgs, "\n")
+	if strings.Contains(joined, "Would update local issue") {
+		t.Errorf("dry-run messages = %q, want no update preview under --create-only", joined)
+	}
+	if !strings.Contains(joined, "Would import: EXT-NEW") {
+		t.Errorf("dry-run messages = %q, want an import preview for the unmatched issue", joined)
+	}
+	if len(state.issues) != 2 || state.commits != 0 || len(state.updateSpec.Fields) != 0 {
+		t.Fatalf("dry-run wrote to the store: issues=%d commits=%d update=%v",
+			len(state.issues), state.commits, state.updateSpec.Fields)
+	}
+	if got := state.issues["bd-linked"].Title; got != "Already linked" {
+		t.Errorf("linked bead title = %q after dry-run, want %q", got, "Already linked")
+	}
+
+	live, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() real run error: %v", err)
+	}
+	if dry.PullStats.Created != live.PullStats.Created ||
+		dry.PullStats.Updated != live.PullStats.Updated ||
+		dry.PullStats.Skipped != live.PullStats.Skipped {
+		t.Errorf("dry-run PullStats {Created:%d Updated:%d Skipped:%d} != real run {Created:%d Updated:%d Skipped:%d}",
+			dry.PullStats.Created, dry.PullStats.Updated, dry.PullStats.Skipped,
+			live.PullStats.Created, live.PullStats.Updated, live.PullStats.Skipped)
+	}
+}
