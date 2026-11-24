@@ -12,6 +12,7 @@ Flags:
       --children             Show only the children of this issue
       --comments-tail int    Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only; 0, the default, renders every comment unchanged; N must be >= 0)
       --current              Show the currently active issue (in-progress, hooked, or last touched)
+      --head                 Show a short view of a long issue: the last 1 KB of the notes in place of the description, design, notes and acceptance criteria, and the last 3 comments (--comments-tail N changes the count), followed by one line naming what was withheld; the header, labels, metadata and dependency lists print as usual, and a comment is never cut (text output only; cannot be combined with --json, --short, --long, --refs, --children, --thread, --as-of or --watch)
   -h, --help                 help for show
       --id stringArray       Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)
       --include-comments     Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments). Without it the comments field is absent entirely, not truncated: an issue with comments carries comment_count and comments_omitted=true, so check those before reading an absent comments field as none.

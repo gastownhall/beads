@@ -183,6 +183,7 @@
 34 20 TestProxiedServerLint
 34 20 TestProxiedServerPriority
 34 20 TestProxiedServerShow2B
+34 20 TestProxiedServerShowHead
 34 20 TestProxiedServerWispGC
 34 20 TestServerModeSharedServeGlobalReportsTheServedDatabase
 

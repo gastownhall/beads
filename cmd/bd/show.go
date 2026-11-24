@@ -184,6 +184,13 @@ var showCmd = &cobra.Command{
 		if err := validateCommentsTail(commentsTail); err != nil {
 			return err
 		}
+		headMode, _ := cmd.Flags().GetBool("head")
+		if headMode {
+			if err := validateShowHead(cmd, jsonOutput); err != nil {
+				return err
+			}
+			commentsTail = resolveHeadCommentsTail(cmd, commentsTail)
+		}
 		ctx := rootCtx
 
 		// Helper to format timestamp based on --local-time flag
@@ -341,20 +348,26 @@ var showCmd = &cobra.Command{
 			fmt.Println(formatIssueMetadataWithGates(issue, gates))
 
 			// Content sections — always show DESCRIPTION header so the user
-			// can distinguish "empty" from "hidden" (GH#3336).
-			if issue.Description != "" {
-				fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), uimd.RenderMarkdown(issue.Description))
+			// can distinguish "empty" from "hidden" (GH#3336). The head view
+			// (--head) prints the end of the notes instead, and its trailer
+			// names each field it left out, so hidden still reads as hidden.
+			if headMode {
+				printHeadNotes(issue.Notes)
 			} else {
-				fmt.Printf("\n%s\n  %s\n", ui.RenderBold("DESCRIPTION"), ui.RenderMuted("(none)"))
-			}
-			if issue.Design != "" {
-				fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESIGN"), uimd.RenderMarkdown(issue.Design))
-			}
-			if issue.Notes != "" {
-				fmt.Printf("\n%s\n%s\n", ui.RenderBold("NOTES"), uimd.RenderMarkdown(issue.Notes))
-			}
-			if issue.AcceptanceCriteria != "" {
-				fmt.Printf("\n%s\n%s\n", ui.RenderBold("ACCEPTANCE CRITERIA"), uimd.RenderMarkdown(issue.AcceptanceCriteria))
+				if issue.Description != "" {
+					fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), uimd.RenderMarkdown(issue.Description))
+				} else {
+					fmt.Printf("\n%s\n  %s\n", ui.RenderBold("DESCRIPTION"), ui.RenderMuted("(none)"))
+				}
+				if issue.Design != "" {
+					fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESIGN"), uimd.RenderMarkdown(issue.Design))
+				}
+				if issue.Notes != "" {
+					fmt.Printf("\n%s\n%s\n", ui.RenderBold("NOTES"), uimd.RenderMarkdown(issue.Notes))
+				}
+				if issue.AcceptanceCriteria != "" {
+					fmt.Printf("\n%s\n%s\n", ui.RenderBold("ACCEPTANCE CRITERIA"), uimd.RenderMarkdown(issue.AcceptanceCriteria))
+				}
 			}
 
 			// Show labels
@@ -400,8 +413,11 @@ var showCmd = &cobra.Command{
 			printRelatedSection(relatedSeen)
 
 			// Show comments
-			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
+			comments, commentsErr := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
 			printComments(comments, commentsTail, formatTime, issue.ID)
+			if headMode {
+				printHeadTrailer(issue, len(comments), commentsTail, commentsErr != nil)
+			}
 
 			// Long mode: show all extended fields
 			if longMode {
@@ -454,6 +470,7 @@ func init() {
 		"comment_count and comments_omitted=true, so check those before reading an absent comments field as none.")
 	showCmd.Flags().Bool("brief-deps", false, "Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)")
 	showCmd.Flags().Int("comments-tail", 0, "Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only; 0, the default, renders every comment unchanged; N must be >= 0)")
+	showCmd.Flags().Bool("head", false, "Show a short view of a long issue: the last 1 KB of the notes in place of the description, design, notes and acceptance criteria, and the last 3 comments (--comments-tail N changes the count), followed by one line naming what was withheld; the header, labels, metadata and dependency lists print as usual, and a comment is never cut (text output only; cannot be combined with --json, --short, --long, --refs, --children, --thread, --as-of or --watch)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
 }
