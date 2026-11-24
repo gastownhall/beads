@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/dolthub/dolt/go/cmd/dolt/cli"
 )
 
 func TestDoltPruneOutputWriterPassesNonPruneOutputUnchanged(t *testing.T) {
@@ -22,6 +24,53 @@ func TestDoltPruneOutputWriterPassesNonPruneOutputUnchanged(t *testing.T) {
 	}
 	if !bytes.Equal(destination.Bytes(), input) {
 		t.Fatalf("forwarded output = %q, want %q", destination.String(), input)
+	}
+}
+
+func TestDoltPruneOutputWriterCapturesOnlyMatchingDestination(t *testing.T) {
+	const backupURL = "file:///tmp/backup"
+	var destination bytes.Buffer
+	capture := &doltPruneOutputCapture{}
+	writer := &doltPruneOutputWriter{destination: &destination, backupURL: backupURL, capture: capture}
+	matching := []byte("Pruning file:///tmp/backup: deleted 2 file(s), reclaimed 471490 bytes")
+	unmatched := []byte("Pruning file:///tmp/other: deleted 1 file(s), reclaimed 8 bytes")
+
+	if _, err := writer.Write(matching); err != nil {
+		t.Fatalf("Write matching summary: %v", err)
+	}
+	if _, err := writer.Write(unmatched); err != nil {
+		t.Fatalf("Write unmatched summary: %v", err)
+	}
+	if destination.String() != string(unmatched) {
+		t.Fatalf("forwarded output = %q, want unmatched summary %q", destination.String(), unmatched)
+	}
+	outcome := capture.outcome()
+	if outcome.Status != "pruned" || outcome.FilesDeleted == nil || *outcome.FilesDeleted != 2 {
+		t.Fatalf("captured outcome = %+v, want two deleted files", outcome)
+	}
+}
+
+func TestCaptureDoltPruneOutputRestoresGlobalWriter(t *testing.T) {
+	original := cli.CliOut
+	var destination bytes.Buffer
+	cli.CliOut = &destination
+	t.Cleanup(func() { cli.CliOut = original })
+
+	outcome, err := CaptureDoltPruneOutput("file:///tmp/backup", func() error {
+		_, err := cli.CliOut.Write([]byte("Pruning file:///tmp/backup: deleted 2 file(s), reclaimed 471490 bytes"))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CaptureDoltPruneOutput: %v", err)
+	}
+	if cli.CliOut != &destination {
+		t.Fatalf("cli.CliOut after capture = %T, want restored destination writer", cli.CliOut)
+	}
+	if destination.Len() != 0 {
+		t.Fatalf("captured summary leaked to output: %q", destination.String())
+	}
+	if outcome.Status != "pruned" || outcome.FilesDeleted == nil || *outcome.FilesDeleted != 2 {
+		t.Fatalf("captured outcome = %+v, want two deleted files", outcome)
 	}
 }
 

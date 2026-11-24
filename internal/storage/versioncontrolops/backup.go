@@ -50,6 +50,11 @@ var ErrBackupRemoteNotFound = errors.New("backup remote not found")
 // are omitted when the server's output cannot be observed.
 type BackupPruneOutcome = storage.BackupPruneOutcome
 
+// BackupPruneOutputCapture scopes observation of Dolt's non-SQL prune summary
+// around the sync operation. Only the embedded adapter supplies one; SQL and
+// proxy connections cannot observe output produced inside the server process.
+type BackupPruneOutputCapture func(backupURL string, sync func() error) (BackupPruneOutcome, error)
+
 // BackupRemoteURL returns the URL Dolt registered for a backup name. The
 // dolt_backups system table is the source of truth; workspace metadata can be
 // stale if saving the bd-side status file failed after registration.
@@ -77,6 +82,14 @@ func unavailableBackupPruneOutcome() BackupPruneOutcome {
 // supplied grace period. Dolt itself skips pruning when the destination is
 // not quiescent.
 func BackupSyncWithPrune(ctx context.Context, db DBConn, name string, gracePeriod time.Duration) (BackupPruneOutcome, error) {
+	return BackupSyncWithPruneUsingCapture(ctx, db, name, gracePeriod, nil)
+}
+
+// BackupSyncWithPruneUsingCapture syncs and prunes the named backup, using
+// capture only when the caller is the embedded Dolt adapter. Without a
+// capture, the storage result reports that Dolt's server-side summary was not
+// available through SQL.
+func BackupSyncWithPruneUsingCapture(ctx context.Context, db DBConn, name string, gracePeriod time.Duration, capture BackupPruneOutputCapture) (BackupPruneOutcome, error) {
 	if gracePeriod < MinBackupPruneGracePeriod {
 		return BackupPruneOutcome{}, fmt.Errorf("prune grace period must be at least %s", MinBackupPruneGracePeriod)
 	}
@@ -84,17 +97,25 @@ func BackupSyncWithPrune(ctx context.Context, db DBConn, name string, gracePerio
 	if err != nil {
 		return BackupPruneOutcome{}, err
 	}
-	finishCapture := beginDoltPruneOutputCapture(backupURL)
-	if _, err := db.ExecContext(ctx,
-		"CALL DOLT_BACKUP('sync', ?, '--prune-with-grace-period', ?)",
-		name, gracePeriod.String(),
-	); err != nil {
-		outcome := finishCapture()
+	sync := func() error {
+		_, err := db.ExecContext(ctx,
+			"CALL DOLT_BACKUP('sync', ?, '--prune-with-grace-period', ?)",
+			name, gracePeriod.String(),
+		)
+		return err
+	}
+	outcome := unavailableBackupPruneOutcome()
+	if capture != nil {
+		outcome, err = capture(backupURL, sync)
+	} else {
+		err = sync()
+	}
+	if err != nil {
 		outcome.Status = "failed"
 		outcome.Message = fmt.Sprintf("sync with pruning failed: %v", err)
 		return outcome, fmt.Errorf("sync backup %s with pruning: %w", name, err)
 	}
-	return finishCapture(), nil
+	return outcome, nil
 }
 
 // BackupRemove removes a configured Dolt backup destination.

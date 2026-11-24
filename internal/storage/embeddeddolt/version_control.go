@@ -823,7 +823,7 @@ func (s *EmbeddedDoltStore) BackupSyncWithPrune(ctx context.Context, name string
 	var outcome versioncontrolops.BackupPruneOutcome
 	err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		var err error
-		outcome, err = versioncontrolops.BackupSyncWithPrune(ctx, db, name, gracePeriod)
+		outcome, err = versioncontrolops.BackupSyncWithPruneUsingCapture(ctx, db, name, gracePeriod, versioncontrolops.CaptureDoltPruneOutput)
 		return err
 	})
 	return outcome, err

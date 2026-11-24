@@ -12,23 +12,16 @@ import (
 )
 
 // Dolt's DOLT_BACKUP prune procedure writes its summary with cli.Printf
-// instead of returning it through SQL. Wrap Dolt's exported output writer once
-// at package initialization so a registered destination's summary can be
-// captured without redirecting process stdout or swapping Dolt's global writer
-// around a query.
-//
-// This writer is process-global and remains wrapped for the process lifetime.
-// Dolt's NewEphemeralPrinter checks the identity of cli.CliOut, so clone
-// progress also takes the forwarding path through this wrapper. Non-prune
-// bytes are passed unchanged to the original writer; only a matching prune
-// summary with an active capture is withheld from stdout. The !cgo build has a
-// stub because Dolt CLI output is only available to the embedded route.
-func init() {
-	cli.CliOut = &doltPruneOutputWriter{destination: cli.CliOut}
-}
+// instead of returning it through SQL. The embedded adapter scopes this
+// writer to one backup operation; SQL and proxy adapters report the summary as
+// unavailable. Serialize scoped captures because Dolt exposes one process-wide
+// output writer, then restore the original writer before returning.
+var doltPruneOutputCaptureMu sync.Mutex
 
 type doltPruneOutputWriter struct {
 	destination io.Writer
+	backupURL   string
+	capture     *doltPruneOutputCapture
 	mu          sync.Mutex
 }
 
@@ -36,12 +29,9 @@ func (w *doltPruneOutputWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	line := string(p)
-	if strings.HasPrefix(line, "Pruning ") {
-		if recordDoltPruneOutput(line) {
-			return len(p), nil
-		}
-		return io.WriteString(cli.CliErr, line)
+	if summary, ok := doltPruneSummaryForURL(string(p), w.backupURL); ok && w.capture != nil {
+		w.capture.summaries = append(w.capture.summaries, summary)
+		return len(p), nil
 	}
 	return w.destination.Write(p)
 }
@@ -50,68 +40,48 @@ type doltPruneOutputCapture struct {
 	summaries []string
 }
 
-var doltPruneOutputCaptures = struct {
-	sync.Mutex
-	byURL map[string][]*doltPruneOutputCapture
-}{byURL: make(map[string][]*doltPruneOutputCapture)}
+// CaptureDoltPruneOutput observes the summary emitted by one embedded backup
+// sync. The writer is installed only while syncBackup runs and is restored on
+// both success and failure.
+func CaptureDoltPruneOutput(backupURL string, syncBackup func() error) (BackupPruneOutcome, error) {
+	doltPruneOutputCaptureMu.Lock()
+	defer doltPruneOutputCaptureMu.Unlock()
 
-func beginDoltPruneOutputCapture(backupURL string) func() BackupPruneOutcome {
 	capture := &doltPruneOutputCapture{}
-	doltPruneOutputCaptures.Lock()
-	doltPruneOutputCaptures.byURL[backupURL] = append(doltPruneOutputCaptures.byURL[backupURL], capture)
-	doltPruneOutputCaptures.Unlock()
+	destination := cli.CliOut
+	cli.CliOut = &doltPruneOutputWriter{destination: destination, backupURL: backupURL, capture: capture}
+	defer func() { cli.CliOut = destination }()
 
-	return func() BackupPruneOutcome {
-		doltPruneOutputCaptures.Lock()
-		captures := doltPruneOutputCaptures.byURL[backupURL]
-		for i, active := range captures {
-			if active == capture {
-				captures = append(captures[:i], captures[i+1:]...)
-				break
-			}
-		}
-		if len(captures) == 0 {
-			delete(doltPruneOutputCaptures.byURL, backupURL)
-		} else {
-			doltPruneOutputCaptures.byURL[backupURL] = captures
-		}
-		summaries := append([]string(nil), capture.summaries...)
-		doltPruneOutputCaptures.Unlock()
-
-		if len(summaries) == 0 {
-			return unavailableBackupPruneOutcome()
-		}
-		outcome, ok := parseDoltPruneSummary(summaries[len(summaries)-1])
-		if !ok {
-			return BackupPruneOutcome{
-				Status:  "unavailable",
-				Message: "Dolt returned an unrecognized prune summary: " + summaries[len(summaries)-1],
-			}
-		}
-		return outcome
-	}
+	err := syncBackup()
+	return capture.outcome(), err
 }
 
-func recordDoltPruneOutput(line string) bool {
+func (capture *doltPruneOutputCapture) outcome() BackupPruneOutcome {
+	if len(capture.summaries) == 0 {
+		return unavailableBackupPruneOutcome()
+	}
+	summary := capture.summaries[len(capture.summaries)-1]
+	outcome, ok := parseDoltPruneSummary(summary)
+	if !ok {
+		return BackupPruneOutcome{
+			Status:  "unavailable",
+			Message: "Dolt returned an unrecognized prune summary: " + summary,
+		}
+	}
+	return outcome
+}
+
+func doltPruneSummaryForURL(line, backupURL string) (string, bool) {
 	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 	rest := strings.TrimPrefix(line, "Pruning ")
+	if rest == line {
+		return "", false
+	}
 	separator := strings.Index(rest, ": ")
-	if separator < 0 {
-		return false
+	if separator < 0 || rest[:separator] != backupURL {
+		return "", false
 	}
-	backupURL := rest[:separator]
-	summary := rest[separator+2:]
-
-	doltPruneOutputCaptures.Lock()
-	defer doltPruneOutputCaptures.Unlock()
-	captures := doltPruneOutputCaptures.byURL[backupURL]
-	if len(captures) == 0 {
-		return false
-	}
-	for _, capture := range captures {
-		capture.summaries = append(capture.summaries, summary)
-	}
-	return true
+	return rest[separator+2:], true
 }
 
 func parseDoltPruneSummary(summary string) (BackupPruneOutcome, bool) {
