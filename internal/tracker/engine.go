@@ -523,10 +523,12 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil {
-			// --create-only holds on a pull as on a push: a linked bead is left
-			// alone, so a pull is safe while beads are held locally (#8507).
-			// A forced ID still updates, as the push gate allows.
-			if opts.CreateOnly && !allowOverwriteIDs[existing.ID] {
+			// --create-only creates beads only for remote issues that match no
+			// local issue; a matched issue is left alone however it matched
+			// (exact ref, fallback index, mapper-assigned ID). Neither a
+			// conflict verdict, pre-linked hydration nor an explicit selection
+			// lifts the hold (gastownhall/beads#8507).
+			if opts.CreateOnly {
 				stats.Skipped++
 				continue
 			}
@@ -1823,6 +1825,10 @@ func (e *Engine) renderBatchDryRun(issues []*types.Issue, result *BatchPushResul
 	}
 }
 
+// createOnlyExternalWinsMsg reports an external-wins conflict under
+// --create-only, whose pull leaves matched local issues alone.
+const createOnlyExternalWinsMsg = "Conflict on %s: external is newer; --create-only leaves the local issue unchanged"
+
 // resolveConflicts applies the configured conflict resolution strategy.
 func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipIDs, forceIDs, allowPullOverwriteIDs map[string]bool) {
 	for _, c := range conflicts {
@@ -1834,7 +1840,11 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 		case ConflictExternal:
 			skipIDs[c.IssueID] = true
 			allowPullOverwriteIDs[c.IssueID] = true
-			e.msg("Conflict on %s: keeping external version", c.IssueID)
+			if opts.CreateOnly {
+				e.msg(createOnlyExternalWinsMsg, c.IssueID)
+			} else {
+				e.msg("Conflict on %s: keeping external version", c.IssueID)
+			}
 
 		default: // ConflictTimestamp or unset
 			if c.LocalUpdated.After(c.ExternalUpdated) {
@@ -1843,7 +1853,11 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 			} else {
 				skipIDs[c.IssueID] = true
 				allowPullOverwriteIDs[c.IssueID] = true
-				e.msg("Conflict on %s: external is newer, importing", c.IssueID)
+				if opts.CreateOnly {
+					e.msg(createOnlyExternalWinsMsg, c.IssueID)
+				} else {
+					e.msg("Conflict on %s: external is newer, importing", c.IssueID)
+				}
 			}
 		}
 	}
