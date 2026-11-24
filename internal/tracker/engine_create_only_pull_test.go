@@ -197,3 +197,51 @@ func TestEngineCreateOnlyPullDryRunMatchesRealRun(t *testing.T) {
 			d.Created, d.Updated, d.Skipped, l.Created, l.Updated, l.Skipped)
 	}
 }
+
+// TestEngineCreateOnlyPullHoldsMapperIDMatch covers AC-3: an unlinked bead
+// that a remote issue matches only by its mapper-assigned bead ID (Notion's
+// "Beads ID") is neither rewritten nor linked, and no bead is created.
+func TestEngineCreateOnlyPullHoldsMapperIDMatch(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:         "ext-fresh",
+		Identifier: "EXT-FRESH",
+		Title:      "Remote title for fresh",
+		State:      types.StatusOpen,
+		Priority:   2,
+	}}
+	tracker.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		return &IssueConversion{Issue: &types.Issue{
+			ID:        "bd-fresh",
+			Title:     ti.Title,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			Priority:  2,
+		}}
+	}}
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !reflect.DeepEqual(state.updateSpec, domain.UpdateSpec{}) {
+		t.Errorf("pull applied an issue update %+v, want none under --create-only", state.updateSpec)
+	}
+	fresh := state.issues["bd-fresh"]
+	if fresh.Title != "Not yet linked" {
+		t.Errorf("bd-fresh title = %q, want %q (left alone)", fresh.Title, "Not yet linked")
+	}
+	if fresh.ExternalRef != nil {
+		t.Errorf("bd-fresh external_ref = %q, want none (left unlinked)", *fresh.ExternalRef)
+	}
+	if len(state.issues) != 2 {
+		t.Errorf("store holds %d beads, want 2: the mapper-ID match must not create a bead", len(state.issues))
+	}
+	if got := result.PullStats; got.Created != 0 || got.Updated != 0 || got.Skipped != 1 {
+		t.Errorf("PullStats = {Created:%d Updated:%d Skipped:%d}, want {Created:0 Updated:0 Skipped:1}",
+			got.Created, got.Updated, got.Skipped)
+	}
+}
