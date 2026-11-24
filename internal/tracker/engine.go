@@ -1794,7 +1794,11 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 		case ConflictExternal:
 			skipIDs[c.IssueID] = true
 			allowPullOverwriteIDs[c.IssueID] = true
-			e.msg("Conflict on %s: keeping external version", c.IssueID)
+			if opts.CreateOnly {
+				e.msg("Conflict on %s: external is newer; --create-only leaves the local issue unchanged", c.IssueID)
+			} else {
+				e.msg("Conflict on %s: keeping external version", c.IssueID)
+			}
 
 		default: // ConflictTimestamp or unset
 			if c.LocalUpdated.After(c.ExternalUpdated) {
@@ -1803,7 +1807,11 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 			} else {
 				skipIDs[c.IssueID] = true
 				allowPullOverwriteIDs[c.IssueID] = true
-				e.msg("Conflict on %s: external is newer, importing", c.IssueID)
+				if opts.CreateOnly {
+					e.msg("Conflict on %s: external is newer; --create-only leaves the local issue unchanged", c.IssueID)
+				} else {
+					e.msg("Conflict on %s: external is newer, importing", c.IssueID)
+				}
 			}
 		}
 	}

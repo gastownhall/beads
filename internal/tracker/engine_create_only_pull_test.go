@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -303,5 +304,66 @@ func TestEngineCreateOnlyPullSelectiveHoldsNamedBead(t *testing.T) {
 	}
 	if result.PullStats.Skipped != 1 {
 		t.Errorf("PullStats.Skipped = %d, want 1", result.PullStats.Skipped)
+	}
+}
+
+// TestEngineCreateOnlyPullConflictMessagesAndOverwriteHold pins the AC-5
+// contract: under --create-only the external-wins conflict messages report the
+// hold instead of an import that no longer happens, and a conflict verdict in
+// allowPullOverwriteIDs does not lift the pull-side hold.
+func TestEngineCreateOnlyPullConflictMessagesAndOverwriteHold(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:         "ext-linked",
+		Identifier: "EXT-LINKED",
+		Title:      "Retitled remotely",
+		State:      types.StatusOpen,
+		Priority:   2,
+	}}
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+	var msgs []string
+	engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+
+	newer := time.Now().UTC()
+	older := newer.Add(-time.Hour)
+	conflicts := []Conflict{{IssueID: "bd-linked", LocalUpdated: older, ExternalUpdated: newer}}
+
+	// Under --create-only both external-wins policies report the hold.
+	skip, force, allow := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	engine.resolveConflicts(SyncOptions{CreateOnly: true, ConflictResolution: ConflictExternal}, conflicts, skip, force, allow)
+	engine.resolveConflicts(SyncOptions{CreateOnly: true, ConflictResolution: ConflictTimestamp}, conflicts, skip, force, allow)
+	wantMsg := "Conflict on bd-linked: external is newer; --create-only leaves the local issue unchanged"
+	if got := strings.Count(strings.Join(msgs, "\n"), wantMsg); got != 2 {
+		t.Errorf("messages = %q, want %q twice (external and timestamp policies)", msgs, wantMsg)
+	}
+	// The verdict still keeps its push-side effect.
+	if !skip["bd-linked"] || !allow["bd-linked"] || force["bd-linked"] {
+		t.Errorf("skip=%v force=%v allow=%v, want skip and allow set with force unset",
+			skip["bd-linked"], force["bd-linked"], allow["bd-linked"])
+	}
+
+	// Control: without the flag the messages still name the import.
+	msgs = nil
+	skip, force, allow = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	engine.resolveConflicts(SyncOptions{ConflictResolution: ConflictExternal}, conflicts, skip, force, allow)
+	engine.resolveConflicts(SyncOptions{ConflictResolution: ConflictTimestamp}, conflicts, skip, force, allow)
+	joined := strings.Join(msgs, "\n")
+	if !strings.Contains(joined, "keeping external version") || !strings.Contains(joined, "external is newer, importing") {
+		t.Errorf("messages = %q, want the un-gated conflict messages", joined)
+	}
+
+	// A conflict verdict that chose the external version does not lift the
+	// hold: the pull leaves the bead alone even in allowPullOverwriteIDs.
+	stats, err := engine.doPull(ctx, SyncOptions{Pull: true, CreateOnly: true}, map[string]bool{"bd-linked": true}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("doPull() error: %v", err)
+	}
+	if got := state.issues["bd-linked"].Title; got != "Already linked" {
+		t.Errorf("overwrite-allowed bead title = %q, want %q (held under --create-only)", got, "Already linked")
+	}
+	if stats.Updated != 0 || stats.Skipped != 1 {
+		t.Errorf("PullStats = {Updated:%d Skipped:%d}, want {0 1}", stats.Updated, stats.Skipped)
 	}
 }
