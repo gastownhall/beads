@@ -751,13 +751,19 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 		updatedAt = time.Now()
 	}
 
+	// The description is Linear's body without the sections and marker a push
+	// wrote, so a pull inverts the push instead of folding them back in (#8506).
+	desc, acceptance, design, notes := ParseLinearDescription(li.Description)
 	issue := &types.Issue{
-		Title:       li.Title,
-		Description: li.Description,
-		Priority:    PriorityToBeads(li.Priority, config),
-		IssueType:   LabelToIssueType(li.Labels, config),
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
+		Title:              li.Title,
+		Description:        desc,
+		AcceptanceCriteria: acceptance,
+		Design:             design,
+		Notes:              notes,
+		Priority:           PriorityToBeads(li.Priority, config),
+		IssueType:          LabelToIssueType(li.Labels, config),
+		CreatedAt:          createdAt,
+		UpdatedAt:          updatedAt,
 	}
 
 	// Map state using configurable mapping
@@ -855,8 +861,12 @@ func BuildLinearToLocalUpdates(li *Issue, config *MappingConfig) map[string]inte
 	// Update title
 	updates["title"] = li.Title
 
-	// Update description
-	updates["description"] = li.Description
+	// Update description and the sections a push wrote into it (#8506)
+	desc, acceptance, design, notes := ParseLinearDescription(li.Description)
+	updates["description"] = desc
+	updates["acceptance_criteria"] = acceptance
+	updates["design"] = design
+	updates["notes"] = notes
 
 	// Update priority using configured mapping
 	updates["priority"] = PriorityToBeads(li.Priority, config)
