@@ -45,6 +45,11 @@ const MinBackupPruneGracePeriod = 10 * time.Minute
 // reading Dolt's backup registry.
 var ErrBackupRemoteNotFound = errors.New("backup remote not found")
 
+// ErrBackupPruneRequiresFileDestination reports that the registered backup
+// destination is not a local file:// URL, the only kind Dolt's grace-period
+// prune supports. BackupSyncWithPrune returns it before issuing any sync.
+var ErrBackupPruneRequiresFileDestination = errors.New("grace-period pruning supports only local file:// backup destinations")
+
 // BackupPruneOutcome is the storage contract for the prune summary Dolt
 // exposes. Dolt does not return this information to SQL clients, so its counts
 // are omitted when the server's output cannot be observed.
@@ -71,7 +76,7 @@ func BackupRemoteURL(ctx context.Context, db DBConn, name string) (string, error
 
 func unavailableBackupPruneOutcome() BackupPruneOutcome {
 	return BackupPruneOutcome{
-		Status: "unavailable",
+		Status: storage.BackupPruneUnavailable,
 		Message: "Dolt did not return a prune summary; best-effort pruning may have skipped, failed, " +
 			"or found nothing to prune. Check Dolt server logs if available.",
 	}
@@ -89,6 +94,13 @@ func BackupSyncWithPrune(ctx context.Context, db DBConn, name string, gracePerio
 // capture only when the caller is the embedded Dolt adapter. Without a
 // capture, the storage result reports that Dolt's server-side summary was not
 // available through SQL.
+//
+// The destination registered in dolt_backups is read on the same connection
+// that runs the sync and must be a local file:// URL (isLocalFileURL, the
+// classification DirToFileURL's URLs satisfy); otherwise the error matches
+// ErrBackupPruneRequiresFileDestination and names the destination without
+// credentials. On a sync error the outcome is zero: a failed sync has no
+// prune outcome to report.
 func BackupSyncWithPruneUsingCapture(ctx context.Context, db DBConn, name string, gracePeriod time.Duration, capture BackupPruneOutputCapture) (BackupPruneOutcome, error) {
 	if gracePeriod < MinBackupPruneGracePeriod {
 		return BackupPruneOutcome{}, fmt.Errorf("prune grace period must be at least %s", MinBackupPruneGracePeriod)
@@ -96,6 +108,10 @@ func BackupSyncWithPruneUsingCapture(ctx context.Context, db DBConn, name string
 	backupURL, err := BackupRemoteURL(ctx, db, name)
 	if err != nil {
 		return BackupPruneOutcome{}, err
+	}
+	if !isLocalFileURL(backupURL) {
+		return BackupPruneOutcome{}, fmt.Errorf("%w (configured destination: %s)",
+			ErrBackupPruneRequiresFileDestination, redactedURL(backupURL))
 	}
 	sync := func() error {
 		_, err := db.ExecContext(ctx,
@@ -111,9 +127,7 @@ func BackupSyncWithPruneUsingCapture(ctx context.Context, db DBConn, name string
 		err = sync()
 	}
 	if err != nil {
-		outcome.Status = "failed"
-		outcome.Message = fmt.Sprintf("sync with pruning failed: %v", err)
-		return outcome, fmt.Errorf("sync backup %s with pruning: %w", name, err)
+		return BackupPruneOutcome{}, fmt.Errorf("sync backup %s with pruning: %w", name, err)
 	}
 	return outcome, nil
 }

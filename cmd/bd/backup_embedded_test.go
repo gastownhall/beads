@@ -196,6 +196,12 @@ func TestEmbeddedBackup(t *testing.T) {
 			t.Fatalf("pruned sync removed a recent destination file; stat error: %v", err)
 		}
 
+		// The human (non-JSON) output renders the same structured outcome.
+		out = bdBackup(t, bd, dir, "sync", "--prune-with-grace-period", "10m")
+		if !strings.Contains(out, "Prune outcome: deleted 0 file(s), reclaimed 0 bytes; skipped ") {
+			t.Fatalf("text-mode prune output = %q, want the skipped summary line", out)
+		}
+
 		after := bdCreateSilent(t, bd, dir, "issue created after pruned backup")
 		bdBackup(t, bd, dir, "restore", backupDest, "--force")
 		if got := bdShow(t, bd, dir, before); got.Title != "issue present before pruning" {

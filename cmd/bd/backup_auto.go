@@ -227,9 +227,10 @@ func maybeAutoBackup(ctx context.Context) {
 	}
 
 	// Size cap: skip entirely once the destination has grown past
-	// backup.size-cap-mb (ga-y6gjv). Automatic backups do not opt into the
-	// explicit command's grace-period pruning; see backupSizeCapExceeded for why
-	// this path remains capped until it has a configured pruning policy.
+	// backup.size-cap-mb (ga-y6gjv) — see backupSizeCapExceeded for why a
+	// cap, not an in-place prune, is the safe fix here. Grace-period pruning
+	// (bd backup sync --prune-with-grace-period) removes only orphan table
+	// files, not unreachable chunks, so it does not replace this cap.
 	//
 	// Placed AFTER change detection, which is the order
 	// docs/reference/configuration.md:"How it works" documents. Ahead of

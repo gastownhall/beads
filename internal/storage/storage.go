@@ -1123,39 +1123,55 @@ type BackupStore interface {
 	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 
+// BackupPruneStatus is the machine-readable prune result that
+// `bd backup sync --prune-with-grace-period --json` emits as prune.status.
+type BackupPruneStatus string
+
+const (
+	// BackupPrunePruned means Dolt reported its prune summary and skipped
+	// nothing. FilesDeleted may be zero when nothing was old enough.
+	BackupPrunePruned BackupPruneStatus = "pruned"
+	// BackupPrunePartial means Dolt deleted at least one file and also
+	// reported one or more skip reasons.
+	BackupPrunePartial BackupPruneStatus = "partial"
+	// BackupPruneSkipped means Dolt deleted nothing and reported why, for
+	// example because a destination file is newer than the grace period.
+	BackupPruneSkipped BackupPruneStatus = "skipped"
+	// BackupPruneUnavailable means bd could not observe a prune summary. It
+	// does not distinguish "nothing to prune" from "pruning failed"; Message
+	// explains why the summary was not observed.
+	BackupPruneUnavailable BackupPruneStatus = "unavailable"
+)
+
 // BackupPruneOutcome reports the prune details that Dolt exposes for a backup
-// sync. Counts are omitted when the SQL server does not return a summary.
+// sync. A prune problem never fails the sync, so an outcome is only meaningful
+// alongside a successful sync.
+//
+// FilesDeleted and BytesReclaimed are set only for pruned, partial and skipped
+// outcomes, which require Dolt's summary line. They are omitted whenever the
+// status is unavailable: on SQL-server and proxied routes, where Dolt writes
+// the summary to server stdout instead of returning it over SQL; in embedded
+// mode when Dolt prints no summary, which it does for a no-op prune (nothing
+// deleted, nothing skipped) and for a prune error (logged, not printed); and
+// when the summary has an unrecognized format.
 type BackupPruneOutcome struct {
-	Status         string   `json:"status"`
-	FilesDeleted   *int     `json:"files_deleted,omitempty"`
-	BytesReclaimed *int64   `json:"bytes_reclaimed,omitempty"`
-	Skipped        []string `json:"skipped,omitempty"`
-	Message        string   `json:"message,omitempty"`
+	Status         BackupPruneStatus `json:"status"`
+	FilesDeleted   *int              `json:"files_deleted,omitempty"`
+	BytesReclaimed *int64            `json:"bytes_reclaimed,omitempty"`
+	Skipped        []string          `json:"skipped,omitempty"`
+	Message        string            `json:"message,omitempty"`
 }
 
-// Summary renders the structured outcome for human command output.
-func (outcome BackupPruneOutcome) Summary() string {
-	if outcome.Status == "unavailable" || outcome.Status == "failed" {
-		if outcome.Message == "" {
-			return outcome.Status
-		}
-		return outcome.Status + ": " + outcome.Message
-	}
-	if outcome.FilesDeleted == nil || outcome.BytesReclaimed == nil {
-		return outcome.Status
-	}
-	result := fmt.Sprintf("deleted %d file(s), reclaimed %d bytes", *outcome.FilesDeleted, *outcome.BytesReclaimed)
-	for _, reason := range outcome.Skipped {
-		result += "; skipped " + reason
-	}
-	return result
-}
-
-// PrunableBackupStore supports Dolt's grace-period pruning for file:// backup
-// destinations. It is separate from BackupStore so callers that do not offer
-// this opt-in operation can keep the ordinary sync contract unchanged.
+// PrunableBackupStore supports Dolt's grace-period pruning for local file://
+// backup destinations. It is separate from BackupStore so callers that do not
+// offer this opt-in operation can keep the ordinary sync contract unchanged.
+//
+// Implementations read the registered destination and reject any destination
+// that is not a local file:// URL with an error matching
+// versioncontrolops.ErrBackupPruneRequiresFileDestination (errors.Is) before
+// issuing the sync. A missing destination matches
+// versioncontrolops.ErrBackupRemoteNotFound.
 type PrunableBackupStore interface {
-	BackupRemoteURL(ctx context.Context, name string) (string, error)
 	BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (BackupPruneOutcome, error)
 }
 

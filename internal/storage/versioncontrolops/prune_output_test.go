@@ -4,10 +4,15 @@ package versioncontrolops
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestDoltPruneOutputWriterPassesNonPruneOutputUnchanged(t *testing.T) {
@@ -74,6 +79,123 @@ func TestCaptureDoltPruneOutputRestoresGlobalWriter(t *testing.T) {
 	}
 }
 
+// installCaptureTestWriter points Dolt's global writer at a buffer for one
+// test and restores the original afterwards.
+func installCaptureTestWriter(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	original := cli.CliOut
+	destination := &bytes.Buffer{}
+	cli.CliOut = destination
+	t.Cleanup(func() { cli.CliOut = original })
+	return destination
+}
+
+func TestCaptureDoltPruneOutputRestoresWriterOnSyncError(t *testing.T) {
+	destination := installCaptureTestWriter(t)
+	syncErr := errors.New("sync failed")
+
+	_, err := CaptureDoltPruneOutput("file:///tmp/backup", func() error { return syncErr })
+	if err != syncErr {
+		t.Fatalf("CaptureDoltPruneOutput error = %v, want the sync error unchanged", err)
+	}
+	if cli.CliOut != destination {
+		t.Fatalf("cli.CliOut after failed sync = %T, want restored destination writer", cli.CliOut)
+	}
+}
+
+func TestCaptureDoltPruneOutputRestoresWriterAndUnlocksOnPanic(t *testing.T) {
+	destination := installCaptureTestWriter(t)
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("CaptureDoltPruneOutput swallowed the sync panic")
+			}
+		}()
+		_, _ = CaptureDoltPruneOutput("file:///tmp/backup", func() error { panic("sync panicked") })
+	}()
+	if cli.CliOut != destination {
+		t.Fatalf("cli.CliOut after panic = %T, want restored destination writer", cli.CliOut)
+	}
+	// The capture mutex must have been released, or this second capture
+	// deadlocks.
+	if _, err := CaptureDoltPruneOutput("file:///tmp/backup", func() error { return nil }); err != nil {
+		t.Fatalf("capture after panic: %v", err)
+	}
+}
+
+func TestCaptureDoltPruneOutputReportsUnrecognizedSummary(t *testing.T) {
+	installCaptureTestWriter(t)
+
+	outcome, err := CaptureDoltPruneOutput("file:///tmp/backup", func() error {
+		_, err := cli.CliOut.Write([]byte("Pruning file:///tmp/backup: removed everything\n"))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CaptureDoltPruneOutput: %v", err)
+	}
+	if outcome.Status != storage.BackupPruneUnavailable ||
+		outcome.Message != "Dolt returned an unrecognized prune summary: removed everything" {
+		t.Fatalf("outcome = %+v, want unavailable with the unrecognized summary", outcome)
+	}
+}
+
+func TestCaptureDoltPruneOutputUsesLastSummaryAndStripsCRLF(t *testing.T) {
+	destination := installCaptureTestWriter(t)
+
+	outcome, err := CaptureDoltPruneOutput("file:///tmp/backup", func() error {
+		for _, line := range []string{
+			"Pruning file:///tmp/backup: deleted 1 file(s), reclaimed 8 bytes\n",
+			"Pruning file:///tmp/backup: deleted 0 file(s), reclaimed 0 bytes; skipped destination is busy\r\n",
+		} {
+			if _, err := cli.CliOut.Write([]byte(line)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("CaptureDoltPruneOutput: %v", err)
+	}
+	if outcome.Status != storage.BackupPruneSkipped || len(outcome.Skipped) != 1 || outcome.Skipped[0] != "destination is busy" {
+		t.Fatalf("outcome = %+v, want the last summary with its CRLF stripped", outcome)
+	}
+	if destination.Len() != 0 {
+		t.Fatalf("captured summaries leaked to output: %q", destination.String())
+	}
+}
+
+func TestCaptureDoltPruneOutputSerializesConcurrentCaptures(t *testing.T) {
+	installCaptureTestWriter(t)
+
+	urls := []string{"file:///tmp/backup-a", "file:///tmp/backup-b"}
+	deleted := map[string]int{urls[0]: 1, urls[1]: 2}
+	outcomes := make([]BackupPruneOutcome, len(urls))
+	var wg sync.WaitGroup
+	for i, backupURL := range urls {
+		wg.Add(1)
+		go func(i int, backupURL string) {
+			defer wg.Done()
+			outcomes[i], _ = CaptureDoltPruneOutput(backupURL, func() error {
+				for _, other := range urls {
+					summary := fmt.Sprintf("Pruning %s: deleted %d file(s), reclaimed 8 bytes\n", other, deleted[other])
+					if _, err := cli.CliOut.Write([]byte(summary)); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		}(i, backupURL)
+	}
+	wg.Wait()
+	for i, backupURL := range urls {
+		got := outcomes[i]
+		if got.FilesDeleted == nil || *got.FilesDeleted != deleted[backupURL] {
+			t.Fatalf("capture for %s = %+v, want only its own summary (%d deleted)", backupURL, got, deleted[backupURL])
+		}
+	}
+}
+
 func TestUnavailableBackupPruneOutcomeMentionsNoWork(t *testing.T) {
 	outcome := unavailableBackupPruneOutcome()
 	if outcome.Status != "unavailable" {
@@ -88,7 +210,7 @@ func TestParseDoltPruneSummary(t *testing.T) {
 	tests := []struct {
 		name           string
 		summary        string
-		status         string
+		status         storage.BackupPruneStatus
 		filesDeleted   int
 		bytesReclaimed int64
 		skipped        []string

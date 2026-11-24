@@ -1753,16 +1753,6 @@ func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
 	return versioncontrolops.BackupSync(ctx, db, name)
 }
 
-// BackupRemoteURL returns the URL registered by Dolt for the named backup.
-func (s *DoltStore) BackupRemoteURL(ctx context.Context, name string) (string, error) {
-	db, err := s.oneShotConn(0)
-	if err != nil {
-		return "", err
-	}
-	defer db.Close()
-	return versioncontrolops.BackupRemoteURL(ctx, db, name)
-}
-
 func (s *DoltStore) BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (versioncontrolops.BackupPruneOutcome, error) {
 	db, err := s.oneShotConn(0)
 	if err != nil {

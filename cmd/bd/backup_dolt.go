@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,19 +131,26 @@ var backupSyncCmd = &cobra.Command{
 This pushes the entire database state (all branches, full history) to the
 backup location configured with 'bd backup init'.
 
-For file:// destinations, --prune-with-grace-period <duration> asks Dolt to
-remove manifest-unreferenced table files older than the duration before
-syncing. This reclaims orphan files from interrupted syncs; it does not reclaim
-unreachable chunks inside files still referenced by the manifest, so the backup
-size cap remains the control for normal backup growth. The duration must be at
-least 10m and shorter than the sync interval, or pruning may never run. Dolt
-skips pruning if any destination file was modified within the grace period.
+--prune-with-grace-period <duration> asks Dolt to remove manifest-unreferenced
+table files older than the duration from a local file:// destination before
+syncing. Any other destination (for example an https:// or aws:// remote) is
+rejected with an error and nothing is synced. Pruning reclaims orphan files
+from interrupted syncs; it does not reclaim unreachable chunks inside files
+still referenced by the manifest, so the backup size cap remains the control
+for normal backup growth. The duration must be at least 10m. Dolt skips
+pruning if any destination file was modified within the grace period, so the
+duration must also be shorter than the time between syncs to this
+destination, or pruning never runs.
 
 Pruning is best-effort: a prune failure does not fail the sync. Embedded mode
-reports Dolt's prune summary when available. On SQL-server and proxied routes,
-Dolt writes that summary to server stdout and does not return it over SQL, so
-bd reports the prune outcome as unavailable; check the Dolt server logs.
-Without the flag, sync behavior is unchanged.
+reports Dolt's prune summary when Dolt prints one. On SQL-server and proxied
+routes, Dolt writes that summary to server stdout and does not return it over
+SQL, so bd reports the prune outcome as unavailable; check the Dolt server logs.
+With --json, prune.status is one of: pruned (summary reported, nothing
+skipped), partial (files deleted and some skipped), skipped (nothing deleted,
+skip reasons listed), or unavailable (no summary observed: also the result of
+a no-op or failed prune in embedded mode). Without the flag, sync behavior is
+unchanged.
 
 The backup is atomic — if the sync fails, the previous backup state is preserved.
 
@@ -200,9 +206,6 @@ Run 'bd backup init <path>' first to configure a destination.`,
 			if !ok {
 				return fmt.Errorf("storage backend does not support backup pruning")
 			}
-			if err := requireFileBackupForPrune(ctx, prunable.BackupRemoteURL); err != nil {
-				return HandleErrorRespectJSON("%v", err)
-			}
 		}
 
 		// First, commit any pending changes so they're included in the backup
@@ -222,11 +225,10 @@ Run 'bd backup init <path>' first to configure a destination.`,
 			syncErr = bs.BackupSync(ctx, defaultDoltBackupName)
 		}
 		if syncErr != nil {
-			if strings.Contains(syncErr.Error(), "no backup") ||
-				strings.Contains(syncErr.Error(), "not found") {
-				return fmt.Errorf("no backup destination configured. Run 'bd backup init <path>' first")
+			if errors.Is(syncErr, versioncontrolops.ErrBackupPruneRequiresFileDestination) {
+				return HandleErrorRespectJSON("%v", syncErr)
 			}
-			return fmt.Errorf("backup sync failed: %w", syncErr)
+			return backupSyncFailure(syncErr)
 		}
 
 		elapsed := time.Since(start)
@@ -249,7 +251,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 
 		fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
 		if prune {
-			fmt.Printf("Prune outcome: %s\n", pruneOutcome.Summary())
+			fmt.Printf("Prune outcome: %s\n", formatBackupPruneOutcome(pruneOutcome))
 		}
 		return nil
 	},
@@ -556,27 +558,38 @@ func validateBackupPruneGracePeriod(gracePeriod time.Duration, provided bool) (t
 	return gracePeriod, true, nil
 }
 
-func requireFileBackupForPrune(ctx context.Context, readBackupURL func(context.Context, string) (string, error)) error {
-	backupURL, err := readBackupURL(ctx, defaultDoltBackupName)
-	if err != nil {
-		if errors.Is(err, versioncontrolops.ErrBackupRemoteNotFound) {
-			return fmt.Errorf("no backup destination configured. Run 'bd backup init <path>' first")
-		}
-		return fmt.Errorf("read backup destination: %w", err)
+// errNoBackupDestination is the user guidance for a sync with no registered
+// destination, shared by the direct and proxied routes.
+var errNoBackupDestination = errors.New("no backup destination configured. Run 'bd backup init <path>' first")
+
+// backupSyncFailure maps a failed sync onto the command's error. A missing
+// destination is recognized by sentinel on the prune path; plain BackupSync
+// surfaces Dolt's own "not found" text, so the substring check remains for it.
+func backupSyncFailure(err error) error {
+	if errors.Is(err, versioncontrolops.ErrBackupRemoteNotFound) ||
+		strings.Contains(err.Error(), "no backup") ||
+		strings.Contains(err.Error(), "not found") {
+		return errNoBackupDestination
 	}
-	return validateBackupPruneDestination(backupURL)
+	return fmt.Errorf("backup sync failed: %w", err)
 }
 
-func validateBackupPruneDestination(backupURL string) error {
-	parsed, err := url.Parse(backupURL)
-	if err != nil || parsed.Scheme == "" {
-		return fmt.Errorf("--%s requires a valid file:// backup destination", backupSyncPruneGracePeriodFlag)
+// formatBackupPruneOutcome renders a prune outcome for human command output.
+// The JSON form is the storage.BackupPruneOutcome struct itself.
+func formatBackupPruneOutcome(outcome storage.BackupPruneOutcome) string {
+	status := string(outcome.Status)
+	if outcome.Status == storage.BackupPruneUnavailable {
+		if outcome.Message == "" {
+			return status
+		}
+		return status + ": " + outcome.Message
 	}
-	if !strings.EqualFold(parsed.Scheme, "file") {
-		return fmt.Errorf("--%s supports only file:// backup destinations (configured scheme: %s)", backupSyncPruneGracePeriodFlag, parsed.Scheme)
+	if outcome.FilesDeleted == nil || outcome.BytesReclaimed == nil {
+		return status
 	}
-	if !strings.HasPrefix(strings.ToLower(backupURL), "file://") {
-		return fmt.Errorf("--%s requires a file:// backup destination", backupSyncPruneGracePeriodFlag)
+	result := fmt.Sprintf("deleted %d file(s), reclaimed %d bytes", *outcome.FilesDeleted, *outcome.BytesReclaimed)
+	for _, reason := range outcome.Skipped {
+		result += "; skipped " + reason
 	}
-	return nil
+	return result
 }

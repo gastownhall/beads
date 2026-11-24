@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,69 +200,87 @@ func TestValidateBackupPruneGracePeriod(t *testing.T) {
 	}
 }
 
-func TestValidateBackupPruneDestination(t *testing.T) {
+func TestBackupSyncWithPruneErrorMapping(t *testing.T) {
+	driverErr := errors.New("connection reset")
 	tests := []struct {
-		name    string
-		url     string
-		wantErr string
+		name      string
+		err       error
+		want      string
+		wantIsErr error
 	}{
-		{name: "file URL", url: "file:///var/backups/beads"},
-		{name: "case-insensitive scheme", url: "FILE:///var/backups/beads"},
-		{name: "https destination", url: "https://user:secret@example.com/beads", wantErr: "configured scheme: https"},
-		{name: "file URI without //", url: "file:/var/backups/beads", wantErr: "requires a file://"},
-		{name: "scheme missing", url: "/var/backups/beads", wantErr: "requires a valid file://"},
-		{name: "malformed URL", url: "file://%zz", wantErr: "requires a valid file://"},
+		{
+			name: "missing registered destination on the prune path",
+			err:  fmt.Errorf("%w: default", versioncontrolops.ErrBackupRemoteNotFound),
+			want: "no backup destination configured",
+		},
+		{
+			name: "plain sync reports Dolt's not-found text",
+			err:  errors.New("backup 'default' not found"),
+			want: "no backup destination configured",
+		},
+		{
+			name:      "other sync failure keeps its cause",
+			err:       fmt.Errorf("sync backup default with pruning: %w", driverErr),
+			want:      "backup sync failed: sync backup default with pruning: connection reset",
+			wantIsErr: driverErr,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateBackupPruneDestination(tt.url)
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("validateBackupPruneDestination(%q): %v", tt.url, err)
-				}
-				return
+			got := backupSyncFailure(tt.err)
+			if !strings.Contains(got.Error(), tt.want) {
+				t.Fatalf("backupSyncFailure(%v) = %q, want %q", tt.err, got, tt.want)
 			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("validateBackupPruneDestination(%q) error = %v, want %q", tt.url, err, tt.wantErr)
-			}
-			if strings.Contains(err.Error(), "secret") {
-				t.Fatalf("validation error leaked URL credentials: %v", err)
+			if tt.wantIsErr != nil && !errors.Is(got, tt.wantIsErr) {
+				t.Fatalf("backupSyncFailure(%v) = %v, want it to wrap %v", tt.err, got, tt.wantIsErr)
 			}
 		})
 	}
 }
 
-func TestRequireFileBackupForPruneUsesDoltRegisteredDestination(t *testing.T) {
-	prepareBackupStatusTest(t)
-	if err := saveDoltBackupConfig("file:///stale/local/status-file"); err != nil {
-		t.Fatalf("save stale backup config: %v", err)
+func TestBackupSyncWithPruneOutcomeText(t *testing.T) {
+	files := func(n int) *int { return &n }
+	bytes := func(n int64) *int64 { return &n }
+	tests := []struct {
+		name    string
+		outcome storage.BackupPruneOutcome
+		want    string
+	}{
+		{
+			name:    "unavailable with message",
+			outcome: storage.BackupPruneOutcome{Status: storage.BackupPruneUnavailable, Message: "Dolt did not return a prune summary"},
+			want:    "unavailable: Dolt did not return a prune summary",
+		},
+		{
+			name:    "unavailable without message or counts",
+			outcome: storage.BackupPruneOutcome{Status: storage.BackupPruneUnavailable},
+			want:    "unavailable",
+		},
+		{
+			name:    "pruned",
+			outcome: storage.BackupPruneOutcome{Status: storage.BackupPrunePruned, FilesDeleted: files(2), BytesReclaimed: bytes(471490)},
+			want:    "deleted 2 file(s), reclaimed 471490 bytes",
+		},
+		{
+			name: "partial lists every skip reason",
+			outcome: storage.BackupPruneOutcome{
+				Status: storage.BackupPrunePartial, FilesDeleted: files(1), BytesReclaimed: bytes(8),
+				Skipped: []string{"manifest lock was busy", "destination has a recent file"},
+			},
+			want: "deleted 1 file(s), reclaimed 8 bytes; skipped manifest lock was busy; skipped destination has a recent file",
+		},
+		{
+			name:    "counts missing falls back to status",
+			outcome: storage.BackupPruneOutcome{Status: storage.BackupPruneSkipped, FilesDeleted: files(0)},
+			want:    "skipped",
+		},
 	}
-
-	read := false
-	err := requireFileBackupForPrune(context.Background(), func(_ context.Context, name string) (string, error) {
-		read = true
-		if name != defaultDoltBackupName {
-			t.Fatalf("backup remote name = %q, want %q", name, defaultDoltBackupName)
-		}
-		return "https://example.com/registered", nil
-	})
-	if !read {
-		t.Fatal("registered backup destination was not read")
-	}
-	if err == nil {
-		t.Fatal("prune validation accepted a non-file Dolt-registered destination")
-	}
-	if !strings.Contains(err.Error(), "configured scheme: https") {
-		t.Fatalf("backup prune validation error = %q, want non-file destination rejection", err)
-	}
-}
-
-func TestRequireFileBackupForPruneReportsMissingDoltRemote(t *testing.T) {
-	err := requireFileBackupForPrune(context.Background(), func(context.Context, string) (string, error) {
-		return "", versioncontrolops.ErrBackupRemoteNotFound
-	})
-	if err == nil || !strings.Contains(err.Error(), "no backup destination configured") {
-		t.Fatalf("backup prune validation error = %v, want missing destination guidance", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatBackupPruneOutcome(tt.outcome); got != tt.want {
+				t.Fatalf("formatBackupPruneOutcome(%+v) = %q, want %q", tt.outcome, got, tt.want)
+			}
+		})
 	}
 }
 

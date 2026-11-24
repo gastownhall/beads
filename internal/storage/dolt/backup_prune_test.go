@@ -25,13 +25,6 @@ func TestDoltStoreBackupSyncWithPrune(t *testing.T) {
 	if err := store.BackupSync(ctx, "default"); err != nil {
 		t.Fatalf("initial BackupSync: %v", err)
 	}
-	registeredURL, err := store.BackupRemoteURL(ctx, "default")
-	if err != nil {
-		t.Fatalf("BackupRemoteURL: %v", err)
-	}
-	if registeredURL != backupURL {
-		t.Fatalf("registered backup URL = %q, want %q", registeredURL, backupURL)
-	}
 
 	orphan := filepath.Join(backupDir, "00000000000000000000000000000001")
 	if err := os.WriteFile(orphan, []byte("orphaned table file"), 0o600); err != nil {

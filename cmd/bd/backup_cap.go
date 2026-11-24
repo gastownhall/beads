@@ -28,14 +28,26 @@ func effectiveSizeCapMB() int {
 // backupSizeCapExceeded reports whether dir's on-disk size has crossed
 // backup.size-cap-mb (default 2048MB / 2GB; 0 disables the cap).
 //
-// Automatic backups still use plain BackupSync/CALL DOLT_BACKUP('sync', ...),
-// so they transfer new chunks without pruning ones that became unreachable on
-// the source DB (history rewrites, superseded data). The explicit `bd backup
-// sync --prune-with-grace-period` path can prune a configured file:// backup,
-// but automatic backups have no grace-period setting and do not opt in. Keep
-// this cap until automatic pruning has its own deliberate policy.
-// formatBytes is shared with runCompactDolt (compact.go); getDirSize is defined
-// below.
+// A hard cap exists because BackupSync/CALL DOLT_BACKUP('sync', ...) only
+// ever transfers new chunks into dir — it never prunes ones that became
+// unreachable on the source DB (history rewrites, superseded data) — and
+// Dolt exposes no supported way to GC a backup destination in place: it is
+// a bare chunk-store directory with no .dolt repo-root marker (confirmed
+// against dolt_backup.go's SQL procedures — add/sync/restore only, no gc;
+// and empirically, `dolt gc` run with its working directory set to a real
+// backup destination fails "not a valid dolt repository" because there is
+// no .dolt for the CLI to find). Absent a cap, the destination can only
+// grow forever until disk fills (ga-y6gjv, the 2026-06-19 outage: 43GB
+// backup dir from a 1.7GB store).
+//
+// `bd backup sync --prune-with-grace-period` does not change this. Dolt's
+// grace-period prune deletes only table files the destination manifest no
+// longer references (orphans from interrupted syncs); it does not reclaim
+// unreachable chunks inside files the manifest still references, which is
+// how normal backup growth accumulates. Keep this cap even if automatic
+// backups ever opt into that prune: it is not a replacement for the cap.
+// formatBytes is shared with runCompactDolt (compact.go); getDirSize is
+// defined below.
 func backupSizeCapExceeded(dir string) (exceeded bool, size int64, err error) {
 	capMB := effectiveSizeCapMB()
 	if capMB == 0 {

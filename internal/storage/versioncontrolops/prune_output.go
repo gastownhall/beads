@@ -9,13 +9,25 @@ import (
 	"sync"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // Dolt's DOLT_BACKUP prune procedure writes its summary with cli.Printf
-// instead of returning it through SQL. The embedded adapter scopes this
-// writer to one backup operation; SQL and proxy adapters report the summary as
-// unavailable. Serialize scoped captures because Dolt exposes one process-wide
-// output writer, then restore the original writer before returning.
+// instead of returning it through SQL, so the embedded adapter installs a
+// filtering writer for the duration of one backup sync; SQL and proxy adapters
+// report the summary as unavailable.
+//
+// cli.CliOut is a single process-wide variable that Dolt reads without
+// synchronization on every cli.Printf. doltPruneOutputCaptureMu serializes
+// captures against each other only; it does not synchronize the swap against
+// other goroutines printing through Dolt's cli package. Such a concurrent
+// print during the capture window is a data race on cli.CliOut, and its
+// output is routed through the wrapper, which forwards every line that is not
+// this destination's prune summary. The only caller is the embedded
+// EmbeddedDoltStore.BackupSyncWithPrune, which bd runs under the cross-process
+// backup lock from a single short-lived command, where no other Dolt CLI
+// output is expected; any new caller must preserve that invariant.
 var doltPruneOutputCaptureMu sync.Mutex
 
 type doltPruneOutputWriter struct {
@@ -42,7 +54,9 @@ type doltPruneOutputCapture struct {
 
 // CaptureDoltPruneOutput observes the summary emitted by one embedded backup
 // sync. The writer is installed only while syncBackup runs and is restored on
-// both success and failure.
+// success, failure and panic. When Dolt prints several summaries for the
+// destination, the last one wins. It is compiled only with cgo, like its one
+// caller in embeddeddolt.
 func CaptureDoltPruneOutput(backupURL string, syncBackup func() error) (BackupPruneOutcome, error) {
 	doltPruneOutputCaptureMu.Lock()
 	defer doltPruneOutputCaptureMu.Unlock()
@@ -64,7 +78,7 @@ func (capture *doltPruneOutputCapture) outcome() BackupPruneOutcome {
 	outcome, ok := parseDoltPruneSummary(summary)
 	if !ok {
 		return BackupPruneOutcome{
-			Status:  "unavailable",
+			Status:  storage.BackupPruneUnavailable,
 			Message: "Dolt returned an unrecognized prune summary: " + summary,
 		}
 	}
@@ -112,7 +126,7 @@ func parseDoltPruneSummary(summary string) (BackupPruneOutcome, bool) {
 	files := filesDeleted
 	bytes := bytesReclaimed
 	outcome := BackupPruneOutcome{
-		Status:         "pruned",
+		Status:         storage.BackupPrunePruned,
 		FilesDeleted:   &files,
 		BytesReclaimed: &bytes,
 	}
@@ -130,9 +144,9 @@ func parseDoltPruneSummary(summary string) (BackupPruneOutcome, bool) {
 		outcome.Skipped = append(outcome.Skipped, reason)
 	}
 	if filesDeleted == 0 {
-		outcome.Status = "skipped"
+		outcome.Status = storage.BackupPruneSkipped
 	} else {
-		outcome.Status = "partial"
+		outcome.Status = storage.BackupPrunePartial
 	}
 	return outcome, true
 }

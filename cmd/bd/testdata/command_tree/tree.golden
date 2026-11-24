@@ -463,19 +463,26 @@ bd backup sync
     | This pushes the entire database state (all branches, full history) to the
     | backup location configured with 'bd backup init'.
     |
-    | For file:// destinations, --prune-with-grace-period <duration> asks Dolt to
-    | remove manifest-unreferenced table files older than the duration before
-    | syncing. This reclaims orphan files from interrupted syncs; it does not reclaim
-    | unreachable chunks inside files still referenced by the manifest, so the backup
-    | size cap remains the control for normal backup growth. The duration must be at
-    | least 10m and shorter than the sync interval, or pruning may never run. Dolt
-    | skips pruning if any destination file was modified within the grace period.
+    | --prune-with-grace-period <duration> asks Dolt to remove manifest-unreferenced
+    | table files older than the duration from a local file:// destination before
+    | syncing. Any other destination (for example an https:// or aws:// remote) is
+    | rejected with an error and nothing is synced. Pruning reclaims orphan files
+    | from interrupted syncs; it does not reclaim unreachable chunks inside files
+    | still referenced by the manifest, so the backup size cap remains the control
+    | for normal backup growth. The duration must be at least 10m. Dolt skips
+    | pruning if any destination file was modified within the grace period, so the
+    | duration must also be shorter than the time between syncs to this
+    | destination, or pruning never runs.
     |
     | Pruning is best-effort: a prune failure does not fail the sync. Embedded mode
-    | reports Dolt's prune summary when available. On SQL-server and proxied routes,
-    | Dolt writes that summary to server stdout and does not return it over SQL, so
-    | bd reports the prune outcome as unavailable; check the Dolt server logs.
-    | Without the flag, sync behavior is unchanged.
+    | reports Dolt's prune summary when Dolt prints one. On SQL-server and proxied
+    | routes, Dolt writes that summary to server stdout and does not return it over
+    | SQL, so bd reports the prune outcome as unavailable; check the Dolt server logs.
+    | With --json, prune.status is one of: pruned (summary reported, nothing
+    | skipped), partial (files deleted and some skipped), skipped (nothing deleted,
+    | skip reasons listed), or unavailable (no summary observed: also the result of
+    | a no-op or failed prune in embedded mode). Without the flag, sync behavior is
+    | unchanged.
     |
     | The backup is atomic — if the sync fails, the previous backup state is preserved.
     |

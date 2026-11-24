@@ -89,6 +89,13 @@ func TestManagedLocalProxiedBackupRoundTrip(t *testing.T) {
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Fatalf("pruned sync left the orphan in place; stat error: %v", err)
 	}
+	out, err = bdProxiedRun(t, bd, p.dir, "backup", "sync", "--prune-with-grace-period", "10m")
+	if err != nil {
+		t.Fatalf("text-mode bd backup sync --prune-with-grace-period 10m: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Prune outcome: unavailable: Dolt did not return a prune summary") {
+		t.Fatalf("proxied text-mode prune output = %q, want the unavailable outcome line", out)
+	}
 
 	after := bdProxiedCreate(t, bd, p.dir, "must not survive the restore", "-p", "1")
 

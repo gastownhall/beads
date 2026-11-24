@@ -212,13 +212,6 @@ func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.D
 	start := time.Now()
 	var pruneOutcome versioncontrolops.BackupPruneOutcome
 	err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
-		if gracePeriod > 0 {
-			if err := requireFileBackupForPrune(ctx, func(ctx context.Context, name string) (string, error) {
-				return versioncontrolops.BackupRemoteURL(ctx, conn, name)
-			}); err != nil {
-				return err
-			}
-		}
 		if err := commitWorkingSetBeforeBackup(ctx, conn); err != nil {
 			// Same posture as the direct path: a failed pre-backup commit
 			// means the backup may miss the newest writes, which is worth
@@ -226,6 +219,9 @@ func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.D
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
 		}
 		if gracePeriod > 0 {
+			// Reads and validates the registered destination on this same
+			// connection before syncing; a non-file destination is refused
+			// with ErrBackupPruneRequiresFileDestination.
 			var err error
 			pruneOutcome, err = versioncontrolops.BackupSyncWithPrune(ctx, conn, proxiedBackupTargetName, gracePeriod)
 			return err
@@ -233,10 +229,10 @@ func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.D
 		return versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName)
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "no backup") || strings.Contains(err.Error(), "not found") {
-			return HandleErrorRespectJSON("no backup destination configured. Run 'bd backup init <path>' first")
+		if errors.Is(err, versioncontrolops.ErrBackupPruneRequiresFileDestination) {
+			return HandleErrorRespectJSON("%v", err)
 		}
-		return HandleErrorRespectJSON("backup sync failed: %v", err)
+		return HandleErrorRespectJSON("%v", backupSyncFailure(err))
 	}
 
 	elapsed := time.Since(start)
@@ -256,7 +252,7 @@ func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.D
 	}
 	fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
 	if gracePeriod > 0 {
-		fmt.Printf("Prune outcome: %s\n", pruneOutcome.Summary())
+		fmt.Printf("Prune outcome: %s\n", formatBackupPruneOutcome(pruneOutcome))
 	}
 	return nil
 }
