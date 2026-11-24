@@ -523,6 +523,13 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil {
+			// --create-only holds on a pull as on a push: a linked bead is left
+			// alone, so a pull is safe while beads are held locally (#8507).
+			// A forced ID still updates, as the push gate allows.
+			if opts.CreateOnly && !allowOverwriteIDs[existing.ID] {
+				stats.Skipped++
+				continue
+			}
 			// Conflict-aware pull: skip updating issues that were locally
 			// modified since last sync. Conflict detection (Phase 2) will
 			// handle these per the configured resolution strategy.
