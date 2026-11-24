@@ -1753,8 +1753,7 @@ func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
 	return versioncontrolops.BackupSync(ctx, db, name)
 }
 
-// BackupSyncWithPrune runs a long-timeout Dolt backup sync with native
-// grace-period pruning enabled for the configured file:// destination.
+// BackupRemoteURL returns the URL registered by Dolt for the named backup.
 func (s *DoltStore) BackupRemoteURL(ctx context.Context, name string) (string, error) {
 	db, err := s.oneShotConn(0)
 	if err != nil {

@@ -19,6 +19,7 @@ go_library(
         "gc.go",
         "mergesettle.go",
         "prune_output.go",
+        "prune_output_nocgo.go",
         "remoterefs.go",
         "remotes.go",
         "version_control.go",

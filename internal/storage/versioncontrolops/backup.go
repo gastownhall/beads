@@ -64,6 +64,14 @@ func BackupRemoteURL(ctx context.Context, db DBConn, name string) (string, error
 	return backupURL, nil
 }
 
+func unavailableBackupPruneOutcome() BackupPruneOutcome {
+	return BackupPruneOutcome{
+		Status: "unavailable",
+		Message: "Dolt did not return a prune summary; best-effort pruning may have skipped, failed, " +
+			"or found nothing to prune. Check Dolt server logs if available.",
+	}
+}
+
 // BackupSyncWithPrune syncs the named backup and asks Dolt to remove table
 // files that are unreferenced by the destination manifest and older than the
 // supplied grace period. Dolt itself skips pruning when the destination is

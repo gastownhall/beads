@@ -172,6 +172,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Grace-period pruning for file-backed backup syncs.**
+  `bd backup sync --prune-with-grace-period <duration>` asks Dolt to remove
+  aged orphan table files before syncing and reports the prune outcome where
+  Dolt exposes it.
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,

@@ -1,3 +1,5 @@
+//go:build cgo
+
 package versioncontrolops
 
 import (
@@ -11,10 +13,16 @@ import (
 
 // Dolt's DOLT_BACKUP prune procedure writes its summary with cli.Printf
 // instead of returning it through SQL. Wrap Dolt's exported output writer once
-// at package initialization: this diverts only prune summaries from stdout and
-// associates them with the registered destination. It avoids redirecting
-// process stdout or swapping Dolt's global writer around a query, either of
-// which would race unrelated commands.
+// at package initialization so a registered destination's summary can be
+// captured without redirecting process stdout or swapping Dolt's global writer
+// around a query.
+//
+// This writer is process-global and remains wrapped for the process lifetime.
+// Dolt's NewEphemeralPrinter checks the identity of cli.CliOut, so clone
+// progress also takes the forwarding path through this wrapper. Non-prune
+// bytes are passed unchanged to the original writer; only a matching prune
+// summary with an active capture is withheld from stdout. The !cgo build has a
+// stub because Dolt CLI output is only available to the embedded route.
 func init() {
 	cli.CliOut = &doltPruneOutputWriter{destination: cli.CliOut}
 }
@@ -104,14 +112,6 @@ func recordDoltPruneOutput(line string) bool {
 		capture.summaries = append(capture.summaries, summary)
 	}
 	return true
-}
-
-func unavailableBackupPruneOutcome() BackupPruneOutcome {
-	return BackupPruneOutcome{
-		Status: "unavailable",
-		Message: "Dolt did not return a prune summary; best-effort pruning may have skipped or failed. " +
-			"Check Dolt server logs for details.",
-	}
 }
 
 func parseDoltPruneSummary(summary string) (BackupPruneOutcome, bool) {

@@ -1,6 +1,39 @@
+//go:build cgo
+
 package versioncontrolops
 
-import "testing"
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+func TestDoltPruneOutputWriterPassesNonPruneOutputUnchanged(t *testing.T) {
+	var destination bytes.Buffer
+	writer := &doltPruneOutputWriter{destination: &destination}
+	input := []byte("Cloning backup destination\rprogress 1/2\n")
+
+	n, err := writer.Write(input)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(input) {
+		t.Fatalf("Write returned %d bytes, want %d", n, len(input))
+	}
+	if !bytes.Equal(destination.Bytes(), input) {
+		t.Fatalf("forwarded output = %q, want %q", destination.String(), input)
+	}
+}
+
+func TestUnavailableBackupPruneOutcomeMentionsNoWork(t *testing.T) {
+	outcome := unavailableBackupPruneOutcome()
+	if outcome.Status != "unavailable" {
+		t.Fatalf("Status = %q, want unavailable", outcome.Status)
+	}
+	if !strings.Contains(outcome.Message, "found nothing to prune") {
+		t.Fatalf("Message = %q, want it to explain that there may be nothing to prune", outcome.Message)
+	}
+}
 
 func TestParseDoltPruneSummary(t *testing.T) {
 	tests := []struct {
