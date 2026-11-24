@@ -273,3 +273,35 @@ func TestEngineCreateOnlyPullHoldsMapperMatchedBead(t *testing.T) {
 			result.PullStats.Created, result.PullStats.Updated, result.PullStats.Skipped)
 	}
 }
+
+// TestEngineCreateOnlyPullSelectiveHoldsNamedBead pins the AC-4 contract: a
+// selective pull that names a linked bead ID (bd <tracker> sync --create-only
+// --issues <id>) still holds the bead; selection narrows the fetch, it does
+// not lift the hold.
+func TestEngineCreateOnlyPullSelectiveHoldsNamedBead(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:         "ext-linked",
+		Identifier: "EXT-LINKED",
+		Title:      "Retitled remotely",
+		State:      types.StatusOpen,
+		Priority:   2,
+	}}
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true, IssueIDs: []string{"bd-linked"}})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if got := state.issues["bd-linked"].Title; got != "Already linked" {
+		t.Errorf("named bead title = %q, want %q (selection does not lift --create-only)", got, "Already linked")
+	}
+	if result.PullStats.Updated != 0 {
+		t.Errorf("PullStats.Updated = %d, want 0", result.PullStats.Updated)
+	}
+	if result.PullStats.Skipped != 1 {
+		t.Errorf("PullStats.Skipped = %d, want 1", result.PullStats.Skipped)
+	}
+}
