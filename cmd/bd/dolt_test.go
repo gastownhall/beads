@@ -389,6 +389,16 @@ func TestDoltSetConfigWithUpdateConfig(t *testing.T) {
 	if result["config_yaml_updated"] != true {
 		t.Errorf("expected config_yaml_updated true, got %v", result["config_yaml_updated"])
 	}
+
+	// GH#8593: the flag must mean the yaml write actually ran.
+	yamlBytes, err := os.ReadFile(configYamlPath)
+	if err != nil {
+		t.Fatalf("reading config.yaml: %v", err)
+	}
+	yamlText := string(yamlBytes)
+	if !strings.Contains(yamlText, "database:") && !strings.Contains(yamlText, "myproject") {
+		t.Fatalf("config.yaml was not updated with dolt.database=myproject:\n%s", yamlText)
+	}
 }
 
 func TestTestServerConnection(t *testing.T) {
