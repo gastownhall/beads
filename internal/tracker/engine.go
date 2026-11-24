@@ -501,6 +501,15 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil {
+			// --create-only creates beads only for remote issues that match no
+			// local issue; a matched issue is left alone however it matched
+			// (exact ref, fallback index, mapper-assigned ID). Neither a
+			// conflict verdict, pre-linked hydration nor an explicit selection
+			// lifts the hold (gastownhall/beads#8507).
+			if opts.CreateOnly {
+				stats.Skipped++
+				continue
+			}
 			// Conflict-aware pull: skip updating issues that were locally
 			// modified since last sync. Conflict detection (Phase 2) will
 			// handle these per the configured resolution strategy.

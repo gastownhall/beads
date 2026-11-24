@@ -1475,6 +1475,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--create-only` no longer updates local issues on pull**
+  ([#8621](https://github.com/gastownhall/beads/pull/8621), reported in
+  [#8507](https://github.com/gastownhall/beads/issues/8507)). The flag is
+  documented as "only creates new issues, doesn't update existing", and the
+  push honored it, but a pull overwrote every local issue it matched with
+  the remote content — including the pull half of the default bidirectional
+  `bd jira|linear|notion sync --create-only`, even one narrowed with
+  `--issues`. A create-only sync now leaves every matched issue unchanged,
+  however it matched (external ref, identity fallback, or a mapper-assigned
+  beads ID), and counts it as skipped; only remote issues that match no
+  local issue are created. To take remote edits, run the sync without the
+  flag. By rjgeng.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
