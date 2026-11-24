@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
@@ -266,4 +267,55 @@ func TestEngineCreateOnlyPullSelectiveHoldsNamedBead(t *testing.T) {
 	if result.PullStats.Updated != 0 {
 		t.Errorf("PullStats.Updated = %d, want 0 under --create-only", result.PullStats.Updated)
 	}
+}
+
+// TestEngineCreateOnlyPullExternalWinsConflict covers AC-5: a conflict whose
+// resolution chose the external version neither lifts the hold nor claims an
+// import under --create-only.
+func TestEngineCreateOnlyPullExternalWinsConflict(t *testing.T) {
+	t.Run("conflict messages", func(t *testing.T) {
+		const want = "Conflict on bd-linked: external is newer; --create-only leaves the local issue unchanged"
+		now := time.Now().UTC()
+		for _, tc := range []struct {
+			name     string
+			strategy ConflictResolution
+		}{
+			{"external strategy", ConflictExternal},
+			{"timestamp strategy, external newer", ConflictTimestamp},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				engine := NewEngine(newMockTracker("test"), NewUOWStore(&engineUOWProvider{state: createOnlyState()}), "test-actor")
+				var msgs []string
+				engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+				skip, force, allow := map[string]bool{}, map[string]bool{}, map[string]bool{}
+				engine.resolveConflicts(SyncOptions{CreateOnly: true, ConflictResolution: tc.strategy},
+					[]Conflict{{IssueID: "bd-linked", LocalUpdated: now.Add(-time.Hour), ExternalUpdated: now}},
+					skip, force, allow)
+				if joined := strings.Join(msgs, "\n"); joined != want {
+					t.Errorf("messages = %q, want %q", joined, want)
+				}
+				if !skip["bd-linked"] || !allow["bd-linked"] || force["bd-linked"] {
+					t.Errorf("skip=%v force=%v allow=%v, want skip and allow set for bd-linked", skip, force, allow)
+				}
+			})
+		}
+	})
+
+	t.Run("pull holds an allowed overwrite", func(t *testing.T) {
+		ctx := context.Background()
+		state := createOnlyState()
+		tracker := newMockTracker("test")
+		tracker.issues = createOnlyPullRemote()
+		engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+		stats, err := engine.doPull(ctx, SyncOptions{Pull: true, CreateOnly: true},
+			map[string]bool{"bd-linked": true}, map[string]bool{})
+		if err != nil {
+			t.Fatalf("doPull() error: %v", err)
+		}
+		assertLinkedBeadUntouched(t, state)
+		if stats.Updated != 0 {
+			t.Errorf("PullStats.Updated = %d, want 0 under --create-only", stats.Updated)
+		}
+	})
 }

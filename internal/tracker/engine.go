@@ -1783,6 +1783,10 @@ func (e *Engine) renderBatchDryRun(issues []*types.Issue, result *BatchPushResul
 	}
 }
 
+// createOnlyExternalWinsMsg reports an external-wins conflict under
+// --create-only, whose pull leaves matched local issues alone.
+const createOnlyExternalWinsMsg = "Conflict on %s: external is newer; --create-only leaves the local issue unchanged"
+
 // resolveConflicts applies the configured conflict resolution strategy.
 func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipIDs, forceIDs, allowPullOverwriteIDs map[string]bool) {
 	for _, c := range conflicts {
@@ -1794,7 +1798,11 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 		case ConflictExternal:
 			skipIDs[c.IssueID] = true
 			allowPullOverwriteIDs[c.IssueID] = true
-			e.msg("Conflict on %s: keeping external version", c.IssueID)
+			if opts.CreateOnly {
+				e.msg(createOnlyExternalWinsMsg, c.IssueID)
+			} else {
+				e.msg("Conflict on %s: keeping external version", c.IssueID)
+			}
 
 		default: // ConflictTimestamp or unset
 			if c.LocalUpdated.After(c.ExternalUpdated) {
@@ -1803,7 +1811,11 @@ func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipID
 			} else {
 				skipIDs[c.IssueID] = true
 				allowPullOverwriteIDs[c.IssueID] = true
-				e.msg("Conflict on %s: external is newer, importing", c.IssueID)
+				if opts.CreateOnly {
+					e.msg(createOnlyExternalWinsMsg, c.IssueID)
+				} else {
+					e.msg("Conflict on %s: external is newer, importing", c.IssueID)
+				}
 			}
 		}
 	}
