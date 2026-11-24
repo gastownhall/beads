@@ -245,3 +245,25 @@ func TestEngineCreateOnlyPullHoldsMapperIDMatch(t *testing.T) {
 			got.Created, got.Updated, got.Skipped)
 	}
 }
+
+// TestEngineCreateOnlyPullSelectiveHoldsNamedBead covers AC-4: naming a linked
+// bead with --issues narrows the fetch but does not lift --create-only.
+func TestEngineCreateOnlyPullSelectiveHoldsNamedBead(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = createOnlyPullRemote()
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true, IssueIDs: []string{"bd-linked"}})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if tracker.fetchCalls != 1 {
+		t.Fatalf("tracker.fetchCalls = %d, want 1: the selective pull must fetch the named issue", tracker.fetchCalls)
+	}
+	assertLinkedBeadUntouched(t, state)
+	if result.PullStats.Updated != 0 {
+		t.Errorf("PullStats.Updated = %d, want 0 under --create-only", result.PullStats.Updated)
+	}
+}
