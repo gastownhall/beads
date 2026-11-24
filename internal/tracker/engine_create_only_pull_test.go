@@ -3,6 +3,7 @@ package tracker
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -147,5 +148,52 @@ func TestEngineCreateOnlyPullFallbackMatchHeld(t *testing.T) {
 	if got := result.PullStats; got.Created != 0 || got.Updated != 0 || got.Skipped != 1 {
 		t.Errorf("PullStats = {Created:%d Updated:%d Skipped:%d}, want {Created:0 Updated:0 Skipped:1}",
 			got.Created, got.Updated, got.Skipped)
+	}
+}
+
+// TestEngineCreateOnlyPullDryRunMatchesRealRun covers AC-2: the dry-run
+// preview of a --create-only pull shows no update for the linked bead, shows
+// the import of the unmatched issue, writes nothing, and reports the stats of
+// the real run.
+func TestEngineCreateOnlyPullDryRunMatchesRealRun(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = createOnlyPullRemote()
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+	var msgs []string
+	engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+
+	dry, err := engine.Sync(ctx, SyncOptions{Pull: true, DryRun: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() dry-run error: %v", err)
+	}
+	joined := strings.Join(msgs, "\n")
+	if strings.Contains(joined, "Would update local issue") {
+		t.Errorf("dry-run messages = %q, did not expect a local update preview under --create-only", joined)
+	}
+	if !strings.Contains(joined, "Would import: EXT-NEW - Only remote") {
+		t.Errorf("dry-run messages = %q, want an import preview for EXT-NEW", joined)
+	}
+	assertLinkedBeadUntouched(t, state)
+	if len(state.issues) != 2 || state.commits != 0 {
+		t.Errorf("dry-run wrote to the store: beads=%d commits=%d, want 2 beads and no commit", len(state.issues), state.commits)
+	}
+	if len(tracker.created) != 0 || len(tracker.updated) != 0 {
+		t.Errorf("dry-run wrote to the tracker: created=%d updated=%d", len(tracker.created), len(tracker.updated))
+	}
+
+	liveState := createOnlyState()
+	liveTracker := newMockTracker("test")
+	liveTracker.issues = createOnlyPullRemote()
+	live, err := NewEngine(liveTracker, NewUOWStore(&engineUOWProvider{state: liveState}), "test-actor").
+		Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync() real run error: %v", err)
+	}
+	d, l := dry.PullStats, live.PullStats
+	if d.Created != l.Created || d.Updated != l.Updated || d.Skipped != l.Skipped {
+		t.Errorf("dry-run PullStats {Created:%d Updated:%d Skipped:%d} != real run {Created:%d Updated:%d Skipped:%d}",
+			d.Created, d.Updated, d.Skipped, l.Created, l.Updated, l.Skipped)
 	}
 }
