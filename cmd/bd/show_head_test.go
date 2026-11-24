@@ -127,10 +127,13 @@ func TestClipNotesTail(t *testing.T) {
 	})
 
 	t.Run("a newline followed only by blank space does not empty the view", func(t *testing.T) {
-		notes := strings.Repeat("q", 2000) + "\n   \n"
-		tail, _ := clipNotesTail(notes, 1024, 256)
-		if strings.TrimSpace(tail) == "" {
-			t.Error("the cut moved past the last text and left a blank view")
+		// The cut lands at 1977, 23 bytes before the newline and so within
+		// the slack, but only blank space follows that line start: the cut
+		// stays where it landed instead of moving past the last text.
+		notes := strings.Repeat("q", 2000) + "\n" + strings.Repeat(" ", 1000)
+		tail, withheld := clipNotesTail(notes, 1024, 256)
+		if withheld != 1977 || strings.TrimSpace(tail) == "" {
+			t.Errorf("withheld %d, tail text %q; want the cut left at 1977, keeping the last text", withheld, strings.TrimSpace(tail))
 		}
 	})
 
