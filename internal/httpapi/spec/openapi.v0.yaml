@@ -2593,8 +2593,9 @@ paths:
             count answers the same rows the listing returns for the same
             filter. The empty value and the literal `all` still mean EVERY
             status, which is what makes a bare count answer for closed rows
-            as well as open ones. Parts are matched as written and are NOT
-            validated against this workspace's configured vocabulary: a
+            as well as open ones. Parts are trimmed of surrounding spaces
+            and otherwise matched as written, and are NOT validated
+            against this workspace's configured vocabulary: a
             part no row's status equals — including a stray `all` inside a
             set — matches nothing, and an unrecognized name answers `0`,
             not a refusal; the shipped match-nothing behavior of

@@ -82,7 +82,8 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 	// name matches nothing rather than failing.
 	//
 	// A comma-separated value is a status OR set, the spelling bd list
-	// documents (GH#8502); parts stay as written, so an unknown part — and a
+	// documents (GH#8502); parts are trimmed of surrounding spaces and
+	// otherwise stay as written, so an unknown part — and a
 	// stray "all" inside a set — contributes nothing rather than widening the
 	// count. The value passes through the list selector's splitter, so a
 	// single name comes back trimmed the way bd list reads it.

@@ -43,13 +43,13 @@ const (
 // checks, so it is left off rather than published untested; TitleSearch and
 // the three *Contains fields are the substring matches that ARE reachable.
 type CountRequest struct {
-	// Status restricts by status. Empty and the literal "all" both mean every
-	// status, which is what makes a bare count answer for closed rows as well
-	// as open ones. A comma-separated value is a status OR set — the same
-	// spelling ListRequest.Status documents for `bd list --status` — so
-	// `bd count --status open,in_progress` answers the rows `bd list --status
-	// open,in_progress` returns (GH#8502); BuildCountFilter splits the set and
-	// each part is kept as written.
+	// One stored status. Empty and the literal "all" both
+	// mean every status, which is what makes a bare count answer for closed
+	// rows as well as open ones. A comma-separated value is a status OR set —
+	// the same spelling ListRequest.Status documents for `bd list --status` —
+	// so `bd count --status open,in_progress` answers the rows `bd list
+	// --status open,in_progress` returns (#8502); BuildCountFilter splits the
+	// set, trims each part, and keeps names as written otherwise.
 	//
 	// No part is validated against the workspace vocabulary: an unrecognized
 	// name matches nothing and returns zero rather than failing, exactly as
