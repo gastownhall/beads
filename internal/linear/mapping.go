@@ -751,13 +751,20 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 		updatedAt = time.Now()
 	}
 
+	// A push folds acceptance criteria, design and notes into the Linear
+	// description; split them back out so a pull does not fold them into the
+	// local description as well (GH#8506).
+	parts := ParseLinearDescription(li.Description)
 	issue := &types.Issue{
-		Title:       li.Title,
-		Description: li.Description,
-		Priority:    PriorityToBeads(li.Priority, config),
-		IssueType:   LabelToIssueType(li.Labels, config),
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
+		Title:              li.Title,
+		Description:        parts.Description,
+		AcceptanceCriteria: parts.AcceptanceCriteria,
+		Design:             parts.Design,
+		Notes:              parts.Notes,
+		Priority:           PriorityToBeads(li.Priority, config),
+		IssueType:          LabelToIssueType(li.Labels, config),
+		CreatedAt:          createdAt,
+		UpdatedAt:          updatedAt,
 	}
 
 	// Map state using configurable mapping
@@ -855,8 +862,18 @@ func BuildLinearToLocalUpdates(li *Issue, config *MappingConfig) map[string]inte
 	// Update title
 	updates["title"] = li.Title
 
-	// Update description
-	updates["description"] = li.Description
+	// Update description and the sections a push folded into it (GH#8506)
+	parts := ParseLinearDescription(li.Description)
+	updates["description"] = parts.Description
+	if parts.AcceptanceCriteria != "" {
+		updates["acceptance_criteria"] = parts.AcceptanceCriteria
+	}
+	if parts.Design != "" {
+		updates["design"] = parts.Design
+	}
+	if parts.Notes != "" {
+		updates["notes"] = parts.Notes
+	}
 
 	// Update priority using configured mapping
 	updates["priority"] = PriorityToBeads(li.Priority, config)
