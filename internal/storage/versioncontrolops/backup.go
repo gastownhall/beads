@@ -55,11 +55,14 @@ func BackupRemoteURL(ctx context.Context, db DBConn, name string) (string, error
 	return backupURL, nil
 }
 
+// unavailableBackupPruneOutcome is the outcome on SQL-server and proxied
+// routes, where Dolt prints its prune summary on the server's stdout instead
+// of returning it over SQL.
 func unavailableBackupPruneOutcome() storage.BackupPruneOutcome {
 	return storage.BackupPruneOutcome{
 		Status: storage.BackupPruneUnavailable,
-		Message: "Dolt did not return a prune summary; best-effort pruning may have skipped, failed, " +
-			"or found nothing to prune. Check Dolt server logs if available.",
+		Message: "Dolt did not return a prune summary over SQL; best-effort pruning may have deleted files, " +
+			"skipped, failed, or found nothing to prune. Dolt prints the summary on the SQL server's output.",
 	}
 }
 

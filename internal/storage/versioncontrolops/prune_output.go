@@ -70,9 +70,21 @@ func CaptureDoltPruneOutput(backupURL string, syncBackup func() error) (storage.
 	return capture.outcome(), err
 }
 
+// noEmbeddedPruneSummaryOutcome is the outcome when the in-process capture
+// observed no summary. There is no Dolt server in embedded mode, so unlike
+// unavailableBackupPruneOutcome it does not point at server output: Dolt
+// prints nothing for a no-op prune and logs, rather than prints, a prune error.
+func noEmbeddedPruneSummaryOutcome() storage.BackupPruneOutcome {
+	return storage.BackupPruneOutcome{
+		Status: storage.BackupPruneUnavailable,
+		Message: "Dolt did not print a prune summary; best-effort pruning found nothing to prune or failed " +
+			"(Dolt logs a prune failure instead of printing it). The backup sync itself succeeded.",
+	}
+}
+
 func (capture *doltPruneOutputCapture) outcome() storage.BackupPruneOutcome {
 	if len(capture.summaries) == 0 {
-		return unavailableBackupPruneOutcome()
+		return noEmbeddedPruneSummaryOutcome()
 	}
 	summary := capture.summaries[len(capture.summaries)-1]
 	outcome, ok := parseDoltPruneSummary(summary)

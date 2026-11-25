@@ -247,6 +247,26 @@ func TestParseDoltPruneSummaryJSONCountKeys(t *testing.T) {
 	}
 }
 
+// TestCaptureDoltPruneOutputNoSummaryDoesNotCiteServer pins the embedded
+// no-summary message: embedded mode has no Dolt server, so it must not send
+// the user to server output or logs the way the SQL-route message does.
+func TestCaptureDoltPruneOutputNoSummaryDoesNotCiteServer(t *testing.T) {
+	installCaptureTestWriter(t)
+	outcome, err := CaptureDoltPruneOutput("file:///tmp/backup", func() error { return nil })
+	if err != nil {
+		t.Fatalf("CaptureDoltPruneOutput: %v", err)
+	}
+	if outcome.Status != storage.BackupPruneUnavailable {
+		t.Fatalf("Status = %q, want unavailable", outcome.Status)
+	}
+	if strings.Contains(strings.ToLower(outcome.Message), "server") {
+		t.Fatalf("Message = %q, want no reference to a Dolt server in embedded mode", outcome.Message)
+	}
+	if !strings.Contains(outcome.Message, "found nothing to prune") {
+		t.Fatalf("Message = %q, want it to explain that there may be nothing to prune", outcome.Message)
+	}
+}
+
 func TestUnavailableBackupPruneOutcomeMentionsNoWork(t *testing.T) {
 	outcome := unavailableBackupPruneOutcome()
 	if outcome.Status != "unavailable" {

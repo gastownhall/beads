@@ -209,7 +209,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		if prune {
 			prunable, ok = storage.UnwrapStore(store).(storage.PrunableBackupStore)
 			if !ok {
-				return fmt.Errorf("storage backend does not support backup pruning")
+				return HandleErrorRespectJSON("storage backend does not support backup pruning")
 			}
 		}
 
