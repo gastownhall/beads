@@ -62,6 +62,7 @@ go_test(
     embed = [":versioncontrolops"],
     deps = [
         "//internal/githooksenv",
+        "//internal/storage",
         "//internal/testutil",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_dolthub_dolt_go//cmd/dolt/cli",

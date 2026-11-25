@@ -307,6 +307,73 @@ func TestBackupSyncWithPruneOutcomeText(t *testing.T) {
 	}
 }
 
+// TestReportBackupSyncResultPruneOnlyWhenRequested pins the shared sync
+// renderer's contract for both routes: without --prune-with-grace-period the
+// JSON is exactly {synced, duration} (plus schema_version) and text mode prints
+// no "Prune outcome:" line; with it, the prune object and line appear.
+func TestReportBackupSyncResultPruneOnlyWhenRequested(t *testing.T) {
+	oldJSON := jsonOutput
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	t.Setenv("BD_JSON_ENVELOPE", "")
+
+	deleted := 1
+	outcome := storage.BackupPruneOutcome{Status: storage.BackupPrunePruned, FilesDeleted: &deleted}
+	for _, tt := range []struct {
+		name  string
+		json  bool
+		prune bool
+	}{
+		{name: "json without prune", json: true, prune: false},
+		{name: "json with prune", json: true, prune: true},
+		{name: "text without prune", json: false, prune: false},
+		{name: "text with prune", json: false, prune: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			jsonOutput = tt.json
+			out := captureStdout(t, func() error {
+				return reportBackupSyncResult(1500*time.Millisecond, tt.prune, outcome)
+			})
+
+			if !tt.json {
+				if !strings.Contains(out, "Backup synced in 1.5s") {
+					t.Fatalf("text output missing sync line: %q", out)
+				}
+				if got := strings.Contains(out, "Prune outcome:"); got != tt.prune {
+					t.Fatalf("text output has Prune outcome line = %v, want %v: %q", got, tt.prune, out)
+				}
+				return
+			}
+
+			var result map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("output is not a JSON object: %v\n%s", err, out)
+			}
+			delete(result, "schema_version")
+			want := []string{"duration", "synced"}
+			if tt.prune {
+				want = append(want, "prune")
+			}
+			if len(result) != len(want) {
+				t.Fatalf("JSON keys = %v, want exactly %v", result, want)
+			}
+			for _, key := range want {
+				if _, ok := result[key]; !ok {
+					t.Fatalf("JSON missing %q: %s", key, out)
+				}
+			}
+			if tt.prune {
+				var got storage.BackupPruneOutcome
+				if err := json.Unmarshal(result["prune"], &got); err != nil {
+					t.Fatalf("prune is not a BackupPruneOutcome: %v", err)
+				}
+				if got.Status != storage.BackupPrunePruned || got.FilesDeleted == nil || *got.FilesDeleted != 1 {
+					t.Fatalf("prune = %+v, want status pruned with 1 file deleted", got)
+				}
+			}
+		})
+	}
+}
+
 func TestFormatBytes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

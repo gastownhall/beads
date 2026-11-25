@@ -177,6 +177,14 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		}()
 
 		ctx := rootCtx
+		// Refuse a non-local proxied topology before taking the backup lock,
+		// so a guaranteed refusal never waits on (or reports busy for) the
+		// lock. runBackupSyncProxied keeps its own route-level re-check.
+		if usesProxiedServer() {
+			if err := requireLocalProxiedBackup("backup sync"); err != nil {
+				return err
+			}
+		}
 		release, err := acquireBackupLock(backupLockWait)
 		if err != nil {
 			if errors.Is(err, errBackupBusy) {
