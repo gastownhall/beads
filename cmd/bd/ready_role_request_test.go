@@ -180,6 +180,9 @@ func TestReadyEmptyStateVerdict(t *testing.T) {
 			[]*types.BlockedIssue{blocked(func(i *types.Issue) { i.Assignee = "bob" })}, readyEmptyNoneBlocked},
 		{"own_blocked_issue", issueops.ReadyRequest{Assignee: "alice"},
 			[]*types.BlockedIssue{blocked(func(i *types.Issue) { i.Assignee = "alice" })}, readyEmptyBlocked},
+		// GH#8628: the listing folds letter case, so the verdict must too.
+		{"own_blocked_issue_under_another_letter_case", issueops.ReadyRequest{Assignee: "HIEROPHANT"},
+			[]*types.BlockedIssue{blocked(func(i *types.Issue) { i.Assignee = "hierophant" })}, readyEmptyBlocked},
 		{"unassigned_listing_assigned_blocked_issue", issueops.ReadyRequest{Unassigned: true},
 			[]*types.BlockedIssue{blocked(func(i *types.Issue) { i.Assignee = "bob" })}, readyEmptyNoneBlocked},
 		{"another_priority", issueops.ReadyRequest{Priority: &one},
