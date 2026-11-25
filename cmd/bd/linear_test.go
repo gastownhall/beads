@@ -2090,17 +2090,52 @@ func (f *linearDescriptionSync) sentDescriptions() []string {
 // (a blank line after each heading, then the create's marker), so a no-change
 // sync must not push it again.
 func TestLinearSyncNoChangeSendsNoUpdateForStoredSections(t *testing.T) {
-	stored := "DESC\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\nDESIGN\n\n## Notes\n\nNOTES\n<!-- bd-idempotency: 0123456789ab -->"
-	f := newLinearDescriptionSync(t, types.Issue{
-		Description:        "DESC",
-		AcceptanceCriteria: "AC",
-		Design:             "DESIGN",
-		Notes:              "NOTES",
-	}, stored)
+	stored := linearDescriptionSyncStored
+	f := newLinearDescriptionSync(t, linearDescriptionSyncBead(), stored)
 
 	result := f.sync()
 	if remote, updates := f.api.snapshot(); updates != 0 || remote.Description != stored {
 		t.Fatalf("no-change sync: PushStats = %+v, issueUpdate calls = %d, Linear description %q; want no update", result.PushStats, updates, remote.Description)
+	}
+}
+
+// linearDescriptionSyncStored is what Linear holds after a create pushed the
+// bead DESC/AC/DESIGN/NOTES: Build's text with a blank line after each
+// heading, then the idempotency marker (GH#8506's state).
+const linearDescriptionSyncStored = "DESC\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\nDESIGN\n\n## Notes\n\nNOTES\n<!-- bd-idempotency: 0123456789ab -->"
+
+func linearDescriptionSyncBead() types.Issue {
+	return types.Issue{Description: "DESC", AcceptanceCriteria: "AC", Design: "DESIGN", Notes: "NOTES"}
+}
+
+// requireBeadText fails unless the bead's four text fields are as given.
+func (f *linearDescriptionSync) requireBeadText(when, description, acceptance, design, notes string) {
+	f.t.Helper()
+	got := f.store.issue
+	if got.Description != description || got.AcceptanceCriteria != acceptance || got.Design != design || got.Notes != notes {
+		f.t.Fatalf("%s: bead description %q, acceptance %q, design %q, notes %q; want %q, %q, %q, %q",
+			when, got.Description, got.AcceptanceCriteria, got.Design, got.Notes, description, acceptance, design, notes)
+	}
+}
+
+// TestLinearSyncPullsNotesEditedInLinear pins AC-4: an edit under ## Notes
+// in Linear reaches the bead's notes and nothing else, and neither that sync
+// nor the next pushes the old notes back.
+func TestLinearSyncPullsNotesEditedInLinear(t *testing.T) {
+	const edited = "NOTES edited in Linear"
+	f := newLinearDescriptionSync(t, linearDescriptionSyncBead(), linearDescriptionSyncStored)
+	f.editLinear(func(li *linear.Issue) {
+		li.Description = strings.Replace(li.Description, "\n\nNOTES\n", "\n\n"+edited+"\n", 1)
+	})
+
+	for _, when := range []string{"sync after the Linear edit", "next sync"} {
+		result := f.sync()
+		f.requireBeadText(when, "DESC", "AC", "DESIGN", edited)
+		for _, sent := range f.sentDescriptions() {
+			if notes := linear.ParseLinearDescription(sent).Notes; notes != edited {
+				t.Fatalf("%s: PushStats = %+v; an issueUpdate sent notes %q, want none but %q:\n%s", when, result.PushStats, notes, edited, sent)
+			}
+		}
 	}
 }
 
@@ -2261,6 +2296,12 @@ func (s *linearSyncStore) ApplyIssueUpdate(_ context.Context, id string, updates
 			next.Title = text
 		case "description":
 			next.Description = text
+		case "acceptance_criteria":
+			next.AcceptanceCriteria = text
+		case "design":
+			next.Design = text
+		case "notes":
+			next.Notes = text
 		case "status":
 			next.Status = types.Status(text)
 		case "assignee":

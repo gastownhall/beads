@@ -15,6 +15,7 @@ import (
 )
 
 var _ tracker.BatchPushTracker = (*Tracker)(nil)
+var _ tracker.DescriptionFieldsTracker = (*Tracker)(nil)
 
 func init() {
 	tracker.Register("linear", func() tracker.IssueTracker {

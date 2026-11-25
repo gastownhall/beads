@@ -1,6 +1,10 @@
 package linear
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/steveyegge/beads/internal/types"
+)
 
 // The section headings BuildLinearDescription appends, in the order it
 // writes them. A heading's index is its rank.
@@ -219,4 +223,12 @@ func canonicalLinearText(text string) string {
 		}
 	}
 	return strings.Join(kept, "\n")
+}
+
+// SettleDescriptionFields implements tracker.DescriptionFieldsTracker. A pull
+// parsed pulled's description, acceptance criteria, design and notes out of
+// the Linear description; a section Linear shows wins, so a Linear edit flows
+// into the bead's field.
+func (t *Tracker) SettleDescriptionFields(existing, pulled *types.Issue) (keptLocal bool) {
+	return false
 }
