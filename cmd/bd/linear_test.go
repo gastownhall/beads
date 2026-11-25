@@ -2183,6 +2183,25 @@ func TestLinearSyncKeepsNotesLinearDoesNotShow(t *testing.T) {
 	})
 }
 
+// TestLinearSyncTitleChangeKeepsDescriptionHeading pins AC-6: a bead whose
+// own description ends in an ## Acceptance Criteria section (its field
+// empty) pulls a Linear title change, with the description unchanged but for
+// Linear's blank line after the heading, without being reshaped.
+func TestLinearSyncTitleChangeKeepsDescriptionHeading(t *testing.T) {
+	const description = "DESC\n\n## Acceptance Criteria\n- [ ] it ships"
+	f := newLinearDescriptionSync(t, types.Issue{Description: description}, "DESC\n\n## Acceptance Criteria\n\n- [ ] it ships")
+	f.editLinear(func(li *linear.Issue) { li.Title = "Ship it v2" })
+
+	result := f.sync()
+	if f.store.issue.Title != "Ship it v2" {
+		t.Fatalf("PullStats = %+v, bead title %q, want the pulled title", result.PullStats, f.store.issue.Title)
+	}
+	f.requireBeadText("sync after the Linear title change", description, "", "", "")
+	if _, updates := f.api.snapshot(); updates != 0 {
+		t.Fatalf("PushStats = %+v, issueUpdate calls = %d, want none", result.PushStats, updates)
+	}
+}
+
 // fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes
 // for one team holding one issue: workflow states, labels (none), the
 // incremental issues query, which honours its updatedAt.gte filter, the

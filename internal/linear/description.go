@@ -227,7 +227,12 @@ func canonicalLinearText(text string) string {
 
 // SettleDescriptionFields implements tracker.DescriptionFieldsTracker. A pull
 // parsed pulled's description, acceptance criteria, design and notes out of
-// the Linear description. Per field:
+// the Linear description.
+//
+// When the Linear text is the bead's own (DescriptionFieldsEqual), pulled
+// takes existing's four fields: an unchanged bead is never reshaped, even
+// one whose description ends in a heading the parser lifts. Otherwise, per
+// field:
 //   - A section Linear shows wins, so a Linear edit flows into the bead.
 //   - An absent section empties a blank local field, and one whose text
 //     Linear still shows elsewhere (its non-blank lines adjacent and in
@@ -240,6 +245,13 @@ func canonicalLinearText(text string) string {
 // push.
 func (t *Tracker) SettleDescriptionFields(existing, pulled *types.Issue) (keptLocal bool) {
 	if existing == nil || pulled == nil {
+		return false
+	}
+	if DescriptionFieldsEqual(existing, pulled) {
+		pulled.Description = existing.Description
+		pulled.AcceptanceCriteria = existing.AcceptanceCriteria
+		pulled.Design = existing.Design
+		pulled.Notes = existing.Notes
 		return false
 	}
 	remote := strings.Split(canonicalLinearText(BuildLinearDescription(pulled)), "\n")

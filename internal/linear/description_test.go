@@ -351,3 +351,23 @@ func TestSettleDescriptionFields(t *testing.T) {
 		})
 	}
 }
+
+// TestSettleDescriptionFieldsKeepsUnchangedBead pins AC-6 at the unit level:
+// when the Linear text is the bead's own pushed text, the settle restores the
+// bead's four fields, even when its description ends in a heading the parser
+// lifts.
+func TestSettleDescriptionFieldsKeepsUnchangedBead(t *testing.T) {
+	bead := &types.Issue{Description: "DESC\n\n## Acceptance Criteria\n- [ ] works", Notes: "NOTES"}
+	stored := "DESC\n\n## Acceptance Criteria\n\n- [ ] works\n\n## Notes\n\nNOTES\n<!-- bd-idempotency: 0123456789ab -->"
+	pulled := partsIssue(ParseLinearDescription(stored))
+	if pulled.AcceptanceCriteria == "" {
+		t.Fatalf("fixture: the parser should lift the bead's own heading; got %+v", pulled)
+	}
+	if kept := (&Tracker{}).SettleDescriptionFields(bead, pulled); kept {
+		t.Errorf("SettleDescriptionFields reported kept local text for an unchanged bead")
+	}
+	if pulled.Description != bead.Description || pulled.AcceptanceCriteria != "" || pulled.Design != "" || pulled.Notes != "NOTES" {
+		t.Errorf("SettleDescriptionFields reshaped an unchanged bead: description %q, acceptance %q, design %q, notes %q",
+			pulled.Description, pulled.AcceptanceCriteria, pulled.Design, pulled.Notes)
+	}
+}
