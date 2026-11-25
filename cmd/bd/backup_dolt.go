@@ -187,10 +187,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		defer release()
 
 		if usesProxiedServer() {
-			if prune {
-				return runBackupSyncProxiedWithPrune(ctx, gracePeriod)
-			}
-			return runBackupSyncProxied(ctx)
+			return runBackupSyncProxied(ctx, gracePeriod, prune)
 		}
 		if store == nil {
 			return fmt.Errorf("no store available")
@@ -225,10 +222,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 			syncErr = bs.BackupSync(ctx, defaultDoltBackupName)
 		}
 		if syncErr != nil {
-			if errors.Is(syncErr, versioncontrolops.ErrBackupPruneRequiresFileDestination) {
-				return HandleErrorRespectJSON("%v", syncErr)
-			}
-			return backupSyncFailure(syncErr)
+			return HandleErrorRespectJSON("%v", backupSyncFailure(syncErr, prune))
 		}
 
 		elapsed := time.Since(start)
@@ -238,22 +232,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 			fmt.Fprintf(os.Stderr, "Warning: backup synced but failed to update state: %v\n", err)
 		}
 
-		if jsonOutput {
-			result := map[string]interface{}{
-				"synced":   true,
-				"duration": elapsed.String(),
-			}
-			if prune {
-				result["prune"] = pruneOutcome
-			}
-			return outputJSON(result)
-		}
-
-		fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
-		if prune {
-			fmt.Printf("Prune outcome: %s\n", formatBackupPruneOutcome(pruneOutcome))
-		}
-		return nil
+		return reportBackupSyncResult(elapsed, prune, pruneOutcome)
 	},
 }
 
@@ -562,16 +541,48 @@ func validateBackupPruneGracePeriod(gracePeriod time.Duration, provided bool) (t
 // destination, shared by the direct and proxied routes.
 var errNoBackupDestination = errors.New("no backup destination configured. Run 'bd backup init <path>' first")
 
-// backupSyncFailure maps a failed sync onto the command's error. A missing
-// destination is recognized by sentinel on the prune path; plain BackupSync
-// surfaces Dolt's own "not found" text, so the substring check remains for it.
-func backupSyncFailure(err error) error {
-	if errors.Is(err, versioncontrolops.ErrBackupRemoteNotFound) ||
-		strings.Contains(err.Error(), "no backup") ||
-		strings.Contains(err.Error(), "not found") {
+// backupSyncFailure maps a failed sync onto the command's error for both the
+// direct and proxied routes; callers render it with HandleErrorRespectJSON.
+//
+// A prune refused for a non-file destination is returned unchanged. The prune
+// path reads the registered destination itself and reports a missing one with
+// ErrBackupRemoteNotFound, so on that path only the sentinel means "not
+// configured": any other failure keeps its cause even when Dolt's text
+// contains "not found" (a missing table file, chunk or database). Plain
+// BackupSync has no such sentinel and surfaces Dolt's own text, so the
+// substring check applies to it alone.
+func backupSyncFailure(err error, prune bool) error {
+	switch {
+	case errors.Is(err, versioncontrolops.ErrBackupPruneRequiresFileDestination):
+		return err
+	case errors.Is(err, versioncontrolops.ErrBackupRemoteNotFound):
+		return errNoBackupDestination
+	case !prune && (strings.Contains(err.Error(), "no backup") ||
+		strings.Contains(err.Error(), "not found")):
 		return errNoBackupDestination
 	}
 	return fmt.Errorf("backup sync failed: %w", err)
+}
+
+// reportBackupSyncResult renders a successful sync for both the direct and
+// proxied routes. The prune object (JSON) or line (text) is present only when
+// pruning was requested.
+func reportBackupSyncResult(elapsed time.Duration, prune bool, pruneOutcome storage.BackupPruneOutcome) error {
+	if jsonOutput {
+		result := map[string]interface{}{
+			"synced":   true,
+			"duration": elapsed.String(),
+		}
+		if prune {
+			result["prune"] = pruneOutcome
+		}
+		return outputJSON(result)
+	}
+	fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
+	if prune {
+		fmt.Printf("Prune outcome: %s\n", formatBackupPruneOutcome(pruneOutcome))
+	}
+	return nil
 }
 
 // formatBackupPruneOutcome renders a prune outcome for human command output.

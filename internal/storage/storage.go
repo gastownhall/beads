@@ -1129,7 +1129,9 @@ type BackupPruneStatus string
 
 const (
 	// BackupPrunePruned means Dolt reported its prune summary and skipped
-	// nothing. FilesDeleted may be zero when nothing was old enough.
+	// nothing. Dolt prints a summary only when it deleted or skipped
+	// something, so FilesDeleted is at least 1 in practice: a no-op prune
+	// prints no summary and is reported as BackupPruneUnavailable.
 	BackupPrunePruned BackupPruneStatus = "pruned"
 	// BackupPrunePartial means Dolt deleted at least one file and also
 	// reported one or more skip reasons.

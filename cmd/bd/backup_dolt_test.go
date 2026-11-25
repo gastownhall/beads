@@ -202,16 +202,21 @@ func TestValidateBackupPruneGracePeriod(t *testing.T) {
 
 func TestBackupSyncWithPruneErrorMapping(t *testing.T) {
 	driverErr := errors.New("connection reset")
+	missingChunkErr := errors.New("table file abc123 not found")
+	destinationErr := fmt.Errorf("%w (configured destination: https://example.invalid/beads)",
+		versioncontrolops.ErrBackupPruneRequiresFileDestination)
 	tests := []struct {
 		name      string
 		err       error
+		prune     bool
 		want      string
 		wantIsErr error
 	}{
 		{
-			name: "missing registered destination on the prune path",
-			err:  fmt.Errorf("%w: default", versioncontrolops.ErrBackupRemoteNotFound),
-			want: "no backup destination configured",
+			name:  "missing registered destination on the prune path",
+			err:   fmt.Errorf("%w: default", versioncontrolops.ErrBackupRemoteNotFound),
+			prune: true,
+			want:  "no backup destination configured",
 		},
 		{
 			name: "plain sync reports Dolt's not-found text",
@@ -219,20 +224,38 @@ func TestBackupSyncWithPruneErrorMapping(t *testing.T) {
 			want: "no backup destination configured",
 		},
 		{
+			name:      "prune sync failure mentioning not found keeps its cause",
+			err:       fmt.Errorf("sync backup default with pruning: %w", missingChunkErr),
+			prune:     true,
+			want:      "backup sync failed: sync backup default with pruning: table file abc123 not found",
+			wantIsErr: missingChunkErr,
+		},
+		{
+			name:      "non-file destination is returned unchanged",
+			err:       destinationErr,
+			prune:     true,
+			want:      destinationErr.Error(),
+			wantIsErr: versioncontrolops.ErrBackupPruneRequiresFileDestination,
+		},
+		{
 			name:      "other sync failure keeps its cause",
 			err:       fmt.Errorf("sync backup default with pruning: %w", driverErr),
+			prune:     true,
 			want:      "backup sync failed: sync backup default with pruning: connection reset",
 			wantIsErr: driverErr,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := backupSyncFailure(tt.err)
+			got := backupSyncFailure(tt.err, tt.prune)
 			if !strings.Contains(got.Error(), tt.want) {
-				t.Fatalf("backupSyncFailure(%v) = %q, want %q", tt.err, got, tt.want)
+				t.Fatalf("backupSyncFailure(%v, %v) = %q, want %q", tt.err, tt.prune, got, tt.want)
 			}
 			if tt.wantIsErr != nil && !errors.Is(got, tt.wantIsErr) {
-				t.Fatalf("backupSyncFailure(%v) = %v, want it to wrap %v", tt.err, got, tt.wantIsErr)
+				t.Fatalf("backupSyncFailure(%v, %v) = %v, want it to wrap %v", tt.err, tt.prune, got, tt.wantIsErr)
+			}
+			if tt.wantIsErr != nil && errors.Is(got, errNoBackupDestination) {
+				t.Fatalf("backupSyncFailure(%v, %v) = %v, must not report a missing destination", tt.err, tt.prune, got)
 			}
 		})
 	}

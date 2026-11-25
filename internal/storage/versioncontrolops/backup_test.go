@@ -212,6 +212,33 @@ func TestBackupSyncWithPruneReportsMissingRemoteBeforeSync(t *testing.T) {
 	}
 }
 
+// TestBackupSyncWithPruneRegistryReadErrorIsNotMissingRemote pins that a
+// failure reading dolt_backups keeps its cause and is not reported as an
+// unconfigured destination, and that no sync is attempted after it.
+func TestBackupSyncWithPruneRegistryReadErrorIsNotMissingRemote(t *testing.T) {
+	db, mock := newBackupPruneMock(t)
+	driverErr := errors.New("table dolt_backups is locked")
+	mock.ExpectQuery(regexp.QuoteMeta(backupRemoteURLQuery)).
+		WithArgs("default").
+		WillReturnError(driverErr)
+
+	outcome, err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute)
+	if !errors.Is(err, driverErr) {
+		t.Fatalf("BackupSyncWithPrune error = %v, want it to wrap the registry read error", err)
+	}
+	if errors.Is(err, ErrBackupRemoteNotFound) {
+		t.Fatalf("BackupSyncWithPrune error = %v, must not match ErrBackupRemoteNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "read backup remote default") {
+		t.Fatalf("BackupSyncWithPrune error = %q, want it to name the registry read", err)
+	}
+	if outcome.Status != "" {
+		t.Fatalf("outcome on registry read error = %+v, want zero outcome", outcome)
+	}
+	// newBackupPruneMock's cleanup fails the test if any unexpected
+	// CALL DOLT_BACKUP was issued.
+}
+
 func TestBackupSyncWithPruneSyncErrorWrapsCauseWithoutOutcome(t *testing.T) {
 	db, mock := newBackupPruneMock(t)
 	expectRegisteredBackupURL(mock, "file:///tmp/backup")

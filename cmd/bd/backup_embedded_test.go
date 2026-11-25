@@ -220,6 +220,60 @@ func TestEmbeddedBackup(t *testing.T) {
 		}
 	})
 
+	t.Run("sync_prune_without_init", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkprune0")
+
+		out := bdBackupFail(t, bd, dir, "sync", "--prune-with-grace-period", "10m")
+		if !strings.Contains(out, "no backup destination configured") {
+			t.Errorf("expected backup-not-configured error, got: %s", out)
+		}
+	})
+
+	t.Run("sync_prune_rejects_non_file_destination", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkprunehttps")
+		bdBackup(t, bd, dir, "init", "https://example.invalid/beads")
+
+		const refusal = "grace-period pruning supports only local file:// backup destinations"
+		out := bdBackupFail(t, bd, dir, "sync", "--prune-with-grace-period", "10m")
+		if !strings.Contains(out, refusal) {
+			t.Fatalf("expected file-destination refusal, got: %s", out)
+		}
+		for _, wrong := range []string{"backup sync failed", "no backup destination configured"} {
+			if strings.Contains(out, wrong) {
+				t.Fatalf("file-destination refusal was reported as %q: %s", wrong, out)
+			}
+		}
+
+		cmd := exec.Command(bd, "backup", "sync", "--json", "--prune-with-grace-period", "10m")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err == nil {
+			t.Fatalf("bd backup sync --json --prune-with-grace-period should have failed, got: %s", stdout.String())
+		}
+		// The error object may sit inside the schema envelope, so check the
+		// document is JSON and carries the refusal rather than pinning a shape.
+		if !json.Valid(stdout.Bytes()) || !strings.Contains(stdout.String(), refusal) {
+			t.Fatalf("want a JSON error with the file-destination refusal on stdout\nstdout:\n%s\nstderr:\n%s",
+				stdout.String(), stderr.String())
+		}
+
+		// The refusal happens before any sync, so no sync was recorded.
+		statusOut := bdBackup(t, bd, dir, "status", "--json")
+		var status struct {
+			Dolt map[string]interface{} `json:"dolt"`
+		}
+		if err := json.Unmarshal([]byte(statusOut), &status); err != nil {
+			t.Fatalf("parse backup status JSON: %v\noutput: %s", err, statusOut)
+		}
+		if status.Dolt["configured"] != true {
+			t.Fatalf("backup status lost the registered destination: %s", statusOut)
+		}
+		if _, synced := status.Dolt["last_sync"]; synced {
+			t.Fatalf("refused prune recorded a sync: %s", statusOut)
+		}
+	})
+
 	t.Run("restore_from_backup", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "bksrc")
 		bdCreateSilent(t, bd, dir, "restore test issue A")

@@ -195,16 +195,10 @@ func runBackupInitProxied(ctx context.Context, rawPath string) error {
 	return nil
 }
 
-// runBackupSyncProxied pushes the database to the configured destination.
-func runBackupSyncProxied(ctx context.Context) error {
-	return runBackupSyncProxiedWithGracePeriod(ctx, 0)
-}
-
-func runBackupSyncProxiedWithPrune(ctx context.Context, gracePeriod time.Duration) error {
-	return runBackupSyncProxiedWithGracePeriod(ctx, gracePeriod)
-}
-
-func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.Duration) error {
+// runBackupSyncProxied pushes the database to the configured destination and,
+// when prune is set, asks Dolt to prune it with gracePeriod (already validated
+// by the caller).
+func runBackupSyncProxied(ctx context.Context, gracePeriod time.Duration, prune bool) error {
 	if err := requireLocalProxiedBackup("backup sync"); err != nil {
 		return err
 	}
@@ -218,7 +212,7 @@ func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.D
 			// saying out loud and is not worth refusing to back up over.
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
 		}
-		if gracePeriod > 0 {
+		if prune {
 			// Reads and validates the registered destination on this same
 			// connection before syncing; a non-file destination is refused
 			// with ErrBackupPruneRequiresFileDestination.
@@ -229,10 +223,7 @@ func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.D
 		return versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName)
 	})
 	if err != nil {
-		if errors.Is(err, versioncontrolops.ErrBackupPruneRequiresFileDestination) {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		return HandleErrorRespectJSON("%v", backupSyncFailure(err))
+		return HandleErrorRespectJSON("%v", backupSyncFailure(err, prune))
 	}
 
 	elapsed := time.Since(start)
@@ -240,21 +231,7 @@ func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.D
 		fmt.Fprintf(os.Stderr, "Warning: backup synced but failed to update state: %v\n", err)
 	}
 
-	if jsonOutput {
-		result := map[string]interface{}{
-			"synced":   true,
-			"duration": elapsed.String(),
-		}
-		if gracePeriod > 0 {
-			result["prune"] = pruneOutcome
-		}
-		return outputJSON(result)
-	}
-	fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
-	if gracePeriod > 0 {
-		fmt.Printf("Prune outcome: %s\n", formatBackupPruneOutcome(pruneOutcome))
-	}
-	return nil
+	return reportBackupSyncResult(elapsed, prune, pruneOutcome)
 }
 
 // commitWorkingSetBeforeBackup is the proxied twin of the direct path's

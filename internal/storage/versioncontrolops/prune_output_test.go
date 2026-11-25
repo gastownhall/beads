@@ -242,8 +242,58 @@ func TestParseDoltPruneSummary(t *testing.T) {
 			wantOK:         true,
 		},
 		{
+			// Dolt does not print this for a no-op prune today; the parser
+			// still accepts it rather than misreporting it as unrecognized.
+			name:           "zero counts without skips",
+			summary:        "deleted 0 file(s), reclaimed 0 bytes",
+			status:         "pruned",
+			filesDeleted:   0,
+			bytesReclaimed: 0,
+			wantOK:         true,
+		},
+		{
 			name:    "unexpected summary",
 			summary: "pruning failed",
+		},
+		{
+			name:    "non-numeric file count",
+			summary: "deleted x file(s), reclaimed 8 bytes",
+		},
+		{
+			name:    "negative file count",
+			summary: "deleted -1 file(s), reclaimed 8 bytes",
+		},
+		{
+			name:    "missing files marker",
+			summary: "deleted 1 files, reclaimed 8 bytes",
+		},
+		{
+			name:    "missing bytes marker",
+			summary: "deleted 1 file(s), reclaimed 8",
+		},
+		{
+			name:    "non-numeric byte count",
+			summary: "deleted 1 file(s), reclaimed many bytes",
+		},
+		{
+			name:    "overflowing byte count",
+			summary: "deleted 1 file(s), reclaimed 99999999999999999999 bytes",
+		},
+		{
+			name:    "negative byte count",
+			summary: "deleted 1 file(s), reclaimed -8 bytes",
+		},
+		{
+			name:    "unexpected trailer",
+			summary: "deleted 1 file(s), reclaimed 8 bytes, done",
+		},
+		{
+			name:    "empty trailing skip reason",
+			summary: "deleted 1 file(s), reclaimed 8 bytes; skipped ",
+		},
+		{
+			name:    "empty skip reason between reasons",
+			summary: "deleted 0 file(s), reclaimed 0 bytes; skipped ; skipped busy",
 		},
 	}
 
