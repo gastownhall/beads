@@ -456,6 +456,36 @@ func TestAssigneeNotStolen(t *testing.T) {
 			newAssignee: "gastown__mayor",
 			wantErr:     false,
 		},
+		// GH#8628: letter case is not part of an identity.
+		{
+			name:        "holder under another letter case moves its own claim",
+			issue:       inProgress("hierophant"),
+			actor:       "Hierophant",
+			newAssignee: "carol",
+			wantErr:     false,
+		},
+		{
+			name:        "idempotent re-assert of the holder under another letter case passes",
+			issue:       inProgress("hierophant"),
+			actor:       "bob",
+			newAssignee: "Hierophant",
+			wantErr:     false,
+		},
+		{
+			name:        "a stranger moving a case-held claim to a third name is still refused",
+			issue:       inProgress("hierophant"),
+			actor:       "bob",
+			newAssignee: "carol",
+			wantErr:     true,
+		},
+		{
+			name:        "a case variant of a claim.pools alias is not the alias",
+			issue:       inProgress("Fable-Crew"),
+			actor:       "alice",
+			newAssignee: "alice",
+			pools:       pools,
+			wantErr:     true,
+		},
 		{
 			name:        "different identity with shared separators still refused",
 			issue:       inProgress("gastown.mayor"),
