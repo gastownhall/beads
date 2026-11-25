@@ -1123,6 +1123,24 @@ type BackupStore interface {
 	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 
+// MinBackupPruneGracePeriod is the smallest grace period Dolt accepts for
+// pruning a file:// backup destination. It mirrors Dolt's
+// cli.BackupPruneMinGracePeriod, which this package cannot import; a
+// cgo-tagged test in versioncontrolops pins the two together.
+const MinBackupPruneGracePeriod = 10 * time.Minute
+
+// ErrBackupRemoteNotFound reports a missing row in Dolt's registered backup
+// remotes, so callers can tell an unconfigured destination from an error
+// reading Dolt's backup registry. PrunableBackupStore implementations return
+// errors matching it (errors.Is).
+var ErrBackupRemoteNotFound = errors.New("backup remote not found")
+
+// ErrBackupPruneRequiresFileDestination reports that the registered backup
+// destination is not a local file:// URL, the only kind Dolt's grace-period
+// prune supports. PrunableBackupStore implementations return errors matching
+// it (errors.Is) before issuing any sync.
+var ErrBackupPruneRequiresFileDestination = errors.New("grace-period pruning supports only local file:// backup destinations")
+
 // BackupPruneStatus is the machine-readable prune result that
 // `bd backup sync --prune-with-grace-period --json` emits as prune.status.
 type BackupPruneStatus string
@@ -1168,11 +1186,11 @@ type BackupPruneOutcome struct {
 // backup destinations. It is separate from BackupStore so callers that do not
 // offer this opt-in operation can keep the ordinary sync contract unchanged.
 //
-// Implementations read the registered destination and reject any destination
-// that is not a local file:// URL with an error matching
-// versioncontrolops.ErrBackupPruneRequiresFileDestination (errors.Is) before
-// issuing the sync. A missing destination matches
-// versioncontrolops.ErrBackupRemoteNotFound.
+// Implementations reject a grace period below MinBackupPruneGracePeriod,
+// read the registered destination, and reject any destination that is not a
+// local file:// URL with an error matching ErrBackupPruneRequiresFileDestination
+// (errors.Is) before issuing the sync. A missing destination matches
+// ErrBackupRemoteNotFound.
 type PrunableBackupStore interface {
 	BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (BackupPruneOutcome, error)
 }

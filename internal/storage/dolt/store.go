@@ -1753,10 +1753,18 @@ func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
 	return versioncontrolops.BackupSync(ctx, db, name)
 }
 
-func (s *DoltStore) BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (versioncontrolops.BackupPruneOutcome, error) {
+// BackupSyncWithPrune implements storage.PrunableBackupStore: it syncs the
+// named file:// backup destination and asks Dolt to prune orphan table files
+// older than gracePeriod. Like BackupSync it runs on a long-timeout
+// connection, because the sync streams the database and outlives the pool's
+// 10s ReadTimeout. A destination that is not a local file:// URL is refused
+// with storage.ErrBackupPruneRequiresFileDestination before any sync. Dolt
+// prints its prune summary on the SQL server's stdout, not over SQL, so on
+// this route the outcome is always storage.BackupPruneUnavailable.
+func (s *DoltStore) BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (storage.BackupPruneOutcome, error) {
 	db, err := s.oneShotConn(0)
 	if err != nil {
-		return versioncontrolops.BackupPruneOutcome{}, err
+		return storage.BackupPruneOutcome{}, err
 	}
 	defer db.Close()
 	return versioncontrolops.BackupSyncWithPrune(ctx, db, name, gracePeriod)

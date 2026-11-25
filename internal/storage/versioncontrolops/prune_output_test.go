@@ -4,6 +4,7 @@ package versioncontrolops
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -170,7 +171,7 @@ func TestCaptureDoltPruneOutputSerializesConcurrentCaptures(t *testing.T) {
 
 	urls := []string{"file:///tmp/backup-a", "file:///tmp/backup-b"}
 	deleted := map[string]int{urls[0]: 1, urls[1]: 2}
-	outcomes := make([]BackupPruneOutcome, len(urls))
+	outcomes := make([]storage.BackupPruneOutcome, len(urls))
 	var wg sync.WaitGroup
 	for i, backupURL := range urls {
 		wg.Add(1)
@@ -193,6 +194,56 @@ func TestCaptureDoltPruneOutputSerializesConcurrentCaptures(t *testing.T) {
 		if got.FilesDeleted == nil || *got.FilesDeleted != deleted[backupURL] {
 			t.Fatalf("capture for %s = %+v, want only its own summary (%d deleted)", backupURL, got, deleted[backupURL])
 		}
+	}
+}
+
+// TestDoltPruneOutputMinGracePeriodMatchesDolt pins bd's copy of Dolt's prune
+// grace-period floor to Dolt's own constant. storage cannot import Dolt's cli
+// package, so without this check a Dolt upgrade that moves the floor would
+// leave bd validating against a stale minimum.
+func TestDoltPruneOutputMinGracePeriodMatchesDolt(t *testing.T) {
+	if storage.MinBackupPruneGracePeriod != cli.BackupPruneMinGracePeriod {
+		t.Fatalf("storage.MinBackupPruneGracePeriod = %s, Dolt's cli.BackupPruneMinGracePeriod = %s; update bd's copy",
+			storage.MinBackupPruneGracePeriod, cli.BackupPruneMinGracePeriod)
+	}
+}
+
+// TestParseDoltPruneSummaryJSONCountKeys pins the JSON contract documented on
+// storage.BackupPruneOutcome at the producers: a parsed skipped summary emits
+// files_deleted and bytes_reclaimed as 0, and the unavailable outcome omits
+// both keys.
+func TestParseDoltPruneSummaryJSONCountKeys(t *testing.T) {
+	skipped, ok := parseDoltPruneSummary("deleted 0 file(s), reclaimed 0 bytes; skipped destination is busy")
+	if !ok || skipped.Status != storage.BackupPruneSkipped {
+		t.Fatalf("parseDoltPruneSummary(skipped) = %+v, %v; want a skipped outcome", skipped, ok)
+	}
+	for _, tt := range []struct {
+		name        string
+		outcome     storage.BackupPruneOutcome
+		wantPresent bool
+	}{
+		{name: "skipped", outcome: skipped, wantPresent: true},
+		{name: "unavailable", outcome: unavailableBackupPruneOutcome(), wantPresent: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded, err := json.Marshal(tt.outcome)
+			if err != nil {
+				t.Fatalf("marshal %+v: %v", tt.outcome, err)
+			}
+			var keys map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &keys); err != nil {
+				t.Fatalf("unmarshal %s: %v", encoded, err)
+			}
+			for _, key := range []string{"files_deleted", "bytes_reclaimed"} {
+				value, present := keys[key]
+				if present != tt.wantPresent {
+					t.Fatalf("%s present = %v, want %v: %s", key, present, tt.wantPresent, encoded)
+				}
+				if present && string(value) != "0" {
+					t.Fatalf("%s = %s, want 0: %s", key, value, encoded)
+				}
+			}
+		})
 	}
 }
 

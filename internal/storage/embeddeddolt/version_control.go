@@ -809,8 +809,8 @@ func (s *EmbeddedDoltStore) BackupSync(ctx context.Context, name string) error {
 	})
 }
 
-func (s *EmbeddedDoltStore) BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (versioncontrolops.BackupPruneOutcome, error) {
-	var outcome versioncontrolops.BackupPruneOutcome
+func (s *EmbeddedDoltStore) BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (storage.BackupPruneOutcome, error) {
+	var outcome storage.BackupPruneOutcome
 	err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		var err error
 		outcome, err = versioncontrolops.BackupSyncWithPruneUsingCapture(ctx, db, name, gracePeriod, versioncontrolops.CaptureDoltPruneOutput)

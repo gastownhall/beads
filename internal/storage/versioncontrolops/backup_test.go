@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -166,8 +168,8 @@ func TestBackupSyncWithPruneRejectsNonFileDestinationBeforeSync(t *testing.T) {
 			expectRegisteredBackupURL(mock, backupURL)
 
 			_, err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute)
-			if !errors.Is(err, ErrBackupPruneRequiresFileDestination) {
-				t.Fatalf("BackupSyncWithPrune(%q) error = %v, want ErrBackupPruneRequiresFileDestination", backupURL, err)
+			if !errors.Is(err, storage.ErrBackupPruneRequiresFileDestination) {
+				t.Fatalf("BackupSyncWithPrune(%q) error = %v, want storage.ErrBackupPruneRequiresFileDestination", backupURL, err)
 			}
 			if strings.Contains(err.Error(), "secret") {
 				t.Fatalf("destination error leaked URL credentials: %v", err)
@@ -207,8 +209,8 @@ func TestBackupSyncWithPruneReportsMissingRemoteBeforeSync(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"url"}))
 
 	_, err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute)
-	if !errors.Is(err, ErrBackupRemoteNotFound) {
-		t.Fatalf("BackupSyncWithPrune error = %v, want ErrBackupRemoteNotFound", err)
+	if !errors.Is(err, storage.ErrBackupRemoteNotFound) {
+		t.Fatalf("BackupSyncWithPrune error = %v, want storage.ErrBackupRemoteNotFound", err)
 	}
 }
 
@@ -226,8 +228,8 @@ func TestBackupSyncWithPruneRegistryReadErrorIsNotMissingRemote(t *testing.T) {
 	if !errors.Is(err, driverErr) {
 		t.Fatalf("BackupSyncWithPrune error = %v, want it to wrap the registry read error", err)
 	}
-	if errors.Is(err, ErrBackupRemoteNotFound) {
-		t.Fatalf("BackupSyncWithPrune error = %v, must not match ErrBackupRemoteNotFound", err)
+	if errors.Is(err, storage.ErrBackupRemoteNotFound) {
+		t.Fatalf("BackupSyncWithPrune error = %v, must not match storage.ErrBackupRemoteNotFound", err)
 	}
 	if !strings.Contains(err.Error(), "read backup remote default") {
 		t.Fatalf("BackupSyncWithPrune error = %q, want it to name the registry read", err)
@@ -265,9 +267,9 @@ func TestBackupSyncWithPruneUsingCaptureObservesRegisteredDestination(t *testing
 
 	deleted := 3
 	var capturedURL string
-	capture := func(backupURL string, sync func() error) (BackupPruneOutcome, error) {
+	capture := func(backupURL string, sync func() error) (storage.BackupPruneOutcome, error) {
 		capturedURL = backupURL
-		return BackupPruneOutcome{Status: "pruned", FilesDeleted: &deleted}, sync()
+		return storage.BackupPruneOutcome{Status: "pruned", FilesDeleted: &deleted}, sync()
 	}
 	outcome, err := BackupSyncWithPruneUsingCapture(context.Background(), db, "default", 30*time.Minute, capture)
 	if err != nil {
@@ -290,8 +292,8 @@ func TestBackupSyncWithPruneUsingCaptureDropsOutcomeOnSyncError(t *testing.T) {
 		WillReturnError(driverErr)
 
 	deleted := 1
-	capture := func(_ string, sync func() error) (BackupPruneOutcome, error) {
-		return BackupPruneOutcome{Status: "pruned", FilesDeleted: &deleted}, sync()
+	capture := func(_ string, sync func() error) (storage.BackupPruneOutcome, error) {
+		return storage.BackupPruneOutcome{Status: "pruned", FilesDeleted: &deleted}, sync()
 	}
 	outcome, err := BackupSyncWithPruneUsingCapture(context.Background(), db, "default", 30*time.Minute, capture)
 	if !errors.Is(err, driverErr) {
@@ -337,8 +339,8 @@ func TestBackupRemoteURLReportsMissingRegisteredBackup(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"url"}))
 
 	_, err = BackupRemoteURL(context.Background(), db, "default")
-	if !errors.Is(err, ErrBackupRemoteNotFound) {
-		t.Fatalf("BackupRemoteURL error = %v, want ErrBackupRemoteNotFound", err)
+	if !errors.Is(err, storage.ErrBackupRemoteNotFound) {
+		t.Fatalf("BackupRemoteURL error = %v, want storage.ErrBackupRemoteNotFound", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

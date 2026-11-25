@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 func TestResolveDoltBackupURL(t *testing.T) {
@@ -204,7 +203,7 @@ func TestBackupSyncWithPruneErrorMapping(t *testing.T) {
 	driverErr := errors.New("connection reset")
 	missingChunkErr := errors.New("table file abc123 not found")
 	destinationErr := fmt.Errorf("%w (configured destination: https://example.invalid/beads)",
-		versioncontrolops.ErrBackupPruneRequiresFileDestination)
+		storage.ErrBackupPruneRequiresFileDestination)
 	tests := []struct {
 		name      string
 		err       error
@@ -214,7 +213,7 @@ func TestBackupSyncWithPruneErrorMapping(t *testing.T) {
 	}{
 		{
 			name:  "missing registered destination on the prune path",
-			err:   fmt.Errorf("%w: default", versioncontrolops.ErrBackupRemoteNotFound),
+			err:   fmt.Errorf("%w: default", storage.ErrBackupRemoteNotFound),
 			prune: true,
 			want:  "no backup destination configured",
 		},
@@ -235,7 +234,7 @@ func TestBackupSyncWithPruneErrorMapping(t *testing.T) {
 			err:       destinationErr,
 			prune:     true,
 			want:      destinationErr.Error(),
-			wantIsErr: versioncontrolops.ErrBackupPruneRequiresFileDestination,
+			wantIsErr: storage.ErrBackupPruneRequiresFileDestination,
 		},
 		{
 			name:      "other sync failure keeps its cause",
@@ -368,6 +367,62 @@ func TestReportBackupSyncResultPruneOnlyWhenRequested(t *testing.T) {
 				}
 				if got.Status != storage.BackupPrunePruned || got.FilesDeleted == nil || *got.FilesDeleted != 1 {
 					t.Fatalf("prune = %+v, want status pruned with 1 file deleted", got)
+				}
+			}
+		})
+	}
+}
+
+// TestBackupSyncWithPruneJSONCountPresence pins the documented --json contract
+// for prune counts: a skipped prune reports files_deleted and bytes_reclaimed
+// as 0, while an unavailable outcome omits both keys rather than claiming zero.
+func TestBackupSyncWithPruneJSONCountPresence(t *testing.T) {
+	oldJSON := jsonOutput
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	t.Setenv("BD_JSON_ENVELOPE", "")
+	jsonOutput = true
+
+	zeroFiles, zeroBytes := 0, int64(0)
+	for _, tt := range []struct {
+		name        string
+		outcome     storage.BackupPruneOutcome
+		wantPresent bool
+	}{
+		{
+			name: "skipped",
+			outcome: storage.BackupPruneOutcome{
+				Status:         storage.BackupPruneSkipped,
+				FilesDeleted:   &zeroFiles,
+				BytesReclaimed: &zeroBytes,
+				Skipped:        []string{"destination is busy"},
+			},
+			wantPresent: true,
+		},
+		{
+			name:        "unavailable",
+			outcome:     storage.BackupPruneOutcome{Status: storage.BackupPruneUnavailable, Message: "no summary"},
+			wantPresent: false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := captureStdout(t, func() error {
+				return reportBackupSyncResult(time.Second, true, tt.outcome)
+			})
+			var result map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("output is not a JSON object: %v\n%s", err, out)
+			}
+			var prune map[string]json.RawMessage
+			if err := json.Unmarshal(result["prune"], &prune); err != nil {
+				t.Fatalf("prune is not a JSON object: %v\n%s", err, out)
+			}
+			for _, key := range []string{"files_deleted", "bytes_reclaimed"} {
+				value, present := prune[key]
+				if present != tt.wantPresent {
+					t.Fatalf("prune.%s present = %v, want %v: %s", key, present, tt.wantPresent, out)
+				}
+				if present && string(value) != "0" {
+					t.Fatalf("prune.%s = %s, want 0: %s", key, value, out)
 				}
 			}
 		})

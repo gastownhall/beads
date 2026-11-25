@@ -204,7 +204,7 @@ func runBackupSyncProxied(ctx context.Context, gracePeriod time.Duration, prune 
 	}
 
 	start := time.Now()
-	var pruneOutcome versioncontrolops.BackupPruneOutcome
+	var pruneOutcome storage.BackupPruneOutcome
 	err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		if err := commitWorkingSetBeforeBackup(ctx, conn); err != nil {
 			// Same posture as the direct path: a failed pre-backup commit

@@ -57,7 +57,7 @@ type doltPruneOutputCapture struct {
 // success, failure and panic. When Dolt prints several summaries for the
 // destination, the last one wins. It is compiled only with cgo, like its one
 // caller in embeddeddolt.
-func CaptureDoltPruneOutput(backupURL string, syncBackup func() error) (BackupPruneOutcome, error) {
+func CaptureDoltPruneOutput(backupURL string, syncBackup func() error) (storage.BackupPruneOutcome, error) {
 	doltPruneOutputCaptureMu.Lock()
 	defer doltPruneOutputCaptureMu.Unlock()
 
@@ -70,14 +70,14 @@ func CaptureDoltPruneOutput(backupURL string, syncBackup func() error) (BackupPr
 	return capture.outcome(), err
 }
 
-func (capture *doltPruneOutputCapture) outcome() BackupPruneOutcome {
+func (capture *doltPruneOutputCapture) outcome() storage.BackupPruneOutcome {
 	if len(capture.summaries) == 0 {
 		return unavailableBackupPruneOutcome()
 	}
 	summary := capture.summaries[len(capture.summaries)-1]
 	outcome, ok := parseDoltPruneSummary(summary)
 	if !ok {
-		return BackupPruneOutcome{
+		return storage.BackupPruneOutcome{
 			Status:  storage.BackupPruneUnavailable,
 			Message: "Dolt returned an unrecognized prune summary: " + summary,
 		}
@@ -98,34 +98,34 @@ func doltPruneSummaryForURL(line, backupURL string) (string, bool) {
 	return rest[separator+2:], true
 }
 
-func parseDoltPruneSummary(summary string) (BackupPruneOutcome, bool) {
+func parseDoltPruneSummary(summary string) (storage.BackupPruneOutcome, bool) {
 	const filesMarker = " file(s), reclaimed "
 	const bytesMarker = " bytes"
 	if !strings.HasPrefix(summary, "deleted ") {
-		return BackupPruneOutcome{}, false
+		return storage.BackupPruneOutcome{}, false
 	}
 
 	filesEnd := strings.Index(summary, filesMarker)
 	if filesEnd < 0 {
-		return BackupPruneOutcome{}, false
+		return storage.BackupPruneOutcome{}, false
 	}
 	filesDeleted, err := strconv.Atoi(strings.TrimPrefix(summary[:filesEnd], "deleted "))
 	if err != nil || filesDeleted < 0 {
-		return BackupPruneOutcome{}, false
+		return storage.BackupPruneOutcome{}, false
 	}
 	bytesStart := filesEnd + len(filesMarker)
 	bytesEnd := strings.Index(summary[bytesStart:], bytesMarker)
 	if bytesEnd < 0 {
-		return BackupPruneOutcome{}, false
+		return storage.BackupPruneOutcome{}, false
 	}
 	bytesReclaimed, err := strconv.ParseInt(summary[bytesStart:bytesStart+bytesEnd], 10, 64)
 	if err != nil || bytesReclaimed < 0 {
-		return BackupPruneOutcome{}, false
+		return storage.BackupPruneOutcome{}, false
 	}
 
 	files := filesDeleted
 	bytes := bytesReclaimed
-	outcome := BackupPruneOutcome{
+	outcome := storage.BackupPruneOutcome{
 		Status:         storage.BackupPrunePruned,
 		FilesDeleted:   &files,
 		BytesReclaimed: &bytes,
@@ -135,11 +135,11 @@ func parseDoltPruneSummary(summary string) (BackupPruneOutcome, bool) {
 		return outcome, true
 	}
 	if !strings.HasPrefix(remainder, "; skipped ") {
-		return BackupPruneOutcome{}, false
+		return storage.BackupPruneOutcome{}, false
 	}
 	for _, reason := range strings.Split(strings.TrimPrefix(remainder, "; skipped "), "; skipped ") {
 		if reason == "" {
-			return BackupPruneOutcome{}, false
+			return storage.BackupPruneOutcome{}, false
 		}
 		outcome.Skipped = append(outcome.Skipped, reason)
 	}

@@ -223,7 +223,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 
 		// Sync to the configured backup
 		var syncErr error
-		var pruneOutcome versioncontrolops.BackupPruneOutcome
+		var pruneOutcome storage.BackupPruneOutcome
 		if prune {
 			pruneOutcome, syncErr = prunable.BackupSyncWithPrune(ctx, defaultDoltBackupName, gracePeriod)
 		} else {
@@ -539,8 +539,8 @@ func validateBackupPruneGracePeriod(gracePeriod time.Duration, provided bool) (t
 	if !provided {
 		return 0, false, nil
 	}
-	if gracePeriod < versioncontrolops.MinBackupPruneGracePeriod {
-		return 0, true, fmt.Errorf("--%s must be at least %s", backupSyncPruneGracePeriodFlag, versioncontrolops.MinBackupPruneGracePeriod)
+	if gracePeriod < storage.MinBackupPruneGracePeriod {
+		return 0, true, fmt.Errorf("--%s must be at least %s", backupSyncPruneGracePeriodFlag, storage.MinBackupPruneGracePeriod)
 	}
 	return gracePeriod, true, nil
 }
@@ -561,9 +561,9 @@ var errNoBackupDestination = errors.New("no backup destination configured. Run '
 // substring check applies to it alone.
 func backupSyncFailure(err error, prune bool) error {
 	switch {
-	case errors.Is(err, versioncontrolops.ErrBackupPruneRequiresFileDestination):
+	case errors.Is(err, storage.ErrBackupPruneRequiresFileDestination):
 		return err
-	case errors.Is(err, versioncontrolops.ErrBackupRemoteNotFound):
+	case errors.Is(err, storage.ErrBackupRemoteNotFound):
 		return errNoBackupDestination
 	case !prune && (strings.Contains(err.Error(), "no backup") ||
 		strings.Contains(err.Error(), "not found")):
