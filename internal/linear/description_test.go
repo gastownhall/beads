@@ -101,3 +101,121 @@ func TestIssueToBeadsSplitsDescriptionSections(t *testing.T) {
 		}
 	}
 }
+
+// parserCases are Linear descriptions with none of bd's headings, or with
+// them out of order, repeated, empty-bodied, fenced or misspelled (AC-2).
+// A nil want means nothing is lifted and the text comes back byte-for-byte.
+var parserCases = []struct {
+	name string
+	text string
+	want *DescriptionParts
+}{
+	{name: "plain text", text: "Hello\n\nworld  \n"},
+	{name: "empty", text: ""},
+	{name: "marker only", text: "<!-- bd-idempotency: 0123456789ab -->", want: &DescriptionParts{}},
+	{
+		name: "marker mid-text",
+		text: "A\n<!-- bd-idempotency: 0123456789ab -->\nB\n\n## Notes\nN",
+		want: &DescriptionParts{Description: "A\nB", Notes: "N"},
+	},
+	{
+		name: "crlf and trailing spaces after a heading",
+		text: "D\r\n\r\n## Notes  \t\r\n\r\nN1\r\nN2\r\n",
+		want: &DescriptionParts{Description: "D", Notes: "N1\r\nN2"},
+	},
+	{name: "empty description with sections", text: "## Design\n\nX", want: &DescriptionParts{Design: "X"}},
+	{
+		name: "out of order",
+		text: "D\n\n## Notes\nN\n\n## Design\nX",
+		want: &DescriptionParts{Description: "D\n\n## Notes\nN", Design: "X"},
+	},
+	{
+		name: "repeated run",
+		text: "D\n\n## Design\nX\n\n## Notes\nN\n<!-- bd-idempotency: 0123456789ab -->\n\n## Design\n\nX\n\n## Notes\n\nN",
+		want: &DescriptionParts{Description: "D\n\n## Design\nX\n\n## Notes\nN", Design: "X", Notes: "N"},
+	},
+	{name: "empty-bodied template heading", text: "D\n\n## Acceptance Criteria\n\n"},
+	{
+		name: "empty-bodied heading above a section",
+		text: "D\n\n## Acceptance Criteria\n\n## Notes\nN",
+		want: &DescriptionParts{Description: "D\n\n## Acceptance Criteria", Notes: "N"},
+	},
+	{name: "closed backtick fence", text: "D\n\n```markdown\n## Notes\nN\n```"},
+	{name: "closed tilde fence", text: "D\n\n~~~\n## Design\nX\n~~~\n"},
+	{
+		name: "fenced heading above a real section",
+		text: "```\n## Notes\nx\n```\n\n## Notes\n\nN",
+		want: &DescriptionParts{Description: "```\n## Notes\nx\n```", Notes: "N"},
+	},
+	{
+		name: "unclosed fence hides nothing",
+		text: "D\n```\ncode\n\n## Notes\nN",
+		want: &DescriptionParts{Description: "D\n```\ncode", Notes: "N"},
+	},
+	{name: "deeper heading", text: "D\n\n### Notes\nN"},
+	{name: "lower-case heading", text: "D\n\n## notes\nN"},
+	{name: "heading with colon", text: "D\n\n## Notes:\nN"},
+	{name: "indented heading", text: "D\n\n ## Notes\nN"},
+}
+
+// TestParseLinearDescription pins AC-2: only the final in-order run with
+// non-blank bodies is lifted, and a text with nothing lifted and no marker
+// comes back byte-for-byte.
+func TestParseLinearDescription(t *testing.T) {
+	for _, tc := range parserCases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := DescriptionParts{Description: tc.text}
+			if tc.want != nil {
+				want = *tc.want
+			}
+			if got := ParseLinearDescription(tc.text); got != want {
+				t.Errorf("ParseLinearDescription(%q) =\n  %+v\nwant\n  %+v", tc.text, got, want)
+			}
+		})
+	}
+}
+
+// TestParseLinearDescriptionRoundTrip pins the parser's properties (AC-1,
+// AC-2): P1 Parse(Build(L)) == L, P2 Parse(Build(Parse(x))) == Parse(x),
+// P3 Linear's stored form parses like Build's output, and P4 Build(Parse(x))
+// reproduces x up to blank lines, trailing whitespace and markers.
+func TestParseLinearDescriptionRoundTrip(t *testing.T) {
+	marker := GenerateIdempotencyMarker("bd-1", "a@b.c", 1)
+	for mask := 0; mask < 8; mask++ {
+		bead := &types.Issue{Description: "DESC\n\nmore"}
+		if mask&1 != 0 {
+			bead.AcceptanceCriteria = "AC line 1\n\n  AC line 2"
+		}
+		if mask&2 != 0 {
+			bead.Design = "DESIGN"
+		}
+		if mask&4 != 0 {
+			bead.Notes = "NOTES\n```\ncode\n```"
+		}
+		want := DescriptionParts{Description: bead.Description, AcceptanceCriteria: bead.AcceptanceCriteria, Design: bead.Design, Notes: bead.Notes}
+		for form, text := range map[string]string{
+			"built":              BuildLinearDescription(bead),
+			"stored":             linearStoredDescription(bead),
+			"stored with marker": AppendIdempotencyMarker(linearStoredDescription(bead), marker),
+		} {
+			if got := ParseLinearDescription(text); got != want {
+				t.Errorf("P1/P3 mask %03b %s: ParseLinearDescription(%q) = %+v, want %+v", mask, form, text, got, want)
+			}
+		}
+	}
+
+	for _, tc := range parserCases {
+		parsed := ParseLinearDescription(tc.text)
+		rebuilt := BuildLinearDescription(partsIssue(parsed))
+		if again := ParseLinearDescription(rebuilt); again != parsed {
+			t.Errorf("P2 %s: Parse(Build(Parse(x))) = %+v, want %+v", tc.name, again, parsed)
+		}
+		if got, want := canonicalLinearText(rebuilt), canonicalLinearText(tc.text); got != want {
+			t.Errorf("P4 %s: Build(Parse(x)) = %q, want %q up to blank lines, trailing whitespace and markers", tc.name, got, want)
+		}
+	}
+}
+
+func partsIssue(p DescriptionParts) *types.Issue {
+	return &types.Issue{Description: p.Description, AcceptanceCriteria: p.AcceptanceCriteria, Design: p.Design, Notes: p.Notes}
+}

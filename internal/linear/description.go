@@ -29,7 +29,8 @@ type DescriptionParts struct {
 //   - A candidate heading is a line that equals "## Acceptance Criteria",
 //     "## Design" or "## Notes" once trailing spaces, tabs and "\r" are
 //     trimmed. Case is exact and leading space is not allowed, so "### Notes",
-//     "## notes" and "## Notes:" are text.
+//     "## notes" and "## Notes:" are text. A line inside a closed ``` or ~~~
+//     code fence is not a candidate; an unclosed fence hides nothing.
 //   - Only the trailing in-order run a push could have written is lifted.
 //     Scanning candidates from the bottom up, a heading is accepted when it
 //     ranks before the heading accepted below it (Acceptance Criteria, then
@@ -48,13 +49,14 @@ type DescriptionParts struct {
 func ParseLinearDescription(text string) DescriptionParts {
 	body, removed := stripIdempotencyMarkers(text)
 	lines := strings.Split(body, "\n")
+	fenced := closedFenceLines(lines)
 
 	type section struct{ rank, line int }
 	var lifted []section // bottom-up
 	limit, end := len(linearSectionHeadings), len(lines)
 	for i := len(lines) - 1; i >= 0; i-- {
 		rank := linearSectionRank(lines[i])
-		if rank < 0 {
+		if rank < 0 || fenced[i] {
 			continue
 		}
 		if rank >= limit || linesBlank(lines[i+1:end]) {
@@ -83,6 +85,50 @@ func ParseLinearDescription(text string) DescriptionParts {
 		Design:             fields[1],
 		Notes:              fields[2],
 	}
+}
+
+// closedFenceLines marks the lines of every closed ``` or ~~~ code fence,
+// fence lines included. A fence opens on a line indented at most three spaces
+// that starts with three or more backticks or tildes, and closes on such a
+// line of the same character, at least as long, with nothing after it. A
+// fence that never closes marks nothing.
+func closedFenceLines(lines []string) []bool {
+	fenced := make([]bool, len(lines))
+	open, openChar, openLen := -1, byte(0), 0
+	for i, line := range lines {
+		char, n, rest := fenceRun(line)
+		if n == 0 {
+			continue
+		}
+		if open < 0 {
+			open, openChar, openLen = i, char, n
+			continue
+		}
+		if char == openChar && n >= openLen && strings.TrimSpace(rest) == "" {
+			for j := open; j <= i; j++ {
+				fenced[j] = true
+			}
+			open = -1
+		}
+	}
+	return fenced
+}
+
+// fenceRun returns the fence character and run length that open line, and
+// the text after the run, or n == 0 when line is not a fence line.
+func fenceRun(line string) (char byte, n int, rest string) {
+	trimmed := strings.TrimLeft(line, " ")
+	if len(line)-len(trimmed) > 3 || trimmed == "" || (trimmed[0] != '`' && trimmed[0] != '~') {
+		return 0, 0, ""
+	}
+	char = trimmed[0]
+	for n < len(trimmed) && trimmed[n] == char {
+		n++
+	}
+	if n < 3 {
+		return 0, 0, ""
+	}
+	return char, n, trimmed[n:]
 }
 
 // linearSectionRank returns the rank of line as a candidate section heading,
@@ -156,4 +202,21 @@ func stripIdempotencyMarkers(text string) (string, bool) {
 	}
 	b.WriteString(rest)
 	return b.String(), true
+}
+
+// canonicalLinearText reduces a Linear description to the text a reader sees:
+// markers removed, then the non-blank lines with trailing whitespace trimmed,
+// joined by "\n". Linear's editor adds a blank line after each heading and a
+// create appends the marker, so two descriptions that differ only there carry
+// the same bead content.
+func canonicalLinearText(text string) string {
+	body, _ := stripIdempotencyMarkers(text)
+	lines := strings.Split(body, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if line = strings.TrimRight(line, " \t\r"); line != "" {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
