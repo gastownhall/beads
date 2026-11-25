@@ -1,0 +1,48 @@
+//go:build cgo
+
+package main
+
+import (
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// TestEmbeddedAssigneeCaseInsensitiveCLI replays GH#8628 end to end: letter
+// case is not part of an identity, so an issue assigned "hierophant" belongs
+// to actor "Hierophant" at every ownership gate, without --force. A different
+// name stays a stranger: the fold covers letter case and nothing else.
+func TestEmbeddedAssigneeCaseInsensitiveCLI(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ac")
+
+	// AC-1: the issue's script. bd close by the same actor under another
+	// letter case exits 0; a different name is still refused.
+	t.Run("close_by_case_variant_actor", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "x", "--assignee", "hierophant")
+
+		out := bdCloseFail(t, bd, dir, issue.ID, "--actor", "hierophant2")
+		if !strings.Contains(out, `assignee is "hierophant"`) || !strings.Contains(out, "--force") {
+			t.Errorf("close by hierophant2 should be the not-assignee refusal, got:\n%s", out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Status == types.StatusClosed {
+			t.Fatalf("refused close by hierophant2 closed the issue")
+		}
+
+		bdClose(t, bd, dir, issue.ID, "--actor", "Hierophant")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("status = %s, want closed", got.Status)
+		}
+		if got.Assignee != "hierophant" {
+			t.Errorf("assignee = %q, want the stored spelling hierophant kept", got.Assignee)
+		}
+	})
+}

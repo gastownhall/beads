@@ -11,7 +11,7 @@ import (
 
 // TestCheckClosable pins the close guards' one decision: template first (no
 // bypass), then — unless force — the pin (both spellings) and the assignee
-// fence (separator-insensitive; unassigned is anyone's).
+// fence (separator- and case-insensitive; unassigned is anyone's).
 func TestCheckClosable(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -33,6 +33,11 @@ func TestCheckClosable(t *testing.T) {
 		{"forced held", &types.Issue{Assignee: "bob"}, "alice", true, nil},
 		{"own", &types.Issue{Assignee: "alice"}, "alice", false, nil},
 		{"unassigned", &types.Issue{}, "alice", false, nil},
+		// GH#8628: letter case is not part of an identity.
+		{"own under another letter case", &types.Issue{Assignee: "hierophant"}, "Hierophant", false, nil},
+		{"own under another case and separator", &types.Issue{Assignee: "gastown.mayor"}, "GASTOWN__MAYOR", false, nil},
+		{"case fold never widens to another name", &types.Issue{Assignee: "hierophant"}, "hierophant2", false, publicops.ErrNotOwner},
+		{"padded name is another name", &types.Issue{Assignee: "hierophant"}, " Hierophant", false, publicops.ErrNotOwner},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -73,5 +78,22 @@ func TestRefusedMoleculeAutoCloseReportsTheRefusalsOwnSentence(t *testing.T) {
 				t.Errorf("RefusedMoleculeAutoClose(%q).Refusal = %q, want %q", err, got, refusal.Error())
 			}
 		}
+	}
+}
+
+// TestCheckClosableAssigneeCaseInsensitive reproduces GH#8628 (bd-f76042):
+// an issue assigned to "hierophant" must be closable by actor "Hierophant"
+// without --force — the two spellings name the same actor.
+func TestCheckClosableAssigneeCaseInsensitive(t *testing.T) {
+	issue := &types.Issue{ID: "cst-z8sw", Status: types.StatusInProgress, Assignee: "hierophant"}
+	if err := CheckClosable("cst-z8sw", issue, "Hierophant", false); err != nil {
+		t.Fatalf("CheckClosable(assignee %q, actor %q) = %v, want nil (case-insensitive actor match)", issue.Assignee, "Hierophant", err)
+	}
+	if !ActorMatches("hierophant", "Hierophant") {
+		t.Fatalf("ActorMatches(%q, %q) = false, want true", "hierophant", "Hierophant")
+	}
+	var held *publicops.CloseNotAssigneeError
+	if err := CheckClosable("cst-z8sw", issue, "hierophant2", false); !errors.As(err, &held) || held.Assignee != "hierophant" || held.Actor != "hierophant2" {
+		t.Fatalf("CheckClosable(assignee %q, actor %q) = %v, want the not-assignee refusal", issue.Assignee, "hierophant2", err)
 	}
 }

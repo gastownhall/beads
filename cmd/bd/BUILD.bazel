@@ -567,6 +567,7 @@ go_test(
         "arrival_seq_json_e2e_test.go",
         "assign_fence_embedded_test.go",
         "assign_fence_proxied_test.go",
+        "assignee_case_embedded_test.go",
         "assignee_normalization_embedded_test.go",
         "assignee_normalization_proxied_test.go",
         "assignee_normalization_test.go",
