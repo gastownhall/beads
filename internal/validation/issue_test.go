@@ -304,6 +304,21 @@ func TestAssigneeMatches(t *testing.T) {
 			actor:   "gastown_mayor",
 			wantErr: false,
 		},
+		// GH#8628: the reporter's case — an issue assigned "hierophant" is
+		// closed by actor "Hierophant" without --force.
+		{
+			name:    "same identity under another letter case passes (GH#8628)",
+			issue:   &types.Issue{ID: "bd-test", Assignee: "hierophant"},
+			actor:   "Hierophant",
+			wantErr: false,
+		},
+		{
+			name:        "a case fold never widens to a different name",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "hierophant"},
+			actor:       "hierophant2",
+			wantErr:     true,
+			wantErrFrag: "assignee is",
+		},
 		// The control that keeps the guard from becoming a no-op: a genuinely
 		// DIFFERENT agent must still be refused, even though its own name also
 		// contains separator characters that canonicalize.
