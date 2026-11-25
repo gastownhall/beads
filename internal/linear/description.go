@@ -227,8 +227,58 @@ func canonicalLinearText(text string) string {
 
 // SettleDescriptionFields implements tracker.DescriptionFieldsTracker. A pull
 // parsed pulled's description, acceptance criteria, design and notes out of
-// the Linear description; a section Linear shows wins, so a Linear edit flows
-// into the bead's field.
+// the Linear description. Per field:
+//   - A section Linear shows wins, so a Linear edit flows into the bead.
+//   - An absent section empties a blank local field, and one whose text
+//     Linear still shows elsewhere (its non-blank lines adjacent and in
+//     order), as after someone deleted the heading in Linear.
+//   - Otherwise the local text is kept and keptLocal reported, so the push
+//     restores the section.
+//
+// A pull therefore never drops a field's text and never makes a push carry
+// it twice. Clearing a field takes a local edit (bd update --notes "") and a
+// push.
 func (t *Tracker) SettleDescriptionFields(existing, pulled *types.Issue) (keptLocal bool) {
+	if existing == nil || pulled == nil {
+		return false
+	}
+	remote := strings.Split(canonicalLinearText(BuildLinearDescription(pulled)), "\n")
+	for _, field := range []struct {
+		local  string
+		pulled *string
+	}{
+		{existing.AcceptanceCriteria, &pulled.AcceptanceCriteria},
+		{existing.Design, &pulled.Design},
+		{existing.Notes, &pulled.Notes},
+	} {
+		if strings.TrimSpace(*field.pulled) != "" {
+			continue
+		}
+		*field.pulled = ""
+		local := canonicalLinearText(field.local)
+		if local == "" || containsLineRun(remote, strings.Split(local, "\n")) {
+			continue
+		}
+		*field.pulled = field.local
+		keptLocal = true
+	}
+	return keptLocal
+}
+
+// containsLineRun reports whether run appears in lines as adjacent lines, in
+// order.
+func containsLineRun(lines, run []string) bool {
+	for start := 0; start+len(run) <= len(lines); start++ {
+		match := true
+		for i, line := range run {
+			if lines[start+i] != line {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
 	return false
 }

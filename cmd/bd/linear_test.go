@@ -2139,6 +2139,50 @@ func TestLinearSyncPullsNotesEditedInLinear(t *testing.T) {
 	}
 }
 
+// TestLinearSyncKeepsNotesLinearDoesNotShow pins AC-5: a pull after a Linear
+// change keeps the bead's notes when the Linear description shows them
+// nowhere, and the sync's push restores exactly one ## Notes section; when
+// Linear still shows the text (its heading was deleted), the notes field
+// empties and nothing is pushed.
+func TestLinearSyncKeepsNotesLinearDoesNotShow(t *testing.T) {
+	const notes = "Local notes"
+	withoutNotes := "DESC\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\nDESIGN\n<!-- bd-idempotency: 0123456789ab -->"
+	bead := linearDescriptionSyncBead()
+	bead.Notes = notes
+
+	t.Run("missing from Linear", func(t *testing.T) {
+		f := newLinearDescriptionSync(t, bead, withoutNotes)
+		f.editLinear(func(li *linear.Issue) { li.Title = "Ship it v2" })
+
+		for _, when := range []string{"sync after the Linear change", "next sync"} {
+			result := f.sync()
+			if f.store.issue.Title != "Ship it v2" {
+				t.Fatalf("%s: bead title %q, want the pulled title", when, f.store.issue.Title)
+			}
+			f.requireBeadText(when, "DESC", "AC", "DESIGN", notes)
+			sent := f.sentDescriptions()
+			if len(sent) != 1 {
+				t.Fatalf("%s: PushStats = %+v, %d issueUpdate descriptions %q; want the notes pushed once", when, result.PushStats, len(sent), sent)
+			}
+			if got := strings.Count(sent[0], "## Notes"); got != 1 || linear.ParseLinearDescription(sent[0]).Notes != notes {
+				t.Fatalf("%s: pushed description %q holds %d ## Notes sections, want exactly one holding %q", when, sent[0], got, notes)
+			}
+		}
+	})
+
+	t.Run("still in Linear without its heading", func(t *testing.T) {
+		moved := strings.Replace(withoutNotes, "DESIGN\n", "DESIGN\n\n"+notes+"\n", 1)
+		f := newLinearDescriptionSync(t, bead, moved)
+		f.editLinear(func(li *linear.Issue) { li.Title = "Ship it v2" })
+
+		result := f.sync()
+		f.requireBeadText("sync after the Linear change", "DESC", "AC", "DESIGN\n\n"+notes, "")
+		if _, updates := f.api.snapshot(); updates != 0 {
+			t.Fatalf("PushStats = %+v, issueUpdate calls = %d, want none: Linear already shows the notes", result.PushStats, updates)
+		}
+	})
+}
+
 // fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes
 // for one team holding one issue: workflow states, labels (none), the
 // incremental issues query, which honours its updatedAt.gte filter, the

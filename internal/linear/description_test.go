@@ -291,3 +291,63 @@ func TestPushFieldsEqualLinearStoredDescription(t *testing.T) {
 		t.Run("unequal/"+name, func(t *testing.T) { check(t, description, false) })
 	}
 }
+
+// TestSettleDescriptionFields pins the pull's settle rules: a section Linear
+// shows wins; an absent section empties a blank local field, or one whose
+// text Linear still shows elsewhere; otherwise the local text is kept and
+// reported, so the push restores the section (AC-5).
+func TestSettleDescriptionFields(t *testing.T) {
+	tr := &Tracker{}
+	local := func() *types.Issue {
+		return &types.Issue{Description: "DESC", AcceptanceCriteria: "AC", Design: "DESIGN", Notes: "Local notes\n\n  second line"}
+	}
+	for _, tc := range []struct {
+		name     string
+		local    *types.Issue
+		linear   string
+		want     DescriptionParts
+		wantKept bool
+	}{
+		{
+			name:   "present section wins",
+			local:  local(),
+			linear: "DESC\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\nDESIGN\n\n## Notes\n\nLinear notes",
+			want:   DescriptionParts{Description: "DESC", AcceptanceCriteria: "AC", Design: "DESIGN", Notes: "Linear notes"},
+		},
+		{
+			name:   "absent and blank locally",
+			local:  &types.Issue{Description: "DESC", AcceptanceCriteria: "AC"},
+			linear: "DESC v2\n\n## Acceptance Criteria\n\nAC",
+			want:   DescriptionParts{Description: "DESC v2", AcceptanceCriteria: "AC"},
+		},
+		{
+			name:   "absent but still in the Linear text",
+			local:  local(),
+			linear: "DESC\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\nDESIGN\n\nLocal notes\n  second line  ",
+			want:   DescriptionParts{Description: "DESC", AcceptanceCriteria: "AC", Design: "DESIGN\n\nLocal notes\n  second line"},
+		},
+		{
+			name:     "absent and missing from the Linear text",
+			local:    local(),
+			linear:   "DESC v2\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\nDESIGN\n\nLocal notes",
+			want:     DescriptionParts{Description: "DESC v2", AcceptanceCriteria: "AC", Design: "DESIGN\n\nLocal notes", Notes: "Local notes\n\n  second line"},
+			wantKept: true,
+		},
+		{
+			name:     "every section absent",
+			local:    local(),
+			linear:   "DESC v2",
+			want:     DescriptionParts{Description: "DESC v2", AcceptanceCriteria: "AC", Design: "DESIGN", Notes: "Local notes\n\n  second line"},
+			wantKept: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pulled := partsIssue(ParseLinearDescription(tc.linear))
+			kept := tr.SettleDescriptionFields(tc.local, pulled)
+			got := DescriptionParts{Description: pulled.Description, AcceptanceCriteria: pulled.AcceptanceCriteria, Design: pulled.Design, Notes: pulled.Notes}
+			if got != tc.want || kept != tc.wantKept {
+				t.Errorf("SettleDescriptionFields() = %+v, kept %v; want %+v, kept %v", got, kept, tc.want, tc.wantKept)
+			}
+		})
+	}
+}
