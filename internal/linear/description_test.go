@@ -219,3 +219,75 @@ func TestParseLinearDescriptionRoundTrip(t *testing.T) {
 func partsIssue(p DescriptionParts) *types.Issue {
 	return &types.Issue{Description: p.Description, AcceptanceCriteria: p.AcceptanceCriteria, Design: p.Design, Notes: p.Notes}
 }
+
+// TestPushFieldsEqualLinearStoredDescription pins AC-7: the push comparators
+// match the description Linear stored for an unchanged bead (a blank line
+// after each heading, marker present or absent), including BatchPush's
+// pre-rendered comparableIssue, and still tell a changed body, section text
+// or section presence apart.
+func TestPushFieldsEqualLinearStoredDescription(t *testing.T) {
+	config := DefaultMappingConfig()
+	state := &State{ID: "state-progress", Name: "In Progress", Type: "started"}
+	local := fullDescriptionBead()
+	local.Status = types.StatusInProgress
+	local.Priority = 2
+	marker := GenerateIdempotencyMarker("bd-1", "a@b.c", 1)
+
+	remoteWith := func(description string) *Issue {
+		return &Issue{
+			Identifier:  "TEAM-1",
+			Title:       local.Title,
+			Description: description,
+			Priority:    PriorityToLinear(local.Priority, config),
+			State:       state,
+			CreatedAt:   "2026-01-01T00:00:00Z",
+			UpdatedAt:   "2026-01-01T00:00:00Z",
+		}
+	}
+	// What BatchPush compares: the FormatDescription copy with the
+	// structured fields cleared.
+	comparable := *local
+	comparable.Description = BuildLinearDescription(local)
+	comparable.AcceptanceCriteria, comparable.Design, comparable.Notes = "", "", ""
+
+	check := func(t *testing.T, description string, want bool) {
+		t.Helper()
+		remote := remoteWith(description)
+		if got := PushFieldsEqual(local, remote, config, nil); got != want {
+			t.Errorf("PushFieldsEqual(local, %q) = %v, want %v", description, got, want)
+		}
+		if got := PushFieldsEqual(&comparable, remote, config, nil); got != want {
+			t.Errorf("PushFieldsEqual(comparableIssue, %q) = %v, want %v", description, got, want)
+		}
+		pulled, _ := IssueToBeads(remote, config).Issue.(*types.Issue)
+		if got := PushFieldsEqualToBeads(local, pulled); got != want {
+			t.Errorf("PushFieldsEqualToBeads(local, pulled %q) = %v, want %v", description, got, want)
+		}
+	}
+
+	stored := linearStoredDescription(local)
+	for name, description := range map[string]string{
+		"built":              BuildLinearDescription(local),
+		"stored":             stored,
+		"built with marker":  AppendIdempotencyMarker(BuildLinearDescription(local), marker),
+		"stored with marker": AppendIdempotencyMarker(stored, marker),
+	} {
+		t.Run("equal/"+name, func(t *testing.T) { check(t, description, true) })
+	}
+
+	without := func(field func(*types.Issue)) string {
+		changed := *local
+		field(&changed)
+		return AppendIdempotencyMarker(linearStoredDescription(&changed), marker)
+	}
+	for name, description := range map[string]string{
+		"body":              without(func(i *types.Issue) { i.Description = "DESC changed" }),
+		"section text":      without(func(i *types.Issue) { i.Design = "DESIGN changed" }),
+		"section missing":   without(func(i *types.Issue) { i.Notes = "" }),
+		"section unheaded":  "DESC\n\nAC\n\n## Design\n\nDESIGN\n\n## Notes\n\nNOTES",
+		"section added":     stored + "\n\n## Notes\n\nMORE",
+		"heading level off": "DESC\n\n## Acceptance Criteria\n\nAC\n\n### Design\n\nDESIGN\n\n## Notes\n\nNOTES",
+	} {
+		t.Run("unequal/"+name, func(t *testing.T) { check(t, description, false) })
+	}
+}

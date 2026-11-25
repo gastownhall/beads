@@ -37,6 +37,18 @@ func BuildLinearDescription(issue *types.Issue) string {
 	return description
 }
 
+// DescriptionFieldsEqual reports whether a and b put the same text into
+// Linear's description: BuildLinearDescription of each, compared without
+// blank lines, trailing whitespace or idempotency markers. It holds for a
+// bead and the issue a pull parsed from the description that bead pushed,
+// however the four fields split.
+func DescriptionFieldsEqual(a, b *types.Issue) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return canonicalLinearText(BuildLinearDescription(a)) == canonicalLinearText(BuildLinearDescription(b))
+}
+
 // NormalizeIssueForLinearHash returns a copy of the issue using Linear's description
 // formatting and clears fields not present in Linear's model to avoid false conflicts.
 func NormalizeIssueForLinearHash(issue *types.Issue) *types.Issue {
@@ -621,7 +633,9 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig, l
 	if local.Title != remote.Title {
 		return false
 	}
-	if BuildLinearDescription(local) != remote.Description {
+	// Linear stores a blank line after each heading and keeps a create's
+	// idempotency marker, so compare the text a reader sees (GH#8506).
+	if canonicalLinearText(BuildLinearDescription(local)) != canonicalLinearText(remote.Description) {
 		return false
 	}
 	if PriorityToLinear(local.Priority, config) != remote.Priority {
@@ -651,7 +665,7 @@ func PushFieldsEqualToBeads(local, remote *types.Issue) bool {
 	if local.Title != remote.Title {
 		return false
 	}
-	if BuildLinearDescription(local) != remote.Description {
+	if !DescriptionFieldsEqual(local, remote) {
 		return false
 	}
 	if local.Priority != remote.Priority {

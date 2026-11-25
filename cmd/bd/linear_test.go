@@ -1966,6 +1966,144 @@ func TestLinearSyncOverlapKeepsEchoOfNameMappedStatus(t *testing.T) {
 	}
 }
 
+// linearDescriptionSync is a `bd linear sync` fixture for GH#8506: one bead
+// linked to one Linear issue whose description carries the bead's acceptance
+// criteria, design and notes as sections.
+type linearDescriptionSync struct {
+	t     *testing.T
+	api   *fakeLinearIssueAPI
+	store *linearSyncStore
+	lt    *linear.Tracker
+}
+
+const linearDescriptionSyncRef = "https://linear.app/team/issue/TEAM-1"
+
+// newLinearDescriptionSync links bead (ID, title, status and priority filled
+// in when unset) to TEAM-1 holding description. The last sync ran two minutes
+// ago; Linear last changed the issue an hour ago and the bead ten minutes
+// ago, so a sync pulls nothing until a test edits either side.
+func newLinearDescriptionSync(t *testing.T, bead types.Issue, description string) *linearDescriptionSync {
+	t.Helper()
+	ctx := context.Background()
+	t.Setenv("LINEAR_API_KEY", "test-api-key")
+	t.Setenv("LINEAR_OAUTH_CLIENT_ID", "")
+	t.Setenv("LINEAR_OAUTH_CLIENT_SECRET", "")
+
+	now := time.Now().UTC()
+	progress := linear.State{ID: "state-progress", Name: "In Progress", Type: "started"}
+	api := &fakeLinearIssueAPI{
+		states: []linear.State{
+			{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			progress,
+			{ID: "state-done", Name: "Done", Type: "completed"},
+		},
+		issue: linear.Issue{
+			ID:          "uuid-1",
+			Identifier:  "TEAM-1",
+			URL:         linearDescriptionSyncRef,
+			Title:       "Ship it",
+			Description: description,
+			Priority:    3,
+			State:       &progress,
+			CreatedAt:   now.Add(-2 * time.Hour).Format(time.RFC3339),
+			UpdatedAt:   now.Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	server := httptest.NewServer(api)
+	t.Cleanup(server.Close)
+	setupEndpointTrustWorkspaceForTest(t)
+	t.Setenv("LINEAR_API_ENDPOINT", server.URL)
+
+	ref := linearDescriptionSyncRef
+	bead.ExternalRef = &ref
+	if bead.ID == "" {
+		bead.ID = "bd-1"
+	}
+	if bead.Title == "" {
+		bead.Title = "Ship it"
+	}
+	if bead.Status == "" {
+		bead.Status = types.StatusInProgress
+	}
+	if bead.Priority == 0 {
+		bead.Priority = 2
+	}
+	if bead.IssueType == "" {
+		bead.IssueType = types.TypeTask
+	}
+	bead.CreatedAt = now.Add(-2 * time.Hour)
+	bead.UpdatedAt = now.Add(-10 * time.Minute)
+	store := &linearSyncStore{
+		config: map[string]string{
+			"linear.team_id":               "team-1",
+			"linear.api_endpoint":          server.URL,
+			"linear.state_map.todo":        "open",
+			"linear.state_map.in progress": "in_progress",
+			"linear.state_map.done":        "closed",
+		},
+		metadata: map[string]string{"linear.last_sync": now.Add(-2 * time.Minute).Format(time.RFC3339)},
+		issue:    bead,
+	}
+
+	lt := &linear.Tracker{}
+	lt.SetTeamIDs([]string{"team-1"})
+	if err := lt.Init(ctx, store); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := lt.ValidatePushStateMappings(ctx); err != nil {
+		t.Fatalf("ValidatePushStateMappings: %v", err)
+	}
+	return &linearDescriptionSync{t: t, api: api, store: store, lt: lt}
+}
+
+// sync runs one bidirectional `bd linear sync` engine pass.
+func (f *linearDescriptionSync) sync() *tracker.SyncResult {
+	f.t.Helper()
+	ctx := context.Background()
+	engine := tracker.NewEngine(f.lt, f.store, "test")
+	engine.PushHooks = buildLinearPushHooksForStore(ctx, f.store, f.lt, false)
+	result, err := engine.Sync(ctx, tracker.SyncOptions{Pull: true, Push: true})
+	if err != nil {
+		f.t.Fatalf("Sync: %v", err)
+	}
+	return result
+}
+
+// editLinear changes the Linear issue as a Linear user would, stamping
+// updatedAt so the next incremental pull fetches it.
+func (f *linearDescriptionSync) editLinear(edit func(*linear.Issue)) {
+	f.api.mu.Lock()
+	defer f.api.mu.Unlock()
+	edit(&f.api.issue)
+	f.api.issue.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+// sentDescriptions returns the descriptions issueUpdate calls carried so far.
+func (f *linearDescriptionSync) sentDescriptions() []string {
+	f.api.mu.Lock()
+	defer f.api.mu.Unlock()
+	return append([]string(nil), f.api.sent...)
+}
+
+// TestLinearSyncNoChangeSendsNoUpdateForStoredSections pins AC-7 end to end:
+// Linear holds an unchanged bead's pushed description the way it stores it
+// (a blank line after each heading, then the create's marker), so a no-change
+// sync must not push it again.
+func TestLinearSyncNoChangeSendsNoUpdateForStoredSections(t *testing.T) {
+	stored := "DESC\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\nDESIGN\n\n## Notes\n\nNOTES\n<!-- bd-idempotency: 0123456789ab -->"
+	f := newLinearDescriptionSync(t, types.Issue{
+		Description:        "DESC",
+		AcceptanceCriteria: "AC",
+		Design:             "DESIGN",
+		Notes:              "NOTES",
+	}, stored)
+
+	result := f.sync()
+	if remote, updates := f.api.snapshot(); updates != 0 || remote.Description != stored {
+		t.Fatalf("no-change sync: PushStats = %+v, issueUpdate calls = %d, Linear description %q; want no update", result.PushStats, updates, remote.Description)
+	}
+}
+
 // fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes
 // for one team holding one issue: workflow states, labels (none), the
 // incremental issues query, which honours its updatedAt.gte filter, the
@@ -1976,6 +2114,8 @@ type fakeLinearIssueAPI struct {
 	states  []linear.State
 	issue   linear.Issue
 	updates int
+	// sent holds the description of every issueUpdate that carried one.
+	sent []string
 }
 
 func (f *fakeLinearIssueAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -2018,6 +2158,7 @@ func (f *fakeLinearIssueAPI) update(raw interface{}) {
 	}
 	if description, ok := input["description"].(string); ok {
 		f.issue.Description = description
+		f.sent = append(f.sent, description)
 	}
 	if priority, ok := input["priority"].(float64); ok {
 		f.issue.Priority = int(priority)
