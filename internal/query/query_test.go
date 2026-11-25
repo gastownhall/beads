@@ -823,6 +823,10 @@ func TestPredicateEvaluation(t *testing.T) {
 		UpdatedAt: now,
 	}
 
+	assignedTo := func(assignee string) *types.Issue {
+		return &types.Issue{ID: "bd-as", Status: types.StatusOpen, IssueType: types.TypeTask, Assignee: assignee, CreatedAt: now, UpdatedAt: now}
+	}
+
 	tests := []struct {
 		name    string
 		query   string
@@ -873,6 +877,16 @@ func TestPredicateEvaluation(t *testing.T) {
 		{"label=urgent OR label=backend matches urgent", "label=urgent OR label=backend", openBug, true},
 		{"label=urgent OR label=backend matches backend", "label=urgent OR label=backend", closedTask, true},
 		{"label=urgent OR label=backend doesn't match unlabeled", "label=urgent OR label=backend", blockedFeature, false},
+
+		// Assignee tests (GH#8628): predicate mode admits exactly what
+		// filter mode's LOWER(assignee) = ? admits — every letter-case
+		// variant, and nothing strings.ToLower keeps apart.
+		{"assignee=HIEROPHANT OR assignee=nobody matches hierophant", "assignee=HIEROPHANT OR assignee=nobody", assignedTo("hierophant"), true},
+		{"assignee=HIEROPHANT OR assignee=nobody matches Hierophant", "assignee=HIEROPHANT OR assignee=nobody", assignedTo("Hierophant"), true},
+		{"assignee=HIEROPHANT OR assignee=nobody doesn't match bob", "assignee=HIEROPHANT OR assignee=nobody", assignedTo("bob"), false},
+		{"assignee=s OR assignee=nobody doesn't match long s", "assignee=s OR assignee=nobody", assignedTo("\u017F"), false},
+		{"assignee!=HIEROPHANT OR assignee=nobody doesn't match Hierophant", "assignee!=HIEROPHANT OR assignee=nobody", assignedTo("Hierophant"), false},
+		{"assignee!=s OR assignee=nobody matches long s", "assignee!=s OR assignee=nobody", assignedTo("\u017F"), true},
 	}
 
 	for _, tt := range tests {

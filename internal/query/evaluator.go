@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -790,12 +791,15 @@ func (e *Evaluator) buildAssigneePredicate(comp *ComparisonNode) (func(*types.Is
 		if isNone {
 			return func(i *types.Issue) bool { return i.Assignee == "" }, nil
 		}
-		return func(i *types.Issue) bool { return strings.EqualFold(i.Assignee, value) }, nil
+		// The same predicate filter mode renders in SQL
+		// (sqlbuild.AssigneeFilterClause), so predicate mode admits exactly
+		// the rows filter mode admits (GH#8628).
+		return func(i *types.Issue) bool { return sqlbuild.AssigneeFilterMatches(i.Assignee, value) }, nil
 	case OpNotEquals:
 		if isNone {
 			return func(i *types.Issue) bool { return i.Assignee != "" }, nil
 		}
-		return func(i *types.Issue) bool { return !strings.EqualFold(i.Assignee, value) }, nil
+		return func(i *types.Issue) bool { return !sqlbuild.AssigneeFilterMatches(i.Assignee, value) }, nil
 	default:
 		return nil, fmt.Errorf("assignee does not support %s operator", comp.Op.String())
 	}
