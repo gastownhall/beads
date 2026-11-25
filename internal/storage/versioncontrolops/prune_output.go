@@ -103,11 +103,9 @@ func doltPruneSummaryForURL(line, backupURL string) (string, bool) {
 	if rest == line {
 		return "", false
 	}
-	separator := strings.Index(rest, ": ")
-	if separator < 0 || rest[:separator] != backupURL {
-		return "", false
-	}
-	return rest[separator+2:], true
+	// Match the known URL exactly: file:// URLs are built from unescaped
+	// paths, so the URL itself may contain ": ".
+	return strings.CutPrefix(rest, backupURL+": ")
 }
 
 func parseDoltPruneSummary(summary string) (storage.BackupPruneOutcome, bool) {

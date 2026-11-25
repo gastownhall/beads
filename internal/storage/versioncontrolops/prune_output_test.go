@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dolthub/dolt/go/cmd/dolt/cli"
@@ -34,25 +36,36 @@ func TestDoltPruneOutputWriterPassesNonPruneOutputUnchanged(t *testing.T) {
 }
 
 func TestDoltPruneOutputWriterCapturesOnlyMatchingDestination(t *testing.T) {
-	const backupURL = "file:///tmp/backup"
-	var destination bytes.Buffer
-	capture := &doltPruneOutputCapture{}
-	writer := &doltPruneOutputWriter{destination: &destination, backupURL: backupURL, capture: capture}
-	matching := []byte("Pruning file:///tmp/backup: deleted 2 file(s), reclaimed 471490 bytes")
-	unmatched := []byte("Pruning file:///tmp/other: deleted 1 file(s), reclaimed 8 bytes")
+	for _, tt := range []struct {
+		name      string
+		backupURL string
+		other     string
+	}{
+		{name: "plain", backupURL: "file:///tmp/backup", other: "file:///tmp/other"},
+		// DirToFileURL does not escape paths, so a URL can contain ": ".
+		{name: "url with colon-space", backupURL: "file:///tmp/beads: old", other: "file:///tmp/beads"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var destination bytes.Buffer
+			capture := &doltPruneOutputCapture{}
+			writer := &doltPruneOutputWriter{destination: &destination, backupURL: tt.backupURL, capture: capture}
+			matching := []byte("Pruning " + tt.backupURL + ": deleted 2 file(s), reclaimed 471490 bytes")
+			unmatched := []byte("Pruning " + tt.other + ": deleted 1 file(s), reclaimed 8 bytes")
 
-	if _, err := writer.Write(matching); err != nil {
-		t.Fatalf("Write matching summary: %v", err)
-	}
-	if _, err := writer.Write(unmatched); err != nil {
-		t.Fatalf("Write unmatched summary: %v", err)
-	}
-	if destination.String() != string(unmatched) {
-		t.Fatalf("forwarded output = %q, want unmatched summary %q", destination.String(), unmatched)
-	}
-	outcome := capture.outcome()
-	if outcome.Status != "pruned" || outcome.FilesDeleted == nil || *outcome.FilesDeleted != 2 {
-		t.Fatalf("captured outcome = %+v, want two deleted files", outcome)
+			if _, err := writer.Write(matching); err != nil {
+				t.Fatalf("Write matching summary: %v", err)
+			}
+			if _, err := writer.Write(unmatched); err != nil {
+				t.Fatalf("Write unmatched summary: %v", err)
+			}
+			if destination.String() != string(unmatched) {
+				t.Fatalf("forwarded output = %q, want unmatched summary %q", destination.String(), unmatched)
+			}
+			outcome := capture.outcome()
+			if outcome.Status != "pruned" || outcome.FilesDeleted == nil || *outcome.FilesDeleted != 2 {
+				t.Fatalf("captured outcome = %+v, want two deleted files", outcome)
+			}
+		})
 	}
 }
 
@@ -169,30 +182,60 @@ func TestCaptureDoltPruneOutputUsesLastSummaryAndStripsCRLF(t *testing.T) {
 func TestCaptureDoltPruneOutputSerializesConcurrentCaptures(t *testing.T) {
 	installCaptureTestWriter(t)
 
-	urls := []string{"file:///tmp/backup-a", "file:///tmp/backup-b"}
-	deleted := map[string]int{urls[0]: 1, urls[1]: 2}
-	outcomes := make([]storage.BackupPruneOutcome, len(urls))
+	// Assert the lock is held during the callback even when the scheduler runs
+	// all concurrent captures sequentially.
+	_, err := CaptureDoltPruneOutput("file:///tmp/backup", func() error {
+		if doltPruneOutputCaptureMu.TryLock() {
+			doltPruneOutputCaptureMu.Unlock()
+			return errors.New("backup sync ran without the capture lock")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Overlap is checked inside each sync rather than inferred from the
+	// captured counts: without doltPruneOutputCaptureMu, nested wrappers can
+	// still route every summary to the right capture. A second sync in flight,
+	// or a global writer that is not this capture's own, fails the test
+	// directly.
+	const captures = 8
+	var inFlight, overlaps, foreignWriters atomic.Int32
+	outcomes := make([]storage.BackupPruneOutcome, captures)
 	var wg sync.WaitGroup
-	for i, backupURL := range urls {
+	for i := 0; i < captures; i++ {
 		wg.Add(1)
-		go func(i int, backupURL string) {
+		go func(i int) {
 			defer wg.Done()
+			backupURL := fmt.Sprintf("file:///tmp/backup-%d", i)
 			outcomes[i], _ = CaptureDoltPruneOutput(backupURL, func() error {
-				for _, other := range urls {
-					summary := fmt.Sprintf("Pruning %s: deleted %d file(s), reclaimed 8 bytes\n", other, deleted[other])
-					if _, err := cli.CliOut.Write([]byte(summary)); err != nil {
-						return err
-					}
+				if inFlight.Add(1) > 1 {
+					overlaps.Add(1)
 				}
-				return nil
+				defer inFlight.Add(-1)
+				for step := 0; step < 50; step++ {
+					if writer, ok := cli.CliOut.(*doltPruneOutputWriter); !ok || writer.backupURL != backupURL {
+						foreignWriters.Add(1)
+					}
+					runtime.Gosched()
+				}
+				summary := fmt.Sprintf("Pruning %s: deleted %d file(s), reclaimed 8 bytes\n", backupURL, i+1)
+				_, err := cli.CliOut.Write([]byte(summary))
+				return err
 			})
-		}(i, backupURL)
+		}(i)
 	}
 	wg.Wait()
-	for i, backupURL := range urls {
-		got := outcomes[i]
-		if got.FilesDeleted == nil || *got.FilesDeleted != deleted[backupURL] {
-			t.Fatalf("capture for %s = %+v, want only its own summary (%d deleted)", backupURL, got, deleted[backupURL])
+	if n := overlaps.Load(); n != 0 {
+		t.Fatalf("%d captures ran while another capture's sync was in flight", n)
+	}
+	if n := foreignWriters.Load(); n != 0 {
+		t.Fatalf("%d checks inside a sync saw a cli.CliOut that was not that capture's writer", n)
+	}
+	for i, got := range outcomes {
+		if got.FilesDeleted == nil || *got.FilesDeleted != i+1 {
+			t.Fatalf("capture %d = %+v, want only its own summary (%d deleted)", i, got, i+1)
 		}
 	}
 }
