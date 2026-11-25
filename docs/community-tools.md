@@ -24,6 +24,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[btui](https://github.com/AndreasDellrud/beads-tui)** - Read-only terminal browser with active, ready, and closed views, filtering, keyboard and mouse navigation, and issue details with comments and dependency relationships. Launches Codex or Claude Code sessions for selected work, with optional [Herdr](https://herdr.dev) worktree integration. Reads through the installed `bd --readonly` CLI. Supports Beads 1.3.0 with optional event-triggered refresh, retaining polling fallback for older versions and unjournaled changes. Built by [@AndreasDellrud](https://github.com/AndreasDellrud). (Rust/Ratatui)
 
+- **[bdv](https://github.com/nizom333/bdv)** - Fast two-pane terminal viewer: an issue tree with collapsible priority groups and a Markdown detail card with links, comments and blockers. Adds search, a `⊘` marker and a ready filter for blocked work, and tabs for specs (epics with child progress), decisions, memories and formulas. Reads through `bd --readonly`; its only writes (adding a comment, `bd init`, `bd config set` from a settings screen) each need an explicit confirmation. English and Russian UI. Install with `brew install nizom333/tap/bdv`, Scoop, deb/rpm/apk packages or `go install`. Built by [@nizom333](https://github.com/nizom333). (Go/Bubble Tea)
+
 ## Web UIs
 
 - **[bd-board](https://github.com/jeanpfs/bd-board)** - Local-first web dashboard for browsing Beads projects, viewing kanban boards by status or epic swimlanes, and filtering by priority, text search, or sort order. Uses the `bd` CLI for Dolt compatibility, with writes disabled unless explicitly enabled. Built by [@jeanpfs](https://github.com/jeanpfs). (TanStack Start/React)
