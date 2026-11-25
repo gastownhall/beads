@@ -5,6 +5,8 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
@@ -104,10 +106,21 @@ func NotPinned(force bool) IssueValidator {
 // "gastown.mayor"; treating them as the same actor was wrong regardless of
 // whether either happens to be held by the same principal today.
 //
+// Letter case is not part of an identity either (GH#8628): "hierophant" and
+// "Hierophant" are one actor, so the scan also lowers every letter. On valid
+// UTF-8 the lowering is exactly strings.ToLower (unicode.ToLower per rune),
+// which is the function Dolt's LOWER() runs on utf8mb4 — the --assignee
+// listings compare LOWER(assignee), so the gates and the listings agree on
+// which spellings are one identity. An invalid byte is copied unchanged
+// rather than decoded to U+FFFD, so two different invalid bytes never merge.
+// The separator fold and the case fold compose: separators are case-neutral
+// ASCII and no rune lowers to '.', '_' or '-'.
+//
 // Byte-scanned rather than rune-scanned so a 2-byte lookahead can detect an
 // exact "--" run: safe because '.', '_', '-' are single-byte ASCII that never
 // appear as a continuation byte of a multi-byte UTF-8 rune, so slicing on
-// them cannot split one.
+// them cannot split one. A byte at or above utf8.RuneSelf starts a rune that
+// is decoded whole for the case fold.
 //
 // Empty stays empty: an actual absence of an actor must never canonicalize
 // to the same value as a non-empty one, or AssigneeMatches would start
@@ -134,15 +147,30 @@ func CanonicalActor(s string) string {
 			i = j
 			continue
 		}
-		b.WriteByte(c)
-		i++
+		if c < utf8.RuneSelf {
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+		i += size
 	}
 	return b.String()
 }
 
 // ActorMatches reports whether actor has the same authority as assignee:
 // either they're byte-identical, or they canonicalize to the same identity
-// (see CanonicalActor). The byte-identical check is not redundant — it
+// (see CanonicalActor) — spellings that differ only in separators or in
+// letter case match (GH#8628), and nothing else does. The byte-identical check is not redundant — it
 // avoids paying canonicalization on the overwhelmingly common exact-match
 // path (ga-5ksp5 gate review, #5438: fixes a garbled doc comment, no
 // behavior change).
@@ -157,7 +185,8 @@ func ActorMatches(assignee, actor string) bool {
 // Authority is identity-by-string: actor is compared to assignee under
 // CanonicalActor, so two principals sharing one canonical actor name both
 // pass — including the same principal spelled two different ways by two
-// different layers of Gas Town (ga-wzl83). bd has no identity layer, so this
+// different layers of Gas Town (ga-wzl83), or in a different letter case
+// (GH#8628: an issue assigned "hierophant" closes for actor "Hierophant"). bd has no identity layer, so this
 // matches the existing semantics of the actor field — the guard removes
 // silent cross-actor closes without adding new identity guarantees.
 //
@@ -186,7 +215,8 @@ func AssigneeMatches(actor string, force bool) IssueValidator {
 //   - Assignee != ""                    — unassigned issues are freely
 //     assignable.
 //   - Assignee doesn't canonicalize to actor       — an actor editing its
-//     own claim is untouched, under any spelling of its own identity.
+//     own claim is untouched, under any spelling or letter case of its own
+//     identity.
 //   - Assignee doesn't canonicalize to newAssignee — an idempotent re-assert
 //     of the current holder stays a success (retry/replay safety on the
 //     proxied path), even when the re-assert names the holder under a
@@ -204,8 +234,9 @@ func AssigneeMatches(actor string, force bool) IssueValidator {
 // CanonicalActor rather than verbatim (ga-wzl83), so this removes silent
 // cross-actor takeovers without adding new identity guarantees, and without
 // falsely treating the current holder as a stranger when actor or
-// newAssignee names it under a different layer's spelling of the same
-// identity.
+// newAssignee names it under a different layer's spelling, or a different
+// letter case (GH#8628), of the same identity. The claim.pools carve-out
+// still matches the alias verbatim.
 func AssigneeNotStolen(actor, newAssignee string, poolAliases func() []string, force bool) IssueValidator {
 	return func(id string, issue *types.Issue) error {
 		if issue == nil || force {
