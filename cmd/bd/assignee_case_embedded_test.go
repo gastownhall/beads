@@ -45,4 +45,25 @@ func TestEmbeddedAssigneeCaseInsensitiveCLI(t *testing.T) {
 			t.Errorf("assignee = %q, want the stored spelling hierophant kept", got.Assignee)
 		}
 	})
+
+	// AC-2: on an issue in_progress and held by "hierophant", actor
+	// "Hierophant" re-claims (an idempotent success) and then unclaims,
+	// both without --force.
+	t.Run("claim_and_unclaim_by_case_variant_actor", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "held", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "hierophant", "--claim")
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "hierophant" || got.Status != types.StatusInProgress {
+			t.Fatalf("setup claim: assignee=%q status=%s, want hierophant/in_progress", got.Assignee, got.Status)
+		}
+
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "Hierophant", "--claim")
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "hierophant" || got.Status != types.StatusInProgress {
+			t.Errorf("re-claim by Hierophant: assignee=%q status=%s, want the idempotent hierophant/in_progress", got.Assignee, got.Status)
+		}
+
+		bdRunOK(t, bd, dir, "unclaim", issue.ID, "--actor", "Hierophant")
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "" || got.Status != types.StatusOpen {
+			t.Errorf("unclaim by Hierophant: assignee=%q status=%s, want released (empty/open)", got.Assignee, got.Status)
+		}
+	})
 }
