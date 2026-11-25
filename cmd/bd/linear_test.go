@@ -2202,6 +2202,35 @@ func TestLinearSyncTitleChangeKeepsDescriptionHeading(t *testing.T) {
 	}
 }
 
+// TestLinearSyncDescriptionSectionsReachAFixedPoint pins AC-3, GH#8506's
+// report: Linear holds the bead's pushed text plus the create's marker, and
+// three syncs (the second after a local status change) leave the bead's
+// description and fields as they were and never push a heading twice.
+func TestLinearSyncDescriptionSectionsReachAFixedPoint(t *testing.T) {
+	f := newLinearDescriptionSync(t, linearDescriptionSyncBead(), linearDescriptionSyncStored)
+	// Linear touched the issue since the last sync, so the first sync pulls it.
+	f.editLinear(func(*linear.Issue) {})
+
+	for run := 1; run <= 3; run++ {
+		if run == 2 {
+			f.store.issue.Status = types.StatusOpen
+			f.store.issue.UpdatedAt = time.Now().UTC()
+		}
+		result := f.sync()
+		f.requireBeadText(fmt.Sprintf("sync %d", run), "DESC", "AC", "DESIGN", "NOTES")
+		for _, sent := range f.sentDescriptions() {
+			for _, heading := range []string{"## Acceptance Criteria", "## Design", "## Notes"} {
+				if got := strings.Count(sent, heading); got != 1 {
+					t.Fatalf("sync %d: PushStats = %+v; an issueUpdate sent %d %q headings, want 1:\n%s", run, result.PushStats, got, heading, sent)
+				}
+			}
+		}
+	}
+	if remote, updates := f.api.snapshot(); updates != 1 || remote.State.Type != "unstarted" {
+		t.Fatalf("issueUpdate calls = %d, Linear state %q; want the status change pushed once", updates, remote.State.Name)
+	}
+}
+
 // fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes
 // for one team holding one issue: workflow states, labels (none), the
 // incremental issues query, which honours its updatedAt.gte filter, the
