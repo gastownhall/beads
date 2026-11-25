@@ -3,7 +3,9 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -87,6 +89,66 @@ func TestEmbeddedAssigneeCaseInsensitiveCLI(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Assignee != "Hierophant" || got.Status != types.StatusInProgress {
 			t.Errorf("re-spell by Hierophant: assignee=%q status=%s, want Hierophant/in_progress", got.Assignee, got.Status)
+		}
+	})
+
+	// AC-4: --assignee on list, count, search and ready ignores letter case:
+	// every spelling of the filter returns both hierophant issues, never
+	// bob's, and prints each stored spelling unchanged.
+	t.Run("listings_fold_assignee_case", func(t *testing.T) {
+		ldir, _, _ := bdInit(t, bd, "--prefix", "lc")
+		lower := bdCreate(t, bd, ldir, "casefold lower", "--assignee", "hierophant")
+		upper := bdCreate(t, bd, ldir, "casefold upper", "--assignee", "Hierophant")
+		bdCreate(t, bd, ldir, "casefold other", "--assignee", "bob")
+		want := map[string]string{lower.ID: "hierophant", upper.ID: "Hierophant"}
+
+		check := func(t *testing.T, what string, rows []map[string]interface{}) {
+			t.Helper()
+			got := map[string]string{}
+			for _, row := range rows {
+				id, _ := row["id"].(string)
+				assignee, _ := row["assignee"].(string)
+				got[id] = assignee
+			}
+			if len(got) != len(want) {
+				t.Errorf("%s returned %v, want exactly %v", what, got, want)
+			}
+			for id, spelling := range want {
+				if got[id] != spelling {
+					t.Errorf("%s: %s assignee = %q, want the stored spelling %q (all: %v)", what, id, got[id], spelling, got)
+				}
+			}
+		}
+		readyRows := func(t *testing.T, asked string) []map[string]interface{} {
+			t.Helper()
+			cmd := exec.Command(bd, "ready", "--json", "--assignee", asked)
+			cmd.Dir = ldir
+			cmd.Env = bdEnv(ldir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd ready --assignee %s: %v\nstdout:\n%s\nstderr:\n%s", asked, err, stdout.String(), stderr.String())
+			}
+			out := strings.TrimSpace(stdout.String())
+			var rows []map[string]interface{}
+			if err := json.Unmarshal([]byte(out[strings.Index(out, "["):]), &rows); err != nil {
+				t.Fatalf("parse ready JSON: %v\n%s", err, out)
+			}
+			return rows
+		}
+
+		for _, asked := range []string{"hierophant", "Hierophant", "HIEROPHANT"} {
+			t.Run(asked, func(t *testing.T) {
+				var listed []map[string]interface{}
+				for _, l := range bdListJSON(t, bd, ldir, "--assignee", asked) {
+					listed = append(listed, map[string]interface{}{"id": l.ID, "assignee": l.Assignee})
+				}
+				check(t, "bd list --assignee "+asked, listed)
+				check(t, "bd search --assignee "+asked, bdSearchJSON(t, bd, ldir, "casefold", "--assignee", asked))
+				check(t, "bd ready --assignee "+asked, readyRows(t, asked))
+				if got := bdCountJSON(t, bd, ldir, "--assignee", asked)["count"]; got != float64(2) {
+					t.Errorf("bd count --assignee %s = %v, want 2", asked, got)
+				}
+			})
 		}
 	})
 }

@@ -50,6 +50,26 @@ const KeysetCreatedAtIDPredicate = "(created_at <= ? AND ((created_at < ?) OR (i
 // instead of a full scan.
 const KeysetPriorityCreatedAtIDPredicate = "(priority >= ? AND ((priority > ?) OR " + KeysetCreatedAtIDPredicate + "))"
 
+// AssigneeFilterClause is the --assignee predicate of every listing (list,
+// count, search, ready, bd query filter mode, the wisp plane and the HTTP
+// server). Letter case is not part of an identity (GH#8628), so it compares
+// LOWER(assignee) with an argument AssigneeFilterArg lowered in Go: Dolt's
+// LOWER() on utf8mb4 is strings.ToLower, the same fold, and the column keeps
+// its binary default collation and its stored spelling. It folds case only;
+// the gates' separator fold has no portable SQL form, so separators match
+// exactly here, as before.
+const AssigneeFilterClause = "LOWER(assignee) = ?"
+
+// AssigneeFilterArg is the bound value of AssigneeFilterClause.
+func AssigneeFilterArg(v string) string { return strings.ToLower(v) }
+
+// AssigneeFilterMatches is AssigneeFilterClause in Go, for the callers that
+// judge a stored assignee against an --assignee value without SQL; it admits
+// exactly the rows the SQL admits.
+func AssigneeFilterMatches(stored, asked string) bool {
+	return strings.ToLower(stored) == AssigneeFilterArg(asked)
+}
+
 // BuildIssueFilterClauses builds WHERE clause fragments and args from a query
 // string and IssueFilter. The tables parameter controls which table names are
 // referenced in subqueries (issues vs wisps).
@@ -137,8 +157,8 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 	}
 
 	if filter.Assignee != nil {
-		whereClauses = append(whereClauses, "assignee = ?")
-		args = append(args, *filter.Assignee)
+		whereClauses = append(whereClauses, AssigneeFilterClause)
+		args = append(args, AssigneeFilterArg(*filter.Assignee))
 	}
 
 	if filter.Priority != nil {

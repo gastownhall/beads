@@ -1561,6 +1561,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry points now replay the rolled-back delete, as create, update, close,
   claim and sweep already do.
 
+- **Letter case is no longer part of an identity** ([#8628](https://github.com/gastownhall/beads/issues/8628)).
+  An issue assigned `hierophant` can now be closed, re-claimed, unclaimed and
+  re-spelled by actor `Hierophant` without `--force`, and `--assignee` on
+  `bd list`, `bd count`, `bd search`, `bd ready` and `bd query` returns every
+  case variant of the name, so `--assignee hierophant` and
+  `--assignee Hierophant` return the same issues. bd keeps and prints the
+  spelling it was given; nothing is migrated. The ownership gates still treat
+  any `.`/`_`/`-` run as one separator, while `--assignee` folds letter case
+  only, and `claim.pools` aliases still match exactly. Reported by murdarch.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
