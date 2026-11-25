@@ -1078,12 +1078,13 @@ func readyTypeDrops(f types.WorkFilter, issueType types.IssueType) bool {
 	return slices.Contains(sqlbuild.ReadyWorkExcludeTypes(f.ExcludeTypes), issueType)
 }
 
-// readyAssigneeDrops is the listing's assignee predicate.
+// readyAssigneeDrops is the listing's assignee predicate. It folds letter case
+// the way the listing's SQL does (GH#8628).
 func readyAssigneeDrops(f types.WorkFilter, assignee string) bool {
 	if f.Unassigned {
 		return assignee != ""
 	}
-	return f.Assignee != nil && assignee != *f.Assignee
+	return f.Assignee != nil && !sqlbuild.AssigneeFilterMatches(assignee, *f.Assignee)
 }
 
 // readyListingUndecided reports whether the listing whose filter is f may leave
