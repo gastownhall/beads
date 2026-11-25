@@ -98,6 +98,32 @@ func TestAuthorizeAssigneeTransferWithPools(t *testing.T) {
 			request: transfer(func(r *publicops.UpdateRequest) { r.Actor = "gastown_dog-1" }),
 			refuse:  true,
 		},
+		// GH#8628: letter case is not part of an identity.
+		{
+			name:    "actor already holds it under another letter case",
+			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "hierophant"},
+			request: transfer(func(r *publicops.UpdateRequest) { r.Actor = "Hierophant"; r.Patch.Assignee.Value = "Hierophant" }),
+		},
+		{
+			name:    "reasserts the current assignee under another letter case",
+			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "hierophant"},
+			request: transfer(func(r *publicops.UpdateRequest) { r.Actor = "bob"; r.Patch.Assignee.Value = "Hierophant" }),
+		},
+		{
+			name:    "a stranger moving a case-held claim to a third name is still refused",
+			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "hierophant"},
+			request: transfer(func(r *publicops.UpdateRequest) { r.Actor = "bob"; r.Patch.Assignee.Value = "carol" }),
+			refuse:  true,
+		},
+		{
+			// A pool alias is a literal config value: matched verbatim, so a
+			// case variant of the alias is not the alias.
+			name:    "a case variant of a pool alias is not the alias",
+			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "Crew"},
+			request: transfer(nil),
+			pools:   []string{"crew"},
+			refuse:  true,
+		},
 		{
 			name:    "holder is a configured pool alias",
 			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "crew"},

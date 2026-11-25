@@ -66,4 +66,27 @@ func TestEmbeddedAssigneeCaseInsensitiveCLI(t *testing.T) {
 			t.Errorf("unclaim by Hierophant: assignee=%q status=%s, want released (empty/open)", got.Assignee, got.Status)
 		}
 	})
+
+	// AC-3: on an issue in_progress and held by "hierophant", actor
+	// "Hierophant" re-spells the assignee without --force and the stored
+	// spelling becomes "Hierophant"; a stranger moving the claim to a third
+	// name is still refused.
+	t.Run("reassign_by_case_variant_actor", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "held", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "hierophant", "--assignee", "hierophant", "--status", "in_progress")
+
+		out, code := bdUpdateFailCode(t, bd, dir, issue.ID, "--actor", "bob", "--assignee", "carol")
+		if code != 1 || !strings.Contains(out, "cannot reassign") || !strings.Contains(out, "held by") {
+			t.Errorf("bob --assignee carol: exit %d, want 1 with the cannot reassign … held by refusal, got:\n%s", code, out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "hierophant" {
+			t.Fatalf("refused reassign clobbered the row: assignee=%q, want hierophant", got.Assignee)
+		}
+
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "Hierophant", "--assignee", "Hierophant")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Assignee != "Hierophant" || got.Status != types.StatusInProgress {
+			t.Errorf("re-spell by Hierophant: assignee=%q status=%s, want Hierophant/in_progress", got.Assignee, got.Status)
+		}
+	})
 }
