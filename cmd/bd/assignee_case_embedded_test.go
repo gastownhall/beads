@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -149,6 +150,52 @@ func TestEmbeddedAssigneeCaseInsensitiveCLI(t *testing.T) {
 					t.Errorf("bd count --assignee %s = %v, want 2", asked, got)
 				}
 			})
+		}
+	})
+
+	// AC-5: bd query's filter mode (SQL) and predicate mode (Go) agree on
+	// the case-folded assignee: both return exactly the two hierophant
+	// issues.
+	t.Run("query_modes_agree_on_assignee_case", func(t *testing.T) {
+		qdir, _, _ := bdInit(t, bd, "--prefix", "qc")
+		lower := bdCreate(t, bd, qdir, "query lower", "--assignee", "hierophant")
+		upper := bdCreate(t, bd, qdir, "query upper", "--assignee", "Hierophant")
+		bdCreate(t, bd, qdir, "query other", "--assignee", "bob")
+		// U+017F long s: strings.ToLower (and so LOWER()) keeps it apart from
+		// s, while strings.EqualFold would merge them; neither mode may.
+		bdCreate(t, bd, qdir, "query long s", "--assignee", "\u017F")
+		hierophants := []string{lower.ID, upper.ID}
+		slices.Sort(hierophants)
+
+		for q, want := range map[string][]string{
+			"assignee=HIEROPHANT":                    hierophants,
+			"assignee=HIEROPHANT OR assignee=nobody": hierophants,
+			"assignee=s":                             nil,
+			"assignee=s OR assignee=nobody":          nil,
+		} {
+			cmd := exec.Command(bd, "query", q, "--json")
+			cmd.Dir = qdir
+			cmd.Env = bdEnv(qdir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd query %q: %v\nstdout:\n%s\nstderr:\n%s", q, err, stdout.String(), stderr.String())
+			}
+			out := strings.TrimSpace(stdout.String())
+			var rows []map[string]interface{}
+			if start := strings.Index(out, "["); start >= 0 {
+				if err := json.Unmarshal([]byte(out[start:]), &rows); err != nil {
+					t.Fatalf("parse bd query %q JSON: %v\n%s", q, err, out)
+				}
+			}
+			var got []string
+			for _, row := range rows {
+				id, _ := row["id"].(string)
+				got = append(got, id)
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, want) {
+				t.Errorf("bd query %q = %v, want %v", q, got, want)
+			}
 		}
 	})
 }
