@@ -11,6 +11,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/storage",
+        "//internal/storage/sqlbuild",
         "//internal/timeparsing",
         "//internal/types",
     ],

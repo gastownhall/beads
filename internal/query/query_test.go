@@ -823,6 +823,52 @@ func TestPredicateEvaluation(t *testing.T) {
 		UpdatedAt: now,
 	}
 
+	// GH#8628 (bd-f76042): the same identity in drifting case — the assignee
+	// is free text typed by humans and agents — plus the control rows that
+	// keep the fold from widening: a genuinely different assignee, and the
+	// long s whose EqualFold admission predicate mode must lose to agree
+	// with filter mode's LOWER(assignee) = ?.
+	hierLower := &types.Issue{
+		ID:        "bd-4",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Assignee:  "hierophant",
+		Labels:    []string{},
+		CreatedAt: now.AddDate(0, 0, -2),
+		UpdatedAt: now,
+	}
+	hierTitled := &types.Issue{
+		ID:        "bd-5",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Assignee:  "Hierophant",
+		Labels:    []string{},
+		CreatedAt: now.AddDate(0, 0, -2),
+		UpdatedAt: now,
+	}
+	hierStranger := &types.Issue{
+		ID:        "bd-6",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Assignee:  "bob",
+		Labels:    []string{},
+		CreatedAt: now.AddDate(0, 0, -2),
+		UpdatedAt: now,
+	}
+	longS := &types.Issue{
+		ID:        "bd-7",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Assignee:  "ſ",
+		Labels:    []string{},
+		CreatedAt: now.AddDate(0, 0, -2),
+		UpdatedAt: now,
+	}
+
 	tests := []struct {
 		name    string
 		query   string
@@ -873,6 +919,14 @@ func TestPredicateEvaluation(t *testing.T) {
 		{"label=urgent OR label=backend matches urgent", "label=urgent OR label=backend", openBug, true},
 		{"label=urgent OR label=backend matches backend", "label=urgent OR label=backend", closedTask, true},
 		{"label=urgent OR label=backend doesn't match unlabeled", "label=urgent OR label=backend", blockedFeature, false},
+
+		// Assignee case-fold tests (GH#8628, bd-f76042): predicate mode
+		// admits exactly what filter mode's JOINED-UP SQL admits.
+		{"assignee=HIEROPHANT matches lower spelling", "assignee=HIEROPHANT", hierLower, true},
+		{"assignee=HIEROPHANT OR assignee=nobody matches titled spelling", "assignee=HIEROPHANT OR assignee=nobody", hierTitled, true},
+		{"assignee=HIEROPHANT OR assignee=nobody doesn't match stranger", "assignee=HIEROPHANT OR assignee=nobody", hierStranger, false},
+		{"assignee=s doesn't fold the long s onto s (GH#8628)", "assignee=s", longS, false},
+		{"assignee=ſ matches the long s exactly", "assignee=ſ", longS, true},
 	}
 
 	for _, tt := range tests {
