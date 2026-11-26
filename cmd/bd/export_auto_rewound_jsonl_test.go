@@ -14,10 +14,15 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// CommitExists says the diff anchor is on the store's history. The drift path
-// reaches the reconcile guard, which asks this question before judging
-// JSONL-only records.
-func (f *fakeMovingStateStore) CommitExists(_ context.Context, _ string) (bool, error) {
+// rewindHistoryStore is fakeMovingStateStore that also answers CommitExists:
+// the drift path reaches the reconcile guard, which asks whether the diff
+// anchor is on HEAD's history. Only the rewind and drift tests use it, so the
+// shared fake keeps its existing behavior for the other auto-export tests.
+type rewindHistoryStore struct {
+	*fakeMovingStateStore
+}
+
+func (s rewindHistoryStore) CommitExists(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }
 
@@ -36,7 +41,7 @@ func TestMaybeAutoExport_RewoundJSONLIsReexported(t *testing.T) {
 		{ID: "rw-a", Title: "A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
 		{ID: "rw-b", Title: "B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
 	}
-	store = fake
+	store = rewindHistoryStore{fake}
 	dir := autoExportTestDir(t)
 	exportPath := filepath.Join(dir, ".beads", "issues.jsonl")
 
@@ -70,7 +75,7 @@ func TestMaybeAutoExport_RewoundJSONLKeepsJSONLOnlyRecords(t *testing.T) {
 	fake.issues = []*types.Issue{
 		{ID: "rw-a", Title: "A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
 	}
-	store = fake
+	store = rewindHistoryStore{fake}
 	dir := autoExportTestDir(t)
 	exportPath := filepath.Join(dir, ".beads", "issues.jsonl")
 
@@ -106,7 +111,7 @@ func TestMaybeAutoExport_DriftDoesNotOverwriteNewerJSONLRecord(t *testing.T) {
 	fake.issues = []*types.Issue{
 		{ID: "rw-a", Title: "A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, UpdatedAt: t0},
 	}
-	store = fake
+	store = rewindHistoryStore{fake}
 	dir := autoExportTestDir(t)
 	exportPath := filepath.Join(dir, ".beads", "issues.jsonl")
 
