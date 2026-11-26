@@ -545,7 +545,17 @@ bd prune --older-than 90d --ignore-references --force
 ```
 
 `bd purge` is unaffected — ephemeral beads' references are themselves
-transient. For full Dolt storage reclaim after deleting many rows, follow
+transient.
+
+**Live-dependent protection:** `bd prune` and `bd purge` both skip a closed
+bead that a live bead still depends on through a `parent-child`, `tracks` or
+`blocks` edge: a closed epic whose child is still open, a closed bead a live
+convoy tracks, a closed blocker of a live bead. Live means any status that
+is not done. No flag turns this off (`--ignore-references` covers citations
+in text only); `bd delete` removes such a bead on purpose. When any are
+held back, `--json` reports the count as `live_dependent_skipped`.
+
+For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
 
 **On Dolt 2.3.x, storage-reclaim operations can fail partway.** In older
