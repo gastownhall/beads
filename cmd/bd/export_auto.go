@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -80,6 +82,24 @@ type exportAutoState struct {
 	// the live row instead of going stale. Self-healing: a cycle that finds
 	// nothing new for a carried id drops it, so this never grows unbounded.
 	LastDirtyIDs []string `json:"last_dirty_ids,omitempty"`
+
+	// LastExportFile is the SHA-256 (hex) of the JSONL file as this process
+	// last wrote it. The no-change return trusts the store alone, so a file
+	// another process restores (git stash, checkout) went unrepaired. When the
+	// digest on disk no longer matches, the export runs again (#8585).
+	LastExportFile string `json:"last_export_file,omitempty"`
+}
+
+// exportFileDigest returns the SHA-256 (hex) of the file at path, or "" when it
+// cannot be read. The auto-export state records it after each write, so a
+// later pass can tell that another process changed the file (#8585).
+func exportFileDigest(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 const exportAutoStateFile = "export-state.json"
@@ -132,7 +152,12 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
 		return nil
 	}
-	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
+	// The file on disk must also still be the one this process last wrote. A
+	// stash or checkout can restore an older tracked JSONL with the store
+	// unchanged (#8585). Drift forces a run, through the reconcile guards
+	// below, instead of the no-change return.
+	drifted := exportFileDigest(fullPath) != state.LastExportFile
+	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" && !drifted {
 		debug.Logf("auto-export: no changes since last export\n")
 		return nil
 	}
@@ -198,11 +223,22 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	// preserve its stale JSONL line forever even though the guard just
 	// cleared the export to run. A full export needs nothing — it rewrites
 	// from the store.
-	issueCount, memoryCount, dirtyIDs, didIncremental, err := tryIncrementalExport(
-		ctx, fullPath, state.LastDiffAnchor, doltWorkingRef, state.LastDirtyIDs, provenDeleted,
+	var (
+		issueCount, memoryCount int
+		dirtyIDs                []string
+		didIncremental          bool
 	)
-	if err != nil {
-		debug.Logf("auto-export: incremental failed (%v); falling back to full\n", err)
+	if drifted {
+		// An incremental patch would edit the stale file. Rewrite it whole
+		// from the store (#8585).
+		debug.Logf("auto-export: %s changed on disk since the last export; full export\n", fullPath)
+	} else {
+		issueCount, memoryCount, dirtyIDs, didIncremental, err = tryIncrementalExport(
+			ctx, fullPath, state.LastDiffAnchor, doltWorkingRef, state.LastDirtyIDs, provenDeleted,
+		)
+		if err != nil {
+			debug.Logf("auto-export: incremental failed (%v); falling back to full\n", err)
+		}
 	}
 	if !didIncremental {
 		issueCount, memoryCount, err = exportToFile(ctx, fullPath, false)
@@ -278,6 +314,7 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		Timestamp:      time.Now(),
 		Issues:         issueCount,
 		Memories:       memoryCount,
+		LastExportFile: exportFileDigest(fullPath),
 	}
 	saveExportAutoState(beadsDir, &newState)
 	return nil
