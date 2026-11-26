@@ -94,7 +94,7 @@ type exportAutoState struct {
 // cannot be read. The auto-export state records it after each write, so a
 // later pass can tell that another process changed the file (#8585).
 func exportFileDigest(path string) string {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path is the auto-export JSONL this process writes
 	if err != nil {
 		return ""
 	}
@@ -189,6 +189,18 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		} else if skip {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: current database would export 0 issues, but %s already contains %d issue(s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, existingCount)
 			return nil
+		}
+
+		if drifted {
+			newer, nerr := newerJSONLRecords(ctx, fullPath)
+			if nerr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare the drifted JSONL against the store: %v\n", nerr)
+				return nil
+			}
+			if len(newer) > 0 {
+				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %s changed on disk since the last export and holds %d record(s) newer than the store (%s); refusing to overwrite them. Re-import or reconcile the file first (#8585)\n", fullPath, len(newer), strings.Join(newer, ", "))
+				return nil
+			}
 		}
 
 		if len(rec.unproven) > 0 {
@@ -384,6 +396,34 @@ type autoExportReconciliation struct {
 	// unproven are in-scope JSONL ids absent from the store that nothing
 	// could account for. The orphan guard refuses over these, unchanged.
 	unproven []string
+}
+
+// newerJSONLRecords returns the ids of issue records in the on-disk export whose
+// updated_at is later than the store's copy. A drift repair rewrites the file
+// whole from the store, so it would overwrite those newer records (#8585 review).
+func newerJSONLRecords(ctx context.Context, path string) ([]string, error) {
+	existing, err := issueRecordsInJSONL(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(existing) == 0 {
+		return nil, nil
+	}
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Limit: 0, MaxRows: 0})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search issues: %w", err)
+	}
+	storeAt := make(map[string]time.Time, len(issues))
+	for _, issue := range issues {
+		storeAt[issue.ID] = issue.UpdatedAt
+	}
+	var newer []string
+	for _, rec := range existing {
+		if at, ok := storeAt[rec.ID]; ok && rec.UpdatedAt.After(at) {
+			newer = append(newer, rec.ID)
+		}
+	}
+	return newer, nil
 }
 
 // reconcileAutoExportJSONL compares the on-disk export against the store and
@@ -621,6 +661,7 @@ type jsonlIssueRecord struct {
 	IssueType  types.IssueType
 	IsTemplate bool
 	Ephemeral  bool
+	UpdatedAt  time.Time
 }
 
 // issueRecordsInJSONL returns issue records (id + scope fields) from a JSONL
@@ -661,6 +702,9 @@ func issueRecordsInJSONL(path string) ([]jsonlIssueRecord, error) {
 		var rec jsonlIssueRecord
 		if rawID, ok := raw["id"]; ok {
 			_ = json.Unmarshal(rawID, &rec.ID)
+		}
+		if rawUpdated, ok := raw["updated_at"]; ok {
+			_ = json.Unmarshal(rawUpdated, &rec.UpdatedAt)
 		}
 		if rec.ID == "" {
 			continue
