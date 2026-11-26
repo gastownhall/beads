@@ -1966,6 +1966,79 @@ func TestLinearSyncOverlapKeepsEchoOfNameMappedStatus(t *testing.T) {
 	}
 }
 
+// TestLinearPullKeepsDesignEditedInLinear pins the #8624 review: a Design
+// section edited in Linear must reach the bead on pull. The pull compared and
+// wrote the description alone, so the edit was reverted by the next sync and
+// reached neither side.
+func TestLinearPullKeepsDesignEditedInLinear(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("LINEAR_API_KEY", "test-api-key")
+	t.Setenv("LINEAR_OAUTH_CLIENT_ID", "")
+	t.Setenv("LINEAR_OAUTH_CLIENT_SECRET", "")
+
+	const ref = "https://linear.app/team/issue/TEAM-2"
+	now := time.Now().UTC()
+	api := &fakeLinearIssueAPI{
+		states: []linear.State{
+			{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			{ID: "state-progress", Name: "In Progress", Type: "started"},
+		},
+		// Linear holds the body with a Design section, edited after the last sync.
+		issue: linear.Issue{
+			ID:          "uuid-2",
+			Identifier:  "TEAM-2",
+			URL:         ref,
+			Title:       "Design edit",
+			Description: "Body\n\n## Design\nNEW DESIGN",
+			Priority:    3,
+			State:       &linear.State{ID: "state-progress", Name: "In Progress", Type: "started"},
+			CreatedAt:   now.Add(-time.Hour).Format(time.RFC3339),
+			UpdatedAt:   now.Add(-time.Minute).Format(time.RFC3339),
+		},
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	setupEndpointTrustWorkspaceForTest(t)
+	t.Setenv("LINEAR_API_ENDPOINT", server.URL)
+
+	linkedRef := ref
+	store := &linearSyncStore{
+		config: map[string]string{
+			"linear.team_id":               "team-1",
+			"linear.api_endpoint":          server.URL,
+			"linear.state_map.todo":        "open",
+			"linear.state_map.in progress": "in_progress",
+		},
+		metadata: map[string]string{"linear.last_sync": now.Add(-2 * time.Minute).Format(time.RFC3339)},
+		// The bead before the edit: the old design.
+		issue: types.Issue{
+			ID:          "bd-2",
+			Title:       "Design edit",
+			Description: "Body",
+			Design:      "OLD DESIGN",
+			Status:      types.StatusInProgress,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			ExternalRef: &linkedRef,
+			CreatedAt:   now.Add(-time.Hour),
+			UpdatedAt:   now.Add(-time.Hour),
+		},
+	}
+
+	lt := &linear.Tracker{}
+	lt.SetTeamIDs([]string{"team-1"})
+	if err := lt.Init(ctx, store); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	engine := tracker.NewEngine(lt, store, "test")
+	if _, err := engine.Sync(ctx, tracker.SyncOptions{Pull: true}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if store.issue.Design != "NEW DESIGN" {
+		t.Fatalf("after pull: bead design = %q, want %q (the Design section edited in Linear)", store.issue.Design, "NEW DESIGN")
+	}
+}
+
 // fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes
 // for one team holding one issue: workflow states, labels (none), the
 // incremental issues query, which honours its updatedAt.gte filter, the
@@ -2120,6 +2193,12 @@ func (s *linearSyncStore) ApplyIssueUpdate(_ context.Context, id string, updates
 			next.Title = text
 		case "description":
 			next.Description = text
+		case "design":
+			next.Design = text
+		case "acceptance_criteria":
+			next.AcceptanceCriteria = text
+		case "notes":
+			next.Notes = text
 		case "status":
 			next.Status = types.Status(text)
 		case "assignee":

@@ -732,6 +732,9 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 	}
 	if local.Title != remote.Title ||
 		local.Description != remote.Description ||
+		local.Design != remote.Design ||
+		local.AcceptanceCriteria != remote.AcceptanceCriteria ||
+		local.Notes != remote.Notes ||
 		local.Priority != remote.Priority ||
 		local.Status != remote.Status ||
 		local.IssueType != remote.IssueType ||
@@ -748,12 +751,15 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 
 func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref string) map[string]interface{} {
 	updates := map[string]interface{}{
-		"title":       remote.Title,
-		"description": remote.Description,
-		"priority":    remote.Priority,
-		"status":      string(remote.Status),
-		"issue_type":  string(remote.IssueType),
-		"assignee":    remote.Assignee,
+		"title":               remote.Title,
+		"description":         remote.Description,
+		"design":              remote.Design,
+		"acceptance_criteria": remote.AcceptanceCriteria,
+		"notes":               remote.Notes,
+		"priority":            remote.Priority,
+		"status":              string(remote.Status),
+		"issue_type":          string(remote.IssueType),
+		"assignee":            remote.Assignee,
 	}
 	trimmedRef := strings.TrimSpace(ref)
 	if trimmedRef == "" {
