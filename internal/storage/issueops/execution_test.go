@@ -38,6 +38,13 @@ func TestClaimAdvancedTheRow(t *testing.T) {
 			oldAssignee: "gastown__mayor", actor: "gastown.mayor", want: false,
 		},
 		{
+			// GH#8628's own repro shape: the same identity, differently cased.
+			// bd update --claim by the holder must be the same idempotent
+			// no-op whether it spells itself "hierophant" or "Hierophant".
+			name: "idempotent reclaim by the holder, differently cased", oldStatus: types.StatusInProgress,
+			oldAssignee: "hierophant", actor: "Hierophant", want: false,
+		},
+		{
 			// Not-a-no-op control (canonicalActor's own doc-comment pair): a
 			// canonicalization broad enough to match everyone would pass the
 			// case above for the wrong reason.

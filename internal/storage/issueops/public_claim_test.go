@@ -245,6 +245,48 @@ func TestExecuteClaimIdempotentReclaimAcrossSpellingStagesNothing(t *testing.T) 
 	}
 }
 
+// TestExecuteClaimIdempotentReclaimCaseVariantStagesNothing is GH#8628's
+// repro in the same shape as the cross-spelling test above: the idempotent
+// re-claim must also hold when the caller's actor differs from the stored
+// assignee only in letter case ("Hierophant" vs "hierophant") — assignee is
+// free text typed by humans and agents, so mixed case drifts in within a
+// day, and the holder re-claiming its own bead must not stage a phantom
+// mutation for a CAS that is a no-op. The stored spelling is what comes
+// back, unchanged.
+func TestExecuteClaimIdempotentReclaimCaseVariantStagesNothing(t *testing.T) {
+	_, mock, tx := beginMockTx(t)
+
+	const id = "bd-1"
+	const storedAssignee = "hierophant" // as persisted
+	const actor = "Hierophant"          // as this caller spells itself
+	expectClaimableRead(mock, id, storedAssignee, types.StatusInProgress)
+	mock.ExpectExec(`(?s)UPDATE issues\s+SET assignee`).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectClaimStateRead(mock, id, storedAssignee, types.StatusInProgress)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM issues " + sqlbuild.LeaseJoin("issues") + " WHERE id = ?")).
+		WithArgs(id).
+		WillReturnRows(claimIssueRow(id, storedAssignee, types.StatusInProgress))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT label FROM labels WHERE issue_id = ? ORDER BY label")).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"label"}))
+
+	result, tables, err := ExecuteClaim(context.Background(), tx, publicops.ClaimRequest{Actor: actor, IssueID: id})
+	if err != nil {
+		t.Fatalf("ExecuteClaim: %v, want success (same identity, differently cased)", err)
+	}
+	if result.Changed {
+		t.Error("a case-variant re-claim by the holder reported a persisted mutation")
+	}
+	if len(tables) != 0 {
+		t.Errorf("a case-variant re-claim by the holder staged %v; nothing changed, so nothing may be committed", tables)
+	}
+	if result.Issue == nil || result.Issue.Assignee != storedAssignee || result.Issue.Status != types.StatusInProgress {
+		t.Errorf("result issue = %+v, want the post-state row (assignee stays in its stored spelling %q)", result.Issue, storedAssignee)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
 // TestExecuteClaimRefusesGenuinelyDifferentIdentityDespiteSimilarSpelling is
 // the not-a-no-op control for the cross-spelling fix above (steveyegge's
 // #5438 review flagged exactly this shape as the right guard): the pair named
