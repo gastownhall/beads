@@ -11,7 +11,7 @@ import (
 
 // TestCheckClosable pins the close guards' one decision: template first (no
 // bypass), then — unless force — the pin (both spellings) and the assignee
-// fence (separator-insensitive; unassigned is anyone's).
+// fence (separator- and case-insensitive, GH#8628; unassigned is anyone's).
 func TestCheckClosable(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -73,5 +73,25 @@ func TestRefusedMoleculeAutoCloseReportsTheRefusalsOwnSentence(t *testing.T) {
 				t.Errorf("RefusedMoleculeAutoClose(%q).Refusal = %q, want %q", err, got, refusal.Error())
 			}
 		}
+	}
+}
+
+// TestCheckClosableAssigneeCaseInsensitive reproduces GH#8628 (bd-f76042):
+// an issue assigned to "hierophant" must be closable by actor "Hierophant"
+// without --force — the two spellings name the same actor.
+func TestCheckClosableAssigneeCaseInsensitive(t *testing.T) {
+	issue := &types.Issue{ID: "cst-z8sw", Status: types.StatusInProgress, Assignee: "hierophant"}
+	if err := CheckClosable("cst-z8sw", issue, "Hierophant", false); err != nil {
+		t.Fatalf("CheckClosable(assignee %q, actor %q) = %v, want nil (case-insensitive actor match)", issue.Assignee, "Hierophant", err)
+	}
+	if !ActorMatches("hierophant", "Hierophant") {
+		t.Fatalf("ActorMatches(%q, %q) = false, want true", "hierophant", "Hierophant")
+	}
+	// The control that keeps the fold from being a free pass: a genuinely
+	// different identity that merely shares a prefix stays refused.
+	var refused *publicops.CloseNotAssigneeError
+	err := CheckClosable("cst-z8sw", issue, "hierophant2", false)
+	if !errors.As(err, &refused) || refused.IssueID != "cst-z8sw" {
+		t.Fatalf("CheckClosable(assignee %q, actor %q) = %v, want CloseNotAssigneeError", issue.Assignee, "hierophant2", err)
 	}
 }

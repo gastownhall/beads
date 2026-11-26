@@ -162,6 +162,8 @@ func TestCanonicalActor(t *testing.T) {
 		{name: "exact double-hyphen separator decodes to the rig-qualified slash (ga-2vy9p2)", in: "gastown--mayor", want: "gastown/mayor"},
 		{name: "raw slash passes through unchanged", in: "gastown/mayor", want: "gastown/mayor"},
 		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor", want: "gastown_mayor"},
+		{name: "ASCII letter case is folded (GH#8628)", in: "Hierophant", want: "hierophant"},
+		{name: "case fold composes with the separator fold (GH#8628)", in: "Gastown--Mayor", want: "gastown/mayor"},
 	}
 
 	for _, tt := range tests {
@@ -188,6 +190,9 @@ func TestActorMatches(t *testing.T) {
 		{name: "double-hyphen and double-underscore spellings no longer widen to the same identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown__mayor", want: false},
 		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor", want: true},
 		{name: "raw slash and raw dot stay genuinely distinct identities", assignee: "gastown/mayor", actor: "gastown.mayor", want: false},
+		{name: "a case variant is the same identity (GH#8628)", assignee: "hierophant", actor: "Hierophant", want: true},
+		{name: "case variants compose with separator variants (GH#8628)", assignee: "gastown.mayor", actor: "GASTOWN__MAYOR", want: true},
+		{name: "a longer name sharing the prefix is a different identity (GH#8628)", assignee: "hierophant", actor: "hierophant2", want: false},
 	}
 
 	for _, tt := range tests {
@@ -282,6 +287,16 @@ func TestAssigneeMatches(t *testing.T) {
 			force:       false,
 			wantErr:     true,
 			wantErrFrag: "assignee is",
+		},
+		// GH#8628 (bd-f76042): letter case is not part of an identity
+		// either. Assignee is free text typed by humans and agents, so mixed
+		// case drifts in within a day; the owner closing its own bead must
+		// not need --force for that.
+		{
+			name:    "case variant of the assignee passes (GH#8628)",
+			issue:   &types.Issue{ID: "bd-test", Assignee: "hierophant"},
+			actor:   "Hierophant",
+			wantErr: false,
 		},
 	}
 

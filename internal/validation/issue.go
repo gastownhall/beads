@@ -5,6 +5,8 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
@@ -88,6 +90,13 @@ func NotPinned(force bool) IssueValidator {
 // genuinely different identities, whose non-separator characters still
 // differ (e.g. "gastown.mayor" vs "gastown.dog-3" stay distinct).
 //
+// Letter case carries no meaning in an identity either (GH#8628): an
+// assignee is free text typed by humans and agents, so mixed case drifts in
+// within a day. Both the ASCII and the Unicode simple-lowercase fold are
+// applied — exactly what strings.ToLower does on valid UTF-8, which is also
+// what Dolt's LOWER() runs on a utf8mb4 column. A byte that is not a valid
+// UTF-8 start is copied unchanged, so "\xff" and "\xfe" stay distinct.
+//
 // A run that is the exact two-byte sequence "--" is a second, distinct axis:
 // gascity's session-name encoding (session_name.go) substitutes "--" for a
 // rig-qualified agent's "/" — a DIFFERENT identity from one substituting "_"
@@ -107,7 +116,8 @@ func NotPinned(force bool) IssueValidator {
 // Byte-scanned rather than rune-scanned so a 2-byte lookahead can detect an
 // exact "--" run: safe because '.', '_', '-' are single-byte ASCII that never
 // appear as a continuation byte of a multi-byte UTF-8 rune, so slicing on
-// them cannot split one.
+// them cannot split one. A byte at or above 0x80 is decoded as a rune so the
+// case fold stays correct on multi-byte characters.
 //
 // Empty stays empty: an actual absence of an actor must never canonicalize
 // to the same value as a non-empty one, or AssigneeMatches would start
@@ -134,16 +144,34 @@ func CanonicalActor(s string) string {
 			i = j
 			continue
 		}
-		b.WriteByte(c)
-		i++
+		if c < utf8.RuneSelf {
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			// An invalid byte is not a character to case-fold; keep it
+			// distinct rather than merging it with every other invalid
+			// byte the way strings.ToLower's U+FFFD substitution would.
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		b.WriteString(string(unicode.ToLower(r)))
+		i += size
 	}
 	return b.String()
 }
 
 // ActorMatches reports whether actor has the same authority as assignee:
-// either they're byte-identical, or they canonicalize to the same identity
-// (see CanonicalActor). The byte-identical check is not redundant — it
-// avoids paying canonicalization on the overwhelmingly common exact-match
+// either they're byte-identical, or they canonicalize to the same identity,
+// which forgives separator respellings and letter case and nothing else
+// (GH#8628; see CanonicalActor). The byte-identical check is not redundant —
+// it avoids paying canonicalization on the overwhelmingly common exact-match
 // path (ga-5ksp5 gate review, #5438: fixes a garbled doc comment, no
 // behavior change).
 func ActorMatches(assignee, actor string) bool {
@@ -157,7 +185,8 @@ func ActorMatches(assignee, actor string) bool {
 // Authority is identity-by-string: actor is compared to assignee under
 // CanonicalActor, so two principals sharing one canonical actor name both
 // pass — including the same principal spelled two different ways by two
-// different layers of Gas Town (ga-wzl83). bd has no identity layer, so this
+// different layers of Gas Town (ga-wzl83), or with different letter case
+// (GH#8628). bd has no identity layer, so this
 // matches the existing semantics of the actor field — the guard removes
 // silent cross-actor closes without adding new identity guarantees.
 //
@@ -186,7 +215,8 @@ func AssigneeMatches(actor string, force bool) IssueValidator {
 //   - Assignee != ""                    — unassigned issues are freely
 //     assignable.
 //   - Assignee doesn't canonicalize to actor       — an actor editing its
-//     own claim is untouched, under any spelling of its own identity.
+//     own claim is untouched, under any spelling of its own identity
+//     (separator or letter case, GH#8628).
 //   - Assignee doesn't canonicalize to newAssignee — an idempotent re-assert
 //     of the current holder stays a success (retry/replay safety on the
 //     proxied path), even when the re-assert names the holder under a
