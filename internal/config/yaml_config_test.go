@@ -55,11 +55,13 @@ func TestIsYamlOnlyKey(t *testing.T) {
 
 		// Secret keys (stored in yaml to avoid leaking via Dolt push)
 		{"github.token", true},
+		{"gitea.token", true},
 		{"linear.api_key", true},
 		{"notion.token", true}, // GH#6676
 
 		// Non-yaml keys (should return false)
 		{"jira.url", false},
+		{"gitea.url", false},
 		{"jira.project", false},
 		{"github.org", false},
 		{"custom.setting", false},
@@ -1178,6 +1180,7 @@ func TestSecretKeyEnvVarHint(t *testing.T) {
 	}{
 		{"linear.api_key", "LINEAR_API_KEY"},
 		{"github.token", "GITHUB_TOKEN"},
+		{"gitea.token", "GITEA_TOKEN"},
 		{"notion.token", "NOTION_TOKEN"},
 		{"ai.api_key", "ANTHROPIC_API_KEY"},
 		{"custom.secret-token", "BD_CUSTOM_SECRET_TOKEN"},

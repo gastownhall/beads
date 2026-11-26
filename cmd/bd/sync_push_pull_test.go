@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/gitea"
 	"github.com/steveyegge/beads/internal/github"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -22,6 +23,7 @@ func TestPushPullSubcommandsRegistered(t *testing.T) {
 		{"linear", linearCmd},
 		{"github", githubCmd},
 		{"gitlab", gitlabCmd},
+		{"gitea", giteaCmd},
 		{"notion", notionCmd},
 	}
 
@@ -77,6 +79,12 @@ func TestPushSubcommandRequiresArgs(t *testing.T) {
 	if err == nil {
 		t.Error("gitlab push with no args should return error")
 	}
+
+	// Test Gitea push (uses RunE)
+	err = giteaPushCmd.RunE(giteaPushCmd, []string{})
+	if err == nil {
+		t.Error("gitea push with no args should return error")
+	}
 }
 
 // TestPullSubcommandRequiresArgs verifies pull commands require at least one argument.
@@ -100,6 +108,12 @@ func TestPullSubcommandRequiresArgs(t *testing.T) {
 	if err == nil {
 		t.Error("gitlab pull with no args should return error")
 	}
+
+	// Test Gitea pull (uses RunE)
+	err = giteaPullCmd.RunE(giteaPullCmd, []string{})
+	if err == nil {
+		t.Error("gitea pull with no args should return error")
+	}
 }
 
 // TestNewGitHubEngineCarriesThePushHash pins the engine every GitHub command
@@ -119,5 +133,21 @@ func TestNewGitHubEngineCarriesThePushHash(t *testing.T) {
 	want := github.PushContentHash(issue, github.DefaultMappingConfig())
 	if got := engine.PushHooks.ContentHash(issue); got == "" || got != want {
 		t.Fatalf("ContentHash = %q, want GitHub's push hash %q", got, want)
+	}
+}
+
+func TestNewGiteaEngineCarriesThePushHash(t *testing.T) {
+	engine := newGiteaEngine(&gitea.Tracker{}, io.Discard)
+	if engine.PushHooks == nil || engine.PushHooks.ContentHash == nil {
+		t.Fatal("Gitea engine has no push ContentHash, so a pull clears the push hash")
+	}
+	ref := "https://codeberg.org/o/r/issues/1"
+	issue := &types.Issue{
+		ID: "bd-1", Title: "Fix it", Status: types.StatusOpen, Priority: 2,
+		IssueType: types.TypeTask, ExternalRef: &ref,
+	}
+	want := gitea.PushContentHash(issue, gitea.DefaultMappingConfig())
+	if got := engine.PushHooks.ContentHash(issue); got == "" || got != want {
+		t.Fatalf("ContentHash = %q, want Gitea's push hash %q", got, want)
 	}
 }

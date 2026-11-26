@@ -526,6 +526,9 @@ var proxyCapabilityRegistry = []capabilityRow{
 	refusedInRunE("gitlab status", "gitlab.go"),
 	refusedInRunE("gitlab projects", "gitlab.go"),
 	refusedInRunE("gitlab sync", "gitlab.go"),
+	refusedInRunE("gitea status", "gitea.go"),
+	refusedInRunE("gitea repos", "gitea.go"),
+	refusedInRunE("gitea sync", "gitea.go"),
 	refusedInRunE("notion status", "notion.go"),
 	refusedInRunE("notion init", "notion.go"),
 	refusedInRunE("notion connect", "notion.go"),
@@ -591,7 +594,7 @@ var proxyPermittedPaths = []string{
 	"human", "human dismiss", "human list", "human respond", "human stats",
 
 	// trackers: the verbs with no proxied refusal of any kind
-	"ado pull", "ado push", "github pull", "github push", "gitlab pull", "gitlab push",
+	"ado pull", "ado push", "gitea pull", "gitea push", "github pull", "github push", "gitlab pull", "gitlab push",
 	"jira pull", "jira push", "jira status", "jira sync",
 	"linear pull", "linear push", "linear status", "linear sync", "linear teams",
 	"notion pull", "notion push",

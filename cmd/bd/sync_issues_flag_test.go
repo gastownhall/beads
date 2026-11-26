@@ -19,6 +19,7 @@ func TestIssuesFlagRegistered(t *testing.T) {
 		{"linear", linearSyncCmd},
 		{"github", githubSyncCmd},
 		{"gitlab", gitlabSyncCmd},
+		{"gitea", giteaSyncCmd},
 		{"notion", notionSyncCmd},
 	}
 

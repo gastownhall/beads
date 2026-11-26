@@ -918,6 +918,44 @@ commands:
         args: [gc, '--dry-run', '--json']
         exit: 1
         words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd gitea pull
+    cases:
+      - id: gitea-pull-unconfigured
+        class: works
+        note: without a configured Gitea/Forgejo URL, fails preflight before any network call identically on connect and embedded
+        args: [gitea, pull, '1', '--json']
+        exit: 1
+        compare: text
+  - command: bd gitea push
+    cases:
+      - id: gitea-push-unconfigured
+        class: works
+        note: without a configured Gitea/Forgejo URL, fails preflight before any network call identically on connect and embedded
+        args: [gitea, push, e2e-fdalpha, '--json']
+        exit: 1
+        compare: text
+  - command: bd gitea repos
+    cases:
+      - id: gitea-repos-unconfigured
+        class: works
+        note: without a configured Gitea/Forgejo URL, fails preflight before any network call identically on connect and embedded
+        args: [gitea, repos, '--json']
+        exit: 1
+        compare: text
+  - command: bd gitea status
+    cases:
+      - id: gitea-status
+        class: works
+        args: [gitea, status, '--json']
+        compare: text
+  - command: bd gitea sync
+    cases:
+      - id: gitea-sync-unconfigured
+        class: works
+        note: without a configured Gitea/Forgejo URL, fails preflight before any network call identically on connect and embedded
+        args: [gitea, sync, '--json']
+        exit: 1
+        compare: text
   - command: bd github pull
     class: pending-ruling
     reason: 'tracker integration: it needs a configured GitHub repository and its network API, which no test lane has, so its behavior over bd connect is unexercised'

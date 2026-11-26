@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/ado"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/gitea"
 	"github.com/steveyegge/beads/internal/github"
 	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/jira"
@@ -152,6 +154,32 @@ Equivalent to: bd gitlab sync --pull-only --issues <refs>`,
 	RunE:          runGitLabPull,
 }
 
+// --- Gitea push/pull ---
+
+var giteaPushCmd = &cobra.Command{
+	Use:   "push [bead-ids...]",
+	Short: "Push specific beads to Gitea/Forgejo",
+	Long: `Push one or more beads issues to Gitea or Forgejo.
+
+Accepts bead IDs as positional arguments.
+Equivalent to: bd gitea sync --push-only --issues <ids>`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGiteaPush,
+}
+
+var giteaPullCmd = &cobra.Command{
+	Use:   "pull [refs...]",
+	Short: "Pull specific items from Gitea/Forgejo",
+	Long: `Pull one or more items from Gitea or Forgejo.
+
+Accepts bead IDs or external references as positional arguments.
+Equivalent to: bd gitea sync --pull-only --issues <refs>`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGiteaPull,
+}
+
 // --- Notion push/pull ---
 
 var notionPushCmd = &cobra.Command{
@@ -209,6 +237,12 @@ func init() {
 	gitlabPullCmd.Flags().Bool("dry-run", false, "Preview pull without making changes")
 	gitlabCmd.AddCommand(gitlabPushCmd)
 	gitlabCmd.AddCommand(gitlabPullCmd)
+
+	// Gitea push/pull
+	giteaPushCmd.Flags().Bool("dry-run", false, "Preview push without making changes")
+	giteaPullCmd.Flags().Bool("dry-run", false, "Preview pull without making changes")
+	giteaCmd.AddCommand(giteaPushCmd)
+	giteaCmd.AddCommand(giteaPullCmd)
 
 	// Notion push/pull
 	notionPushCmd.Flags().Bool("dry-run", false, "Preview push without making changes")
@@ -831,6 +865,184 @@ func runGitLabPull(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	outputSyncResult(result, dryRun)
+	return nil
+}
+
+// --- Gitea implementations ---
+
+func runGiteaPush(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("gitea-push")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
+	if len(args) == 0 {
+		return HandleErrorRespectJSON("at least one bead ID is required")
+	}
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	if !dryRun {
+		CheckReadonly("gitea push")
+	}
+
+	cfg := getGiteaConfig()
+	if err := validateGiteaConfig(cfg); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	if err := ensureStoreActive(); err != nil {
+		return HandleErrorRespectJSON("database not available: %v", err)
+	}
+
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	gt := &gitea.Tracker{}
+	if err := gt.Init(ctx, store); err != nil {
+		return HandleErrorRespectJSON("initializing Gitea/Forgejo tracker: %v", err)
+	}
+
+	out := cmd.OutOrStdout()
+	engine := newGiteaEngine(gt, out)
+
+	if dryRun && !jsonOutput {
+		_, _ = fmt.Fprintln(out, "Dry run mode - no changes will be made")
+		_, _ = fmt.Fprintln(out)
+	}
+
+	opts := tracker.SyncOptions{
+		Push:     true,
+		Pull:     false,
+		DryRun:   dryRun,
+		IssueIDs: args,
+	}
+	result, err := engine.Sync(ctx, opts)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
+	var linkWarnings []string
+	warnLink := func(msg string) {
+		linkWarnings = append(linkWarnings, msg)
+		_, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg)
+	}
+	linksPushed, linksSkipped := pushGiteaDependencyLinks(ctx, gt, store, opts, dryRun, out, warnLink)
+
+	if !dryRun {
+		commandDidWrite.Store(true)
+	}
+
+	if jsonOutput {
+		return outputJSON(giteaSyncResult{
+			DryRun:       dryRun,
+			Pushed:       result.Stats.Pushed,
+			Created:      result.Stats.Created,
+			Updated:      result.Stats.Updated,
+			Skipped:      result.Stats.Skipped,
+			Conflicts:    result.Stats.Conflicts,
+			Errors:       result.Stats.Errors,
+			LinksPushed:  linksPushed,
+			LinksSkipped: linksSkipped,
+			Warnings:     append(result.Warnings, linkWarnings...),
+		})
+	}
+
+	if dryRun {
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out, "Run without --dry-run to apply changes")
+		return nil
+	}
+	if result.Stats.Pushed > 0 {
+		_, _ = fmt.Fprintf(out, "✓ Pushed %d issues\n", result.Stats.Pushed)
+	}
+	if linksPushed > 0 {
+		_, _ = fmt.Fprintf(out, "✓ Synced %d dependency links\n", linksPushed)
+	}
+	if result.Stats.Conflicts > 0 {
+		_, _ = fmt.Fprintf(out, "→ Resolved %d conflicts\n", result.Stats.Conflicts)
+	}
+	return nil
+}
+
+func runGiteaPull(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("gitea-pull")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
+	if len(args) == 0 {
+		return HandleErrorRespectJSON("at least one bead ID or external reference is required")
+	}
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	if !dryRun {
+		CheckReadonly("gitea pull")
+	}
+
+	cfg := getGiteaConfig()
+	if err := validateGiteaConfig(cfg); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	if err := ensureStoreActive(); err != nil {
+		return HandleErrorRespectJSON("database not available: %v", err)
+	}
+
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	gt := &gitea.Tracker{}
+	if err := gt.Init(ctx, store); err != nil {
+		return HandleErrorRespectJSON("initializing Gitea/Forgejo tracker: %v", err)
+	}
+
+	out := cmd.OutOrStdout()
+	engine := newGiteaEngine(gt, out)
+	engine.PullHooks = buildGiteaPullHooks(ctx)
+
+	if dryRun && !jsonOutput {
+		_, _ = fmt.Fprintln(out, "Dry run mode - no changes will be made")
+		_, _ = fmt.Fprintln(out)
+	}
+
+	result, err := engine.Sync(ctx, tracker.SyncOptions{
+		Pull:     true,
+		Push:     false,
+		DryRun:   dryRun,
+		IssueIDs: args,
+	})
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
+	if !dryRun {
+		commandDidWrite.Store(true)
+	}
+
+	if jsonOutput {
+		return outputJSON(giteaSyncResult{
+			DryRun:    dryRun,
+			Pulled:    result.Stats.Pulled,
+			Created:   result.Stats.Created,
+			Updated:   result.Stats.Updated,
+			Skipped:   result.Stats.Skipped,
+			Conflicts: result.Stats.Conflicts,
+			Errors:    result.Stats.Errors,
+			Warnings:  result.Warnings,
+		})
+	}
+
+	if dryRun {
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out, "Run without --dry-run to apply changes")
+		return nil
+	}
+	if result.Stats.Pulled > 0 {
+		_, _ = fmt.Fprintf(out, "✓ Pulled %d issues (%d created, %d updated)\n",
+			result.Stats.Pulled, result.Stats.Created, result.Stats.Updated)
+	}
 	return nil
 }
 

@@ -31,6 +31,7 @@ freshness source.
 | `reference/configuration.md` | `Last reviewed:` marker tied to `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`. (Mintlify port: absorbed `CONFIG.md`.) |
 | `getting-started/ide-setup.md` | `Last reviewed:` marker tied to `cmd/bd/setup*.go` and `internal/recipes/`. (Mintlify port: absorbed `SETUP.md`.) |
 | `integrations/azure-devops.md` | `Last reviewed:` marker tied to `cmd/bd/ado*.go` and `internal/ado/`. (Mintlify port: was `ADO_CONFIG.md`.) |
+| `integrations/gitea.md` | `Last reviewed:` marker tied to `cmd/bd/gitea*.go` and `internal/gitea/`. |
 | `reference/json-schema.md` | `Last reviewed:` marker tied to `cmd/bd/output.go`, `cmd/bd/errors.go`, and protocol tests. (Mintlify port: was `JSON_SCHEMA.md`.) |
 | `recovery/init-safety.md` | `Last reviewed:` marker tied to `cmd/bd/init*.go` safety code and tests. (Mintlify port: was `RECOVERY.md`.) |
 | `ERROR_HANDLING.md` | `Last reviewed:` marker tied to current command error exits and JSON error helpers. |

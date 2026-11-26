@@ -208,6 +208,7 @@ release_cross_build(
         "//internal/formula/schemagen:schemagen",
         "//internal/formula:formula",
         "//internal/git:git",
+        "//internal/gitea:gitea",
         "//internal/gitenv:gitenv",
         "//internal/githooksenv:githooksenv",
         "//internal/github:github",

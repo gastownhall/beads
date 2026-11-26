@@ -20,6 +20,7 @@ func TestParentFlagRegistered(t *testing.T) {
 		{"linear", linearSyncCmd},
 		{"github", githubSyncCmd},
 		{"gitlab", gitlabSyncCmd},
+		{"gitea", giteaSyncCmd},
 	}
 
 	for _, tc := range trackers {

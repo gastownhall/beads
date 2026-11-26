@@ -918,6 +918,7 @@ bd config
     |   - linear.*          Linear integration settings
     |   - github.*          GitHub integration settings
     |   - gitlab.*          GitLab integration settings
+    |   - gitea.*           Gitea/Forgejo integration settings
     |   - ado.*             Azure DevOps integration settings
     |   - notion.*          Notion integration settings
     |   - custom.*          Custom integration settings
@@ -3163,6 +3164,90 @@ bd gc
   flag --older-than type=int default="90" usage="Delete closed issues older than N days"
   flag --skip-decay type=bool default="false" usage="Skip issue deletion phase"
   flag --skip-dolt type=bool default="false" usage="Skip Dolt garbage collection phase"
+
+bd gitea
+  use: "gitea"
+  short: "Gitea/Forgejo integration commands"
+  hidden: false
+  runnable: false
+  long:
+    | Commands for syncing issues between beads and Gitea or Forgejo instances
+    | (including Codeberg and self-hosted deployments).
+    |
+    | Configuration can be set via 'bd config' or environment variables:
+    |   gitea.url / GITEA_URL       - Gitea/Forgejo instance URL (e.g., https://codeberg.org)
+    |   gitea.token / GITEA_TOKEN   - Personal access token (stored in config.yaml)
+    |   gitea.repo / GITEA_REPO     - Repository in owner/repo format
+    |   gitea.owner / GITEA_OWNER   - Repository owner (alternative to owner/repo)
+    |   gitea.tls_ca / GITEA_TLS_CA - Optional PEM CA bundle path for self-signed TLS
+
+bd gitea pull
+  use: "pull [refs...]"
+  short: "Pull specific items from Gitea/Forgejo"
+  hidden: false
+  runnable: true
+  long:
+    | Pull one or more items from Gitea or Forgejo.
+    |
+    | Accepts bead IDs or external references as positional arguments.
+    | Equivalent to: bd gitea sync --pull-only --issues <refs>
+  flag --dry-run type=bool default="false" usage="Preview pull without making changes"
+
+bd gitea push
+  use: "push [bead-ids...]"
+  short: "Push specific beads to Gitea/Forgejo"
+  hidden: false
+  runnable: true
+  long:
+    | Push one or more beads issues to Gitea or Forgejo.
+    |
+    | Accepts bead IDs as positional arguments.
+    | Equivalent to: bd gitea sync --push-only --issues <ids>
+  flag --dry-run type=bool default="false" usage="Preview push without making changes"
+
+bd gitea repos
+  use: "repos"
+  short: "List accessible Gitea/Forgejo repositories"
+  hidden: false
+  runnable: true
+  long:
+    | List Gitea/Forgejo repositories accessible to the configured token.
+
+bd gitea status
+  use: "status"
+  short: "Show Gitea/Forgejo sync status"
+  hidden: false
+  runnable: true
+  long:
+    | Display current Gitea/Forgejo configuration and sync status.
+
+bd gitea sync
+  use: "sync"
+  short: "Sync issues with Gitea/Forgejo"
+  hidden: false
+  runnable: true
+  long:
+    | Synchronize issues between beads and a Gitea or Forgejo repository.
+    |
+    | By default, performs bidirectional sync:
+    | - Pulls new/updated issues from Gitea/Forgejo to beads
+    | - Pushes local beads issues to Gitea/Forgejo
+    |
+    | Use --pull-only or --push-only to limit direction.
+  flag --assignee type=string default="" usage="Filter by assignee username"
+  flag --dry-run type=bool default="false" usage="Show what would be synced without making changes"
+  flag --exclude-type type=string default="" usage="Exclude these issue types from sync (comma-separated)"
+  flag --issues type=string default="" usage="Comma-separated bead IDs to sync selectively (e.g., bd-abc,bd-def). Mutually exclusive with --parent."
+  flag --label type=string default="" usage="Filter by labels (comma-separated, AND logic)"
+  flag --milestone type=string default="" usage="Filter by milestone title"
+  flag --no-ephemeral type=bool default="true" usage="Exclude ephemeral/wisp issues from push (default: true)"
+  flag --parent type=string default="" usage="Limit push to this bead and its descendants (push only). Mutually exclusive with --issues."
+  flag --prefer-gitea type=bool default="false" usage="On conflict, use Gitea/Forgejo version"
+  flag --prefer-local type=bool default="false" usage="On conflict, keep local beads version"
+  flag --prefer-newer type=bool default="false" usage="On conflict, use most recent version (default)"
+  flag --pull-only type=bool default="false" usage="Only pull issues from Gitea/Forgejo"
+  flag --push-only type=bool default="false" usage="Only push issues to Gitea/Forgejo"
+  flag --type type=string default="" usage="Only sync these issue types (comma-separated, e.g. 'epic,feature,task')"
 
 bd github
   use: "github"

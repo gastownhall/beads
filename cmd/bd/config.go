@@ -42,6 +42,7 @@ Common namespaces:
   - linear.*          Linear integration settings
   - github.*          GitHub integration settings
   - gitlab.*          GitLab integration settings
+  - gitea.*           Gitea/Forgejo integration settings
   - ado.*             Azure DevOps integration settings
   - notion.*          Notion integration settings
   - custom.*          Custom integration settings
