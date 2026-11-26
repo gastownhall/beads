@@ -164,6 +164,11 @@ func TestCanonicalActor(t *testing.T) {
 		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor", want: "gastown_mayor"},
 		{name: "ASCII letter case is folded (GH#8628)", in: "Hierophant", want: "hierophant"},
 		{name: "case fold composes with the separator fold (GH#8628)", in: "Gastown--Mayor", want: "gastown/mayor"},
+		{name: "the Kelvin sign folds onto k, exactly as strings.ToLower does (GH#8628)", in: "K", want: "k"},
+		{name: "dotted capital I folds to plain i, exactly as strings.ToLower does (GH#8628)", in: "İ", want: "i"},
+		{name: "long s is already lowercase and does not fold onto s (GH#8628)", in: "ſ", want: "ſ"},
+		{name: "accented capitals fold to the accented lowercase, not the bare ASCII one (GH#8628)", in: "JOSÉ", want: "josé"},
+		{name: "an invalid byte is copied unchanged, not merged into U+FFFD (GH#8628)", in: "\xff", want: "\xff"},
 	}
 
 	for _, tt := range tests {
@@ -193,6 +198,12 @@ func TestActorMatches(t *testing.T) {
 		{name: "a case variant is the same identity (GH#8628)", assignee: "hierophant", actor: "Hierophant", want: true},
 		{name: "case variants compose with separator variants (GH#8628)", assignee: "gastown.mayor", actor: "GASTOWN__MAYOR", want: true},
 		{name: "a longer name sharing the prefix is a different identity (GH#8628)", assignee: "hierophant", actor: "hierophant2", want: false},
+		{name: "the Kelvin sign matches plain k (GH#8628)", assignee: "k", actor: "K", want: true},
+		{name: "accented case variants match (GH#8628)", assignee: "josé", actor: "JOSÉ", want: true},
+		{name: "but the accent is not itself folded away (GH#8628)", assignee: "jose", actor: "josé", want: false},
+		{name: "long s is a different character from s (GH#8628)", assignee: "s", actor: "ſ", want: false},
+		{name: "two distinct invalid bytes stay distinct (GH#8628)", assignee: "\xff", actor: "\xfe", want: false},
+		{name: "an invalid byte is not U+FFFD (GH#8628)", assignee: "\xff", actor: "�", want: false},
 	}
 
 	for _, tt := range tests {

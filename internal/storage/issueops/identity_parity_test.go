@@ -39,6 +39,13 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "exact double-hyphen separator decodes to the rig-qualified slash (ga-2vy9p2)", in: "gastown--mayor"},
 		{name: "raw slash passes through unchanged", in: "gastown/mayor"},
 		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor"},
+		{name: "ASCII letter case is folded (GH#8628)", in: "Hierophant"},
+		{name: "case fold composes with the separator fold (GH#8628)", in: "Gastown--Mayor"},
+		{name: "the Kelvin sign folds onto k, exactly as strings.ToLower does (GH#8628)", in: "K"},
+		{name: "dotted capital I folds to plain i, exactly as strings.ToLower does (GH#8628)", in: "İ"},
+		{name: "long s is already lowercase and does not fold onto s (GH#8628)", in: "ſ"},
+		{name: "accented capitals fold to the accented lowercase, not the bare ASCII one (GH#8628)", in: "JOSÉ"},
+		{name: "an invalid byte is copied unchanged, not merged into U+FFFD (GH#8628)", in: "\xff"},
 	}
 	for _, tc := range canonicalCases {
 		t.Run("CanonicalActor/"+tc.name, func(t *testing.T) {
@@ -63,6 +70,15 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "double-hyphen and double-underscore spellings no longer widen to the same identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown__mayor"},
 		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor"},
 		{name: "raw slash and raw dot stay genuinely distinct identities", assignee: "gastown/mayor", actor: "gastown.mayor"},
+		{name: "a case variant is the same identity (GH#8628)", assignee: "hierophant", actor: "Hierophant"},
+		{name: "case variants compose with separator variants (GH#8628)", assignee: "gastown.mayor", actor: "GASTOWN__MAYOR"},
+		{name: "a longer name sharing the prefix is a different identity (GH#8628)", assignee: "hierophant", actor: "hierophant2"},
+		{name: "the Kelvin sign matches plain k (GH#8628)", assignee: "k", actor: "K"},
+		{name: "accented case variants match (GH#8628)", assignee: "josé", actor: "JOSÉ"},
+		{name: "but the accent is not itself folded away (GH#8628)", assignee: "jose", actor: "josé"},
+		{name: "long s is a different character from s (GH#8628)", assignee: "s", actor: "ſ"},
+		{name: "two distinct invalid bytes stay distinct (GH#8628)", assignee: "\xff", actor: "\xfe"},
+		{name: "an invalid byte is not U+FFFD (GH#8628)", assignee: "\xff", actor: "�"},
 	}
 	for _, tc := range matchCases {
 		t.Run("ActorMatches/"+tc.name, func(t *testing.T) {
