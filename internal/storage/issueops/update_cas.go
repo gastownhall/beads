@@ -49,7 +49,7 @@ func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAs
 	if err != nil {
 		return fmt.Errorf("failed to read assignee/status for %s: %w", id, err)
 	}
-	if expectedAssignee != nil && !actorMatchesFold(assignee.String, *expectedAssignee) {
+	if expectedAssignee != nil && !actorMatches(assignee.String, *expectedAssignee) {
 		return fmt.Errorf("%w: %s is held by %q, expected %q", storage.ErrAssigneeMismatch, id, assignee.String, *expectedAssignee)
 	}
 	if expectedStatus != nil && status != *expectedStatus {

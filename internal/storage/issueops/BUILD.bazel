@@ -141,6 +141,7 @@ go_library(
 go_test(
     name = "issueops_test",
     srcs = [
+        "actor_case_fold_test.go",
         "aggregate_authorize_notes_test.go",
         "aggregate_authorize_transfer_test.go",
         "arrival_seq_guard_test.go",
