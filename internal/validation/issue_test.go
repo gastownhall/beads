@@ -335,6 +335,10 @@ func TestAssigneeNotStolen(t *testing.T) {
 		poolsCalled = true
 		return []string{"fable-crew", "night-crew"}
 	}
+	caseVariantPools := func() []string {
+		poolsCalled = true
+		return []string{"FABLE-CREW", "night-crew"}
+	}
 
 	tests := []struct {
 		name        string
@@ -444,6 +448,42 @@ func TestAssigneeNotStolen(t *testing.T) {
 			actor:       "Hierophant",
 			newAssignee: "",
 			wantErr:     false,
+		},
+		// GH#8628, AC-3's two sides on the same holder: the holder updating
+		// its own --assignee (to anyone, including its own other casing)
+		// passes, while a stranger transferring a live claim to a third
+		// party stays refused with the "held by" error.
+		{
+			name:        "holder reassigns its own live claim under a case variant",
+			issue:       inProgress("hierophant"),
+			actor:       "Hierophant",
+			newAssignee: "carol",
+			wantErr:     false,
+		},
+		{
+			name:        "holder reasserts itself under its other casing",
+			issue:       inProgress("hierophant"),
+			actor:       "Hierophant",
+			newAssignee: "Hierophant",
+			wantErr:     false,
+		},
+		{
+			name:        "a stranger's transfer of a live claim stays refused",
+			issue:       inProgress("hierophant"),
+			actor:       "bob",
+			newAssignee: "carol",
+			wantErr:     true,
+		},
+		// claim.pools aliases keep exact-string membership (ga-v2k49): a
+		// case variant of a configured alias is NOT the alias, so the issue
+		// stays fenced when only the variant is configured.
+		{
+			name:        "case-variant claim.pools alias does not unlock a foreign claim",
+			issue:       inProgress("fable-crew"),
+			actor:       "alice",
+			newAssignee: "alice",
+			pools:       caseVariantPools,
+			wantErr:     true,
 		},
 		{
 			name:        "different identity with shared separators still refused",

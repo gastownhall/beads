@@ -99,6 +99,33 @@ func TestAuthorizeAssigneeTransferWithPools(t *testing.T) {
 			refuse:  true,
 		},
 		{
+			// GH#8628: letter case is the same class of drift as a separator
+			// respelling — the holder updating its own assignee (here: to its
+			// own other casing) is an edit of its own claim, not a transfer.
+			name:    "holder edits its own live claim under a case variant",
+			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "hierophant"},
+			request: transfer(func(r *publicops.UpdateRequest) { r.Actor = "Hierophant"; r.Patch.Assignee.Value = "Hierophant" }),
+		},
+		{
+			// GH#8628's control: case-folding the fence must not unlock a
+			// stranger transferring a live claim to a third party.
+			name:    "stranger transferring a differently cased live claim is still refused",
+			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "hierophant"},
+			request: transfer(func(r *publicops.UpdateRequest) { r.Patch.Assignee.Value = "carol" }),
+			refuse:  true,
+		},
+		{
+			// Pool aliases keep exact-string membership (ga-v2k49, reason on
+			// the predicate's own loop): a case variant of a configured alias
+			// is NOT the alias, so an issue held under a different casing than
+			// the configured alias stays fenced.
+			name:    "case-variant pool alias does not take the claim",
+			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "hierophant"},
+			request: transfer(nil),
+			pools:   []string{"HIEROPHANT"},
+			refuse:  true,
+		},
+		{
 			name:    "holder is a configured pool alias",
 			before:  &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "crew"},
 			request: transfer(nil),
