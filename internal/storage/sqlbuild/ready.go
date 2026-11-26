@@ -266,8 +266,12 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	if filter.Unassigned {
 		whereClauses = append(whereClauses, "(assignee IS NULL OR assignee = '')")
 	} else if filter.Assignee != nil {
-		whereClauses = append(whereClauses, "assignee = ?")
-		args = append(args, *filter.Assignee)
+		// Letter case is not part of an identity (GH#8628): the ready
+		// listing compares LOWER(assignee) with the lowered bound, the same
+		// predicate BuildIssueFilterClauses renders. The Unassigned arm above
+		// is the emptiness check and keeps its byte-identical shape.
+		whereClauses = append(whereClauses, "LOWER(assignee) = ?")
+		args = append(args, AssigneeFilterArg(*filter.Assignee))
 	}
 
 	if !filter.IncludeDeferred {

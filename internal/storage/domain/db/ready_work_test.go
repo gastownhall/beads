@@ -180,6 +180,16 @@ func (s *testSuite) readyFilterByAssignee() {
 	got := issueIDsFrom(out)
 	s.Contains(got, "bd-rdy-as-mine")
 	s.NotContains(got, "bd-rdy-as-theirs")
+
+	// The same identity asked in a different casing lists the same issues
+	// (GH#8628): the assignee filter compares LOWER(assignee) with the
+	// lowered spelling, on this served-HTTP path too.
+	aliceUpper := "ALICE"
+	cased, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{Assignee: &aliceUpper})
+	s.Require().NoError(err)
+	got = issueIDsFrom(cased)
+	s.Contains(got, "bd-rdy-as-mine")
+	s.NotContains(got, "bd-rdy-as-theirs")
 }
 
 func (s *testSuite) readyFilterByType() {

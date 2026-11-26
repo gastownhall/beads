@@ -1,6 +1,8 @@
 package sqlbuild
 
 import (
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,6 +112,89 @@ func TestKeysetCursorBindsTheUTCInstant(t *testing.T) {
 			if !ok || !got.Equal(want) || got.Location() != time.UTC {
 				t.Errorf("%s: arg %d = %v (%T), want the time.Time %v", tc.name, i, args[i], args[i], want)
 			}
+		}
+	}
+}
+
+// stringPtr is a test-local pointer helper for the filter literals below.
+func stringPtr(s string) *string { return &s }
+
+// TestAssigneeFilterClauseComparesLowercased pins the assignee clauses of
+// both listing builders (GH#8628): the filter compares LOWER(assignee) with
+// a lowered bound, so an --assignee spelling matches the stored spelling
+// whatever its letter case, while the separator fold the ownership gates
+// apply has no SQL form and stays exact. The NoAssignee/Unassigned arms are
+// the emptiness check and keep their byte-identical shape.
+func TestAssigneeFilterClauseComparesLowercased(t *testing.T) {
+	clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{Assignee: stringPtr("HieroPhant")}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("BuildIssueFilterClauses: %v", err)
+	}
+	found := false
+	for _, c := range clauses {
+		if c == "LOWER(assignee) = ?" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("clauses = %v, want a LOWER(assignee) = ? clause", clauses)
+	}
+	if len(args) != 1 || args[0] != "hierophant" {
+		t.Errorf("args = %v, want [hierophant]", args)
+	}
+
+	where, rargs, err := BuildReadyWorkWhere(types.WorkFilter{Assignee: stringPtr("HieroPhant")}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("BuildReadyWorkWhere: %v", err)
+	}
+	if !strings.Contains(where, "LOWER(assignee) = ?") {
+		t.Errorf("ready WHERE = %q, want a LOWER(assignee) = ? term", where)
+	}
+	bound := false
+	for _, a := range rargs {
+		if s, ok := a.(string); ok && s == "hierophant" {
+			bound = true
+		}
+	}
+	if !bound {
+		t.Errorf("ready args = %v, want the lowered assignee bound", rargs)
+	}
+
+	noAssignee, _, err := BuildIssueFilterClauses("", types.IssueFilter{NoAssignee: true}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("BuildIssueFilterClauses(NoAssignee): %v", err)
+	}
+	if !slices.Contains(noAssignee, "(assignee IS NULL OR assignee = '')") {
+		t.Errorf("NoAssignee clauses = %v, want the byte-identical emptiness check", noAssignee)
+	}
+	unassignedWhere, _, err := BuildReadyWorkWhere(types.WorkFilter{Unassigned: true}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("BuildReadyWorkWhere(Unassigned): %v", err)
+	}
+	if strings.Contains(unassignedWhere, "LOWER(assignee)") {
+		t.Errorf("unassigned WHERE = %q, unexpectedly cased", unassignedWhere)
+	}
+}
+
+// TestAssigneeFilterMatches pins the Go form of the assignee predicate so
+// the in-memory listings and verdicts admit exactly what the SQL admits
+// (GH#8628): case folds, separators and padding do not.
+func TestAssigneeFilterMatches(t *testing.T) {
+	for _, tc := range []struct {
+		stored, asked string
+		want          bool
+	}{
+		{"hierophant", "HIEROPHANT", true},
+		{"Hierophant", "hierophant", true},
+		{"hierophant", "hierophant", true},
+		{"hierophant", "hierophant2", false},
+		{"hierophant", " hierophant", false},
+		{"a.b", "a__b", false}, // separators stay exact in the listings
+		{"ſ", "s", false},      // long s does not lowercase to s
+		{"K", "k", true},       // the Kelvin sign lowercases to k
+	} {
+		if got := AssigneeFilterMatches(tc.stored, tc.asked); got != tc.want {
+			t.Errorf("AssigneeFilterMatches(%q, %q) = %v, want %v", tc.stored, tc.asked, got, tc.want)
 		}
 	}
 }

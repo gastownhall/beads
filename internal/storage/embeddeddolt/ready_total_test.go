@@ -427,6 +427,10 @@ func readyWorkPageTotalFilterMatrix(t *testing.T, prefix string, undated bool) {
 
 	all := []string{"blocker", "r0", "r1", "r2", "r3", "r4", "w0", "w1", "w2"}
 	alice, zero := "alice", 0
+	// aliceUpper is the same identity in a different casing: the --assignee
+	// listing fold (LOWER(assignee) = ?, GH#8628) must reach both planes —
+	// the issue r2 and the wisp w1 — and the windowed total.
+	aliceUpper := "ALICE"
 	parent := id("dparent")
 	// IncludeDeferred lifts the deferral exclusions, not the ready status
 	// filter: a dated parent is open and listed, an undated one is deferred
@@ -448,6 +452,7 @@ func readyWorkPageTotalFilterMatrix(t *testing.T, prefix string, undated bool) {
 		{"labels_all", types.WorkFilter{Labels: []string{"a", "b"}}, []string{"r0"}},
 		{"labels_any", types.WorkFilter{LabelsAny: []string{"a", "b"}}, []string{"blocker", "r0", "r1", "w0"}},
 		{"assignee", types.WorkFilter{Assignee: &alice}, []string{"r2", "w1"}},
+		{"assignee_case", types.WorkFilter{Assignee: &aliceUpper}, []string{"r2", "w1"}},
 		{"unassigned", types.WorkFilter{Unassigned: true}, []string{"blocker", "r0", "r1", "r3", "r4", "w0", "w2"}},
 		{"priority_0", types.WorkFilter{Priority: &zero}, []string{"r0", "r3"}},
 		{"exclude_ids", types.WorkFilter{ExcludeIDs: []string{id("r1"), id("w2")}}, []string{"blocker", "r0", "r2", "r3", "r4", "w0", "w1"}},

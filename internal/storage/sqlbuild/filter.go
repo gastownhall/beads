@@ -61,6 +61,23 @@ const KeysetPriorityCreatedAtIDPredicate = "(priority >= ? AND ((priority > ?) O
 // aliases are out of scope; a count-driven predicate (e.g. "issues with >5
 // blockers") cannot live here and would need a separate outer predicate
 // parameter. See the SearchCountsSQL doc comment for why a violation fails loud.
+// AssigneeFilterArg is the bound value of the assignee filter: the listing
+// predicates render LOWER(assignee) = ?, so the bound value must carry the
+// same fold (GH#8628). It lowercases exactly the way Dolt's LOWER() does on
+// a utf8mb4 column — strings.ToLower — keeping the SQL plane and the Go
+// plane in agreement. It does NOT fold separators: the ownership gates'
+// separator fold has no portable SQL form, so --assignee keeps matching
+// separators exactly, as it always has.
+func AssigneeFilterArg(v string) string { return strings.ToLower(v) }
+
+// AssigneeFilterMatches is the assignee listing predicate (GH#8628) in Go:
+// the in-memory listings and empty-state verdicts admit exactly what the
+// SQL builders' LOWER(assignee) = ? admits — letter case folds, separators
+// and padding do not.
+func AssigneeFilterMatches(stored, asked string) bool {
+	return strings.ToLower(stored) == AssigneeFilterArg(asked)
+}
+
 func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables FilterTables) ([]string, []any, error) {
 	var whereClauses []string
 	var args []any
@@ -137,8 +154,13 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 	}
 
 	if filter.Assignee != nil {
-		whereClauses = append(whereClauses, "assignee = ?")
-		args = append(args, *filter.Assignee)
+		// Letter case is not part of an identity (GH#8628), so the listing
+		// compares the lowercased column with the lowercased bound — the
+		// same shape as the LOWER(...) LIKE ? clauses above, which already
+		// fold on these binary-default columns. The separator fold the
+		// ownership gates apply has no portable SQL form and stays exact.
+		whereClauses = append(whereClauses, "LOWER(assignee) = ?")
+		args = append(args, AssigneeFilterArg(*filter.Assignee))
 	}
 
 	if filter.Priority != nil {
