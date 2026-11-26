@@ -1078,12 +1078,15 @@ func readyTypeDrops(f types.WorkFilter, issueType types.IssueType) bool {
 	return slices.Contains(sqlbuild.ReadyWorkExcludeTypes(f.ExcludeTypes), issueType)
 }
 
-// readyAssigneeDrops is the listing's assignee predicate.
+// readyAssigneeDrops is the listing's assignee predicate: the same fold
+// BuildReadyWorkWhere renders as LOWER(assignee) = ? (GH#8628), so a cased
+// spelling of the holder's own identity does not make the empty-state
+// verdict call the holder's blocked issue someone else's.
 func readyAssigneeDrops(f types.WorkFilter, assignee string) bool {
 	if f.Unassigned {
 		return assignee != ""
 	}
-	return f.Assignee != nil && assignee != *f.Assignee
+	return f.Assignee != nil && !sqlbuild.AssigneeFilterMatches(assignee, *f.Assignee)
 }
 
 // readyListingUndecided reports whether the listing whose filter is f may leave

@@ -180,6 +180,12 @@ func TestReadyEmptyStateVerdict(t *testing.T) {
 			[]*types.BlockedIssue{blocked(func(i *types.Issue) { i.Assignee = "bob" })}, readyEmptyNoneBlocked},
 		{"own_blocked_issue", issueops.ReadyRequest{Assignee: "alice"},
 			[]*types.BlockedIssue{blocked(func(i *types.Issue) { i.Assignee = "alice" })}, readyEmptyBlocked},
+		// GH#8628 (bd-f76042): the ready listing folds letter case
+		// (LOWER(assignee) = ?), so the verdict must not call the holder's
+		// blocked issue another assignee's just because the spelling
+		// drifted to a different casing.
+		{"own_blocked_issue_case_drift", issueops.ReadyRequest{Assignee: "HIEROPHANT"},
+			[]*types.BlockedIssue{blocked(func(i *types.Issue) { i.Assignee = "hierophant" })}, readyEmptyBlocked},
 		{"unassigned_listing_assigned_blocked_issue", issueops.ReadyRequest{Unassigned: true},
 			[]*types.BlockedIssue{blocked(func(i *types.Issue) { i.Assignee = "bob" })}, readyEmptyNoneBlocked},
 		{"another_priority", issueops.ReadyRequest{Priority: &one},
