@@ -300,3 +300,69 @@ func TestEmbeddedMigrateFinishesStrandedStepNoLaterMigrationTouches(t *testing.T
 		})
 	}
 }
+
+// assertNoStepCommittedTwice fails when any numbered step has more than one
+// commit on HEAD's history.
+func assertNoStepCommittedTwice(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	if dup := queryStrings(t, ctx, conn,
+		"SELECT message FROM dolt_log WHERE message LIKE 'schema: apply migration 0%' "+
+			"GROUP BY message HAVING COUNT(*) > 1"); len(dup) != 0 {
+		t.Fatalf("steps committed more than once: %v", dup)
+	}
+}
+
+// TestEmbeddedMigrateStrandedStepSurvivesASecondKill strands migration 49 on
+// a lineage that still owes the aux rekey (HEAD at 48) and kills the retry
+// right after the series' last step commits, before the pass's tail (rekeys,
+// ignored series, final commit) runs. A pass killed between steps must leave
+// a clean working set (#4566), and the finished step is no exception: it must
+// have committed everything 0049 changed, comments included, which the
+// aux-rekey exemption hides from the pass's dirty set on this lineage. A
+// finish that left comments to the pass's final commit left it dirty here,
+// and the third open, starting from the latest main version, past the
+// exemption's windows, treated it as user dirt and never committed it.
+func TestEmbeddedMigrateStrandedStepSurvivesASecondKill(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	const stranded = 49
+	dataDir := strandStepAt(t, ctx, stranded)
+
+	latest := schema.LatestVersion()
+	restore := schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, version int) error {
+		if version == latest {
+			return fmt.Errorf("injected fault: process killed after migration %d", latest)
+		}
+		return nil
+	})
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	_, err := schema.MigrateUp(ctx, conn)
+	closeConn()
+	restore()
+	if err == nil || !strings.Contains(err.Error(), "injected fault") {
+		t.Fatalf("retry MigrateUp err = %v, want the injected fault", err)
+	}
+
+	conn2, closeConn2 := openPinnedConn(t, ctx, dataDir)
+	defer closeConn2()
+	if got := stepCommitTables(t, ctx, conn2, stranded); !slices.Contains(got, "comments") {
+		t.Fatalf("tables in the finished %04d commit = %v, want comments among them", stranded, got)
+	}
+	if v := headMainVersion(t, ctx, conn2); v != latest {
+		t.Fatalf("HEAD schema version after the second kill = %d, want %d", v, latest)
+	}
+	if dirty := dirtyTableNames(t, ctx, conn2); len(dirty) != 0 {
+		t.Fatalf("working set after the second kill = %v, want clean (the finished %04d and every later step commit their own tables)",
+			dirty, stranded)
+	}
+	if _, err := schema.MigrateUp(ctx, conn2); err != nil {
+		t.Fatalf("third MigrateUp: %v", err)
+	}
+	if v := headMainVersion(t, ctx, conn2); v != latest {
+		t.Fatalf("HEAD schema version after the third open = %d, want %d", v, latest)
+	}
+	if dirty := dirtyTableNames(t, ctx, conn2); len(dirty) != 0 {
+		t.Fatalf("working set after the third open = %v, want clean", dirty)
+	}
+	assertNoStepCommittedTwice(t, ctx, conn2)
+}
