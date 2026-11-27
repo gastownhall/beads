@@ -8,9 +8,15 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -79,6 +85,265 @@ func TestExtractAddressConflictName(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBackupSyncWithPrunePassesNativeProcedureOptions(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT url FROM dolt_backups WHERE name = ?")).
+		WithArgs("default").
+		WillReturnRows(sqlmock.NewRows([]string{"url"}).AddRow("file:///tmp/backup"))
+	query := "CALL DOLT_BACKUP('sync', ?, '--prune-with-grace-period', ?)"
+	mock.ExpectExec(regexp.QuoteMeta(query)).
+		WithArgs("default", "30m0s").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	outcome, err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("BackupSyncWithPrune: %v", err)
+	}
+	if outcome.Status != "unavailable" || !strings.Contains(outcome.Message, "did not return a prune summary") {
+		t.Fatalf("BackupSyncWithPrune outcome = %+v, want explicit unavailable status for SQL-only result", outcome)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackupSyncWithPruneRejectsTooShortGracePeriodBeforeSQL(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, err = BackupSyncWithPrune(context.Background(), db, "default", time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "at least 10m") {
+		t.Fatalf("BackupSyncWithPrune short grace error = %v, want minimum-duration error", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const backupRemoteURLQuery = "SELECT url FROM dolt_backups WHERE name = ?"
+const backupPruneSyncQuery = "CALL DOLT_BACKUP('sync', ?, '--prune-with-grace-period', ?)"
+
+func newBackupPruneMock(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+		_ = db.Close()
+	})
+	return db, mock
+}
+
+func expectRegisteredBackupURL(mock sqlmock.Sqlmock, backupURL string) {
+	mock.ExpectQuery(regexp.QuoteMeta(backupRemoteURLQuery)).
+		WithArgs("default").
+		WillReturnRows(sqlmock.NewRows([]string{"url"}).AddRow(backupURL))
+}
+
+func TestBackupSyncWithPruneRejectsNonFileDestinationBeforeSync(t *testing.T) {
+	for _, backupURL := range []string{
+		"https://user:secret@example.com/beads",
+		"aws://[table:bucket]/beads",
+		"file:/var/backups/beads",
+		"file://user:secret@host/beads",
+		"/var/backups/beads",
+	} {
+		t.Run(backupURL, func(t *testing.T) {
+			db, mock := newBackupPruneMock(t)
+			expectRegisteredBackupURL(mock, backupURL)
+
+			_, err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute)
+			if !errors.Is(err, storage.ErrBackupPruneRequiresFileDestination) {
+				t.Fatalf("BackupSyncWithPrune(%q) error = %v, want storage.ErrBackupPruneRequiresFileDestination", backupURL, err)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Fatalf("destination error leaked URL credentials: %v", err)
+			}
+		})
+	}
+}
+
+// TestBackupSyncWithPruneAcceptsLocalFileURLsNetURLRejects pins that the
+// destination check uses isLocalFileURL, which accepts the URLs DirToFileURL
+// builds for bd backup init even where net/url rejects them.
+func TestBackupSyncWithPruneAcceptsLocalFileURLsNetURLRejects(t *testing.T) {
+	for _, backupURL := range []string{
+		"file:///var/backups/beads",
+		"FILE:///var/backups/beads",
+		`file://C:\Users\x\bk`,
+		"file:///var/backups/100%/beads",
+	} {
+		t.Run(backupURL, func(t *testing.T) {
+			db, mock := newBackupPruneMock(t)
+			expectRegisteredBackupURL(mock, backupURL)
+			mock.ExpectExec(regexp.QuoteMeta(backupPruneSyncQuery)).
+				WithArgs("default", "30m0s").
+				WillReturnResult(sqlmock.NewResult(0, 0))
+
+			if _, err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute); err != nil {
+				t.Fatalf("BackupSyncWithPrune(%q): %v", backupURL, err)
+			}
+		})
+	}
+}
+
+func TestBackupSyncWithPruneReportsMissingRemoteBeforeSync(t *testing.T) {
+	db, mock := newBackupPruneMock(t)
+	mock.ExpectQuery(regexp.QuoteMeta(backupRemoteURLQuery)).
+		WithArgs("default").
+		WillReturnRows(sqlmock.NewRows([]string{"url"}))
+
+	_, err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute)
+	if !errors.Is(err, storage.ErrBackupRemoteNotFound) {
+		t.Fatalf("BackupSyncWithPrune error = %v, want storage.ErrBackupRemoteNotFound", err)
+	}
+}
+
+// TestBackupSyncWithPruneRegistryReadErrorIsNotMissingRemote pins that a
+// failure reading dolt_backups keeps its cause and is not reported as an
+// unconfigured destination, and that no sync is attempted after it.
+func TestBackupSyncWithPruneRegistryReadErrorIsNotMissingRemote(t *testing.T) {
+	db, mock := newBackupPruneMock(t)
+	driverErr := errors.New("table dolt_backups is locked")
+	mock.ExpectQuery(regexp.QuoteMeta(backupRemoteURLQuery)).
+		WithArgs("default").
+		WillReturnError(driverErr)
+
+	outcome, err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute)
+	if !errors.Is(err, driverErr) {
+		t.Fatalf("BackupSyncWithPrune error = %v, want it to wrap the registry read error", err)
+	}
+	if errors.Is(err, storage.ErrBackupRemoteNotFound) {
+		t.Fatalf("BackupSyncWithPrune error = %v, must not match storage.ErrBackupRemoteNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "read backup remote default") {
+		t.Fatalf("BackupSyncWithPrune error = %q, want it to name the registry read", err)
+	}
+	if outcome.Status != "" {
+		t.Fatalf("outcome on registry read error = %+v, want zero outcome", outcome)
+	}
+	// newBackupPruneMock's cleanup fails the test if any unexpected
+	// CALL DOLT_BACKUP was issued.
+}
+
+func TestBackupSyncWithPruneSyncErrorWrapsCauseWithoutOutcome(t *testing.T) {
+	db, mock := newBackupPruneMock(t)
+	expectRegisteredBackupURL(mock, "file:///tmp/backup")
+	driverErr := errors.New("disk full")
+	mock.ExpectExec(regexp.QuoteMeta(backupPruneSyncQuery)).
+		WithArgs("default", "30m0s").
+		WillReturnError(driverErr)
+
+	outcome, err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute)
+	if !errors.Is(err, driverErr) || !strings.Contains(err.Error(), "sync backup default with pruning") {
+		t.Fatalf("BackupSyncWithPrune error = %v, want wrapped driver error", err)
+	}
+	if outcome.Status != "" || outcome.Message != "" {
+		t.Fatalf("BackupSyncWithPrune outcome on sync error = %+v, want zero outcome", outcome)
+	}
+}
+
+func TestBackupSyncWithPruneUsingCaptureObservesRegisteredDestination(t *testing.T) {
+	db, mock := newBackupPruneMock(t)
+	expectRegisteredBackupURL(mock, "file:///registered/backup")
+	mock.ExpectExec(regexp.QuoteMeta(backupPruneSyncQuery)).
+		WithArgs("default", "30m0s").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	deleted := 3
+	var capturedURL string
+	capture := func(backupURL string, sync func() error) (storage.BackupPruneOutcome, error) {
+		capturedURL = backupURL
+		return storage.BackupPruneOutcome{Status: "pruned", FilesDeleted: &deleted}, sync()
+	}
+	outcome, err := BackupSyncWithPruneUsingCapture(context.Background(), db, "default", 30*time.Minute, capture)
+	if err != nil {
+		t.Fatalf("BackupSyncWithPruneUsingCapture: %v", err)
+	}
+	if capturedURL != "file:///registered/backup" {
+		t.Fatalf("capture received backup URL %q, want the dolt_backups registration", capturedURL)
+	}
+	if outcome.Status != "pruned" || outcome.FilesDeleted == nil || *outcome.FilesDeleted != 3 {
+		t.Fatalf("outcome = %+v, want the capture's outcome", outcome)
+	}
+}
+
+func TestBackupSyncWithPruneUsingCaptureDropsOutcomeOnSyncError(t *testing.T) {
+	db, mock := newBackupPruneMock(t)
+	expectRegisteredBackupURL(mock, "file:///tmp/backup")
+	driverErr := errors.New("manifest write failed")
+	mock.ExpectExec(regexp.QuoteMeta(backupPruneSyncQuery)).
+		WithArgs("default", "30m0s").
+		WillReturnError(driverErr)
+
+	deleted := 1
+	capture := func(_ string, sync func() error) (storage.BackupPruneOutcome, error) {
+		return storage.BackupPruneOutcome{Status: "pruned", FilesDeleted: &deleted}, sync()
+	}
+	outcome, err := BackupSyncWithPruneUsingCapture(context.Background(), db, "default", 30*time.Minute, capture)
+	if !errors.Is(err, driverErr) {
+		t.Fatalf("BackupSyncWithPruneUsingCapture error = %v, want wrapped driver error", err)
+	}
+	if outcome.Status != "" || outcome.FilesDeleted != nil {
+		t.Fatalf("outcome on sync error = %+v, want zero outcome", outcome)
+	}
+}
+
+func TestBackupRemoteURLReadsDoltRegisteredBackup(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT url FROM dolt_backups WHERE name = ?")).
+		WithArgs("default").
+		WillReturnRows(sqlmock.NewRows([]string{"url"}).AddRow("file:///registered/backup"))
+
+	got, err := BackupRemoteURL(context.Background(), db, "default")
+	if err != nil {
+		t.Fatalf("BackupRemoteURL: %v", err)
+	}
+	if got != "file:///registered/backup" {
+		t.Fatalf("BackupRemoteURL = %q, want registered URL", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackupRemoteURLReportsMissingRegisteredBackup(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT url FROM dolt_backups WHERE name = ?")).
+		WithArgs("default").
+		WillReturnRows(sqlmock.NewRows([]string{"url"}))
+
+	_, err = BackupRemoteURL(context.Background(), db, "default")
+	if !errors.Is(err, storage.ErrBackupRemoteNotFound) {
+		t.Fatalf("BackupRemoteURL error = %v, want storage.ErrBackupRemoteNotFound", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

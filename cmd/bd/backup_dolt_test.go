@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,6 +161,271 @@ func TestDoltBackupStateRoundTrip(t *testing.T) {
 	}
 	if !loaded.LastSync.Equal(state.LastSync) {
 		t.Errorf("last_sync = %v, want %v", loaded.LastSync, state.LastSync)
+	}
+}
+
+func TestValidateBackupPruneGracePeriod(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    time.Duration
+		provided bool
+		want     time.Duration
+		prune    bool
+		wantErr  string
+	}{
+		{name: "omitted"},
+		{name: "minimum", input: 10 * time.Minute, provided: true, want: 10 * time.Minute, prune: true},
+		{name: "compound duration", input: 90 * time.Minute, provided: true, want: 90 * time.Minute, prune: true},
+		{name: "below minimum", input: 9*time.Minute + 59*time.Second, provided: true, prune: true, wantErr: "must be at least 10m"},
+		{name: "zero", input: 0, provided: true, prune: true, wantErr: "must be at least 10m"},
+		{name: "negative", input: -time.Hour, provided: true, prune: true, wantErr: "must be at least 10m"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, prune, err := validateBackupPruneGracePeriod(tt.input, tt.provided)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("validateBackupPruneGracePeriod(%s) error = %v, want %q", tt.input, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateBackupPruneGracePeriod(%s): %v", tt.input, err)
+			}
+			if got != tt.want || prune != tt.prune {
+				t.Fatalf("validateBackupPruneGracePeriod(%s) = (%s, %v), want (%s, %v)", tt.input, got, prune, tt.want, tt.prune)
+			}
+		})
+	}
+}
+
+func TestBackupSyncWithPruneErrorMapping(t *testing.T) {
+	driverErr := errors.New("connection reset")
+	missingChunkErr := errors.New("table file abc123 not found")
+	destinationErr := fmt.Errorf("%w (configured destination: https://example.invalid/beads)",
+		storage.ErrBackupPruneRequiresFileDestination)
+	tests := []struct {
+		name      string
+		err       error
+		prune     bool
+		want      string
+		wantIsErr error
+	}{
+		{
+			name:  "missing registered destination on the prune path",
+			err:   fmt.Errorf("%w: default", storage.ErrBackupRemoteNotFound),
+			prune: true,
+			want:  "no backup destination configured",
+		},
+		{
+			name: "plain sync reports Dolt's not-found text",
+			err:  errors.New("backup 'default' not found"),
+			want: "no backup destination configured",
+		},
+		{
+			name:      "prune sync failure mentioning not found keeps its cause",
+			err:       fmt.Errorf("sync backup default with pruning: %w", missingChunkErr),
+			prune:     true,
+			want:      "backup sync failed: sync backup default with pruning: table file abc123 not found",
+			wantIsErr: missingChunkErr,
+		},
+		{
+			name:      "non-file destination is returned unchanged",
+			err:       destinationErr,
+			prune:     true,
+			want:      destinationErr.Error(),
+			wantIsErr: storage.ErrBackupPruneRequiresFileDestination,
+		},
+		{
+			name:      "other sync failure keeps its cause",
+			err:       fmt.Errorf("sync backup default with pruning: %w", driverErr),
+			prune:     true,
+			want:      "backup sync failed: sync backup default with pruning: connection reset",
+			wantIsErr: driverErr,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := backupSyncFailure(tt.err, tt.prune)
+			if !strings.Contains(got.Error(), tt.want) {
+				t.Fatalf("backupSyncFailure(%v, %v) = %q, want %q", tt.err, tt.prune, got, tt.want)
+			}
+			if tt.wantIsErr != nil && !errors.Is(got, tt.wantIsErr) {
+				t.Fatalf("backupSyncFailure(%v, %v) = %v, want it to wrap %v", tt.err, tt.prune, got, tt.wantIsErr)
+			}
+			if tt.wantIsErr != nil && errors.Is(got, errNoBackupDestination) {
+				t.Fatalf("backupSyncFailure(%v, %v) = %v, must not report a missing destination", tt.err, tt.prune, got)
+			}
+		})
+	}
+}
+
+func TestBackupSyncWithPruneOutcomeText(t *testing.T) {
+	files := func(n int) *int { return &n }
+	bytes := func(n int64) *int64 { return &n }
+	tests := []struct {
+		name    string
+		outcome storage.BackupPruneOutcome
+		want    string
+	}{
+		{
+			name:    "unavailable with message",
+			outcome: storage.BackupPruneOutcome{Status: storage.BackupPruneUnavailable, Message: "Dolt did not return a prune summary"},
+			want:    "unavailable: Dolt did not return a prune summary",
+		},
+		{
+			name:    "unavailable without message or counts",
+			outcome: storage.BackupPruneOutcome{Status: storage.BackupPruneUnavailable},
+			want:    "unavailable",
+		},
+		{
+			name:    "pruned",
+			outcome: storage.BackupPruneOutcome{Status: storage.BackupPrunePruned, FilesDeleted: files(2), BytesReclaimed: bytes(471490)},
+			want:    "deleted 2 file(s), reclaimed 471490 bytes",
+		},
+		{
+			name: "partial lists every skip reason",
+			outcome: storage.BackupPruneOutcome{
+				Status: storage.BackupPrunePartial, FilesDeleted: files(1), BytesReclaimed: bytes(8),
+				Skipped: []string{"manifest lock was busy", "destination has a recent file"},
+			},
+			want: "deleted 1 file(s), reclaimed 8 bytes; skipped manifest lock was busy; skipped destination has a recent file",
+		},
+		{
+			name:    "counts missing falls back to status",
+			outcome: storage.BackupPruneOutcome{Status: storage.BackupPruneSkipped, FilesDeleted: files(0)},
+			want:    "skipped",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatBackupPruneOutcome(tt.outcome); got != tt.want {
+				t.Fatalf("formatBackupPruneOutcome(%+v) = %q, want %q", tt.outcome, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReportBackupSyncResultPruneOnlyWhenRequested pins the shared sync
+// renderer's contract for both routes: without --prune-with-grace-period the
+// JSON is exactly {synced, duration} (plus schema_version) and text mode prints
+// no "Prune outcome:" line; with it, the prune object and line appear.
+func TestReportBackupSyncResultPruneOnlyWhenRequested(t *testing.T) {
+	oldJSON := jsonOutput
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	t.Setenv("BD_JSON_ENVELOPE", "")
+
+	deleted := 1
+	outcome := storage.BackupPruneOutcome{Status: storage.BackupPrunePruned, FilesDeleted: &deleted}
+	for _, tt := range []struct {
+		name  string
+		json  bool
+		prune bool
+	}{
+		{name: "json without prune", json: true, prune: false},
+		{name: "json with prune", json: true, prune: true},
+		{name: "text without prune", json: false, prune: false},
+		{name: "text with prune", json: false, prune: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			jsonOutput = tt.json
+			out := captureStdout(t, func() error {
+				return reportBackupSyncResult(1500*time.Millisecond, tt.prune, outcome)
+			})
+
+			if !tt.json {
+				if !strings.Contains(out, "Backup synced in 1.5s") {
+					t.Fatalf("text output missing sync line: %q", out)
+				}
+				if got := strings.Contains(out, "Prune outcome:"); got != tt.prune {
+					t.Fatalf("text output has Prune outcome line = %v, want %v: %q", got, tt.prune, out)
+				}
+				return
+			}
+
+			var result map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("output is not a JSON object: %v\n%s", err, out)
+			}
+			delete(result, "schema_version")
+			want := []string{"duration", "synced"}
+			if tt.prune {
+				want = append(want, "prune")
+			}
+			if len(result) != len(want) {
+				t.Fatalf("JSON keys = %v, want exactly %v", result, want)
+			}
+			for _, key := range want {
+				if _, ok := result[key]; !ok {
+					t.Fatalf("JSON missing %q: %s", key, out)
+				}
+			}
+			if tt.prune {
+				var got storage.BackupPruneOutcome
+				if err := json.Unmarshal(result["prune"], &got); err != nil {
+					t.Fatalf("prune is not a BackupPruneOutcome: %v", err)
+				}
+				if got.Status != storage.BackupPrunePruned || got.FilesDeleted == nil || *got.FilesDeleted != 1 {
+					t.Fatalf("prune = %+v, want status pruned with 1 file deleted", got)
+				}
+			}
+		})
+	}
+}
+
+// TestBackupSyncWithPruneJSONCountPresence pins the documented --json contract
+// for prune counts: a skipped prune reports files_deleted and bytes_reclaimed
+// as 0, while an unavailable outcome omits both keys rather than claiming zero.
+func TestBackupSyncWithPruneJSONCountPresence(t *testing.T) {
+	oldJSON := jsonOutput
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	t.Setenv("BD_JSON_ENVELOPE", "")
+	jsonOutput = true
+
+	zeroFiles, zeroBytes := 0, int64(0)
+	for _, tt := range []struct {
+		name        string
+		outcome     storage.BackupPruneOutcome
+		wantPresent bool
+	}{
+		{
+			name: "skipped",
+			outcome: storage.BackupPruneOutcome{
+				Status:         storage.BackupPruneSkipped,
+				FilesDeleted:   &zeroFiles,
+				BytesReclaimed: &zeroBytes,
+				Skipped:        []string{"destination is busy"},
+			},
+			wantPresent: true,
+		},
+		{
+			name:        "unavailable",
+			outcome:     storage.BackupPruneOutcome{Status: storage.BackupPruneUnavailable, Message: "no summary"},
+			wantPresent: false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := captureStdout(t, func() error {
+				return reportBackupSyncResult(time.Second, true, tt.outcome)
+			})
+			var result map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("output is not a JSON object: %v\n%s", err, out)
+			}
+			var prune map[string]json.RawMessage
+			if err := json.Unmarshal(result["prune"], &prune); err != nil {
+				t.Fatalf("prune is not a JSON object: %v\n%s", err, out)
+			}
+			for _, key := range []string{"files_deleted", "bytes_reclaimed"} {
+				value, present := prune[key]
+				if present != tt.wantPresent {
+					t.Fatalf("prune.%s present = %v, want %v: %s", key, present, tt.wantPresent, out)
+				}
+				if present && string(value) != "0" {
+					t.Fatalf("prune.%s = %s, want 0: %s", key, value, out)
+				}
+			}
+		})
 	}
 }
 

@@ -2,12 +2,17 @@ package versioncontrolops
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	neturl "net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // ExportBackupName is the Dolt backup remote the auto-backup path registers
@@ -29,6 +34,86 @@ func BackupSync(ctx context.Context, db DBConn, name string) error {
 		return fmt.Errorf("sync backup %s: %w", name, err)
 	}
 	return nil
+}
+
+// BackupPruneOutputCapture scopes observation of Dolt's non-SQL prune summary
+// around the sync operation. Only the embedded adapter supplies one; SQL and
+// proxy connections cannot observe output produced inside the server process.
+type BackupPruneOutputCapture func(backupURL string, sync func() error) (storage.BackupPruneOutcome, error)
+
+// BackupRemoteURL returns the URL Dolt registered for a backup name. The
+// dolt_backups system table is the source of truth; workspace metadata can be
+// stale if saving the bd-side status file failed after registration.
+func BackupRemoteURL(ctx context.Context, db DBConn, name string) (string, error) {
+	var backupURL string
+	if err := db.QueryRowContext(ctx, "SELECT url FROM dolt_backups WHERE name = ?", name).Scan(&backupURL); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("%w: %s", storage.ErrBackupRemoteNotFound, name)
+		}
+		return "", fmt.Errorf("read backup remote %s: %w", name, err)
+	}
+	return backupURL, nil
+}
+
+// unavailableBackupPruneOutcome is the outcome on SQL-server and proxied
+// routes, where Dolt prints its prune summary on the server's stdout instead
+// of returning it over SQL.
+func unavailableBackupPruneOutcome() storage.BackupPruneOutcome {
+	return storage.BackupPruneOutcome{
+		Status: storage.BackupPruneUnavailable,
+		Message: "Dolt did not return a prune summary over SQL; best-effort pruning may have deleted files, " +
+			"skipped, failed, or found nothing to prune. Dolt prints the summary on the SQL server's output.",
+	}
+}
+
+// BackupSyncWithPrune syncs the named backup and asks Dolt to remove table
+// files that are unreferenced by the destination manifest and older than the
+// supplied grace period. Dolt itself skips pruning when the destination is
+// not quiescent.
+func BackupSyncWithPrune(ctx context.Context, db DBConn, name string, gracePeriod time.Duration) (storage.BackupPruneOutcome, error) {
+	return BackupSyncWithPruneUsingCapture(ctx, db, name, gracePeriod, nil)
+}
+
+// BackupSyncWithPruneUsingCapture syncs and prunes the named backup, using
+// capture only when the caller is the embedded Dolt adapter. Without a
+// capture, the storage result reports that Dolt's server-side summary was not
+// available through SQL.
+//
+// The destination registered in dolt_backups is read on the same connection
+// that runs the sync and must be a local file:// URL (isLocalFileURL, the
+// classification DirToFileURL's URLs satisfy); otherwise the error matches
+// storage.ErrBackupPruneRequiresFileDestination and names the destination without
+// credentials. On a sync error the outcome is zero: a failed sync has no
+// prune outcome to report.
+func BackupSyncWithPruneUsingCapture(ctx context.Context, db DBConn, name string, gracePeriod time.Duration, capture BackupPruneOutputCapture) (storage.BackupPruneOutcome, error) {
+	if gracePeriod < storage.MinBackupPruneGracePeriod {
+		return storage.BackupPruneOutcome{}, fmt.Errorf("prune grace period must be at least %s", storage.MinBackupPruneGracePeriod)
+	}
+	backupURL, err := BackupRemoteURL(ctx, db, name)
+	if err != nil {
+		return storage.BackupPruneOutcome{}, err
+	}
+	if !isLocalFileURL(backupURL) {
+		return storage.BackupPruneOutcome{}, fmt.Errorf("%w (configured destination: %s)",
+			storage.ErrBackupPruneRequiresFileDestination, redactedURL(backupURL))
+	}
+	sync := func() error {
+		_, err := db.ExecContext(ctx,
+			"CALL DOLT_BACKUP('sync', ?, '--prune-with-grace-period', ?)",
+			name, gracePeriod.String(),
+		)
+		return err
+	}
+	outcome := unavailableBackupPruneOutcome()
+	if capture != nil {
+		outcome, err = capture(backupURL, sync)
+	} else {
+		err = sync()
+	}
+	if err != nil {
+		return storage.BackupPruneOutcome{}, fmt.Errorf("sync backup %s with pruning: %w", name, err)
+	}
+	return outcome, nil
 }
 
 // BackupRemove removes a configured Dolt backup destination.

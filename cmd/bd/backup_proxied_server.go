@@ -195,13 +195,16 @@ func runBackupInitProxied(ctx context.Context, rawPath string) error {
 	return nil
 }
 
-// runBackupSyncProxied pushes the database to the configured destination.
-func runBackupSyncProxied(ctx context.Context) error {
+// runBackupSyncProxied pushes the database to the configured destination and,
+// when prune is set, asks Dolt to prune it with gracePeriod (already validated
+// by the caller).
+func runBackupSyncProxied(ctx context.Context, gracePeriod time.Duration, prune bool) error {
 	if err := requireLocalProxiedBackup("backup sync"); err != nil {
 		return err
 	}
 
 	start := time.Now()
+	var pruneOutcome storage.BackupPruneOutcome
 	err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		if err := commitWorkingSetBeforeBackup(ctx, conn); err != nil {
 			// Same posture as the direct path: a failed pre-backup commit
@@ -209,13 +212,18 @@ func runBackupSyncProxied(ctx context.Context) error {
 			// saying out loud and is not worth refusing to back up over.
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
 		}
+		if prune {
+			// Reads and validates the registered destination on this same
+			// connection before syncing; a non-file destination is refused
+			// with ErrBackupPruneRequiresFileDestination.
+			var err error
+			pruneOutcome, err = versioncontrolops.BackupSyncWithPrune(ctx, conn, proxiedBackupTargetName, gracePeriod)
+			return err
+		}
 		return versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName)
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "no backup") || strings.Contains(err.Error(), "not found") {
-			return HandleErrorRespectJSON("no backup destination configured. Run 'bd backup init <path>' first")
-		}
-		return HandleErrorRespectJSON("backup sync failed: %v", err)
+		return HandleErrorRespectJSON("%v", backupSyncFailure(err, prune))
 	}
 
 	elapsed := time.Since(start)
@@ -223,14 +231,7 @@ func runBackupSyncProxied(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "Warning: backup synced but failed to update state: %v\n", err)
 	}
 
-	if jsonOutput {
-		return outputJSON(map[string]interface{}{
-			"synced":   true,
-			"duration": elapsed.String(),
-		})
-	}
-	fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
-	return nil
+	return reportBackupSyncResult(elapsed, prune, pruneOutcome)
 }
 
 // commitWorkingSetBeforeBackup is the proxied twin of the direct path's

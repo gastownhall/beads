@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // bdBackup runs "bd backup" with extra args. Returns combined output.
@@ -42,6 +43,20 @@ func bdBackupFail(t *testing.T, bd, dir string, args ...string) string {
 		t.Fatalf("bd backup %s should have failed, got: %s", strings.Join(args, " "), out)
 	}
 	return string(out)
+}
+
+func ageBackupDestinationEntries(t *testing.T, dir string, age time.Duration) {
+	t.Helper()
+	modified := time.Now().Add(-age)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if err := os.Chtimes(filepath.Join(dir, entry.Name()), modified, modified); err != nil {
+			t.Fatalf("age backup entry %s: %v", entry.Name(), err)
+		}
+	}
 }
 
 func TestEmbeddedBackup(t *testing.T) {
@@ -118,6 +133,83 @@ func TestEmbeddedBackup(t *testing.T) {
 		}
 	})
 
+	t.Run("sync_prunes_aged_orphan_and_backup_restores", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkprune")
+		before := bdCreateSilent(t, bd, dir, "issue present before pruning")
+
+		backupDest := filepath.Join(t.TempDir(), "dolt-backup-prune")
+		backupURL := "file://" + backupDest
+		bdBackup(t, bd, dir, "init", backupURL)
+		bdBackup(t, bd, dir, "sync")
+
+		// Model the table file left behind when a sync is interrupted before
+		// its manifest commit. Dolt's pruner removes it only after the whole
+		// destination has been quiet for the requested grace period.
+		orphan := filepath.Join(backupDest, "00000000000000000000000000000001")
+		if err := os.WriteFile(orphan, []byte("orphaned table file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ageBackupDestinationEntries(t, backupDest, 20*time.Minute)
+
+		out := bdBackup(t, bd, dir, "sync", "--json", "--prune-with-grace-period", "10m")
+		var firstPrune struct {
+			Synced bool `json:"synced"`
+			Prune  struct {
+				Status         string   `json:"status"`
+				FilesDeleted   int      `json:"files_deleted"`
+				BytesReclaimed int64    `json:"bytes_reclaimed"`
+				Skipped        []string `json:"skipped"`
+			} `json:"prune"`
+		}
+		if err := json.Unmarshal([]byte(out), &firstPrune); err != nil {
+			t.Fatalf("parse pruned sync JSON: %v\nstdout: %s", err, out)
+		}
+		if !firstPrune.Synced || (firstPrune.Prune.Status != "pruned" && firstPrune.Prune.Status != "partial") || firstPrune.Prune.FilesDeleted != 1 || firstPrune.Prune.BytesReclaimed <= 0 {
+			t.Fatalf("pruned sync result = %+v, want successful sync and one deleted orphan", firstPrune)
+		}
+		if firstPrune.Prune.Status == "partial" && len(firstPrune.Prune.Skipped) == 0 {
+			t.Fatalf("partial prune result = %+v, want skip reasons", firstPrune.Prune)
+		}
+		if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+			t.Fatalf("pruned sync left the orphan in place; stat error: %v", err)
+		}
+
+		recentOrphan := filepath.Join(backupDest, "00000000000000000000000000000002")
+		if err := os.WriteFile(recentOrphan, []byte("recent orphaned table file"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out = bdBackup(t, bd, dir, "sync", "--json", "--prune-with-grace-period", "10m")
+		var recentPrune struct {
+			Synced bool `json:"synced"`
+			Prune  struct {
+				Status  string   `json:"status"`
+				Skipped []string `json:"skipped"`
+			} `json:"prune"`
+		}
+		if err := json.Unmarshal([]byte(out), &recentPrune); err != nil {
+			t.Fatalf("parse recent-file prune JSON: %v\nstdout: %s", err, out)
+		}
+		if !recentPrune.Synced || recentPrune.Prune.Status != "skipped" || len(recentPrune.Prune.Skipped) == 0 {
+			t.Fatalf("recent-file prune result = %+v, want successful sync with a reported skip", recentPrune)
+		}
+		if _, err := os.Stat(recentOrphan); err != nil {
+			t.Fatalf("pruned sync removed a recent destination file; stat error: %v", err)
+		}
+
+		// The human (non-JSON) output renders the same structured outcome.
+		out = bdBackup(t, bd, dir, "sync", "--prune-with-grace-period", "10m")
+		if !strings.Contains(out, "Prune outcome: deleted 0 file(s), reclaimed 0 bytes; skipped ") {
+			t.Fatalf("text-mode prune output = %q, want the skipped summary line", out)
+		}
+
+		after := bdCreateSilent(t, bd, dir, "issue created after pruned backup")
+		bdBackup(t, bd, dir, "restore", backupDest, "--force")
+		if got := bdShow(t, bd, dir, before); got.Title != "issue present before pruning" {
+			t.Fatalf("restored backup lost its issue: %+v", got)
+		}
+		bdShowFail(t, bd, dir, after)
+	})
+
 	t.Run("sync_without_init", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "bksync0")
 
@@ -125,6 +217,60 @@ func TestEmbeddedBackup(t *testing.T) {
 		if !strings.Contains(out, "no backup") && !strings.Contains(out, "not found") &&
 			!strings.Contains(out, "No backup") {
 			t.Errorf("expected backup-not-configured error, got: %s", out)
+		}
+	})
+
+	t.Run("sync_prune_without_init", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkprune0")
+
+		out := bdBackupFail(t, bd, dir, "sync", "--prune-with-grace-period", "10m")
+		if !strings.Contains(out, "no backup destination configured") {
+			t.Errorf("expected backup-not-configured error, got: %s", out)
+		}
+	})
+
+	t.Run("sync_prune_rejects_non_file_destination", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "bkprunehttps")
+		bdBackup(t, bd, dir, "init", "https://example.invalid/beads")
+
+		const refusal = "grace-period pruning supports only local file:// backup destinations"
+		out := bdBackupFail(t, bd, dir, "sync", "--prune-with-grace-period", "10m")
+		if !strings.Contains(out, refusal) {
+			t.Fatalf("expected file-destination refusal, got: %s", out)
+		}
+		for _, wrong := range []string{"backup sync failed", "no backup destination configured"} {
+			if strings.Contains(out, wrong) {
+				t.Fatalf("file-destination refusal was reported as %q: %s", wrong, out)
+			}
+		}
+
+		cmd := exec.Command(bd, "backup", "sync", "--json", "--prune-with-grace-period", "10m")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err == nil {
+			t.Fatalf("bd backup sync --json --prune-with-grace-period should have failed, got: %s", stdout.String())
+		}
+		// The error object may sit inside the schema envelope, so check the
+		// document is JSON and carries the refusal rather than pinning a shape.
+		if !json.Valid(stdout.Bytes()) || !strings.Contains(stdout.String(), refusal) {
+			t.Fatalf("want a JSON error with the file-destination refusal on stdout\nstdout:\n%s\nstderr:\n%s",
+				stdout.String(), stderr.String())
+		}
+
+		// The refusal happens before any sync, so no sync was recorded.
+		statusOut := bdBackup(t, bd, dir, "status", "--json")
+		var status struct {
+			Dolt map[string]interface{} `json:"dolt"`
+		}
+		if err := json.Unmarshal([]byte(statusOut), &status); err != nil {
+			t.Fatalf("parse backup status JSON: %v\noutput: %s", err, statusOut)
+		}
+		if status.Dolt["configured"] != true {
+			t.Fatalf("backup status lost the registered destination: %s", statusOut)
+		}
+		if _, synced := status.Dolt["last_sync"]; synced {
+			t.Fatalf("refused prune recorded a sync: %s", statusOut)
 		}
 	})
 

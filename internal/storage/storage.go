@@ -1123,6 +1123,78 @@ type BackupStore interface {
 	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 
+// MinBackupPruneGracePeriod is the smallest grace period Dolt accepts for
+// pruning a file:// backup destination. It mirrors Dolt's
+// cli.BackupPruneMinGracePeriod, which this package cannot import; a
+// cgo-tagged test in versioncontrolops pins the two together.
+const MinBackupPruneGracePeriod = 10 * time.Minute
+
+// ErrBackupRemoteNotFound reports a missing row in Dolt's registered backup
+// remotes, so callers can tell an unconfigured destination from an error
+// reading Dolt's backup registry. PrunableBackupStore implementations return
+// errors matching it (errors.Is).
+var ErrBackupRemoteNotFound = errors.New("backup remote not found")
+
+// ErrBackupPruneRequiresFileDestination reports that the registered backup
+// destination is not a local file:// URL, the only kind Dolt's grace-period
+// prune supports. PrunableBackupStore implementations return errors matching
+// it (errors.Is) before issuing any sync.
+var ErrBackupPruneRequiresFileDestination = errors.New("grace-period pruning supports only local file:// backup destinations")
+
+// BackupPruneStatus is the machine-readable prune result that
+// `bd backup sync --prune-with-grace-period --json` emits as prune.status.
+type BackupPruneStatus string
+
+const (
+	// BackupPrunePruned means Dolt reported its prune summary and skipped
+	// nothing. Dolt prints a summary only when it deleted or skipped
+	// something, so FilesDeleted is at least 1 in practice: a no-op prune
+	// prints no summary and is reported as BackupPruneUnavailable.
+	BackupPrunePruned BackupPruneStatus = "pruned"
+	// BackupPrunePartial means Dolt deleted at least one file and also
+	// reported one or more skip reasons.
+	BackupPrunePartial BackupPruneStatus = "partial"
+	// BackupPruneSkipped means Dolt deleted nothing and reported why, for
+	// example because a destination file is newer than the grace period.
+	BackupPruneSkipped BackupPruneStatus = "skipped"
+	// BackupPruneUnavailable means bd could not observe a prune summary. It
+	// does not distinguish "nothing to prune" from "pruning failed"; Message
+	// explains why the summary was not observed.
+	BackupPruneUnavailable BackupPruneStatus = "unavailable"
+)
+
+// BackupPruneOutcome reports the prune details that Dolt exposes for a backup
+// sync. A prune problem never fails the sync, so an outcome is only meaningful
+// alongside a successful sync.
+//
+// FilesDeleted and BytesReclaimed are set only for pruned, partial and skipped
+// outcomes, which require Dolt's summary line. They are omitted whenever the
+// status is unavailable: on SQL-server and proxied routes, where Dolt writes
+// the summary to server stdout instead of returning it over SQL; in embedded
+// mode when Dolt prints no summary, which it does for a no-op prune (nothing
+// deleted, nothing skipped) and for a prune error (logged, not printed); and
+// when the summary has an unrecognized format.
+type BackupPruneOutcome struct {
+	Status         BackupPruneStatus `json:"status"`
+	FilesDeleted   *int              `json:"files_deleted,omitempty"`
+	BytesReclaimed *int64            `json:"bytes_reclaimed,omitempty"`
+	Skipped        []string          `json:"skipped,omitempty"`
+	Message        string            `json:"message,omitempty"`
+}
+
+// PrunableBackupStore supports Dolt's grace-period pruning for local file://
+// backup destinations. It is separate from BackupStore so callers that do not
+// offer this opt-in operation can keep the ordinary sync contract unchanged.
+//
+// Implementations reject a grace period below MinBackupPruneGracePeriod,
+// read the registered destination, and reject any destination that is not a
+// local file:// URL with an error matching ErrBackupPruneRequiresFileDestination
+// (errors.Is) before issuing the sync. A missing destination matches
+// ErrBackupRemoteNotFound.
+type PrunableBackupStore interface {
+	BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (BackupPruneOutcome, error)
+}
+
 // ReadyWorkCounter sizes the total ready-work count for a filter without
 // materializing the counts mega-query. It is identical to
 // len(GetReadyWorkWithCounts(filter with Limit=0)) but computed with cheap

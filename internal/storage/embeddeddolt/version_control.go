@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -806,6 +807,29 @@ func (s *EmbeddedDoltStore) BackupSync(ctx context.Context, name string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.BackupSync(ctx, db, name)
 	})
+}
+
+// BackupSyncWithPrune implements storage.PrunableBackupStore: it syncs the
+// named file:// backup destination and asks Dolt to prune orphan table files
+// older than gracePeriod. A destination that is not a local file:// URL is
+// refused with storage.ErrBackupPruneRequiresFileDestination before any sync.
+//
+// Unlike the SQL-server and proxied routes, which always report
+// storage.BackupPruneUnavailable, this is the one route that can observe
+// Dolt's prune summary and return a pruned, partial or skipped outcome with
+// counts. It does so through versioncontrolops.CaptureDoltPruneOutput, which
+// swaps the process-global cli.CliOut for the duration of the sync. That is
+// safe only because bd calls this method under the cross-process backup lock
+// from a single short-lived command, where no other Dolt CLI output is
+// expected; any new caller must preserve that invariant.
+func (s *EmbeddedDoltStore) BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (storage.BackupPruneOutcome, error) {
+	var outcome storage.BackupPruneOutcome
+	err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		outcome, err = versioncontrolops.BackupSyncWithPruneUsingCapture(ctx, db, name, gracePeriod, versioncontrolops.CaptureDoltPruneOutput)
+		return err
+	})
+	return outcome, err
 }
 
 func (s *EmbeddedDoltStore) BackupRemove(ctx context.Context, name string) error {

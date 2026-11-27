@@ -38,8 +38,16 @@ func effectiveSizeCapMB() int {
 // backup destination fails "not a valid dolt repository" because there is
 // no .dolt for the CLI to find). Absent a cap, the destination can only
 // grow forever until disk fills (ga-y6gjv, the 2026-06-19 outage: 43GB
-// backup dir from a 1.7GB store). formatBytes is shared with
-// runCompactDolt (compact.go); getDirSize is defined below.
+// backup dir from a 1.7GB store).
+//
+// `bd backup sync --prune-with-grace-period` does not change this. Dolt's
+// grace-period prune deletes only table files the destination manifest no
+// longer references (orphans from interrupted syncs); it does not reclaim
+// unreachable chunks inside files the manifest still references, which is
+// how normal backup growth accumulates. Keep this cap even if automatic
+// backups ever opt into that prune: it is not a replacement for the cap.
+// formatBytes is shared with runCompactDolt (compact.go); getDirSize is
+// defined below.
 func backupSizeCapExceeded(dir string) (exceeded bool, size int64, err error) {
 	capMB := effectiveSizeCapMB()
 	if capMB == 0 {
