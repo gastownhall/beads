@@ -49,6 +49,12 @@ type Tracker struct {
 	// configured project's web_url, or "" when it could not be learned. It is
 	// only compared with refs, never sent a request.
 	webBase string
+	// initProject is what Init's read of the configured project returned,
+	// and initProjectErr why it failed; initProjectRead says Init sent it.
+	// ProjectScope starts from them, so a run reads the project once.
+	initProject     *Project
+	initProjectErr  error
+	initProjectRead bool
 }
 
 func (t *Tracker) Name() string         { return "gitlab" }
@@ -118,10 +124,12 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 // refs under gitlab.url only, as before.
 func (t *Tracker) readProject(ctx context.Context) error {
 	t.webBase = ""
+	t.initProject, t.initProjectErr, t.initProjectRead = nil, nil, false
 	if t.client.ProjectID == "" {
 		return nil
 	}
 	project, err := t.client.GetProject(ctx)
+	t.initProject, t.initProjectErr, t.initProjectRead = project, err, true
 	if err != nil {
 		if IsNotFound(err) {
 			return nil

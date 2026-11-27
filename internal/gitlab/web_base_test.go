@@ -325,3 +325,42 @@ func TestMatchKeyAndLocalIdentityKeyUnderWebBase(t *testing.T) {
 		t.Errorf("LocalIdentityKey(%s at %s) = %q, want gitlab:42:7", bead.SourceSystem, link, got)
 	}
 }
+
+// TestProjectScopeUnderGitLabURLAndWebBase pins AC-6 in this package: with a
+// learned web address, the configured project's refs under gitlab.url and
+// under that address are in the scope, another project or instance is not,
+// and the run reads the project once, in Init, whether the project is
+// configured by path or only by ID.
+func TestProjectScopeUnderGitLabURLAndWebBase(t *testing.T) {
+	for _, projectPath := range []string{"g/p", ""} {
+		t.Run("project_path="+projectPath, func(t *testing.T) {
+			stub := newGitLabStub(t)
+			stub.projectJSON = `{"id":42,"path_with_namespace":"g/p","web_url":"https://git.example.org/g/p"}`
+			tr, err := initStubTracker(t, stub, projectPath, nil)
+			if err != nil {
+				t.Fatalf("Init: %v", err)
+			}
+			scope := tr.ProjectScope()
+			for _, tc := range []struct {
+				ref  string
+				want bool
+			}{
+				{stub.srv.URL + "/g/p/-/issues/1", true},
+				{"https://git.example.org/g/p/-/issues/2", true},
+				{"https://git.example.org/other/q/-/issues/3", false},
+				{"https://tracker.example.net/g/p/-/issues/4", false},
+			} {
+				ref := tc.ref
+				if got := scope.Contains(context.Background(), &types.Issue{ID: "bd-x", ExternalRef: &ref}); got != tc.want {
+					t.Errorf("Contains(%q) = %v, want %v", ref, got, tc.want)
+				}
+			}
+			if err := scope.Err(); err != nil {
+				t.Errorf("scope.Err() = %v", err)
+			}
+			if gets, _ := stub.counts(); gets != 1 {
+				t.Errorf("GET /projects/42 requested %d times in the run, want 1", gets)
+			}
+		})
+	}
+}
