@@ -164,6 +164,45 @@ func TestProxiedServerReclaim(t *testing.T) {
 		t.Fatalf("claim did not create a lease row for %s; cannot test reclaim", issue.ID)
 	}
 
+	// A preview runs first and must leave the lease and the claim exactly as
+	// they are, so the real sweep below still finds the row.
+	t.Run("dry_run_changes_nothing", func(t *testing.T) {
+		out, err := bdProxiedRun(t, bd, p.dir, "reclaim", "--dry-run", "--older-than", "0s", "--json")
+		if err != nil {
+			t.Fatalf("reclaim --dry-run: %v\n%s", err, out)
+		}
+		var got struct {
+			Count     int   `json:"count"`
+			DryRun    *bool `json:"dry_run"`
+			Reclaimed []struct {
+				ID       string `json:"id"`
+				Revision string `json:"revision"`
+			} `json:"reclaimed"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if got.DryRun == nil || !*got.DryRun {
+			t.Fatalf("dry run answered %s, want dry_run true", out)
+		}
+		var found bool
+		for _, r := range got.Reclaimed {
+			if r.ID == issue.ID {
+				found = true
+				if r.Revision != "" {
+					t.Errorf("previewed %s carries revision %q, want none", issue.ID, r.Revision)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("expected %s in the previewed set, got %+v", issue.ID, got.Reclaimed)
+		}
+		iss := bdProxiedShow(t, bd, p.dir, issue.ID)
+		if iss.Status != types.StatusInProgress || iss.Assignee == "" {
+			t.Errorf("after a dry run %s is status=%s assignee=%q, want it still held and in_progress", issue.ID, iss.Status, iss.Assignee)
+		}
+	})
+
 	t.Run("reclaims_stale_lease", func(t *testing.T) {
 		out, err := bdProxiedRun(t, bd, p.dir, "reclaim", "--older-than", "0s", "--json")
 		if err != nil {

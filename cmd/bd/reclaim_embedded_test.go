@@ -131,3 +131,161 @@ func TestEmbeddedReclaimRunsTheLeaseReclaimerRole(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// TestEmbeddedReclaimDryRunChangesNothing drives `bd reclaim --dry-run` on the
+// direct route: it names the stale row the real sweep then reverts, in --json
+// with dry_run true and no revision, it is allowed on a read-only workspace
+// where the real sweep is refused, and it leaves the issue in_progress with its
+// assignee, writes no version commit and fires no on_update. The real sweep
+// that follows reverts the same row and adds the one commit and the one hook
+// the preview did not.
+func TestEmbeddedReclaimDryRunChangesNothing(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "rd")
+
+	hookLog := filepath.Join(t.TempDir(), "on_update.log")
+	hooksDir := filepath.Join(beadsDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	script := "#!/bin/sh\necho \"$1\" >> " + hookLog + "\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "on_update"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: a hook must be executable to run at all
+		t.Fatalf("plant on_update: %v", err)
+	}
+
+	stale := bdCreate(t, bd, dir, "Stale lease", "--type", "task")
+	bdUpdate(t, bd, dir, stale.ID, "--claim")
+
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(), "UPDATE leases SET lease_expires_at = ? WHERE issue_id = ?",
+		time.Now().UTC().Add(-time.Hour), stale.ID); err != nil {
+		_ = cleanup()
+		t.Fatalf("age the lease: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("close the aging connection: %v", err)
+	}
+	countRows := func(query string, args ...any) int {
+		t.Helper()
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer func() { _ = cleanup() }()
+		var n int
+		if err := db.QueryRowContext(t.Context(), query, args...).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		return n
+	}
+	commits := func() int {
+		return countRows("SELECT COUNT(*) FROM dolt_log WHERE message LIKE 'bd: reclaim%'")
+	}
+	leases := func() int { return countRows("SELECT COUNT(*) FROM leases WHERE issue_id = ?", stale.ID) }
+	events := func() int {
+		return countRows("SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", stale.ID, string(types.EventLeaseReclaimed))
+	}
+	before := commits()
+
+	// The preview is allowed where the sweep is refused: --readonly stops the
+	// real run outright and lets the preview through.
+	if out, err := bdRunWithFlockRetry(t, bd, dir, "--readonly", "reclaim", "--older-than", "0s", "--id", stale.ID); err == nil {
+		t.Fatalf("a real reclaim ran under --readonly:\n%s", out)
+	}
+	out, err := bdRunWithFlockRetry(t, bd, dir, "--readonly", "reclaim", "--dry-run", "--older-than", "0s", "--json", "--id", stale.ID)
+	if err != nil {
+		t.Fatalf("bd --readonly reclaim --dry-run: %v\n%s", err, out)
+	}
+	var got struct {
+		Count     int                    `json:"count"`
+		DryRun    *bool                  `json:"dry_run"`
+		Reclaimed []types.ReclaimedLease `json:"reclaimed"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if got.DryRun == nil || !*got.DryRun || got.Count != 1 || len(got.Reclaimed) != 1 || got.Reclaimed[0].ID != stale.ID {
+		t.Fatalf("dry run answered %s, want dry_run true naming exactly %s", out, stale.ID)
+	}
+	if got.Reclaimed[0].Revision != "" {
+		t.Fatalf("dry run row carries revision %q, want none", got.Reclaimed[0].Revision)
+	}
+
+	// The text form's headline.
+	text, err := bdRunWithFlockRetry(t, bd, dir, "reclaim", "--dry-run", "--older-than", "0s", "--id", stale.ID)
+	if err != nil {
+		t.Fatalf("bd reclaim --dry-run: %v\n%s", err, text)
+	}
+	if !strings.Contains(string(text), "Would reclaim 1 stale-lease issue(s):") || !strings.Contains(string(text), stale.ID) {
+		t.Fatalf("dry run text = %q, want the Would reclaim headline naming %s", text, stale.ID)
+	}
+
+	if iss := bdShow(t, bd, dir, stale.ID); iss.Status != types.StatusInProgress || iss.Assignee == "" {
+		t.Fatalf("%s after two dry runs: status=%s assignee=%q, want it still held and in_progress", stale.ID, iss.Status, iss.Assignee)
+	}
+	if n := leases(); n != 1 {
+		t.Fatalf("lease rows after dry runs = %d, want 1", n)
+	}
+	if n := events(); n != 0 {
+		t.Fatalf("lease_reclaimed events after dry runs = %d, want 0", n)
+	}
+	if after := commits(); after != before {
+		t.Fatalf("reclaim version commits %d -> %d across dry runs, want none", before, after)
+	}
+
+	// The real sweep with the same flags then reverts the row the preview named.
+	out, err = bdRunWithFlockRetry(t, bd, dir, "reclaim", "--older-than", "0s", "--json", "--id", stale.ID)
+	if err != nil {
+		t.Fatalf("bd reclaim: %v\n%s", err, out)
+	}
+	var swept struct {
+		DryRun    *bool                  `json:"dry_run"`
+		Reclaimed []types.ReclaimedLease `json:"reclaimed"`
+	}
+	if err := json.Unmarshal(out, &swept); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if swept.DryRun == nil || *swept.DryRun || len(swept.Reclaimed) != 1 || swept.Reclaimed[0].ID != stale.ID || swept.Reclaimed[0].Revision == "" {
+		t.Fatalf("real sweep answered %s, want dry_run false and %s reverted with a revision", out, stale.ID)
+	}
+	if after := commits(); after != before+1 {
+		t.Fatalf("reclaim version commits %d -> %d, want exactly one more from the real sweep", before, after)
+	}
+	if iss := bdShow(t, bd, dir, stale.ID); iss.Status != types.StatusOpen || iss.Assignee != "" {
+		t.Fatalf("%s after the real sweep: status=%s assignee=%q, want open and unassigned", stale.ID, iss.Status, iss.Assignee)
+	}
+
+	// The claim fired on_update once for the row and the real sweep once more;
+	// had a dry run fired it, there would be more.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		data, _ := os.ReadFile(hookLog) // #nosec G304 -- this test's own temp file
+		fired := 0
+		for _, line := range strings.Fields(string(data)) {
+			if line == stale.ID {
+				fired++
+			}
+		}
+		if fired == 2 {
+			break
+		}
+		if fired > 2 || time.Now().After(deadline) {
+			t.Fatalf("on_update fired %d time(s) for %s, want 2 (claim, real sweep)", fired, stale.ID)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

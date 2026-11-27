@@ -477,6 +477,155 @@ func RunLeaseReclaimerDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Co
 	}
 }
 
+// RunLeaseReclaimerDryRunNamesTheRowsAndChangesNothing pins
+// ReclaimRequest.DryRun: a preview names exactly the rows the real sweep then
+// reverts, echoes DryRun, mints no revision, and leaves the world as it found
+// it. The lease rows, the assignee, the status, the row's own revision, the
+// recovery events and the version-control log are all read RAW afterwards, and
+// the same request without DryRun then reverts those rows.
+func RunLeaseReclaimerDryRunNamesTheRowsAndChangesNothing(t *testing.T, ctx context.Context, fixture LeaseReclaimerFixture) {
+	t.Helper()
+	requireLeaseReclaimerExec(t, fixture)
+	first := fixture.IssuePrefix + "-dry-a"
+	second := fixture.IssuePrefix + "-dry-b"
+	live := fixture.IssuePrefix + "-dry-live"
+	leaseReclaimerSeedStale(t, ctx, fixture, leaseReclaimerHolder, first, second)
+	leaseReclaimerSeedClaimed(t, ctx, fixture, leaseReclaimerHolder, live)
+	ids := []string{first, second, live}
+	locks := map[string]int64{}
+	for _, id := range ids {
+		locks[id] = leaseReclaimerScalar[int64](t, ctx, fixture, "SELECT row_lock FROM issues WHERE id = ?", id)
+	}
+	commitsBefore, commitsKnown := leaseReclaimerCommitCount(ctx, fixture)
+
+	request := publicops.ReclaimRequest{
+		Actor:  leaseReclaimerReaper,
+		Filter: publicops.ReclaimFilter{IDs: ids},
+		DryRun: true,
+	}
+	preview := leaseReclaim(t, ctx, fixture, request)
+	if !preview.DryRun {
+		t.Fatal("a dry run answered DryRun = false; the result must echo the request")
+	}
+	if got := leaseReclaimerIDs(preview); !slices.Equal(got, []string{first, second}) {
+		t.Fatalf("dry run Reclaimed = %v, want [%s %s]: the stale rows and not the live one", got, first, second)
+	}
+	for _, row := range preview.Reclaimed {
+		if row.PreviousOwner != leaseReclaimerHolder {
+			t.Fatalf("dry run row %+v: PreviousOwner is not %s", row, leaseReclaimerHolder)
+		}
+		if row.Revision != "" {
+			t.Fatalf("dry run row %+v carries a revision, but nothing was reverted to mint one", row)
+		}
+	}
+
+	for _, id := range ids {
+		leaseReclaimerRequireHeld(t, ctx, fixture, id)
+		if owner := leaseReclaimerScalar[string](t, ctx, fixture, "SELECT COALESCE(assignee, '') FROM issues WHERE id = ?", id); owner != leaseReclaimerHolder {
+			t.Fatalf("%s assignee after a dry run = %q, want %q", id, owner, leaseReclaimerHolder)
+		}
+		if leases := leaseReclaimerScalar[int](t, ctx, fixture, "SELECT COUNT(*) FROM leases WHERE issue_id = ?", id); leases != 1 {
+			t.Fatalf("%s lease rows after a dry run = %d, want its 1 lease row untouched", id, leases)
+		}
+		if lock := leaseReclaimerScalar[int64](t, ctx, fixture, "SELECT row_lock FROM issues WHERE id = ?", id); lock != locks[id] {
+			t.Fatalf("%s row_lock moved from %d to %d across a dry run", id, locks[id], lock)
+		}
+		if n := leaseReclaimerScalar[int](t, ctx, fixture,
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", id, string(types.EventLeaseReclaimed)); n != 0 {
+			t.Fatalf("%s has %d lease_reclaimed event(s) after a dry run, want none", id, n)
+		}
+	}
+	if commitsKnown {
+		if after, _ := leaseReclaimerCommitCount(ctx, fixture); after != commitsBefore {
+			t.Fatalf("version-control commits for reclaim went %d -> %d across a dry run, want no new entry", commitsBefore, after)
+		}
+	}
+
+	// The same request, no longer a preview, reverts exactly the rows the
+	// preview named.
+	request.DryRun = false
+	result := leaseReclaim(t, ctx, fixture, request)
+	if result.DryRun {
+		t.Fatal("a real sweep answered DryRun = true")
+	}
+	if got, want := leaseReclaimerIDs(result), leaseReclaimerIDs(preview); !slices.Equal(got, want) {
+		t.Fatalf("the real sweep reverted %v, but the dry run named %v", got, want)
+	}
+	for _, row := range result.Reclaimed {
+		if row.Revision == "" {
+			t.Fatalf("real sweep row %+v carries no revision", row)
+		}
+	}
+	for _, id := range []string{first, second} {
+		if status := leaseReclaimerScalar[string](t, ctx, fixture, "SELECT status FROM issues WHERE id = ?", id); status != string(types.StatusOpen) {
+			t.Fatalf("%s status after the real sweep = %q, want %q", id, status, types.StatusOpen)
+		}
+	}
+	leaseReclaimerRequireHeld(t, ctx, fixture, live)
+}
+
+// RunLeaseReclaimerDryRunRefusesWhereTheSweepRefuses pins the last sentence of
+// the Reclaim doc: a dry run is validated exactly as the real sweep is, so a
+// caller that got a clean preview has learned the real run will not be
+// refused for its shape.
+func RunLeaseReclaimerDryRunRefusesWhereTheSweepRefuses(t *testing.T, ctx context.Context, fixture LeaseReclaimerFixture) {
+	t.Helper()
+	requireLeaseReclaimerExec(t, fixture)
+	id := fixture.IssuePrefix + "-dry-refuse"
+	leaseReclaimerSeedStale(t, ctx, fixture, leaseReclaimerHolder, id)
+	for _, test := range []struct {
+		name    string
+		request publicops.ReclaimRequest
+	}{
+		{"blank actor", publicops.ReclaimRequest{Actor: "  ", Filter: publicops.ReclaimFilter{IDs: []string{id}}, DryRun: true}},
+		{"negative older_than", publicops.ReclaimRequest{Actor: leaseReclaimerReaper, OlderThan: -time.Second, Filter: publicops.ReclaimFilter{IDs: []string{id}}, DryRun: true}},
+	} {
+		if _, err := fixture.LeaseReclaimer.Reclaim(ctx, test.request); !errors.Is(err, publicops.ErrValidation) {
+			t.Fatalf("dry run with a %s: err = %v, want ErrValidation", test.name, err)
+		}
+	}
+	leaseReclaimerRequireHeld(t, ctx, fixture, id)
+}
+
+// RunLeaseReclaimerDryRunFiresNoHook pins the hook sentence of the role's doc
+// ("a request with DryRun set ... fires no hook"): the rows a preview names
+// are still leased and assigned, so an on_update for them would announce a
+// change that never happened.
+func RunLeaseReclaimerDryRunFiresNoHook(t *testing.T, ctx context.Context, fixture LeaseReclaimerFixture) {
+	t.Helper()
+	requireLeaseReclaimerExec(t, fixture)
+	if fixture.HookedLeaseReclaimer == nil || fixture.FiredUpdates == nil {
+		t.Skip("LeaseReclaimerFixture.HookedLeaseReclaimer/FiredUpdates is nil: this backend cannot observe its hooks")
+	}
+	id := fixture.IssuePrefix + "-dry-hook"
+	leaseReclaimerSeedStale(t, ctx, fixture, leaseReclaimerHolder, id)
+	before, err := fixture.FiredUpdates(ctx)
+	if err != nil {
+		t.Fatalf("FiredUpdates before: %v", err)
+	}
+
+	result, err := fixture.HookedLeaseReclaimer.Reclaim(ctx, publicops.ReclaimRequest{
+		Actor:  leaseReclaimerReaper,
+		Filter: publicops.ReclaimFilter{IDs: []string{id}},
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("hooked dry-run Reclaim: %v", err)
+	}
+	if got := leaseReclaimerIDs(result); !slices.Equal(got, []string{id}) {
+		t.Fatalf("hooked dry run Reclaimed = %v, want [%s]", got, id)
+	}
+
+	after, err := fixture.FiredUpdates(ctx)
+	if err != nil {
+		t.Fatalf("FiredUpdates after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("a dry run fired on_update for %v, want no hook at all", after[len(before):])
+	}
+	leaseReclaimerRequireHeld(t, ctx, fixture, id)
+}
+
 // NewUpdateHookLog plants an on_update script that appends the id of every
 // issue it fires for, and returns the runner a hook-firing chain is built over
 // plus a reader for LeaseReclaimerFixture.FiredUpdates. The reader waits for
@@ -622,4 +771,16 @@ func leaseReclaimerScalar[T any](t *testing.T, ctx context.Context, fixture Leas
 		t.Fatalf("%s %v: %v", query, args, err)
 	}
 	return value
+}
+
+// leaseReclaimerCommitCount counts the version-control entries the reclaim
+// role records, read raw. The second answer is false where the backend has no
+// such log to read, so the assertion that uses it is skipped rather than
+// failed.
+func leaseReclaimerCommitCount(ctx context.Context, fixture LeaseReclaimerFixture) (int, bool) {
+	var n int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM dolt_log WHERE message LIKE 'bd: reclaim%'", nil, &n); err != nil {
+		return 0, false
+	}
+	return n, true
 }

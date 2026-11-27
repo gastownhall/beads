@@ -6213,6 +6213,11 @@ bd reclaim
     | is not robbed of live work. Run it from a supervisor on a timer with a window
     | of roughly 2× the claim TTL.
     |
+    | --dry-run lists the leases a sweep would revert and changes nothing: it applies
+    | the same grace window, scope filters and replica guard to the same snapshot, so
+    | the list is what a real run with the same flags would revert at that moment.
+    | Nothing is written, recorded or committed, and no hook fires.
+    |
     | By default reclaim covers every stale lease THIS replica granted. The scope
     | filters below narrow it further, using the same label surface claiming is
     | scoped by (--label / --label-any / --exclude-label), plus --assignee and --id.
@@ -6253,6 +6258,7 @@ bd reclaim
     |   bd reclaim                       # default grace window (2× the lease TTL)
     |   bd reclaim --older-than 10m      # reclaim leases expired >10m ago
     |   bd reclaim --older-than 0s       # reclaim every currently-expired lease
+    |   bd reclaim --dry-run             # list what a sweep would revert, change nothing
     |   bd reclaim --label lane-a        # only this machine's claim partition
     |   bd reclaim --label-any lane-a,lane-b --exclude-label pinned
     |   bd reclaim --assignee zelda --assignee epona   # only these workers' leases
@@ -6260,6 +6266,7 @@ bd reclaim
     |   bd reclaim --any-replica         # also reap leases granted by a departed replica
   flag --any-replica type=bool default="false" usage="Also reclaim leases granted by ANOTHER replica (unsafe unless that replica is gone; see 'Replicas and leases')"
   flag --assignee -a type=stringSlice default="[]" usage="Only reclaim leases held by these assignees (repeatable)"
+  flag --dry-run type=bool default="false" usage="List the leases a sweep would revert and change nothing"
   flag --exclude-label type=stringSlice default="[]" usage="Never reclaim issues carrying ANY of these labels"
   flag --id type=stringSlice default="[]" usage="Only reclaim these issue IDs (repeatable)"
   flag --label -l type=stringSlice default="[]" usage="Only reclaim issues with ALL these labels (AND). Can combine with --label-any"

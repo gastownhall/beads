@@ -26,6 +26,7 @@ const (
 	reclaimLabelsAnyMember     = "labels_any"
 	reclaimExcludeLabelsMember = "exclude_labels"
 	reclaimAnyReplicaMember    = "any_replica"
+	reclaimDryRunMember        = "dry_run"
 )
 
 // reclaimMembers is the whole vocabulary, in one place, so the unknown-member
@@ -40,6 +41,7 @@ var reclaimMembers = []string{
 	reclaimLabelsAnyMember,
 	reclaimExcludeLabelsMember,
 	reclaimAnyReplicaMember,
+	reclaimDryRunMember,
 }
 
 // maxReclaimOlderThanSeconds is the smallest grace window time.Duration can
@@ -191,6 +193,16 @@ func (s *Server) reclaimRequest(w http.ResponseWriter, r *http.Request) (issueop
 		request.Filter.AnyReplica = *value
 	}
 
+	if raw, ok := members[reclaimDryRunMember]; ok {
+		var value *bool
+		if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+			s.fail(w, r, InvalidArgument(reclaimDryRunMember, ReasonInvalidValue,
+				"`"+reclaimDryRunMember+"` must be a boolean"))
+			return issueops.ReclaimRequest{}, false
+		}
+		request.DryRun = *value
+	}
+
 	return request, true
 }
 
@@ -243,7 +255,7 @@ func (s *Server) failReclaimErr(w http.ResponseWriter, r *http.Request, err erro
 // apigen.ReclaimedLease IS types.ReclaimedLease (pinning.go), so this is a
 // copy rather than a field list; `reclaimed` is never null.
 func reclaimResponse(result issueops.ReclaimResult) apigen.ReclaimIssuesResult {
-	body := apigen.ReclaimIssuesResult{Reclaimed: []apigen.ReclaimedLease{}}
+	body := apigen.ReclaimIssuesResult{DryRun: result.DryRun, Reclaimed: []apigen.ReclaimedLease{}}
 	body.Reclaimed = append(body.Reclaimed, result.Reclaimed...)
 	return body
 }

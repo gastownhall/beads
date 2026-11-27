@@ -4951,6 +4951,16 @@ paths:
         reported.
 
 
+        `dry_run: true` answers which rows the sweep would revert and changes
+        nothing: no lease is deleted, no issue is touched, and no event or
+        history entry is recorded. The validation, the scope and the replica
+        guard are the real sweep's, applied to the same snapshot, so an entry
+        of `reclaimed` is a row the real sweep would have reverted at that
+        moment. No revision was minted, so each entry's `revision` is the
+        empty string. A preview is a forecast, not a reservation: a heartbeat
+        that lands afterwards still rescues its lease.
+
+
         Available when the server advertises the `issues.reclaim` capability.
       requestBody:
         required: true
@@ -4964,7 +4974,9 @@ paths:
         '200':
           description: >-
             The rows the sweep reverted, each with its former holder and its new
-            revision. An empty array (never null) when nothing was stale.
+            revision; under `dry_run`, the rows it would revert, each with an
+            empty `revision`. An empty array (never null) when nothing was
+            stale.
           content:
             application/json:
               schema:
@@ -9916,18 +9928,33 @@ components:
           description: >-
             Also revert leases another replica granted. The one member that
             WIDENS the sweep; see the operation. Absent means `false`.
+        dry_run:
+          type: boolean
+          default: false
+          description: >-
+            Report which leases the sweep would revert and change nothing. The
+            refusals, the scope and the replica guard are the same ones the
+            real sweep applies, computed against the same snapshot, and
+            nothing is recorded in history either. Absent means `false`.
 
     ReclaimIssuesResult:
       type: object
-      required: [reclaimed]
+      required: [dry_run, reclaimed]
       description: >-
-        Every row the sweep reverted, in the order the sweep found them.
+        Every row the sweep reverted, in the order the sweep found them; under
+        `dry_run`, every row it would revert.
       properties:
+        dry_run:
+          type: boolean
+          description: >-
+            Echoes the request, so a result carries whether its rows were
+            reverted or would be.
         reclaimed:
           type: array
           description: >-
-            One entry per reverted row. Empty array (never null) when nothing
-            was stale in scope.
+            One entry per reverted row (under `dry_run`, per row that would be
+            reverted, each with an empty `revision`). Empty array (never null)
+            when nothing was stale in scope.
           items:
             $ref: '#/components/schemas/ReclaimedLease'
 
@@ -9954,6 +9981,8 @@ components:
             The row's NEW revision, minted by the revert: the
             optimistic-concurrency token a guarded write after the reclaim
             needs. A decimal string, like every `revision` on this surface.
+            The empty string on a row a `dry_run` previewed: nothing was
+            reverted, so nothing was minted.
 
     SweepRequest:
       type: object

@@ -30,6 +30,13 @@ func (s *EmbeddedDoltStore) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
 // library caller) that have no such second step, so the role records its own
 // entry, and the funnel is what lets a deferred version commit on the context
 // suppress it.
+//
+// A dry run takes the non-committing path, the Sweeper's: withConn(commit=false)
+// rolls the transaction back and attempts no version-control entry, so a
+// preview cannot look like a mutation to anything watching the store. It is
+// also the path a store opened read-only can serve, which is what `bd reclaim
+// --dry-run` gets, because the CLI opens every --dry-run command's store that
+// way.
 type leaseReclaimer struct{ store *EmbeddedDoltStore }
 
 var _ issueops.LeaseReclaimer = (*leaseReclaimer)(nil)
@@ -39,6 +46,16 @@ func (l *leaseReclaimer) Reclaim(ctx context.Context, request issueops.ReclaimRe
 		return issueops.ReclaimResult{}, err
 	}
 	var result issueops.ReclaimResult
+	if request.DryRun {
+		if err := l.store.withConn(ctx, false, func(tx *sql.Tx) error {
+			var err error
+			result, err = storeops.ExecuteReclaimInTx(ctx, tx, request)
+			return err
+		}); err != nil {
+			return issueops.ReclaimResult{}, err
+		}
+		return result, nil
+	}
 	if err := l.store.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storeops.ChangedTables, string, error) {
 		var err error
 		result, err = storeops.ExecuteReclaimInTx(ctx, tx, request)

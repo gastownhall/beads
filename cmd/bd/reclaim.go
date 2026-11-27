@@ -34,6 +34,11 @@ least this long ago are reclaimed, so a worker briefly paused (GC, clock skew)
 is not robbed of live work. Run it from a supervisor on a timer with a window
 of roughly 2× the claim TTL.
 
+--dry-run lists the leases a sweep would revert and changes nothing: it applies
+the same grace window, scope filters and replica guard to the same snapshot, so
+the list is what a real run with the same flags would revert at that moment.
+Nothing is written, recorded or committed, and no hook fires.
+
 By default reclaim covers every stale lease THIS replica granted. The scope
 filters below narrow it further, using the same label surface claiming is
 scoped by (--label / --label-any / --exclude-label), plus --assignee and --id.
@@ -74,6 +79,7 @@ Examples:
   bd reclaim                       # default grace window (2× the lease TTL)
   bd reclaim --older-than 10m      # reclaim leases expired >10m ago
   bd reclaim --older-than 0s       # reclaim every currently-expired lease
+  bd reclaim --dry-run             # list what a sweep would revert, change nothing
   bd reclaim --label lane-a        # only this machine's claim partition
   bd reclaim --label-any lane-a,lane-b --exclude-label pinned
   bd reclaim --assignee zelda --assignee epona   # only these workers' leases
@@ -100,7 +106,11 @@ Examples:
 			return HandleErrorRespectJSON("%v", err)
 		}
 
-		CheckReadonly("reclaim")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		// A preview only reads, so it is allowed on a read-only workspace.
+		if !dryRun {
+			CheckReadonly("reclaim")
+		}
 
 		reclaimer, err := openLeaseReclaimer()
 		if err != nil {
@@ -120,15 +130,17 @@ Examples:
 			Actor:     currentActor(),
 			OlderThan: olderThan,
 			Filter:    filter,
+			DryRun:    dryRun,
 		})
 		if err != nil {
 			return HandleErrorRespectJSON("reclaim: %v", err)
 		}
-		if len(result.Reclaimed) > 0 {
+		// A preview changed nothing, so it never marks the command as a write.
+		if !dryRun && len(result.Reclaimed) > 0 {
 			commandDidWrite.Store(true)
 		}
 
-		return renderReclaim(result.Reclaimed, !filter.IsEmpty())
+		return renderReclaim(result.Reclaimed, !filter.IsEmpty(), dryRun)
 	},
 }
 
@@ -164,11 +176,14 @@ func proxiedLeaseReclaimer() (issueops.LeaseReclaimer, error) {
 	return src.LeaseReclaimer()
 }
 
-func renderReclaim(reclaimed []types.ReclaimedLease, scoped bool) error {
+func renderReclaim(reclaimed []types.ReclaimedLease, scoped, dryRun bool) error {
 	if jsonOutput {
 		return outputJSON(map[string]interface{}{
 			"reclaimed": reclaimed,
 			"count":     len(reclaimed),
+			// Whether the rows were reverted or only would be, so a consumer
+			// never mistakes a preview's list for a sweep's.
+			"dry_run": dryRun,
 			// Whether any scope filter was in effect, so a supervisor auditing
 			// its own reclaim log can tell a scoped sweep from a global one.
 			"scoped": scoped,
@@ -182,7 +197,11 @@ func renderReclaim(reclaimed []types.ReclaimedLease, scoped bool) error {
 		fmt.Printf("%s No stale leases to reclaim\n", ui.RenderPass("✓"))
 		return nil
 	}
-	fmt.Printf("%s Reclaimed %d stale-lease issue(s):\n", ui.RenderPass("✓"), len(reclaimed))
+	verb := "Reclaimed"
+	if dryRun {
+		verb = "Would reclaim"
+	}
+	fmt.Printf("%s %s %d stale-lease issue(s):\n", ui.RenderPass("✓"), verb, len(reclaimed))
 	for _, r := range reclaimed {
 		owner := r.PreviousOwner
 		if owner == "" {
@@ -267,5 +286,7 @@ func init() {
 	reclaimCmd.Flags().Duration("older-than", 2*storeops.DefaultLeaseTTL,
 		"Only reclaim leases that expired at least this long ago (grace window)")
 	registerReclaimScopeFlags(reclaimCmd.Flags())
+	reclaimCmd.Flags().Bool("dry-run", false,
+		"List the leases a sweep would revert and change nothing")
 	rootCmd.AddCommand(reclaimCmd)
 }

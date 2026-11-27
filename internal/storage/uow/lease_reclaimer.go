@@ -38,7 +38,8 @@ var _ publicops.LeaseReclaimer = (*leaseReclaimer)(nil)
 // Reclaim reaches domain.IssueUseCase.Reclaim inside ONE committing unit of
 // work, composing the same conditional commit message the dolt and
 // embedded-dolt legs use: a sweep that reverts nothing leaves no history
-// entry describing a no-op.
+// entry describing a no-op. A request with DryRun set takes a read-only unit of
+// work instead and composes no message at all.
 //
 // VALIDATION HAPPENS BEFORE THE UNIT OF WORK OPENS, as on those two legs and
 // for Releaser's reason: a refusal then changes nothing on the connection as
@@ -48,6 +49,13 @@ var _ publicops.LeaseReclaimer = (*leaseReclaimer)(nil)
 func (l *leaseReclaimer) Reclaim(ctx context.Context, request publicops.ReclaimRequest) (publicops.ReclaimResult, error) {
 	if err := storageissueops.ValidateReclaimRequest(request); err != nil {
 		return publicops.ReclaimResult{}, err
+	}
+	if request.DryRun {
+		// A dry run takes a read-only unit of work, the Sweeper's path: it
+		// writes nothing, so it must not take the committing one.
+		return RunTxRead(ctx, l.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ReclaimResult, error) {
+			return uw.IssueUseCase().Reclaim(ctx, request)
+		})
 	}
 	return RunTxResult(ctx, l.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ReclaimResult, string, error) {
 		result, err := uw.IssueUseCase().Reclaim(ctx, request)

@@ -105,3 +105,74 @@ func TestReclaimVersionCommitComposesNothingForANoOp(t *testing.T) {
 		t.Fatalf("message = %q, want it to name the two reverted leases", msg)
 	}
 }
+
+// TestReclaimVersionCommitComposesNothingForADryRun pins that a preview mints
+// no version-control entry, whatever rows it found: the mock-free half of "no
+// leg commits for a dry run", since every leg takes its entry from this helper.
+func TestReclaimVersionCommitComposesNothingForADryRun(t *testing.T) {
+	result := publicops.ReclaimResult{DryRun: true, Reclaimed: []publicops.ReclaimedLease{{ID: "a"}, {ID: "b"}}}
+	if tables, msg := ReclaimVersionCommit(result); len(tables) != 0 || msg != "" {
+		t.Fatalf("a dry run composed tables=%v msg=%q, want neither", tables, msg)
+	}
+}
+
+// TestExecuteReclaimInTxDryRunOnlyReads pins the shared body's half of the
+// preview: the snapshot SELECT and the foreign-replica summary's SELECT run,
+// and nothing else does. The mock expects exactly those two queries and no
+// statement at all, so a DELETE on leases, an UPDATE on issues, or an event,
+// journal or version insert would fail the test. The replica guard is armed
+// (a named node) so the summary's query is part of what is expected.
+func TestExecuteReclaimInTxDryRunOnlyReads(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery("SELECT l.issue_id").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "assignee", "granted_node"}).
+			AddRow("bd-1", "worker-a", "node-a").
+			AddRow("bd-2", "", ""))
+	mock.ExpectQuery("GROUP BY COALESCE").
+		WillReturnRows(sqlmock.NewRows([]string{"granted_node", "count"}))
+
+	ctx := WithNodeID(context.Background(), "node-a")
+	result, err := ExecuteReclaimInTx(ctx, db, publicops.ReclaimRequest{Actor: "reaper", DryRun: true})
+	if err != nil {
+		t.Fatalf("ExecuteReclaimInTx dry run: %v", err)
+	}
+	if !result.DryRun {
+		t.Fatal("result.DryRun = false, want the request echoed")
+	}
+	want := []publicops.ReclaimedLease{{ID: "bd-1", PreviousOwner: "worker-a"}, {ID: "bd-2"}}
+	if len(result.Reclaimed) != len(want) || result.Reclaimed[0] != want[0] || result.Reclaimed[1] != want[1] {
+		t.Fatalf("Reclaimed = %+v, want %+v (no revision on a preview)", result.Reclaimed, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestExecuteReclaimInTxDryRunWithNothingStaleAnswersAnEmptySlice pins the
+// role's "never nil" promise for a preview that finds nothing.
+func TestExecuteReclaimInTxDryRunWithNothingStaleAnswersAnEmptySlice(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery("SELECT l.issue_id").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "assignee", "granted_node"}))
+
+	result, err := ExecuteReclaimInTx(WithNodeID(context.Background(), ""), db, publicops.ReclaimRequest{Actor: "reaper", DryRun: true})
+	if err != nil {
+		t.Fatalf("ExecuteReclaimInTx dry run: %v", err)
+	}
+	if !result.DryRun || result.Reclaimed == nil || len(result.Reclaimed) != 0 {
+		t.Fatalf("result = %+v, want DryRun with an empty, non-nil Reclaimed", result)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

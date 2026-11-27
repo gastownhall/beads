@@ -2448,7 +2448,8 @@ type ReclaimedLease struct {
 	// same UPDATE that reverted its lease — the one this package's
 	// RevisionToken/ParseRevisionToken pair encodes, the same wire shape as
 	// IssueDetails.Revision. A caller that re-fetches after a reclaim sees a
-	// different token than one that raced it.
+	// different token than one that raced it. It is empty on a row a dry run
+	// previewed, because no revert ran and so no revision was minted.
 	Revision string `json:"revision"`
 }
 

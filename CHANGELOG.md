@@ -172,6 +172,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd reclaim --dry-run` lists the stale leases a sweep would revert and
+  changes nothing.** Until now `bd reclaim` had no preview, so the only way
+  to see what it would revert was to run it. `--dry-run` applies the same
+  grace window, scope filters and replica guard to the same snapshot, prints
+  `Would reclaim N stale-lease issue(s):` with the usual per-row lines, and
+  writes no lease, issue, event, version row or version commit and fires no
+  `on_update` hook. It is a read, so `--readonly` allows it. `--json` output
+  gains `dry_run` in every case, and a previewed row carries an empty
+  `revision` because none was minted. The role carries it as
+  `ReclaimRequest.DryRun` and `ReclaimResult.DryRun`, and `bd serve` as
+  `dry_run` on `POST /v0/beads/issues:reclaim` (additive; a server without it
+  answers `unknown_parameter` and sweeps nothing).
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,
