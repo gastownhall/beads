@@ -80,16 +80,18 @@ func ConfigPath(beadsDir string) string {
 }
 
 // LegacyConfigFileName is the pre-metadata.json name of a workspace's
-// metadata file. Load migrates it into metadata.json; LoadForDiscovery reads
-// it in place.
+// metadata file. Load migrates it into metadata.json when it sets a Config
+// field and reads it in place otherwise; LoadForDiscovery always reads it in
+// place.
 const LegacyConfigFileName = "config.json"
 
 // MetadataFilePath returns the path of the file beadsDir's metadata is read
 // from: the legacy config.json when metadata.json is absent and config.json
-// exists (the file LoadForDiscovery reads, and Load would migrate), and
-// ConfigPath otherwise. Messages that name the file holding a setting use it,
-// so a refusal made before any migration names the file the user must edit.
-// It only stats; an empty beadsDir returns ConfigPath("").
+// exists (the file LoadForDiscovery reads, and Load migrates when it sets a
+// Config field), and ConfigPath otherwise. Messages that name the file
+// holding a setting use it, so a refusal made before any migration names the
+// file the user must edit. It only stats; an empty beadsDir returns
+// ConfigPath("").
 func MetadataFilePath(beadsDir string) string {
 	path := ConfigPath(beadsDir)
 	if beadsDir == "" {
@@ -105,6 +107,15 @@ func MetadataFilePath(beadsDir string) string {
 	return path
 }
 
+// Load reads beadsDir's workspace metadata: metadata.json when it exists,
+// else the legacy config.json. The legacy file migrates to metadata.json
+// (write, then remove) only when it sets at least one Config field; a
+// config.json that sets none carries no beads settings and may belong to
+// another program — under the GH#7034 slip, BEADS_DIR naming a project root
+// made six commands delete the project's own config.json and leave a
+// metadata.json holding {"database": ""} in its place. Such a file is read
+// in place, as LoadForDiscovery reads it, and both loaders return the same
+// non-nil zero *Config.
 func Load(beadsDir string) (*Config, error) {
 	configPath := ConfigPath(beadsDir)
 
@@ -124,6 +135,14 @@ func Load(beadsDir string) (*Config, error) {
 		var cfg Config
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parsing legacy config: %w", err)
+		}
+
+		// A config.json that sets no beads field carries no beads settings
+		// and may belong to another program (GH#7034: BEADS_DIR naming a
+		// project root). Read it in place, as LoadForDiscovery does, instead
+		// of migrating it.
+		if cfg == (Config{}) {
+			return &cfg, nil
 		}
 
 		// Save to new location

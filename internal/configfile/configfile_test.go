@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +100,117 @@ func TestLoadForDiscoveryNeverMigratesLegacyConfig(t *testing.T) {
 	if string(after) != string(legacy) {
 		t.Fatalf("LoadForDiscovery rewrote legacy config: got %q, want %q", after, legacy)
 	}
+}
+
+// TestLoadMigratesOnlyBeadsLegacyConfig pins which legacy config.json files
+// Load migrates (GH#7034): only a file that sets at least one Config field is
+// beads' own, and it migrates to metadata.json as before. A config.json that
+// sets no field — another program's settings, an empty object, null, or a
+// beads key left empty — may live in a directory BEADS_DIR was slipped to
+// point at (a project root), so Load leaves it byte-identical, the directory
+// gains nothing, and both loaders read it in place and agree: the same
+// non-nil zero *Config.
+func TestLoadMigratesOnlyBeadsLegacyConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		file    string
+		body    string
+		migrate bool // Load writes metadata.json and removes the legacy file
+	}{
+		{name: "another program's settings", file: LegacyConfigFileName, body: `{"port": 8080, "debug": true}`},
+		{name: "empty object", file: LegacyConfigFileName, body: `{}`},
+		{name: "null", file: LegacyConfigFileName, body: `null`},
+		{name: "explicitly empty database", file: LegacyConfigFileName, body: `{"database": ""}`},
+		{name: "empty metadata.json", file: ConfigFileName, body: `{}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, tc.file)
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var want Config
+			if err := json.Unmarshal([]byte(tc.body), &want); err != nil {
+				t.Fatalf("decode want: %v", err)
+			}
+			before := dirListing(t, dir)
+
+			// Load runs twice: for a file that stays, neither call may write
+			// or remove anything; a migrating file must be stable after the
+			// first Load too.
+			for call := 1; call <= 2; call++ {
+				cfg, err := Load(dir)
+				if err != nil {
+					t.Fatalf("Load #%d: %v", call, err)
+				}
+				if cfg == nil {
+					t.Fatalf("Load #%d returned nil, want the metadata read in place", call)
+				}
+				if *cfg != want {
+					t.Errorf("Load #%d = %+v, want %+v", call, *cfg, want)
+				}
+			}
+
+			disc, err := LoadForDiscovery(dir)
+			if err != nil {
+				t.Fatalf("LoadForDiscovery: %v", err)
+			}
+			if disc == nil || *disc != want {
+				t.Errorf("LoadForDiscovery = %#v, want the same metadata Load returns", disc)
+			}
+
+			if tc.migrate {
+				if tc.file != LegacyConfigFileName {
+					t.Fatal("a migrating row must use the legacy file")
+				}
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Errorf("legacy config.json still present after Load")
+				}
+				saved, err := os.ReadFile(ConfigPath(dir))
+				if err != nil {
+					t.Fatalf("read migrated metadata.json: %v", err)
+				}
+				var got Config
+				if err := json.Unmarshal(saved, &got); err != nil {
+					t.Fatalf("decode migrated metadata.json: %v", err)
+				}
+				if got != want {
+					t.Errorf("metadata.json holds %+v, want the decoded %+v", got, want)
+				}
+				return
+			}
+
+			// A file that stays: byte-identical, and the directory gains no
+			// entry (no metadata.json, no metadata.json.tmp-*).
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("%s was removed by Load: %v", tc.file, err)
+			}
+			if string(got) != tc.body {
+				t.Errorf("%s changed: got %q, want %q", tc.file, got, tc.body)
+			}
+			if after := dirListing(t, dir); after != before {
+				t.Errorf("directory changed around a file Load must not touch: before [%s], after [%s]", before, after)
+			}
+		})
+	}
+}
+
+// dirListing names dir's entries, sorted, so a test can hold a directory's
+// shape constant across calls that must not write.
+func dirListing(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, len(entries))
+	for i, entry := range entries {
+		names[i] = entry.Name()
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
 }
 
 func TestDatabasePath(t *testing.T) {

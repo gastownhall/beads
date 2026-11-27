@@ -1544,6 +1544,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd` no longer deletes a `config.json` that sets no beads field.** Under
+  the GH#7034 slip — `BEADS_DIR` naming a project root that holds its own
+  `config.yaml` — discovery took the root for a workspace, and six commands
+  (`bd config show`, `bd prime` and the `bd dolt show`, `status`, `set` and
+  `test` subcommands) then migrated the project's own `config.json`: the file
+  was deleted and a `metadata.json` holding `{"database": ""}` written in its
+  place. `configfile.Load` now migrates a legacy `config.json` only when it
+  sets at least one beads field; a file that sets none is read in place,
+  byte-identical, with no `metadata.json` written. A `config.json` beads
+  itself wrote (its writers always named a database) still migrates as
+  before.
+
 - **`bd show` no longer prints `Lease: expires expired` for a lapsed lease.**
   An in_progress issue keeps its lease row after the lease runs out, until
   `bd reclaim` sweeps it, and the lease line then printed the verb twice and
