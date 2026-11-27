@@ -94,10 +94,10 @@ func TestIsExternalRefSelfHostedURL(t *testing.T) {
 		t.Error("URL outside the configured sub-path should be rejected")
 	}
 
-	// Port is part of the host comparison, so gitlab.url has to name the host
-	// the way GitLab spells it in web_url. A non-default port must be present
-	// in the ref; conversely, a base that spells a port the web URLs omit
-	// matches nothing and the ref falls through to the legacy arms.
+	// A non-default port is part of the host comparison: it must be present
+	// in the ref, and a base that spells one the web URLs omit matches
+	// nothing, so the ref falls through to the legacy arms. A default port is
+	// not compared (TestIsExternalRefWebURLAndDefaultPort).
 	port := &Tracker{client: NewClient("tok", "https://gl.corp:8443", "42")}
 	if !port.IsExternalRef("https://gl.corp:8443/g/p/-/issues/3") {
 		t.Error("URL on the configured host:port should be recognized")
