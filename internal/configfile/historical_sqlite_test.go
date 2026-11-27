@@ -112,3 +112,37 @@ func TestCheckHistoricalSQLiteWorkspaceIsAdmissionsRefusal(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadDiscoveredForOpenRefusesSQLiteBesideEmptyLegacyConfig pins that the
+// GH#7034 read-in-place rule keeps a SQLite-era .beads refused: a config.json
+// that sets no beads field beside a non-empty SQLite beads.db is still read as
+// metadata (a zero *Config, not nil), so classification takes the configured
+// arm, which defaults to beads.db, and refuses without changing a byte.
+func TestLoadDiscoveredForOpenRefusesSQLiteBesideEmptyLegacyConfig(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, LegacyConfigFileName), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte("SQLite format 3\x00\x10\x00\x01\x01 legacy page"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := legacyworkspace.TreeDigest(t, beadsDir)
+
+	cfg, err := LoadDiscoveredForOpen(beadsDir)
+	if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+		t.Fatalf("LoadDiscoveredForOpen changed the workspace: before %v, after %v", before, after)
+	}
+	if cfg != nil {
+		t.Errorf("LoadDiscoveredForOpen returned metadata %+v with its refusal", cfg)
+	}
+	if err == nil || err.Error() != legacyworkspace.HistoricalSQLiteRefusal {
+		t.Fatalf("LoadDiscoveredForOpen = %v, want admission's refusal %q", err, legacyworkspace.HistoricalSQLiteRefusal)
+	}
+	var legacyErr *LegacyWorkspaceError
+	if !errors.As(err, &legacyErr) {
+		t.Fatalf("LoadDiscoveredForOpen = %#v, want a *LegacyWorkspaceError", err)
+	}
+}
