@@ -583,3 +583,48 @@ func TestRecomputeAllIsBlocked_ParentHoldsDanglingEdge_ChildHeld(t *testing.T) {
 		})
 	}
 }
+
+// TestCountIsBlockedHeld_AfterRepair is AC-6's database half: on a repaired
+// database with dangling edges the stale count is 0 and the held count names
+// exactly the rows left as found; on a database where every wisp named by a
+// dependency row is present, the held count is 0 (the probe answers first).
+// The message render for both is pinned in cmd/bd/doctor/blocked_test.go.
+func TestCountIsBlockedHeld_AfterRepair(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Nothing dangling yet: the held count reads 0 before any fixture.
+	held, err := issueops.CountIsBlockedHeldInTx(ctx, store.db)
+	if err != nil {
+		t.Fatalf("clean held count: %v", err)
+	}
+	if held != 0 {
+		t.Errorf("clean database held count = %d, want 0", held)
+	}
+
+	// Two direct holders plus one held child.
+	createWisp(t, ctx, store, "dc-w1")
+	createWisp(t, ctx, store, "dc-w2")
+	createPerm(t, ctx, store, "dc-a1")
+	createPerm(t, ctx, store, "dc-a2")
+	createPerm(t, ctx, store, "dc-c1")
+	addDependencyWithMeta(t, ctx, store, "dc-a1", "dc-w1", types.DepBlocks, "")
+	addDependencyWithMeta(t, ctx, store, "dc-a2", "dc-w2", types.DepBlocks, "")
+	addDependencyWithMeta(t, ctx, store, "dc-c1", "dc-a1", types.DepParentChild, "")
+	dropWisp(t, ctx, store, "dc-w1")
+	dropWisp(t, ctx, store, "dc-w2")
+
+	fullRepair(t, ctx, store)
+	if stale, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, store.db); err != nil || stale != 0 {
+		t.Fatalf("repaired stale count: want 0/nil, got %d/%v", stale, err)
+	}
+	held, err = issueops.CountIsBlockedHeldInTx(ctx, store.db)
+	if err != nil {
+		t.Fatalf("repaired held count: %v", err)
+	}
+	if held != 3 {
+		t.Errorf("repaired held count = %d, want 3 (two direct holders and one held child)", held)
+	}
+}

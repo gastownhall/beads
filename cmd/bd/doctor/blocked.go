@@ -60,18 +60,52 @@ func checkBlockedConsistencyDB(ctx context.Context, db *sql.DB) DoctorCheck {
 			Detail:  err.Error(),
 		}
 	}
-	if stale == 0 {
+	held, heldErr := issueops.CountIsBlockedHeldInTx(ctx, db)
+	return blockedConsistencyCheck(stale, held, heldErr)
+}
+
+// blockedConsistencyCheck renders the check from its two counts: stale rows a
+// full recompute would flip, and held rows it would leave as found because a
+// dependency row names a wisp this database does not have (bd-muhnf0). Pure,
+// so the render is testable without a database.
+//
+// A database with nothing dangling never reaches the held read's machinery
+// (the probe answers 0 first), so its message is byte for byte the pre-hold
+// one; a database that does hold dangling edges keeps the OK status — nothing
+// a recompute here could do would be right — and says so. A held count that
+// could not be read is never read as 0.
+func blockedConsistencyCheck(stale, held int64, heldErr error) DoctorCheck {
+	if stale == 0 && heldErr == nil && held == 0 {
 		return DoctorCheck{
 			Name:    BlockedConsistencyCheckName,
 			Status:  StatusOK,
 			Message: "is_blocked flags consistent with dependency graph",
 		}
 	}
-	return DoctorCheck{
+	if stale == 0 && heldErr == nil {
+		return DoctorCheck{
+			Name:    BlockedConsistencyCheckName,
+			Status:  StatusOK,
+			Message: fmt.Sprintf("is_blocked flags consistent with dependency graph; %d open row(s) depend on a wisp this database does not have — is_blocked left as found", held),
+		}
+	}
+	if stale == 0 {
+		return DoctorCheck{
+			Name:    BlockedConsistencyCheckName,
+			Status:  StatusOK,
+			Message: "is_blocked flags consistent with dependency graph",
+			Detail:  fmt.Sprintf("could not count rows left as found: %v", heldErr),
+		}
+	}
+	warning := DoctorCheck{
 		Name:    BlockedConsistencyCheckName,
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d issue/wisp row(s) have a stale is_blocked flag — 'bd ready' may hide ready work or show blocked work", stale),
 		Detail:  "is_blocked is derived from the dependency graph; a skipped post-pull recompute can leave it stale",
 		Fix:     "Run: bd doctor --fix (or 'bd recompute-blocked', which also works in embedded mode)",
 	}
+	if heldErr == nil && held > 0 {
+		warning.Detail = fmt.Sprintf("is_blocked is derived from the dependency graph; a skipped post-pull recompute can leave it stale; %d open row(s) depend on a wisp this database does not have — is_blocked left as found", held)
+	}
+	return warning
 }
