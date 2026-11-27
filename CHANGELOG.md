@@ -867,6 +867,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd prune` no longer deletes a closed bead that a live bead still depends
+  on.** A prune deleted the closed parent of an open child, because the
+  reference protection scans text and a child names its parent by a
+  `parent-child` edge and a dotted id, not by citing it. The child stayed open
+  with no parent, and the epic's history was gone. `bd prune` now asks for the
+  protection `bd purge` already has
+  (`issueops.SweepRequest.ProtectLiveDependents`): a closed bead is kept while
+  a bead in any status that is not done depends on it through a
+  `parent-child`, `tracks` or `blocks` edge, so a closed blocker of an open
+  bead is kept too, until that bead closes. The held-back count is reported
+  as `live_dependent_skipped` in `--json` when it is not zero, and on its own
+  line in text output. The edges are read before the text scan, so a closed
+  bead that a live bead both depends on and cites is now counted there and no
+  longer in `referenced_skipped` or `referenced_ids_sample`. No flag turns the
+  protection off: `--ignore-references` covers citations in text only, so it
+  no longer deletes a cited bead that a live bead also depends on; `bd delete`
+  removes such a bead on purpose. On a `bd connect` workspace the server must
+  advertise `issues.sweep.liveDependents`, as `bd purge` already requires. No
+  `bd serve` up to 1.3.4 does, so against one `bd prune` is refused before
+  the request is sent, where it used to run without the protection.
+
 - **On macOS, bd no longer reads `~/Library/Application
   Support/bd/config.yaml` or `~/Library/Application Support/beads/PRIME.md`.**
   Probing those paths on every launch could raise a macOS 26 privacy prompt
@@ -5544,8 +5565,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     "Live" is any status that is not done, including custom statuses. The
     held-back count is reported as `live_dependent_skipped` in `--json` (and
     on its own line in text output). The protection is on the role
-    (`issueops.SweepRequest.ProtectLiveDependents`); `bd prune` does not ask
-    for it.
+    (`issueops.SweepRequest.ProtectLiveDependents`); `bd prune` asks for it
+    too (see Changed).
   - **`--wisps-plane`** selects every closed row stored in the wisps table,
     including `--no-history` beads, which the default ephemeral selection
     leaves to `bd prune`. It works on embedded, server and proxied

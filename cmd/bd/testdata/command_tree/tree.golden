@@ -5934,6 +5934,13 @@ bd prune
     | --ignore-references to override (e.g., when bulk-decommissioning a
     | retired label across the rig).
     |
+    | Also skips closed beads a live bead still depends on through a parent-child,
+    | tracks or blocks edge: a closed epic whose child is still open, a closed bead
+    | a live convoy tracks, a closed blocker of a live bead. Live means any status
+    | that is not done. When any are held back, --json reports the count as
+    | live_dependent_skipped. --ignore-references does not turn this off; to remove
+    | such a bead on purpose use `bd delete`.
+    |
     | To delete closed ephemeral beads (wisps, transient molecules) use
     | `bd purge` instead.
     |
