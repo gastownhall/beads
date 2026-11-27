@@ -255,18 +255,35 @@ Seen on staging only.
 A pull splits that text back into the four fields. Only the trailing run of
 `## Acceptance Criteria`, `## Design` and `## Notes` headings, in that order
 and each with a non-empty body, is split off; a heading inside a code fence,
-out of order, repeated, or followed by nothing stays in the description.
+out of order or repeated stays in the description, and so does one followed
+by nothing, unless the bead holds that field (see below).
 
 - Editing a section in Linear updates that field in bd.
-- Deleting a section's heading in Linear keeps its text in the description
-  and empties the field.
-- Deleting a whole section in Linear does not clear the field: the next sync
-  pushes it back. To clear a field, clear it in bd and push:
+- A pull writes acceptance criteria, design and notes as it writes the
+  description, so a newer change to the issue in Linear (see
+  [Conflict Resolution](#conflict-resolution)) overwrites a local edit to
+  one of them that was not pushed yet. Push right after
+  `bd update --notes`, `--append-notes`, `--design` or `--acceptance`:
+  `bd linear sync --push`.
+- Deleting a section's heading in Linear moves its text into the section
+  above it (or into the description) and empties the field.
+- Deleting a whole section in Linear, or only the text under its heading,
+  does not clear the field: the next sync pushes the text back under one
+  heading. Text moved elsewhere in the Linear description still empties
+  the field, as above, and the sync then removes the empty heading. To
+  clear a field, clear it in bd and push. `bd update` refuses `--notes ""`,
+  so clear notes with `--clear-notes`; `--design ""` and `--acceptance ""`
+  clear the other two fields:
 
 ```bash
-bd update <id> --notes ""
+bd update <id> --clear-notes
 bd linear sync --push
 ```
+
+A sync compares the text without bd's marker line, trailing spaces and the
+blank lines Linear adds around a heading. An edit that only adds or removes
+a blank line between paragraphs or inside a code block still syncs; an edit
+to trailing spaces alone, such as a Markdown hard break, does not.
 
 ## Conflict Resolution
 

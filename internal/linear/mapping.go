@@ -38,10 +38,11 @@ func BuildLinearDescription(issue *types.Issue) string {
 }
 
 // DescriptionFieldsEqual reports whether a and b put the same text into
-// Linear's description: BuildLinearDescription of each, compared without
-// blank lines, trailing whitespace or idempotency markers. It holds for a
-// bead and the issue a pull parsed from the description that bead pushed,
-// however the four fields split.
+// Linear's description: BuildLinearDescription of each, compared as
+// canonicalLinearText (no idempotency markers, no trailing whitespace, no
+// blank lines around a heading). It holds for a bead and the issue a pull
+// parsed from the description that bead pushed, however the four fields
+// split.
 func DescriptionFieldsEqual(a, b *types.Issue) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -634,7 +635,8 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig, l
 		return false
 	}
 	// Linear stores a blank line after each heading and keeps a create's
-	// idempotency marker, so compare the text a reader sees (GH#8506).
+	// idempotency marker, so compare without those (GH#8506); every other
+	// change, a blank line between paragraphs included, still pushes.
 	if canonicalLinearText(BuildLinearDescription(local)) != canonicalLinearText(remote.Description) {
 		return false
 	}

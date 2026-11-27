@@ -9,6 +9,9 @@ import (
 const idempotencyPrefix = "<!-- bd-idempotency: "
 const idempotencySuffix = " -->"
 
+// idempotencyHashLen is the number of lowercase hex digits in a marker's hash.
+const idempotencyHashLen = 12
+
 // GenerateIdempotencyMarker produces a deterministic HTML comment marker for
 // embedding in Linear issue descriptions. The marker enables dedup queries
 // after sync interruptions: if the marker already exists in Linear, we skip
@@ -22,7 +25,7 @@ func GenerateIdempotencyMarker(beadID, creatorEmail string, createdAtNano int64)
 	h.Write([]byte(beadID))
 	h.Write([]byte(creatorEmail))
 	h.Write([]byte(fmt.Sprintf("%d", createdAtNano)))
-	hash := hex.EncodeToString(h.Sum(nil))[:12]
+	hash := hex.EncodeToString(h.Sum(nil))[:idempotencyHashLen]
 	return idempotencyPrefix + hash + idempotencySuffix
 }
 

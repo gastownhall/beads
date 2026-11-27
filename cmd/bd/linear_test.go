@@ -1966,6 +1966,79 @@ func TestLinearSyncOverlapKeepsEchoOfNameMappedStatus(t *testing.T) {
 	}
 }
 
+// TestLinearPullKeepsDesignEditedInLinear pins the #8624 review: a Design
+// section edited in Linear must reach the bead on pull. The pull compared and
+// wrote the description alone, so the edit was reverted by the next sync and
+// reached neither side.
+func TestLinearPullKeepsDesignEditedInLinear(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("LINEAR_API_KEY", "test-api-key")
+	t.Setenv("LINEAR_OAUTH_CLIENT_ID", "")
+	t.Setenv("LINEAR_OAUTH_CLIENT_SECRET", "")
+
+	const ref = "https://linear.app/team/issue/TEAM-2"
+	now := time.Now().UTC()
+	api := &fakeLinearIssueAPI{
+		states: []linear.State{
+			{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			{ID: "state-progress", Name: "In Progress", Type: "started"},
+		},
+		// Linear holds the body with a Design section, edited after the last sync.
+		issue: linear.Issue{
+			ID:          "uuid-2",
+			Identifier:  "TEAM-2",
+			URL:         ref,
+			Title:       "Design edit",
+			Description: "Body\n\n## Design\nNEW DESIGN",
+			Priority:    3,
+			State:       &linear.State{ID: "state-progress", Name: "In Progress", Type: "started"},
+			CreatedAt:   now.Add(-time.Hour).Format(time.RFC3339),
+			UpdatedAt:   now.Add(-time.Minute).Format(time.RFC3339),
+		},
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	setupEndpointTrustWorkspaceForTest(t)
+	t.Setenv("LINEAR_API_ENDPOINT", server.URL)
+
+	linkedRef := ref
+	store := &linearSyncStore{
+		config: map[string]string{
+			"linear.team_id":               "team-1",
+			"linear.api_endpoint":          server.URL,
+			"linear.state_map.todo":        "open",
+			"linear.state_map.in progress": "in_progress",
+		},
+		metadata: map[string]string{"linear.last_sync": now.Add(-2 * time.Minute).Format(time.RFC3339)},
+		// The bead before the edit: the old design.
+		issue: types.Issue{
+			ID:          "bd-2",
+			Title:       "Design edit",
+			Description: "Body",
+			Design:      "OLD DESIGN",
+			Status:      types.StatusInProgress,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			ExternalRef: &linkedRef,
+			CreatedAt:   now.Add(-time.Hour),
+			UpdatedAt:   now.Add(-time.Hour),
+		},
+	}
+
+	lt := &linear.Tracker{}
+	lt.SetTeamIDs([]string{"team-1"})
+	if err := lt.Init(ctx, store); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	engine := tracker.NewEngine(lt, store, "test")
+	if _, err := engine.Sync(ctx, tracker.SyncOptions{Pull: true}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if store.issue.Design != "NEW DESIGN" {
+		t.Fatalf("after pull: bead design = %q, want %q (the Design section edited in Linear)", store.issue.Design, "NEW DESIGN")
+	}
+}
+
 // linearDescriptionSync is a `bd linear sync` fixture for GH#8506: one bead
 // linked to one Linear issue whose description carries the bead's acceptance
 // criteria, design and notes as sections.
@@ -2201,6 +2274,63 @@ func TestLinearSyncClearsSectionMovedIntoBody(t *testing.T) {
 	}
 }
 
+// TestLinearSyncRestoresSectionEmptiedInLinear pins the settle's rule for a
+// section whose text is deleted in Linear while its heading stays (the two
+// texts of bee-ghosttrack's review of #8624, and the same for acceptance
+// criteria): the bead keeps all four fields, the sync's push writes the text
+// back under that one heading, and later syncs change nothing.
+func TestLinearSyncRestoresSectionEmptiedInLinear(t *testing.T) {
+	for _, tc := range []struct{ name, emptied string }{
+		{name: "notes", emptied: "DESC\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\nDESIGN\n\n## Notes\n"},
+		{name: "design", emptied: "DESC\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\n## Notes\n\nNOTES"},
+		{name: "acceptance criteria", emptied: "DESC\n\n## Acceptance Criteria\n\n## Design\n\nDESIGN\n\n## Notes\n\nNOTES"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLinearDescriptionSync(t, linearDescriptionSyncBead(), linearDescriptionSyncStored)
+			f.editLinear(func(li *linear.Issue) { li.Description = tc.emptied })
+
+			for run := 1; run <= 3; run++ {
+				result := f.sync()
+				f.requireBeadText(fmt.Sprintf("sync %d", run), "DESC", "AC", "DESIGN", "NOTES")
+				if remote, updates := f.api.snapshot(); updates != 1 {
+					t.Fatalf("sync %d: PushStats = %+v, issueUpdate calls = %d, Linear description %q; want the emptied section pushed back once",
+						run, result.PushStats, updates, remote.Description)
+				}
+			}
+			remote, _ := f.api.snapshot()
+			for _, heading := range []string{"## Acceptance Criteria", "## Design", "## Notes"} {
+				if got := strings.Count(remote.Description, heading); got != 1 {
+					t.Fatalf("Linear description holds %d %q headings, want 1:\n%s", got, heading, remote.Description)
+				}
+			}
+			want := linear.DescriptionParts{Description: "DESC", AcceptanceCriteria: "AC", Design: "DESIGN", Notes: "NOTES"}
+			if got := linear.ParseLinearDescription(remote.Description); got != want {
+				t.Fatalf("Linear description parses as %+v, want %+v:\n%s", got, want, remote.Description)
+			}
+		})
+	}
+}
+
+// TestLinearSyncDropsEmptiedHeadingOfMovedText pins the other side of that
+// rule: when the text under the kept heading now shows elsewhere in Linear,
+// the field empties, as for a deleted heading, and the sync's push drops the
+// empty heading, so the other sections stay in their fields and Linear and
+// the bead agree.
+func TestLinearSyncDropsEmptiedHeadingOfMovedText(t *testing.T) {
+	const moved = "DESC\n\nNOTES\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\nDESIGN\n\n## Notes\n"
+	f := newLinearDescriptionSync(t, linearDescriptionSyncBead(), linearDescriptionSyncStored)
+	f.editLinear(func(li *linear.Issue) { li.Description = moved })
+
+	for run := 1; run <= 2; run++ {
+		result := f.sync()
+		f.requireBeadText(fmt.Sprintf("sync %d", run), "DESC\n\nNOTES", "AC", "DESIGN", "")
+		if remote, updates := f.api.snapshot(); updates != 1 || strings.Contains(remote.Description, "## Notes") {
+			t.Fatalf("sync %d: PushStats = %+v, issueUpdate calls = %d, Linear description %q; want one push that drops the empty ## Notes heading",
+				run, result.PushStats, updates, remote.Description)
+		}
+	}
+}
+
 // TestLinearSyncTitleChangeKeepsDescriptionHeading pins AC-6: a bead whose
 // own description ends in an ## Acceptance Criteria section (its field
 // empty) pulls a Linear title change, with the description unchanged but for
@@ -2247,6 +2377,107 @@ func TestLinearSyncDescriptionSectionsReachAFixedPoint(t *testing.T) {
 	if remote, updates := f.api.snapshot(); updates != 1 || remote.State.Type != "unstarted" {
 		t.Fatalf("issueUpdate calls = %d, Linear state %q; want the status change pushed once", updates, remote.State.Name)
 	}
+}
+
+// TestLinearSyncPushesBlankLineEdit pins that a local edit that only splits a
+// paragraph reaches Linear: the push compares the blank lines between text
+// lines, not only the words (#8624 review).
+func TestLinearSyncPushesBlankLineEdit(t *testing.T) {
+	const before, after = "First paragraph\nsecond paragraph", "First paragraph\n\nsecond paragraph"
+	f := newLinearDescriptionSync(t, types.Issue{Description: before}, before)
+	f.store.issue.Description = after
+	f.store.issue.UpdatedAt = time.Now().UTC()
+
+	result := f.sync()
+	if remote, updates := f.api.snapshot(); updates != 1 || remote.Description != after {
+		t.Fatalf("PushStats = %+v, issueUpdate calls = %d, Linear description %q; want %q pushed once", result.PushStats, updates, remote.Description, after)
+	}
+}
+
+// TestLinearSyncPullsBlankLineEditInCodeFence pins that a Linear edit that
+// only adds a blank line inside a fenced code block reaches the bead: every
+// line inside a closed fence counts as it is (#8624 review).
+func TestLinearSyncPullsBlankLineEditInCodeFence(t *testing.T) {
+	const before = "```python\ns = '''a\nb'''\n```"
+	const after = "```python\ns = '''a\n\nb'''\n```"
+	f := newLinearDescriptionSync(t, types.Issue{Description: before}, before)
+	f.editLinear(func(li *linear.Issue) { li.Description = after })
+
+	result := f.sync()
+	if f.store.issue.Description != after {
+		t.Fatalf("PullStats = %+v, bead description %q; want the Linear edit %q", result.PullStats, f.store.issue.Description, after)
+	}
+	if _, updates := f.api.snapshot(); updates != 0 {
+		t.Fatalf("PushStats = %+v, issueUpdate calls = %d; want none", result.PushStats, updates)
+	}
+}
+
+// TestLinearSyncKeepsQuotedMarkerText pins that a pull strips only bd's own
+// marker line: a bead that quotes the marker in a sentence keeps the quote
+// when it pulls a Linear edit, and the sync pushes nothing (#8624 review).
+func TestLinearSyncKeepsQuotedMarkerText(t *testing.T) {
+	const quoted = "Pull must drop `<!-- bd-idempotency: 0123456789ab -->` lines."
+	const edited = quoted + "\n\nAdded in Linear."
+	f := newLinearDescriptionSync(t, types.Issue{Description: quoted}, quoted)
+	f.editLinear(func(li *linear.Issue) { li.Description = edited })
+
+	result := f.sync()
+	if f.store.issue.Description != edited {
+		t.Fatalf("PullStats = %+v, bead description %q; want %q", result.PullStats, f.store.issue.Description, edited)
+	}
+	if _, updates := f.api.snapshot(); updates != 0 {
+		t.Fatalf("PushStats = %+v, issueUpdate calls = %d; want none", result.PushStats, updates)
+	}
+}
+
+// TestLinearSyncNewerLinearChangeOverwritesLocalNotes pins the conflict rule
+// the CHANGELOG and the README's Description Mapping state for acceptance
+// criteria, design and notes: when both sides changed since the last sync and
+// Linear's change is newer, the pull takes the issue as Linear has it. A
+// local notes edit is then replaced by the section Linear shows, as a local
+// description edit is; notes Linear does not show are kept, and the next
+// sync pushes them.
+func TestLinearSyncNewerLinearChangeOverwritesLocalNotes(t *testing.T) {
+	todo := linear.State{ID: "state-todo", Name: "Todo", Type: "unstarted"}
+
+	t.Run("section Linear shows", func(t *testing.T) {
+		bead := linearDescriptionSyncBead()
+		bead.Notes = "NOTES\nA LINE ADDED LOCALLY"
+		f := newLinearDescriptionSync(t, bead, linearDescriptionSyncStored)
+		f.store.issue.UpdatedAt = time.Now().UTC().Add(-time.Minute)
+		f.editLinear(func(li *linear.Issue) { li.State = &todo })
+
+		result := f.sync()
+		if result.Stats.Conflicts != 1 || f.store.issue.Status != types.StatusOpen {
+			t.Fatalf("Stats = %+v, bead status %q; want one conflict resolved for Linear's state", result.Stats, f.store.issue.Status)
+		}
+		f.requireBeadText("sync after the newer Linear change", "DESC", "AC", "DESIGN", "NOTES")
+		if _, updates := f.api.snapshot(); updates != 0 {
+			t.Fatalf("PushStats = %+v, issueUpdate calls = %d; want none", result.PushStats, updates)
+		}
+	})
+
+	t.Run("section Linear does not show", func(t *testing.T) {
+		const note = "A NOTE ADDED LOCALLY"
+		withoutNotes := "DESC\n\n## Acceptance Criteria\n\nAC\n\n## Design\n\nDESIGN\n<!-- bd-idempotency: 0123456789ab -->"
+		bead := linearDescriptionSyncBead()
+		bead.Notes = note
+		f := newLinearDescriptionSync(t, bead, withoutNotes)
+		f.store.issue.UpdatedAt = time.Now().UTC().Add(-time.Minute)
+		f.editLinear(func(li *linear.Issue) { li.State = &todo })
+
+		for _, when := range []string{"sync after the newer Linear change", "next sync"} {
+			result := f.sync()
+			f.requireBeadText(when, "DESC", "AC", "DESIGN", note)
+			if f.store.issue.Status != types.StatusOpen {
+				t.Fatalf("%s: Stats = %+v, bead status %q; want Linear's state", when, result.Stats, f.store.issue.Status)
+			}
+		}
+		sent := f.sentDescriptions()
+		if len(sent) != 1 || strings.Count(sent[0], "## Notes") != 1 || linear.ParseLinearDescription(sent[0]).Notes != note {
+			t.Fatalf("issueUpdate descriptions %q; want one holding a single ## Notes section with %q", sent, note)
+		}
+	})
 }
 
 // fakeLinearIssueAPI serves the Linear GraphQL calls `bd linear sync` makes

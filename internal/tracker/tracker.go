@@ -120,7 +120,8 @@ type IdentityKeyer interface {
 type DescriptionFieldsTracker interface {
 	// SettleDescriptionFields reconciles pulled, the issue converted from the
 	// remote, with existing, the local issue it updates, and reports whether
-	// pulled now holds local text the remote lacks, which the push must send.
+	// pulled no longer matches the remote's text (it holds local text the
+	// remote lacks, say), so the push must send it.
 	SettleDescriptionFields(existing, pulled *types.Issue) (keptLocal bool)
 }
 

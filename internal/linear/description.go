@@ -28,8 +28,8 @@ type DescriptionParts struct {
 // the Linear description (GH#8506).
 //
 // Grammar:
-//   - Every complete idempotency marker is removed, with the newline before
-//     it, wherever it sits.
+//   - Every line that is exactly bd's idempotency marker, outside a closed
+//     code fence, is removed with the newline before it, wherever it sits.
 //   - A candidate heading is a line that equals "## Acceptance Criteria",
 //     "## Design" or "## Notes" once trailing spaces, tabs and "\r" are
 //     trimmed. Case is exact and leading space is not allowed, so "### Notes",
@@ -49,7 +49,8 @@ type DescriptionParts struct {
 //     byte-for-byte.
 //
 // Text is never dropped or reordered: BuildLinearDescription of the result
-// reproduces text up to blank lines, trailing whitespace and markers.
+// reproduces text up to canonicalLinearText (markers, trailing whitespace
+// and the blank lines around a heading).
 func ParseLinearDescription(text string) DescriptionParts {
 	body, removed := stripIdempotencyMarkers(text)
 	lines := strings.Split(body, "\n")
@@ -165,64 +166,116 @@ func sectionBody(lines []string) string {
 	return strings.TrimRight(strings.Join(lines, "\n"), " \t\r\n")
 }
 
-// stripIdempotencyMarkers removes every complete idempotency marker from text,
-// together with the newline before it (or, for a marker that opens the text,
-// the newline after it). A marker an earlier pull folded into the description
-// can sit mid-text. It reports whether it removed any.
+// stripIdempotencyMarkers removes every line that is a marker
+// GenerateIdempotencyMarker makes (isIdempotencyMarkerLine) and is not inside
+// a closed code fence, together with the newline before it (or, for a marker
+// on the first line, the newline after it). AppendIdempotencyMarker puts the
+// marker on a line of its own; one an earlier pull folded into the
+// description can sit mid-text. Marker text anywhere else, quoted in a
+// sentence or shown in a code block, is text. It reports whether it removed
+// any.
 func stripIdempotencyMarkers(text string) (string, bool) {
-	var b strings.Builder
-	removed := false
-	rest := text
-	for {
-		start := strings.Index(rest, idempotencyPrefix)
-		if start < 0 {
-			break
-		}
-		stop := strings.Index(rest[start+len(idempotencyPrefix):], idempotencySuffix)
-		if stop < 0 {
-			break
-		}
-		stop += start + len(idempotencyPrefix)
-		if strings.ContainsAny(rest[start:stop], "\r\n") {
-			// Not a marker AppendIdempotencyMarker wrote; keep it as text.
-			b.WriteString(rest[:stop])
-			rest = rest[stop:]
-			continue
-		}
-		before := rest[:start]
-		after := rest[stop+len(idempotencySuffix):]
-		switch {
-		case strings.HasSuffix(before, "\n"):
-			before = strings.TrimSuffix(strings.TrimSuffix(before, "\n"), "\r")
-		case b.Len() == 0 && before == "":
-			after = strings.TrimPrefix(strings.TrimPrefix(after, "\r"), "\n")
-		}
-		b.WriteString(before)
-		rest = after
-		removed = true
-	}
-	if !removed {
+	if !strings.Contains(text, idempotencyPrefix) {
 		return text, false
 	}
-	b.WriteString(rest)
-	return b.String(), true
+	lines := strings.Split(text, "\n")
+	fenced := closedFenceLines(lines)
+	kept := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if !fenced[i] && isIdempotencyMarkerLine(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) == len(lines) {
+		return text, false
+	}
+	return strings.Join(kept, "\n"), true
 }
 
-// canonicalLinearText reduces a Linear description to the text a reader sees:
-// markers removed, then the non-blank lines with trailing whitespace trimmed,
-// joined by "\n". Linear's editor adds a blank line after each heading and a
-// create appends the marker, so two descriptions that differ only there carry
-// the same bead content.
+// isIdempotencyMarkerLine reports whether line, less trailing spaces, tabs
+// and "\r", is exactly a marker GenerateIdempotencyMarker makes: the prefix,
+// idempotencyHashLen lowercase hex digits and the suffix.
+func isIdempotencyMarkerLine(line string) bool {
+	hash, ok := strings.CutPrefix(strings.TrimRight(line, " \t\r"), idempotencyPrefix)
+	if !ok {
+		return false
+	}
+	hash, ok = strings.CutSuffix(hash, idempotencySuffix)
+	if !ok || len(hash) != idempotencyHashLen {
+		return false
+	}
+	for i := 0; i < len(hash); i++ {
+		if c := hash[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// canonicalLinearText reduces a Linear description to what a push compares.
+// It undoes what bd's create and Linear's storage add to the text bd pushed
+// and keeps every other change, blank lines included:
+//   - bd's idempotency marker lines are removed (stripIdempotencyMarkers);
+//   - trailing spaces, tabs and "\r" are trimmed from every line;
+//   - outside a closed code fence, a blank line next to a heading is dropped
+//     (Linear stores a blank line after each heading, and Markdown renders
+//     none), and a run of blank lines counts as one;
+//   - blank lines at the start and the end are dropped.
+//
+// Every line inside a closed fence, blank or not, counts as it is. So
+// splitting or joining paragraphs, or adding a blank line inside a code
+// block, is a change on either side. Trailing spaces alone, which Markdown
+// reads as a hard line break, are not.
 func canonicalLinearText(text string) string {
 	body, _ := stripIdempotencyMarkers(text)
 	lines := strings.Split(body, "\n")
-	kept := lines[:0]
-	for _, line := range lines {
+	fenced := closedFenceLines(lines)
+	kept := make([]string, 0, len(lines))
+	prevHeading, blank := false, false
+	for i, line := range lines {
+		line = strings.TrimRight(line, " \t\r")
+		if line == "" && !fenced[i] {
+			blank = true
+			continue
+		}
+		heading := !fenced[i] && isMarkdownHeading(line)
+		if blank && len(kept) > 0 && !prevHeading && !heading {
+			kept = append(kept, "")
+		}
+		kept = append(kept, line)
+		prevHeading, blank = heading, false
+	}
+	return strings.Join(kept, "\n")
+}
+
+// isMarkdownHeading reports whether line is an ATX heading: up to three
+// spaces, one to six '#', then a space, a tab or the end of the line.
+func isMarkdownHeading(line string) bool {
+	trimmed := strings.TrimLeft(line, " ")
+	if len(line)-len(trimmed) > 3 {
+		return false
+	}
+	n := 0
+	for n < len(trimmed) && trimmed[n] == '#' {
+		n++
+	}
+	return n >= 1 && n <= 6 && (n == len(trimmed) || trimmed[n] == ' ' || trimmed[n] == '\t')
+}
+
+// visibleLinearLines returns the non-blank lines of text, markers removed and
+// trailing whitespace trimmed. SettleDescriptionFields matches a field's
+// text against the Linear text with it, so text Linear shows with other
+// blank lines or spacing still counts as shown and is never pushed twice.
+func visibleLinearLines(text string) []string {
+	body, _ := stripIdempotencyMarkers(text)
+	var kept []string
+	for _, line := range strings.Split(body, "\n") {
 		if line = strings.TrimRight(line, " \t\r"); line != "" {
 			kept = append(kept, line)
 		}
 	}
-	return strings.Join(kept, "\n")
+	return kept
 }
 
 // SettleDescriptionFields implements tracker.DescriptionFieldsTracker. A pull
@@ -231,8 +284,11 @@ func canonicalLinearText(text string) string {
 //
 // When the Linear text is the bead's own (DescriptionFieldsEqual), pulled
 // takes existing's four fields: an unchanged bead is never reshaped, even
-// one whose description ends in a heading the parser lifts. Otherwise, per
-// field:
+// one whose description ends in a heading the parser lifts. Otherwise a
+// heading of a field the bead holds, left in Linear with nothing under it,
+// is that section with its text deleted (liftEmptiedSections): the heading
+// is dropped, the sections above it are lifted, and the field is absent.
+// Then, per field:
 //   - A section Linear shows wins, so a Linear edit flows into the bead.
 //   - An absent section empties a blank local field, and one whose text
 //     Linear still shows elsewhere (its non-blank lines adjacent and in
@@ -240,9 +296,11 @@ func canonicalLinearText(text string) string {
 //   - Otherwise the local text is kept and keptLocal reported, so the push
 //     restores the section.
 //
-// A pull therefore never drops a field's text and never makes a push carry
-// it twice. Clearing a field takes a local edit (bd update --notes "") and a
-// push.
+// keptLocal is also reported when a heading was dropped, so the push
+// removes it from Linear even when its field empties. A pull therefore
+// never drops a field's text and never makes a push carry it twice. Clearing
+// a field takes a local edit (bd update --clear-notes, --design "" or
+// --acceptance "") and a push.
 func (t *Tracker) SettleDescriptionFields(existing, pulled *types.Issue) (keptLocal bool) {
 	if existing == nil || pulled == nil {
 		return false
@@ -254,7 +312,8 @@ func (t *Tracker) SettleDescriptionFields(existing, pulled *types.Issue) (keptLo
 		pulled.Notes = existing.Notes
 		return false
 	}
-	remote := strings.Split(canonicalLinearText(BuildLinearDescription(pulled)), "\n")
+	keptLocal = liftEmptiedSections(existing, pulled)
+	remote := visibleLinearLines(BuildLinearDescription(pulled))
 	for _, field := range []struct {
 		local  string
 		pulled *string
@@ -267,14 +326,66 @@ func (t *Tracker) SettleDescriptionFields(existing, pulled *types.Issue) (keptLo
 			continue
 		}
 		*field.pulled = ""
-		local := canonicalLinearText(field.local)
-		if local == "" || containsLineRun(remote, strings.Split(local, "\n")) {
+		local := visibleLinearLines(field.local)
+		if len(local) == 0 || containsLineRun(remote, local) {
 			continue
 		}
 		*field.pulled = field.local
 		keptLocal = true
 	}
 	return keptLocal
+}
+
+// liftEmptiedSections carries on the parse of pulled's description past the
+// headings Linear left with nothing under them, for the fields existing
+// holds, and reports whether it dropped any. ParseLinearDescription stops at
+// the first in-order heading whose body is blank, so deleting a section's
+// text in Linear but keeping its heading leaves that heading, and every
+// section above it, in the description.
+//
+// The scan starts where the parse stopped. A heading that ranks before the
+// sections the parse lifted and has a blank body is dropped, and its field
+// left absent, when existing holds that field. The bead never pushed such a
+// heading: BuildLinearDescription writes a field's own heading, with its
+// text, below any bare heading of that field in the description, so on the
+// text the bead pushed the scan stops before reaching one. After a drop the
+// scan lifts the sections above it as the parser does, and drops the next
+// such heading too. A bare heading of a field existing leaves blank is
+// text, as the parser has it.
+func liftEmptiedSections(existing, pulled *types.Issue) (dropped bool) {
+	local := [len(linearSectionHeadings)]string{existing.AcceptanceCriteria, existing.Design, existing.Notes}
+	fields := [len(linearSectionHeadings)]*string{&pulled.AcceptanceCriteria, &pulled.Design, &pulled.Notes}
+	limit := len(linearSectionHeadings)
+	for rank, field := range fields {
+		if strings.TrimSpace(*field) != "" {
+			limit = rank
+			break
+		}
+	}
+	lines := strings.Split(pulled.Description, "\n")
+	fenced := closedFenceLines(lines)
+	end := len(lines)
+	for i := len(lines) - 1; i >= 0; i-- {
+		rank := linearSectionRank(lines[i])
+		if rank < 0 || fenced[i] {
+			continue
+		}
+		if rank >= limit {
+			break
+		}
+		if body := lines[i+1 : end]; !linesBlank(body) {
+			*fields[rank] = sectionBody(body)
+		} else if len(visibleLinearLines(local[rank])) > 0 {
+			dropped = true
+		} else {
+			break
+		}
+		limit, end = rank, i
+	}
+	if end < len(lines) {
+		pulled.Description = strings.TrimRight(strings.Join(lines[:end], "\n"), " \t\r\n")
+	}
+	return dropped
 }
 
 // containsLineRun reports whether run appears in lines as adjacent lines, in

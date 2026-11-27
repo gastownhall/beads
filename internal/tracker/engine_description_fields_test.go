@@ -136,3 +136,43 @@ func TestEnginePullSettlesDescriptionFields(t *testing.T) {
 		}
 	})
 }
+
+// TestEnginePullKeptLocalTextIsNotHashSkipped pins the push hash a
+// kept-local settle stores. It fingerprints the remote as pulled, before the
+// settle put the local text back, so a tracker with a ContentHash still sends
+// the kept text: a hash of the settled issue would equal the local issue's,
+// and the push would skip the issue as already pushed.
+func TestEnginePullKeptLocalTextIsNotHashSkipped(t *testing.T) {
+	settle, store, local := newSettleTestEngine(t, true)
+	// The remote lacks the local notes, which is why the settle keeps them.
+	settle.issues[0].Description = "DESC"
+	settle.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		return &IssueConversion{Issue: &types.Issue{
+			ID:          "bd-settle",
+			Title:       ti.Title,
+			Description: ti.Description,
+			Priority:    2,
+			Status:      types.StatusOpen,
+			IssueType:   types.TypeTask,
+		}}
+	}}
+	engine := NewEngine(settle, store, "sync")
+	engine.PushHooks = &PushHooks{
+		ContentEqual: func(l *types.Issue, r *TrackerIssue) bool {
+			return l.Title == r.Title && l.Description == r.Description && l.Notes == ""
+		},
+		ContentHash: func(l *types.Issue) string { return l.Title + "|" + l.Description + "|" + l.Notes },
+	}
+
+	result, err := engine.Sync(context.Background(), SyncOptions{Pull: true, Push: true})
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if result.PullStats.Updated != 1 || local.Title != "new title" || local.Notes != "N1" {
+		t.Fatalf("PullStats = %+v, title %q, notes %q; want the remote title pulled and the local notes kept", result.PullStats, local.Title, local.Notes)
+	}
+	sent, ok := settle.updated["EXT-1"]
+	if result.PushStats.Updated != 1 || !ok || sent.Notes != "N1" {
+		t.Fatalf("PushStats = %+v, sent %+v; want the kept notes pushed once", result.PushStats, sent)
+	}
+}

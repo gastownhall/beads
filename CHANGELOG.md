@@ -1482,11 +1482,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hidden idempotency marker. A pull copied the whole text back into the
   description, so each sync nested the sections deeper and pushed an update
   for an unchanged bead. A pull now splits the trailing sections back into
-  their fields and drops the marker; headings inside code fences, out of
-  order, repeated or with an empty body stay in the description. An edit to
-  a section in Linear flows into the bead; a field Linear does not show is
-  kept and pushed again, unless its text appears elsewhere in the Linear
-  description. Reported by @rjgeng, who also wrote the first fix (#8624).
+  their fields and drops bd's marker line; headings inside code fences, out
+  of order or repeated stay in the description, and so does a heading with
+  an empty body unless the bead holds that field. An edit to a section in
+  Linear flows into the bead; a field Linear does not show, or shows as a
+  heading with its text deleted, is kept and pushed again under one
+  heading, unless its text appears elsewhere in the Linear description. A
+  pull now writes these fields as it writes the description, so a newer
+  change to the issue in Linear overwrites a local
+  `bd update --notes`, `--append-notes`, `--design` or `--acceptance` edit
+  that was not pushed yet, as it overwrites a local description edit: push
+  such an edit right away (`bd linear sync --push`). Copies that earlier
+  syncs added stay in the description; remove them, and any marker line,
+  with `bd update <id> --description=-`, and the next sync pushes the
+  cleaned text. Reported by @mmick66; fixed by @rjgeng in #8624.
 
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming

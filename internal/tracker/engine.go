@@ -530,9 +530,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 		// A tracker whose description carries acceptance criteria, design and
 		// notes settles them against the local issue, and the pull compares
-		// and writes them with the description. When the settle keeps local
-		// text the remote lacks, remoteIssue keeps the remote's content for
-		// the push hash and the push sends the kept text.
+		// and writes them with the description. When the settled issue no
+		// longer matches the remote's text (it keeps local text the remote
+		// lacks, say), remoteIssue keeps the remote's content for the push
+		// hash and the push sends the settled text.
 		descriptionFields, keptLocalDescription := false, false
 		remoteIssue := conv.Issue
 		if dft, ok := e.Tracker.(DescriptionFieldsTracker); ok && existing != nil {
