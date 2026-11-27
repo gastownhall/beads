@@ -259,36 +259,46 @@ func heldChunkMembersInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, i
 //nolint:gosec // constants and ? placeholders only.
 func heldScopeAncestryInTx(ctx context.Context, tx DBTX, held heldRows) (heldRows, error) {
 	var out heldRows
-	if held.empty() {
+	// Each plane's statement seeds from that plane's held ids only: an empty
+	// seed set has no ancestry to read, and rendering it would be `IN ()`.
+	if len(held.issues) == 0 && len(held.wisps) == 0 {
 		return out, nil
 	}
-	issuePlaceholders, issueArgs := buildSQLInClause(held.issues)
-	issueAncestry, err := queryIDs(ctx, tx, fmt.Sprintf(`
-		WITH RECURSIVE ancestors(node) AS (
-			SELECT id FROM issues WHERE id IN (%[1]s)
-			UNION
-			%[2]s
-		)
-		SELECT DISTINCT a.node FROM ancestors a
-		JOIN issues t ON t.id = a.node
-		WHERE t.status <> 'closed' AND t.status <> 'pinned'
-	`, issuePlaceholders, heldAncestryMembers()), issueArgs...)
-	if err != nil {
-		return out, fmt.Errorf("read held ancestry: %w", err)
+	var issueAncestry []string
+	if len(held.issues) > 0 {
+		issuePlaceholders, issueArgs := buildSQLInClause(held.issues)
+		var err error
+		issueAncestry, err = queryIDs(ctx, tx, fmt.Sprintf(`
+			WITH RECURSIVE ancestors(node) AS (
+				SELECT id FROM issues WHERE id IN (%[1]s)
+				UNION
+				%[2]s
+			)
+			SELECT DISTINCT a.node FROM ancestors a
+			JOIN issues t ON t.id = a.node
+			WHERE t.status <> 'closed' AND t.status <> 'pinned'
+		`, issuePlaceholders, heldAncestryMembers()), issueArgs...)
+		if err != nil {
+			return out, fmt.Errorf("read held ancestry: %w", err)
+		}
 	}
-	wispPlaceholders, wispArgs := buildSQLInClause(held.wisps)
-	wispAncestry, err := queryIDs(ctx, tx, fmt.Sprintf(`
-		WITH RECURSIVE ancestors(node) AS (
-			SELECT id FROM wisps WHERE id IN (%[1]s)
-			UNION
-			%[2]s
-		)
-		SELECT DISTINCT a.node FROM ancestors a
-		JOIN wisps t ON t.id = a.node
-		WHERE t.status <> 'closed' AND t.status <> 'pinned'
-	`, wispPlaceholders, heldAncestryMembers()), wispArgs...)
-	if err != nil && !isTableNotExistError(err) {
-		return out, fmt.Errorf("read held ancestry: %w", err)
+	var wispAncestry []string
+	if len(held.wisps) > 0 {
+		wispPlaceholders, wispArgs := buildSQLInClause(held.wisps)
+		var err error
+		wispAncestry, err = queryIDs(ctx, tx, fmt.Sprintf(`
+			WITH RECURSIVE ancestors(node) AS (
+				SELECT id FROM wisps WHERE id IN (%[1]s)
+				UNION
+				%[2]s
+			)
+			SELECT DISTINCT a.node FROM ancestors a
+			JOIN wisps t ON t.id = a.node
+			WHERE t.status <> 'closed' AND t.status <> 'pinned'
+		`, wispPlaceholders, heldAncestryMembers()), wispArgs...)
+		if err != nil && !isTableNotExistError(err) {
+			return out, fmt.Errorf("read held ancestry: %w", err)
+		}
 	}
 	out.issues, out.wisps = issueAncestry, wispAncestry
 	return out, nil

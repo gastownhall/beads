@@ -240,3 +240,117 @@ func TestRecomputeAllBlockedOnConn_DanglingEdgeNoCorrectionNoCommit(t *testing.T
 		t.Errorf("commit count moved %d -> %d over a zero-correction repair", before, after)
 	}
 }
+
+// TestRecomputeIsBlockedAfterMerge_MergedHeldFlagStaysPut is AC-2: the other
+// database set A's flag to its own (equally valid) view — that write merges
+// in — and the post-merge recompute must keep the merged value in BOTH
+// directions, touch no working-set row, and journal nothing for A. The
+// merged-in 1 is the direction the bug burned: base read the absent wisp as
+// a satisfied blocker and cleared it, so every merge ping-ponged the flag.
+// The scoped recompute and the mark-only pass over A and A's subtree must
+// agree.
+func TestRecomputeIsBlockedAfterMerge_MergedHeldFlagStaysPut(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// dm-a and dm-q blocked on absent wisps (merged to 0 and to 1
+	// respectively below), plus the parent-child pair for the subtree half.
+	createWisp(t, ctx, store, "dm-w")
+	createWisp(t, ctx, store, "dm-wq")
+	createPerm(t, ctx, store, "dm-a")
+	createPerm(t, ctx, store, "dm-q")
+	addDependencyWithMeta(t, ctx, store, "dm-a", "dm-w", types.DepBlocks, "")
+	addDependencyWithMeta(t, ctx, store, "dm-q", "dm-wq", types.DepBlocks, "")
+	createWisp(t, ctx, store, "dm-wp")
+	createPerm(t, ctx, store, "dm-p")
+	createPerm(t, ctx, store, "dm-c")
+	addDependencyWithMeta(t, ctx, store, "dm-p", "dm-wp", types.DepBlocks, "")
+	addDependencyWithMeta(t, ctx, store, "dm-c", "dm-p", types.DepParentChild, "")
+	dropWisp(t, ctx, store, "dm-w")
+	dropWisp(t, ctx, store, "dm-wq")
+	dropWisp(t, ctx, store, "dm-wp")
+	// Seed dm-q at 0 so the merged commit genuinely carries its flip to 1.
+	setFlag(t, ctx, store, "issues", "dm-q", false)
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed dangling edges')"); err != nil && !isDoltNothingToCommit(err) {
+		t.Fatalf("commit seed: %v", err)
+	}
+	preHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("read seed HEAD: %v", err)
+	}
+
+	// The "merge": the other database (which has the wisps) recomputed both
+	// rows to its own view — dm-a to 0, dm-q to 1 (its wisp is open there) —
+	// and those rows merged in here.
+	setFlag(t, ctx, store, "issues", "dm-a", false)
+	setFlag(t, ctx, store, "issues", "dm-q", true)
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-am', 'merged: remote view of held flags')"); err != nil {
+		t.Fatalf("commit merge: %v", err)
+	}
+
+	// The fixture's own writes journal; the claim under test is that the
+	// recompute adds nothing, so snapshot per-row counts first.
+	journalCount := func(id string) int {
+		t.Helper()
+		var n int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM events WHERE issue_id = ?", id).Scan(&n); err != nil {
+			t.Fatalf("count journal rows: %v", err)
+		}
+		return n
+	}
+	journalBefore := map[string]int{}
+	for _, id := range []string{"dm-a", "dm-q", "dm-p", "dm-c"} {
+		journalBefore[id] = journalCount(id)
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin recompute tx: %v", err)
+	}
+	unscope := issueops.ScopeEventsJournalTransaction(tx, true)
+	if err := issueops.RecomputeIsBlockedAfterMergeInTx(ctx, tx, preHead); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("RecomputeIsBlockedAfterMergeInTx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit recompute tx: %v", err)
+	}
+	unscope()
+
+	if flagOf(t, ctx, store, "issues", "dm-a") {
+		t.Error("post-merge recompute overwrote the merged is_blocked=0 with the local view; a held row keeps the merged value")
+	}
+	if !flagOf(t, ctx, store, "issues", "dm-q") {
+		t.Error("post-merge recompute cleared the merged is_blocked=1 by reading the absent wisp as a satisfied blocker; a held row keeps the merged value")
+	}
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	for _, id := range []string{"dm-a", "dm-q"} {
+		if got := journalCount(id); got != journalBefore[id] {
+			t.Errorf("recompute journaled %d new update event(s) for %s; a row left as found journals nothing", got-journalBefore[id], id)
+		}
+	}
+
+	// Scoped paths over A and over the held subtree must agree: give the
+	// pair the other database's view too (dm-p 0 — its wisp is closed there,
+	// dm-c 1 — it inherits the block), merged and committed the same way,
+	// and every path must keep it.
+	setFlag(t, ctx, store, "issues", "dm-p", false)
+	setFlag(t, ctx, store, "issues", "dm-c", true)
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-am', 'merged: remote view of the pair')"); err != nil {
+		t.Fatalf("commit pair merge: %v", err)
+	}
+	scopedRecompute(t, ctx, store, []string{"dm-a", "dm-q"})
+	scopedMark(t, ctx, store, []string{"dm-a", "dm-q"})
+	scopedRecompute(t, ctx, store, []string{"dm-p", "dm-c"})
+	scopedMark(t, ctx, store, []string{"dm-p", "dm-c"})
+	requireFlags(t, ctx, store, "issues", map[string]bool{"dm-a": false, "dm-q": true, "dm-p": false, "dm-c": true})
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	for _, id := range []string{"dm-p", "dm-c"} {
+		if got := journalCount(id); got != journalBefore[id] {
+			t.Errorf("scoped recompute journaled %d new update event(s) for held %s; a row left as found journals nothing", got-journalBefore[id], id)
+		}
+	}
+}
