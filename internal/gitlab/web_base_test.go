@@ -178,3 +178,60 @@ func TestAPIErrorTextUnchanged(t *testing.T) {
 		t.Errorf("IsNotFound misclassifies 403 or 404")
 	}
 }
+
+// assertTodaysRecognition checks the recognition and keys a tracker had
+// before it learned GitLab's web address: refs under gitlab.url only.
+func assertTodaysRecognition(t *testing.T, tr *Tracker, stub *gitLabStub) {
+	t.Helper()
+	under := stub.srv.URL + "/g/p/-/issues/7"
+	if !tr.IsExternalRef(under) {
+		t.Errorf("IsExternalRef(%q) = false, want true", under)
+	}
+	if other := "https://git.example.org/g/p/-/issues/7"; tr.IsExternalRef(other) {
+		t.Errorf("IsExternalRef(%q) = true, want false", other)
+	}
+	if got, want := tr.MatchKey("gitlab:7"), tr.MatchKey(under); got != want || got == "" {
+		t.Errorf("MatchKey(gitlab:7) = %q, want %q", got, want)
+	}
+}
+
+// TestInitKeepsTodaysRecognitionWhenTheWebAddressIsUnknown pins AC-3: a 404
+// for the project, a web_url that does not end in the project's path, and a
+// group-only config (which sends no request) all leave Init succeeding with
+// today's recognition and keys.
+func TestInitKeepsTodaysRecognitionWhenTheWebAddressIsUnknown(t *testing.T) {
+	t.Run("project 404", func(t *testing.T) {
+		stub := newGitLabStub(t)
+		stub.projectStatus = http.StatusNotFound
+		tr, err := initStubTracker(t, stub, "g/p", nil)
+		if err != nil {
+			t.Fatalf("Init: %v", err)
+		}
+		assertTodaysRecognition(t, tr, stub)
+	})
+	t.Run("web_url does not end in path_with_namespace", func(t *testing.T) {
+		stub := newGitLabStub(t)
+		stub.projectJSON = `{"id":42,"path_with_namespace":"g/p","web_url":"https://git.example.org/x/y"}`
+		tr, err := initStubTracker(t, stub, "g/p", nil)
+		if err != nil {
+			t.Fatalf("Init: %v", err)
+		}
+		assertTodaysRecognition(t, tr, stub)
+	})
+	t.Run("group-only config sends no request", func(t *testing.T) {
+		stub := newGitLabStub(t)
+		setStubEnv(t, stub, "", "g/p")
+		t.Setenv("GITLAB_GROUP_ID", "30")
+		tr := &Tracker{}
+		if err := tr.Init(context.Background(), &crossProjectStore{issues: map[string]*types.Issue{}}); err != nil {
+			t.Fatalf("Init: %v", err)
+		}
+		stub.mu.Lock()
+		reqs := append([]string(nil), stub.requests...)
+		stub.mu.Unlock()
+		if len(reqs) != 0 {
+			t.Errorf("group-only Init sent %q, want no request", reqs)
+		}
+		assertTodaysRecognition(t, tr, stub)
+	})
+}
