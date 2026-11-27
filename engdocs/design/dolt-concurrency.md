@@ -356,9 +356,11 @@ not adopted; the routes below say why.
 **Reproduction.** Two tests hold one side (the loser) at its first commit
 point, after it has read and written everything, then run the other side
 (the winner) to completion and release the loser. They run both orders,
-both commit styles (an in-body `DOLT_COMMIT` by default; a plain SQL
-`COMMIT` with the version commit deferred), and both server paths: the
-direct store and the unit-of-work path that proxied mode and `bd serve` use.
+both commit styles (by default the version commit is a `DOLT_COMMIT`: inside
+the transaction on the unit-of-work path, right after the SQL `COMMIT` on
+the direct store; otherwise a plain SQL `COMMIT` with the version commit
+deferred), and both server paths: the direct store and the unit-of-work path
+that proxied mode and `bd serve` use.
 The journal is off, `foreign_key_checks=1` and
 `dolt_force_transaction_commit=0`, read from the session that commits. Each
 case logs one `delete-comment race evidence:` JSON line, and each test ends
@@ -383,9 +385,8 @@ journal-off cases on both paths:
   transaction resulted in a working set with constraint violations,
   transaction rolled back. …`, and the error names the violated key:
   `Type: Foreign Key Constraint Violation, ForeignKey: fk_comments_issue`.
-  On the direct store the error is wrapped as `dolt commit: …` for an
-  in-body delete and `commit write tx: …` otherwise. It does not match
-  `ErrNotFound`.
+  On the direct store the error is wrapped as `commit write tx: …`. It does
+  not match `ErrNotFound`.
 - The loser gets exactly one attempt. Beads retries serialization failures
   (1213, 1205) and the exact autocommit 1105, not this one.
 - The loser's write is rolled back and the winner's stands. A losing delete
@@ -393,9 +394,9 @@ journal-off cases on both paths:
   issue deleted with no comments.
 - No comment is orphaned and `dolt_constraint_violations` is empty. The
   orphan-row outcome reported against this race did not reproduce.
-- On the direct store the Commenter always commits with a plain SQL `COMMIT`
-  and mints its version commit afterwards, so "comment loses under an
-  in-body `DOLT_COMMIT`" cannot run there. On the unit-of-work path every
+- On the direct store the Deleter and the Commenter both commit with a plain
+  SQL `COMMIT` and mint their version commit afterwards (GH#5752), so no
+  in-body `DOLT_COMMIT` case runs there. On the unit-of-work path every
   combination runs.
 
 Two controls in each test pass in either mode. With the events journal on,
