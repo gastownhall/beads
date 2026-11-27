@@ -13,12 +13,22 @@ import (
 // field holds its section's text when the body still carries that section.
 //
 // A section the body still carries wins: its text is Linear's edit of what
-// the last push folded there. A section the body no longer carries keeps
-// the local text and reports it kept, so the following push sends it; the
-// absent case is refined in later commits (blank locally, or text that
-// moved into the body).
+// the last push folded there. When the body holds exactly what a push of
+// the local fields sends, the local fields already are the remote's
+// decision — including a description that itself ends in a section-shaped
+// run, which the parse would otherwise lift into a field and reshape. A
+// section the body no longer carries keeps the local text and reports it
+// kept, so the following push sends it; the absent case is refined in
+// later commits (blank locally, or text that moved into the body).
 func (t *Tracker) SettleDescriptionFields(existing, pulled *types.Issue) (keptLocal bool) {
 	if existing == nil || pulled == nil {
+		return false
+	}
+	if DescriptionFieldsEqual(existing, pulled) {
+		pulled.Description = existing.Description
+		pulled.AcceptanceCriteria = existing.AcceptanceCriteria
+		pulled.Design = existing.Design
+		pulled.Notes = existing.Notes
 		return false
 	}
 	fields := []struct{ remote, local *string }{

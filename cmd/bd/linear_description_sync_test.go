@@ -14,7 +14,7 @@ import (
 // newLinearDescriptionSyncFixture builds a one-issue sync harness whose
 // Linear body and local row differ in the description fields, for the bd
 // #8506 settle tests.
-func newLinearDescriptionSyncFixture(t *testing.T, body, localNotes string) (*fakeLinearIssueAPI, *linearSyncStore, func() *tracker.SyncResult) {
+func newLinearDescriptionSyncFixture(t *testing.T, remoteTitle, body, localDescription, localNotes string) (*fakeLinearIssueAPI, *linearSyncStore, func() *tracker.SyncResult) {
 	t.Helper()
 	ctx := context.Background()
 	t.Setenv("LINEAR_API_KEY", "test-api-key")
@@ -34,7 +34,7 @@ func newLinearDescriptionSyncFixture(t *testing.T, body, localNotes string) (*fa
 			ID:          "uuid-1",
 			Identifier:  "TEAM-1",
 			URL:         ref,
-			Title:       "Ship it",
+			Title:       remoteTitle,
 			Description: body,
 			Priority:    3,
 			State:       &linear.State{ID: "state-todo", Name: "Todo", Type: "unstarted"},
@@ -61,7 +61,7 @@ func newLinearDescriptionSyncFixture(t *testing.T, body, localNotes string) (*fa
 		issue: types.Issue{
 			ID:          "bd-1",
 			Title:       "Ship it",
-			Description: "Body",
+			Description: localDescription,
 			Notes:       localNotes,
 			Status:      types.StatusOpen,
 			Priority:    2,
@@ -99,7 +99,9 @@ func newLinearDescriptionSyncFixture(t *testing.T, body, localNotes string) (*fa
 // description nor echoes a push back.
 func TestLinearSyncSettlesRemoteSectionEdit(t *testing.T) {
 	api, store, runSync := newLinearDescriptionSyncFixture(t,
+		"Ship it",
 		"Body\n\n## Notes\n\nedited in Linear",
+		"Body",
 		"old notes")
 
 	result := runSync()
@@ -116,5 +118,36 @@ func TestLinearSyncSettlesRemoteSectionEdit(t *testing.T) {
 	// has nothing to send.
 	if _, updates := api.snapshot(); updates != 0 {
 		t.Fatalf("issueUpdate calls = %d, want 0 (nothing to echo back)", updates)
+	}
+}
+
+// TestLinearSyncKeepsTemplateHeadingDescription asserts the #8506
+// unchanged-shape rule: a local description that itself ends in a
+// section-shaped heading pushes to exactly the body Linear stores, so a
+// remote title change must update the title without reshaping the fields —
+// the heading text stays in the description, not in notes.
+func TestLinearSyncKeepsTemplateHeadingDescription(t *testing.T) {
+	marker := linear.GenerateIdempotencyMarker("bd-template", "a@b.c", 11)
+	api, store, runSync := newLinearDescriptionSyncFixture(t,
+		"Renamed in Linear",
+		"Intro\n\n## Notes\n\ntemplate text\n"+marker+"\n",
+		"Intro\n\n## Notes\ntemplate text",
+		"")
+
+	result := runSync()
+	if result.PullStats.Updated != 1 {
+		t.Fatalf("PullStats = %+v, want Updated=1 (the title edit pulled)", result.PullStats)
+	}
+	if store.issue.Title != "Renamed in Linear" {
+		t.Fatalf("local title = %q, want the remote title", store.issue.Title)
+	}
+	if store.issue.Description != "Intro\n\n## Notes\ntemplate text" {
+		t.Fatalf("local description = %q, want the template heading text kept in the description", store.issue.Description)
+	}
+	if store.issue.Notes != "" {
+		t.Fatalf("local notes = %q, want empty (the heading text was never a notes field)", store.issue.Notes)
+	}
+	if _, updates := api.snapshot(); updates != 0 {
+		t.Fatalf("issueUpdate calls = %d, want 0 (nothing local was kept)", updates)
 	}
 }
