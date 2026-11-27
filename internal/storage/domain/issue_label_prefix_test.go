@@ -241,7 +241,16 @@ func (r *prefixTouchIssueRepo) Get(_ context.Context, id string, _ IssueTableOpt
 // overlapping `bd set-state` calls on the proxied-server route both commit and
 // the issue keeps two values of one dimension. Setting a dimension that holds
 // no value yet removes nothing and still touches: that is the overlap two
-// first-time calls race on.
+// first-time calls race on. Only a non-empty prefix chooses removals from the
+// set (an empty one matches nothing, issueops' labelPatchReadsTheSet rule), so
+// a patch whose prefixes are all empty does not touch, even when its adds
+// change the set.
+//
+// iucApplyUpdateLabelCoordination (internal/storage/domain/db) pins the touch
+// over real SQL in the dolt-server lane. This test pins it in the unit lane
+// too, and adds what that one does not check: the wisp tier, a first value, a
+// clear, the touch before the first row write, and no touch for an empty
+// dimension or an empty prefix.
 func TestApplyUpdatePrefixRemovalTouchesTheCoordinationCell(t *testing.T) {
 	setState := func(value string) UpdateSpec {
 		return UpdateSpec{RemoveLabelPrefixes: []string{"state:"}, AddLabels: []string{"state:" + value}}
@@ -289,6 +298,12 @@ func TestApplyUpdatePrefixRemovalTouchesTheCoordinationCell(t *testing.T) {
 			held: []string{"keep"},
 			spec: UpdateSpec{RemoveLabelPrefixes: []string{"state:"}},
 			want: nil,
+		},
+		{
+			name: "an empty prefix matches nothing and does not touch even when the add changes the set",
+			held: []string{"keep"},
+			spec: UpdateSpec{RemoveLabelPrefixes: []string{""}, AddLabels: []string{"state:a"}},
+			want: []string{"insert state:a"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
