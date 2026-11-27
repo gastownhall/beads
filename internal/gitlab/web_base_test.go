@@ -197,9 +197,9 @@ func assertTodaysRecognition(t *testing.T, tr *Tracker, stub *gitLabStub) {
 }
 
 // TestInitKeepsTodaysRecognitionWhenTheWebAddressIsUnknown pins AC-3: a 404
-// for the project, a web_url that does not end in the project's path, and a
-// group-only config (which sends no request) all leave Init succeeding with
-// today's recognition and keys.
+// for the project, a web_url that does not end in the project's path, a
+// project that reports no web_url, and a group-only config (which sends no
+// request) all leave Init succeeding with today's recognition and keys.
 func TestInitKeepsTodaysRecognitionWhenTheWebAddressIsUnknown(t *testing.T) {
 	t.Run("project 404", func(t *testing.T) {
 		stub := newGitLabStub(t)
@@ -213,6 +213,15 @@ func TestInitKeepsTodaysRecognitionWhenTheWebAddressIsUnknown(t *testing.T) {
 	t.Run("web_url does not end in path_with_namespace", func(t *testing.T) {
 		stub := newGitLabStub(t)
 		stub.projectJSON = `{"id":42,"path_with_namespace":"g/p","web_url":"https://git.example.org/x/y"}`
+		tr, err := initStubTracker(t, stub, "g/p", nil)
+		if err != nil {
+			t.Fatalf("Init: %v", err)
+		}
+		assertTodaysRecognition(t, tr, stub)
+	})
+	t.Run("no web_url reported", func(t *testing.T) {
+		stub := newGitLabStub(t)
+		stub.projectJSON = `{"id":42,"path_with_namespace":"g/p"}`
 		tr, err := initStubTracker(t, stub, "g/p", nil)
 		if err != nil {
 			t.Fatalf("Init: %v", err)
