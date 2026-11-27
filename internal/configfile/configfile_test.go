@@ -121,8 +121,31 @@ func TestLoadMigratesOnlyBeadsLegacyConfig(t *testing.T) {
 		{name: "empty object", file: LegacyConfigFileName, body: `{}`},
 		{name: "null", file: LegacyConfigFileName, body: `null`},
 		{name: "explicitly empty database", file: LegacyConfigFileName, body: `{"database": ""}`},
+		{name: "database and keys Config no longer has", file: LegacyConfigFileName, body: `{"database":"beads.db","version":"0.20.1","jsonl_export":"issues.jsonl"}`, migrate: true},
+		{name: "backend only", file: LegacyConfigFileName, body: `{"backend":"dolt"}`, migrate: true},
+		{name: "project id only", file: LegacyConfigFileName, body: `{"project_id":"p-1"}`, migrate: true},
 		{name: "empty metadata.json", file: ConfigFileName, body: `{}`},
 	}
+
+	// A config.json beads cannot decode still fails Load with the legacy
+	// parse error and writes nothing: the no-field guard runs only after a
+	// successful decode.
+	t.Run("wrong-typed field", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, LegacyConfigFileName), []byte(`{"database": 123}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before := dirListing(t, dir)
+		if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "parsing legacy config") {
+			t.Fatalf("Load = %v, want the parsing legacy config error", err)
+		}
+		if _, err := LoadForDiscovery(dir); err == nil {
+			t.Error("LoadForDiscovery decoded a wrong-typed config.json; want an error")
+		}
+		if after := dirListing(t, dir); after != before {
+			t.Errorf("directory changed around a file that does not load: before [%s], after [%s]", before, after)
+		}
+	})
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
