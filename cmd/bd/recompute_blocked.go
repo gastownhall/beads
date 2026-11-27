@@ -28,6 +28,13 @@ It is idempotent: on a consistent database it changes nothing. Works in every
 storage mode — embedded, server, and proxied-server (unlike 'bd doctor', which
 is server-mode only).
 
+A row whose flag depends on a wisp this database does not have is left as
+found: dependencies replicate and wisps do not, so a clone holds the
+dependency without the wisp and can derive neither value. So are the children
+of a blocked parent with no other blocker this database can see. A blocker
+this database can see still marks such a row, and a closed or pinned row is
+still cleared. 'bd doctor' counts these rows on its Blocked State line.
+
 On a workspace connected to a bd serve backend ('bd connect') it is a no-op
 that exits 0: the server maintains is_blocked on every write, and the column
 lives in the server's database, so the repair is run there, by the server's
