@@ -149,6 +149,7 @@ go_test(
         "blocked_dangling_wisp_ac3_test.go",
         "blocked_dangling_wisp_ac4_test.go",
         "blocked_dangling_wisp_ac5_test.go",
+        "blocked_dangling_wisp_ac8_test.go",
         "blocked_dangling_wisp_repro_test.go",
         "blocked_dangling_wisp_test.go",
         "blocked_full_repair_test.go",
