@@ -621,7 +621,7 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig, l
 	if local.Title != remote.Title {
 		return false
 	}
-	if BuildLinearDescription(local) != remote.Description {
+	if canonicalLinearText(BuildLinearDescription(local)) != canonicalLinearText(remote.Description) {
 		return false
 	}
 	if PriorityToLinear(local.Priority, config) != remote.Priority {
@@ -651,13 +651,27 @@ func PushFieldsEqualToBeads(local, remote *types.Issue) bool {
 	if local.Title != remote.Title {
 		return false
 	}
-	if BuildLinearDescription(local) != remote.Description {
+	if !DescriptionFieldsEqual(local, remote) {
 		return false
 	}
 	if local.Priority != remote.Priority {
 		return false
 	}
 	return local.Status == remote.Status
+}
+
+// DescriptionFieldsEqual reports whether two issues carry the same
+// description-field content in the body a push would send. Either side may
+// hold the fields split (Description plus AcceptanceCriteria/Design/Notes)
+// or still folded into Description in Linear's stored form: folding both
+// sides and comparing canonicalLinearText accepts the blank line after a
+// heading, trailing whitespace and idempotency markers that Linear adds to
+// what it stores, so a stored pull-back does not read as drift.
+func DescriptionFieldsEqual(a, b *types.Issue) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return canonicalLinearText(BuildLinearDescription(a)) == canonicalLinearText(BuildLinearDescription(b))
 }
 
 // LabelToIssueType infers issue type from label names.

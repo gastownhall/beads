@@ -49,6 +49,7 @@ go_test(
         "parent_reconcile_test.go",
         "pull_description_split_test.go",
         "pull_inverts_base_test.go",
+        "push_fields_stored_test.go",
         "staleness_test.go",
         "synclock_info_windows_test.go",
         "synclock_test.go",
