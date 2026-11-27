@@ -364,3 +364,71 @@ func TestProjectScopeUnderGitLabURLAndWebBase(t *testing.T) {
 		})
 	}
 }
+
+// workItemGraphQL answers the GraphQL calls of a task created as work item 9
+// under a parent issue.
+func workItemGraphQL(query string) string {
+	switch {
+	case strings.Contains(query, "workItemCreate"):
+		return `{"data":{"workItemCreate":{"errors":[],"workItem":{"id":"gid://gitlab/WorkItem/9","iid":"9","title":"Task","workItemType":{"name":"Task"},"webUrl":"https://elsewhere.example/g/p/-/work_items/9"}}}}`
+	case strings.Contains(query, "workItemTypes"):
+		return `{"data":{"project":{"workItemTypes":{"nodes":[{"id":"gid://gitlab/WorkItems::Type/5"}]}}}}`
+	default:
+		return `{"data":{"project":{"workItems":{"nodes":[{"id":"gid://gitlab/WorkItem/1"}]}}}}`
+	}
+}
+
+// TestCreateTaskWorkItemRefUnderWebBase pins AC-7: a task created as a work
+// item gets its ref composed under the learned web address, where it is
+// recognized and keys like GitLab's link for the same IID, and under
+// gitlab.url when no web address was learned.
+func TestCreateTaskWorkItemRefUnderWebBase(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		learned bool
+	}{
+		{name: "learned web base", learned: true},
+		{name: "no learned web base"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newGitLabStub(t)
+			stub.graphql = workItemGraphQL
+			root := stub.srv.URL
+			if tc.learned {
+				root = "https://git.example.org"
+				stub.projectJSON = `{"id":42,"path_with_namespace":"g/p","web_url":"https://git.example.org/g/p"}`
+			} else {
+				stub.projectStatus = http.StatusNotFound
+			}
+			parentRef := root + "/g/p/-/issues/1"
+			store := &crossProjectStore{
+				issues: map[string]*types.Issue{
+					"bd-story": {ID: "bd-story", Title: "Story", IssueType: types.TypeFeature, ExternalRef: &parentRef},
+					"bd-task":  {ID: "bd-task", Title: "Task", IssueType: types.TypeTask, Status: types.StatusOpen},
+				},
+				deps: []types.Dependency{{IssueID: "bd-task", DependsOnID: "bd-story", Type: types.DepParentChild}},
+			}
+			tr, err := initStubTracker(t, stub, "g/p", store)
+			if err != nil {
+				t.Fatalf("Init: %v", err)
+			}
+			created, err := tr.CreateIssue(context.Background(), store.issues["bd-task"])
+			if err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+			ref := tr.BuildExternalRef(created)
+			if want := root + "/g/p/-/work_items/9"; ref != want {
+				t.Fatalf("work item ref = %q, want %q", ref, want)
+			}
+			if !tr.IsExternalRef(ref) {
+				t.Errorf("IsExternalRef(%q) = false, want true", ref)
+			}
+			if got, want := tr.MatchKey(ref), tr.MatchKey(root+"/g/p/-/issues/9"); got != want || got == "" {
+				t.Errorf("MatchKey(%q) = %q, want %q (GitLab's issue link for IID 9)", ref, got, want)
+			}
+			if len(created.Warnings) != 0 {
+				t.Errorf("warnings = %q, want none", created.Warnings)
+			}
+		})
+	}
+}
