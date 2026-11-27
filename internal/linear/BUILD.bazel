@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "client.go",
         "description.go",
+        "description_fields.go",
         "fieldmapper.go",
         "idempotency.go",
         "mapping.go",

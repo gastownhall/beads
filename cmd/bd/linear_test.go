@@ -2120,6 +2120,12 @@ func (s *linearSyncStore) ApplyIssueUpdate(_ context.Context, id string, updates
 			next.Title = text
 		case "description":
 			next.Description = text
+		case "acceptance_criteria":
+			next.AcceptanceCriteria = text
+		case "design":
+			next.Design = text
+		case "notes":
+			next.Notes = text
 		case "status":
 			next.Status = types.Status(text)
 		case "assignee":

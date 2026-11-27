@@ -1020,6 +1020,7 @@ go_test(
         "legacy_upgrade_guard_init_flag_test.go",
         "legacy_upgrade_guard_test.go",
         "legacy_upgrade_guard_witness_test.go",
+        "linear_description_sync_test.go",
         "linear_roundtrip_test.go",
         "linear_test.go",
         "lint_embedded_test.go",
