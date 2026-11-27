@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // cliMergeSession hands the CLI pull route's merge (mergeTrackingRefAfterCLIFetch)
@@ -47,6 +50,35 @@ func doltMergeRow(conflicts int) *sqlmock.Rows {
 		AddRow("abc", 0, conflicts, message)
 }
 
+// conflictRows is a dolt_conflicts result naming table, or none when table is
+// empty.
+func conflictRows(table string) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{"table", "num_conflicts"})
+	if table != "" {
+		rows.AddRow(table, 1)
+	}
+	return rows
+}
+
+// expectCleanSettleReads expects settleMergeInTx's reads of a merge that left
+// nothing to settle: the resolver and the pre-rollback capture both find no
+// conflict, and the FK repair finds no violation.
+func expectCleanSettleReads(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("SELECT `table`, num_conflicts FROM dolt_conflicts").WillReturnRows(conflictRows(""))
+	mock.ExpectQuery("SELECT `table`, num_conflicts FROM dolt_conflicts").WillReturnRows(conflictRows(""))
+	mock.ExpectQuery("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0").
+		WillReturnRows(sqlmock.NewRows([]string{"table"}))
+}
+
+// expectDeclinedSettle expects settleMergeInTx to find a conflict in table,
+// which the resolver declines (no table outside its allowlist is settled),
+// capture it before the rollback (bd-578h9.15), and roll back.
+func expectDeclinedSettle(mock sqlmock.Sqlmock, table string) {
+	mock.ExpectQuery("SELECT `table`, num_conflicts FROM dolt_conflicts").WillReturnRows(conflictRows(table))
+	mock.ExpectQuery("SELECT `table`, num_conflicts FROM dolt_conflicts").WillReturnRows(conflictRows(table))
+	mock.ExpectRollback()
+}
+
 // TestCLIPullMergeRunsOnAPinnedLongTimeoutSession pins where the CLI pull
 // route's merge runs (bd-e2q8zs): on its own session, which production opens
 // with openLongTimeoutConn, moved onto the store's branch before it merges,
@@ -54,12 +86,15 @@ func doltMergeRow(conflicts int) *sqlmock.Rows {
 // read deadline (10s by default) a large three-way merge can outlast, where
 // the `dolt pull` it replaced had the CLI transfer timeout. The pool only
 // answers which branch the store is on (pinStoreBranch). The merge runs in a
-// transaction of its own, committed unless the merge failed, as `dolt pull`
-// sent COMMIT, so a conflicted merge persists with autocommit off too. The
-// test also pins what the merge reports: Dolt's "Already up to date." error
-// is no failure, a conflicted merge fails, and a failed merge or commit names
-// the ref.
+// transaction of its own with the allow-conflicts and force variables set,
+// and settles there (settleMergeInTx): a clean merge commits, also with
+// autocommit off, and a merge the resolver declines rolls back with its
+// conflicts captured, so it is never published (GH#7839). The test also pins
+// what the merge reports: Dolt's "Already up to date." error is no failure, a
+// conflicted merge fails with a MergeConflictsError, and a failed merge or
+// commit names the ref, a lost COMMIT response as ErrCommitIndeterminate.
 func TestCLIPullMergeRunsOnAPinnedLongTimeoutSession(t *testing.T) {
+	commitLost := errors.New("commit response lost")
 	for _, tc := range []struct {
 		name string
 		// sessionBranch is the branch the fresh session starts on: a fresh
@@ -72,13 +107,19 @@ func TestCLIPullMergeRunsOnAPinnedLongTimeoutSession(t *testing.T) {
 		// commitErr, when non-nil, is returned by the transaction's COMMIT.
 		commitErr error
 		wantErr   string // empty: want nil
+		// wantConflicts asks for a MergeConflictsError; wantIs for an error
+		// errors.Is matches.
+		wantConflicts bool
+		wantIs        error
 	}{
 		{name: "fresh session moves to the store's branch", sessionBranch: "default"},
 		{name: "session already on the store's branch", sessionBranch: "main"},
 		{name: "already up to date is not an error", sessionBranch: "main", mergeErr: errors.New("Already up to date.")},
-		{name: "a conflicted merge fails", sessionBranch: "main", conflicts: 1, wantErr: "merge origin/main: conflicts found"},
-		{name: "a failed merge names the ref", sessionBranch: "main", mergeErr: errors.New("cannot merge"), wantErr: "merge origin/main: cannot merge"},
-		{name: "a failed commit names the ref", sessionBranch: "main", commitErr: errors.New("commit refused"), wantErr: "merge origin/main: commit: commit refused"},
+		{name: "a declined conflicted merge fails and rolls back", sessionBranch: "main", conflicts: 1,
+			wantErr: "merge origin/main: conflicts found", wantConflicts: true},
+		{name: "a failed merge names the ref and rolls back", sessionBranch: "main", mergeErr: errors.New("cannot merge"), wantErr: "merge origin/main: cannot merge"},
+		{name: "a failed commit names the ref", sessionBranch: "main", commitErr: commitLost,
+			wantErr: "merge origin/main: commit pull merge settlement: commit response lost", wantIs: storage.ErrCommitIndeterminate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, poolMock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
@@ -93,21 +134,32 @@ func TestCLIPullMergeRunsOnAPinnedLongTimeoutSession(t *testing.T) {
 			if tc.sessionBranch != "main" {
 				session.ExpectExec("CALL DOLT_CHECKOUT(?)").WithArgs("main").WillReturnResult(sqlmock.NewResult(0, 0))
 			}
+			session.ExpectExec("SET @@dolt_allow_commit_conflicts = 1").WillReturnResult(sqlmock.NewResult(0, 0))
 			session.ExpectExec("SET @@dolt_force_transaction_commit = 1").WillReturnResult(sqlmock.NewResult(0, 0))
 			session.ExpectBegin()
 			merge := session.ExpectQuery("CALL DOLT_MERGE(?)").WithArgs("origin/main")
-			if tc.mergeErr != nil {
+			switch {
+			case tc.mergeErr != nil:
 				merge.WillReturnError(tc.mergeErr)
-				session.ExpectRollback()
-			} else {
+				expectCleanSettleReads(session)
+				if tc.wantErr != "" {
+					session.ExpectRollback()
+				} else {
+					session.ExpectCommit()
+				}
+			case tc.conflicts != 0:
 				merge.WillReturnRows(doltMergeRow(tc.conflicts))
+				expectDeclinedSettle(session, "pull_msg_marker")
+			default:
+				merge.WillReturnRows(doltMergeRow(0))
+				expectCleanSettleReads(session)
 				commit := session.ExpectCommit()
 				if tc.commitErr != nil {
 					commit.WillReturnError(tc.commitErr)
 				}
 			}
-			// The session is closed, not kept idle: the force variable dies
-			// with it.
+			// The session is closed, not kept idle: the variables die with
+			// it.
 			session.ExpectClose()
 
 			store := &DoltStore{db: pool, branch: "main"}
@@ -117,6 +169,13 @@ func TestCLIPullMergeRunsOnAPinnedLongTimeoutSession(t *testing.T) {
 			}
 			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 				t.Fatalf("merge: %v, want an error containing %q", err, tc.wantErr)
+			}
+			var mce *versioncontrolops.MergeConflictsError
+			if got := errors.As(err, &mce); got != tc.wantConflicts {
+				t.Errorf("merge error %v: errors.As MergeConflictsError = %v, want %v", err, got, tc.wantConflicts)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("merge error %v: want errors.Is %v", err, tc.wantIs)
 			}
 			if err := session.ExpectationsWereMet(); err != nil {
 				t.Errorf("merge session statements: %v", err)
