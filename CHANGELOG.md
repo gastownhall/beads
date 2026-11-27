@@ -6292,6 +6292,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for it, so upgrade every bd that shares the workspace, or run `bd dolt stop`
   before going back to an older one.
 
+### Fixed
+
+- **Assignee and actor identities now compare case-insensitively** (#8628).
+  The ownership gates compared letter case exactly, so an issue assigned
+  `hierophant` could not be closed by actor `Hierophant` without `--force`,
+  and `bd list --assignee` treated the two spellings as disjoint sets. Every
+  gate (close, claim, re-claim, unclaim, `--assignee` transfer, the
+  compare-and-set release, the heartbeat slow path) now folds letter case —
+  the same Unicode simple-lowercase fold Dolt's `LOWER()` runs — and still
+  forgives separator respellings (`.`/`_`/`-` runs, with an exact `--` still
+  decoding to `/`); nothing else is forgiven, padding included. `bd list`,
+  `bd count`, `bd search`, `bd ready` and `bd query`'s `assignee=` filter
+  compare `--assignee` values with stored assignees ignoring letter case
+  only (separator matching in listings stays exact, as it always has), and
+  `bd query`'s predicate mode now agrees with its SQL filter mode instead of
+  folding more than the listings do. The stored spelling is never rewritten:
+  an issue held by `hierophant` stays spelled `hierophant` until reassigned,
+  and `bd update <id> --assignee Hierophant` by the holder is an allowed
+  respelling, not a forced transfer. `claim.pools` aliases are matched
+  exactly, casing included.
+
 ## [1.3.4] - 2026-11-04
 
 First stable release of the 1.3.4 patch line. It ships the same code as

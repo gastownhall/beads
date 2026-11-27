@@ -276,7 +276,8 @@ func RestoreLeaseOnImportInTx(ctx context.Context, tx DBTX, issue *types.Issue, 
 	// actorMatches — a query predicate can't canonicalize across a join the
 	// way Go code can, so a lease granted under one spelling of an identity
 	// can be dropped here if the issue's stored assignee is later written
-	// under a different, equivalent spelling (ga-v2k49). Bounded and
+	// under a different, equivalent spelling, where equivalent means either
+	// separator respelling (ga-v2k49) or letter case (GH#8628). Bounded and
 	// self-healing: HeartbeatIssueInTx's disambiguation fallback re-arms the
 	// lease under the caller's current spelling on the next beat, so the gap
 	// is one issue briefly in_progress with no lease row (visible to
@@ -476,8 +477,9 @@ func RenewLeaseInTx(ctx context.Context, tx DBTX, id, actor string) (LeaseRenewa
 	//
 	// THE COMPARISON IS VERBATIM (assignee = the holder as sent), deliberately,
 	// as the holder predicate is: a holder whose lease row and assignee are
-	// spelled differently (ga-v2k49's separator case) misses here on every
-	// beat and takes the slow path, which judges under actorMatches and
+	// spelled differently — a separator respelling (ga-v2k49) or a case
+	// variant of the same identity (GH#8628) — misses here on every beat
+	// and takes the slow path, which judges under actorMatches and
 	// refreshes the row in place. Correct, a few reads slower, and only for
 	// that spelling mismatch; the common case pays one indexed count read.
 	//

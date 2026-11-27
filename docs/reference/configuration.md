@@ -343,6 +343,24 @@ For most developers no configuration is needed — issue authorship matches comm
 export BEADS_ACTOR="my-github-handle"
 ```
 
+### How identities compare
+
+In bd v1.4.0 and later, letter case is not part of an identity (#8628).
+Every ownership gate — `bd close`, `bd update --claim`, `bd unclaim`,
+`bd update --assignee`, the compare-and-set release and the heartbeat slow
+path — compares the stored assignee with the acting identity ignoring
+letter case (Unicode simple lowercase, so `K` matches `k`) and treating any
+run of `.`, `_` or `-` as one separator (an exact `--` run is the encoding
+of a rig-qualified agent's `/` and stays distinct). Nothing else is
+forgiven: padding is a different string, and so are two spellings that
+differ in more than case or separators. `bd list`, `bd count`, `bd search`,
+`bd ready` and `bd query`'s `assignee=` compare an `--assignee` value with
+stored assignees ignoring letter case only; separator matching in those
+listings stays exact, as it always has. The stored spelling is never
+rewritten — an issue assigned `hierophant` stays spelled that way until it
+is reassigned, and both spellings list, match and release it — and
+`claim.pools` aliases are matched exactly, casing included.
+
 ## Project-Level Settings (Database)
 
 These are written to the Dolt database by `bd config set` and have no env var override, with one exception: `versioned-history.enabled` also honors `BD_VERSIONED_HISTORY_ENABLED` (see [Versioned Issue History](#versioned-issue-history)). Common namespaces:
