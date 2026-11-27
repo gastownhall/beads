@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Linear sync keeps the description fields split.** The pull copied the
+  whole Linear body — description plus the `## Acceptance Criteria`,
+  `## Design` and `## Notes` sections and the idempotency marker — into the
+  local description, and the next push folded that copy back with a fresh
+  set of sections, so the body compounded on every sync cycle and a
+  Linear-side edit to a section never reached the structured field. The
+  pull now parses the stored body back into the fields, pushes compare
+  bodies in a form that ignores the blank line after a heading and the
+  marker, and a settle step gives a section the body still carries to
+  Linear while keeping local text whose section the body dropped for the
+  next push. (#8506, builds on PR #8624 by rjgeng)
+
 ### Security
 
 - **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and

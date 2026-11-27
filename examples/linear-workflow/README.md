@@ -235,6 +235,26 @@ bd config set linear.relation_map.causes discovered-from
 bd config set linear.relation_map.duplicate related
 ```
 
+### Description Mapping
+
+bd folds its long-text fields into the single description Linear offers:
+
+| Beads field | Linear body section |
+|-------------|---------------------|
+| description | text above the first section heading |
+| acceptance_criteria | `## Acceptance Criteria` |
+| design | `## Design` |
+| notes | `## Notes` |
+
+A push appends the sections that hold text. A pull parses the trailing run
+of those headings — in the form Linear stores it, with a blank line after
+each heading and possibly the sync's idempotency marker — back into the
+fields. A section the body still carries wins over the local field (edit it
+in Linear and the pull adopts the edit); text whose section the body dropped
+is kept locally and pushed back. Section headings inside fenced code blocks
+count as body text, and only the final in-order run of headings is parsed:
+earlier or out-of-order headings stay description text.
+
 ## Conflict Resolution
 
 Conflicts occur when both local and Linear versions are modified since the last sync.
@@ -479,6 +499,7 @@ For large projects, initial sync fetches all issues. Subsequent syncs are increm
 - **No attachments**: Attachments are not synced
 - **No comments**: Comments are not synced (only description)
 - **Custom fields**: Linear custom fields are not mapped
+- **Description sections**: only the final in-order `## Acceptance Criteria` / `## Design` / `## Notes` run at the end of the body maps back to fields; headings inside code fences stay description text
 - **Projects**: Linear projects are not mapped (use labels for categorization)
 - **Cycles**: Linear cycles/sprints are not mapped
 
