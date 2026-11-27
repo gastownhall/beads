@@ -145,6 +145,7 @@ go_test(
         "batch_creator_contract_test.go",
         "batch_getter_contract_test.go",
         "blocked_consistency_test.go",
+        "blocked_dangling_wisp_ac2_test.go",
         "blocked_dangling_wisp_repro_test.go",
         "blocked_dangling_wisp_test.go",
         "blocked_full_repair_test.go",
