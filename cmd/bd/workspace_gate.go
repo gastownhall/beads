@@ -602,7 +602,13 @@ func acquireInitMutationGate(ctx context.Context, beadsDir, physicalRoot string,
 		Reason: "bd init",
 		OnWait: onWait,
 	}
-	h, err := acquireExclusiveWorkspaceGatesWithOptions(ctx, beadsDir, opts, physicalRoot)
+	// An empty physicalRoot is an init with no database directory of its own
+	// to gate (a registered backend places its store through its Create hook).
+	var physicalRoots []string
+	if physicalRoot != "" {
+		physicalRoots = append(physicalRoots, physicalRoot)
+	}
+	h, err := acquireExclusiveWorkspaceGatesWithOptions(ctx, beadsDir, opts, physicalRoots...)
 	stopNotice()
 	if err != nil {
 		if errors.Is(err, workspacegate.ErrBusy) {

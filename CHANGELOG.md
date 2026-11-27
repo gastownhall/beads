@@ -172,6 +172,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A registered storage backend can now be provisioned by `bd init`.** The
+  backend registry (`internal/storage/backends`) gains an optional `Create`
+  hook on `Backend`, with `backends.CanCreate` and `backends.Create` beside
+  `Lookup` and `Registered`. `bd init --backend=<name>` on a registered backend
+  that supplies the hook runs a minimal init under init's exclusive workspace
+  gate: the legacy-workspace, nested-`.beads` and existing-data guards, the
+  standard `.beads/.gitignore`, the backend's own store creation, the issue
+  prefix and the workspace identity written through the opened store, then
+  `metadata.json` naming the backend with a fresh project id, and the
+  gate-file patterns in the project `.gitignore`. `metadata.json` is written
+  last, so an init that fails leaves no half-built workspace: a `.beads`
+  directory the init created is removed, and neither the next `bd init` nor
+  `--init-if-missing` mistakes what is left for a workspace. The route applies
+  `--prefix`, `--quiet` and `--init-if-missing`, accepts `--non-interactive`,
+  `--skip-hooks` and `--skip-agents` (it never prompts and installs neither),
+  and refuses every other `bd init` flag, and `--db`/`--database`, by name:
+  `--server`, `--remote`, `--stealth` and the rest select something only the
+  Dolt route does. A `BEADS_DB` or `BD_DB` in the environment is refused the
+  same way, since it names a Dolt database as `--db` does.
+  `--init-if-missing` skips an initialized workspace, and
+  like the Dolt route refuses a `--prefix` that workspace does not have
+  instead of reporting success for it; the prefix compared is the one the
+  workspace's store holds. A registered backend without the hook is still
+  refused by name, as before, so nothing changes for the `http` backend or
+  for any registrant that only opens workspaces something else created. This
+  is the init half of the backend seam GH#4547 describes; the Dolt init path
+  is untouched.
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,
