@@ -1569,8 +1569,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still overwrote every local issue a remote issue matched, linked or matched
   by its Beads ID. A create-only sync now creates issues only for remote
   issues that match no local issue and leaves every matched issue unchanged,
-  also when conflict resolution picks the remote side. To take remote edits,
-  run the sync without `--create-only`. By rjgeng.
+  also when conflict resolution picks the remote side. A create-only pull that
+  holds a remote edit for a matched issue does not advance the sync cursor past
+  that edit, so the next ordinary sync fetches it. To take the held edits, run
+  the sync without `--create-only`. By rjgeng.
 
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming

@@ -363,3 +363,46 @@ func TestEngineCreateOnlyPullExternalWinsConflict(t *testing.T) {
 		}
 	})
 }
+
+// #8621 (review): a create-only pull that skips a remote edit it held for a
+// matched issue must not advance last_sync past that edit, or the next
+// ordinary pull never fetches it. LastSync is empty when the cursor is held.
+func TestEngineCreateOnlyPullHoldsCursorWhenItSkipsAnEdit(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:         "uuid-linked",
+		Identifier: "EXT-LINKED",
+		URL:        "https://test.test/EXT-LINKED",
+		Title:      "Edited in Linear",
+	}}
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	res, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync(pull, create-only): %v", err)
+	}
+	if res.PullStats.Skipped == 0 {
+		t.Fatalf("fixture skipped no remote edit, so the cursor hold is not exercised")
+	}
+	if res.LastSync != "" {
+		t.Fatalf("LastSync = %q after a create-only pull that skipped an edit, want the cursor held", res.LastSync)
+	}
+}
+
+// Control: a create-only pull with nothing held still advances last_sync.
+func TestEngineCreateOnlyPullAdvancesCursorWhenNothingHeld(t *testing.T) {
+	ctx := context.Background()
+	state := createOnlyState()
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	res, err := engine.Sync(ctx, SyncOptions{Pull: true, CreateOnly: true})
+	if err != nil {
+		t.Fatalf("Sync(pull, create-only): %v", err)
+	}
+	if res.LastSync == "" {
+		t.Fatalf("LastSync empty after a create-only pull that held nothing, want it advanced")
+	}
+}

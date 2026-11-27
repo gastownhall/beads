@@ -222,6 +222,10 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	}
 
 	// Phase 2: Pull
+	// holdCursor is set when a --create-only pull skipped remote edits it held
+	// for matched local issues. Those edits are still newer than last_sync, so
+	// last_sync must not move past them (see the last_sync write below).
+	holdCursor := false
 	if opts.Pull {
 		pullStats, err := e.doPull(ctx, opts, allowPullOverwriteIDs, skipPushIDs)
 		if err != nil {
@@ -231,6 +235,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 			span.SetStatus(codes.Error, result.Error)
 			return result, err
 		}
+		holdCursor = opts.CreateOnly && pullStats.Skipped > 0
 		result.PullStats = *pullStats
 		result.Stats.Pulled = pullStats.Created + pullStats.Updated
 		result.Stats.Created += pullStats.Created
@@ -274,7 +279,9 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	// to half a second in the future of wall clock. Record last_sync at
 	// the next whole second so the engine's own writes are never misread
 	// as local edits by the next pull's conflict guard.
-	if !opts.DryRun {
+	if holdCursor {
+		e.warn("--create-only held remote edits on matched issues; last_sync not advanced, so the next pull fetches them")
+	} else if !opts.DryRun {
 		lastSync := time.Now().UTC().Truncate(time.Second).Add(time.Second).Format(time.RFC3339Nano)
 		key := e.Tracker.ConfigPrefix() + ".last_sync"
 		if err := e.Store.SetLocalMetadata(ctx, key, lastSync); err != nil {
