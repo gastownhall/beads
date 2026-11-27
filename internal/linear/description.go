@@ -55,6 +55,7 @@ var idempotencyMarkerRe = regexp.MustCompile(`<!-- bd-idempotency: [0-9a-f]+ -->
 func ParseLinearDescription(text string) DescriptionParts {
 	stripped, markerRemoved := stripIdempotencyMarkers(text)
 	lines := strings.Split(stripped, "\n")
+	hidden := hiddenFenceLines(lines)
 
 	type candidate struct {
 		line int // index into lines
@@ -62,6 +63,9 @@ func ParseLinearDescription(text string) DescriptionParts {
 	}
 	var candidates []candidate // in document order
 	for i, line := range lines {
+		if hidden[i] {
+			continue
+		}
 		if rank := headingRank(line); rank >= 0 {
 			candidates = append(candidates, candidate{line: i, rank: rank})
 		}
@@ -173,4 +177,80 @@ func stripIdempotencyMarkers(text string) (string, bool) {
 		text = text[:start] + text[end:]
 	}
 	return text, removed
+}
+
+// canonicalLinearText normalizes a Linear description body for comparison:
+// markers removed, blank lines dropped, every line right-trimmed. Two bodies
+// equal in this form differ only in blank lines, trailing whitespace and
+// idempotency markers.
+func canonicalLinearText(s string) string {
+	stripped, _ := stripIdempotencyMarkers(s)
+	return strings.Join(nonBlankTrimmedLines(stripped), "\n")
+}
+
+// nonBlankTrimmedLines splits s into its non-blank lines, each right-trimmed.
+func nonBlankTrimmedLines(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if t := strings.TrimRight(line, " \t\r\n"); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// hiddenFenceLines reports which lines sit inside a closed ``` or ~~~ code
+// fence: a section heading there is quoted text, not a candidate. An unclosed
+// fence hides nothing.
+func hiddenFenceLines(lines []string) map[int]bool {
+	hidden := make(map[int]bool)
+	inFence := false
+	var fenceChar byte
+	for i, line := range lines {
+		c, closing := fenceLine(line)
+		if !inFence {
+			if c != 0 && hasClosingFence(lines, i+1, c) {
+				inFence = true
+				fenceChar = c
+			}
+			continue
+		}
+		if closing && c == fenceChar {
+			inFence = false
+			continue
+		}
+		hidden[i] = true
+	}
+	return hidden
+}
+
+// fenceLine reports the fence character of a line that opens or closes a ```
+// or ~~~ fence and whether the line is a closing fence (fence characters
+// only). An opening fence may carry an info string ("```go").
+func fenceLine(line string) (char byte, closing bool) {
+	t := strings.TrimSpace(line)
+	if len(t) < 3 {
+		return 0, false
+	}
+	c := t[0]
+	if c != '`' && c != '~' {
+		return 0, false
+	}
+	n := 0
+	for n < len(t) && t[n] == c {
+		n++
+	}
+	if n < 3 {
+		return 0, false
+	}
+	return c, strings.TrimSpace(t[n:]) == ""
+}
+
+func hasClosingFence(lines []string, from int, char byte) bool {
+	for i := from; i < len(lines); i++ {
+		if c, closing := fenceLine(lines[i]); closing && c == char {
+			return true
+		}
+	}
+	return false
 }

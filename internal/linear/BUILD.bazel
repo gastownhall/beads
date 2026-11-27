@@ -42,6 +42,7 @@ go_test(
     name = "linear_test",
     srcs = [
         "client_test.go",
+        "description_test.go",
         "idempotency_test.go",
         "mapping_test.go",
         "oauth_test.go",
