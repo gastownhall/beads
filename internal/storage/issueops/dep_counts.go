@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -33,22 +34,59 @@ func CountDependencyEdgesInTx(ctx context.Context, tx DBTX, sourceID string, dir
 		total += n
 	}
 	if dir == domain.DepDirectionIn || dir == domain.DepDirectionBoth {
-		// depTargetEqualsOr, not DepTargetExpr+" = ?": the COALESCE form
-		// wraps the three target columns in an expression no index can
-		// match, so this count degraded into a full table scan of
-		// dependencies/wisp_dependencies (GH#7666). depTargetEqualsOr is
-		// the existing SARGABLE per-column-OR predicate already used by
-		// queryDependentRecordsFromTable and CountDependentRecordsInTx
-		// for the same reason — this just wires it into the one count
-		// path that still used the COALESCE form. sourceID repeats once
-		// per OR'd column (depTargetEqualsOr's own doc comment).
-		n, err := countDistinctEdges(ctx, tx, depTargetEqualsOr(), "issue_id", "", typeClause, []any{sourceID, sourceID, sourceID}, typeArgs)
+		// Guarded union, not the per-column OR (GH#7666): each target column is
+		// its own UNION ALL branch, so the planner seeks each target index. The
+		// OR form plans as a full read of dependencies/wisp_dependencies.
+		n, err := countInEdgesGuarded(ctx, tx, sourceID, typeClause, typeArgs)
 		if err != nil {
 			return 0, err
 		}
 		total += n
 	}
 	return total, nil
+}
+
+// countInEdgesGuarded counts the incoming edges of sourceID (rows whose target
+// is sourceID): the durable rows matching typeClause, plus the wisp rows
+// matching it whose far end (issue_id) the durable plane does not already
+// hold for the same target. It is countDistinctEdges for the incoming
+// direction, with each target read as sqlbuild.DepTargetUnion's guarded
+// UNION ALL instead of a per-column OR, so each branch can seek an index.
+// The wisp leg's NOT IN subquery is unfiltered by type, as in
+// countDistinctEdges.
+func countInEdgesGuarded(ctx context.Context, tx DBTX, sourceID, typeClause string, typeArgs []any) (int64, error) {
+	typeFilter := ""
+	if typeClause != "" {
+		typeFilter = " AND " + typeClause
+	}
+	durableAll := sqlbuild.DepTargetUnion("dependencies", "", func(string) string { return "issue_id" }, "= ?", "")
+	durable := fmt.Sprintf("SELECT count(*) FROM (%s) du", sqlbuild.DepTargetUnion("dependencies", "", func(string) string { return "issue_id" }, "= ?", typeFilter)) //nolint:gosec // fixed fragments
+	n, err := countUnion(ctx, tx, durable, sqlbuild.DepTargetUnionArgs([]any{sourceID}, typeArgs))
+	if err != nil {
+		return 0, err
+	}
+
+	wisp := fmt.Sprintf("SELECT count(*) FROM (%s) wu WHERE wu.issue_id NOT IN (SELECT dfar.issue_id FROM (%s) dfar)", //nolint:gosec // fixed fragments
+		sqlbuild.DepTargetUnion("wisp_dependencies", "", func(string) string { return "issue_id" }, "= ?", typeFilter), durableAll)
+	// Wisp args: the wisp union (type filter included), then the durable far-end subquery (unfiltered).
+	wispArgs := append(sqlbuild.DepTargetUnionArgs([]any{sourceID}, typeArgs), sqlbuild.DepTargetUnionArgs([]any{sourceID}, nil)...)
+	wispN, err := countUnion(ctx, tx, wisp, wispArgs)
+	if err != nil {
+		if optionalBlockedTable("wisp_dependencies") && dberrors.IsMissingTable(err, "wisp_dependencies") {
+			return n, nil
+		}
+		return 0, err
+	}
+	return n + wispN, nil
+}
+
+// countUnion runs a single count(*) query with its bound arguments.
+func countUnion(ctx context.Context, tx DBTX, q string, args []any) (int64, error) {
+	var n int64
+	if err := tx.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // countDistinctEdges counts the durable rows matching anchorExpr, plus the wisp
