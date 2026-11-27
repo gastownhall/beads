@@ -739,7 +739,10 @@ func RelationToBeadsDep(relationType string, config *MappingConfig) string {
 	return "related" // Default fallback
 }
 
-// IssueToBeads converts a Linear issue to a Beads issue.
+// IssueToBeads converts a Linear issue to a Beads issue. The description
+// body a push folds the structured fields into is split back apart, so a
+// pull restores description, acceptance criteria, design and notes instead of
+// compounding the sections (gastownhall/beads#8506).
 func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 	createdAt, err := time.Parse(time.RFC3339, li.CreatedAt)
 	if err != nil {
@@ -751,13 +754,17 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 		updatedAt = time.Now()
 	}
 
+	parts := ParseLinearDescription(li.Description)
 	issue := &types.Issue{
-		Title:       li.Title,
-		Description: li.Description,
-		Priority:    PriorityToBeads(li.Priority, config),
-		IssueType:   LabelToIssueType(li.Labels, config),
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
+		Title:              li.Title,
+		Description:        parts.Description,
+		AcceptanceCriteria: parts.AcceptanceCriteria,
+		Design:             parts.Design,
+		Notes:              parts.Notes,
+		Priority:           PriorityToBeads(li.Priority, config),
+		IssueType:          LabelToIssueType(li.Labels, config),
+		CreatedAt:          createdAt,
+		UpdatedAt:          updatedAt,
 	}
 
 	// Map state using configurable mapping
@@ -849,14 +856,25 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 
 // BuildLinearToLocalUpdates creates an updates map from a Linear issue
 // to apply to a local Beads issue. This is used when Linear wins a conflict.
+// The description is the split body: the plain description plus a key for
+// each section a pull lifted out of it.
 func BuildLinearToLocalUpdates(li *Issue, config *MappingConfig) map[string]interface{} {
 	updates := make(map[string]interface{})
 
 	// Update title
 	updates["title"] = li.Title
 
-	// Update description
-	updates["description"] = li.Description
+	parts := ParseLinearDescription(li.Description)
+	updates["description"] = parts.Description
+	if parts.AcceptanceCriteria != "" {
+		updates["acceptance_criteria"] = parts.AcceptanceCriteria
+	}
+	if parts.Design != "" {
+		updates["design"] = parts.Design
+	}
+	if parts.Notes != "" {
+		updates["notes"] = parts.Notes
+	}
 
 	// Update priority using configured mapping
 	updates["priority"] = PriorityToBeads(li.Priority, config)
