@@ -486,3 +486,109 @@ func TestEmbeddedMigrateStrandedStepCommitsUserDirtInItsOwnTable(t *testing.T) {
 		t.Fatalf("user row before the %04d commit: %d rows, want 0", stranded, n)
 	}
 }
+
+// TestEmbeddedMigrateStrandedStepWithoutItsContentHashRefuses strands
+// migration 49 and then changes its cursor row's content_hash, to NULL and to
+// a well-formed hash no migration file has. Only runMigrations writes the
+// frozen file's hash, so such a row was marked by hand or by another build,
+// and the working set is not provably this binary's stranded step: the pass
+// must refuse exactly as it did before the fix and commit no migration.
+func TestEmbeddedMigrateStrandedStepWithoutItsContentHashRefuses(t *testing.T) {
+	requireEmbedded(t)
+	const stranded = 49
+	for _, tc := range []struct {
+		name string
+		hash any
+	}{
+		{name: "null", hash: nil},
+		{name: "mismatched", hash: strings.Repeat("0", 64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			dataDir := strandStepAt(t, ctx, stranded)
+
+			conn, closeConn := openPinnedConn(t, ctx, dataDir)
+			defer closeConn()
+			res, err := conn.ExecContext(ctx,
+				"UPDATE schema_migrations SET content_hash = ? WHERE version = ?", tc.hash, stranded)
+			if err != nil {
+				t.Fatalf("set content_hash of cursor row %d: %v", stranded, err)
+			}
+			if n, err := res.RowsAffected(); err != nil || n != 1 {
+				t.Fatalf("set content_hash of cursor row %d: rows affected = %d (err %v), want 1", stranded, n, err)
+			}
+			assertRefusedUnchanged(t, ctx, conn, []string{"issues"})
+		})
+	}
+}
+
+// TestEmbeddedMigrateTwoStrandedStepsRefuse leaves migrations 49 and 50 both
+// applied and uncommitted. A per-step-committing pass strands at most one
+// step, so two uncommitted cursor rows are not the signature of one stranded
+// step (they are what an older whole-pass binary, or a hand-run migration,
+// leaves), and the pass must refuse as before.
+func TestEmbeddedMigrateTwoStrandedStepsRefuse(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := strandStepsThrough(t, ctx, 48, 50)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	assertRefusedUnchanged(t, ctx, conn, []string{"issues"})
+}
+
+// TestEmbeddedMigrateUserDirtWithoutStrandedStepRefuses leaves a user's
+// uncommitted row in issues, a table pending migrations alter, with no
+// stranded cursor row. That is the #4566 guard's own case, and the pass must
+// refuse as before and leave the row uncommitted.
+func TestEmbeddedMigrateUserDirtWithoutStrandedStepRefuses(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedStrandFixtureAt(t, ctx, 48)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	mustExecStranded(t, ctx, conn,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES ('bd-user1', 'user row', '', '', '', '', 'open', 2, 'task')")
+	assertRefusedUnchanged(t, ctx, conn, []string{"issues"})
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM issues AS OF 'HEAD' WHERE id = 'bd-user1'"); n != 0 {
+		t.Fatalf("user row committed at HEAD (%d rows), want it left uncommitted", n)
+	}
+}
+
+// assertRefusedUnchanged runs MigrateUp and requires main's refusal: a
+// *DirtyTablesError naming wantTables, with the commit log (apart from
+// MigrateUp's own dolt_ignore seed commit, which runs before the guard by
+// design), HEAD's cursor and the dirty tables left as they were.
+func assertRefusedUnchanged(t *testing.T, ctx context.Context, conn *sql.Conn, wantTables []string) {
+	t.Helper()
+	logBefore := queryStrings(t, ctx, conn, "SELECT message FROM dolt_log")
+	headBefore := headMainVersion(t, ctx, conn)
+	dirtyBefore := dirtyTableNames(t, ctx, conn)
+
+	_, err := schema.MigrateUp(ctx, conn)
+	var dirty *schema.DirtyTablesError
+	if !errors.As(err, &dirty) {
+		t.Fatalf("MigrateUp err = %v, want *DirtyTablesError", err)
+	}
+	if !slices.Equal(dirty.Tables, wantTables) {
+		t.Fatalf("DirtyTablesError tables = %v, want %v", dirty.Tables, wantTables)
+	}
+
+	logAfter := queryStrings(t, ctx, conn, "SELECT message FROM dolt_log")
+	if len(logAfter) < len(logBefore) || !slices.Equal(logAfter[len(logAfter)-len(logBefore):], logBefore) {
+		t.Fatalf("commit log rewritten by a refused pass: before %q, after %q", logBefore, logAfter)
+	}
+	for _, msg := range logAfter[:len(logAfter)-len(logBefore)] {
+		if msg != "schema: seed dolt_ignore patterns" {
+			t.Fatalf("refused pass committed %q, want no commit but the dolt_ignore seed", msg)
+		}
+	}
+	if v := headMainVersion(t, ctx, conn); v != headBefore {
+		t.Fatalf("HEAD schema version after refusal = %d, want %d", v, headBefore)
+	}
+	if got := dirtyTableNames(t, ctx, conn); !slices.Equal(got, dirtyBefore) {
+		t.Fatalf("dirty tables after refusal = %v, want %v as before", got, dirtyBefore)
+	}
+}
