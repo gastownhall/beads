@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -181,6 +182,80 @@ func commitChangedTables(t *testing.T, ctx context.Context, conn *sql.Conn, hash
 	return tables
 }
 
+// cursorRowCommit is one dolt_history_schema_migrations entry for a cursor
+// row: a commit that carried the row, by hash and message.
+type cursorRowCommit struct {
+	hash    string
+	message string
+}
+
+// cursorRowCommitHistory returns every commit that carried cursor row
+// version, newest first. dolt_history_schema_migrations lists the row at
+// every commit from its first appearance to HEAD — not only the commit that
+// introduced it — and names each commit only by commit_hash (its extra
+// columns are commit_hash, committer and commit_date — no message), so the
+// hashes are resolved to messages through dolt_log.
+func cursorRowCommitHistory(t *testing.T, ctx context.Context, conn *sql.Conn, version int) []cursorRowCommit {
+	t.Helper()
+	rows, err := conn.QueryContext(ctx,
+		"SELECT commit_hash FROM dolt_history_schema_migrations WHERE version = ?", version)
+	if err != nil {
+		t.Fatalf("read dolt_history_schema_migrations for version %d: %v", version, err)
+	}
+	defer rows.Close()
+	var hashes []string
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			t.Fatalf("scan dolt_history_schema_migrations: %v", err)
+		}
+		hashes = append(hashes, hash)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate dolt_history_schema_migrations: %v", err)
+	}
+
+	messagesByHash := make(map[string]string, len(hashes))
+	logs, err := conn.QueryContext(ctx, "SELECT commit_hash, message FROM dolt_log")
+	if err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	defer logs.Close()
+	for logs.Next() {
+		var hash, message string
+		if err := logs.Scan(&hash, &message); err != nil {
+			t.Fatalf("scan dolt_log: %v", err)
+		}
+		messagesByHash[hash] = message
+	}
+	if err := logs.Err(); err != nil {
+		t.Fatalf("iterate dolt_log: %v", err)
+	}
+
+	entries := make([]cursorRowCommit, 0, len(hashes))
+	for _, hash := range hashes {
+		entries = append(entries, cursorRowCommit{hash: hash, message: messagesByHash[hash]})
+	}
+	return entries
+}
+
+// applyMigrationVersionOf extracts the four-digit version an apply-migration
+// commit message carries ("schema: apply migration 0062_events_dolt_ignore.up.sql"
+// → 62, true). Other commit messages — the open's dolt_ignore seed commit,
+// the pass's terminal "schema: apply migrations" commit — report false.
+func applyMigrationVersionOf(message string) (int, bool) {
+	const prefix = "schema: apply migration "
+	rest, ok := strings.CutPrefix(message, prefix)
+	if !ok || len(rest) < 5 || rest[4] != '_' {
+		return 0, false
+	}
+	v, err := strconv.Atoi(rest[:4])
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -230,6 +305,8 @@ func TestEmbeddedMigrateFinishesStrandedOwnStep(t *testing.T) {
 		{46, "0046_", []string{"issues"}, true},
 		{49, "0049_", []string{"comments", "issues"}, true},
 		{54, "0054_", []string{"issues"}, true},
+		{62, "0062_", []string{"dolt_ignore"}, false},
+		{73, "0073_", []string{"issues"}, false},
 	}
 
 	for _, row := range rows {
@@ -281,7 +358,93 @@ func TestEmbeddedMigrateFinishesStrandedOwnStep(t *testing.T) {
 				if !equalStrings(got, wantB) {
 					t.Fatalf("finished step %d changed tables = %v, uninterrupted pass's step commit changed %v", row.version, got, wantB)
 				}
+			} else {
+				// AC-2 rows: pin where the change and the cursor rows landed.
+				switch row.version {
+				case 62:
+					// 0062's ('events', true) row is in the step's own commit:
+					// the row is present at HEAD and the only apply-migration
+					// commit that ever touches dolt_ignore is 0062's (the
+					// fixture's pre-seed commit is not an apply commit). If
+					// seedDoltIgnorePatterns ever changes dolt_ignore at this
+					// open, its seed commit sweeps the strand row first and the
+					// finishing commit below loses the diff — that drift fails
+					// here loudly.
+					var eventsRows int
+					if err := connA.QueryRowContext(ctx,
+						"SELECT COUNT(*) FROM dolt_ignore WHERE pattern = 'events' AND ignored = true").Scan(&eventsRows); err != nil {
+						t.Fatalf("read dolt_ignore at HEAD: %v", err)
+					}
+					if eventsRows != 1 {
+						t.Fatalf("dolt_ignore ('events', true) rows at HEAD = %d, want 1", eventsRows)
+					}
+					ignoreCommits := schemaApplyCommits(t, ctx, connA, "")
+					touching := 0
+					for _, hash := range ignoreCommits {
+						if contains(commitChangedTables(t, ctx, connA, hash), "dolt_ignore") {
+							touching++
+						}
+					}
+					if touching != 1 {
+						t.Fatalf("%d apply-migration commits touched dolt_ignore, want exactly 1 (0062's own): a seed commit swept the strand row before the finish could stage it", touching)
+					}
+					assertCursorRowInOwnCommit(t, ctx, connA, 62, "0062_")
+					assertCursorRowInOwnCommit(t, ctx, connA, 63, "0063_")
+				case 73:
+					// issues.arrival_seq landed with the step. QueryRowContext
+					// Scan closes its rows, so the connection's close mutex is
+					// released before the subtest's deferred conn.Close — a bare
+					// QueryContext here leaves the rows open and deadlocks the
+					// deferred close for the rest of the shard.
+					var arrivalSeq any
+					if err := connA.QueryRowContext(ctx, "SELECT arrival_seq FROM issues LIMIT 1").Scan(&arrivalSeq); err != nil && err != sql.ErrNoRows {
+						t.Fatalf("issues.arrival_seq missing after retry: %v", err)
+					}
+					// ...and 0074's commit carries only its own cursor row and
+					// table, none of 0073's.
+					assertCursorRowInOwnCommit(t, ctx, connA, 73, "0073_")
+					assertCursorRowInOwnCommit(t, ctx, connA, 74, "0074_")
+					hash74 := oneApplyCommit(t, ctx, connA, "0074_")
+					got74 := commitChangedTables(t, ctx, connA, hash74)
+					want74 := []string{"id_tombstones", "schema_migrations"}
+					if !equalStrings(got74, want74) {
+						t.Fatalf("0074's commit changed tables = %v, want %v", got74, want74)
+					}
+				default:
+					t.Fatalf("unhandled AC-2 row %d", row.version)
+				}
 			}
 		})
+	}
+}
+
+// assertCursorRowInOwnCommit pins that cursor row version was carried by its
+// own apply-migration commit and by nothing before it — the row-level half of
+// "step N+1's commit adds no schema_migrations row other than N+1's" (AC-2).
+// dolt_history lists the row at every commit from its first appearance to
+// HEAD, so the entry set must reach back to exactly the step's own apply
+// commit: an entry naming an apply commit for a version below N means the row
+// left the stranded working set in some earlier commit — the seed's or a
+// step's — before the finish could stage it, and a set that does not reach
+// the step's own commit at all means a later commit swept the row instead
+// (that shape also fails oneApplyCommit, which finds no apply commit for N).
+func assertCursorRowInOwnCommit(t *testing.T, ctx context.Context, conn *sql.Conn, version int, versionPfx string) {
+	t.Helper()
+	entries := cursorRowCommitHistory(t, ctx, conn, version)
+	want := oneApplyCommit(t, ctx, conn, versionPfx)
+	found := false
+	messages := make([]string, 0, len(entries))
+	for _, e := range entries {
+		messages = append(messages, e.message)
+		if e.hash == want {
+			found = true
+			continue
+		}
+		if v, ok := applyMigrationVersionOf(e.message); ok && v < version {
+			t.Fatalf("cursor row %d's commit history includes %q for version %d: the row left the stranded working set before its own step committed it", version, e.message, v)
+		}
+	}
+	if !found {
+		t.Fatalf("cursor row %d's commit history does not reach its own apply commit (%s): entries %v", version, versionPfx, messages)
 	}
 }
