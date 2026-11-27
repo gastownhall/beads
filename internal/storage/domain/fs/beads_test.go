@@ -508,3 +508,46 @@ func (s *testSuite) beadsDirIsLocalFalseEnv() {
 
 // statically assert the BeadsDirTemplates type is reachable for downstream callers.
 var _ = domain.BeadsDirTemplates{}
+
+// TestManageOptOutLeavesGitignoresAlone pins gitignore.manage: false
+// (bd-cxm9r) on both init-time writers, against a sibling workspace whose
+// config.yaml leaves the key unset and so still gets them.
+func (s *testSuite) TestManageOptOutLeavesGitignoresAlone() {
+	s.T().Setenv("BD_GITIGNORE_MANAGE", "")
+	s.Require().NoError(os.Unsetenv("BD_GITIGNORE_MANAGE"))
+
+	workDir, beadsDir, _ := s.newRepo()
+	s.Require().NoError(os.MkdirAll(beadsDir, 0700))
+	s.Require().NoError(os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("gitignore:\n  manage: false\n"), 0600))
+	const ownBeads, ownProject = "# ours\nnothing-of-bd\n", "node_modules/\n"
+	s.Require().NoError(os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte(ownBeads), 0644))
+	s.Require().NoError(os.WriteFile(filepath.Join(workDir, ".gitignore"), []byte(ownProject), 0644))
+	repo := NewBeadsDirFSRepository(workDir, testTemplates())
+	s.Require().NoError(repo.WriteBeadsGitignore(s.Ctx()))
+	s.Require().NoError(repo.WriteProjectGitignore(s.Ctx()))
+	got, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
+	s.Require().NoError(err)
+	s.Equal(ownBeads, string(got), ".beads/.gitignore changed under gitignore.manage: false")
+	got, err = os.ReadFile(filepath.Join(workDir, ".gitignore"))
+	s.Require().NoError(err)
+	s.Equal(ownProject, string(got), "project .gitignore changed under gitignore.manage: false")
+
+	// A missing .beads/.gitignore is not created either.
+	s.Require().NoError(os.Remove(filepath.Join(beadsDir, ".gitignore")))
+	s.Require().NoError(repo.WriteBeadsGitignore(s.Ctx()))
+	_, err = os.Stat(filepath.Join(beadsDir, ".gitignore"))
+	s.True(os.IsNotExist(err), ".beads/.gitignore created under gitignore.manage: false")
+
+	workDir, beadsDir, _ = s.newRepo()
+	s.Require().NoError(os.MkdirAll(beadsDir, 0700))
+	s.Require().NoError(os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: demo\n"), 0600))
+	repo = NewBeadsDirFSRepository(workDir, testTemplates())
+	s.Require().NoError(repo.WriteBeadsGitignore(s.Ctx()))
+	s.Require().NoError(repo.WriteProjectGitignore(s.Ctx()))
+	got, err = os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
+	s.Require().NoError(err)
+	s.Equal(testTemplates().BeadsGitignore, string(got))
+	got, err = os.ReadFile(filepath.Join(workDir, ".gitignore"))
+	s.Require().NoError(err)
+	s.Contains(string(got), testTemplates().ProjectGitignoreHeader)
+}

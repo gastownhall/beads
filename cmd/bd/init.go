@@ -4599,8 +4599,8 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 		}
 		return
 	}
-	gitAddCmd := initArtifactGitCommand(workDir, "add", ".beads/")
-	if _, addErr := gitAddCmd.CombinedOutput(); addErr == nil {
+	gitignoreManaged := config.GitignoreManaged(filepath.Join(workDir, ".beads"))
+	if stageInitBeadsArtifacts(workDir, gitignoreManaged) {
 		// Also stage the agents file if it exists
 		agentsFileToStage := config.SafeAgentsFile()
 		if _, statErr := os.Stat(filepath.Join(workDir, agentsFileToStage)); statErr == nil {
@@ -4627,8 +4627,9 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 				_ = codexCmd.Run()
 			}
 		}
-		// Also stage .gitignore if modified by EnsureProjectGitignore
-		if _, statErr := os.Stat(filepath.Join(workDir, ".gitignore")); statErr == nil {
+		// Also stage .gitignore if modified by EnsureProjectGitignore, which
+		// leaves it alone under gitignore.manage: false.
+		if _, statErr := os.Stat(filepath.Join(workDir, ".gitignore")); statErr == nil && gitignoreManaged {
 			giCmd := initArtifactGitCommand(workDir, "add", ".gitignore")
 			_ = giCmd.Run()
 		}
@@ -4650,6 +4651,43 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 		// Removing them WILL cause unrecoverable data corruption and data loss.
 		// Dolt manages these files itself; external interference is never safe.
 	}
+}
+
+// initTrackedBeadsFiles are the entries bd init writes under .beads for git to
+// track. The .beads/.gitignore bd writes keeps everything else there (the
+// database, locks, machine-local state) out of a whole-directory add.
+var initTrackedBeadsFiles = []string{"config.yaml", "metadata.json", "README.md", "hooks"}
+
+// initTrackedBeadsPaths returns initTrackedBeadsFiles as paths relative to the
+// repository root. bd init's commit stages these by name, instead of the whole
+// .beads directory, for a workspace that sets gitignore.manage: false: bd did
+// not write that .beads/.gitignore and cannot tell that it keeps the database
+// and the machine-local files out of git.
+func initTrackedBeadsPaths() []string {
+	paths := make([]string, 0, len(initTrackedBeadsFiles))
+	for _, name := range initTrackedBeadsFiles {
+		paths = append(paths, filepath.Join(".beads", name))
+	}
+	return paths
+}
+
+// stageInitBeadsArtifacts stages workDir/.beads for bd init's commit and
+// reports whether the commit should go ahead. Under a .beads/.gitignore bd
+// manages it adds the whole directory, and a failed add stops the commit, as it
+// always has. Otherwise it adds bd's own files by name (initTrackedBeadsPaths),
+// one at a time like the optional files: one that the repository's own ignore
+// rules exclude stays out of the commit instead of stopping it.
+func stageInitBeadsArtifacts(workDir string, gitignoreManaged bool) bool {
+	if gitignoreManaged {
+		_, err := initArtifactGitCommand(workDir, "add", ".beads/").CombinedOutput()
+		return err == nil
+	}
+	for _, path := range initTrackedBeadsPaths() {
+		if _, err := os.Stat(filepath.Join(workDir, path)); err == nil {
+			_ = initArtifactGitCommand(workDir, "add", "--", path).Run()
+		}
+	}
+	return true
 }
 
 func initArtifactGitCommand(workDir string, args ...string) *exec.Cmd {

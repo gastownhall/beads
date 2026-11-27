@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +24,44 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
+
+// errHooksNotManaged is what every git hook writer returns, before it touches
+// anything, in a repository that sets hooks.manage: false, wrapped with where
+// the setting comes from and how to undo it there (refuseUnmanagedHooks). An
+// explicit `bd hooks install` or `bd migrate hooks --apply` reports it and
+// exits non-zero; implicit installers (bd init, bd config apply) check
+// config.HooksManaged first and skip with one informational line.
+var errHooksNotManaged = errors.New("git hooks are not managed by bd in this repository")
+
+// hooksNotManagedNote is the one informational line an implicit installer
+// prints when it skips hook installation for hooks.manage: false.
+const hooksNotManagedNote = "Git hooks not managed by bd (hooks.manage=false); skipped hook installation"
+
+// refuseUnmanagedHooks returns errHooksNotManaged when hooks.manage is false
+// for the workspace at beadsDir ("" for the workspace this process loaded).
+func refuseUnmanagedHooks(beadsDir string) error {
+	setting := config.ResolveManageSetting(beadsDir, config.HooksManageKey)
+	if setting.Managed {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", errHooksNotManaged, hooksManageRemedy(setting))
+}
+
+// hooksManageRemedy names the layer that sets hooks.manage to false and the
+// change that lets bd manage the hooks again. `bd config set` writes only the
+// workspace's tracked config.yaml, so it is the remedy for that layer alone:
+// under the environment variable or a config.local.yaml the next install would
+// still refuse, after a change every clone of the repository pulls.
+func hooksManageRemedy(setting config.ManageSetting) string {
+	switch setting.Layer {
+	case config.ManageEnv:
+		return fmt.Sprintf("%s=%s turns hooks.manage off; to let bd manage them again, unset %s", setting.Source, setting.Value, setting.Source)
+	case config.ManageWorkspace:
+		return fmt.Sprintf("hooks.manage is false in %s; to let bd manage them again, run in that workspace: bd config set hooks.manage true", setting.Source)
+	default:
+		return fmt.Sprintf("hooks.manage is false in %s; to let bd manage them again, set it to true there", setting.Source)
+	}
+}
 
 // managedHookNames lists the git hooks managed by beads.
 // Hook content is generated dynamically by generateHookSection().
@@ -1132,6 +1171,11 @@ func installHooksWithContext(hookNames []string, force, shared, chain, beadsHook
 
 //nolint:unparam // force and chain remain accepted compatibility no-ops
 func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) error {
+	// Every installer reaches this function, so the opt-out is enforced here,
+	// before any directory is created or any hook is read or written.
+	if err := refuseUnmanagedHooks(selected.selectedBeadsDir()); err != nil {
+		return err
+	}
 	var hooksDir string
 	if selected != nil {
 		hooksDir = selected.paths.HooksDir

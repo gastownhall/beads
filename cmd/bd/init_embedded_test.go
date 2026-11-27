@@ -2149,3 +2149,38 @@ func TestEmbeddedInitGitOriginAdoptionWithConsent(t *testing.T) {
 		})
 	}
 }
+
+// TestEmbeddedInitGitignoreManageFalseCommitsOnlyBdFiles runs bd init with
+// gitignore.manage: false in the user config, which reaches a brand-new
+// repository that has no ignore rules at all. bd writes no .beads/.gitignore
+// there, so its bootstrap commit holds bd's own .beads files by name, and the
+// embedded database and the machine-local files stay out of git.
+func TestEmbeddedInitGitignoreManageFalseCommitsOnlyBdFiles(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	bd := buildEmbeddedBD(t)
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	home := t.TempDir()
+	userConfig := filepath.Join(home, ".config", "bd", "config.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(userConfig), 0o700))
+	require.NoError(t, os.WriteFile(userConfig, []byte("gitignore:\n  manage: false\n"), 0o600))
+
+	cmd := exec.Command(bd, "init", "--prefix", "optout", "--non-interactive", "--skip-agents", "--skip-hooks")
+	cmd.Dir, cmd.Env = dir, append(bdEnv(home), "XDG_CONFIG_HOME="+filepath.Join(home, ".config"))
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "bd init: %s", out)
+
+	_, err = os.Stat(filepath.Join(dir, ".beads", "embeddeddolt"))
+	require.NoError(t, err, "fixture: bd init created no embedded database")
+	_, err = os.Stat(filepath.Join(dir, ".beads", ".gitignore"))
+	require.ErrorIs(t, err, os.ErrNotExist, "bd wrote .beads/.gitignore under gitignore.manage: false")
+
+	show := gitCommand("show", "--name-only", "--format=", "HEAD")
+	show.Dir = dir
+	committed, err := show.CombinedOutput()
+	require.NoError(t, err, "%s", committed)
+	require.Equal(t, []string{".beads/README.md", ".beads/config.yaml", ".beads/metadata.json"}, strings.Fields(string(committed)),
+		"the bootstrap commit must hold bd's own files only, never .beads/embeddeddolt/ or a machine-local file")
+}

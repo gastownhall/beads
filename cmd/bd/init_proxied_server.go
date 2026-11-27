@@ -312,6 +312,31 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	})
 }
 
+// proxiedInitCommitParams is the bootstrap commit of the proxied-server tail
+// in workDir, staging what direct init does (commitEmbeddedInitArtifacts). A
+// workspace that sets gitignore.manage: false gets bd's own .beads files by name
+// (initTrackedBeadsPaths) instead of the whole directory, and keeps its project
+// .gitignore out of the commit, since bd did not change it.
+func proxiedInitCommitParams(workDir string) domain.CommitInitArtifactsParams {
+	params := domain.CommitInitArtifactsParams{
+		BeadsDir: ".beads/",
+		OptionalPaths: []string{
+			config.SafeAgentsFile(),
+			filepath.Join(".claude", "settings.json"),
+			"CLAUDE.md",
+		},
+		Message:   "bd init: initialize beads issue tracking",
+		NoVerify:  true,
+		SkipHooks: true,
+	}
+	if config.GitignoreManaged(filepath.Join(workDir, ".beads")) {
+		params.OptionalPaths = append(params.OptionalPaths, ".gitignore")
+	} else {
+		params.BeadsPaths = initTrackedBeadsPaths()
+	}
+	return params
+}
+
 func resolveInitPrefix(flagPrefix string) (string, error) {
 	prefix := flagPrefix
 	if prefix == "" {
@@ -655,7 +680,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				if !in.quiet {
 					fmt.Fprintf(os.Stderr, "\n%s Failed to resolve git hooks: %v\n", ui.RenderWarn("⚠"), err)
 				}
-			} else if !hooks.installed() || hooks.needsUpdate() {
+			} else if !skipUnmanagedInitHooks(hooks, in.quiet) && (!hooks.installed() || hooks.needsUpdate()) {
 				if hooks.installed() && !in.quiet {
 					fmt.Printf("  Updating hooks to version %s...\n", Version)
 				}
@@ -716,18 +741,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 	}
 
 	if !in.stealth && isRepo && t.useLocalBeads {
-		commitResult, err := gitUC.CommitInitArtifacts(ctx, domain.CommitInitArtifactsParams{
-			BeadsDir: ".beads/",
-			OptionalPaths: []string{
-				config.SafeAgentsFile(),
-				filepath.Join(".claude", "settings.json"),
-				"CLAUDE.md",
-				".gitignore",
-			},
-			Message:   "bd init: initialize beads issue tracking",
-			NoVerify:  true,
-			SkipHooks: true,
-		})
+		commitResult, err := gitUC.CommitInitArtifacts(ctx, proxiedInitCommitParams(t.workDir))
 		switch {
 		case err != nil && !in.quiet:
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", err)

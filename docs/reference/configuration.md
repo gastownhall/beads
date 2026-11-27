@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-11-19
+Last reviewed: 2026-11-23
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -104,7 +104,7 @@ The full namespaces routed to YAML are:
 
 Plus these individual keys:
 
-`json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `prime.disabled`, `memories.budget-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
+`json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `hooks.manage`, `gitignore.manage`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `prime.disabled`, `memories.budget-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
 
 `no-db` is obsolete: the JSONL-only mode it selected is gone, and issues always live in the Dolt database. `bd config set no-db` is refused; an old `no-db: true` in any `config.yaml` or `config.local.yaml` (or `BD_NO_DB=true`) is ignored with a warning on stderr. `bd config unset no-db` removes it from the workspace's own `config.yaml`; delete an entry in a user-level `config.yaml` or in `config.local.yaml` (see [Configuration Locations](#configuration-locations)) by hand.
 
@@ -122,6 +122,8 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `identity` | `--identity` | `BEADS_IDENTITY` | (git user / hostname) | Sender identity for `bd mail` |
 | `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to the remote in `bd dolt push` |
 | `no-git-ops` | — | — | `false` | Disable git ops in `bd prime` close protocol. Does not affect Dolt remote sync or auto-push; set `dolt.local-only` to stop those |
+| `hooks.manage` | — | `BD_HOOKS_MANAGE` | `true` | When `false`, bd never installs, reinstalls, injects into or migrates git hooks in this repository (see [below](#repositories-that-manage-their-own-hooks-or-gitignore)) |
+| `gitignore.manage` | — | `BD_GITIGNORE_MANAGE` | `true` | When `false`, bd never creates, appends to or rewrites `.beads/.gitignore`, and never adds its patterns to the project `.gitignore` (see [below](#repositories-that-manage-their-own-hooks-or-gitignore)) |
 | `agent.profile` | — | `BD_AGENT_PROFILE` | `conservative` | Policy profile `bd prime` uses for git/commit authority: `conservative`, `minimal`, `team-maintainer`; invalid values fall back to `conservative` |
 | `prime.max-memories` | `--max-memories` | `BD_PRIME_MAX_MEMORIES` | `0` | Max persistent memories injected by `bd prime` (0 = unlimited) |
 | `prime.max-memory-chars` | `--max-memory-chars` | `BD_PRIME_MAX_MEMORY_CHARS` | `0` | Max total bytes of memory entries injected by `bd prime`, at whole-memory boundaries (0 = unlimited) |
@@ -170,6 +172,60 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `output.title-length` | — | — | `255` | Title display in feedback (`0` hides); see routing note below |
 | `ai.model` | — | `BD_AI_MODEL` | `claude-haiku-4-5-20251001` | Default AI model |
 | `agents.file` | — | — | `AGENTS.md` | Agents instruction filename; see routing note below |
+
+### Repositories that manage their own hooks or .gitignore
+
+A repository that runs its own hook manager, or keeps its own `.beads/.gitignore`,
+can tell bd to keep its hands off both. Commit the setting in `.beads/config.yaml`
+so every clone agrees:
+
+```bash
+bd config set hooks.manage false
+bd config set gitignore.manage false
+```
+
+```yaml
+hooks:
+  manage: false
+gitignore:
+  manage: false
+```
+
+With `hooks.manage: false`:
+
+- `bd hooks install` and `bd migrate hooks --apply` refuse with an error that
+  names where the key is set and how to undo it there, and exit non-zero.
+  `bd migrate hooks` checks the repository whose hooks it would rewrite, from
+  any of its subdirectories, as well as the workspace it runs in.
+- `bd init` and `bd config apply` skip hook installation with one informational
+  line; `bd config drift` reports the hooks check as skipped, not as drift.
+- `bd doctor` reports the Git Hooks and Git Hooks Dolt Compatibility checks as
+  "Not managed by bd (hooks.manage=false)" with status ok, reports no pending
+  hook migration, and `bd doctor --fix` leaves the hooks alone, so a legacy
+  inline bd hook the compatibility check would flag is yours to fix.
+  `bd doctor --check-health` and `bd info` stop reporting hooks.
+- `bd hooks uninstall` and `bd hooks run` are unchanged, and `bd doctor --fix`
+  still clears a `core.hooksPath` left pointing at a missing bd hooks directory.
+
+With `gitignore.manage: false`, `bd init`, `bd bootstrap`, `bd connect` and
+`bd doctor --fix` leave `.beads/.gitignore` and the project `.gitignore`
+byte-for-byte as they are (the `bd init --stealth` and `bd doctor --fix` removal
+of bd's section from the project `.gitignore` included). Your own ignore rules
+must then keep the database and the machine-local files under `.beads` out of
+git: `bd init` commits only its own files there (`config.yaml`,
+`metadata.json`, `README.md` and `hooks/`), and `bd doctor` warns, with no fix,
+while `.beads/.gitignore` is missing or lacks a pattern bd requires. It reports
+the Project Gitignore check as not managed. The key does not cover
+`.git/info/exclude`, which `bd init --stealth` and fork protection still update,
+or the `.gitignore` entry `bd worktree create` adds for the worktree it creates.
+
+Unlike `doctor.suppress.*`, which only hides a `bd doctor` warning and lives in
+the database, these keys stop the writes themselves. bd reads them in this
+order: `BD_HOOKS_MANAGE` or `BD_GITIGNORE_MANAGE`, the workspace's
+`config.local.yaml` and `config.yaml`, then your user-level `config.yaml`. A
+user-level `false` applies to every repository you run bd in, including the one
+a `bd init` creates. Any value other than `true` or `false` is refused by
+`bd config set` and read as the default, `true`.
 
 <Warning>
 **JSONL export is opt-in**
@@ -367,7 +423,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `max_collision_prob` | Hash ID collision tolerance (default `0.25`) |
 | `claim.pools` | Comma-separated pool aliases: placeholder assignees that any actor can take with `bd update <id> --claim` (see [below](#claim-pools)). Unset by default, which turns pool claiming off |
 | `versioned-history.enabled` | `true` records a version row for every issue write to this store; off by default. Unlike the rest of this table it also honors an environment variable, which can only turn it on (see [below](#versioned-issue-history)) |
-| `doctor.suppress.*` | Suppress specific `bd doctor` warnings by check slug (warnings only; errors always show) |
+| `doctor.suppress.*` | Suppress specific `bd doctor` warnings by check slug (warnings only; errors always show). To stop bd writing git hooks or `.gitignore` files at all, use the config.yaml keys `hooks.manage` and `gitignore.manage` instead (see [above](#repositories-that-manage-their-own-hooks-or-gitignore)) |
 
 Issue prefix (`issue_prefix`) is **not** settable via `bd config set` — use `bd init --prefix`, `bd bootstrap`, or `bd rename-prefix`. To change only the prefix new issues get, run `bd rename-prefix <new-prefix> --mint-only`: existing IDs stay, and the old prefix is added to `allowed_prefixes` so they remain valid. A dependency between an old-prefix and a new-prefix issue does not block, though (see [Prefix Rename](/reference/advanced#prefix-rename)).
 

@@ -172,6 +172,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`hooks.manage` and `gitignore.manage`: per-repository opt-outs from bd's
+  hook and .gitignore management.** A repository that runs its own hook manager
+  or keeps its own `.beads/.gitignore` had no durable way to stop bd writing
+  them: `no-hooks` only turns off the issue-lifecycle hook runner,
+  `bd init --skip-hooks` lasts one invocation, and `doctor.suppress.*` only
+  hides a `bd doctor` warning. Set either key to `false` in the tracked
+  `.beads/config.yaml` (`bd config set hooks.manage false`). With
+  `hooks.manage: false`, `bd hooks install` and `bd migrate hooks --apply`
+  refuse with a message naming where the key is set and exit non-zero, while
+  `bd init`, `bd config apply` and `bd doctor --fix` skip the hooks;
+  `bd config drift`, `bd doctor` (`--check-health` too) and `bd info` stop
+  reporting them. With `gitignore.manage: false`, `bd init`, `bd bootstrap`,
+  `bd connect` and `bd doctor --fix` leave `.beads/.gitignore` and the project
+  `.gitignore` untouched; `bd init` then commits only its own files under
+  `.beads`, never the database, and `bd doctor` still warns, with no fix,
+  while `.beads/.gitignore` lacks a pattern bd requires. A user-level `false`
+  applies to every repository. Both keys default to `true` (bd-cxm9r).
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,
