@@ -157,6 +157,7 @@
 40 3 TestEmbeddedDoltStoreIssueLifecycleBuildsOperations
 40 3 TestEmbeddedDoltStoreIssueLifecycleRejectsNilStore
 40 3 TestEmbeddedMigrate0046And0047KeepIssueUpdatedAt
+40 3 TestEmbeddedMigrateFinishesStrandedOwnStep
 40 3 TestEmbeddedOpenReadOnly_FreshDatabaseNoWrites
 40 3 TestEmbeddedSQLCommitResponseLossIsIndeterminate
 40 3 TestEpochContract
