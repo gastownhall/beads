@@ -278,3 +278,30 @@ func TestPushTwiceCreatesOneIssue(t *testing.T) {
 		})
 	}
 }
+
+// TestIsExternalRefLearnedWebBase pins AC-2: with the project's web_url under
+// a relative root, refs under that root are recognized beside refs under
+// gitlab.url, while another path on its host and an unrelated host are not.
+func TestIsExternalRefLearnedWebBase(t *testing.T) {
+	stub := newGitLabStub(t)
+	stub.projectJSON = `{"id":42,"path_with_namespace":"g/p","web_url":"https://code.example.org/scm/g/p"}`
+	tr, err := initStubTracker(t, stub, "g/p", nil)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	for _, tc := range []struct {
+		ref  string
+		want bool
+	}{
+		{"https://code.example.org/scm/g/p/-/issues/5", true},
+		{"https://code.example.org/scm/g/p/-/work_items/5", true},
+		{"https://code.example.org/scm/other/q/-/issues/5", true},
+		{stub.srv.URL + "/g/p/-/issues/5", true},
+		{"https://code.example.org/other/-/issues/5", false},
+		{"https://tracker.example.net/g/p/-/issues/5", false},
+	} {
+		if got := tr.IsExternalRef(tc.ref); got != tc.want {
+			t.Errorf("IsExternalRef(%q) = %v, want %v", tc.ref, got, tc.want)
+		}
+	}
+}
