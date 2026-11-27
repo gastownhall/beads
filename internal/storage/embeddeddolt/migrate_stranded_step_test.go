@@ -668,3 +668,70 @@ func TestEmbeddedMigrateStrandedStepLeavesUnrelatedDirt(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedMigrateStrandedStepCommitsUserDirtInItsOwnTable is AC-5: a
+// strand at 0049 plus a user row written after the kill into issues (a table
+// 0049 touches). The finish stages every working-set table the step's SQL
+// touches, so the row commits inside 0049's commit, under 0049's message —
+// the same rows the old refusal's prescribed manual `bd dolt commit` would
+// have recorded, under a different label.
+//
+// PRE-fix the retry refuses with *DirtyTablesError and the row stays
+// uncommitted.
+func TestEmbeddedMigrateStrandedStepCommitsUserDirtInItsOwnTable(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := strandSeedMainSchemaAt(t, ctx, selfHealSeedVersion)
+	strandMainAt(t, ctx, dataDir, 49)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	const userRow = "bd-0eetsy-user-row"
+	if _, err := conn.ExecContext(ctx, "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES (?, 'user row beside a stranded step', 'd', 'de', 'ac', 'n')", userRow); err != nil {
+		t.Fatalf("insert user row into issues: %v", err)
+	}
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp with user dirt in the stranded step's own table: %v", err)
+	}
+	if v := currentMainVersion(t, ctx, conn); v != schema.LatestVersion() {
+		t.Fatalf("main version = %d, want latest %d", v, schema.LatestVersion())
+	}
+	if dirty := dirtyTableNames(t, ctx, conn); len(dirty) != 0 {
+		t.Fatalf("working set is dirty: %v, want clean", dirty)
+	}
+	var working int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues WHERE id = ?", userRow).Scan(&working); err != nil {
+		t.Fatalf("count working issues: %v", err)
+	}
+	if working != 1 {
+		t.Fatalf("working user rows = %d, want 1", working)
+	}
+	// The row was committed by 0049's own commit: the row did not exist
+	// before the kill, so its first recorded version is the finishing commit,
+	// and dolt_history_issues attributes each recorded version to its commit.
+	hash49 := oneApplyCommit(t, ctx, conn, "0049_")
+	rows, err := conn.QueryContext(ctx,
+		"SELECT commit_hash FROM dolt_history_issues WHERE id = ?", userRow)
+	if err != nil {
+		t.Fatalf("read dolt_history_issues: %v", err)
+	}
+	defer rows.Close()
+	introduced := false
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			t.Fatalf("scan dolt_history_issues: %v", err)
+		}
+		if hash == hash49 {
+			introduced = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate dolt_history_issues: %v", err)
+	}
+	if !introduced {
+		t.Fatalf("user row %s was not committed by 0049's apply commit %s", userRow, hash49)
+	}
+}
