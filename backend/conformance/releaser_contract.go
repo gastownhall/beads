@@ -209,21 +209,26 @@ func RunReleaserRefusesAForeignClaimUntilForced(t *testing.T, ctx context.Contex
 // caller need not be the holder. An implementation that ran the fence anyway
 // would answer ErrNotOwner here and pass every other case in this file.
 //
-// THE LAST TWO LIMBS PIN WHAT "MATCH" MEANS, which nothing at this tier pinned
+// THE LAST LIMBS PIN WHAT "MATCH" MEANS, which nothing at this tier pinned
 // before (ga-2ltro.14) — and it is not string equality. The comparison is
-// SEPARATOR-INSENSITIVE AND NOTHING ELSE (canonicalActor, ga-5ksp5): a run of
-// ".", "_" or "-" matches any other such run, so an expectation spelled under
-// one layer's separator convention releases a claim stored under another's.
-// The one exception is an exact "--" run: it is gascity's encoding of a
-// rig-qualified agent's "/" and decodes to "/", so "a--b" matches "a/b" and
-// not "a__b" (ga-2vy9p2). This tier does not pin that limb — the respelling
-// exercised below is "-" -> "_", which is unaffected — but the contract text
-// must not claim a rule the implementation no longer has.
+// SEPARATOR- AND CASE-INSENSITIVE AND NOTHING ELSE (canonicalActor, ga-5ksp5,
+// GH#8628): a run of ".", "_" or "-" matches any other such run, so an
+// expectation spelled under one layer's separator convention releases a claim
+// stored under another's, and letter case folds too, so "RELEASER-HOLDER" is
+// the same expectation as "releaser-holder". The one separator exception is an
+// exact "--" run: it is gascity's encoding of a rig-qualified agent's "/" and
+// decodes to "/", so "a--b" matches "a/b" and not "a__b" (ga-2vy9p2). This
+// tier does not pin that limb — the respelling exercised below is "-" -> "_",
+// which is unaffected — but the contract text must not claim a rule the
+// implementation no longer has. The case fold is the same per-rune simple
+// lowercase strings.ToLower runs (so the Kelvin sign "K" matches "k" but the
+// long s "ſ" is not "s"); invalid bytes stay byte-distinct, a shape this tier
+// does not seed.
 // NOTHING ELSE IS FORGIVEN, and the padded limb is the half that says so: an
-// implementation that reached for strings.TrimSpace to make the respelled limb
-// pass would release on an expectation the caller never actually held.
+// implementation that reached for strings.TrimSpace to make the forgiving
+// limbs pass would release on an expectation the caller never actually held.
 //
-// The two limbs are ONE case rather than two because they are one predicate,
+// The limbs are ONE case rather than several because they are one predicate,
 // and a reader who sees only the forgiving half draws exactly the wrong
 // conclusion about the other.
 func RunReleaserReleasesOnlyTheExpectedHolder(t *testing.T, ctx context.Context, fixture ReleaserFixture) {
@@ -272,9 +277,22 @@ func RunReleaserReleasesOnlyTheExpectedHolder(t *testing.T, ctx context.Context,
 	}
 	releaserAssertRow(t, ctx, fixture, "issues", separatorSpelled, "", types.StatusOpen)
 
-	// The other half of the same predicate: separators are all that is
-	// forgiven. A padded expectation is a different string and refuses, and the
-	// claim it named is still there afterwards.
+	// Letter case is the other forgiving axis (GH#8628): the holder spelled
+	// in UPPER CASE is the same expectation, so the conditional release
+	// lands on a claim only that spelling names.
+	upperCased := strings.ToUpper(releaserHolder)
+	caseSpelled := releaserSeedClaimed(t, ctx, fixture, "expect", "cased", false)
+	if _, err := fixture.Releaser.Release(ctx, publicops.ReleaseRequest{
+		Actor: "releaser-supervisor", IssueID: caseSpelled, ExpectedAssignee: &upperCased,
+	}); err != nil {
+		t.Fatalf("Release() expecting %q against a claim held by %q error = %v, want the release to land — the comparison folds letter case",
+			upperCased, releaserHolder, err)
+	}
+	releaserAssertRow(t, ctx, fixture, "issues", caseSpelled, "", types.StatusOpen)
+
+	// The other half of the same predicate: separators and case are all that
+	// is forgiven. A padded expectation is a different string and refuses, and
+	// the claim it named is still there afterwards.
 	padded := " " + releaserHolder
 	untouched := releaserSeedClaimed(t, ctx, fixture, "expect", "padded", false)
 	paddedVersion := releaserRowVersion(t, ctx, fixture, untouched)
