@@ -1085,6 +1085,27 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 			return 0, err
 		}
 	}
+	// Stranded-step recovery (bd-0eetsy). A pass killed after a numbered
+	// migration's cursor row and before its per-step commit leaves that one
+	// step uncommitted; the guard below refuses such a working set whenever a
+	// later pending migration touches one of its tables, and otherwise a later
+	// step's commit records the stranded cursor row while the step's own
+	// change stays uncommitted. Recognize and finish exactly that shape first,
+	// so the reads below see only the dirt the finish leaves behind — this
+	// must run ahead of the aux-rekey exemption (below) too, so recognition
+	// never sees the exemption's narrowed dirty set: a step that alters an
+	// aux-rekey table as its own work (0049 alters comments) needs that
+	// change in its commit, as an uninterrupted pass makes it. Every other
+	// dirty working set declines recognition and reaches the guard unchanged.
+	if _, cursorDirty := dirtyBeforeAll[mainSource.cursorTable]; cursorDirty {
+		finished, err := finishStrandedMainStep(ctx, db)
+		if err != nil {
+			return applied, err
+		}
+		if finished {
+			applied++
+		}
+	}
 	dirtyBefore, err := committableDirtyTables(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("reading pre-migration status: %w", err)
@@ -1151,12 +1172,12 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	// recovery reads the ignored series again. So the read error returns only
 	// when the main series has nothing to refuse.
 	if err != nil && len(touchedDirtyTables) == 0 {
-		return 0, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
+		return applied, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
 	}
 	if len(touchedDirtyTables) > 0 || len(touchedIgnoredDirtyTables) > 0 {
 		tables := append(touchedDirtyTables, touchedIgnoredDirtyTables...)
 		sort.Strings(tables)
-		return 0, &DirtyTablesError{Tables: slices.Compact(tables)}
+		return applied, &DirtyTablesError{Tables: slices.Compact(tables)}
 	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
@@ -2330,9 +2351,13 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 // in MigrateUp's later backfill/rekey/ignored tail cannot strand this pass's
 // applied migrations uncommitted for a retry to trip over (#4566). A residual
 // window remains within a single step: a kill between a migration's SQL and
-// its commitMigrationStep still leaves that one step's debris in the working
-// set for the dirty-table guard to refuse. The window shrinks from the whole
-// pass tail to one step; it does not close entirely.
+// its commitMigrationStep leaves that one step's debris in the working set.
+// The next pass recognizes exactly that shape and finishes the stranded step
+// under its own message before the dirty-table guard runs
+// (finishStrandedMainStep). What still reaches the guard is a step killed
+// before its cursor row was recorded, a stranded step beside user dirt its
+// SQL does not touch, and a stranded latest step — the retry of which
+// short-circuits on migrationWorkNeeded before the recovery runs.
 //
 // An error returned while a numbered step is selected, from its snapshots,
 // pre-repair, body, updated_at restore, cursor row or step commit, that carries
@@ -2508,6 +2533,13 @@ func SetMigrateStepFaultHookForTest(fn func(ctx context.Context, db DBConn, vers
 // MigrateUp's pre-flight guard proves no table a pending migration touches
 // holds uncommitted user rows before the pass runs, so every table this step
 // newly dirties is the migration's own DDL/DML — safe to commit on its own.
+// That proof covers steps this pass runs itself. The stranded-step finish
+// (finishStrandedMainStep) also commits through here, and for it the proof
+// does not hold: it passes dirtyBeforeStep = the working-set tables the
+// stranded step's SQL does not touch, so a user row written into a table the
+// step DOES touch after the kill commits under the migration's message — the
+// same rows the old refusal's prescribed 'bd dolt commit' recorded, under a
+// different label.
 func commitMigrationStep(ctx context.Context, db DBConn, cursorTable, migrationName string, dirtyBeforeStep map[string]dirtyTableState) error {
 	dirtyAfter, err := dirtyTables(ctx, db, true)
 	if err != nil {
