@@ -83,6 +83,11 @@ func (u *engineIssueUC) UpdateIssue(_ context.Context, id string, fields map[str
 		if title, ok := fields["title"].(string); ok {
 			issue.Title = title
 		}
+		// A pull relinks an issue through its update fields, as the real
+		// stores apply them.
+		if ref, ok := fields["external_ref"].(string); ok {
+			issue.ExternalRef = &ref
+		}
 	}
 	return nil
 }
