@@ -12,16 +12,27 @@ import (
 
 type pullTestTransaction struct {
 	storage.Transaction
-	issue       *types.Issue
-	addLabelErr error
+	issue          *types.Issue
+	addLabelErr    error
+	appliedUpdates []map[string]interface{}
 }
 
 func (t *pullTestTransaction) UpdateIssue(_ context.Context, _ string, updates map[string]interface{}, _ string) error {
+	t.appliedUpdates = append(t.appliedUpdates, updates)
 	if title, ok := updates["title"].(string); ok {
 		t.issue.Title = title
 	}
 	if description, ok := updates["description"].(string); ok {
 		t.issue.Description = description
+	}
+	if acceptance, ok := updates["acceptance_criteria"].(string); ok {
+		t.issue.AcceptanceCriteria = acceptance
+	}
+	if design, ok := updates["design"].(string); ok {
+		t.issue.Design = design
+	}
+	if notes, ok := updates["notes"].(string); ok {
+		t.issue.Notes = notes
 	}
 	if assignee, ok := updates["assignee"].(string); ok {
 		t.issue.Assignee = assignee
