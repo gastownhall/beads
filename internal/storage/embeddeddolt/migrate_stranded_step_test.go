@@ -366,3 +366,92 @@ func TestEmbeddedMigrateStrandedStepSurvivesASecondKill(t *testing.T) {
 	}
 	assertNoStepCommittedTwice(t, ctx, conn2)
 }
+
+// workingRowDiff renders the working-set rows of table against HEAD, as
+// "<diff_type>|<to_ columns>", sorted.
+func workingRowDiff(t *testing.T, ctx context.Context, conn *sql.Conn, table string, cols ...string) []string {
+	t.Helper()
+	to := make([]string, len(cols))
+	for i, c := range cols {
+		to[i] = "COALESCE(to_" + c + ", '<null>')"
+	}
+	return queryStrings(t, ctx, conn, "SELECT CONCAT_WS('|', diff_type, "+strings.Join(to, ", ")+") FROM dolt_diff_"+table+
+		" WHERE to_commit = 'WORKING' ORDER BY 1")
+}
+
+func stagedRows(t *testing.T, ctx context.Context, conn *sql.Conn, table string) int {
+	t.Helper()
+	return scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_status WHERE table_name = ? AND staged", table)
+}
+
+// TestEmbeddedMigrateStrandedStepLeavesUnrelatedDirt strands migration 49
+// beside a user's uncommitted row in a table 0049's SQL does not touch. The
+// step is finished without that table, which stays uncommitted and unstaged
+// with its content unchanged, and the existing guard decides the rest of the
+// pass on what is left: config (no later migration touches it) lets the pass
+// reach the latest version; labels (0053 rewrites it) is refused, with HEAD's
+// cursor at the finished 49.
+//
+// This replaces #8603's TestEmbeddedMigrateStrandedStepWithExtraDirtRefuses,
+// which required the whole working set to refuse: the approved design commits
+// the recognized step and leaves the unrelated dirt to the guard.
+func TestEmbeddedMigrateStrandedStepLeavesUnrelatedDirt(t *testing.T) {
+	requireEmbedded(t)
+	const stranded = 49
+	for _, tc := range []struct {
+		table   string
+		insert  string
+		cols    []string
+		refuses bool
+	}{
+		{"config", "INSERT INTO config (`key`, value) VALUES ('user-dirt-beside-stranded-step', '1')", []string{"key", "value"}, false},
+		{"labels", "INSERT INTO labels (issue_id, label) VALUES ('bd-s1', 'user-dirt-beside-stranded-step')", []string{"issue_id", "label"}, true},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			ctx := t.Context()
+			dataDir := strandStepAt(t, ctx, stranded)
+			conn, closeConn := openPinnedConn(t, ctx, dataDir)
+			defer closeConn()
+			mustExecStranded(t, ctx, conn, tc.insert)
+			before := workingRowDiff(t, ctx, conn, tc.table, tc.cols...)
+			if len(before) != 1 {
+				t.Fatalf("working rows of %s before the retry = %v, want the one user row", tc.table, before)
+			}
+
+			_, err := schema.MigrateUp(ctx, conn)
+			if tc.refuses {
+				var dirty *schema.DirtyTablesError
+				if !errors.As(err, &dirty) {
+					t.Fatalf("MigrateUp err = %v, want *DirtyTablesError", err)
+				}
+				if !slices.Equal(dirty.Tables, []string{tc.table}) {
+					t.Fatalf("DirtyTablesError tables = %v, want [%s]", dirty.Tables, tc.table)
+				}
+				if v := headMainVersion(t, ctx, conn); v != stranded {
+					t.Fatalf("HEAD schema version after the refusal = %d, want %d (the finished step)", v, stranded)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("MigrateUp: %v", err)
+				}
+				if v := headMainVersion(t, ctx, conn); v != schema.LatestVersion() {
+					t.Fatalf("HEAD schema version = %d, want latest %d", v, schema.LatestVersion())
+				}
+				if dirty := dirtyTableNames(t, ctx, conn); !slices.Equal(dirty, []string{tc.table}) {
+					t.Fatalf("working set after the pass = %v, want only the user's %s", dirty, tc.table)
+				}
+			}
+
+			stepCommitHash(t, ctx, conn, stranded)
+			if got := stepCommitTables(t, ctx, conn, stranded); slices.Contains(got, tc.table) {
+				t.Fatalf("tables in the finished %04d commit = %v, want %s left out", stranded, got, tc.table)
+			}
+			if after := workingRowDiff(t, ctx, conn, tc.table, tc.cols...); !slices.Equal(after, before) {
+				t.Fatalf("working rows of %s = %v, want %v unchanged", tc.table, after, before)
+			}
+			if n := stagedRows(t, ctx, conn, tc.table); n != 0 {
+				t.Fatalf("%s is staged after the pass, want it unstaged", tc.table)
+			}
+		})
+	}
+}
