@@ -326,8 +326,27 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	}
 
 	ti := gitlabToTrackerIssue(created)
+	// A create whose returned web_url lies under no address this tracker
+	// recognizes stores a ref the next push will not match — it would create
+	// the issue again. Say so now rather than silently.
+	if !t.IsExternalRef(t.BuildExternalRef(&ti)) {
+		warnings = append(warnings, t.unrecognizedWebURLWarning(created))
+	}
 	ti.Warnings = warnings
 	return &ti, nil
+}
+
+// unrecognizedWebURLWarning names a create whose returned web_url is under no
+// address this tracker recognizes, and the consequence: the stored ref will
+// not match the next run's, which will create the issue again.
+func (t *Tracker) unrecognizedWebURLWarning(created *Issue) string {
+	recognized := "gitlab.url " + t.client.BaseURL
+	if wb := t.effectiveWebBase(); wb != "" {
+		recognized += " or the web address " + wb
+	} else {
+		recognized += "; no other GitLab web address could be learned"
+	}
+	return fmt.Sprintf("GitLab returned web_url %s for the created issue %d, which is under no address this tracker recognizes (%s); check the instance's external_url — the next push will not match this ref and will create the issue again", created.WebURL, created.IID, recognized)
 }
 
 func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *types.Issue) (*tracker.TrackerIssue, error) {

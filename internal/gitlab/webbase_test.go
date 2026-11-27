@@ -419,6 +419,87 @@ func TestCreateTaskWorkItemRefUnderWebBase(t *testing.T) {
 	}
 }
 
+// TestCreateWarnsWhenWebURLIsNotRecognized (AC-8): when a create's returned
+// web_url lies under no address the tracker recognizes — the instance writes
+// an external_url that was neither learned nor configured — the create says
+// so, naming the URL and the consequence, instead of silently storing a ref
+// the next push will not match.
+func TestCreateWarnsWhenWebURLIsNotRecognized(t *testing.T) {
+	tests := []struct {
+		name        string
+		projectJSON string
+		createRef   string
+		wantWarned  bool
+	}{
+		{
+			name:        "web_url under an unrecognized host",
+			projectJSON: `{"id":42,"path_with_namespace":"g/p","web_url":"https://code.example.org/elsewhere"}`,
+			createRef:   "https://git.example.org/g/p/-/issues/5",
+			wantWarned:  true,
+		},
+		{
+			name:        "web_url under the gitlab.url root (control)",
+			projectJSON: `{"id":42,"path_with_namespace":"g/p","web_url":"%ROOT%/g/p"}`,
+			createRef:   "%ROOT%/g/p/-/issues/5",
+			wantWarned:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				path := strings.TrimPrefix(r.URL.Path, "/api/v4")
+				w.Header().Set("Content-Type", "application/json")
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case r.Method == http.MethodGet && path == "/projects/42":
+					_, _ = w.Write([]byte(strings.ReplaceAll(tt.projectJSON, "%ROOT%", "http://"+r.Host)))
+				case r.Method == http.MethodPost && path == "/projects/42/issues":
+					ref := strings.ReplaceAll(tt.createRef, "%ROOT%", "http://"+r.Host)
+					_, _ = w.Write([]byte(`{"id":1005,"iid":5,"project_id":42,"title":"Do it","state":"opened",` +
+						`"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z","web_url":"` + ref + `"}`))
+				default:
+					http.Error(w, `{"message":"404 Not found"}`, http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			t.Setenv("BEADS_DIR", "")
+			t.Setenv("GITLAB_URL", srv.URL)
+			t.Setenv("GITLAB_TOKEN", "token")
+			t.Setenv("GITLAB_PROJECT_ID", "42")
+			t.Setenv("GITLAB_PROJECT_PATH", "g/p")
+
+			store := &crossProjectStore{issues: map[string]*types.Issue{
+				"bd-task": {ID: "bd-task", IssueType: types.TypeTask, Status: types.StatusOpen, Title: "Do it"},
+			}}
+			tr := &Tracker{}
+			if err := tr.Init(context.Background(), store); err != nil {
+				t.Fatalf("Init: %v", err)
+			}
+			ti, err := tr.CreateIssue(context.Background(), store.issues["bd-task"])
+			if err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+			if !tt.wantWarned {
+				if len(ti.Warnings) != 0 {
+					t.Fatalf("warnings = %q, want none", ti.Warnings)
+				}
+				return
+			}
+			if len(ti.Warnings) != 1 {
+				t.Fatalf("warnings = %q, want exactly one", ti.Warnings)
+			}
+			for _, want := range []string{tt.createRef, "5", "next push"} {
+				if !strings.Contains(ti.Warnings[0], want) {
+					t.Errorf("warning %q does not mention %q", ti.Warnings[0], want)
+				}
+			}
+		})
+	}
+}
+
 // TestIsExternalRefLearnedWebBase (AC-2): with a relative-root web base
 // learned, issue and work-item URLs under it are recognized, refs under
 // gitlab.url stay recognized, and a path outside the root, an unrelated host

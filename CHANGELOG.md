@@ -1544,6 +1544,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd` no longer creates a second copy of every GitLab-linked issue on
+  each push when GitLab is reached at an address other than the one it
+  writes into its links.** GitLab spells every `web_url` it returns with its
+  own `external_url` — an internal name, an IP or a proxy — whatever address
+  the API was reached at, and a push that did not recognize that address
+  treated the issue it had just created as someone else's and created a new
+  copy, moving the link to the copy every run. The tracker now learns the
+  web address from the configured project's `web_url` once per run and
+  recognizes, keys and scopes refs under it as well as under `gitlab.url`;
+  task work-item refs are composed under it; nothing already stored is
+  rewritten. A project read that fails with other than 404 stops the run
+  rather than pushing blind, and a create whose returned `web_url` is under
+  no recognized address says so instead of silently storing the ref. A
+  GitLab that reports no usable `web_url` can be told the address directly
+  with the new `gitlab.web_url` setting (or `GITLAB_WEB_URL`).
+
 - **`bd show` no longer prints `Lease: expires expired` for a lapsed lease.**
   An in_progress issue keeps its lease row after the lease runs out, until
   `bd reclaim` sweeps it, and the lease line then printed the verb twice and
