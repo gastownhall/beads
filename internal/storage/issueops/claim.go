@@ -34,7 +34,32 @@ type ClaimResult struct {
 // A claim that wrote the row mints one version row (assignee, status and
 // started_at are durable state); the idempotent re-claim mints nothing.
 func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*ClaimResult, error) {
-	return claimIssueInTx(ctx, tx, id, actor, true)
+	return claimIssueInTx(ctx, tx, id, actor, true, false)
+}
+
+// EnforceClaimPolicyInTx refuses a claim of id while it has a live local
+// blocker, unless force. It reuses the close policy's predicate exactly
+// (isBlockedByInTx): the stored is_blocked flag plus the direct blocks,
+// waits-for and conditional-blocks edges whose target is neither closed nor
+// pinned. A stale flag with no live edge, or a block inherited only through a
+// parent, does not refuse. The refusal is a BlockedError wrapping
+// ErrClaimBlocked that carries the typed blockers read here. A read failure is
+// returned, never read as permission.
+//
+// It writes nothing, so a caller that runs it after a claim's compare-and-set
+// relies on the enclosing transaction rolling the CAS back on refusal.
+func EnforceClaimPolicyInTx(ctx context.Context, tx DBTX, id string, force bool) error {
+	if force {
+		return nil
+	}
+	blocked, blockers, err := isBlockedByInTx(ctx, tx, id)
+	if err != nil {
+		return fmt.Errorf("check claim blockers for %s: %w", id, err)
+	}
+	if blocked && len(blockers) > 0 {
+		return &publicops.BlockedError{IssueID: id, Blockers: blockers, Err: storage.ErrClaimBlocked}
+	}
+	return nil
 }
 
 // claimIssueInTx is the body of ClaimIssueInTx. mintVersion controls whether a
@@ -44,8 +69,14 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 // mints exactly once after the last of them, so the version carries the final
 // state and one guarded update never records two.
 //
+// refuseBlocked applies EnforceClaimPolicyInTx once the CAS has won, before
+// the lease, event, journal and version writes: only the lifecycle update's
+// claim sets it, so the raw and ready-claim entry points keep their behavior.
+// Checking only after a win keeps a lost CAS reporting its conflict and an
+// idempotent re-claim succeeding without writes.
+//
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintVersion bool) (*ClaimResult, error) {
+func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintVersion, refuseBlocked bool) (*ClaimResult, error) {
 	// The CAS below writes assignee = actor. actor is user-settable (--actor /
 	// BEADS_ACTOR), so bound it against the VARCHAR(255) assignee column up front
 	// and return a typed ErrFieldTooLong rather than a raw backend error.
@@ -203,6 +234,15 @@ func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintV
 			Assignee: assignee,
 			Status:   currentStatus,
 			Err:      refusal,
+		}
+	}
+
+	// The CAS won, so this claim is about to become real. Refuse it here, while
+	// nothing but the row update has been written, if a live local blocker
+	// still holds the issue; the caller's transaction rolls the CAS back.
+	if refuseBlocked {
+		if err := EnforceClaimPolicyInTx(ctx, tx, id, false); err != nil {
+			return nil, err
 		}
 	}
 

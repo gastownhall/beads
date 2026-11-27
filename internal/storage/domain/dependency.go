@@ -131,6 +131,19 @@ type DepTreeOpts struct {
 
 type BulkAddDepsOpts struct {
 	SkipPerEdgeCycleCheck bool
+	// SuppressEvents writes each edge without its dependency_added events-table
+	// row (the journal entry is still written). Storage.Transaction's
+	// AddDependency is quiet by default on every store, so the uow-backed
+	// Storage adapter (internal/storage/uowstore) sets it unless the caller
+	// asked for an event.
+	SuppressEvents bool
+}
+
+// RemoveDepBySourceOpts tunes RemoveDependencyBySourceWithOptions.
+type RemoveDepBySourceOpts struct {
+	// SuppressEvent removes the edge without its dependency_removed
+	// events-table row, as BulkAddDepsOpts.SuppressEvents does for an add.
+	SuppressEvent bool
 }
 
 type BulkAddDepsResult struct {
@@ -199,6 +212,9 @@ type DependencyUseCase interface {
 	// cannot put an edge anywhere, so reading the plane is always safer than
 	// pinning it.
 	RemoveDependencyBySource(ctx context.Context, sourceID, dependsOnID, actor string) (bool, error)
+	// RemoveDependencyBySourceWithOptions is RemoveDependencyBySource with
+	// control over the dependency_removed event.
+	RemoveDependencyBySourceWithOptions(ctx context.Context, sourceID, dependsOnID, actor string, opts RemoveDepBySourceOpts) (bool, error)
 	Reparent(ctx context.Context, childID, newParentID, actor string) error
 	ListByIssueIDs(ctx context.Context, issueIDs []string, filter DepListFilter) (DepBulkResult, error)
 	ListWithIssueMetadata(ctx context.Context, issueID string, filter DepListFilter) ([]*types.IssueWithDependencyMetadata, error)
@@ -357,6 +373,12 @@ func (u *dependencyUseCaseImpl) RemoveWispDependency(ctx context.Context, wispID
 // the verdict, the way the store-backed body reads it off RemoveDependencyInTx
 // rather than from a separate lookup.
 func (u *dependencyUseCaseImpl) RemoveDependencyBySource(ctx context.Context, sourceID, dependsOnID, actor string) (bool, error) {
+	return u.RemoveDependencyBySourceWithOptions(ctx, sourceID, dependsOnID, actor, RemoveDepBySourceOpts{})
+}
+
+// RemoveDependencyBySourceWithOptions is RemoveDependencyBySource with control
+// over the dependency_removed event.
+func (u *dependencyUseCaseImpl) RemoveDependencyBySourceWithOptions(ctx context.Context, sourceID, dependsOnID, actor string, opts RemoveDepBySourceOpts) (bool, error) {
 	if sourceID == "" || dependsOnID == "" {
 		return false, fmt.Errorf("remove dep: sourceID and dependsOnID must not be empty")
 	}
@@ -365,7 +387,7 @@ func (u *dependencyUseCaseImpl) RemoveDependencyBySource(ctx context.Context, so
 		return false, fmt.Errorf("remove dep: classify source: %w", err)
 	}
 	_, sourceIsWisp := wispSources[sourceID]
-	res, err := u.depRepo.Delete(ctx, sourceID, dependsOnID, actor, DepInsertOpts{UseWispsTable: sourceIsWisp, EmitEvent: true})
+	res, err := u.depRepo.Delete(ctx, sourceID, dependsOnID, actor, DepInsertOpts{UseWispsTable: sourceIsWisp, EmitEvent: !opts.SuppressEvent})
 	if err != nil {
 		return false, fmt.Errorf("remove dep %s -> %s: %w", sourceID, dependsOnID, err)
 	}
@@ -767,13 +789,14 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 			// dependency_added event for each genuine new edge — unlike
 			// create-with-deps, which calls depRepo.Insert directly without
 			// EmitEvent. UseWispsTable routes both the edge and that event to
-			// the source's own pair of tables.
+			// the source's own pair of tables. SuppressEvents opts out, for
+			// callers whose contract is a quiet edge write.
 			_, sourceIsWisp := wispSources[dep.IssueID]
 			if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{
 				UseWispsTable:      sourceIsWisp,
 				HierarchyValidated: true,
 				CycleValidated:     true,
-				EmitEvent:          true,
+				EmitEvent:          !opts.SuppressEvents,
 			}); err != nil {
 				var hierarchyConflict *DependencyHierarchyConflictError
 				if errors.As(err, &hierarchyConflict) {

@@ -39,6 +39,7 @@ var metadataFactoryReferences = map[string]string{
 	"foreign_workspace.go:openForeignStore":            "the foreign opener: admits the workspace first (admitForeignWorkspace)",
 	"main.go:var rootCmd":                              "own workspace: the root pre-run's identity preview of the workspace admission admitted",
 	"direct_mode.go:ensureStoreActiveWithContext":      "own workspace: the discovered workspace, after admission",
+	"doctor_export.go:openExportCheckStore":            "own workspace: the one bd selected for bd doctor --check=export, opened read-only",
 	"store_reopen.go:openReadOnlyStoreForDBPath":       "own workspace: reopens the command's own database path",
 	"init.go:countExistingIssues":                      "own workspace: the workspace bd init runs in",
 	"init_contributor.go:autoConfigureForkContributor": "a planning .beads bd init just created, empty",
@@ -112,12 +113,12 @@ var configfileLoadSites = map[string]string{
 	"serve.go:serveDatabaseSource":                                     "own: bd serve's workspace",
 	"store_factory.go:openDoltStoreFromConfig":                         "admitted: after checkDiscoveredBackend (a foreign open, after admitForeignWorkspace too)",
 	"store_factory_nocgo.go:newDoltStoreFromConfig":                    "admitted: after checkDiscoveredBackend (a foreign open, after admitForeignWorkspace too)",
-	"uow_factory.go:resolveProxiedServerUOWTopology":                   "own: the command's or bd serve's workspace",
 	"uow_factory.go:resolveServerModeUOWTopologyWithTransportResolver": "own: the command's or bd serve's workspace",
 	"upgrade.go:var upgradeAckCmd":                                     "own",
 	"version_tracking.go:autoMigrateOnVersionBump":                     "own: the workspace admission (or doctor's) admitted",
 	"sdk/beads_cgo.go:OpenBestAvailableWith":                           "admitted: after checkDiscoveredBackend (library open)",
 	"sdk/beads_nocgo.go:OpenBestAvailableWith":                         "admitted: after checkDiscoveredBackend (library open)",
+	"proxiedopen/topology.go:ResolveProxiedTopology":                   "own: the proxied-server workspace the bd command opens",
 }
 
 // TestConfigfileLoadCallersAreClassified pins that every call of the
@@ -128,7 +129,7 @@ var configfileLoadSites = map[string]string{
 // (multirepo.go); a doctor site loading anything else is reviewed there.
 func TestConfigfileLoadCallersAreClassified(t *testing.T) {
 	found := map[string]bool{}
-	for _, dir := range []string{".", "../.."} {
+	for _, dir := range []string{".", "../..", "../../internal/proxiedopen"} {
 		prefix := scannedPackages[dir]
 		fset := token.NewFileSet()
 		pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {

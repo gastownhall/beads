@@ -7,55 +7,64 @@ import (
 )
 
 // TestGeneratedShellIsFresh is the anti-drift check this tool never had: it
-// runs exactly the same scan-then-generate pipeline main() runs for the one
+// runs exactly the same scan-then-generate pipeline main() runs for each
 // registered consumer (internal/httpclient's unsupported_gen.go, built from
-// storage.DoltStorage with receiver Store), and compares the result byte for
-// byte against the checked-in file. A storage.DoltStorage interface change,
+// storage.DoltStorage, and internal/storage/uowstore's, built from
+// storage.Storage, both with receiver Store), and compares the result byte
+// for byte against the checked-in file. A storage.DoltStorage interface change,
 // a hand-written method added or removed from httpclient's Store, or an edit
 // to this generator's own output shape that nobody reran `go generate` after
 // is caught here instead of silently drifting until someone notices the
 // shell no longer matches what the generator would produce today.
 //
-// Regenerate with: go generate ./internal/httpclient (see unsupported.go's
+// Regenerate with: go generate ./internal/httpclient or
+// go generate ./internal/storage/uowstore (see each package's unsupported.go
 // //go:generate line, which this test mirrors).
 func TestGeneratedShellIsFresh(t *testing.T) {
 	const (
-		typeName = "DoltStorage"
-		pkgName  = "httpclient"
 		receiver = "Store"
 		outName  = "unsupported_gen.go"
 	)
+	for _, shell := range []struct {
+		typeName string
+		pkgName  string
+		// scanDir is relative to this package (internal/storage/unsupportedgen).
+		scanDir string
+		genHint string
+	}{
+		{typeName: "DoltStorage", pkgName: "httpclient", scanDir: filepath.Join("..", "..", "httpclient"), genHint: "go generate ./internal/httpclient"},
+		{typeName: "Storage", pkgName: "uowstore", scanDir: filepath.Join("..", "uowstore"), genHint: "go generate ./internal/storage/uowstore"},
+	} {
+		t.Run(shell.pkgName, func(t *testing.T) {
+			outPath := filepath.Join(shell.scanDir, outName)
 
-	// httpclient lives two levels up from this package
-	// (internal/storage/unsupportedgen -> internal/httpclient).
-	scanDir := filepath.Join("..", "..", "httpclient")
-	outPath := filepath.Join(scanDir, outName)
+			ifaceType, ok := registry[shell.typeName]
+			if !ok {
+				t.Fatalf("%q is not in this tool's registry (add it in main.go)", shell.typeName)
+			}
 
-	ifaceType, ok := registry[typeName]
-	if !ok {
-		t.Fatalf("%q is not in this tool's registry (add it in main.go)", typeName)
-	}
+			handWritten, err := scanHandWrittenMethods(shell.scanDir, receiver, outPath)
+			if err != nil {
+				t.Fatalf("scanning %s: %v", shell.scanDir, err)
+			}
 
-	handWritten, err := scanHandWrittenMethods(scanDir, receiver, outPath)
-	if err != nil {
-		t.Fatalf("scanning %s: %v", scanDir, err)
-	}
+			want, _, err := generate(shell.pkgName, shell.typeName, ifaceType, handWritten)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
 
-	want, _, err := generate(pkgName, typeName, ifaceType, handWritten)
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
+			got, err := os.ReadFile(outPath)
+			if err != nil {
+				t.Fatalf("reading checked-in %s: %v", outPath, err)
+			}
 
-	got, err := os.ReadFile(outPath)
-	if err != nil {
-		t.Fatalf("reading checked-in %s: %v", outPath, err)
-	}
-
-	if string(got) != string(want) {
-		t.Fatalf("%s is stale: it does not match what this generator produces today.\n"+
-			"This file is generated and must not be hand-edited.\n"+
-			"Regenerate it with:\n"+
-			"    go generate ./internal/httpclient", outPath)
+			if string(got) != string(want) {
+				t.Fatalf("%s is stale: it does not match what this generator produces today.\n"+
+					"This file is generated and must not be hand-edited.\n"+
+					"Regenerate it with:\n"+
+					"    %s", outPath, shell.genHint)
+			}
+		})
 	}
 }
 

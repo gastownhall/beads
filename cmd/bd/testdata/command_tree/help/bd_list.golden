@@ -4,7 +4,7 @@ Usage:
   bd list [flags]
 
 Flags:
-      --all                          Show all issues including closed (overrides default filter)
+      --all                          Lift default status and pinned exclusions and the default limit (type and plane suppressions still apply; see --include-all-types)
   -a, --assignee string              Filter by assignee
       --brief                        Omit the free-form text (description, design, acceptance criteria, notes, payload, waiters) from each row. Filters that read those fields, such as --desc-contains, still select on them. An omitted field is indistinguishable from an empty one in --json; fetch a whole issue with bd show.
       --closed-after string          Filter issues closed after date (YYYY-MM-DD or RFC3339)
@@ -28,6 +28,7 @@ Flags:
       --has-metadata-key string      Filter issues that have this metadata key set
   -h, --help                         help for list
       --id string                    Filter by specific issue IDs (comma-separated or repeated, e.g., bd-1,bd-5,bd-10)
+      --include-all-types            Include all issue types and the ephemeral wisp plane (default status and pinned exclusions still apply; see --all)
       --include-comments             Populate each row's comments field with full comment bodies in JSON output (--json only; costs one query per row that has comments). Without it, a row with comments carries comments_omitted=true, so an absent comments field is never mistaken for having none. Text output is unaffected either way.
       --include-ephemeral            Include ephemeral wisp-plane rows in output (normally hidden)
       --include-gates                Include gate issues in output (normally hidden)
@@ -74,7 +75,7 @@ Flags:
 Global Flags:
       --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
       --cpu-profile               Generate CPU profile for performance analysis
-      --database string           Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only)
+      --database string           Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only). Refused when it holds another beads project; a database with no beads project identity is allowed; set BEADS_SKIP_IDENTITY_CHECK=1 to override. Team-server workspaces always check identity
       --db string                 Database path (default: auto-discover .beads/*.db). In proxied-server mode, a value that isn't an existing path is treated as a database name override (see --database)
   -C, --directory string          Change to this directory before running the command (like git -C)
       --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then (a live batch-mode bd process also flushes on SIGTERM/SIGHUP, except in proxied-server mode, where bd dolt commit is the only flush point). In proxied-server mode the deferral covers the writes the CLI makes on that route, including config and version metadata; explicit commit points (bd batch, bd mol bond/pour/squash, bd mol wisp create, and the wisp half of bd mol burn) still commit, and a bd serve process on the same database is unaffected. Default: on. Override via config key dolt.auto-commit

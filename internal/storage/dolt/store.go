@@ -5155,13 +5155,14 @@ func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
 // re-pushes that remote faithfully propagates the dangling reference.
 //
 // If CLIDir is empty or .dolt/noms does not exist, the check is skipped.
-// Six outcomes are possible when fsck exits non-zero (see classifyFSCKFailure):
-//   - non-empty output, could-not-open: skipped with a log warning.
-//   - non-empty output, other: ErrDanglingReference — push aborted.
+// When fsck exits non-zero, classifyFSCKFailure decides the outcome:
+//   - recognized finding in the output: ErrDanglingReference — push aborted.
+//   - could-not-open output: skipped with a log warning.
 //   - parent context canceled: cancellation error — push aborted.
 //   - parent context deadline exceeded: ErrFSCKTimeout (caller timeout) — push aborted.
 //   - fsck own timeout: ErrFSCKTimeout (raise BEADS_FSCK_TIMEOUT) — push aborted.
 //   - cancellation phrasing in output, no context error: cancellation error — push aborted.
+//   - anything else: ErrFSCKFailed naming dir — push aborted, no verdict on the store.
 func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	dir := s.CLIDir()
 	if dir == "" {
@@ -5177,7 +5178,7 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		output := strings.TrimSpace(string(out))
-		if classified := classifyFSCKFailure(ctx.Err(), fsckCtx.Err(), output); classified != nil {
+		if classified := classifyFSCKFailure(ctx.Err(), fsckCtx.Err(), err, dir, output); classified != nil {
 			return classified
 		}
 		log.Printf("pre-push fsck could not run, skipping integrity check: %s", output)
@@ -5186,18 +5187,17 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	return nil
 }
 
-// classifyFSCKFailure maps a failed dolt fsck exit into one of six outcomes,
-// evaluated in priority order:
+// classifyFSCKFailure maps a failed dolt fsck exit (runErr is the execution
+// error, dir the database directory fsck ran in, output its trimmed combined
+// output) into one of these outcomes, evaluated in priority order:
 //
-//	(a) Non-empty output → route by content: could-not-open → nil (caller logs
-//	    and skips); cancellation phrasing (fsckOutputInterrupted) → fall
-//	    through to the context-state branches below, because an interrupted
-//	    fsck prints e.g. "context canceled" before dying and that text is not
-//	    an integrity finding; any other content → ErrDanglingReference abort.
-//	    Non-empty output means fsck actually ran and said something (--quiet
-//	    fsck is silent until it finds a problem), so content wins over context
-//	    state. This also closes the race where real corruption arrives at the
-//	    deadline instant and would otherwise be masked as a timeout.
+//	(0) Output carries a recognized integrity finding (fsckReportedFinding)
+//	    → ErrDanglingReference abort quoting the output. The finding wins over
+//	    everything below, so real corruption reported at the deadline instant
+//	    or alongside cancellation or open-failure text is never masked.
+//
+//	(a) Could-not-open output (fsckCouldNotOpen) → nil; the caller logs and
+//	    skips the check.
 //
 //	(b) Parent context canceled (Ctrl-C, caller abort) → plain cancellation
 //	    error wrapping context.Canceled; neither ErrDanglingReference nor
@@ -5218,25 +5218,30 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 //	    carries the reason. Plain cancellation error wrapping context.Canceled;
 //	    the store is not implicated.
 //
-//	(f) Generic non-zero exit, empty output → ErrDanglingReference abort.
+//	(f) Anything else → ErrFSCKFailed abort with runErr and the output (or
+//	    "(no output)"). Output without a finding is not evidence of corruption:
+//	    dolt prints config warnings and errors before fsck runs, and a process
+//	    that failed to start or was killed prints nothing. Neither is the
+//	    absence of a finding evidence of health (fsck's unexpected-error path
+//	    exits without a report), so the push is still refused, and the message
+//	    names dir for a manual fsck and warns against bypassing the check if
+//	    that keeps failing without a report.
 //
 // Returning nil for the could-not-open case (branch a) distinguishes "fsck
 // couldn't run at all" from "fsck ran and found a problem". Wrapping an
 // open-failure as ErrDanglingReference misleads users (dolthub/dolt#10915);
-// so does wrapping an interrupt's "context canceled" noise as corruption
-// (same genus, observed when a background push's process group was killed).
-func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
-	// (a) Non-empty output: fsck actually reported something; route by content.
-	if output != "" {
-		if fsckCouldNotOpen(output) {
-			return nil
-		}
-		if !fsckOutputInterrupted(output) {
-			return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
-				ErrDanglingReference, output)
-		}
-		// Cancellation phrasing: not an integrity finding — classify by
-		// context state below.
+// so does wrapping an interrupt's "context canceled" noise (bd-f2b15), a
+// startup warning or a silent failure as corruption (GH#4258).
+func classifyFSCKFailure(parentErr, fsckErr, runErr error, dir, output string) error {
+	// (0) A recognized integrity finding refuses the push whatever else
+	// happened.
+	if fsckReportedFinding(output) {
+		return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
+			ErrDanglingReference, output)
+	}
+	// (a) fsck could not open the database: nil, the caller logs and skips.
+	if fsckCouldNotOpen(output) {
+		return nil
 	}
 	// (b) Parent context canceled — user interrupt or caller abort.
 	if errors.Is(parentErr, context.Canceled) {
@@ -5265,9 +5270,41 @@ func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 		return fmt.Errorf("pre-push integrity check interrupted: %w: %s",
 			context.Canceled, output)
 	}
-	// (f) Generic failure with no output and no recognized context error.
-	return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks",
-		ErrDanglingReference)
+	// (f) The check failed without reporting a finding.
+	reason := "dolt fsck failed"
+	if runErr != nil {
+		reason = runErr.Error()
+	}
+	if output == "" {
+		output = "(no output)"
+	}
+	return fmt.Errorf("%w: %s; the push was aborted because the integrity check did not complete "+
+		"successfully (the store is not necessarily corrupt); to see the full report, run "+
+		"`dolt fsck` in the database directory %s; if it keeps failing there without a report, "+
+		"do not bypass the check with a direct `dolt push`: see "+
+		"https://beads.gascity.com/recovery/sync-failures#push-refused-by-the-pre-push-integrity-check; "+
+		"fsck output: %s",
+		ErrFSCKFailed, reason, remedy.PrintedValue(dir), output)
+}
+
+// fsckReportedFinding reports whether dolt fsck output carries an integrity
+// finding: one of the report headers FsckReport.Print emits for corrupt chunks
+// or commit errors, or the corrupted chunk journal warning fsck prints when it
+// cannot load the journal (cmd/dolt/commands/fsck.go). The headers are wrapped
+// in ANSI color, so they are matched as substrings. Generic "corrupt" or
+// "dangling" wording is not matched: it occurs in warnings and paths, and a
+// commit-errors-only report contains neither.
+func fsckReportedFinding(output string) bool {
+	for _, marker := range []string{
+		"============ Corrupt Chunks ============",
+		"============ Commit Errors ============",
+		"WARNING: Chunk journal is corrupted",
+	} {
+		if strings.Contains(output, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // fsckCouldNotOpen reports whether dolt fsck output indicates the check
@@ -6618,16 +6655,22 @@ func (s *DoltStore) MergeWithStrategy(ctx context.Context, branch, strategy stri
 	// configured with a single connection (setupTestStore's MaxOpenConns: 1
 	// mirrors constrained production configs), and recomputeBlockedAfterPull
 	// acquires its own connection — held past this point, conn would starve
-	// it of the only one available.
-	closeErr := conn.Close()
+	// it of the only one available. The conflict-tolerance flags the merge
+	// set are session state: clear them first so the pool never hands a
+	// later, unrelated write a session that silently commits conflicts
+	// (bd-sesknw), and discard the session if the reset fails — the
+	// discipline ResolveConflictRows follows. A failed reset is recorded,
+	// never returned: the discarded session cannot leak the flags, and by
+	// now the merge has concluded or failed on its own, so failing a
+	// concluded merge would only skip the is_blocked recompute below.
+	if resetErr := releaseMergeConn(ctx, conn); resetErr != nil {
+		span.RecordError(resetErr)
+	}
 	if len(conflicts) > 0 {
 		span.SetAttributes(attribute.Int("dolt.conflicts", len(conflicts)))
 	}
 	if err != nil {
 		return conflicts, err
-	}
-	if closeErr != nil {
-		return conflicts, fmt.Errorf("release merge connection: %w", closeErr)
 	}
 	if !s.readOnly {
 		if rerr := s.recomputeBlockedAfterPull(ctx, preHead); rerr != nil {
@@ -6635,6 +6678,37 @@ func (s *DoltStore) MergeWithStrategy(ctx context.Context, branch, strategy stri
 		}
 	}
 	return conflicts, nil
+}
+
+// mergeSessionResetTimeout bounds the flag reset releaseConflictTolerantConn
+// runs on a context detached from its caller's cancellation.
+const mergeSessionResetTimeout = 5 * time.Second
+
+// releaseMergeConn is how MergeWithStrategy releases its pinned connection:
+// releaseConflictTolerantConn outside tests, which swap it to fail the reset
+// after a merge has concluded.
+var releaseMergeConn = releaseConflictTolerantConn
+
+// releaseConflictTolerantConn returns a pinned connection whose session may
+// carry @@dolt_allow_commit_conflicts / @@dolt_force_transaction_commit to the
+// pool with both flags cleared — on success, on failure, and after a partial
+// flag setup alike. The reset runs on a short context detached from ctx's
+// cancellation, so a caller canceled after its merge still hands back a
+// cleared session. When the reset fails anyway (a dead session, the timeout)
+// the physical connection is discarded instead of being returned with the
+// flags possibly still set, and the reset's own error is returned. conn is
+// closed either way.
+func releaseConflictTolerantConn(ctx context.Context, conn *sql.Conn) error {
+	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mergeSessionResetTimeout)
+	defer cancel()
+	if _, err := conn.ExecContext(resetCtx,
+		"SET @@dolt_allow_commit_conflicts = 0, @@dolt_force_transaction_commit = 0"); err != nil {
+		// ErrBadConn makes database/sql drop the physical connection and
+		// close conn; a Close after it would only report sql.ErrConnDone.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return fmt.Errorf("reset merge session flags (session discarded): %w", err)
+	}
+	return conn.Close()
 }
 
 // RecomputeBlockedAfterMerge recomputes the denormalized is_blocked column

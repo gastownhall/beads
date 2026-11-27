@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -673,4 +674,255 @@ func forwardFromOtherLoopback(t *testing.T, port int) int {
 		}
 	}()
 	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// restoreFlowStore is a DoltStorage stand-in for runBackupRestore: it embeds
+// a nil DoltStorage for the type assertion and overrides only the methods the
+// direct restore sequence calls, logging each call in order.
+type restoreFlowStore struct {
+	storage.DoltStorage
+	restoreErr   error
+	backupAddErr error
+	commitErr    error
+	projectID    string
+	calls        []string
+}
+
+func (r *restoreFlowStore) RestoreDatabase(context.Context, string, bool) error {
+	r.calls = append(r.calls, "RestoreDatabase")
+	return r.restoreErr
+}
+
+func (r *restoreFlowStore) GetMetadata(_ context.Context, key string) (string, error) {
+	r.calls = append(r.calls, "GetMetadata:"+key)
+	return r.projectID, nil
+}
+
+func (r *restoreFlowStore) BackupRemove(context.Context, string) error {
+	r.calls = append(r.calls, "BackupRemove")
+	return nil
+}
+
+func (r *restoreFlowStore) BackupAdd(context.Context, string, string) error {
+	r.calls = append(r.calls, "BackupAdd")
+	return r.backupAddErr
+}
+
+func (r *restoreFlowStore) BackupSync(context.Context, string) error     { return nil }
+func (r *restoreFlowStore) BackupDatabase(context.Context, string) error { return nil }
+
+func (r *restoreFlowStore) Commit(context.Context, string) error {
+	r.calls = append(r.calls, "Commit")
+	return r.commitErr
+}
+
+// isolateRestoreWorkspace points workspace discovery at a fresh .beads under
+// t.TempDir(), so the identity sync and backup registration that
+// runBackupRestore performs never touch a real workspace.
+func isolateRestoreWorkspace(t *testing.T) string {
+	t.Helper()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := configfile.DefaultConfig().Save(beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DB", "")
+	beads.ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	})
+	return beadsDir
+}
+
+// TestRunBackupRestoreUnknownFieldsCommitGuidance pins the diagnostic for a
+// post-restore commit the engine refuses with "table has unknown fields"
+// (GH#7569): the restore step already ran, so the error must say the
+// workspace may have been replaced, name the possible engine/backup format
+// mismatch with embedded and server guidance (a server bd starts keeps the
+// dolt it started with, so an upgrade needs a server restart), and keep the
+// commit outcome and readability unknown. The injected error tests the
+// reporting contract; it is not a real storage incompatibility.
+func TestRunBackupRestoreUnknownFieldsCommitGuidance(t *testing.T) {
+	mysqlCause := errors.New("Error 1105: table has unknown fields")
+	bareCause := errors.New("table has unknown fields")
+	wrappedCause := errors.New("table has unknown fields")
+	cases := []struct {
+		name              string
+		commitErr         error
+		cause             error
+		wantIndeterminate bool
+	}{
+		{
+			name:              "mysql error with indeterminate marker",
+			commitErr:         fmt.Errorf("dolt commit: %w: %w", mysqlCause, storage.ErrCommitIndeterminate),
+			cause:             mysqlCause,
+			wantIndeterminate: true,
+		},
+		{
+			name:      "bare engine diagnostic",
+			commitErr: bareCause,
+			cause:     bareCause,
+		},
+		{
+			name:              "outer wrapped error",
+			commitErr:         fmt.Errorf("commit restore: %w", fmt.Errorf("dolt commit: %w: %w", wrappedCause, storage.ErrCommitIndeterminate)),
+			cause:             wrappedCause,
+			wantIndeterminate: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateRestoreWorkspace(t)
+			st := &restoreFlowStore{commitErr: tc.commitErr}
+
+			err := runBackupRestore(context.Background(), st, t.TempDir(), true)
+			if err == nil {
+				t.Fatal("runBackupRestore returned nil for a refused post-restore commit")
+			}
+			msg := err.Error()
+			for _, want := range []string{
+				"failed to commit restore",
+				"table has unknown fields",
+				"may already have been replaced",
+				"newer",
+				"Embedded mode",
+				"upgrade bd",
+				"Server mode",
+				"Dolt server",
+				"that was on PATH when it started",
+				"'bd dolt stop', then 'bd dolt start'",
+				"separate",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error lacks %q:\n%s", want, msg)
+				}
+			}
+			for _, unwanted := range []string{
+				"Restore complete",
+				"no commit was",
+				"nothing was committed",
+				"was not committed",
+				"is readable",
+				"remains readable",
+				"registered as",
+				"--force again",
+			} {
+				if strings.Contains(msg, unwanted) {
+					t.Errorf("error makes an unsupported claim (%q):\n%s", unwanted, msg)
+				}
+			}
+			// AC-2: the diagnostic keeps the original cause and the
+			// indeterminate marker in the chain, so callers never read a
+			// possibly-durable commit as a clean failure.
+			if !errors.Is(err, tc.commitErr) {
+				t.Errorf("errors.Is(err, commitErr) = false: %v", err)
+			}
+			if !errors.Is(err, tc.cause) {
+				t.Errorf("errors.Is(err, cause) = false: %v", err)
+			}
+			if got := errors.Is(err, storage.ErrCommitIndeterminate); got != tc.wantIndeterminate {
+				t.Errorf("errors.Is(err, ErrCommitIndeterminate) = %v, want %v: %v", got, tc.wantIndeterminate, err)
+			}
+			if tc.wantIndeterminate && !strings.Contains(msg, "indeterminate") {
+				t.Errorf("error drops the indeterminate wording:\n%s", msg)
+			}
+			if got := st.calls[len(st.calls)-1]; got != "Commit" {
+				t.Errorf("last call = %s, want Commit (calls %v)", got, st.calls)
+			}
+		})
+	}
+}
+
+// TestRunBackupRestoreCommitOutcomes pins the direct restore sequence the
+// unknown-fields hint must leave alone: restore, identity sync (only with
+// --force), backup registration, then the commit; a clean or empty commit
+// succeeds, an ordinary commit error keeps the plain wrapper with no hint, and
+// a failed restore stops before anything else runs.
+func TestRunBackupRestoreCommitOutcomes(t *testing.T) {
+	ordinaryCause := errors.New("Error 1105: lock wait timeout")
+	restoreCause := errors.New("restore refused")
+	forceCalls := []string{"RestoreDatabase", "GetMetadata:_project_id", "BackupRemove", "BackupAdd", "Commit"}
+	plainCalls := []string{"RestoreDatabase", "BackupRemove", "BackupAdd", "Commit"}
+	cases := []struct {
+		name         string
+		force        bool
+		restoreErr   error
+		backupAddErr error
+		commitErr    error
+		projectID    string
+		wantErr      error
+		wantCalls    []string
+	}{
+		{name: "success force", force: true, wantCalls: forceCalls},
+		{name: "success force syncs restored identity", force: true, projectID: "restored-project", wantCalls: forceCalls},
+		{name: "success", wantCalls: plainCalls},
+		{name: "nothing to commit", force: true, commitErr: errors.New("dolt commit: nothing to commit"), wantCalls: forceCalls},
+		{name: "ordinary commit error", force: true, commitErr: ordinaryCause, wantErr: ordinaryCause, wantCalls: forceCalls},
+		{name: "ordinary commit error without force", commitErr: ordinaryCause, wantErr: ordinaryCause, wantCalls: plainCalls},
+		{name: "registration error then success", force: true, backupAddErr: errors.New("remote add refused"), wantCalls: forceCalls},
+		{
+			name:         "registration error then unknown fields",
+			force:        true,
+			backupAddErr: errors.New("remote add refused"),
+			commitErr:    fmt.Errorf("dolt commit: %w: %w", errors.New("table has unknown fields"), storage.ErrCommitIndeterminate),
+			wantErr:      storage.ErrCommitIndeterminate,
+			wantCalls:    forceCalls,
+		},
+		{name: "restore fails", force: true, restoreErr: restoreCause, wantErr: restoreCause, wantCalls: []string{"RestoreDatabase"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := isolateRestoreWorkspace(t)
+			st := &restoreFlowStore{
+				restoreErr:   tc.restoreErr,
+				backupAddErr: tc.backupAddErr,
+				commitErr:    tc.commitErr,
+				projectID:    tc.projectID,
+			}
+
+			err := runBackupRestore(context.Background(), st, t.TempDir(), tc.force)
+			if !slices.Equal(st.calls, tc.wantCalls) {
+				t.Errorf("calls = %v, want %v", st.calls, tc.wantCalls)
+			}
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("runBackupRestore = %v, want nil", err)
+				}
+				if tc.projectID != "" {
+					// The identity sync wrote the restored database's project
+					// id into the isolated workspace's metadata.json.
+					cfg, loadErr := configfile.Load(beadsDir)
+					if loadErr != nil {
+						t.Fatalf("configfile.Load: %v", loadErr)
+					}
+					if cfg == nil || cfg.ProjectID != tc.projectID {
+						t.Errorf("workspace ProjectID = %+v, want %q", cfg, tc.projectID)
+					}
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("runBackupRestore = %v, want an error wrapping %v", err, tc.wantErr)
+			}
+			msg := err.Error()
+			switch {
+			case tc.restoreErr != nil:
+				if msg != tc.restoreErr.Error() {
+					t.Errorf("restore error = %q, want the store's error unchanged", msg)
+				}
+			case tc.commitErr == ordinaryCause:
+				if want := "failed to commit restore: " + ordinaryCause.Error(); msg != want {
+					t.Errorf("ordinary commit error = %q, want %q", msg, want)
+				}
+			}
+			if tc.backupAddErr != nil && strings.Contains(msg, "regist") {
+				t.Errorf("error mentions backup registration after it failed:\n%s", msg)
+			}
+		})
+	}
 }

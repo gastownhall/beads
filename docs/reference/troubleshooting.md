@@ -100,6 +100,27 @@ bd init --quiet
 BEADS_DIR=/path/to/.beads bd list
 ```
 
+### Missing metadata.json: bd refuses to open, or picked the wrong database
+
+In releases after v1.3.4, an embedded workspace without
+`.beads/metadata.json` selects its database as described in
+[Configuration](/reference/configuration#missing-metadatajson): it uses the
+sole existing database, honors `BEADS_DOLT_SERVER_DATABASE`, and refuses when
+several databases exist and none is selected. The selection itself renames no
+database directory and writes no `metadata.json`.
+
+```bash
+# Restore the metadata from a known-good copy: a backup, or a recent
+# version if the workspace keeps the file in version control
+git checkout <good-rev> -- .beads/metadata.json
+
+# Or select one of the existing databases explicitly
+BEADS_DOLT_SERVER_DATABASE=<name> bd list
+```
+
+Do not run `bd init` over the existing databases: the refusal is a safety
+stop, and reinitializing cannot recover which database the workspace meant.
+
 ### Database locked
 
 ```bash
@@ -536,6 +557,56 @@ bd dolt push
 ```
 
 See [Merge Conflicts](/recovery/merge-conflicts) for the full runbook.
+
+### Push logs "conjoin of database failed" over SSH
+
+**Symptom:** `bd dolt push` to a `git+ssh://` remote prints this error and then
+reports the push complete:
+
+```
+conjoin of database failed with error: kex_exchange_identification: read: Connection reset by peer
+```
+
+The pushed data does reach the remote, but the remote's table files keep
+accumulating and `bd dolt pull` gets slower with every push.
+
+**Cause:** after a push, Dolt compacts (*conjoins*) the remote's table files.
+Older Dolt opened a separate SSH connection for each table file it conjoined,
+all at once. A burst larger than the SSH server's `MaxStartups` limit gets its
+excess connections dropped before authentication, so the compaction fails
+while the push itself succeeds, and the next compaction has even more files
+to merge. This is a known cause in affected Dolt versions, not an explanation
+for every SSH connection reset. Tracked in beads
+[#6359](https://github.com/gastownhall/beads/issues/6359) and upstream
+[dolthub/dolt#11739](https://github.com/dolthub/dolt/issues/11739); fixed by
+[dolthub/dolt#11742](https://github.com/dolthub/dolt/pull/11742) and
+[dolthub/dolt#11745](https://github.com/dolthub/dolt/pull/11745).
+
+**Fix:** upgrade the Dolt engine that runs the push. Both fixes shipped in
+Dolt 2.3.3. Which engine that is depends on how `bd` runs Dolt:
+
+- **Embedded mode**: the push runs on the Dolt engine linked into `bd`
+  itself, so only a `bd` build linking a fixed engine fixes it. The engine in
+  beads v1.3.4 predates the fix and is affected; beads `main` already links
+  Dolt 2.6.0, which carries it. Upgrading a standalone `dolt` binary does not
+  replace the embedded engine.
+- **Server mode or an external Dolt**: git-protocol pushes and pulls run
+  through the `dolt` CLI and the `dolt sql-server`, not the engine inside
+  `bd`. Install the supported version from
+  [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
+  for both, then restart the server on the new binary. A `dolt` already at
+  2.3.3 or newer is not affected, whatever the `bd` version. The 2.6.0
+  minimum in the `"bd requires dolt 2.6.0 or newer"` entry above does not
+  catch a `dolt` whose version `bd` cannot determine, so check
+  `dolt version` yourself.
+
+**Workaround until you can upgrade:** if you administer the SSH server the
+remote lives on, raise `MaxStartups` in its `sshd_config` and reload the SSH
+service. The reporter of #6359 got compaction working again with
+`MaxStartups 100:30:200`; treat that as one reported example, not a setting
+guaranteed to be enough, since a larger burst can still exceed it. A Git host
+you do not administer cannot be tuned this way. Upgrading remains the
+permanent fix.
 
 ## Git Hook Issues
 

@@ -76,6 +76,17 @@ type proxyCapabilityRule struct {
 	Mutates  bool
 	Reason   ProxyRefusalReason
 	Tracking string
+	// ForceFlag, on a refused path rule only, names a bool flag of the command
+	// whose true value carries the invocation past the refusal. It exists for
+	// a refusal whose danger the operator can remove and bd cannot see — the
+	// clients sharing a proxied backend — so the refusal names the route and
+	// the flag is the operator saying they took it. Empty for every other rule.
+	// Only the path-keyed gate reads it (validateProxyRegistryBeforeProvider).
+	ForceFlag string
+	// ForceWarning is printed to stderr, once, when ForceFlag carries an
+	// invocation past the refusal. Set exactly when ForceFlag is. It is
+	// generic on purpose: bd cannot see who the warning is about.
+	ForceWarning string
 }
 
 // ProxyCapabilityError is a machine-identifiable front-door refusal.

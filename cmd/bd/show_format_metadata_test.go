@@ -177,6 +177,35 @@ func TestFormatIssueMetadata_TimestampsRenderLocal(t *testing.T) {
 	}
 }
 
+// TestFormatIssueMetadata_LeaseLine pins the lease line on both sides of the
+// expiry. A lapsed lease stays on an in_progress issue until bd reclaim sweeps
+// it, and the line then read "Lease: expires expired": the verb was printed
+// twice, and the reader was not told when the lease ran out.
+func TestFormatIssueMetadata_LeaseLine(t *testing.T) {
+	leased := func(expires, beat time.Time) *types.Issue {
+		return &types.Issue{
+			ID: "test-lease", Title: "t", IssueType: types.TypeTask,
+			Status:         types.StatusInProgress,
+			LeaseExpiresAt: &expires, HeartbeatAt: &beat,
+		}
+	}
+	now := time.Now()
+
+	t.Run("live lease says when it expires", func(t *testing.T) {
+		out := formatIssueMetadata(leased(now.Add(3*time.Minute+30*time.Second), now.Add(-90*time.Second)))
+		if got, want := metadataLine(out, "Lease:"), "Lease: expires in 3 mins (heartbeat 1 min ago)"; got != want {
+			t.Errorf("lease line = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("lapsed lease says when it expired", func(t *testing.T) {
+		out := formatIssueMetadata(leased(now.Add(-3*time.Hour-time.Minute), now.Add(-3*time.Hour-6*time.Minute)))
+		if got, want := metadataLine(out, "Lease:"), "Lease: expired 3 hours ago (heartbeat 3 hours ago)"; got != want {
+			t.Errorf("lease line = %q, want %q", got, want)
+		}
+	})
+}
+
 func TestFormatIssueCustomMetadata_Nil(t *testing.T) {
 	t.Parallel()
 	issue := &types.Issue{}

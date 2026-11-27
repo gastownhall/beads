@@ -173,7 +173,7 @@ func warnIfMetricsEnvOverride(cmd *cobra.Command, wantDisabled bool) {
 
 func runMetricsStatus(cmd *cobra.Command) {
 	out := cmd.OutOrStdout()
-	effective := resolveMetricsEnabled()
+	effective := metricsEnabledAfterBootstrap()
 	state := "OFF"
 	if effective {
 		state = "ON"
@@ -194,10 +194,10 @@ func runMetricsStatus(cmd *cobra.Command) {
 
 	// Surface the env override if it disagrees with the saved config.
 	if name, v, ok := metricsEnvOverride(); ok {
-		if envTruthyValue(v) == metricsEnabledByConfig() {
+		if saved := savedMetricsConsent(); envTruthyValue(v) == saved {
 			fmt.Fprintf(cmd.ErrOrStderr(),
 				"\nNote: %s=%s is overriding your saved config (which is %q) for this shell.\n",
-				name, v, map[bool]string{true: "on", false: "off"}[metricsEnabledByConfig()])
+				name, v, map[bool]string{true: "on", false: "off"}[saved])
 		}
 	}
 }
@@ -383,7 +383,7 @@ func firstRunNoticeSuppressedByContext(cmd *cobra.Command) bool {
 // quiet / stealth contexts (see firstRunNoticeSuppressedByContext) so it can
 // never corrupt machine-readable output.
 func maybeShowMetricsFirstRunNotice(cmd *cobra.Command) {
-	if !resolveMetricsEnabled() {
+	if !metricsEnabledAfterBootstrap() {
 		return
 	}
 	// Resolve the "already shown" marker from user-global config only. Reading it

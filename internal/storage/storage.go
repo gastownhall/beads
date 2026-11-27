@@ -32,6 +32,7 @@ var (
 	ErrNotInitialized    = issueops.ErrNotInitialized
 	ErrPrefixMismatch    = issueops.ErrPrefixMismatch
 	ErrCloseBlocked      = issueops.ErrCloseBlocked
+	ErrClaimBlocked      = issueops.ErrClaimBlocked
 	ErrCloseOpenChildren = issueops.ErrCloseOpenChildren
 	ErrAlreadyExists     = issueops.ErrAlreadyExists
 	// ErrIdempotencyExpired matches a create refused because a retaining
@@ -418,6 +419,16 @@ type Storage interface {
 	MoleculeStepper() (issueops.MoleculeStepper, error)
 
 	// Issue CRUD
+
+	// CreateIssue and CreateIssues write back to the caller's structs the IDs
+	// they fill: a minted issue.ID for an empty one and a fresh comment's ID.
+	// CreateIssues also backfills each dependency's empty IssueID from its
+	// owning issue; CreateIssue does not persist Dependencies. On success the
+	// fields hold the created rows' IDs. When the create fails and its
+	// transaction rolled back, every one of those fields the caller left
+	// empty is empty again, so retrying the same struct mints afresh; an
+	// error wrapping ErrCommitIndeterminate keeps them, since the rows may
+	// exist. Caller-supplied IDs are never changed.
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
@@ -883,11 +894,13 @@ type BlockedRecomputer interface {
 	RecomputeAllBlocked(ctx context.Context) (int, error)
 }
 
-// StateHasher returns a hash covering committed history plus the working set.
-// Unlike GetCurrentCommit (HEAD only), the hash moves on uncommitted writes.
-// Change detection against a SQL server must use this when available: server
-// mode runs with dolt auto-commit off, so writes sit in the working set and
-// HEAD does not advance.
+// StateHasher returns a hash of the working root (DOLT_HASHOF_DB()). Unlike
+// GetCurrentCommit (HEAD only), the hash moves on uncommitted writes, and it
+// stays put across reads and across a commit that leaves the working data as
+// it was. Change detection must use this when available: server mode runs
+// with dolt auto-commit off, and embedded batch or off auto-commit leaves
+// writes in the working set too, so HEAD does not advance. The server store
+// falls back to HEAD on servers that predate DOLT_HASHOF_DB.
 // Callers should type-assert to this interface and fall back to
 // GetCurrentCommit when the store does not implement it.
 type StateHasher interface {

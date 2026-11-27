@@ -170,7 +170,8 @@ var beadDMLExemptions = map[string]string{
 	// (1) Child counters are derived CLI acceleration state. In contrast,
 	// is_blocked is part of the exported bead snapshot and its recompute helpers
 	// structurally journal every value that actually changes.
-	"ReconcileChildCounters": "recomputes denormalized child-counter state, not a bead mutation",
+	"ReconcileChildCounters":   "recomputes denormalized child-counter state, not a bead mutation",
+	"ReserveChildSuffixesInTx": "raises the child_counters high-water mark (GH#4750): counter state, not a bead mutation; the calling create/rename/delete journals the mutation",
 
 	// (2) aux tables matched via templated %s, not work-bead state.
 	"RecordEventInTable":            "writes the events audit table (templated %s), not work-bead state",
@@ -419,6 +420,7 @@ var derivedActorSystemCallers = map[string]string{
 	"embeddeddolt/store.go:DeleteIssue":       "storage.DeleteIssue carries no actor (see above)",
 	"embeddeddolt/store.go:DeleteIssues":      "storage.DeleteIssues carries no actor (see above)",
 	"embeddeddolt/transaction.go:DeleteIssue": "storage.Transaction.DeleteIssue carries no actor (see above)",
+	"uowstore/tx.go:DeleteIssue":              "storage.DeleteIssue and storage.Transaction.DeleteIssue carry no actor (see above)",
 }
 
 // TestNoRequestActorReachesTheReadinessFamilyOnlyFromSystemPaths is the census

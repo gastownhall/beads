@@ -327,7 +327,7 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 			!strings.Contains(stderr, "bd migrate schema") {
 			t.Errorf("bd %v refusal does not name the behind schema and its remedy:\n%s", args, stderr)
 		}
-		if strings.Contains(stderr, "column") {
+		if strings.Contains(stderr, "could not be found in any table in scope") || strings.Contains(stderr, "does not have column") {
 			t.Errorf("bd %v reached a query and failed on the missing column instead of refusing at open:\n%s", args, stderr)
 		}
 	}

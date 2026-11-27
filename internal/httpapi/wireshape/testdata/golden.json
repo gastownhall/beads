@@ -5509,6 +5509,12 @@
     },
     {
       "schema": "UpdateIssueRequest",
+      "member": "force_claim_blocked",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
       "member": "force_close_policy",
       "type": "boolean",
       "required": false

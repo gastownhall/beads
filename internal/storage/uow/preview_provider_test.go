@@ -3,6 +3,7 @@ package uow
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -84,8 +85,24 @@ func TestApplyProviderOptions(t *testing.T) {
 	if applyProviderOptions(nil).rotateServerLog {
 		t.Fatal("applyProviderOptions(nil).rotateServerLog = true, want false")
 	}
-	if got := applyProviderOptions([]ProviderOption{WithServerLogRotation()}); got != (providerOptions{rotateServerLog: true}) {
+	if got := applyProviderOptions([]ProviderOption{WithServerLogRotation()}); !reflect.DeepEqual(got, providerOptions{rotateServerLog: true}) {
 		t.Fatalf("applyProviderOptions(WithServerLogRotation()) = %+v, want only rotateServerLog set", got)
+	}
+	// The proxy executable is unset unless the caller names one, so the CLI
+	// keeps spawning itself.
+	if applyProviderOptions(nil).proxyExecutable != nil {
+		t.Fatal("applyProviderOptions(nil).proxyExecutable != nil, want the proxy package default")
+	}
+	resolve := func() (string, error) { return "/opt/bd", nil }
+	got = applyProviderOptions([]ProviderOption{WithProxyExecutable(resolve)})
+	if got.proxyExecutable == nil {
+		t.Fatal("WithProxyExecutable did not set proxyExecutable")
+	}
+	if path, _ := got.proxyExecutable(); path != "/opt/bd" {
+		t.Fatalf("proxyExecutable() = %q, want the resolver passed to WithProxyExecutable", path)
+	}
+	if got.preview || got.readOnly || got.rotateServerLog || got.proxiedServerMode {
+		t.Fatalf("applyProviderOptions(WithProxyExecutable()) = %+v, want only proxyExecutable set", got)
 	}
 }
 

@@ -7,8 +7,7 @@ import (
 )
 
 // createConfigYaml creates the config.yaml template in the specified directory
-// In --no-db mode, the prefix is saved here since there's no database to store it.
-func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
+func createConfigYaml(beadsDir string) error {
 	configYamlPath := filepath.Join(beadsDir, "config.yaml")
 
 	// Skip if already exists
@@ -16,7 +15,7 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 		return nil
 	}
 
-	body := renderInitConfigYAML(prefix, noDbMode)
+	body := renderInitConfigYAML()
 	if err := os.WriteFile(configYamlPath, body, 0600); err != nil {
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
@@ -24,18 +23,8 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 	return nil
 }
 
-func renderInitConfigYAML(prefix string, noDbMode bool) []byte {
-	noDbLine := "# no-db: false"
-	if noDbMode {
-		noDbLine = "no-db: true  # JSONL-only mode, no database"
-	}
-
-	prefixLine := "# issue-prefix: \"\""
-	if noDbMode && prefix != "" {
-		prefixLine = fmt.Sprintf("issue-prefix: %q", prefix)
-	}
-
-	body := fmt.Sprintf(`# Beads Configuration File
+func renderInitConfigYAML() []byte {
+	body := `# Beads Configuration File
 # This file configures default behavior for all bd commands in this repository
 # All settings can also be set via environment variables (BD_* prefix)
 # or overridden with command-line flags
@@ -43,11 +32,7 @@ func renderInitConfigYAML(prefix string, noDbMode bool) []byte {
 # Issue prefix for this repository (used by bd init)
 # If not set, bd init will auto-detect from directory name
 # Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
-%s
-
-# Use no-db mode: JSONL-only, no Dolt database
-# When true, .beads/issues.jsonl is the only local store
-%s
+# issue-prefix: ""
 
 # Enable JSON output by default
 # json: false
@@ -107,7 +92,7 @@ func renderInitConfigYAML(prefix string, noDbMode bool) []byte {
 # Secret keys (stored in this file but prefer env vars to avoid git exposure):
 # - linear.api_key  → use LINEAR_API_KEY env var instead
 # - github.token    → use GITHUB_TOKEN env var instead
-`, prefixLine, noDbLine)
+`
 	return []byte(body)
 }
 
@@ -119,7 +104,7 @@ Welcome to Beads! This repository uses **Beads** for issue tracking - a modern, 
 
 Beads is issue tracking that lives in your repo, making it perfect for AI coding agents and developers who want their issues close to their code. No web UI required - everything works through the CLI and integrates seamlessly with git.
 
-**Learn more:** [github.com/steveyegge/beads](https://github.com/steveyegge/beads)
+**Learn more:** [github.com/gastownhall/beads](https://github.com/gastownhall/beads)
 
 ## Quick Start
 
@@ -174,7 +159,7 @@ Try Beads in your own projects:
 
 ` + "```bash" + `
 # Install Beads
-curl -sSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
 # Initialize in your repo
 bd init
@@ -185,9 +170,9 @@ bd create "Try out Beads"
 
 ## Learn More
 
-- **Documentation**: [github.com/steveyegge/beads/docs](https://github.com/steveyegge/beads/tree/main/docs)
+- **Documentation**: [beads.gascity.com](https://beads.gascity.com/)
 - **Quick Start Guide**: Run ` + "`bd quickstart`" + `
-- **Examples**: [github.com/steveyegge/beads/examples](https://github.com/steveyegge/beads/tree/main/examples)
+- **Examples**: [github.com/gastownhall/beads/examples](https://github.com/gastownhall/beads/tree/main/examples)
 
 ---
 

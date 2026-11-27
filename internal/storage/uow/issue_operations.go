@@ -373,6 +373,7 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 	return domain.UpdateSpec{
 		Fields:              fields,
 		Claim:               request.Claim,
+		ForceClaimBlocked:   request.ForceClaimBlocked,
 		ExpectedVersion:     request.ExpectedVersion,
 		ExpectedAssignee:    request.ExpectedAssignee,
 		ExpectedStatus:      statusPointer(request.ExpectedStatus),

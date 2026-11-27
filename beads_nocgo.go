@@ -12,8 +12,13 @@ import (
 )
 
 // OpenBestAvailable opens a beads database using the best available backend
-// for the given .beads directory. In non-CGO builds, only Dolt server mode is
-// supported; embedded Dolt returns an error directing the user to server mode.
+// for the given .beads directory. In non-CGO builds, Dolt server mode and
+// proxied-server mode (through the workspace's bd proxy, exactly as in the cgo
+// build) are supported; embedded Dolt returns an error directing the user to
+// server mode. As in the cgo build, a proxied-server workspace takes the
+// server arm only when the environment forces server mode
+// (BEADS_DOLT_SERVER_MODE or BEADS_DOLT_SHARED_SERVER) and names the port
+// (BEADS_DOLT_SERVER_PORT).
 //
 // beadsDir is the path to the .beads directory.
 //
@@ -72,6 +77,16 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	}
 	if opts.UserAgent != "" {
 		return nil, fmt.Errorf("beads: OpenOptions.UserAgent is not supported for backend %q (Dolt has no per-open transport seam): %w", cfg.GetBackend(), backends.ErrUserAgentWithoutOpenWith)
+	}
+
+	if routesThroughProxy(cfg) {
+		// Before the server arm, which BEADS_DOLT_SERVER_MODE or
+		// BEADS_DOLT_SHARED_SERVER would otherwise select ahead of dolt_mode
+		// (unless BEADS_DOLT_SERVER_PORT names the port to dial, which
+		// keeps that arm: see routesThroughProxy), and before the
+		// embedded-Dolt-requires-CGO error: a proxied workspace is served
+		// through its bd proxy, as on the bd CLI (GH#8323).
+		return openProxiedServer(ctx, beadsDir)
 	}
 
 	if cfg.IsDoltServerMode() {

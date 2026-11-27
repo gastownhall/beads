@@ -997,6 +997,13 @@ func timePtrEqualSecond(a, b *time.Time) bool {
 	return a.UTC().Truncate(time.Second).Equal(b.UTC().Truncate(time.Second))
 }
 
+// importAuxAlreadyStored reports whether every incoming label, comment and
+// dependency of a tie row is already stored on the local issue, so rewriting
+// the row would add none of them (see proveUnchangedImportRows). A comment
+// counts as stored when its content key (author, created_at as stored, text)
+// is, or failing that when its id is already stored on this same issue:
+// PersistComments keeps that stored row whatever the incoming content says. An
+// id stored only on another issue proves nothing (the write reports it).
 func importAuxAlreadyStored(incoming, local *types.Issue, storedComments []*types.Comment, storedDeps []*types.Dependency) bool {
 	stored := make(map[string]struct{}, len(local.Labels))
 	for _, l := range local.Labels {
@@ -1011,11 +1018,21 @@ func importAuxAlreadyStored(incoming, local *types.Issue, storedComments []*type
 		return c.Author + "\x00" + issueops.FormatAuxTime(c.CreatedAt) + "\x00" + c.Text
 	}
 	stored = make(map[string]struct{}, len(storedComments))
+	storedIDs := make(map[string]struct{}, len(storedComments))
 	for _, c := range storedComments {
 		stored[commentKey(c)] = struct{}{}
+		if c.ID != "" {
+			storedIDs[c.ID] = struct{}{}
+		}
 	}
 	for _, c := range incoming.Comments {
-		if c == nil || c.CreatedAt.IsZero() {
+		if c == nil {
+			return false
+		}
+		if _, ok := storedIDs[c.ID]; ok && c.ID != "" {
+			continue // a stored id on this issue keeps its stored row
+		}
+		if c.CreatedAt.IsZero() {
 			return false // would be stamped live on write: not provably a no-op
 		}
 		if _, ok := stored[commentKey(c)]; !ok {

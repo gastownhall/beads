@@ -144,11 +144,41 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, fo
 
 	if err := s.Commit(ctx, "bd backup restore"); err != nil {
 		if !strings.Contains(err.Error(), "nothing to commit") {
-			return fmt.Errorf("failed to commit restore: %w", err)
+			return restoreCommitError(err)
 		}
 	}
 
 	return nil
+}
+
+// restoreUnknownFieldsDiagnostic is the Dolt engine's text for a stored
+// table it cannot decode because it holds fields this engine does not know.
+const restoreUnknownFieldsDiagnostic = "table has unknown fields"
+
+// restoreUnknownFieldsHint follows a post-restore commit failure carrying
+// restoreUnknownFieldsDiagnostic (GH#7569). The restore step already ran, so
+// it says what is known and leaves the commit outcome and the readability of
+// the restored data open: the failure may be indeterminate
+// (storage.ErrCommitIndeterminate), and the engine text alone does not say
+// which field or which writer version is involved.
+const restoreUnknownFieldsHint = "The restore step completed before this commit, so this workspace's database may already have been replaced\n" +
+	"by the backup contents; whether the commit was recorded, and whether the restored data can be read, is unknown.\n" +
+	"Dolt reported table fields the restoring engine does not know, which can mean the backup was written in a newer\n" +
+	"storage format than that engine reads.\n" +
+	"Embedded mode: upgrade bd to a build whose embedded Dolt engine can read this backup.\n" +
+	"Server mode: restore through a Dolt server whose version can read this backup. A server bd starts runs the dolt\n" +
+	"that was on PATH when it started: upgrade dolt, then restart the server ('bd dolt stop', then 'bd dolt start').\n" +
+	"Keep the backup unchanged and verify the recovery by restoring it into a separate, freshly initialized workspace\n" +
+	"(see docs/recovery/database-corruption.md)"
+
+// restoreCommitError wraps a failed post-restore commit, adding restore
+// guidance when the engine reported unknown table fields. The original error,
+// including any storage.ErrCommitIndeterminate, stays in the chain.
+func restoreCommitError(err error) error {
+	if strings.Contains(err.Error(), restoreUnknownFieldsDiagnostic) {
+		return fmt.Errorf("failed to commit restore: %w\n%s", err, restoreUnknownFieldsHint)
+	}
+	return fmt.Errorf("failed to commit restore: %w", err)
 }
 
 // registerBackupRemote registers dir as the default backup remote and saves
