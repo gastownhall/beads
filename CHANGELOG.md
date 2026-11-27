@@ -172,6 +172,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Issues record who closed them: `closed_by` (GH#8617).** A close now stores
+  its actor (`--actor`, `BEADS_ACTOR`, …) in a new `closed_by` column on
+  `issues` and `wisps` (migration 0075, with ignored/0032 for the wisps
+  plane), and `bd show --json`, `bd list --json`, `bd export` and the
+  `bd serve` issue responses carry it as `closed_by`. `bd show` prints a
+  `Closed by:` line. Every close route stamps it: `bd close` (one stamp per
+  id), `bd update -s closed`, `bd batch` close, and a `bd create -s closed`;
+  a reopen (`bd reopen`, `bd update -s open`) clears it, and the next close
+  records its own actor. Import keeps the value it reads and never stamps the
+  importer, and a merge settles it with the rest of the close group from the
+  same winner. Existing rows read `closed_by` as empty: there is no backfill
+  from events. It is response-only on the HTTP API and not caller-writable,
+  and it stays out of the content hash. The Dolt commit author
+  (`bd history`'s "Author: beads") is unchanged (#7628).
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,

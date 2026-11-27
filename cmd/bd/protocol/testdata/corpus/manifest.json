@@ -5,11 +5,11 @@
   "blobs": {
     "envelope/close": {
       "cmd": "bd close --force --json --reason \"corpus close reason exceeding twenty chars\" corpus-closed",
-      "sha256": "9bf64690973160e6658017138882a767bc4d2a790d35a2cf6fb02019e53d5825"
+      "sha256": "e891ce8e95c4b21b040d5c5285f730100e284503d20224997a5506fdfe3cc853"
     },
     "envelope/close_claim_next": {
       "cmd": "bd close corpus-closer --claim-next --json",
-      "sha256": "89b9af2cad3d434e933de92e3a5dc5531ac3f3755db2ddeda6a656467b96d320"
+      "sha256": "8746671aeb7efc56ce367af522bc279b44517fbff9cd0933d5a2f41e50285ef4"
     },
     "envelope/close_claim_next_events": {
       "cmd": "bd history corpus-closer --events --json",
@@ -145,7 +145,7 @@
     },
     "envelope/show_refs": {
       "cmd": "bd show corpus-canonical --refs --json",
-      "sha256": "1991173107a007e128fbd6a239dbd9ec5be6b1d67a98e2868a9ed01abfef32bd"
+      "sha256": "76c9255f7acfa6fe9d5a6dacbc7ca2c815487def3fa9f53be4022207b1189c60"
     },
     "envelope/supersede": {
       "cmd": "bd supersede corpus-superseded --with corpus-canonical --json",
@@ -197,11 +197,11 @@
     },
     "flat/close": {
       "cmd": "bd close --force --json --reason \"corpus close reason exceeding twenty chars\" corpus-closed",
-      "sha256": "2d5f3dd1dcba8ee0190b22c957859cf5b605789248fadc9fd5543f20ef8b9b31"
+      "sha256": "e305b214acf78167aa60dbac5ad4ad9e23a5f5d1f0942ecc0fd207c3aa8b3888"
     },
     "flat/close_claim_next": {
       "cmd": "bd close corpus-closer --claim-next --json",
-      "sha256": "d569bdc95456a3060204f4c477d9e3d67d42463854319ac700cb09dc2b54f0f0"
+      "sha256": "b954c0b2185de21c2b5d1b534b1560496e2a87a31acbefa2cd3afebbc5bf3b5f"
     },
     "flat/close_claim_next_events": {
       "cmd": "bd history corpus-closer --events --json",
@@ -337,7 +337,7 @@
     },
     "flat/show_refs": {
       "cmd": "bd show corpus-canonical --refs --json",
-      "sha256": "b93096272ff260b4c096d873fc5efe53b078da528dd2ad0bc62734e3f35b6b6d"
+      "sha256": "a81702424a3878d67f7f63ca8c2d6409d9b4e4daea84b3da78c58d969fcddb4d"
     },
     "flat/supersede": {
       "cmd": "bd supersede corpus-superseded --with corpus-canonical --json",

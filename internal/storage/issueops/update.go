@@ -44,10 +44,14 @@ func IsAllowedUpdateField(key string) bool {
 // default is suppressed by its own explicit key, so a caller that names the
 // column still wins — the CLI's own closed_by_session pass-through included.
 //
-// The reopen branch clears all three, mirroring ReopenIssueInTx. Both branches
+// closed_by is the closing write's actor (GH#8617), stamped the way
+// closeIssueInTx stamps it, so `bd update -s closed --actor a` records a as
+// the closer. It is not an allowlisted update key, so nothing suppresses it.
+//
+// The reopen branch clears all four, mirroring ReopenIssueInTx. Both branches
 // stay keyed on the LITERAL closed status; category-aware reopen keying is
 // ga-ktn9pe.4.15.
-func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}) ([]string, []interface{}) {
+func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, actor string, setClauses []string, args []interface{}) ([]string, []interface{}) {
 	statusVal, hasStatus := updates["status"]
 	if !hasStatus {
 		return setClauses, args
@@ -79,10 +83,12 @@ func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setCl
 		appendDefault("closed_at", time.Now().UTC())
 		appendDefault("close_reason", "")
 		appendDefault("closed_by_session", "")
+		appendDefault("closed_by", actor)
 	} else if oldIssue.Status == types.StatusClosed {
 		appendDefault("closed_at", nil)
 		appendDefault("close_reason", "")
 		appendDefault("closed_by_session", "")
+		appendDefault("closed_by", "")
 	}
 
 	return setClauses, args
@@ -479,7 +485,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 
 	// Auto-manage closed_at (set on close, clear on reopen).
-	setClauses, args = ManageClosedAt(oldIssue, updates, setClauses, args)
+	setClauses, args = ManageClosedAt(oldIssue, updates, actor, setClauses, args)
 
 	// Auto-manage started_at (set on transition to in_progress). (GH#2796)
 	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)

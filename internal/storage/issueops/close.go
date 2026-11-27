@@ -353,9 +353,9 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 	// lease.go). The lease row is deleted below: a closed issue holds no lease.
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?, closed_by_session = ?,
-			row_lock = ?
+			closed_by = ?, row_lock = ?
 		WHERE id = ? AND status != ?
-	`, issueTable), types.StatusClosed, now, now, reason, session, freshRowLock(), id, types.StatusClosed)
+	`, issueTable), types.StatusClosed, now, now, reason, session, actor, freshRowLock(), id, types.StatusClosed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to close issue: %w", err)
 	}

@@ -281,6 +281,16 @@ func TestServedLifecycleCloseAndReopenKeepTheClaimHolder(t *testing.T) {
 	conformance.RunLifecycleCloseAndReopenKeepTheClaimHolder(t, t.Context(), newServedCloseReopenFixture(t, "hlch"))
 }
 
+// TestServedLifecycleCloseStampsTheWritingActorIntoClosedBy is the served leg of
+// GH#8617: the closer reaches the caller through the HTTP response body's
+// closed_by member, on the CloseResult snapshot and on every later read, and the
+// stored cell survives the wire in both directions. A port or schema that
+// dropped the member would answer snapshots with no closer at all, and only
+// this surface can say so.
+func TestServedLifecycleCloseStampsTheWritingActorIntoClosedBy(t *testing.T) {
+	conformance.RunLifecycleCloseStampsTheWritingActorIntoClosedBy(t, t.Context(), newServedCloseReopenFixture(t, "hlcb2"))
+}
+
 // The FOUR BLOCKED-STATE cases, which are the close/reopen family's other
 // half: every one of them asserts the persisted `is_blocked` projection through
 // the shared blocked-state probe, and no read on any role hydrates that column

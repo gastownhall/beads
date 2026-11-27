@@ -917,7 +917,7 @@ func TestBatchCreateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		if len(refused) == 0 {
 			t.Fatal("no member is wire-refused; the partition tables have swallowed the population this gate exists for")
 		}
-		for _, name := range []string{"ID", "Status", "Ephemeral", "Metadata", "Pinned"} {
+		for _, name := range []string{"ID", "Status", "Ephemeral", "Metadata", "Pinned", "ClosedBy"} {
 			if !slices.Contains(refused, name) {
 				t.Errorf("Issue.%s is not in the refused population; a create that dropped it is data loss", name)
 			}

@@ -29,6 +29,12 @@ import (
 // from ignored/0019 while the rows sat in its own history. Ignored migration
 // 0031's repair restores them from the first parent of the drop commit. Like
 // the rest of the events-flip tests they need BEADS_TEST_EMBEDDED_DOLT=1.
+//
+// A test puts a database back in the adopting clone's state by deleting 0031
+// and every later row from ignored_schema_migrations. The ignored cursor is
+// MAX(version), so a later row left behind (ignored/0032 on) would hold it
+// past 31 and 0031 would never run again. The later ignored migrations are
+// guarded, so replaying them changes nothing.
 
 const preflipDatabase = "testdb"
 
@@ -303,7 +309,7 @@ UPDATE events SET id = 'kept-custom-id' WHERE id = 'legacy-4';
 INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id) VALUES
   ('pre-2', 'closed', 'dave', NULL, NULL, NULL, '2026-08-01 08:00:00', 'evt-post-1');
 `)
-	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version >= 31")
 	before := liveEvents(t, ctx, conn)
 	if n := len(before); n != 4 {
 		t.Fatalf("setup left %d distinct contents, want 4: %v", n, before)
@@ -421,7 +427,7 @@ INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
 			if addDrop {
 				mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('--allow-empty', '-m', ?)", eventsFlipDropMessage)
 			}
-			mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+			mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version >= 31")
 			before := liveEvents(t, ctx, conn)
 
 			var notice bytes.Buffer
@@ -459,7 +465,7 @@ func TestEmbeddedIgnoredMigration0031RetryAfterPartialRestore(t *testing.T) {
 	}
 	// The adopter's state: events present and empty, 0031 not yet recorded.
 	execFrozenGuard(t, ctx, conn, "DELETE FROM events")
-	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version >= 31")
 
 	// One issue per page and one row per INSERT, failing after the second.
 	restoreSizes := schema.SetPreflipEventsBatchSizesForTest(1, 1)
@@ -521,7 +527,7 @@ func TestEmbeddedIgnoredMigration0031LeavesHistoryAndWorkingSetAlone(t *testing.
 		// The adopter's state, plus an operator's uncommitted edit.
 		execFrozenGuard(t, ctx, conn, `
 DELETE FROM events;
-DELETE FROM ignored_schema_migrations WHERE version = 31;
+DELETE FROM ignored_schema_migrations WHERE version >= 31;
 UPDATE issues SET title = 'edited, not committed' WHERE id = 'pre-1';
 `)
 		head = scalarString(t, ctx, conn, "SELECT HASHOF('HEAD')")
@@ -623,7 +629,7 @@ WHERE l.message = ? AND l.commit_hash <> ? AND a.parent_index = 0`,
 		t.Fatalf("find 0062's drop commit parent: %v", err)
 	}
 	execFrozenGuard(t, ctx, conn, "DELETE FROM events")
-	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version >= 31")
 
 	v := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
 	null := sql.NullString{}
@@ -740,7 +746,7 @@ INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
 		t.Fatalf("MigrateUp (migrator): %v", err)
 	}
 	execFrozenGuard(t, ctx, conn, "DELETE FROM events")
-	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version >= 31")
 
 	var notice bytes.Buffer
 	defer schema.SetPreflipEventsNoticeOutForTest(&notice)()
@@ -785,7 +791,7 @@ func adoptPreflipLineage(t *testing.T, ctx context.Context, conn *sql.Conn) {
 		t.Fatalf("MigrateUp (migrator): %v", err)
 	}
 	execFrozenGuard(t, ctx, conn, "DELETE FROM events")
-	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version >= 31")
 }
 
 // TestEmbeddedIgnoredMigration0031SkipsADerivedIDAnotherIssueHolds pins the
@@ -1153,7 +1159,7 @@ INSERT INTO events (issue_id, event_type, actor, created_at, id) VALUES
 	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log WHERE message = ?", eventsFlipDropMessage); got != 2 {
 		t.Fatalf("fixture holds %d drop commits, want 2", got)
 	}
-	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 31")
+	mustExecOn(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version >= 31")
 
 	var notice bytes.Buffer
 	defer schema.SetPreflipEventsNoticeOutForTest(&notice)()

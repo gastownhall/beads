@@ -126,14 +126,16 @@ func TestPreflipEventsRestoreOnSQLServer(t *testing.T) {
 
 	// The migrator's own pass runs 0062 (and 0031, which finds nothing
 	// missing). Then the issue is deleted, and the live rows go, which leaves
-	// the adopting clone's state with the 0031 marker pending.
+	// the adopting clone's state with the 0031 marker pending. The ignored
+	// cursor is MAX(version), so every row above 31 goes too (a later guarded
+	// migration such as ignored/0032 replays as a no-op).
 	if _, err := schema.MigrateUpWithLock(ctx, conn, dbName); err != nil {
 		t.Fatalf("MigrateUpWithLock (migrator): %v", err)
 	}
 	exec("DELETE FROM issues WHERE id = 'srv-gone'")
 	exec("CALL DOLT_COMMIT('-Am', 'test: delete srv-gone after the upgrade')")
 	exec("DELETE FROM events")
-	exec("DELETE FROM ignored_schema_migrations WHERE version = 31")
+	exec("DELETE FROM ignored_schema_migrations WHERE version >= 31")
 
 	head := scalar("SELECT HASHOF('HEAD')")
 	statusBefore := status()

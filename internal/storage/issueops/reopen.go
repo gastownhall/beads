@@ -62,7 +62,7 @@ func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, ret
 	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s
-		SET status = ?, closed_at = NULL, close_reason = '', closed_by_session = '', defer_until = NULL,
+		SET status = ?, closed_at = NULL, close_reason = '', closed_by_session = '', closed_by = '', defer_until = NULL,
 			updated_at = ?, row_lock = ?
 		WHERE id = ? AND status = ?
 	`, issueTable), types.StatusOpen, now, freshRowLock(), id, status)

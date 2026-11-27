@@ -208,6 +208,17 @@ var schemaAdditions = []schemaAddition{{
 	Migrations: map[string][]string{
 		"ignored_schema_migrations": {"31"},
 	},
+}, {
+	By: "the closed_by column (GH#8617)",
+	// Migration 0075 and ignored/0032 add closed_by to issues and wisps.
+	// It is not listed as a column: it defaults to '' rather than NULL, and
+	// every close writes the closing actor into it with history off, so the
+	// goldens were re-recorded with it (see "Maintaining the goldens"). Only
+	// the bookkeeping rows are set aside here.
+	Migrations: map[string][]string{
+		"schema_migrations":         {"75"},
+		"ignored_schema_migrations": {"32"},
+	},
 }}
 
 // runWindow widens the span of the run on each side to bound the wall-clock

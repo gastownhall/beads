@@ -204,10 +204,10 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 // TestServerModeReadRefusesASchemaItsReadsCannotQuery is the other half of the
 // upgrade window above. There the database was behind by its cursor alone and
 // `bd list` had to keep working. Here it is behind for real: the database a
-// previous release migrated has no arrival_seq column, which this binary's
-// issue reads select. A read-only open never migrates, so without a check at
-// open `bd list` failed on the unknown column. It must refuse at open instead,
-// naming the remedy, and that remedy must converge.
+// previous release migrated has no arrival_seq or closed_by column, both of
+// which this binary's issue reads select. A read-only open never migrates, so
+// without a check at open `bd list` failed on the unknown column. It must
+// refuse at open instead, naming the remedy, and that remedy must converge.
 func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 	if testDoltServerPort == 0 {
 		t.Skip("Dolt test server not available, skipping")
@@ -269,15 +269,17 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 	}
 	t.Cleanup(func() { admin.Close() })
 
-	// The v72 shape a previous release leaves: 0073 and 0074 never ran, so
-	// neither plane has the column, neither id tombstone table exists and the
-	// cursor stops at 72. Committed, as that release's own migration pass
-	// committed it.
+	// The v72 shape a previous release leaves: 0073, 0074 and 0075 never ran,
+	// so neither plane has arrival_seq or closed_by, neither id tombstone
+	// table exists and the cursor stops at 72. Committed, as that release's
+	// own migration pass committed it.
 	for _, stmt := range []string{
 		"ALTER TABLE issues DROP COLUMN arrival_seq",
 		"ALTER TABLE wisps DROP COLUMN arrival_seq",
 		"DROP TABLE id_tombstones",
 		"DROP TABLE wisp_id_tombstones",
+		"ALTER TABLE issues DROP COLUMN closed_by",
+		"ALTER TABLE wisps DROP COLUMN closed_by",
 		"DELETE FROM schema_migrations WHERE version >= 73",
 		"CALL DOLT_COMMIT('-Am', 'test: the schema a v72 release leaves')",
 	} {
@@ -285,8 +287,8 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 			t.Fatalf("%s: %v", stmt, err)
 		}
 	}
-	if schema.LatestVersion() != 74 {
-		t.Fatalf("this fixture rebuilds the v72 shape for migrations 0073 (arrival_seq, which this binary's reads select) and 0074 (the id tombstone tables); LatestVersion() = %d, retarget it", schema.LatestVersion())
+	if schema.LatestVersion() != 75 {
+		t.Fatalf("this fixture rebuilds the v72 shape for migrations 0073 and 0075 (arrival_seq and closed_by, which this binary's reads select) and 0074 (the id tombstone tables); LatestVersion() = %d, retarget it", schema.LatestVersion())
 	}
 
 	bd := buildBDForInitTests(t)
@@ -323,7 +325,7 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("bd %v succeeded on a schema its reads cannot query\nstdout:\n%s\nstderr:\n%s", args, stdout, stderr)
 		}
-		if !strings.Contains(stderr, "schema version mismatch: database is at v72, binary expects v74") ||
+		if !strings.Contains(stderr, "schema version mismatch: database is at v72, binary expects v75") ||
 			!strings.Contains(stderr, "bd migrate schema") {
 			t.Errorf("bd %v refusal does not name the behind schema and its remedy:\n%s", args, stderr)
 		}

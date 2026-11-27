@@ -53,6 +53,11 @@ type Issue struct {
 	ClosedAt        *time.Time `json:"closed_at,omitempty"`
 	CloseReason     string     `json:"close_reason,omitempty"`      // Reason provided when closing
 	ClosedBySession string     `json:"closed_by_session,omitempty"` // Claude Code session that closed this issue
+	// ClosedBy is the actor whose write moved the issue into closed (GH#8617),
+	// the close-side twin of CreatedBy. Storage stamps it from the closing
+	// write's actor and clears it on reopen; it is not caller-writable through
+	// updates, and like the rest of the close group it is not content-hashed.
+	ClosedBy string `json:"closed_by,omitempty"`
 
 	// ===== Leasing (claim TTL + heartbeat; migrations 0054/0055) =====
 	// Hydrated from the ephemeral, node-local leases table (bd-lrgn1), not
