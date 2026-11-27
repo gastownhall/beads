@@ -1068,6 +1068,7 @@ func TestFindBeadsDir_WorktreeStoreWithMetadataPreservesLocal(t *testing.T) {
 		{name: "inherited metadata", file: "metadata.json", body: mainEmbeddedMetadata, wantDBIn: true},
 		{name: "metadata without database name", file: "metadata.json", body: `{"backend":"dolt","dolt_mode":"embedded"}`, wantDBIn: true},
 		{name: "legacy config.json", file: "config.json", body: `{"backend":"dolt","dolt_mode":"embedded"}`, wantDBIn: true},
+		{name: "legacy config.json setting no field", file: "config.json", body: `{}`, wantDBIn: true},
 		{name: "malformed metadata", file: "metadata.json", body: `{not json`},
 	}
 	for _, tc := range cases {
