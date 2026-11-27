@@ -1184,7 +1184,14 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return 0, fmt.Errorf("reading pre-migration dirty table diffs: %w", err)
 	}
 
-	applied, mainColumnAdded, err := mainSource.migrate(ctx, db, 0)
+	// The pass's applied count must also carry the stranded step the finish
+	// committed above (applied++ there): mainSource.migrate reports only the
+	// steps it ran, and an uninterrupted pass from the same seed counts the
+	// stranded step among the steps it applies — the finished pass must too.
+	// Adding into applied (rather than overwriting it) keeps that increment
+	// visible to every return below.
+	appliedMain, mainColumnAdded, err := mainSource.migrate(ctx, db, 0)
+	applied += appliedMain
 	if err != nil {
 		return applied, err
 	}

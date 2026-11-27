@@ -3,10 +3,12 @@
 package embeddeddolt_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -119,6 +121,29 @@ func strandSeedMainSchemaAt(t *testing.T, ctx context.Context, at int) string {
 		t.Fatalf("DOLT_COMMIT baseline: %v", err)
 	}
 	return dataDir
+}
+
+// captureLog redirects the standard logger into a buffer for the duration of
+// fn and returns what fn wrote.
+func captureLog(fn func()) string {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+	fn()
+	return buf.String()
+}
+
+// finishingLogLines returns the stranded-finish lines among captured log
+// output.
+func finishingLogLines(logText string) []string {
+	var lines []string
+	for _, line := range strings.Split(logText, "\n") {
+		if strings.Contains(line, "finishing stranded migration") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 // schemaApplyCommits returns the commit hashes of every
@@ -333,12 +358,13 @@ func TestEmbeddedMigrateFinishesStrandedOwnStep(t *testing.T) {
 			dataDirA := strandSeedMainSchemaAt(t, ctx, row.version-1)
 			strandMainAt(t, ctx, dataDirA, row.version)
 
+			var appliedA int
 			var errA error
-			func() {
+			logText := captureLog(func() {
 				connA, closeA := openPinnedConn(t, ctx, dataDirA)
 				defer closeA()
-				_, errA = schema.MigrateUp(ctx, connA)
-			}()
+				appliedA, errA = schema.MigrateUp(ctx, connA)
+			})
 			if errA != nil {
 				t.Fatalf("retry MigrateUp after strand at %d: %v", row.version, errA)
 			}
@@ -360,6 +386,18 @@ func TestEmbeddedMigrateFinishesStrandedOwnStep(t *testing.T) {
 				t.Fatalf("apply commit for step %d changed tables = %v, want %v", row.version, got, want)
 			}
 
+			// AC-7: exactly one standard-logger line names the step and the
+			// tables it staged (the cursor table included).
+			lines := finishingLogLines(logText)
+			if len(lines) != 1 {
+				t.Fatalf("got %d finishing log lines, want exactly 1: %q", len(lines), logText)
+			}
+			for _, fragment := range append([]string{row.versionPfx, "schema_migrations"}, row.wantCommitTables...) {
+				if !strings.Contains(lines[0], fragment) {
+					t.Fatalf("finishing log line %q does not name %q", lines[0], fragment)
+				}
+			}
+
 			if row.twinCompare {
 				// AC-1: the finish's commit must match the uninterrupted
 				// pass's commit for the same step, table for table — and
@@ -368,9 +406,12 @@ func TestEmbeddedMigrateFinishesStrandedOwnStep(t *testing.T) {
 				dataDirB := strandSeedMainSchemaAt(t, ctx, row.version-1)
 				connB, closeB := openPinnedConn(t, ctx, dataDirB)
 				defer closeB()
-				_, errB := schema.MigrateUp(ctx, connB)
+				appliedB, errB := schema.MigrateUp(ctx, connB)
 				if errB != nil {
 					t.Fatalf("uninterrupted MigrateUp from seed %d: %v", row.version-1, errB)
+				}
+				if appliedA != appliedB {
+					t.Fatalf("applied after finishing the strand = %d, uninterrupted pass applied %d: the finished step must count as applied", appliedA, appliedB)
 				}
 				hashB := oneApplyCommit(t, ctx, connB, row.versionPfx)
 				wantB := commitChangedTables(t, ctx, connB, hashB)
@@ -624,7 +665,11 @@ func TestEmbeddedMigrateStrandedStepLeavesUnrelatedDirt(t *testing.T) {
 			t.Fatalf("insert user dirt into labels: %v", err)
 		}
 
-		_, err := schema.MigrateUp(ctx, conn)
+		var applied int
+		var err error
+		logText := captureLog(func() {
+			applied, err = schema.MigrateUp(ctx, conn)
+		})
 		var refused *schema.DirtyTablesError
 		if !errors.As(err, &refused) {
 			t.Fatalf("MigrateUp err = %v, want *DirtyTablesError for labels", err)
@@ -632,6 +677,14 @@ func TestEmbeddedMigrateStrandedStepLeavesUnrelatedDirt(t *testing.T) {
 		want := []string{"labels"}
 		if !equalStrings(refused.Tables, want) {
 			t.Fatalf("refused tables = %v, want %v", refused.Tables, want)
+		}
+		// AC-7's error-return clause: the finished stranded step counts even
+		// though the pass then refused.
+		if applied != 1 {
+			t.Fatalf("applied on the refused open = %d, want 1 (the finished stranded step)", applied)
+		}
+		if lines := finishingLogLines(logText); len(lines) != 1 {
+			t.Fatalf("got %d finishing log lines on the refused open, want exactly 1: %q", len(lines), logText)
 		}
 		if v := currentMainVersion(t, ctx, conn); v != 49 {
 			t.Fatalf("HEAD cursor after refusal = %d, want 49", v)
