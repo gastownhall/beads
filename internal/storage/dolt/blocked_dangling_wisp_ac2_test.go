@@ -132,3 +132,80 @@ func TestDanglingWispEdge_MergedValueKeptByTheScopedPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestDanglingWispEdge_MarkOnlyPathKeepsAWaiterOnAnAbsentSpawner is the
+// mark-only path (MarkIsBlockedInTx, which every blocks, conditional-blocks and
+// waits-for edge add runs over its source and the source's subtree) over the
+// waiter of an any-children gate onto a wisp spawner this database does not
+// have. On the minting database the spawner's closed wisp child opens the gate,
+// so the waiter is clear. Here only the spawner's open durable child is
+// visible, and read alone it would close the gate. The waiter is undecided, so
+// no recompute would ever take back a mark made on that partial view: the
+// write must leave it as found, journal no flip for it, and leave the full
+// repair nothing to correct. Each arm reaches the mark-only pass its own way:
+// directly; through a waits-for add on the waiter onto a spawner with no
+// children (no reason); and through a blocks add on the waiter's parent onto
+// a closed issue, which gives the parent no reason, so the pass runs over the
+// parent's subtree.
+func TestDanglingWispEdge_MarkOnlyPathKeepsAWaiterOnAnAbsentSpawner(t *testing.T) {
+	for _, arm := range []struct {
+		name, prefix string
+		write        func(ctx context.Context, t *testing.T, store *DoltStore, prefix string)
+	}{
+		{"MarkIsBlockedInTx", "dmm", func(ctx context.Context, t *testing.T, store *DoltStore, prefix string) {
+			inJournaledTx(ctx, t, store, "MarkIsBlockedInTx", func(tx *sql.Tx) error {
+				return issueops.MarkIsBlockedInTx(ctx, tx, []string{prefix + "-a"}, nil, issueops.NoRequestActor)
+			})
+		}},
+		{"waits-for add on the waiter", "dmw", func(ctx context.Context, t *testing.T, store *DoltStore, prefix string) {
+			createPerm(t, ctx, store, prefix+"-z")
+			addDependencyWithMeta(t, ctx, store, prefix+"-a", prefix+"-z", types.DepWaitsFor, "")
+		}},
+		{"blocks add on the waiter's parent", "dmb", func(ctx context.Context, t *testing.T, store *DoltStore, prefix string) {
+			createPerm(t, ctx, store, prefix+"-y")
+			if err := store.CloseIssue(ctx, prefix+"-y", "done", "tester", ""); err != nil {
+				t.Fatalf("close %s-y: %v", prefix, err)
+			}
+			addDependencyWithMeta(t, ctx, store, prefix+"-e", prefix+"-y", types.DepBlocks, "")
+		}},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+			a, e, s, k, kw := arm.prefix+"-a", arm.prefix+"-e", arm.prefix+"-s", arm.prefix+"-k", arm.prefix+"-kw"
+
+			createPerm(t, ctx, store, e)
+			createPerm(t, ctx, store, a)
+			createWisp(t, ctx, store, s)
+			createPerm(t, ctx, store, k)
+			createWisp(t, ctx, store, kw)
+			addDependencyWithMeta(t, ctx, store, a, e, types.DepParentChild, "")
+			addDependencyWithMeta(t, ctx, store, k, s, types.DepParentChild, "")
+			addDependencyWithMeta(t, ctx, store, kw, s, types.DepParentChild, "")
+			addDependencyWithMeta(t, ctx, store, a, s, types.DepWaitsFor, `{"gate":"any-children"}`)
+			if err := store.CloseIssue(ctx, kw, "done", "tester", ""); err != nil {
+				t.Fatalf("close wisp child: %v", err)
+			}
+			minting := map[string]bool{a: false, e: false, k: false}
+			assertBlockedFlags(ctx, t, store, "minting database, one child closed", minting)
+			assertConvergedAndStable(ctx, t, store)
+
+			loseWisp(ctx, t, store, kw)
+			loseWisp(ctx, t, store, s)
+			assertLeftAsFound(ctx, t, store, "spawner absent", minting, a)
+
+			enableJournalForTest(t, store)
+			clearJournal(t, store)
+			arm.write(ctx, t, store, arm.prefix)
+			assertBlockedFlags(ctx, t, store, "after the write", minting)
+			for _, r := range readJournalRows(t, store) {
+				if r.id == a && r.op == string(issueops.EventUpdate) {
+					t.Errorf("the write journaled an is_blocked flip for held %s", a)
+				}
+			}
+			assertLeftAsFound(ctx, t, store, "after the write", minting, a)
+		})
+	}
+}

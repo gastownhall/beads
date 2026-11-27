@@ -866,15 +866,24 @@ func runMarkBatchedInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids
 			end = len(ids)
 		}
 		placeholders, args := buildSQLInClause(ids[start:end])
-		// The monotonic mark holds nothing out: it never unmarks, so a mark it
-		// makes is one only a later recompute can take back (undecidedRows).
-		explained, _, err := batchExogeneity(ctx, tx, spec, placeholders, args)
+		// The monotonic mark holds nothing out, so it must mark an undecided
+		// row (undecidedRows) only on a reason this database can see: no
+		// recompute clears an open row while it is undecided, so a mark made
+		// on a guess would stick. Legs 3 and 4 already skip undecided parents.
+		// The waits-for leg is gated the way the closing marks gate it
+		// (withPresentSpawnerGate) whenever the chunk holds a dangling edge,
+		// because an absent spawner's visible open child is not a reason. A
+		// chunk with no dangling edge runs the statement unchanged.
+		explained, holders, err := batchExogeneity(ctx, tx, spec, placeholders, args)
 		if err != nil {
 			return changed, fmt.Errorf("mark is_blocked (exogeneity): %w", err)
 		}
 
-		stmt, stmtArgs, err := expandBatchTemplate(
-			markBlockedTemplate(spec, explained, 0), placeholders, args, explained.args())
+		tmpl := markBlockedTemplate(spec, explained, 0)
+		if holders {
+			tmpl = withPresentSpawnerGate(tmpl)
+		}
+		stmt, stmtArgs, err := expandBatchTemplate(tmpl, placeholders, args, explained.args())
 		if err != nil {
 			return changed, fmt.Errorf("mark is_blocked: %w", err)
 		}

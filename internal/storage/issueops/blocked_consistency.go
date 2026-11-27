@@ -460,8 +460,10 @@ const presentSpawnerSQL = `( d.depends_on_wisp_id IS NULL
 // ones. The leg as written would read the gate from the visible children
 // alone, which is a reason for no row whose edge dangles.
 //
-// Only the statements that decide a held row read it (the closing marks and
-// the doctor's counts while a row is held). A decided row holds no such edge
+// Only the statements that can decide a held row read it: the closing marks,
+// the doctor's counts while a row is held, and the mark-only pass an edge add
+// runs over a chunk that holds a dangling edge (runMarkBatchedInTx), which
+// marks held rows and decided rows alike. A decided row holds no such edge
 // (it would be a holder), so the rewrite changes nothing for it, and a
 // database without a dangling edge never runs a rewritten statement: its SQL is
 // byte for byte what it was.
@@ -564,6 +566,16 @@ const (
 //     wispParents; see subtreeExplainedParents), whose inherited flag
 //     depends on whether that parent is blocked from outside its own subtree,
 //     which the absent wisp decides.
+//
+// The set stops there. An undecided row with no reason row of its own, such as
+// the reasonless child of an undecided parent, is never an undecided parent:
+// its flag is inherited, and every database passes it down unchanged. Its
+// children are decided from the flag it holds as found, which is the value the
+// database that has the wisp gave it, and from which that database derives the
+// same value for them. Holding them too would make every scoped write climb
+// from each reasonless blocked parent of its batch to learn whether an
+// undecided parent sits above it, on a database with no dangling edge as well
+// (TestDanglingWispEdge_ReasonlessHeldChildPassesItsFlagDown pins the stop).
 //
 // A recompute never derives such a row's flag from the graph it cannot see.
 // It holds the row out of the mark/unmark fixpoint, so the flag stays as found
@@ -696,6 +708,11 @@ func danglingWispHoldersInTx(ctx context.Context, tx DBTX) (danglingHolders, err
 //     and nothing above is plainly exogenous. Whether its children are dark
 //     is the minting database's answer, so they are undecided rows
 //     (undecidedRows) and keep the flag they have.
+//
+// Both sorts carry a reason row of their own: a blocking reason, or a
+// dependency on a wisp that is not here. A blocked parent with neither is never
+// in the set, so it passes its stored flag down, even while it is an undecided
+// row itself (parentsExplainedBySubtreeSQL, undecidedRows).
 //
 // WHY THE IDS AND NOT THE SQL. A spliced `p.id NOT IN (deriving query)` is
 // evaluated once per leg per statement, and a full repair pass is four

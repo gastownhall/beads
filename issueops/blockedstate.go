@@ -59,9 +59,18 @@ package issueops
 //     spawner; or
 //   - it is the parent-child child of a blocked parent that holds one and has
 //     no reason the database can see placing its blockedness outside its own
-//     subtree, or of a parent below such a parent with nothing plainly
-//     exogenous between them. Such a parent darkens no child by inheritance,
-//     and brightens none either.
+//     subtree, or of a blocked parent with a blocking reason of its own below
+//     such a parent, with nothing plainly exogenous between them. Such a
+//     parent darkens no child by inheritance, and brightens none either.
+//
+// The hold reaches no further down. A parent with no blocking reason of its
+// own is never such a parent, even while it is undecided itself: its flag is
+// inherited, and every database passes it to the parent's children
+// unchanged. So its children are decided from the flag it holds, which while
+// it is undecided is the value the database that has the wisp gave it, and
+// from which that database derives the same value for them. A parent stored
+// at 0 is not blocked, so it holds nothing below it either: its children are
+// decided as under any parent that is not blocked.
 //
 // An undecided row that is closed or pinned is still never blocked. Otherwise
 // it is blocked when the predicate, read over what the database can see after

@@ -232,3 +232,54 @@ func TestDanglingWispEdge_HeldParentDecidesNothingBelowIt(t *testing.T) {
 	assertBothPathsSet(ctx, t, store, "P blocked from outside",
 		map[string]bool{"dhp-c": false}, map[string]bool{"dhp-p": true, "dhp-c": true}, "dhp-p", "dhp-c")
 }
+
+// TestDanglingWispEdge_ReasonlessHeldChildPassesItsFlagDown pins where the hold
+// stops (the review of gastownhall/beads#8639). P blocks on a wisp that is not
+// here, C is P's child and G is C's, and neither child has a reason of its own.
+// C is undecided: P's flag and transparency both hang on the wisp. G is not: C
+// carries no reason row, so on every database C's flag is inherited and passes
+// to G unchanged. G is therefore decided from the flag C holds as found, which
+// is the minting database's value for C, and that database derives the same G
+// from it. Both recomputes keep C as found and set G to C's flag, at 1 and at
+// 0, and the doctor counts G as stale until they do.
+func TestDanglingWispEdge_ReasonlessHeldChildPassesItsFlagDown(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "drg-p")
+	createPerm(t, ctx, store, "drg-c")
+	createPerm(t, ctx, store, "drg-g")
+	createWisp(t, ctx, store, "drg-w")
+	addDependencyWithMeta(t, ctx, store, "drg-p", "drg-w", types.DepBlocks, "")
+	addDependencyWithMeta(t, ctx, store, "drg-c", "drg-p", types.DepParentChild, "")
+	addDependencyWithMeta(t, ctx, store, "drg-g", "drg-c", types.DepParentChild, "")
+	dark := map[string]bool{"drg-p": true, "drg-c": true, "drg-g": true}
+	assertBlockedFlags(ctx, t, store, "minting database, wisp open", dark)
+	assertConvergedAndStable(ctx, t, store)
+
+	loseWisp(ctx, t, store, "drg-w")
+	assertLeftAsFound(ctx, t, store, "wisp absent", dark, "drg-p", "drg-c", "drg-g")
+
+	// G follows the 1 that C holds.
+	plantIsBlocked(ctx, t, store, "drg-g", false)
+	if n := countInconsistencies(ctx, t, store.db); n != 1 {
+		t.Errorf("G at 0 under C at 1: doctor counts %d stale rows, want 1", n)
+	}
+	assertBothPathsSet(ctx, t, store, "G at 0 under C at 1",
+		map[string]bool{"drg-g": false}, dark, "drg-g")
+
+	// C keeps a merged 0 (the minting value when the wisp sits inside P's
+	// subtree), and G follows that too.
+	bright := map[string]bool{"drg-p": true, "drg-c": false, "drg-g": false}
+	plantIsBlocked(ctx, t, store, "drg-c", false)
+	plantIsBlocked(ctx, t, store, "drg-g", false)
+	assertLeftAsFound(ctx, t, store, "C at 0", bright, "drg-p", "drg-c", "drg-g")
+	plantIsBlocked(ctx, t, store, "drg-g", true)
+	if n := countInconsistencies(ctx, t, store.db); n != 1 {
+		t.Errorf("G at 1 under C at 0: doctor counts %d stale rows, want 1", n)
+	}
+	assertBothPathsSet(ctx, t, store, "G at 1 under C at 0",
+		map[string]bool{"drg-g": true}, bright, "drg-g")
+}
