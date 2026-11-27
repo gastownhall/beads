@@ -4,6 +4,8 @@ import (
 	"context"
 	"slices"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // stubPrefixLabelUseCase answers only the label reads labelPrefixRemovals
@@ -212,5 +214,96 @@ func TestOnlySetLabelsTouchesTheCoordinationCell(t *testing.T) {
 	}
 	if want := []string{"insert area:y", "delete keep"}; !slices.Equal(repo.log, want) {
 		t.Errorf("named adds and removes wrote %q, want %q and no touch", repo.log, want)
+	}
+}
+
+// prefixTouchIssueRepo answers only the two issue reads ApplyUpdate makes for
+// a labels-only patch: the wisp probe and the final re-fetch. The embedded
+// interface is nil on purpose: any other call panics.
+type prefixTouchIssueRepo struct {
+	IssueSQLRepository
+	wisp bool
+}
+
+func (r *prefixTouchIssueRepo) Exists(_ context.Context, _ string, opts IssueTableOpts) (bool, error) {
+	return r.wisp && opts.UseWispsTable, nil
+}
+
+func (r *prefixTouchIssueRepo) Get(_ context.Context, id string, _ IssueTableOpts) (*types.Issue, error) {
+	return &types.Issue{ID: id}, nil
+}
+
+// TestApplyUpdatePrefixRemovalTouchesTheCoordinationCell pins ApplyUpdate's
+// half of the coordination rule (GH#5657): a RemoveLabelPrefixes patch with no
+// replacement removes labels out of the set it read, so it touches the cell,
+// in the issue's own tier, once and before its first row write when it leaves
+// a different set, and not at all when it does not. Without the touch two
+// overlapping `bd set-state` calls on the proxied-server route both commit and
+// the issue keeps two values of one dimension. Setting a dimension that holds
+// no value yet removes nothing and still touches: that is the overlap two
+// first-time calls race on.
+func TestApplyUpdatePrefixRemovalTouchesTheCoordinationCell(t *testing.T) {
+	setState := func(value string) UpdateSpec {
+		return UpdateSpec{RemoveLabelPrefixes: []string{"state:"}, AddLabels: []string{"state:" + value}}
+	}
+	for _, tc := range []struct {
+		name string
+		held []string
+		wisp bool
+		spec UpdateSpec
+		want []string
+	}{
+		{
+			name: "replacing the dimension's value touches before the first row write",
+			held: []string{"state:a", "keep"},
+			spec: setState("b"),
+			want: []string{"touch labels", "insert state:b", "delete state:a"},
+		},
+		{
+			name: "setting a dimension that holds no value touches too",
+			held: []string{"keep"},
+			spec: setState("a"),
+			want: []string{"touch labels", "insert state:a"},
+		},
+		{
+			name: "clearing a dimension touches",
+			held: []string{"state:a", "keep"},
+			spec: UpdateSpec{RemoveLabelPrefixes: []string{"state:"}},
+			want: []string{"touch labels", "delete state:a"},
+		},
+		{
+			name: "a wisp touches its own tier",
+			held: []string{"state:a", "keep"},
+			wisp: true,
+			spec: setState("b"),
+			want: []string{"touch wisp_labels", "insert state:b", "delete state:a"},
+		},
+		{
+			name: "re-setting the held value changes nothing and does not touch",
+			held: []string{"state:a", "keep"},
+			spec: setState("a"),
+			want: []string{"insert state:a"},
+		},
+		{
+			name: "clearing a dimension that holds no value does not touch",
+			held: []string{"keep"},
+			spec: UpdateSpec{RemoveLabelPrefixes: []string{"state:"}},
+			want: nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &coordinationLabelRepo{labels: slices.Clone(tc.held)}
+			uc := &issueUseCaseImpl{
+				issueRepo: &prefixTouchIssueRepo{wisp: tc.wisp},
+				labelRepo: repo,
+				labelUC:   NewLabelUseCase(repo),
+			}
+			if _, err := uc.ApplyUpdate(t.Context(), "bd-1", tc.spec, "tester"); err != nil {
+				t.Fatalf("ApplyUpdate: %v", err)
+			}
+			if !slices.Equal(repo.log, tc.want) {
+				t.Errorf("ApplyUpdate wrote %q, want %q", repo.log, tc.want)
+			}
+		})
 	}
 }
