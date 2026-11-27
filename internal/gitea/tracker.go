@@ -101,7 +101,7 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	}
 
 	client := NewClient(token, baseURL, owner, repo)
-	if caPath := strings.TrimSpace(t.getConfig(ctx, "gitea.tls_ca", "GITEA_TLS_CA")); caPath != "" {
+	if caPath := ResolvePrivateTLSCA(); caPath != "" {
 		var err error
 		client, err = client.WithTLSCA(caPath)
 		if err != nil {
@@ -393,7 +393,7 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	}
 
 	var warnings []string
-	if issue.Status == types.StatusClosed {
+	if state, _ := fields["state"].(string); state == "closed" {
 		if closed, closeErr := t.client.UpdateIssue(ctx, created.Number, map[string]interface{}{
 			"state": "closed",
 		}); closeErr == nil {
@@ -444,7 +444,7 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 
 // FieldMapper returns the field mapper for Gitea/Forgejo.
 func (t *Tracker) FieldMapper() tracker.FieldMapper {
-	return &giteaFieldMapper{config: t.config}
+	return &giteaFieldMapper{config: t.config, tracker: t}
 }
 
 // PushTargetScope returns a canonical identifier for the configured repository endpoint.
@@ -537,15 +537,35 @@ func (t *Tracker) RefScope() RefScope {
 		withNames(append([]string{t.currentName}, t.formerNames...)...)
 }
 
-// BuildExternalRef constructs the canonical external_ref for a pulled or created issue.
+// BuildExternalRef constructs a canonical external_ref that this tracker always
+// recognizes. When the remote html_url is on the configured host and resolves
+// in the configured repository scope, it is stored directly; otherwise (for
+// example when gitea.url points at an internal host or loopback while ROOT_URL
+// points at a public hostname) it stores the host-independent gitea:owner/repo#N
+// shorthand so subsequent syncs recognize and update the issue instead of
+// creating duplicates.
 func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
-	if issue.URL != "" {
+	if issue.URL != "" && (t.client == nil || (t.IsExternalRef(issue.URL) && t.ExtractIdentifier(issue.URL) != "")) {
 		return issue.URL
 	}
 	if t.client != nil && t.client.Owner != "" && t.client.Repo != "" {
 		return fmt.Sprintf("gitea:%s/%s#%s", t.client.Owner, t.client.Repo, issue.Identifier)
 	}
 	return fmt.Sprintf("gitea:%s", issue.Identifier)
+}
+
+func (t *Tracker) canonicalRef(rawRef string, number int) string {
+	trimmed := strings.TrimSpace(rawRef)
+	if trimmed != "" && (t.client == nil || (t.IsExternalRef(trimmed) && t.ExtractIdentifier(trimmed) != "")) {
+		return trimmed
+	}
+	if t.client != nil && t.client.Owner != "" && t.client.Repo != "" && number > 0 {
+		return fmt.Sprintf("gitea:%s/%s#%d", t.client.Owner, t.client.Repo, number)
+	}
+	if number > 0 {
+		return fmt.Sprintf("gitea:%d", number)
+	}
+	return trimmed
 }
 
 // MatchKey implements tracker.MatchKeyer.
@@ -597,6 +617,18 @@ func (t *Tracker) RemoteIdentityKey(issue *tracker.TrackerIssue) string {
 		return ""
 	}
 	return fmt.Sprintf("gitea:%d:%d", repoID, gt.Number)
+}
+
+// ResolvePrivateTLSCA returns the custom TLS CA bundle path from a private
+// source only: the caller's shell environment (GITEA_TLS_CA / BD_GITEA_TLS_CA,
+// ignoring .beads/.env) or user-global config (~/.config/bd/config.yaml).
+// Values in the shared Dolt store, project .beads/config.yaml, or .beads/.env
+// are ignored so a cloned repository cannot inject a custom CA.
+func ResolvePrivateTLSCA() string {
+	if val := strings.TrimSpace(config.PrivateGetenv("GITEA_TLS_CA")); val != "" {
+		return val
+	}
+	return strings.TrimSpace(config.PrivateConfigValue("gitea.tls_ca"))
 }
 
 func (t *Tracker) getConfig(ctx context.Context, key, envVar string) string {

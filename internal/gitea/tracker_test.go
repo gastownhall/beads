@@ -3,6 +3,7 @@ package gitea
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -80,8 +81,9 @@ func TestInitRejectsChangedOrUnpinnedEndpointBeforeRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var requestsB int
+	var requestsA, requestsB int
 	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestsA++
 		_, _ = w.Write([]byte(`{"id":10,"name":"widgets","full_name":"acme/widgets"}`))
 	}))
 	defer serverA.Close()
@@ -96,11 +98,17 @@ func TestInitRejectsChangedOrUnpinnedEndpointBeforeRequest(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "credential was not sent") {
 		t.Fatalf("unpinned shared first use error = %v", err)
 	}
+	if requestsA != 0 {
+		t.Fatalf("unpinned shared endpoint received %d requests, want 0", requestsA)
+	}
 
 	// Private env confirmation with trailing /api/v1/ must match unstripped raw URL.
 	t.Setenv("GITEA_URL", serverA.URL+"/api/v1/")
 	if err := (&Tracker{}).Init(context.Background(), endpointTestStore{endpoint: serverA.URL + "/api/v1"}); err != nil {
 		t.Fatalf("private confirmed Init with /api/v1: %v", err)
+	}
+	if requestsA == 0 {
+		t.Fatal("confirmed Init made 0 requests to serverA, want >= 1")
 	}
 
 	// Changed shared endpoint must fail before sending credentials.
@@ -411,8 +419,32 @@ func TestConformance(t *testing.T) {
 				labels[strings.ToLower(req.Name)] = lbl
 				_ = json.NewEncoder(w).Encode(lbl)
 			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/issues":
+				q := r.URL.Query()
+				if q.Get("type") != "issues" {
+					t.Errorf("GET /issues type = %q, want issues", q.Get("type"))
+				}
+				if p := q.Get("page"); p != "" && p != "1" {
+					_, _ = w.Write([]byte(`[]`))
+					return
+				}
+				stateFilter := q.Get("state")
+				var sinceFilter time.Time
+				if sinceRaw := q.Get("since"); sinceRaw != "" {
+					parsed, parseErr := time.Parse(time.RFC3339, sinceRaw)
+					if parseErr != nil {
+						t.Errorf("GET /issues invalid since %q: %v", sinceRaw, parseErr)
+					} else {
+						sinceFilter = parsed
+					}
+				}
 				out := make([]*Issue, 0, len(issues))
 				for _, iss := range issues {
+					if stateFilter != "" && stateFilter != "all" && !strings.EqualFold(iss.State, stateFilter) {
+						continue
+					}
+					if !sinceFilter.IsZero() && iss.UpdatedAt != nil && iss.UpdatedAt.Before(sinceFilter) {
+						continue
+					}
 					out = append(out, iss)
 				}
 				_ = json.NewEncoder(w).Encode(out)
@@ -630,4 +662,488 @@ func TestConformance(t *testing.T) {
 			},
 		}
 	})
+}
+
+func TestPushTwiceWithMismatchedHTMLURLHost(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GITEA_TOKEN", "tok")
+	t.Setenv("GITEA_REPO", "acme/widgets")
+
+	var mu sync.Mutex
+	var postCount, patchCount int
+	issues := map[int]*Issue{}
+	nextNum := 1
+	labels := map[string]Label{}
+	nextLabelID := int64(1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets":
+			_, _ = w.Write([]byte(`{"id":99,"name":"widgets","full_name":"acme/widgets"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/labels":
+			out := make([]Label, 0, len(labels))
+			for _, l := range labels {
+				out = append(out, l)
+			}
+			_ = json.NewEncoder(w).Encode(out)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/acme/widgets/labels":
+			var req struct {
+				Name  string `json:"name"`
+				Color string `json:"color"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			lbl := Label{ID: nextLabelID, Name: req.Name, Color: req.Color}
+			nextLabelID++
+			labels[strings.ToLower(req.Name)] = lbl
+			_ = json.NewEncoder(w).Encode(lbl)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/issues":
+			out := make([]*Issue, 0, len(issues))
+			for _, iss := range issues {
+				out = append(out, iss)
+			}
+			_ = json.NewEncoder(w).Encode(out)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/acme/widgets/issues":
+			postCount++
+			var req struct {
+				Title  string  `json:"title"`
+				Body   string  `json:"body"`
+				Labels []int64 `json:"labels"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			num := nextNum
+			nextNum++
+			now := time.Now().UTC()
+			iss := &Issue{
+				ID:         int64(1000 + num),
+				Number:     num,
+				Title:      req.Title,
+				Body:       req.Body,
+				State:      "open",
+				CreatedAt:  &now,
+				UpdatedAt:  &now,
+				HTMLURL:    fmt.Sprintf("https://git.example.org/acme/widgets/issues/%d", num),
+				Repository: &RepositoryMeta{ID: 99, Owner: "acme", Name: "widgets", FullName: "acme/widgets"},
+			}
+			issues[num] = iss
+			_ = json.NewEncoder(w).Encode(iss)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dependencies"):
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/labels"):
+			_, _ = w.Write([]byte(`[]`))
+		case strings.HasPrefix(r.URL.Path, "/api/v1/repos/acme/widgets/issues/"):
+			numStr := strings.TrimPrefix(r.URL.Path, "/api/v1/repos/acme/widgets/issues/")
+			n, _ := strconv.Atoi(numStr)
+			iss := issues[n]
+			if iss == nil {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			if r.Method == http.MethodPatch {
+				patchCount++
+				var req map[string]interface{}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				if title, ok := req["title"].(string); ok {
+					iss.Title = title
+				}
+				if body, ok := req["body"].(string); ok {
+					iss.Body = body
+				}
+				if st, ok := req["state"].(string); ok {
+					iss.State = st
+				}
+				now := time.Now().UTC()
+				iss.UpdatedAt = &now
+			}
+			_ = json.NewEncoder(w).Encode(iss)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("GITEA_URL", srv.URL)
+
+	st := conformance.NewStore()
+	st.Config["gitea.url"] = srv.URL
+	st.Config["gitea.repo"] = "acme/widgets"
+	st.Issues["bd-1"] = &types.Issue{
+		ID:          "bd-1",
+		Title:       "Unlinked bead",
+		Description: "Body",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		UpdatedAt:   time.Now().UTC(),
+	}
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), st); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	engine := tracker.NewEngine(tr, st, "tester")
+	engine.PushHooks = &tracker.PushHooks{
+		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
+			gt, ok := remote.Raw.(*Issue)
+			return ok && PushFieldsEqual(local, gt, tr.MappingConfig())
+		},
+		PushFieldsEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
+			gt, ok := remote.Raw.(*Issue)
+			return ok && PushFieldsEqual(local, gt, tr.MappingConfig())
+		},
+		ContentHash: func(local *types.Issue) string {
+			return PushContentHash(local, tr.MappingConfig())
+		},
+		TargetScope: tr.PushTargetScope,
+	}
+
+	res1, err := engine.Sync(context.Background(), tracker.SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("first push: %v", err)
+	}
+	if res1.Stats.Created != 1 || postCount != 1 {
+		t.Fatalf("first push: created=%d postCount=%d, want 1/1", res1.Stats.Created, postCount)
+	}
+	if got := *st.Issues["bd-1"].ExternalRef; got != "gitea:acme/widgets#1" {
+		t.Fatalf("external_ref after first push = %q, want gitea:acme/widgets#1", got)
+	}
+
+	// Second push must recognize the stored ref and skip instead of creating a duplicate.
+	res2, err := engine.Sync(context.Background(), tracker.SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("second push: %v", err)
+	}
+	if res2.Stats.Created != 0 || res2.Stats.Updated != 0 || res2.Stats.Skipped != 1 || postCount != 1 {
+		t.Fatalf("second push: stats=%+v postCount=%d, want skipped=1 postCount=1", res2.Stats, postCount)
+	}
+	if got := *st.Issues["bd-1"].ExternalRef; got != "gitea:acme/widgets#1" {
+		t.Fatalf("external_ref after second push = %q, want gitea:acme/widgets#1", got)
+	}
+
+	// Editing locally and pushing a 3rd time updates #1 via PATCH without another POST.
+	st.Issues["bd-1"].Title = "Updated bead"
+	st.Issues["bd-1"].UpdatedAt = time.Now().UTC().Add(time.Second)
+	res3, err := engine.Sync(context.Background(), tracker.SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("third push: %v", err)
+	}
+	if res3.Stats.Updated != 1 || postCount != 1 || patchCount != 1 {
+		t.Fatalf("third push: stats=%+v postCount=%d patchCount=%d, want updated=1 post=1 patch=1", res3.Stats, postCount, patchCount)
+	}
+
+	// Pulling from the same server matches the existing bead without duplicating it.
+	resPull, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if resPull.Stats.Created != 0 || len(st.Issues) != 1 {
+		t.Fatalf("pull created duplicates: stats=%+v issues=%d", resPull.Stats, len(st.Issues))
+	}
+}
+
+func TestClosedStateMapPullAndPushRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GITEA_TOKEN", "tok")
+	t.Setenv("GITEA_REPO", "acme/widgets")
+
+	created := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	closedAt := created.Add(time.Hour)
+	var mu sync.Mutex
+	var patchStates []string
+	var baseURL string
+	remoteIssue := &Issue{
+		ID:         1001,
+		Number:     1,
+		Title:      "Declined feature",
+		Body:       "Original body",
+		State:      "closed",
+		CreatedAt:  &created,
+		UpdatedAt:  &closedAt,
+		ClosedAt:   &closedAt,
+		Labels:     []Label{{ID: 1, Name: "wontfix"}},
+		Repository: &RepositoryMeta{ID: 99, Owner: "acme", Name: "widgets", FullName: "acme/widgets"},
+	}
+	labels := map[string]Label{"wontfix": {ID: 1, Name: "wontfix"}}
+	nextLabelID := int64(2)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets":
+			_, _ = w.Write([]byte(`{"id":99,"name":"widgets","full_name":"acme/widgets"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/issues":
+			_ = json.NewEncoder(w).Encode([]*Issue{remoteIssue})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/issues/1":
+			_ = json.NewEncoder(w).Encode(remoteIssue)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dependencies"):
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/labels":
+			out := make([]Label, 0, len(labels))
+			for _, l := range labels {
+				out = append(out, l)
+			}
+			_ = json.NewEncoder(w).Encode(out)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/acme/widgets/labels":
+			var req struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			lbl := Label{ID: nextLabelID, Name: req.Name}
+			nextLabelID++
+			labels[strings.ToLower(req.Name)] = lbl
+			_ = json.NewEncoder(w).Encode(lbl)
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/repos/acme/widgets/issues/1":
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if st, ok := req["state"].(string); ok {
+				patchStates = append(patchStates, st)
+				remoteIssue.State = st
+			}
+			if body, ok := req["body"].(string); ok {
+				remoteIssue.Body = body
+			}
+			_ = json.NewEncoder(w).Encode(remoteIssue)
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/repos/acme/widgets/issues/1/labels":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/acme/widgets/issues":
+			createdNew := &Issue{
+				ID:         1002,
+				Number:     2,
+				Title:      "New wontfix",
+				State:      "open",
+				HTMLURL:    baseURL + "/acme/widgets/issues/2",
+				Repository: &RepositoryMeta{ID: 99, Owner: "acme", Name: "widgets", FullName: "acme/widgets"},
+			}
+			_ = json.NewEncoder(w).Encode(createdNew)
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/repos/acme/widgets/issues/2":
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if st, ok := req["state"].(string); ok {
+				patchStates = append(patchStates, st)
+			}
+			_ = json.NewEncoder(w).Encode(&Issue{
+				ID:         1002,
+				Number:     2,
+				Title:      "New wontfix",
+				State:      "closed",
+				HTMLURL:    baseURL + "/acme/widgets/issues/2",
+				Repository: &RepositoryMeta{ID: 99, Owner: "acme", Name: "widgets", FullName: "acme/widgets"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	baseURL = srv.URL
+	remoteIssue.HTMLURL = srv.URL + "/acme/widgets/issues/1"
+	t.Setenv("GITEA_URL", srv.URL)
+
+	st := conformance.NewStore()
+	st.Config["gitea.url"] = srv.URL
+	st.Config["gitea.repo"] = "acme/widgets"
+	st.Config["gitea.closed_state_map.wontfix"] = "deferred"
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), st); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	engine := tracker.NewEngine(tr, st, "tester")
+	engine.PullHooks = &tracker.PullHooks{
+		GenerateID: func(_ context.Context, issue *types.Issue) error {
+			if issue.ID == "" {
+				issue.ID = "bd-wontfix"
+			}
+			return nil
+		},
+	}
+
+	// Pull must succeed and produce a valid deferred bead with nil ClosedAt.
+	resPull, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if resPull.Stats.Created != 1 {
+		t.Fatalf("pull created = %d, want 1", resPull.Stats.Created)
+	}
+	pulled := st.Issues["bd-wontfix"]
+	if pulled == nil || pulled.Status != types.StatusDeferred || pulled.ClosedAt != nil {
+		t.Fatalf("pulled issue = %+v, want Status=deferred ClosedAt=nil", pulled)
+	}
+	if err := pulled.ValidateWithCustom(nil, nil); err != nil {
+		t.Fatalf("pulled issue failed ValidateWithCustom: %v", err)
+	}
+
+	// Updating description locally and pushing must keep remote issue state=closed.
+	pulled.Description = "Updated notes"
+	pulled.UpdatedAt = time.Now().UTC()
+	if _, err := engine.Sync(context.Background(), tracker.SyncOptions{Push: true}); err != nil {
+		t.Fatalf("push updated wontfix: %v", err)
+	}
+	if len(patchStates) != 1 || patchStates[0] != "closed" {
+		t.Fatalf("PATCH states after push = %v, want [closed]", patchStates)
+	}
+
+	// Creating a new deferred+wontfix bead via CreateIssue must close it remotely.
+	if _, err := tr.CreateIssue(context.Background(), &types.Issue{
+		Title:     "New wontfix",
+		Status:    types.StatusDeferred,
+		IssueType: types.TypeTask,
+		Priority:  2,
+		Labels:    []string{"wontfix"},
+	}); err != nil {
+		t.Fatalf("CreateIssue(deferred+wontfix): %v", err)
+	}
+	if len(patchStates) != 2 || patchStates[1] != "closed" {
+		t.Fatalf("PATCH states after CreateIssue = %v, want [closed closed]", patchStates)
+	}
+}
+
+func TestTrackerPullSendsSinceQueryParam(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GITEA_TOKEN", "tok")
+	t.Setenv("GITEA_REPO", "acme/widgets")
+
+	var gotSince []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets":
+			_, _ = w.Write([]byte(`{"id":99,"name":"widgets","full_name":"acme/widgets"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/issues":
+			gotSince = append(gotSince, r.URL.Query().Get("since"))
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("GITEA_URL", srv.URL)
+
+	st := conformance.NewStore()
+	st.Config["gitea.url"] = srv.URL
+	st.Config["gitea.repo"] = "acme/widgets"
+	st.Metadata["gitea.last_sync"] = "2026-11-20T12:00:00Z"
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), st); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	engine := tracker.NewEngine(tr, st, "tester")
+	if _, err := engine.Sync(context.Background(), tracker.SyncOptions{Pull: true}); err != nil {
+		t.Fatalf("incremental pull: %v", err)
+	}
+	if len(gotSince) == 0 || gotSince[0] == "" {
+		t.Fatalf("GET /issues received since=%v, want non-empty RFC3339 timestamp", gotSince)
+	}
+	if _, err := time.Parse(time.RFC3339, gotSince[0]); err != nil {
+		t.Fatalf("since=%q is not valid RFC3339: %v", gotSince[0], err)
+	}
+}
+
+type tlsCATestStore struct {
+	tracker.Store
+	endpoint string
+	tlsCA    string
+}
+
+func (s tlsCATestStore) GetConfig(_ context.Context, key string) (string, error) {
+	switch key {
+	case "gitea.url":
+		return s.endpoint, nil
+	case "gitea.repo":
+		return "acme/widgets", nil
+	case "gitea.tls_ca":
+		return s.tlsCA, nil
+	default:
+		return "", nil
+	}
+}
+
+func (s tlsCATestStore) GetAllConfig(context.Context) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
+func (s tlsCATestStore) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
+	return nil, nil
+}
+
+func TestInitIgnoresSharedTLSCAAndHonorsPrivateTLSCA(t *testing.T) {
+	home := t.TempDir()
+	xdgConfig := filepath.Join(home, ".config")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdgConfig)
+	t.Setenv("GITEA_TOKEN", "tok")
+	t.Setenv("GITEA_REPO", "acme/widgets")
+	t.Setenv("GITEA_TLS_CA", "")
+	t.Setenv("BD_GITEA_TLS_CA", "")
+	t.Setenv("BEADS_DIR", "")
+
+	work := t.TempDir()
+	beadsDir := filepath.Join(work, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Shared project config tries to inject a bogus CA path.
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("gitea.tls_ca: /nonexistent/project-ca.pem\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plain HTTP loopback server: if shared store/project gitea.tls_ca were read,
+	// WithTLSCA("/nonexistent/...") would fail Init.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":10,"name":"widgets","full_name":"acme/widgets"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("GITEA_URL", srv.URL)
+
+	st := tlsCATestStore{endpoint: srv.URL, tlsCA: "/nonexistent/store-ca.pem"}
+	if err := (&Tracker{}).Init(context.Background(), st); err != nil {
+		t.Fatalf("Init should ignore store and project gitea.tls_ca, got: %v", err)
+	}
+
+	// Now verify user-global ~/.config/bd/config.yaml IS honored for a self-signed TLS server.
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":11,"name":"widgets","full_name":"acme/widgets"}`))
+	}))
+	defer tlsSrv.Close()
+	t.Setenv("GITEA_URL", tlsSrv.URL)
+
+	caFile := filepath.Join(home, "forgejo-ca.pem")
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsSrv.Certificate().Raw})
+	if err := os.WriteFile(caFile, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	userCfgDir := filepath.Join(xdgConfig, "bd")
+	if err := os.MkdirAll(userCfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userCfgDir, "config.yaml"), []byte(fmt.Sprintf("gitea.tls_ca: %q\n", caFile)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Tracker{}).Init(context.Background(), tlsCATestStore{endpoint: tlsSrv.URL, tlsCA: "/nonexistent/store-ca.pem"}); err != nil {
+		t.Fatalf("Init with user-global gitea.tls_ca failed: %v", err)
+	}
+
+	// Private env GITEA_TLS_CA overrides user-global config.
+	t.Setenv("GITEA_TLS_CA", "/nonexistent/env-ca.pem")
+	if err := (&Tracker{}).Init(context.Background(), tlsCATestStore{endpoint: tlsSrv.URL}); err == nil {
+		t.Fatal("expected Init to honor private GITEA_TLS_CA env and fail on nonexistent path")
+	}
 }

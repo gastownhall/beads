@@ -50,14 +50,14 @@ bd gitea pull 42
 | `gitea.repo` | `GITEA_REPO` | Yes¹ | Repository in `owner/repo` format |
 | `gitea.owner` | `GITEA_OWNER` | Conditional¹ | Repository owner when configuring `gitea.project` separately |
 | `gitea.project` | `GITEA_PROJECT` | Conditional¹ | Repository name when `gitea.repo` omits the `owner/` prefix |
-| `gitea.tls_ca` | `GITEA_TLS_CA` | No | Optional path to a PEM CA certificate bundle for self-signed TLS |
+| `gitea.tls_ca` | `GITEA_TLS_CA` | No | Optional path to a PEM CA certificate bundle for self-signed TLS (user-global `~/.config/bd/config.yaml` or private shell env only) |
 
 ¹ Either `gitea.repo` in `owner/repo` form, or both `gitea.owner` and `gitea.project` (or `gitea.repo` as the repo name), must be set.
 
 **Transport & endpoint security:**
 
 - `gitea.url` must use `https://`. Plain `http://` is permitted only for loopback hosts (`localhost`, `127.0.0.1`, `::1`).
-- Custom CA bundles (`gitea.tls_ca` / `GITEA_TLS_CA`) are opt-in and off by default; TLS certificate verification is never disabled.
+- Custom CA bundles (`gitea.tls_ca` / `GITEA_TLS_CA`) are opt-in and off by default; TLS certificate verification is never disabled. When configured, the PEM file replaces (rather than appends to) the system root pool for that Gitea/Forgejo client. Like endpoint confirmation, `gitea.tls_ca` is a private per-user setting read only from `~/.config/bd/config.yaml` (where `bd config set gitea.tls_ca` writes it) or a private shell environment variable (`GITEA_TLS_CA`) — values in the shared Dolt database, project `.beads/config.yaml`, or `.beads/.env` are ignored.
 - `bd` pins the Gitea/Forgejo endpoint per workspace in `trusted-endpoints.json` (see [Configuration](/reference/configuration#precedence)). Because Gitea and Forgejo have no single vendor host, a workspace with a shared `gitea.url` requires private confirmation via `GITEA_URL` in your shell or `gitea.url` in `~/.config/bd/config.yaml` before any token is sent.
 - `gitea.token` is routed exclusively to `config.yaml` and redacted from synced database tables so credentials cannot leak via `bd dolt push`.
 
@@ -109,6 +109,8 @@ By default, remote `closed` issues map to beads status `closed`. To map specific
 ```bash
 bd config set gitea.closed_state_map.wontfix deferred
 ```
+
+When a closed remote issue maps to a non-closed beads status via `gitea.closed_state_map.<label>`, `closed_at` is cleared on import so the bead remains valid, and subsequent pushes keep the remote issue `closed` while that label and mapped status remain paired.
 
 ## Sync Flags
 

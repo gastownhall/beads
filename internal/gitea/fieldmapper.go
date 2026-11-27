@@ -17,7 +17,8 @@ func encodeMetadata(m map[string]interface{}) (json.RawMessage, error) {
 }
 
 type giteaFieldMapper struct {
-	config *MappingConfig
+	config  *MappingConfig
+	tracker *Tracker
 }
 
 func (m *giteaFieldMapper) PriorityToBeads(trackerPriority interface{}) int {
@@ -82,15 +83,23 @@ func (m *giteaFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.Issue
 	if conv == nil {
 		return nil
 	}
+	if m.tracker != nil && conv.Issue != nil {
+		canonical := m.tracker.BuildExternalRef(ti)
+		conv.Issue.ExternalRef = &canonical
+	}
 
 	var deps []tracker.DependencyInfo
 	for _, d := range conv.Dependencies {
 		fromID := d.FromRef
-		if fromID == "" {
+		if m.tracker != nil {
+			fromID = m.tracker.canonicalRef(fromID, d.FromNumber)
+		} else if fromID == "" {
 			fromID = fmt.Sprintf("gitea:%d", d.FromNumber)
 		}
 		toID := d.ToRef
-		if toID == "" {
+		if m.tracker != nil {
+			toID = m.tracker.canonicalRef(toID, d.ToNumber)
+		} else if toID == "" {
 			toID = fmt.Sprintf("gitea:%d", d.ToNumber)
 		}
 		var fromKey, toKey string

@@ -124,7 +124,7 @@ func getGiteaConfig() GiteaConfig {
 	cfg.URL = strings.TrimSpace(getGiteaConfigValue(ctx, "gitea.url"))
 	cfg.Token = getGiteaConfigValue(ctx, "gitea.token")
 	cfg.Repository = strings.TrimSpace(getGiteaConfigValue(ctx, "gitea.repo"))
-	cfg.TLSCA = strings.TrimSpace(getGiteaConfigValue(ctx, "gitea.tls_ca"))
+	cfg.TLSCA = gitea.ResolvePrivateTLSCA()
 
 	ownerCfg := strings.TrimSpace(getGiteaConfigValue(ctx, "gitea.owner"))
 	projectCfg := strings.TrimSpace(getGiteaConfigValue(ctx, "gitea.project"))
@@ -134,6 +134,9 @@ func getGiteaConfig() GiteaConfig {
 }
 
 func getGiteaConfigValue(ctx context.Context, key string) string {
+	if key == "gitea.tls_ca" {
+		return gitea.ResolvePrivateTLSCA()
+	}
 	// Secret keys (e.g. gitea.token) live in config.yaml, never the Dolt DB.
 	if config.IsYamlOnlyKey(key) {
 		if val := config.GetString(key); val != "" {
@@ -727,7 +730,10 @@ func pushGiteaDependencyLinks(ctx context.Context, gt *gitea.Tracker, st storage
 	if res.SourceMissing > 0 {
 		warn(fmt.Sprintf("Gitea dependency sync: %d link(s) skipped; source issue not readable on Gitea/Forgejo", res.SourceMissing))
 	}
-	return res.Created, res.DependenciesDisabledSkipped + res.SourceMissing
+	if res.TargetMissing > 0 {
+		warn(fmt.Sprintf("Gitea dependency sync: %d link(s) skipped; blocker issue not readable on Gitea/Forgejo", res.TargetMissing))
+	}
+	return res.Created, res.DependenciesDisabledSkipped + res.SourceMissing + res.TargetMissing
 }
 
 func newGiteaEngine(gt *gitea.Tracker, out io.Writer) *tracker.Engine {

@@ -2,6 +2,7 @@ package gitea
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -194,6 +195,7 @@ type PushLinkResult struct {
 	Created                     int
 	DependenciesDisabledSkipped int
 	SourceMissing               int
+	TargetMissing               int
 	Errors                      []error
 }
 
@@ -316,7 +318,7 @@ func (r *LinkResolver) PushLinks(ctx context.Context, desired []DependencyLink, 
 				case IsForbidden(err):
 					state.disabled = true
 				case IsNotFound(err):
-					state.missing = r.sourceIssueMissing(ctx, link.FromNumber, missingByNumber)
+					state.missing = r.issueMissing(ctx, link.FromNumber, missingByNumber)
 					state.disabled = !state.missing
 				default:
 					result.Errors = append(result.Errors, fmt.Errorf("fetch Gitea dependencies for #%d: %w", link.FromNumber, err))
@@ -354,12 +356,25 @@ func (r *LinkResolver) PushLinks(ctx context.Context, desired []DependencyLink, 
 
 		err := r.Client.AddBlockedBy(ctx, link.FromNumber, r.Client.Owner, r.Client.Repo, link.ToNumber)
 		if err != nil {
-			if IsForbidden(err) || IsNotFound(err) {
-				result.DependenciesDisabledSkipped++
+			switch {
+			case IsNotFound(err):
+				if r.issueMissing(ctx, link.ToNumber, missingByNumber) {
+					result.TargetMissing++
+				} else {
+					result.DependenciesDisabledSkipped++
+				}
+				continue
+			case IsForbidden(err):
+				if isDependenciesDisabledError(err) {
+					result.DependenciesDisabledSkipped++
+					continue
+				}
+				result.Errors = append(result.Errors, fmt.Errorf("create Gitea blocked_by link #%d -> #%d: %w", link.FromNumber, link.ToNumber, err))
+				continue
+			default:
+				result.Errors = append(result.Errors, fmt.Errorf("create Gitea blocked_by link #%d -> #%d: %w", link.FromNumber, link.ToNumber, err))
 				continue
 			}
-			result.Errors = append(result.Errors, fmt.Errorf("create Gitea blocked_by link #%d -> #%d: %w", link.FromNumber, link.ToNumber, err))
-			continue
 		}
 		state.targets[link.ToNumber] = struct{}{}
 		result.Created++
@@ -368,7 +383,7 @@ func (r *LinkResolver) PushLinks(ctx context.Context, desired []DependencyLink, 
 	return result
 }
 
-func (r *LinkResolver) sourceIssueMissing(ctx context.Context, number int, cache map[int]bool) bool {
+func (r *LinkResolver) issueMissing(ctx context.Context, number int, cache map[int]bool) bool {
 	if missing, ok := cache[number]; ok {
 		return missing
 	}
@@ -376,6 +391,16 @@ func (r *LinkResolver) sourceIssueMissing(ctx context.Context, number int, cache
 	missing := (err == nil && iss == nil) || (err != nil && IsNotFound(err))
 	cache[number] = missing
 	return missing
+}
+
+func isDependenciesDisabledError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	lower := strings.ToLower(apiErr.Body)
+	return strings.Contains(lower, "enable_issue_dependencies") ||
+		(strings.Contains(lower, "dependenc") && (strings.Contains(lower, "disabled") || strings.Contains(lower, "not enabled")))
 }
 
 func matchKeyFromRef(baseURL, defaultOwner, defaultRepo, ref string) string {

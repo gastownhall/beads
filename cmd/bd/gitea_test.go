@@ -48,6 +48,62 @@ func TestGiteaConfigFromEnv(t *testing.T) {
 	}
 }
 
+func TestGiteaConfigTLSCAPrivateOnly(t *testing.T) {
+	oldDBPath, oldStore := dbPath, store
+	t.Cleanup(func() { dbPath, store = oldDBPath, oldStore })
+
+	isolateBeadsDirForTest(t)
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("gitea.tls_ca: \"/project/evil-ca.pem\"\n"), 0o600); err != nil {
+		t.Fatalf("write project config.yaml: %v", err)
+	}
+
+	home := filepath.Join(tmpDir, "home")
+	xdg := filepath.Join(tmpDir, "xdg")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("GITEA_TLS_CA", "")
+	t.Setenv("BD_GITEA_TLS_CA", "")
+	t.Setenv("BEADS_DIR", "")
+	t.Chdir(tmpDir)
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	dbPath = ""
+	store = &giteaSyncFakeStore{
+		config: map[string]string{
+			"gitea.tls_ca": "/store/evil-ca.pem",
+		},
+	}
+
+	if got := getGiteaConfig().TLSCA; got != "" {
+		t.Fatalf("getGiteaConfig().TLSCA = %q, want empty when only set in store/project config", got)
+	}
+
+	userDir := filepath.Join(xdg, "bd")
+	if err := os.MkdirAll(userDir, 0o700); err != nil {
+		t.Fatalf("mkdir user config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "config.yaml"), []byte("gitea.tls_ca: \"/user/ca.pem\"\n"), 0o600); err != nil {
+		t.Fatalf("write user config.yaml: %v", err)
+	}
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if got := getGiteaConfig().TLSCA; got != "/user/ca.pem" {
+		t.Fatalf("getGiteaConfig().TLSCA = %q, want /user/ca.pem from user-global config", got)
+	}
+}
+
 func TestGiteaConfigValueYamlTokenReadsFromYamlAndEnv(t *testing.T) {
 	const wantToken = "yaml-gitea-token"
 

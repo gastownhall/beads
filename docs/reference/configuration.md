@@ -104,7 +104,7 @@ The full namespaces routed to YAML are:
 
 Plus these individual keys:
 
-`json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `hooks.manage`, `gitignore.manage`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `prime.disabled`, `memories.budget-chars`, and the secret keys `github.token`, `gitlab.token`, `gitea.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
+`json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `hooks.manage`, `gitignore.manage`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `prime.disabled`, `memories.budget-chars`, `gitea.tls_ca` (user-global), and the secret keys `github.token`, `gitlab.token`, `gitea.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
 
 `no-db` is obsolete: the JSONL-only mode it selected is gone, and issues always live in the Dolt database. `bd config set no-db` is refused; an old `no-db: true` in any `config.yaml` or `config.local.yaml` (or `BD_NO_DB=true`) is ignored with a warning on stderr. `bd config unset no-db` removes it from the workspace's own `config.yaml`; delete an entry in a user-level `config.yaml` or in `config.local.yaml` (see [Configuration Locations](#configuration-locations)) by hand.
 
@@ -619,7 +619,7 @@ Connection keys (`ado.pat`, `ado.org`, `ado.project`, `ado.projects`, `ado.url`)
 
 ### Gitea / Forgejo
 
-Connection keys (`gitea.url`, `gitea.token`, `gitea.repo`, `gitea.owner`, `gitea.project`, `gitea.tls_ca`) fall back to `GITEA_URL`, `GITEA_TOKEN`, `GITEA_REPO`, `GITEA_OWNER`, `GITEA_PROJECT`, and `GITEA_TLS_CA` environment variables; `gitea.token` is YAML-only and never written to the database. Supports Gitea, Forgejo, Codeberg, and self-hosted instances. Full setup, mapping tables, and sync commands: [Gitea & Forgejo integration](/integrations/gitea).
+Connection keys (`gitea.url`, `gitea.token`, `gitea.repo`, `gitea.owner`, `gitea.project`, `gitea.tls_ca`) fall back to `GITEA_URL`, `GITEA_TOKEN`, `GITEA_REPO`, `GITEA_OWNER`, `GITEA_PROJECT`, and `GITEA_TLS_CA` environment variables; `gitea.token` is YAML-only and never written to the database, and `gitea.tls_ca` is a private per-user setting read only from `~/.config/bd/config.yaml` or a private `GITEA_TLS_CA` shell environment variable. Supports Gitea, Forgejo, Codeberg, and self-hosted instances. Full setup, mapping tables, and sync commands: [Gitea & Forgejo integration](/integrations/gitea).
 
 ## Environment Variables
 

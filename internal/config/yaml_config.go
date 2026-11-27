@@ -160,6 +160,7 @@ var YamlOnlyKeys = map[string]bool{
 	"jira.api_token":             true,
 	"gitlab.token":               true,
 	"gitea.token":                true,
+	"gitea.tls_ca":               true, // Machine-local TLS CA path; must never replicate via Dolt
 	"ado.pat":                    true,
 	"notion.token":               true,
 }
@@ -415,6 +416,7 @@ var userGlobalExactKeys = map[string]bool{
 	"mail.delegate":        true,
 	"dolt.remotesapi-port": true,
 	"node_id":              true,
+	"gitea.tls_ca":         true,
 }
 
 func IsUserGlobalKey(key string) bool {

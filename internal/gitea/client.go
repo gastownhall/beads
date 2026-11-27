@@ -58,33 +58,42 @@ func ValidateURLScheme(rawURL string) error {
 	}
 }
 
-// NewHTTPClientWithCA returns an *http.Client trusting the PEM certificates at
-// caPath (on top of the system cert pool) with TLS 1.2 minimum. If caPath is
-// empty, a default HTTP client is returned.
+// NewHTTPClientWithCA returns an *http.Client that trusts ONLY the PEM
+// certificates at caPath (replacing, rather than appending to, the system root
+// pool) with TLS 1.2 minimum. Transport settings such as Proxy are cloned from
+// http.DefaultTransport so HTTPS_PROXY/HTTP_PROXY/NO_PROXY remain effective.
+// If caPath is empty, a default HTTP client is returned.
 func NewHTTPClientWithCA(caPath string) (*http.Client, error) {
 	trimmed := strings.TrimSpace(caPath)
 	if trimmed == "" {
 		return &http.Client{Timeout: DefaultTimeout}, nil
 	}
-	pemData, err := os.ReadFile(trimmed) //nolint:gosec // G304: caPath is explicitly configured via gitea.tls_ca / GITEA_TLS_CA
+	pemData, err := os.ReadFile(trimmed) //nolint:gosec // G304: caPath is explicitly configured via private gitea.tls_ca / GITEA_TLS_CA
 	if err != nil {
 		return nil, fmt.Errorf("read Gitea/Forgejo TLS CA %q: %w", trimmed, err)
 	}
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
+	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pemData) {
 		return nil, fmt.Errorf("parse PEM certificates from %q", trimmed)
 	}
+	var transport *http.Transport
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = dt.Clone()
+	} else {
+		transport = &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+		}
+	}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	transport.TLSClientConfig.RootCAs = pool
+	if transport.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+		transport.TLSClientConfig.MinVersion = tls.VersionTLS12
+	}
 	return &http.Client{
-		Timeout: DefaultTimeout,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				RootCAs:    pool,
-				MinVersion: tls.VersionTLS12,
-			},
-		},
+		Timeout:   DefaultTimeout,
+		Transport: transport,
 	}, nil
 }
 

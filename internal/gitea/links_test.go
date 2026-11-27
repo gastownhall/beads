@@ -145,6 +145,60 @@ func TestPushLinksHandlesDisabledDependenciesAndMissingSource(t *testing.T) {
 	}
 }
 
+func TestPushLinksDistinguishesPost404And403(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dependencies"):
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/acme/widgets/issues/10/dependencies":
+			// Missing blocker #99 -> 404
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"issue not found"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/issues/99":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"issue not found"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/acme/widgets/issues/11/dependencies":
+			// Dependencies endpoint disabled on write -> 404, but target #50 exists
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"not found"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos/acme/widgets/issues/50":
+			_, _ = w.Write([]byte(`{"id":500,"number":50,"title":"Blocker exists"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/acme/widgets/issues/12/dependencies":
+			// Token lacks write scope -> 403 without disabled message -> real error
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"token does not have at least one of required scope(s): [write:issue]"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/repos/acme/widgets/issues/13/dependencies":
+			// Explicit disabled message -> DependenciesDisabledSkipped
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"issue dependencies are disabled"}`))
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	resolver := NewLinkResolver(NewClient("tok", srv.URL, "acme", "widgets"))
+	res := resolver.PushLinks(context.Background(), []DependencyLink{
+		{FromNumber: 10, ToNumber: 99, LinkType: giteaLinkBlockedBy},
+		{FromNumber: 11, ToNumber: 50, LinkType: giteaLinkBlockedBy},
+		{FromNumber: 12, ToNumber: 50, LinkType: giteaLinkBlockedBy},
+		{FromNumber: 13, ToNumber: 50, LinkType: giteaLinkBlockedBy},
+	}, PushLinkOptions{})
+
+	if res.TargetMissing != 1 {
+		t.Errorf("TargetMissing = %d, want 1", res.TargetMissing)
+	}
+	if res.DependenciesDisabledSkipped != 2 {
+		t.Errorf("DependenciesDisabledSkipped = %d, want 2", res.DependenciesDisabledSkipped)
+	}
+	if res.SourceMissing != 0 {
+		t.Errorf("SourceMissing = %d, want 0", res.SourceMissing)
+	}
+	if len(res.Errors) != 1 || !strings.Contains(res.Errors[0].Error(), "write:issue") {
+		t.Errorf("Errors = %v, want 1 write-scope error", res.Errors)
+	}
+}
+
 func TestBlockedByLinkFromBeadsDependency(t *testing.T) {
 	scope := NewRefScope("https://codeberg.org", "acme", "widgets")
 	ref1 := "https://codeberg.org/acme/widgets/issues/1"

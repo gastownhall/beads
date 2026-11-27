@@ -74,24 +74,105 @@ func TestGiteaIssueToBeads_RoundTripAndPRMerged(t *testing.T) {
 }
 
 func TestClosedStateMapOverride(t *testing.T) {
+	created := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	closed := created.Add(time.Hour)
 	cfg := DefaultMappingConfig()
 	gt := &Issue{
-		Number: 10,
-		State:  "closed",
-		Labels: []Label{{Name: "wontfix"}},
+		Number:    10,
+		Title:     "Won't fix item",
+		State:     "closed",
+		CreatedAt: &created,
+		UpdatedAt: &closed,
+		ClosedAt:  &closed,
+		Labels:    []Label{{Name: "wontfix"}},
 	}
 
-	// Default behavior: closed -> closed.
+	// Default behavior: closed -> closed with ClosedAt preserved and valid.
 	conv := GiteaIssueToBeads(gt, cfg)
 	if conv.Issue.Status != types.StatusClosed {
 		t.Errorf("default closed status = %q, want closed", conv.Issue.Status)
 	}
+	if conv.Issue.ClosedAt == nil {
+		t.Fatal("default closed issue missing ClosedAt")
+	}
+	if err := conv.Issue.ValidateWithCustom(nil, nil); err != nil {
+		t.Fatalf("default closed issue failed ValidateWithCustom: %v", err)
+	}
 
-	// Explicit override via gitea.closed_state_map.wontfix=deferred.
+	// Explicit override via gitea.closed_state_map.wontfix=deferred:
+	// ClosedAt must be cleared so ValidateWithCustom succeeds on pull.
 	cfg.ClosedStateMap["wontfix"] = "deferred"
 	conv = GiteaIssueToBeads(gt, cfg)
 	if conv.Issue.Status != types.StatusDeferred {
 		t.Errorf("overridden closed status = %q, want deferred", conv.Issue.Status)
+	}
+	if conv.Issue.ClosedAt != nil {
+		t.Errorf("overridden non-closed issue ClosedAt = %v, want nil", conv.Issue.ClosedAt)
+	}
+	if err := conv.Issue.ValidateWithCustom(nil, nil); err != nil {
+		t.Fatalf("overridden non-closed issue failed ValidateWithCustom: %v", err)
+	}
+
+	// Pushing the mapped bead back must keep remote state closed without adding status::deferred.
+	fields := BeadsIssueToGiteaFields(conv.Issue, cfg)
+	if fields["state"] != "closed" {
+		t.Errorf("BeadsIssueToGiteaFields state = %v, want closed", fields["state"])
+	}
+	pushedLabels, _ := fields["labels"].([]string)
+	for _, l := range pushedLabels {
+		if l == "status::deferred" {
+			t.Errorf("BeadsIssueToGiteaFields unexpectedly included status::deferred in %v", pushedLabels)
+		}
+	}
+	remoteMatched := &Issue{
+		Title: conv.Issue.Title,
+		Body:  conv.Issue.Description,
+		State: "closed",
+		Labels: []Label{
+			{Name: "type::task"},
+			{Name: "priority::medium"},
+			{Name: "wontfix"},
+		},
+	}
+	if !PushFieldsEqual(conv.Issue, remoteMatched, cfg) {
+		t.Fatal("PushFieldsEqual = false for closed_state_map round-trip")
+	}
+	remoteOpen := *remoteMatched
+	remoteOpen.State = "open"
+	if PushFieldsEqual(conv.Issue, &remoteOpen, cfg) {
+		t.Fatal("PushFieldsEqual = true when remote was reopened")
+	}
+	if PushContentHash(conv.Issue, cfg) == PushContentHash(conv.Issue, DefaultMappingConfig()) {
+		t.Fatal("PushContentHash did not distinguish closed_state_map state")
+	}
+
+	// Reopening the bead locally must push state=open even while wontfix remains.
+	reopened := *conv.Issue
+	reopened.Status = types.StatusOpen
+	if got := BeadsIssueToGiteaFields(&reopened, cfg)["state"]; got != "open" {
+		t.Errorf("reopened bead state = %v, want open", got)
+	}
+
+	// A deferred bead without the mapped label stays open with status::deferred.
+	plainDeferred := &types.Issue{
+		Title:     "Deferred normally",
+		Status:    types.StatusDeferred,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	plainFields := BeadsIssueToGiteaFields(plainDeferred, cfg)
+	if plainFields["state"] != "open" {
+		t.Errorf("plain deferred bead state = %v, want open", plainFields["state"])
+	}
+	plainLabels, _ := plainFields["labels"].([]string)
+	foundStatusDeferred := false
+	for _, l := range plainLabels {
+		if l == "status::deferred" {
+			foundStatusDeferred = true
+		}
+	}
+	if !foundStatusDeferred {
+		t.Errorf("plain deferred bead missing status::deferred in %v", plainLabels)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -107,11 +108,13 @@ func TestClientWithTLSCA(t *testing.T) {
 
 	// Default client without custom CA must reject self-signed TLS server.
 	untrusted := NewClient("tok", srv.URL, "acme", "widgets")
+	untrusted.Retry = RetryConfig{MaxRetries: 0, BaseDelay: time.Millisecond, MaxBackoff: time.Millisecond}
 	if _, err := untrusted.GetAuthenticatedUser(context.Background()); err == nil {
 		t.Fatal("expected TLS verification error without custom CA")
 	}
 
-	// Write server cert as PEM file and verify WithTLSCA trusts it.
+	// Write server cert as PEM file and verify WithTLSCA trusts ONLY it (replacing system roots)
+	// and preserves http.DefaultTransport proxy handling.
 	cert := srv.Certificate()
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 	caFile := filepath.Join(t.TempDir(), "ca.pem")
@@ -122,12 +125,40 @@ func TestClientWithTLSCA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WithTLSCA: %v", err)
 	}
+	tr, ok := trusted.HTTPClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport = %T, want *http.Transport", trusted.HTTPClient.Transport)
+	}
+	if tr.Proxy == nil {
+		t.Fatal("Transport.Proxy is nil; expected cloned http.DefaultTransport preserving ProxyFromEnvironment")
+	}
+	wantPool := x509.NewCertPool()
+	if !wantPool.AppendCertsFromPEM(pemBytes) {
+		t.Fatal("failed to build expected cert pool")
+	}
+	if tr.TLSClientConfig == nil || tr.TLSClientConfig.RootCAs == nil || !tr.TLSClientConfig.RootCAs.Equal(wantPool) {
+		t.Fatal("Transport RootCAs must equal ONLY the configured CA bundle (not appended to system roots)")
+	}
 	u, err := trusted.GetAuthenticatedUser(context.Background())
 	if err != nil {
 		t.Fatalf("GetAuthenticatedUser with custom CA: %v", err)
 	}
 	if u.Handle() != "alice" {
 		t.Errorf("Handle = %q, want alice", u.Handle())
+	}
+
+	// A TLS server with a different certificate must be rejected by the pinned CA pool.
+	otherSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":2,"login":"bob"}`))
+	}))
+	otherSrv.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{generateTestTLSCert(t)},
+	}
+	otherSrv.StartTLS()
+	defer otherSrv.Close()
+	if _, err := trusted.WithBaseURL(otherSrv.URL).GetAuthenticatedUser(context.Background()); err == nil {
+		t.Fatal("expected TLS verification error against server signed by another CA")
 	}
 
 	// Invalid PEM must return a clear error.
@@ -138,29 +169,38 @@ func TestClientWithTLSCA(t *testing.T) {
 	if _, err := untrusted.WithTLSCA(badCA); err == nil {
 		t.Fatal("expected error for invalid PEM CA file")
 	}
-
-	// Ensure unused crypto imports aren't needed; generate a fresh leaf check helper too.
-	_ = generateTestCertPEM
 }
 
-func generateTestCertPEM(t *testing.T) []byte {
+func generateTestTLSCert(t *testing.T) tls.Certificate {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "localhost"},
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "other-localhost"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pair
 }
 
 func TestFetchIssuesFiltersPRsAndPaginates(t *testing.T) {
@@ -223,6 +263,45 @@ func TestFetchIssuesFiltersPRsAndPaginates(t *testing.T) {
 		}
 		if len(issues) != 2 || issues[0].Number != 1 || issues[1].Number != 2 {
 			t.Fatalf("issues = %+v, want 2 items", issues)
+		}
+	})
+
+	t.Run("FetchIssuesSince sends RFC3339 since and filter query parameters", func(t *testing.T) {
+		since := time.Date(2026, 11, 15, 14, 30, 0, 0, time.FixedZone("UTC+2", 2*3600))
+		var gotSince, gotType, gotState, gotPage, gotLabels, gotMilestone, gotAssignee string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			gotSince = q.Get("since")
+			gotType = q.Get("type")
+			gotState = q.Get("state")
+			gotPage = q.Get("page")
+			gotLabels = q.Get("labels")
+			gotMilestone = q.Get("milestones")
+			gotAssignee = q.Get("assigned_by")
+			_, _ = w.Write([]byte(`[{"id":9,"number":9,"title":"Recent","state":"open"}]`))
+		}))
+		defer srv.Close()
+
+		c := NewClient("tok", srv.URL, "acme", "widgets")
+		issues, err := c.FetchIssuesSince(context.Background(), "open", since, &IssueFilter{
+			Labels:    "bug,backend",
+			Milestone: "v1.2",
+			Assignee:  "alice",
+		})
+		if err != nil {
+			t.Fatalf("FetchIssuesSince: %v", err)
+		}
+		if len(issues) != 1 || issues[0].Number != 9 {
+			t.Fatalf("issues = %+v, want [#9]", issues)
+		}
+		if want := since.UTC().Format(time.RFC3339); gotSince != want {
+			t.Errorf("since param = %q, want %q", gotSince, want)
+		}
+		if gotType != "issues" || gotState != "open" || gotPage != "1" {
+			t.Errorf("query params type=%q state=%q page=%q, want issues/open/1", gotType, gotState, gotPage)
+		}
+		if gotLabels != "bug,backend" || gotMilestone != "v1.2" || gotAssignee != "alice" {
+			t.Errorf("filter params labels=%q milestones=%q assigned_by=%q", gotLabels, gotMilestone, gotAssignee)
 		}
 	})
 }

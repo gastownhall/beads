@@ -180,7 +180,7 @@ func GiteaIssueToBeads(gt *Issue, config *MappingConfig) *IssueConversion {
 	if gt.UpdatedAt != nil {
 		issue.UpdatedAt = *gt.UpdatedAt
 	}
-	if gt.ClosedAt != nil {
+	if gt.ClosedAt != nil && issue.Status == types.StatusClosed {
 		issue.ClosedAt = gt.ClosedAt
 	}
 
@@ -229,12 +229,40 @@ func GiteaIssueToBeads(gt *Issue, config *MappingConfig) *IssueConversion {
 	}
 }
 
+func shouldCloseRemote(issue *types.Issue, config *MappingConfig) bool {
+	if issue == nil {
+		return false
+	}
+	if issue.Status == types.StatusClosed {
+		return true
+	}
+	if config == nil || len(config.ClosedStateMap) == 0 {
+		return false
+	}
+	for _, label := range issue.Labels {
+		mapped, ok := config.ClosedStateMap[strings.ToLower(strings.TrimSpace(label))]
+		if ok && mapped != "" && strings.EqualFold(mapped, string(issue.Status)) {
+			return true
+		}
+	}
+	return false
+}
+
+func desiredGiteaState(issue *types.Issue, config *MappingConfig) string {
+	if shouldCloseRemote(issue, config) {
+		return "closed"
+	}
+	return "open"
+}
+
 // BeadsIssueToGiteaFields converts a beads Issue to Gitea/Forgejo API fields.
 func BeadsIssueToGiteaFields(issue *types.Issue, config *MappingConfig) map[string]interface{} {
 	fields := map[string]interface{}{
 		"title": issue.Title,
 		"body":  issue.Description,
 	}
+
+	closeRemote := shouldCloseRemote(issue, config)
 
 	var labels []string
 	if issue.IssueType != "" {
@@ -243,13 +271,15 @@ func BeadsIssueToGiteaFields(issue *types.Issue, config *MappingConfig) map[stri
 	if priorityLabel := priorityToLabel(issue.Priority); priorityLabel != "" {
 		labels = append(labels, "priority::"+priorityLabel)
 	}
-	switch issue.Status {
-	case types.StatusInProgress:
-		labels = append(labels, "status::in_progress")
-	case types.StatusBlocked:
-		labels = append(labels, "status::blocked")
-	case types.StatusDeferred:
-		labels = append(labels, "status::deferred")
+	if !closeRemote {
+		switch issue.Status {
+		case types.StatusInProgress:
+			labels = append(labels, "status::in_progress")
+		case types.StatusBlocked:
+			labels = append(labels, "status::blocked")
+		case types.StatusDeferred:
+			labels = append(labels, "status::deferred")
+		}
 	}
 	labels = append(labels, issue.Labels...)
 	if labels == nil {
@@ -257,7 +287,7 @@ func BeadsIssueToGiteaFields(issue *types.Issue, config *MappingConfig) map[stri
 	}
 	fields["labels"] = labels
 
-	if issue.Status == types.StatusClosed {
+	if closeRemote {
 		fields["state"] = "closed"
 	} else {
 		fields["state"] = "open"
@@ -278,10 +308,7 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) b
 		return false
 	}
 
-	desiredState := "open"
-	if local.Status == types.StatusClosed {
-		desiredState = "closed"
-	}
+	desiredState := desiredGiteaState(local, config)
 	if !strings.EqualFold(desiredState, remote.State) {
 		return false
 	}
@@ -297,10 +324,7 @@ func PushContentHash(local *types.Issue, config *MappingConfig) string {
 	if local == nil {
 		return ""
 	}
-	desiredState := "open"
-	if local.Status == types.StatusClosed {
-		desiredState = "closed"
-	}
+	desiredState := desiredGiteaState(local, config)
 	desiredLabels, _ := BeadsIssueToGiteaFields(local, config)["labels"].([]string)
 	sortedLabels := append([]string(nil), desiredLabels...)
 	slices.Sort(sortedLabels)
