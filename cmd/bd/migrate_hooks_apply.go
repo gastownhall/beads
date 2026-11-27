@@ -62,6 +62,22 @@ type hookMigrationWriteOp struct {
 	State      string                   `json:"state"`
 	SourceKind hookMigrationWriteSource `json:"source_kind"`
 	SourcePath string                   `json:"source_path,omitempty"`
+	// NonShell marks a write of a non-shell script (GH#6348): its complete
+	// bd sections are removed and no shell section is injected.
+	NonShell    bool   `json:"non_shell,omitempty"`
+	Interpreter string `json:"interpreter,omitempty"`
+}
+
+// outputAction names a write for dry-run and apply output.
+func (op hookMigrationWriteOp) outputAction() string {
+	switch {
+	case !op.NonShell:
+		return "write_hook"
+	case op.SourceKind == hookMigrationWriteFromHookFile:
+		return "repair_hook"
+	default:
+		return "restore_hook"
+	}
 }
 
 type hookMigrationRetireOp struct {
@@ -87,12 +103,15 @@ type hookMigrationOutputOperation struct {
 }
 
 type hookMigrationApplySummary struct {
-	WrittenHooks     []string `json:"written_hooks"`
-	RetiredArtifacts []string `json:"retired_artifacts"`
-	SkippedArtifacts []string `json:"skipped_artifacts"`
-	WrittenHookCount int      `json:"written_hook_count"`
-	RetiredCount     int      `json:"retired_count"`
-	SkippedCount     int      `json:"skipped_count"`
+	WrittenHooks []string `json:"written_hooks"`
+	// SkippedIntegrations lists written hooks left without bd integration
+	// because they run under a non-shell interpreter (GH#6348).
+	SkippedIntegrations []string `json:"skipped_integrations,omitempty"`
+	RetiredArtifacts    []string `json:"retired_artifacts"`
+	SkippedArtifacts    []string `json:"skipped_artifacts"`
+	WrittenHookCount    int      `json:"written_hook_count"`
+	RetiredCount        int      `json:"retired_count"`
+	SkippedCount        int      `json:"skipped_count"`
 }
 
 func (p hookMigrationExecutionPlan) operationCount() int {
@@ -103,7 +122,7 @@ func (p hookMigrationExecutionPlan) outputOperations() []hookMigrationOutputOper
 	ops := make([]hookMigrationOutputOperation, 0, p.operationCount())
 	for _, write := range p.WriteOps {
 		ops = append(ops, hookMigrationOutputOperation{
-			Action:     "write_hook",
+			Action:     write.outputAction(),
 			HookName:   write.HookName,
 			Path:       write.HookPath,
 			SourcePath: write.SourcePath,
@@ -135,8 +154,26 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 		case "marker_managed", "unmanaged_custom", "missing_no_artifacts":
 			execPlan.NoopHooks = append(execPlan.NoopHooks, hook.Name)
 			continue
-		case "read_error":
+		case "read_error", doctor.HookStateNonShellManual:
+			// A non-shell hook with ambiguous markers is never rewritten:
+			// its suggested action explains what to inspect (GH#6348).
 			execPlan.BlockingErrors = append(execPlan.BlockingErrors, formatHookMigrationBlockingError(hook))
+			continue
+		case doctor.HookStateNonShellCustom, doctor.HookStateNonShellEdited:
+			execPlan.NoopHooks = append(execPlan.NoopHooks, hook.Name)
+			continue
+		case doctor.HookStateNonShellRepair:
+			// Remove the complete bd sections; keep the sidecars, which are
+			// the user's and not bd's to retire.
+			execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
+				HookName:    hook.Name,
+				HookPath:    hook.HookPath,
+				State:       hook.State,
+				SourceKind:  hookMigrationWriteFromHookFile,
+				SourcePath:  hook.HookPath,
+				NonShell:    true,
+				Interpreter: hook.Interpreter,
+			})
 			continue
 		case "marker_broken":
 			// Broken markers are fixable: read existing file and re-inject.
@@ -170,14 +207,27 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 			continue
 		}
 
-		execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
+		write := hookMigrationWriteOp{
 			HookName:   hook.Name,
 			HookPath:   hook.HookPath,
 			State:      hook.State,
 			SourceKind: sourceKind,
 			SourcePath: sourcePath,
-		})
+		}
+		// A non-shell sidecar becomes the active hook as it is (less any
+		// complete bd sections), without bd's shell section (GH#6348).
+		if hook.SourceInterpreter != "" && sourceKind != hookMigrationWriteFromTemplate {
+			if hook.MarkerProblem != "" {
+				execPlan.BlockingErrors = append(execPlan.BlockingErrors, formatHookMigrationBlockingError(hook))
+				continue
+			}
+			write.NonShell, write.Interpreter = true, hook.SourceInterpreter
+		}
+		execPlan.WriteOps = append(execPlan.WriteOps, write)
 
+		// The sidecars are retired on both paths. Left in place, a restored
+		// .old would run twice: as the active hook, and again when that hook
+		// calls bd hooks run, which chains any non-bd .old (runChainedHook).
 		if hook.HasOldSidecar {
 			execPlan.RetireOps = append(execPlan.RetireOps, hookMigrationRetireOp{
 				HookName:        hook.Name,
@@ -230,6 +280,7 @@ type preparedHookWrite struct {
 	HookName string
 	Path     string
 	Content  []byte
+	NonShell bool
 }
 
 func applyHookMigrationExecution(execPlan hookMigrationExecutionPlan) (hookMigrationApplySummary, error) {
@@ -265,6 +316,9 @@ func applyHookMigrationExecution(execPlan hookMigrationExecutionPlan) (hookMigra
 			return summary, fmt.Errorf("writing migrated hook %s: %w", write.Path, err)
 		}
 		summary.WrittenHooks = append(summary.WrittenHooks, write.HookName)
+		if write.NonShell {
+			summary.SkippedIntegrations = append(summary.SkippedIntegrations, write.HookName)
+		}
 	}
 
 	for _, retire := range execPlan.RetireOps {
@@ -298,6 +352,7 @@ func prepareHookMigrationWrites(writeOps []hookMigrationWriteOp) ([]preparedHook
 			HookName: op.HookName,
 			Path:     op.HookPath,
 			Content:  rendered,
+			NonShell: op.NonShell,
 		})
 	}
 
@@ -320,6 +375,10 @@ func renderMigratedHookContent(op hookMigrationWriteOp) ([]byte, error) {
 		return nil, fmt.Errorf("unknown source kind %q for %s", op.SourceKind, op.HookName)
 	}
 
+	if op.NonShell {
+		return renderNonShellHookContent(op, baseContent)
+	}
+
 	baseContent = strings.ReplaceAll(baseContent, "\r\n", "\n")
 	baseContent = ensureHookShebang(baseContent)
 
@@ -330,6 +389,25 @@ func renderMigratedHookContent(op hookMigrationWriteOp) ([]byte, error) {
 	}
 
 	return []byte(content), nil
+}
+
+// renderNonShellHookContent returns a non-shell script with only its complete
+// bd sections removed: no shebang insertion, no line-ending normalization and
+// no injected section (GH#6348). It re-checks the source, which may have
+// changed since planning, and refuses rather than guess.
+func renderNonShellHookContent(op hookMigrationWriteOp, content string) ([]byte, error) {
+	if _, nonShell := doctor.NonShellHookInterpreter(content); !nonShell {
+		return nil, fmt.Errorf("%s changed since the migration was planned (it is no longer a non-shell script); rerun hook migration", op.SourcePath)
+	}
+	if !hookContentHasMarkers(content) {
+		return []byte(content), nil
+	}
+	// A section whose body is not bd's shell code is the user's: it stays.
+	repaired, _, problem, _ := removeNonShellHookSections(content)
+	if problem != "" {
+		return nil, fmt.Errorf("%s: bd markers need manual inspection (%s); not rewritten", op.SourcePath, problem)
+	}
+	return []byte(repaired), nil
 }
 
 func ensureHookShebang(content string) string {

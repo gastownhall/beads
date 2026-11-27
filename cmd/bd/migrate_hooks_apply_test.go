@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -382,4 +383,340 @@ func assertMissingHookMigrationFile(t *testing.T, path string) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected %s to be missing, got err=%v", path, err)
 	}
+}
+
+const nonShellMigrationPython = "#!/usr/bin/env python3\nimport sys\n\n\nif __name__ == \"__main__\":\n    sys.exit(0)\n"
+
+const nonShellMigrationLegacyShim = "#!/usr/bin/env sh\n# bd-shim v2\n# bd-hooks-version: 0.56.1\nexec bd hooks run pre-push \"$@\"\n"
+
+// nonShellMigrationPort is GH#6348's workaround: bd's section ported to Python
+// between its markers (five lines).
+const nonShellMigrationPort = "# --- BEGIN BEADS INTEGRATION v1.2.2 ---\n" +
+	"# This section is managed by beads. Do not remove these markers.\n" +
+	"import subprocess as _sp\n" +
+	"_sp.call([\"bd\", \"hooks\", \"run\", \"pre-push\"] + sys.argv[1:])\n" +
+	"# --- END BEADS INTEGRATION v1.2.2 ---\n"
+
+func planAndApplyHookMigrationForTest(t *testing.T, repoDir string) (doctor.HookMigrationPlan, hookMigrationExecutionPlan, hookMigrationApplySummary) {
+	t.Helper()
+	plan, err := doctor.PlanHookMigration(repoDir)
+	if err != nil {
+		t.Fatalf("PlanHookMigration failed: %v", err)
+	}
+	execPlan := buildHookMigrationExecutionPlan(plan)
+	if len(execPlan.BlockingErrors) > 0 {
+		t.Fatalf("unexpected blocking errors: %v", execPlan.BlockingErrors)
+	}
+	summary, err := applyHookMigrationExecution(execPlan)
+	if err != nil {
+		t.Fatalf("applyHookMigrationExecution failed: %v", err)
+	}
+	return plan, execPlan, summary
+}
+
+func hookMigrationPlanFor(t *testing.T, plan doctor.HookMigrationPlan, name string) doctor.HookMigrationHookPlan {
+	t.Helper()
+	for _, hook := range plan.Hooks {
+		if hook.Name == name {
+			return hook
+		}
+	}
+	t.Fatalf("hook %s missing from plan", name)
+	return doctor.HookMigrationHookPlan{}
+}
+
+func assertHookMigrationConverged(t *testing.T, repoDir string) {
+	t.Helper()
+	plan, err := doctor.PlanHookMigration(repoDir)
+	if err != nil {
+		t.Fatalf("PlanHookMigration failed: %v", err)
+	}
+	if plan.NeedsMigrationCount != 0 {
+		t.Fatalf("expected the migration to converge, still needed: %+v", plan.Hooks)
+	}
+	execPlan := buildHookMigrationExecutionPlan(plan)
+	if execPlan.operationCount() != 0 || len(execPlan.BlockingErrors) != 0 {
+		t.Fatalf("expected a no-op rerun, got ops=%+v blocking=%v", execPlan.outputOperations(), execPlan.BlockingErrors)
+	}
+}
+
+// TestApplyHookMigration_NonShell pins GH#6348 for bd migrate hooks and the
+// bd doctor --fix hook migration: they never add bd's shell section to a
+// non-shell hook, repair sections an earlier install appended, leave a section
+// someone edited alone, restore a non-shell sidecar as-is and retire it, and
+// stop on markers they cannot remove safely.
+func TestApplyHookMigration_NonShell(t *testing.T) {
+	section := generateHookSection("pre-push")
+	oldSection := strings.NewReplacer(
+		hookSectionBeginLine(), hookSectionBeginPrefix+" v0.56.1 ---",
+		hookSectionEndLine(), hookSectionEndPrefix+" v0.56.1 ---",
+	).Replace(section)
+
+	t.Run("AC6_marker_repair_keeps_sidecars", func(t *testing.T) {
+		for name, injected := range map[string]string{"current_version": section, "old_version": oldSection} {
+			t.Run(name, func(t *testing.T) {
+				repoDir, hooksDir := setupHookMigrationRepo(t)
+				hookPath := filepath.Join(hooksDir, "pre-push")
+				writeHookMigrationFile(t, hookPath, injectHookSection(nonShellMigrationPython, injected))
+				oldSidecar := "#!/usr/bin/env python3\nprint('old')\n"
+				backupSidecar := "#!/usr/bin/env python3\nprint('backup')\n"
+				writeHookMigrationFile(t, hookPath+".old", oldSidecar)
+				writeHookMigrationFile(t, hookPath+".backup", backupSidecar)
+
+				plan, _, summary := planAndApplyHookMigrationForTest(t, repoDir)
+				hook := hookMigrationPlanFor(t, plan, "pre-push")
+				if hook.State != "non_shell_marker_repair" || !hook.NeedsMigration {
+					t.Fatalf("expected non_shell_marker_repair needing migration, got %+v", hook)
+				}
+				if got := mustReadHookMigrationFile(t, hookPath); got != nonShellMigrationPython {
+					t.Fatalf("expected the original python hook back, got:\n%q", got)
+				}
+				if mustReadHookMigrationFile(t, hookPath+".old") != oldSidecar || mustReadHookMigrationFile(t, hookPath+".backup") != backupSidecar {
+					t.Fatal("sidecars must be kept unchanged")
+				}
+				assertMissingHookMigrationFile(t, hookPath+".old.migrated")
+				assertMissingHookMigrationFile(t, hookPath+".backup.migrated")
+				if !strings.Contains(strings.Join(formatHookMigrationApplySummary(summary), "\n"), "bd integration skipped") {
+					t.Fatalf("summary must report the skipped integration: %+v", summary)
+				}
+				assertHookMigrationConverged(t, repoDir)
+			})
+		}
+	})
+
+	t.Run("AC6_clean_non_shell_hook_is_a_noop", func(t *testing.T) {
+		repoDir, hooksDir := setupHookMigrationRepo(t)
+		hookPath := filepath.Join(hooksDir, "pre-push")
+		content := nonShellMigrationPython + "# bd-shim v1\n# bd-hooks-version: 0.40.0\n"
+		writeHookMigrationFile(t, hookPath, content)
+		writeHookMigrationFile(t, hookPath+".old", "#!/bin/sh\necho old\n")
+		writeHookMigrationFile(t, hookPath+".backup", "#!/bin/sh\necho backup\n")
+
+		plan, err := doctor.PlanHookMigration(repoDir)
+		if err != nil {
+			t.Fatalf("PlanHookMigration failed: %v", err)
+		}
+		hook := hookMigrationPlanFor(t, plan, "pre-push")
+		if hook.State != "non_shell_custom" || hook.NeedsMigration {
+			t.Fatalf("expected non_shell_custom with no migration, got %+v", hook)
+		}
+		assertHookMigrationConverged(t, repoDir)
+		if mustReadHookMigrationFile(t, hookPath) != content {
+			t.Fatal("hook must be unchanged")
+		}
+	})
+
+	t.Run("AC6_edited_section_is_a_noop", func(t *testing.T) {
+		// GH#6348's workaround: bd's section ported to Python between the
+		// markers. A line someone added to bd's own code is theirs too.
+		// Migration must neither delete them nor block on them.
+		beforeFi := strings.Replace(section, "\nfi\n"+hookSectionEndLine(), "\nprint('mine')\nfi\n"+hookSectionEndLine(), 1)
+		if beforeFi == section {
+			t.Fatal("the closing fi of the section was not found")
+		}
+		for name, edited := range map[string]string{"python_port": nonShellMigrationPort, "line_added_before_fi": beforeFi} {
+			t.Run(name, func(t *testing.T) {
+				repoDir, hooksDir := setupHookMigrationRepo(t)
+				hookPath := filepath.Join(hooksDir, "pre-push")
+				content := nonShellMigrationPython + "\n" + edited
+				writeHookMigrationFile(t, hookPath, content)
+				writeHookMigrationFile(t, hookPath+".old", "#!/usr/bin/env python3\nprint('old')\n")
+
+				plan, err := doctor.PlanHookMigration(repoDir)
+				if err != nil {
+					t.Fatalf("PlanHookMigration failed: %v", err)
+				}
+				hook := hookMigrationPlanFor(t, plan, "pre-push")
+				if hook.State != doctor.HookStateNonShellEdited || hook.NeedsMigration || hook.MarkerProblem != "" {
+					t.Fatalf("expected non_shell_marker_edited with no migration, got %+v", hook)
+				}
+				first := strings.Count(nonShellMigrationPython, "\n") + 2
+				lines := fmt.Sprintf("lines %d-%d", first, first+strings.Count(edited, "\n")-1)
+				if !strings.Contains(hook.SuggestedAction, lines) {
+					t.Fatalf("suggested action must name the edited section (%s): %q", lines, hook.SuggestedAction)
+				}
+				execPlan := buildHookMigrationExecutionPlan(plan)
+				if execPlan.operationCount() != 0 || len(execPlan.BlockingErrors) != 0 {
+					t.Fatalf("expected no operations and no blocking errors, got ops=%+v blocking=%v", execPlan.outputOperations(), execPlan.BlockingErrors)
+				}
+				if _, err := applyHookMigrationExecution(execPlan); err != nil {
+					t.Fatalf("applyHookMigrationExecution failed: %v", err)
+				}
+				if mustReadHookMigrationFile(t, hookPath) != content {
+					t.Fatal("the edited hook must be unchanged")
+				}
+				assertHookMigrationConverged(t, repoDir)
+			})
+		}
+	})
+
+	t.Run("AC7_non_shell_sidecar_restored_without_injection", func(t *testing.T) {
+		repaired := injectHookSection(nonShellMigrationPython, section)
+		cases := []struct {
+			name         string
+			active       string // "" = missing hook
+			old, backup  string
+			wantSource   string
+			wantContents string
+		}{
+			{name: "legacy_shim_with_old", active: nonShellMigrationLegacyShim, old: nonShellMigrationPython, wantSource: ".old", wantContents: nonShellMigrationPython},
+			{name: "missing_hook_with_backup", backup: nonShellMigrationPython, wantSource: ".backup", wantContents: nonShellMigrationPython},
+			{name: "both_sidecars_old_wins", active: nonShellMigrationLegacyShim, old: nonShellMigrationPython, backup: "#!/usr/bin/env python3\nprint('backup')\n", wantSource: ".old", wantContents: nonShellMigrationPython},
+			{name: "sidecar_with_paired_section", active: nonShellMigrationLegacyShim, old: repaired, wantSource: ".old", wantContents: nonShellMigrationPython},
+			{name: "sidecar_with_ported_section", active: nonShellMigrationLegacyShim, old: nonShellMigrationPython + nonShellMigrationPort, wantSource: ".old", wantContents: nonShellMigrationPython + nonShellMigrationPort},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				repoDir, hooksDir := setupHookMigrationRepo(t)
+				hookPath := filepath.Join(hooksDir, "pre-push")
+				if tc.active != "" {
+					writeHookMigrationFile(t, hookPath, tc.active)
+				}
+				if tc.old != "" {
+					writeHookMigrationFile(t, hookPath+".old", tc.old)
+				}
+				if tc.backup != "" {
+					writeHookMigrationFile(t, hookPath+".backup", tc.backup)
+				}
+
+				plan, err := doctor.PlanHookMigration(repoDir)
+				if err != nil {
+					t.Fatalf("PlanHookMigration failed: %v", err)
+				}
+				dryRun := buildHookMigrationExecutionPlan(plan)
+				var restore *hookMigrationOutputOperation
+				var retired, wantRetired []string
+				for _, op := range dryRun.outputOperations() {
+					if op.HookName != "pre-push" {
+						continue
+					}
+					if op.Action == "retire_sidecar" {
+						retired = append(retired, op.SourcePath)
+						continue
+					}
+					op := op
+					restore = &op
+				}
+				if restore == nil || restore.Action != "restore_hook" || restore.SourcePath != hookPath+tc.wantSource {
+					t.Fatalf("expected restore_hook from %s, got %+v", tc.wantSource, restore)
+				}
+				// The sidecars are retired as on the shell path, so the
+				// restored script is not chained again as .old.
+				if tc.old != "" {
+					wantRetired = append(wantRetired, hookPath+".old")
+				}
+				if tc.backup != "" {
+					wantRetired = append(wantRetired, hookPath+".backup")
+				}
+				if strings.Join(retired, "\n") != strings.Join(wantRetired, "\n") {
+					t.Fatalf("retired sidecars = %v, want %v", retired, wantRetired)
+				}
+				if !strings.Contains(strings.Join(formatHookMigrationOperations(dryRun), "\n"), "without bd's shell section") {
+					t.Fatalf("dry run must describe the restore: %v", formatHookMigrationOperations(dryRun))
+				}
+
+				_, _, summary := planAndApplyHookMigrationForTest(t, repoDir)
+				if got := mustReadHookMigrationFile(t, hookPath); got != tc.wantContents {
+					t.Fatalf("restored hook mismatch, got:\n%q", got)
+				}
+				for suffix, sidecar := range map[string]string{".old": tc.old, ".backup": tc.backup} {
+					if sidecar == "" {
+						continue
+					}
+					assertMissingHookMigrationFile(t, hookPath+suffix)
+					if mustReadHookMigrationFile(t, hookPath+suffix+".migrated") != sidecar {
+						t.Fatalf("%s must be retired unchanged to %s.migrated", suffix, suffix)
+					}
+				}
+				if !strings.Contains(strings.Join(formatHookMigrationApplySummary(summary), "\n"), "bd integration skipped") {
+					t.Fatalf("summary must report the skipped integration: %+v", summary)
+				}
+				assertHookMigrationConverged(t, repoDir)
+			})
+		}
+	})
+
+	t.Run("AC7_restored_sidecar_is_not_chained_again", func(t *testing.T) {
+		// bd hooks run <hook>, which the migration output advises calling
+		// from the restored script, chains any non-bd .old. Left in place,
+		// the .old would run a second time on every git operation.
+		repoDir, hooksDir := setupHookMigrationRepo(t)
+		hookPath := filepath.Join(hooksDir, "pre-push")
+		ran := filepath.Join(t.TempDir(), "old-hook-ran")
+		awkHook := "#!/usr/bin/awk -f\nBEGIN { printf \"ran\\n\" > \"" + ran + "\" }\n"
+		writeHookMigrationFile(t, hookPath, nonShellMigrationLegacyShim)
+		writeHookMigrationFile(t, hookPath+".old", awkHook)
+
+		_, execPlan, _ := planAndApplyHookMigrationForTest(t, repoDir)
+		if len(execPlan.WriteOps) != 1 || execPlan.WriteOps[0].outputAction() != "restore_hook" {
+			t.Fatalf("expected one restore_hook, got %+v", execPlan.outputOperations())
+		}
+		if got := mustReadHookMigrationFile(t, hookPath); got != awkHook {
+			t.Fatalf("the awk script must be the active hook, got:\n%q", got)
+		}
+
+		var code int
+		runInDir(t, repoDir, func() { code = runPrePushHook(nil) })
+		if code != 0 {
+			t.Fatalf("runPrePushHook() = %d, want 0", code)
+		}
+		if _, err := os.Stat(ran); !os.IsNotExist(err) {
+			t.Fatalf("bd hooks run pre-push ran the restored script again as .old (stat err=%v)", err)
+		}
+	})
+
+	t.Run("AC8_ambiguous_markers_block", func(t *testing.T) {
+		begin := hookSectionBeginLine() + "\n"
+		cases := []struct {
+			name           string
+			active, old    string
+			wantInBlocking string
+		}{
+			{name: "orphan_begin_in_hook", active: nonShellMigrationPython + begin + "print('x')\n", wantInBlocking: "manual inspection"},
+			{name: "binary_with_markers", active: "\x7fELF\x00\x01\n" + section, wantInBlocking: "binary"},
+			{name: "ambiguous_old_sidecar", active: nonShellMigrationLegacyShim, old: nonShellMigrationPython + begin, wantInBlocking: "manual inspection"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				repoDir, hooksDir := setupHookMigrationRepo(t)
+				hookPath := filepath.Join(hooksDir, "pre-push")
+				writeHookMigrationFile(t, hookPath, tc.active)
+				if tc.old != "" {
+					writeHookMigrationFile(t, hookPath+".old", tc.old)
+				}
+				plan, err := doctor.PlanHookMigration(repoDir)
+				if err != nil {
+					t.Fatalf("PlanHookMigration failed: %v", err)
+				}
+				execPlan := buildHookMigrationExecutionPlan(plan)
+				blocking := strings.Join(execPlan.BlockingErrors, "\n")
+				if !strings.Contains(blocking, "pre-push") || !strings.Contains(blocking, tc.wantInBlocking) {
+					t.Fatalf("expected a pre-push blocking error naming %q, got: %v", tc.wantInBlocking, execPlan.BlockingErrors)
+				}
+				for _, op := range execPlan.WriteOps {
+					if op.HookName == "pre-push" {
+						t.Fatalf("no write op for a blocked hook: %+v", op)
+					}
+				}
+				if mustReadHookMigrationFile(t, hookPath) != tc.active {
+					t.Fatal("hook must be unchanged")
+				}
+			})
+		}
+
+		t.Run("user_modified_legacy_still_blocks", func(t *testing.T) {
+			repoDir, hooksDir := setupHookMigrationRepo(t)
+			hookPath := filepath.Join(hooksDir, "pre-push")
+			writeHookMigrationFile(t, hookPath, nonShellMigrationLegacyShim+"\n./my-linter.sh\n")
+			writeHookMigrationFile(t, hookPath+".old", nonShellMigrationPython)
+			plan, err := doctor.PlanHookMigration(repoDir)
+			if err != nil {
+				t.Fatalf("PlanHookMigration failed: %v", err)
+			}
+			blocking := strings.Join(buildHookMigrationExecutionPlan(plan).BlockingErrors, "\n")
+			if !strings.Contains(blocking, "user-modified") {
+				t.Fatalf("expected the user-modified legacy block, got: %s", blocking)
+			}
+		})
+	})
 }
