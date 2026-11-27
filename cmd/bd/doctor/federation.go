@@ -41,7 +41,11 @@ func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
 		// which reads a sourceless port as caller-explicit (see
 		// dolt.ApplyResolvedServerPort).
 		dolt.ApplyResolvedServerPort(beadsDir, cfg)
-		cfg.ServerUser = bcfg.GetDoltServerUser()
+		// Scoped to beadsDir: federation checks routinely target a foreign
+		// workspace, and the launcher's yaml dolt.user (e.g. a personal
+		// config.local.yaml override) must not authenticate against it
+		// (GH#8577, review F1).
+		cfg.ServerUser = dolt.ResolveServerUserForWorkspace(beadsDir, bcfg)
 		cfg.ServerTLS = bcfg.GetDoltServerTLS()
 		cfg.ServerPassword = bcfg.GetDoltServerPasswordForPort(cfg.ServerPort)
 	}

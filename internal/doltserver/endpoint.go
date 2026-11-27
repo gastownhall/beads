@@ -59,7 +59,9 @@ type Endpoint struct {
 	// Mode is the server's ownership mode (ResolveServerMode).
 	Mode   ServerMode
 	Socket string
-	// User is the static user (BEADS_DOLT_SERVER_USER, metadata.json, root).
+	// User is the static user (BEADS_DOLT_SERVER_USER, dolt.user in the
+	// workspace config.local.yaml / config.yaml, metadata.json, root —
+	// GetDoltServerUser's order).
 	// When CredentialCommand is set the store presents that command's token
 	// instead (WithIdentity), unless the caller named a user (WithUser).
 	User string

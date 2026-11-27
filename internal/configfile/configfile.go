@@ -606,9 +606,47 @@ func (c *Config) GetDoltServerSocket() string {
 }
 
 // GetDoltServerUser returns the Dolt server MySQL user.
-// Checks BEADS_DOLT_SERVER_USER env var first, then config, then default.
+//
+// Precedence, highest first (GH#8577):
+//
+//	BEADS_DOLT_SERVER_USER env
+//	  > BD_DOLT_USER env (the yaml key's AutomaticEnv binding)
+//	  > .beads/config.local.yaml dolt.user
+//	  > .beads/config.yaml     dolt.user
+//	  > user-level ~/.config/bd/config.yaml dolt.user
+//	  > .beads/metadata.json   dolt_server_user
+//	  > DefaultDoltServerUser (root)
+//
+// (config.Initialize merges local over project over user-level; an empty or
+// null dolt.user in config.local.yaml shadows the config.yaml value and falls
+// through to the layers below — the merge keeps the key present.)
+//
+// The yaml layers deliberately outrank metadata.json here — unlike
+// GetDoltServerHost, where metadata wins over yaml. metadata.json is committed
+// shared state: a user written there imposes one account on every clone and
+// machine, while the user is machine-local identity. The only pre-existing
+// override was the env var, which is process-global and hijacks every
+// workspace in the shell. This also completes the write/read pair for
+// dolt.user: `bd dolt set user --update-config` has always written the key
+// (cmd/bd/dolt.go) but nothing read it back.
+//
+// The yaml read is process-global (the launching workspace's merged config),
+// as with GetDoltServerHost. Cross-workspace and routed opens must not
+// inherit the launcher's yaml user: they resolve through
+// ResolveServerUserForWorkspace (internal/storage/dolt), which re-reads the
+// yaml layers scoped to the workspace being opened. A bare
+// `bd dolt set user` (metadata-only write) warns when ANY yaml layer —
+// workspace or user-level — holds a different dolt.user that outranks the
+// write, so the shadow is never silent.
+//
+// Note: the password is looked up by host:port (ServerPasswordFor), never by
+// user — a user override without a matching credentials entry fails with a
+// credentials-shaped error (1045) even though the user resolution worked.
 func (c *Config) GetDoltServerUser() string {
 	if u := os.Getenv("BEADS_DOLT_SERVER_USER"); u != "" {
+		return u
+	}
+	if u := config.GetYamlConfig("dolt.user"); u != "" {
 		return u
 	}
 	if c.DoltServerUser != "" {

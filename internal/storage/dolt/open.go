@@ -417,7 +417,7 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		applied = got
 	}
 	if !applied && cfg.ServerUser == "" {
-		cfg.ServerUser = fileCfg.GetDoltServerUser()
+		cfg.ServerUser = ResolveServerUserForWorkspace(beadsDir, fileCfg)
 	}
 	// Populate password and TLS the same way the CLI CRUD path does. Without
 	// this, callers that rely on NewFromConfigWithOptions (e.g. doctor's
@@ -437,6 +437,40 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	applyPoolKnobs(cfg)
 
 	return nil
+}
+
+// ResolveServerUserForWorkspace resolves the static MySQL user for the
+// workspace being OPENED — not the launching workspace. GetDoltServerUser
+// reads the process-global merged yaml config (the launcher's BEADS_DIR
+// context), which is right when bd runs inside one workspace but wrong for
+// routed and cross-workspace opens: with the yaml layers outranking metadata
+// (GH#8577), the launcher's personal dolt.user (e.g. a config.local.yaml test
+// override) would otherwise override the target workspace's committed
+// dolt_server_user on a write into the target. WithBeadsDir loads exactly
+// what Initialize would load for beadsDir — user-level files, the target's
+// own config.yaml + config.local.yaml, BD_* env — and restores the previous
+// configuration afterwards. On a scoped-load error this falls back to the
+// process-global getter (pre-GH#8577 behavior) rather than failing the open.
+//
+// Concurrency: config.WithBeadsDir mutates package-global config state. The
+// invariant is broader than opens: NO configuration read may run while a
+// WithBeadsDir scope is active — a reader landing inside a foreign-open
+// scope reads the TARGET's config for launcher work. cmd/bd has background
+// goroutines that read config (dolt_autopush.go, events.go, main.go's
+// watch/daemon loops); this contract is pre-existing and shared with the 11
+// WithBeadsDir callers in bootstrap/init/create, all on serialized CLI
+// paths (doctor's checks run sequentially — no goroutine machinery in the
+// package). Callers must not invoke this from parallel store opens or
+// alongside concurrent config readers; locking package-global config is a
+// WithBeadsDir-wide concern beyond this fix.
+func ResolveServerUserForWorkspace(beadsDir string, fileCfg *configfile.Config) string {
+	var user string
+	if err := config.WithBeadsDir(beadsDir, func() {
+		user = fileCfg.GetDoltServerUser()
+	}); err != nil {
+		return fileCfg.GetDoltServerUser()
+	}
+	return user
 }
 
 // applyPoolKnobs fills the shared pool's operator knobs when the caller left

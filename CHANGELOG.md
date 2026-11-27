@@ -172,6 +172,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`dolt.user` resolves from the yaml config layers (#8577).** Fleets that
+  run several dolt servers keep one committed config per repo (shared across
+  users and machines) and need per-machine identity and test overrides that
+  never land in git — but the server MySQL user could previously only come
+  from committed `metadata.json` (`dolt_server_user`, one account imposed on
+  every clone) or the process-global `BEADS_DOLT_SERVER_USER` (hijacks every
+  workspace in the shell). `dolt.user` now resolves
+  `BEADS_DOLT_SERVER_USER` > `BD_DOLT_USER` > `.beads/config.local.yaml`
+  (uncommitted, machine-local) > `.beads/config.yaml` > user-level
+  `~/.config/bd/config.yaml` > `metadata.json` > `root` — and routed /
+  cross-workspace opens resolve against the workspace being opened, never
+  the launcher's yaml. This also completes an existing write/read pair:
+  `bd dolt set user --update-config` and `bd config set dolt.user` always
+  wrote the key, but nothing read it. A bare `bd dolt set user` now warns
+  (naming the winning layer — workspace or user-level) when a yaml value
+  shadows the metadata write.
+  `.beads/.gitignore` gains `config.local.yaml` (append-only: existing
+  workspaces pick the line up at the next ensure), and `bd doctor`'s server
+  report shows `connected as <user>`.
+
 - **`bd list --include-all-types`: one flag for every hidden kind of row.**
   `ListRequest.IncludeAllTypes` — the union that lifts every default type or
   plane suppression (templates, gates, infra types, the ephemeral wisp plane,

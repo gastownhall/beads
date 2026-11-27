@@ -354,7 +354,7 @@ Configure the connection with flags or environment variables:
 | `--server-host` | `BEADS_DOLT_SERVER_HOST` | `127.0.0.1` |
 | `--server-port` | `BEADS_DOLT_SERVER_PORT` | `3307` |
 | `--server-socket` | `BEADS_DOLT_SERVER_SOCKET` | (none; uses TCP) |
-| `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` |
+| `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` (or `dolt.user` in config.local.yaml / config.yaml / metadata.json) |
 | | `BEADS_DOLT_PASSWORD` | (none) |
 
 **`BEADS_DOLT_SERVER_PORT` also declares the server externally managed.**
@@ -933,7 +933,7 @@ dolt:
 | `BEADS_DOLT_SERVER_HOST` | Server host (default: 127.0.0.1) |
 | `BEADS_DOLT_SERVER_PORT` | Server port (default: 3307, or 3308 in shared mode) |
 | `BEADS_DOLT_SERVER_TLS` | Enable TLS (set to "1" or "true") |
-| `BEADS_DOLT_SERVER_USER` | MySQL connection user |
+| `BEADS_DOLT_SERVER_USER` | MySQL connection user (overrides `dolt.user` in config.local.yaml / config.yaml and `dolt_server_user` in metadata.json) |
 | `BEADS_DOLT_SHARED_SERVER` | Enable shared server mode (set to "1" or "true") |
 | `DOLT_REMOTE_USER` | Clone/push/pull auth user |
 | `DOLT_REMOTE_PASSWORD` | Clone/push/pull auth password |

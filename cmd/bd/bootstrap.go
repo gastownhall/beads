@@ -2044,7 +2044,12 @@ func initServerClonePortAndSource(beadsDir string, cfg *configfile.Config) (int,
 // (dolt.TestModeRefusesPort).
 func initServerCloneEndpoint(beadsDir string, cfg *configfile.Config) (bootstrapServerProbeConfig, error) {
 	port := initServerClonePort(beadsDir, cfg)
+	// Resolve against the init-target workspace, not the launcher's merged
+	// yaml (GH#8577 review): the same scoping bootstrapServerEndpoint uses.
+	// The unscoped value is kept if the scoped load errors — callers inspect
+	// ep even on the error returns below.
 	ep := serverDialEndpoint(cfg, port)
+	_ = config.WithBeadsDir(beadsDir, func() { ep = serverDialEndpoint(cfg, port) })
 	if port == 0 && ep.socket == "" {
 		return ep, fmt.Errorf("%w for the Dolt server at %s to clone into", dolt.ErrUnresolvedServerPort, remedy.PrintedValue(ep.host))
 	}
