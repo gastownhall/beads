@@ -68,6 +68,29 @@ func TestManageLeaseOnUpdate(t *testing.T) {
 			wantClear: false,
 		},
 		{
+			// GH#8628: the holder re-spelled under another letter case is
+			// the same claim, so its lease survives for bd reclaim.
+			name:      "case-only re-spell of the holder leaves lease alone",
+			oldStatus: types.StatusInProgress,
+			oldOwner:  "hierophant",
+			updates:   map[string]interface{}{"assignee": "Hierophant"},
+			wantClear: false,
+		},
+		{
+			name:      "separator re-spell of the holder leaves lease alone",
+			oldStatus: types.StatusInProgress,
+			oldOwner:  "gastown.mayor",
+			updates:   map[string]interface{}{"assignee": "gastown_mayor"},
+			wantClear: false,
+		},
+		{
+			name:      "transfer to another name that differs by more than case clears the lease",
+			oldStatus: types.StatusInProgress,
+			oldOwner:  "hierophant",
+			updates:   map[string]interface{}{"assignee": "Hierophant2"},
+			wantClear: true,
+		},
+		{
 			name:      "no status or assignee in updates is a no-op",
 			oldStatus: types.StatusInProgress,
 			oldOwner:  "alice",

@@ -58,6 +58,13 @@ const KeysetPriorityCreatedAtIDPredicate = "(priority >= ? AND ((priority > ?) O
 // its binary default collation and its stored spelling. It folds case only;
 // the gates' separator fold has no portable SQL form, so separators match
 // exactly here, as before.
+//
+// No index covers LOWER(assignee), so where an exact match would seek
+// idx_issues_assignee this one scans: `bd ready --assignee` reads every
+// unblocked row. A functional index on the expression would restore the seek,
+// but on Dolt 2.6.0 it breaks the VALUES() upserts of issues and wisps (see
+// "A VIRTUAL generated column breaks VALUES() upserts" in
+// internal/storage/schema/migrations/README.md).
 const AssigneeFilterClause = "LOWER(assignee) = ?"
 
 // AssigneeFilterArg is the bound value of AssigneeFilterClause.

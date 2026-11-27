@@ -21,7 +21,7 @@ func TestBuildReclaimScopeClausesEmpty(t *testing.T) {
 func TestBuildReclaimScopeClausesShapeAndAlias(t *testing.T) {
 	filter := types.ReclaimFilter{
 		IDs:           []string{"wy-a", "wy-b"},
-		Assignees:     []string{"zelda"},
+		Assignees:     []string{"Zelda"},
 		Labels:        []string{"lane-a", "tier:opus"},
 		LabelsAny:     []string{"x", "y"},
 		ExcludeLabels: []string{"pinned"},
@@ -30,8 +30,8 @@ func TestBuildReclaimScopeClausesShapeAndAlias(t *testing.T) {
 	joined := strings.Join(clauses, " AND ")
 
 	wantContains := []string{
-		"i.id IN (?,?)",     // IDs
-		"i.assignee IN (?)", // assignees
+		"i.id IN (?,?)",            // IDs
+		"LOWER(i.assignee) IN (?)", // assignees, letter case folded (GH#8628)
 		"i.id IN (SELECT issue_id FROM labels WHERE label = ?)",        // per-label AND (x2)
 		"i.id IN (SELECT issue_id FROM labels WHERE label IN (?,?))",   // label-any OR
 		"i.id NOT IN (SELECT issue_id FROM labels WHERE label IN (?))", // exclude
@@ -45,7 +45,8 @@ func TestBuildReclaimScopeClausesShapeAndAlias(t *testing.T) {
 	if got := strings.Count(joined, "WHERE label = ?"); got != 2 {
 		t.Errorf("per-label AND subquery count = %d, want 2", got)
 	}
-	// Args order: ids, assignee, each AND-label, label-any set, exclude set.
+	// Args order: ids, assignee (bound lowered, as AssigneeFilterArg binds
+	// it), each AND-label, label-any set, exclude set.
 	want := []any{"wy-a", "wy-b", "zelda", "lane-a", "tier:opus", "x", "y", "pinned"}
 	if len(args) != len(want) {
 		t.Fatalf("args = %v, want %v", args, want)

@@ -237,15 +237,16 @@ func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) 
 		}
 	}
 
-	// newAssignee == oldIssue.Assignee is deliberately verbatim, not
-	// actorMatches (ga-v2k49): a generic update that hand-doles the same
-	// identity back under a different layer's spelling genuinely rewrites the
-	// assignee column's bytes, so clearing the lease here (as any other
-	// transfer would) is defensible rather than a false positive — it costs
-	// the holder's live lease, but HeartbeatIssueInTx's fallback re-arms one
-	// under the caller's current spelling on the next beat, so it self-heals.
+	// The same claim is judged under actorMatches, not verbatim: re-spelling
+	// the holder (a separator run, ga-v2k49, or letter case, GH#8628) keeps
+	// the claim, so it keeps the lease row too. The row keeps the holder
+	// spelling it was granted under. HeartbeatIssueInTx's slow path refreshes
+	// it in place under the caller's spelling, and ReclaimExpiredLeasesInTx
+	// still sees it once it expires. Deleting it here was self-healing only
+	// for a live holder: a crashed one never beats again, and an in_progress
+	// claim with no lease row is invisible to bd reclaim.
 	sameClaim := newStatus == string(types.StatusInProgress) && newAssignee != "" &&
-		oldIssue.Status == types.StatusInProgress && newAssignee == oldIssue.Assignee
+		oldIssue.Status == types.StatusInProgress && actorMatches(newAssignee, oldIssue.Assignee)
 	return !sameClaim
 }
 

@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -90,6 +94,67 @@ func TestEmbeddedAssigneeCaseInsensitiveCLI(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Assignee != "Hierophant" || got.Status != types.StatusInProgress {
 			t.Errorf("re-spell by Hierophant: assignee=%q status=%s, want Hierophant/in_progress", got.Assignee, got.Status)
+		}
+	})
+
+	// A case-only re-spell of a live claim keeps its lease, so a holder that
+	// dies afterwards is still recovered by bd reclaim, and reclaim's
+	// --assignee scope folds letter case like every other --assignee filter.
+	t.Run("respell_keeps_lease_and_reclaim_folds_case", func(t *testing.T) {
+		rdir, beadsDir, _ := bdInit(t, bd, "--prefix", "rl")
+		issue := bdCreate(t, bd, rdir, "leased", "--type", "task")
+		bdUpdate(t, bd, rdir, issue.ID, "--actor", "hierophant", "--claim")
+		bdUpdate(t, bd, rdir, issue.ID, "--actor", "Hierophant", "--assignee", "Hierophant")
+		if got := bdShow(t, bd, rdir, issue.ID); got.Assignee != "Hierophant" || got.Status != types.StatusInProgress {
+			t.Fatalf("re-spell: assignee=%q status=%s, want Hierophant/in_progress", got.Assignee, got.Status)
+		}
+
+		cfg, _ := configfile.Load(beadsDir)
+		database := ""
+		if cfg != nil {
+			database = cfg.GetDoltDatabase()
+		}
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		var holder string
+		err = db.QueryRowContext(t.Context(), "SELECT holder FROM leases WHERE issue_id = ?", issue.ID).Scan(&holder)
+		if err == nil {
+			// The holder dies: its lease expires without a heartbeat.
+			_, err = db.ExecContext(t.Context(), "UPDATE leases SET lease_expires_at = ? WHERE issue_id = ?",
+				time.Now().UTC().Add(-time.Hour), issue.ID)
+		}
+		_ = cleanup()
+		if err != nil {
+			t.Fatalf("the case-only re-spell lost the claim's lease row (or expiring it failed): %v", err)
+		}
+		if holder != "hierophant" {
+			t.Fatalf("lease holder = %q, want the granted spelling hierophant kept", holder)
+		}
+
+		reclaim := func(t *testing.T, assignee string) []types.ReclaimedLease {
+			t.Helper()
+			out, err := bdRunWithFlockRetry(t, bd, rdir, "reclaim", "--older-than", "0s", "--json", "--assignee", assignee)
+			if err != nil {
+				t.Fatalf("bd reclaim --assignee %s: %v\n%s", assignee, err, out)
+			}
+			var got struct {
+				Reclaimed []types.ReclaimedLease `json:"reclaimed"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("parse bd reclaim --assignee %s JSON: %v\n%s", assignee, err, out)
+			}
+			return got.Reclaimed
+		}
+		if got := reclaim(t, "hierophant2"); len(got) != 0 {
+			t.Fatalf("bd reclaim --assignee hierophant2 reclaimed %+v, want nothing: another name is out of scope", got)
+		}
+		if got := reclaim(t, "HIEROPHANT"); len(got) != 1 || got[0].ID != issue.ID {
+			t.Fatalf("bd reclaim --assignee HIEROPHANT reclaimed %+v, want exactly %s", got, issue.ID)
+		}
+		if got := bdShow(t, bd, rdir, issue.ID); got.Status != types.StatusOpen || got.Assignee != "" {
+			t.Errorf("after reclaim: status=%s assignee=%q, want open and unassigned", got.Status, got.Assignee)
 		}
 	})
 

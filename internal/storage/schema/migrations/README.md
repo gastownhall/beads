@@ -73,6 +73,22 @@ duplicate primary key given: [w2,external:e1]
 Normalize *after* dropping the generated column and its key, not before. (0058
 normalizes before, and reaches the abort on any store whose rows collide.)
 
+**A VIRTUAL generated column breaks `VALUES()` upserts, and a functional index
+adds one.** On Dolt 2.6.0, bd's embedded engine and the oldest server bd
+accepts, every `VALUES(col)` (and row-alias `new.col`) in an
+`INSERT … ON DUPLICATE KEY UPDATE` on a table with a VIRTUAL generated column
+reads the next column over, and the last one reads the generated value.
+`CREATE INDEX i ON t ((LOWER(c)))` adds such a column, hidden. bd upserts
+`issues` and `wisps` that way (`issueops.issueUpsertAssignments`,
+`domain/db.insertIssueRow`), so either one on those tables makes the
+stale-guarded upsert of `bd import` silently keep an open issue's stored row,
+and makes the plain upsert of `bd repo sync` fail with Error 1366 (the
+incoming `issue_type` lands in `priority`). A STORED generated column is not
+affected. This is why `LOWER(assignee)` (GH#8628) has no index.
+`TestCreateIssuesRejectStaleUpserts` in `internal/storage/embeddeddolt`
+(embedded lane) upserts an existing issue and wisp in both forms and fails on
+it.
+
 **Restore any session variable you set, in the script that set it.** Six
 migrations here clear `FOREIGN_KEY_CHECKS` and restore it (0041, 0043, 0047,
 0050, 0053, 0058); keep that shape. Since wy-s8ytnw the steady-state open in

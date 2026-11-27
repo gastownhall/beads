@@ -41,8 +41,10 @@ import (
 // UTF-8 the lowering is exactly strings.ToLower (unicode.ToLower per rune),
 // which is the function Dolt's LOWER() runs on utf8mb4 — the --assignee
 // listings compare LOWER(assignee), so the gates and the listings agree on
-// which spellings are one identity. An invalid byte is copied unchanged
-// rather than decoded to U+FFFD, so two different invalid bytes never merge.
+// letter case, and only on letter case: the listings do not fold
+// separators, so a listing is no pre-filter for a gate decision. An invalid
+// byte is copied unchanged rather than decoded to U+FFFD, so two different
+// invalid bytes never merge.
 // The separator fold and the case fold compose: separators are case-neutral
 // ASCII and no rune lowers to '.', '_' or '-'.
 //

@@ -403,9 +403,9 @@ Since bd 1.4, letter case is not part of an actor name. The ownership checks
 in `bd close`, `bd update --claim`, `bd update --assignee`, `bd unclaim` and
 the other claim commands treat `Hierophant` and `hierophant` as one actor,
 and, as before, any run of `.`, `_` or `-` as one separator. `--assignee` on
-`bd list`, `bd count`, `bd search`, `bd ready` and `bd query` ignores letter
-case too, but matches separators exactly. bd stores and prints the spelling
-it was given. `claim.pools` aliases still match exactly.
+`bd list`, `bd count`, `bd search`, `bd ready`, `bd query` and `bd reclaim`
+ignores letter case too, but matches separators exactly. bd stores and prints
+the spelling it was given. `claim.pools` aliases still match exactly.
 
 ## Project-Level Settings (Database)
 
