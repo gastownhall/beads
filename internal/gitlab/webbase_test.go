@@ -145,6 +145,24 @@ func TestInitLearnsWebBase(t *testing.T) {
 			projectJSON: `{"id":42,"path_with_namespace":"g/p","web_url":"https://code.example.org/scm/g/p"}`,
 			want:        "https://code.example.org/scm",
 		},
+		// AC-3: no address is learned — a 404 for the project, or a web_url
+		// that does not end in the project's path with namespace, or none at
+		// all — and recognition and keys keep exactly today's behavior.
+		{
+			name:        "project answers 404",
+			projectJSON: ``,
+			want:        "",
+		},
+		{
+			name:        "web_url does not end in path_with_namespace",
+			projectJSON: `{"id":42,"path_with_namespace":"g/p","web_url":"https://git.example.org/elsewhere"}`,
+			want:        "",
+		},
+		{
+			name:        "no web_url reported",
+			projectJSON: `{"id":42,"path_with_namespace":"g/p"}`,
+			want:        "",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -152,7 +170,51 @@ func TestInitLearnsWebBase(t *testing.T) {
 			if tr.webBase != tt.want {
 				t.Fatalf("learned web base = %q, want %q", tr.webBase, tt.want)
 			}
+			if tt.want != "" {
+				return
+			}
+			// Nothing was learned, so recognition and keys are exactly
+			// today's: a web-host ref stays unrecognized, and the shorthand
+			// still keys on the gitlab.url host.
+			if tr.IsExternalRef("https://git.example.org/g/p/-/issues/5") {
+				t.Error(`IsExternalRef("https://git.example.org/g/p/-/issues/5") = true, want false`)
+			}
+			wantKey := matchKeyFromURL(tr.client.BaseURL + "/g/p/-/issues/7")
+			if got := tr.MatchKey("gitlab:7"); got != wantKey {
+				t.Errorf(`MatchKey("gitlab:7") = %q, want today's %q`, got, wantKey)
+			}
 		})
+	}
+}
+
+// TestInitGroupOnlySendsNoProjectRequest (AC-3): a group-mode config without
+// a project (no gitlab.default_project_id) cannot create issues, so Init
+// sends no request and learns no web address.
+func TestInitGroupOnlySendsNoProjectRequest(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, `{"message":"404 Not found"}`, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("GITLAB_URL", srv.URL)
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_PROJECT_ID", "")
+	t.Setenv("GITLAB_PROJECT_PATH", "")
+	t.Setenv("GITLAB_GROUP_ID", "30")
+	t.Setenv("GITLAB_DEFAULT_PROJECT_ID", "")
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), &crossProjectStore{issues: map[string]*types.Issue{}}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("Init sent %d API requests, want 0", requests)
+	}
+	if tr.webBase != "" || tr.configuredWebURL != "" {
+		t.Fatalf("webBase = %q configuredWebURL = %q, want neither learned nor configured", tr.webBase, tr.configuredWebURL)
 	}
 }
 
