@@ -1,0 +1,180 @@
+package gitlab
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// gitLabStub is an httptest GitLab for project 42. GET /projects/42 answers
+// projectJSON, or projectStatus when that is set; POST /projects/42/issues
+// creates issue N with web_url issueWebRoot+"/-/issues/N", which a later
+// GET /projects/42/issues/N returns.
+type gitLabStub struct {
+	srv *httptest.Server
+
+	mu            sync.Mutex
+	projectStatus int
+	projectJSON   string
+	issueWebRoot  string
+	projectGets   int
+	creates       int
+	requests      []string
+	issues        map[int]map[string]any
+	linkPosts     []string
+	graphql       func(query string) string
+}
+
+func newGitLabStub(t *testing.T) *gitLabStub {
+	t.Helper()
+	s := &gitLabStub{issues: map[int]map[string]any{}}
+	s.srv = httptest.NewServer(http.HandlerFunc(s.serve))
+	t.Cleanup(s.srv.Close)
+	s.issueWebRoot = s.srv.URL + "/g/p"
+	s.projectJSON = `{"id":42,"path_with_namespace":"g/p","web_url":"` + s.srv.URL + `/g/p"}`
+	return s
+}
+
+func (s *gitLabStub) serve(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	body, _ := io.ReadAll(r.Body)
+	path := strings.TrimPrefix(r.URL.Path, "/api/v4")
+	s.requests = append(s.requests, r.Method+" "+path)
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case r.Method == http.MethodGet && path == "/projects/42":
+		s.projectGets++
+		if s.projectStatus != 0 {
+			http.Error(w, `{"message":"`+http.StatusText(s.projectStatus)+`"}`, s.projectStatus)
+			return
+		}
+		_, _ = io.WriteString(w, s.projectJSON)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/graphql":
+		var in struct {
+			Query string `json:"query"`
+		}
+		_ = json.Unmarshal(body, &in)
+		if s.graphql == nil {
+			http.Error(w, `{"message":"no graphql"}`, http.StatusNotFound)
+			return
+		}
+		_, _ = io.WriteString(w, s.graphql(in.Query))
+	case r.Method == http.MethodPost && path == "/projects/42/issues":
+		s.creates++
+		var in map[string]any
+		_ = json.Unmarshal(body, &in)
+		iid := s.creates
+		iss := map[string]any{
+			"id": 1000 + iid, "iid": iid, "project_id": 42, "title": in["title"], "description": in["description"],
+			"state": "opened", "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z",
+			"web_url": s.issueWebRoot + "/-/issues/" + strconv.Itoa(iid),
+		}
+		s.issues[iid] = iss
+		_ = json.NewEncoder(w).Encode(iss)
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/links"):
+		_, _ = io.WriteString(w, `[]`)
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/links"):
+		s.linkPosts = append(s.linkPosts, path+" "+string(body))
+		_, _ = io.WriteString(w, `{}`)
+	case strings.HasPrefix(path, "/projects/42/issues/"):
+		iid, _ := strconv.Atoi(strings.TrimPrefix(path, "/projects/42/issues/"))
+		iss, ok := s.issues[iid]
+		if !ok {
+			http.Error(w, `{"message":"404 Not found"}`, http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(iss)
+	case r.Method == http.MethodGet:
+		_, _ = io.WriteString(w, `[]`)
+	default:
+		_, _ = io.WriteString(w, `{}`)
+	}
+}
+
+func (s *gitLabStub) counts() (projectGets, creates int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.projectGets, s.creates
+}
+
+// initStubTracker runs Init the way `bd gitlab sync` does, configured by
+// environment for project 42 at the stub (projectPath "" leaves
+// gitlab.project_path unset). store nil means an empty store.
+func initStubTracker(t *testing.T, stub *gitLabStub, projectPath string, store *crossProjectStore) (*Tracker, error) {
+	t.Helper()
+	setStubEnv(t, stub, "42", projectPath)
+	if store == nil {
+		store = &crossProjectStore{issues: map[string]*types.Issue{}}
+	}
+	tr := &Tracker{}
+	return tr, tr.Init(context.Background(), store)
+}
+
+func setStubEnv(t *testing.T, stub *gitLabStub, projectID, projectPath string) {
+	t.Helper()
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("GITLAB_URL", stub.srv.URL)
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_PROJECT_ID", projectID)
+	t.Setenv("GITLAB_PROJECT_PATH", projectPath)
+	t.Setenv("GITLAB_GROUP_ID", "")
+	t.Setenv("GITLAB_DEFAULT_PROJECT_ID", "")
+	for _, k := range []string{"GITLAB_FILTER_LABELS", "GITLAB_FILTER_PROJECT", "GITLAB_FILTER_MILESTONE", "GITLAB_FILTER_ASSIGNEE"} {
+		t.Setenv(k, "")
+	}
+}
+
+// TestInitFailsWhenTheProjectCannotBeRead pins AC-4: a project read that
+// fails for any reason but 404 stops Init, since a push without the address
+// GitLab writes into its links could copy every issue linked under it.
+func TestInitFailsWhenTheProjectCannotBeRead(t *testing.T) {
+	stub := newGitLabStub(t)
+	stub.projectStatus = http.StatusUnauthorized
+	_, err := initStubTracker(t, stub, "g/p", nil)
+	if err == nil {
+		t.Fatal("Init succeeded although GET /projects/42 answered 401")
+	}
+	for _, want := range []string{"project 42", "address GitLab writes into issue links"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Init error %q does not say %q", err, want)
+		}
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Init error %v does not wrap the 401 *APIError", err)
+	}
+}
+
+// TestAPIErrorTextUnchanged pins the text of a typed API error to the untyped
+// error it replaces, which isGitLabLicenseError still matches.
+func TestAPIErrorTextUnchanged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Blocked issues not available for current license"}`, http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+	_, err := NewClient("token", srv.URL, "42").CreateIssueLink(context.Background(), 1, 2, "blocks")
+	want := `API error: {"message":"Blocked issues not available for current license"}` + "\n (status 403)"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("CreateIssueLink error = %v, want it to contain %q", err, want)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden || apiErr.Error() != want {
+		t.Fatalf("error %v: *APIError = %+v, want status 403 and text %q", err, apiErr, want)
+	}
+	if !isGitLabLicenseError(err) {
+		t.Errorf("isGitLabLicenseError(%v) = false, want true", err)
+	}
+	if IsNotFound(err) || !IsNotFound(&APIError{StatusCode: http.StatusNotFound}) {
+		t.Errorf("IsNotFound misclassifies 403 or 404")
+	}
+}

@@ -30,6 +30,7 @@ go_test(
         "tracker_state_test.go",
         "tracker_test.go",
         "types_test.go",
+        "web_base_test.go",
     ],
     embed = [":gitlab"],
     deps = [

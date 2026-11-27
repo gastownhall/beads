@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -13,6 +14,25 @@ import (
 	"strconv"
 	"time"
 )
+
+// APIError is a non-retried GitLab API failure that carries the HTTP status
+// code, so callers can branch on it (IsNotFound) instead of matching error
+// text. Its message is unchanged from the untyped error it replaces, which
+// isGitLabLicenseError still reads.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error: %s (status %d)", e.Body, e.StatusCode)
+}
+
+// IsNotFound reports whether err is, or wraps, a GitLab 404.
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
 
 // NewClient creates a new GitLab client with the given token, base URL, and project ID.
 func NewClient(token, baseURL, projectID string) *Client {
@@ -184,7 +204,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 			}
 		}
 
-		return nil, nil, fmt.Errorf("API error: %s (status %d)", string(respBody), resp.StatusCode)
+		return nil, nil, &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	return nil, nil, fmt.Errorf("max retries (%d) exceeded: %w", MaxRetries+1, lastErr)
