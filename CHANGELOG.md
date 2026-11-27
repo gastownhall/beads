@@ -1517,6 +1517,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bootstrap`. What is refused, and the consent it takes, are unchanged;
   server and embedded mode print, and emit as JSON, what they did before.
 
+- After an upgrade, a failed schema reconciliation is retried on the next
+  command instead of being skipped for good. bd advanced
+  `.beads/.local_version` to the new version before the post-upgrade
+  maintenance ran, so a failure (for example a migration refused because a
+  table had uncommitted changes) was never tried again. bd now keeps the old
+  marker until the maintenance settles. Two outcomes settle it without
+  migrating: a migration-gate or consent refusal, which leaves the decision
+  to an explicit `bd migrate schema`, and a performed pre-0.56 database
+  recovery, which is not repeated. A dirty-table refusal now prints `bd
+  upgraded to <version>: schema migration of <workspace> refused` on stderr,
+  naming the tables and the workspace to commit in (not under `--json`).
+  `bd doctor <path>` applies the same rule to the target workspace's marker
+  and leaves the caller's alone. See "Migration refused: uncommitted
+  changes" in docs/getting-started/upgrading.md (#6929, #6949).
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
