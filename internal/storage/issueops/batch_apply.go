@@ -426,7 +426,7 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 	// row was recorded, and `issues` only when the edge flipped a durable
 	// is_blocked — the staging addDependencyEdgeInTx documents, so the flag
 	// rides the edge's commit (GH#6647) and an idempotent or non-flipping add
-	// cannot sweep unrelated pending rows into it (GH#2455).
+	// names no unrelated table (GH#2455).
 	r.write.Tables.Add(depTable)
 	// The edge row was written EITHER WAY: a new edge is an insert, and a
 	// same-type re-add rewrites that row's metadata. So the transaction has

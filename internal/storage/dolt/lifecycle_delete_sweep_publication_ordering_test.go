@@ -103,27 +103,9 @@ func TestLifecycleDeleteSweepPostTxPublication(t *testing.T) {
 			message:  "bd: delete 1 issue(s)",
 		},
 		{
-			name: "DeleterDeleteFencedSingleConnection",
-			setup: func(d *publicationOrderDriver, s *DoltStore) {
-				d.rows = func(query string, args []driver.NamedValue) (driver.Rows, bool) {
-					switch {
-					case strings.Contains(query, "GET_LOCK("), strings.Contains(query, "RELEASE_LOCK("):
-						return &valRows{cols: []string{"lock"}, vals: [][]driver.Value{{int64(1)}}}, true
-					case strings.Contains(query, "SELECT row_lock FROM issues WHERE id"):
-						return &valRows{cols: []string{"row_lock"}, vals: [][]driver.Value{{int64(1)}}}, true
-					}
-					return existingIssueRows(query, args)
-				}
-				s.serverMode = true
-				// The post-commit publisher needs a pooled connection of its
-				// own: it can only get one once the fence released the sole
-				// connection the guarded delete pinned.
-				s.db.SetMaxOpenConns(1)
-			},
-			run: func(t *testing.T, ctx context.Context, s *DoltStore) error {
-				version := int64(1)
-				return runRoleDelete(t, ctx, s, issueops.DeleteRequest{Actor: "alice", IDs: []string{"pub-1"}, Force: true, ExpectedVersion: &version})
-			},
+			name:     "DeleterDeleteFencedSingleConnection",
+			setup:    func(d *publicationOrderDriver, s *DoltStore) { fencedSingleConnectionSetup(d, s, existingIssueRows) },
+			run:      runFencedRoleDelete,
 			mutation: deletesFrom("issues"),
 			tables:   sweptTables,
 			message:  "bd: delete 1 issue(s)",
@@ -145,19 +127,9 @@ func TestLifecycleDeleteSweepPostTxPublication(t *testing.T) {
 			},
 		},
 		{
-			name:  "SweeperSweep",
-			setup: func(d *publicationOrderDriver, _ *DoltStore) { d.rows = sweepCandidateRows },
-			run: func(t *testing.T, ctx context.Context, s *DoltStore) error {
-				sw, err := s.Sweeper()
-				if err != nil {
-					return err
-				}
-				res, err := sw.Sweep(ctx, issueops.SweepRequest{Actor: "alice", Tier: issueops.SweepDurable, IDPattern: "*"})
-				if err == nil && res.Swept != 1 {
-					t.Errorf("Sweep result = %+v, want 1 swept", res)
-				}
-				return err
-			},
+			name:     "SweeperSweep",
+			setup:    func(d *publicationOrderDriver, _ *DoltStore) { d.rows = sweepCandidateRows },
+			run:      runDurableSweep,
 			mutation: deletesFrom("issues"),
 			tables:   sweptTables,
 			message:  "bd: sweep 1 durable bead(s)",
@@ -187,6 +159,145 @@ func TestLifecycleDeleteSweepPostTxPublication(t *testing.T) {
 	}
 }
 
+// TestLifecycleDeleteSweepSettleRecheckAfterPublication pins
+// gastownhall/beads#7035 over the same writers: a write whose transaction
+// recorded dependents for the post-commit blocked-state recheck settles them
+// only after its own Dolt commit. The recheck stages the whole issues table
+// when it changes a row, so a recheck settled first would publish the write's
+// issues rows under its own message: for a delete, without the dependencies
+// rows that named the deleted issue (TestCloseRecheckBlocked_* shows that on
+// a real server). Here the recheck changes no row; the test pins that its
+// transaction starts only after the write's DOLT_COMMIT. pub-dep blocks on
+// what each delete and the sweep remove, so their bodies record it; the
+// lifecycle callback records it as a close would. The fenced delete runs on a
+// pool of one connection: a recheck settled under the fence could not get one.
+func TestLifecycleDeleteSweepSettleRecheckAfterPublication(t *testing.T) {
+	cases := []struct {
+		name     string
+		setup    func(*publicationOrderDriver, *DoltStore)
+		run      func(*testing.T, context.Context, *DoltStore) error
+		mutation func(pubEvent) bool
+		message  string
+	}{
+		{
+			name: "RunInIssueLifecycleTransaction",
+			run: func(t *testing.T, ctx context.Context, s *DoltStore) error {
+				return s.RunInIssueLifecycleTransaction(ctx, "bd: lifecycle pub-1", func(tx storage.IssueLifecycleTransaction) error {
+					dtx := tx.(*doltTransaction)
+					if _, err := dtx.regularTx.ExecContext(ctx, "UPDATE issues SET status = ? WHERE id = ?", string(types.StatusClosed), "pub-1"); err != nil {
+						return err
+					}
+					dtx.markIssuesChanged("issues")
+					storeops.NoteStatusChangeBlockedRecheck(dtx.regularTx, "pub-1", string(types.StatusClosed), "alice", []string{"pub-dep"}, nil)
+					return nil
+				})
+			},
+			mutation: writesTo("issues"),
+			message:  "bd: lifecycle pub-1",
+		},
+		{
+			name:  "DeleteIssue",
+			setup: func(d *publicationOrderDriver, _ *DoltStore) { d.rows = blockingDependerRows(nil) },
+			run: func(_ *testing.T, ctx context.Context, s *DoltStore) error {
+				return s.DeleteIssue(ctx, "pub-1")
+			},
+			mutation: deletesFrom("issues"),
+			message:  "bd: delete pub-1",
+		},
+		{
+			name:  "DeleteIssues",
+			setup: func(d *publicationOrderDriver, _ *DoltStore) { d.rows = blockingDependerRows(existingIssueRows) },
+			run: func(_ *testing.T, ctx context.Context, s *DoltStore) error {
+				_, err := s.DeleteIssues(ctx, []string{"pub-1"}, false, true, false)
+				return err
+			},
+			mutation: deletesFrom("issues"),
+			message:  "bd: delete 1 issue(s)",
+		},
+		{
+			name:  "DeleterDelete",
+			setup: func(d *publicationOrderDriver, _ *DoltStore) { d.rows = blockingDependerRows(existingIssueRows) },
+			run: func(t *testing.T, ctx context.Context, s *DoltStore) error {
+				return runRoleDelete(t, ctx, s, issueops.DeleteRequest{Actor: "alice", IDs: []string{"pub-1"}, Force: true})
+			},
+			mutation: deletesFrom("issues"),
+			message:  "bd: delete 1 issue(s)",
+		},
+		{
+			name: "DeleterDeleteFencedSingleConnection",
+			setup: func(d *publicationOrderDriver, s *DoltStore) {
+				fencedSingleConnectionSetup(d, s, blockingDependerRows(existingIssueRows))
+			},
+			run:      runFencedRoleDelete,
+			mutation: deletesFrom("issues"),
+			message:  "bd: delete 1 issue(s)",
+		},
+		{
+			name:     "SweeperSweep",
+			setup:    func(d *publicationOrderDriver, _ *DoltStore) { d.rows = blockingDependerRows(sweepCandidateRows) },
+			run:      runDurableSweep,
+			mutation: deletesFrom("issues"),
+			message:  "bd: sweep 1 durable bead(s)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newPublicationOrderDriver()
+			s := d.store()
+			t.Cleanup(func() { _ = s.db.Close() })
+			if tc.setup != nil {
+				tc.setup(d, s)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := tc.run(t, ctx, s); err != nil {
+				t.Fatalf("%s: %v; events:%s", tc.name, err, formatPubEvents(d.snapshot()))
+			}
+			evs := d.snapshot()
+			commitIdx := mutationCommitIndex(evs, tc.mutation)
+			if commitIdx < 0 {
+				t.Fatalf("no committed SQL transaction carried the mutation; events:%s", formatPubEvents(evs))
+			}
+			published, recheck := -1, -1
+			for i, ev := range evs[commitIdx+1:] {
+				switch {
+				case published < 0 && isDoltCommit(ev) && len(ev.args) > 0 && ev.args[0] == tc.message:
+					published = commitIdx + 1 + i
+				case recheck < 0 && ev.inTx && strings.Contains(ev.query, "is_blocked"):
+					recheck = commitIdx + 1 + i
+				}
+			}
+			if published < 0 {
+				t.Fatalf("no DOLT_COMMIT %q after the mutation's SQL COMMIT at %d; events:%s", tc.message, commitIdx, formatPubEvents(evs))
+			}
+			if recheck < 0 {
+				t.Fatalf("no blocked-state recheck ran after the mutation's SQL COMMIT at %d: the write recorded no dependent, "+
+					"or the recheck never got a connection; events:%s", commitIdx, formatPubEvents(evs))
+			}
+			if recheck < published {
+				t.Fatalf("the blocked-state recheck ran at event %d, before the write's own DOLT_COMMIT at %d; events:%s",
+					recheck, published, formatPubEvents(evs))
+			}
+		})
+	}
+}
+
+// blockingDependerRows makes every blocking-depender read of a deletion find
+// pub-dep, so the delete records it for the post-commit recheck; any other
+// query goes to next, when set.
+func blockingDependerRows(next func(string, []driver.NamedValue) (driver.Rows, bool)) func(string, []driver.NamedValue) (driver.Rows, bool) {
+	return func(query string, args []driver.NamedValue) (driver.Rows, bool) {
+		if strings.Contains(query, "SELECT issue_id FROM dependencies") && strings.Contains(query, "type = 'blocks'") {
+			return &valRows{cols: []string{"issue_id"}, vals: [][]driver.Value{{"pub-dep"}}}, true
+		}
+		if next == nil {
+			return nil, false
+		}
+		return next(query, args)
+	}
+}
+
 // legacyDeleteTables is the table list DeleteIssue/DeleteIssues stage.
 var legacyDeleteTables = []string{
 	"issues", "dependencies", "labels", "comments", "events", "provenance_events",
@@ -203,6 +314,31 @@ func withTablesAdded(tables []string, extra ...string) []string {
 		}
 	}
 	return out
+}
+
+// fencedSingleConnectionSetup makes the role deleter take its fenced path on
+// a pool of one connection: the fence's GET_LOCK and RELEASE_LOCK succeed and
+// the version probe reads 1, and every other query goes to next. Whatever runs
+// after the write — the post-commit publisher, the blocked-state recheck —
+// can only get a connection once the fence released the sole one the guarded
+// delete pinned.
+func fencedSingleConnectionSetup(d *publicationOrderDriver, s *DoltStore, next func(string, []driver.NamedValue) (driver.Rows, bool)) {
+	d.rows = func(query string, args []driver.NamedValue) (driver.Rows, bool) {
+		switch {
+		case strings.Contains(query, "GET_LOCK("), strings.Contains(query, "RELEASE_LOCK("):
+			return &valRows{cols: []string{"lock"}, vals: [][]driver.Value{{int64(1)}}}, true
+		case strings.Contains(query, "SELECT row_lock FROM issues WHERE id"):
+			return &valRows{cols: []string{"row_lock"}, vals: [][]driver.Value{{int64(1)}}}, true
+		}
+		return next(query, args)
+	}
+	s.serverMode = true
+	s.db.SetMaxOpenConns(1)
+}
+
+func runFencedRoleDelete(t *testing.T, ctx context.Context, s *DoltStore) error {
+	version := int64(1)
+	return runRoleDelete(t, ctx, s, issueops.DeleteRequest{Actor: "alice", IDs: []string{"pub-1"}, Force: true, ExpectedVersion: &version})
 }
 
 func runRoleDelete(t *testing.T, ctx context.Context, s *DoltStore, req issueops.DeleteRequest) error {
@@ -232,6 +368,18 @@ func existingIssueRows(query string, _ []driver.NamedValue) (driver.Rows, bool) 
 		return &valRows{cols: []string{"id"}, vals: [][]driver.Value{{"pub-1"}}}, true
 	}
 	return nil, false
+}
+
+func runDurableSweep(t *testing.T, ctx context.Context, s *DoltStore) error {
+	sw, err := s.Sweeper()
+	if err != nil {
+		return err
+	}
+	res, err := sw.Sweep(ctx, issueops.SweepRequest{Actor: "alice", Tier: issueops.SweepDurable, IDPattern: "*"})
+	if err == nil && res.Swept != 1 {
+		t.Errorf("Sweep result = %+v, want 1 swept", res)
+	}
+	return err
 }
 
 // sweepCandidateRows makes a durable sweep's candidate query find one closed

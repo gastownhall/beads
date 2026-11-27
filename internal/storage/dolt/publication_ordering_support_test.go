@@ -332,9 +332,9 @@ func mutationCommitIndex(evs []pubEvent, mutation func(pubEvent) bool) int {
 
 // requirePublishedAfterCommit asserts the post-commit publication contract on
 // recorded events: every DOLT_ADD and DOLT_COMMIT ran with no SQL transaction
-// open on its connection, after the mutation's SQL COMMIT, on one connection;
-// and it returns what was published: every table any DOLT_ADD named, however
-// many tables each call bound, and the DOLT_COMMIT message.
+// open on its connection, after the mutation's SQL COMMIT, on one connection,
+// and one DOLT_ADD named every staged table; and it returns what was
+// published: the tables the DOLT_ADD named and the DOLT_COMMIT message.
 func requirePublishedAfterCommit(t *testing.T, name string, evs []pubEvent, mutation func(pubEvent) bool) publication {
 	t.Helper()
 	commitIdx := mutationCommitIndex(evs, mutation)
@@ -344,6 +344,7 @@ func requirePublishedAfterCommit(t *testing.T, name string, evs []pubEvent, muta
 	var pub publication
 	pubConn := 0
 	sawCommit := false
+	adds := 0
 	for i, ev := range evs {
 		if !isDoltAdd(ev) && !isDoltCommit(ev) {
 			continue
@@ -365,9 +366,8 @@ func requirePublishedAfterCommit(t *testing.T, name string, evs []pubEvent, muta
 				name, i, ev.conn, pubConn, formatPubEvents(evs))
 		}
 		if isDoltAdd(ev) {
-			// Every argument names a staged table. The staged set is the
-			// contract, not the call shape: one DOLT_ADD per table and one
-			// DOLT_ADD naming them all stage the same set.
+			// Every argument names a staged table.
+			adds++
 			for _, arg := range ev.args {
 				pub.tables = append(pub.tables, fmt.Sprint(arg))
 			}
@@ -380,6 +380,12 @@ func requirePublishedAfterCommit(t *testing.T, name string, evs []pubEvent, muta
 	}
 	if len(pub.tables) == 0 || !sawCommit {
 		t.Fatalf("%s: no DOLT_ADD/DOLT_COMMIT publication recorded; events:%s", name, formatPubEvents(evs))
+	}
+	if adds != 1 {
+		// One statement stages every table from one working-set snapshot; a
+		// call per table lets a write that commits between two calls be
+		// staged in part (withIssueClosure).
+		t.Errorf("%s: staged with %d DOLT_ADD statements, want one naming every table; events:%s", name, adds, formatPubEvents(evs))
 	}
 	sort.Strings(pub.tables)
 	return pub
@@ -411,10 +417,26 @@ func sortedCopy(tables ...string) []string {
 	return out
 }
 
+// stagedWithIssueClosure is what a scoped publication of tables stages: the
+// tables, plus the issue closure (wantIssueClosure) when they name a table of
+// it, sorted and without duplicates.
+func stagedWithIssueClosure(tables ...string) []string {
+	out := slices.Clone(tables)
+	if slices.ContainsFunc(out, func(table string) bool { return slices.Contains(wantIssueClosure, table) }) {
+		out = append(out, wantIssueClosure...)
+	}
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+// requirePublication checks what a write published. wantTables is the
+// write's own list: what is staged is that list widened to the issue closure
+// when it names a table of it (withIssueClosure).
 func requirePublication(t *testing.T, name string, got publication, wantTables []string, wantMessage string) {
 	t.Helper()
-	if !slices.Equal(got.tables, sortedCopy(wantTables...)) {
-		t.Errorf("%s: staged tables = %v, want %v", name, got.tables, sortedCopy(wantTables...))
+	want := stagedWithIssueClosure(wantTables...)
+	if !slices.Equal(got.tables, want) {
+		t.Errorf("%s: staged tables = %v, want %v", name, got.tables, want)
 	}
 	if got.message != wantMessage {
 		t.Errorf("%s: commit message = %q, want %q", name, got.message, wantMessage)

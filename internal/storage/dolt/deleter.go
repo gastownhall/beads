@@ -51,8 +51,12 @@ var _ issueops.Deleter = (*deleter)(nil)
 // failure after the commit leaves the deletion applied and is counted and
 // logged, and a concurrent writer's commit can absorb the rows under its own
 // message, which is why the role promises exactly one entry only in the
-// STEADY STATE. A deletion confined to the wisp tables touches only tables
-// this plane ignores, so the staged-set guard finds nothing and records none.
+// STEADY STATE. That commit absorbs the deletion whole: it stages the issue
+// closure in one DOLT_ADD (withIssueClosure), so it never publishes the
+// issues row removal while the dependencies, labels or comments rows naming
+// the deleted issue stay at HEAD. A deletion confined to the wisp tables
+// touches only tables this plane ignores, so the staged-set guard finds
+// nothing and records none.
 func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issueops.DeleteResult, error) {
 	if err := workapi.ValidateDeleteRequest(req); err != nil {
 		return issueops.DeleteResult{}, err
@@ -73,7 +77,7 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 	}
 
 	write := func(tx *sql.Tx) error {
-		// withRetryTx/withDeleteFence may replay this body on a serialization
+		// Either runner below may replay this body on a serialization
 		// failure: reset so a rolled-back attempt's result never leaks into
 		// the value returned below (the withRetryTx closure contract).
 		result = issueops.DeleteResult{}
@@ -89,17 +93,27 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 	// identical concurrent delete into a real conflict, so the fence is
 	// scoped to serverMode only. See withDeleteFence's doc for the full
 	// design and why one pinned connection, rather than a pool-sourced one,
-	// is required.
-	runner := s.store.withRetryTx
+	// is required. Either runner hands back the dependents the delete's
+	// unblocking writes recorded instead of settling them.
+	runner := func(ctx context.Context, fn func(*sql.Tx) error) (storeops.BlockedRecheck, error) {
+		return s.store.retryWriteTxOn(ctx, s.store.db, fn)
+	}
 	if req.ExpectedVersion != nil && s.store.serverMode {
-		runner = func(ctx context.Context, fn func(*sql.Tx) error) error {
+		runner = func(ctx context.Context, fn func(*sql.Tx) error) (storeops.BlockedRecheck, error) {
 			return s.store.withDeleteFence(ctx, req.IDs[0], fn)
 		}
 	}
-	if err := runner(ctx, write); err != nil {
+	pending, err := runner(ctx, write)
+	if err != nil {
 		return issueops.DeleteResult{}, err
 	}
 
+	// Settled after the delete's own Dolt commit below, never before it
+	// (gastownhall/beads#7035): the recheck's commit stages the whole issues
+	// table and with it the issue closure, so run first it would publish the
+	// deletion under the recheck's message and leave the delete's own commit
+	// nothing to stage.
+	defer s.store.settleBlockedRecheck(ctx, pending)
 	// Published only once the runner returned: after the SQL COMMIT and, on
 	// the fenced path, after RELEASE_LOCK closed the pinned connection, so a
 	// pool of one connection is free for the publisher. The same tables a

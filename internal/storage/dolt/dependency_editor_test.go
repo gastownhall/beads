@@ -247,12 +247,14 @@ func TestDoltStoreDependencyEditorRemoveCommitsUnblock(t *testing.T) {
 	}
 }
 
-// TestDoltStoreDependencyEditorNonFlippingAddLeavesPendingIssuesUncommitted
-// is the GH#2455 half of the GH#6647 staging rule: `issues` is staged only
-// when the edge flipped a durable is_blocked. A blocking edge onto a closed
-// target flips nothing, so another writer's pending issues edit must not ride
-// the edge's commit.
-func TestDoltStoreDependencyEditorNonFlippingAddLeavesPendingIssuesUncommitted(t *testing.T) {
+// TestDoltStoreDependencyEditorNonFlippingAddStagesTheIssueClosure: a
+// blocking edge onto a closed target flips no is_blocked, so the edge's own
+// list holds no `issues` (GH#6647). The Dolt store still stages the edge with
+// the whole issue closure (withIssueClosure), so the commit never publishes a
+// dependencies row whose issues row is not in it, and another writer's pending
+// issues edit rides the edge's commit; a pending row outside the closure does
+// not. Until the closure, the pending issues edit stayed pending (GH#2455).
+func TestDoltStoreDependencyEditorNonFlippingAddStagesTheIssueClosure(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 	ctx, cancel := testContext(t)
@@ -272,6 +274,8 @@ func TestDoltStoreDependencyEditorNonFlippingAddLeavesPendingIssuesUncommitted(t
 		"UPDATE issues SET title = 'pending elsewhere' WHERE id = 'test-dep-closed-c'"); err != nil {
 		t.Fatalf("stage a pending title edit: %v", err)
 	}
+
+	pendingMetadataKey(ctx, t, store, "test.dep-closure")
 
 	editor, err := store.DependencyEditor()
 	if err != nil {
@@ -298,17 +302,11 @@ func TestDoltStoreDependencyEditorNonFlippingAddLeavesPendingIssuesUncommitted(t
 		"SELECT title FROM issues AS OF 'HEAD' WHERE id = 'test-dep-closed-c'").Scan(&headTitle); err != nil {
 		t.Fatalf("read HEAD title: %v", err)
 	}
-	if headTitle != "test-dep-closed-c" {
-		t.Fatalf("HEAD title of test-dep-closed-c = %q: the non-flipping add swept a pending issues edit into its commit", headTitle)
+	if headTitle != "pending elsewhere" {
+		t.Fatalf("HEAD title of test-dep-closed-c = %q, want the pending edit: the edge's commit stages the issue closure", headTitle)
 	}
-	var dirty int
-	if err := store.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'issues'").Scan(&dirty); err != nil {
-		t.Fatalf("query dolt_status: %v", err)
-	}
-	if dirty == 0 {
-		t.Fatal("issues is clean: the non-flipping add committed a row it never wrote")
-	}
+	requireCleanTables(ctx, t, store, "issues")
+	requireMetadataKeyUncommitted(ctx, t, store, "test.dep-closure")
 }
 
 // TestDoltStoreDependencyEditorWispSourceCommitsDurableIsBlocked is GH#6647

@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"regexp"
 	"strings"
@@ -28,6 +29,10 @@ import (
 // conn.ExecContext therefore fails this test loudly ("call to ExecQuery
 // was not expected, next expectation is: ExecQuery ...") instead of
 // silently reintroducing the drain gap.
+//
+// The doltAddAndCommit tests here stage metadata, a table outside the issue
+// closure, so the call they pin is a one-table DOLT_ADD; TestWithIssueClosure
+// and the publication-ordering tests cover the closure.
 func TestDoltAddAndCommitDrainsCallResultSets(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	if err != nil {
@@ -36,7 +41,7 @@ func TestDoltAddAndCommitDrainsCallResultSets(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-		WithArgs("issues").
+		WithArgs("metadata").
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -46,7 +51,7 @@ func TestDoltAddAndCommitDrainsCallResultSets(t *testing.T) {
 
 	store := &DoltStore{db: db}
 
-	if err := store.doltAddAndCommit(context.Background(), []string{"issues"}, "bd: test commit"); err != nil {
+	if err := store.doltAddAndCommit(context.Background(), []string{"metadata"}, "bd: test commit"); err != nil {
 		t.Fatalf("doltAddAndCommit: %v", err)
 	}
 
@@ -74,17 +79,17 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 			name: "DOLT_ADD",
 			setup: func(mock sqlmock.Sqlmock) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-					WithArgs("issues").
+					WithArgs("metadata").
 					WillReturnError(testConnectionLoss)
 			},
 			cause:       testConnectionLoss,
-			wantContext: "dolt add issues after SQL mutation",
+			wantContext: "dolt add metadata after SQL mutation",
 		},
 		{
 			name: "untyped DOLT_COMMIT",
 			setup: func(mock sqlmock.Sqlmock) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-					WithArgs("issues").
+					WithArgs("metadata").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
 					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -99,7 +104,7 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 			name: "typed deadlock DOLT_COMMIT",
 			setup: func(mock sqlmock.Sqlmock) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-					WithArgs("issues").
+					WithArgs("metadata").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
 					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -114,7 +119,7 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 			name: "typed lock wait DOLT_COMMIT",
 			setup: func(mock sqlmock.Sqlmock) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-					WithArgs("issues").
+					WithArgs("metadata").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
 					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -142,7 +147,7 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 				}
 			}
 
-			err = store.doltAddAndCommit(context.Background(), []string{"issues"}, "bd: test commit")
+			err = store.doltAddAndCommit(context.Background(), []string{"metadata"}, "bd: test commit")
 			if !errors.Is(err, storage.ErrCommitIndeterminate) {
 				t.Fatalf("doltAddAndCommit() error = %v, want ErrCommitIndeterminate", err)
 			}
@@ -174,14 +179,14 @@ func TestDoltAddAndCommitAmbiguousConnectionFailuresTripCircuitOnce(t *testing.T
 	t.Cleanup(func() { _ = db.Close() })
 	for range circuitFailureThreshold {
 		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-			WithArgs("issues").
+			WithArgs("metadata").
 			WillReturnError(testConnectionLoss)
 	}
 
 	breaker := newTestCircuitBreaker(t)
 	store := &DoltStore{db: db, breaker: breaker}
 	for i := 0; i < circuitFailureThreshold; i++ {
-		err := store.doltAddAndCommit(context.Background(), []string{"issues"}, "bd: test commit")
+		err := store.doltAddAndCommit(context.Background(), []string{"metadata"}, "bd: test commit")
 		if !errors.Is(err, ErrCommitIndeterminate) {
 			t.Fatalf("attempt %d error = %v, want ErrCommitIndeterminate", i+1, err)
 		}
@@ -205,7 +210,7 @@ func TestDoltAddAndCommitTreatsNothingToCommitAsSuccess(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-		WithArgs("issues").
+		WithArgs("metadata").
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -214,7 +219,7 @@ func TestDoltAddAndCommitTreatsNothingToCommitAsSuccess(t *testing.T) {
 		WillReturnError(errors.New("nothing to commit"))
 
 	store := &DoltStore{db: db}
-	if err := store.doltAddAndCommit(context.Background(), []string{"issues"}, "bd: test commit"); err != nil {
+	if err := store.doltAddAndCommit(context.Background(), []string{"metadata"}, "bd: test commit"); err != nil {
 		t.Fatalf("doltAddAndCommit() error = %v, want nil", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -246,6 +251,104 @@ func TestCommitWithConfigCommitResponseLossIsIndeterminate(t *testing.T) {
 	}
 }
 
+// expectClosureStaging expects what commitWorkingSet sends after a dolt_status
+// read that named issues, on a database that holds every table of the issue
+// closure: the SHOW TABLES read, then one DOLT_ADD naming the whole closure.
+// It returns that DOLT_ADD's expectation for the caller to answer.
+func expectClosureStaging(mock sqlmock.Sqlmock) *sqlmock.ExpectedQuery {
+	held := sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("config").AddRow("metadata")
+	for _, table := range wantIssueClosure {
+		held.AddRow(table)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW TABLES")).WillReturnRows(held)
+	return expectDoltAddOf(mock, wantIssueClosure...)
+}
+
+// expectDoltAddOf expects one CALL DOLT_ADD naming tables, in order.
+func expectDoltAddOf(mock sqlmock.Sqlmock, tables ...string) *sqlmock.ExpectedQuery {
+	stmt, args := callNamingTables("CALL DOLT_ADD", tables)
+	values := make([]driver.Value, len(args))
+	for i, arg := range args {
+		values[i] = arg
+	}
+	return mock.ExpectQuery(regexp.QuoteMeta(stmt)).WithArgs(values...)
+}
+
+// TestCommitWorkingSetStagesTheHeldIssueClosure pins commitWorkingSet's
+// widening: a dolt_status list that names a table of the issue closure stages
+// every closure table the database holds, in one DOLT_ADD with the rest of the
+// list, so a write that commits in SQL after the status read is staged whole;
+// a database a migration has not reached stages the closure tables it has; a
+// list with no closure table, or config under Commit, is staged as before; and
+// a failed table listing stages nothing.
+func TestCommitWorkingSetStagesTheHeldIssueClosure(t *testing.T) {
+	// Migration 0063 creates provenance_events and 0074 id_tombstones.
+	below0063 := []string{"child_counters", "comments", "compaction_snapshots", "dependencies",
+		"issue_snapshots", "issues", "labels"}
+	listErr := errors.New("show tables failed")
+	for _, tc := range []struct {
+		name    string
+		dirty   []string
+		held    []string // nil: no SHOW TABLES read expected
+		listErr error
+		staged  []string // nil: no DOLT_ADD expected
+	}{
+		{name: "issues on a migrated database", dirty: []string{"issues", "metadata", "config"},
+			held: append([]string{"config", "metadata", "repo_mtimes"}, wantIssueClosure...),
+			staged: []string{"child_counters", "comments", "compaction_snapshots", "dependencies", "id_tombstones",
+				"issue_snapshots", "issues", "labels", "metadata", "provenance_events"}},
+		{name: "labels on a database below migration 0063", dirty: []string{"labels"},
+			held: append([]string{"metadata"}, below0063...), staged: below0063},
+		{name: "no closure table", dirty: []string{"metadata", "config"}, staged: []string{"metadata"}},
+		{name: "the table listing fails", dirty: []string{"issues"}, held: []string{}, listErr: listErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+
+			status := sqlmock.NewRows([]string{"table_name"})
+			for _, table := range tc.dirty {
+				status.AddRow(table)
+			}
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).WillReturnRows(status)
+			if tc.held != nil {
+				listing := mock.ExpectQuery(regexp.QuoteMeta("SHOW TABLES"))
+				if tc.listErr != nil {
+					listing.WillReturnError(tc.listErr)
+				} else {
+					held := sqlmock.NewRows([]string{"Tables_in_beads"})
+					for _, table := range tc.held {
+						held.AddRow(table)
+					}
+					listing.WillReturnRows(held)
+				}
+			}
+			if tc.staged != nil {
+				expectDoltAddOf(mock, tc.staged...).WillReturnRows(sqlmock.NewRows([]string{"status"}))
+				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
+					WithArgs("bd: test commit", " <>").
+					WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+			}
+
+			store := &DoltStore{db: db}
+			err = store.Commit(context.Background(), "bd: test commit")
+			if tc.listErr != nil {
+				if !errors.Is(err, tc.listErr) {
+					t.Fatalf("Commit() error = %v, want the listing's %v", err, tc.listErr)
+				}
+			} else if err != nil {
+				t.Fatalf("Commit() error = %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sqlmock expectations: %v", err)
+			}
+		})
+	}
+}
+
 func TestCommitCommitResponseLossIsIndeterminate(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	if err != nil {
@@ -255,9 +358,7 @@ func TestCommitCommitResponseLossIsIndeterminate(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).
 		WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
-	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-		WithArgs("issues").
-		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	expectClosureStaging(mock).WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 		WithArgs("bd: test commit", " <>").
 		WillReturnError(testConnectionLoss)
@@ -285,17 +386,15 @@ func TestCommitPropagatesDoltAddFailureBeforeCommit(t *testing.T) {
 	stageErr := errors.New("stage issues failed")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).
 		WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
-	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-		WithArgs("issues").
-		WillReturnError(stageErr)
+	expectClosureStaging(mock).WillReturnError(stageErr)
 
 	store := &DoltStore{db: db}
 	err = store.Commit(context.Background(), "bd: test commit")
 	if !errors.Is(err, stageErr) {
 		t.Fatalf("Commit() error = %v, want staging cause %v", err, stageErr)
 	}
-	if !strings.Contains(err.Error(), "stage issues") {
-		t.Fatalf("Commit() error = %q, want staging table context", err)
+	if want := "failed to stage " + strings.Join(wantIssueClosure, ", ") + " before commit"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("Commit() error = %q, want staging table context %q", err, want)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)
@@ -314,9 +413,7 @@ func TestPublicCommitAmbiguousConnectionFailuresTripCircuit(t *testing.T) {
 			expect: func(mock sqlmock.Sqlmock) {
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).
 					WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
-				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-					WithArgs("issues").
-					WillReturnRows(sqlmock.NewRows([]string{"status"}))
+				expectClosureStaging(mock).WillReturnRows(sqlmock.NewRows([]string{"status"}))
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: test commit", " <>").
 					WillReturnError(testConnectionLoss)
@@ -330,9 +427,7 @@ func TestPublicCommitAmbiguousConnectionFailuresTripCircuit(t *testing.T) {
 			expect: func(mock sqlmock.Sqlmock) {
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).
 					WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
-				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-					WithArgs("issues").
-					WillReturnRows(sqlmock.NewRows([]string{"status"}))
+				expectClosureStaging(mock).WillReturnRows(sqlmock.NewRows([]string{"status"}))
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: test merge commit", " <>").
 					WillReturnError(testConnectionLoss)

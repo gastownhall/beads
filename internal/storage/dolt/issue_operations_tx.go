@@ -54,10 +54,13 @@ func (s *DoltStore) runIssueOperationTx(ctx context.Context, commitMsg string, f
 //
 // Audit-trail caveat (server mode): sessions on one branch share the working
 // set, so a concurrent writer's DOLT_COMMIT can absorb this operation's rows
-// under its own message; this operation's commit then degrades to
-// nothing-to-commit and its message never reaches dolt log. The data is
-// intact — doltAddAndCommit logs the absorption so the missing audit line is
-// explicable.
+// under its own message; this operation's commit then finds nothing to stage
+// and its message never reaches dolt log. The absorbing commit carries the
+// rows whole: every publisher in this package stages the issue closure in
+// one DOLT_ADD (withIssueClosure), so no published commit holds a delete's
+// issues row removal without the rows that named the issue, or a create's
+// child rows without its issues row. doltAddAndCommit logs an absorption
+// that lands between its staged check and its DOLT_COMMIT.
 func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(*sql.Tx) (storageissueops.ChangedTables, string, error)) error {
 	var tables storageissueops.ChangedTables
 	var commitMsg string
@@ -99,8 +102,10 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 // history tables when active) and DOLT_COMMIT with commitMsg, on a fresh
 // pinned connection with no SQL transaction open. It is the only publication
 // step a SQL mutation may take (GH#5752, LatentLabsSpace/NEXUS#92): staging
-// inside the still-open transaction builds the Dolt commit from the BEGIN-time
-// root and silently reverts rows concurrent writers committed in the window.
+// inside the still-open transaction can build the Dolt commit from the
+// BEGIN-time root, which on a server with the staged-root behavior GH#5752
+// describes writes rows concurrent writers committed in the window back to
+// their old values.
 //
 // Callers reach it only after their runner returned nil, so a failed or
 // indeterminate SQL commit never publishes (see runIssueOperationTxWithMessage
@@ -111,16 +116,21 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 // guard (no empty commits) and the nothing-to-commit tolerance live in
 // doltAddAndCommit.
 //
-// Recheck ordering: runIssueOperationTxWithMessage settles the post-commit
-// blocked-state recheck only after this publication (gastownhall/beads#7035),
-// as runDoltTransaction and RemoveDependency settle it after their own Dolt
-// commit. Its other callers (DeleteIssue and DeleteIssues, the role deleter,
-// the sweeper and lifecycle transactions) are a known exception: their
-// runners (withRetryTx, withWriteTx, withDeleteFence) settle the recheck
-// before they return. When that recheck changes an issues row (the
-// gastownhall/beads#6716 race), its Dolt commit therefore comes BEFORE this
-// publication and stages this mutation's committed issues rows under the
-// recheck's message. The data is intact; only the audit attribution differs.
+// Recheck ordering: every caller settles the post-commit blocked-state
+// recheck only after this publication (gastownhall/beads#7035), as
+// runDoltTransaction and RemoveDependency settle it after their own Dolt
+// commit. Their runners (retryWriteTxOn, commitWriteTx, withDeleteFence) hand
+// the pending recheck back instead of settling it. The recheck's commit
+// stages the whole issues table and, with it, the issue closure
+// (withIssueClosure), so a recheck that changed a row (the
+// gastownhall/beads#6716 race) and ran first would publish this mutation's
+// rows under the recheck's message and leave commitMsg's own commit nothing
+// to stage.
+//
+// Between the SQL COMMIT and this publication the mutation's rows sit in the
+// shared working set unpublished, and another writer's commit can take them.
+// That commit stages the issue closure in one DOLT_ADD, so it takes them
+// whole (see the audit-trail caveat on runIssueOperationTxWithMessage).
 func (s *DoltStore) publishCommittedOperation(ctx context.Context, tables []string, commitMsg string) {
 	if len(tables) == 0 {
 		return

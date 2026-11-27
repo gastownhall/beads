@@ -68,18 +68,22 @@ func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueop
 		return result, nil
 	}
 
-	// withRetryTx, like the deleter: a sweep that loses Dolt's commit-time
+	// The deleter's retried runner: a sweep that loses Dolt's commit-time
 	// merge (1213/1205, or the exact 1105 autocommit rollback) never landed,
 	// so the whole body replays — candidates re-read, result re-derived. A
 	// retaining sweep needs it most: it writes one coordination cell per
 	// shard it retires (see issueops.Sweeper on the lock footprint), and a
 	// create committing in any of those shards first conflicts it.
-	if err := s.store.withRetryTx(ctx, func(tx *sql.Tx) error {
+	pending, err := s.store.retryWriteTxOn(ctx, s.store.db, func(tx *sql.Tx) error {
 		result = issueops.SweepResult{}
 		return run(tx)
-	}); err != nil {
+	})
+	if err != nil {
 		return issueops.SweepResult{}, err
 	}
+	// Settled after the sweep's own Dolt commit below, as the deleter settles
+	// its recheck (gastownhall/beads#7035).
+	defer s.store.settleBlockedRecheck(ctx, pending)
 	// Through the same publisher, with the same table list, as the deleter. A
 	// sweep mints nothing today — SweepInTx deletes through DeleteIssuesInTx,
 	// which rewrites no neighbor, so there is no surviving row to version —

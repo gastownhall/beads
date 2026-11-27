@@ -1363,17 +1363,7 @@ func (s *DoltStore) withReadTxLongTimeout(ctx context.Context, fn func(tx *sql.T
 // logic (verify passes, hooks, return values). See ready_claimer.ClaimNext's
 // `claimed = nil` reset for the canonical example.
 func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	return s.withRetryTxOn(ctx, s.db, fn)
-}
-
-// withRetryTxOn is withRetryTx against a caller-chosen txBeginner instead of
-// the shared pool, so a caller that must hold a session-scoped resource (e.g.
-// a GET_LOCK) across the whole retried write can pin one *sql.Conn for it —
-// see withDeleteFence. Every retried attempt replays on that SAME connection,
-// which is required: txBeginner's one other implementer, *sql.Conn, is itself
-// the pinned session, there is no pool to hand back a different one.
-func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) error {
-	pending, err := s.retryWriteTxOn(ctx, beginner, fn)
+	pending, err := s.retryWriteTxOn(ctx, s.db, fn)
 	if err != nil {
 		return err
 	}
@@ -1381,15 +1371,23 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 	return nil
 }
 
-// retryWriteTxOn is withRetryTxOn without its tail: once fn has committed it
+// retryWriteTxOn is withRetryTx without its tail: once fn has committed it
 // hands back the dependents fn's unblocking writes recorded instead of
 // settling them. It is for a caller that mints the write's own Dolt commit
-// after the SQL transaction (runIssueOperationTxWithMessage) and must settle
-// only after that commit. The recheck's commit stages the whole issues table,
-// so a recheck that ran first would take the write's rows into its own commit
-// and leave the write's commit, and the message that carries its provenance,
-// with nothing to stage (gastownhall/beads#7035). The caller owns the settle:
-// a pending recheck that is dropped leaves the #6716 race unrepaired.
+// after the SQL transaction (runIssueOperationTxWithMessage, the role deleter
+// and the sweeper) and must settle only after that commit. The recheck's
+// commit stages the whole issues table, so a recheck that ran first would
+// take the write's rows into its own commit and leave the write's commit, and
+// the message that carries its provenance, with nothing to stage
+// (gastownhall/beads#7035). The caller owns the settle: a pending recheck
+// that is dropped leaves the #6716 race unrepaired.
+//
+// beginner is the shared pool, or one pinned *sql.Conn for a caller that must
+// hold a session-scoped resource (e.g. a GET_LOCK) across the whole retried
+// write — see withDeleteFence. Every retried attempt replays on that SAME
+// connection, which is required: txBeginner's one other implementer,
+// *sql.Conn, is itself the pinned session, there is no pool to hand back a
+// different one.
 func (s *DoltStore) retryWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	// Keep circuit admission at the transaction retry boundary. Calling
 	// withRetry from here would multiply retries and could replay a write after
@@ -1475,7 +1473,7 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 }
 
 // commitWriteTxOn is commitWriteTx against a caller-chosen txBeginner — see
-// withRetryTxOn.
+// retryWriteTxOn.
 func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
@@ -1698,6 +1696,128 @@ func (s *DoltStore) withVersionedHistoryTables(ctx context.Context, q issueops.D
 		}
 	}
 	return staged
+}
+
+// issueClosureTables are the versioned tables whose rows must reach Dolt
+// history together with the issues rows they describe: issues; every
+// versioned table with a foreign key to it, namely dependencies (fk_dep_issue,
+// fk_dep_issue_target), labels, comments, child_counters (fk_counter_parent,
+// which migration 0039 dropped and ignored migration 0002 added back),
+// issue_snapshots, compaction_snapshots and provenance_events; and
+// id_tombstones, which has no key to issues but which a retaining sweep
+// writes in the same transaction as the deletes it records (migration 0074),
+// so that a clone never pulls the deletes without the tombstones that keep
+// their ids from being created again. events also has a key to issues, but it
+// is dolt_ignore'd (0062) and never staged.
+// TestIssueClosureTablesCoverEveryForeignKeyToIssues pins the list against
+// the migrated schema.
+//
+// Every table on the list exists at the latest schema, which every write path
+// already needs: a create reads id_tombstones. A DOLT_ADD naming a table that
+// does not exist fails with nothing staged, so only the write publishers
+// (stageAndCommit, the transaction publisher) apply the whole list.
+// commitWorkingSet also runs on a database a migration has not reached yet
+// (the lenient and remote-sync opens), and applies the part of the list that
+// database holds (heldIssueClosureTables).
+var issueClosureTables = []string{
+	"issues", "dependencies", "labels", "comments", "child_counters",
+	"issue_snapshots", "compaction_snapshots", "provenance_events",
+	issueops.IDTombstoneTable,
+}
+
+func isIssueClosureTable(table string) bool {
+	return slices.Contains(issueClosureTables, table)
+}
+
+// withIssueClosure widens a staging list that names any table of the issue
+// closure (issueClosureTables) to the whole closure. The publishers stage the
+// list with one DOLT_ADD, so a Dolt commit takes an issues row and the rows
+// that name it from one working-set snapshot and never publishes a root whose
+// rows name an issue the root does not hold.
+//
+// Sessions on one branch share the working set, and DOLT_ADD stages a whole
+// table from it. A write is published after its SQL COMMIT (GH#5752), so for
+// a moment its rows sit in the working set unpublished. A close, a claim or
+// the blocked-state recheck stages issues. Without the closure its commit
+// would take a concurrent delete's removal of an issues row but leave the
+// dependencies, labels and comments rows naming that issue at HEAD, and a
+// label or dependency write would publish a concurrent create's child rows
+// without the create's issues row. Either commit breaks the foreign keys,
+// and bd dolt push distributes it. With the closure, the commit carries the
+// concurrent write whole, under its own message (the absorption
+// doltAddAndCommit documents), and that write's own commit finds nothing left
+// to stage.
+//
+// Staging a clean table stages nothing, so a write's own changes are
+// unaffected. What the closure widens is the set of other writers' pending
+// changes a commit carries: a write used to stage only the tables it wrote
+// (#4149, GH#6647), and now a pending row anywhere in the closure rides the
+// next commit that stages any of it. Tables outside the closure keep that
+// selective staging.
+func withIssueClosure(tables []string) []string {
+	if !slices.ContainsFunc(tables, isIssueClosureTable) {
+		return tables
+	}
+	widened := slices.Clone(tables)
+	for _, table := range issueClosureTables {
+		if !slices.Contains(widened, table) {
+			widened = append(widened, table)
+		}
+	}
+	return widened
+}
+
+// markIssueClosureDirty is withIssueClosure for a transaction's dirty-table
+// tracker: when the transaction dirtied any table of the issue closure, it
+// marks the whole closure, so the post-commit StageAndCommit stages it.
+func markIssueClosureDirty(dirty *versioncontrolops.DirtyTableTracker) {
+	tables := dirty.DirtyTables()
+	if !slices.ContainsFunc(issueClosureTables, func(table string) bool { return tables[table] }) {
+		return
+	}
+	for _, table := range issueClosureTables {
+		dirty.MarkDirty(table)
+	}
+}
+
+// heldIssueClosureTables returns the tables of the issue closure
+// (issueClosureTables) that conn's database holds. commitWorkingSet widens
+// its list to them. It reads SHOW TABLES rather than INFORMATION_SCHEMA.TABLES,
+// for the reason schema's showTableExists gives: Dolt answers the latter by
+// walking every database on the server. Names compare case-insensitively, as
+// Dolt resolves them.
+func heldIssueClosureTables(ctx context.Context, conn *sql.Conn) ([]string, error) {
+	rows, err := conn.QueryContext(ctx, "SHOW TABLES")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	// SHOW TABLES returns Tables_in_<db>, and on some servers Table_type
+	// after it; the first column is the table name.
+	cells := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	var held []string
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		if len(cells) == 0 {
+			continue
+		}
+		for _, table := range issueClosureTables {
+			if strings.EqualFold(string(cells[0]), table) {
+				held = append(held, table)
+			}
+		}
+	}
+	return held, rows.Err()
 }
 
 func (s *DoltStore) commitSQLTx(ctx context.Context, op string, tx *sql.Tx) error {
@@ -4184,11 +4304,11 @@ func (s *DoltStore) commitWorkingSet(ctx context.Context, message string, mode c
 	}
 	defer conn.Close()
 
-	// GH#2455: stage each dirty table individually, skipping config unless the
+	// GH#2455: stage the dirty tables by name, skipping config unless the
 	// mode opts it in, to avoid sweeping up stale issue_prefix changes from
 	// concurrent operations. Exclude dolt_ignore'd tables (wisps, wisp_%, leases)
 	// with the same anti-join HasCommittablePending uses: they surface in
-	// dolt_status but are never stageable, and the fail-hard DOLT_ADD loop below
+	// dolt_status but are never stageable, and the fail-hard DOLT_ADD below
 	// must see only tables it can actually stage. A dirty wisp or lease row is the
 	// normal steady state; staging it depends on Dolt's version-specific
 	// ignored-table DOLT_ADD behavior (a silent no-op on 2.2.0), so filtering here
@@ -4249,10 +4369,32 @@ func (s *DoltStore) commitWorkingSet(ctx context.Context, message string, mode c
 		return nil // Nothing to commit (all changes were config-only or dolt_ignore'd)
 	}
 
-	for _, table := range tables {
-		if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
-			return fmt.Errorf("failed to stage %s before commit: %w", table, err)
+	// One DOLT_ADD stages every dirty table from one working-set snapshot, as
+	// stageAndCommit does: a call per table lets a write that commits in SQL
+	// between two calls be staged in part. The list is the dolt_status read
+	// above, though, so a write that commits in SQL after that read (a
+	// delete or create inside its publication window) would still be staged
+	// in part: its issues rows with an issues edit the read saw, without the
+	// dependencies, labels or comments rows naming them. A list that names a
+	// table of the issue closure therefore names the whole closure, as the
+	// write publishers' lists do (withIssueClosure), but only the closure
+	// tables this database holds: this path also commits a database a
+	// migration has not reached yet (the lenient and remote-sync opens), and
+	// a DOLT_ADD naming a missing table fails with nothing staged.
+	// dolt_status lists a table twice when it has both staged and unstaged
+	// changes, so the list is deduplicated before it becomes the arguments.
+	if slices.ContainsFunc(tables, isIssueClosureTable) {
+		held, err := heldIssueClosureTables(ctx, conn)
+		if err != nil {
+			return fmt.Errorf("list the issue closure tables before commit: %w", err)
 		}
+		tables = append(tables, held...)
+	}
+	slices.Sort(tables)
+	tables = slices.Compact(tables)
+	stmt, args := callNamingTables("CALL DOLT_ADD", tables)
+	if err := schema.DrainCall(ctx, conn, stmt, args...); err != nil {
+		return fmt.Errorf("failed to stage %s before commit: %w", strings.Join(tables, ", "), err)
 	}
 
 	// NOTE: In SQL procedure mode, Dolt defaults author to the authenticated SQL user
@@ -4508,9 +4650,12 @@ var afterStageCommitScreen = func() {}
 
 // doltAddAndCommit stages the specified tables and commits on a pinned
 // connection. This prevents DOLT_COMMIT('-Am') from sweeping up stale
-// working set changes from concurrent operations (GH#2455). Every caller has
-// already committed its SQL mutation, so any publication failure here has an
-// indeterminate durable outcome and must not be replayed.
+// working set changes from concurrent operations (GH#2455). A list that
+// names any table of the issue closure stages the whole closure
+// (withIssueClosure), so the commit never holds rows that name an issue
+// without that issue's row. Every caller has already committed its SQL
+// mutation, so any publication failure here has an indeterminate durable
+// outcome and must not be replayed.
 func (s *DoltStore) doltAddAndCommit(ctx context.Context, tables []string, commitMsg string) error {
 	return s.stageAndCommit(ctx, tables, commitMsg, stageOptions{})
 }
@@ -4532,7 +4677,8 @@ func (s *DoltStore) stageAndCommit(ctx context.Context, tables []string, commitM
 
 		tables := tables
 		if !opts.configPlane {
-			tables = s.withVersionedHistoryTables(ctx, conn, tables)
+			// The closure goes last: the history tables add issues.
+			tables = withIssueClosure(s.withVersionedHistoryTables(ctx, conn, tables))
 		}
 
 		if opts.screen != nil {
@@ -4542,10 +4688,21 @@ func (s *DoltStore) stageAndCommit(ctx context.Context, tables []string, commitM
 			afterStageCommitScreen()
 		}
 
-		for _, table := range tables {
-			if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
+		// One DOLT_ADD names every table (gastownhall/beads#8239). One
+		// statement stages every table from one working-set snapshot, so a
+		// write that lands between per-table calls can no longer leave the
+		// staged issue closure half-updated (withIssueClosure). Dolt stages
+		// all of a call's arguments together (actions.StageTables): a
+		// dolt_ignore'd table named among the others stages nothing, as its
+		// own call did, and a table that does not exist fails the call with
+		// nothing staged. A call whose response is lost may have staged
+		// every table, which is why the error stays ErrCommitIndeterminate.
+		if len(tables) > 0 {
+			stmt, args := callNamingTables("CALL DOLT_ADD", tables)
+			if err := schema.DrainCall(ctx, conn, stmt, args...); err != nil {
 				return s.recordDoltPublicationFailure(ctx,
-					fmt.Errorf("dolt add %s after SQL mutation: %w: %w", table, err, ErrCommitIndeterminate))
+					fmt.Errorf("dolt add %s after SQL mutation: %w: %w",
+						strings.Join(tables, ", "), err, ErrCommitIndeterminate))
 			}
 		}
 
@@ -4591,6 +4748,18 @@ func (s *DoltStore) stageAndCommit(ctx context.Context, tables []string, commitM
 		}
 		return nil
 	})
+}
+
+// callNamingTables returns procedure called with one placeholder per table,
+// and the tables as its arguments: callNamingTables("CALL DOLT_ADD",
+// []string{"a", "b"}) is "CALL DOLT_ADD(?, ?)" bound to "a" and "b".
+func callNamingTables(procedure string, tables []string) (string, []any) {
+	args := make([]any, len(tables))
+	for i, table := range tables {
+		args[i] = table
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(tables)), ", ")
+	return procedure + "(" + placeholders + ")", args
 }
 
 // unstageRefused undoes stageAndCommit's DOLT_ADD after its screen refused the
@@ -6325,7 +6494,7 @@ func (s *DoltStore) recomputeAllBlocked(ctx context.Context) (int, error) {
 // txBeginner is satisfied by both *sql.DB and *sql.Conn, letting
 // recomputeAllBlockedWithDB run either against a caller-owned pinned
 // *sql.Conn (recomputeAllBlocked) or directly against a *sql.DB (tests). Also
-// used by withRetryTxOn/commitWriteTxOn to run the shared retry-and-commit
+// used by retryWriteTxOn/commitWriteTxOn to run the shared retry-and-commit
 // body against either the pool (the common case) or one pinned connection
 // (withDeleteFence, which must hold a GET_LOCK session across the whole
 // retried write).
@@ -6351,8 +6520,15 @@ func (s *DoltStore) recomputeAllBlockedWithDB(ctx context.Context, db txBeginner
 		return 0, err
 	}
 	if changed > 0 {
-		// Stage only issues — the synced table is_blocked lives on (wisps are
+		// Stage issues — the synced table is_blocked lives on (wisps are
 		// dolt_ignore'd) — so an unrelated dirty working set is not swept in.
+		// doltAddAndCommit stages the rest of the issue closure with it
+		// (withIssueClosure). The guard above saw issues and dependencies
+		// clean, so a change they hold now is a write that landed since, and
+		// the closure publishes that write whole instead of an issues row
+		// without the rows that name it. Another writer's pending rows in the
+		// other closure tables ride along, as they do in any commit that
+		// stages their table.
 		if err := s.doltAddAndCommit(ctx, blockedRecomputeStagedTableList(),
 			versioncontrolops.BlockedRecomputeCommitMsg); err != nil {
 			return int(changed), err
@@ -6363,7 +6539,8 @@ func (s *DoltStore) recomputeAllBlockedWithDB(ctx context.Context, db txBeginner
 
 // blockedRecomputeStagedTableList is versioncontrolops.BlockedRecomputeStagedTables
 // in the ordered form doltAddAndCommit takes, so the staging set of the repair
-// commit is defined in exactly one place for every mode.
+// commit is defined in exactly one place for every mode. Server mode stages
+// the issue closure with it (withIssueClosure), as it does for every write.
 func blockedRecomputeStagedTableList() []string {
 	staged := versioncontrolops.BlockedRecomputeStagedTables()
 	tables := make([]string, 0, len(staged))

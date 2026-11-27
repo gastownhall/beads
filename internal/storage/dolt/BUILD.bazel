@@ -333,6 +333,7 @@ go_test(
         "public_write_circuit_test.go",
         "publication_failure_test.go",
         "publication_guard_test.go",
+        "publication_issue_closure_test.go",
         "publication_ordering_support_test.go",
         "publication_skip_test.go",
         "pull_branch_tracking_test.go",

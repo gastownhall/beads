@@ -262,7 +262,7 @@ func TestMetadataSlotWritesDoltCommitResponseLossAfterSQLCommitIsAppliedAndNotRe
 			if driver.metadataUpdates != 1 || driver.eventInserts != 1 {
 				t.Fatalf("mutation attempts = updates:%d events:%d, want updates:1 events:1 (no replay)", driver.metadataUpdates, driver.eventInserts)
 			}
-			if got, want := sortedCopy(driver.stagedTables...), []string{"events", "issues"}; !slices.Equal(got, want) || driver.doltCommits != 1 {
+			if got, want := sortedCopy(driver.stagedTables...), stagedWithIssueClosure("events", "issues"); !slices.Equal(got, want) || driver.doltCommits != 1 {
 				t.Fatalf("Dolt publication = staged %v commits:%d, want staged %v commits:1", got, driver.doltCommits, want)
 			}
 			if driver.txAttempts != 1 || driver.txCommits != 1 || driver.txRollbacks != 0 {

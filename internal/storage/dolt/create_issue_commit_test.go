@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -93,7 +94,42 @@ func TestCreateIssueCommitsInitialRelationalData(t *testing.T) {
 	}
 }
 
-func TestCreateIssueWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t *testing.T) {
+// pendingMetadataKey writes a metadata row outside any of the store's
+// writes: a pending change in a table outside the issue closure, which no
+// issue write may commit.
+func pendingMetadataKey(ctx context.Context, t *testing.T, store *DoltStore, key string) {
+	t.Helper()
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO metadata (`key`, value) VALUES (?, 'pending')", key); err != nil {
+		t.Fatalf("pending metadata insert: %v", err)
+	}
+}
+
+// requireMetadataKeyUncommitted fails unless key is still only in the working
+// set: an issue write stages its own tables and the issue closure
+// (withIssueClosure), never a table outside both.
+func requireMetadataKeyUncommitted(ctx context.Context, t *testing.T, store *DoltStore, key string) {
+	t.Helper()
+	var committed int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM metadata AS OF 'HEAD' WHERE `key` = ?", key).Scan(&committed); err != nil {
+		t.Fatalf("count committed metadata: %v", err)
+	}
+	if committed != 0 {
+		t.Fatalf("metadata %q is at HEAD: the write committed a pending row outside its tables and the issue closure", key)
+	}
+	if !tableDirty(ctx, t, store, "metadata") {
+		t.Fatalf("metadata is clean: the write committed the pending %q row", key)
+	}
+}
+
+// TestCreateIssueCarriesPendingIssueClosureRows: a create without labels or
+// comments still stages the whole issue closure (withIssueClosure), so the
+// pending labels and comments rows another write left in the working set
+// ride its commit whole rather than staying behind while issues is
+// published; a pending row outside the closure stays where it is. Until the
+// closure, the create staged only the tables it wrote (#4149) and left both.
+func TestCreateIssueCarriesPendingIssueClosureRows(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -124,6 +160,8 @@ func TestCreateIssueWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t *
 		t.Fatalf("dirty comment insert: %v", err)
 	}
 
+	pendingMetadataKey(ctx, t, store, "test.create-closure")
+
 	plain := &types.Issue{
 		ID:        "plain-create",
 		Title:     "Plain create",
@@ -142,8 +180,8 @@ func TestCreateIssueWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t *
 	).Scan(&committedLabels); err != nil {
 		t.Fatalf("count committed dirty labels: %v", err)
 	}
-	if committedLabels != 0 {
-		t.Fatalf("committed dirty labels = %d, want 0", committedLabels)
+	if committedLabels != 1 {
+		t.Fatalf("committed pending labels = %d, want 1: the create's commit stages the issue closure", committedLabels)
 	}
 
 	var committedComments int
@@ -153,20 +191,12 @@ func TestCreateIssueWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t *
 	).Scan(&committedComments); err != nil {
 		t.Fatalf("count committed dirty comments: %v", err)
 	}
-	if committedComments != 0 {
-		t.Fatalf("committed dirty comments = %d, want 0", committedComments)
+	if committedComments != 1 {
+		t.Fatalf("committed pending comments = %d, want 1: the create's commit stages the issue closure", committedComments)
 	}
 
-	var dirtySideTables int
-	if err := store.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM dolt_status
-		WHERE table_name IN ('labels', 'comments')
-	`).Scan(&dirtySideTables); err != nil {
-		t.Fatalf("count dirty side tables: %v", err)
-	}
-	if dirtySideTables != 2 {
-		t.Fatalf("dirty side table count = %d, want 2", dirtySideTables)
-	}
+	requireCleanTables(ctx, t, store, "issues", "labels", "comments")
+	requireMetadataKeyUncommitted(ctx, t, store, "test.create-closure")
 }
 
 func TestCreateIssueCommitsChildCounterForHierarchicalID(t *testing.T) {
@@ -215,7 +245,13 @@ func TestCreateIssueCommitsChildCounterForHierarchicalID(t *testing.T) {
 	}
 }
 
-func TestCreateIssueWithExplicitHierarchicalIDDoesNotCommitDirtyChildCounters(t *testing.T) {
+// TestCreateIssueWithExplicitHierarchicalIDCarriesThePendingChildCounter: an
+// explicit hierarchical id does not bump the parent's counter, but
+// child_counters has a foreign key to issues, so the create's commit stages
+// it with the rest of the issue closure (withIssueClosure) and the pending
+// counter row rides along. Until the closure, the create left it pending
+// (#4149).
+func TestCreateIssueWithExplicitHierarchicalIDCarriesThePendingChildCounter(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -258,23 +294,16 @@ func TestCreateIssueWithExplicitHierarchicalIDDoesNotCommitDirtyChildCounters(t 
 	).Scan(&committedDirtyCounters); err != nil {
 		t.Fatalf("count committed dirty child counters: %v", err)
 	}
-	if committedDirtyCounters != 0 {
-		t.Fatalf("committed dirty child counters = %d, want 0", committedDirtyCounters)
+	if committedDirtyCounters != 1 {
+		t.Fatalf("committed pending child counters = %d, want 1: the create's commit stages the issue closure", committedDirtyCounters)
 	}
-
-	var dirtyChildCounters int
-	if err := store.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM dolt_status
-		WHERE table_name = 'child_counters'
-	`).Scan(&dirtyChildCounters); err != nil {
-		t.Fatalf("count dirty child counters: %v", err)
-	}
-	if dirtyChildCounters != 1 {
-		t.Fatalf("dirty child_counters count = %d, want 1", dirtyChildCounters)
-	}
+	requireCleanTables(ctx, t, store, "child_counters")
 }
 
-func TestCreateIssuesWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t *testing.T) {
+// TestCreateIssuesCarriesPendingIssueClosureRows is
+// TestCreateIssueCarriesPendingIssueClosureRows for a batch create, with a
+// pending child counter as well.
+func TestCreateIssuesCarriesPendingIssueClosureRows(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -311,6 +340,8 @@ func TestCreateIssuesWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t 
 		t.Fatalf("dirty child counter insert: %v", err)
 	}
 
+	pendingMetadataKey(ctx, t, store, "test.batch-create-closure")
+
 	plain := []*types.Issue{{
 		ID:        "test-batch-plain-create",
 		Title:     "Batch plain create",
@@ -329,8 +360,8 @@ func TestCreateIssuesWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t 
 	).Scan(&committedLabels); err != nil {
 		t.Fatalf("count committed dirty labels: %v", err)
 	}
-	if committedLabels != 0 {
-		t.Fatalf("committed dirty labels = %d, want 0", committedLabels)
+	if committedLabels != 1 {
+		t.Fatalf("committed pending labels = %d, want 1: the create's commit stages the issue closure", committedLabels)
 	}
 
 	var committedComments int
@@ -340,8 +371,8 @@ func TestCreateIssuesWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t 
 	).Scan(&committedComments); err != nil {
 		t.Fatalf("count committed dirty comments: %v", err)
 	}
-	if committedComments != 0 {
-		t.Fatalf("committed dirty comments = %d, want 0", committedComments)
+	if committedComments != 1 {
+		t.Fatalf("committed pending comments = %d, want 1: the create's commit stages the issue closure", committedComments)
 	}
 
 	var committedChildCounters int
@@ -351,23 +382,18 @@ func TestCreateIssuesWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t 
 	).Scan(&committedChildCounters); err != nil {
 		t.Fatalf("count committed dirty child counters: %v", err)
 	}
-	if committedChildCounters != 0 {
-		t.Fatalf("committed dirty child counters = %d, want 0", committedChildCounters)
+	if committedChildCounters != 1 {
+		t.Fatalf("committed pending child counters = %d, want 1: the create's commit stages the issue closure", committedChildCounters)
 	}
 
-	var dirtySideTables int
-	if err := store.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM dolt_status
-		WHERE table_name IN ('labels', 'comments', 'child_counters')
-	`).Scan(&dirtySideTables); err != nil {
-		t.Fatalf("count dirty side tables: %v", err)
-	}
-	if dirtySideTables != 3 {
-		t.Fatalf("dirty side table count = %d, want 3", dirtySideTables)
-	}
+	requireCleanTables(ctx, t, store, "issues", "labels", "comments", "child_counters")
+	requireMetadataKeyUncommitted(ctx, t, store, "test.batch-create-closure")
 }
 
-func TestCreateIssuesWithExplicitHierarchicalIDDoesNotCommitDirtyChildCounters(t *testing.T) {
+// TestCreateIssuesWithExplicitHierarchicalIDCarriesThePendingChildCounter is
+// TestCreateIssueWithExplicitHierarchicalIDCarriesThePendingChildCounter for
+// a batch create.
+func TestCreateIssuesWithExplicitHierarchicalIDCarriesThePendingChildCounter(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -410,20 +436,10 @@ func TestCreateIssuesWithExplicitHierarchicalIDDoesNotCommitDirtyChildCounters(t
 	).Scan(&committedDirtyCounters); err != nil {
 		t.Fatalf("count committed dirty child counters: %v", err)
 	}
-	if committedDirtyCounters != 0 {
-		t.Fatalf("committed dirty child counters = %d, want 0", committedDirtyCounters)
+	if committedDirtyCounters != 1 {
+		t.Fatalf("committed pending child counters = %d, want 1: the create's commit stages the issue closure", committedDirtyCounters)
 	}
-
-	var dirtyChildCounters int
-	if err := store.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM dolt_status
-		WHERE table_name = 'child_counters'
-	`).Scan(&dirtyChildCounters); err != nil {
-		t.Fatalf("count dirty child counters: %v", err)
-	}
-	if dirtyChildCounters != 1 {
-		t.Fatalf("dirty child_counters count = %d, want 1", dirtyChildCounters)
-	}
+	requireCleanTables(ctx, t, store, "child_counters")
 }
 
 func TestCreateIssuesHierarchicalIDsCommitChildCounters(t *testing.T) {
@@ -547,7 +563,14 @@ func TestCreateIssuesAllWispBatchPersistsDependenciesAndCounters(t *testing.T) {
 	}
 }
 
-func TestCreateIssuesDuplicateSideTableInputsDoNotCommitDirtySideTables(t *testing.T) {
+// TestCreateIssuesDuplicateSideTableInputsKeepPendingClosureRowsTogether: a
+// re-create whose labels, comments and dependencies already exist writes no
+// side row of its own. Whatever it stages, the pending side rows another
+// write left behind move together: the commit stages the issue closure in one
+// DOLT_ADD (withIssueClosure), so they are all at HEAD afterwards or all still
+// pending, never split. A pending row outside the closure stays pending.
+// Until the closure, the create left all of them pending (#4149).
+func TestCreateIssuesDuplicateSideTableInputsKeepPendingClosureRowsTogether(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -616,6 +639,8 @@ func TestCreateIssuesDuplicateSideTableInputsDoNotCommitDirtySideTables(t *testi
 		t.Fatalf("dirty dependency insert: %v", err)
 	}
 
+	pendingMetadataKey(ctx, t, store, "test.duplicate-create-closure")
+
 	duplicateSource := &types.Issue{
 		ID:        source.ID,
 		Title:     source.Title,
@@ -644,9 +669,6 @@ func TestCreateIssuesDuplicateSideTableInputsDoNotCommitDirtySideTables(t *testi
 	).Scan(&committedDirtyLabels); err != nil {
 		t.Fatalf("count committed dirty labels: %v", err)
 	}
-	if committedDirtyLabels != 0 {
-		t.Fatalf("committed dirty labels = %d, want 0", committedDirtyLabels)
-	}
 
 	var committedDirtyComments int
 	if err := store.db.QueryRowContext(ctx,
@@ -654,9 +676,6 @@ func TestCreateIssuesDuplicateSideTableInputsDoNotCommitDirtySideTables(t *testi
 		dirtyOwner.ID, "uncommitted comment",
 	).Scan(&committedDirtyComments); err != nil {
 		t.Fatalf("count committed dirty comments: %v", err)
-	}
-	if committedDirtyComments != 0 {
-		t.Fatalf("committed dirty comments = %d, want 0", committedDirtyComments)
 	}
 
 	var committedDirtyDependencies int
@@ -666,10 +685,6 @@ func TestCreateIssuesDuplicateSideTableInputsDoNotCommitDirtySideTables(t *testi
 	).Scan(&committedDirtyDependencies); err != nil {
 		t.Fatalf("count committed dirty dependencies: %v", err)
 	}
-	if committedDirtyDependencies != 0 {
-		t.Fatalf("committed dirty dependencies = %d, want 0", committedDirtyDependencies)
-	}
-
 	var dirtySideTables int
 	if err := store.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM dolt_status
@@ -677,7 +692,15 @@ func TestCreateIssuesDuplicateSideTableInputsDoNotCommitDirtySideTables(t *testi
 	`).Scan(&dirtySideTables); err != nil {
 		t.Fatalf("count dirty side tables: %v", err)
 	}
-	if dirtySideTables != 3 {
-		t.Fatalf("dirty side table count = %d, want 3", dirtySideTables)
+	committed := committedDirtyLabels + committedDirtyComments + committedDirtyDependencies
+	switch {
+	case committed == 3 && dirtySideTables == 0:
+		// The re-create staged the closure and carried the pending rows.
+	case committed == 0 && dirtySideTables == 3:
+		// The re-create staged nothing of the closure.
+	default:
+		t.Fatalf("pending side rows split: %d labels, %d comments, %d dependencies at HEAD and %d side tables still dirty; want all three committed or none",
+			committedDirtyLabels, committedDirtyComments, committedDirtyDependencies, dirtySideTables)
 	}
+	requireMetadataKeyUncommitted(ctx, t, store, "test.duplicate-create-closure")
 }

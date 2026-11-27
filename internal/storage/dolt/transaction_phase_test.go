@@ -3,7 +3,9 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"strings"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
@@ -49,6 +51,19 @@ func newTransactionPhaseFixture(t *testing.T) (*DoltStore, *sql.Conn, *doltTrans
 	}, regularMock, ignoredMock
 }
 
+// expectTransactionStageOf expects the transaction publisher's one DOLT_ADD
+// for a transaction that dirtied tables: the tables widened to the issue
+// closure (markIssueClosureDirty), in name order.
+func expectTransactionStageOf(mock sqlmock.Sqlmock, tables ...string) *sqlmock.ExpectedQuery {
+	staged := stagedWithIssueClosure(tables...)
+	args := make([]driver.Value, len(staged))
+	for i, table := range staged {
+		args[i] = table
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat(`\?, `, len(staged)), ", ")
+	return mock.ExpectQuery(`^CALL DOLT_ADD\(` + placeholders + `\)$`).WithArgs(args...)
+}
+
 func requireTransactionPhaseMocks(t *testing.T, regularMock, ignoredMock sqlmock.Sqlmock) {
 	t.Helper()
 	if err := regularMock.ExpectationsWereMet(); err != nil {
@@ -65,7 +80,7 @@ func TestRunInTransactionStageFailureAfterRegularCommitIsIndeterminateAndNotRepl
 	regularMock.ExpectCommit()
 	regularMock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM dolt_status s").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	regularMock.ExpectQuery("CALL DOLT_ADD\\(\\?\\)").WithArgs("issues").
+	expectTransactionStageOf(regularMock, "issues").
 		WillReturnError(errors.New("invalid connection"))
 	ignoredMock.ExpectRollback()
 

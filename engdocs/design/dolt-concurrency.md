@@ -218,7 +218,8 @@ func (s *DoltStore) runDoltTransaction(ctx, fn, commitMsg) error {
 
 > **Superseded (GH#5752, LatentLabsSpace/NEXUS#92):** do not publish inside
 > the SQL transaction. `DOLT_ADD` stages a whole table from the session's
-> BEGIN-time root, so a Dolt commit minted before `COMMIT` writes every row a
+> BEGIN-time root, so on a server with the staged-root behavior GH#5752
+> describes, a Dolt commit minted before `COMMIT` can write every row a
 > concurrent writer committed in the meantime back to its BEGIN-time value.
 > `DoltStore` writes now commit their SQL transaction first and publish after
 > it, in one of two ways:
@@ -232,11 +233,35 @@ func (s *DoltStore) runDoltTransaction(ctx, fn, commitMsg) error {
 >   there cannot unwind the committed write: the write reports success, and
 >   the dropped publication is logged and counted on
 >   `bd.db.post_tx_commit_dropped`; the next explicit or automatic commit
->   picks the change up.
+>   picks the change up. Each of them settles the post-commit blocked-state
+>   recheck only after that commit (gastownhall/beads#7035): the recheck's
+>   commit stages the whole `issues` table, so run first it would publish
+>   the write's `issues` rows under its own message.
 > - `RunInTransaction`, which CLI commands use for multi-statement writes,
 >   stages and Dolt-commits on the transaction's own pinned connection after
 >   the SQL commit, and returns `ErrCommitIndeterminate` when that trailing
 >   commit fails.
+>
+> Between its SQL `COMMIT` and its Dolt commit, a write's rows sit in the
+> shared working set, and another writer's commit can take them. Both
+> publishers therefore stage the issue closure (`withIssueClosure`). A staging
+> list that names `issues`, a table with a foreign key to it (`dependencies`,
+> `labels`, `comments`, `child_counters`, `issue_snapshots`,
+> `compaction_snapshots`, `provenance_events`) or `id_tombstones` stages all of
+> them with one `DOLT_ADD`. A commit made in that window then carries the
+> other write whole. The explicit commit points (`commitWorkingSet`: `Commit`,
+> which the CLI's auto-commit calls, the commits around a pull, and a merge
+> resolution) widen the tables their `dolt_status` read listed the same way,
+> to the closure tables the database holds, since they also commit a
+> database a migration has not reached. No published commit holds an issue's
+> removal while rows naming it stay, or a child row without its issue. The
+> conformance case `RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables`
+> lets a create's commit carry another writer's pending issue rows only
+> together, and never a pending row outside the closure. The cost is selective
+> staging inside the closure: a pending row in any of those tables rides the
+> next commit that stages one of them. The `TestIssueClosure_*` tests
+> (`internal/storage/dolt/publication_issue_closure_test.go`) hold a write in
+> that window on a real server.
 >
 > `TestNoDoltAddOrCommitInsideOpenTransaction`
 > (`internal/storage/dolt/publication_guard_test.go`) keeps

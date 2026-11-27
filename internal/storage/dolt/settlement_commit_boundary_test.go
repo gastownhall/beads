@@ -153,9 +153,7 @@ func TestCommitWorkingSetAfterSQLCommitResponseLossIsIndeterminate(t *testing.T)
 			setup: func(mock sqlmock.Sqlmock, responseLoss error) {
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).
 					WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
-				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-					WithArgs("issues").
-					WillReturnError(responseLoss)
+				expectClosureStaging(mock).WillReturnError(responseLoss)
 			},
 		},
 		{
@@ -163,9 +161,7 @@ func TestCommitWorkingSetAfterSQLCommitResponseLossIsIndeterminate(t *testing.T)
 			setup: func(mock sqlmock.Sqlmock, responseLoss error) {
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT s.table_name FROM dolt_status")).
 					WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
-				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
-					WithArgs("issues").
-					WillReturnRows(sqlmock.NewRows([]string{"status"}))
+				expectClosureStaging(mock).WillReturnRows(sqlmock.NewRows([]string{"status"}))
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: recompute is_blocked after pull", " <>").
 					WillReturnError(responseLoss)

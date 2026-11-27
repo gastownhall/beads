@@ -691,22 +691,21 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 		return s.deleteWisp(ctx, id)
 	}
 
-	// Wrap in withRetryTx like UpdateIssue and CloseIssue: a delete that loses
-	// Dolt's commit-time merge to a concurrent write on the same row (MySQL
-	// 1213/1205, guaranteed server-side rollback) is replayed against the
-	// winner's state instead of surfacing the conflict. The closure holds only
-	// the delete; withRetryTx owns BeginTx and the final Commit, and records an
-	// indeterminate commit with the breaker. The Dolt history commit runs after
-	// it (GH#5752).
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	// The issue-operation runner, like UpdateIssue and CloseIssue: a delete
+	// that loses Dolt's commit-time merge to a concurrent write on the same row
+	// (MySQL 1213/1205, guaranteed server-side rollback) is replayed against
+	// the winner's state instead of surfacing the conflict. The closure holds
+	// only the delete; the runner owns BeginTx and the final Commit, records an
+	// indeterminate commit with the breaker, publishes the Dolt history commit
+	// after the SQL COMMIT (GH#5752), and settles the blocked-state recheck
+	// only after that commit (gastownhall/beads#7035).
+	return s.runIssueOperationTx(ctx, fmt.Sprintf("bd: delete %s", id), func(tx *sql.Tx) (issueops.ChangedTables, error) {
 		// storage.DeleteIssue carries no actor, so the journal rows record none.
-		return issueops.DeleteIssueInTx(ctx, tx, id, issueops.NoRequestActor)
-	}); err != nil {
-		return err
-	}
-	// Published after the SQL COMMIT, never inside it (GH#5752).
-	s.publishCommittedOperation(ctx, issueDeleteTables, fmt.Sprintf("bd: delete %s", id))
-	return nil
+		if err := issueops.DeleteIssueInTx(ctx, tx, id, issueops.NoRequestActor); err != nil {
+			return nil, err
+		}
+		return changedTables(issueDeleteTables...), nil
+	})
 }
 
 // issueDeleteTables are the versioned tables DeleteIssue and DeleteIssues
@@ -777,10 +776,12 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 		return &types.DeleteIssuesResult{DeletedCount: wispDeleteCount}, nil
 	}
 
-	// Wrap in withRetryTx for the same reason deleteIssue does: a batch that
-	// loses Dolt's commit-time merge is replayed rather than surfaced.
+	// The issue-operation runner, for the same reasons deleteIssue uses it: a
+	// batch that loses Dolt's commit-time merge is replayed rather than
+	// surfaced, its Dolt history commit is published after the SQL COMMIT
+	// (GH#5752), and the blocked-state recheck is settled after that commit.
 	var result *types.DeleteIssuesResult
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	if err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
 		// A replayed attempt starts clean, so a rolled-back attempt's result
 		// never leaks into the value returned below (the withRetryTx closure
 		// contract).
@@ -789,24 +790,19 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 		// The wisps peeled off above stay part of the request for the
 		// dependents guard, in a dry run too, where they are not deleted first.
 		r, err := issueops.DeleteIssuesBesideWispsInTx(ctx, tx, ids, activeWispIDs, cascade, force, dryRun, issueops.NoRequestActor)
-		if err != nil {
-			result = r
-			return err
-		}
 		result = r
-		return nil
+		if err != nil || dryRun {
+			return nil, "", err
+		}
+		// The message counts the durable deletions only, before the wisp
+		// count is folded into the result below.
+		return changedTables(issueDeleteTables...), fmt.Sprintf("bd: delete %d issue(s)", r.DeletedCount), nil
 	}); err != nil {
 		// Preserve partial result (e.g., OrphanedIssues) on error.
 		if result != nil {
 			result.DeletedCount += wispDeleteCount
 		}
 		return result, err
-	}
-	if !dryRun {
-		// Published after the SQL COMMIT, never inside it (GH#5752). The
-		// message counts the durable deletions only, before the wisp count is
-		// folded into the result.
-		s.publishCommittedOperation(ctx, issueDeleteTables, fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount))
 	}
 	result.DeletedCount += wispDeleteCount
 

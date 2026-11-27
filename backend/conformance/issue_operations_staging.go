@@ -29,8 +29,17 @@ type IssueOperationsStagingFixture struct {
 }
 
 // RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables proves that a
-// reverse nonblocking dependency commits its concrete dependency row without
-// sweeping an unrelated dirty durable row into the same commit.
+// reverse nonblocking dependency commits its concrete dependency row, and that
+// the create's commit takes other writers' pending rows only whole.
+//
+// An unrelated issue's pending title and pending label may ride the commit or
+// stay pending, but they go together. A backend whose writers share one
+// working set stages every issue table with each write that stages one (the
+// Dolt server store's issue closure), so that no commit holds rows naming an
+// issue it does not hold; such a create commits both. A backend that stages
+// only the tables a write changed leaves both pending. A pending row outside
+// the issue tables (metadata) stays uncommitted either way: no create commits
+// the whole working set (GH#2455).
 func RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
 	t.Helper()
 
@@ -56,13 +65,23 @@ func RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables(t *testing.T
 	if err := fixture.Commit(ctx, "seed selective create staging"); err != nil {
 		t.Fatalf("commit seed state: %v", err)
 	}
+	const pendingLabel = "working-label"
+	pendingKey := fixture.IssuePrefix + ".create-relates-pending"
 	if err := fixture.Exec(ctx, "UPDATE issues SET title = ? WHERE id = ?", "working title", dirty.ID); err != nil {
 		t.Fatalf("dirty unrelated issue: %v", err)
+	}
+	if err := fixture.Exec(ctx, "INSERT INTO labels (issue_id, label) VALUES (?, ?)", dirty.ID, pendingLabel); err != nil {
+		t.Fatalf("label unrelated issue: %v", err)
+	}
+	if err := fixture.Exec(ctx, "INSERT INTO metadata (`key`, value) VALUES (?, ?)", pendingKey, "pending"); err != nil {
+		t.Fatalf("pending metadata row: %v", err)
 	}
 	assertIssueOperationsScalar(t, ctx, fixture, "working dirty title", "working title",
 		"SELECT title FROM issues WHERE id = ?", []any{dirty.ID})
 	assertIssueOperationsScalar(t, ctx, fixture, "committed dirty title before create", "committed title",
 		"SELECT title FROM issues AS OF 'HEAD' WHERE id = ?", []any{dirty.ID})
+	assertIssueOperationsScalar(t, ctx, fixture, "committed dirty label before create", 0,
+		"SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ? AND label = ?", []any{dirty.ID, pendingLabel})
 
 	created, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
 		Actor:         "writer",
@@ -96,8 +115,30 @@ func RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables(t *testing.T
 		"SELECT is_blocked FROM issues AS OF 'HEAD' WHERE id = ?", []any{source.ID})
 	assertIssueOperationsScalar(t, ctx, fixture, "working dirty title after create", "working title",
 		"SELECT title FROM issues WHERE id = ?", []any{dirty.ID})
-	assertIssueOperationsScalar(t, ctx, fixture, "committed dirty title after create", "committed title",
-		"SELECT title FROM issues AS OF 'HEAD' WHERE id = ?", []any{dirty.ID})
+	assertIssueOperationsScalar(t, ctx, fixture, "working dirty label after create", 1,
+		"SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", []any{dirty.ID, pendingLabel})
+	var committedTitle string
+	if err := fixture.QueryScalar(ctx, "SELECT title FROM issues AS OF 'HEAD' WHERE id = ?", []any{dirty.ID}, &committedTitle); err != nil {
+		t.Fatalf("committed dirty title after create: %v", err)
+	}
+	var committedLabels int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ? AND label = ?",
+		[]any{dirty.ID, pendingLabel}, &committedLabels); err != nil {
+		t.Fatalf("committed dirty label after create: %v", err)
+	}
+	switch {
+	case committedTitle == "committed title" && committedLabels == 0:
+		// The create staged only the tables it changed.
+	case committedTitle == "working title" && committedLabels == 1:
+		// The create staged every issue table, and both pending rows rode it.
+	default:
+		t.Fatalf("committed dirty issue after create = title %q and %d %q labels; want both pending rows committed or neither",
+			committedTitle, committedLabels, pendingLabel)
+	}
+	assertIssueOperationsScalar(t, ctx, fixture, "committed pending metadata after create", 0,
+		"SELECT COUNT(*) FROM metadata AS OF 'HEAD' WHERE `key` = ?", []any{pendingKey})
+	assertIssueOperationsScalar(t, ctx, fixture, "working pending metadata after create", 1,
+		"SELECT COUNT(*) FROM metadata WHERE `key` = ?", []any{pendingKey})
 }
 
 // RunIssueOperationsCreateParentChildRecomputesWaitsForClosure proves that
