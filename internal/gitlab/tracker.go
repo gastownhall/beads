@@ -631,9 +631,11 @@ func (t *Tracker) onBase(ref, base string) bool {
 }
 
 // webBaseFromProject derives the web root GitLab spells into the configured
-// project's web_url: the URL minus the project's path with namespace. It
-// returns "" unless what remains names an http(s) URL with a host — bd does
-// not guess an address GitLab did not report.
+// project's web_url: the URL minus the project's path with namespace, so a
+// GitLab served from a relative root keeps that root. The path suffix is
+// matched case-insensitively, as GitLab routes are. It returns "" unless what
+// remains names an http(s) URL with a host — bd does not guess an address
+// GitLab did not report.
 func webBaseFromProject(p *Project) string {
 	if p == nil {
 		return ""
@@ -643,10 +645,15 @@ func webBaseFromProject(p *Project) string {
 	if err != nil || suffix == "" || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return ""
 	}
-	if u.Path != "/"+suffix {
-		return ""
+	path := u.Path
+	if !strings.HasSuffix(path, "/"+suffix) {
+		// Case-insensitive fallback, for a web_url spelled with different
+		// path case than the project reports.
+		if len(path) < len(suffix)+1 || path[len(path)-len(suffix)-1] != '/' || !strings.EqualFold(path[len(path)-len(suffix):], suffix) {
+			return ""
+		}
 	}
-	return u.Scheme + "://" + u.Host
+	return u.Scheme + "://" + u.Host + path[:len(path)-len(suffix)-1]
 }
 
 // parseConfiguredWebURL validates a gitlab.web_url value: an http(s) URL with
