@@ -146,6 +146,36 @@ bd migrate schema
 bd migrate --yes
 ```
 
+### If an upgrade was interrupted mid-migration
+
+A migration pass commits each numbered step as it applies, but a process killed
+after a step ran and before that step's commit leaves exactly that one step
+uncommitted: the store's working set holds the step's schema change and its
+migration-counter row, while HEAD does not. The next command that opens the
+store recognizes that shape — one uncommitted step of this binary's own
+migration series, nothing else — and finishes the step before the migration
+pass proper runs, under the step's own message. The finish logs one line
+through the standard logger, naming the step and the tables it staged, so the
+recovery is visible under `bd serve`, agents and CI.
+
+Rows you wrote into a table that step touches after the kill are committed with
+it, under the step's message — the same rows a manual `bd dolt commit` during
+the old refusal would have committed, under a user-authored message instead.
+Dirt in tables the step does not touch stays uncommitted and is refused as
+before, with the dirty-tables error naming the tables to commit or revert.
+
+If the next open still refuses with the dirty-tables error, the working set is
+not a recoverable step: the kill landed mid-step, the migration-counter row is
+missing or carries a content hash this binary does not ship, or more than one
+step is uncommitted. Commit or clean the tables the error names, then run the
+command again.
+
+One shape is still not recovered, as before: a kill of the very last migration
+of the series, with nothing left pending. Such an open sees no migration work
+and skips the pass entirely, so the step stays uncommitted and nothing refuses
+until a later bd release ships another migration; commit the working set by
+hand (`bd dolt commit`) to move it into HEAD early.
+
 ### Upgrading to 1.3.0
 
 A 1.2.2 or 1.1.x database sits at schema v53, and 1.3.0 knows v66. That is more

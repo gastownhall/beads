@@ -1561,6 +1561,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry points now replay the rolled-back delete, as create, update, close,
   claim and sweep already do.
 
+- **A migration step stranded by a killed process is finished by the next
+  open** (bd-0eetsy). Each numbered migration commits as it applies, but a
+  process killed between a step's SQL and that commit left the step
+  uncommitted in the working set, and bd recovered from neither outcome: the
+  next open refused with a dirty-tables error whenever a later pending
+  migration touched one of the step's tables (the recovery was a manual `bd
+  dolt commit` followed by `bd migrate`), and otherwise a later step's commit
+  recorded the stranded step's migration-counter row while its schema change
+  stayed uncommitted, so HEAD claimed a version whose change was only in the
+  working set. The migration pass now recognizes exactly that shape — one
+  uncommitted step of its own series, carrying this binary's own content hash
+  and no other dirt — and commits the step itself, under the step's own
+  message, before the dirty-table guard runs; the applied count the pass
+  reports includes the finished step, and one standard-logger line names the
+  step and the tables it staged. User rows written after the kill into a
+  table the step touches commit with the step, as the manual `bd dolt commit`
+  the old refusal prescribed would have committed them; dirt in tables the
+  step does not touch still refuses as before. A stranded last migration with
+  nothing left pending is still not recovered: the open sees no migration
+  work and skips the pass, so nothing refuses and the step waits for a later
+  bd release to ship another migration (commit it by hand with `bd dolt
+  commit` to move it into HEAD early).
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
