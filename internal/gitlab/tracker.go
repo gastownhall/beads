@@ -100,6 +100,19 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	// Load optional filter config
 	t.filter = t.loadFilterConfig(ctx)
 
+	return t.readProject(ctx)
+}
+
+// readProject reads the configured project once per run. GitLab writes its
+// own external_url into every web_url it returns, whatever address the API
+// was reached at, so the project's web_url is where bd learns the address
+// its issue links are under.
+func (t *Tracker) readProject(ctx context.Context) error {
+	if _, err := t.client.GetProject(ctx); err != nil {
+		return fmt.Errorf("reading GitLab project %s to learn the address GitLab writes into issue links "+
+			"(a push without it could create a second copy of every issue linked under that address): %w",
+			t.client.ProjectID, err)
+	}
 	return nil
 }
 
