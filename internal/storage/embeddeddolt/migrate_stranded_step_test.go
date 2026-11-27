@@ -735,3 +735,111 @@ func TestEmbeddedMigrateStrandedStepCommitsUserDirtInItsOwnTable(t *testing.T) {
 		t.Fatalf("user row %s was not committed by 0049's apply commit %s", userRow, hash49)
 	}
 }
+
+// TestEmbeddedMigrateStrandedStepWithoutItsContentHashRefuses is AC-6's first
+// shape: a stranded cursor row whose content_hash is NULL, or a hash this
+// binary does not ship, is not provably this binary's step. The open refuses
+// with the same *DirtyTablesError main always produced, and the working set,
+// cursor and commit history are unchanged (apart from the open's own
+// dolt_ignore seed commit, if it made one).
+//
+// These rows pass at the base too — they pin the finish's narrowness, not a
+// behavior change.
+func TestEmbeddedMigrateStrandedStepWithoutItsContentHashRefuses(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	t.Run("null_hash", func(t *testing.T) {
+		dataDir := strandSeedMainSchemaAt(t, ctx, selfHealSeedVersion)
+		strandMainAt(t, ctx, dataDir, 49)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+		if _, err := conn.ExecContext(ctx,
+			"UPDATE schema_migrations SET content_hash = NULL WHERE version = 49"); err != nil {
+			t.Fatalf("null out the stranded row's hash: %v", err)
+		}
+		assertRefusalLeavesWorkingSetUnchanged(t, ctx, conn, 49)
+	})
+
+	t.Run("foreign_hash", func(t *testing.T) {
+		dataDir := strandSeedMainSchemaAt(t, ctx, selfHealSeedVersion)
+		strandMainAt(t, ctx, dataDir, 49)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+		foreign := strings.Repeat("ab", 32)
+		if _, err := conn.ExecContext(ctx,
+			"UPDATE schema_migrations SET content_hash = ? WHERE version = 49", foreign); err != nil {
+			t.Fatalf("replace the stranded row's hash: %v", err)
+		}
+		assertRefusalLeavesWorkingSetUnchanged(t, ctx, conn, 49)
+	})
+}
+
+// TestEmbeddedMigrateTwoStrandedStepsRefuse is AC-6's second shape: two
+// uncommitted cursor rows are not "HEAD plus exactly one step" — no
+// per-step-committing pass can strand two. The open refuses as main always
+// did, leaving the working set alone.
+//
+// Passes at the base too; pins the finish's narrowness.
+func TestEmbeddedMigrateTwoStrandedStepsRefuse(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := strandSeedMainSchemaAt(t, ctx, selfHealSeedVersion)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	// MigrateUpTo(50) from 48 runs two steps (49 and 50) without per-step
+	// commits: two uncommitted cursor rows.
+	if _, err := schema.MigrateUpTo(ctx, conn, 50); err != nil {
+		t.Fatalf("MigrateUpTo(50): %v", err)
+	}
+	if v := currentMainVersion(t, ctx, conn); v != 50 {
+		t.Fatalf("working cursor after the two-step strand = %d, want 50", v)
+	}
+	assertRefusalLeavesWorkingSetUnchanged(t, ctx, conn, 50)
+}
+
+// TestEmbeddedMigrateUserDirtWithoutStrandedStepRefuses is AC-6's third
+// shape: user rows in issues with NO stranded cursor row. Recognition must
+// decline (the working cursor equals HEAD's), and the guard refuses exactly
+// as main always did.
+//
+// Passes at the base too; pins the finish's narrowness.
+func TestEmbeddedMigrateUserDirtWithoutStrandedStepRefuses(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := strandSeedMainSchemaAt(t, ctx, selfHealSeedVersion)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	if _, err := conn.ExecContext(ctx, "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES ('bd-0eetsy-user-row', 'user dirt, no strand', 'd', 'de', 'ac', 'n')"); err != nil {
+		t.Fatalf("insert user row into issues: %v", err)
+	}
+	assertRefusalLeavesWorkingSetUnchanged(t, ctx, conn, 48)
+}
+
+// assertRefusalLeavesWorkingSetUnchanged runs MigrateUp on conn, requires a
+// *DirtyTablesError refusal, and requires that the open left the working set
+// alone: the dirty-table set identical to before the open, the working cursor
+// still at wantCursor, and no `schema: apply migration` commit in history
+// (the open's own dolt_ignore seed commit, if any, is not an apply commit).
+func assertRefusalLeavesWorkingSetUnchanged(t *testing.T, ctx context.Context, conn *sql.Conn, wantCursor int) {
+	t.Helper()
+	before := dirtyTableNames(t, ctx, conn)
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		var refused *schema.DirtyTablesError
+		if !errors.As(err, &refused) {
+			t.Fatalf("MigrateUp err = %v, want *DirtyTablesError", err)
+		}
+	} else {
+		t.Fatal("MigrateUp succeeded, want a *DirtyTablesError refusal")
+	}
+	after := dirtyTableNames(t, ctx, conn)
+	if !equalStrings(before, after) {
+		t.Fatalf("dirty tables changed across the refused open: before %v, after %v", before, after)
+	}
+	if v := currentMainVersion(t, ctx, conn); v != wantCursor {
+		t.Fatalf("working cursor after refusal = %d, want %d", v, wantCursor)
+	}
+	if messages := schemaApplyCommits(t, ctx, conn, ""); len(messages) != 0 {
+		t.Fatalf("the refused open committed migrations: %d apply-migration commits in history, want 0", len(messages))
+	}
+}
