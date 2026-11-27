@@ -1567,6 +1567,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no time. It now reads `Lease: expired 3 hours ago`; a live lease still reads
   `Lease: expires in 3 mins`.
 
+- **`bd gc` and `bd doctor --fix` no longer skip a delete that collides with
+  a concurrent write.** On a Dolt sql-server, deleting an issue while another
+  client commits a write to that same issue loses Dolt's commit-time merge:
+  the server rolls the delete back with a serialization failure (Error 1213).
+  The store's `DeleteIssue` and `DeleteIssues` were the last issue writes
+  that ran as a single attempt, so the error reached the caller. `bd gc`'s
+  decay phase and the `bd doctor --fix` stale-closed and patrol-pollution
+  cleanups print it as a warning, leave the issue in place and exit 0. Both
+  entry points now replay the rolled-back delete, as create, update, close,
+  claim and sweep already do.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
@@ -1602,6 +1613,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command, instead of `bd migrate --force`, `bd dolt push` and `bd
   bootstrap`. What is refused, and the consent it takes, are unchanged;
   server and embedded mode print, and emit as JSON, what they did before.
+
+- **A close, a batch close, a dependency removal or an update to a non-active
+  status that races another unblocking write keeps its own Dolt commit**
+  ([#7035](https://github.com/gastownhall/beads/issues/7035)).
+  On a server-mode store the post-commit blocked-state recheck published
+  before the operation's own Dolt commit. The recheck stages the whole
+  `issues` table, so the operation's row went into the commit named
+  `bd: recheck blocked after ...` and the operation's commit, whose message
+  carries its provenance, had nothing left to stage and never reached
+  `dolt log`. The operation's commit is now minted first and the recheck's
+  follows it, the order the dependency-removal and wisp paths already keep.
+  No row was lost before; only the history line was.
 
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
@@ -1828,6 +1851,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dolt.auto-commit` `batch` or `off` the write waits for `bd dolt commit`,
   as other writes do. (builds on PR #7717 by harry-miller-trimble)
 
+- **Overlapping whole-set label edits on one issue now serialize instead of
+  merging, and `bd set-state` leaves one value per dimension** (#5657). Two
+  label edits on the same issue that overlapped both committed: two `bd update
+  --set-labels` calls ended with the union of both sets, and two `bd
+  set-state` calls on one dimension could leave both values, which a later `bd
+  set-state` never removed. An edit that decides which labels to drop from the
+  set it read (`--set-labels`, `bd set-state`, and a `labels` replacement over
+  the HTTP API or the Go SDK) now also rewrites a clone-local coordination
+  record for that issue, so the second of two such edits conflicts at commit
+  and is replayed against the labels the first one committed. `bd set-state`
+  now removes every label of the dimension (each label starting with
+  `<dimension>:`) in the same update that adds the new value, so it also
+  repairs a dimension that already holds two values. Adds and removes of named
+  labels (`--add-label`, `--remove-label`, `bd label add`, `remove` and
+  `propagate`, `bd cook --persist`) never touch the record, so they cannot
+  fail on it. They stay literal: two writers that each move `state:a` to a
+  different value with `--remove-label`/`--add-label` can still leave both,
+  the same result as running them one after the other; use `bd set-state` for
+  a dimension that must hold one value. The HTTP API carries the dimension
+  removal as `remove_label_prefixes` on `PATCH /v0/beads/issues/{id}` and
+  `labels.remove_prefixes` on an `issues:batchApply` update item, behind the
+  new `issues.update.labelPrefixes` capability, and the Go SDK's
+  `issueops.LabelPatch` gains `RemovePrefixes`. Against a `bd serve` without
+  the capability, bd refuses a prefix removal before sending it, and `bd
+  set-state` removes the exact labels it read, as before. `bd label rename`,
+  the create/import label upsert and `bd promote` do not take part in the
+  coordination yet, and a bd older than this release never writes the record,
+  so its label edits can still merge with a newer bd's during an upgrade.
 - **Upgrading a clone whose local `wisps` table lacks `started_at` or
   `no_history` no longer stops at schema v52** (#6080, reported by @dmcp718;
   fix from #8099 by @kyoto-bonsai). Migrations 0023 and 0027 add those

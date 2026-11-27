@@ -691,11 +691,18 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 		return s.deleteWisp(ctx, id)
 	}
 
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	// Wrap in withRetryTx like UpdateIssue and CloseIssue: a delete that loses
+	// Dolt's commit-time merge to a concurrent write on the same row (MySQL
+	// 1213/1205, guaranteed server-side rollback) is replayed against the
+	// winner's state instead of surfacing the conflict. The closure holds only
+	// the delete; withRetryTx owns BeginTx and the final Commit, and records an
+	// indeterminate commit with the breaker. The Dolt history commit runs after
+	// it (GH#5752).
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		// storage.DeleteIssue carries no actor, so the journal rows record none.
 		return issueops.DeleteIssueInTx(ctx, tx, id, issueops.NoRequestActor)
 	}); err != nil {
-		return s.recordDoltPublicationFailure(ctx, err)
+		return err
 	}
 	// Published after the SQL COMMIT, never inside it (GH#5752).
 	s.publishCommittedOperation(ctx, issueDeleteTables, fmt.Sprintf("bd: delete %s", id))
@@ -770,8 +777,14 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 		return &types.DeleteIssuesResult{DeletedCount: wispDeleteCount}, nil
 	}
 
+	// Wrap in withRetryTx for the same reason deleteIssue does: a batch that
+	// loses Dolt's commit-time merge is replayed rather than surfaced.
 	var result *types.DeleteIssuesResult
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		// A replayed attempt starts clean, so a rolled-back attempt's result
+		// never leaks into the value returned below (the withRetryTx closure
+		// contract).
+		result = nil
 		// storage.DeleteIssues carries no actor, so the journal rows record none.
 		// The wisps peeled off above stay part of the request for the
 		// dependents guard, in a dry run too, where they are not deleted first.
@@ -787,7 +800,7 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 		if result != nil {
 			result.DeletedCount += wispDeleteCount
 		}
-		return result, s.recordDoltPublicationFailure(ctx, err)
+		return result, err
 	}
 	if !dryRun {
 		// Published after the SQL COMMIT, never inside it (GH#5752). The

@@ -1,6 +1,14 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"reflect"
+	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/issueops"
+)
 
 func TestFindStateLabel(t *testing.T) {
 	t.Parallel()
@@ -108,5 +116,64 @@ func TestCollectStateLabels(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// labelPrefixProbeStore is a store that answers the label-prefix probe and
+// nothing else: setStateLabelPatch must not touch any other method.
+type labelPrefixProbeStore struct {
+	storage.DoltStorage
+	served bool
+	err    error
+}
+
+func (s labelPrefixProbeStore) ServesLabelPrefixPatch(context.Context) (bool, error) {
+	return s.served, s.err
+}
+
+// TestSetStateLabelPatch pins the shape `bd set-state` settles BEFORE it
+// writes its event (GH#5657). Every route that takes the literal prefix gets
+// RemovePrefixes, which the update evaluates in its own transaction. A bd
+// serve that does not advertise issues.update.labelPrefixes would refuse that
+// member, so set-state names the exact labels its read found instead: every
+// value of the dimension except the new one (removal wins in a LabelPatch, so
+// removing the new label too would drop it). A probe that fails is an error,
+// so nothing is written on a guess.
+func TestSetStateLabelPatch(t *testing.T) {
+	t.Parallel()
+
+	labels := []string{"mode:slow", "keep", "mode:fast", "mode-x:slow", "mode:degraded", "modes:a"}
+	prefixed := issueops.LabelPatch{RemovePrefixes: []string{"mode:"}, Add: []string{"mode:fast"}}
+	exact := issueops.LabelPatch{Add: []string{"mode:fast"}, Remove: []string{"mode:slow", "mode:degraded"}}
+
+	for _, tc := range []struct {
+		name  string
+		store storage.DoltStorage
+		want  issueops.LabelPatch
+	}{
+		{"no store to ask", nil, prefixed},
+		{"a store that is not a prober", struct{ storage.DoltStorage }{}, prefixed},
+		{"a server advertising the token", labelPrefixProbeStore{served: true}, prefixed},
+		{"a server without the token", labelPrefixProbeStore{served: false}, exact},
+	} {
+		got, err := setStateLabelPatch(context.Background(), tc.store, "mode", "mode:fast", labels)
+		if err != nil {
+			t.Errorf("%s: setStateLabelPatch: %v", tc.name, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: patch = %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+
+	// A dimension the read found unset removes nothing on the exact shape.
+	got, err := setStateLabelPatch(context.Background(), labelPrefixProbeStore{}, "health", "health:ok", labels)
+	if err != nil || !reflect.DeepEqual(got, issueops.LabelPatch{Add: []string{"health:ok"}}) {
+		t.Errorf("unset dimension on an older server: patch = (%+v, %v), want an add only", got, err)
+	}
+
+	probeErr := errors.New("handshake unreadable")
+	if _, err := setStateLabelPatch(context.Background(), labelPrefixProbeStore{err: probeErr}, "mode", "mode:fast", labels); !errors.Is(err, probeErr) {
+		t.Errorf("a failed probe returned %v, want it wrapped", err)
 	}
 }

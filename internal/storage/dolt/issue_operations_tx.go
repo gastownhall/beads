@@ -61,7 +61,7 @@ func (s *DoltStore) runIssueOperationTx(ctx context.Context, commitMsg string, f
 func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(*sql.Tx) (storageissueops.ChangedTables, string, error)) error {
 	var tables storageissueops.ChangedTables
 	var commitMsg string
-	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	pending, err := s.retryWriteTxOn(ctx, s.db, func(tx *sql.Tx) error {
 		// Plain assignment (not append-into-captured-state): a retried
 		// transaction re-runs the body and overwrites both values, so a
 		// rolled-back attempt cannot leak tables into the commit.
@@ -82,6 +82,14 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 		// resolves the true outcome.
 		return err
 	}
+	// The operation is durable. Its dependents are settled on every return
+	// below, and after the operation's own Dolt commit, so that the recheck's
+	// commit follows it. The recheck stages the whole issues table: run first,
+	// it would publish this operation's rows under the recheck's message and
+	// leave nothing for the commit that carries this operation's message
+	// (gastownhall/beads#7035). This is the order RemoveDependencyWithOptions
+	// and commitWispTxAndRecheck already keep.
+	defer s.settleBlockedRecheck(ctx, pending)
 	s.publishCommittedOperation(ctx, sortedDirtyTables(tables), commitMsg)
 	return nil
 }
@@ -103,14 +111,16 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 // guard (no empty commits) and the nothing-to-commit tolerance live in
 // doltAddAndCommit.
 //
-// Recheck ordering (a known exception): the runners these callers use
-// (withRetryTx, withWriteTx, withDeleteFence) settle the post-commit
-// blocked-state recheck before they return. When that recheck changes an
-// issues row (the gastownhall/beads#6716 race), its Dolt commit therefore
-// comes BEFORE this publication and stages this mutation's committed issues
-// rows under the recheck's message. The data is intact; only the audit
-// attribution differs from runDoltTransaction and RemoveDependency, which
-// settle the recheck after their own Dolt commit.
+// Recheck ordering: runIssueOperationTxWithMessage settles the post-commit
+// blocked-state recheck only after this publication (gastownhall/beads#7035),
+// as runDoltTransaction and RemoveDependency settle it after their own Dolt
+// commit. Its other callers (DeleteIssue and DeleteIssues, the role deleter,
+// the sweeper and lifecycle transactions) are a known exception: their
+// runners (withRetryTx, withWriteTx, withDeleteFence) settle the recheck
+// before they return. When that recheck changes an issues row (the
+// gastownhall/beads#6716 race), its Dolt commit therefore comes BEFORE this
+// publication and stages this mutation's committed issues rows under the
+// recheck's message. The data is intact; only the audit attribution differs.
 func (s *DoltStore) publishCommittedOperation(ctx context.Context, tables []string, commitMsg string) {
 	if len(tables) == 0 {
 		return
