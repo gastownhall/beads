@@ -702,10 +702,11 @@ func (t *Tracker) ExtractIdentifier(ref string) string {
 //
 // The "gitlab:{iid}" shorthand names no project. When the configured project
 // is known by path (gitlab.project_path, or a path-form gitlab.project_id) it
-// is keyed as that project's issue on the gitlab.url host, so it still
-// matches the issue's web_url. Otherwise it keeps the "gitlab:{iid}" key,
-// which no URL key can equal: such a bead is never matched to some project's
-// issue URL, at worst duplicated by the next pull.
+// is keyed as that project's issue on the web address GitLab writes its
+// links under, when one was learned or configured, else on the gitlab.url
+// host — so it still matches the issue's web_url. Otherwise it keeps the
+// "gitlab:{iid}" key, which no URL key can equal: such a bead is never
+// matched to some project's issue URL, at worst duplicated by the next pull.
 func (t *Tracker) MatchKey(ref string) string {
 	if m := glShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
 		project := t.configuredMatchKeyProject()
@@ -718,18 +719,33 @@ func (t *Tracker) MatchKey(ref string) string {
 }
 
 // configuredMatchKeyProject returns the configured project keyed as MatchKey
-// keys a ref's project, "gl://{host}/{path}" on the gitlab.url host, or ""
-// when the project is only known by numeric ID.
+// keys a ref's project, "gl://{host}/{path}" under the web address GitLab
+// writes its links under, when one was learned or configured, else under
+// gitlab.url, or "" when the project is only known by numeric ID.
 func (t *Tracker) configuredMatchKeyProject() string {
 	project := t.matchKeyProjectPath()
 	if project == "" || t.client == nil {
 		return ""
 	}
-	host, basePath, ok := canonicalGitLabURL(t.client.BaseURL)
+	base := t.client.BaseURL
+	if wb := t.effectiveWebBase(); wb != "" {
+		base = wb
+	}
+	host, basePath, ok := canonicalGitLabURL(base)
 	if !ok {
 		return ""
 	}
 	return "gl://" + host + basePath + "/" + project
+}
+
+// effectiveWebBase returns the address GitLab writes into the web_url values
+// it returns as the tracker knows it: the one Init learned from the
+// configured project, or the gitlab.web_url override. "" when neither is set.
+func (t *Tracker) effectiveWebBase() string {
+	if t.webBase != "" {
+		return t.webBase
+	}
+	return t.configuredWebURL
 }
 
 // matchKeyProjectPath returns the configured project's canonical path, or ""

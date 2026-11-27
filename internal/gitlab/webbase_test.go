@@ -274,6 +274,28 @@ func TestAPIErrorTextUnchanged(t *testing.T) {
 	}
 }
 
+// TestMatchKeyAndLocalIdentityKeyUnderWebBase (AC-5): with a web base
+// learned, the "gitlab:N" shorthand keys on it — the address GitLab's own
+// links are under — so it still matches the issue's web_url, and a bead
+// whose ref is under the web base keeps its source_system identity.
+func TestMatchKeyAndLocalIdentityKeyUnderWebBase(t *testing.T) {
+	tr := initWebBaseTracker(t, `{"id":42,"path_with_namespace":"g/p","web_url":"https://git.example.org/g/p"}`, nil)
+
+	want := tr.MatchKey("https://git.example.org/g/p/-/issues/7")
+	if want != "gl://git.example.org/g/p#7" {
+		t.Fatalf(`MatchKey(web issue URL) = %q, want "gl://git.example.org/g/p#7"`, want)
+	}
+	if got := tr.MatchKey("gitlab:7"); got != want {
+		t.Errorf(`MatchKey("gitlab:7") = %q, want %q (the web_url's key)`, got, want)
+	}
+
+	ref := "https://git.example.org/g/p/-/issues/7"
+	issue := &types.Issue{ID: "bd-7", ExternalRef: &ref, SourceSystem: "gitlab:42:7"}
+	if got := tr.LocalIdentityKey(issue); got != "gitlab:42:7" {
+		t.Errorf("LocalIdentityKey = %q, want %q", got, "gitlab:42:7")
+	}
+}
+
 // TestIsExternalRefLearnedWebBase (AC-2): with a relative-root web base
 // learned, issue and work-item URLs under it are recognized, refs under
 // gitlab.url stay recognized, and a path outside the root, an unrelated host
