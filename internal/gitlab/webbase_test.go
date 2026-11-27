@@ -296,6 +296,59 @@ func TestMatchKeyAndLocalIdentityKeyUnderWebBase(t *testing.T) {
 	}
 }
 
+// TestProjectScopeUnderGitLabURLAndWebBase (AC-6): with a web base learned,
+// the configured project's issues under either address — gitlab.url, where
+// beads linked before the address was known keep their refs, and the web
+// base, where GitLab's links are — are in the dependency-link push scope,
+// another project on the web host and another instance are not, and the run
+// reads the project once (Init's read).
+func TestProjectScopeUnderGitLabURLAndWebBase(t *testing.T) {
+	var projectGets int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.TrimPrefix(r.URL.Path, "/api/v4") == "/projects/42" {
+			projectGets++
+			_, _ = w.Write([]byte(`{"id":42,"path_with_namespace":"g/p","web_url":"https://git.example.org/g/p"}`))
+			return
+		}
+		http.Error(w, `{"message":"404 Not found"}`, http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("GITLAB_URL", srv.URL)
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_PROJECT_ID", "42")
+	t.Setenv("GITLAB_PROJECT_PATH", "g/p")
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), &crossProjectStore{issues: map[string]*types.Issue{}}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	scope := tr.ProjectScope()
+	tests := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{"issue under gitlab.url", srv.URL + "/g/p/-/issues/1", true},
+		{"issue under the web base", "https://git.example.org/g/p/-/issues/2", true},
+		{"work item under gitlab.url", srv.URL + "/g/p/-/work_items/3", true},
+		{"another project on the web host", "https://git.example.org/other/q/-/issues/4", false},
+		{"another instance", "https://gitlab.other.example/g/p/-/issues/5", false},
+	}
+	for _, tt := range tests {
+		ref := tt.ref
+		issue := &types.Issue{ID: "bd-x", ExternalRef: &ref}
+		if got := scope.Contains(context.Background(), issue); got != tt.want {
+			t.Errorf("%s: Contains = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+	if projectGets != 1 {
+		t.Fatalf("GET /projects/42 answered %d times, want 1", projectGets)
+	}
+}
+
 // TestIsExternalRefLearnedWebBase (AC-2): with a relative-root web base
 // learned, issue and work-item URLs under it are recognized, refs under
 // gitlab.url stay recognized, and a path outside the root, an unrelated host

@@ -194,12 +194,19 @@ type ProjectScope struct {
 	fetched bool
 }
 
-// ProjectScope returns the scope of the configured project. It asks GitLab
-// for the project at most once, and only for what the configuration does not
-// say: the project's path when it is configured by numeric ID, or its ID when
-// it is configured by path.
+// ProjectScope returns the scope of the configured project. When Init already
+// read the project — it does, to learn the address GitLab writes into issue
+// links — the scope reuses that read; otherwise it asks GitLab for the project
+// at most once, and only for what the configuration does not say: the
+// project's path when it is configured by numeric ID, or its ID when it is
+// configured by path.
 func (t *Tracker) ProjectScope() *ProjectScope {
-	return &ProjectScope{tracker: t}
+	return &ProjectScope{
+		tracker: t,
+		project: t.initProject,
+		err:     t.initProjectErr,
+		fetched: t.initProject != nil || t.initProjectErr != nil,
+	}
 }
 
 // Contains reports whether issue's external_ref names an issue of the
@@ -226,8 +233,8 @@ func (s *ProjectScope) Contains(ctx context.Context, issue *types.Issue) bool {
 		id := s.projectID(ctx)
 		return id > 0 && m[1] == strconv.Itoa(id)
 	}
-	key := s.projectKey(ctx)
-	return key != "" && project == key
+	_, ok = s.projectKeys(ctx)[project]
+	return ok
 }
 
 // Err returns the error that kept GitLab from reporting the configured
@@ -247,21 +254,34 @@ func (s *ProjectScope) projectID(ctx context.Context) int {
 	return 0
 }
 
-// projectKey returns the configured project keyed as MatchKey keys a ref's
-// project, "gl://{host}/{path}", or "" when it is unknown.
-func (s *ProjectScope) projectKey(ctx context.Context) string {
-	if key := s.tracker.configuredMatchKeyProject(); key != "" {
-		return key
+// projectKeys returns the configured project keyed as MatchKey keys a ref's
+// project, "gl://{host}/{path}", under every root the project is reachable
+// at: gitlab.url, where beads linked before the web address was learned keep
+// their refs, and the learned or configured web address, where GitLab's own
+// links are. When the configuration names no path (a numeric project ID), it
+// asks GitLab for the project once and keys it under the root its web_url
+// spells, as before. The result is nil when the keys are unknown.
+func (s *ProjectScope) projectKeys(ctx context.Context) map[string]struct{} {
+	keys := map[string]struct{}{}
+	if project := s.tracker.matchKeyProjectPath(); project != "" {
+		for _, base := range []string{s.tracker.client.BaseURL, s.tracker.effectiveWebBase()} {
+			if host, basePath, ok := canonicalGitLabURL(base); ok {
+				keys["gl://"+host+basePath+"/"+project] = struct{}{}
+			}
+		}
+	}
+	if len(keys) > 0 {
+		return keys
 	}
 	p := s.fetch(ctx)
 	if p == nil {
-		return ""
+		return nil
 	}
 	host, path, ok := canonicalGitLabURL(p.WebURL)
 	if !ok || !validMatchKeyProject(strings.TrimPrefix(path, "/")) {
-		return ""
+		return nil
 	}
-	return "gl://" + host + path
+	return map[string]struct{}{"gl://" + host + path: {}}
 }
 
 // fetch returns the configured project as GitLab reports it, asking once.

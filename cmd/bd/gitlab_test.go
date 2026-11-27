@@ -804,6 +804,71 @@ func TestPushGitLabDependencyLinksStaysInConfiguredProject(t *testing.T) {
 	}
 }
 
+// TestPushGitLabDependencyLinksUnderGitLabURLAndWebBase (bd-0nikt4): with
+// the address GitLab writes into its links learned from the project's
+// web_url, the dependency-link push scope holds the configured project under
+// both addresses, so a blocks edge between a bead linked under gitlab.url and
+// one under the web address is pushed, while another project's issue on the
+// web address stays outside. The run reads the project once: Init's read.
+func TestPushGitLabDependencyLinksUnderGitLabURLAndWebBase(t *testing.T) {
+	var posts []string
+	var projectGets int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/v4")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && path == "/projects/42":
+			projectGets++
+			_, _ = w.Write([]byte(`{"id":42,"path_with_namespace":"g/p","web_url":"https://git.example.org/g/p"}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/links"):
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/links"):
+			body, _ := io.ReadAll(r.Body)
+			posts = append(posts, path+" "+string(body))
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_URL", srv.URL)
+	t.Setenv("GITLAB_PROJECT_ID", "42")
+	t.Setenv("GITLAB_PROJECT_PATH", "g/p")
+	t.Setenv("GITLAB_GROUP_ID", "")
+	t.Setenv("GITLAB_DEFAULT_PROJECT_ID", "")
+
+	a7 := gitLabSyncIssue("bd-a7", srv.URL+"/g/p/-/issues/7", types.TypeTask)
+	b8 := gitLabSyncIssue("bd-b8", "https://git.example.org/g/p/-/issues/8", types.TypeTask)
+	o9 := gitLabSyncIssue("bd-o9", "https://git.example.org/other/q/-/issues/9", types.TypeTask)
+	st := &gitLabSyncFakeStore{
+		issues: []*types.Issue{a7, b8, o9},
+		deps: map[string][]*types.IssueWithDependencyMetadata{
+			b8.ID: {gitLabSyncDep(a7, types.DepBlocks)},
+			o9.ID: {gitLabSyncDep(a7, types.DepBlocks)},
+		},
+	}
+	gt := &gitlab.Tracker{}
+	if err := gt.Init(context.Background(), st); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	var warnings []string
+	pushed, _, _ := pushGitLabDependencyLinks(context.Background(), gt, st, tracker.SyncOptions{Push: true}, false, io.Discard,
+		func(msg string) { warnings = append(warnings, msg) })
+
+	wantPosts := []string{`/projects/42/issues/7/links {"link_type":"blocks","target_issue_iid":8,"target_project_id":"42"}`}
+	if strings.Join(posts, "\n") != strings.Join(wantPosts, "\n") || pushed != 1 {
+		t.Errorf("pushed %d links, POSTs %q, want only %q", pushed, posts, wantPosts)
+	}
+	if want := []string{gitLabOutsideProjectLinkMessage(1)}; strings.Join(warnings, "\n") != strings.Join(want, "\n") {
+		t.Errorf("warnings = %q, want %q", warnings, want)
+	}
+	if projectGets != 1 {
+		t.Errorf("GET /projects/42 answered %d times, want 1 (Init's read)", projectGets)
+	}
+}
+
 func TestGitLabSyncResultJSONIncludesLinksPushed(t *testing.T) {
 	data, err := json.Marshal(gitlabSyncResult{LinksPushed: 2})
 	if err != nil {
