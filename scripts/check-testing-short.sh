@@ -14,6 +14,7 @@ internal/storage/dolt/concurrent_test.go::TestConcurrentWorkQueueDrain
 internal/storage/dolt/blocked_scale_bench_test.go::TestBlockedStateScaleTiming
 internal/storage/dolt/lease_test.go::TestConcurrentHeartbeatReclaimClose
 internal/storage/uow/lostupdate_dolt_test.go::TestUOW_ConcurrentMergeOps_NoLostUpdate
+internal/storage/uow/label_lostupdate_dolt_test.go::TestUOW_ConcurrentSetLabels_LastWriterWins
 internal/workapi/sweep_test.go::TestCandidateIDMatcherLargeFixture
 EOF
 )

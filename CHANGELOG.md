@@ -1834,6 +1834,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dolt.auto-commit` `batch` or `off` the write waits for `bd dolt commit`,
   as other writes do. (builds on PR #7717 by harry-miller-trimble)
 
+- **Overlapping whole-set label edits on one issue now serialize instead of
+  merging, and `bd set-state` leaves one value per dimension** (#5657). Two
+  label edits on the same issue that overlapped both committed: two `bd update
+  --set-labels` calls ended with the union of both sets, and two `bd
+  set-state` calls on one dimension could leave both values, which a later `bd
+  set-state` never removed. An edit that decides which labels to drop from the
+  set it read (`--set-labels`, `bd set-state`, and a `labels` replacement over
+  the HTTP API or the Go SDK) now also rewrites a clone-local coordination
+  record for that issue, so the second of two such edits conflicts at commit
+  and is replayed against the labels the first one committed. `bd set-state`
+  now removes every label of the dimension (each label starting with
+  `<dimension>:`) in the same update that adds the new value, so it also
+  repairs a dimension that already holds two values. Adds and removes of named
+  labels (`--add-label`, `--remove-label`, `bd label add`, `remove` and
+  `propagate`, `bd cook --persist`) never touch the record, so they cannot
+  fail on it. They stay literal: two writers that each move `state:a` to a
+  different value with `--remove-label`/`--add-label` can still leave both,
+  the same result as running them one after the other; use `bd set-state` for
+  a dimension that must hold one value. The HTTP API carries the dimension
+  removal as `remove_label_prefixes` on `PATCH /v0/beads/issues/{id}` and
+  `labels.remove_prefixes` on an `issues:batchApply` update item, behind the
+  new `issues.update.labelPrefixes` capability, and the Go SDK's
+  `issueops.LabelPatch` gains `RemovePrefixes`. Against a `bd serve` without
+  the capability, bd refuses a prefix removal before sending it, and `bd
+  set-state` removes the exact labels it read, as before. `bd label rename`,
+  the create/import label upsert and `bd promote` do not take part in the
+  coordination yet, and a bd older than this release never writes the record,
+  so its label edits can still merge with a newer bd's during an upgrade.
 - **Upgrading a clone whose local `wisps` table lacks `started_at` or
   `no_history` no longer stops at schema v52** (#6080, reported by @dmcp718;
   fix from #8099 by @kyoto-bonsai). Migrations 0023 and 0027 add those

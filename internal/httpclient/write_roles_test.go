@@ -410,15 +410,19 @@ func stubStore(t *testing.T, w *stubWire) *Store {
 	// A current server: it advertises issues.update.allowTemplate, so
 	// Lifecycle.Update leaves the template guard to it and pre-reads nothing,
 	// issues.update.claim, so a claim rides updateIssue, and
-	// issues.sweep.retainedTypes, so a plain sweep reads no setting first, and
-	// issues.delete.containmentCascade, so a cascade delete is sent.
+	// issues.sweep.retainedTypes, so a plain sweep reads no setting first,
+	// issues.delete.containmentCascade, so a cascade delete is sent, and
+	// issues.update.labelPrefixes, so a label prefix removal is sent.
 	// TestUpdateTemplateGuardAgainstAServerThatPredatesIt,
-	// TestUpdateClaimAgainstAServerWithoutTheToken and
-	// TestAPlainSweepAgainstAServerWithoutRetainedTypesReadsTheSetting cover
-	// the older ones.
+	// TestUpdateClaimAgainstAServerWithoutTheToken,
+	// TestAPlainSweepAgainstAServerWithoutRetainedTypesReadsTheSetting and
+	// TestALabelPrefixRemovalNeedsTheToken cover the older ones.
 	return New(testTarget(t), w, &apigen.ContextResponse{
-		BdVersion:    "1.2.3",
-		Capabilities: []string{wire.CapIssuesUpdateAllowTemplate, wire.CapIssuesUpdateClaim, wire.CapSweepRetainedTypes, wire.CapDeleteContainmentCascade},
+		BdVersion: "1.2.3",
+		Capabilities: []string{
+			wire.CapIssuesUpdateAllowTemplate, wire.CapIssuesUpdateClaim, wire.CapSweepRetainedTypes,
+			wire.CapDeleteContainmentCascade, wire.CapIssuesUpdateLabelPrefixes,
+		},
 	})
 }
 

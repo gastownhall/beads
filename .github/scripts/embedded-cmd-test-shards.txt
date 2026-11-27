@@ -54,6 +54,7 @@
 100 11 TestEmbeddedKVConcurrent
 100 11 TestEmbeddedMemoryBareKeyRecallsKeysDeriveKeyChanges
 100 11 TestEmbeddedMetadatalessWorkspaceAdoptsSoleDatabase
+100 11 TestEmbeddedSetStateHealsADuplicatedDimension
 100 11 TestEmbeddedTelemetryExportCarriesNoIssueContent
 100 11 TestEmbeddedUpdateClaimRefusesBlockedIssue
 
