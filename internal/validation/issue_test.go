@@ -486,6 +486,16 @@ func TestAssigneeNotStolen(t *testing.T) {
 			pools:       pools,
 			wantErr:     true,
 		},
+		// GH#8628: letter case is the same class of drift — the unclaim arm
+		// (an empty newAssignee) must not fence the holder who spells its own
+		// identity differently from the stored assignee.
+		{
+			name:        "actor unassigning its own live claim passes under a case variant",
+			issue:       inProgress("hierophant"),
+			actor:       "Hierophant",
+			newAssignee: "",
+			wantErr:     false,
+		},
 		{
 			name:        "different identity with shared separators still refused",
 			issue:       inProgress("gastown.mayor"),
