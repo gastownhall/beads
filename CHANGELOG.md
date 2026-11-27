@@ -1544,6 +1544,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd gitlab sync` and `bd gitlab push` no longer create another copy of
+  every linked issue on each push when GitLab is reached at another address
+  than the one it writes into its links.** GitLab spells every issue's
+  `web_url` with its own `external_url`, whatever address the API was reached
+  at (an internal name, an IP, a proxy), and the tracker recognized a stored
+  ref only under `gitlab.url`, so each push created the issue again and moved
+  the bead's `external_ref` to the copy. Each GitLab sync, push or pull now
+  reads the configured project once (`GET /projects/:id`) and also recognizes
+  refs under the address its `web_url` names; no config key is needed. A
+  failure of that read other than 404 stops the run, since pushing without it
+  could copy every linked issue. Copies already made are left in place.
+
 - **`bd show` no longer prints `Lease: expires expired` for a lapsed lease.**
   An in_progress issue keeps its lease row after the lease runs out, until
   `bd reclaim` sweeps it, and the lease line then printed the verb twice and

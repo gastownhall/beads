@@ -51,9 +51,10 @@ type Client struct {
 	// BaseURL is the GitLab instance web root, e.g. "https://gitlab.com" — not
 	// an API endpoint. buildURL appends DefaultAPIEndpoint to it per request, so
 	// spelling it "https://gitlab.com/api/v4" doubles the suffix. It is also
-	// load-bearing for ref identity: createTaskWorkItem composes stored web_url
-	// refs from this value, and (*Tracker).onConfiguredHost matches refs back
-	// against it to decide which ones belong to this tracker.
+	// load-bearing for ref identity: (*Tracker).onInstance matches refs back
+	// against it, beside the address GitLab writes into its links (learned in
+	// Init from the project's web_url), to decide which ones belong to this
+	// tracker. Requests go only to BaseURL.
 	BaseURL string
 
 	ProjectID  string       // Project ID or URL-encoded path (e.g., "group/project")

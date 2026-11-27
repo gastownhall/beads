@@ -75,7 +75,7 @@ func TestIsExternalRefSelfHostedURL(t *testing.T) {
 		// Regression pins for the pre-existing arms, not the host check: the
 		// milestone row is claimed by the "milestones" substring and the
 		// shorthand returns at glShorthandPattern, both before the host check
-		// runs. They still pass if onConfiguredHost is deleted.
+		// runs. They still pass if onInstance is deleted.
 		{"https://nova.teachx.ai/group/project/-/milestones/5", true},
 		{"gitlab:24", true},
 	}
