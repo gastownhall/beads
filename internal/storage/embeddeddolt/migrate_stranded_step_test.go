@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -254,6 +255,24 @@ func applyMigrationVersionOf(message string) (int, bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+// doltStatusOfTable asserts the table has a dolt_status row (it is dirty) and
+// returns its staged flag and status.
+func doltStatusOfTable(t *testing.T, ctx context.Context, conn *sql.Conn, table string) (staged bool, status string) {
+	t.Helper()
+	rows, err := conn.QueryContext(ctx, "SELECT staged, status FROM dolt_status WHERE table_name = ?", table)
+	if err != nil {
+		t.Fatalf("read dolt_status for %s: %v", table, err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatalf("table %s has no dolt_status row, want it dirty", table)
+	}
+	if err := rows.Scan(&staged, &status); err != nil {
+		t.Fatalf("scan dolt_status: %v", err)
+	}
+	return staged, status
 }
 
 func equalStrings(a, b []string) bool {
@@ -526,4 +545,126 @@ func TestEmbeddedMigrateStrandedStepSurvivesASecondKill(t *testing.T) {
 	if len(counts) == 0 {
 		t.Fatal("no apply-migration commits in history; the pass did not run")
 	}
+}
+
+// TestEmbeddedMigrateStrandedStepLeavesUnrelatedDirt is AC-4: a strand at
+// 0049 plus an uncommitted user row in a table 0049's SQL does not touch.
+// The finish commits 0049 under its own message WITHOUT that table; the row
+// stays uncommitted and unstaged with unchanged content; and the existing
+// dirty-table guard decides the rest of the pass — with config (no later
+// migration touches it) the pass reaches the latest version, with labels (a
+// later pending migration, 0053, touches it) it refuses with
+// *DirtyTablesError{Tables: [labels]} and HEAD's cursor at 49.
+//
+// PRE-fix both rows refuse at the guard before 0049 is ever committed.
+func TestEmbeddedMigrateStrandedStepLeavesUnrelatedDirt(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	t.Run("untouched_by_pending_migrations", func(t *testing.T) {
+		dataDir := strandSeedMainSchemaAt(t, ctx, selfHealSeedVersion)
+		strandMainAt(t, ctx, dataDir, 49)
+
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+		const dirtKey = "bd-0eetsy-user-dirt"
+		if _, err := conn.ExecContext(ctx,
+			"INSERT INTO config (`key`, value) VALUES (?, ?)", dirtKey, "1"); err != nil {
+			t.Fatalf("insert user dirt into config: %v", err)
+		}
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp with untouched user dirt: %v", err)
+		}
+		if v := currentMainVersion(t, ctx, conn); v != schema.LatestVersion() {
+			t.Fatalf("main version = %d, want latest %d", v, schema.LatestVersion())
+		}
+		// The user row survived uncommitted...
+		var working int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM config WHERE `key` = ?", dirtKey).Scan(&working); err != nil {
+			t.Fatalf("count working config: %v", err)
+		}
+		if working != 1 {
+			t.Fatalf("working config rows = %d, want 1", working)
+		}
+		var committed int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM config AS OF 'HEAD' WHERE `key` = ?", dirtKey).Scan(&committed); err != nil {
+			t.Fatalf("count committed config: %v", err)
+		}
+		if committed != 0 {
+			t.Fatalf("committed config rows = %d, want 0 (the finish must not sweep untouched user dirt)", committed)
+		}
+		staged, status := doltStatusOfTable(t, ctx, conn, "config")
+		if staged {
+			t.Fatal("config is staged in dolt_status, want unstaged")
+		}
+		if status != "modified" {
+			t.Fatalf("config dolt_status = %q, want modified", status)
+		}
+		// ...and 0049's own commit does not include config.
+		hash49 := oneApplyCommit(t, ctx, conn, "0049_")
+		if contains(commitChangedTables(t, ctx, conn, hash49), "config") {
+			t.Fatal("0049's apply commit changed config; the finish must leave untouched user dirt behind")
+		}
+	})
+
+	t.Run("touched_by_pending_migrations", func(t *testing.T) {
+		dataDir := strandSeedMainSchemaAt(t, ctx, selfHealSeedVersion)
+		strandMainAt(t, ctx, dataDir, 49)
+
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+		// labels carries an FK to issues; give the user row a real issue.
+		if _, err := conn.ExecContext(ctx, "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES ('bd-0eetsy-issue', 'issue for the labels row', 'd', 'de', 'ac', 'n')"); err != nil {
+			t.Fatalf("insert issue for the labels row: %v", err)
+		}
+		if _, err := conn.ExecContext(ctx,
+			"INSERT INTO labels (issue_id, label) VALUES ('bd-0eetsy-issue', 'bd-0eetsy-label')"); err != nil {
+			t.Fatalf("insert user dirt into labels: %v", err)
+		}
+
+		_, err := schema.MigrateUp(ctx, conn)
+		var refused *schema.DirtyTablesError
+		if !errors.As(err, &refused) {
+			t.Fatalf("MigrateUp err = %v, want *DirtyTablesError for labels", err)
+		}
+		want := []string{"labels"}
+		if !equalStrings(refused.Tables, want) {
+			t.Fatalf("refused tables = %v, want %v", refused.Tables, want)
+		}
+		if v := currentMainVersion(t, ctx, conn); v != 49 {
+			t.Fatalf("HEAD cursor after refusal = %d, want 49", v)
+		}
+		// The labels row is exactly where it was: uncommitted, unstaged,
+		// unchanged.
+		var working int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM labels WHERE label = 'bd-0eetsy-label'").Scan(&working); err != nil {
+			t.Fatalf("count working labels: %v", err)
+		}
+		if working != 1 {
+			t.Fatalf("working labels rows = %d, want 1", working)
+		}
+		var committed int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE label = 'bd-0eetsy-label'").Scan(&committed); err != nil {
+			t.Fatalf("count committed labels: %v", err)
+		}
+		if committed != 0 {
+			t.Fatalf("committed labels rows = %d, want 0", committed)
+		}
+		staged, status := doltStatusOfTable(t, ctx, conn, "labels")
+		if staged {
+			t.Fatal("labels is staged in dolt_status, want unstaged")
+		}
+		if status != "modified" {
+			t.Fatalf("labels dolt_status = %q, want modified", status)
+		}
+		// 0049 was still finished (and its commit excludes labels).
+		hash49 := oneApplyCommit(t, ctx, conn, "0049_")
+		if contains(commitChangedTables(t, ctx, conn, hash49), "labels") {
+			t.Fatal("0049's apply commit changed labels; the finish must not sweep user dirt it does not touch")
+		}
+	})
 }
