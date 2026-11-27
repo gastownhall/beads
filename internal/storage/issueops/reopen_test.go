@@ -57,10 +57,11 @@ func TestReopenIssueInTxRetriesConditionalUpdateWhenLatestStatusIsCustomDone(t *
 	mock.ExpectQuery(`(?s)SELECT id FROM events`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectExec(`(?s)INSERT INTO events`).WillReturnResult(sqlmock.NewResult(0, 1))
-	// The batched recompute's parent-kind guard: no parent-child row in the
-	// batch, so neither exogeneity read runs before the mark and unmark.
-	mock.ExpectQuery(`(?s)SELECT COUNT\(d\.depends_on_issue_id\)`).
-		WillReturnRows(sqlmock.NewRows([]string{"i", "w"}).AddRow(0, 0))
+	// The batched recompute's parent-kind guard: no parent-child row and no
+	// dangling wisp edge in the batch, so neither exogeneity read nor the
+	// undecided-row read runs before the mark and unmark.
+	mock.ExpectQuery(`(?s)COUNT\(CASE WHEN d\.type = 'parent-child' THEN d\.depends_on_issue_id END\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"i", "w", "dangling"}).AddRow(0, 0, 0))
 	mock.ExpectExec(`(?s)UPDATE issues i SET`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`(?s)UPDATE issues i SET`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectRollback()
