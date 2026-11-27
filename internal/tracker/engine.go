@@ -528,6 +528,18 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 
+		// A tracker that folds several fields into one description settles
+		// which side each description field follows before anything below
+		// reads, previews or writes the converted issue.
+		descriptionFields := false
+		keepLocalDescription := false
+		if existing != nil {
+			if settler, ok := e.Tracker.(DescriptionFieldsTracker); ok {
+				keepLocalDescription = settler.SettleDescriptionFields(existing, conv.Issue)
+				descriptionFields = true
+			}
+		}
+
 		pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes, opts.DependencySources)
 		if opts.DryRun {
 			dryRunIssue := *conv.Issue
@@ -553,7 +565,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			conv.Issue.Labels = existing.Labels
 		}
 
-		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
+		if existing != nil && pullIssueEqual(existing, conv.Issue, ref, descriptionFields) {
 			if !opts.DryRun {
 				// Both sides can reach this content without a push, which
 				// leaves the hash of the last push stale.
@@ -575,7 +587,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil {
-			updates := buildPullIssueUpdates(existing, conv.Issue, ref)
+			updates := buildPullIssueUpdates(existing, conv.Issue, ref, descriptionFields)
 			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
 				updates["metadata"] = raw
 				// The push hash below fingerprints the row this update writes.
@@ -603,8 +615,9 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 			stats.Updated++
 			e.refreshPushHashAfterPull(ctx, existing, withLabels(conv.Issue, pulledLabels), ref)
-			if keepLocalLabels {
-				// The push must send the kept labels.
+			if keepLocalLabels || keepLocalDescription {
+				// The push must send what the pull kept local: labels, and
+				// description-field text the settle step chose to keep.
 				continue
 			}
 			if pulledIDs != nil {
@@ -726,7 +739,7 @@ func markPullIssueFields(updates map[string]interface{}) {
 	updates[issueops.OpForceClosePolicy] = true
 }
 
-func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
+func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string, descriptionFields bool) bool {
 	if local == nil || remote == nil {
 		return false
 	}
@@ -739,6 +752,12 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 		!equalNormalizedStrings(local.Labels, remote.Labels) {
 		return false
 	}
+	if descriptionFields &&
+		(local.AcceptanceCriteria != remote.AcceptanceCriteria ||
+			local.Design != remote.Design ||
+			local.Notes != remote.Notes) {
+		return false
+	}
 	localRef := ""
 	if local.ExternalRef != nil {
 		localRef = strings.TrimSpace(*local.ExternalRef)
@@ -746,7 +765,7 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 	return localRef == strings.TrimSpace(ref)
 }
 
-func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref string) map[string]interface{} {
+func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref string, descriptionFields bool) map[string]interface{} {
 	updates := map[string]interface{}{
 		"title":       remote.Title,
 		"description": remote.Description,
@@ -754,6 +773,14 @@ func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref strin
 		"status":      string(remote.Status),
 		"issue_type":  string(remote.IssueType),
 		"assignee":    remote.Assignee,
+	}
+	if descriptionFields {
+		// The settle step decided every description field, including the
+		// ones it left empty; writing all three keeps the local row in step
+		// with that decision.
+		updates["acceptance_criteria"] = remote.AcceptanceCriteria
+		updates["design"] = remote.Design
+		updates["notes"] = remote.Notes
 	}
 	trimmedRef := strings.TrimSpace(ref)
 	if trimmedRef == "" {
