@@ -1455,6 +1455,9 @@ func TestLoadMigratesOnlyBeadsLegacyConfig(t *testing.T) {
 		want    *Config // what both loaders return
 		wantErr string  // Load fails with this text and writes nothing
 	}{
+		{name: "beads-written legacy config", file: LegacyConfigFileName, body: `{"database":"beads.db","version":"0.20.1","jsonl_export":"issues.jsonl"}`, migrate: true, want: &Config{Database: "beads.db"}},
+		{name: "backend only", file: LegacyConfigFileName, body: `{"backend":"dolt"}`, migrate: true, want: &Config{Backend: "dolt"}},
+		{name: "project id only", file: LegacyConfigFileName, body: `{"project_id":"p-1"}`, migrate: true, want: &Config{ProjectID: "p-1"}},
 		{name: "another program's settings", file: LegacyConfigFileName, body: `{"port": 8080, "debug": true}`, want: &Config{}},
 		{name: "empty object", file: LegacyConfigFileName, body: `{}`, want: &Config{}},
 		{name: "null", file: LegacyConfigFileName, body: `null`, want: &Config{}},
