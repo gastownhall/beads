@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -222,6 +223,79 @@ func TestEmbeddedMigrateFinishesStrandedOwnStep(t *testing.T) {
 			if got := stepCommitTables(t, ctx, conn, stranded); !slices.Equal(got, wantStepTables) {
 				t.Fatalf("tables in the finished %04d commit = %v, want %v (the tables an uninterrupted pass commits with the step)",
 					stranded, got, wantStepTables)
+			}
+		})
+	}
+}
+
+// stepCursorRowChanges lists, as "<diff_type> <version>", the
+// schema_migrations rows the commit `hash` changed against its parent.
+func stepCursorRowChanges(t *testing.T, ctx context.Context, conn *sql.Conn, hash string) []string {
+	t.Helper()
+	return queryStrings(t, ctx, conn,
+		"SELECT CONCAT(diff_type, ' ', COALESCE(to_version, from_version)) FROM dolt_diff_schema_migrations "+
+			"WHERE to_commit = ? ORDER BY 1", hash)
+}
+
+// TestEmbeddedMigrateFinishesStrandedStepNoLaterMigrationTouches strands a
+// step whose tables no later migration touches. Unfixed, the guard lets that
+// pass run, and the next step's commit records the stranded cursor row while
+// the step's own change stays in the working set (73), or rides another
+// commit (62's dolt_ignore row). The finish must put the change in the
+// step's own commit and leave the next step's commit with only its own row.
+func TestEmbeddedMigrateFinishesStrandedStepNoLaterMigrationTouches(t *testing.T) {
+	requireEmbedded(t)
+	for _, tc := range []struct {
+		stranded int
+		// inCommit reports whether the stranded step's change is present AS
+		// OF a revision.
+		inCommit func(t *testing.T, ctx context.Context, conn *sql.Conn, rev string) bool
+	}{
+		{62, func(t *testing.T, ctx context.Context, conn *sql.Conn, rev string) bool {
+			return scalarInt(t, ctx, conn,
+				"SELECT COUNT(*) FROM dolt_ignore AS OF '"+rev+"' WHERE pattern = 'events' AND ignored") == 1
+		}},
+		{73, func(t *testing.T, ctx context.Context, conn *sql.Conn, rev string) bool {
+			var name, ddl string
+			if err := conn.QueryRowContext(ctx, "SHOW CREATE TABLE issues AS OF '"+rev+"'").Scan(&name, &ddl); err != nil {
+				t.Fatalf("SHOW CREATE TABLE issues AS OF %s: %v", rev, err)
+			}
+			return strings.Contains(ddl, "`arrival_seq`")
+		}},
+	} {
+		t.Run(fmt.Sprintf("v%d", tc.stranded), func(t *testing.T) {
+			ctx := t.Context()
+			wantStepTables := uninterruptedStepCommitTables(t, ctx, tc.stranded)
+			dataDir := strandStepAt(t, ctx, tc.stranded)
+
+			conn, closeConn := openPinnedConn(t, ctx, dataDir)
+			defer closeConn()
+			retryStranded(t, ctx, conn)
+
+			step := stepCommitHash(t, ctx, conn, tc.stranded)
+			if got := stepCommitTables(t, ctx, conn, tc.stranded); !slices.Equal(got, wantStepTables) {
+				t.Fatalf("tables in the finished %04d commit = %v, want %v (the tables an uninterrupted pass commits with the step)",
+					tc.stranded, got, wantStepTables)
+			}
+			if !tc.inCommit(t, ctx, conn, step) {
+				t.Fatalf("the %04d change is missing AS OF its own commit", tc.stranded)
+			}
+			if tc.inCommit(t, ctx, conn, step+"~1") {
+				t.Fatalf("the %04d change is present AS OF its commit's parent, want it to land in the step's own commit", tc.stranded)
+			}
+			if got := stepCursorRowChanges(t, ctx, conn, step); !slices.Equal(got, []string{fmt.Sprintf("added %d", tc.stranded)}) {
+				t.Fatalf("cursor rows the %04d commit changed = %v, want only its own", tc.stranded, got)
+			}
+
+			next := tc.stranded + 1
+			nextHash := stepCommitHash(t, ctx, conn, next)
+			if got := stepCursorRowChanges(t, ctx, conn, nextHash); !slices.Equal(got, []string{fmt.Sprintf("added %d", next)}) {
+				t.Fatalf("cursor rows the %04d commit changed = %v, want only its own (added %d)", next, got, next)
+			}
+			for _, table := range stepCommitTables(t, ctx, conn, next) {
+				if table != "schema_migrations" && slices.Contains(wantStepTables, table) {
+					t.Fatalf("the %04d commit changed %s, a table of the stranded %04d", next, table, tc.stranded)
+				}
 			}
 		})
 	}
