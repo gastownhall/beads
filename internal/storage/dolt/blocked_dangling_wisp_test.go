@@ -485,3 +485,101 @@ func TestRecomputeAllIsBlocked_PresentWispBlockerDecidedAsToday(t *testing.T) {
 		t.Error("scoped recompute left a row blocked at 1 after its wisp blocker closed")
 	}
 }
+
+// TestRecomputeAllIsBlocked_ParentHoldsDanglingEdge_ChildHeld is AC-5: an
+// open parent whose own edge dangles makes its open child's blockedness
+// unknown (the parent's is_blocked is itself as-found), so the child is held
+// too — left as found at 1 and at 0, and a stored 1 on the parent marks
+// nothing on the child. The exceptions: a visible reason on the parent
+// outside its own subtree darkens the child, and a closed or pinned child is
+// decided 0.
+func TestRecomputeAllIsBlocked_ParentHoldsDanglingEdge_ChildHeld(t *testing.T) {
+	t.Run("child left as found at 1 and at 0", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		createWisp(t, ctx, store, "dpc-w")
+		createPerm(t, ctx, store, "dpc-p")
+		addDependencyWithMeta(t, ctx, store, "dpc-p", "dpc-w", types.DepBlocks, "")
+		createPerm(t, ctx, store, "dpc-c")
+		addDependencyWithMeta(t, ctx, store, "dpc-c", "dpc-p", types.DepParentChild, "")
+		dropWisp(t, ctx, store, "dpc-w")
+		// The child inherited 1 from the blocked parent before the drop; pin
+		// the parent at 1 and try the child at both values.
+		require := func(childBlocked bool) {
+			t.Helper()
+			setFlag(t, ctx, store, "issues", "dpc-p", true)
+			setFlag(t, ctx, store, "issues", "dpc-c", childBlocked)
+			fullRepair(t, ctx, store)
+			requireFlags(t, ctx, store, "issues", map[string]bool{"dpc-p": true, "dpc-c": childBlocked})
+		}
+		require(true)
+		require(false)
+	})
+
+	t.Run("parent's visible reason outside its subtree darkens the child", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		createWisp(t, ctx, store, "dpe-w")
+		createPerm(t, ctx, store, "dpe-x")
+		createPerm(t, ctx, store, "dpe-p")
+		addDependencyWithMeta(t, ctx, store, "dpe-p", "dpe-w", types.DepBlocks, "")
+		addDependencyWithMeta(t, ctx, store, "dpe-p", "dpe-x", types.DepBlocks, "")
+		createPerm(t, ctx, store, "dpe-c")
+		addDependencyWithMeta(t, ctx, store, "dpe-c", "dpe-p", types.DepParentChild, "")
+		dropWisp(t, ctx, store, "dpe-w")
+		setFlag(t, ctx, store, "issues", "dpe-c", false)
+
+		fullRepair(t, ctx, store)
+		requireFlags(t, ctx, store, "issues", map[string]bool{"dpe-p": true, "dpe-c": true})
+	})
+
+	t.Run("epic whose close gate targets an absent wisp child holds its own children", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		// The epic waits-for its own wisp child; the child is not in this
+		// database, so the gate — and with it the epic — is held.
+		createWisp(t, ctx, store, "dpg-wc")
+		createPerm(t, ctx, store, "dpg-p")
+		addDependencyWithMeta(t, ctx, store, "dpg-p", "dpg-wc", types.DepWaitsFor, "")
+		addDependencyWithMeta(t, ctx, store, "dpg-wc", "dpg-p", types.DepParentChild, "")
+		createPerm(t, ctx, store, "dpg-c")
+		addDependencyWithMeta(t, ctx, store, "dpg-c", "dpg-p", types.DepParentChild, "")
+		dropWisp(t, ctx, store, "dpg-wc")
+
+		setFlag(t, ctx, store, "issues", "dpg-p", true)
+		setFlag(t, ctx, store, "issues", "dpg-c", false)
+		fullRepair(t, ctx, store)
+		requireFlags(t, ctx, store, "issues", map[string]bool{"dpg-p": true, "dpg-c": false})
+	})
+
+	for _, status := range []types.Status{types.StatusClosed, types.StatusPinned} {
+		t.Run("closed-or-pinned child is decided 0 ("+string(status)+")", func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			createWisp(t, ctx, store, "dpz-w")
+			createPerm(t, ctx, store, "dpz-p")
+			addDependencyWithMeta(t, ctx, store, "dpz-p", "dpz-w", types.DepBlocks, "")
+			createPerm(t, ctx, store, "dpz-c")
+			addDependencyWithMeta(t, ctx, store, "dpz-c", "dpz-p", types.DepParentChild, "")
+			dropWisp(t, ctx, store, "dpz-w")
+			setFlag(t, ctx, store, "issues", "dpz-p", true)
+			setFlag(t, ctx, store, "issues", "dpz-c", true)
+			rawSetStatus(t, ctx, store, "issues", "dpz-c", status)
+
+			fullRepair(t, ctx, store)
+			requireFlags(t, ctx, store, "issues", map[string]bool{"dpz-p": true, "dpz-c": false})
+		})
+	}
+}
