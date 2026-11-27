@@ -81,15 +81,18 @@ func ConfigPath(beadsDir string) string {
 
 // LegacyConfigFileName is the pre-metadata.json name of a workspace's
 // metadata file. Load migrates it into metadata.json; LoadForDiscovery reads
-// it in place.
+// it in place. Both ignore a config.json that beads did not write (see
+// notBeadsLegacyConfig).
 const LegacyConfigFileName = "config.json"
 
 // MetadataFilePath returns the path of the file beadsDir's metadata is read
 // from: the legacy config.json when metadata.json is absent and config.json
-// exists (the file LoadForDiscovery reads, and Load would migrate), and
-// ConfigPath otherwise. Messages that name the file holding a setting use it,
+// exists (the file LoadForDiscovery reads, and Load would migrate, when beads
+// wrote it), and ConfigPath otherwise. Messages that name the file holding a setting use it,
 // so a refusal made before any migration names the file the user must edit.
-// It only stats; an empty beadsDir returns ConfigPath("").
+// It only stats, so it also names a config.json that beads did not write and
+// both loaders ignore; no message is built from that file, since it yields no
+// setting. An empty beadsDir returns ConfigPath("").
 func MetadataFilePath(beadsDir string) string {
 	path := ConfigPath(beadsDir)
 	if beadsDir == "" {
@@ -103,6 +106,22 @@ func MetadataFilePath(beadsDir string) string {
 		return legacyPath
 	}
 	return path
+}
+
+// notBeadsLegacyConfig reports whether a parsed legacy config.json was not
+// written by beads: it sets no field beads knows, so it parses to the zero
+// Config. Discovery can take a directory that is not a beads directory for a
+// workspace, such as a project root named by BEADS_DIR that holds a
+// config.yaml of its own, and a config.json there belongs to something else.
+// Every config.json beads wrote names its database: bd init and bd migrate
+// were its only writers, and both saved DefaultConfig's "beads.db" or a
+// loaded value.
+//
+// The test is the parsed value, not the key names, so a foreign file that
+// uses one of beads' keys (matched without regard to case) is still taken
+// for beads' own.
+func notBeadsLegacyConfig(cfg *Config) bool {
+	return *cfg == (Config{})
 }
 
 func Load(beadsDir string) (*Config, error) {
@@ -124,6 +143,13 @@ func Load(beadsDir string) (*Config, error) {
 		var cfg Config
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parsing legacy config: %w", err)
+		}
+
+		// Migrating a config.json that beads did not write would delete
+		// another program's file and leave an empty metadata.json in its
+		// place, so it is left alone and reported as no config.
+		if notBeadsLegacyConfig(&cfg) {
+			return nil, nil
 		}
 
 		// Save to new location
@@ -157,8 +183,10 @@ func Load(beadsDir string) (*Config, error) {
 // result only to decide whether to issue a conservative refusal; normal store
 // selection keeps its existing validation.
 func LoadForDiscovery(beadsDir string) (*Config, error) {
+	legacy := false
 	data, err := os.ReadFile(ConfigPath(beadsDir)) // #nosec G304 -- beadsDir is caller-selected workspace state
 	if os.IsNotExist(err) {
+		legacy = true
 		data, err = os.ReadFile(filepath.Join(beadsDir, LegacyConfigFileName)) // #nosec G304 -- legacy workspace state
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -173,6 +201,12 @@ func LoadForDiscovery(beadsDir string) (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	// Agree with Load on a config.json that beads did not write: both report
+	// no metadata, so a caller that classifies with one and opens with the
+	// other sees the same workspace.
+	if legacy && notBeadsLegacyConfig(&cfg) {
+		return nil, nil
 	}
 	return &cfg, nil
 }

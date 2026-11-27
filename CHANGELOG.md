@@ -1517,6 +1517,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bootstrap`. What is refused, and the consent it takes, are unchanged;
   server and embedded mode print, and emit as JSON, what they did before.
 
+- **bd no longer deletes a `config.json` that sets nothing beads reads**
+  (GH#7034). Loading a workspace's metadata migrates a pre-`metadata.json`
+  `config.json`: it writes `metadata.json` and removes the old file. It did
+  that for any `config.json` it could parse, in whatever directory was taken
+  for the workspace. With `BEADS_DIR` set to a project root that holds a
+  `config.yaml` of its own (the root instead of its `.beads`), `bd prime`,
+  `bd config show`, `bd dolt show`, `bd dolt status`, `bd dolt set` and
+  `bd dolt test` deleted the project's own `config.json` and left a
+  `metadata.json` holding `{"database": ""}` in its place. A `config.json`
+  in which no beads field has a value is now left untouched, and both
+  metadata loaders treat the directory as having no metadata; one that beads
+  wrote is migrated as before. A `config.json` that uses one of beads' own
+  keys, such as `database`, is still taken for beads metadata.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example

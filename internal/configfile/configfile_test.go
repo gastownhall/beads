@@ -101,6 +101,102 @@ func TestLoadForDiscoveryNeverMigratesLegacyConfig(t *testing.T) {
 	}
 }
 
+// Load migrates a legacy config.json that beads wrote, and leaves alone one
+// that sets no field beads knows; LoadForDiscovery reads the first and
+// reports no metadata for the second, so the two agree. Discovery can take a
+// directory that is not a beads directory for a workspace (a project root
+// named by BEADS_DIR that holds its own config.yaml), and before this guard
+// `bd prime`, `bd config show` and the `bd dolt` commands deleted that
+// project's config.json and wrote an empty metadata.json in its place.
+func TestLoadMigratesOnlyBeadsLegacyConfig(t *testing.T) {
+	seed := func(t *testing.T, content string) (dir, legacyPath string) {
+		t.Helper()
+		dir = t.TempDir()
+		legacyPath = filepath.Join(dir, LegacyConfigFileName)
+		if err := os.WriteFile(legacyPath, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dir, legacyPath
+	}
+
+	// The second row names no database: a guard that asked only for a
+	// database would strand it.
+	for name, legacy := range map[string]string{
+		"names its database":      `{"database":"beads.db"}`,
+		"names only its backend":  `{"backend":"dolt","dolt_mode":"server"}`,
+		"names only a project id": `{"project_id":"0f3c"}`,
+	} {
+		t.Run("a config.json that "+name+" is migrated", func(t *testing.T) {
+			dir, legacyPath := seed(t, legacy)
+
+			seen, err := LoadForDiscovery(dir)
+			if err != nil || seen == nil {
+				t.Fatalf("LoadForDiscovery() = %#v, %v; want the legacy config", seen, err)
+			}
+			cfg, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load() failed: %v", err)
+			}
+			if cfg == nil || *cfg != *seen {
+				t.Fatalf("Load() = %#v, want the config LoadForDiscovery read: %#v", cfg, seen)
+			}
+			if _, err := os.Stat(filepath.Join(dir, ConfigFileName)); err != nil {
+				t.Fatalf("Load did not write metadata.json: %v", err)
+			}
+			if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+				t.Fatalf("Load left the legacy config.json in place: %v", err)
+			}
+		})
+	}
+
+	for name, foreign := range map[string]string{
+		"another program's settings":    `{"port": 8080, "debug": true}`,
+		"an empty object":               `{}`,
+		"a JSON null":                   `null`,
+		"an empty database and no more": `{"database": ""}`,
+	} {
+		t.Run(name+" is left alone", func(t *testing.T) {
+			dir, foreignPath := seed(t, foreign)
+
+			seen, err := LoadForDiscovery(dir)
+			if err != nil || seen != nil {
+				t.Fatalf("LoadForDiscovery() = %#v, %v; want nil: the file sets no beads field", seen, err)
+			}
+			cfg, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load() failed: %v", err)
+			}
+			if cfg != nil {
+				t.Fatalf("Load() = %#v, want nil: the file sets no beads field", cfg)
+			}
+			if _, err := os.Stat(filepath.Join(dir, ConfigFileName)); !os.IsNotExist(err) {
+				t.Fatalf("Load wrote metadata.json beside a config.json that is not beads': %v", err)
+			}
+			after, err := os.ReadFile(foreignPath)
+			if err != nil {
+				t.Fatalf("Load removed a config.json that is not beads': %v", err)
+			}
+			if string(after) != foreign {
+				t.Fatalf("Load rewrote a config.json that is not beads': got %q, want %q", after, foreign)
+			}
+		})
+	}
+	// The guard is about the legacy name only: a metadata.json is beads' own
+	// whatever it holds, and both loaders return it.
+	t.Run("an empty metadata.json is still read", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ConfigFileName), []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if seen, err := LoadForDiscovery(dir); err != nil || seen == nil {
+			t.Fatalf("LoadForDiscovery() = %#v, %v; want the empty config", seen, err)
+		}
+		if cfg, err := Load(dir); err != nil || cfg == nil {
+			t.Fatalf("Load() = %#v, %v; want the empty config", cfg, err)
+		}
+	})
+}
+
 func TestDatabasePath(t *testing.T) {
 	beadsDir := "/home/user/project/.beads"
 	// DatabasePath always returns dolt path regardless of Database field
