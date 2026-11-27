@@ -41,9 +41,20 @@ package issueops
 // bypasses the local write paths, so blocked state after a merge is settled by
 // a scoped recompute that follows the merge rather than by the merge itself. If
 // that recompute is skipped or fails, stale values persist until the next pull
-// widens its window or an operator runs the full repair. This is the ONE clause
-// under which a stale column is admissible, and no role method can produce that
-// state.
+// widens its window or an operator runs the full repair.
+//
+// THE PARTIAL-VIEW CLAUSE — a stale column admissible only while its evidence
+// is absent. `dependencies` is versioned while the wisp tables are not, so on a
+// clone an edge can name a wisp this database has no row for, and the value a
+// full view would settle from that edge is UNKNOWN here. A row whose every
+// blocking reason is decidable from this database's own rows is decided as
+// always; a row that holds such a dangling edge — or inherits from a row that
+// does — is HELD: every write path and the merge-following recompute leave its
+// column exactly as found, and the closing mark decides it only on evidence
+// this database can see. Held is therefore the second (and last) clause under
+// which a stale column is admissible; unlike the merge clause, a role method
+// produces it on purpose, and the scoped recompute, the full repair, `bd
+// doctor` and the status writes all keep it.
 //
 // THE NON-PERTURBATION CLAUSES. Settling blocked state is not a user edit: it
 // never bumps a row's updated_at, so a flip does not make a synced row look

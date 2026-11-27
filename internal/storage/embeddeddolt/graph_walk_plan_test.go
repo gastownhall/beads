@@ -194,4 +194,99 @@ func TestGraphWalkPlansHonorJoinHints(t *testing.T) {
 			t.Fatalf("checked %d mark/unmark statements, want a mark and an unmark per fixpoint pass", checked)
 		}
 	})
+
+	// bd-muhnf0: the hold adds reads of its own — the probe, the holder read,
+	// the descendant expansion, and the chunk climb the scoped paths add —
+	// and every one must stay a lookup probe on wisps and the edge tables,
+	// never a scan: they run on every doctor check and every scoped
+	// recompute, including on stores whose whole point is being large. One
+	// dangling edge in the fixture makes the reads fire at all; with none,
+	// the probe answers 0 and none of this machinery runs.
+	t.Run("dangling-edge hold reads", func(t *testing.T) {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO dependencies (id, issue_id, depends_on_wisp_id, type, created_by) VALUES ('wp-dangling-hold', ?, 'wp-absent-wisp-1', 'blocks', 'tester')", id(5)); err != nil {
+			t.Fatal(err)
+		}
+		rec := &statementRecorder{DBTX: tx}
+		if _, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+		var probe, holders []recordedStatement
+		var holdReads []recordedStatement
+		for _, st := range rec.stmts {
+			switch {
+			case strings.Contains(st.query, "LEFT JOIN wisps") && strings.Contains(st.query, "LIMIT 1"):
+				probe = append(probe, st)
+			case strings.Contains(st.query, "DISTINCT d.issue_id") && strings.Contains(st.query, "w.id IS NULL"):
+				holders = append(holders, st)
+			case strings.Contains(st.query, "d.type = 'parent-child'") && strings.Contains(st.query, "IN (") &&
+				!strings.Contains(st.query, "COUNT") && !strings.Contains(st.query, "WITH RECURSIVE") &&
+				!strings.Contains(st.query, "UPDATE"):
+				holdReads = append(holdReads, st)
+			}
+		}
+		if len(probe) != 1 {
+			t.Fatalf("recorded %d probes, want 1", len(probe))
+		}
+		if len(holders) != 1 {
+			t.Fatalf("recorded %d holder reads, want 1", len(holders))
+		}
+		if len(holdReads) == 0 {
+			t.Fatal("recorded no descendant-expansion reads")
+		}
+		all := append([]recordedStatement{probe[0], holders[0]}, holdReads...)
+		for _, st := range all {
+			plan := explainPlan(t, tx, st)
+			if strings.Contains(plan, "HashJoin") || strings.Contains(plan, "InnerJoin") {
+				t.Errorf("hold read is not a lookup join:\n%s", plan)
+			}
+		}
+		if plan := explainPlan(t, tx, probe[0]); !strings.Contains(plan, "keys: d.depends_on_wisp_id") {
+			t.Errorf("probe does not reach wisps by the edge's wisp id:\n%s", plan)
+		}
+		if plan := explainPlan(t, tx, holders[0]); !strings.Contains(plan, "IndexedTableAccess(wisps)") || !strings.Contains(plan, "keys: d.depends_on_wisp_id") {
+			t.Errorf("holder read does not probe wisps by the edge's wisp id:\n%s", plan)
+		}
+
+		// The chunk climb the scoped paths add: four arms, each probing the
+		// edge tables by the frontier node, and the holder probe over the
+		// nodes the climb visited — the probe's shape, not a scan.
+		rec = &statementRecorder{DBTX: tx}
+		if err := issueops.RecomputeIsBlockedInTx(ctx, rec, []string{id(5)}, nil, issueops.NoRequestActor); err != nil {
+			t.Fatal(err)
+		}
+		var climbs, ancestryHolders []recordedStatement
+		for _, st := range rec.stmts {
+			switch {
+			case strings.Contains(st.query, "WITH RECURSIVE climb"):
+				climbs = append(climbs, st)
+			case strings.Contains(st.query, "DISTINCT d.issue_id") && strings.Contains(st.query, "w.id IS NULL") &&
+				strings.Contains(st.query, "IN ("):
+				ancestryHolders = append(ancestryHolders, st)
+			}
+		}
+		if len(climbs) != 1 {
+			t.Fatalf("recorded %d chunk climbs, want 1", len(climbs))
+		}
+		if len(ancestryHolders) != 1 {
+			t.Fatalf("recorded %d ancestry holder probes, want 1", len(ancestryHolders))
+		}
+		plan := explainPlan(t, tx, climbs[0])
+		if got := strings.Count(plan, "keys: c.node"); got != 5 {
+			t.Errorf("climb probes by the frontier node %d times, want 5 (one per arm, plus the outer open-holder probe):\n%s", got, plan)
+		}
+		if got := strings.Count(plan, "keys: c.seed"); got != 1 {
+			t.Errorf("climb probes by the seed %d times, want 1 (the outer seed probe):\n%s", got, plan)
+		}
+		if strings.Contains(plan, "HashJoin") || strings.Contains(plan, "InnerJoin") {
+			t.Errorf("a climb arm is not a lookup join:\n%s", plan)
+		}
+		plan = explainPlan(t, tx, ancestryHolders[0])
+		if !strings.Contains(plan, "IndexedTableAccess(wisps)") || !strings.Contains(plan, "keys: d.depends_on_wisp_id") {
+			t.Errorf("ancestry holder probe does not probe wisps by the edge's wisp id:\n%s", plan)
+		}
+		if strings.Contains(plan, "HashJoin") || strings.Contains(plan, "InnerJoin") {
+			t.Errorf("ancestry holder probe is not a lookup join:\n%s", plan)
+		}
+	})
 }

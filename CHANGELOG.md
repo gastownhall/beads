@@ -1544,6 +1544,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`is_blocked` no longer ping-pongs on a clone whose blocker wisp is absent
+  from that database.** `dependencies` is versioned while the wisp tables are
+  not, so after a partial clone a dependency row can name a wisp with no local
+  row; the blocked-state repair inner-joined wisps, read such an edge as a
+  satisfied blocker, and cleared the flag — the database holding the wisp
+  wrote the true value back, and the two traded the same rows through every
+  merge. A row that holds such a dangling edge, or inherits from one, is now
+  HELD: every recompute, status write and `bd doctor` leave its flag exactly
+  as found, and the row is decided only on evidence the local database can
+  see (an open blocker, a present wisp, a gate-blocked spawner). Clean
+  databases behave byte for byte as before — the hold adds one indexed probe
+  per repair or check, pinned to a lookup plan by the plan-hint tests. (#8597)
+
 - **`bd show` no longer prints `Lease: expires expired` for a lapsed lease.**
   An in_progress issue keeps its lease row after the lease runs out, until
   `bd reclaim` sweeps it, and the lease line then printed the verb twice and

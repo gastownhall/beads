@@ -28,6 +28,13 @@ It is idempotent: on a consistent database it changes nothing. Works in every
 storage mode — embedded, server, and proxied-server (unlike 'bd doctor', which
 is server-mode only).
 
+Rows the local graph cannot decide are HELD, not corrected. Dependency rows are
+versioned but wisps are not, so on a clone an edge can name a wisp this
+database has no row for, and a row blocked only through such an edge has no
+knowable local value. The recompute decides every row whose evidence is
+present and leaves held rows exactly as found, awaiting the database that has
+the wisp; this is the "left as found" count 'bd doctor' reports.
+
 On a workspace connected to a bd serve backend ('bd connect') it is a no-op
 that exits 0: the server maintains is_blocked on every write, and the column
 lives in the server's database, so the repair is run there, by the server's

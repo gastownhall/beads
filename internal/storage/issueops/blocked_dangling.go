@@ -81,11 +81,12 @@ func danglingWispEdgeExistsInTx(ctx context.Context, tx DBTX) (bool, error) {
 //nolint:gosec // a constant; no interpolation.
 func danglingEdgeHoldersInTx(ctx context.Context, tx DBTX) ([]string, error) {
 	return queryIDs(ctx, tx, `
-		SELECT /*+ JOIN_ORDER(d, i) LOOKUP_JOIN(d, i) */ DISTINCT d.issue_id
+		SELECT /*+ JOIN_ORDER(d, w, i) LOOKUP_JOIN(d, w) LOOKUP_JOIN(d, i) */ DISTINCT d.issue_id
 		FROM dependencies d
+		LEFT JOIN wisps w ON w.id = d.depends_on_wisp_id
 		JOIN issues i ON i.id = d.issue_id
 		WHERE d.depends_on_wisp_id IS NOT NULL
-		  AND NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_wisp_id)
+		  AND w.id IS NULL
 		  AND i.status <> 'closed' AND i.status <> 'pinned'
 	`)
 }
@@ -197,9 +198,13 @@ func appendOpenChildrenInTx(
 // the cost tracks the chunk's ancestry, not the store.
 //
 // The walk climbs through OPEN parents only: blockedness does not flow out of
-// a closed or pinned row, so a chain that meets one is not a hold chain. The
-// holder test — open issue holding a dangling edge — runs once, in the outer
-// SELECT, never inside the recursion.
+// a closed or pinned row, so a chain that meets one is not a hold chain. It
+// returns (seed, node) pairs over the whole ancestry and leaves the holder
+// test to Go (danglingHoldersAmongInTx): a holder-side anti-join spelled in
+// the outer SELECT plans, on the embedded engine, as a scan of wisps joined
+// to every climbed row, while the same anti-join over a bound id list — the
+// probe's shape — plans as one lookup per visited node. The holder test
+// therefore runs once, over the visited nodes, never inside the recursion.
 //
 //nolint:gosec // spec's fields are constants; placeholders carries only ? placeholders.
 func heldChunkMembersInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string) ([]string, error) {
@@ -211,41 +216,111 @@ func heldChunkMembersInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, i
 		WITH RECURSIVE climb(seed, node) AS (
 			SELECT t.id, t.id FROM %[1]s t WHERE t.id IN (%[2]s)
 			UNION
-			SELECT /*+ JOIN_ORDER(c, d) LOOKUP_JOIN(c, d) */ c.seed, p.id FROM climb c
+			SELECT /*+ JOIN_ORDER(c, d, p) LOOKUP_JOIN(c, d) LOOKUP_JOIN(d, p) */ c.seed, p.id FROM climb c
 			JOIN dependencies d ON d.issue_id = c.node AND d.type = 'parent-child'
 			JOIN issues p ON p.id = d.depends_on_issue_id
 			WHERE p.status <> 'closed' AND p.status <> 'pinned'
 			UNION
-			SELECT /*+ JOIN_ORDER(c, d) LOOKUP_JOIN(c, d) */ c.seed, w.id FROM climb c
+			SELECT /*+ JOIN_ORDER(c, d, w) LOOKUP_JOIN(c, d) LOOKUP_JOIN(d, w) */ c.seed, w.id FROM climb c
 			JOIN dependencies d ON d.issue_id = c.node AND d.type = 'parent-child'
 			JOIN wisps w ON w.id = d.depends_on_wisp_id
 			WHERE w.status <> 'closed' AND w.status <> 'pinned'
 			UNION
-			SELECT /*+ JOIN_ORDER(c, wd) LOOKUP_JOIN(c, wd) */ c.seed, p.id FROM climb c
+			SELECT /*+ JOIN_ORDER(c, wd, p) LOOKUP_JOIN(c, wd) LOOKUP_JOIN(wd, p) */ c.seed, p.id FROM climb c
 			JOIN wisp_dependencies wd ON wd.issue_id = c.node AND wd.type = 'parent-child'
 			JOIN issues p ON p.id = wd.depends_on_issue_id
 			WHERE p.status <> 'closed' AND p.status <> 'pinned'
 			UNION
-			SELECT /*+ JOIN_ORDER(c, wd) LOOKUP_JOIN(c, wd) */ c.seed, w.id FROM climb c
+			SELECT /*+ JOIN_ORDER(c, wd, w) LOOKUP_JOIN(c, wd) LOOKUP_JOIN(wd, w) */ c.seed, w.id FROM climb c
 			JOIN wisp_dependencies wd ON wd.issue_id = c.node AND wd.type = 'parent-child'
 			JOIN wisps w ON w.id = wd.depends_on_wisp_id
 			WHERE w.status <> 'closed' AND w.status <> 'pinned'
 		)
-		SELECT DISTINCT c.seed
+		SELECT DISTINCT c.seed, c.node
 		FROM climb c
 		JOIN issues h ON h.id = c.node
-		JOIN %[3]s s ON s.id = c.seed
+		JOIN %[1]s s ON s.id = c.seed
 		WHERE h.status <> 'closed' AND h.status <> 'pinned'
 		  AND s.status <> 'closed' AND s.status <> 'pinned'
-		  AND EXISTS (SELECT 1 FROM dependencies dd
-		              WHERE dd.issue_id = c.node AND dd.depends_on_wisp_id IS NOT NULL
-		                AND NOT EXISTS (SELECT 1 FROM wisps w2 WHERE w2.id = dd.depends_on_wisp_id))
-	`, spec.table, placeholders, spec.table)
-	found, err := queryIDs(ctx, tx, query, args...)
+	`, spec.table, placeholders)
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read held chunk members: %w", err)
 	}
-	return found, nil
+	var nodeSeen = make(map[string]bool)
+	var nodes []string
+	type seedNode struct{ seed, node string }
+	var pairs []seedNode
+	seedSeen := make(map[string]bool)
+	var out []string
+	for rows.Next() {
+		var pair seedNode
+		if err := rows.Scan(&pair.seed, &pair.node); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("read held chunk members: scan: %w", err)
+		}
+		pairs = append(pairs, pair)
+		if !nodeSeen[pair.node] {
+			nodeSeen[pair.node] = true
+			nodes = append(nodes, pair.node)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("read held chunk members: %w", err)
+	}
+	_ = rows.Close()
+	holders, err := danglingHoldersAmongInTx(ctx, tx, nodes)
+	if err != nil {
+		return nil, err
+	}
+	holderSeen := make(map[string]bool, len(holders))
+	for _, id := range holders {
+		holderSeen[id] = true
+	}
+	for _, pair := range pairs {
+		if !holderSeen[pair.node] || seedSeen[pair.seed] {
+			continue
+		}
+		seedSeen[pair.seed] = true
+		out = append(out, pair.seed)
+	}
+	return out, nil
+}
+
+// danglingHoldersAmongInTx is danglingEdgeHoldersInTx confined to a bound id
+// list: the dangling-edge holders among exactly the ids one climb visited.
+// The pairs it is given already carry the open filter (both joins in the
+// walk's outer SELECT), so unlike the whole-store read it needs no issues
+// join; one pass over the dependency rows that name those ids, probing wisps
+// by primary key — the probe's shape, so it plans the same way.
+//
+//nolint:gosec // placeholders carries only ? placeholders.
+func danglingHoldersAmongInTx(ctx context.Context, tx DBTX, ids []string) ([]string, error) {
+	var out []string
+	seen := make(map[string]bool)
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := min(start+queryBatchSize, len(ids))
+		placeholders, args := buildSQLInClause(ids[start:end])
+		query := `
+			SELECT /*+ JOIN_ORDER(d, w) LOOKUP_JOIN(d, w) */ DISTINCT d.issue_id
+			FROM dependencies d
+			LEFT JOIN wisps w ON w.id = d.depends_on_wisp_id
+			WHERE d.depends_on_wisp_id IS NOT NULL
+			  AND w.id IS NULL
+			  AND d.issue_id IN (` + placeholders + `)`
+		found, err := queryIDs(ctx, tx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("read dangling holders among chunk ancestry: %w", err)
+		}
+		for _, id := range found {
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	return out, nil
 }
 
 // heldScopeAncestryInTx returns the OPEN parent-child ancestors of the given
