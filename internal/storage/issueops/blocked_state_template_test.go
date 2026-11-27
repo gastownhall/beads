@@ -39,10 +39,10 @@ func explainedFixture() subtreeExplainedParents {
 
 func batchedTemplates(explained subtreeExplainedParents) map[string]string {
 	return map[string]string{
-		"markBlockedTemplateForIssues":   markBlockedTemplateForIssues(explained),
-		"unmarkBlockedTemplateForIssues": unmarkBlockedTemplateForIssues(explained),
-		"markBlockedTemplateForWisps":    markBlockedTemplateForWisps(explained),
-		"unmarkBlockedTemplateForWisps":  unmarkBlockedTemplateForWisps(explained),
+		"markBlockedTemplateForIssues":   markBlockedTemplateForIssues(explained, nil),
+		"unmarkBlockedTemplateForIssues": unmarkBlockedTemplateForIssues(explained, nil),
+		"markBlockedTemplateForWisps":    markBlockedTemplateForWisps(explained, nil),
+		"unmarkBlockedTemplateForWisps":  unmarkBlockedTemplateForWisps(explained, nil),
 	}
 }
 
@@ -143,7 +143,7 @@ func TestExpandBatchTemplateFillsEveryOccurrence(t *testing.T) {
 // error: the template's ? placeholders and the bound ids must agree exactly.
 func TestExpandBatchTemplateRefusesABoundMismatch(t *testing.T) {
 	placeholders, args := buildSQLInClause([]string{"issue-1"})
-	tmpl := markBlockedTemplateForIssues(subtreeExplainedParents{issueParents: []string{"parent-1"}})
+	tmpl := markBlockedTemplateForIssues(subtreeExplainedParents{issueParents: []string{"parent-1"}}, nil)
 
 	if _, _, err := expandBatchTemplate(tmpl, placeholders, args, nil); err == nil {
 		t.Error("want an error when the template carries a ? the caller did not bind")

@@ -281,6 +281,18 @@ func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs 
 	if err != nil {
 		return 0, err
 	}
+	// The hold (bd-muhnf0): rows whose is_blocked value depends on a wisp this
+	// database does not have — because they hold a dependency row naming one,
+	// or inherit from a row that does — are neither marked nor unmarked by the
+	// fixpoint below; the closing mark, after convergence, decides only those
+	// this database's visible evidence settles. Probe first: when nothing
+	// dangles, which is every database whose own wisp-delete cascade still
+	// holds, the hold set is empty and every statement below runs byte for
+	// byte as it did before the hold.
+	held, err := heldRowsForAllInTx(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
 	var total int64
 	for {
 		var changed int64
@@ -291,14 +303,14 @@ func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs 
 			return total, err
 		}
 		if len(issueIDs) > 0 {
-			n, err := recomputeAllIsBlockedPassInTx(ctx, tx, "issues", "i", "dependencies", explained)
+			n, err := recomputeAllIsBlockedPassInTx(ctx, tx, "issues", "i", "dependencies", explained, held.issues)
 			if err != nil {
 				return total, err
 			}
 			changed += n
 		}
 		if len(wispIDs) > 0 {
-			n, err := recomputeAllIsBlockedPassInTx(ctx, tx, "wisps", "w", "wisp_dependencies", explained)
+			n, err := recomputeAllIsBlockedPassInTx(ctx, tx, "wisps", "w", "wisp_dependencies", explained, held.wisps)
 			if err != nil {
 				return total, err
 			}
@@ -306,6 +318,17 @@ func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs 
 		}
 		total += changed
 		if changed == 0 {
+			// Closing mark: held rows this database can see a reason for are
+			// marked now, after the fixpoint over the decided rows converged —
+			// no decided row reads a held flag, so the convergence stands. Its
+			// flips count toward the total, so every repair mode's changed>0
+			// commit gate commits them, and the journal below records them
+			// with the rest.
+			flips, err := markHeldRowsInTx(ctx, tx, held, heldRows{})
+			if err != nil {
+				return total, err
+			}
+			total += int64(flips.total())
 			// The full recompute is repair (`bd recompute-blocked`, `bd doctor
 			// --fix`): no request is behind the rows it corrects.
 			if err := recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs, NoRequestActor); err != nil {
@@ -318,14 +341,16 @@ func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs 
 
 // recomputeAllIsBlockedPassInTx runs one full-table mark+unmark pass for one
 // table using the unbatched semi-join statements, returning rows corrected.
+// held is this table's hold set (rows left as found; blocked_dangling.go),
+// bound after the union's explained ids in text order.
 // Error wrapping mirrors runMarkUnmarkBatchedInTx verbatim — downstream
 // consumers (wh-bridge-sync among them) match on these strings.
 func recomputeAllIsBlockedPassInTx(
-	ctx context.Context, tx DBTX, table, alias, depTable string, explained subtreeExplainedParents,
+	ctx context.Context, tx DBTX, table, alias, depTable string, explained subtreeExplainedParents, held []string,
 ) (int64, error) {
+	args := append(explained.args(), idsAsAny(held)...)
 	var changed int64
-	res, err := tx.ExecContext(ctx,
-		markAllBlockedSQL(table, alias, depTable, explained), explained.args()...)
+	res, err := tx.ExecContext(ctx, markAllBlockedSQL(table, alias, depTable, explained, held), args...)
 	if err != nil {
 		return changed, fmt.Errorf("recompute is_blocked (mark): %w", err)
 	}
@@ -335,8 +360,7 @@ func recomputeAllIsBlockedPassInTx(
 	}
 	changed += n
 
-	res, err = tx.ExecContext(ctx,
-		unmarkAllBlockedSQL(table, alias, depTable, explained), explained.args()...)
+	res, err = tx.ExecContext(ctx, unmarkAllBlockedSQL(table, alias, depTable, explained, held), args...)
 	if err != nil {
 		return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
 	}
@@ -350,31 +374,43 @@ func recomputeAllIsBlockedPassInTx(
 
 // markAllBlockedSQL is the full-table analog of the batched mark template:
 // same predicate, restructured so the engine can execute it as a semi-join.
+// The held exclusion is appended after the union, so its bound ids follow the
+// explained ids in the caller's args.
 //
 //nolint:gosec // G201: table, alias, and depTable are constants from the only two callers.
-func markAllBlockedSQL(table, alias, depTable string, explained subtreeExplainedParents) string {
+func markAllBlockedSQL(table, alias, depTable string, explained subtreeExplainedParents, held []string) string {
 	return fmt.Sprintf(`
 		UPDATE %[1]s %[2]s SET %[2]s.is_blocked = 1, %[2]s.updated_at = %[2]s.updated_at
 		WHERE %[2]s.is_blocked = 0
 		  AND %[2]s.status <> 'closed' AND %[2]s.status <> 'pinned'
-		  AND %[2]s.id IN (%[3]s)
-	`, table, alias, shouldBeBlockedIDsUnionPrecomputedSQL(depTable, explained))
+		  AND %[2]s.id IN (%[3]s)%[4]s
+	`, table, alias, shouldBeBlockedIDsUnionPrecomputedSQL(depTable, explained), heldNotInSQL(alias, held))
+}
+
+// idsAsAny widens a []string to the []any the driver binds.
+func idsAsAny(ids []string) []any {
+	out := make([]any, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, id)
+	}
+	return out
 }
 
 // unmarkAllBlockedSQL is the full-table analog of the batched unmark
 // template. NOT IN is null-hostile — one NULL in the subquery result makes the
 // predicate UNKNOWN for every row and the unmark silently stops firing — which
 // is why every leg of the union carries an explicit
-// d.issue_id IS NOT NULL guard.
+// d.issue_id IS NOT NULL guard. A held row is never unmarked: its value is
+// unknown on this database, not known-zero, so it keeps what it carried in.
 //
 //nolint:gosec // G201: table, alias, and depTable are constants from the only two callers.
-func unmarkAllBlockedSQL(table, alias, depTable string, explained subtreeExplainedParents) string {
+func unmarkAllBlockedSQL(table, alias, depTable string, explained subtreeExplainedParents, held []string) string {
 	return fmt.Sprintf(`
 		UPDATE %[1]s %[2]s SET %[2]s.is_blocked = 0, %[2]s.updated_at = %[2]s.updated_at
 		WHERE %[2]s.is_blocked = 1
 		  AND ( %[2]s.status = 'closed' OR %[2]s.status = 'pinned'
-		        OR %[2]s.id NOT IN (%[3]s) )
-	`, table, alias, shouldBeBlockedIDsUnionPrecomputedSQL(depTable, explained))
+		        OR ( %[2]s.id NOT IN (%[3]s)%[4]s ) )
+	`, table, alias, shouldBeBlockedIDsUnionPrecomputedSQL(depTable, explained), heldNotInSQL(alias, held))
 }
 
 // subtreeExplainedParents is one read of parentsExplainedBySubtreeSQL, pruned
@@ -479,14 +515,14 @@ func subtreeExplainedParentsInTx(ctx context.Context, tx DBTX) (subtreeExplained
 // batch is only what bounds which parents can be asked about.
 func scopedExplainedParentsInTx(
 	ctx context.Context, tx DBTX, depTable, scope string, args []any,
-) (subtreeExplainedParents, error) {
+) (subtreeExplainedParents, bool, error) {
 	var read subtreeExplainedParents
-	hasIssueParent, hasWispParent, err := batchParentKindsInTx(ctx, tx, depTable, scope, args)
+	hasIssueParent, hasWispParent, hasDangling, err := batchParentKindsInTx(ctx, tx, depTable, scope, args)
 	if err != nil {
 		if isTableNotExistError(err) {
-			return read, nil
+			return read, false, nil
 		}
-		return read, err
+		return read, false, err
 	}
 	cands := []candSource{{depTable: depTable, scope: scope}}
 
@@ -494,19 +530,20 @@ func scopedExplainedParentsInTx(
 		read.issueParents, err = queryIDs(ctx, tx,
 			parentsExplainedBySubtreeSQL("issues", "dependencies", "depends_on_issue_id", cands), args...)
 		if err != nil {
-			return read, fmt.Errorf("read batch issue parents explained by their own subtree: %w", err)
+			return read, false, fmt.Errorf("read batch issue parents explained by their own subtree: %w", err)
 		}
 	}
 	if hasWispParent {
 		read.wispParents, err = queryIDs(ctx, tx,
 			parentsExplainedBySubtreeSQL("wisps", "wisp_dependencies", "depends_on_wisp_id", cands), args...)
 		if err != nil && !isTableNotExistError(err) {
-			return read, fmt.Errorf("read batch wisp parents explained by their own subtree: %w", err)
+			return read, false, fmt.Errorf("read batch wisp parents explained by their own subtree: %w", err)
 		}
 	}
 	// Only the batch's own parents were candidates, so the parents above them
 	// are read by id as the walk climbs.
-	return pruneExplainedByAncestryInTx(ctx, tx, read, false)
+	pruned, err := pruneExplainedByAncestryInTx(ctx, tx, read, false)
+	return pruned, hasDangling, err
 }
 
 // parentRef is one parent in pruneExplainedByAncestryInTx's walk: its id and
@@ -888,10 +925,13 @@ func withoutReasonAmongInTx(ctx context.Context, tx DBTX, parents []parentRef) (
 }
 
 // batchParentKindsInTx reports which parent KINDS the batch can possibly ask
-// about: whether any parent-child row in the batch names an issue parent, and
-// whether any names a wisp parent.
+// about, and whether any of the batch's own rows names a wisp this database
+// has no row for — the scoped paths' dangling-edge guard (bd-muhnf0). The
+// first two answers gate the two exogeneity reads below exactly as before;
+// the third sends the chunk's runner through heldChunkMembersInTx before it
+// marks or unmarks anything.
 //
-// It is the cheap guard in front of the two reads above, and it is what keeps
+// It is the cheap guard in front of the reads above, and it is what keeps
 // the SMALL-batch case honest. A kind with no parent-child row in the batch
 // has an empty candidate set, hence an empty exogeneity set, so its read is
 // pure overhead — and that overhead is not small: the read is a ten-join walk
@@ -901,34 +941,43 @@ func withoutReasonAmongInTx(ctx context.Context, tx DBTX, parents []parentRef) (
 // per pass: a 2-id batch of unparented rows 37 ms with both reads run blind
 // against 20 ms with this guard, which is origin/main's own number.
 //
-// One indexed aggregate, both columns at once, because COUNT ignores NULLs and
-// a parent-child row carries exactly one of the two.
+// One indexed aggregate over the batch's rows, all three answers at once. The
+// parent-child filter the WHERE used to carry moved into the first two
+// CASEs, because the third answer must see rows of every type — a dangling
+// edge is as often a blocks edge as a hierarchy one. COUNT(DISTINCT CASE)
+// ignores the NULLs a non-matching row yields, and the third answer's NOT
+// EXISTS is a primary-key probe per wisp-naming row, the same probe
+// danglingWispEdgeProbeSQL runs over the whole table.
 //
 //nolint:gosec // G201: depTable is a constant from the caller; scope carries only ? placeholders.
 func batchParentKindsInTx(
 	ctx context.Context, tx DBTX, depTable, scope string, args []any,
-) (bool, bool, error) {
+) (bool, bool, bool, error) {
 	query := fmt.Sprintf(`
-		SELECT COUNT(d.depends_on_issue_id), COUNT(d.depends_on_wisp_id)
+		SELECT
+		  COUNT(DISTINCT CASE WHEN d.type = 'parent-child' AND d.depends_on_issue_id IS NOT NULL THEN d.depends_on_issue_id END),
+		  COUNT(DISTINCT CASE WHEN d.type = 'parent-child' AND d.depends_on_wisp_id IS NOT NULL THEN d.depends_on_wisp_id END),
+		  COUNT(DISTINCT CASE WHEN d.depends_on_wisp_id IS NOT NULL
+			                      AND NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_wisp_id)
+		                    THEN d.issue_id END)
 		FROM %[1]s d
 		WHERE d.issue_id IS NOT NULL %[2]s
-		  AND d.type = 'parent-child'
 	`, depTable, scope)
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
 	defer func() { _ = rows.Close() }()
-	var issueParents, wispParents int64
+	var issueParents, wispParents, danglingHolders int64
 	if rows.Next() {
-		if err := rows.Scan(&issueParents, &wispParents); err != nil {
-			return false, false, fmt.Errorf("scan batch parent kinds: %w", err)
+		if err := rows.Scan(&issueParents, &wispParents, &danglingHolders); err != nil {
+			return false, false, false, fmt.Errorf("scan batch parent kinds: %w", err)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return false, false, err
+		return false, false, false, err
 	}
-	return issueParents > 0, wispParents > 0, nil
+	return issueParents > 0, wispParents > 0, danglingHolders > 0, nil
 }
 
 // candSource names one dependency table the candidate-parent set is read from,
@@ -1343,20 +1392,38 @@ func blockingReasonSQL(rowAlias string) string {
 func CountIsBlockedInconsistenciesInTx(ctx context.Context, tx DBTX) (int64, error) {
 	var total int64
 
+	// The hold (bd-muhnf0): a held row's flag is not staleness this database
+	// can prove, so both branches below skip held rows the same way the repair
+	// statements do, and the held rows the closing mark's FIRST round would
+	// flip are counted alongside — the same predicate builder, so the count
+	// and the repair cannot drift. The union total is therefore exactly "rows
+	// a full recompute changes", and reads 0 after one. Probe first: nothing
+	// dangling means an empty hold set and the statements below run with the
+	// pre-hold text and no held reads at all.
+	held, err := heldRowsForAllInTx(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+
 	// One exogeneity read for both statements; each splices the union twice,
-	// so the ids are bound twice per statement.
+	// so the ids are bound twice per statement, each splice followed by the
+	// held ids of the table being counted.
 	explained, err := subtreeExplainedParentsInTx(ctx, tx)
 	if err != nil {
 		return 0, fmt.Errorf("count stale is_blocked issues: %w", err)
 	}
-	args := append(explained.args(), explained.args()...)
-	n, err := countRows(ctx, tx, countStaleIsBlockedSQL("issues", "i", "dependencies", explained), args...)
+	base := explained.args()
+	n, err := countRows(ctx, tx,
+		countStaleIsBlockedSQL("issues", "i", "dependencies", explained, held.issues),
+		appendArgsTwice(base, idsAsAny(held.issues))...)
 	if err != nil {
 		return 0, fmt.Errorf("count stale is_blocked issues: %w", err)
 	}
 	total += n
 
-	n, err = countRows(ctx, tx, countStaleIsBlockedSQL("wisps", "w", "wisp_dependencies", explained), args...)
+	n, err = countRows(ctx, tx,
+		countStaleIsBlockedSQL("wisps", "w", "wisp_dependencies", explained, held.wisps),
+		appendArgsTwice(base, idsAsAny(held.wisps))...)
 	if err != nil {
 		if isTableNotExistError(err) {
 			return total, nil
@@ -1365,7 +1432,36 @@ func CountIsBlockedInconsistenciesInTx(ctx context.Context, tx DBTX) (int64, err
 	}
 	total += n
 
+	if !held.empty() {
+		conds := heldPredicateConds{
+			issueParentExcl: idSetUnion(explained.issueParents, held.issues),
+			wispParentExcl:  idSetUnion(explained.wispParents, held.wisps),
+		}
+		n, err := countMarkableHeldInTx(ctx, tx, "issues", held.issues, conds)
+		if err != nil {
+			return 0, fmt.Errorf("count stale is_blocked issues: %w", err)
+		}
+		total += n
+		n, err = countMarkableHeldInTx(ctx, tx, "wisps", held.wisps, conds)
+		if err != nil && !isTableNotExistError(err) {
+			return 0, fmt.Errorf("count stale is_blocked wisps: %w", err)
+		}
+		total += n
+	}
+
 	return total, nil
+}
+
+// appendArgsTwice binds base followed by extra, twice over — the argument
+// shape of a statement that splices a union and its held exclusion in two OR
+// branches.
+func appendArgsTwice(base, extra []any) []any {
+	var out []any
+	out = append(out, base...)
+	out = append(out, extra...)
+	out = append(out, base...)
+	out = append(out, extra...)
+	return out
 }
 
 // countStaleIsBlockedSQL builds a COUNT(*) of rows whose stored is_blocked
@@ -1384,19 +1480,20 @@ func CountIsBlockedInconsistenciesInTx(ctx context.Context, tx DBTX) (int64, err
 // hardcoded constants supplied by the only two callers.
 //
 //nolint:gosec // G201: table, alias, and depTable are constant; only the constant gate SQL is interpolated.
-func countStaleIsBlockedSQL(table, alias, depTable string, explained subtreeExplainedParents) string {
+func countStaleIsBlockedSQL(table, alias, depTable string, explained subtreeExplainedParents, held []string) string {
 	union := shouldBeBlockedIDsUnionPrecomputedSQL(depTable, explained)
+	heldCond := heldNotInSQL(alias, held)
 	return fmt.Sprintf(`
 		SELECT COUNT(*) FROM %[1]s %[2]s
 		WHERE
 		  ( %[2]s.is_blocked = 0
 		    AND %[2]s.status <> 'closed' AND %[2]s.status <> 'pinned'
-		    AND %[2]s.id IN (%[3]s) )
+		    AND %[2]s.id IN (%[3]s)%[4]s )
 		  OR
 		  ( %[2]s.is_blocked = 1
 		    AND ( %[2]s.status = 'closed' OR %[2]s.status = 'pinned'
-		          OR %[2]s.id NOT IN (%[3]s) ) )
-	`, table, alias, union)
+		          OR ( %[2]s.id NOT IN (%[3]s)%[4]s ) ) )
+	`, table, alias, union, heldCond)
 }
 
 // countRows runs a single COUNT(*) query and returns the scalar.

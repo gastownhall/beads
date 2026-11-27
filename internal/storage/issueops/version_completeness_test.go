@@ -436,6 +436,7 @@ var versionExemptions = map[string]string{
 	// is_blocked — derived readiness state, recomputed from the graph, never
 	// a mutation of the bead in its own right.
 	"RecomputeIsBlockedInTx":           "is_blocked is derived state",
+	"CountIsBlockedHeldInTx":           "is_blocked is derived state (bd-muhnf0 doctor count; apply=false never executes its UPDATE)",
 	"RecomputeIsBlockedInTxWithResult": "is_blocked is derived state",
 	"RecomputeIsBlockedForIDsInTx":     "is_blocked is derived state",
 	"RecomputeIsBlockedForWispIDsInTx": "is_blocked is derived state",
@@ -529,6 +530,7 @@ var versionNeverMints = map[string]string{
 	"ImportIssueCommentInTx":           "comments are not in durable_state",
 	"ExecuteAddComment":                "comments are not in durable_state",
 	"RecomputeIsBlockedInTx":           "is_blocked is derived state",
+	"CountIsBlockedHeldInTx":           "is_blocked is derived state (bd-muhnf0 doctor count; apply=false never executes its UPDATE)",
 	"RecomputeIsBlockedInTxWithResult": "is_blocked is derived state",
 	"RecomputeIsBlockedForIDsInTx":     "is_blocked is derived state",
 	"RecomputeIsBlockedForWispIDsInTx": "is_blocked is derived state",

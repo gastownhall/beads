@@ -171,6 +171,11 @@ var beadDMLExemptions = map[string]string{
 	// is_blocked is part of the exported bead snapshot and its recompute helpers
 	// structurally journal every value that actually changes.
 	"ReconcileChildCounters":   "recomputes denormalized child-counter state, not a bead mutation",
+	// Read-only simulation sharing the closing-mark rounds with the repair
+	// path (bd-muhnf0): apply=false never reaches the UPDATE, which is a
+	// runtime fact the static detector cannot see. The doctor count journals
+	// nothing by design.
+	"CountIsBlockedHeldInTx": "doctor count simulating the closing mark; apply=false never executes its UPDATE",
 	"ReserveChildSuffixesInTx": "raises the child_counters high-water mark (GH#4750): counter state, not a bead mutation; the calling create/rename/delete journals the mutation",
 
 	// (2) aux tables matched via templated %s, not work-bead state.

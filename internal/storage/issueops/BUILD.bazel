@@ -11,6 +11,7 @@ go_library(
         "batching.go",
         "blocked.go",
         "blocked_consistency.go",
+        "blocked_dangling.go",
         "blocked_merge.go",
         "blocked_recheck.go",
         "blocked_recheck_report.go",
