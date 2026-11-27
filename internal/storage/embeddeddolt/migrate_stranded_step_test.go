@@ -448,3 +448,82 @@ func assertCursorRowInOwnCommit(t *testing.T, ctx context.Context, conn *sql.Con
 		t.Fatalf("cursor row %d's commit history does not reach its own apply commit (%s): entries %v", version, versionPfx, messages)
 	}
 }
+
+// TestEmbeddedMigrateStrandedStepSurvivesASecondKill is AC-3: a strand at
+// 0049 on a lineage that still owes the aux rekey (HEAD at 48), a second open
+// whose pass is killed again right after the latest step's commit, then a
+// third open. 0049's own commit must include comments (the finish runs before
+// the aux-rekey exemption narrows the dirty set), HEAD must be at the latest
+// version after the second open, and the third open must converge clean with
+// no step committed twice.
+//
+// PRE-fix the second open refuses with *DirtyTablesError before any step runs,
+// so the injected fault never fires.
+func TestEmbeddedMigrateStrandedStepSurvivesASecondKill(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := strandSeedMainSchemaAt(t, ctx, selfHealSeedVersion) // HEAD at 48
+	strandMainAt(t, ctx, dataDir, 49)
+
+	restore := schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, version int) error {
+		if version == schema.LatestVersion() {
+			return fmt.Errorf("injected fault: killed after the latest step's commit")
+		}
+		return nil
+	})
+	conn2, close2 := openPinnedConn(t, ctx, dataDir)
+	_, err := schema.MigrateUp(ctx, conn2)
+	if err == nil || !strings.Contains(err.Error(), "injected fault") {
+		t.Fatalf("second open MigrateUp err = %v, want the injected fault after the latest step (a *DirtyTablesError here means the stranded step was not finished)", err)
+	}
+	if v := currentMainVersion(t, ctx, conn2); v != schema.LatestVersion() {
+		t.Fatalf("main version after second open = %d, want latest %d", v, schema.LatestVersion())
+	}
+	hash49 := oneApplyCommit(t, ctx, conn2, "0049_")
+	tables49 := commitChangedTables(t, ctx, conn2, hash49)
+	if !contains(tables49, "comments") {
+		t.Fatalf("0049's apply commit changed tables %v, want to include comments", tables49)
+	}
+	close2()
+	restore()
+
+	conn3, close3 := openPinnedConn(t, ctx, dataDir)
+	defer close3()
+	if _, err := schema.MigrateUp(ctx, conn3); err != nil {
+		t.Fatalf("third open MigrateUp: %v", err)
+	}
+	if v := currentMainVersion(t, ctx, conn3); v != schema.LatestVersion() {
+		t.Fatalf("main version after third open = %d, want latest %d", v, schema.LatestVersion())
+	}
+	if dirty := dirtyTableNames(t, ctx, conn3); len(dirty) != 0 {
+		t.Fatalf("working set after third open is dirty: %v, want clean", dirty)
+	}
+	// No step committed twice: every apply-migration message appears on
+	// exactly one commit.
+	rows, err := conn3.QueryContext(ctx, "SELECT message FROM dolt_log")
+	if err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var message string
+		if err := rows.Scan(&message); err != nil {
+			t.Fatalf("scan dolt_log: %v", err)
+		}
+		if strings.HasPrefix(message, "schema: apply migration ") {
+			counts[message]++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate dolt_log: %v", err)
+	}
+	for message, count := range counts {
+		if count != 1 {
+			t.Fatalf("migration commit %q appears %d times in history, want 1", message, count)
+		}
+	}
+	if len(counts) == 0 {
+		t.Fatal("no apply-migration commits in history; the pass did not run")
+	}
+}
