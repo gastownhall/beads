@@ -482,8 +482,15 @@ func (t *Tracker) createTaskWorkItem(ctx context.Context, issue *types.Issue, pa
 		return nil, fmt.Errorf("creating task work item: %w", err)
 	}
 
-	// Build URL from project path and IID
-	webURL := fmt.Sprintf("%s/%s/-/work_items/%s", t.client.BaseURL, t.projectPath, wi.IID)
+	// Compose the stored ref under the address GitLab writes its links under
+	// — the learned or configured web base, like the web_url GitLab itself
+	// returns — falling back to the gitlab.url the API is reached at when no
+	// other address is known.
+	base := strings.TrimRight(t.effectiveWebBase(), "/")
+	if base == "" {
+		base = t.client.BaseURL
+	}
+	webURL := fmt.Sprintf("%s/%s/-/work_items/%s", base, t.projectPath, wi.IID)
 
 	iid, _ := strconv.Atoi(wi.IID)
 

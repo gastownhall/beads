@@ -2,8 +2,10 @@ package gitlab
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -346,6 +348,74 @@ func TestProjectScopeUnderGitLabURLAndWebBase(t *testing.T) {
 	}
 	if projectGets != 1 {
 		t.Fatalf("GET /projects/42 answered %d times, want 1", projectGets)
+	}
+}
+
+// TestCreateTaskWorkItemRefUnderWebBase (AC-7): a task created under a story
+// parent becomes a GitLab Task work item whose stored ref is composed under
+// the address GitLab writes its links under — the learned web base, like the
+// web_url GitLab itself returns — not the gitlab.url the API was reached at.
+func TestCreateTaskWorkItemRefUnderWebBase(t *testing.T) {
+	const webBase = "https://git.example.org"
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && strings.TrimPrefix(r.URL.Path, "/api/v4") == "/projects/42":
+			_, _ = w.Write([]byte(`{"id":42,"path_with_namespace":"g/p","web_url":"` + webBase + `/g/p"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/graphql":
+			body, _ := io.ReadAll(r.Body)
+			var req struct {
+				Query string `json:"query"`
+			}
+			_ = json.Unmarshal(body, &req)
+			switch {
+			case strings.Contains(req.Query, "workItems(iid:"):
+				_, _ = w.Write([]byte(`{"data":{"project":{"workItems":{"nodes":[{"id":"gid://gitlab/WorkItem/5"}]}}}}`))
+			case strings.Contains(req.Query, "workItemCreate"):
+				_, _ = w.Write([]byte(`{"data":{"workItemCreate":{"errors":[],"workItem":{"id":"gid://gitlab/WorkItem/9001","iid":"9","title":"Do it","workItemType":{"name":"Task"},"webUrl":"` + webBase + `/g/p/-/work_items/9"}}}}`))
+			default:
+				_, _ = w.Write([]byte(`{"data":{"project":{"workItemTypes":{"nodes":[{"id":"gid://gitlab/WorkItems::Type/5"}]}}}}`))
+			}
+		default:
+			http.Error(w, `{"message":"404 Not found"}`, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("GITLAB_URL", srv.URL)
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_PROJECT_ID", "42")
+	t.Setenv("GITLAB_PROJECT_PATH", "g/p")
+
+	parentRef := webBase + "/g/p/-/issues/5"
+	store := &crossProjectStore{
+		issues: map[string]*types.Issue{
+			"bd-story": {ID: "bd-story", IssueType: types.TypeFeature, Status: types.StatusOpen, ExternalRef: &parentRef},
+			"bd-task":  {ID: "bd-task", IssueType: types.TypeTask, Status: types.StatusOpen, Title: "Do it"},
+		},
+		deps: []types.Dependency{{IssueID: "bd-task", DependsOnID: "bd-story", Type: types.DepParentChild}},
+	}
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), store); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	ti, err := tr.CreateIssue(context.Background(), store.issues["bd-task"])
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	want := webBase + "/g/p/-/work_items/9"
+	if ti.URL != want {
+		t.Fatalf("created work-item ref = %q, want %q (the web base, not %q)", ti.URL, want, srv.URL)
+	}
+	if !tr.IsExternalRef(ti.URL) {
+		t.Error("IsExternalRef(created ref) = false, want true")
+	}
+	if got, shorthand := tr.MatchKey(ti.URL), tr.MatchKey("gitlab:9"); got != shorthand {
+		t.Errorf("MatchKey(created ref) = %q, want the shorthand's %q", got, shorthand)
 	}
 }
 
