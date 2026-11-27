@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -284,23 +285,30 @@ func TestPrintHeadTrailer(t *testing.T) {
 }
 
 func TestShowHeadConflict(t *testing.T) {
-	if got := showHeadConflict(showCmd, false); got != "" {
+	if got := showHeadConflict(showCmd); got != "" {
 		t.Fatalf("no other flag set, want no conflict, got %q", got)
 	}
-	if got := showHeadConflict(showCmd, true); got != "json" {
-		t.Errorf("--json: want conflict \"json\", got %q", got)
-	}
-	for _, name := range []string{"short", "long", "refs", "children", "thread", "watch"} {
+	t.Run("json output is not a conflict", func(t *testing.T) {
+		oldJSON := jsonOutput
+		jsonOutput = true
+		t.Cleanup(func() { jsonOutput = oldJSON })
+		var err error
+		stderr := captureStderr(t, func() { err = validateShowHead(showCmd) })
+		if err != nil || stderr != "" {
+			t.Errorf("--head with JSON output must be accepted, got err=%v stderr=%q", err, stderr)
+		}
+	})
+	for _, name := range []string{"short", "long", "refs", "children", "thread", "watch", "include-comments"} {
 		t.Run(name, func(t *testing.T) {
 			setShowFlag(t, name, "true")
-			if got := showHeadConflict(showCmd, false); got != name {
+			if got := showHeadConflict(showCmd); got != name {
 				t.Errorf("want conflict %q, got %q", name, got)
 			}
 		})
 	}
 	t.Run("as-of", func(t *testing.T) {
 		setShowFlag(t, "as-of", "main")
-		if got := showHeadConflict(showCmd, false); got != "as-of" {
+		if got := showHeadConflict(showCmd); got != "as-of" {
 			t.Errorf("want conflict \"as-of\", got %q", got)
 		}
 	})
@@ -308,9 +316,18 @@ func TestShowHeadConflict(t *testing.T) {
 	t.Run("the refusal names the flag", func(t *testing.T) {
 		setShowFlag(t, "long", "true")
 		var err error
-		stderr := captureStderr(t, func() { err = validateShowHead(showCmd, false) })
+		stderr := captureStderr(t, func() { err = validateShowHead(showCmd) })
 		if err == nil || !strings.Contains(stderr, "--head cannot be combined with --long") {
 			t.Errorf("want a usage error naming --long, got err=%v stderr=%q", err, stderr)
+		}
+	})
+
+	t.Run("the refusal of --include-comments names the flag that sets the count", func(t *testing.T) {
+		setShowFlag(t, "include-comments", "true")
+		var err error
+		stderr := captureStderr(t, func() { err = validateShowHead(showCmd) })
+		if err == nil || !strings.Contains(stderr, "--head cannot be combined with --include-comments") || !strings.Contains(stderr, "--comments-tail N") {
+			t.Errorf("want a usage error naming --include-comments and --comments-tail, got err=%v stderr=%q", err, stderr)
 		}
 	})
 }
@@ -328,4 +345,198 @@ func TestResolveHeadCommentsTail(t *testing.T) {
 			}
 		})
 	}
+}
+
+// headDetailsFixture is a fat detail view as the reader role answers it for
+// the JSON head view: every content field set, notes several times the
+// budget with distinguishable first and last lines, and five comments.
+func headDetailsFixture() *types.IssueDetails {
+	count := int64(5)
+	details := &types.IssueDetails{
+		Issue: types.Issue{
+			ID:                 "be-abc",
+			Title:              "Head me",
+			Description:        strings.Repeat("d", 2048),
+			Design:             strings.Repeat("g", 300),
+			Notes:              "EARLY-LINE\n" + strings.Repeat("a line of the notes field, appended over months\n", 60) + "LAST-LINE",
+			AcceptanceCriteria: "done when green",
+		},
+		Labels:       []string{"lane:beads"},
+		Dependencies: []*types.IssueWithDependencyMetadata{{Issue: types.Issue{ID: "be-dep", Title: "A dependency"}}},
+		CommentCount: &count,
+	}
+	for i := 1; i <= 5; i++ {
+		details.Comments = append(details.Comments, &types.Comment{Text: fmt.Sprintf("comment-%d", i)})
+	}
+	return details
+}
+
+func TestCountHeadWithheld(t *testing.T) {
+	issue := &headDetailsFixture().Issue
+	_, notesCut := clipNotesTail(issue.Notes, headNotesBytes, headLineSlack)
+	if notesCut == 0 || notesCut == len(issue.Notes) {
+		t.Fatalf("fixture notes are not clipped part-way: cut %d of %d", notesCut, len(issue.Notes))
+	}
+
+	t.Run("each field is counted under its own name", func(t *testing.T) {
+		got := countHeadWithheld(issue, 17, 3)
+		want := headWithheldCounts{DescriptionBytes: 2048, DesignBytes: 300, NotesBytes: notesCut, AcceptanceCriteriaBytes: 15, Comments: 14}
+		if got != want {
+			t.Errorf("countHeadWithheld = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("an uncapped comment list withholds none", func(t *testing.T) {
+		for _, tailN := range []int{0, 5, 9} {
+			if got := countHeadWithheld(issue, 5, tailN).Comments; got != 0 {
+				t.Errorf("tail %d of 5 comments withheld %d, want 0", tailN, got)
+			}
+		}
+	})
+
+	t.Run("a short issue withholds nothing", func(t *testing.T) {
+		if got := countHeadWithheld(&types.Issue{ID: "be-abc", Notes: "short"}, 2, 3); got != (headWithheldCounts{}) {
+			t.Errorf("a short issue withheld %+v, want all zero", got)
+		}
+	})
+}
+
+func TestNewHeadDetails(t *testing.T) {
+	// encode returns the head view as a JSON reader sees it.
+	encode := func(t *testing.T, head *headDetails) map[string]json.RawMessage {
+		t.Helper()
+		raw, err := json.Marshal(head)
+		if err != nil {
+			t.Fatalf("marshal the head view: %v", err)
+		}
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("the head view is not one JSON object: %v\n%s", err, raw)
+		}
+		return doc
+	}
+	texts := func(comments []*types.Comment) string {
+		var out []string
+		for _, c := range comments {
+			out = append(out, c.Text)
+		}
+		return strings.Join(out, ",")
+	}
+
+	t.Run("cuts the four content fields and keeps the newest comments", func(t *testing.T) {
+		details := headDetailsFixture()
+		wantNotes, notesCut := clipNotesTail(details.Notes, headNotesBytes, headLineSlack)
+		head := newHeadDetails(details, 3)
+
+		if head.Description != "" || head.Design != "" || head.AcceptanceCriteria != "" {
+			t.Errorf("a withheld field is still set: description=%d design=%d acceptance=%d bytes",
+				len(head.Description), len(head.Design), len(head.AcceptanceCriteria))
+		}
+		if head.Notes != wantNotes || !strings.HasSuffix(head.Notes, "LAST-LINE") || strings.Contains(head.Notes, "EARLY-LINE") {
+			t.Errorf("notes are not the end of the field: %d bytes, want the last %d", len(head.Notes), len(wantNotes))
+		}
+		if got := texts(head.Comments); got != "comment-3,comment-4,comment-5" {
+			t.Errorf("comments = %s, want the newest three in order", got)
+		}
+		want := headWithheldCounts{DescriptionBytes: 2048, DesignBytes: 300, NotesBytes: notesCut, AcceptanceCriteriaBytes: 15, Comments: 2}
+		if head.Withheld != want {
+			t.Errorf("withheld = %+v, want %+v", head.Withheld, want)
+		}
+		if head.ID != "be-abc" || head.Title != "Head me" || len(head.Labels) != 1 || len(head.Dependencies) != 1 || head.CommentCount == nil || *head.CommentCount != 5 {
+			t.Errorf("the rest of the answer did not carry over: %+v", head.IssueDetails)
+		}
+	})
+
+	t.Run("leaves the reader's answer as it was", func(t *testing.T) {
+		details := headDetailsFixture()
+		notes := details.Notes
+		newHeadDetails(details, 1)
+		if len(details.Description) != 2048 || len(details.Design) != 300 || details.AcceptanceCriteria == "" || details.Notes != notes {
+			t.Error("newHeadDetails rewrote a content field of the details it was given")
+		}
+		if got := texts(details.Comments); got != "comment-1,comment-2,comment-3,comment-4,comment-5" {
+			t.Errorf("newHeadDetails changed the comments it was given: %s", got)
+		}
+	})
+
+	t.Run("a cap of 0 or one past the count keeps every comment", func(t *testing.T) {
+		for _, tailN := range []int{0, 5, 9} {
+			head := newHeadDetails(headDetailsFixture(), tailN)
+			if len(head.Comments) != 5 || head.Withheld.Comments != 0 {
+				t.Errorf("tail %d: %d comments kept and %d withheld, want 5 and 0", tailN, len(head.Comments), head.Withheld.Comments)
+			}
+		}
+	})
+
+	t.Run("an issue with no comments has none to cut", func(t *testing.T) {
+		head := newHeadDetails(&types.IssueDetails{Issue: types.Issue{ID: "be-abc"}}, 3)
+		if len(head.Comments) != 0 || head.Withheld.Comments != 0 {
+			t.Errorf("no comments in, %d out and %d withheld", len(head.Comments), head.Withheld.Comments)
+		}
+		if _, ok := encode(t, head)["comments"]; ok {
+			t.Error("an issue with no comments encoded a comments key")
+		}
+	})
+
+	t.Run("encodes as the detail object with a withheld object beside its fields", func(t *testing.T) {
+		doc := encode(t, newHeadDetails(headDetailsFixture(), 3))
+		for _, key := range []string{"description", "design", "acceptance_criteria"} {
+			if _, ok := doc[key]; ok {
+				t.Errorf("the head view encodes %q, which it withholds", key)
+			}
+		}
+		for _, key := range []string{"id", "title", "notes", "labels", "dependencies", "comments", "comment_count", "withheld"} {
+			if _, ok := doc[key]; !ok {
+				t.Errorf("the head view lacks the top-level key %q: %v", key, doc)
+			}
+		}
+		var withheld map[string]int
+		if err := json.Unmarshal(doc["withheld"], &withheld); err != nil {
+			t.Fatalf("withheld is not an object of numbers: %v\n%s", err, doc["withheld"])
+		}
+		if len(withheld) != 5 || withheld["description_bytes"] != 2048 || withheld["design_bytes"] != 300 ||
+			withheld["notes_bytes"] == 0 || withheld["acceptance_criteria_bytes"] != 15 || withheld["comments"] != 2 {
+			t.Errorf("withheld = %v", withheld)
+		}
+	})
+
+	t.Run("no details encode as null, as without --head", func(t *testing.T) {
+		raw, err := json.Marshal([]interface{}{newHeadDetails(nil, 3)})
+		if err != nil || string(raw) != "[null]" {
+			t.Errorf("nil details encoded as %s (err=%v), want [null]", raw, err)
+		}
+	})
+
+	t.Run("an issue shown whole still carries withheld, all zero", func(t *testing.T) {
+		doc := encode(t, newHeadDetails(&types.IssueDetails{Issue: types.Issue{ID: "be-abc", Notes: "short"}}, 3))
+		want := `{"description_bytes":0,"design_bytes":0,"notes_bytes":0,"acceptance_criteria_bytes":0,"comments":0}`
+		if got := string(doc["withheld"]); got != want {
+			t.Errorf("withheld = %s, want %s", got, want)
+		}
+		if got := string(doc["notes"]); got != `"short"` {
+			t.Errorf("notes within the budget changed: %s", got)
+		}
+	})
+}
+
+func TestShowHeadGetRequest(t *testing.T) {
+	t.Run("always reads the comments and brief dependencies", func(t *testing.T) {
+		got := showHeadGetRequest("be-abc", false)
+		if got.ID != "be-abc" || !got.IncludeComments || !got.BriefDeps || got.IncludeDependents {
+			t.Errorf("showHeadGetRequest = %+v", got)
+		}
+		if got := showHeadGetRequest("be-abc", true); !got.IncludeDependents {
+			t.Errorf("showHeadGetRequest dropped IncludeDependents: %+v", got)
+		}
+	})
+
+	t.Run("the proxied route builds the same request under --head only", func(t *testing.T) {
+		in := &showProxiedInput{head: true, includeDepends: true}
+		if got, want := in.getRequest("be-abc"), showHeadGetRequest("be-abc", true); got != want {
+			t.Errorf("proxied --head request = %+v, want %+v", got, want)
+		}
+		if got := (&showProxiedInput{}).getRequest("be-abc"); got.IncludeComments || got.BriefDeps {
+			t.Errorf("without --head the proxied request reads what the head view reads: %+v", got)
+		}
+	})
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // bd show --head is a bounded read of one issue (GH#7187): the header, the
@@ -20,8 +21,14 @@ import (
 // bd show prints all of it, so a reader who pays for every byte either skips
 // the issue or reads a stale part of it.
 //
-// It is a text view only and it stores nothing: no field is added, moved or
-// rewritten, and bd show without the flag prints what it printed before.
+// It stores nothing: no field is added, moved or rewritten, and bd show
+// without the flag prints what it printed before.
+//
+// With --json the same subset is one JSON object per issue (headDetails): the
+// read goes through the reader role's Get like every bd show --json, and this
+// file projects the answer. The read contract itself (issueops.GetRequest and
+// the HTTP operation behind it) has no head parameter, so the projection
+// reads the same over every backend the contract already serves.
 
 const (
 	// headNotesBytes is the notes budget of the head view.
@@ -40,11 +47,8 @@ const (
 // single meaning; refusing it is better than letting one flag win silently,
 // because a reader who asked for a bounded view and got the full record has
 // paid for the bytes before noticing.
-func showHeadConflict(cmd *cobra.Command, jsonOut bool) string {
-	if jsonOut {
-		return "json"
-	}
-	for _, name := range []string{"short", "long", "refs", "children", "thread", "watch"} {
+func showHeadConflict(cmd *cobra.Command) string {
+	for _, name := range []string{"short", "long", "refs", "children", "thread", "watch", "include-comments"} {
 		if on, _ := cmd.Flags().GetBool(name); on {
 			return name
 		}
@@ -57,15 +61,15 @@ func showHeadConflict(cmd *cobra.Command, jsonOut bool) string {
 
 // validateShowHead is the usage error both show routes (direct and
 // --proxied-server) return for a --head combination showHeadConflict names.
-func validateShowHead(cmd *cobra.Command, jsonOut bool) error {
-	switch name := showHeadConflict(cmd, jsonOut); name {
+func validateShowHead(cmd *cobra.Command) error {
+	switch name := showHeadConflict(cmd); name {
 	case "":
 		return nil
-	case "json":
-		// JSON output can come from BD_JSON or a config file as well as the
-		// flag, so the message names the way out for a caller who never
-		// typed --json.
-		return HandleErrorRespectJSON("--head is a text view and cannot be combined with --json (pass --json=false when JSON output is set in the environment or the config file); in JSON, --brief-deps bounds the dependencies and comment bodies are left out unless --include-comments is given")
+	case "include-comments":
+		// --include-comments asks for every comment body and the head view
+		// carries the newest few, so the message names the flag that sets
+		// how many instead of leaving the caller with three of fifty.
+		return HandleErrorRespectJSON("--head cannot be combined with --include-comments: the head view carries the newest comments, and --comments-tail N sets how many (0 for all of them)")
 	default:
 		return HandleErrorRespectJSON("--head cannot be combined with --%s", name)
 	}
@@ -126,6 +130,42 @@ func printHeadNotes(notes string) {
 	fmt.Printf("%s\n", uimd.RenderMarkdown(tail))
 }
 
+// headWithheldCounts is what the head view left out of one issue, as numbers.
+// The text view words it as its closing line (headWithheld) and the JSON view
+// carries it as the withheld object, so the two cannot count differently.
+//
+// Every field is always encoded, zero included: a reader tells a head view
+// from a full record by the presence of the object, and a short issue from a
+// clipped one by its zeros, without a second read.
+type headWithheldCounts struct {
+	// DescriptionBytes, DesignBytes and AcceptanceCriteriaBytes are the whole
+	// size of each field, because the head view leaves those fields out.
+	DescriptionBytes int `json:"description_bytes"`
+	DesignBytes      int `json:"design_bytes"`
+	// NotesBytes is the size of the earlier notes that clipNotesTail cut
+	// off, not the size of the field: the end of the notes is in the view.
+	NotesBytes              int `json:"notes_bytes"`
+	AcceptanceCriteriaBytes int `json:"acceptance_criteria_bytes"`
+	// Comments is how many older comments the comments cap left out.
+	Comments int `json:"comments"`
+}
+
+// countHeadWithheld measures what the head view leaves out of issue. tailN is
+// the comments cap the view was built with: 0 keeps every comment, and so
+// does a cap no smaller than commentCount (see printComments).
+func countHeadWithheld(issue *types.Issue, commentCount, tailN int) headWithheldCounts {
+	w := headWithheldCounts{
+		DescriptionBytes:        len(issue.Description),
+		DesignBytes:             len(issue.Design),
+		AcceptanceCriteriaBytes: len(issue.AcceptanceCriteria),
+	}
+	_, w.NotesBytes = clipNotesTail(issue.Notes, headNotesBytes, headLineSlack)
+	if tailN > 0 && tailN < commentCount {
+		w.Comments = commentCount - tailN
+	}
+	return w
+}
+
 // headWithheld lists what the head view left out of this issue, in the order
 // bd show prints the fields. tailN is the comments cap the view rendered with
 // (see printComments for when a cap hides anything). commentsUnread says the
@@ -133,25 +173,23 @@ func printHeadNotes(notes string) {
 // rather than not at all, and a view that then said nothing was withheld
 // would state the opposite of what happened.
 func headWithheld(issue *types.Issue, commentCount, tailN int, commentsUnread bool) []string {
+	w := countHeadWithheld(issue, commentCount, tailN)
 	var parts []string
-	field := func(name, value string) {
-		if value != "" {
-			parts = append(parts, fmt.Sprintf("%s (%s)", name, formatBytes(int64(len(value)))))
+	field := func(name string, size int) {
+		if size > 0 {
+			parts = append(parts, fmt.Sprintf("%s (%s)", name, formatBytes(int64(size))))
 		}
 	}
-	field("description", issue.Description)
-	field("design", issue.Design)
-	if _, withheld := clipNotesTail(issue.Notes, headNotesBytes, headLineSlack); withheld > 0 {
-		parts = append(parts, fmt.Sprintf("earlier notes (%s)", formatBytes(int64(withheld))))
-	}
-	field("acceptance criteria", issue.AcceptanceCriteria)
-	if tailN > 0 && tailN < commentCount {
-		hidden := commentCount - tailN
+	field("description", w.DescriptionBytes)
+	field("design", w.DesignBytes)
+	field("earlier notes", w.NotesBytes)
+	field("acceptance criteria", w.AcceptanceCriteriaBytes)
+	if w.Comments > 0 {
 		noun := "comments"
-		if hidden == 1 {
+		if w.Comments == 1 {
 			noun = "comment"
 		}
-		parts = append(parts, fmt.Sprintf("%d older %s", hidden, noun))
+		parts = append(parts, fmt.Sprintf("%d older %s", w.Comments, noun))
 	}
 	if commentsUnread {
 		parts = append(parts, "the comments (they could not be read)")
@@ -173,4 +211,60 @@ func printHeadTrailer(issue *types.Issue, commentCount, tailN int, commentsUnrea
 	// same way printComments points at the full record.
 	arg, note := remedy.CommandArg(runtime.GOOS, issue.ID, "<issue-id>")
 	fmt.Printf("\n  %s\n", ui.RenderMuted(fmt.Sprintf("… head view: withheld %s — bd show %s for the full record%s", strings.Join(parts, ", "), arg, note)))
+}
+
+// headDetails is one issue of bd show --head --json: the detail view the
+// reader role answered with, cut down to the head view, and a withheld object
+// that counts what the cut left out.
+//
+// It embeds the answer instead of naming its fields, so every key keeps the
+// name and the meaning it has in bd show --json and a field the contract
+// gains later appears here too. Four things differ, and withheld counts each:
+// description, design and acceptance_criteria are absent, notes is the end of
+// the field (clipNotesTail), and comments holds the newest ones only.
+// comment_count is still the count of all of them.
+type headDetails struct {
+	*types.IssueDetails
+	Withheld headWithheldCounts `json:"withheld"`
+}
+
+// showHeadGetRequest is the read the JSON head view makes. It always asks for
+// the comment bodies, because the view carries the newest ones and a plain
+// bd show --json leaves them out; newHeadDetails drops the older ones. It
+// always asks for brief dependencies, because a full dependency row carries
+// that issue's own description, design and notes, which would put back the
+// bulk the view exists to leave out. Dependents stay behind
+// --include-dependents, as in every bd show --json.
+//
+// The view bounds what is printed, not what is read: the reader streams every
+// comment body and all but the newest are dropped here, as the text view has
+// always read every comment to print three. A read bounded at the store would
+// need a tail parameter on the read contract, which this view does not add.
+func showHeadGetRequest(id string, includeDependents bool) issueops.GetRequest {
+	return issueops.GetRequest{
+		ID:                id,
+		IncludeDependents: includeDependents,
+		IncludeComments:   true,
+		BriefDeps:         true,
+	}
+}
+
+// newHeadDetails cuts a detail view down to the head view. tailN is the
+// comments cap (resolveHeadCommentsTail). It works on a copy and re-slices
+// the comments instead of rewriting them, because the reader that answered
+// owns details and may hand the same rows to another caller.
+func newHeadDetails(details *types.IssueDetails, tailN int) *headDetails {
+	if details == nil {
+		// A reader that answers with no details and no error encodes as
+		// null without --head, and so it does here.
+		return nil
+	}
+	head := *details
+	withheld := countHeadWithheld(&details.Issue, len(details.Comments), tailN)
+	head.Description = ""
+	head.Design = ""
+	head.AcceptanceCriteria = ""
+	head.Notes, _ = clipNotesTail(details.Notes, headNotesBytes, headLineSlack)
+	head.Comments = details.Comments[withheld.Comments:]
+	return &headDetails{IssueDetails: &head, Withheld: withheld}
 }

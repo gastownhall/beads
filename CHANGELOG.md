@@ -638,10 +638,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state is last. One line after the comments names what was withheld and its
   size, or says that nothing was. The header, labels, metadata and both
   dependency lists print as before, and a comment is never cut, so the view
-  is short but has no fixed size. Text output only: `--head` is refused with
-  `--json`, `--short`, `--long`, `--refs`, `--children`, `--thread`,
-  `--as-of` and `--watch`. Nothing is stored or moved, and `bd show` without
+  is short but has no fixed size. `--head` is refused with `--short`,
+  `--long`, `--refs`, `--children`, `--thread`, `--as-of`, `--watch` and
+  `--include-comments`. Nothing is stored or moved, and `bd show` without
   the flag prints what it printed before.
+- **`bd show --head --json`** returns the same short view as JSON
+  ([#7187](https://github.com/gastownhall/beads/issues/7187)): one object
+  per issue with the keys of `bd show --json`, where `description`, `design`
+  and `acceptance_criteria` are absent, `notes` is the last 1 KB of the
+  field, and `comments` holds the last 3 comment bodies (`--comments-tail N`
+  changes the count, and `0` keeps them all; `--include-comments` is refused
+  with `--head`, because it asks for every body). Each dependency row is
+  reduced as by `--brief-deps`, because a full row carries that issue's own
+  description and notes. A `withheld` object counts what was left out
+  (`description_bytes`, `design_bytes`, `notes_bytes`,
+  `acceptance_criteria_bytes`, `comments`). It is always present, and all
+  zero for an issue the view shows whole, so a reader can tell the short
+  view from a full record. `comment_count` is still the count of all
+  comments. The view is cut from the answer that
+  `bd show --json --include-comments --brief-deps` reads, so the read
+  contract and the HTTP API are unchanged: the output is short, and the read
+  still fetches every comment. `bd show --json` without `--head` returns
+  what it returned before.
 - `GET /v0/beads/issues` accepts `no_assignee`, `title` and a repeatable `id`
   (one id per value, at most 200), each behind its own new capability token
   (`issues.list.noAssignee`, `issues.list.title`, `issues.list.ids`; additive,

@@ -186,7 +186,7 @@ var showCmd = &cobra.Command{
 		}
 		headMode, _ := cmd.Flags().GetBool("head")
 		if headMode {
-			if err := validateShowHead(cmd, jsonOutput); err != nil {
+			if err := validateShowHead(cmd); err != nil {
 				return err
 			}
 			commentsTail = resolveHeadCommentsTail(cmd, commentsTail)
@@ -313,12 +313,24 @@ var showCmd = &cobra.Command{
 					result.Close()
 					return HandleErrorRespectJSON("%v", rerr)
 				}
-				details, derr := rd.Get(ctx, showGetRequest(issue.ID, includeDepends, includeComments, briefDeps))
+				// The head view (--head) is a projection of that same answer:
+				// it asks the reader for the comment bodies and brief
+				// dependencies and cuts the result down (show_head.go), so
+				// the request the contract defines is all the reader sees.
+				req := showGetRequest(issue.ID, includeDepends, includeComments, briefDeps)
+				if headMode {
+					req = showHeadGetRequest(issue.ID, includeDepends)
+				}
+				details, derr := rd.Get(ctx, req)
 				if derr != nil {
 					result.Close()
 					return HandleErrorRespectJSON("%v", derr)
 				}
-				allDetails = append(allDetails, details)
+				if headMode {
+					allDetails = append(allDetails, newHeadDetails(details, commentsTail))
+				} else {
+					allDetails = append(allDetails, details)
+				}
 				result.Close()
 				continue
 			}
@@ -469,8 +481,8 @@ func init() {
 		"Without it the comments field is absent entirely, not truncated: an issue with comments carries "+
 		"comment_count and comments_omitted=true, so check those before reading an absent comments field as none.")
 	showCmd.Flags().Bool("brief-deps", false, "Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)")
-	showCmd.Flags().Int("comments-tail", 0, "Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only; 0, the default, renders every comment unchanged; N must be >= 0)")
-	showCmd.Flags().Bool("head", false, "Show a short view of a long issue: the last 1 KB of the notes in place of the description, design, notes and acceptance criteria, and the last 3 comments (--comments-tail N changes the count), followed by one line naming what was withheld; the header, labels, metadata and dependency lists print as usual, and a comment is never cut (text output only; cannot be combined with --json, --short, --long, --refs, --children, --thread, --as-of or --watch)")
+	showCmd.Flags().Int("comments-tail", 0, "Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only, except that with --head it also sets how many comments --json carries; 0 renders every comment unchanged and is the default without --head; N must be >= 0)")
+	showCmd.Flags().Bool("head", false, "Show a short view of a long issue: the last 1 KB of the notes in place of the description, design, notes and acceptance criteria, and the last 3 comments (--comments-tail N changes the count), followed by one line naming what was withheld; the header, labels, metadata and dependency lists print as usual, and a comment is never cut. With --json the same subset is one object per issue: description, design and acceptance_criteria are absent, notes is the last 1 KB, comments holds the newest bodies, each dependency is reduced as by --brief-deps, and a withheld object counts what was left out (cannot be combined with --short, --long, --refs, --children, --thread, --as-of, --watch or --include-comments)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
 }
