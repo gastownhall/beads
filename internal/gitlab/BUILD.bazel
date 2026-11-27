@@ -29,6 +29,7 @@ go_test(
         "tracker_cross_project_test.go",
         "tracker_state_test.go",
         "tracker_test.go",
+        "tracker_web_url_test.go",
         "types_test.go",
     ],
     embed = [":gitlab"],
@@ -36,6 +37,7 @@ go_test(
         "//internal/config",
         "//internal/storage",
         "//internal/tracker",
+        "//internal/tracker/conformance",
         "//internal/types",
     ],
 )

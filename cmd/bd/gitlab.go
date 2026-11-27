@@ -40,6 +40,7 @@ var gitlabCmd = &cobra.Command{
 
 Configuration can be set via 'bd config' or environment variables:
   gitlab.url / GITLAB_URL                         - GitLab instance URL
+  gitlab.web_url / GITLAB_WEB_URL                 - Address in GitLab's issue links, when it is not gitlab.url
   gitlab.token / GITLAB_TOKEN                     - Personal access token
   gitlab.project_id / GITLAB_PROJECT_ID           - Project ID or path
   gitlab.group_id / GITLAB_GROUP_ID               - Group ID for group-level sync

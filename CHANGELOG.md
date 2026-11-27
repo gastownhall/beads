@@ -1552,6 +1552,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bootstrap`. What is refused, and the consent it takes, are unchanged;
   server and embedded mode print, and emit as JSON, what they did before.
 
+- **GitLab push no longer creates the issue again when GitLab's web address is
+  not `gitlab.url`.** GitLab writes its own `external_url` into the `web_url`
+  of every issue, whatever address the API was reached at, and that URL
+  becomes the bead's `external_ref`. For an instance reached at another
+  address (an internal name, an IP, a proxy) the tracker did not recognize its
+  own ref, unless the host happened to contain `gitlab`, and each
+  `bd gitlab sync` that pushed created one more copy of the issue and moved
+  the link to it. The new `gitlab.web_url` (`GITLAB_WEB_URL`) names the address
+  GitLab shows in issue links; refs under it are recognized beside those under
+  `gitlab.url`, a task created as a GitLab work item is linked under it, and it
+  is never contacted. Until it is set, a create whose returned link would not
+  be recognized warns and names the key, because the copies already made are
+  not removed and the next push would add another.
+  A default port spelled in `gitlab.url` (`https://host:443`) no longer keeps
+  refs from matching: hosts are compared without it.
+
 - **`bd vc merge --strategy ours|theirs` concludes a merge whose only
   problem is a foreign-key violation** (#4992 follow-up). A merge with no row
   conflict can still stop on a foreign-key cascade violation, for example
