@@ -455,3 +455,34 @@ func TestEmbeddedMigrateStrandedStepLeavesUnrelatedDirt(t *testing.T) {
 		})
 	}
 }
+
+// TestEmbeddedMigrateStrandedStepCommitsUserDirtInItsOwnTable strands
+// migration 49 and then leaves a user's uncommitted row in issues, a table 49
+// itself alters. Recognition is by table, not by row, so the row cannot be
+// told apart from the step's own change, and the finish commits it with the
+// step, under the step's message (the bd dolt commit the old refusal
+// prescribed committed it too, under the user's). The test pins this, so
+// refusing such a working set instead is a deliberate change.
+func TestEmbeddedMigrateStrandedStepCommitsUserDirtInItsOwnTable(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	const stranded = 49
+	dataDir := strandStepAt(t, ctx, stranded)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	mustExecStranded(t, ctx, conn,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES ('bd-user1', 'user row', '', '', '', '', 'open', 2, 'task')")
+
+	retryStranded(t, ctx, conn)
+	step := stepCommitHash(t, ctx, conn, stranded)
+	if n := scalarInt(t, ctx, conn,
+		"SELECT COUNT(*) FROM issues AS OF '"+step+"' WHERE id = 'bd-user1'"); n != 1 {
+		t.Fatalf("user row in the %04d commit: %d rows, want 1 (committed with the step)", stranded, n)
+	}
+	if n := scalarInt(t, ctx, conn,
+		"SELECT COUNT(*) FROM issues AS OF '"+step+"~1' WHERE id = 'bd-user1'"); n != 0 {
+		t.Fatalf("user row before the %04d commit: %d rows, want 0", stranded, n)
+	}
+}
