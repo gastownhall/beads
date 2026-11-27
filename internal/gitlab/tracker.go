@@ -333,8 +333,25 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	}
 
 	ti := gitlabToTrackerIssue(created)
+	if ref := t.BuildExternalRef(&ti); !t.IsExternalRef(ref) {
+		warnings = append(warnings, t.unrecognizedRefWarning(created.IID, ref))
+	}
 	ti.Warnings = warnings
 	return &ti, nil
+}
+
+// unrecognizedRefWarning reports a created issue whose web_url bd does not
+// recognize as this instance's: the create stands and its ref is stored, but
+// the next push will refuse the ref and create the issue again.
+func (t *Tracker) unrecognizedRefWarning(iid int, ref string) string {
+	recognized := "refs under gitlab.url " + t.client.BaseURL
+	if t.webBase != "" {
+		recognized += " and under " + t.webBase + ", the address the project's web_url names"
+	} else {
+		recognized += " only (the address GitLab writes into its links could not be learned from the project's web_url)"
+	}
+	return fmt.Sprintf("created GitLab issue %d at %s, which is not under an address bd recognizes for this instance (%s): "+
+		"the next push will create it again", iid, ref, recognized)
 }
 
 func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *types.Issue) (*tracker.TrackerIssue, error) {

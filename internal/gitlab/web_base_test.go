@@ -432,3 +432,40 @@ func TestCreateTaskWorkItemRefUnderWebBase(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateWarnsWhenWebURLIsNotRecognized pins AC-8: a create whose
+// returned web_url the tracker would refuse still succeeds and stores that
+// URL, with one warning naming it and saying the next push creates it again;
+// a recognized web_url carries no warning.
+func TestCreateWarnsWhenWebURLIsNotRecognized(t *testing.T) {
+	const unrecognized = "https://git.example.org/g/p/-/issues/3"
+	tr, _ := newRecordingTracker(t, map[string]string{
+		"POST /projects/123/issues": `{"id":300,"iid":3,"state":"opened","web_url":"` + unrecognized + `"}`,
+	})
+	created, err := tr.CreateIssue(context.Background(), &types.Issue{Title: "t", IssueType: types.TypeTask, Status: types.StatusOpen})
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if got := tr.BuildExternalRef(created); got != unrecognized {
+		t.Errorf("ref = %q, want %q", got, unrecognized)
+	}
+	if len(created.Warnings) != 1 {
+		t.Fatalf("warnings = %q, want exactly one", created.Warnings)
+	}
+	for _, want := range []string{unrecognized, "next push will create it again"} {
+		if !strings.Contains(created.Warnings[0], want) {
+			t.Errorf("warning %q does not say %q", created.Warnings[0], want)
+		}
+	}
+
+	tr, _ = newRecordingTracker(t, map[string]string{
+		"POST /projects/123/issues": `{"id":300,"iid":3,"state":"opened","web_url":"https://gitlab.example.com/g/p/-/issues/3"}`,
+	})
+	created, err = tr.CreateIssue(context.Background(), &types.Issue{Title: "t", IssueType: types.TypeTask, Status: types.StatusOpen})
+	if err != nil {
+		t.Fatalf("CreateIssue (recognized): %v", err)
+	}
+	if len(created.Warnings) != 0 {
+		t.Errorf("recognized create warnings = %q, want none", created.Warnings)
+	}
+}
