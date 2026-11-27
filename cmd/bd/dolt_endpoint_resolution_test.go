@@ -129,11 +129,11 @@ func TestServeTopologyDialsTheLegacyPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveServerModeUOWTopology: %v", err)
 	}
-	if topology.external == nil || topology.external.Port != legacy {
-		t.Fatalf("serve fronts %+v, want the server at port %d", topology.external, legacy)
+	if topology.External == nil || topology.External.Port != legacy {
+		t.Fatalf("serve fronts %+v, want the server at port %d", topology.External, legacy)
 	}
-	if want := fmt.Sprintf("127.0.0.1-%d", legacy); topology.rootPassword != want {
-		t.Errorf("serve presents password %q, want %q", topology.rootPassword, want)
+	if want := fmt.Sprintf("127.0.0.1-%d", legacy); topology.RootPassword != want {
+		t.Errorf("serve presents password %q, want %q", topology.RootPassword, want)
 	}
 }
 

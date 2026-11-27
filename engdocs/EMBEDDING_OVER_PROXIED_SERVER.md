@@ -7,6 +7,13 @@ describes observed behaviour rather than a contract, a stale marker makes it
 wrong, not merely old. Re-read it against the sources below before trusting it
 against a later build.
 
+§8 is the exception: it was rewritten when `OpenBestAvailable` gained its
+proxied-server arm (GH#8323) and describes that later behaviour, not 1.3.1's.
+Unlike the rest of this document, it is backed by tests that run a live proxied
+workspace: `TestProxiedServerSDKOpenBestAvailable` (`cmd/bd`, the
+doltserver-proxied lane) and the `TestOpenBestAvailableProxied*` refusal tests
+at the module root.
+
 Freshness source: `internal/storage/dbproxy/pidfile/pidfile.go`,
 `internal/storage/dbproxy/proxy/` (`endpoint.go`, `server.go`, `shutdown.go`,
 `read_status.go`, `backend.go`), `internal/storage/dbproxy/server/doltserver.go`,
@@ -24,7 +31,8 @@ Freshness source: `internal/storage/dbproxy/pidfile/pidfile.go`,
 `cmd/bd/dolt_proxied_lifecycle.go`, `cmd/bd/migrate.go`, `cmd/bd/main.go`,
 `cmd/bd/proxied_server.go`, `cmd/bd/proxy_capability.go`,
 `cmd/bd/remote_migrate_gate.go`, `cmd/bd/store_factory.go`,
-`cmd/bd/uow_factory.go`, `beads.go`, `beads_cgo.go`, `beads_nocgo.go`.
+`cmd/bd/uow_factory.go`, `internal/proxiedopen/`,
+`internal/storage/uowstore/`, `beads.go`, `beads_cgo.go`, `beads_nocgo.go`.
 
 ## What this document is, and is not
 
@@ -634,67 +642,174 @@ Two observations worth carrying, neither of them this document's to fix:
   remote-backed shared case; treat the pull as the part of the remedy this
   document vouches for.
 
-## 8. `SetEventsJournalEnabled` on `OpenBestAvailable`'s `Storage`
+## 8. `OpenBestAvailable` on a proxied-server workspace
 
 `OpenBestAvailable` is the public open path in package `beads` at the module
 root. It exists in two build-tagged copies: `beads_cgo.go` (`//go:build cgo`),
-which handles embedded Dolt, dolt-server mode and registered extension
-backends; and `beads_nocgo.go` (`//go:build !cgo`), which handles the latter two
-and returns an error for embedded Dolt.
+which handles embedded Dolt, proxied-server mode, dolt-server mode and
+registered extension backends; and `beads_nocgo.go` (`//go:build !cgo`), which
+handles all but embedded Dolt and returns an error for that.
 
-**First, a routing fact worth knowing before the interface question.** Neither
-copy has a proxied-server arm. Both dispatch on `cfg.IsDoltServerMode()`, and
-`configfile.IsDoltServerMode` and `IsDoltProxiedServerMode` are mutually
-exclusive — proxied workspaces are explicitly exempt from the host-based
-server-mode inference. So on a proxied-server workspace `OpenBestAvailable` falls
-through to `embeddeddolt.Open`, and it does not connect through the proxy.
+**Routing.** Both copies have a proxied-server arm (GH#8323). It is checked
+after a registered extension backend and the per-open option refusals, and
+before the server and embedded arms. It reads `cfg.IsDoltProxiedServerMode()`,
+which looks only at `dolt_mode` in `metadata.json`. Both builds share the arm
+(`openProxiedServer` in `beads.go`), so a `CGO_ENABLED=0` embedder opens a
+proxied workspace as well as a cgo one.
 
-The consequence is not contention over the directory the proxy is serving. It is
-that the two paths look at **different directories entirely**. `embeddeddolt`
-joins its data directory as `<beadsDir>/embeddeddolt` and does so in four
-non-test places — `newStore`, `openReadOnly`, the open cache's `cacheKey`, and
-`HasRepository` — with no way for a caller to redirect it. The proxy's
-`dolt sql-server`, meanwhile, serves the proxied root, which defaults to
-`<beadsDir>/dolt`
-(`internal/doltserver/physical_root.go`; `Config.DatabasePath`'s fallback joins
-the literal `dolt`, with a comment saying always to).
+One open keeps the server arm: an environment that forces server mode
+(`BEADS_DOLT_SERVER_MODE=1` or `BEADS_DOLT_SHARED_SERVER`) and names the port
+to dial in `BEADS_DOLT_SERVER_PORT` (a positive port, parsed as the server
+store parses it). That open dials the named port as a plain MySQL client, as
+it did before this arm existed (`routesThroughProxy` in `beads.go`; the
+named-port exemption #8476 approved). Gas City's proxied-native lane opens
+that way against bd 1.3.x proxies, whose data port still answers a plain
+MySQL client, and its environment also pins what the proxied arm would ignore:
+no auto-start, the commit author and the pool bound. Without a named port,
+forced server mode would dial a port bd resolves itself, never the proxy's
+data port, so that open takes the proxied arm. The legacy `BEADS_DOLT_PORT`
+does not count as a named port.
 
-So an embedder that calls `OpenBestAvailable` on a proxied workspace does not
-fight the running server for its files — it silently opens **a separate database**
-beside it. On the read-write path — the one `OpenBestAvailable` takes —
-`newStore` `MkdirAll`s `.beads/embeddeddolt`, and `initSchema` issues
-`CREATE DATABASE IF NOT EXISTS` and migrates, so the open creates and writes a
-second database rather than failing. What it contains depends on the workspace's
-history: empty on one initialised straight into proxied mode, and whatever
-`.beads/embeddeddolt` still holds on one that was ever embedded, since none of
-the mode-migration verbs removes that directory. The second case is the nastier
-one — stale issues that look real.
+Before this arm existed, a proxied workspace fell through to the embedded arm
+(cgo), which created and migrated a second, unrelated database at
+`.beads/embeddeddolt` beside the one the proxy serves, or to the
+embedded-requires-CGO error (pure). Neither happens now: the open creates no
+`.beads/embeddeddolt` and no `beads.db`, whether it succeeds or fails.
 
-The read-only join site behaves the other way, which is worth knowing before
-generalising the paragraph above: `openReadOnly` does **not** create. It
-`os.Stat`s the same directory and returns
-`embeddeddolt: no embedded database at …` when it is absent, so a caller
-arriving through the read-only open on a workspace that was never embedded gets
-an error instead of an empty database.
+**What the open does.** It goes through `internal/proxiedopen`, the same
+construction the bd CLI uses, with a root bd command's posture:
 
-Nothing in the open path refuses on that ground and no error comes back. The
-store is genuine; it is just not the one the workspace's issues are in. An
-embedder that wants the proxied endpoint should connect to the data port (§3)
-rather than expect this function to find it.
+- The workspace's project identity is asserted, and a managed-local root that
+  holds no Dolt database is refused rather than initialized.
+- A bd proxy already running for the server root is adopted. With none, one is
+  started from the `bd` found on `PATH`, so an embedder's open may spawn
+  `bd db-proxy-child` from its own `PATH`. With no `bd` on `PATH` the open
+  fails with `beads.ErrProxyUnavailable` (match with `errors.Is`); it creates
+  no embedded store, starts no proxy, and leaves any stale proxy record and
+  orphaned backend alone. It may still create the server root directory and
+  write the proxied sql-server config. The library never starts the proxy
+  from the host executable, because the host is not bd.
+- A proxy started by a bd older than 1.4 (before the authenticated control
+  handshake) cannot answer the library, and the library does not stop it:
+  every older bd on the workspace shares that proxy, and the `bd` on `PATH`
+  may be too old to replace it. The open fails at once with
+  `beads.ErrProxyUnavailable` and leaves the proxy, its record and its
+  backend alone. Upgrading the `bd` on `PATH` and running a bd command in the
+  workspace replaces the old proxy, as does waiting for its idle exit. The
+  bd CLI itself stops such a proxy and starts its own.
+- A managed-local workspace (no external upstream in the sidecar) probes the
+  `dolt` binary before it looks for a proxy, so it needs `dolt` on `PATH`
+  even to adopt a running proxy. Without it the open fails with the dolt
+  resolution error, not `ErrProxyUnavailable`.
+- A `bd` on `PATH` that is a different build from the one that owns the
+  workspace can reject a newer child flag. The open then retries until its
+  deadline and fails with an untyped "proxy child exited" error.
+- The events journal and versioned history are activated under the same
+  workspace switches as the CLI's. A later `SetEventsJournalEnabled` call wins.
+- Schema refusals surface as the exported `beads.SchemaSkewError`,
+  `beads.RemoteMigrateGateError` and `beads.MigrateConsentError` (match with
+  `errors.As`). `AllowSharedSchemaMigration` applies to this arm as it does to
+  the server arm.
 
-`SetEventsJournalEnabled(enabled bool)` is **not a method on the `Storage`
-interface.** `beads.Storage` aliases `internal/beads.Storage`, which aliases
-`internal/storage.Storage`; the method is declared on a separate optional
-interface, `storage.EventsJournalConfigurer`
-(`internal/storage/storage.go`). Its contract is per-instance: implementations
-must not use process-global state, because one process can hold several stores
-at once.
+The returned `Storage` (`internal/storage/uowstore`) runs each call as one
+unit of work over the proxy. Its `Close` releases this handle's connections and
+leaves the shared proxy running, as a bd command's exit does.
 
-The two concrete types `OpenBestAvailable` can return from its Dolt arms do
-implement it: `dolt.DoltStore` and `embeddeddolt.EmbeddedDoltStore` each declare
-the method. (bd's own proxied path forwards it through the unit-of-work provider,
-but that provider is not something `OpenBestAvailable` returns — see the routing
-fact above.) An embedder reaches it by type assertion:
+**Reads.** The flat `GetIssue` resolves the issue on either plane and fills
+its `Labels`, and the flat `GetIssuesByIDs` reads both planes with their
+labels through the same batch read `DoltStore` uses, leaving out an id that
+names no row. As on `DoltStore`, the transaction's `GetIssue` fills no labels.
+
+**Creates.** `CreateIssue`, `CreateIssues` and the transaction creates go
+through the same domain create use case as the proxied `bd create`, and add
+what `DoltStore`'s create adds around it: `PrepareIssueForInsert`, plane
+routing by `IsWisp` (so `NoHistory` lands on the wisp plane; the flat single
+`CreateIssue` also routes wisp-typed and infrastructure-typed issues), a
+refusal for a caller-named ID the other plane holds, `Labels` and `Comments`
+persisted with the issue, and for `CreateIssues` the mixed-bucket dependency
+check and `Dependencies` persisted with no `dependency_added` event. A flat
+create that fails definitely clears the IDs it minted, as `DoltStore` does; a
+commit whose outcome is unknown returns `ErrCommitIndeterminate` (§9), keeps
+the IDs, and is never retried.
+
+**Method coverage.** The store serves the issue, label, dependency, comment,
+config, local-metadata, ready-work, blocked, statistics and claim methods, the
+role accessors, and `RunInTransaction`. A `RunInTransaction` callback runs
+exactly once. A setup failure before the callback can be retried, but the
+callback is never replayed. The other `Storage` methods return a typed
+`beads.ErrUnsupported` with backend `"proxied-server"` rather than a silent
+default. They include the event and provenance reads, the `Iter*` streams,
+merge slots and slot state, `GetDependencies`/`GetDependents` and
+`GetDependencyTree`, `GetIssuesByLabel`, `GetIssueByExternalRef`,
+`SearchIssueSummaries`, `ListWisps`, `RenameLabel`, `MergeMetadata`, and the
+`*Checked` update and close variants. The generated list is
+`internal/storage/uowstore/unsupported_gen.go`.
+
+Divergences an embedder may notice:
+
+- `EventQuerier` and `DependentQuerier` are not implemented, so `AsEventQuerier`
+  and `AsDependentQuerier` return `false`. `BlockedQuerier` and `IssueClaimer`
+  are implemented.
+- Dependency writes, flat and in a transaction, record no `dependency_added`
+  or `dependency_removed` event unless `EmitEvent` is set on the
+  `WithOptions` variant, matching `DoltStore`.
+- A batch-create dependency whose target does not exist is refused, where
+  `DoltStore` skips it. Its `created_by` is the acting user and its
+  `created_at` is the write time; `dep.CreatedAt` is not honored.
+- Import-shaped creates (an explicit ID over an existing row, preset comments)
+  differ from `DoltStore` in ways interactive callers do not reach. The full
+  list is the KNOWN DIVERGENCES comment in `internal/storage/uowstore/create.go`:
+  - Re-creating an explicit ID over a live row upserts it. That writes another
+    `created` events-table row and does not restore an imported lease or drop
+    an orphaned one.
+  - A create-time comment with no `CreatedAt` is stamped with the current
+    time, so several comments in one create can share a second and read back
+    out of list order.
+  - Two identical create-time comments collapse onto one row but are each
+    journaled. An explicit comment ID that is already stored fails with a
+    duplicate-key error, where `DoltStore` skips it.
+  - On such a re-create, an existing dependency edge of a different type fails
+    with a type-conflict error. One of the same type with changed metadata or
+    thread is rewritten, where `DoltStore` leaves it untouched.
+- Dependencies on an external reference are not resolved through routes.
+- Dolt commits carry no `--author`: they are attributed to the proxy's SQL
+  user, where `DoltStore` takes the author from `GIT_AUTHOR_NAME` and
+  `GIT_AUTHOR_EMAIL` or the bd config. An embedder that needs its own author
+  on each commit keeps using the server arm until the proxied arm carries
+  one.
+- `ErrCircuitOpen` (§9) is never produced on this arm. The circuit breaker
+  belongs to the direct server store.
+- `UnderlyingDB()` and `DB()` return the proxy's connection pool as raw-SQL
+  escape hatches. Statements on that pool bypass hooks and the events journal.
+- Role handles obtained before `Close`, `UnderlyingDB()` and `DB()` refuse
+  after `Close`: role calls return an error and the accessors return `nil`.
+  None of them panic, and `Close` is safe to race with them.
+
+**Embedders that projected a server endpoint.** An embedder that steers a
+proxied workspace onto the server arm by forcing server mode and naming the
+port (`BEADS_DOLT_SERVER_MODE=1` with `BEADS_DOLT_SERVER_PORT`) keeps that
+route. Forcing server mode without naming a port now takes the proxied arm.
+An embedder that moves to the proxied arm should keep any read-only fence on
+proxied handles until it runs a beads release that carries the create
+contract, the failed-create ID reset and the quiet dependency writes
+described above, and should check the commit-author divergence.
+
+**The other public opens are unchanged.** `Open`, `OpenFromConfig` and
+`OpenGated` still construct the direct server store. On a proxied workspace
+they dial the configured server around the proxy instead of through it.
+Embedders should use `OpenBestAvailable` there.
+
+**`SetEventsJournalEnabled`.** The method is not on the `Storage` interface.
+`beads.Storage` aliases `internal/beads.Storage`, which aliases
+`internal/storage.Storage`, and the method is declared on a separate optional
+interface, `storage.EventsJournalConfigurer` (`internal/storage/storage.go`).
+Its contract is per-instance: implementations must not use process-global
+state, because one process can hold several stores at once.
+
+Every Dolt arm's store implements it: `dolt.DoltStore`,
+`embeddeddolt.EmbeddedDoltStore`, and the proxied arm's `uowstore.Store`, which
+forwards to the unit-of-work provider. An embedder reaches it by type
+assertion:
 
 ```go
 store, err := beads.OpenBestAvailable(ctx, beadsDir)
@@ -704,20 +819,16 @@ if c, ok := store.(interface{ SetEventsJournalEnabled(bool) }); ok {
 }
 ```
 
-**Two things an embedder should know.** `storage.EventsJournalConfigurer` is
-internal and is not re-exported from the public `beads` package, so the
-assertion has to be written against a locally declared single-method interface
-as above; there is no exported name to assert against. And a store reached
-through a registered extension backend
-(`backends.Lookup`, dispatched ahead of every Dolt path in both copies of
-`OpenBestAvailable`) need not implement the method at all — which is what the
-`ok` is for.
+`storage.EventsJournalConfigurer` is internal and is not re-exported from the
+public `beads` package, so the assertion has to be written against a locally
+declared single-method interface as above. A store reached through a
+registered extension backend (`backends.Lookup`, dispatched ahead of every Dolt
+path in both copies of `OpenBestAvailable`) need not implement the method at
+all, which is what the `ok` is for.
 
 This is among the more likely surfaces here to move, because it is reached by
 assertion rather than by a declared method: no compile error marks its
-disappearance. No test at the module root asserts that
-`OpenBestAvailable`'s result satisfies it, so nothing in CI fails if it stops
-doing so.
+disappearance.
 
 ## 9. `ErrCommitIndeterminate` and `ErrCircuitOpen`
 
@@ -882,8 +993,10 @@ command whose flags exist to serve the parent that spawns it, and flags have
 been added to it as topologies were added. §1's `proxy.pid` and the control-file
 set are next: they are bd's private lifecycle state, and the lifecycle work that
 added `root_id`, `control_port`, the spawn marker and the stop epoch is not
-finished. §8 is likely for a different reason — an assertion-reached optional
-interface can disappear without a compile error anywhere.
+finished. §8 is likely for two reasons: the proxied arm's method coverage is
+new and will grow, so a method that returns `ErrUnsupported` today may be served
+later, and `SetEventsJournalEnabled` is an assertion-reached optional interface
+that can disappear without a compile error anywhere.
 
 **Less likely to move, for a reason:** §9's two error sentinels, because
 `errors.Is` on them is the only way a caller can tell those two conditions
@@ -911,13 +1024,6 @@ live proxy to confirm end to end, and are therefore inferred from the code:
   succeeds against the data port on a managed-local workspace (§3). The
   credentials, the loopback bind and the absence of protocol handling in the
   proxy are all read directly from the source; the end-to-end connection is not.
-- That `OpenBestAvailable`'s embedded fall-through (§8) completes and hands back
-  a usable but separate store, rather than failing somewhere in the create and
-  migrate steps. The *routing* (it takes the embedded arm, because proxied mode
-  is exempt from `IsDoltServerMode`) and the *directory* (`embeddeddolt` joins
-  `<beadsDir>/embeddeddolt`, the proxy serves `<beadsDir>/dolt`) are read off the
-  source and are not in doubt; the open itself was not run against a live
-  proxied workspace.
 
 Everything else — field names, JSON keys and their types, argv and flag
 spellings, exported Go symbols, default values, and which code path decides

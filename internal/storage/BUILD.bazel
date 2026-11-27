@@ -186,6 +186,7 @@ filegroup(
         "//internal/storage/storagecontract:go_srcs",
         "//internal/storage/unsupportedgen:go_srcs",
         "//internal/storage/uow:go_srcs",
+        "//internal/storage/uowstore:go_srcs",
         "//internal/storage/versioncontrolops:go_srcs",
     ],
     visibility = ["//:__subpackages__"],

@@ -420,6 +420,7 @@ var derivedActorSystemCallers = map[string]string{
 	"embeddeddolt/store.go:DeleteIssue":       "storage.DeleteIssue carries no actor (see above)",
 	"embeddeddolt/store.go:DeleteIssues":      "storage.DeleteIssues carries no actor (see above)",
 	"embeddeddolt/transaction.go:DeleteIssue": "storage.Transaction.DeleteIssue carries no actor (see above)",
+	"uowstore/tx.go:DeleteIssue":              "storage.DeleteIssue and storage.Transaction.DeleteIssue carry no actor (see above)",
 }
 
 // TestNoRequestActorReachesTheReadinessFamilyOnlyFromSystemPaths is the census
