@@ -758,16 +758,127 @@ func runMarkBatchedInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids
 	return changed, nil
 }
 
+// AffectedByStatusChangeInTx returns the rows (issues, wisps) whose blocked
+// state a status change of issues-plane row id can flip, id itself first:
+// its blocking dependers, the waiters on its parent-child parents and on id
+// as spawner, and the parent-child descendants of all of those.
 func AffectedByStatusChangeInTx(ctx context.Context, tx DBTX, id string) ([]string, []string, error) {
-	issueSeed := []string{id}
-	issueSeen := map[string]bool{id: true}
-	var wispSeed []string
-	wispSeen := make(map[string]bool)
+	issues, wisps, _, err := affectedByStatusChangeInTx(ctx, tx, id, false, false)
+	return issues, wisps, err
+}
 
-	if err := loadBlockingDependersInTx(ctx, tx, "depends_on_issue_id", id, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
+// AffectedByStatusChangeForWispInTx is AffectedByStatusChangeInTx for a
+// wisps-plane row.
+func AffectedByStatusChangeForWispInTx(ctx context.Context, tx DBTX, id string) ([]string, []string, error) {
+	issues, wisps, _, err := affectedByStatusChangeInTx(ctx, tx, id, true, false)
+	return issues, wisps, err
+}
+
+// AffectedByStatusChangeAndFlagInTx is AffectedByStatusChange(ForWisp)InTx
+// that also reports id's stored is_blocked flag, read in the same statement
+// as the neighborhood. A status change to closed or pinned uses it to decide
+// whether the row needs the recompute's settled unmark at all (blocked: the
+// unmark clears it; not blocked: the unmark would match nothing, so the row
+// leaves the recompute and a row without dependents costs it no statement).
+func AffectedByStatusChangeAndFlagInTx(ctx context.Context, tx DBTX, id string, isWisp bool) (issues, wisps []string, blocked bool, err error) {
+	return affectedByStatusChangeInTx(ctx, tx, id, isWisp, true)
+}
+
+// affectedByStatusChangeInTx is the body of the three entry points above.
+//
+// The affected set is defined by affectedByStatusChangeWalkInTx: one read
+// per leg of the graph around id, nine round trips for a row with no edges
+// at all (gascity measured its op-journal close, a wisp with no edges, at 46
+// statements, 9 of them this walk). This body reads the whole neighborhood
+// of id in ONE statement — every dependency row that names id as its target
+// in either plane's table, id's own parent-child rows, and (withFlag) id's
+// stored flag — and rebuilds the walk's seeds from it in the walk's order.
+// Only the waiters on id's parents (a second statement, when id has
+// parents) and the descendants of the seeds beyond id's own children (the
+// walk's own expansion, which skips id since its children are already in
+// hand) still read on their own. The walk stays as the reference body:
+// createFastPathsDisabled routes here through it, so the fast-vs-per-row
+// equivalence tests compare the two.
+func affectedByStatusChangeInTx(ctx context.Context, tx DBTX, id string, isWisp, withFlag bool) ([]string, []string, bool, error) {
+	if createFastPathsDisabled.Load() {
+		issues, wisps, err := affectedByStatusChangeWalkInTx(ctx, tx, id, isWisp)
+		if err != nil || !withFlag {
+			return issues, wisps, false, err
+		}
+		blocked, err := storedIsBlockedInTx(ctx, tx, id, isWisp)
+		return issues, wisps, blocked, err
+	}
+	n, err := loadStatusChangeNeighborhoodInTx(ctx, tx, id, isWisp, withFlag)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	var issueSeed, wispSeed []string
+	issueSeen, wispSeen := map[string]bool{}, map[string]bool{}
+	if isWisp {
+		wispSeed, wispSeen[id] = []string{id}, true
+	} else {
+		issueSeed, issueSeen[id] = []string{id}, true
+	}
+	appendUnseen := func(ids []string, seed *[]string, seen map[string]bool) {
+		for _, candidate := range ids {
+			if !seen[candidate] {
+				seen[candidate] = true
+				*seed = append(*seed, candidate)
+			}
+		}
+	}
+	// 1. Blocking dependers (loadBlockingDependersInTx's order: the issues
+	//    table's rows, then the wisps table's).
+	appendUnseen(n.dependerIssues, &issueSeed, issueSeen)
+	appendUnseen(n.dependerWisps, &wispSeed, wispSeen)
+	// 2. Waiters on id's parent-child parents
+	//    (loadWaitersWhoseSpawnerIsParentOfInTx).
+	if len(n.parentIssues) > 0 || len(n.parentWisps) > 0 {
+		waiterIssues, waiterWisps, err := loadWaitersOnParentsInTx(ctx, tx, n.parentIssues, n.parentWisps)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		appendUnseen(waiterIssues, &issueSeed, issueSeen)
+		appendUnseen(waiterWisps, &wispSeed, wispSeen)
+	}
+	// 3. Waiters on id as spawner, through either target column
+	//    (loadWaitersOnSpawnerIDsInTx's order: the issue column, then the
+	//    wisp column, each the issues table's rows then the wisps table's).
+	//    id's own status just changed, and an also_blocks waits-for edge
+	//    blocks while the spawner itself is open (pre-fanout window,
+	//    GH#3783/GH#3875): a waiter with only a DepWaitsFor edge on id would
+	//    otherwise never be recomputed when its spawner closes.
+	appendUnseen(n.waiterIssuesByIssueCol, &issueSeed, issueSeen)
+	appendUnseen(n.waiterWispsByIssueCol, &wispSeed, wispSeen)
+	appendUnseen(n.waiterIssuesByWispCol, &issueSeed, issueSeen)
+	appendUnseen(n.waiterWispsByWispCol, &wispSeed, wispSeen)
+	// 4. Parent-child descendants of every seed. id's own children are in
+	//    hand; the expansion reads the rest and does not re-read id's. The
+	//    other plane may hold a row with the same id (a seed, if it depends
+	//    or waits on id or hangs under it), and that row's children are not
+	//    in hand: the skip names id's plane.
+	appendUnseen(n.childIssues, &issueSeed, issueSeen)
+	appendUnseen(n.childWisps, &wispSeed, wispSeen)
+	issues, wisps, err := expandByParentChildDescendantsSkippingInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen, id, isWisp)
+	return issues, wisps, n.blocked, err
+}
+
+// affectedByStatusChangeWalkInTx is the reference body of
+// affectedByStatusChangeInTx: the affected set read one leg at a time.
+func affectedByStatusChangeWalkInTx(ctx context.Context, tx DBTX, id string, isWisp bool) ([]string, []string, error) {
+	var issueSeed, wispSeed []string
+	issueSeen, wispSeen := map[string]bool{}, map[string]bool{}
+	targetCol := "depends_on_issue_id"
+	if isWisp {
+		wispSeed, wispSeen[id] = []string{id}, true
+		targetCol = "depends_on_wisp_id"
+	} else {
+		issueSeed, issueSeen[id] = []string{id}, true
+	}
+	if err := loadBlockingDependersInTx(ctx, tx, targetCol, id, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
 		return nil, nil, err
 	}
-	if err := loadWaitersWhoseSpawnerIsParentOfInTx(ctx, tx, id, false, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
+	if err := loadWaitersWhoseSpawnerIsParentOfInTx(ctx, tx, id, isWisp, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
 		return nil, nil, err
 	}
 	// id's own status just changed, and an also_blocks waits-for edge blocks
@@ -781,25 +892,212 @@ func AffectedByStatusChangeInTx(ctx context.Context, tx DBTX, id string) ([]stri
 	return expandByParentChildDescendantsInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen)
 }
 
-func AffectedByStatusChangeForWispInTx(ctx context.Context, tx DBTX, id string) ([]string, []string, error) {
-	var issueSeed []string
-	issueSeen := make(map[string]bool)
-	wispSeed := []string{id}
-	wispSeen := map[string]bool{id: true}
+// statusChangeNeighborhood is what loadStatusChangeNeighborhoodInTx reads
+// around one row: the ids of the rows adjacent to it, bucketed the way
+// affectedByStatusChangeWalkInTx's legs would have returned them.
+type statusChangeNeighborhood struct {
+	// dependerIssues and dependerWisps are the sources, per plane, of the
+	// blocks and conditional-blocks rows that name id (in its own plane's
+	// target column) as their target.
+	dependerIssues, dependerWisps []string
+	// waiter*ByIssueCol and waiter*ByWispCol are the sources, per plane, of
+	// the waits-for rows that name id in depends_on_issue_id, respectively
+	// depends_on_wisp_id.
+	waiterIssuesByIssueCol, waiterWispsByIssueCol []string
+	waiterIssuesByWispCol, waiterWispsByWispCol   []string
+	// childIssues and childWisps are the sources, per plane, of the
+	// parent-child rows that name id (own plane column) as the parent.
+	childIssues, childWisps []string
+	// parentIssues and parentWisps are the targets, per plane, of id's own
+	// parent-child rows.
+	parentIssues, parentWisps []string
+	// blocked is id's stored is_blocked flag, when it was asked for.
+	blocked bool
+}
 
-	if err := loadBlockingDependersInTx(ctx, tx, "depends_on_wisp_id", id, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
-		return nil, nil, err
+// loadStatusChangeNeighborhoodInTx reads statusChangeNeighborhood for id in
+// one statement: a UNION ALL of one leg per (table, column) pair the walk's
+// loaders read, each an index lookup on that column, tagged so the rows can
+// be bucketed in Go. The legs on id's own-plane target column fetch the four
+// types the walk cares about at once (blocks and conditional-blocks for the
+// dependers, waits-for for the waiters, parent-child for the children); the
+// legs on the other plane's column fetch waits-for only, as
+// loadWaitersOnSpawnerIDsInTx did for that column. Row order across legs is
+// not relied on.
+//
+//nolint:gosec // G201: the columns and tables are constants chosen by isWisp.
+func loadStatusChangeNeighborhoodInTx(ctx context.Context, tx DBTX, id string, isWisp, withFlag bool) (statusChangeNeighborhood, error) {
+	var n statusChangeNeighborhood
+	ownCol, otherCol, ownDepTable, rowTable := "depends_on_issue_id", "depends_on_wisp_id", "dependencies", "issues"
+	if isWisp {
+		ownCol, otherCol, ownDepTable, rowTable = "depends_on_wisp_id", "depends_on_issue_id", "wisp_dependencies", "wisps"
 	}
-	if err := loadWaitersWhoseSpawnerIsParentOfInTx(ctx, tx, id, true, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
-		return nil, nil, err
+	query := fmt.Sprintf(`
+		SELECT 'issues' AS src, 'own' AS leg, issue_id AS id, type AS kind FROM dependencies
+		WHERE %[1]s = ? AND type IN ('blocks', 'conditional-blocks', 'waits-for', 'parent-child')
+		UNION ALL
+		SELECT 'wisps', 'own', issue_id, type FROM wisp_dependencies
+		WHERE %[1]s = ? AND type IN ('blocks', 'conditional-blocks', 'waits-for', 'parent-child')
+		UNION ALL
+		SELECT 'issues', 'other', issue_id, type FROM dependencies
+		WHERE %[2]s = ? AND type = 'waits-for'
+		UNION ALL
+		SELECT 'wisps', 'other', issue_id, type FROM wisp_dependencies
+		WHERE %[2]s = ? AND type = 'waits-for'
+		UNION ALL
+		SELECT 'issues', 'parent', depends_on_issue_id, type FROM %[3]s
+		WHERE issue_id = ? AND type = 'parent-child' AND depends_on_issue_id IS NOT NULL
+		UNION ALL
+		SELECT 'wisps', 'parent', depends_on_wisp_id, type FROM %[3]s
+		WHERE issue_id = ? AND type = 'parent-child' AND depends_on_wisp_id IS NOT NULL
+	`, ownCol, otherCol, ownDepTable)
+	args := []any{id, id, id, id, id, id}
+	if withFlag {
+		query += fmt.Sprintf(`
+		UNION ALL
+		SELECT 'self', 'flag', id, CAST(is_blocked AS CHAR) FROM %s WHERE id = ?
+		`, rowTable)
+		args = append(args, id)
 	}
-	// See the issue-id sibling above: id's own status just changed, and a
-	// waiter that waits directly on this wisp id as spawner needs to be
-	// recomputed too.
-	if err := loadWaitersOnSpawnerIDsInTx(ctx, tx, []string{id}, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
-		return nil, nil, err
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return n, fmt.Errorf("affected by status change of %s: neighborhood: %w", id, err)
 	}
-	return expandByParentChildDescendantsInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen)
+	defer rows.Close()
+	for rows.Next() {
+		var src, leg, rowID, kind string
+		if err := rows.Scan(&src, &leg, &rowID, &kind); err != nil {
+			return n, fmt.Errorf("affected by status change of %s: scan: %w", id, err)
+		}
+		fromIssues := src == "issues"
+		pick := func(issues, wisps *[]string) {
+			if fromIssues {
+				*issues = append(*issues, rowID)
+			} else {
+				*wisps = append(*wisps, rowID)
+			}
+		}
+		switch leg {
+		case "own":
+			switch types.DependencyType(kind) {
+			case types.DepBlocks, types.DepConditionalBlocks:
+				pick(&n.dependerIssues, &n.dependerWisps)
+			case types.DepWaitsFor:
+				if isWisp {
+					pick(&n.waiterIssuesByWispCol, &n.waiterWispsByWispCol)
+				} else {
+					pick(&n.waiterIssuesByIssueCol, &n.waiterWispsByIssueCol)
+				}
+			case types.DepParentChild:
+				pick(&n.childIssues, &n.childWisps)
+			}
+		case "other":
+			if isWisp {
+				pick(&n.waiterIssuesByIssueCol, &n.waiterWispsByIssueCol)
+			} else {
+				pick(&n.waiterIssuesByWispCol, &n.waiterWispsByWispCol)
+			}
+		case "parent":
+			pick(&n.parentIssues, &n.parentWisps)
+		case "flag":
+			n.blocked = kind != "0" && kind != ""
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return n, fmt.Errorf("affected by status change of %s: rows: %w", id, err)
+	}
+	return n, nil
+}
+
+// loadWaitersOnParentsInTx returns the sources, per plane, of the waits-for
+// rows on any of the given parents, in loadWaitersWhoseSpawnerIsParentOfInTx's
+// order (the issue parents' waiters, then the wisp parents'; within each,
+// the issues table's rows then the wisps table's), read in one statement
+// per queryBatchSize chunk of parents.
+//
+//nolint:gosec // G201: only IN-list placeholders are formatted in.
+func loadWaitersOnParentsInTx(ctx context.Context, tx DBTX, parentIssues, parentWisps []string) (issues, wisps []string, err error) {
+	type leg struct {
+		col     string
+		parents []string
+	}
+	for _, l := range []leg{{"depends_on_issue_id", parentIssues}, {"depends_on_wisp_id", parentWisps}} {
+		for start := 0; start < len(l.parents); start += queryBatchSize {
+			end := min(start+queryBatchSize, len(l.parents))
+			placeholders, args := buildSQLInClause(l.parents[start:end])
+			query := fmt.Sprintf(`
+				SELECT 'issues' AS src, issue_id FROM dependencies WHERE type = 'waits-for' AND %[1]s IN (%[2]s)
+				UNION ALL
+				SELECT 'wisps', issue_id FROM wisp_dependencies WHERE type = 'waits-for' AND %[1]s IN (%[2]s)
+			`, l.col, placeholders)
+			rows, err := tx.QueryContext(ctx, query, append(append([]any{}, args...), args...)...)
+			if err != nil {
+				return nil, nil, fmt.Errorf("load waiters on parents: query: %w", err)
+			}
+			var fromIssues, fromWisps []string
+			for rows.Next() {
+				var src, waiterID string
+				if err := rows.Scan(&src, &waiterID); err != nil {
+					_ = rows.Close()
+					return nil, nil, fmt.Errorf("load waiters on parents: scan: %w", err)
+				}
+				if src == "issues" {
+					fromIssues = append(fromIssues, waiterID)
+				} else {
+					fromWisps = append(fromWisps, waiterID)
+				}
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, nil, fmt.Errorf("load waiters on parents: rows: %w", err)
+			}
+			issues = append(issues, fromIssues...)
+			wisps = append(wisps, fromWisps...)
+		}
+	}
+	return issues, wisps, nil
+}
+
+// storedIsBlockedInTx reads id's stored is_blocked flag from its plane's
+// table; a missing row reads as not blocked.
+//
+//nolint:gosec // G201: the table is one of two constants.
+func storedIsBlockedInTx(ctx context.Context, tx DBTX, id string, isWisp bool) (bool, error) {
+	table := "issues"
+	if isWisp {
+		table = "wisps"
+	}
+	var blocked int
+	err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT is_blocked FROM %s WHERE id = ?", table), id).Scan(&blocked)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read is_blocked of %s: %w", id, err)
+	}
+	return blocked != 0, nil
+}
+
+// DropSettledUnblockedRow removes id from the affected set a status change to
+// closed or pinned recomputes, for a row whose stored is_blocked flag is 0
+// (AffectedByStatusChangeAndFlagInTx): the recompute's settled unmark,
+// is_blocked = 1 -> 0, would match nothing for it, and nothing between the
+// read and the recompute writes the column. Its dependents stay.
+func DropSettledUnblockedRow(issues, wisps []string, id string, isWisp bool) ([]string, []string) {
+	if isWisp {
+		return issues, dropID(wisps, id)
+	}
+	return dropID(issues, id), wisps
+}
+
+func dropID(ids []string, id string) []string {
+	out := ids[:0:0]
+	for _, candidate := range ids {
+		if candidate != id {
+			out = append(out, candidate)
+		}
+	}
+	return out
 }
 
 func AffectedByDepChangeInTx(ctx context.Context, tx DBTX, source, target string, depType types.DependencyType) ([]string, []string, error) {
@@ -1083,9 +1381,34 @@ func expandByParentChildDescendantsInTx(
 	issueSeed, wispSeed []string,
 	issueSeen, wispSeen map[string]bool,
 ) ([]string, []string, error) {
+	return expandByParentChildDescendantsSkippingInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen, "", false)
+}
+
+// expandByParentChildDescendantsSkippingInTx is expandByParentChildDescendantsInTx
+// for a caller that already holds the children of seed row skip (and has put
+// them in the seeds): skip's children are not read again, while skip itself
+// stays in the result like any seed. skipWisp names skip's plane. One id can
+// be held by a row in each plane, and the caller holds the children of the
+// row in skip's plane only, so skip is dropped from that plane's queue alone;
+// a row in the other plane with the same id has its children read like any
+// seed's. An empty skip skips nothing.
+func expandByParentChildDescendantsSkippingInTx(
+	ctx context.Context, tx DBTX,
+	issueSeed, wispSeed []string,
+	issueSeen, wispSeen map[string]bool,
+	skip string, skipWisp bool,
+) ([]string, []string, error) {
 	issueQueue := issueSeed
 	wispQueue := wispSeed
 	issueHead, wispHead := 0, 0
+	// parents is the batch whose children are still to be read; wispBatch
+	// says which plane's queue the batch came from.
+	parents := func(batch []string, wispBatch bool) []string {
+		if skip == "" || wispBatch != skipWisp {
+			return batch
+		}
+		return dropID(batch, skip)
+	}
 
 	for issueHead < len(issueQueue) || wispHead < len(wispQueue) {
 		if issueHead < len(issueQueue) {
@@ -1096,10 +1419,10 @@ func expandByParentChildDescendantsInTx(
 			batch := issueQueue[issueHead:end]
 			issueHead = end
 
-			if err := appendChildrenInTx(ctx, tx, "dependencies", "depends_on_issue_id", batch, issueSeen, &issueQueue); err != nil {
+			if err := appendChildrenInTx(ctx, tx, "dependencies", "depends_on_issue_id", parents(batch, false), issueSeen, &issueQueue); err != nil {
 				return nil, nil, err
 			}
-			if err := appendChildrenInTx(ctx, tx, "wisp_dependencies", "depends_on_issue_id", batch, wispSeen, &wispQueue); err != nil {
+			if err := appendChildrenInTx(ctx, tx, "wisp_dependencies", "depends_on_issue_id", parents(batch, false), wispSeen, &wispQueue); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -1111,10 +1434,10 @@ func expandByParentChildDescendantsInTx(
 			batch := wispQueue[wispHead:end]
 			wispHead = end
 
-			if err := appendChildrenInTx(ctx, tx, "dependencies", "depends_on_wisp_id", batch, issueSeen, &issueQueue); err != nil {
+			if err := appendChildrenInTx(ctx, tx, "dependencies", "depends_on_wisp_id", parents(batch, true), issueSeen, &issueQueue); err != nil {
 				return nil, nil, err
 			}
-			if err := appendChildrenInTx(ctx, tx, "wisp_dependencies", "depends_on_wisp_id", batch, wispSeen, &wispQueue); err != nil {
+			if err := appendChildrenInTx(ctx, tx, "wisp_dependencies", "depends_on_wisp_id", parents(batch, true), wispSeen, &wispQueue); err != nil {
 				return nil, nil, err
 			}
 		}

@@ -12,15 +12,13 @@ func HydrateIssueOperationResult(ctx context.Context, tx DBTX, id string, includ
 	if tx == nil {
 		return nil, fmt.Errorf("hydrate issue operation result: transaction is nil")
 	}
+	// GetIssueInTx reads the row's labels with the row (getIssueFromTableInTx),
+	// so the snapshot already carries them; a second label read here cost a
+	// plane probe and a label query per hydrated result for the same answer.
 	issue, err := GetIssueInTx(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
-	labels, err := GetLabelsInTx(ctx, tx, "", id)
-	if err != nil {
-		return nil, fmt.Errorf("hydrate issue labels: %w", err)
-	}
-	issue.Labels = labels
 	dependencies, err := GetDependencyRecordsForIssuesInTx(ctx, tx, []string{id})
 	if err != nil {
 		return nil, fmt.Errorf("hydrate issue dependencies: %w", err)
