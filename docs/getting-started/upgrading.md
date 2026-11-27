@@ -230,6 +230,34 @@ reports `pending schema migrations alter pre-existing dirty tables` instead,
 do not run the `bd dolt commit` it suggests: those tables hold the stopped
 migration's partial changes.
 
+#### If an upgrade is interrupted
+
+bd commits each schema migration on its own as it applies it. If the process
+is killed after a migration has run and recorded itself but before its commit
+(a closed terminal, a timeout, a crash), the next bd command finishes that
+migration: it commits it under its own message, `schema: apply migration
+<file>`, logs `committed <file>, which an interrupted migration pass applied
+but did not commit`, and carries on with the rest of the upgrade.
+
+- **Only the migration's own tables are committed.** If you wrote to the
+  database between the kill and the next command, a change to a table that
+  migration alters is committed with it. Changes to other tables stay
+  uncommitted, as they were.
+- **A refusal still means real uncommitted work.** If bd then reports
+  `pending schema migrations alter pre-existing dirty tables`, the tables it
+  names hold uncommitted changes of your own (or of a migration that stopped
+  on an error, see above), not the interrupted migration. Make sure you
+  want to keep those changes before you run the `bd dolt commit` it
+  suggests.
+- **Only a recognizable migration is finished.** bd finishes the migration
+  only when exactly one is uncommitted and it is the next one in sequence
+  with the exact contents of this binary's migration file. Anything else (a
+  migration recorded by hand or by a different bd build, or two uncommitted
+  migrations) is refused as before. A migration killed before it recorded
+  itself is refused too, since bd cannot tell how much of it ran. If the
+  interrupted migration is the newest one this bd version ships, no
+  migration is left to run, and bd does not finish it this way.
+
 #### Upgrade every client that shares a store, together
 
 A bd binary refuses a database migrated past the schema it knows, rather than

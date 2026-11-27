@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log"
+	"sort"
 	"strings"
 )
 
@@ -172,6 +174,7 @@ func finishStrandedMainStep(ctx context.Context, db DBConn, cursorDirty bool) (f
 		return false, fmt.Errorf("reading dirty tables before finishing migration %s: %w", mf.name, err)
 	}
 	keep := make(map[string]dirtyTableState, len(dirty))
+	staged := []string{mainSource.cursorTable}
 	for table, state := range dirty {
 		if table == mainSource.cursorTable {
 			continue
@@ -181,13 +184,17 @@ func finishStrandedMainStep(ctx context.Context, db DBConn, cursorDirty bool) (f
 			return false, err
 		}
 		if touched {
+			staged = append(staged, table)
 			continue
 		}
 		keep[table] = state
 	}
+	sort.Strings(staged)
 	if err := commitMigrationStep(ctx, db, mainSource.cursorTable, mf.name, keep); err != nil {
 		return false, fmt.Errorf("committing stranded migration %s: %w", mf.name, err)
 	}
+	log.Printf("schema migration: committed %s, which an interrupted migration pass applied but did not commit (tables: %s)",
+		mf.name, strings.Join(staged, ", "))
 	return true, nil
 }
 

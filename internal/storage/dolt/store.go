@@ -2628,9 +2628,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				return nil, fmt.Errorf("failed to initialize schema: %w", err)
 			}
 			// A tolerated refusal still reports what the aborted pass
-			// applied (0 for every tolerated refusal today, since each
-			// refuses before migrating), so the rebuild below stays correct
-			// either way.
+			// applied: 0 for every refusal that fires before any migration,
+			// and — with the stranded-step recovery — 1 when the pass
+			// finished a stranded step and only then hit the dirty-table
+			// guard, so the rebuild below sees HEAD moved.
 		}
 		// initSchema runs migrations over a separate pool (openMigrationDB).
 		// The Ping above already pinned a connection in store.db to the

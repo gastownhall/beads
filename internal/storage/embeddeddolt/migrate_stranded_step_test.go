@@ -3,10 +3,12 @@
 package embeddeddolt_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 	"testing"
@@ -591,4 +593,81 @@ func assertRefusedUnchanged(t *testing.T, ctx context.Context, conn *sql.Conn, w
 	if got := dirtyTableNames(t, ctx, conn); !slices.Equal(got, dirtyBefore) {
 		t.Fatalf("dirty tables after refusal = %v, want %v as before", got, dirtyBefore)
 	}
+}
+
+// captureStdLog sends the standard logger to a buffer for the rest of the
+// test and returns the buffer.
+func captureStdLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return &buf
+}
+
+func finishLogLines(buf *bytes.Buffer) []string {
+	var out []string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "interrupted migration pass") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// TestEmbeddedMigrateFinishedStrandedStepIsCountedAndLogged requires the
+// reported applied count to include a finished stranded step, on the pass
+// that converges and on one the guard refuses after the finish, and exactly
+// one standard-logger line naming the step and the tables it staged.
+func TestEmbeddedMigrateFinishedStrandedStepIsCountedAndLogged(t *testing.T) {
+	requireEmbedded(t)
+	const stranded = 49
+	const stepFile = "0049_longtext_large_content_columns.up.sql"
+
+	assertOneFinishLine := func(t *testing.T, ctx context.Context, conn *sql.Conn, buf *bytes.Buffer) {
+		t.Helper()
+		lines := finishLogLines(buf)
+		if len(lines) != 1 {
+			t.Fatalf("finish log lines = %q, want exactly one", lines)
+		}
+		wantTables := strings.Join(stepCommitTables(t, ctx, conn, stranded), ", ")
+		if !strings.Contains(lines[0], stepFile) || !strings.Contains(lines[0], wantTables) {
+			t.Fatalf("finish log line = %q, want it to name %s and its tables %q", lines[0], stepFile, wantTables)
+		}
+	}
+
+	t.Run("converges", func(t *testing.T) {
+		ctx := t.Context()
+		dataDir := strandStepAt(t, ctx, stranded)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+		buf := captureStdLog(t)
+
+		applied := retryStranded(t, ctx, conn)
+		if want := schema.LatestVersion() - stranded + 1; applied != want {
+			t.Fatalf("applied = %d, want %d (steps %d..%d plus the finished %d)",
+				applied, want, stranded+1, schema.LatestVersion(), stranded)
+		}
+		assertOneFinishLine(t, ctx, conn, buf)
+	})
+
+	t.Run("later refusal", func(t *testing.T) {
+		ctx := t.Context()
+		dataDir := strandStepAt(t, ctx, stranded)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		defer closeConn()
+		mustExecStranded(t, ctx, conn, "INSERT INTO labels (issue_id, label) VALUES ('bd-s1', 'user-dirt')")
+		buf := captureStdLog(t)
+
+		applied, err := schema.MigrateUp(ctx, conn)
+		var dirty *schema.DirtyTablesError
+		if !errors.As(err, &dirty) {
+			t.Fatalf("MigrateUp err = %v, want *DirtyTablesError", err)
+		}
+		if applied != 1 {
+			t.Fatalf("applied = %d on the refused pass, want 1 (the finished %04d moved HEAD)", applied, stranded)
+		}
+		assertOneFinishLine(t, ctx, conn, buf)
+	})
 }
