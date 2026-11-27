@@ -74,7 +74,13 @@ func strandStepAt(t *testing.T, ctx context.Context, at int) string {
 // applied and uncommitted.
 func strandStepsThrough(t *testing.T, ctx context.Context, seed, through int) string {
 	t.Helper()
-	dataDir := seedStrandFixtureAt(t, ctx, seed)
+	return strandOnto(t, ctx, seedStrandFixtureAt(t, ctx, seed), seed, through)
+}
+
+// strandOnto leaves migrations seed+1..through applied and uncommitted on
+// dataDir, a store committed clean at version seed.
+func strandOnto(t *testing.T, ctx context.Context, dataDir string, seed, through int) string {
+	t.Helper()
 	conn, closeConn := openPinnedConn(t, ctx, dataDir)
 	defer closeConn()
 	if _, err := schema.MigrateUpTo(ctx, conn, through); err != nil {
@@ -208,10 +214,13 @@ func retryStranded(t *testing.T, ctx context.Context, conn *sql.Conn) int {
 // converge to the latest version with a clean working set. 46 and 54 are the
 // steps of the specimens measured on a loaded box (2026-09-21); 49 also
 // alters comments, which the aux-rekey exemption drops from the pass's dirty
-// set on a lineage below main 51, as this seed is.
+// set on a lineage below main 51, as this seed is. 44 rewrites the
+// ready_issues view, which Dolt keeps in dolt_schemas, a table no statement
+// names: a finish that left it behind failed the retry once 0045 rewrote the
+// table (pre-existing dirty tables changed during schema migration).
 func TestEmbeddedMigrateFinishesStrandedOwnStep(t *testing.T) {
 	requireEmbedded(t)
-	for _, stranded := range []int{46, 49, 54} {
+	for _, stranded := range []int{44, 46, 49, 54} {
 		t.Run(fmt.Sprintf("v%d", stranded), func(t *testing.T) {
 			ctx := t.Context()
 			wantStepTables := uninterruptedStepCommitTables(t, ctx, stranded)
@@ -242,9 +251,11 @@ func stepCursorRowChanges(t *testing.T, ctx context.Context, conn *sql.Conn, has
 // TestEmbeddedMigrateFinishesStrandedStepNoLaterMigrationTouches strands a
 // step whose tables no later migration touches. Unfixed, the guard lets that
 // pass run, and the next step's commit records the stranded cursor row while
-// the step's own change stays in the working set (73), or rides another
-// commit (62's dolt_ignore row). The finish must put the change in the
-// step's own commit and leave the next step's commit with only its own row.
+// the step's own change stays in the working set (73, and 45's blocked_issues
+// view in dolt_schemas, which left HEAD with a view that reads the column
+// 0043 dropped), or rides another commit (62's dolt_ignore row). The finish
+// must put the change in the step's own commit and leave the next step's
+// commit with only its own row.
 func TestEmbeddedMigrateFinishesStrandedStepNoLaterMigrationTouches(t *testing.T) {
 	requireEmbedded(t)
 	for _, tc := range []struct {
@@ -253,6 +264,14 @@ func TestEmbeddedMigrateFinishesStrandedStepNoLaterMigrationTouches(t *testing.T
 		// OF a revision.
 		inCommit func(t *testing.T, ctx context.Context, conn *sql.Conn, rev string) bool
 	}{
+		{45, func(t *testing.T, ctx context.Context, conn *sql.Conn, rev string) bool {
+			var fragment string
+			if err := conn.QueryRowContext(ctx,
+				"SELECT fragment FROM dolt_schemas AS OF '"+rev+"' WHERE type = 'view' AND name = 'blocked_issues'").Scan(&fragment); err != nil {
+				t.Fatalf("read the blocked_issues view AS OF %s: %v", rev, err)
+			}
+			return strings.Contains(fragment, "depends_on_issue_id")
+		}},
 		{62, func(t *testing.T, ctx context.Context, conn *sql.Conn, rev string) bool {
 			return scalarInt(t, ctx, conn,
 				"SELECT COUNT(*) FROM dolt_ignore AS OF '"+rev+"' WHERE pattern = 'events' AND ignored") == 1
@@ -298,6 +317,195 @@ func TestEmbeddedMigrateFinishesStrandedStepNoLaterMigrationTouches(t *testing.T
 				if table != "schema_migrations" && slices.Contains(wantStepTables, table) {
 					t.Fatalf("the %04d commit changed %s, a table of the stranded %04d", next, table, tc.stranded)
 				}
+			}
+		})
+	}
+}
+
+// seedAgentFixtureAt34 seeds a store at main version 34, the version below
+// 0035, which moves agent, rig, role and message issues to the wisp tables.
+// The agent bd-ag1 has a comment, a label, an event and a dependency, which
+// 0035's multi-table DELETEs remove, and a child counter and two snapshots,
+// which ON DELETE CASCADE removes with the agent. The tasks keep rows of each
+// kind for the later steps to rewrite. The canonical dolt_ignore patterns are
+// committed, as in seedStrandFixtureAt.
+func seedAgentFixtureAt34(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	dataDir := seedMainSchemaAt(t, ctx, 34)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	for _, pattern := range schema.DoltIgnoreSeedPatternsForTest() {
+		mustExecStranded(t, ctx, conn, "INSERT IGNORE INTO dolt_ignore VALUES (?, true)", pattern)
+	}
+	for i, row := range []struct{ id, issueType string }{{"bd-t1", "task"}, {"bd-t2", "task"}, {"bd-ag1", "agent"}} {
+		mustExecStranded(t, ctx, conn,
+			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+				"VALUES (?, 'fixture row', 'body', '', '', '', 'open', 2, ?)", row.id, row.issueType)
+		mustExecStranded(t, ctx, conn, "INSERT INTO comments (id, issue_id, author, text, created_at) "+
+			"VALUES (?, ?, 'fixture', 'a comment', '2025-01-01 00:00:00')", fmt.Sprintf("00000000-0000-0000-0000-00000000c00%d", i+1), row.id)
+		mustExecStranded(t, ctx, conn, "INSERT INTO labels (issue_id, label) VALUES (?, 'fixture')", row.id)
+		mustExecStranded(t, ctx, conn, "INSERT INTO events (id, issue_id, event_type, actor, created_at) "+
+			"VALUES (?, ?, 'created', 'fixture', '2025-01-01 00:00:00')", fmt.Sprintf("00000000-0000-0000-0000-00000000e00%d", i+1), row.id)
+	}
+	mustExecStranded(t, ctx, conn, "INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES ('bd-t2', 'bd-t1', 'blocks', 'fixture')")
+	mustExecStranded(t, ctx, conn, "INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES ('bd-ag1', 'bd-t1', 'blocks', 'fixture')")
+	mustExecStranded(t, ctx, conn, "INSERT INTO child_counters (parent_id, last_child) VALUES ('bd-ag1', 1)")
+	mustExecStranded(t, ctx, conn,
+		"INSERT INTO issue_snapshots (id, issue_id, snapshot_time, compaction_level, original_size, compressed_size, original_content) "+
+			"VALUES ('00000000-0000-0000-0000-0000000005a1', 'bd-ag1', '2025-01-01 00:00:00', 1, 10, 5, 'original')")
+	mustExecStranded(t, ctx, conn, "INSERT INTO compaction_snapshots (id, issue_id, compaction_level, snapshot_json) "+
+		"VALUES ('00000000-0000-0000-0000-0000000005b1', 'bd-ag1', 1, '{}')")
+	mustExecStranded(t, ctx, conn, "CALL DOLT_ADD('-A')")
+	mustExecStranded(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: seed agent fixture at 34')")
+	if dirty := dirtyTableNames(t, ctx, conn); len(dirty) != 0 {
+		t.Fatalf("agent fixture at 34 left a dirty working set: %v", dirty)
+	}
+	return dataDir
+}
+
+// agentChildTables are the tables whose rows reference an issue through a
+// foreign key at version 35, with the referencing column.
+var agentChildTables = []struct{ table, column string }{
+	{"child_counters", "parent_id"},
+	{"comments", "issue_id"},
+	{"compaction_snapshots", "issue_id"},
+	{"dependencies", "issue_id"},
+	{"events", "issue_id"},
+	{"issue_snapshots", "issue_id"},
+	{"labels", "issue_id"},
+}
+
+// TestEmbeddedMigrateFinishesStrandedRowDeletingStep strands 0035 on the
+// agent fixture. 0035 removes the agent's comment, label, event and
+// dependency through multi-table DELETEs, whose targets are aliases, and the
+// agent itself through DELETE FROM issues, which ON DELETE CASCADE carries to
+// its child counter and snapshots. A finish that staged only the tables named
+// right after DELETE FROM committed the agent's deletion without its
+// children's, a commit whose foreign keys are broken (Dolt does not check them
+// at commit), and the pass then refused the rest as user dirt. The finish
+// must commit the tables an uninterrupted pass commits, every reference
+// intact, and the pass must converge.
+func TestEmbeddedMigrateFinishesStrandedRowDeletingStep(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	const stranded = 35
+
+	twin, closeTwin := openPinnedConn(t, ctx, seedAgentFixtureAt34(t, ctx))
+	if _, err := schema.MigrateUp(ctx, twin); err != nil {
+		closeTwin()
+		t.Fatalf("uninterrupted MigrateUp from 34: %v", err)
+	}
+	wantStepTables := stepCommitTables(t, ctx, twin, stranded)
+	closeTwin()
+	for _, child := range agentChildTables {
+		if !slices.Contains(wantStepTables, child.table) {
+			t.Fatalf("an uninterrupted %04d committed %v, want %s among them (the fixture must give the step its rows to delete)",
+				stranded, wantStepTables, child.table)
+		}
+	}
+
+	dataDir := strandOnto(t, ctx, seedAgentFixtureAt34(t, ctx), stranded-1, stranded)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	retryStranded(t, ctx, conn)
+
+	step := stepCommitHash(t, ctx, conn, stranded)
+	if got := stepCommitTables(t, ctx, conn, stranded); !slices.Equal(got, wantStepTables) {
+		t.Fatalf("tables in the finished %04d commit = %v, want %v (the tables an uninterrupted pass commits with the step)",
+			stranded, got, wantStepTables)
+	}
+	for _, child := range agentChildTables {
+		orphans := scalarInt(t, ctx, conn, fmt.Sprintf(
+			"SELECT COUNT(*) FROM %s AS OF '%s' c LEFT JOIN issues AS OF '%s' i ON i.id = c.%s WHERE i.id IS NULL",
+			child.table, step, step, child.column))
+		if orphans != 0 {
+			t.Fatalf("%s AS OF the finished %04d commit holds %d rows whose issue it deleted", child.table, stranded, orphans)
+		}
+	}
+}
+
+// stepCommitTablesOn is stepCommitTables for a migration step fault hook,
+// which runs inside MigrateUp and so reports errors instead of failing.
+func stepCommitTablesOn(ctx context.Context, db schema.DBConn, version int) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		"SELECT table_name FROM dolt_diff WHERE message LIKE ? ORDER BY table_name", stepMessagePattern(version))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			return nil, err
+		}
+		tables = append(tables, table)
+	}
+	return tables, rows.Err()
+}
+
+// TestEmbeddedMigrateStrandedStepTablesCoverEveryStepCommit holds the
+// finish's account of a step's tables (the tables its statements write, and
+// those its row deletes reach through foreign keys) to every step commit an
+// uninterrupted MigrateUp makes. Each commit is checked right after it lands,
+// against the schema its step left, which is the schema a finish of that step
+// reads. A table a step commit holds that the account misses is one a finish
+// would leave behind: uncommitted for good, refused as user dirt, or riding a
+// later step's commit. The series runs from a fresh store (steps 2 to the
+// latest) and from the agent fixture at 34, whose 0035 deletes rows through
+// aliases and cascades.
+func TestEmbeddedMigrateStrandedStepTablesCoverEveryStepCommit(t *testing.T) {
+	requireEmbedded(t)
+	for _, tc := range []struct {
+		name string
+		seed int
+		data func(t *testing.T, ctx context.Context) string
+	}{
+		{"fresh", 1, func(t *testing.T, ctx context.Context) string { return seedMainSchemaAt(t, ctx, 1) }},
+		{"agent fixture", 34, seedAgentFixtureAt34},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			dataDir := tc.data(t, ctx)
+			var checked int
+			var missed []string
+			mainDone := false
+			restore := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+				// The hook also runs for the dolt-ignored series, which starts
+				// after the main series' latest step and commits per pass.
+				if mainDone {
+					return nil
+				}
+				mainDone = version == schema.LatestVersion()
+				tables, err := stepCommitTablesOn(ctx, db, version)
+				if err != nil {
+					return fmt.Errorf("reading the %04d commit's tables: %w", version, err)
+				}
+				tables = slices.DeleteFunc(tables, func(table string) bool { return table == "schema_migrations" })
+				covered, err := schema.StrandedStepTablesForTest(ctx, db, version, tables)
+				if err != nil {
+					return fmt.Errorf("accounting for the %04d commit's tables: %w", version, err)
+				}
+				for _, table := range tables {
+					if !slices.Contains(covered, table) {
+						missed = append(missed, fmt.Sprintf("%04d %s", version, table))
+					}
+				}
+				checked++
+				return nil
+			})
+			defer restore()
+
+			conn, closeConn := openPinnedConn(t, ctx, dataDir)
+			defer closeConn()
+			if _, err := schema.MigrateUp(ctx, conn); err != nil {
+				t.Fatalf("MigrateUp from %d: %v", tc.seed, err)
+			}
+			if want := schema.LatestVersion() - tc.seed; checked != want {
+				t.Fatalf("checked %d step commits, want %d (steps %d..%d)", checked, want, tc.seed+1, schema.LatestVersion())
+			}
+			if len(missed) != 0 {
+				t.Fatalf("step commits hold tables a finish of that step would leave behind: %v", missed)
 			}
 		})
 	}
