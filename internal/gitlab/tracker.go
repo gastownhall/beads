@@ -44,6 +44,24 @@ type Tracker struct {
 	// IID, to the project ID GitLab reported for an issue or link fetched at
 	// that path. LocalIdentityKey reads it.
 	projectAt map[string]int
+
+	// webBase is the address GitLab writes into the web_url values it
+	// returns (its external_url), learned in Init from the configured
+	// project's web_url. It differs from client.BaseURL when the API is
+	// reached at another address (an internal name, an IP, a proxy). It is
+	// never a request target — requests still go only to BaseURL — it only
+	// decides which refs belong to this tracker.
+	webBase string
+
+	// configuredWebURL is the gitlab.web_url / GITLAB_WEB_URL override that
+	// names the web address by hand, for an instance whose project read
+	// cannot give it. It fills webBase's role when nothing was learned.
+	configuredWebURL string
+
+	// initProject and initProjectErr hold the configured project as Init's
+	// one read reported it, so ProjectScope does not read it again.
+	initProject    *Project
+	initProjectErr error
 }
 
 func (t *Tracker) Name() string         { return "gitlab" }
@@ -99,6 +117,31 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 
 	// Load optional filter config
 	t.filter = t.loadFilterConfig(ctx)
+
+	// Learn the address GitLab writes into the web_url values it returns,
+	// from the configured project. Recognition of stored refs needs it when
+	// the API is reached at another address: GitLab spells every web_url with
+	// its external_url, and a push that does not recognize the web_url it
+	// just created would create a second copy of every linked issue. Nothing
+	// is persisted — every run learns it before its first push decision, in
+	// every clone — and it is never a request target. A group-mode config
+	// without a project (no gitlab.default_project_id) cannot create issues,
+	// so it sends no request.
+	if t.client.ProjectID != "" {
+		t.initProject, t.initProjectErr = t.client.GetProject(ctx)
+		if t.initProject != nil {
+			t.webBase = webBaseFromProject(t.initProject)
+		}
+	}
+	// gitlab.web_url names the web address by hand, for an instance whose
+	// project read cannot give it.
+	if webURL, _ := t.getConfig(ctx, "gitlab.web_url", "GITLAB_WEB_URL"); webURL != "" {
+		base, err := parseConfiguredWebURL(webURL)
+		if err != nil {
+			return fmt.Errorf("gitlab.web_url: %w", err)
+		}
+		t.configuredWebURL = base
+	}
 
 	return nil
 }
@@ -533,15 +576,17 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 	if glShorthandPattern.MatchString(ref) {
 		return true
 	}
-	if !strings.Contains(ref, "gitlab") && !strings.Contains(ref, "milestones") && !t.onConfiguredHost(ref) {
+	if !strings.Contains(ref, "gitlab") && !strings.Contains(ref, "milestones") && !t.onInstance(ref) {
 		return false
 	}
 	return issueIIDPattern.MatchString(ref) || milestoneIDPattern.MatchString(ref)
 }
 
-// onConfiguredHost reports whether ref is a URL on the same host (and base
-// path, for GitLab served from a sub-path) as the configured gitlab.url.
-// Self-hosted instances need not have "gitlab" in their hostname.
+// onInstance reports whether ref is a URL on this GitLab instance: under the
+// configured gitlab.url, or under the web address GitLab writes into the
+// web_url values it returns, when Init learned one from the configured
+// project or gitlab.web_url names one. Self-hosted instances need not have
+// "gitlab" in their hostname.
 //
 // Matching is host-scoped, not project-scoped: with GitLab at the host root
 // this claims every issue/work-item URL on the host, other projects' included.
@@ -549,28 +594,71 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 // keying on the project would silently stop recognizing self-hosted refs,
 // since gitlab.project_path is optional and Init discards its load error.
 //
-// Hosts are compared literally, so gitlab.url must name the host the way
-// GitLab spells it in the web_url values it returns: an explicit default port
+// Hosts are compared literally, so a base must name the host the way GitLab
+// spells it in the web_url values it returns: an explicit default port
 // ("https://host:443") matches none of them, and the ref is left to the legacy
 // substring arms. Scheme is not compared, so an http:// ref on an https://
-// instance is still claimed — leniency only, since the IID patterns below
+// instance is still claimed — leniency only, since the IID patterns above
 // still decide what is ultimately recognized.
 // Recognition stays host-scoped; pull fallback identity is project-qualified
 // by MatchKey.
-func (t *Tracker) onConfiguredHost(ref string) bool {
+func (t *Tracker) onInstance(ref string) bool {
 	if t.client == nil || t.client.BaseURL == "" {
 		return false
 	}
-	base, err := url.Parse(t.client.BaseURL)
-	if err != nil || base.Host == "" {
+	if t.onBase(ref, t.client.BaseURL) {
+		return true
+	}
+	return t.onBase(ref, t.webBase) || t.onBase(ref, t.configuredWebURL)
+}
+
+// onBase reports whether ref is a URL on the same host (and base path, for
+// GitLab served from a sub-path) as base.
+func (t *Tracker) onBase(ref, base string) bool {
+	if base == "" {
+		return false
+	}
+	b, err := url.Parse(base)
+	if err != nil || b.Host == "" {
 		return false
 	}
 	u, err := url.Parse(ref)
-	if err != nil || !strings.EqualFold(u.Host, base.Host) {
+	if err != nil || !strings.EqualFold(u.Host, b.Host) {
 		return false
 	}
-	basePath := strings.TrimRight(base.Path, "/")
+	basePath := strings.TrimRight(b.Path, "/")
 	return basePath == "" || u.Path == basePath || strings.HasPrefix(u.Path, basePath+"/")
+}
+
+// webBaseFromProject derives the web root GitLab spells into the configured
+// project's web_url: the URL minus the project's path with namespace. It
+// returns "" unless what remains names an http(s) URL with a host — bd does
+// not guess an address GitLab did not report.
+func webBaseFromProject(p *Project) string {
+	if p == nil {
+		return ""
+	}
+	suffix := strings.Trim(strings.TrimSpace(p.PathWithNamespace), "/")
+	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(p.WebURL), "/"))
+	if err != nil || suffix == "" || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	if u.Path != "/"+suffix {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// parseConfiguredWebURL validates a gitlab.web_url value: an http(s) URL with
+// a host, without a trailing slash. A value no comparison could match would
+// silently bring the duplicate issues back, so it is refused instead of
+// ignored.
+func parseConfiguredWebURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(raw), "/"))
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", fmt.Errorf("%q must be an http(s) URL with a host (the address GitLab writes into its links, e.g. https://git.example.org)", raw)
+	}
+	return u.Scheme + "://" + u.Host + u.Path, nil
 }
 
 // ExtractIdentifier extracts the issue IID from a GitLab URL or shorthand ref.
@@ -659,7 +747,7 @@ func (t *Tracker) LocalIdentityKey(issue *types.Issue) string {
 		return ""
 	}
 	ref := strings.TrimSpace(*issue.ExternalRef)
-	if !glShorthandPattern.MatchString(ref) && !t.onConfiguredHost(ref) {
+	if !glShorthandPattern.MatchString(ref) && !t.onInstance(ref) {
 		return ""
 	}
 	if t.ExtractIdentifier(ref) != m[2] || t.refInOtherProject(ref, m[1]) {
