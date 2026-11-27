@@ -268,6 +268,7 @@ func readyFilterEntries() []FieldEntry {
 		paramTo("ExcludeTypes", "exclude_type", "ExcludeTypes"),
 		paramTo("MetadataFields", "metadata_field", "MetadataFields"),
 		param("HasMetadataKey", "has_metadata_key"),
+		refused("ExcludeParentsWithOpenChildren", "E-ReadyRequest.ExcludeParentsWithOpenChildren"),
 		// [Removed: an enterprise-only `refused("ExcludeIDs", ...)` row stood
 		// here, naming a field issueops.ReadyRequest does not have in OSS
 		// (confirmed via reflection: TestEncoderTableClassifiesEveryRequestField
@@ -619,6 +620,7 @@ func readyBridgeTable() Table {
 			paramTo("HasMetadataKey", "has_metadata_key", "HasMetadataKey"),
 			paramTo("Lite", "brief", "Brief"),
 			refused("ExcludeIDs", "E-WorkFilter.ExcludeIDs"),
+			refused("ExcludeParentsWithOpenChildren", "E-WorkFilter.ExcludeParentsWithOpenChildren"),
 			refused("Offset", "E-WorkFilter.Offset"),
 			clientSide("MaxRows",
 				"enforced during page accumulation exactly as ListRequest.MaxRows is, so `bd ready --max-rows` exits 2 over http where it exits 2 locally (D12)"),

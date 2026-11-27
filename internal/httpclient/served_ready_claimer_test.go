@@ -11,8 +11,9 @@ import (
 	"github.com/steveyegge/beads/backend/conformance"
 )
 
-// The ReadyClaimer contract against the served surface, and the tier is WHOLE:
-// eleven entrypoints, nothing parked.
+// The ReadyClaimer contract against the served surface: thirteen entrypoints,
+// one parked, because its subject is a ready parameter the wire does not
+// publish (GH#6817's exclude-parents case, at the end of the file).
 //
 // THIS FILE USED TO OPEN BY CALLING THE ROLE COMPOSED, and the sentence is worth
 // keeping as a record rather than deleting: "the wire publishes no claimNext, so
@@ -152,4 +153,16 @@ func TestServedReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t
 // and the client's only job is not to recompute them.
 func TestServedReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t *testing.T) {
 	conformance.RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t, t.Context(), newServedReadyClaimerFixture(t, "hrcc"))
+}
+
+// TestServedReadyClaimerExcludeParentsSkipsContainersItWouldOtherwiseClaim is
+// the one parked case (GH#6817): claimNext publishes no exclude-parents
+// parameter, so this client refuses the claim before it dials rather than claim
+// a container the caller asked to skip. It retires when the wire grows the
+// parameter.
+func TestServedReadyClaimerExcludeParentsSkipsContainersItWouldOtherwiseClaim(t *testing.T) {
+	skipKnownDivergence(t, "E-ReadyRequest.ExcludeParentsWithOpenChildren", readParkBead,
+		"the case's subject is ExcludeParentsWithOpenChildren, which claimNext publishes no parameter for; "+
+			"the refusal this wire answers with instead is pinned by TestReadyExcludeParentsRefusesBeforeDialing")
+	conformance.RunReadyClaimerExcludeParentsSkipsContainersItWouldOtherwiseClaim(t, t.Context(), newServedReadyClaimerFixture(t, "hrcd"))
 }

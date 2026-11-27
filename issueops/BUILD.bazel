@@ -64,6 +64,7 @@ go_test(
         "export_test.go",
         "gates_test.go",
         "heartbeater_test.go",
+        "hierarchy_conflict_error_test.go",
         "issueops_external_test.go",
         "molecule_internal_test.go",
         "molecule_test.go",

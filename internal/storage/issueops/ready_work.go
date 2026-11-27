@@ -70,6 +70,9 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
 	}
 	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
+	if err := setOpenChildParentIDsInTx(ctx, tx, filter.ExcludeParentsWithOpenChildren, &inputs, tables); err != nil {
+		return nil, err
+	}
 	return buildReadyWorkPredicatesFrom(filter, tables, inputs)
 }
 
@@ -192,6 +195,23 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 	if err != nil {
 		return nil, err
 	}
+	// GH#6817: the wisp page query bypasses BuildReadyWorkWhere, so the wisp
+	// family's open-child parents are resolved once here and dropped in
+	// filterReadyWispsInTx, before a row counts toward the page.
+	var openChildParents map[string]bool
+	if filter.ExcludeParentsWithOpenChildren {
+		ids, err := openChildParentIDsInTx(ctx, tx, WispsFilterTables)
+		if err != nil {
+			if missingOptionalWispTable(err) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("search wisps (ready work): %w", err)
+		}
+		openChildParents = make(map[string]bool, len(ids))
+		for _, id := range ids {
+			openChildParents[id] = true
+		}
+	}
 
 	wispFilter := readyWorkWispIssueFilter(filter)
 	if filter.Limit <= 0 {
@@ -203,7 +223,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 			}
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
-		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs, stale)
+		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs, stale, openChildParents)
 	}
 
 	pageSize := readyWorkPageSize(filter.Limit)
@@ -225,7 +245,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 		if err != nil {
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
 		}
-		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs, stale)
+		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs, stale, openChildParents)
 		if err != nil {
 			return nil, err
 		}
@@ -386,8 +406,10 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 }
 
 // filterReadyWispsInTx applies the ready predicates the wisp page query does
-// not. stale is the wisp family's stale-flagged rows (excludeBlockedWispsInTx).
-func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs []string, stale map[string]bool) ([]*types.Issue, error) {
+// not. stale is the wisp family's stale-flagged rows (excludeBlockedWispsInTx);
+// openChildParents is the wisp family's open-child parent set, nil unless
+// filter.ExcludeParentsWithOpenChildren.
+func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs []string, stale map[string]bool, openChildParents map[string]bool) ([]*types.Issue, error) {
 	if len(wisps) == 0 {
 		return wisps, nil
 	}
@@ -443,7 +465,7 @@ func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter,
 
 	ready := wisps[:0]
 	for _, wisp := range wisps {
-		if wisp.Pinned {
+		if wisp.Pinned || openChildParents[wisp.ID] {
 			continue
 		}
 		if _, skip := excluded[wisp.ID]; skip {

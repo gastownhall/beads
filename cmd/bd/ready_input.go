@@ -89,6 +89,7 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.ParentID, _ = cmd.Flags().GetString("parent")
 	in.IncludeDeferred, _ = cmd.Flags().GetBool("include-deferred")
 	in.IncludeEphemeral, _ = cmd.Flags().GetBool("include-ephemeral")
+	in.ExcludeParentsWithOpenChildren, _ = cmd.Flags().GetBool("exclude-parents")
 	in.ExcludeTypes, _ = cmd.Flags().GetStringSlice("exclude-type")
 
 	if molTypeStr, _ := cmd.Flags().GetString("mol-type"); molTypeStr != "" {
@@ -112,6 +113,9 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 		return in, HandleErrorRespectJSON("--claim cannot be combined with --explain")
 	}
 	if err := briefModeConflict(in.Brief, in.claim, in.gated, in.explain, in.molID, in.jsonOut); err != nil {
+		return in, err
+	}
+	if err := excludeParentsModeConflict(in.ExcludeParentsWithOpenChildren, in.gated, in.explain, in.molID); err != nil {
 		return in, err
 	}
 	if in.Offset > 0 && in.claim {
@@ -304,6 +308,37 @@ func briefModeConflict(brief, claim, gated, explain bool, molID string, jsonOut 
 		return HandleErrorRespectJSON("--brief requires --json; the text renderings print none of the fields it omits")
 	}
 	return nil
+}
+
+// excludeParentsModeConflict reports the usage error for --exclude-parents
+// combined with a ready mode that answers with a shape of its own (GH#6817):
+// --gated lists molecules, --mol lists one molecule's steps and --explain
+// reasons about the whole graph, and none of them reads the ready filter the
+// flag narrows. Refusing keeps the flag from being taken and silently ignored.
+// It has the same two callers as briefModeConflict, for the same reason.
+func excludeParentsModeConflict(excludeParents, gated, explain bool, molID string) error {
+	if !excludeParents {
+		return nil
+	}
+	switch {
+	case gated:
+		return HandleErrorRespectJSON("--gated cannot be combined with --exclude-parents")
+	case molID != "":
+		return HandleErrorRespectJSON("--mol cannot be combined with --exclude-parents")
+	case explain:
+		return HandleErrorRespectJSON("--explain cannot be combined with --exclude-parents")
+	}
+	return nil
+}
+
+// excludeParentsModeConflictFromFlags is readyCmd's entry to the check above,
+// reading the mode flags off the command before gatherReadyInput has run.
+func excludeParentsModeConflictFromFlags(cmd *cobra.Command) error {
+	excludeParents, _ := cmd.Flags().GetBool("exclude-parents")
+	gated, _ := cmd.Flags().GetBool("gated")
+	explain, _ := cmd.Flags().GetBool("explain")
+	molID, _ := cmd.Flags().GetString("mol")
+	return excludeParentsModeConflict(excludeParents, gated, explain, molID)
 }
 
 // briefModeConflictFromFlags is readyCmd's entry to the check above, reading the

@@ -194,6 +194,12 @@ type ReadyWorkWhereInputs struct {
 	// like the sets above because an id can name a row in both tables and
 	// only one of them may be stale.
 	StaleBlockedIDs map[string][]string
+	// OpenChildParentIDs holds each family's rows that have at least one
+	// recorded non-closed child (OpenChildParentIDsSQL over the family's
+	// target column, both child families), keyed by the family's main table
+	// like StaleBlockedIDs. Consulted only when
+	// filter.ExcludeParentsWithOpenChildren; a caller computes it only then.
+	OpenChildParentIDs map[string][]string
 }
 
 // readyStatusClause renders the ready-work status predicate and its args.
@@ -275,6 +281,11 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 		deferredClauses, deferredArgs := idBatchClauses("id NOT IN (%s)", in.DeferredChildIDs)
 		whereClauses = append(whereClauses, deferredClauses...)
 		args = append(args, deferredArgs...)
+	}
+	if filter.ExcludeParentsWithOpenChildren {
+		parentClauses, parentArgs := idBatchClauses("id NOT IN (%s)", in.OpenChildParentIDs[tables.Main])
+		whereClauses = append(whereClauses, parentClauses...)
+		args = append(args, parentArgs...)
 	}
 	excludedClauses, excludedArgs := idBatchClauses("id NOT IN (%s)", filter.ExcludeIDs)
 	whereClauses = append(whereClauses, excludedClauses...)

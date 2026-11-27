@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // =============================================================================
@@ -3602,4 +3604,289 @@ func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
 			t.Errorf("unmet sqlmock expectations: %v", err)
 		}
 	})
+}
+
+// TestGetReadyWork_ParentWithOnlyUnreadyChildrenIsNotReady reproduces GH#6817:
+// a parent whose open children are all blocked is offered by ready even though
+// none of its children are, so the container is dispatched as actionable work.
+// The fix is opt-in (WorkFilter.ExcludeParentsWithOpenChildren, `bd ready
+// --exclude-parents`): the default ready set keeps the parent, and the flagged
+// one drops it while its children are open, keeps a childless leaf and a parent
+// whose children are all closed, and offers the parent again once its last open
+// child closes. Both parents are features, not epics, so only the flag can tell
+// them apart, and the test holds whether or not the default ready set also
+// hides epics by type (open PR #5930).
+func TestGetReadyWork_ParentWithOnlyUnreadyChildrenIsNotReady(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, iss := range []*types.Issue{
+		{ID: "rc-parent", Title: "Container", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeFeature},
+		{ID: "rc-child1", Title: "Child 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "rc-child2", Title: "Child 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "rc-prereq", Title: "Shared prerequisite", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "rc-leaf", Title: "Childless leaf", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "rc-done-parent", Title: "Parent with closed children", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeFeature},
+		{ID: "rc-done-child", Title: "Closed child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+	} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", iss.ID, err)
+		}
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: "rc-child1", DependsOnID: "rc-parent", Type: types.DepParentChild},
+		{IssueID: "rc-child2", DependsOnID: "rc-parent", Type: types.DepParentChild},
+		{IssueID: "rc-child1", DependsOnID: "rc-prereq", Type: types.DepBlocks},
+		{IssueID: "rc-child2", DependsOnID: "rc-prereq", Type: types.DepBlocks},
+		{IssueID: "rc-done-child", DependsOnID: "rc-done-parent", Type: types.DepParentChild},
+	} {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("add dep %s->%s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+	if err := store.CloseIssue(ctx, "rc-done-child", "done", "tester", ""); err != nil {
+		t.Fatalf("close rc-done-child: %v", err)
+	}
+
+	readySet := func(t *testing.T, filter types.WorkFilter) map[string]bool {
+		t.Helper()
+		work, err := store.GetReadyWork(ctx, filter)
+		if err != nil {
+			t.Fatalf("GetReadyWork(%+v): %v", filter, err)
+		}
+		ready := map[string]bool{}
+		for _, iss := range work {
+			ready[iss.ID] = true
+		}
+		return ready
+	}
+
+	// The default contract is unchanged: the parent is still offered.
+	ready := readySet(t, types.WorkFilter{})
+	if ready["rc-child1"] || ready["rc-child2"] {
+		t.Fatalf("precondition: blocked children must not be ready; ready=%v", ready)
+	}
+	if !ready["rc-prereq"] || !ready["rc-parent"] {
+		t.Fatalf("default ready must keep the prerequisite and the parent; ready=%v", ready)
+	}
+
+	excluding := types.WorkFilter{ExcludeParentsWithOpenChildren: true}
+	ready = readySet(t, excluding)
+	if ready["rc-parent"] {
+		t.Errorf("parent rc-parent is ready although it has open children and none of them is ready; ready=%v", ready)
+	}
+	for _, id := range []string{"rc-prereq", "rc-leaf", "rc-done-parent"} {
+		if !ready[id] {
+			t.Errorf("%s must stay ready under the exclusion; ready=%v", id, ready)
+		}
+	}
+
+	for _, id := range []string{"rc-child1", "rc-child2"} {
+		if err := store.CloseIssue(ctx, id, "done", "tester", ""); err != nil {
+			t.Fatalf("close %s: %v", id, err)
+		}
+	}
+	if ready = readySet(t, excluding); !ready["rc-parent"] {
+		t.Errorf("rc-parent must be ready again once its last open child closed; ready=%v", ready)
+	}
+}
+
+// TestGetReadyWork_ExcludeParentsPagesCountsAndTotals pins the classic store's
+// limit-bounded page, total and count under ExcludeParentsWithOpenChildren (GH#6817): with
+// two containers sorted ahead of three ready leaves, every page is cut from
+// the filtered set and both totals size that set, so neither a page short of
+// its limit nor a total that still counts the containers can pass. The
+// containers' children are one durable and one wisp, so both families feed
+// the probe the total and the count share.
+func TestGetReadyWork_ExcludeParentsPagesCountsAndTotals(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, iss := range []*types.Issue{
+		{ID: "pg-container-a", Title: "Container A", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeFeature},
+		{ID: "pg-container-b", Title: "Container B", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeFeature},
+		{ID: "pg-child-a", Title: "Child A", Status: types.StatusPinned, Priority: 0, IssueType: types.TypeTask},
+		{ID: "pg-child-b", Title: "Child B", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeTask, Ephemeral: true},
+		{ID: "pg-leaf-1", Title: "Leaf 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "pg-leaf-2", Title: "Leaf 2", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "pg-leaf-3", Title: "Leaf 3", Status: types.StatusOpen, Priority: 3, IssueType: types.TypeTask},
+	} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", iss.ID, err)
+		}
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: "pg-child-a", DependsOnID: "pg-container-a", Type: types.DepParentChild},
+		{IssueID: "pg-child-b", DependsOnID: "pg-container-b", Type: types.DepParentChild},
+	} {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("add dep %s->%s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+
+	ids := func(rows []*types.IssueWithCounts) []string {
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, row.ID)
+		}
+		return out
+	}
+	base := types.WorkFilter{SortPolicy: types.SortPolicyPriority, ExcludeParentsWithOpenChildren: true}
+
+	// Baseline: without the flag the containers are the front of the order and
+	// both are counted.
+	unflagged := base
+	unflagged.ExcludeParentsWithOpenChildren = false
+	unflagged.Limit = 2
+	page, total, err := store.GetReadyWorkWithCountsAndTotal(ctx, unflagged)
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCountsAndTotal (flag off): %v", err)
+	}
+	if got := ids(page); !slices.Equal(got, []string{"pg-container-a", "pg-container-b"}) || total != 5 {
+		t.Fatalf("flag off: page %v total %d, want the two containers and 5", got, total)
+	}
+
+	for _, test := range []struct {
+		limit, offset int
+		want          []string
+	}{
+		{limit: 2, offset: 0, want: []string{"pg-leaf-1", "pg-leaf-2"}},
+		{limit: 1, offset: 0, want: []string{"pg-leaf-1"}},
+		{limit: 0, offset: 0, want: []string{"pg-leaf-1", "pg-leaf-2", "pg-leaf-3"}},
+	} {
+		filter := base
+		filter.Limit, filter.Offset = test.limit, test.offset
+		page, total, err := store.GetReadyWorkWithCountsAndTotal(ctx, filter)
+		if err != nil {
+			t.Fatalf("GetReadyWorkWithCountsAndTotal(limit %d, offset %d): %v", test.limit, test.offset, err)
+		}
+		if got := ids(page); !slices.Equal(got, test.want) {
+			t.Errorf("page (limit %d, offset %d) = %v, want %v", test.limit, test.offset, got, test.want)
+		}
+		if total != 3 {
+			t.Errorf("total (limit %d, offset %d) = %d, want 3 — the filtered set", test.limit, test.offset, total)
+		}
+		withCounts, err := store.GetReadyWorkWithCounts(ctx, filter)
+		if err != nil {
+			t.Fatalf("GetReadyWorkWithCounts(limit %d, offset %d): %v", test.limit, test.offset, err)
+		}
+		if got := ids(withCounts); !slices.Equal(got, test.want) {
+			t.Errorf("GetReadyWorkWithCounts (limit %d, offset %d) = %v, want %v", test.limit, test.offset, got, test.want)
+		}
+	}
+
+	count, err := store.CountReadyWork(ctx, base)
+	if err != nil {
+		t.Fatalf("CountReadyWork: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("CountReadyWork = %d, want 3 — the filtered set", count)
+	}
+}
+
+// TestGetReadyWork_ExcludeParentsDropsWispContainersOnTheClassicPath pins the
+// wisp half of the classic listing and claim under ExcludeParentsWithOpenChildren
+// (GH#6817). Plain-text `bd ready` and `bd ready --claim` read wisps through
+// their own page query, which bypasses BuildReadyWorkWhere, so the wisp
+// family's open-child parents are resolved in getReadyWispsInTx and dropped in
+// filterReadyWispsInTx; the reader conformance cases go through the probe and
+// never reach that code. Two wisp containers, one with a wisp child and one
+// with a durable child, sort ahead of two ready wisp leaves. A Limit of 1 sits
+// inside the first wisp page, the unbounded listing takes the other branch, and
+// a claim scoped to the containers alone must find nothing, where the same
+// claim without the flag takes one of them.
+func TestGetReadyWork_ExcludeParentsDropsWispContainersOnTheClassicPath(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, iss := range []*types.Issue{
+		{ID: "wc-container-w", Title: "Wisp container, wisp child", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeTask, Ephemeral: true},
+		{ID: "wc-container-d", Title: "Wisp container, durable child", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeTask, Ephemeral: true},
+		{ID: "wc-leaf-1", Title: "Wisp leaf 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, Ephemeral: true},
+		{ID: "wc-leaf-2", Title: "Wisp leaf 2", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true},
+		{ID: "wc-child-w", Title: "Wisp child", Status: types.StatusOpen, Priority: 4, IssueType: types.TypeTask, Ephemeral: true},
+		{ID: "wc-child-d", Title: "Durable child", Status: types.StatusOpen, Priority: 4, IssueType: types.TypeTask},
+	} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", iss.ID, err)
+		}
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: "wc-child-w", DependsOnID: "wc-container-w", Type: types.DepParentChild},
+		{IssueID: "wc-child-d", DependsOnID: "wc-container-d", Type: types.DepParentChild},
+	} {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("add dep %s->%s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+	const onlyContainers = "wc-only-containers"
+	for _, id := range []string{"wc-container-w", "wc-container-d"} {
+		if err := store.AddLabel(ctx, id, onlyContainers, "tester"); err != nil {
+			t.Fatalf("label %s: %v", id, err)
+		}
+	}
+
+	containers := map[string]bool{"wc-container-w": true, "wc-container-d": true}
+	ready := func(t *testing.T, filter types.WorkFilter) []string {
+		t.Helper()
+		work, err := store.GetReadyWork(ctx, filter)
+		if err != nil {
+			t.Fatalf("GetReadyWork(%+v): %v", filter, err)
+		}
+		out := make([]string, 0, len(work))
+		for _, iss := range work {
+			out = append(out, iss.ID)
+		}
+		return out
+	}
+	filter := types.WorkFilter{IncludeEphemeral: true, SortPolicy: types.SortPolicyPriority, Limit: 1}
+
+	// Baseline: without the flag a container is the front of the order.
+	if got := ready(t, filter); len(got) != 1 || !containers[got[0]] {
+		t.Fatalf("flag off, limit 1: page %v, want one of the wisp containers", got)
+	}
+
+	filter.ExcludeParentsWithOpenChildren = true
+	if got := ready(t, filter); !slices.Equal(got, []string{"wc-leaf-1"}) {
+		t.Errorf("--exclude-parents, limit 1: page %v, want [wc-leaf-1]", got)
+	}
+	filter.Limit = 0
+	got := ready(t, filter)
+	slices.Sort(got)
+	if want := []string{"wc-child-d", "wc-child-w", "wc-leaf-1", "wc-leaf-2"}; !slices.Equal(got, want) {
+		t.Errorf("--exclude-parents, unbounded: %v, want %v", got, want)
+	}
+
+	claimer, err := store.ReadyClaimer()
+	if err != nil {
+		t.Fatalf("ReadyClaimer(): %v", err)
+	}
+	claim := func(t *testing.T, excludeParents bool) *types.IssueWithCounts {
+		t.Helper()
+		result, err := claimer.ClaimNext(ctx, publicops.ClaimNextRequest{
+			Actor: "claimer",
+			Filter: publicops.ReadyRequest{
+				Labels: []string{onlyContainers}, IncludeEphemeral: true, ExcludeParentsWithOpenChildren: excludeParents,
+			},
+		})
+		if err != nil {
+			t.Fatalf("ClaimNext(exclude parents %v): %v", excludeParents, err)
+		}
+		return result.Claimed
+	}
+	if claimed := claim(t, true); claimed != nil {
+		t.Fatalf("--exclude-parents claim over the wisp containers alone claimed %s, want nil", claimed.ID)
+	}
+	if claimed := claim(t, false); claimed == nil || !containers[claimed.ID] {
+		t.Fatalf("claim over the wisp containers without the flag = %v, want one of them", claimed)
+	}
 }
