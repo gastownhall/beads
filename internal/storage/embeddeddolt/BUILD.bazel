@@ -220,6 +220,7 @@ go_test(
         "migrate_journal_shape_repair_test.go",
         "migrate_repair_atomicity_test.go",
         "migrate_selfheal_test.go",
+        "migrate_stranded_step_test.go",
         "migrate_temp_intermediates_test.go",
         "migrate_transaction_commit_4470_test.go",
         "migrate_updated_at_preservation_test.go",

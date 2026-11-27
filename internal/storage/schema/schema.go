@@ -1090,6 +1090,38 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return 0, fmt.Errorf("reading pre-migration status: %w", err)
 	}
 	delete(dirtyBefore, "dolt_ignore")
+	// A pass killed between a step's cursor row and its commitMigrationStep
+	// left that one step in the working set, and the guard below would refuse
+	// its debris on every later open. When the working set is provably nothing
+	// but that step (findStrandedStep names the conditions), finish it with
+	// the commit it missed and go on; any other dirty set reaches the guard
+	// unchanged. Counted in the total because it moves HEAD, for the reason
+	// the cursor heal above is, so every return below reports it.
+	//
+	// It runs ahead of the aux-rekey exemption below on purpose. On a lineage
+	// that still owes the aux rekey (below main 51 or 61) that exemption drops
+	// events, comments and the snapshot tables from dirtyBefore, but a step
+	// that alters one of them (0049 alters comments) dirties it as its own
+	// work, and an uninterrupted pass commits it with the step. Hidden from
+	// findStrandedStep, it would ride the pass's final commit instead, and a
+	// second kill after a later step's commit would leave HEAD claiming the
+	// step without that change. Seen here, an aux table is still recognized
+	// only when the step's SQL touches it.
+	_, cursorDirty := dirtyBeforeAll[mainSource.cursorTable]
+	stranded, err := mainSource.findStrandedStep(ctx, db, cursorDirty, dirtyBefore)
+	if err != nil {
+		return 0, fmt.Errorf("checking for a stranded migration step: %w", err)
+	}
+	finished := 0
+	if stranded != nil {
+		if err := mainSource.finishStrandedStep(ctx, db, stranded); err != nil {
+			return 0, err
+		}
+		for _, table := range stranded.tables {
+			delete(dirtyBefore, table)
+		}
+		finished = 1
+	}
 	// Captured before the main migrations run: the aux re-key uses it to
 	// distinguish the lineage's first rekey-aware migration (run the pass) from
 	// a fresh clone of an already-converged lineage (record the marker only,
@@ -1097,7 +1129,7 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	// derived from it (auxRekeyExemptTables).
 	mainVersionBefore, err := mainSource.currentVersion(ctx, db)
 	if err != nil {
-		return 0, fmt.Errorf("reading pre-migration schema version: %w", err)
+		return finished, fmt.Errorf("reading pre-migration schema version: %w", err)
 	}
 	// A previous pass that crashed mid-aux-rekey left its partial UPDATEs
 	// dirty in the working set with the in-progress sentinel still recorded
@@ -1122,14 +1154,14 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	// edits out of dirtyBefore and into the migration commit (#4380).
 	auxRekeyExempt, err := auxRekeyExemptTables(ctx, db, mainVersionBefore)
 	if err != nil {
-		return 0, err
+		return finished, err
 	}
 	for name := range auxRekeyExempt {
 		delete(dirtyBefore, name)
 	}
 	touchedDirtyTables, err := mainSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
 	if err != nil {
-		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
+		return finished, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
 	}
 	// The ignored series is checked here too, before any numbered migration
 	// or rekey runs, so its refusal applies none of them (the seed and
@@ -1151,19 +1183,20 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	// recovery reads the ignored series again. So the read error returns only
 	// when the main series has nothing to refuse.
 	if err != nil && len(touchedDirtyTables) == 0 {
-		return 0, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
+		return finished, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
 	}
 	if len(touchedDirtyTables) > 0 || len(touchedIgnoredDirtyTables) > 0 {
 		tables := append(touchedDirtyTables, touchedIgnoredDirtyTables...)
 		sort.Strings(tables)
-		return 0, &DirtyTablesError{Tables: slices.Compact(tables)}
+		return finished, &DirtyTablesError{Tables: slices.Compact(tables)}
 	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
-		return 0, fmt.Errorf("reading pre-migration dirty table diffs: %w", err)
+		return finished, fmt.Errorf("reading pre-migration dirty table diffs: %w", err)
 	}
 
 	applied, mainColumnAdded, err := mainSource.migrate(ctx, db, 0)
+	applied += finished
 	if err != nil {
 		return applied, err
 	}
@@ -2328,11 +2361,24 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 // as it applies (see commitMigrationStep): its ALTERs and cursor row land in a
 // Dolt commit before the next migration runs, so a crash/kill/timeout anywhere
 // in MigrateUp's later backfill/rekey/ignored tail cannot strand this pass's
-// applied migrations uncommitted for a retry to trip over (#4566). A residual
-// window remains within a single step: a kill between a migration's SQL and
-// its commitMigrationStep still leaves that one step's debris in the working
-// set for the dirty-table guard to refuse. The window shrinks from the whole
-// pass tail to one step; it does not close entirely.
+// applied migrations uncommitted for a retry to trip over (#4566). A kill
+// inside a single step still leaves that step's work in the working set. When
+// the kill came after the step's cursor row, the next MigrateUp that runs a
+// pass recognizes the working set as that step alone (findStrandedStep) and
+// finishes it with the commit it missed (finishStrandedStep) before the
+// dirty-table guard runs. Recognition is by table, so an uncommitted write
+// that landed in one of the step's tables after the kill is committed with
+// the step. No pass runs for a stranded step that is the series' latest when
+// nothing else is pending: its cursor row already reads latest, so
+// migrationWorkNeeded (and alreadyConverged) report no work, and the step
+// stays uncommitted until a later commit carries it. A kill before the cursor
+// row leaves a body of unknown completeness, and a stranded step beside a
+// dirty table it does not touch cannot be told apart from user writes; neither
+// is finished, and both reach the guard as before. The guard refuses when a
+// pending migration touches a dirty table. When none does (a stranded 0073
+// beside an uncommitted config row), it lets the pass run, and the next
+// step's commit carries the stranded cursor row without the step's change, as
+// it did before this recovery existed.
 //
 // An error returned while a numbered step is selected, from its snapshots,
 // pre-repair, body, updated_at restore, cursor row or step commit, that carries

@@ -1481,6 +1481,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no time. It now reads `Lease: expired 3 hours ago`; a live lease still reads
   `Lease: expires in 3 mins`.
 
+- **A schema migration step left uncommitted by an interrupted pass no longer
+  wedges the store.** Each numbered migration commits as it applies, but a
+  process killed after a step's SQL and cursor row and before that step's
+  commit (a crash, a kill, or an open's timeout expiring mid-step) left the
+  step in the working set. The next open refused it as "pending schema
+  migrations alter pre-existing dirty tables", and only `bd dolt commit`
+  followed by `bd migrate` cleared it; when no later migration touched the
+  step's tables, the next pass instead committed the step's cursor row
+  without its schema change. The next migration pass now recognizes a working
+  set that holds exactly one of bd's own steps (its cursor row is the only
+  one missing from HEAD, it is the next version after HEAD's, its content
+  hash matches the migration file, and every dirty table is one that
+  migration touches), commits that step the way the interrupted pass would
+  have, and carries on. An uncommitted write that landed in one of the
+  step's tables after the kill cannot be told apart from the step's own
+  change, so it is committed with the step. Any other dirty working set is
+  handled as before: it is refused when a pending migration touches one of
+  its dirty tables, and otherwise the pass still runs and splits the step
+  (a stranded 0073 beside an uncommitted `config` row still has its cursor
+  row committed by 0074 without its schema change). A stranded step that is
+  the latest migration, on a store with nothing else to migrate, starts no
+  pass and is still left for a later commit to carry.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
