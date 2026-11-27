@@ -1107,8 +1107,15 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	// alters comments) needs that change in its commit, as an uninterrupted
 	// pass makes it. finishStrandedMainStep reads its own dirty set.
 	_, cursorDirty := dirtyBeforeAll[mainSource.cursorTable]
-	if _, err := finishStrandedMainStep(ctx, db, cursorDirty); err != nil {
+	finished, err := finishStrandedMainStep(ctx, db, cursorDirty)
+	if err != nil {
 		return 0, err
+	}
+	if finished {
+		// The finished step moved HEAD like any step this pass commits, so it
+		// counts in applied on every return from here, an error return
+		// included: a guard refusal after the finish still reports it.
+		defer func() { applied++ }()
 	}
 	dirtyBefore, err := committableDirtyTables(ctx, db)
 	if err != nil {
