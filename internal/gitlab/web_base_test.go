@@ -305,3 +305,23 @@ func TestIsExternalRefLearnedWebBase(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchKeyAndLocalIdentityKeyUnderWebBase pins AC-5: the project-less
+// shorthand keys like GitLab's link for the same IID under the learned web
+// address, and a pulled bead linked there keeps its source_system identity.
+func TestMatchKeyAndLocalIdentityKeyUnderWebBase(t *testing.T) {
+	stub := newGitLabStub(t)
+	stub.projectJSON = `{"id":42,"path_with_namespace":"g/p","web_url":"https://git.example.org/g/p"}`
+	tr, err := initStubTracker(t, stub, "g/p", nil)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	link := "https://git.example.org/g/p/-/issues/7"
+	if got, want := tr.MatchKey("gitlab:7"), tr.MatchKey(link); got != want || want == "" {
+		t.Errorf("MatchKey(gitlab:7) = %q, want %q (the key of %s)", got, want, link)
+	}
+	bead := &types.Issue{ID: "bd-7", SourceSystem: "gitlab:42:7", ExternalRef: &link}
+	if got := tr.LocalIdentityKey(bead); got != "gitlab:42:7" {
+		t.Errorf("LocalIdentityKey(%s at %s) = %q, want gitlab:42:7", bead.SourceSystem, link, got)
+	}
+}
