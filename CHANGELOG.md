@@ -1475,6 +1475,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Linear pull no longer folds acceptance criteria, design and notes into
+  the description** ([#8506](https://github.com/gastownhall/beads/issues/8506)).
+  A push writes those fields into the Linear description as `## Acceptance
+  Criteria`, `## Design` and `## Notes` sections, and a create appends a
+  hidden idempotency marker. A pull copied the whole text back into the
+  description, so each sync nested the sections deeper and pushed an update
+  for an unchanged bead. A pull now splits the trailing sections back into
+  their fields and drops the marker; headings inside code fences, out of
+  order, repeated or with an empty body stay in the description. An edit to
+  a section in Linear flows into the bead; a field Linear does not show is
+  kept and pushed again, unless its text appears elsewhere in the Linear
+  description. Reported by @rjgeng, who also wrote the first fix (#8624).
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so

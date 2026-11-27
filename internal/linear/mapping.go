@@ -37,6 +37,18 @@ func BuildLinearDescription(issue *types.Issue) string {
 	return description
 }
 
+// DescriptionFieldsEqual reports whether a and b put the same text into
+// Linear's description: BuildLinearDescription of each, compared without
+// blank lines, trailing whitespace or idempotency markers. It holds for a
+// bead and the issue a pull parsed from the description that bead pushed,
+// however the four fields split.
+func DescriptionFieldsEqual(a, b *types.Issue) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return canonicalLinearText(BuildLinearDescription(a)) == canonicalLinearText(BuildLinearDescription(b))
+}
+
 // NormalizeIssueForLinearHash returns a copy of the issue using Linear's description
 // formatting and clears fields not present in Linear's model to avoid false conflicts.
 func NormalizeIssueForLinearHash(issue *types.Issue) *types.Issue {
@@ -621,7 +633,9 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig, l
 	if local.Title != remote.Title {
 		return false
 	}
-	if BuildLinearDescription(local) != remote.Description {
+	// Linear stores a blank line after each heading and keeps a create's
+	// idempotency marker, so compare the text a reader sees (GH#8506).
+	if canonicalLinearText(BuildLinearDescription(local)) != canonicalLinearText(remote.Description) {
 		return false
 	}
 	if PriorityToLinear(local.Priority, config) != remote.Priority {
@@ -651,7 +665,7 @@ func PushFieldsEqualToBeads(local, remote *types.Issue) bool {
 	if local.Title != remote.Title {
 		return false
 	}
-	if BuildLinearDescription(local) != remote.Description {
+	if !DescriptionFieldsEqual(local, remote) {
 		return false
 	}
 	if local.Priority != remote.Priority {
@@ -751,13 +765,20 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 		updatedAt = time.Now()
 	}
 
+	// A push folds acceptance criteria, design and notes into the Linear
+	// description; split them back out so a pull does not fold them into the
+	// local description as well (GH#8506).
+	parts := ParseLinearDescription(li.Description)
 	issue := &types.Issue{
-		Title:       li.Title,
-		Description: li.Description,
-		Priority:    PriorityToBeads(li.Priority, config),
-		IssueType:   LabelToIssueType(li.Labels, config),
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
+		Title:              li.Title,
+		Description:        parts.Description,
+		AcceptanceCriteria: parts.AcceptanceCriteria,
+		Design:             parts.Design,
+		Notes:              parts.Notes,
+		Priority:           PriorityToBeads(li.Priority, config),
+		IssueType:          LabelToIssueType(li.Labels, config),
+		CreatedAt:          createdAt,
+		UpdatedAt:          updatedAt,
 	}
 
 	// Map state using configurable mapping
@@ -855,8 +876,18 @@ func BuildLinearToLocalUpdates(li *Issue, config *MappingConfig) map[string]inte
 	// Update title
 	updates["title"] = li.Title
 
-	// Update description
-	updates["description"] = li.Description
+	// Update description and the sections a push folded into it (GH#8506)
+	parts := ParseLinearDescription(li.Description)
+	updates["description"] = parts.Description
+	if parts.AcceptanceCriteria != "" {
+		updates["acceptance_criteria"] = parts.AcceptanceCriteria
+	}
+	if parts.Design != "" {
+		updates["design"] = parts.Design
+	}
+	if parts.Notes != "" {
+		updates["notes"] = parts.Notes
+	}
 
 	// Update priority using configured mapping
 	updates["priority"] = PriorityToBeads(li.Priority, config)

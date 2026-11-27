@@ -235,6 +235,39 @@ bd config set linear.relation_map.causes discovered-from
 bd config set linear.relation_map.duplicate related
 ```
 
+### Description Mapping
+
+Linear has one description field. A push writes the bead's description
+followed by its acceptance criteria, design and notes, each under a heading:
+
+```markdown
+Fix the login timeout.
+
+## Acceptance Criteria
+
+Login succeeds within 5 seconds.
+
+## Notes
+
+Seen on staging only.
+```
+
+A pull splits that text back into the four fields. Only the trailing run of
+`## Acceptance Criteria`, `## Design` and `## Notes` headings, in that order
+and each with a non-empty body, is split off; a heading inside a code fence,
+out of order, repeated, or followed by nothing stays in the description.
+
+- Editing a section in Linear updates that field in bd.
+- Deleting a section's heading in Linear keeps its text in the description
+  and empties the field.
+- Deleting a whole section in Linear does not clear the field: the next sync
+  pushes it back. To clear a field, clear it in bd and push:
+
+```bash
+bd update <id> --notes ""
+bd linear sync --push
+```
+
 ## Conflict Resolution
 
 Conflicts occur when both local and Linear versions are modified since the last sync.
@@ -478,6 +511,7 @@ For large projects, initial sync fetches all issues. Subsequent syncs are increm
 - **Single team**: Sync is configured per-team (one team_id per bd project)
 - **No attachments**: Attachments are not synced
 - **No comments**: Comments are not synced (only description)
+- **Description sections**: Acceptance criteria, design and notes travel as headings in the Linear description (see [Description Mapping](#description-mapping))
 - **Custom fields**: Linear custom fields are not mapped
 - **Projects**: Linear projects are not mapped (use labels for categorization)
 - **Cycles**: Linear cycles/sprints are not mapped

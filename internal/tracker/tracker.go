@@ -111,6 +111,19 @@ type IdentityKeyer interface {
 	RemoteIdentityKey(issue *TrackerIssue) string
 }
 
+// DescriptionFieldsTracker is implemented by trackers whose remote
+// description carries the bead's acceptance criteria, design and notes
+// (Linear folds them in as sections). A pull of such a tracker compares and
+// writes those three fields as well as the description, after
+// SettleDescriptionFields has reconciled them; other trackers' pulls leave
+// the three fields alone.
+type DescriptionFieldsTracker interface {
+	// SettleDescriptionFields reconciles pulled, the issue converted from the
+	// remote, with existing, the local issue it updates, and reports whether
+	// pulled now holds local text the remote lacks, which the push must send.
+	SettleDescriptionFields(existing, pulled *types.Issue) (keptLocal bool)
+}
+
 // FieldMapper handles bidirectional conversion of issue fields between
 // an external tracker and beads. Each tracker provides its own mapper.
 type FieldMapper interface {
