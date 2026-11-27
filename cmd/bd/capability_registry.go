@@ -600,7 +600,7 @@ var proxyPermittedPaths = []string{
 	"hooks install", "hooks list", "hooks run", "hooks uninstall",
 	"metrics", "metrics example", "metrics off", "metrics on",
 	"serve", "sql",
-	"codex-hook", "cursor-hook", "db-proxy-child", "send-metrics",
+	"codex-hook", "cursor-hook", "db-proxy-child", "dolt-idle-watch", "send-metrics",
 }
 
 func init() {

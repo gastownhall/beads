@@ -392,6 +392,71 @@ Switch to server mode when you need:
 - Orchestrator multi-rig setups
 - Federation with remote peers
 
+#### Idle stop for auto-started servers
+
+When a bd command needs the server and none is running, bd starts one in the
+background (auto-start). That server is stopped again once it has been idle
+for 30 minutes: bd launches a small watcher process beside each server it
+auto-starts, and the watcher stops the server the way `bd dolt stop` does
+(`dolt-server.pid` and `dolt-server.port` removed). Unlike `bd dolt stop`, it
+does not commit the working set first: with `dolt.auto-commit: batch` or
+`off`, pending changes stay uncommitted across the stop, and `bd dolt commit`
+still records them. The next bd command starts the server again, so idle stop
+costs only that start. A `--readonly` command never starts a server, so after
+an idle stop it fails until another bd command or `bd dolt start` starts one.
+
+The server counts as idle only while it has accepted no new SQL connection,
+holds no open one apart from the watcher's own check, and no running bd
+process has the workspace's store open. Each open store leaves a lease file
+for the watcher, whether or not it may start a server; a `--readonly` store,
+which writes no file, holds a connection to the server open instead. A lease
+whose process has died does not count and is removed. When the server is
+stopped, `dolt-server.log` gets a line saying so, and a `bd dolt stop` run
+afterwards reports `dolt server is not running` and exits 1, as it does for
+any server that is not running. The watcher's own files live in
+`.beads/dolt-server.activity/`.
+When the server stops some other way (`bd dolt stop`, a crash, a restart that
+replaces it), the watcher notices within 5 seconds and exits without acting.
+
+Idle stop applies only to a server bd started on a port it chose itself. It
+never applies to an external server, a shared server, a server on a pinned
+port, or a server with a remotesapi listener.
+
+A server started with `bd dolt start` or `bd dolt restart` is never stopped
+for idleness. Running `bd dolt start` while an auto-started server is up
+adopts that server and cancels its watcher, so this is also how to keep an
+auto-started server running.
+
+Set the idle window with `dolt.idle-timeout` in `config.yaml` or the
+`BEADS_DOLT_IDLE_TIMEOUT` environment variable, which wins (a Go duration such
+as `10m` or `2h`). `0` turns idle stop off: auto-started servers then keep
+running, as they did before idle stop existed. A value that is not a duration
+prints a warning and the 30-minute default applies. The window is read when
+the server is auto-started, so a change applies from the next auto-start.
+
+```yaml
+dolt:
+  idle-timeout: 2h   # or 0 to keep auto-started servers running
+```
+
+`bd dolt status` shows a running server's idle-stop setting. To see every
+Dolt server on the machine, from any directory, run `bd dolt status --all`
+(add `--json` for scripts). It lists each server bd manages with its
+workspace, PID, port, uptime and idle-stop setting (`after 30m`,
+`off: started with bd dolt start`, `off: no watcher (started by an older bd)`,
+...), and lists any other `dolt sql-server` (another tool's, such as a Gas
+City city's) as not managed by bd. A server counts as bd's when the
+`dolt-server.pid` in the directory it was started from names it.
+
+`bd dolt stop --all` stops every server `bd dolt status --all` lists as
+bd's, the way `bd dolt stop` does, reports each, and leaves the others
+running; it exits non-zero if any stop fails. A server that stopped before
+its turn (its idle watcher reaped it first) is reported as already stopped
+and is no failure. Servers started by a bd
+version without idle stop have no watcher and stay up until stopped: run
+`bd dolt stop --all` once after upgrading, and the next bd command in each
+workspace restarts its server with a watcher.
+
 ### Shared Server Mode
 
 On machines with multiple beads projects, each project normally starts its own Dolt server.

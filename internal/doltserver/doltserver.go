@@ -1556,9 +1556,19 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 			"  To check status: bd dolt status", cfg.Port)
 	}
 
+	// The pre-start config says whether bd chose the port, which decides
+	// whether this server is bd's alone to stop when idle.
+	preCfg := DefaultConfig(serverDir)
 	s, err := startLocked(serverDir)
 	if err != nil {
 		return 0, false, err
+	}
+	clearIdleWatchRecords(serverDir)
+	timeout := ResolveIdleTimeout(beadsDir)
+	if reason := idleOffReason(preCfg, mode, IsSharedServerMode(), timeout); reason == "" {
+		launchIdleWatcherLocked(serverDir, s, preCfg.Host, timeout)
+	} else {
+		recordIdleOff(serverDir, reason)
 	}
 	return s.Port, true, nil
 }
@@ -1869,7 +1879,14 @@ func Start(beadsDir string) (*State, error) {
 		return nil, err
 	}
 	defer releaseLifecycleLock(lockF)
-	return startLocked(beadsDir)
+	state, err := startLocked(beadsDir)
+	if err == nil {
+		// An explicitly started server is never stopped for idleness: cancel
+		// the watcher of an auto-started server this start adopted.
+		clearIdleWatchRecords(beadsDir)
+		recordIdleOff(beadsDir, IdleOffExplicitStart)
+	}
+	return state, err
 }
 
 func startLocked(beadsDir string) (*State, error) {
@@ -2377,6 +2394,8 @@ func Restart(beadsDir string) (*State, error) {
 		}
 		return nil, restartErr
 	}
+	clearIdleWatchRecords(beadsDir)
+	recordIdleOff(beadsDir, IdleOffExplicitRestart)
 	return state, nil
 }
 
@@ -2397,6 +2416,20 @@ func StopWithForce(beadsDir string, force bool) error {
 }
 
 func stopLocked(beadsDir string) error {
+	return stopServerLocked(beadsDir, true)
+}
+
+// stopIdleLocked is stopLocked for the idle watcher, without the working-set
+// flush. Nobody asked for this stop, so it must not record a
+// dolt.auto-commit batch or off user's pending changes as a Dolt commit:
+// `bd dolt commit` records that batch. The changes are SQL-committed, so they
+// are durable in the working set either way, and the next server serves them
+// uncommitted, as they were.
+func stopIdleLocked(beadsDir string) error {
+	return stopServerLocked(beadsDir, false)
+}
+
+func stopServerLocked(beadsDir string, flush bool) error {
 	state, err := IsRunning(beadsDir)
 	if err != nil {
 		return err
@@ -2445,9 +2478,11 @@ func stopLocked(beadsDir string) error {
 	// server, best-effort. With Dolt's default chunk journal, SQL-committed
 	// changes are already durable; this flush preserves them in history, it
 	// does not save them from loss.
-	cfg := DefaultConfig(beadsDir)
-	if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
+	if flush {
+		cfg := DefaultConfig(beadsDir)
+		if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
+		}
 	}
 
 	if err := gracefulStop(state.PID, 5*time.Second); err != nil {

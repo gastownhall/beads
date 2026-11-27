@@ -186,8 +186,10 @@ func isProductionPort(cfg *Config) bool {
 // drops to zero, the server is stopped. This prevents test-started servers
 // from leaking (GH#2542) while allowing multiple stores to share one server.
 // Normal repo-local auto-starts are intentionally not tracked here: those
-// servers should stay up like an explicit `bd dolt start`, rather than being
-// torn down at the end of each command.
+// servers outlive each command, and their idle watcher (doltserver idle
+// stop) stops them once no store or client has used them for
+// dolt.idle-timeout; each open store holds a client lease, or a server
+// connection, that keeps the watcher off (serverOpenHoldsClientLease).
 var autoStartRefs struct {
 	mu sync.Mutex
 	m  map[string]int
@@ -394,6 +396,17 @@ type DoltStore struct {
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
+
+	// releaseClientLease removes this store's client lease on its server
+	// (doltserver.AcquireClientLease), which keeps the server's idle watcher
+	// from stopping it while the store is open. Nil when the open holds no
+	// lease (serverOpenHoldsClientLease).
+	releaseClientLease func()
+
+	// releaseServerHold closes the server connection a store with no client
+	// lease holds open on a watched server for the same purpose
+	// (holdServerConnection). Nil when it holds none.
+	releaseServerHold func()
 
 	// createdDatabase reports whether this store's open created its database
 	// (serverConnFacts.created); see CreatedDatabase.
@@ -2272,6 +2285,26 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 	serverDir := doltserver.ResolveServerDir(resolvedBeadsDir)
 
+	// An open of the workspace's own server holds a client lease on it for as
+	// long as the store is open, so the server's idle watcher does not stop
+	// it under a store that holds no SQL connection for a while
+	// (serverOpenHoldsClientLease). It is taken before the first dial: a reap
+	// in flight finishes first, and the dial below then auto-starts a fresh
+	// server, or, for an open that may not start one, fails as it would on
+	// any stopped server.
+	var releaseClientLease func()
+	if serverOpenHoldsClientLease(cfg, serverDir) {
+		if release, leaseErr := doltserver.AcquireClientLease(serverDir); leaseErr == nil {
+			releaseClientLease = release
+		}
+	}
+	clientLeaseKept := false
+	defer func() {
+		if !clientLeaseKept && releaseClientLease != nil {
+			releaseClientLease()
+		}
+	}()
+
 	// Socket-first / TCP-fallback (gt-28itz): a configured unix socket that
 	// isn't currently connectable must not block operations when the server is
 	// reachable over TCP. Normalizing here means the fail-fast dial below and
@@ -2539,6 +2572,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		readOnly:               cfg.ReadOnly,
 		classifiedRead:         cfg.ClassifiedRead,
 		autoStartedServerDir:   autoStartedDir,
+		releaseClientLease:     releaseClientLease,
 		createdDatabase:        dbFacts.created,
 	}
 
@@ -2641,9 +2675,19 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// These report sql.DB.Stats() on each OTel scrape — no-op when telemetry is off.
 	store.registerPoolGauges()
 
+	// A store with no client lease on a watched server (an open with
+	// DisableAutoStart writes nothing into the workspace, and a lease write
+	// can fail) holds one connection to the server open instead: the idle
+	// watcher counts an open connection as activity. Taken after the last
+	// failure path, while the open's own pooled connection still counts.
+	if releaseClientLease == nil && serverOpenTargetsLocalBDServer(cfg) && idleWatchRunning(serverDir) {
+		store.releaseServerHold = holdServerConnection(ctx, connStr)
+	}
+
 	// Ownership of db transfers to the returned store; suppress the deferred
 	// close above. Must be the last thing before the success return.
 	storeReady = true
+	clientLeaseKept = true
 	return store, nil
 }
 
@@ -2751,8 +2795,60 @@ func initializeServerCircuitBreaker(cfg *Config) *circuitBreaker {
 // 127.0.0.1 only, so at any other host, the IPv6 loopback included, the
 // retry would still find nothing at host:port and leave bd's server running.
 func serverOpenCanAutoStart(cfg *Config) bool {
-	return !cfg.DisableAutoStart && cfg.AutoStart && cfg.Path != "" &&
-		doltserver.AutoStartReaches(cfg.ServerHost, cfg.ServerSocket)
+	return !cfg.DisableAutoStart && cfg.AutoStart && serverOpenTargetsLocalBDServer(cfg)
+}
+
+// serverOpenTargetsLocalBDServer reports whether the open dials the server bd
+// runs for its workspace (doltserver.AutoStartReaches), with a workspace path
+// to find that server's records under.
+func serverOpenTargetsLocalBDServer(cfg *Config) bool {
+	return cfg.Path != "" && doltserver.AutoStartReaches(cfg.ServerHost, cfg.ServerSocket)
+}
+
+// idleWatchRunning is doltserver.IdleWatchRunning; tests replace it.
+var idleWatchRunning = doltserver.IdleWatchRunning
+
+// serverOpenHoldsClientLease reports whether the open holds a client lease on
+// serverDir's server (doltserver.AcquireClientLease) for as long as the store
+// is open. Holding one does not depend on permission to start a server: an
+// open that may auto-start always holds one, since the server it starts gets
+// an idle watcher, and one that may not holds one when the server already has
+// a watcher, since a store that cannot start a server needs the running one to
+// stay up all the more. An open with DisableAutoStart (strict --readonly, and
+// the diagnostic opens that must not write) writes nothing into the
+// workspace, so it holds no lease; newServerMode holds a server connection for
+// it instead (holdServerConnection).
+func serverOpenHoldsClientLease(cfg *Config, serverDir string) bool {
+	if serverOpenCanAutoStart(cfg) {
+		return true
+	}
+	return !cfg.DisableAutoStart && serverOpenTargetsLocalBDServer(cfg) && idleWatchRunning(serverDir)
+}
+
+// holdServerConnection opens one connection to the server connStr names and
+// keeps it open until the returned release runs. An auto-started server's idle
+// watcher counts an open connection as activity, so this keeps the server up
+// under a store that holds no client lease, however long its own pool stays
+// idle. It returns nil when the connection cannot be opened; the store then
+// counts as activity only while its own pool holds a connection.
+func holdServerConnection(ctx context.Context, connStr string) func() {
+	db, err := sql.Open("mysql", connStr)
+	if err != nil {
+		return nil
+	}
+	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		_ = db.Close()
+		return nil
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = conn.Close()
+			_ = db.Close()
+		})
+	}
 }
 
 // ErrUnresolvedServerPort is wrapped by the error an open returns when it has
@@ -3896,6 +3992,14 @@ func (s *DoltStore) Close() error {
 			fmt.Fprintf(os.Stderr, "Warning: failed to stop auto-started dolt server: %v\n", stopErr)
 		}
 		s.autoStartedServerDir = ""
+	}
+	if s.releaseClientLease != nil {
+		s.releaseClientLease()
+		s.releaseClientLease = nil
+	}
+	if s.releaseServerHold != nil {
+		s.releaseServerHold()
+		s.releaseServerHold = nil
 	}
 
 	// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
