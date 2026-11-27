@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -99,6 +100,36 @@ func (c *Client) buildURL(path string, params map[string]string) string {
 	return u
 }
 
+// APIError is a GitLab API failure that carries the HTTP status code, so
+// callers can branch on it instead of matching error strings (e.g. treating
+// a 404 from the project read as "unknown project" rather than a hard
+// failure, mirroring internal/github/errors.go). Its message is unchanged
+// from the untyped error it replaces.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error: %s (status %d)", e.Body, e.StatusCode)
+}
+
+// IsNotFound reports whether err is, or wraps, a GitLab 404.
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+// isDecodeError reports whether err is a JSON decode failure — a 2xx whose
+// body is not the shape the client expected (a catch-all stub, a proxy's
+// error page). Such a body says nothing about the project, so Init treats it
+// like an absent web address rather than a failed read.
+func isDecodeError(err error) bool {
+	var syntax *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &syntax) || errors.As(err, &typeErr)
+}
+
 // doRequest performs an HTTP request with authentication and retry logic.
 func (c *Client) doRequest(ctx context.Context, method, urlStr string, body interface{}) ([]byte, http.Header, error) {
 	var reqBody io.Reader
@@ -184,7 +215,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 			}
 		}
 
-		return nil, nil, fmt.Errorf("API error: %s (status %d)", string(respBody), resp.StatusCode)
+		return nil, nil, &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	return nil, nil, fmt.Errorf("max retries (%d) exceeded: %w", MaxRetries+1, lastErr)

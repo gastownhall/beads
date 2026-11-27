@@ -2,6 +2,8 @@ package gitlab
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -215,6 +217,60 @@ func TestInitGroupOnlySendsNoProjectRequest(t *testing.T) {
 	}
 	if tr.webBase != "" || tr.configuredWebURL != "" {
 		t.Fatalf("webBase = %q configuredWebURL = %q, want neither learned nor configured", tr.webBase, tr.configuredWebURL)
+	}
+}
+
+// TestInitFailsWhenProjectReadFails (AC-4): only a 404 leaves today's
+// behavior. Any other failure of the project read — a refused token, a 5xx
+// after the client's retries, a network error — stops Init: a push without
+// the web address would create a second copy of every linked issue, and a
+// warning would not stop the next run from moving the link to the copy.
+func TestInitFailsWhenProjectReadFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"401 Unauthorized"}`, http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("GITLAB_URL", srv.URL)
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("GITLAB_PROJECT_ID", "42")
+	t.Setenv("GITLAB_PROJECT_PATH", "g/p")
+
+	tr := &Tracker{}
+	err := tr.Init(context.Background(), &crossProjectStore{issues: map[string]*types.Issue{}})
+	if err == nil {
+		t.Fatal("Init succeeded with the project read answering 401, want an error")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "42") || !strings.Contains(msg, "could not be read") {
+		t.Errorf("error = %q, want it to name project 42 and say the address could not be read", msg)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error does not wrap *APIError: %v", err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("wrapped APIError status = %d, want 401", apiErr.StatusCode)
+	}
+}
+
+// TestAPIErrorTextUnchanged pins that the typed API error keeps the exact
+// message of the untyped error it replaces, which the license-403 matcher and
+// its tests match on.
+func TestAPIErrorTextUnchanged(t *testing.T) {
+	apiErr := &APIError{StatusCode: 403, Body: `{"message":"Blocked issues not available for current license"}`}
+	want := `API error: {"message":"Blocked issues not available for current license"} (status 403)`
+	if got := apiErr.Error(); got != want {
+		t.Fatalf("APIError.Error() = %q, want %q", got, want)
+	}
+	if !isGitLabLicenseError(fmt.Errorf("failed to create issue link: %w", apiErr)) {
+		t.Error("license matcher no longer recognizes the typed error")
+	}
+	if IsNotFound(apiErr) {
+		t.Error("IsNotFound(403) = true, want false")
+	}
+	if !IsNotFound(fmt.Errorf("failed to get project: %w", &APIError{StatusCode: 404, Body: `{"message":"404 Not found"}`})) {
+		t.Error("IsNotFound(wrapped 404) = false, want true")
 	}
 }
 

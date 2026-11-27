@@ -127,10 +127,21 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	// every clone — and it is never a request target. A group-mode config
 	// without a project (no gitlab.default_project_id) cannot create issues,
 	// so it sends no request.
+	//
+	// A 404 leaves today's behavior (the project is gone or unreadable), as
+	// does a body that does not parse as a project (a catch-all stub or a
+	// proxy page says nothing about the address). Any other failure — a
+	// refused token, a 5xx after the client's retries, a network error —
+	// stops Init here, the rule the GitHub tracker applies to its repository
+	// read: going on without the address would silently create the copies.
 	if t.client.ProjectID != "" {
-		t.initProject, t.initProjectErr = t.client.GetProject(ctx)
-		if t.initProject != nil {
-			t.webBase = webBaseFromProject(t.initProject)
+		project, err := t.client.GetProject(ctx)
+		if err != nil && !IsNotFound(err) && !isDecodeError(err) {
+			return fmt.Errorf("reading GitLab project %s failed, so the address GitLab writes into issue links could not be read; a push without it would create a second copy of every issue linked under it: %w", t.client.ProjectID, err)
+		}
+		t.initProject, t.initProjectErr = project, err
+		if project != nil {
+			t.webBase = webBaseFromProject(project)
 		}
 	}
 	// gitlab.web_url names the web address by hand, for an instance whose
