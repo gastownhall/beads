@@ -628,3 +628,44 @@ func TestCountIsBlockedHeld_AfterRepair(t *testing.T) {
 		t.Errorf("repaired held count = %d, want 3 (two direct holders and one held child)", held)
 	}
 }
+
+// TestRecomputeAllIsBlocked_HeldRowReleasesWhenEvidenceArrives is AC-8: a
+// held row at 1 stays 1 when its visible local blocker closes (the dangling
+// edge still forbids a local decision), and drops to 0 the moment the
+// dangling dependency itself is gone — the row is decided again, and decided
+// unblocked.
+func TestRecomputeAllIsBlocked_HeldRowReleasesWhenEvidenceArrives(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createWisp(t, ctx, store, "dh-w")
+	createPerm(t, ctx, store, "dh-b")
+	createPerm(t, ctx, store, "dh-a")
+	addDependencyWithMeta(t, ctx, store, "dh-a", "dh-w", types.DepBlocks, "")
+	addDependencyWithMeta(t, ctx, store, "dh-a", "dh-b", types.DepBlocks, "")
+	dropWisp(t, ctx, store, "dh-w")
+
+	// The local blocker holds A at 1 …
+	fullRepair(t, ctx, store)
+	requireFlags(t, ctx, store, "issues", map[string]bool{"dh-a": true})
+
+	// … its merged-in close does not unblock A: the dangling edge still
+	// decides A in the other database's favor.
+	rawSetStatus(t, ctx, store, "issues", "dh-b", types.StatusClosed)
+	fullRepair(t, ctx, store)
+	requireFlags(t, ctx, store, "issues", map[string]bool{"dh-a": true})
+
+	// The dangling dependency itself arriving-removed (merged delete) makes
+	// A local again — decided 0 now that nothing blocks it.
+	if _, err := store.db.ExecContext(ctx,
+		"DELETE FROM dependencies WHERE issue_id = 'dh-a' AND depends_on_wisp_id = 'dh-w'"); err != nil {
+		t.Fatalf("remove dangling dependency: %v", err)
+	}
+	if stale, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, store.db); err != nil || stale != 1 {
+		t.Fatalf("post-delete stale count: want 1/nil, got %d/%v", stale, err)
+	}
+	fullRepair(t, ctx, store)
+	requireFlags(t, ctx, store, "issues", map[string]bool{"dh-a": false})
+}
