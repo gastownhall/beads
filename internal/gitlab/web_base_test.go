@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -234,4 +235,46 @@ func TestInitKeepsTodaysRecognitionWhenTheWebAddressIsUnknown(t *testing.T) {
 		}
 		assertTodaysRecognition(t, tr, stub)
 	})
+}
+
+// TestPushTwiceCreatesOneIssue pins AC-1: GitLab reached at gitlab.url but
+// writing its links under another address (its external_url, as the
+// project's web_url reports it) must not get a new issue on every push. Each
+// run Inits a fresh tracker, as a second bd run would.
+func TestPushTwiceCreatesOneIssue(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		webRoot string // the project's web_url; "" = under gitlab.url
+	}{
+		{name: "web_url under gitlab.url"},
+		{name: "web_url on another host", webRoot: "https://git.example.org/g/p"},
+		{name: "web_url under a relative root", webRoot: "https://code.example.org/scm/g/p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newGitLabStub(t)
+			if tc.webRoot != "" {
+				stub.issueWebRoot = tc.webRoot
+				stub.projectJSON = `{"id":42,"path_with_namespace":"g/p","web_url":"` + tc.webRoot + `"}`
+			}
+			store := &crossProjectStore{issues: map[string]*types.Issue{
+				"bd-1": {ID: "bd-1", Title: "Local bead", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+			}}
+			for run := 1; run <= 2; run++ {
+				tr, err := initStubTracker(t, stub, "g/p", store)
+				if err != nil {
+					t.Fatalf("run %d Init: %v", run, err)
+				}
+				if _, err := tracker.NewEngine(tr, store, "test").Sync(context.Background(), tracker.SyncOptions{Push: true}); err != nil {
+					t.Fatalf("run %d Sync: %v", run, err)
+				}
+			}
+			ref := derefRef(store.issues["bd-1"].ExternalRef)
+			if _, creates := stub.counts(); creates != 1 {
+				t.Fatalf("two pushes made %d POST /projects/42/issues, want 1 (external_ref now %q)", creates, ref)
+			}
+			if want := stub.issueWebRoot + "/-/issues/1"; ref != want {
+				t.Errorf("external_ref = %q, want the first create's web_url %q", ref, want)
+			}
+		})
+	}
 }
