@@ -354,3 +354,97 @@ func TestRecomputeIsBlockedAfterMerge_MergedHeldFlagStaysPut(t *testing.T) {
 		}
 	}
 }
+
+// TestRecomputeAllIsBlocked_HeldRowWithVisibleReasonIsDecided is AC-3: held
+// is not frozen — visible local evidence decides the row. An open blocker
+// issue, a present open wisp, or a present spawner whose gate reads blocked
+// each mark a held row at 0 up to 1 on every path (full repair, scoped
+// recompute, mark-only), while a closed or pinned holder of a dangling edge
+// is decided 0.
+func TestRecomputeAllIsBlocked_HeldRowWithVisibleReasonIsDecided(t *testing.T) {
+	t.Run("open blocker issue marks held row", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		createWisp(t, ctx, store, "dv-w")
+		createPerm(t, ctx, store, "dv-b")
+		createPerm(t, ctx, store, "dv-a")
+		addDependencyWithMeta(t, ctx, store, "dv-a", "dv-w", types.DepBlocks, "")
+		addDependencyWithMeta(t, ctx, store, "dv-a", "dv-b", types.DepBlocks, "")
+		dropWisp(t, ctx, store, "dv-w")
+		setFlag(t, ctx, store, "issues", "dv-a", false)
+
+		fullRepair(t, ctx, store)
+		requireFlags(t, ctx, store, "issues", map[string]bool{"dv-a": true})
+
+		// Scoped recompute and mark-only over the same row agree.
+		setFlag(t, ctx, store, "issues", "dv-a", false)
+		scopedRecompute(t, ctx, store, []string{"dv-a"})
+		if !flagOf(t, ctx, store, "issues", "dv-a") {
+			t.Error("scoped recompute left a held row at 0 though an open local blocker decides it")
+		}
+		setFlag(t, ctx, store, "issues", "dv-a", false)
+		scopedMark(t, ctx, store, []string{"dv-a"})
+		if !flagOf(t, ctx, store, "issues", "dv-a") {
+			t.Error("mark-only pass left a held row at 0 though an open local blocker decides it")
+		}
+	})
+
+	t.Run("present open wisp marks held row", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		createWisp(t, ctx, store, "dv-gone")
+		createWisp(t, ctx, store, "dv-here")
+		createPerm(t, ctx, store, "dv-a2")
+		addDependencyWithMeta(t, ctx, store, "dv-a2", "dv-gone", types.DepBlocks, "")
+		addDependencyWithMeta(t, ctx, store, "dv-a2", "dv-here", types.DepBlocks, "")
+		dropWisp(t, ctx, store, "dv-gone")
+		setFlag(t, ctx, store, "issues", "dv-a2", false)
+
+		fullRepair(t, ctx, store)
+		requireFlags(t, ctx, store, "issues", map[string]bool{"dv-a2": true})
+	})
+
+	t.Run("present spawner with blocking gate marks held row", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		createWisp(t, ctx, store, "dv-gw")
+		createPerm(t, ctx, store, "dv-s")
+		createPerm(t, ctx, store, "dv-sk")
+		createPerm(t, ctx, store, "dv-a3")
+		addDependencyWithMeta(t, ctx, store, "dv-a3", "dv-gw", types.DepBlocks, "")
+		addDependencyWithMeta(t, ctx, store, "dv-sk", "dv-s", types.DepParentChild, "")
+		addDependencyWithMeta(t, ctx, store, "dv-a3", "dv-s", types.DepWaitsFor, "")
+		dropWisp(t, ctx, store, "dv-gw")
+		setFlag(t, ctx, store, "issues", "dv-a3", false)
+
+		fullRepair(t, ctx, store)
+		requireFlags(t, ctx, store, "issues", map[string]bool{"dv-a3": true})
+	})
+
+	for _, status := range []types.Status{types.StatusClosed, types.StatusPinned} {
+		t.Run("closed-or-pinned holder of a dangling edge is decided 0 ("+string(status)+")", func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			createWisp(t, ctx, store, "dv-w")
+			createPerm(t, ctx, store, "dv-a4")
+			addDependencyWithMeta(t, ctx, store, "dv-a4", "dv-w", types.DepBlocks, "")
+			dropWisp(t, ctx, store, "dv-w")
+			rawSetStatus(t, ctx, store, "issues", "dv-a4", status)
+
+			fullRepair(t, ctx, store)
+			requireFlags(t, ctx, store, "issues", map[string]bool{"dv-a4": false})
+		})
+	}
+}

@@ -382,9 +382,11 @@ func notInCond(ids []string, args *[]any) string {
 	return "AND p.id NOT IN (" + placeholders + ")"
 }
 
-// inCond renders "dp.<col> IN (…)" for the marked-parent arm, or nothing for
-// an empty set.
-func inCond(ids []string, col string, args *[]any) string {
+// inCond renders the marked-parent arm as its own EXISTS over depTable — a
+// parent-child edge onto a held row this closing mark has established
+// blocked — or nothing for an empty set. The arm carries its own OR because
+// the template splices it as a bare disjunct.
+func inCond(ids []string, depTable, rowAlias, col string, args *[]any) string {
 	if len(ids) == 0 {
 		return ""
 	}
@@ -396,7 +398,11 @@ func inCond(ids []string, col string, args *[]any) string {
 		placeholders += "?"
 		*args = append(*args, ids[i])
 	}
-	return "dp." + col + " IN (" + placeholders + ")"
+	return fmt.Sprintf(`OR EXISTS (SELECT 1 FROM %[1]s dm
+			              WHERE dm.issue_id = %[2]s.id
+			                AND dm.type = 'parent-child'
+			                AND dm.%[3]s IN (%[4]s))`,
+		depTable, rowAlias, col, placeholders)
 }
 
 // sql returns the closing-mark predicate for a row aliased rowAlias whose
@@ -425,8 +431,8 @@ func (c heldPredicateConds) sql(rowAlias, depTable string) (string, []any) {
 	var args []any
 	issueParentCond := notInCond(c.issueParentExcl, &args)
 	wispParentCond := notInCond(c.wispParentExcl, &args)
-	markedIssue := inCond(c.markedIssue, "depends_on_issue_id", &args)
-	markedWisp := inCond(c.markedWisp, "depends_on_wisp_id", &args)
+	markedIssue := inCond(c.markedIssue, depTable, rowAlias, "depends_on_issue_id", &args)
+	markedWisp := inCond(c.markedWisp, depTable, rowAlias, "depends_on_wisp_id", &args)
 	return fmt.Sprintf(`
 			  ( EXISTS (SELECT 1 FROM %[2]s dh
 			            WHERE dh.issue_id = %[1]s.id
@@ -538,14 +544,23 @@ func heldMarkRoundsInTx(ctx context.Context, tx DBTX, held, extraExcl heldRows, 
 			if len(rows) == 0 {
 				continue
 			}
-			roundMarked += len(rows)
 			var toFlip []string
 			for _, row := range rows {
+				// Only a row NEW to the marked set advances the fixpoint: a
+				// stored-1 row the predicate keeps establishing returns every
+				// round, and counting it again would never let the loop end.
 				if side.table == "issues" {
+					if issueMarked[row.id] {
+						continue
+					}
 					issueMarked[row.id] = true
 				} else {
+					if wispMarked[row.id] {
+						continue
+					}
 					wispMarked[row.id] = true
 				}
+				roundMarked++
 				if !row.blocked {
 					toFlip = append(toFlip, row.id)
 				}
