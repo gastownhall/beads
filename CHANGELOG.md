@@ -629,6 +629,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description and metadata are unchanged, and omitting the flag (or passing
   `0`) is byte-identical to today's output. JSON output is untouched;
   `--include-comments` still streams every comment there.
+- **`bd show --head`** prints a short view of a long issue
+  ([#7187](https://github.com/gastownhall/beads/issues/7187)): the last 1 KB
+  of the notes in place of the description, design, notes and acceptance
+  criteria, and the last 3 comments (`--comments-tail N` changes the count).
+  The notes are cut from the end, on a line start where one is near and
+  never inside a character, because notes are appended to and the newest
+  state is last. One line after the comments names what was withheld and its
+  size, or says that nothing was. The header, labels, metadata and both
+  dependency lists print as before, and a comment is never cut, so the view
+  is short but has no fixed size. Text output only: `--head` is refused with
+  `--json`, `--short`, `--long`, `--refs`, `--children`, `--thread`,
+  `--as-of` and `--watch`. Nothing is stored or moved, and `bd show` without
+  the flag prints what it printed before.
 - `GET /v0/beads/issues` accepts `no_assignee`, `title` and a repeatable `id`
   (one id per value, at most 200), each behind its own new capability token
   (`issues.list.noAssignee`, `issues.list.title`, `issues.list.ids`; additive,
