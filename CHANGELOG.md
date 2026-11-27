@@ -1561,6 +1561,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry points now replay the rolled-back delete, as create, update, close,
   claim and sweep already do.
 
+- **A rewound `issues.jsonl` is repaired on the next write.** A `git stash` or checkout could restore an older tracked export while the store was unchanged, and the auto-export skipped it. Any write command now rewrites the export from the store. A write that would overwrite a newer teammate record is refused with a warning and the file is kept; run `bd import` to bring the file in, after which writes resume. Read commands such as `bd list` do not repair the file. (#8631, refs #8585)
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so
