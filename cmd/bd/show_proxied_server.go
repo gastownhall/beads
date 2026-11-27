@@ -37,6 +37,7 @@ type showProxiedInput struct {
 	briefDeps       bool
 	includeComments bool
 	commentsTail    int
+	head            bool
 }
 
 func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput {
@@ -54,6 +55,7 @@ func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput
 	in.briefDeps, _ = cmd.Flags().GetBool("brief-deps")
 	in.includeComments, _ = cmd.Flags().GetBool("include-comments")
 	in.commentsTail, _ = cmd.Flags().GetInt("comments-tail")
+	in.head, _ = cmd.Flags().GetBool("head")
 
 	idFlags, _ := cmd.Flags().GetStringArray("id")
 	in.ids = append(in.ids, args...)
@@ -98,6 +100,12 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 
 	if err := validateCommentsTail(in.commentsTail); err != nil {
 		return err
+	}
+	if in.head {
+		if err := validateShowHead(cmd, jsonOutput); err != nil {
+			return err
+		}
+		in.commentsTail = resolveHeadCommentsTail(cmd, in.commentsTail)
 	}
 
 	// Resolved BEFORE the unit of work opens: --current reads through the
@@ -560,19 +568,26 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	}
 	fmt.Println(formatIssueMetadataWithGates(issue, gates))
 
-	if issue.Description != "" {
-		fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), uimd.RenderMarkdown(issue.Description))
+	// The head view (--head) prints the end of the notes instead of the four
+	// content fields; see show_head.go. The direct route in show.go branches
+	// the same way.
+	if in.head {
+		printHeadNotes(issue.Notes)
 	} else {
-		fmt.Printf("\n%s\n  %s\n", ui.RenderBold("DESCRIPTION"), ui.RenderMuted("(none)"))
-	}
-	if issue.Design != "" {
-		fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESIGN"), uimd.RenderMarkdown(issue.Design))
-	}
-	if issue.Notes != "" {
-		fmt.Printf("\n%s\n%s\n", ui.RenderBold("NOTES"), uimd.RenderMarkdown(issue.Notes))
-	}
-	if issue.AcceptanceCriteria != "" {
-		fmt.Printf("\n%s\n%s\n", ui.RenderBold("ACCEPTANCE CRITERIA"), uimd.RenderMarkdown(issue.AcceptanceCriteria))
+		if issue.Description != "" {
+			fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), uimd.RenderMarkdown(issue.Description))
+		} else {
+			fmt.Printf("\n%s\n  %s\n", ui.RenderBold("DESCRIPTION"), ui.RenderMuted("(none)"))
+		}
+		if issue.Design != "" {
+			fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESIGN"), uimd.RenderMarkdown(issue.Design))
+		}
+		if issue.Notes != "" {
+			fmt.Printf("\n%s\n%s\n", ui.RenderBold("NOTES"), uimd.RenderMarkdown(issue.Notes))
+		}
+		if issue.AcceptanceCriteria != "" {
+			fmt.Printf("\n%s\n%s\n", ui.RenderBold("ACCEPTANCE CRITERIA"), uimd.RenderMarkdown(issue.AcceptanceCriteria))
+		}
 	}
 
 	// A READ on an ALTERNATE view. `bd show`'s detail view is on
@@ -630,8 +645,11 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 
 	printRelatedSection(relatedSeen)
 
-	comments, _ := proxiedGetComments(ctx, uw, issue.ID, isWisp)
+	comments, commentsErr := proxiedGetComments(ctx, uw, issue.ID, isWisp)
 	printComments(comments, in.commentsTail, formatTime, issue.ID)
+	if in.head {
+		printHeadTrailer(issue, len(comments), in.commentsTail, commentsErr != nil)
+	}
 
 	if in.longMode {
 		fmt.Print(formatIssueLongExtras(issue, formatTime))

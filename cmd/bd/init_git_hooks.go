@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -37,6 +38,9 @@ func runEmbeddedInitHooks(ctx context.Context, workDir, beadsDir string, skip, q
 		if !quiet {
 			fmt.Fprintf(os.Stderr, "\n%s Failed to resolve git hooks: %v\n", ui.RenderWarn("⚠"), err)
 		}
+		return
+	}
+	if skipUnmanagedInitHooks(hooks, quiet) {
 		return
 	}
 	hooksExist := hooks.installed()
@@ -408,6 +412,29 @@ func resolveInitHooksContext(workDir, beadsDir string) (*initHooksContext, error
 		beadsDir = filepath.Join(workDir, beadsDir)
 	}
 	return &initHooksContext{workDir: workDir, beadsDir: beadsDir, paths: paths, env: env, inheritedEnv: inherited}, nil
+}
+
+// selectedBeadsDir is the .beads directory whose hooks.manage governs an
+// install through c: the workspace init is creating, or "" (the workspace this
+// process loaded) for a nil context or one that names no storage.
+func (c *initHooksContext) selectedBeadsDir() string {
+	if c == nil {
+		return ""
+	}
+	return c.beadsDir
+}
+
+// skipUnmanagedInitHooks reports whether init must leave git hooks alone
+// because hooks.manage is false for the workspace being initialized, printing
+// the one informational line init shows for it.
+func skipUnmanagedInitHooks(c *initHooksContext, quiet bool) bool {
+	if config.HooksManaged(c.selectedBeadsDir()) {
+		return false
+	}
+	if !quiet {
+		fmt.Printf("  %s\n", hooksNotManagedNote)
+	}
+	return true
 }
 
 func (c *initHooksContext) installed() bool {

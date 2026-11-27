@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-10-26
+Last reviewed: 2026-11-23
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -23,11 +23,23 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 `config.yaml` is searched in this order, with later files overriding earlier ones:
 
 1. `~/.beads/config.yaml` (legacy user-level, lowest priority)
-2. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
-3. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
-4. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
+2. `$XDG_CONFIG_HOME/bd/config.yaml` on Linux and macOS when `XDG_CONFIG_HOME` is set, `%AppData%\bd\config.yaml` on Windows (native user-level; with `XDG_CONFIG_HOME` unset on Linux or macOS this is the next entry)
+3. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
+4. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
+5. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
 
 A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
+
+On macOS, bd no longer reads `~/Library/Application Support/bd/config.yaml` or the global `~/Library/Application Support/beads/PRIME.md`: probing that folder can raise a macOS privacy prompt (GH#8113). The macOS user config directory is now `$XDG_CONFIG_HOME` when set, otherwise `~/.config`, for both `bd/config.yaml` and `beads/PRIME.md`. Move any settings in the old file to `bd/config.yaml`, and PRIME.md to `beads/PRIME.md`, in that directory; `bd doctor` lists the settings that differ and prints the commands. Apart from `bd doctor`, bd reads the old config only when the new one has no `metrics.disabled` (normally once, after upgrading). It then carries the metrics settings (`metrics.disabled`, `metrics.endpoint`, `metrics.notice_shown`) into the new config, keeping any value the new config already sets, and in the same write the per-machine settings `bd config set` writes there: `node_id` unless the new config sets it or `bd config unset` removed it, and `mail.delegate` and `dolt.remotesapi-port` only when bd creates the new config (bd read those two from `~/.config/bd/config.yaml` alone whenever it existed). When bd never reads the old file (`BD_DISABLE_METRICS` or `DO_NOT_TRACK` turns metrics off, the new config already has `metrics.disabled`, or one of the cases below keeps bd out of the old folder), nothing is carried; without `node_id`, the guard that keeps `bd reclaim` from reverting leases another replica granted is off. If the old file cannot be read or parsed, nothing is carried and metrics are left off. If the new config cannot be written, bd leaves the old folder alone and metrics stay off on macOS until the user config sets `metrics.disabled` or `BD_DISABLE_METRICS` is set (`BD_DISABLE_METRICS` set to `0`, `false` or empty turns metrics on). Metrics on macOS also stay off, silently, when the user config has a commented-out `metrics` block, unparseable YAML, a top level that is not a mapping (for example a file holding only `---`), a `metrics` key that is not a section, a dangling symlink or a non-bool `metrics.disabled`; `bd metrics on` or `bd metrics off` settles it (first fix unparseable YAML, a non-mapping top level or a non-section `metrics` key, and create the target folder of a dangling symlink). On macOS bd leaves a `.lock` file named after the user config (`config.yaml.lock`), or after its target when the config is a symlink to an existing file. Paths are unchanged on Linux and Windows.
+
+### Missing `metadata.json`
+
+`.beads/metadata.json` names the workspace's Dolt database. Your issues live in that database; `.beads/issues.jsonl` is only an export of them and never stands in for it. If `metadata.json` is missing from an embedded workspace, bd does not fall back to a new, empty database beside the ones the workspace already holds:
+
+- With exactly one database under `.beads/embeddeddolt/`, bd uses it and names it on stderr.
+- With several, bd refuses to pick one: the command fails before opening any database, lists the candidates, and suggests restoring `metadata.json` or naming the database for the command with `BEADS_DOLT_SERVER_DATABASE=<name> bd ...`.
+- When the workspace holds databases, `BEADS_DOLT_SERVER_DATABASE` must name one of them; a name that matches none is refused rather than created.
+- With none, bd opens the default database, `beads`, or the one `BEADS_DOLT_SERVER_DATABASE` names.
 
 ## Precedence
 
@@ -92,7 +104,9 @@ The full namespaces routed to YAML are:
 
 Plus these individual keys:
 
-`no-db`, `json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `prime.disabled`, `memories.budget-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
+`json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `hooks.manage`, `gitignore.manage`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `prime.disabled`, `memories.budget-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
+
+`no-db` is obsolete: the JSONL-only mode it selected is gone, and issues always live in the Dolt database. `bd config set no-db` is refused; an old `no-db: true` in any `config.yaml` or `config.local.yaml` (or `BD_NO_DB=true`) is ignored with a warning on stderr. `bd config unset no-db` removes it from the workspace's own `config.yaml`; delete an entry in a user-level `config.yaml` or in `config.local.yaml` (see [Configuration Locations](#configuration-locations)) by hand.
 
 Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `password` is treated as a secret: it is refused on git-tracked `config.yaml` files unless you pass `--force-git-tracked`. Prefer exporting the value as an environment variable instead (e.g. `LINEAR_API_KEY`).
 
@@ -106,9 +120,10 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
 | `actor` | `--actor` | `BEADS_ACTOR` | `git config user.name` | Actor name for audit trail (see [Actor identity](#actor-identity-resolution)) |
 | `identity` | `--identity` | `BEADS_IDENTITY` | (git user / hostname) | Sender identity for `bd mail` |
-| `no-db` | `--no-db` | `BD_NO_DAEMON` (related) | `false` | Run without opening the database |
 | `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to the remote in `bd dolt push` |
 | `no-git-ops` | — | — | `false` | Disable git ops in `bd prime` close protocol. Does not affect Dolt remote sync or auto-push; set `dolt.local-only` to stop those |
+| `hooks.manage` | — | `BD_HOOKS_MANAGE` | `true` | When `false`, bd never installs, reinstalls, injects into or migrates git hooks in this repository (see [below](#repositories-that-manage-their-own-hooks-or-gitignore)) |
+| `gitignore.manage` | — | `BD_GITIGNORE_MANAGE` | `true` | When `false`, bd never creates, appends to or rewrites `.beads/.gitignore`, and never adds its patterns to the project `.gitignore` (see [below](#repositories-that-manage-their-own-hooks-or-gitignore)) |
 | `agent.profile` | — | `BD_AGENT_PROFILE` | `conservative` | Policy profile `bd prime` uses for git/commit authority: `conservative`, `minimal`, `team-maintainer`; invalid values fall back to `conservative` |
 | `prime.max-memories` | `--max-memories` | `BD_PRIME_MAX_MEMORIES` | `0` | Max persistent memories injected by `bd prime` (0 = unlimited) |
 | `prime.max-memory-chars` | `--max-memory-chars` | `BD_PRIME_MAX_MEMORY_CHARS` | `0` | Max total bytes of memory entries injected by `bd prime`, at whole-memory boundaries (0 = unlimited) |
@@ -135,10 +150,10 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `backup.git-repo` | — | `BD_BACKUP_GIT_REPO` | (none) | Path to a local git repository (`~/` expands); when set, auto-backup syncs to a `backup/` directory inside it. A path without `.git` falls back to `.beads/backup/` with a warning |
 | `backup.size-cap-mb` | — | `BD_BACKUP_SIZE_CAP_MB` | `2048` | Pause auto-backup once the destination directory reaches this size; `0` disables the cap (see [below](#auto-backup)) |
 | `backup.size-warn-interval` | — | `BD_BACKUP_SIZE_WARN_INTERVAL` | `24h` | Minimum time between repeated "auto-backup paused" warnings |
-| `audit.enabled` | — | `BD_AUDIT_ENABLED` | `false` | Enable the optional JSONL interaction sidecar at `.beads/interactions.jsonl`, written by `bd audit record` / `bd audit label`. While disabled, `bd init` does not create the file and `bd audit record` / `bd audit label` refuse to write. Issue history is always recorded in the database either way — see `bd history <id> --events` |
-| `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` export after every write; not cross-machine sync |
+| `audit.enabled` | — | `BD_AUDIT_ENABLED` | `false` | Enable the optional JSONL interaction sidecar at `.beads/interactions.jsonl`, written by `bd audit record` / `bd audit label`. While disabled, `bd init` does not create the file and `bd audit record` / `bd audit label` refuse to write. While enabled, commands also append best-effort entries: `field_change` rows (extra: `field`, `old_value`, `new_value`, optional `reason`) for `bd update`'s status/assignee/priority changes, a `--claim`'s included, and for `bd close`, whose old value comes from a read just before the write and is advisory under concurrency, not the transactional pre-image; and a post-state-only `claimed` entry (extra: `status`, `assignee`; no prior values) for the claim `bd ready --claim` or `bd close --claim-next` returned, which records a returned claim rather than proof that the command changed the row. Consumers that read only `field_change` must handle `claimed` to see these claims. `bd create`, `bd comment` and many other writes append nothing, so the sidecar is not a replayable history: for ordered replay enable the transactional events journal (`bd config set events-journal true`, read with `bd events tail`). Issue history is always recorded in the database either way — see `bd history <id> --events` |
+| `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` after eligible mutating commands; not cross-machine sync (see [passive export timing](#passive-export-timing-and-coverage)) |
 | `export.path` | — | — | `issues.jsonl` | Output filename relative to `.beads/` |
-| `export.interval` | — | — | `60s` | Minimum time between auto-exports |
+| `export.interval` | — | — | `60s` | Minimum time between auto-exports — a throttle, not a staleness deadline (see [passive export timing](#passive-export-timing-and-coverage)) |
 | `export.git-add` | — | — | `false` | Run `git add` on the export file |
 | `import.auto` | — | `BD_IMPORT_AUTO` | `true` | Master switch for automatic JSONL imports: the git-hook fallback used when no Dolt remote is configured, and the empty-database recovery import when `.beads/issues.jsonl` exists but the database is empty. `false` disables all auto-imports; explicit `bd import` always works |
 | `import.path` | — | — | `issues.jsonl` | Input filename relative to `.beads/` for implied JSONL imports (including `bd init --from-jsonl` and empty-DB auto-import); use relative paths for portability |
@@ -158,6 +173,60 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `ai.model` | — | `BD_AI_MODEL` | `claude-haiku-4-5-20251001` | Default AI model |
 | `agents.file` | — | — | `AGENTS.md` | Agents instruction filename; see routing note below |
 
+### Repositories that manage their own hooks or .gitignore
+
+A repository that runs its own hook manager, or keeps its own `.beads/.gitignore`,
+can tell bd to keep its hands off both. Commit the setting in `.beads/config.yaml`
+so every clone agrees:
+
+```bash
+bd config set hooks.manage false
+bd config set gitignore.manage false
+```
+
+```yaml
+hooks:
+  manage: false
+gitignore:
+  manage: false
+```
+
+With `hooks.manage: false`:
+
+- `bd hooks install` and `bd migrate hooks --apply` refuse with an error that
+  names where the key is set and how to undo it there, and exit non-zero.
+  `bd migrate hooks` checks the repository whose hooks it would rewrite, from
+  any of its subdirectories, as well as the workspace it runs in.
+- `bd init` and `bd config apply` skip hook installation with one informational
+  line; `bd config drift` reports the hooks check as skipped, not as drift.
+- `bd doctor` reports the Git Hooks and Git Hooks Dolt Compatibility checks as
+  "Not managed by bd (hooks.manage=false)" with status ok, reports no pending
+  hook migration, and `bd doctor --fix` leaves the hooks alone, so a legacy
+  inline bd hook the compatibility check would flag is yours to fix.
+  `bd doctor --check-health` and `bd info` stop reporting hooks.
+- `bd hooks uninstall` and `bd hooks run` are unchanged, and `bd doctor --fix`
+  still clears a `core.hooksPath` left pointing at a missing bd hooks directory.
+
+With `gitignore.manage: false`, `bd init`, `bd bootstrap`, `bd connect` and
+`bd doctor --fix` leave `.beads/.gitignore` and the project `.gitignore`
+byte-for-byte as they are (the `bd init --stealth` and `bd doctor --fix` removal
+of bd's section from the project `.gitignore` included). Your own ignore rules
+must then keep the database and the machine-local files under `.beads` out of
+git: `bd init` commits only its own files there (`config.yaml`,
+`metadata.json`, `README.md` and `hooks/`), and `bd doctor` warns, with no fix,
+while `.beads/.gitignore` is missing or lacks a pattern bd requires. It reports
+the Project Gitignore check as not managed. The key does not cover
+`.git/info/exclude`, which `bd init --stealth` and fork protection still update,
+or the `.gitignore` entry `bd worktree create` adds for the worktree it creates.
+
+Unlike `doctor.suppress.*`, which only hides a `bd doctor` warning and lives in
+the database, these keys stop the writes themselves. bd reads them in this
+order: `BD_HOOKS_MANAGE` or `BD_GITIGNORE_MANAGE`, the workspace's
+`config.local.yaml` and `config.yaml`, then your user-level `config.yaml`. A
+user-level `false` applies to every repository you run bd in, including the one
+a `bd init` creates. Any value other than `true` or `false` is refused by
+`bd config set` and read as the default, `true`.
+
 <Warning>
 **JSONL export is opt-in**
 
@@ -176,6 +245,39 @@ bd config set export.git-add true
 Use `bd dolt push` / `bd dolt pull` for sync and `bd backup` for restorable
 database backups.
 </Warning>
+
+### Passive Export Timing and Coverage
+
+`export.auto` refreshes the export after eligible mutating commands, and
+`export.interval` (default `60s`) is the *minimum* time between those
+refreshes. It is not a maximum staleness bound and not a timer: a write
+inside the window is skipped and exports only when a later mutating command
+runs. Without such a command — or an explicit export — the file can remain
+stale indefinitely.
+
+The pre-commit hook adds one more refresh opportunity, but only when the
+commit stages at least one `.beads/` path, and never when
+`.beads/issues.jsonl` itself is staged for deletion. A commit that stages no
+beads paths does not refresh the export.
+
+Detect and refresh a stale file explicitly:
+
+```bash
+bd doctor --check=export
+bd export -o .beads/issues.jsonl
+```
+
+`bd doctor --check=export` is the missing-ID staleness detector: it exits 0
+with a warning when an in-scope store issue ID is absent from the export
+file, and names `bd export -o <resolved-path>` as the refresh action: the
+path is the file auto-export writes, including a custom `export.path`, so
+use it in place of the default path in the example above. It reports ID
+coverage only — not full record content equality, and not backup validity.
+Bare `bd doctor` and `bd doctor --check=artifacts` do not perform this
+coverage check.
+
+The export file is not a database backup: for recovery, use `bd backup` and
+`bd dolt push` / `bd dolt pull` (see [Dolt History, Backup, and Push](#dolt-history-backup-and-push)).
 
 Routing note: `output.title-length` and `agents.file` are functionally tool-level settings, but `bd config set` writes them to the Dolt database. They are typically read from `config.yaml` when set there directly.
 
@@ -278,7 +380,7 @@ How it works:
 - Push failures are warnings only (non-fatal), and failed attempts are throttled too.
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
-Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
+Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`). A timed-out check refuses the push as `pre-push integrity check timed out`, which does not mean the store is corrupt. A finding fsck reports refuses it as `dangling chunk reference`. In bd v1.4.0 and later, an fsck that fails without reporting a finding refuses it as `pre-push integrity check failed`, which does not mean the store is corrupt either; v1.3.4 and earlier refuse that case as `dangling chunk reference` too. To tell them apart, see [Push refused by the pre-push integrity check](/recovery/sync-failures#push-refused-by-the-pre-push-integrity-check).
 
 ## Actor Identity Resolution
 
@@ -321,9 +423,9 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `max_collision_prob` | Hash ID collision tolerance (default `0.25`) |
 | `claim.pools` | Comma-separated pool aliases: placeholder assignees that any actor can take with `bd update <id> --claim` (see [below](#claim-pools)). Unset by default, which turns pool claiming off |
 | `versioned-history.enabled` | `true` records a version row for every issue write to this store; off by default. Unlike the rest of this table it also honors an environment variable, which can only turn it on (see [below](#versioned-issue-history)) |
-| `doctor.suppress.*` | Suppress specific `bd doctor` warnings by check slug (warnings only; errors always show) |
+| `doctor.suppress.*` | Suppress specific `bd doctor` warnings by check slug (warnings only; errors always show). To stop bd writing git hooks or `.gitignore` files at all, use the config.yaml keys `hooks.manage` and `gitignore.manage` instead (see [above](#repositories-that-manage-their-own-hooks-or-gitignore)) |
 
-Issue prefix (`issue_prefix`) is **not** settable via `bd config set` — use `bd init --prefix`, `bd bootstrap`, or `bd rename-prefix`.
+Issue prefix (`issue_prefix`) is **not** settable via `bd config set` — use `bd init --prefix`, `bd bootstrap`, or `bd rename-prefix`. To change only the prefix new issues get, run `bd rename-prefix <new-prefix> --mint-only`: existing IDs stay, and the old prefix is added to `allowed_prefixes` so they remain valid. A dependency between an old-prefix and a new-prefix issue does not block, though (see [Prefix Rename](/reference/advanced#prefix-rename)).
 
 ### Custom Statuses and Types
 
@@ -372,7 +474,8 @@ Counter mode behavior:
 - Each prefix (`bd`, `plug`, ...) has its own independent counter, so multi-repo or routed setups don't interleave.
 - The counter is stored atomically in the database; concurrent creates within a single Dolt session are safe.
 - On first use (including switching an existing repository to counter mode), the counter seeds itself from the highest existing numeric ID for that prefix, so new IDs don't collide with old ones.
-- An explicit `--id` flag on `bd create` bypasses ID generation entirely; the counter is not incremented.
+- An explicit `--id` flag on `bd create` bypasses ID generation entirely; the counter is not incremented. Imports and wisps don't move the counter either.
+- When the counter's next number is already held, by an explicit `--id`, an imported issue, a wisp or a deleted ID that is still reserved, counter mode skips to the next free number. It never overwrites that issue or refuses the create. This holds however far the counter lags, for example after a large import: the next ID is the lowest free number above the counter, and a far-ahead ID such as `bd-5000` doesn't make it jump.
 - Counter mode applies only to regular issues, not wisps.
 
 Tradeoff — hash vs. counter:
@@ -427,7 +530,7 @@ bd config set versioned-history.enabled false   # turn it off
 - **What that check does not cover.** It runs once, at the moment you turn the setting on. A writer that does not record versions (an older `bd`, `bd sql`, a pull from a clone that had history off) can add such a row at any time afterwards, including right after the switch is on, and, if that row participates in history, the first write to it then fails with the same refusal, as does the next pour or bond of a proto it is part of, whatever it is; the same fix applies. Checking and writing the setting in one transaction would narrow that window, not close it. A formula file is not in the store, so the check cannot read one: with history on, `bd mol pour`, `bd mol bond` or `bd cook --persist` straight from a formula that holds such a value is refused when it is made, naming the step and the field. Nor does it check an issue on the wisps plane, where a proto created with `--ephemeral` or `--no-history` lives: a persistent pour of such a proto is refused the same way. Turning recording on through `BD_VERSIONED_HISTORY_ENABLED` or `config.yaml` does not go through the command at all, and nothing is checked when a store is opened either (those planes are read by every `bd` process on every open), so nothing is checked ahead of time there: a write to such a row is refused when it happens, in its own transaction, naming the issue, the field and the value, and the same fix applies (for a gate's timeout, with recording off). Duplicate keys in metadata are refused too, but Dolt's JSON column collapses them when it stores a document, so on a Dolt store neither the check nor a write can see one; that refusal is a defense for another backend that keeps them.
 - **The environment can turn it on, never off.** `BD_VERSIONED_HISTORY_ENABLED=1`, or a hand-written `enabled: true` under `versioned-history:` in `config.yaml`, applies to every store the process opens, routed targets included. The environment and the row are OR'd, not ranked, so `BD_VERSIONED_HISTORY_ENABLED=0` does not turn off a store whose row says `true`. Turn it off where it was turned on: `bd config set versioned-history.enabled false`.
 - **Server-backed modes read the same row.** Proxied-server mode, and `bd serve` against a server-mode workspace, write through a unit-of-work provider rather than a store. The provider reads the row from its own database inside its first unit of work, so `bd config set versioned-history.enabled true` covers those modes too. It does not fall back to the environment alone.
-- **The Go SDK is not covered.** Writers built on the Go SDK (the `beads` package: `Open`, `OpenFromConfig`, `OpenGated`, `OpenBestAvailable`) do not apply the switch: a write they make to a store whose row says `true` records no version. The `bd` binary's store factories apply it, and the events journal's switch has the same boundary. Opening a store through the SDK and applying both switches is a separate change.
+- **The Go SDK is covered only on a proxied-server workspace.** `OpenBestAvailable` and `OpenBestAvailableWith` open a proxied-server workspace through its bd proxy, as `bd` does, and apply this switch and the events journal's. Every other Go SDK open (the `beads` package: `Open`, `OpenFromConfig`, `OpenGated`, `OpenBestAvailable` on an embedded or server-mode workspace, and `OpenBestAvailable` on a proxied-server workspace whose environment forces server mode and names the port in `BEADS_DOLT_SERVER_PORT`, which dials that port directly) does not apply the switch: a write it makes to a store whose row says `true` records no version. The `bd` binary's store factories apply it, and the events journal's switch has the same boundary.
 - **The value is read by a store's first write transaction**, or, for a proxied-server provider, by its first unit of work, read or write. A store that only reads never reads it, so a command that never writes pays nothing for the setting; `bd ready` does write, because it first wakes issues whose defer time has passed. If that read fails, the transaction that made it fails with it and changes nothing, and the next one reads the setting again. A long-lived process such as `bd serve` keeps the value it read until it is restarted, so after changing the setting, restart it.
 
 ## Sync and Federation
@@ -545,6 +648,7 @@ Selected commonly-used variables:
 | `BEADS_GATE_WAIT_TIMEOUT` | How long an ordinary bd command waits while a maintenance operation (`bd init`, backup restore, migrate, bootstrap — on the same workspace, or on any project sharing the server in shared-server mode) holds or is queued for the workspace gate, before failing (default `30s`; accepts durations like `1m` or bare seconds like `90`; `0` fails immediately, for scripts that want the old fail-fast behavior). Queued maintenance operations run one after another and a waiting command waits for all of them; a queued one only delays a command, never fails it, and stops queueing others after 10s if it cannot get in. Git hooks always fail fast |
 | `BEADS_MIGRATION_WATCHDOG_INTERVAL` | Interval between soft WARN lines while a schema migration's SQL keeps running (default `5m`; accepts durations like `10m` or bare seconds like `90`). Observability only — it never aborts a migration |
 | `BEADS_DOLT_SERVER_MODE`, `BEADS_DOLT_SHARED_SERVER`, `BEADS_DOLT_DATA_DIR`, `BEADS_DOLT_PORT`, ... | Embedded/server Dolt overrides |
+| `BEADS_DOLT_SERVER_DATABASE` | Dolt database name, overriding `metadata.json`. In an embedded workspace without `metadata.json` it must name a database the workspace already holds (see [Missing `metadata.json`](#missing-metadatajson)) |
 | `BEADS_DOLT_BIN` | Pin the exact external `dolt` CLI binary managed proxied-server mode spawns, overriding PATH lookup (highest precedence; an explicit path that fails validation is an error, not a silent fallback to PATH). On Windows the executable extension may be omitted — `C:\tools\dolt` finds `C:\tools\dolt.exe` via PATHEXT, though a file at the exact spelled path wins if both exist. The binary must be dolt 2.6.0 or newer; an older one is refused |
 
 Integration secrets follow tracker-specific conventions: `LINEAR_API_KEY`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `JIRA_API_TOKEN`, `AZURE_DEVOPS_PAT`, `ANTHROPIC_API_KEY`. These are preferred over storing the value in `config.yaml` for git-tracked projects.

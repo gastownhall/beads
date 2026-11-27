@@ -128,13 +128,29 @@ jobs:
       # migrations. Checks A and B (duplicate versions, nondeterministic SQL)
       # read only the tree and run in Bazel. Details:
       # scripts/check-migration-hygiene.sh.
+      #
+      # The base is the same one the .beads guard below takes: origin/<base
+      # branch> on a pull_request, merge_group.base_sha in the merge queue.
+      # It is not pull_request.base.sha: that commit stays behind when the
+      # base branch moves, while the checkout is the pull request merged
+      # into the base branch's tip. Diffed from the commit left behind,
+      # every migration the base branch changed or added since counts as
+      # this pull request's (#6588).
       - name: Run migration hygiene checks
         id: migration-hygiene
         if: ${{ !cancelled() }}
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           MIGRATION_HYGIENE_SCOPE: delta
-        run: ./scripts/check-migration-hygiene.sh
+        run: |
+          base="${MERGE_GROUP_BASE_SHA:-origin/${GITHUB_BASE_REF:-main}}"
+          # Fail closed: the script skips checks C, D and E with a warning
+          # when it cannot resolve its base.
+          if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+            echo "::error::diff base $base is unavailable"
+            exit 1
+          fi
+          BASE_SHA="$base" ./scripts/check-migration-hygiene.sh
 
       # Fast check to catch accidental .beads/issues.jsonl changes from
       # contributors. Runs on both PR triggers: a pull_request diffs against

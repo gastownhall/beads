@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/remedy"
 )
@@ -88,6 +89,21 @@ dolt-pprof/
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
+# Dolt-native backup destination and last-sync state (bd backup init/sync).
+# dolt-backup.json holds an absolute path for a filesystem destination.
+dolt-backup.json
+dolt-backup-state.json
+
+# Audit log of bd dolt set changes (each line records the .beads path)
+dolt-config.log
+
+# JSONL auto-import stamp (size and mtime of the issues.jsonl last attempted)
+.auto-import-issues.jsonl
+
+# Resume journal of the bd migrate from-<mode>-to-<mode> switches (absolute
+# paths; kept only while a migration is unfinished)
+dolt-mode-migration.json
+
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 
@@ -152,12 +168,22 @@ var requiredPatterns = []string{
 	"http_local_metadata.json",
 	".local_version",
 	"backup/",
+	// GH#8318: machine-local files beside backup/, which only matches the directory.
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+	"dolt-mode-migration.json",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
 // repoPath is the project root directory.
 func CheckGitignore(repoPath string) DoctorCheck {
-	gitignorePath := filepath.Join(ResolveBeadsDirForRepo(repoPath), ".gitignore")
+	beadsDir := ResolveBeadsDirForRepo(repoPath)
+	if !config.GitignoreManaged(beadsDir) {
+		return checkOwnedGitignore(beadsDir)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
 
 	// Check if file exists
 	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- path is constructed from known parts
@@ -203,6 +229,34 @@ func CheckGitignore(repoPath string) DoctorCheck {
 	}
 }
 
+// checkOwnedGitignore is CheckGitignore for a workspace that sets
+// gitignore.manage: false, whose .beads/.gitignore bd never writes. A file that
+// ignores every required pattern is reported as not managed. A missing file, or
+// one that lacks a required pattern, is still a warning, because whatever it
+// misses (the database among it) goes into the next whole-directory git add, but
+// a warning with no fix: bd doctor --fix does not write the file, and the
+// repository adds the patterns itself.
+func checkOwnedGitignore(beadsDir string) DoctorCheck {
+	content, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore")) // #nosec G304 -- path is constructed from known parts
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Gitignore",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf(".beads/.gitignore not found, and bd does not write it (%s=false)", config.GitignoreManageKey),
+			Detail:  "Nothing keeps the database and the machine-local files under .beads out of git. Add a .beads/.gitignore with the patterns bd requires, or set gitignore.manage to true and run bd doctor --fix.",
+		}
+	}
+	if missing := missingGitignorePatterns(string(content)); len(missing) > 0 {
+		return DoctorCheck{
+			Name:    "Gitignore",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf(".beads/.gitignore misses required patterns, and bd does not add them (%s=false)", config.GitignoreManageKey),
+			Detail:  "Missing: " + strings.Join(missing, ", "),
+		}
+	}
+	return notManagedCheck("Gitignore", config.GitignoreManageKey)
+}
+
 // beadsGitignoreTooLoose reports whether .beads/.gitignore grants any group or
 // other access. Owner bits stricter than 0600 (e.g. 0400) are not loose, so the
 // check never asks for, and the fix never makes, a change that adds access.
@@ -230,7 +284,15 @@ var chmodBeadsGitignore = os.Chmod
 // Permissions: the file must grant no group or other access. A file bd creates
 // or must modify ends at the canonical 0600; owner bits stricter than 0600
 // (e.g. 0400) on a file bd does not write are preserved.
+//
+// A workspace that sets gitignore.manage: false owns the file: this returns nil
+// without reading, creating, appending to or changing the mode of it. Every
+// .beads/.gitignore write in cmd/bd (init, bootstrap, connect, doctor --fix)
+// goes through here, and writeGitignoreTemplate has no other caller.
 func EnsureGitignoreForBeadsDir(beadsDir string) error {
+	if !config.GitignoreManaged(beadsDir) {
+		return nil
+	}
 	gitignorePath := filepath.Join(beadsDir, ".gitignore")
 
 	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- caller supplies the active .beads dir
@@ -777,6 +839,9 @@ func FixLastTouchedTracking(repoPath string) error {
 // to prevent accidentally committing Dolt database files and credential keys.
 // repoPath is the project root directory.
 func CheckProjectGitignore(repoPath string) DoctorCheck {
+	if !config.GitignoreManaged(ResolveBeadsDirForRepo(repoPath)) {
+		return notManagedCheck("Project Gitignore", config.GitignoreManageKey)
+	}
 	gitignorePath := filepath.Join(repoPath, ".gitignore")
 
 	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- path is hardcoded
@@ -827,8 +892,12 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 // nonempty files retain their bytes and receive a blank separator before it.
 // This prevents users from accidentally committing
 // Dolt database files or the credential encryption key.
-// repoPath is the project root directory.
+// repoPath is the project root directory. Under gitignore.manage: false for
+// the workspace at repoPath it returns nil and writes nothing.
 func EnsureProjectGitignore(repoPath string) error {
+	if !config.GitignoreManaged(ResolveBeadsDirForRepo(repoPath)) {
+		return nil
+	}
 	gitignorePath := filepath.Join(repoPath, ".gitignore")
 
 	// #nosec G304 -- path is hardcoded

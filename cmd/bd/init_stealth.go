@@ -197,8 +197,12 @@ func addProjectPatternsToGitExclude(repoPath string, patterns []string, verbose 
 // writes (doctor.ProjectGitignoreHeader) plus the Dolt pattern lines beads added directly beneath
 // it, so unrelated user patterns are preserved. If beads was the .gitignore's only content the file
 // is removed entirely, restoring true stealth. Returns true when it changed (or removed) the file;
-// a repo with no beads section (or no .gitignore) is left untouched.
+// a repo with no beads section (or no .gitignore) is left untouched, and so is
+// every repo whose workspace sets gitignore.manage: false.
 func removeBeadsProjectGitignoreSection(repoPath string) (bool, error) {
+	if !config.GitignoreManaged(doctor.ResolveBeadsDirForRepo(repoPath)) {
+		return false, nil
+	}
 	gitignorePath := filepath.Join(repoPath, ".gitignore")
 	// #nosec G304 - path is the repo-root .gitignore
 	content, err := os.ReadFile(gitignorePath)
@@ -266,8 +270,13 @@ func isStealthRepo(repoPath string) bool {
 
 // trackedGitignoreHasBeadsSection reports whether the tracked project-root .gitignore at repoPath
 // still carries the bd-managed section header — i.e. a previous run leaked Dolt patterns into a
-// git-visible file. Used by the stealth doctor check to flag the leak for --fix to clean up.
+// git-visible file. Used by the stealth doctor check to flag the leak for --fix to clean up. Under
+// gitignore.manage: false the file is the repository's own and --fix leaves it alone, so the
+// section is not reported as a leak.
 func trackedGitignoreHasBeadsSection(repoPath string) bool {
+	if !config.GitignoreManaged(doctor.ResolveBeadsDirForRepo(repoPath)) {
+		return false
+	}
 	// #nosec G304 - path is the repo-root .gitignore
 	content, err := os.ReadFile(filepath.Join(repoPath, ".gitignore"))
 	if err != nil {

@@ -511,11 +511,11 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 
 	if recordEvent {
-		oldData, _ := json.Marshal(oldIssue)
+		oldData := ChangedFieldsPreImage(oldIssue, updates)
 		newData, _ := json.Marshal(updates)
 		eventType := DetermineEventType(oldIssue, updates)
 
-		if err := RecordFullEventInTable(ctx, tx, eventTable, id, eventType, actor, string(oldData), string(newData)); err != nil {
+		if err := RecordFullEventInTable(ctx, tx, eventTable, id, eventType, actor, oldData, string(newData)); err != nil {
 			return nil, fmt.Errorf("failed to record event: %w", err)
 		}
 	}

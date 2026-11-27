@@ -251,8 +251,8 @@ func TestMergeQueuePullRequestFieldsHandleMergeGroup(t *testing.T) {
 			t.Errorf("stale merge_group classification %q (%s): nothing matches it", suffix, why)
 		}
 	}
-	if len(fallbacks) < 3 {
-		t.Fatalf("found %d merge_group fallbacks, want at least the migration-hygiene BASE_SHA and both package gates' bounds", len(fallbacks))
+	if len(fallbacks) < 4 {
+		t.Fatalf("found %d merge_group fallbacks, want at least both package gates' base and head bounds", len(fallbacks))
 	}
 	for _, expr := range fallbacks {
 		mg, pr := interpolateGH(t, expr, mergeGroupCtx(1, nil)), interpolateGH(t, expr, pullRequestCtx(1, nil))
@@ -543,6 +543,162 @@ func TestGHExprLooseEquality(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("%s with %v = %v, want %v", c.expr, c.ctx, got, c.want)
+		}
+	}
+}
+
+// fast-checks' migration-hygiene step judges a pull request by its own
+// migration changes. In each fixture the base branch (release/x) changes its
+// migrations after the pull request was cut, and HEAD is the pull request
+// merged into that tip, which is what both events check out. The commit the
+// pull request was cut from stands for pull_request.base.sha, which stays at
+// an older base-branch commit when the base branch moves. The script given
+// that commit (the control) gets both shapes wrong:
+//
+//   - the base branch renames a shipped migration, as main's 1.3.0
+//     forward-port did (#6588): a pull request that changed no migration is
+//     failed for the rename;
+//   - the base branch adds an ignored-plane migration: a pull request whose
+//     new migration alters a clone-local table without a twin passes check D,
+//     because the base branch's file counts as its twin.
+//
+// origin/main stays at the cut commit too, so a step that ignored
+// GITHUB_BASE_REF, or the queue's base commit, or dropped BASE_SHA and left
+// the script to its origin/main default, fails the same rows.
+func TestMergeQueueMigrationHygieneBase(t *testing.T) {
+	requireHostTool(t, "git")
+	requireHostTool(t, "bash")
+	// The script's check E needs bash >= 4 (declare -A); macOS ships bash
+	// 3.2 as /bin/bash. The step itself runs on Linux.
+	if err := exec.Command("bash", "-c", "declare -A probe=()").Run(); err != nil {
+		skipOrFailWithoutHostTool(t, "bash lacks associative arrays (bash >= 4 required)")
+	}
+	step := readCIWorkflow(t, "pr.yml").job(t, "fast-checks").step(t, "Run migration hygiene checks")
+	script, err := os.ReadFile(filepath.Join(sourceRepoRoot(t), "scripts", "check-migration-hygiene.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		migrations = "internal/storage/schema/migrations/"
+		baseBranch = "release/x"
+	)
+	write := func(dir, rel, content string) {
+		t.Helper()
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	renameShipped := func(dir string) {
+		gitIn(t, dir, "mv", migrations+"0001_a.up.sql", migrations+"0003_a.up.sql")
+	}
+	addIgnored := func(dir string) {
+		write(dir, migrations+"ignored/0001_d.up.sql", "ALTER TABLE wisps ADD COLUMN d INT;\n")
+	}
+	// fixture returns the repo, the commit the pull request was cut from
+	// and the base branch's tip.
+	fixture := func(prFile, prContent string, baseChange func(dir string)) (dir, cut, tip string) {
+		t.Helper()
+		dir, _, cut = mergeQueueRepo(t, []string{migrations + "0001_a.up.sql", migrations + "0002_b.up.sql"})
+		gitIn(t, dir, "checkout", "-q", "-b", "pr")
+		write(dir, prFile, prContent)
+		gitIn(t, dir, "add", "-A")
+		gitIn(t, dir, "commit", "-q", "-m", "pull request")
+		gitIn(t, dir, "checkout", "-q", "-b", "base", cut)
+		baseChange(dir)
+		gitIn(t, dir, "add", "-A")
+		gitIn(t, dir, "commit", "-q", "-m", "the base branch changes its migrations")
+		tip = strings.TrimSpace(gitIn(t, dir, "rev-parse", "HEAD"))
+		gitIn(t, dir, "update-ref", "refs/remotes/origin/"+baseBranch, tip)
+		gitIn(t, dir, "update-ref", "refs/remotes/origin/main", cut)
+		gitIn(t, dir, "checkout", "-q", "--detach", tip)
+		gitIn(t, dir, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+		write(dir, "scripts/check-migration-hygiene.sh", string(script))
+		if err := os.Chmod(filepath.Join(dir, "scripts", "check-migration-hygiene.sh"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir, cut, tip
+	}
+	stepEnv := func(ctx map[string]string, extra ...string) []string {
+		t.Helper()
+		env := []string{"PATH=" + os.Getenv("PATH")}
+		for k, v := range step.Env {
+			env = append(env, k+"="+interpolateGH(t, v, ctx))
+		}
+		return append(env, extra...)
+	}
+	// GitHub's default shell for a run step without `shell:`.
+	runStep := func(dir string, env []string) (string, error) {
+		cmd := exec.Command("bash", "--noprofile", "--norc", "-e", "-c", step.Run)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	const ok = "Migration hygiene OK"
+	for _, c := range []struct {
+		name       string
+		prFile     string
+		prContent  string
+		baseChange func(dir string)
+		pass       bool
+		want       string // in the step's output
+		// The control: the script given the commit the pull request was
+		// cut from. It shows that the fixture tells the two bases apart.
+		controlPass bool
+		controlWant string
+	}{
+		{
+			name: "base branch renames a shipped migration, pull request changes none", prFile: "README.md", prContent: "docs\n",
+			baseChange: renameShipped, pass: true, want: ok,
+			controlPass: false, controlWant: "0001_a.up.sql",
+		},
+		{
+			name: "base branch renames a shipped migration, pull request edits another", prFile: migrations + "0002_b.up.sql", prContent: "edited\n",
+			baseChange: renameShipped, pass: false, want: "0002_b.up.sql",
+			controlPass: false, controlWant: "0001_a.up.sql",
+		},
+		{
+			name: "base branch adds an ignored migration, pull request adds clone-local DDL without a twin", prFile: migrations + "0004_c.up.sql", prContent: "ALTER TABLE wisps ADD COLUMN c INT;\n",
+			baseChange: addIgnored, pass: false, want: "ignored twin missing",
+			controlPass: true, controlWant: ok,
+		},
+	} {
+		dir, cut, tip := fixture(c.prFile, c.prContent, c.baseChange)
+		for event, env := range map[string][]string{
+			"merge_group":  stepEnv(mergeGroupCtx(1, map[string]string{"github.event.merge_group.base_sha": tip})),
+			"pull_request": stepEnv(pullRequestCtx(1, map[string]string{"github.event.pull_request.base.sha": cut}), "GITHUB_BASE_REF="+baseBranch),
+		} {
+			out, err := runStep(dir, env)
+			if (err == nil) != c.pass || !strings.Contains(out, c.want) {
+				t.Errorf("%s, %s: err %v, want pass %v and output with %q\n%s", event, c.name, err, c.pass, c.want, out)
+			}
+			// A WARN line is a check skipped for want of a base.
+			if strings.Contains(out, "WARN") || strings.Contains(out, "0001_a.up.sql") || strings.Contains(out, "0003_a.up.sql") {
+				t.Errorf("%s, %s: the step skipped a check or charged the pull request with the base branch's rename\n%s", event, c.name, out)
+			}
+		}
+		cmd := exec.Command("bash", filepath.Join(dir, "scripts", "check-migration-hygiene.sh"))
+		cmd.Dir = dir
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "MIGRATION_HYGIENE_SCOPE=delta", "BASE_SHA=" + cut}
+		if out, err := cmd.CombinedOutput(); (err == nil) != c.controlPass || !strings.Contains(string(out), c.controlWant) {
+			t.Errorf("%s: the script given the commit the pull request was cut from: err %v, want pass %v and output with %q\n%s", c.name, err, c.controlPass, c.controlWant, out)
+		}
+	}
+
+	// The step fails closed when its base is missing: the script itself
+	// skips checks C, D and E with a warning. origin/main exists here, so
+	// a step that fell back to it would not fail.
+	dir, _, _ := fixture(migrations+"0002_b.up.sql", "edited\n", renameShipped)
+	for name, env := range map[string][]string{
+		"merge_group, unknown base_sha":      stepEnv(mergeGroupCtx(1, map[string]string{"github.event.merge_group.base_sha": strings.Repeat("e", 40)})),
+		"pull_request, no origin/<base ref>": stepEnv(pullRequestCtx(1, nil), "GITHUB_BASE_REF=release/y"),
+	} {
+		if out, err := runStep(dir, env); err == nil || !strings.Contains(out, "unavailable") {
+			t.Errorf("%s: err %v, want a failure naming the missing base\n%s", name, err, out)
 		}
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -75,6 +76,10 @@ type hookMigrationExecutionPlan struct {
 	RetireOps      []hookMigrationRetireOp `json:"retire_ops"`
 	NoopHooks      []string                `json:"noop_hooks"`
 	BlockingErrors []string                `json:"blocking_errors"`
+	// RepoPath is the repository whose hooks the plan rewrites (the path the
+	// plan was built for when it found no repository); its workspace's
+	// hooks.manage decides whether the plan may be applied.
+	RepoPath string `json:"-"`
 }
 
 type hookMigrationOutputOperation struct {
@@ -128,6 +133,9 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 		RetireOps:      make([]hookMigrationRetireOp, 0, plan.NeedsMigrationCount*2),
 		NoopHooks:      make([]string, 0, plan.TotalHooks),
 		BlockingErrors: make([]string, 0),
+		// The repository root, not the path the plan was built for: that path
+		// can be a subdirectory, which has no .beads of its own.
+		RepoPath: cmp.Or(plan.RepoRoot, plan.Path),
 	}
 
 	for _, hook := range plan.Hooks {
@@ -232,7 +240,35 @@ type preparedHookWrite struct {
 	Content  []byte
 }
 
+// hookMigrationBeadsDir is the .beads directory whose hooks.manage governs a
+// migration of the hooks at repoPath ("" for the loaded workspace).
+func hookMigrationBeadsDir(repoPath string) string {
+	if repoPath == "" {
+		return ""
+	}
+	return doctor.ResolveBeadsDirForRepo(repoPath)
+}
+
+// refuseUnmanagedHookMigration refuses a migration of execPlan's hooks when
+// hooks.manage is false for the repository that holds them or, when the
+// command named no path (loadedWorkspace), for the workspace it runs in: the
+// one bd hooks install consults, found by walking up from a subdirectory or
+// through BEADS_DIR, which need not be the repository's own .beads.
+func refuseUnmanagedHookMigration(execPlan hookMigrationExecutionPlan, loadedWorkspace bool) error {
+	if loadedWorkspace {
+		if err := refuseUnmanagedHooks(""); err != nil {
+			return err
+		}
+	}
+	return refuseUnmanagedHooks(hookMigrationBeadsDir(execPlan.RepoPath))
+}
+
 func applyHookMigrationExecution(execPlan hookMigrationExecutionPlan) (hookMigrationApplySummary, error) {
+	// Before any write or sidecar rename: a migration rewrites hook files.
+	// bd doctor --fix reaches this without bd migrate hooks' own check.
+	if err := refuseUnmanagedHookMigration(execPlan, false); err != nil {
+		return hookMigrationApplySummary{}, err
+	}
 	if len(execPlan.BlockingErrors) > 0 {
 		return hookMigrationApplySummary{}, fmt.Errorf(
 			"hook migration blocked by %d issue(s): %s",

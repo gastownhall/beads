@@ -425,8 +425,8 @@ func TestInit_ConsoleExportersWriteToStderr(t *testing.T) {
 // TestBuildResource_NeverCarriesCommandLine pins the privacy contract of the
 // process resource: it is attached to every exported metric and span, so it
 // must not carry the raw command line (which can hold secrets, search text
-// and issue titles that scrubArgsForTelemetry exists to keep out), nor the
-// executable path or OS user name, which identify the person running bd.
+// and issue titles, none of which the command span's bd.args carries), nor
+// the executable path or OS user name, which identify the person running bd.
 func TestBuildResource_NeverCarriesCommandLine(t *testing.T) {
 	clearAllEnv(t)
 	const secret = "s3cr3t-telemetry-argv-canary"

@@ -2637,18 +2637,25 @@ func TestPRCIGateFastChecksTokens(t *testing.T) {
 	}
 
 	// The migration step runs only the delta half (checks C, D and E) of
-	// check-migration-hygiene.sh against the PR's base; the tree half is
-	// //scripts/repochecks:migration_hygiene_test.
+	// check-migration-hygiene.sh; the tree half is
+	// //scripts/repochecks:migration_hygiene_test. Its base is the .beads
+	// guard's: origin/<base branch> on pull_request, the queue's base commit
+	// on merge_group. pull_request.base.sha stays behind when the base
+	// branch moves, and a diff from it charges the pull request with the
+	// base branch's own migration changes (#6588;
+	// TestMergeQueueMigrationHygieneBase runs the step on that shape).
 	migrationHygiene := job.step(t, "Run migration hygiene checks")
-	const wantBaseSHA = "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}"
-	if migrationHygiene.Env["BASE_SHA"] != wantBaseSHA {
-		t.Errorf("fast-checks migration-hygiene step env BASE_SHA = %q, want %q", migrationHygiene.Env["BASE_SHA"], wantBaseSHA)
+	if _, ok := migrationHygiene.Env["BASE_SHA"]; ok {
+		t.Errorf("fast-checks migration-hygiene step sets env BASE_SHA = %q; the run script derives the base", migrationHygiene.Env["BASE_SHA"])
+	}
+	if migrationHygiene.Env["MERGE_GROUP_BASE_SHA"] != "${{ github.event.merge_group.base_sha }}" ||
+		!strings.Contains(migrationHygiene.Run, `base="${MERGE_GROUP_BASE_SHA:-origin/${GITHUB_BASE_REF:-main}}"`) ||
+		!strings.Contains(migrationHygiene.Run, `BASE_SHA="$base" ./scripts/check-migration-hygiene.sh`) ||
+		strings.Contains(migrationHygiene.Run, "${{") || strings.Contains(fmt.Sprint(migrationHygiene.Env), "pull_request.base.sha") {
+		t.Errorf("fast-checks migration-hygiene step must diff merge_group.base_sha (merge queue) or origin/$GITHUB_BASE_REF (pull_request), never pull_request.base.sha, without interpolating expressions: env %v\n%s", migrationHygiene.Env, migrationHygiene.Run)
 	}
 	if migrationHygiene.Env["MIGRATION_HYGIENE_SCOPE"] != "delta" {
 		t.Errorf("fast-checks migration-hygiene step MIGRATION_HYGIENE_SCOPE = %q, want delta", migrationHygiene.Env["MIGRATION_HYGIENE_SCOPE"])
-	}
-	if migrationHygiene.Run != "./scripts/check-migration-hygiene.sh" {
-		t.Errorf("fast-checks migration-hygiene step run = %q", migrationHygiene.Run)
 	}
 }
 
@@ -2666,6 +2673,7 @@ func TestPRPolicyChecksRunAsBazelTargets(t *testing.T) {
 		{"scripts/repochecks/BUILD.bazel", "build_tags_test", `"scripts/check-build-tags.sh"`, ""},
 		{"scripts/repochecks/BUILD.bazel", "workflow_tags_test", `"$(rlocationpath //scripts/checkworkflowtags)"`, ""},
 		{"scripts/repochecks/BUILD.bazel", "go_install_guidance_test", `"scripts/check-go-install-guidance.sh"`, ""},
+		{"scripts/repochecks/BUILD.bazel", "legacy_repo_refs_test", `"scripts/check-legacy-repo-refs.sh"`, ""},
 		{"scripts/repochecks/BUILD.bazel", "winget_portable_alias_test", `"scripts/check-winget-portable-alias.sh"`, ""},
 		{"scripts/repochecks/BUILD.bazel", "migration_hygiene_test", `"MIGRATION_HYGIENE_SCOPE": "tree"`, ""},
 		{"scripts/repochecks/BUILD.bazel", "fmt_test", `"scripts/ci/fmt-check.sh"`, ""},

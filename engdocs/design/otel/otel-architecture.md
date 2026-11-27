@@ -168,10 +168,13 @@ defer telemetry.Shutdown(ctx)
 - never `process.command_args`, `process.executable.path` or `process.owner`
   (the raw argv can hold secrets; see `buildResource`)
 
-**Custom resource attributes** (via `OTEL_RESOURCE_ATTRIBUTES` env var or `BEADS_ACTOR`):
-- `bd.actor`: Actor identity (from git config or env) — set after actor resolution
+`OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` can add or override
+resource attributes (the `FromEnv` detector runs last).
+
+**Command span attributes** (on each `bd.command.<name>` span, not the resource):
 - `bd.command`: Current command name
-- `bd.args`: Full arguments passed to command
+- `bd.args`: Command path and the names of the flags set, never an argument or flag value (#8505)
+- `bd.actor`: Actor identity (`--actor`, else `BEADS_ACTOR` or config, else git `user.name` or `$USER`) — set after actor resolution
 
 ---
 
@@ -331,10 +334,10 @@ OTel SDK uses dot-notation internally. Prometheus-compatible backends (VictoriaM
 | `storage.CreateIssue` | Issue creation | `bd.issue.id`, `bd.issue.type`, `bd.actor` |
 | `storage.UpdateIssue` | Issue update | `bd.issue.id`, `bd.update.count`, `bd.actor` |
 | `storage.GetIssue` | Issue lookup | `bd.issue.id` |
-| `storage.SearchIssues` | Issue search | `bd.query`, `bd.result.count` |
+| `storage.SearchIssues` | Issue search | `bd.result.count` (never the search text) |
 | `storage.GetReadyWork` | Ready work query | `bd.result.count` |
 | `storage.GetBlockedIssues` | Blocked issues query | `bd.result.count` |
-| `storage.RunInTransaction` | Transaction execution | `db.commit_msg` |
+| `storage.RunInTransaction` | Transaction execution | `db.operation` (never the commit message) |
 
 ### Dolt Events
 
@@ -343,7 +346,7 @@ OTel SDK uses dot-notation internally. Prometheus-compatible backends (VictoriaM
 | `dolt.query` | Each SQL query (`queryContext`) | `db.operation`, `db.statement` |
 | `dolt.exec` | Each SQL write (`execContext`) | `db.operation`, `db.statement` |
 | `dolt.query_row` | Single-row queries (`queryRowContext`) | `db.operation`, `db.statement` |
-| `dolt.commit` | DOLT_COMMIT operation | `commit_msg` |
+| `dolt.commit` | DOLT_COMMIT operation | `doltSpanAttrs()` only (never the commit message) |
 | `dolt.push` | DOLT_PUSH operation | `dolt.branch` |
 | `dolt.pull` | Pull: fetch, then DOLT_MERGE of the tracking ref | `dolt.branch` |
 | `dolt.merge` | DOLT_MERGE operation | `dolt.merge_branch` |
@@ -539,10 +542,10 @@ Every factual claim in this document is backed by a specific source location. Th
 | `CreateIssue` — attrs: `bd.actor`, `bd.issue.type` | `storage.go:86` |
 | `UpdateIssue` — attrs: `bd.issue.id`, `bd.update.count`, `bd.actor` | `storage.go:131` |
 | `GetIssue` — attr: `bd.issue.id` | `storage.go:108` |
-| `SearchIssues` — attrs: `bd.query`, `bd.result.count` | `storage.go:162` |
+| `SearchIssues` — attr: `bd.result.count` (no search text since #8505) | `storage.go` |
 | `GetReadyWork` — attr: `bd.result.count` | `storage.go:283` |
 | `GetBlockedIssues` — attr: `bd.result.count` | `storage.go:293` |
-| `RunInTransaction` — attr: `db.commit_msg` | `storage.go:393` |
+| `RunInTransaction` — `db.operation` only (no commit message since #8505) | `storage.go` |
 | `GetStatistics` emits gauge broken down by status | `storage.go:349` |
 | `AddDependency`, `RemoveDependency`, `GetDependencies` instrumented | `storage.go:175, 187, 198` |
 | `AddLabel`, `RemoveLabel`, `GetLabels` instrumented | `storage.go:243, 254, 265` |
@@ -589,8 +592,8 @@ Every factual claim in this document is backed by a specific source location. Th
 |-------|--------|
 | Span `hook.exec` created in `runHook` | `hooks_unix.go:31` |
 | Span attrs: `hook.event`, `hook.path`, `bd.issue_id` | `hooks_unix.go:33-35` |
-| Stdout/stderr added as span events via `addHookOutputEvents` | `hooks_otel.go:14, 20` |
-| `hook.stdout` / `hook.stderr` events carry `output`, `bytes` attrs | `hooks_otel.go:15-16, 21-22` |
+| Stdout/stderr added as span events via `addHookOutputEvents` | `hooks_otel.go:17, 20` |
+| `hook.stdout` / `hook.stderr` events carry `bytes` only (no output text since #8505) | `hooks_otel.go` |
 | No metric counters or histograms for hooks | grep `internal/hooks/` for `Counter\|Histogram` → zero matches |
 
 ### AI (`internal/compact/haiku.go`, `cmd/bd/find_duplicates.go`)

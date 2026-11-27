@@ -1424,7 +1424,7 @@ func allRecognizedConfigPrefixes() []string {
 
 // recognizedConfigKeys lists valid non-namespaced config keys.
 var recognizedConfigKeys = map[string]bool{
-	"no-db": true, "json": true, "db": true, "actor": true,
+	"json": true, "db": true, "actor": true,
 	"identity": true, "no-push": true, "no-git-ops": true,
 	"node_id":                    true, // replica identity for the lease guard (read from yaml/env, never the DB)
 	"create.require-description": true, "beads.role": true,
@@ -1432,6 +1432,8 @@ var recognizedConfigKeys = map[string]bool{
 	"output.title-length": true,
 	"prime.max-memories":  true, "prime.max-memory-chars": true,
 	"prime.disabled": true,
+	// Per-repository opt-outs for git hook and .gitignore management (yaml-only).
+	config.HooksManageKey: true, config.GitignoreManageKey: true,
 	// Opt-in ceiling on the persistent-memory corpus, enforced by `bd
 	// remember` (0 = off). Yaml-only for the same reason the prime caps are:
 	// it is read through viper, so a DB-backed write would never be seen.
@@ -1466,13 +1468,22 @@ func isRecognizedConfigKey(key string) bool {
 // dash or underscore form silently produces a write that looks like it
 // succeeded but is never visible to 'bd create'. Reject both and point the
 // user at the right command.
+//
+// no-db is refused for a different reason: the JSONL-only mode it selected
+// is gone, so any value would be a setting nothing reads (GH#7387). 'bd config
+// unset no-db' still clears an old entry.
 func rejectProtectedConfigKey(key string) (string, bool) {
 	switch key {
 	case "issue_prefix", "issue-prefix":
 		return "Error: issue_prefix cannot be set via 'bd config set'.\n" +
 			"  - New project:       bd init --prefix <prefix>\n" +
 			"  - Fresh clone:       bd bootstrap\n" +
-			"  - Rename existing:   bd rename-prefix <new-prefix>", true
+			"  - Rename existing:   bd rename-prefix <new-prefix>\n" +
+			"  - New IDs only:      bd rename-prefix <new-prefix> --mint-only", true
+	case "no-db":
+		return "Error: no-db is obsolete and cannot be set.\n" +
+			"  bd keeps issues in its Dolt database; .beads/issues.jsonl is only an export of them.\n" +
+			"  - Remove an old entry:   bd config unset no-db", true
 	}
 	return "", false
 }

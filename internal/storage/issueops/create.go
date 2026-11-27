@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -377,6 +378,23 @@ func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, iss
 		}
 	}
 	return nil
+}
+
+// ResetCreateIDsIfRolledBack runs reset when err means the create's
+// transaction rolled back, and returns err unchanged. A nil error keeps the
+// filled IDs (the rows exist), and so does an error wrapping
+// storage.ErrCommitIndeterminate (directly or inside errors.Join): the commit
+// may have landed, so the IDs may name real rows.
+//
+// Store create entry points take a SnapshotUnsetCreateIDs snapshot before
+// their transaction and hand its closure here on the transaction's error
+// return, so a create that rolled back leaves the caller's struct as it was
+// passed in and a retry of the same struct mints afresh (GH#8457).
+func ResetCreateIDsIfRolledBack(err error, reset func()) error {
+	if err != nil && !errors.Is(err, storage.ErrCommitIndeterminate) && reset != nil {
+		reset()
+	}
+	return err
 }
 
 // CreateIssuesResult reports side effects that callers need for selective
@@ -1170,7 +1188,15 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 			continue
 		}
 		// Incoming id (import/interchange): preserve it, with the historical
-		// existence check preventing duplicates on re-import.
+		// content check preventing duplicates on re-import. The content check
+		// misses a stored comment whose id matches but whose text, author or
+		// time was edited since, and inserting it then collides on the
+		// primary key (Error 1062), rolling back the whole chunk. Resolve the
+		// id before writing: comment merge is additive, so a comment already
+		// stored on this issue keeps its stored fields in every mode — no
+		// rewrite, no comment journal event, whatever the issue row's own
+		// stale guard decided. An id owned by a different issue is a conflict
+		// the caller must see (not a silent remap, drop or duplicate).
 		var exists int
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
@@ -1182,8 +1208,27 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 		if exists > 0 {
 			continue
 		}
+		var owner string
 		//nolint:gosec // G201: table is determined by ephemeral flag
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+				SELECT issue_id FROM %s WHERE id = ?
+			`, commentTable), comment.ID).Scan(&owner)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// Not stored anywhere: insert below, preserving the incoming id.
+		case err != nil:
+			return result, fmt.Errorf("failed to check comment id %s for %s: %w", comment.ID, issue.ID, err)
+		case owner == issue.ID:
+			// Already stored on this issue: keep the stored comment (fields
+			// and journal state), whatever the incoming snapshot says.
+			continue
+		default:
+			return result, fmt.Errorf(
+				"cannot import comment %s on issue %s: it is already stored on issue %s",
+				comment.ID, issue.ID, owner)
+		}
+		//nolint:gosec // G201: table is determined by ephemeral flag
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (id, issue_id, author, text, created_at)
 			VALUES (?, ?, ?, ?, ?)
 		`, commentTable), comment.ID, issue.ID, comment.Author, comment.Text, createdAtText)
@@ -1378,14 +1423,16 @@ func recordSkippedDependencyEdge(opts storage.BatchCreateOptions, issueID, depen
 	opts.OnSkippedDependency(issueID, dependsOnID, reason)
 }
 
+// childCounterBucket is one parent's pending counter reservation: the highest
+// direct child suffix to preserve, and the parent's plane once known.
+type childCounterBucket struct {
+	maxChild int
+	isWisp   bool
+	known    bool
+}
+
 func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue) (map[string]bool, error) {
-	type bucket struct {
-		maxChild int
-		isWisp   bool
-		known    bool
-	}
-	parents := make(map[string]*bucket)
-	var changed map[string]bool
+	parents := make(map[string]*childCounterBucket)
 
 	for _, issue := range issues {
 		if issue == nil {
@@ -1395,7 +1442,7 @@ func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue)
 			if b, ok := parents[issue.ID]; ok {
 				b.isWisp, b.known = true, true
 			} else {
-				parents[issue.ID] = &bucket{isWisp: true, known: true}
+				parents[issue.ID] = &childCounterBucket{isWisp: true, known: true}
 			}
 		}
 	}
@@ -1410,13 +1457,71 @@ func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue)
 		}
 		b, exists := parents[parentID]
 		if !exists {
-			b = &bucket{}
+			b = &childCounterBucket{}
 			parents[parentID] = b
 		}
 		if childNum > b.maxChild {
 			b.maxChild = childNum
 		}
 	}
+
+	return applyChildCounterBuckets(ctx, tx, parents)
+}
+
+// ReserveChildSuffixesInTx preserves, in each surviving immediate parent's
+// existing child counter, the highest direct child suffix among ids: the ids a
+// create or rename just materialized, or the ids a removal is about to delete
+// or a rename just vacated (GH#4750). The counter is the parent's
+// automatic-allocation high-water mark, and once a row is gone it is the only
+// record that its suffix was used; without this a plain removal of the
+// highest child, under a counter that lagged it (a database written before
+// the singular create reconciled, or a child created through a door that did
+// not advance it), let the next generated child re-mint the removed id.
+//
+// The counter is written in the parent's own plane (child_counters for an
+// issues-plane parent, wisp_child_counters for a wisps-plane one), never the
+// child's. A parent named in departing (the complete set a removal deletes)
+// gets no counter, nor does a parent with no row: both counter tables require
+// an owner. An adequate counter is left alone and a raise is GREATEST, so the
+// counter never decreases. This is not retention: plain removal writes no
+// tombstone, and an explicit create may still reuse the removed id.
+//
+// A suffix above math.MaxInt32 (a legacy P.3000000000) is skipped. The INT
+// counter column cannot hold it, and the allocator stores every suffix it
+// mints in that column, so it can never mint such a suffix again. Skipping
+// keeps the create, rename or removal that names it working; clamping the
+// counter to math.MaxInt32 instead would leave the parent no suffix to mint.
+//
+// The returned set names the counter tables written, for callers that stage
+// tables for a Dolt commit.
+func ReserveChildSuffixesInTx(ctx context.Context, tx DBTX, ids []string, departing map[string]bool) (map[string]bool, error) {
+	parents := make(map[string]*childCounterBucket)
+	for _, id := range ids {
+		parentID, childNum, ok := ParseHierarchicalID(id)
+		if !ok || childNum <= 0 || childNum > math.MaxInt32 || departing[parentID] {
+			continue
+		}
+		b, exists := parents[parentID]
+		if !exists {
+			b = &childCounterBucket{}
+			parents[parentID] = b
+		}
+		if childNum > b.maxChild {
+			b.maxChild = childNum
+		}
+	}
+	if len(parents) == 0 {
+		return nil, nil
+	}
+	return applyChildCounterBuckets(ctx, tx, parents)
+}
+
+// applyChildCounterBuckets routes every bucket whose plane is not yet known by
+// its parent's live row, then raises each existing parent's counter to at
+// least the bucket's maximum. It is the shared write half of
+// ReconcileChildCounters and ReserveChildSuffixesInTx.
+func applyChildCounterBuckets(ctx context.Context, tx DBTX, parents map[string]*childCounterBucket) (map[string]bool, error) {
+	var changed map[string]bool
 
 	unknownParentIDs := make([]string, 0, len(parents))
 	for parentID, b := range parents {

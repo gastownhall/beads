@@ -86,15 +86,16 @@
 #      point of the check is that the idiom stops spreading into migrations
 #      where the write does matter.
 #
-# Checks C, D, and E compare against $BASE_SHA if set (CI passes the PR base),
-# else origin/main, else main; they are skipped with a warning when no base
-# is resolvable (e.g. shallow clone without the base commit).
+# Checks C, D, and E compare against $BASE_SHA if set (CI passes the base
+# branch's tip, or the merge queue's base commit), else origin/main, else
+# main; they are skipped with a warning when no base is resolvable (e.g.
+# shallow clone without the base commit).
 #
 # MIGRATION_HYGIENE_SCOPE splits the two halves for CI (default: all):
 #   tree   checks A and B, which read only the checked-out migrations: the
 #          hermetic half, //scripts/repochecks:migration_hygiene_test.
 #   delta  checks C, D and E, which diff against the base: pr.yml's
-#          pr-diff-checks job, the only place a PR's base is known.
+#          fast-checks job, the only place a PR's base is known.
 
 set -euo pipefail
 

@@ -68,6 +68,10 @@ Examples:
 		execPlan := buildHookMigrationExecutionPlan(plan)
 
 		if mode.RequestedApply {
+			// Refuse before printing the plan or asking for consent.
+			if err := refuseUnmanagedHookMigration(execPlan, len(args) == 0); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			if len(execPlan.BlockingErrors) > 0 {
 				return HandleErrorRespectJSON("hook migration is blocked:\n- %s", strings.Join(execPlan.BlockingErrors, "\n- "))
 			}

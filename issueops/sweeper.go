@@ -143,7 +143,7 @@ type SweepRequest struct {
 	//
 	// Unlike ProtectReferenced it is a stored-edge lookup, not a text scan, so
 	// it costs one read of the edges pointing at the candidates and one of
-	// their sources. `bd purge` always asks for it; `bd prune` does not.
+	// their sources. `bd purge` and `bd prune` always ask for it.
 	ProtectLiveDependents bool
 	// Limit, when positive, caps how many rows ONE sweep deletes, taking the
 	// OLDEST-CLOSED first (closed_at ascending, then id). The rest are left

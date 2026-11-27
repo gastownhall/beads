@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/versionedhistory"
 )
 
@@ -48,17 +47,6 @@ func activateVersionedHistoryStore(ctx context.Context, s storage.DoltStorage, e
 	return versionedhistory.ActivateStore(ctx, s, err)
 }
 
-// activateVersionedHistoryProvider is the same for a unit-of-work provider -- bd's
-// second write plumbing, with its own transactions and its own activation switch,
-// which proxied-server mode and `bd serve` against a server-mode workspace write
-// through instead of a DoltStorage.
-//
-// A provider has no DoltStorage to ask for a settings plane, so its row is read
-// with SQL of its own: bd's provider is handed the read and makes it inside its
-// first unit of work (storage.VersionedHistoryDeferrer), one SELECT after that
-// unit's START TRANSACTION. The provider constructors have already opened the
-// pool and run their schema setup, so the read starts no server and creates
-// nothing.
-func activateVersionedHistoryProvider(ctx context.Context, p uow.UnitOfWorkProvider, err error) (uow.UnitOfWorkProvider, error) {
-	return versionedhistory.ActivateProvider(ctx, p, err)
-}
+// A unit-of-work provider is activated by internal/proxiedopen's
+// constructors (its activateVersionedHistoryProvider), which the construction
+// guard scans alongside this package.

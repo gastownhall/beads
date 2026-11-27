@@ -375,6 +375,13 @@ func TestMaybeAutoExportUsesStateHashForChangeDetection(t *testing.T) {
 	}
 }
 
+// TestMaybeAutoExportExportsOnStateHashChange also pins cross-version state
+// compatibility: LastDoltCommit is an opaque change-detection token, and the
+// embedded store changed its form (HEAD commit → working-data hash, GH#6955)
+// without a state-format version bump. A state file written by an older
+// binary holds a token of the other form, the comparison below mismatches,
+// and the safe outcome is exactly this — an extra export if anything changed,
+// never a missed one.
 func TestMaybeAutoExportExportsOnStateHashChange(t *testing.T) {
 	initConfigForTest(t)
 	config.Set("export.auto", true)
@@ -2010,15 +2017,19 @@ func TestMaybeAutoExport_HistoryRewindDoesNotProveDeletion(t *testing.T) {
 }
 
 // TestMaybeAutoExport_EmbeddedModeFallsBackToFullExportCleanly documents and
-// locks in embedded mode's contract: EmbeddedDoltStore implements neither
-// StateHasher nor DiffStore, so it can never take the incremental path —
-// but per the fix (be-shbed / PR #5806 review item 3) it must still fall
-// back to a full export cleanly, rather than silently producing nothing.
-// This is deliberately a fake-store unit test, not a real embedded-mode
-// integration test: exercising a genuine EmbeddedDoltStore end-to-end is
-// out of scope (the bead explicitly excludes implementing DiffStore/
-// StateHasher on it), and fakeHeadOnlyStore already models exactly the
-// capability gap that matters here — no StateHasher, no DiffStore.
+// locks in embedded mode's export contract: EmbeddedDoltStore still has no
+// DiffStore, so it can never take the incremental path — but per the fix
+// (be-shbed / PR #5806 review item 3) it must still fall back to a full
+// export cleanly, rather than silently producing nothing. This is
+// deliberately a fake-store unit test, not a real embedded-mode integration
+// test: fakeHeadOnlyStore models a store with neither StateHasher nor
+// DiffStore (a server too old for DOLT_HASHOF_DB, or any store predating the
+// capability) so maybeAutoExport exercises its last-resort full-export arc.
+// Embedded mode itself now implements StateHasher (working-data hashing,
+// GH#6955, pinned for real in the embedded lane by the batch/off auto-commit
+// test and the embeddeddolt StateHasher contract test) but still no
+// DiffStore — a genuinely embedded-mode end-to-end test runs in the embedded
+// lane, not here.
 func TestMaybeAutoExport_EmbeddedModeFallsBackToFullExportCleanly(t *testing.T) {
 	initConfigForTest(t)
 	config.Set("export.auto", true)
@@ -2440,4 +2451,95 @@ func jsonlRecordsByID(t *testing.T, path string) map[string]map[string]interface
 		out[id] = rec
 	}
 	return out
+}
+
+// TestAutoExportReadCommandsAndChainedClosesGH4135 reproduces the two
+// concrete embedded-mode claims of GH#4135: (2a) read commands against an
+// empty database with export.auto on must not truncate or delete the
+// populated issues.jsonl, and (6) several `bd close` calls run back to back
+// in one shell invocation must all persist.
+func TestAutoExportReadCommandsAndChainedClosesGH4135(t *testing.T) {
+	bd := buildBDForInitTests(t)
+	dir := t.TempDir()
+	env := autoExportDataLossTestEnv(dir)
+
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, _ := cmd.CombinedOutput()
+		return string(out)
+	}
+	mustRun := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd %v failed: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	mustRun("init", "--prefix", "gh", "--non-interactive")
+	jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+	original := []byte(`{"_type":"issue","id":"gh-1","title":"Tracked in git","priority":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}` + "\n")
+	if err := os.WriteFile(jsonlPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("config", "set", "export.auto", "true")
+
+	for _, args := range [][]string{{"count"}, {"list"}, {"show", "gh-1"}, {"count"}} {
+		// show misses gh-1 in the empty database and exits non-zero;
+		// count and list must succeed.
+		if args[0] == "show" {
+			run(args...)
+		} else {
+			mustRun(args...)
+		}
+		got, err := os.ReadFile(jsonlPath)
+		if err != nil {
+			t.Fatalf("2a: bd %v against an empty DB removed issues.jsonl: %v", args, err)
+		}
+		if string(got) != string(original) {
+			t.Fatalf("2a: bd %v against an empty DB rewrote issues.jsonl:\n%s", args, got)
+		}
+	}
+
+	// Failure mode 6: chained closes in one shell invocation.
+	if err := os.Remove(jsonlPath); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, title := range []string{"A", "B", "C"} {
+		out := mustRun("create", title, "--json")
+		var created struct {
+			ID string `json:"id"`
+		}
+		if i := strings.Index(out, "{"); i < 0 || json.NewDecoder(strings.NewReader(out[i:])).Decode(&created) != nil || created.ID == "" {
+			t.Fatalf("6: parse bd create %s:\n%s", title, out)
+		}
+		id := created.ID
+		ids = append(ids, id)
+	}
+	sh := exec.Command("sh", "-c", fmt.Sprintf(`"$BD" close %s -r one && "$BD" close %s -r two && "$BD" close %s -r three`, ids[0], ids[1], ids[2]))
+	sh.Dir = dir
+	sh.Env = append(append([]string{}, env...), "BD="+bd)
+	if out, err := sh.CombinedOutput(); err != nil {
+		t.Fatalf("6: chained close failed: %v\n%s", err, out)
+	}
+	for _, id := range ids {
+		var shown []struct {
+			Status string `json:"status"`
+		}
+		out := mustRun("show", id, "--json")
+		if err := json.Unmarshal([]byte(out[strings.Index(out, "["):]), &shown); err != nil || len(shown) != 1 {
+			t.Fatalf("6: parse bd show %s: %v\n%s", id, err, out)
+		}
+		if shown[0].Status != "closed" {
+			t.Fatalf("6: %s status = %q after chained close, want closed", id, shown[0].Status)
+		}
+	}
 }

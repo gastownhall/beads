@@ -49,6 +49,17 @@ cert)
 		--argjson artifact "$ARTIFACT_ID" \
 		'{repo: $repo, run_id: $run, run_attempt: $attempt, pr: $pr, job: $job, artifact_id: $artifact}')
 	reply="$dir/mint.json"
+	# The mint reads the CSR artifact through GitHub's API and answers 403
+	# "not found: /repos/<repo>/actions/artifacts/<id>" when GitHub has none
+	# under that id. The step before this one uploaded it, and GitHub does not
+	# always serve an artifact the moment its upload returns (2026-11-22: 16
+	# lanes of five PRs got that answer within seconds of the upload, and
+	# every one of those artifacts was there when read afterwards). So a
+	# not-found that names this request's artifact is a read that came too
+	# early. Any other 403 is the mint's decision.
+	artifact_not_served_yet() {
+		jq -e --arg id "$ARTIFACT_ID" '(.error // "") | startswith("not found: /repos/") and endswith("/actions/artifacts/" + $id)' "$reply" >/dev/null 2>&1
+	}
 	code=000
 	for attempt in 1 2 3 4; do
 		# --connect-timeout: a closed gate drops the SYN; fail fast, not in 60 s.
@@ -56,9 +67,18 @@ cert)
 			-H 'content-type: application/json' --data "$body" "$MINT/v1/cert") || code=000
 		# Retry what may pass on its own: a rate or live-certificate limit (429;
 		# the rates are per minute, the backoff sums to one), the mint could not
-		# reach GitHub (502), or the network (000). Everything else is an answer.
-		case "$code" in 429 | 502 | 000) ;; *) break ;; esac
-		[ "$attempt" -eq 4 ] || sleep $((attempt * 10))
+		# reach GitHub (502), the network (000), or GitHub not serving this
+		# job's artifact yet (403, see above). Everything else is an answer.
+		case "$code" in
+		429 | 502 | 000) ;;
+		403) artifact_not_served_yet || break ;;
+		*) break ;;
+		esac
+		[ "$attempt" -eq 4 ] && break
+		# Say so in the log: a lane that got its certificate on a later attempt
+		# is otherwise told apart from one that got it at once only by timing.
+		echo "setup-bazel: rbe-fork mint answered HTTP $code on attempt $attempt of 4; asking again in $((attempt * 10)) s" >&2
+		sleep $((attempt * 10))
 	done
 	if [ "$code" != 200 ]; then
 		echo "::error title=rbe-fork mint refused (HTTP $code)::$(jq -r '.error // empty' "$reply" 2>/dev/null || true)"

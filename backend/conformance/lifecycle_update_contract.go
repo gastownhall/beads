@@ -195,6 +195,13 @@ type LifecycleUpdateFixture struct {
 	// message", and that case SKIPS loudly with that reason rather than passing
 	// quietly. See history_matching.go for the convention.
 	CountHistoryMatching func(context.Context, string) (int, error)
+	// StoredIsBlocked reads an issue's persisted is_blocked projection, which
+	// the issue reads do not hydrate. It is a premise probe, not a post-state
+	// read: the inherited-flag claim case uses it to prove the flag it says the
+	// claim ignores is really set. Nil drops that premise with a t.Log and the
+	// claim half still runs. StoredIsBlockedThrough builds it from a kit's
+	// QueryScalar.
+	StoredIsBlocked func(context.Context, string) (bool, error)
 }
 
 // RunLifecycleUpdatePersistsThePatchAndHydratesTheResult pins the two halves of

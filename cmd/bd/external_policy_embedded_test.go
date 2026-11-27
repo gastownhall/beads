@@ -61,14 +61,22 @@ func exerciseExternalMutationPolicy(t *testing.T, local crossModeEnv) {
 	}
 
 	t.Run("claim_is_atomic", func(t *testing.T) {
-		// --force waives only the close policy, so a claim refusal must not
-		// suggest it.
+		// --force cannot waive the external-reference guard, so its claim
+		// refusal must not suggest it.
 		if stderr := refuse(t, "update", blocked, "--claim", "--notes", "must not be written"); strings.Contains(stderr, "--force") {
 			t.Errorf("claim refusal suggests --force, which cannot waive it:\n%s", stderr)
 		}
 		assertOpen(t, blocked)
 		if got := local.show(t, blocked); got.Notes != "" {
 			t.Fatalf("refused claim wrote notes: %q", got.Notes)
+		}
+		// --force waives a local blocker's claim refusal, not this one.
+		if stderr := refuse(t, "update", blocked, "--claim", "--force", "--notes", "must not be written"); strings.Contains(stderr, "--force") {
+			t.Errorf("forced claim refusal suggests --force, which cannot waive it:\n%s", stderr)
+		}
+		assertOpen(t, blocked)
+		if got := local.show(t, blocked); got.Notes != "" {
+			t.Fatalf("refused forced claim wrote notes: %q", got.Notes)
 		}
 	})
 	t.Run("single_close", func(t *testing.T) {

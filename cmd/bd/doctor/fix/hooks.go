@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/steveyegge/beads/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -592,10 +593,19 @@ func ManagerNames(managers []ExternalHookManager) string {
 // GitHooks fixes missing or broken git hooks by calling bd hooks install.
 // If external hook managers are detected (lefthook, husky, etc.), it uses
 // --chain to preserve existing hooks instead of overwriting them.
+//
+// A workspace that sets hooks.manage: false is left alone: the fix prints one
+// informational line and returns nil without running bd hooks install, which
+// would refuse there.
 func GitHooks(path string) error {
 	// Validate workspace
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
+	}
+	if !config.HooksManaged(beadsDir) {
+		fmt.Printf("  Git hooks not managed by bd (%s=false); skipped\n", config.HooksManageKey)
+		return nil
 	}
 
 	// Check if we're in a git repository using git rev-parse

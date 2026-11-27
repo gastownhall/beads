@@ -17,6 +17,19 @@ import (
 // configured mode:
 //
 //   - Embedded Dolt (default): Opens via the CGo embedded Dolt engine.
+//   - Proxied server (dolt_mode "proxied-server"): Opens through the
+//     workspace's bd proxy, as the bd CLI does. A running proxy is adopted;
+//     with none, one is started from `bd` on PATH; with no bd there, or with
+//     a proxy an older bd (before 1.4) started, the open fails with
+//     ErrProxyUnavailable, having created no embedded store and started or
+//     stopped no proxy. A managed-local workspace (no external upstream)
+//     also needs `dolt` on PATH, even to adopt a running proxy. The store
+//     covers the common issue, label, dependency, comment and config methods
+//     and RunInTransaction; the rest return a typed ErrUnsupported. Close
+//     leaves the proxy running. The one exception is an environment that
+//     forces server mode (BEADS_DOLT_SERVER_MODE or BEADS_DOLT_SHARED_SERVER)
+//     and names the port (BEADS_DOLT_SERVER_PORT): that open takes the Dolt
+//     server arm below and dials the named port as a plain MySQL client.
 //   - Dolt server: Connects to a dolt sql-server via OpenFromConfig.
 //
 // The returned Storage must be closed when no longer needed.
@@ -86,6 +99,16 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	}
 	if opts.UserAgent != "" {
 		return nil, fmt.Errorf("beads: OpenOptions.UserAgent is not supported for backend %q (Dolt has no per-open transport seam): %w", cfg.GetBackend(), backends.ErrUserAgentWithoutOpenWith)
+	}
+
+	if routesThroughProxy(cfg) {
+		// Before the server arm, which BEADS_DOLT_SERVER_MODE or
+		// BEADS_DOLT_SHARED_SERVER would otherwise select ahead of dolt_mode
+		// (unless BEADS_DOLT_SERVER_PORT names the port to dial, which
+		// keeps that arm: see routesThroughProxy), and before the embedded
+		// arm, which would create .beads/embeddeddolt: a proxied workspace
+		// is served through its bd proxy, as on the bd CLI (GH#8323).
+		return openProxiedServer(ctx, beadsDir)
 	}
 
 	if cfg.IsDoltServerMode() {
