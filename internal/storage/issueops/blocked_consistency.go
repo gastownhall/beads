@@ -1857,6 +1857,78 @@ func countStaleIsBlockedSQL(table, alias, depTable string, explained subtreeExpl
 	`, table, alias, union, left.notInSQL(alias, depTable, ""))
 }
 
+// CountIsBlockedHeldInTx reports how many open issue and wisp rows are
+// undecided (undecidedRows) and have no blocker this database can see: the
+// rows whose is_blocked the recompute leaves as found, because neither value
+// can be derived here. They hold a dependency on a wisp this database has no
+// row for (danglingWispEdgeSQL), or they are the children of a parent whose
+// blockedness such a dependency may decide. It is the read behind the second
+// half of the bd doctor "Blocked State" line.
+//
+// Zero on a database that holds every wisp its edges name. Nonzero is the
+// ordinary state of a clone of a database that blocks issues on wisps, and on
+// the database that mints the wisps it names edges left behind by a delete
+// that bypassed the wisp-delete cascade.
+//
+// It asks first whether any dangling edge exists at all, one probe per
+// dependency table that stops at the first hit, so a database that holds
+// every wisp its edges name, which is every database that mints its own, pays
+// two probes and not the exogeneity read.
+func CountIsBlockedHeldInTx(ctx context.Context, tx DBTX) (int64, error) {
+	holders, err := danglingWispHoldersInTx(ctx, tx)
+	if err != nil {
+		return 0, fmt.Errorf("count held is_blocked rows: %w", err)
+	}
+	if !holders.issues && !holders.wisps {
+		// No row holds a dangling edge, so no parent is undecided either: the
+		// read below would return none.
+		return 0, nil
+	}
+	explained, err := subtreeExplainedParentsInTx(ctx, tx)
+	if err != nil {
+		return 0, fmt.Errorf("count held is_blocked rows: %w", err)
+	}
+	var total int64
+	for _, t := range []struct {
+		table, alias, depTable string
+		left                   undecidedRows
+	}{
+		{"issues", "i", "dependencies", explained.undecidedRowsFor(holders.issues)},
+		{"wisps", "w", "wisp_dependencies", explained.undecidedRowsFor(holders.wisps)},
+	} {
+		if t.left.empty() {
+			continue
+		}
+		n, err := countRows(ctx, tx, countHeldIsBlockedSQL(t.table, t.alias, t.depTable, explained, t.left),
+			append(t.left.args(), explained.args()...)...)
+		if err != nil {
+			if t.table == "wisps" && isTableNotExistError(err) {
+				return total, nil
+			}
+			return 0, fmt.Errorf("count held is_blocked %s: %w", t.table, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// countHeldIsBlockedSQL counts one table's rows for
+// CountIsBlockedHeldInTx; left must not be empty. The undecided set comes
+// first, so its ids bind before the union's, in text order.
+//
+//nolint:gosec // G201: table, alias, and depTable are constants from the only two callers.
+func countHeldIsBlockedSQL(table, alias, depTable string, explained subtreeExplainedParents, left undecidedRows) string {
+	// The union reads held rows as the closing mark does: a waits-for gate
+	// only onto a present spawner (withPresentSpawnerGate).
+	return fmt.Sprintf(`
+		SELECT COUNT(*) FROM %[1]s %[2]s
+		WHERE %[2]s.status <> 'closed' AND %[2]s.status <> 'pinned'
+		  AND %[2]s.id IN (%[3]s)
+		  AND %[2]s.id NOT IN (%[4]s)
+	`, table, alias, left.selectSQL(depTable, ""),
+		withPresentSpawnerGate(shouldBeBlockedIDsUnionPrecomputedSQL(depTable, explained)))
+}
+
 // hasDanglingWispEdgeInTx reports whether depTable holds at least one dangling
 // wisp edge (danglingWispEdgeSQL) on a row with a holder. It is the select
 // danglingWispHoldersSQL spells, cut off at the first row, so it costs one
