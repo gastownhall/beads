@@ -1145,3 +1145,441 @@ func TestPushFieldsEqualToBeads(t *testing.T) {
 		t.Fatal("expected beads-form fallback comparison to ignore local-only fields")
 	}
 }
+
+// team9Description is the Linear description of the issue in GH#8506 after
+// a push: Linear stores a blank line after each heading, and the create
+// appended bd's idempotency marker.
+const team9Description = "DESC-MARK the description.\n\n## Acceptance Criteria\n\nAC-MARK the acceptance criteria.\n\n## Design\n\nDESIGN-MARK the design.\n\n## Notes\n\nNOTES-MARK the notes.\n<!-- bd-idempotency: a590f1df4a90 -->"
+
+var team9Parts = DescriptionParts{
+	Description:        "DESC-MARK the description.",
+	AcceptanceCriteria: "AC-MARK the acceptance criteria.",
+	Design:             "DESIGN-MARK the design.",
+	Notes:              "NOTES-MARK the notes.",
+}
+
+// linearStoredDescription renders text the way Linear stores a pushed
+// description: a blank line after each "## " heading line.
+func linearStoredDescription(text string) string {
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	for i, line := range lines {
+		out = append(out, line)
+		if strings.HasPrefix(line, "## ") && (i+1 >= len(lines) || lines[i+1] != "") {
+			out = append(out, "")
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func blankLineBefore(field string) string {
+	if field == "" {
+		return ""
+	}
+	return "\n" + field
+}
+
+// parseLinearDescriptionCases are the texts TestParseLinearDescription pins;
+// TestParseLinearDescriptionIsAFixedPoint checks P2 and P3 over them.
+var parseLinearDescriptionCases = []struct {
+	name string
+	text string
+	want DescriptionParts
+}{
+	{
+		name: "bd output with every field",
+		text: "D\n\n## Acceptance Criteria\nA\n\n## Design\nG\n\n## Notes\nN",
+		want: DescriptionParts{Description: "D", AcceptanceCriteria: "A", Design: "G", Notes: "N"},
+	},
+	{
+		name: "bd output with acceptance criteria only",
+		text: "D\n\n## Acceptance Criteria\nA",
+		want: DescriptionParts{Description: "D", AcceptanceCriteria: "A"},
+	},
+	{
+		name: "bd output with acceptance criteria and notes",
+		text: "D\n\n## Acceptance Criteria\nA\n\n## Notes\nN",
+		want: DescriptionParts{Description: "D", AcceptanceCriteria: "A", Notes: "N"},
+	},
+	{
+		name: "reporter's TEAM-9 text",
+		text: team9Description,
+		want: team9Parts,
+	},
+	{
+		name: "marker only",
+		text: "<!-- bd-idempotency: a590f1df4a90 -->",
+		want: DescriptionParts{},
+	},
+	{
+		name: "description and marker",
+		text: "Body\n<!-- bd-idempotency: a590f1df4a90 -->",
+		want: DescriptionParts{Description: "Body"},
+	},
+	{
+		name: "mid-text marker",
+		text: "Body\n<!-- bd-idempotency: a590f1df4a90 -->\nmore\n\n## Notes\nN",
+		want: DescriptionParts{Description: "Body\nmore", Notes: "N"},
+	},
+	{
+		name: "unterminated marker prefix stays",
+		text: "Body\n<!-- bd-idempotency: abc",
+		want: DescriptionParts{Description: "Body\n<!-- bd-idempotency: abc"},
+	},
+	{
+		name: "quoted marker prefix before another comment stays",
+		text: "Markers start with `<!-- bd-idempotency: ` and are hex.\n\nKeep this paragraph.\n\n## Acceptance Criteria\nA\n<!-- reviewer: ok -->",
+		want: DescriptionParts{
+			Description:        "Markers start with `<!-- bd-idempotency: ` and are hex.\n\nKeep this paragraph.",
+			AcceptanceCriteria: "A\n<!-- reviewer: ok -->",
+		},
+	},
+	{
+		name: "marker quoted in prose stays",
+		text: "Each create adds a `<!-- bd-idempotency: ... -->` marker.",
+		want: DescriptionParts{Description: "Each create adds a `<!-- bd-idempotency: ... -->` marker."},
+	},
+	{
+		name: "marker on a line of its own without bd's 12 hex digits stays",
+		text: "Body\n<!-- bd-idempotency: a590f1df4a90a590 -->\n<!-- bd-idempotency: A590F1DF4A90 -->",
+		want: DescriptionParts{Description: "Body\n<!-- bd-idempotency: a590f1df4a90a590 -->\n<!-- bd-idempotency: A590F1DF4A90 -->"},
+	},
+	{
+		name: "fenced literal heading stays in the description",
+		text: "Example:\n\n```markdown\n## Notes\nexample note\n```\n\nAfter the example.",
+		want: DescriptionParts{Description: "Example:\n\n```markdown\n## Notes\nexample note\n```\n\nAfter the example."},
+	},
+	{
+		name: "fenced example before a real section",
+		text: "Example:\n\n```markdown\n## Notes\nexample note\n```\n\n## Notes\nreal note",
+		want: DescriptionParts{Description: "Example:\n\n```markdown\n## Notes\nexample note\n```", Notes: "real note"},
+	},
+	{
+		name: "fenced heading in a section body stays in that section",
+		text: "D\n\n## Design\nG\n\n```markdown\n## Notes\nexample\n```",
+		want: DescriptionParts{Description: "D", Design: "G\n\n```markdown\n## Notes\nexample\n```"},
+	},
+	{
+		name: "tilde fence holds a backtick run and a heading",
+		text: "D\n\n## Notes\nN\n\n~~~\n```\n## Notes\n~~~",
+		want: DescriptionParts{Description: "D", Notes: "N\n\n~~~\n```\n## Notes\n~~~"},
+	},
+	{
+		name: "fence closes only on a run at least as long",
+		text: "D\n\n## Notes\nN\n````\n```\n## Design\nx\n````",
+		want: DescriptionParts{Description: "D", Notes: "N\n````\n```\n## Design\nx\n````"},
+	},
+	{
+		name: "fence indented three spaces hides a heading",
+		text: "D\n   ```\n## Notes\nN\n   ```",
+		want: DescriptionParts{Description: "D\n   ```\n## Notes\nN\n   ```"},
+	},
+	{
+		name: "line indented four spaces is no fence",
+		text: "D\n    ```\n## Notes\nN\n    ```",
+		want: DescriptionParts{Description: "D\n    ```", Notes: "N\n    ```"},
+	},
+	{
+		name: "backtick in a backtick fence's info string opens no fence",
+		text: "D\n```a`b\n## Notes\nN\n```",
+		want: DescriptionParts{Description: "D\n```a`b", Notes: "N\n```"},
+	},
+	{
+		name: "fence never closed hides nothing",
+		text: "D\n```\ncut off\n\n## Acceptance Criteria\nA",
+		want: DescriptionParts{Description: "D\n```\ncut off", AcceptanceCriteria: "A"},
+	},
+	{
+		name: "notes heading in the description while acceptance criteria is set",
+		text: "D\n## Notes\nnot a field\n\n## Acceptance Criteria\nA",
+		want: DescriptionParts{Description: "D\n## Notes\nnot a field", AcceptanceCriteria: "A"},
+	},
+	{
+		name: "trailing heading with an empty body stays text",
+		text: "D\n\n## Notes\n\n",
+		want: DescriptionParts{Description: "D\n\n## Notes\n\n"},
+	},
+	{
+		name: "out-of-order headings split only the final in-order run",
+		text: "D\n\n## Notes\nN0\n\n## Design\nG",
+		want: DescriptionParts{Description: "D\n\n## Notes\nN0", Design: "G"},
+	},
+	{
+		name: "repeated heading keeps the earlier one in the section above",
+		text: "D\n\n## Acceptance Criteria\nA1\n\n## Acceptance Criteria\nA2",
+		want: DescriptionParts{Description: "D\n\n## Acceptance Criteria\nA1", AcceptanceCriteria: "A2"},
+	},
+	{
+		name: "field with its own subheadings is not cut",
+		text: "D\n\n## Design\n### Storage\nrows\n## Rollout\nslow",
+		want: DescriptionParts{Description: "D", Design: "### Storage\nrows\n## Rollout\nslow"},
+	},
+	{
+		name: "section body keeps indentation and inner blank lines",
+		text: "DESC\n\n## Notes\n  - item one\n\n  - item two",
+		want: DescriptionParts{Description: "DESC", Notes: "  - item one\n\n  - item two"},
+	},
+	{
+		name: "CRLF line ends and trailing spaces on a heading line",
+		text: "D\r\n\r\n## Acceptance Criteria  \r\n\r\nA\r\n\r\n## Notes\t\r\nN\r\n",
+		want: DescriptionParts{Description: "D", AcceptanceCriteria: "A", Notes: "N"},
+	},
+	{
+		name: "Linear-native description without a trailing run is verbatim",
+		text: "# Context\n\n## Notes:\n\nfrom the PM\n\n### Design\n\n## Acceptance criteria\nship it\n",
+		want: DescriptionParts{Description: "# Context\n\n## Notes:\n\nfrom the PM\n\n### Design\n\n## Acceptance criteria\nship it\n"},
+	},
+	{
+		name: "text the bug already damaged: two copies and a mid-text marker",
+		text: team9Description + "\n\n## Acceptance Criteria\nAC-MARK the acceptance criteria.\n\n## Design\nDESIGN-MARK the design.\n\n## Notes\nNOTES-MARK the notes.",
+		want: DescriptionParts{
+			Description:        "DESC-MARK the description.\n\n## Acceptance Criteria\n\nAC-MARK the acceptance criteria.\n\n## Design\n\nDESIGN-MARK the design.\n\n## Notes\n\nNOTES-MARK the notes.",
+			AcceptanceCriteria: team9Parts.AcceptanceCriteria,
+			Design:             team9Parts.Design,
+			Notes:              team9Parts.Notes,
+		},
+	},
+}
+
+// TestParseLinearDescription pins the inverse of BuildLinearDescription a
+// pull applies to Linear's description (GH#8506).
+func TestParseLinearDescription(t *testing.T) {
+	for _, tc := range parseLinearDescriptionCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ParseLinearDescription(tc.text); got != tc.want {
+				t.Errorf("ParseLinearDescription(%q)\n got  %#v\n want %#v", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseLinearDescriptionIsAFixedPoint checks that parse inverts build
+// (P1), that a parse then build then parse changes nothing, so the text can
+// never grow again (P2), and that Linear's stored form, with or without the
+// marker, parses as bd's own output does (P3).
+func TestParseLinearDescriptionIsAFixedPoint(t *testing.T) {
+	const marker = "<!-- bd-idempotency: a590f1df4a90 -->"
+	for mask := 0; mask < 16; mask++ {
+		local := &types.Issue{}
+		if mask&1 != 0 {
+			local.Description = "Body line one.\n\n  indented line"
+		}
+		if mask&2 != 0 {
+			local.AcceptanceCriteria = "- [ ] it works\n- [ ] it ships"
+		}
+		if mask&4 != 0 {
+			local.Design = "### Storage\nrows"
+		}
+		if mask&8 != 0 {
+			local.Notes = "note"
+		}
+		want := DescriptionParts{
+			Description:        local.Description,
+			AcceptanceCriteria: local.AcceptanceCriteria,
+			Design:             local.Design,
+			Notes:              local.Notes,
+		}
+		built := BuildLinearDescription(local)
+		for name, text := range map[string]string{
+			"bd output":                built,
+			"Linear stored":            linearStoredDescription(built),
+			"Linear stored and marker": AppendIdempotencyMarker(linearStoredDescription(built), marker),
+		} {
+			if got := ParseLinearDescription(text); got != want {
+				t.Errorf("mask %04b %s: ParseLinearDescription(%q)\n got  %#v\n want %#v", mask, name, text, got, want)
+			}
+		}
+	}
+
+	for _, tc := range parseLinearDescriptionCases {
+		first := ParseLinearDescription(tc.text)
+		rebuilt := BuildLinearDescription(&types.Issue{
+			Description:        first.Description,
+			AcceptanceCriteria: first.AcceptanceCriteria,
+			Design:             first.Design,
+			Notes:              first.Notes,
+		})
+		if again := ParseLinearDescription(rebuilt); again != first {
+			t.Errorf("%s: parse(build(parse(x))) = %#v, want %#v", tc.name, again, first)
+		}
+		// Linear's blank line after each heading bd wrote; the headings
+		// inside the description and the fields are left as they are.
+		stored := BuildLinearDescription(&types.Issue{
+			Description:        first.Description,
+			AcceptanceCriteria: blankLineBefore(first.AcceptanceCriteria),
+			Design:             blankLineBefore(first.Design),
+			Notes:              blankLineBefore(first.Notes),
+		})
+		if again := ParseLinearDescription(stored); again != first {
+			t.Errorf("%s: parse(Linear stored build(parse(x))) = %#v, want %#v", tc.name, again, first)
+		}
+	}
+}
+
+// TestIssueToBeadsSplitsDescriptionSections checks that a pulled Linear issue
+// carries its pushed sections in the bead's fields, not its description.
+func TestIssueToBeadsSplitsDescriptionSections(t *testing.T) {
+	li := &Issue{
+		ID:          "uuid-9",
+		Identifier:  "TEAM-9",
+		Title:       "fields pushed",
+		Description: team9Description,
+		URL:         "https://linear.app/team/issue/TEAM-9/fields-pushed",
+		CreatedAt:   "2026-11-18T10:00:00Z",
+		UpdatedAt:   "2026-11-18T10:05:00Z",
+	}
+	issue := IssueToBeads(li, DefaultMappingConfig()).Issue.(*types.Issue)
+	got := DescriptionParts{
+		Description:        issue.Description,
+		AcceptanceCriteria: issue.AcceptanceCriteria,
+		Design:             issue.Design,
+		Notes:              issue.Notes,
+	}
+	if got != team9Parts {
+		t.Fatalf("IssueToBeads fields = %#v, want %#v", got, team9Parts)
+	}
+
+	plain := IssueToBeads(&Issue{Identifier: "TEAM-1", Description: "Just a body\n"}, DefaultMappingConfig()).Issue.(*types.Issue)
+	if plain.Description != "Just a body\n" || plain.AcceptanceCriteria != "" || plain.Design != "" || plain.Notes != "" {
+		t.Fatalf("IssueToBeads of a plain description = %#v, want it verbatim with empty fields", plain)
+	}
+}
+
+// TestBuildLinearToLocalUpdatesSplitsDescriptionSections checks that the
+// conflict-resolution updates write the pushed sections to their fields.
+func TestBuildLinearToLocalUpdatesSplitsDescriptionSections(t *testing.T) {
+	updates := BuildLinearToLocalUpdates(&Issue{Identifier: "TEAM-9", Description: team9Description}, DefaultMappingConfig())
+	want := map[string]string{
+		"description":         team9Parts.Description,
+		"acceptance_criteria": team9Parts.AcceptanceCriteria,
+		"design":              team9Parts.Design,
+		"notes":               team9Parts.Notes,
+	}
+	for key, value := range want {
+		if got := updates[key]; got != value {
+			t.Errorf("updates[%q] = %#v, want %q", key, got, value)
+		}
+		if text, _ := updates[key].(string); strings.Contains(text, "bd-idempotency") {
+			t.Errorf("updates[%q] = %q carries the idempotency marker", key, text)
+		}
+	}
+}
+
+// TestLinearPullInvertsPushDescription reproduces GH#8506: a pull must invert
+// what a push wrote into Linear's description. Pulling the pushed body must not
+// fold the Acceptance Criteria/Design/Notes sections or the idempotency marker
+// into the bead's description, so push -> pull -> push is a fixed point.
+func TestLinearPullInvertsPushDescription(t *testing.T) {
+	local := &types.Issue{
+		ID:                 "spk-moq",
+		Description:        "DESC-MARK the description.",
+		AcceptanceCriteria: "AC-MARK the acceptance criteria.",
+		Design:             "DESIGN-MARK the design.",
+		Notes:              "NOTES-MARK the notes.",
+	}
+	marker := GenerateIdempotencyMarker(local.ID, "", 0)
+	pushed := AppendIdempotencyMarker(BuildLinearDescription(local), marker)
+
+	li := &Issue{
+		ID:          "uuid-1",
+		Identifier:  "TEAM-9",
+		Title:       "fields pushed",
+		Description: pushed,
+		URL:         "https://linear.app/team/issue/TEAM-9/fields-pushed",
+		CreatedAt:   "2026-11-18T10:00:00Z",
+		UpdatedAt:   "2026-11-18T10:05:00Z",
+	}
+	config := DefaultMappingConfig()
+
+	conv := IssueToBeads(li, config)
+	pulled := conv.Issue.(*types.Issue)
+	if pulled.Description != local.Description {
+		t.Errorf("IssueToBeads description = %q, want %q", pulled.Description, local.Description)
+	}
+
+	updates := BuildLinearToLocalUpdates(li, config)
+	if got := updates["description"]; got != local.Description {
+		t.Errorf("BuildLinearToLocalUpdates description = %q, want %q", got, local.Description)
+	}
+
+	// The next push builds the description from the pulled bead (which keeps
+	// its acceptance_criteria/design/notes); it must not add another copy.
+	repulled := *local
+	repulled.Description, _ = updates["description"].(string)
+	if n := strings.Count(BuildLinearDescription(&repulled), "## Acceptance Criteria"); n != 1 {
+		t.Errorf("second push carries %d Acceptance Criteria sections, want 1", n)
+	}
+}
+
+// TestPushFieldsEqualLinearStoredDescription checks that both push
+// comparators see an unchanged bead as equal to the description Linear
+// stored for its push (a blank line after each heading, with or without the
+// create's idempotency marker), and still see a changed body, section text
+// or section presence (GH#8506).
+func TestPushFieldsEqualLinearStoredDescription(t *testing.T) {
+	config := DefaultMappingConfig()
+	const marker = "<!-- bd-idempotency: a590f1df4a90 -->"
+	local := &types.Issue{
+		Title:              "fields pushed",
+		Description:        team9Parts.Description,
+		AcceptanceCriteria: team9Parts.AcceptanceCriteria,
+		Design:             team9Parts.Design,
+		Notes:              team9Parts.Notes,
+		Status:             types.StatusInProgress,
+		Priority:           2,
+	}
+	stored := linearStoredDescription(BuildLinearDescription(local))
+	remoteFor := func(description string) *Issue {
+		return &Issue{
+			Title:       local.Title,
+			Description: description,
+			Priority:    PriorityToLinear(local.Priority, config),
+			State:       &State{ID: "state-3", Name: "In Progress", Type: "started"},
+		}
+	}
+	beadsFor := func(description string) map[string]*types.Issue {
+		folded := &types.Issue{Title: local.Title, Description: description, Status: local.Status, Priority: local.Priority}
+		split := IssueToBeads(remoteFor(description), config).Issue.(*types.Issue)
+		split.Status, split.Priority = local.Status, local.Priority
+		return map[string]*types.Issue{"folded": folded, "split": split}
+	}
+
+	for name, description := range map[string]string{
+		"Linear stored":            stored,
+		"Linear stored and marker": AppendIdempotencyMarker(stored, marker),
+		"reporter's TEAM-9 text":   team9Description,
+	} {
+		if !PushFieldsEqual(local, remoteFor(description), config, nil) {
+			t.Errorf("%s: PushFieldsEqual = false, want the unchanged bead equal to %q", name, description)
+		}
+		for form, remote := range beadsFor(description) {
+			if !PushFieldsEqualToBeads(local, remote) {
+				t.Errorf("%s: PushFieldsEqualToBeads(%s remote) = false, want equal", name, form)
+			}
+		}
+	}
+
+	changed := map[string]func(*types.Issue){
+		"description body":  func(i *types.Issue) { i.Description = "DESC-MARK an edited description." },
+		"section text":      func(i *types.Issue) { i.AcceptanceCriteria = "AC-MARK edited criteria." },
+		"dropped section":   func(i *types.Issue) { i.Design = "" },
+		"two sections gone": func(i *types.Issue) { i.Notes, i.Design = "", "" },
+	}
+	for name, edit := range changed {
+		other := *local
+		edit(&other)
+		description := AppendIdempotencyMarker(linearStoredDescription(BuildLinearDescription(&other)), marker)
+		if PushFieldsEqual(local, remoteFor(description), config, nil) {
+			t.Errorf("%s: PushFieldsEqual = true for remote %q, want unequal", name, description)
+		}
+		for form, remote := range beadsFor(description) {
+			if PushFieldsEqualToBeads(local, remote) {
+				t.Errorf("%s: PushFieldsEqualToBeads(%s remote) = true, want unequal", name, form)
+			}
+		}
+		// The other direction: the local bead changed, Linear did not.
+		if PushFieldsEqual(&other, remoteFor(AppendIdempotencyMarker(stored, marker)), config, nil) {
+			t.Errorf("%s: PushFieldsEqual(edited local) = true, want unequal", name)
+		}
+	}
+}

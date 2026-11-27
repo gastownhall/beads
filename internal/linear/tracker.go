@@ -15,6 +15,7 @@ import (
 )
 
 var _ tracker.BatchPushTracker = (*Tracker)(nil)
+var _ tracker.DescriptionFieldsTracker = (*Tracker)(nil)
 
 func init() {
 	tracker.Register("linear", func() tracker.IssueTracker {
@@ -40,6 +41,12 @@ func (t *Tracker) SetTeamIDs(ids []string) {
 func (t *Tracker) Name() string         { return "linear" }
 func (t *Tracker) DisplayName() string  { return "Linear" }
 func (t *Tracker) ConfigPrefix() string { return "linear" }
+
+// DescriptionFieldsEqual implements tracker.DescriptionFieldsTracker: a push
+// folds acceptance criteria, design and notes into Linear's description.
+func (t *Tracker) DescriptionFieldsEqual(a, b *types.Issue) bool {
+	return DescriptionFieldsEqual(a, b)
+}
 
 func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
