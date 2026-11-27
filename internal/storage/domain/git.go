@@ -32,6 +32,14 @@ type GitCommitParams struct {
 	Message   string
 	NoVerify  bool
 	SkipHooks bool
+	// Only scopes the commit to the files with staged changes under these
+	// work-directory-relative paths; anything else staged stays staged. The
+	// staged diff only selects the files: the commit records each one's
+	// current working-tree content, so stage the full intended content
+	// first. A staged removal of a file still on disk stays staged and out
+	// of the commit. Nil commits the whole index. A non-nil empty slice
+	// scopes to nothing.
+	Only []string
 }
 
 type GitCommitResult struct {
@@ -213,6 +221,7 @@ func (u *gitUseCaseImpl) CommitInitArtifacts(ctx context.Context, params CommitI
 		Message:   params.Message,
 		NoVerify:  params.NoVerify,
 		SkipHooks: params.SkipHooks,
+		Only:      paths,
 	})
 	if err != nil {
 		return CommitInitArtifactsResult{}, fmt.Errorf("CommitInitArtifacts: commit: %w", err)

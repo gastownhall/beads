@@ -286,6 +286,302 @@ func (s *testSuite) TestCommit_NothingToCommitDidCommitFalse() {
 	s.True(strings.Contains(string(result.Output), "nothing to commit"))
 }
 
+func (s *testSuite) gitOut(args ...string) string {
+	s.T().Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = s.tmpDir
+	out, err := cmd.Output()
+	s.Require().NoError(err, "git %v", args)
+	return strings.TrimSpace(string(out))
+}
+
+// prepareInitArtifacts writes the beads artifacts into a new repository,
+// after a seed commit unless unborn.
+func (s *testSuite) prepareInitArtifacts(unborn bool) {
+	s.T().Helper()
+	s.gitInit()
+	if !unborn {
+		s.writeFile("seed", "seed\n")
+		s.run("git", "add", "seed")
+		s.run("git", "commit", "-q", "-m", "seed")
+	}
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(filepath.Join(".beads", "config.yaml"), "# beads\n")
+	s.writeFile("CLAUDE.md", "beads instructions\n")
+}
+
+func (s *testSuite) stageForeignWork() {
+	s.T().Helper()
+	s.writeFile("work.txt", "staged work\n")
+	s.run("git", "add", "work.txt")
+	s.writeFile("work.txt", "staged work\nunstaged edit\n")
+}
+
+func (s *testSuite) commitInitArtifacts() (domain.CommitInitArtifactsResult, error) {
+	return domain.NewGitUseCase(s.tmpDir, s.repo).CommitInitArtifacts(s.Ctx(), domain.CommitInitArtifactsParams{
+		BeadsDir:      ".beads/",
+		OptionalPaths: []string{"CLAUDE.md", ".gitignore"},
+		Message:       "bd init: initialize beads issue tracking",
+		NoVerify:      true,
+		SkipHooks:     true,
+	})
+}
+
+func (s *testSuite) requireForeignWorkUntouched() {
+	s.T().Helper()
+	s.Equal("A\twork.txt", s.gitOut("diff", "--cached", "--name-status"))
+	s.Equal("staged work", s.gitOut("show", ":work.txt"))
+	data, err := os.ReadFile(filepath.Join(s.tmpDir, "work.txt"))
+	s.Require().NoError(err)
+	s.Equal("staged work\nunstaged edit\n", string(data))
+}
+
+// GH#5654: the init commit holds only the artifact paths; a file the user
+// staged beforehand keeps its staged blob and its unstaged edit.
+func (s *testSuite) TestCommitInitArtifacts_LeavesForeignStagedFiles() {
+	s.prepareInitArtifacts(false)
+	s.stageForeignWork()
+	seed := s.gitOut("rev-parse", "HEAD")
+
+	result, err := s.commitInitArtifacts()
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(seed, s.gitOut("rev-parse", "HEAD^"))
+	s.Equal(".beads/config.yaml\nCLAUDE.md", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+	s.requireForeignWorkUntouched()
+}
+
+// GH#5654: when the artifacts already match HEAD, a foreign staged file is no
+// reason to commit; the result reports no commit and no error.
+func (s *testSuite) TestCommitInitArtifacts_NothingToCommitWithForeignStaged() {
+	s.prepareInitArtifacts(false)
+	s.run("git", "add", ".beads", "CLAUDE.md")
+	s.run("git", "commit", "-q", "-m", "artifacts")
+	s.stageForeignWork()
+	head := s.gitOut("rev-parse", "HEAD")
+
+	result, err := s.commitInitArtifacts()
+	s.Require().NoError(err)
+	s.False(result.DidCommit)
+	s.Equal(head, s.gitOut("rev-parse", "HEAD"))
+	s.requireForeignWorkUntouched()
+}
+
+// GH#5654: on an unborn branch the init commit becomes the root commit with
+// only the artifacts, leaving none of them staged (or staged for deletion)
+// and the foreign file staged as before.
+func (s *testSuite) TestCommitInitArtifacts_UnbornHeadLeavesForeignStagedFiles() {
+	s.prepareInitArtifacts(true)
+	s.stageForeignWork()
+
+	result, err := s.commitInitArtifacts()
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal("1", s.gitOut("rev-list", "--count", "HEAD"))
+	s.Equal(".beads/config.yaml\nCLAUDE.md", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+	s.requireForeignWorkUntouched()
+}
+
+func (s *testSuite) TestCommit_OnlyLeavesOtherStagedChangesStaged() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+	s.Equal("work.txt", s.gitOut("diff", "--cached", "--name-only"))
+}
+
+func (s *testSuite) TestCommit_OnlySkipsPathWithNothingStaged() {
+	s.gitInit()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	// Every file under .cursor is ignored, so adding it stages nothing; a
+	// pathspec git knows no file under would refuse the whole commit.
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".cursor"), 0750))
+	s.writeFile(".cursor/.gitignore", "*\n")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/", ".cursor"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/", ".cursor"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+}
+
+// An Only scope with nothing staged under it is no commit, even on an unborn
+// branch with another file staged.
+func (s *testSuite) TestCommit_OnlyWithNothingStagedDidCommitFalse() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.False(result.DidCommit)
+	s.runFails("rev-parse", "-q", "--verify", "HEAD")
+	s.Equal("work.txt", s.gitOut("diff", "--cached", "--name-only"))
+}
+
+// Only names the files from the staged diff, but the commit records their
+// working-tree content: an unstaged edit on top of a staged file goes in
+// with it, and the index then matches the commit.
+func (s *testSuite) TestCommit_OnlyRecordsWorkingTreeContent() {
+	s.gitInit()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "staged\n")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+	s.writeFile(".beads/config.yaml", "staged\nunstaged\n")
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal("staged\nunstaged", s.gitOut("show", "HEAD:.beads/config.yaml"))
+	s.Empty(s.gitOut("status", "--porcelain"))
+}
+
+// untrackIgnoredBeadsFile commits .beads/key, which .beads/.gitignore
+// ignores, then stages its removal with git rm --cached, as bd doctor --fix
+// untracks an ignored runtime file. The file stays on disk, and a staged
+// config.yaml stands in for the init artifacts.
+func (s *testSuite) untrackIgnoredBeadsFile() {
+	s.T().Helper()
+	s.gitInit()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/.gitignore", "key\n")
+	s.writeFile(".beads/key", "committed key\n")
+	s.run("git", "add", "-f", ".beads/.gitignore", ".beads/key")
+	s.run("git", "commit", "-q", "-m", "seed")
+	s.run("git", "rm", "-q", "--cached", ".beads/key")
+	s.writeFile(".beads/config.yaml", "x")
+}
+
+// A staged removal of a file still on disk stays staged and out of the Only
+// commit: --only would record the file's working-tree content and track it
+// again, undoing the user's git rm --cached.
+func (s *testSuite) TestCommit_OnlyKeepsStagedRemovalOfFileOnDisk() {
+	s.untrackIgnoredBeadsFile()
+	s.writeFile(".beads/key", "rotated key\n")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+	s.Equal("committed key", s.gitOut("show", "HEAD:.beads/key"))
+	s.Equal("D\t.beads/key", s.gitOut("diff", "--cached", "--name-status"))
+}
+
+// The removal of a file that is gone from disk is an ordinary change under
+// the scope, and the Only commit records it.
+func (s *testSuite) TestCommit_OnlyCommitsStagedRemovalOfDeletedFile() {
+	s.untrackIgnoredBeadsFile()
+	s.Require().NoError(os.Remove(filepath.Join(s.tmpDir, ".beads", "key")))
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal("A\t.beads/config.yaml\nD\t.beads/key", s.gitOut("show", "--name-status", "--format=", "HEAD"))
+	s.Empty(s.gitOut("diff", "--cached", "--name-status"))
+}
+
+func (s *testSuite) TestCommitInitArtifacts_LeavesPreStagedWorkStaged() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	s.writeFile("AGENTS.md", "agents")
+
+	result, err := domain.NewGitUseCase(s.tmpDir, s.repo).CommitInitArtifacts(s.Ctx(), domain.CommitInitArtifactsParams{
+		BeadsDir:      ".beads/",
+		OptionalPaths: []string{"AGENTS.md", "CLAUDE.md"},
+		Message:       "init",
+	})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml\nAGENTS.md", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+	s.Equal("work.txt", s.gitOut("diff", "--cached", "--name-only"))
+}
+
+// runFails runs a git command that is expected to exit nonzero, such as a
+// merge that stops on a conflict.
+func (s *testSuite) runFails(args ...string) {
+	s.T().Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = s.tmpDir
+	s.Require().Error(cmd.Run())
+}
+
+// commitBaseAndSide commits a.txt and a side branch that changes it and adds
+// side.txt, then returns to the starting branch. With conflict, the starting
+// branch also changes a.txt, so merging side stops on a.txt.
+func (s *testSuite) commitBaseAndSide(conflict bool) {
+	s.T().Helper()
+	s.gitInit()
+	s.writeFile("a.txt", "base\n")
+	s.run("git", "add", "a.txt")
+	s.run("git", "commit", "-q", "-m", "base")
+	s.run("git", "checkout", "-q", "-b", "side")
+	s.writeFile("a.txt", "side\n")
+	s.writeFile("side.txt", "side\n")
+	s.run("git", "add", "a.txt", "side.txt")
+	s.run("git", "commit", "-q", "-m", "side")
+	s.run("git", "checkout", "-q", "-")
+	changed := "ours.txt"
+	if conflict {
+		changed = "a.txt"
+	}
+	s.writeFile(changed, "ours\n")
+	s.run("git", "add", changed)
+	s.run("git", "commit", "-q", "-m", "ours")
+}
+
+// requireOnlyCommitRefusedDuringMerge stages .beads/config.yaml during an
+// in-progress merge and requires git to refuse the Only commit without
+// moving HEAD, changing the index or removing MERGE_HEAD.
+func (s *testSuite) requireOnlyCommitRefusedDuringMerge() {
+	s.T().Helper()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+	head := s.gitOut("rev-parse", "HEAD")
+	mergeHead := s.gitOut("rev-parse", "--verify", "MERGE_HEAD")
+	index := s.gitOut("ls-files", "--stage")
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "partial commit during a merge")
+	s.False(result.DidCommit)
+	s.Equal(head, s.gitOut("rev-parse", "HEAD"))
+	s.Equal(mergeHead, s.gitOut("rev-parse", "--verify", "MERGE_HEAD"))
+	s.Equal(index, s.gitOut("ls-files", "--stage"))
+}
+
+func (s *testSuite) TestCommit_OnlyRefusedDuringConflictedMerge() {
+	s.commitBaseAndSide(true)
+	s.runFails("merge", "side")
+	s.Equal("UU a.txt", s.gitOut("status", "--porcelain", "--", "a.txt"))
+
+	s.requireOnlyCommitRefusedDuringMerge()
+	s.run("git", "merge", "--abort")
+	s.runFails("rev-parse", "-q", "--verify", "MERGE_HEAD")
+}
+
+func (s *testSuite) TestCommit_OnlyRefusedDuringMergeNoCommit() {
+	s.commitBaseAndSide(false)
+	s.run("git", "merge", "--no-commit", "--no-ff", "side")
+
+	s.requireOnlyCommitRefusedDuringMerge()
+	s.run("git", "merge", "--abort")
+	s.runFails("rev-parse", "-q", "--verify", "MERGE_HEAD")
+}
+
 func (s *testSuite) TestAdd_EmptyPathsErrors() {
 	s.gitInit()
 	err := s.repo.Add(s.Ctx())

@@ -2569,6 +2569,9 @@ func TestInitDatabaseAdoptsExistingProjectID(t *testing.T) {
 	// Simulate second user — init with --database pointing at the existing DB
 	secondDir := t.TempDir()
 	t.Chdir(secondDir)
+	// init resolves .beads through the cached Git context, which an earlier
+	// test in this binary can leave pointing at a fixture it has removed.
+	resetRepoCachesForTest(t)
 
 	// Set up minimal git repo (init expects it for repo_id)
 	if err := gitCommand("-C", secondDir, "init").Run(); err != nil {

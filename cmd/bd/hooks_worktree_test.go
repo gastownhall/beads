@@ -62,6 +62,7 @@ func TestConfigureBeadsHooksPath_WorktreeUsesMainRepo(t *testing.T) {
 
 	t.Chdir(worktreeDir)
 	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
 
 	if !git.IsWorktree() {
 		t.Fatal("expected git.IsWorktree() to return true")
