@@ -54,10 +54,13 @@ func (s *DoltStore) runIssueOperationTx(ctx context.Context, commitMsg string, f
 //
 // Audit-trail caveat (server mode): sessions on one branch share the working
 // set, so a concurrent writer's DOLT_COMMIT can absorb this operation's rows
-// under its own message; this operation's commit then degrades to
-// nothing-to-commit and its message never reaches dolt log. The data is
-// intact — doltAddAndCommit logs the absorption so the missing audit line is
-// explicable.
+// under its own message; this operation's commit then finds nothing to stage
+// and its message never reaches dolt log. The absorbing commit carries the
+// rows whole: every publisher in this package stages the issue closure in
+// one DOLT_ADD (withIssueClosure), so no published commit holds a delete's
+// issues row removal without the rows that named the issue, or a create's
+// child rows without its issues row. doltAddAndCommit logs an absorption
+// that lands between its staged check and its DOLT_COMMIT.
 func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(*sql.Tx) (storageissueops.ChangedTables, string, error)) error {
 	var tables storageissueops.ChangedTables
 	var commitMsg string
@@ -90,9 +93,47 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 	// (gastownhall/beads#7035). This is the order RemoveDependencyWithOptions
 	// and commitWispTxAndRecheck already keep.
 	defer s.settleBlockedRecheck(ctx, pending)
-	staged := sortedDirtyTables(tables)
-	if len(staged) == 0 {
-		return nil
+	s.publishCommittedOperation(ctx, sortedDirtyTables(tables), commitMsg)
+	return nil
+}
+
+// publishCommittedOperation mints the Dolt history commit for a mutation whose
+// SQL transaction has ALREADY committed: DOLT_ADD of tables (plus the version
+// history tables when active) and DOLT_COMMIT with commitMsg, on a fresh
+// pinned connection with no SQL transaction open. It is the only publication
+// step a SQL mutation may take (GH#5752, LatentLabsSpace/NEXUS#92): staging
+// inside the still-open transaction can build the Dolt commit from the
+// BEGIN-time root, which on a server with the staged-root behavior GH#5752
+// describes writes rows concurrent writers committed in the window back to
+// their old values.
+//
+// Callers reach it only after their runner returned nil, so a failed or
+// indeterminate SQL commit never publishes (see runIssueOperationTxWithMessage
+// on why an ambiguous commit is not published either). Publication is
+// best-effort by contract: the mutation is applied and durable, so a
+// failure is counted and logged once and never returned — the change rides
+// the next Dolt commit on the branch. Version-commit deferral, the staged-set
+// guard (no empty commits) and the nothing-to-commit tolerance live in
+// doltAddAndCommit.
+//
+// Recheck ordering: every caller settles the post-commit blocked-state
+// recheck only after this publication (gastownhall/beads#7035), as
+// runDoltTransaction and RemoveDependency settle it after their own Dolt
+// commit. Their runners (retryWriteTxOn, commitWriteTx, withDeleteFence) hand
+// the pending recheck back instead of settling it. The recheck's commit
+// stages the whole issues table and, with it, the issue closure
+// (withIssueClosure), so a recheck that changed a row (the
+// gastownhall/beads#6716 race) and ran first would publish this mutation's
+// rows under the recheck's message and leave commitMsg's own commit nothing
+// to stage.
+//
+// Between the SQL COMMIT and this publication the mutation's rows sit in the
+// shared working set unpublished, and another writer's commit can take them.
+// That commit stages the issue closure in one DOLT_ADD, so it takes them
+// whole (see the audit-trail caveat on runIssueOperationTxWithMessage).
+func (s *DoltStore) publishCommittedOperation(ctx context.Context, tables []string, commitMsg string) {
+	if len(tables) == 0 {
+		return
 	}
 	if commitMsg == "" {
 		// A body can dirty tables without composing a message (e.g. a ready
@@ -100,12 +141,19 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 		// mint a Dolt commit with an empty message.
 		commitMsg = "bd: issue operation"
 	}
-	if err := s.doltAddAndCommitPostTx(ctx, staged, commitMsg); err != nil {
-		// See the failure-mode note above: the mutation is applied and
-		// durable; only the trailing history commit is missing, and the
-		// change rides the next dolt commit on the branch.
+	if err := s.doltAddAndCommitPostTx(ctx, tables, commitMsg); err != nil {
+		// The mutation is applied and durable; only the trailing history
+		// commit is missing, and the change rides the next dolt commit on
+		// the branch.
 		doltMetrics.postTxCommitDropped.Add(ctx, 1)
 		log.Printf("dolt: post-tx dolt commit failed for %q (data already committed; change rides the next dolt commit): %v", commitMsg, err)
 	}
-	return nil
+}
+
+// changedTables builds the publication intent for a legacy write whose table
+// set is fixed at the call site.
+func changedTables(names ...string) storageissueops.ChangedTables {
+	tables := storageissueops.ChangedTables{}
+	tables.Add(names...)
+	return tables
 }

@@ -77,9 +77,12 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 	// Stage events only when AddDependencyInTx actually recorded a
 	// dependency_added event (explicit verb + genuine new edge). A structural or
 	// idempotent add writes no event, so staging events would sweep unrelated
-	// pending event rows into this dependency commit. Stage issues only when
-	// the add flipped a durable is_blocked, so the flag rides the edge's
-	// commit (GH#6647) and a non-flipping add sweeps no pending issues edit.
+	// pending event rows into this dependency commit. Name issues when the add
+	// flipped a durable is_blocked, so the flag rides the edge's commit
+	// (GH#6647). doltAddAndCommit stages the rest of the issue closure with
+	// dependencies either way (withIssueClosure), so a pending issues edit
+	// rides this commit too, rather than being left behind by a commit that
+	// could publish an edge without the issues row it names.
 	tables := []string{"dependencies"}
 	if written.EventWritten {
 		tables = append(tables, "events")
@@ -168,9 +171,11 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		// dependency_removed event (explicit verb + genuine edge removal). A
 		// structural or missing-edge remove writes no event, so staging events would
 		// sweep unrelated pending event rows into this dependency commit.
-		// Issues is staged when the removal's recompute changed a durable
+		// Issues is named when the removal's recompute changed a durable
 		// is_blocked, so the unblock rides this commit (GH#6647); the recheck
-		// below only settles concurrent-unblock races.
+		// below only settles concurrent-unblock races. doltAddAndCommit
+		// stages the rest of the issue closure with dependencies either way
+		// (withIssueClosure).
 		tables := []string{"dependencies"}
 		if written.EventWritten {
 			tables = append(tables, "events")

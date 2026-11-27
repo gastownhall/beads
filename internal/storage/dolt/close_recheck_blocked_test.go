@@ -9,9 +9,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/testutil/sqlgate"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // seedSiblingBlockers creates rb-a and rb-b, both blocking rb-c.
@@ -215,6 +219,264 @@ func TestCloseRecheckBlocked_IssueOperationCommitsBeforeRecheck(t *testing.T) {
 	}
 	if recheckAt > operationAt {
 		t.Fatalf("the recheck's commit is older than the operation's (log positions %d and %d, newest first), want the operation's commit first", recheckAt, operationAt)
+	}
+}
+
+// doltLogEntry is one dolt_log row.
+type doltLogEntry struct{ hash, message string }
+
+// readDoltLog returns dolt_log, newest commit first.
+func readDoltLog(ctx context.Context, t *testing.T, store *DoltStore) []doltLogEntry {
+	t.Helper()
+	rows, err := store.db.QueryContext(ctx, "SELECT commit_hash, message FROM dolt_log")
+	if err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	defer rows.Close()
+	var log []doltLogEntry
+	for rows.Next() {
+		var entry doltLogEntry
+		if err := rows.Scan(&entry.hash, &entry.message); err != nil {
+			t.Fatalf("scan dolt_log: %v", err)
+		}
+		log = append(log, entry)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate dolt_log: %v", err)
+	}
+	return log
+}
+
+// doltLogIndex returns the position of the newest commit whose message
+// matches, or -1.
+func doltLogIndex(log []doltLogEntry, match func(message string) bool) int {
+	for i, entry := range log {
+		if match(entry.message) {
+			return i
+		}
+	}
+	return -1
+}
+
+// requireOperationCommitBeforeRecheck fails unless dolt_log holds the
+// operation's own commit and, newer than it, the recheck's commit.
+func requireOperationCommitBeforeRecheck(t *testing.T, log []doltLogEntry, operationMsg, recheckMsg string) {
+	t.Helper()
+	operationAt := doltLogIndex(log, func(m string) bool { return m == operationMsg })
+	recheckAt := doltLogIndex(log, func(m string) bool { return m == recheckMsg })
+	if recheckAt < 0 {
+		t.Fatalf("dolt_log has no %q commit: the race under test was not reproduced; log: %v", recheckMsg, log)
+	}
+	if operationAt < 0 {
+		t.Fatalf("dolt_log has no %q commit: the recheck published the operation's rows under its own message; log: %v",
+			operationMsg, log)
+	}
+	if recheckAt > operationAt {
+		t.Fatalf("the recheck's commit is older than %q (log positions %d and %d, newest first), want the operation's commit first; log: %v",
+			operationMsg, recheckAt, operationAt, log)
+	}
+}
+
+// TestCloseRecheckBlocked_LifecycleTransactionCommitsBeforeRecheck is
+// gastownhall/beads#7035 on RunInIssueLifecycleTransaction, the tracker-sync
+// path. The transition mints its Dolt commit after its SQL transaction, as the
+// issue-operation runner does, and must settle the recheck after that commit.
+// Settled first, the recheck's commit staged the whole issues table, the
+// close of rb-b with it, and the transition's own commit was left with
+// nothing to stage (events is dolt-ignored): dolt_log never showed it.
+func TestCloseRecheckBlocked_LifecycleTransactionCommitsBeforeRecheck(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedSiblingBlockers(t, ctx, store)
+
+	// rb-a closes on its own connection inside the transition's window: after
+	// the transition pinned its snapshot, before it commits. Neither close sees
+	// the other, so only the recheck unblocks rb-c.
+	_, commitA := beginRacingClose(t, ctx, store, "rb-a")
+	var landA sync.Once
+	calls := 0
+	const operationMsg = "bd: tracker update rb-b"
+	err := store.RunInIssueLifecycleTransaction(ctx, operationMsg, func(tx storage.IssueLifecycleTransaction) error {
+		calls++
+		for _, id := range []string{"rb-a", "rb-b"} {
+			issue, err := tx.GetIssue(ctx, id)
+			if err != nil {
+				return err
+			}
+			if issue.Status == types.StatusClosed {
+				return fmt.Errorf("the transition's snapshot sees %s closed, want both blockers open", id)
+			}
+		}
+		landA.Do(commitA)
+		return tx.CloseIssue(ctx, "rb-b", "done", "tester", "")
+	})
+	if err != nil {
+		t.Fatalf("close rb-b in a lifecycle transaction: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("lifecycle callback ran %d times, want 1", calls)
+	}
+
+	assertIsBlocked(t, ctx, store, "issues", "rb-c", false)
+	requireCleanTables(ctx, t, store, "issues")
+	requireOperationCommitBeforeRecheck(t, readDoltLog(ctx, t, store), operationMsg, "bd: recheck blocked after close of rb-b")
+}
+
+// TestCloseRecheckBlocked_DeletesCommitBeforeRecheck is gastownhall/beads#7035
+// on the deletes that mint their Dolt commit after their SQL transaction:
+// DeleteIssue, DeleteIssues and the role Deleter, unguarded and fenced. Each
+// case seeds its own blockers a and b of c, deletes b while held at its SQL
+// commit point, and closes a to completion in that window, so neither write
+// sees the other and only the delete's post-commit recheck unblocks c. The
+// recheck's commit stages the whole issues table: settled before the delete's
+// own commit, it published b's deletion while the dependencies row naming b
+// stayed in the published root, a commit that breaks fk_dep_issue_target for
+// any push, pull or AS OF read that lands on it. The delete's commit comes
+// first, and no commit the race published has a dependencies row naming a
+// missing b.
+func TestCloseRecheckBlocked_DeletesCommitBeforeRecheck(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	gate := raceGatedStore(t, store)
+
+	roleDelete := func(ctx context.Context, req publicops.DeleteRequest) error {
+		deleter, err := store.Deleter()
+		if err != nil {
+			return err
+		}
+		res, err := deleter.Delete(ctx, req)
+		if err == nil && res.Deleted != 1 {
+			return fmt.Errorf("deleted %d rows, want 1", res.Deleted)
+		}
+		return err
+	}
+	cases := []struct {
+		name string
+		// message is the delete's own commit message for id.
+		message func(id string) string
+		// deleteOf runs before the race and returns the delete of id to
+		// hold. c depends on id, so the batch and role deletes force.
+		deleteOf func(ctx context.Context, t *testing.T, id string) func(context.Context) error
+	}{
+		{
+			name:    "DeleteIssue",
+			message: func(id string) string { return "bd: delete " + id },
+			deleteOf: func(_ context.Context, _ *testing.T, id string) func(context.Context) error {
+				return func(ctx context.Context) error { return store.DeleteIssue(ctx, id) }
+			},
+		},
+		{
+			name:    "DeleteIssues",
+			message: func(string) string { return "bd: delete 1 issue(s)" },
+			deleteOf: func(_ context.Context, _ *testing.T, id string) func(context.Context) error {
+				return func(ctx context.Context) error {
+					res, err := store.DeleteIssues(ctx, []string{id}, false, true, false)
+					if err == nil && res.DeletedCount != 1 {
+						return fmt.Errorf("deleted %d issues, want 1", res.DeletedCount)
+					}
+					return err
+				}
+			},
+		},
+		{
+			name:    "Deleter",
+			message: func(string) string { return "bd: delete 1 issue(s)" },
+			deleteOf: func(_ context.Context, _ *testing.T, id string) func(context.Context) error {
+				return func(ctx context.Context) error {
+					return roleDelete(ctx, publicops.DeleteRequest{Actor: "tester", IDs: []string{id}, Force: true})
+				}
+			},
+		},
+		{
+			// An ExpectedVersion on a server-mode store runs the write on
+			// withDeleteFence's pinned connection.
+			name:    "DeleterFenced",
+			message: func(string) string { return "bd: delete 1 issue(s)" },
+			deleteOf: func(ctx context.Context, t *testing.T, id string) func(context.Context) error {
+				if !store.serverMode {
+					t.Fatal("the fenced delete runs only on a server-mode store")
+				}
+				issue, err := store.GetIssue(ctx, id)
+				if err != nil {
+					t.Fatalf("read %s's version: %v", id, err)
+				}
+				version := issue.RowVersion
+				return func(ctx context.Context) error {
+					return roleDelete(ctx, publicops.DeleteRequest{
+						Actor: "tester", IDs: []string{id}, Force: true, ExpectedVersion: &version,
+					})
+				}
+			},
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := testContext(t)
+			defer cancel()
+			a, b, c := fmt.Sprintf("rd%d-a", i), fmt.Sprintf("rd%d-b", i), fmt.Sprintf("rd%d-c", i)
+			seedSiblingBlockersAs(t, ctx, store, a, b, c)
+			del := tc.deleteOf(ctx, t, b)
+
+			label := t.Name()
+			hold := gate.Arm(label)
+			defer hold.Release()
+			done := make(chan error, 1)
+			go func() { done <- del(sqlgate.WithLabel(ctx, label)) }()
+			select {
+			case <-hold.Reached():
+			case err := <-done:
+				t.Fatalf("the delete finished before its commit point: %v", err)
+			case <-time.After(30 * time.Second):
+				t.Fatal("the delete never reached its commit point")
+			}
+			if err := store.CloseIssue(ctx, a, "done", "tester", ""); err != nil {
+				t.Fatalf("close %s while the delete is held: %v", a, err)
+			}
+			// b is still open on every committed snapshot: c stays blocked.
+			assertIsBlocked(t, ctx, store, "issues", c, true)
+			hold.Release()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("delete %s: %v", b, err)
+				}
+			case <-time.After(60 * time.Second):
+				t.Fatal("the delete did not finish after its release")
+			}
+			if kind := gate.CommitKind(label); kind != "Tx.Commit" {
+				t.Fatalf("the delete was held at %q, want its SQL Tx.Commit", kind)
+			}
+
+			assertIsBlocked(t, ctx, store, "issues", c, false)
+			requireCleanTables(ctx, t, store, "issues", "dependencies")
+			log := readDoltLog(ctx, t, store)
+			closeAt := doltLogIndex(log, func(m string) bool { return m == "bd: close "+a })
+			if closeAt < 0 {
+				t.Fatalf("dolt_log has no %q commit; log: %v", "bd: close "+a, log)
+			}
+			// The cases share the store: only the commits newer than this
+			// case's close of a are this race's.
+			race := log[:closeAt]
+			count := func(query, hash string) int {
+				t.Helper()
+				var n int
+				if err := store.db.QueryRowContext(ctx, fmt.Sprintf(query, hash), b).Scan(&n); err != nil {
+					t.Fatalf("count at %s: %v", hash, err)
+				}
+				return n
+			}
+			for _, entry := range race {
+				issues := count("SELECT COUNT(*) FROM issues AS OF '%s' WHERE id = ?", entry.hash)
+				deps := count("SELECT COUNT(*) FROM dependencies AS OF '%s' WHERE depends_on_issue_id = ?", entry.hash)
+				if issues == 0 && deps > 0 {
+					t.Errorf("published commit %s %q has no %s issues row but %d dependencies row(s) naming it",
+						entry.hash, entry.message, b, deps)
+				}
+			}
+			requireOperationCommitBeforeRecheck(t, race, tc.message(b), "bd: recheck blocked after delete of "+b)
+		})
 	}
 }
 

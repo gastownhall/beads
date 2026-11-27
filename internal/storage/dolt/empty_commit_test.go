@@ -15,7 +15,7 @@ import (
 // TestDoltAddAndCommitSkipsEmptyCommitWithUnrelatedDirtyTable is a regression
 // test for the high-frequency "nothing to commit" Dolt warning spam.
 //
-// Root cause: doltAddAndCommit / doltAddAndCommitInTx stage only a FIXED table
+// Root cause: doltAddAndCommit / stageAndCommit stage only a FIXED table
 // list (e.g. ["dependencies"]) and then issue DOLT_COMMIT('-m', ...). An
 // idempotent no-op write (re-adding an existing dependency via INSERT IGNORE, or
 // removing a non-existent one) leaves that table clean, so the DOLT_ADD stages
@@ -97,8 +97,8 @@ func TestDoltAddAndCommitSkipsEmptyCommitWithUnrelatedDirtyTable(t *testing.T) {
 }
 
 // TestClaimAndCloseNoRegressionWithUnrelatedDirtyTable guards the issues.go
-// commit sites that were consolidated onto the guarded doltAddAndCommitInTx
-// helper (UpdateIssue/ClaimIssue/ClaimReadyIssue/CloseIssue/Delete*).
+// commit sites that were consolidated onto the guarded post-commit publisher
+// stageAndCommit (UpdateIssue/ClaimIssue/ClaimReadyIssue/CloseIssue/Delete*).
 //
 // IMPORTANT — what this test does and does NOT prove. The empty-commit BUG is a
 // server-side "nothing to commit" WARNING, not a HEAD movement: an empty
@@ -201,7 +201,7 @@ func dirtyConfigUncommitted(t *testing.T, store *DoltStore) {
 
 // TestHasStagedChanges is a fast, server-free unit test of the guard predicate
 // (issueops.HasStagedChanges) used by StageAndCommit, doltAddAndCommit and
-// doltAddAndCommitInTx. It asserts the helper returns false on an empty staged
+// stageAndCommit. It asserts the helper returns false on an empty staged
 // set (so the caller skips the empty '-m' commit) and true when something is
 // staged (so a real change still commits). Mirrors the sqlmock style of
 // versioncontrolops.TestStageAndCommit*.

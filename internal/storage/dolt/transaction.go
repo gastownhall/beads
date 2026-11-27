@@ -136,32 +136,48 @@ func (s *DoltStore) runInTransaction(
 // RunInIssueLifecycleTransaction runs a lifecycle transition and its durable
 // side effects through one SQL transaction and one Dolt commit attempt.
 func (s *DoltStore) RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx storage.IssueLifecycleTransaction) error) error {
-	return s.runInIssueLifecycleTransaction(ctx, commitMsg, fn, s.withWriteTx)
+	return s.runInIssueLifecycleTransaction(ctx, commitMsg, fn, s.commitWriteTx)
 }
 
 // runInIssueLifecycleTransaction retries only failures that occur before the
 // public callback starts. Once fn has run, its caller-owned work must never be
 // replayed, even when Dolt proves that the SQL transaction rolled back.
+//
+// The Dolt history commit is published only after run returned nil — after
+// the SQL COMMIT, on a connection with no transaction open — and outside the
+// setup retry, so a publication failure can neither replay the callback nor
+// enter the setup-retry classification (GH#5752: staging inside the open
+// transaction can build the Dolt commit from the BEGIN-time root).
+//
+// run hands back the dependents the callback's unblocking writes recorded
+// instead of settling them, and they are settled only after that Dolt commit
+// (gastownhall/beads#7035). The recheck's commit stages the whole issues
+// table: run first, it would publish the transition's rows under the
+// recheck's message and leave the commit that carries commitMsg nothing to
+// stage.
 func (s *DoltStore) runInIssueLifecycleTransaction(
 	ctx context.Context,
 	commitMsg string,
 	fn func(tx storage.IssueLifecycleTransaction) error,
-	run func(context.Context, func(*sql.Tx) error) error,
+	run func(context.Context, func(*sql.Tx) error) (issueops.BlockedRecheck, error),
 ) error {
-	return s.withTransactionSetupRetry(ctx, func() error {
+	var tables []string
+	var pending issueops.BlockedRecheck
+	if err := s.withTransactionSetupRetry(ctx, func() error {
+		tables = nil
 		invoked := false
 		var callbackErr error
-		err := run(ctx, func(sqlTx *sql.Tx) error {
+		var err error
+		// Plain assignment: every attempt replaces the recheck, and a failed
+		// one hands back none.
+		pending, err = run(ctx, func(sqlTx *sql.Tx) error {
 			invoked = true
 			tx := &doltTransaction{regularTx: sqlTx, ignoredTx: sqlTx, store: s}
 			if callbackErr = fn(tx); callbackErr != nil {
 				return callbackErr
 			}
-			tables := tx.dirtyTableNames()
-			if len(tables) == 0 {
-				return nil
-			}
-			return s.doltAddAndCommitInTx(ctx, sqlTx, tables, commitMsg)
+			tables = tx.dirtyTableNames()
+			return nil
 		})
 		if invoked && err != nil {
 			// An ambiguous commit reaches withRetry so connection failures still
@@ -172,7 +188,12 @@ func (s *DoltStore) runInIssueLifecycleTransaction(
 			return backoff.Permanent(err)
 		}
 		return err
-	})
+	}); err != nil {
+		return err
+	}
+	defer s.settleBlockedRecheck(ctx, pending)
+	s.publishCommittedOperation(ctx, tables, commitMsg)
+	return nil
 }
 
 func (t *doltTransaction) dirtyTableNames() []string {
@@ -382,6 +403,10 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 	// staged with them or the version rows never reach this operation's Dolt
 	// commit. Marked here, once, rather than at each MarkDirty call site.
 	tx.dirty.MarkVersionedHistoryDirty(s.versionedHistory.Enabled())
+	// Then the issue closure, which the history tables' issues can bring in:
+	// a commit that names issues or a table naming it stages them all
+	// (withIssueClosure).
+	markIssueClosureDirty(&tx.dirty)
 
 	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
 		rollbackIgnored()
@@ -405,6 +430,7 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 // failure is counted and logged like the other post-commit history commits,
 // never returned: the rows ride the next Dolt commit on the branch.
 func (s *DoltStore) publishIgnoredDirty(ctx context.Context, conn *sql.Conn, tx *doltTransaction, commitMsg string) {
+	markIssueClosureDirty(&tx.ignoredDirty)
 	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.ignoredDirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
 		doltMetrics.postTxCommitDropped.Add(ctx, 1)
 		log.Printf("dolt: post-tx dolt commit failed for %q (data already committed; change rides the next dolt commit): %v", commitMsg, err)

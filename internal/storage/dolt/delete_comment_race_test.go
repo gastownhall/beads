@@ -209,16 +209,18 @@ type raceCase struct {
 // outcome), and both orders run one after the other with no overlap (the
 // serial outcome by construction).
 //
-// The styles: by default a guarded write mints its version commit with
-// DOLT_COMMIT inside its transaction ("in-body-dolt-commit"); under
-// dolt.auto-commit batch/off it commits with a plain SQL COMMIT and the
-// version commit is deferred ("sql-commit").
+// The styles: a guarded write on the direct store commits with a plain SQL
+// COMMIT in both. By default it then mints its version commit right after
+// that commit ("post-commit-dolt-commit", GH#5752); under dolt.auto-commit
+// batch/off the version commit is deferred ("sql-commit"). Only the
+// unit-of-work path still mints it with DOLT_COMMIT inside the transaction
+// (TestUOWDeleteCommentRaceCharacterization's "in-body-dolt-commit").
 func raceCases() []raceCase {
 	var cases []raceCase
 	for _, style := range []struct {
 		name     string
 		deferred bool
-	}{{name: "in-body-dolt-commit"}, {name: "sql-commit", deferred: true}} {
+	}{{name: "post-commit-dolt-commit"}, {name: "sql-commit", deferred: true}} {
 		for _, loser := range []string{raceDeleteLoses, raceCommentLoses} {
 			cases = append(cases, raceCase{name: loser + "/" + style.name, loser: loser, deferred: style.deferred})
 		}
@@ -269,10 +271,10 @@ func requireRaceIntegrity(t *testing.T, ev raceEvidence) {
 // The loser's transaction is held at its commit point (it has read and
 // written everything), the winner runs to completion, and the loser is then
 // released. Both orders run, under both supported commit styles. The direct
-// store's Commenter commits with a plain SQL COMMIT and mints its version
-// commit after it, whatever the style, so "comment loses under an in-body
-// DOLT_COMMIT" is not executable on this path: the case still runs, and its
-// evidence records the commit kind the commenter really used.
+// store's Deleter and Commenter both commit with a plain SQL COMMIT and mint
+// their version commit after it, whatever the style (GH#5752), so no case on
+// this path commits with an in-body DOLT_COMMIT; the unit-of-work test runs
+// those. Each case's evidence records the commit kind each side really used.
 //
 // Every case logs one evidence line. By default the journal-off cases then
 // assert the characterized current outcome (see
@@ -401,7 +403,8 @@ func TestGuardedDeleteCommentRaceCharacterization(t *testing.T) {
 		})
 	}
 	t.Logf("delete-comment race coverage (dolt-store): executed %v; not executable on this path: "+
-		"comment loser with an in-body DOLT_COMMIT (the Commenter always SQL-COMMITs first); "+
+		"either side with an in-body DOLT_COMMIT (the Deleter and the Commenter both SQL-COMMIT first; "+
+		"TestUOWDeleteCommentRaceCharacterization runs those); "+
 		"not covered by this item: labels, dependencies, the wisp plane, cancellation of a held loser, "+
 		"persisted (non-sequencing) constraint violations", executed)
 }
@@ -465,21 +468,18 @@ func fillRaceOp(t *testing.T, gate *sqlgate.Connector, op *raceOp, label string)
 }
 
 // requireRaceCommitKinds fails unless each side committed the way its case
-// says: a case named for an in-body DOLT_COMMIT that really SQL-COMMITted
-// would be evidence for the wrong path. The direct store's Commenter always
-// commits with Tx.Commit first.
+// says: a side that reached a CALL DOLT_ADD or DOLT_COMMIT inside its
+// transaction would be evidence for the wrong path. On the direct store the
+// Deleter and the Commenter both commit with Tx.Commit first, in every style,
+// and publish their version commit after it (GH#5752).
 func requireRaceCommitKinds(t *testing.T, rc raceCase, ev raceEvidence) {
 	t.Helper()
-	wantDelete := "CALL DOLT_ADD"
-	if rc.deferred {
-		wantDelete = "Tx.Commit"
-	}
 	del, com := ev.Loser, ev.Winner
 	if rc.loser == raceCommentLoses {
 		del, com = ev.Winner, ev.Loser
 	}
-	if del.CommitKind != wantDelete {
-		t.Errorf("delete commit kind = %q, want %q", del.CommitKind, wantDelete)
+	if del.CommitKind != "Tx.Commit" {
+		t.Errorf("delete commit kind = %q, want Tx.Commit", del.CommitKind)
 	}
 	if com.CommitKind != "Tx.Commit" {
 		t.Errorf("comment commit kind = %q, want Tx.Commit", com.CommitKind)

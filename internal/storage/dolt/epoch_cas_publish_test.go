@@ -122,8 +122,11 @@ func (c epochArgConnector) Connect(ctx context.Context) (driver.Conn, error) {
 type epochArgConn struct{ *seqConn }
 
 func (c *epochArgConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	if strings.Contains(query, "DOLT_ADD") && len(args) == 1 {
-		c.parent.rec.add(c.id, fmt.Sprintf("STAGE %v", args[0].Value))
+	if strings.Contains(query, "DOLT_ADD") {
+		// One DOLT_ADD names every table the commit stages.
+		for _, arg := range args {
+			c.parent.rec.add(c.id, fmt.Sprintf("STAGE %v", arg.Value))
+		}
 	}
 	return c.seqConn.QueryContext(ctx, query, args)
 }
@@ -189,7 +192,7 @@ func epochPublishIndex(events []string, pred func(string) bool) int {
 // TestEpochWritesPublishToDoltOnlyAfterTheSQLCommit is the ordering contract
 // of dolt_commit_ordering_test.go applied to the epoch methods. Staging and
 // Dolt-committing store_epoch or epoch_minted_addresses inside the still-open
-// SQL transaction is the lost-update hazard documented on doltAddAndCommitInTx
+// SQL transaction is the lost-update hazard of GH#5752
 // (LatentLabsSpace/NEXUS#92), and it costs more here than on issues: both
 // tables are append-only, so a row reverted to its BEGIN-time value is never
 // rewritten.

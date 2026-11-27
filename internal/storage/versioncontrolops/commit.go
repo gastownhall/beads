@@ -3,6 +3,8 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -11,7 +13,8 @@ import (
 
 // DirtyTableTracker records which tables were modified during a transaction.
 // Both DoltStore and EmbeddedDoltStore embed this in their transaction types
-// to enable selective staging (DOLT_ADD per table) instead of staging everything.
+// to enable selective staging (a DOLT_ADD of those tables) instead of staging
+// everything.
 type DirtyTableTracker struct {
 	tables map[string]bool
 }
@@ -123,10 +126,22 @@ func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 		return nil
 	}
 
-	for table := range dirtyTables {
-		if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
-			return fmt.Errorf("dolt add %s: %w", table, err)
-		}
+	// One DOLT_ADD names every table, in a fixed order. One statement stages
+	// them all from one working-set snapshot: with a call per table, another
+	// session's SQL commit landing between two calls stages part of that
+	// write, and the commit can publish rows naming an issue without the
+	// issue's row. Dolt stages all of a call's arguments together: a
+	// dolt_ignore'd table named among the others stages nothing, as its own
+	// call did, and a table that does not exist fails the call with nothing
+	// staged.
+	tables := slices.Sorted(maps.Keys(dirtyTables))
+	args := make([]any, len(tables))
+	for i, table := range tables {
+		args[i] = table
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(tables)), ", ")
+	if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD("+placeholders+")", args...); err != nil {
+		return fmt.Errorf("dolt add %s: %w", strings.Join(tables, ", "), err)
 	}
 
 	// Precise guard: HasPendingChanges above is global, but we only DOLT_ADD the

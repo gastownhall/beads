@@ -202,8 +202,9 @@ func addDependencyEdgeInTx(ctx context.Context, tx *sql.Tx, request publicops.Ad
 	// durable row, whatever the source's plane — a wisp-sourced edge can still
 	// block a durable child — so the flag rides the edge's commit (GH#6647),
 	// while an edge that flipped nothing (a closed target, a non-blocking
-	// type, a change-free re-add) stages no `issues` and cannot sweep someone
-	// else's pending edit into its commit (GH#2455).
+	// type, a change-free re-add) names no `issues` (GH#2455). The Dolt
+	// server store stages the whole issue closure with any table of it, so
+	// there a pending issues edit rides the edge's commit all the same.
 	tables := ChangedTables{}
 	tables.Add(depTable)
 	if written.EventWritten {

@@ -86,6 +86,38 @@ func TestStageAndCommitCommitsWhenPending(t *testing.T) {
 	}
 }
 
+// TestStageAndCommitStagesEveryTableInOneDoltAdd: the dirty tables are staged
+// by one DOLT_ADD naming them all, sorted, so they come from one working-set
+// snapshot. With a call per table, another session's SQL commit landing
+// between two calls was staged in part, and the commit could hold rows that
+// name an issue without the issue's row.
+func TestStageAndCommitStagesEveryTableInOneDoltAdd(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(matchPendingQuery.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`^CALL DOLT_ADD\(\?, \?, \?\)$`).
+		WithArgs("dependencies", "issues", "labels").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(matchStagedQuery.String()).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`CALL DOLT_COMMIT`).
+		WithArgs("bd: create x", "tester").
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+
+	dirty := map[string]bool{"labels": true, "issues": true, "dependencies": true}
+	if err := StageAndCommit(context.Background(), db, dirty, "bd: create x", "tester"); err != nil {
+		t.Fatalf("StageAndCommit(%v) = %v", dirty, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("StageAndCommit did not stage %v with one DOLT_ADD: %v", dirty, err)
+	}
+}
+
 // TestStageAndCommitSkipsWhenOnlyUnrelatedTableDirty is a regression test for
 // the second, subtler half of the empty-commit bug: the dirty-tracked tables
 // turn out clean (idempotent INSERT IGNORE label/dependency write) while some

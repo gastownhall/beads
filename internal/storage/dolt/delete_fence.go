@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 const (
@@ -77,7 +79,7 @@ func deleteFenceLockName(databaseName, id string) string {
 // anything — a second racer could then acquire the lock and, under
 // repeatable-read isolation, still observe the pre-delete row because the
 // first racer's delete was not yet durable. Running GET_LOCK, the retried
-// write, and RELEASE_LOCK all on one *sql.Conn (via withRetryTxOn) is the
+// write, and RELEASE_LOCK all on one *sql.Conn (via retryWriteTxOn) is the
 // same contract schema.MigrateUpWithLock documents for migrations.
 //
 // This also means withDeleteFence must never be called when the store's pool
@@ -88,24 +90,29 @@ func deleteFenceLockName(databaseName, id string) string {
 // both the lock and the write (rather than a lock connection plus a
 // pool-sourced write connection) avoids that deadlock by construction —
 // the fenced write never needs a second connection at all.
-func (s *DoltStore) withDeleteFence(ctx context.Context, id string, fn func(tx *sql.Tx) error) error {
+//
+// The dependents the write's unblocking writes recorded are handed back, not
+// settled here: the caller settles them after RELEASE_LOCK and after the
+// delete's own Dolt commit (gastownhall/beads#7035), so the recheck's pooled
+// connection is never needed while the fence holds its pinned one either.
+func (s *DoltStore) withDeleteFence(ctx context.Context, id string, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("delete fence: acquire connection: %w", err)
+		return issueops.BlockedRecheck{}, fmt.Errorf("delete fence: acquire connection: %w", err)
 	}
 	defer conn.Close()
 
 	lockName := deleteFenceLockName(s.database, id)
 	var locked sql.NullInt64
 	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", lockName, deleteFenceLockTimeoutSeconds).Scan(&locked); err != nil {
-		return fmt.Errorf("delete fence: acquire lock: %w: %w", ErrDeleteFenceUnavailable, err)
+		return issueops.BlockedRecheck{}, fmt.Errorf("delete fence: acquire lock: %w: %w", ErrDeleteFenceUnavailable, err)
 	}
 	if !locked.Valid || locked.Int64 != 1 {
-		return fmt.Errorf("delete fence: acquire lock: %w: timed out after %ds", ErrDeleteFenceUnavailable, deleteFenceLockTimeoutSeconds)
+		return issueops.BlockedRecheck{}, fmt.Errorf("delete fence: acquire lock: %w: timed out after %ds", ErrDeleteFenceUnavailable, deleteFenceLockTimeoutSeconds)
 	}
 	defer releaseDeleteFenceLock(conn, lockName)
 
-	return s.withRetryTxOn(ctx, conn, fn)
+	return s.retryWriteTxOn(ctx, conn, fn)
 }
 
 // releaseDeleteFenceLock releases a lock acquired by withDeleteFence from the

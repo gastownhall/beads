@@ -216,6 +216,61 @@ func (s *DoltStore) runDoltTransaction(ctx, fn, commitMsg) error {
 }
 ```
 
+> **Superseded (GH#5752, LatentLabsSpace/NEXUS#92):** do not publish inside
+> the SQL transaction. `DOLT_ADD` stages a whole table from the session's
+> BEGIN-time root, so on a server with the staged-root behavior GH#5752
+> describes, a Dolt commit minted before `COMMIT` can write every row a
+> concurrent writer committed in the meantime back to its BEGIN-time value.
+> `DoltStore` writes now commit their SQL transaction first and publish after
+> it, in one of two ways:
+>
+> - The writes that publish through `publishCommittedOperation` (issue
+>   updates, claims, closes, reopens and deletes, metadata and slot writes,
+>   wisp promotion and demotion, lifecycle transactions, the role deleter and
+>   the sweeper, among others) stage and Dolt-commit on a fresh pooled
+>   connection (`publishCommittedOperation` → `stageAndCommit`), honoring
+>   deferred version commits and skipping an empty staged set. A failure
+>   there cannot unwind the committed write: the write reports success, and
+>   the dropped publication is logged and counted on
+>   `bd.db.post_tx_commit_dropped`; the next explicit or automatic commit
+>   picks the change up. Each of them settles the post-commit blocked-state
+>   recheck only after that commit (gastownhall/beads#7035): the recheck's
+>   commit stages the whole `issues` table, so run first it would publish
+>   the write's `issues` rows under its own message.
+> - `RunInTransaction`, which CLI commands use for multi-statement writes,
+>   stages and Dolt-commits on the transaction's own pinned connection after
+>   the SQL commit, and returns `ErrCommitIndeterminate` when that trailing
+>   commit fails.
+>
+> Between its SQL `COMMIT` and its Dolt commit, a write's rows sit in the
+> shared working set, and another writer's commit can take them. Both
+> publishers therefore stage the issue closure (`withIssueClosure`). A staging
+> list that names `issues`, a table with a foreign key to it (`dependencies`,
+> `labels`, `comments`, `child_counters`, `issue_snapshots`,
+> `compaction_snapshots`, `provenance_events`) or `id_tombstones` stages all of
+> them with one `DOLT_ADD`. A commit made in that window then carries the
+> other write whole. The explicit commit points (`commitWorkingSet`: `Commit`,
+> which the CLI's auto-commit calls, the commits around a pull, and a merge
+> resolution) widen the tables their `dolt_status` read listed the same way,
+> to the closure tables the database holds, since they also commit a
+> database a migration has not reached. No published commit holds an issue's
+> removal while rows naming it stay, or a child row without its issue. The
+> conformance case `RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables`
+> lets a create's commit carry another writer's pending issue rows only
+> together, and never a pending row outside the closure. The cost is selective
+> staging inside the closure: a pending row in any of those tables rides the
+> next commit that stages one of them. The `TestIssueClosure_*` tests
+> (`internal/storage/dolt/publication_issue_closure_test.go`) hold a write in
+> that window on a real server.
+>
+> `TestNoDoltAddOrCommitInsideOpenTransaction`
+> (`internal/storage/dolt/publication_guard_test.go`) keeps
+> `DOLT_ADD`/`DOLT_COMMIT` literals to an approved list of publishers that run
+> outside any transaction. The unit-of-work transaction
+> (`internal/storage/uow/doltserver_tx.go`), which proxied-server mode writes
+> through, still commits inside its transaction; GH#5752 stays open until it
+> publishes after the SQL commit too.
+
 #### `dolt_autocommit.go`: Retire or Simplify
 
 With `DOLT_COMMIT` moving inside transactions, the external auto-commit
@@ -326,9 +381,11 @@ not adopted; the routes below say why.
 **Reproduction.** Two tests hold one side (the loser) at its first commit
 point, after it has read and written everything, then run the other side
 (the winner) to completion and release the loser. They run both orders,
-both commit styles (an in-body `DOLT_COMMIT` by default; a plain SQL
-`COMMIT` with the version commit deferred), and both server paths: the
-direct store and the unit-of-work path that proxied mode and `bd serve` use.
+both commit styles (by default the version commit is a `DOLT_COMMIT`: inside
+the transaction on the unit-of-work path, right after the SQL `COMMIT` on
+the direct store; otherwise a plain SQL `COMMIT` with the version commit
+deferred), and both server paths: the direct store and the unit-of-work path
+that proxied mode and `bd serve` use.
 The journal is off, `foreign_key_checks=1` and
 `dolt_force_transaction_commit=0`, read from the session that commits. Each
 case logs one `delete-comment race evidence:` JSON line, and each test ends
@@ -353,9 +410,8 @@ journal-off cases on both paths:
   transaction resulted in a working set with constraint violations,
   transaction rolled back. …`, and the error names the violated key:
   `Type: Foreign Key Constraint Violation, ForeignKey: fk_comments_issue`.
-  On the direct store the error is wrapped as `dolt commit: …` for an
-  in-body delete and `commit write tx: …` otherwise. It does not match
-  `ErrNotFound`.
+  On the direct store the error is wrapped as `commit write tx: …`. It does
+  not match `ErrNotFound`.
 - The loser gets exactly one attempt. Beads retries serialization failures
   (1213, 1205) and the exact autocommit 1105, not this one.
 - The loser's write is rolled back and the winner's stands. A losing delete
@@ -363,9 +419,9 @@ journal-off cases on both paths:
   issue deleted with no comments.
 - No comment is orphaned and `dolt_constraint_violations` is empty. The
   orphan-row outcome reported against this race did not reproduce.
-- On the direct store the Commenter always commits with a plain SQL `COMMIT`
-  and mints its version commit afterwards, so "comment loses under an
-  in-body `DOLT_COMMIT`" cannot run there. On the unit-of-work path every
+- On the direct store the Deleter and the Commenter both commit with a plain
+  SQL `COMMIT` and mint their version commit afterwards (GH#5752), so no
+  in-body `DOLT_COMMIT` case runs there. On the unit-of-work path every
   combination runs.
 
 Two controls in each test pass in either mode. With the events journal on,
@@ -429,6 +485,8 @@ persisted constraint violations.
 
 Modify `RunInTransaction` to include `DOLT_COMMIT` inside the SQL transaction.
 This works regardless of branch-per-worker — it's strictly additive safety.
+(Superseded by GH#5752: the Dolt commit now runs after the SQL commit; see
+the note under `transaction.go` above.)
 
 - Modify `transaction.go`: Add commit message parameter, call `DOLT_COMMIT`
   before `tx.Commit()`

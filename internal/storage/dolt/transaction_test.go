@@ -59,12 +59,12 @@ func TestRunInIssueLifecycleTransactionRollbackDoesNotReplayCallback(t *testing.
 	err := store.runInIssueLifecycleTransaction(context.Background(), "test: lifecycle callback at most once", func(storage.IssueLifecycleTransaction) error {
 		calls++
 		return nil
-	}, func(_ context.Context, fn func(*sql.Tx) error) error {
+	}, func(_ context.Context, fn func(*sql.Tx) error) (issueops.BlockedRecheck, error) {
 		runnerCalls++
 		if err := fn(nil); err != nil {
-			return err
+			return issueops.BlockedRecheck{}, err
 		}
-		return rollback
+		return issueops.BlockedRecheck{}, rollback
 	})
 	if !errors.Is(err, rollback) {
 		t.Fatalf("RunInIssueLifecycleTransaction() error = %v, want %v", err, rollback)
@@ -126,12 +126,12 @@ func TestPublicTransactionSetupRetriesRollbackSafeErrorsBeforeCallback(t *testin
 				return store.runInIssueLifecycleTransaction(context.Background(), "test: setup retry", func(storage.IssueLifecycleTransaction) error {
 					*callbacks++
 					return nil
-				}, func(_ context.Context, fn func(*sql.Tx) error) error {
+				}, func(_ context.Context, fn func(*sql.Tx) error) (issueops.BlockedRecheck, error) {
 					*attempts++
 					if *attempts == 1 {
-						return setupErr
+						return issueops.BlockedRecheck{}, setupErr
 					}
-					return fn(nil)
+					return issueops.BlockedRecheck{}, fn(nil)
 				})
 			},
 		},

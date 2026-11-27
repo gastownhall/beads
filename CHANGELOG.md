@@ -1544,6 +1544,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A server-mode write that landed no longer reports an error when its
+  Dolt history commit fails, and the sweeper honors `dolt.auto-commit`
+  `batch`/`off`** (part of #5752). Updates, claims, unclaims, closes,
+  reopens, metadata and slot writes, wisp promotion and demotion, lifecycle
+  transactions, deletes and the sweeper now commit their SQL transaction
+  first and make their Dolt commit after it, as the main issue-operation
+  path already did. If that trailing commit fails, the write still reports
+  success (it is already durable), the failure is logged and counted on
+  `bd.db.post_tx_commit_dropped`, and the next commit picks the change up;
+  previously some of these paths returned an error for a write that had
+  landed. A lost SQL `COMMIT` response is still reported as indeterminate
+  and never retried. Like the role deleter, the sweeper now leaves its rows
+  for the explicit commit point under `dolt.auto-commit` `batch` or `off`,
+  and neither sends a `DOLT_COMMIT` when nothing was staged. The new order
+  is defensive: these writes used to stage their tables inside the open SQL
+  transaction, from its starting snapshot, and on a Dolt server with the
+  staged-root behavior #5752 describes such a commit can write rows another
+  writer had just committed back to their old values. Because a write's rows
+  now sit in the shared working set for a moment before its Dolt commit,
+  every server-mode commit that stages an issue table stages all of them,
+  with one `DOLT_ADD`: `issues`, the tables whose rows name an issue
+  (`dependencies`, `labels`, `comments`, `child_counters`, the two snapshot
+  tables and `provenance_events`), and `id_tombstones`. A commit made in that
+  moment carries the other write whole. Before, it could publish an issue's
+  removal while the rows naming the issue stayed, or a new issue's labels
+  without the issue, a commit that breaks foreign keys for anyone who pulls
+  it. The auto-commit after a command, the commits around `bd dolt pull` and
+  a merge resolution's commit stage them the same way when any of them is
+  dirty. A pending change to any
+  of these tables therefore rides the next commit that stages one of them,
+  where a write used to commit only the tables it changed. Writes in
+  proxied-server mode still make their Dolt commit inside the transaction;
+  #5752 stays open for them. For out-of-tree backends,
+  `conformance.RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables`
+  now accepts a create whose commit carries another writer's pending
+  `issues` edit, as the server store's does, provided that issue's pending
+  label rides with it. It now fails a create that commits only one of the
+  two, or a pending `metadata` row.
 - **`bd show` no longer prints `Lease: expires expired` for a lapsed lease.**
   An in_progress issue keeps its lease row after the lease runs out, until
   `bd reclaim` sweeps it, and the lease line then printed the verb twice and
