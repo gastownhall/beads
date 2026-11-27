@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -546,6 +547,138 @@ func TestSweepDeadLocalServerRoots(t *testing.T) {
 	}
 	if got := sweepDeadLocalServerRoots(base, alive); len(got) != 0 {
 		t.Errorf("second sweep removed %v", got)
+	}
+}
+
+// startLocalServerStandIn runs a process whose command line ends the way
+// launch's does for root, without needing dolt: a shell script that blocks
+// reading a pipe this test holds. It starts no child, and it exits when it is
+// killed or when the test ends. done is closed once it has exited.
+func startLocalServerStandIn(t *testing.T, root string) (pid int, done <-chan struct{}) {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "dolt")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nread line\n"), 0o700); err != nil { //nolint:gosec // G306: the script must be executable
+		t.Fatal(err)
+	}
+	cmd := exec.Command(script, "sql-server", "--config", localServerConfigPath(root)) // #nosec G204 -- the script written above
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		<-exited
+	})
+	return cmd.Process.Pid, exited
+}
+
+// A dead owner's server is killed before its root is removed. A process that
+// only has the PID a dead owner's root recorded, and the server of a live
+// owner, are not signaled.
+func TestSweepDeadLocalServerRoots_StopsOrphanServer(t *testing.T) {
+	base := t.TempDir()
+	const liveOwner, deadOwner = 1001, 1002
+	mk := func(name string, owner int) string {
+		t.Helper()
+		root := filepath.Join(base, name)
+		if err := os.MkdirAll(filepath.Join(root, "data"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeLocalRootPID(root, localRootOwnerFile, owner); err != nil {
+			t.Fatal(err)
+		}
+		return root
+	}
+	record := func(root string, pid int) {
+		t.Helper()
+		if err := writeLocalRootPID(root, localServerPIDFile, pid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orphanRoot := mk("bdt-dolt-1", deadOwner)
+	reusedRoot := mk("bdt-dolt-2", deadOwner)
+	liveRoot := mk("bdt-dolt-3", liveOwner)
+	elsewhere := filepath.Join(base, "elsewhere")
+
+	orphanPID, orphanDone := startLocalServerStandIn(t, orphanRoot)
+	// reusedRoot's server exited and its PID now names a process that was
+	// started for another root.
+	otherPID, otherDone := startLocalServerStandIn(t, elsewhere)
+	livePID, liveDone := startLocalServerStandIn(t, liveRoot)
+	record(orphanRoot, orphanPID)
+	record(reusedRoot, otherPID)
+	record(liveRoot, livePID)
+	if !isLocalServerProcess(orphanPID, orphanRoot) {
+		cmdline, _ := processCommandLine(orphanPID)
+		t.Fatalf("stand-in pid %d is not recognized as %s's server; command line %q", orphanPID, orphanRoot, cmdline)
+	}
+
+	swept := sweepDeadLocalServerRoots(base, func(pid int) bool { return pid == liveOwner })
+	sort.Strings(swept)
+	if want := []string{orphanRoot, reusedRoot}; fmt.Sprint(swept) != fmt.Sprint(want) {
+		t.Errorf("swept %v, want %v", swept, want)
+	}
+	select {
+	case <-orphanDone:
+	case <-time.After(10 * time.Second):
+		t.Errorf("the dead owner's server (pid %d) is still running after the sweep", orphanPID)
+	}
+	select {
+	case <-otherDone:
+		t.Errorf("pid %d was killed: it had the PID recorded in %s, but not that root's command line", otherPID, reusedRoot)
+	case <-liveDone:
+		t.Errorf("pid %d was killed: the owner of %s is alive", livePID, liveRoot)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if _, err := os.Lstat(liveRoot); err != nil {
+		t.Errorf("%s must be left alone: %v", liveRoot, err)
+	}
+}
+
+// The same through a real server: the PID that launch records is the dolt
+// sql-server's, and the sweep recognizes that process by its command line.
+func TestLocalDoltServer_SweepStopsDeadOwnersServer(t *testing.T) {
+	requireLocalDoltCLI(t)
+	s, err := startLocalDoltServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.terminate)
+	s.mu.Lock()
+	pid, done := s.cmd.Process.Pid, s.done
+	s.mu.Unlock()
+	if got, ok := readLocalRootPID(s.root, localServerPIDFile); !ok || got != pid {
+		t.Fatalf("%s holds %d, %v; want the server's pid %d", localServerPIDFile, got, ok, pid)
+	}
+
+	// Hand the root to an owner that has exited.
+	owner := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := owner.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLocalRootPID(s.root, localRootOwnerFile, owner.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	swept := sweepDeadLocalServerRoots(localServerBase, processAlive)
+	if !strings.Contains(fmt.Sprint(swept), s.root) {
+		t.Errorf("swept %v, want it to include %s", swept, s.root)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Errorf("dolt sql-server pid %d is still running after its dead owner's root was swept", pid)
+	}
+	if _, err := os.Stat(s.root); !os.IsNotExist(err) {
+		t.Errorf("state dir %s not removed: %v", s.root, err)
 	}
 }
 
