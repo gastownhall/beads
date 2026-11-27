@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/gitenv"
 )
 
@@ -187,6 +188,40 @@ func TestCollectMetadataEntriesNoBeadsDir(t *testing.T) {
 	entries := collectMetadataEntries()
 	if len(entries) != 0 {
 		t.Errorf("expected no metadata entries without .beads dir, got %d", len(entries))
+	}
+}
+
+// TestCollectMetadataEntriesLeavesForeignConfigJSON reproduces the GH#7034
+// slip at the command layer: BEADS_DIR naming a project root that holds its
+// own config.yaml, with the project's own config.json beside it. bd config
+// show's metadata read must not migrate that config.json — not delete it, not
+// write a metadata.json — and, no beads field being set, must report no
+// metadata entries. Not parallel: it selects the workspace via BEADS_DIR.
+func TestCollectMetadataEntriesLeavesForeignConfigJSON(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("port: 8080\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []byte(`{"port": 8080, "debug": true}`)
+	legacyPath := filepath.Join(root, configfile.LegacyConfigFileName)
+	if err := os.WriteFile(legacyPath, foreign, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", root)
+
+	entries := collectMetadataEntries()
+	if len(entries) != 0 {
+		t.Errorf("collectMetadataEntries = %+v, want no entries for a config.json with no beads field", entries)
+	}
+	got, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatalf("config.json was removed by the metadata read: %v", err)
+	}
+	if string(got) != string(foreign) {
+		t.Errorf("config.json changed: got %q, want %q", got, foreign)
+	}
+	if _, err := os.Stat(filepath.Join(root, configfile.ConfigFileName)); err == nil {
+		t.Error("the metadata read wrote metadata.json into the project root")
 	}
 }
 
