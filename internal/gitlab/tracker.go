@@ -489,8 +489,16 @@ func (t *Tracker) createTaskWorkItem(ctx context.Context, issue *types.Issue, pa
 		return nil, fmt.Errorf("creating task work item: %w", err)
 	}
 
-	// Build URL from project path and IID
-	webURL := fmt.Sprintf("%s/%s/-/work_items/%s", t.client.BaseURL, t.projectPath, wi.IID)
+	// Build the ref from project path and IID under the address GitLab
+	// writes into its links (else gitlab.url), so it is recognized and keys
+	// like GitLab's link for the same IID. GitLab's reported webUrl is not
+	// used: on an instance whose web address bd could not learn, the next
+	// push would refuse it and create the task again.
+	root := t.client.BaseURL
+	if t.webBase != "" {
+		root = t.webBase
+	}
+	webURL := fmt.Sprintf("%s/%s/-/work_items/%s", root, t.projectPath, wi.IID)
 
 	iid, _ := strconv.Atoi(wi.IID)
 
