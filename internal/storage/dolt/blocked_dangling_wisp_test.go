@@ -448,3 +448,40 @@ func TestRecomputeAllIsBlocked_HeldRowWithVisibleReasonIsDecided(t *testing.T) {
 		})
 	}
 }
+
+// TestRecomputeAllIsBlocked_PresentWispBlockerDecidedAsToday is AC-4: a
+// blocker wisp that IS present behaves exactly as it always did — decided 1
+// while open, decided 0 once closed — on the full repair and the scoped
+// path. The hold never applies to rows whose evidence is all here.
+func TestRecomputeAllIsBlocked_PresentWispBlockerDecidedAsToday(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createWisp(t, ctx, store, "dp-w")
+	createPerm(t, ctx, store, "dp-a")
+	addDependencyWithMeta(t, ctx, store, "dp-a", "dp-w", types.DepBlocks, "")
+
+	// Stale 0 is corrected up to 1, full repair and scoped.
+	setFlag(t, ctx, store, "issues", "dp-a", false)
+	fullRepair(t, ctx, store)
+	requireFlags(t, ctx, store, "issues", map[string]bool{"dp-a": true})
+
+	setFlag(t, ctx, store, "issues", "dp-a", false)
+	scopedRecompute(t, ctx, store, []string{"dp-a"})
+	if !flagOf(t, ctx, store, "issues", "dp-a") {
+		t.Error("scoped recompute left a present-wisp-blocked row at 0")
+	}
+
+	// Merged-in close of the wisp: decided 0, full repair and scoped.
+	rawSetStatus(t, ctx, store, "wisps", "dp-w", types.StatusClosed)
+	fullRepair(t, ctx, store)
+	requireFlags(t, ctx, store, "issues", map[string]bool{"dp-a": false})
+
+	setFlag(t, ctx, store, "issues", "dp-a", true)
+	scopedRecompute(t, ctx, store, []string{"dp-a"})
+	if flagOf(t, ctx, store, "issues", "dp-a") {
+		t.Error("scoped recompute left a row blocked at 1 after its wisp blocker closed")
+	}
+}
