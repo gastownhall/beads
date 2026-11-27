@@ -1550,10 +1550,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could parse, so with `BEADS_DIR` set to a project root that holds its own
   `config.yaml` (instead of the `.beads` inside it), `bd prime`,
   `bd config show` and `bd dolt show`, `status`, `set` and `test` deleted the
-  project's own `config.json` and wrote `{"database": ""}` in its place.
-  A `config.json` in which no beads field has a value is now read in place
-  and left untouched; one that sets a beads field is migrated as before
-  (GH#7034).
+  project's own `config.json` and wrote `{"database": ""}` in its place; in
+  Dolt server mode, commands that open the store, such as `bd list` and
+  `bd show`, deleted it too. A `config.json` in which no beads field has a
+  value is now read in place and left untouched. One in which a beads key
+  such as `database` or `project_id` has a value (key names match without
+  regard to case) is still taken for beads metadata and migrated as before,
+  so under the same slip it is still removed (GH#7034, from #8615 by
+  @bee-ghosttrack).
 
 - **`bd show` no longer prints `Lease: expires expired` for a lapsed lease.**
   An in_progress issue keeps its lease row after the lease runs out, until
