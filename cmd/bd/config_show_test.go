@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/gitenv"
 )
@@ -513,5 +514,40 @@ func TestCollectGitConfigEntriesIgnoresInheritedRouting(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCollectMetadataEntriesLeavesForeignConfigJSON pins GH#7034 at the
+// bd config show entry point: BEADS_DIR naming a project root that holds its
+// own config.yaml and another program's config.json reports no metadata and
+// neither deletes that config.json nor writes metadata.json beside it. Not
+// parallel: it sets BEADS_DIR.
+func TestCollectMetadataEntriesLeavesForeignConfigJSON(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("app: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(root, "config.json")
+	foreign := `{"port": 8080, "debug": true}`
+	if err := os.WriteFile(legacy, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", root)
+	if got := beads.FindBeadsDir(); got == "" {
+		t.Fatalf("FindBeadsDir() = %q with BEADS_DIR=%s, want the project root (the GH#7034 slip)", got, root)
+	}
+
+	if entries := collectMetadataEntries(); len(entries) != 0 {
+		t.Errorf("collectMetadataEntries() = %+v, want no entries", entries)
+	}
+	got, err := os.ReadFile(legacy)
+	if err != nil {
+		t.Fatalf("config.json removed: %v", err)
+	}
+	if string(got) != foreign {
+		t.Errorf("config.json rewritten: got %q, want %q", got, foreign)
+	}
+	if _, err := os.Stat(filepath.Join(root, "metadata.json")); !os.IsNotExist(err) {
+		t.Errorf("metadata.json written into the project root: %v", err)
 	}
 }
