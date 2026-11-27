@@ -1108,11 +1108,13 @@ func (s *EmbeddedDoltStore) ListTags(ctx context.Context) ([]string, error) {
 
 // ImportJSONLData atomically checks if the database is empty and, if so,
 // imports parsed issues and config key/value pairs in a single transaction.
-// Returns the count of issues imported and, deduplicated in file order, the
-// ids it skipped because a retaining retention sweep retired them (an import
-// never resurrects a swept row, and they are not counted as imported), or 0
-// and nil if the database was not empty. A database holding only tombstones
-// has no issue rows, so it counts as empty.
+// Returns the count of issues imported; deduplicated in file order, the ids
+// it skipped because a retaining retention sweep retired them (an import
+// never resurrects a swept row, and they are not counted as imported); and,
+// deduplicated, the dependency edges it skipped because the batch refused
+// them, each as "issue -> target: reason" as `bd import` reports them. It
+// returns 0 and nils if the database was not empty. A database holding only
+// tombstones has no issue rows, so it counts as empty.
 // Does NOT issue DOLT_COMMIT — the caller is responsible for committing
 // (e.g. via the PersistentPostRun auto-commit hook).
 func (s *EmbeddedDoltStore) ImportJSONLData(
@@ -1120,9 +1122,9 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 	issues []*types.Issue,
 	configEntries map[string]string,
 	actor string,
-) (int, []string, error) {
+) (int, []string, []string, error) {
 	var imported int
-	var retiredIDs []string
+	var retiredIDs, skippedDeps []string
 	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// Atomically check: is the database empty?
 		stats := &types.Statistics{}
@@ -1156,6 +1158,8 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 
 		// Create all issues in the same transaction
 		retired := make(map[string]bool)
+		skippedDeps = nil
+		seenSkipped := make(map[string]bool)
 		if err := issueops.CreateIssuesInTx(ctx, tx, issues, actor, storage.BatchCreateOptions{
 			SkipPrefixValidation: true,
 			// Defense-in-depth (GH#3955): the embedded fast-path is the primary
@@ -1167,6 +1171,20 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 			// A row whose id a retaining sweep retired is skipped, never
 			// written; the callback names it so the count below leaves it out.
 			OnRetiredID: func(issueID string) { retired[issueID] = true },
+			// The whole file is one batch, so a dependency the batch refuses
+			// (a cycle, or a blocker in the issue's own hierarchy) is skipped
+			// and reported, as `bd import` does, instead of importing
+			// nothing. A database that held several prefixes before GH#8299
+			// filed every cross-prefix edge as external and never
+			// hierarchy-checked it, so its export can carry such an edge.
+			SkipDependencyValidationErrors: true,
+			OnSkippedDependency: func(issueID, dependsOnID, reason string) {
+				edge := fmt.Sprintf("%s -> %s: %s", issueID, dependsOnID, reason)
+				if !seenSkipped[edge] {
+					seenSkipped[edge] = true
+					skippedDeps = append(skippedDeps, edge)
+				}
+			},
 		}); err != nil {
 			return err
 		}
@@ -1183,7 +1201,7 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 		}
 		return nil
 	})
-	return imported, retiredIDs, err
+	return imported, retiredIDs, skippedDeps, err
 }
 
 // Flatten squashes all Dolt commit history into a single commit.

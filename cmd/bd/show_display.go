@@ -287,7 +287,7 @@ type unresolvableDepCounter interface {
 // ISSUES on the far end of each edge and skip any whose id has no row in this
 // database — a cross-repo id or an `external:` reference, both of which live
 // in depends_on_external, the one target column carrying no foreign key into
-// issues (issueops.IsExternalDepTarget). The count queries have no such join,
+// issues (issueops.ClassifyDepTargetFrom). The count queries have no such join,
 // so they keep those edges. The difference is exactly the set of edges that
 // are real, stored, and unrenderable from here.
 //

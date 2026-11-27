@@ -6388,10 +6388,10 @@ bd rename-prefix
     | Changing the prefix for new issues only:
     | --mint-only makes new issues use the new prefix and leaves every existing ID
     | and text reference as it is. The old prefix is added to allowed_prefixes, so
-    | explicit --id values and children of existing issues keep working. A
-    | dependency between an old-prefix and a new-prefix issue does not block: it is
-    | stored as a reference to another repository, which bd ready ignores. A later
-    | --repair consolidates the prefixes and re-points those dependencies.
+    | explicit --id values and children of existing issues keep working. Both
+    | prefixes' issues stay in this database, so a dependency between an old-prefix
+    | and a new-prefix issue blocks like any other. A later --repair consolidates the
+    | prefixes.
     |
     | EXAMPLES:
     |   bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'

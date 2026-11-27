@@ -34,9 +34,9 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 	anchor := bdCreate(t, bd, dir, "Anchor with an external edge", "--type", "task")
 	local := bdCreate(t, bd, dir, "Fully local blocker", "--type", "task")
 
-	// Both target shapes IsExternalDepTarget classifies as external: an
+	// Both target shapes ClassifyDepTargetFrom classifies as external: an
 	// explicit `external:` reference, and a bare id whose prefix names
-	// another repository. They land in the same column and fail the same
+	// another repository and has no row here. They land in the same column and fail the same
 	// way, so pinning only one would leave the commoner of the two —
 	// `bd dep add ud-x liveop-y` — uncovered.
 	for _, tc := range []struct {

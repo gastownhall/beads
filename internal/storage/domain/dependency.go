@@ -152,6 +152,10 @@ type BulkAddDepsResult struct {
 
 type DependencySQLRepository interface {
 	ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error
+	// ValidateWrittenBlockingHierarchy is ValidateBlockingHierarchy for an edge
+	// already written: it exempts an external target by the typed column the
+	// edge's row holds, not by presence read now.
+	ValidateWrittenBlockingHierarchy(ctx context.Context, dep *types.Dependency) error
 	Insert(ctx context.Context, dep *types.Dependency, actor string, opts DepInsertOpts) error
 	Delete(ctx context.Context, issueID, dependsOnID, actor string, opts DepInsertOpts) (DepDeleteResult, error)
 	HasCycle(ctx context.Context, issueID, dependsOnID string) (bool, error)
@@ -247,19 +251,26 @@ type DependencyUseCase interface {
 	// pass per plane: the parent-child-first ordering and the whole-graph
 	// cycle gate both have to see the request as a single graph.
 	AddDependencies(ctx context.Context, deps []*types.Dependency, actor string, opts BulkAddDepsOpts) (BulkAddDepsResult, error)
-	// ValidateBlockingHierarchy and CycleThroughEdges are the two halves of the
-	// whole-graph gate AddDependencies runs at the end of its own batch,
-	// published so a caller that writes edges INTERLEAVED with other mutations
-	// can run the same gate over the graph its whole request produced.
+	// ValidateWrittenBlockingHierarchy and CycleThroughEdges are the two
+	// halves of the whole-graph gate AddDependencies runs at the end of its own
+	// batch, published so a caller that writes edges INTERLEAVED with other
+	// mutations can run the same gate over the graph its whole request
+	// produced.
 	//
 	// issueops.BatchApplier is that caller and the reason these are here: it
 	// applies items in the caller's declaration order and never reorders, so a
 	// blocking edge can be written before the parent-child edge that makes it a
 	// conflict, and the per-edge probe that ran at the time saw a hierarchy
 	// that had not been built yet. Both must be re-run at the end, against the
-	// same repository methods the per-edge path uses, or the two backends
+	// same repository checks the per-edge path uses, or the two backends
 	// answer different refusals to the same request.
-	ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error
+	//
+	// The hierarchy half runs on edges the request already WROTE, so it
+	// exempts an external target by the typed column the edge's row holds,
+	// the kind the store bodies' gate takes from their write. An edge filed
+	// external because its target was absent stays external when a later item
+	// creates that target, and gates nothing.
+	ValidateWrittenBlockingHierarchy(ctx context.Context, dep *types.Dependency) error
 	// CycleThroughEdges reports the path of a scheduling cycle any of edges
 	// closes, or "" when none does. Each pair is (source, target).
 	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
@@ -829,12 +840,13 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 	return BulkAddDepsResult{Added: deps}, nil
 }
 
-// ValidateBlockingHierarchy passes the edge straight to the repository check
-// AddDependencies runs per edge, so a caller re-running the gate at the end of
-// a mixed request raises the identical *DependencyHierarchyConflictError rather
-// than a second opinion about the same graph.
-func (u *dependencyUseCaseImpl) ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error {
-	return u.depRepo.ValidateBlockingHierarchy(ctx, dep)
+// ValidateWrittenBlockingHierarchy passes the edge straight to the repository's
+// written-edge twin of the check AddDependencies runs per edge, so a caller
+// re-running the gate at the end of a mixed request raises the identical
+// *DependencyHierarchyConflictError rather than a second opinion about the
+// same graph.
+func (u *dependencyUseCaseImpl) ValidateWrittenBlockingHierarchy(ctx context.Context, dep *types.Dependency) error {
+	return u.depRepo.ValidateWrittenBlockingHierarchy(ctx, dep)
 }
 
 // CycleThroughEdges passes the pairs straight to the repository walk

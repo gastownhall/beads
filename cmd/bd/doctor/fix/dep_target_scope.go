@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -21,11 +20,10 @@ func IsUnverifiableDepTarget(sourceID, targetID, issuePrefix, allowedPrefixes st
 	if strings.HasPrefix(targetID, "external:") {
 		return true
 	}
-	// Same condition as bd dep add's pass-through (resolveUnresolvedDepTarget
-	// in cmd/bd/dep.go), via the write side's classifier, so the two cannot
-	// drift. A hyphenless ID is never stored unverified.
+	// Only a bare target with another prefix can be unverified.
+	// A hyphenless ID is never stored unverified.
 	if types.ExtractPrefix(sourceID) == "" || types.ExtractPrefix(targetID) == "" ||
-		!issueops.IsExternalDepTarget(sourceID, targetID) {
+		types.ExtractPrefix(sourceID) == types.ExtractPrefix(targetID) {
 		return false
 	}
 	// Match held prefixes as issueops.ValidateIssueIDPrefix does, so a

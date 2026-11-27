@@ -8,9 +8,11 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,6 +147,85 @@ func TestImportJSONLIntoStore_EmptyFile(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("imported %d issues, want 0", count)
+	}
+}
+
+// TestImportJSONLIntoStore_SkipsARefusedDependency: a database that held two
+// prefixes before GH#8299 filed r-kid's blocking edge onto its grandparent
+// p-epic as external and never hierarchy-checked it, so its export carries
+// an edge the import now refuses (r-kid cannot be blocked by its own
+// ancestor). The whole file is one batch, so the import skips and reports
+// that one edge and imports every issue, instead of failing and leaving the
+// database empty.
+func TestImportJSONLIntoStore_SkipsARefusedDependency(t *testing.T) {
+	ctx := context.Background()
+	beadsDir := setupTestBeadsDir(t, t.TempDir())
+
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	if err != nil {
+		t.Fatalf("dolt.NewFromConfigWithOptions against running test container: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	jsonlPath := writeTestJSONL(t, beadsDir, []types.Issue{
+		{ID: "p-epic", Title: "Epic", Status: "open", IssueType: "epic", Priority: 2},
+		{ID: "r-mid", Title: "Mid", Status: "open", IssueType: "task", Priority: 2, Dependencies: []*types.Dependency{
+			{IssueID: "r-mid", DependsOnID: "p-epic", Type: types.DepParentChild},
+		}},
+		{ID: "r-kid", Title: "Kid", Status: "open", IssueType: "task", Priority: 2, Dependencies: []*types.Dependency{
+			{IssueID: "r-kid", DependsOnID: "r-mid", Type: types.DepParentChild},
+			{IssueID: "r-kid", DependsOnID: "p-epic", Type: types.DepBlocks},
+		}},
+		{ID: "r-other", Title: "Unrelated", Status: "open", IssueType: "task", Priority: 2},
+	})
+
+	var count int
+	out := captureFixStdout(t, func() {
+		count, err = importJSONLIntoStore(ctx, store, jsonlPath)
+	})
+	if err != nil {
+		t.Fatalf("importJSONLIntoStore failed: %v\noutput:\n%s", err, out)
+	}
+	if count != 4 {
+		t.Errorf("imported %d issues, want 4", count)
+	}
+	stored, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues failed: %v", err)
+	}
+	if len(stored) != 4 {
+		t.Errorf("store has %d issues, want all 4", len(stored))
+	}
+	if want := "Warning: skipped dependency r-kid -> p-epic: r-kid cannot be blocked by its ancestor p-epic"; !strings.Contains(out, want) {
+		t.Errorf("output does not report the skipped edge (%q):\n%s", want, out)
+	}
+
+	// The two parent-child edges are stored local; the refused edge is not
+	// stored at all.
+	for _, edge := range []struct {
+		source, target string
+		stored         bool
+	}{
+		{"r-mid", "p-epic", true},
+		{"r-kid", "r-mid", true},
+		{"r-kid", "p-epic", false},
+	} {
+		var issueCol sql.NullString
+		err := store.DB().QueryRowContext(ctx,
+			"SELECT depends_on_issue_id FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+			edge.source, edge.target).Scan(&issueCol)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			if edge.stored {
+				t.Errorf("dependency %s -> %s not stored", edge.source, edge.target)
+			}
+		case err != nil:
+			t.Fatalf("read dependency %s -> %s: %v", edge.source, edge.target, err)
+		case !edge.stored:
+			t.Errorf("dependency %s -> %s stored (depends_on_issue_id=%v), want it skipped", edge.source, edge.target, issueCol)
+		case issueCol.String != edge.target:
+			t.Errorf("dependency %s -> %s: depends_on_issue_id = %v, want it local", edge.source, edge.target, issueCol)
+		}
 	}
 }
 

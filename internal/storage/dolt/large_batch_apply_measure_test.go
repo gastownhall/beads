@@ -175,10 +175,16 @@ const statementCountToleranceDolt = 2
 // id tombstone tables — in ONE statement where it used to read the two row
 // tables in two: -1 statement per create item (356: 102 creates, -102; 712:
 // 204, -204; classic: 10, -10).
+//
+// Re-pinned for GH#8299 presence-first dependency classification (was 6090 /
+// 12178 / 805). One target classification now serves a dep add's routing and
+// its typed column, where the target's wisp row was read twice: -1 statement
+// per dep-add item (356: 238 dep adds, -238; 712: 476, -476; classic: 20,
+// -20; breakdown in pinnedEmbeddedStatementCounts).
 var pinnedDoltStatementCounts = map[string]int64{
-	"356 (mol 1x)": 6090,
-	"712 (mol 2x)": 12178,
-	"40 (classic)": 805,
+	"356 (mol 1x)": 5852,
+	"712 (mol 2x)": 11702,
+	"40 (classic)": 785,
 }
 
 // BenchmarkLargeBatchApply_Dolt is gated by setupBenchStore's own

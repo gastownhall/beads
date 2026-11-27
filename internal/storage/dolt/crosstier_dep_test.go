@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -373,4 +376,114 @@ func TestRunInTransactionCrossTierNonSchedulingEdgeIsNotGated(t *testing.T) {
 
 	assertDepEdge(ctx, t, store, wisp.ID, regular.ID)
 	assertDepEdge(ctx, t, store, regular.ID, wisp.ID)
+}
+
+// TestTransaction_CrossPrefixTargetCreatedInSameTx pins GH#8299 on the
+// two-session seam: a target of another prefix created earlier in the same
+// logical transaction is uncommitted on its owning session, and classification
+// must read it there and file it in its local typed column. The wisp-source
+// arm onto a new issue is the one a single-session read gets wrong: the edge
+// is written on the ignored session while the target lives on the regular one.
+func TestTransaction_CrossPrefixTargetCreatedInSameTx(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "allowed_prefixes", "xp"); err != nil {
+		t.Fatalf("set allowed_prefixes: %v", err)
+	}
+	issueSource := crossTierRegularIssue("test-xptx-src", "issue source")
+	wispSource := crossTierWispIssue("test-xptx-wsrc", "wisp source")
+	for _, issue := range []*types.Issue{issueSource, wispSource} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+		}
+	}
+
+	issueTarget := crossTierRegularIssue("xp-xptx-target", "cross-prefix issue target")
+	wispTarget := crossTierWispIssue("xp-xptx-wtarget", "cross-prefix wisp target")
+	edges := []struct {
+		source, target, table, column string
+	}{
+		{issueSource.ID, issueTarget.ID, "dependencies", "depends_on_issue_id"},
+		{wispSource.ID, issueTarget.ID, "wisp_dependencies", "depends_on_issue_id"},
+		{issueSource.ID, wispTarget.ID, "dependencies", "depends_on_wisp_id"},
+		{wispSource.ID, wispTarget.ID, "wisp_dependencies", "depends_on_wisp_id"},
+	}
+	if err := store.RunInTransaction(ctx, "test: cross-prefix targets created in the transaction", func(tx storage.Transaction) error {
+		for _, target := range []*types.Issue{issueTarget, wispTarget} {
+			if err := tx.CreateIssue(ctx, target, "tester"); err != nil {
+				return err
+			}
+		}
+		for _, e := range edges {
+			if err := tx.AddDependency(ctx, &types.Dependency{IssueID: e.source, DependsOnID: e.target, Type: types.DepBlocks}, "tester"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("RunInTransaction create cross-prefix targets + blocks edges: %v", err)
+	}
+
+	for _, e := range edges {
+		var target sql.NullString
+		//nolint:gosec // G201: table and column are hardcoded above.
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT "+e.column+" FROM "+e.table+" WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+			e.source, e.target).Scan(&target); err != nil {
+			t.Fatalf("read %s edge %s -> %s: %v", e.table, e.source, e.target, err)
+		}
+		if target.String != e.target {
+			t.Errorf("%s edge %s -> %s: %s = %v, want the target there", e.table, e.source, e.target, e.column, target)
+		}
+	}
+	assertCrossTierIsBlocked(ctx, t, store.db, "issues", issueSource.ID, true)
+	assertCrossTierIsBlocked(ctx, t, store.db, "wisps", wispSource.ID, true)
+}
+
+// TestTransaction_CrossPrefixWispProbeErrorFailsClosed pins the error half of
+// the same seam: the target's wisp probe runs on the ignored session, and when
+// it fails while the regular session still works, AddDependency must return
+// that error before anything reaches the regular session. Reading the failure
+// as "not a wisp" sends a present cross-prefix wisp target on to the issue
+// probe, which finds no row, so the edge would be filed in
+// depends_on_external, where it never blocks (GH#8299).
+func TestTransaction_CrossPrefixWispProbeErrorFailsClosed(t *testing.T) {
+	_, _, tx, regularMock, ignoredMock := newTransactionPhaseFixture(t)
+	wispProbe := regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")
+	// The source is a regular issue: its routing probe finds no wisp.
+	ignoredMock.ExpectQuery(wispProbe).WithArgs("test-xpwe-src").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	probeErr := errors.New("read wisps: invalid connection")
+	ignoredMock.ExpectQuery(wispProbe).WithArgs("xp-xpwe-wtarget").WillReturnError(probeErr)
+	// Then each session gets the rollback a failed callback gets.
+	regularMock.ExpectRollback()
+	ignoredMock.ExpectRollback()
+	t.Cleanup(func() {
+		// An open transaction would block the fixture's connection cleanup.
+		_ = tx.regularTx.Rollback()
+		_ = tx.ignoredTx.Rollback()
+	})
+
+	err := tx.AddDependency(context.Background(), &types.Dependency{
+		IssueID:     "test-xpwe-src",
+		DependsOnID: "xp-xpwe-wtarget",
+		Type:        types.DepBlocks,
+	}, "tester")
+	if !errors.Is(err, probeErr) {
+		t.Fatalf("AddDependency error = %v, want the wisp probe's error %q", err, probeErr)
+	}
+	if err := tx.regularTx.Rollback(); err != nil {
+		t.Fatalf("roll back the regular session: %v", err)
+	}
+	if err := tx.ignoredTx.Rollback(); err != nil {
+		t.Fatalf("roll back the ignored session: %v", err)
+	}
+	// regularMock expects only BEGIN and ROLLBACK: no issue probe and no
+	// edge write reached the regular session (an unexpected statement there
+	// would have been the error returned above).
+	requireTransactionPhaseMocks(t, regularMock, ignoredMock)
 }

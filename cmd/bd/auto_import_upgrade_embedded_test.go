@@ -86,6 +86,77 @@ func TestEmbeddedAutoImportJSONLNoExplicitCommit(t *testing.T) {
 	}
 }
 
+// TestEmbeddedAutoImportJSONLSkipsARefusedDependency: a database that held two
+// prefixes before GH#8299 filed r-kid's blocking edge onto its grandparent
+// p-epic as external and never hierarchy-checked it, so its export carries an
+// edge the batch now refuses (r-kid cannot be blocked by its own ancestor). The
+// auto-import writes the whole file as one batch, so it skips and names that
+// one edge and imports every issue, as `bd import` does. Refusing the batch
+// instead would import nothing, and the stamp would keep the file from ever
+// being tried again.
+func TestEmbeddedAutoImportJSONLSkipsARefusedDependency(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "p")
+
+	// p-epic comes first: a file without an issue_prefix line sets the
+	// workspace prefix from its first issue.
+	const stamps = `"created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"`
+	lines := []string{
+		`{"id":"p-epic","title":"Epic","status":"open","priority":2,"issue_type":"epic",` + stamps + `}`,
+		`{"id":"r-mid","title":"Mid","status":"open","priority":2,"issue_type":"task",` + stamps +
+			`,"dependencies":[{"issue_id":"r-mid","depends_on_id":"p-epic","type":"parent-child"}]}`,
+		`{"id":"r-kid","title":"Kid","status":"open","priority":2,"issue_type":"task",` + stamps +
+			`,"dependencies":[{"issue_id":"r-kid","depends_on_id":"r-mid","type":"parent-child"},` +
+			`{"issue_id":"r-kid","depends_on_id":"p-epic","type":"blocks"}]}`,
+		`{"id":"r-other","title":"Unrelated","status":"open","priority":2,"issue_type":"task",` + stamps + `}`,
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write issues.jsonl: %v", err)
+	}
+
+	// A write command runs the auto-import first (bd list is read-only).
+	_, stderr := bdRunSplit(t, bd, dir, "create", "post-import marker", "--type", "task")
+	if strings.Contains(stderr, "warning: auto-import from") {
+		t.Fatalf("auto-import failed:\n%s", stderr)
+	}
+	if want := "auto-imported 4 issues"; !strings.Contains(stderr, want) {
+		t.Errorf("stderr does not report the import (%q):\n%s", want, stderr)
+	}
+	if want := "Skipped dependency: r-kid -> p-epic: r-kid cannot be blocked by its ancestor p-epic"; !strings.Contains(stderr, want) {
+		t.Errorf("stderr does not name the skipped edge (%q):\n%s", want, stderr)
+	}
+	held := repoSyncIssueIDs(t, beadsDir)
+	for _, id := range []string{"p-epic", "r-mid", "r-kid", "r-other"} {
+		if !held[id] {
+			t.Errorf("%s not imported\nstderr:\n%s", id, stderr)
+		}
+	}
+
+	// The two parent-child edges are stored local; the refused edge is not
+	// stored at all.
+	for _, edge := range []struct {
+		source, target string
+		stored         bool
+	}{
+		{"r-mid", "p-epic", true},
+		{"r-kid", "r-mid", true},
+		{"r-kid", "p-epic", false},
+	} {
+		issueCol, found := repoSyncDepIssueColumn(t, beadsDir, edge.source, edge.target)
+		switch {
+		case found != edge.stored:
+			t.Errorf("dependency %s -> %s stored = %v, want %v", edge.source, edge.target, found, edge.stored)
+		case found && issueCol.String != edge.target:
+			t.Errorf("dependency %s -> %s: depends_on_issue_id = %v, want it local", edge.source, edge.target, issueCol)
+		}
+	}
+}
+
 // TestEmbeddedAutoImportJSONLConcurrentWriter verifies no data loss when
 // auto-import runs concurrently with other writers (the race that prompted
 // the single-transaction fix).

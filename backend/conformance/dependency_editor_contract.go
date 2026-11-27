@@ -930,11 +930,23 @@ func RunDependencyEditorAcceptsAForeignRepoTarget(t *testing.T, ctx context.Cont
 // Both directions are asserted because they are two construction sites of the
 // same typed sentinel, and the flag that distinguishes them is part of the
 // value a caller reads.
+//
+// The case runs twice: once with every endpoint in the fixture's prefix, and
+// once with a grandparent of another prefix that this database holds. A local
+// issue is local whatever its prefix (GH#8299), so the hierarchy between them
+// refuses the blocking edge the same way.
 func RunDependencyEditorRefusesBlockingEdgeAcrossItsOwnHierarchy(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
 	t.Helper()
-	grand := fixture.IssuePrefix + "-hier-grand"
-	parent := fixture.IssuePrefix + "-hier-parent"
-	child := fixture.IssuePrefix + "-hier-child"
+	for _, grandPrefix := range []string{fixture.IssuePrefix, "x" + fixture.IssuePrefix} {
+		refuseBlockingEdgeAcrossItsOwnHierarchy(t, ctx, fixture, grandPrefix)
+	}
+}
+
+func refuseBlockingEdgeAcrossItsOwnHierarchy(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, grandPrefix string) {
+	t.Helper()
+	grand := grandPrefix + "-hier-grand"
+	parent := fixture.IssuePrefix + "-hier-parent-" + grandPrefix
+	child := fixture.IssuePrefix + "-hier-child-" + grandPrefix
 	for _, id := range []string{grand, parent, child} {
 		seedDependencyEditorIssue(t, ctx, fixture, id)
 	}
@@ -1537,12 +1549,19 @@ func RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T, ctx cont
 	wisp := fixture.IssuePrefix + "-tcol-wisp"
 	issueTarget := fixture.IssuePrefix + "-tcol-issuetgt"
 	wispTarget := fixture.IssuePrefix + "-tcol-wisptgt"
+	// A local issue whose prefix differs from the sources': one database may
+	// hold several prefixes (allowed_prefixes), so the prefix alone does not
+	// say the target lives in another rig's database (GH#8299).
+	crossIssueTarget := "x" + fixture.IssuePrefix + "-tcol-issuetgt"
+	crossWispTarget := "x" + fixture.IssuePrefix + "-tcol-wisptgt"
 	const external = "external:https://example.invalid/tracker/61"
 	const foreign = "othertcol-9001"
 	seedDependencyEditorIssue(t, ctx, fixture, issue)
 	seedDependencyEditorIssue(t, ctx, fixture, issueTarget)
+	seedDependencyEditorIssue(t, ctx, fixture, crossIssueTarget)
 	seedDependencyEditorWisp(t, ctx, fixture, wisp)
 	seedDependencyEditorWisp(t, ctx, fixture, wispTarget)
+	seedDependencyEditorWisp(t, ctx, fixture, crossWispTarget)
 
 	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
 		Actor: "writer",
@@ -1553,6 +1572,10 @@ func RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T, ctx cont
 			{IssueID: issue, DependsOnID: foreign, Type: publicops.DepRelated},
 			{IssueID: wisp, DependsOnID: wispTarget, Type: publicops.DepBlocks},
 			{IssueID: wisp, DependsOnID: issueTarget, Type: publicops.DepRelated},
+			{IssueID: issue, DependsOnID: crossIssueTarget, Type: publicops.DepBlocks},
+			{IssueID: wisp, DependsOnID: crossIssueTarget, Type: publicops.DepRelated},
+			{IssueID: issue, DependsOnID: crossWispTarget, Type: publicops.DepRelated},
+			{IssueID: wisp, DependsOnID: crossWispTarget, Type: publicops.DepBlocks},
 		},
 	}); err != nil {
 		t.Fatalf("AddDependencies over the four target classes: %v", err)
@@ -1572,11 +1595,19 @@ func RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T, ctx cont
 		{"dependencies", issue, external, "depends_on_external",
 			"an external: reference names something outside this database entirely"},
 		{"dependencies", issue, foreign, "depends_on_external",
-			"another repository's id lives in that rig's database, not this one"},
+			"a foreign-prefix id this database holds no row for belongs to another rig's database"},
 		{"wisp_dependencies", wisp, wispTarget, "depends_on_wisp_id",
 			"the ephemeral plane classifies its targets by the same rule"},
 		{"wisp_dependencies", wisp, issueTarget, "depends_on_issue_id",
 			"a wisp-sourced edge onto a durable issue still files the target as an issue"},
+		{"dependencies", issue, crossIssueTarget, "depends_on_issue_id",
+			"a local issue of another prefix is still a local issue, not another rig's"},
+		{"wisp_dependencies", wisp, crossIssueTarget, "depends_on_issue_id",
+			"a wisp-sourced edge classifies a local cross-prefix issue the same way"},
+		{"dependencies", issue, crossWispTarget, "depends_on_wisp_id",
+			"an active wisp of another prefix is still a local wisp"},
+		{"wisp_dependencies", wisp, crossWispTarget, "depends_on_wisp_id",
+			"a wisp-sourced edge classifies a local cross-prefix wisp the same way"},
 	} {
 		assertDependencyEditorTargetColumn(t, ctx, fixture, want.table, want.source, want.target, want.column, want.why)
 	}

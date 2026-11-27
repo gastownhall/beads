@@ -196,7 +196,7 @@ func TestRecordingDependencyUseCaseCoversItsSurface(t *testing.T) {
 			// — an ancestry walk and a reachability walk — so there is nothing
 			// for the recorder to notify about; the writes those gates guard are
 			// recorded by AddDependencies, which is declared below.
-			"ValidateBlockingHierarchy":            reads,
+			"ValidateWrittenBlockingHierarchy":     reads,
 			"CycleThroughEdges":                    reads,
 			"DetectCycleReport":                    reads,
 			"DetectCycles":                         reads,
