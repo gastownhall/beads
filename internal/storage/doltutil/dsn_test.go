@@ -136,6 +136,27 @@ func TestServerDSN_TCPFallbackWithoutSocket(t *testing.T) {
 	}
 }
 
+// TestServerDSN_Net pins the dial network a caller names for Host and Port
+// (the bd db-proxy's authenticated network, say): the driver dials Host:Port
+// over it, and a Socket still wins over it.
+func TestServerDSN_Net(t *testing.T) {
+	cfg, err := mysql.ParseDSN(ServerDSN{Net: "custom-net", Host: "::1", Port: 3307, User: "root"}.String())
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+	if cfg.Net != "custom-net" || cfg.Addr != "[::1]:3307" {
+		t.Errorf("Net, Addr = %q, %q; want %q, %q", cfg.Net, cfg.Addr, "custom-net", "[::1]:3307")
+	}
+
+	cfg, err = mysql.ParseDSN(ServerDSN{Socket: "/tmp/dolt.sock", Net: "custom-net", Host: "127.0.0.1", Port: 3307}.String())
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+	if cfg.Net != "unix" || cfg.Addr != "/tmp/dolt.sock" {
+		t.Errorf("with a Socket, Net, Addr = %q, %q; want %q, %q", cfg.Net, cfg.Addr, "unix", "/tmp/dolt.sock")
+	}
+}
+
 func TestServerDSN_TLSEnabledWhenRequested(t *testing.T) {
 	dsn := ServerDSN{
 		Host: "hosted.doltdb.com",
