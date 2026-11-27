@@ -843,6 +843,7 @@ go_test(
         "export_auto_empty_throttle_test.go",
         "export_auto_max_rows_gate_test.go",
         "export_auto_missing_store_test.go",
+        "export_auto_rewound_jsonl_test.go",
         "export_auto_test.go",
         "export_auto_wedge_heal_test.go",
         "export_clone_local_test.go",
