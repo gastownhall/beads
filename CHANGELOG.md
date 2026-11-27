@@ -1526,9 +1526,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd gitlab sync` that pushed created one more copy of the issue and moved
   the link to it. The new `gitlab.web_url` (`GITLAB_WEB_URL`) names the address
   GitLab shows in issue links; refs under it are recognized beside those under
-  `gitlab.url`, and it is never contacted. Until it is set, a create whose
-  returned link would not be recognized warns and names the key, because the
-  copies already made are not removed and the next push would add another.
+  `gitlab.url`, a task created as a GitLab work item is linked under it, and it
+  is never contacted. Until it is set, a create whose returned link would not
+  be recognized warns and names the key, because the copies already made are
+  not removed and the next push would add another.
   A default port spelled in `gitlab.url` (`https://host:443`) no longer keeps
   refs from matching: hosts are compared without it.
 

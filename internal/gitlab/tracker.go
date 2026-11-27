@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -300,11 +301,38 @@ func (t *Tracker) unrecognizedRefWarnings(webURL string) []string {
 	if webURL == "" || t.IsExternalRef(webURL) {
 		return nil
 	}
-	hint := ""
-	if u, err := url.Parse(webURL); err == nil && u.Host != "" {
-		hint = fmt.Sprintf(" (e.g. %s://%s)", u.Scheme, u.Host)
+	where := "not under gitlab.url"
+	if t.webURL != "" {
+		where = fmt.Sprintf("under neither gitlab.url nor gitlab.web_url (%s)", t.webURL)
 	}
-	return []string{fmt.Sprintf("GitLab reports the created issue at %s, which is not under gitlab.url, so the next push will not recognize the link and will create the issue again; set gitlab.web_url to this GitLab's web address%s", webURL, hint)}
+	hint := ""
+	if address := t.webAddressOf(webURL); address != "" {
+		hint = fmt.Sprintf(" (e.g. %s)", address)
+	}
+	return []string{fmt.Sprintf("GitLab reports the created issue at %s, which is %s, so the next push will not recognize the link and will create the issue again; set gitlab.web_url to this GitLab's web address%s", webURL, where, hint)}
+}
+
+// webAddressOf returns the gitlab.web_url that claims webURL, the web URL of
+// an issue GitLab created in the configured project. That is webURL's scheme
+// and host, followed by whatever path comes before the project's path: the
+// relative URL root of a GitLab served from a sub-path, which the project
+// scope and the "gitlab:N" shorthand key on. With the project known only by
+// numeric ID nothing keys on the root, and the host alone claims the ref.
+func (t *Tracker) webAddressOf(webURL string) string {
+	u, err := url.Parse(webURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	address := u.Scheme + "://" + u.Host
+	project := t.matchKeyProjectPath()
+	_, path, ok := canonicalGitLabURL(webURL)
+	if project == "" || !ok {
+		return address
+	}
+	if m := matchKeyIssuePathPattern.FindStringSubmatch(path); m != nil && strings.HasSuffix(m[1], "/"+project) {
+		address += "/" + strings.TrimSuffix(m[1], "/"+project)
+	}
+	return address
 }
 
 func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *types.Issue) (*tracker.TrackerIssue, error) {
@@ -459,8 +487,11 @@ func (t *Tracker) createTaskWorkItem(ctx context.Context, issue *types.Issue, pa
 		return nil, fmt.Errorf("creating task work item: %w", err)
 	}
 
-	// Build URL from project path and IID
-	webURL := fmt.Sprintf("%s/%s/-/work_items/%s", t.client.BaseURL, t.projectPath, wi.IID)
+	// Build the ref from the project path and IID under webBase, the address
+	// GitLab's own links are on once gitlab.web_url is set, so a pull matches
+	// it. It is not taken from the webUrl GitLab reports: where no configured
+	// address claims that, the next push would create the task again.
+	webURL := fmt.Sprintf("%s/%s/-/work_items/%s", strings.TrimRight(t.webBase(), "/"), t.projectPath, wi.IID)
 
 	iid, _ := strconv.Atoi(wi.IID)
 
@@ -485,7 +516,6 @@ func (t *Tracker) createTaskWorkItem(ctx context.Context, issue *types.Issue, pa
 		}
 	}
 
-	warnings = append(warnings, t.unrecognizedRefWarnings(webURL)...)
 	return &tracker.TrackerIssue{
 		ID:         wi.ID,
 		Identifier: wi.IID,
@@ -582,11 +612,12 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 // keying on the project would silently stop recognizing self-hosted refs,
 // since gitlab.project_path is optional and Init discards its load error.
 //
-// Hosts are compared as canonicalGitLabURL spells them, so case and an
-// explicit default port ("https://host:443") make no difference, while a
-// non-default port must be in both. Scheme is not compared, so an http:// ref
-// on an https:// instance is still claimed — leniency only, since the IID
-// patterns below still decide what is ultimately recognized.
+// Hosts are compared without case and without the default port of each URL's
+// own scheme, so "https://host:443" and "http://host:80" are "host", while any
+// other port, "https://host:80" included, must be in both. Scheme is not
+// otherwise compared, so an http:// ref on an https:// instance is still
+// claimed — leniency only, since the IID patterns below still decide what is
+// ultimately recognized.
 //
 // GitLab writes its own external_url into every web_url, whatever address the
 // API was reached at. An instance reached at another address (an internal
@@ -604,15 +635,33 @@ func (t *Tracker) onConfiguredHost(ref string) bool {
 // urlUnderBase reports whether ref is a URL on base's host and under base's
 // path. An empty or host-less base matches nothing.
 func urlUnderBase(ref, base string) bool {
-	baseHost, basePath, ok := canonicalGitLabURL(base)
+	baseHost, basePath, ok := endpointOf(base)
 	if !ok {
 		return false
 	}
-	host, path, ok := canonicalGitLabURL(ref)
+	host, path, ok := endpointOf(ref)
 	if !ok || host != baseHost {
 		return false
 	}
 	return basePath == "" || path == basePath || strings.HasPrefix(path, basePath+"/")
+}
+
+// endpointOf returns raw's host and path as canonicalGitLabURL spells them,
+// except that a port 80 or 443 stays on the host unless it is the default port
+// of raw's own scheme: https://host:80 is another endpoint than https://host.
+func endpointOf(raw string) (host, path string, ok bool) {
+	host, path, ok = canonicalGitLabURL(raw)
+	if !ok {
+		return "", "", false
+	}
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", "", false
+	}
+	if port := u.Port(); (port == "80" && u.Scheme != "http") || (port == "443" && u.Scheme != "https") {
+		host += ":" + port
+	}
+	return host, path, true
 }
 
 // webBase returns the address GitLab's web URLs are under: gitlab.web_url
@@ -650,8 +699,8 @@ func (t *Tracker) ExtractIdentifier(ref string) string {
 //
 // The "gitlab:{iid}" shorthand names no project. When the configured project
 // is known by path (gitlab.project_path, or a path-form gitlab.project_id) it
-// is keyed as that project's issue on the gitlab.url host, so it still
-// matches the issue's web_url. Otherwise it keeps the "gitlab:{iid}" key,
+// is keyed as that project's issue under webBase, so it still matches the
+// issue's web_url. Otherwise it keeps the "gitlab:{iid}" key,
 // which no URL key can equal: such a bead is never matched to some project's
 // issue URL, at worst duplicated by the next pull.
 func (t *Tracker) MatchKey(ref string) string {
@@ -673,7 +722,33 @@ func (t *Tracker) configuredMatchKeyProject() string {
 	if project == "" || t.client == nil {
 		return ""
 	}
-	host, basePath, ok := canonicalGitLabURL(t.webBase())
+	return projectKeyUnder(t.webBase(), project)
+}
+
+// configuredProjectKeys returns the configured project keyed as MatchKey keys
+// a ref's project under each address its refs are on: gitlab.url, and
+// gitlab.web_url when that is set. Beads linked before gitlab.web_url was set
+// keep refs under gitlab.url, and so does a task work item created then. It
+// returns nil when the project is only known by numeric ID.
+func (t *Tracker) configuredProjectKeys() []string {
+	project := t.matchKeyProjectPath()
+	if project == "" || t.client == nil {
+		return nil
+	}
+	var keys []string
+	for _, base := range []string{t.client.BaseURL, t.webURL} {
+		if key := projectKeyUnder(base, project); key != "" && !slices.Contains(keys, key) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// projectKeyUnder keys project, a canonical project path, as MatchKey keys a
+// ref's project on the instance at base: "gl://{host}{base path}/{project}",
+// or "" when base names no host.
+func projectKeyUnder(base, project string) string {
+	host, basePath, ok := canonicalGitLabURL(base)
 	if !ok {
 		return ""
 	}
