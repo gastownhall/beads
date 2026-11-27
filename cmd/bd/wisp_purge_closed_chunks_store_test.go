@@ -142,7 +142,7 @@ func TestWispPurgeClosedPersistsCompletedChunksOnRealStore(t *testing.T) {
 	store, rootCtx, jsonOutput, quietFlag, proxiedServerMode, actor = rec, ctx, true, false, false, "test"
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(ctx, false, true, nil)
+		return runWispPurgeClosed(ctx, false, true, nil, 0)
 	})
 	if err == nil {
 		t.Fatalf("first run succeeded, want the injected failure\nstdout:\n%s", stdout)
@@ -182,7 +182,7 @@ func TestWispPurgeClosedPersistsCompletedChunksOnRealStore(t *testing.T) {
 
 	rec.failOn, rec.requests = "", nil
 	stdout, stderr, err = captureWispGC(t, func() error {
-		return runWispPurgeClosed(ctx, false, true, nil)
+		return runWispPurgeClosed(ctx, false, true, nil, 0)
 	})
 	if err != nil {
 		t.Fatalf("rerun: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -210,5 +210,79 @@ func TestWispPurgeClosedPersistsCompletedChunksOnRealStore(t *testing.T) {
 	}
 	if _, err := s.GetIssue(ctx, live.ID); err != nil {
 		t.Errorf("live step %s did not survive the rerun: %v", live.ID, err)
+	}
+}
+
+// closedWispScanRecorder passes every read through to a real store and keeps
+// the rows each SearchIssues call returned: what the storage query itself let
+// through, ahead of the selector's own age check.
+type closedWispScanRecorder struct {
+	molReader
+	scans [][]*types.Issue
+}
+
+func (r *closedWispScanRecorder) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	rows, err := r.molReader.SearchIssues(ctx, query, filter)
+	r.scans = append(r.scans, rows)
+	return rows, err
+}
+
+// TestWispPurgeClosedRealStoreHonorsAgeInQuery is the storage-query half of
+// the GH#8202 age floor: the UpdatedBefore bound the shared selector puts in
+// the filter must reach the wisps query itself, so on a real Dolt store the
+// scan does not even return a wisp closed moments ago under a positive --age,
+// and returns and selects it once the clock passes the threshold. The test
+// reads the rows the scan returned, not only the candidates, because the
+// selector's Go check would keep that wisp out of the candidates by itself.
+// The clock is the selector's wispGCNow seam; the rows carry the real clock.
+func TestWispPurgeClosedRealStoreHonorsAgeInQuery(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t, filepath.Join(t.TempDir(), ".beads", "beads.db"))
+
+	wisp := &types.Issue{
+		Title:     "patrol report step",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := s.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatalf("creating closed wisp: %v", err)
+	}
+
+	const threshold = time.Hour
+	old := wispGCNow
+	t.Cleanup(func() { wispGCNow = old })
+
+	// Ineligible at the current time, and kept out by the storage bound
+	// (updated_at < now-threshold) itself: the scan never returns it.
+	rec := &closedWispScanRecorder{molReader: s}
+	sel, err := selectClosedWispsForPurge(ctx, rec, threshold, nil)
+	if err != nil {
+		t.Fatalf("selecting at the current time: %v", err)
+	}
+	for _, issue := range sel.candidates {
+		if issue.ID == wisp.ID {
+			t.Errorf("closed wisp %s selected under the --age %v floor moments after it was written", wisp.ID, threshold)
+		}
+	}
+	if len(rec.scans) != 1 {
+		t.Fatalf("selection ran %d scans, want 1", len(rec.scans))
+	}
+	for _, issue := range rec.scans[0] {
+		if issue.ID == wisp.ID {
+			t.Errorf("the closed-wisp scan returned %s, written moments ago, under the --age %v bound: the bound did not reach the wisps query", wisp.ID, threshold)
+		}
+	}
+
+	// Eligible once the clock passes the threshold.
+	now := wispGCNow()
+	wispGCNow = func() time.Time { return now.Add(2 * threshold) }
+	sel, err = selectClosedWispsForPurge(ctx, s, threshold, nil)
+	if err != nil {
+		t.Fatalf("selecting past the threshold: %v", err)
+	}
+	if len(sel.candidates) != 1 || sel.candidates[0].ID != wisp.ID {
+		t.Errorf("selection past the threshold = %v, want exactly the aged wisp %s", sel.candidates, wisp.ID)
 	}
 }

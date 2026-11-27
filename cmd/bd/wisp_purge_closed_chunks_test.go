@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
+	"time"
+
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -33,6 +38,11 @@ type wispPurgeStubStore struct {
 	deleter *wispPurgeStubDeleter
 	scanned bool
 	lookups int
+	// updated is each wisp's updated_at; an unset one reads as the zero
+	// time, older than any --age.
+	updated map[string]time.Time
+	// scans is every filter the closed-wisp scan sent.
+	scans []types.IssueFilter
 }
 
 func (s *wispPurgeStubStore) issue(id string) *types.Issue {
@@ -40,7 +50,7 @@ func (s *wispPurgeStubStore) issue(id string) *types.Issue {
 	if s.infra[id] {
 		issueType = "agent"
 	}
-	return &types.Issue{ID: id, Title: "wisp " + id, Status: types.StatusClosed, Ephemeral: true, IssueType: issueType, Pinned: s.pinned[id]}
+	return &types.Issue{ID: id, Title: "wisp " + id, Status: types.StatusClosed, Ephemeral: true, IssueType: issueType, Pinned: s.pinned[id], UpdatedAt: s.updated[id]}
 }
 
 func (s *wispPurgeStubStore) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
@@ -55,6 +65,7 @@ func (s *wispPurgeStubStore) SearchIssues(_ context.Context, _ string, filter ty
 		return out, nil
 	}
 	s.scanned = true
+	s.scans = append(s.scans, filter)
 	for _, id := range s.closed {
 		if s.deleter.deleted[id] {
 			continue
@@ -63,6 +74,31 @@ func (s *wispPurgeStubStore) SearchIssues(_ context.Context, _ string, filter ty
 			break
 		}
 		out = append(out, s.issue(id))
+	}
+	return out, nil
+}
+
+// GetDependentRecordsForIssues answers the closed selection's hold-back read
+// from deleter.dependents, the same edges the deletion role reports orphans
+// from.
+func (s *wispPurgeStubStore) GetDependentRecordsForIssues(_ context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
+	out := map[string][]*types.Dependency{}
+	for _, target := range targetIDs {
+		for _, dependent := range s.deleter.dependents[target] {
+			out[target] = append(out[target], &types.Dependency{IssueID: dependent, DependsOnID: target, Type: types.DepBlocks})
+		}
+	}
+	return out, nil
+}
+
+// GetIssuesByIDs is the hold-back's read of the dependents it found; a closed
+// wisp the stub holds answers, anything else (a live step) does not.
+func (s *wispPurgeStubStore) GetIssuesByIDs(_ context.Context, ids []string) ([]*types.Issue, error) {
+	var out []*types.Issue
+	for _, id := range ids {
+		if slices.Contains(s.closed, id) && !s.deleter.deleted[id] {
+			out = append(out, s.issue(id))
+		}
 	}
 	return out, nil
 }
@@ -115,6 +151,17 @@ type wispPurgeStubDeleter struct {
 
 func (d *wispPurgeStubDeleter) Delete(_ context.Context, req issueops.DeleteRequest) (issueops.DeleteResult, error) {
 	d.requests = append(d.requests, req)
+	// The role's unforced guard: a named row that a surviving row outside
+	// the request depends on refuses the whole request, dry run or not.
+	if !req.Force && !req.Cascade {
+		for _, id := range req.IDs {
+			for _, dep := range d.dependents[id] {
+				if !slices.Contains(req.IDs, dep) && !d.deleted[dep] {
+					return issueops.DeleteResult{}, &issueops.DependentsOutsideRequestError{IssueID: id, Dependents: []string{dep}}
+				}
+			}
+		}
+	}
 	if req.DryRun {
 		return issueops.DeleteResult{DryRun: true, Deleted: len(req.IDs)}, nil
 	}
@@ -283,7 +330,7 @@ func TestWispPurgeClosedForceCommitsInBoundedBatches(t *testing.T) {
 	s := useWispPurgeStub(t, 401)
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 	})
 	if err != nil {
 		t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -317,7 +364,7 @@ func TestWispPurgeClosedSubmitsBoundedChunks(t *testing.T) {
 	s := useWispPurgeStub(t, 450)
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 	})
 	if err != nil {
 		t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -358,7 +405,7 @@ func TestWispPurgeClosedReportsDeletedIDsAscending(t *testing.T) {
 	jsonOutput = true
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 	})
 	if err != nil {
 		t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -386,7 +433,7 @@ func TestWispPurgeClosedSkipsPerIDResolution(t *testing.T) {
 	s := useWispPurgeStub(t, 450)
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 	})
 	if err != nil {
 		t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -420,7 +467,7 @@ func TestWispPurgeClosedCommitsBoundedChunks(t *testing.T) {
 	s.deleter.fail = failRequestContaining(s.closed[449], context.DeadlineExceeded)
 
 	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 	})
 	if err == nil {
 		t.Fatalf("runWispPurgeClosed succeeded, want a nonzero exit\nstdout:\n%s", stdout)
@@ -460,7 +507,7 @@ func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
 		jsonOutput = true
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, true, nil)
+			return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 		})
 		if err == nil {
 			t.Fatalf("runWispPurgeClosed succeeded, want a nonzero exit\nstdout:\n%s", stdout)
@@ -503,7 +550,7 @@ func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
 		jsonOutput = true
 
 		stdout, _, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, true, nil)
+			return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 		})
 		if err == nil {
 			t.Fatalf("a missing-id refusal exited nil\nstdout:\n%s", stdout)
@@ -539,6 +586,28 @@ type wispPurgeProxiedProvider struct {
 	units []*wispPurgeProxiedUOW
 	// fail, when it returns an error, refuses a DeleteIssues call.
 	fail func(ids []string) error
+	// updated, pinned and infra shape a wisp the scan returns, as on
+	// wispPurgeStubStore; scans is every filter the scan sent.
+	updated map[string]time.Time
+	pinned  map[string]bool
+	infra   map[string]bool
+	scans   []types.IssueFilter
+	// dependents maps a wisp to the wisps that depend on it, the
+	// wisp_dependencies rows the closed selection's hold-back reads.
+	dependents map[string][]string
+	// wispsReadErr, when set, fails every by-id read of the wisps table.
+	wispsReadErr error
+}
+
+// wisp is the row the stub holds for id, as the scan and the by-id read
+// return it.
+func (p *wispPurgeProxiedProvider) wisp(id string) *types.Issue {
+	issueType := types.TypeTask
+	if p.infra[id] {
+		issueType = "agent"
+	}
+	return &types.Issue{ID: id, Status: types.StatusClosed, Ephemeral: true, IssueType: issueType,
+		Pinned: p.pinned[id], UpdatedAt: p.updated[id]}
 }
 
 func (p *wispPurgeProxiedProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
@@ -588,12 +657,61 @@ func (u *wispPurgeProxiedUOW) ConfigUseCase() domain.ConfigUseCase {
 	return wispPurgeProxiedConfig{}
 }
 
+// DependencyUseCase answers the closed selection's hold-back read from the
+// provider's dependents.
+func (u *wispPurgeProxiedUOW) DependencyUseCase() domain.DependencyUseCase {
+	return wispPurgeProxiedDeps{p: u.p}
+}
+
+// LabelUseCase answers the label reads that ride along with a by-id read:
+// the stub's wisps carry no labels.
+func (u *wispPurgeProxiedUOW) LabelUseCase() domain.LabelUseCase {
+	return wispPurgeProxiedLabels{}
+}
+
+type wispPurgeProxiedDeps struct {
+	domain.DependencyUseCase
+	p *wispPurgeProxiedProvider
+}
+
+// ListByIssueIDs is the durable dependency table: no durable row depends on
+// the stub's wisps.
+func (wispPurgeProxiedDeps) ListByIssueIDs(context.Context, []string, domain.DepListFilter) (domain.DepBulkResult, error) {
+	return domain.DepBulkResult{}, nil
+}
+
+func (d wispPurgeProxiedDeps) ListByWispIDs(_ context.Context, ids []string, filter domain.DepListFilter) (domain.DepBulkResult, error) {
+	res := domain.DepBulkResult{Incoming: map[string][]*types.Dependency{}}
+	if filter.Direction != domain.DepDirectionIn {
+		return res, nil
+	}
+	for _, target := range ids {
+		for _, dependent := range d.p.dependents[target] {
+			res.Incoming[target] = append(res.Incoming[target], &types.Dependency{IssueID: dependent, DependsOnID: target, Type: types.DepBlocks})
+		}
+	}
+	return res, nil
+}
+
+type wispPurgeProxiedLabels struct {
+	domain.LabelUseCase
+}
+
+func (wispPurgeProxiedLabels) GetLabelsForIssues(context.Context, []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
+func (wispPurgeProxiedLabels) GetLabelsForWisps(context.Context, []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
 type wispPurgeProxiedIssues struct {
 	domain.IssueUseCase
 	u *wispPurgeProxiedUOW
 }
 
 func (s wispPurgeProxiedIssues) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) (domain.SearchPage, error) {
+	s.u.p.scans = append(s.u.p.scans, filter)
 	var page domain.SearchPage
 	for _, id := range s.u.p.closed {
 		if s.u.p.deleted[id] {
@@ -603,9 +721,28 @@ func (s wispPurgeProxiedIssues) SearchIssues(_ context.Context, _ string, filter
 			page.HasMore = true
 			break
 		}
-		page.Items = append(page.Items, &types.Issue{ID: id, Status: types.StatusClosed, Ephemeral: true, IssueType: types.TypeTask})
+		page.Items = append(page.Items, s.u.p.wisp(id))
 	}
 	return page, nil
+}
+
+// GetIssuesByIDs is the durable plane of the hold-back's by-id read: the
+// stub holds no durable rows.
+func (s wispPurgeProxiedIssues) GetIssuesByIDs(context.Context, []string) ([]*types.Issue, error) {
+	return nil, nil
+}
+
+func (s wispPurgeProxiedIssues) GetWispsByIDs(_ context.Context, ids []string) ([]*types.Issue, error) {
+	if s.u.p.wispsReadErr != nil {
+		return nil, s.u.p.wispsReadErr
+	}
+	var out []*types.Issue
+	for _, id := range ids {
+		if slices.Contains(s.u.p.closed, id) && !s.u.p.deleted[id] {
+			out = append(out, s.u.p.wisp(id))
+		}
+	}
+	return out, nil
 }
 
 func (s wispPurgeProxiedIssues) DeleteIssues(_ context.Context, params domain.DeleteIssuesParams, _ string) (domain.DeleteIssuesResult, error) {
@@ -658,7 +795,7 @@ func TestWispPurgeClosedProxiedBoundsEachUnitOfWork(t *testing.T) {
 		jsonOutput = true
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -702,7 +839,7 @@ func TestWispPurgeClosedProxiedBoundsEachUnitOfWork(t *testing.T) {
 		}
 
 		stdout, _, err := captureWispGC(t, func() error {
-			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil, 0)
 		})
 		if err == nil || !isReportedExit(err) {
 			t.Fatalf("error = %v, want an already-reported nonzero exit\nstdout:\n%s", err, stdout)
@@ -752,7 +889,7 @@ func TestWispPurgeClosedOrphanReportDropsLaterChunkDeletions(t *testing.T) {
 		s.deleter.dependents[s.closed[420]] = []string{live}
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, true, nil)
+			return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -771,7 +908,7 @@ func TestWispPurgeClosedOrphanReportDropsLaterChunkDeletions(t *testing.T) {
 		s.deleter.fail = failRequestContaining(s.closed[449], context.Canceled)
 
 		stdout, _, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, true, nil)
+			return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 		})
 		if err == nil {
 			t.Fatalf("runWispPurgeClosed succeeded, want the injected failure\nstdout:\n%s", stdout)
@@ -803,7 +940,7 @@ func TestWispPurgeClosedStopsOnCancellationBetweenChunks(t *testing.T) {
 		s.deleter.committed = func(issueops.DeleteRequest) { cancel() }
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(ctx, false, true, nil)
+			return runWispPurgeClosed(ctx, false, true, nil, 0)
 		})
 		if err == nil {
 			t.Fatalf("runWispPurgeClosed succeeded after cancellation\nstdout:\n%s", stdout)
@@ -829,7 +966,7 @@ func TestWispPurgeClosedStopsOnCancellationBetweenChunks(t *testing.T) {
 		cancel()
 
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(ctx, false, true, nil)
+			return runWispPurgeClosed(ctx, false, true, nil, 0)
 		})
 		if err == nil {
 			t.Fatalf("a purge canceled before its first chunk exited nil\nstdout:\n%s", stdout)
@@ -871,7 +1008,7 @@ func TestWispPurgeClosedReportsCappedScan(t *testing.T) {
 		t.Helper()
 		jsonOutput = asJSON
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, true, nil)
+			return runWispPurgeClosed(context.Background(), false, true, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -994,7 +1131,7 @@ func TestWispPurgeClosedReportsCappedScan(t *testing.T) {
 		p := useWispPurgeProxied(t, 6000)
 		jsonOutput = true
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -1025,7 +1162,7 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 		s := useWispPurgeStub(t, 450)
 		jsonOutput = true
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), false, false, nil)
+			return runWispPurgeClosed(context.Background(), false, false, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosed: %v\nstderr:\n%s", err, stderr)
@@ -1040,7 +1177,7 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 		s := useWispPurgeStub(t, 450)
 		jsonOutput = true
 		stdout, stderr, err := captureWispGC(t, func() error {
-			return runWispPurgeClosed(context.Background(), true, true, nil)
+			return runWispPurgeClosed(context.Background(), true, true, nil, 0)
 		})
 		if err != nil {
 			t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -1070,7 +1207,7 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 			p := useWispPurgeProxied(t, 450)
 			jsonOutput = true
 			stdout, stderr, err := captureWispGC(t, func() error {
-				return runWispPurgeClosedProxiedServer(context.Background(), tc.dryRun, tc.force, nil)
+				return runWispPurgeClosedProxiedServer(context.Background(), tc.dryRun, tc.force, nil, 0)
 			})
 			if err != nil {
 				t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstderr:\n%s", err, stderr)
@@ -1084,4 +1221,375 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWispPurgeClosedRoutesShareAgeSelection pins GH#8202 on both routes of
+// `bd mol wisp gc --closed --force`: each scans with the same now-age bound,
+// and each deletes only the closed wisp idle longer than --age, sparing the
+// recently closed, pinned and infra ones, uncascaded. --age 0s deletes every
+// unprotected one on both. Neither stub applies the bound, so the shared Go
+// check is what keeps the recent wisp.
+func TestWispPurgeClosedRoutesShareAgeSelection(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	oldNow := wispGCNow
+	t.Cleanup(func() { wispGCNow = oldNow })
+	wispGCNow = func() time.Time { return now }
+
+	ids := wispPurgeIDs(4)
+	idle, recent, pinned, infra := ids[0], ids[1], ids[2], ids[3]
+	updated := map[string]time.Time{
+		idle:   now.Add(-2 * time.Hour),
+		recent: now.Add(-time.Minute),
+		pinned: now.Add(-2 * time.Hour),
+		infra:  now.Add(-2 * time.Hour),
+	}
+
+	for _, tc := range []struct {
+		age        time.Duration
+		wantBound  bool
+		wantDelete []string
+	}{
+		{time.Hour, true, []string{idle}},
+		{0, false, []string{idle, recent}},
+	} {
+		checkScan := func(route string, scans []types.IssueFilter) {
+			t.Helper()
+			if len(scans) != 1 {
+				t.Fatalf("%s --age %s: scan sent %d queries, want 1", route, tc.age, len(scans))
+			}
+			bound := scans[0].UpdatedBefore
+			switch {
+			case tc.wantBound && (bound == nil || !bound.Equal(now.Add(-tc.age))):
+				t.Errorf("%s --age %s: UpdatedBefore = %v, want %v", route, tc.age, bound, now.Add(-tc.age))
+			case !tc.wantBound && bound != nil:
+				t.Errorf("%s --age %s: UpdatedBefore = %v, want no bound", route, tc.age, *bound)
+			}
+		}
+
+		t.Run(fmt.Sprintf("direct age %s", tc.age), func(t *testing.T) {
+			s := useWispPurgeStub(t, 4)
+			s.updated = updated
+			s.pinned[pinned] = true
+			s.infra[infra] = true
+			jsonOutput = true
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosed(context.Background(), false, true, nil, tc.age)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			checkScan("direct", s.scans)
+			var got []string
+			for _, req := range s.deleter.requests {
+				if req.Cascade {
+					t.Errorf("direct: deletion request cascades")
+				}
+				got = append(got, req.IDs...)
+			}
+			if !slices.Equal(got, tc.wantDelete) {
+				t.Errorf("direct --age %s deleted %v, want %v", tc.age, got, tc.wantDelete)
+			}
+		})
+
+		t.Run(fmt.Sprintf("proxied age %s", tc.age), func(t *testing.T) {
+			p := useWispPurgeProxied(t, 4)
+			p.updated = updated
+			p.pinned = map[string]bool{pinned: true}
+			p.infra = map[string]bool{infra: true}
+			jsonOutput = true
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil, tc.age)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			checkScan("proxied", p.scans)
+			var got []string
+			for _, u := range p.deletionUnits() {
+				if u.params.Cascade {
+					t.Errorf("proxied: deletion unit cascades")
+				}
+				got = append(got, u.params.IDs...)
+			}
+			if !slices.Equal(got, tc.wantDelete) {
+				t.Errorf("proxied --age %s deleted %v, want %v", tc.age, got, tc.wantDelete)
+			}
+		})
+	}
+}
+
+// TestWispPurgeClosedPreviewMatchesForceUnderAge pins GH#8202's preview side
+// on both routes: with a positive --age, the preview (no --force), --dry-run
+// and --force runs all count the same age-eligible wisp, every text run says
+// which threshold kept the recent ones and that --age 0s purges them too, a
+// run that finds nothing old enough says so, and the JSON preview keeps its
+// candidates and dry_run keys.
+func TestWispPurgeClosedPreviewMatchesForceUnderAge(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	oldNow := wispGCNow
+	t.Cleanup(func() { wispGCNow = oldNow })
+	wispGCNow = func() time.Time { return now }
+
+	ids := wispPurgeIDs(3)
+	idle := ids[0]
+	updated := map[string]time.Time{
+		ids[0]: now.Add(-3 * time.Hour),
+		ids[1]: now.Add(-time.Minute),
+		ids[2]: now.Add(-time.Hour),
+	}
+	allRecent := map[string]time.Time{ids[0]: now, ids[1]: now, ids[2]: now}
+
+	type route struct {
+		name string
+		// run installs a stub holding the three wisps updated at the given
+		// times, runs the purge, and returns what it printed and the ids it
+		// deleted.
+		run func(t *testing.T, updated map[string]time.Time, dryRun, force, asJSON bool) (string, []string)
+	}
+	routes := []route{
+		{"direct", func(t *testing.T, updated map[string]time.Time, dryRun, force, asJSON bool) (string, []string) {
+			s := useWispPurgeStub(t, 3)
+			s.updated = updated
+			jsonOutput = asJSON
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosed(context.Background(), dryRun, force, nil, 2*time.Hour)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			var deleted []string
+			for _, req := range s.deleter.requests {
+				if !req.DryRun {
+					deleted = append(deleted, req.IDs...)
+				}
+			}
+			return stdout, deleted
+		}},
+		{"proxied", func(t *testing.T, updated map[string]time.Time, dryRun, force, asJSON bool) (string, []string) {
+			p := useWispPurgeProxied(t, 3)
+			p.updated = updated
+			jsonOutput = asJSON
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosedProxiedServer(context.Background(), dryRun, force, nil, 2*time.Hour)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+			}
+			var deleted []string
+			for _, u := range p.deletionUnits() {
+				deleted = append(deleted, u.params.IDs...)
+			}
+			return stdout, deleted
+		}},
+	}
+
+	note := func(t *testing.T, out string) {
+		t.Helper()
+		if !strings.Contains(out, "within the last 2h") || !strings.Contains(out, "--age 0s") {
+			t.Errorf("output does not explain the 2h threshold and the --age 0s escape hatch:\n%s", out)
+		}
+	}
+	for _, r := range routes {
+		t.Run(r.name, func(t *testing.T) {
+			out, deleted := r.run(t, updated, false, false, false)
+			if !strings.Contains(out, "Found 1 closed wisp(s) to delete") || len(deleted) != 0 {
+				t.Errorf("preview: want 1 candidate and no deletion, deleted %v:\n%s", deleted, out)
+			}
+			note(t, out)
+
+			out, deleted = r.run(t, updated, true, true, false)
+			if !strings.Contains(out, "Found 1 closed wisp(s)") || len(deleted) != 0 {
+				t.Errorf("dry run: want 1 candidate and no deletion, deleted %v:\n%s", deleted, out)
+			}
+			note(t, out)
+
+			out, deleted = r.run(t, updated, false, true, false)
+			if !slices.Equal(deleted, []string{idle}) {
+				t.Errorf("force deleted %v, want the preview's one candidate %s", deleted, idle)
+			}
+			note(t, out)
+
+			out, deleted = r.run(t, allRecent, false, true, false)
+			if !strings.Contains(out, "No closed wisps to delete") || len(deleted) != 0 {
+				t.Errorf("nothing old enough: deleted %v:\n%s", deleted, out)
+			}
+			note(t, out)
+
+			out, _ = r.run(t, updated, false, false, true)
+			obj := decodeSingleJSONObject(t, out)
+			if obj["candidates"] != float64(1) || obj["dry_run"] != true {
+				t.Errorf("JSON preview = %v, want candidates 1 and dry_run true", obj)
+			}
+		})
+	}
+}
+
+// TestWispPurgeClosedRoutesHoldBackWhatNewerWispsDepend pins the GH#8202
+// hold-back on both routes of `bd mol wisp gc --closed`: of a molecule whose
+// first step closed long ago and whose second step, which depends on it,
+// closed moments ago, the preview, the unforced --dry-run and --force all
+// keep both steps and take only the unrelated idle wisp, and each says how
+// many older wisps it kept for a newer one. The direct route's unforced dry
+// run asks the deletion role, whose dependents guard (modeled by the stub)
+// refuses a request that a row outside it depends on: selecting the first
+// step without the second fails that dry run.
+func TestWispPurgeClosedRoutesHoldBackWhatNewerWispsDepend(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	oldNow := wispGCNow
+	t.Cleanup(func() { wispGCNow = oldNow })
+	wispGCNow = func() time.Time { return now }
+
+	ids := wispPurgeIDs(3)
+	first, second, idle := ids[0], ids[1], ids[2]
+	updated := map[string]time.Time{
+		first:  now.Add(-3 * time.Hour),
+		second: now.Add(-time.Minute),
+		idle:   now.Add(-3 * time.Hour),
+	}
+	dependents := map[string][]string{first: {second}}
+
+	type route struct {
+		name string
+		// asksRole says whether a run sends the selection to a deletion
+		// request: the direct route's dry run does, the proxied one's does
+		// not, and neither preview does.
+		asksRole func(dryRun, force bool) bool
+		// run installs the route's stub holding the three wisps, runs the
+		// purge, and returns what it printed and every id it sent to a
+		// deletion request.
+		run func(t *testing.T, dryRun, force bool) (string, []string)
+	}
+	routes := []route{
+		{"direct", func(dryRun, force bool) bool { return dryRun || force }, func(t *testing.T, dryRun, force bool) (string, []string) {
+			s := useWispPurgeStub(t, 3)
+			s.updated = updated
+			s.deleter.dependents = dependents
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosed(context.Background(), dryRun, force, nil, time.Hour)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosed dryRun=%v force=%v: %v\nstdout:\n%s\nstderr:\n%s", dryRun, force, err, stdout, stderr)
+			}
+			var sent []string
+			for _, req := range s.deleter.requests {
+				sent = append(sent, req.IDs...)
+			}
+			return stdout, sent
+		}},
+		{"proxied", func(dryRun, force bool) bool { return force && !dryRun }, func(t *testing.T, dryRun, force bool) (string, []string) {
+			p := useWispPurgeProxied(t, 3)
+			p.updated = updated
+			p.dependents = dependents
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosedProxiedServer(context.Background(), dryRun, force, nil, time.Hour)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosedProxiedServer dryRun=%v force=%v: %v\nstdout:\n%s\nstderr:\n%s", dryRun, force, err, stdout, stderr)
+			}
+			var sent []string
+			for _, u := range p.deletionUnits() {
+				sent = append(sent, u.params.IDs...)
+			}
+			return stdout, sent
+		}},
+	}
+	for _, r := range routes {
+		t.Run(r.name, func(t *testing.T) {
+			for _, mode := range []struct {
+				name          string
+				dryRun, force bool
+				found         string
+			}{
+				{"preview", false, false, "Found 1 closed wisp(s) to delete"},
+				{"dry run", true, false, "Found 1 closed wisp(s)"},
+				{"force", false, true, "Deleted 1 issue(s)"},
+			} {
+				out, sent := r.run(t, mode.dryRun, mode.force)
+				if !strings.Contains(out, mode.found) {
+					t.Errorf("%s: want %q, the idle wisp alone:\n%s", mode.name, mode.found, out)
+				}
+				if !strings.Contains(out, "Keeping 1 older closed wisp(s) that newer ones depend on") {
+					t.Errorf("%s: output does not say it kept the older step for the newer one:\n%s", mode.name, out)
+				}
+				var want []string
+				if r.asksRole(mode.dryRun, mode.force) {
+					want = []string{idle}
+				}
+				if !slices.Equal(sent, want) {
+					t.Errorf("%s: sent %v to deletion requests, want %v", mode.name, sent, want)
+				}
+			}
+		})
+	}
+}
+
+// TestWispPurgeClosedProxiedHoldBackFailsOnAFailedWispsRead pins the proxied
+// hold-back to its by-id read of the wisps that hold older ones back
+// (GH#8202). That read runs through uowMolReader.GetIssuesByIDs, which took
+// any failure of its wisps read for "no such wisp": the hold dropped, and
+// --force deleted the older step that a step closed a minute ago depends on,
+// and exited 0. The run now fails before it opens a deletion unit of work, as
+// the direct route's read fails it, and only a missing wisps table still
+// reads as having no wisps.
+func TestWispPurgeClosedProxiedHoldBackFailsOnAFailedWispsRead(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	oldNow := wispGCNow
+	t.Cleanup(func() { wispGCNow = oldNow })
+	wispGCNow = func() time.Time { return now }
+	readErr := errors.New("invalid connection: connection reset by peer")
+
+	t.Run("force deletes nothing", func(t *testing.T) {
+		ids := wispPurgeIDs(3)
+		first, second, idle := ids[0], ids[1], ids[2]
+		p := useWispPurgeProxied(t, 3)
+		p.updated = map[string]time.Time{
+			first:  now.Add(-3 * time.Hour),
+			second: now.Add(-time.Minute),
+			idle:   now.Add(-3 * time.Hour),
+		}
+		p.dependents = map[string][]string{first: {second}}
+		p.wispsReadErr = readErr
+		stdout, stderr, err := captureWispGC(t, func() error {
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil, time.Hour)
+		})
+		if err == nil {
+			t.Errorf("the run succeeded although the read of %s, which depends on %s, failed:\nstdout:\n%s", second, first, stdout)
+		}
+		if units := p.deletionUnits(); len(units) != 0 {
+			t.Errorf("opened %d deletion unit(s) after the failed read, want none", len(units))
+		}
+		if !strings.Contains(stderr, readErr.Error()) {
+			t.Errorf("stderr does not name the failed read:\n%s", stderr)
+		}
+	})
+
+	t.Run("reader", func(t *testing.T) {
+		tableMissing := fmt.Errorf("db: GetByIDs: %w", &mysql.MySQLError{Number: 1146, Message: "table not found: wisps"})
+		for _, tc := range []struct {
+			name    string
+			readErr error
+			wantErr bool
+		}{
+			{"a failed read is returned", readErr, true},
+			{"a missing wisps table is no wisps", tableMissing, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p := &wispPurgeProxiedProvider{closed: wispPurgeIDs(1), deleted: map[string]bool{}, wispsReadErr: tc.readErr}
+				uw, err := p.NewUOW(context.Background())
+				if err != nil {
+					t.Fatalf("NewUOW: %v", err)
+				}
+				got, err := uowMolReader{uw: uw}.GetIssuesByIDs(context.Background(), p.closed)
+				if tc.wantErr {
+					if !errors.Is(err, tc.readErr) {
+						t.Errorf("err = %v, want the failed read (%v)", err, tc.readErr)
+					}
+					return
+				}
+				if err != nil || len(got) != 0 {
+					t.Errorf("got %d issue(s) and err %v, want none and no error", len(got), err)
+				}
+			})
+		}
+	})
 }

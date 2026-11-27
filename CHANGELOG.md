@@ -854,6 +854,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd mol wisp gc --closed` keeps closed wisps updated within `--age`**
+  (#8202). It used to delete every closed wisp regardless of age, so a
+  molecule that finished moments ago lost its steps, notes and report for
+  good: wisps are not versioned, so the deletion left nothing to recover.
+  Closed mode now honors `--age` (default `1h`) on both the direct and
+  proxied-server routes, applying it in the scan ahead of the 5000-wisp
+  limit, and its preview, `--dry-run` and `--force` output name the
+  threshold. An older closed wisp that a newer one depends on, directly or
+  through another wisp kept that way (its molecule root, an earlier step),
+  is kept with it, so a chain of dependent steps ages out together with its
+  newest step. Pass `--age 0s` for the old purge-everything behavior, or a
+  longer `--age` to keep finished work around longer. `--json` keys are
+  unchanged.
 - **On macOS, bd no longer reads `~/Library/Application
   Support/bd/config.yaml` or `~/Library/Application Support/beads/PRIME.md`.**
   Probing those paths on every launch could raise a macOS 26 privacy prompt

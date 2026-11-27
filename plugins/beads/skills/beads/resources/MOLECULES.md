@@ -198,9 +198,10 @@ Use burn for routine work with no archival value.
 ### Garbage Collection
 
 ```bash
-bd mol wisp gc                       # Clean up orphaned wisps
-bd mol wisp gc --closed              # Preview closed wisp deletion
-bd mol wisp gc --closed --force      # Purge all closed wisps
+bd mol wisp gc                            # Clean up orphaned wisps
+bd mol wisp gc --closed                   # Preview closed wisp deletion
+bd mol wisp gc --closed --force           # Purge closed wisps idle over --age (default 1h)
+bd mol wisp gc --closed --force --age 0s  # Purge every closed wisp, any age
 ```
 
 ---
@@ -333,7 +334,7 @@ bd mol distill bd-release-epic --as "Release Process" --var version=X.Y.Z
 | `bd mol wisp <proto>` | Create ephemeral wisp |
 | `bd mol wisp list` | List all wisps |
 | `bd mol wisp gc` | Garbage collect orphaned wisps |
-| `bd mol wisp gc --closed` | Purge all closed wisps (preview; use --force to delete) |
+| `bd mol wisp gc --closed` | Purge closed wisps idle over --age, default 1h; --age 0s for all (preview; use --force to delete) |
 | `bd ship <capability>` | Publish capability for cross-project deps |
 
 ---
