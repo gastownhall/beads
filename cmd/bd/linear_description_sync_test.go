@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,5 +150,60 @@ func TestLinearSyncKeepsTemplateHeadingDescription(t *testing.T) {
 	}
 	if _, updates := api.snapshot(); updates != 0 {
 		t.Fatalf("issueUpdate calls = %d, want 0 (nothing local was kept)", updates)
+	}
+}
+
+// TestLinearSyncKeepsLocallyDeletedSectionText asserts the #8506 keep rule:
+// when the remote deletes a section and its text outright, the pull keeps
+// the local text and the push restores the section exactly once.
+func TestLinearSyncKeepsLocallyDeletedSectionText(t *testing.T) {
+	api, store, runSync := newLinearDescriptionSyncFixture(t,
+		"Ship it",
+		"Body",
+		"Body",
+		"N1")
+
+	runSync()
+	if store.issue.Description != "Body" || store.issue.Notes != "N1" {
+		t.Fatalf("after first sync: description=%q notes=%q, want Body/N1 (deleted text kept locally)", store.issue.Description, store.issue.Notes)
+	}
+	remote, updates := api.snapshot()
+	if updates != 1 || !strings.Contains(remote.Description, "## Notes") || !strings.Contains(remote.Description, "N1") {
+		t.Fatalf("first sync: issueUpdate calls = %d, remote body %q, want the notes section restored once", updates, remote.Description)
+	}
+
+	// The restored section is now what both sides hold: nothing more moves.
+	runSync()
+	if _, updates := api.snapshot(); updates != 1 {
+		t.Fatalf("second sync: issueUpdate calls = %d, want 1 (the restore must not repeat)", updates)
+	}
+	if store.issue.Description != "Body" || store.issue.Notes != "N1" {
+		t.Fatalf("second sync: description=%q notes=%q, want Body/N1 stable", store.issue.Description, store.issue.Notes)
+	}
+}
+
+// TestLinearSyncClearsSectionMovedIntoBody asserts the #8506 clear rule:
+// when the remote deletes the section heading but keeps its text in the
+// body, the pull moves the text into the description, clears the field and
+// pushes nothing back.
+func TestLinearSyncClearsSectionMovedIntoBody(t *testing.T) {
+	api, store, runSync := newLinearDescriptionSyncFixture(t,
+		"Ship it",
+		"Body\n\nN1",
+		"Body",
+		"N1")
+
+	result := runSync()
+	if result.PullStats.Updated != 1 {
+		t.Fatalf("PullStats = %+v, want Updated=1 (the field clears)", result.PullStats)
+	}
+	if store.issue.Description != "Body\n\nN1" {
+		t.Fatalf("local description = %q, want the moved text kept in the body", store.issue.Description)
+	}
+	if store.issue.Notes != "" {
+		t.Fatalf("local notes = %q, want empty (the text lives in the body now)", store.issue.Notes)
+	}
+	if _, updates := api.snapshot(); updates != 0 {
+		t.Fatalf("issueUpdate calls = %d, want 0 (the remote's decision stands)", updates)
 	}
 }
