@@ -107,8 +107,18 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 // own external_url into every web_url it returns, whatever address the API
 // was reached at, so the project's web_url is where bd learns the address
 // its issue links are under.
+//
+// A config with no project (group mode without gitlab.default_project_id)
+// sends no request, and a 404 is not an error: both leave bd recognizing
+// refs under gitlab.url only, as before.
 func (t *Tracker) readProject(ctx context.Context) error {
+	if t.client.ProjectID == "" {
+		return nil
+	}
 	if _, err := t.client.GetProject(ctx); err != nil {
+		if IsNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("reading GitLab project %s to learn the address GitLab writes into issue links "+
 			"(a push without it could create a second copy of every issue linked under that address): %w",
 			t.client.ProjectID, err)
