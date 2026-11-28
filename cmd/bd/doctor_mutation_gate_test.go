@@ -495,6 +495,30 @@ func TestSQLReadonlyRefusesDoltWriteFunction(t *testing.T) {
 	}
 }
 
+// TestSQLReadonlyRefusesSetOperationExport is the readonly gate for `bd sql`
+// set operations that export their rows with INTO OUTFILE (#7033). The export
+// must be refused before it reaches the server; the refusal text, not the
+// missing file, is the proof, since the server may not share this filesystem.
+// The same UNION without INTO still runs and returns the seeded issue.
+func TestSQLReadonlyRefusesSetOperationExport(t *testing.T) {
+	w := newServerReadonlyGateWorkspace(t)
+	out := filepath.Join(t.TempDir(), "export.tsv")
+
+	query := fmt.Sprintf("(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '%s'", out)
+	stdout, stderr, code := w.run(t, "sql", "--readonly", query)
+	if code != 1 || !strings.Contains(stderr, "operation 'sql' is not allowed in read-only mode") {
+		t.Errorf("UNION ... INTO OUTFILE under --readonly should be refused (exit %d, want 1):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("UNION ... INTO OUTFILE under --readonly left %s behind (stat err %v)", out, err)
+	}
+
+	stdout, stderr, code = w.run(t, "sql", "--readonly", "SELECT id FROM issues UNION SELECT id FROM issues")
+	if code != 0 || strings.Contains(stderr, "not allowed in read-only mode") || !strings.Contains(stdout, w.prefix+"-") {
+		t.Errorf("a UNION read under --readonly should run and return the seeded issue (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
+
 // TestDoctorMaintenanceSkippedInReadonlyMode is the readonly twin of
 // TestDoctorMaintenanceSkippedDuringMigrationFreeze — see that test for why
 // plain `bd doctor` had hidden writes at all, and for the shared-server setup.
