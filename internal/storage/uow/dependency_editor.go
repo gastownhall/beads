@@ -42,9 +42,12 @@ var _ publicops.DependencyEditor = (*dependencyEditor)(nil)
 // that rolls every earlier edge back with it, which is what makes the request
 // all-or-nothing without any bookkeeping of its own.
 //
-// The use case applies the parent-child-first ordering and the whole-graph
-// final gate the store-backed sibling applies, through the same rules, so the
-// two answer the same refusals to the same requests. It is the SOURCE-ROUTED
+// The use case applies the parent-child-first ordering and the cycle checks
+// the store-backed sibling applies, through the same rules, so the two answer
+// the same refusals to the same requests. It runs its whole-graph final gate
+// on every request; the store-backed sibling runs that gate only when the
+// per-edge probes were skipped, because with them on the gate finds nothing
+// the probes did not. It is the SOURCE-ROUTED
 // bulk verb for the same reason: each edge follows the plane its source lives
 // in, and a request may mix them, so the two implementations also land the
 // same edges in the same tables.

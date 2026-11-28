@@ -345,7 +345,7 @@ func loadDependencyEdgeScan(ctx context.Context, tx *sql.Tx, table string, maxEd
 }
 
 // addBlockingDependencyEdge adds one row to the adjacency map if it is a
-// blocking edge. The type filter runs client-side like
+// blocking edge. The type filter runs client-side, unlike the unpaginated
 // issueops.AppendBlockingGraphInTx: a WHERE on type would let one paginated
 // page scan an unbounded id range when blocking edges are sparse, defeating
 // the bounded-work-per-query guarantee. Returns the graph-too-large warning
