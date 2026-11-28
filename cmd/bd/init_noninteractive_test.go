@@ -11,13 +11,7 @@ import (
 
 // TestIsNonInteractiveInit tests the non-interactive detection logic.
 func TestIsNonInteractiveInit(t *testing.T) {
-	// Save original env vars and restore after tests
-	origCI := os.Getenv("CI")
-	origBDNI := os.Getenv("BD_NON_INTERACTIVE")
-	defer func() {
-		os.Setenv("CI", origCI)
-		os.Setenv("BD_NON_INTERACTIVE", origBDNI)
-	}()
+	usePipedStdinForInteractionTest(t)
 
 	tests := []struct {
 		name      string
@@ -91,12 +85,34 @@ func TestIsNonInteractiveInit(t *testing.T) {
 			envBDNI:   "false",
 			want:      false,
 		},
+		{
+			name:    "BD_NON_INTERACTIVE=0 overrides piped stdin",
+			envBDNI: "0",
+			want:    false,
+		},
+		{
+			name:    "BD_NON_INTERACTIVE=false overrides piped stdin",
+			envBDNI: "false",
+			want:    false,
+		},
+		{
+			name:      "explicit flag wins over BD_NON_INTERACTIVE=0",
+			flagValue: true,
+			envBDNI:   "0",
+			want:      true,
+		},
+		{
+			name:      "explicit flag wins over BD_NON_INTERACTIVE=false",
+			flagValue: true,
+			envBDNI:   "false",
+			want:      true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Setenv("CI", tt.envCI)
-			os.Setenv("BD_NON_INTERACTIVE", tt.envBDNI)
+			t.Setenv("CI", tt.envCI)
+			t.Setenv("BD_NON_INTERACTIVE", tt.envBDNI)
 
 			got := isNonInteractiveInit(tt.flagValue)
 			if got != tt.want {
