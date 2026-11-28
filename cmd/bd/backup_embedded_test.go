@@ -207,7 +207,10 @@ func TestEmbeddedBackupConcurrent(t *testing.T) {
 		}
 		if r.err == nil {
 			successes++
-		} else if !strings.Contains(r.out, "one writer at a time") {
+		} else if !strings.Contains(r.out, "one writer at a time") &&
+			!strings.Contains(r.out, errBackupBusy.Error()) {
+			// Two refusals are expected: the store's single-writer error, and the
+			// backup lock's errBackupBusy when a sync overlaps another past the wait.
 			t.Errorf("worker %d failed with unexpected error: %v\n%s", r.worker, r.err, r.out)
 		}
 	}
