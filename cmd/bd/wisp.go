@@ -1,9 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -635,10 +638,22 @@ Use --closed to purge ALL closed wisps (regardless of age). This is the
 fastest way to reclaim space from accumulated wisp bloat. Safe by default:
 requires --force to actually delete.
 
---closed --force deletes in batches of 200 wisps, each committed on its own,
-so a failure keeps the batches already committed. The summary then reports
-only the deletions that committed, plus remaining_count, error and hint in
---json output, and the command exits nonzero; rerun it to delete the rest.
+Deletion (age-based gc, and --closed --force) goes in batches of 200 wisps,
+each committed on its own, so a failure keeps the batches already committed
+and sends no further batch. The summary then reports only the deletions that
+committed; --json adds unconfirmed_count (selected wisps no committed batch
+confirmed, the failed batch included), remaining_count (the same number),
+error and hint, and writes one error object to stderr. The command exits
+nonzero; rerun it to reselect and delete the rest. Age-based gc deletes
+dependents before the wisps they depend on, so a failure leaves the edges
+that tie the rest to an abandoned wisp, and the rerun selects them again.
+The exception: a batch rewrites the text of wisps that cite what it deleted,
+and a rewritten wisp counts as just updated, so the rerun treats it as too
+young (see above).
+One batch can still be slow on a large database; in server mode, if it
+times out, BEADS_DOLT_POOL_READ_TIMEOUT (dolt.pool-read-timeout in
+config.yaml, default 10s) raises the pool read timeout for the run.
+Embedded mode and proxied-server workspaces do not use that timeout.
 A scan reads at most 5000 closed wisps: when it reaches that limit the output
 says more may remain (candidates_capped in --json), even if every wisp it
 read was excluded.
@@ -777,13 +792,19 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	if closedMode {
 		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes)
 	}
+	return runWispGCAbandoned(ctx, dryRun, cleanAll, ageThreshold, excludeTypes)
+}
 
+// runWispGCAbandoned is the age half of `bd mol wisp gc` on the direct route:
+// it selects the abandoned wisps and deletes them in chunks of
+// wispPurgeChunkSize, as the closed purge does (bd-xfuna8, GH#6246).
+func runWispGCAbandoned(ctx context.Context, dryRun, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) error {
 	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
 	if err != nil && abandoned == nil {
 		return HandleError("%v", err)
 	}
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: cascade expansion incomplete: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: cascade expansion incomplete: %v\n", err)
 	}
 
 	if len(abandoned) == 0 {
@@ -826,16 +847,23 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	}
 	// Cascade must stay OFF here too. findAbandonedWisps has already expanded
 	// dependents and kept only the unprotected ones that meet --age, so a
-	// deleteBatch cascade would re-expand from that set to ALL transitive
-	// dependents — including blocked/in-progress steps that isProtectedWisp
-	// just excluded (GH#4394's protection is only enforced in the pre-filter;
-	// cascade bypasses it) and fresh steps the --age check just spared.
-	// Without cascade the list is deleted exactly as filtered and live
-	// dependents are orphaned (edges dropped, is_blocked recomputed).
-	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, nil, "wisp gc"); err != nil {
+	// cascade would re-expand from that set to ALL transitive dependents —
+	// including blocked/in-progress steps that isProtectedWisp just excluded
+	// (GH#4394's protection is only enforced in the pre-filter; cascade
+	// bypasses it) and fresh steps the --age check just spared. Without
+	// cascade the list is deleted exactly as filtered and live dependents are
+	// orphaned (edges dropped, is_blocked recomputed).
+	//
+	// The selection goes to the deletion role in chunks, each its own
+	// transaction: one request for the whole selection was one transaction
+	// whose blocked-state recompute grew with it (GH#6246).
+	outcome, err := deleteSelectedWispsDirect(ctx, ids)
+	if err != nil {
 		return HandleError("%v", err)
 	}
-	return nil
+	report := wispGCAbandonedReport
+	report.withDeletedIDs = true
+	return renderWispPurgeOutcome(outcome, report)
 }
 
 // wispIsAbandoned reports whether a wisp counts as abandoned for GC
@@ -862,6 +890,10 @@ func wispIsAbandoned(now, updatedAt time.Time, ageThreshold time.Duration) bool 
 // t.Parallel().
 var wispGCNow = time.Now
 
+// findAbandonedWisps selects what an age gc deletes, in the order it deletes
+// it: the dependents its cascade adds come first, farthest from an abandoned
+// wisp first (see abandonedWispDependents), then the abandoned wisps the scan
+// found, in scan order.
 func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, error) {
 	ephemeralFlag := true
 	filter := types.IssueFilter{
@@ -909,49 +941,113 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		return abandoned, nil
 	}
 
-	parentIDs := make([]string, len(abandoned))
+	// Dependents skip the parent scan's not-closed clause: an abandoned
+	// molecule's finished steps go with it, even without --all. They are held
+	// to the same --age contract as parents. One spared here is detached when
+	// its parent is deleted, so a closed one is left for --all, --closed or
+	// bd purge.
+	eligible := func(child *types.Issue) bool {
+		return !r.IsInfraTypeCtx(ctx, child.IssueType) &&
+			!isProtectedWisp(child, blockedSet, protectedStatuses) &&
+			wispIsAbandoned(now, child.UpdatedAt, ageThreshold)
+	}
+	dependents, cascadeErr := abandonedWispDependents(ctx, r, abandoned, eligible)
+	return append(dependents, abandoned...), cascadeErr
+}
+
+// abandonedWispDependents returns the wisps that depend on the abandoned ones,
+// directly or through other wisps, and that eligible accepts, ordered for
+// deletion: the most edges away from an abandoned wisp first.
+//
+// The order is what lets a rerun finish an age gc that a failed batch stopped
+// (GH#6246). Batches go out in selection order, and deleting a wisp drops its
+// dependents' edges to it. Without --all the scan passes over closed wisps,
+// so a closed step is selected only through a chain of edges back to an
+// abandoned wisp: had a wisp on that chain gone in an earlier batch, no rerun
+// would select the step again. Deleting the farthest wisps first, and the
+// abandoned ones last, keeps every chain a failure leaves whole, so the rerun
+// reselects its abandoned wisp and reaches the rest from it.
+func abandonedWispDependents(ctx context.Context, r molReader, abandoned []*types.Issue, eligible func(*types.Issue) bool) ([]*types.Issue, error) {
+	roots := make([]string, len(abandoned))
+	isRoot := make(map[string]bool, len(abandoned))
 	for i, issue := range abandoned {
-		parentIDs[i] = issue.ID
+		roots[i] = issue.ID
+		isRoot[issue.ID] = true
 	}
-	childIDs, cascadeErr := r.FindWispDependentsRecursive(ctx, parentIDs)
-	if len(childIDs) > 0 {
-		childIDSlice := make([]string, 0, len(childIDs))
-		for id := range childIDs {
-			childIDSlice = append(childIDSlice, id)
-		}
-		// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc
-		// and the importIssueLookup TODO in import_shared.go for why this is
-		// not yet routed through the role.
-		childIssues, fetchErr := r.GetIssuesByIDs(ctx, childIDSlice)
-		if fetchErr == nil {
-			abandonedSet := make(map[string]bool, len(abandoned))
-			for _, issue := range abandoned {
-				abandonedSet[issue.ID] = true
-			}
-			// Dependents skip the parent scan's not-closed clause: an
-			// abandoned molecule's finished steps go with it, even without
-			// --all.
-			for _, child := range childIssues {
-				if abandonedSet[child.ID] {
-					continue
-				}
-				if r.IsInfraTypeCtx(ctx, child.IssueType) {
-					continue
-				}
-				if isProtectedWisp(child, blockedSet, protectedStatuses) {
-					continue
-				}
-				// Children are held to the same --age contract as parents. One
-				// spared here is detached when its parent is deleted, so a
-				// closed one is left for --all, --closed or bd purge.
-				if !wispIsAbandoned(now, child.UpdatedAt, ageThreshold) {
-					continue
-				}
-				abandoned = append(abandoned, child)
-			}
+	found, cascadeErr := r.FindWispDependentsRecursive(ctx, roots)
+	if len(found) == 0 {
+		return nil, cascadeErr
+	}
+	foundIDs := make([]string, 0, len(found))
+	for id := range found {
+		foundIDs = append(foundIDs, id)
+	}
+	slices.Sort(foundIDs)
+	// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc
+	// and the importIssueLookup TODO in import_shared.go for why this is
+	// not yet routed through the role.
+	children, fetchErr := r.GetIssuesByIDs(ctx, foundIDs)
+	if fetchErr != nil {
+		return nil, cascadeErr
+	}
+	var dependents []*types.Issue
+	for _, child := range children {
+		if !isRoot[child.ID] && eligible(child) {
+			dependents = append(dependents, child)
 		}
 	}
-	return abandoned, cascadeErr
+	if len(dependents) < 2 {
+		return dependents, cascadeErr
+	}
+	edges, err := r.GetDependencyRecordsForIssues(ctx, foundIDs)
+	if err != nil {
+		return dependents, errors.Join(cascadeErr, fmt.Errorf("reading the dependents' edges to order their deletion: %w", err))
+	}
+	depth := wispCascadeDepths(roots, edges)
+	// A dependent with no chain back in the edges read here (an edge changed
+	// after the cascade walked it) counts as the farthest.
+	rank := func(issue *types.Issue) int {
+		if d, ok := depth[issue.ID]; ok {
+			return d
+		}
+		return math.MaxInt
+	}
+	slices.SortFunc(dependents, func(a, b *types.Issue) int {
+		if c := cmp.Compare(rank(b), rank(a)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return dependents, cascadeErr
+}
+
+// wispCascadeDepths is the number of dependency edges between each wisp a
+// cascade found and the nearest of roots, read from edges (each found wisp's
+// own dependency records): 1 for a wisp that depends on a root directly.
+func wispCascadeDepths(roots []string, edges map[string][]*types.Dependency) map[string]int {
+	dependentsOf := make(map[string][]string)
+	for id, deps := range edges {
+		for _, dep := range deps {
+			dependentsOf[dep.DependsOnID] = append(dependentsOf[dep.DependsOnID], id)
+		}
+	}
+	depth := make(map[string]int, len(roots)+len(edges))
+	for _, id := range roots {
+		depth[id] = 0
+	}
+	for frontier := roots; len(frontier) > 0; {
+		var next []string
+		for _, id := range frontier {
+			for _, dependent := range dependentsOf[id] {
+				if _, seen := depth[dependent]; !seen {
+					depth[dependent] = depth[id] + 1
+					next = append(next, dependent)
+				}
+			}
+		}
+		frontier = next
+	}
+	return depth
 }
 
 func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
@@ -1039,11 +1135,13 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		return nil
 	}
 
-	outcome, err := purgeClosedWispsDirect(ctx, ids)
+	outcome, err := deleteSelectedWispsDirect(ctx, ids)
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	if err := renderWispPurgeOutcome(outcome, scanCapped, true); err != nil {
+	report := wispPurgeClosedReport
+	report.scanCapped, report.withDeletedIDs = scanCapped, true
+	if err := renderWispPurgeOutcome(outcome, report); err != nil {
 		return err
 	}
 	if !jsonOutput {
@@ -1190,11 +1288,25 @@ func (o wispPurgeOutcome) remaining() int {
 // and it does not promise the failed chunk wrote nothing: a rerun reselects.
 const wispPurgeRerunHint = "Rerun the same command to reselect current data and delete the remaining closed wisps."
 
-// purgeClosedWispsDirect deletes ids, which this store's own scan just
-// selected, through its deletion role. The ids go to the role as they are: the
+// wispGCRerunHint is wispPurgeRerunHint for a stopped age gc, plus what a
+// rerun can still miss (see abandonedWispDependents): a wisp whose text a
+// committed batch rewrote reads as just updated.
+const wispGCRerunHint = "Rerun the same command to reselect current data and delete the remaining abandoned wisps. " +
+	"A wisp whose text a batch rewrote counts as just updated and waits until it is --age old again; " +
+	"a closed wisp left with no edge to an abandoned one needs --all, --closed --force or 'bd purge'."
+
+// wispPurgeClosedReport and wispGCAbandonedReport name a gc mode for
+// renderWispPurgeOutcome; each route adds its own keys.
+var (
+	wispPurgeClosedReport = wispGCReport{command: "wisp gc --closed", rerunHint: wispPurgeRerunHint, withScanCapped: true}
+	wispGCAbandonedReport = wispGCReport{command: "wisp gc", rerunHint: wispGCRerunHint}
+)
+
+// deleteSelectedWispsDirect deletes ids, which this store's own scan just
+// selected (closed purge or age GC), through its deletion role. The ids go to the role as they are: the
 // front door's per-id resolution (deleteBatch) would re-read each one to learn
 // what the scan already said.
-func purgeClosedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutcome, error) {
+func deleteSelectedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutcome, error) {
 	deleter, err := store.Deleter()
 	if err != nil {
 		return wispPurgeOutcome{}, err
@@ -1229,15 +1341,30 @@ func purgeClosedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutcome
 	}), nil
 }
 
-// renderWispPurgeOutcome prints a forced closed purge's result with the keys
-// each route has always printed, plus candidates_capped (scanCapped: the scan
-// came back full, so more may remain); withDeletedIDs adds the direct route's
-// deleted_ids. A purge a failure stopped prints the same summary of what its
-// committed chunks deleted, then the cause and the rerun hint, and returns an
-// already-reported exit: under --json all of it is one stdout object
-// (remaining_count, error and hint beside the success keys), so a caller that
-// reads one JSON value still gets the progress.
-func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs bool) error {
+// wispGCReport says how renderWispPurgeOutcome prints a chunked gc's result
+// for the route and mode that ran it.
+type wispGCReport struct {
+	// command names the gc mode in a stopped run's error ("wisp gc" or
+	// "wisp gc --closed"); rerunHint is that mode's continue guidance.
+	command   string
+	rerunHint string
+	// withScanCapped adds candidates_capped, set from scanCapped: the closed
+	// purge's scan came back full, so more may remain.
+	withScanCapped bool
+	scanCapped     bool
+	// withDeletedIDs adds the direct route's deleted_ids.
+	withDeletedIDs bool
+}
+
+// renderWispPurgeOutcome prints a forced chunked gc's result with the keys
+// each route and mode has always printed (see wispGCReport). A gc a failure
+// stopped prints the same summary of what its committed chunks deleted, then
+// the cause and the rerun hint, and returns an already-reported exit: under
+// --json the summary is one stdout object (remaining_count, error and hint
+// beside the success keys), so a caller that reads one JSON value still gets
+// the progress.
+func renderWispPurgeOutcome(out wispPurgeOutcome, report wispGCReport) error {
+	scanCapped := report.withScanCapped && report.scanCapped
 	if jsonOutput {
 		answer := map[string]interface{}{
 			"deleted":              out.confirmed,
@@ -1247,21 +1374,30 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs boo
 			"events_removed":       out.events,
 			"references_updated":   out.referencesUpdated,
 			"orphaned_issues":      out.orphaned,
-			"candidates_capped":    scanCapped,
 		}
-		if withDeletedIDs {
+		if report.withScanCapped {
+			answer["candidates_capped"] = report.scanCapped
+		}
+		if report.withDeletedIDs {
 			answer["deleted_ids"] = out.deletedIDs
 		}
 		if out.err != nil {
+			// unconfirmed_count is the same number as remaining_count, named
+			// for what it is: selected ids no committed chunk confirmed (the
+			// failed chunk and any never sent), not a count of rows known to
+			// be left.
 			answer["remaining_count"] = out.remaining()
+			answer["unconfirmed_count"] = out.remaining()
 			answer["error"] = out.err.Error()
-			answer["hint"] = wispPurgeRerunHint
+			answer["hint"] = report.rerunHint
 		}
 		if err := outputJSON(answer); err != nil {
 			return err
 		}
 		if out.err != nil {
-			return SilentExit()
+			// The one error object for the failure, on stderr where every
+			// --json failure goes; its exit is already reported.
+			return outputJSONError(errors.New(wispGCStoppedMessage(out, report)), "")
 		}
 		return nil
 	}
@@ -1285,10 +1421,16 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs boo
 		// The counts above are what committed chunks confirmed. The failed
 		// chunk is not claimed either way: an error at a commit boundary does
 		// not prove nothing was written, which is why the hint reselects.
-		return HandleErrorWithHint(fmt.Sprintf("wisp gc --closed stopped after deleting %d of %d selected wisp(s); %d not confirmed deleted: %v",
-			len(out.confirmed), out.selected, out.remaining(), out.err), wispPurgeRerunHint)
+		return HandleErrorWithHint(wispGCStoppedMessage(out, report), report.rerunHint)
 	}
 	return nil
+}
+
+// wispGCStoppedMessage is a stopped gc's error: what committed chunks
+// confirmed, how many selected ids none confirmed, and the cause.
+func wispGCStoppedMessage(out wispPurgeOutcome, report wispGCReport) string {
+	return fmt.Sprintf("%s stopped after deleting %d of %d selected wisp(s); %d not confirmed deleted: %v",
+		report.command, len(out.confirmed), out.selected, out.remaining(), out.err)
 }
 
 func init() {

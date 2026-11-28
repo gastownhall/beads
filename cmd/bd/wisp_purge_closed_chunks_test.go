@@ -450,7 +450,8 @@ func TestWispPurgeClosedCommitsBoundedChunks(t *testing.T) {
 // TestWispPurgeClosedJSONReportsPartialProgress pins the --json half: a purge
 // stopped by a failed request prints exactly one JSON object on stdout, with
 // the success keys counting only the committed chunks plus remaining_count,
-// error and hint, and exits nonzero without a second error envelope. A
+// unconfirmed_count, error and hint, exactly one error object on stderr, and
+// exits nonzero without the caller printing the error again. A
 // missing-id refusal mid-run is diagnosed the same way: no retry, no shrink,
 // no phantom deletes.
 func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
@@ -468,8 +469,10 @@ func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
 		if !isReportedExit(err) {
 			t.Errorf("error = %v, want an already-reported exit (the caller must not print it again)", err)
 		}
-		if bytes.Contains([]byte(stderr), []byte("{")) {
-			t.Errorf("stderr carries a JSON value; the answer belongs in the one stdout object:\n%s", stderr)
+		// The progress is the one stdout object; stderr carries exactly one
+		// error object for the failure (bd-xfuna8).
+		if msg, _ := decodeSingleJSONObject(t, stderr)["error"].(string); !bytes.Contains([]byte(msg), []byte("context deadline exceeded")) {
+			t.Errorf("stderr error = %q, want the cause", msg)
 		}
 		obj := decodeSingleJSONObject(t, stdout)
 		if got := obj["deleted_count"]; got != float64(400) {
@@ -483,6 +486,9 @@ func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
 		}
 		if got := obj["remaining_count"]; got != float64(50) {
 			t.Errorf("remaining_count = %v, want 50", got)
+		}
+		if got := obj["unconfirmed_count"]; got != float64(50) {
+			t.Errorf("unconfirmed_count = %v, want 50", got)
 		}
 		if got, _ := obj["error"].(string); !bytes.Contains([]byte(got), []byte("context deadline exceeded")) {
 			t.Errorf("error = %q, want the cause", got)
@@ -615,7 +621,11 @@ func (s wispPurgeProxiedIssues) DeleteIssues(_ context.Context, params domain.De
 			return domain.DeleteIssuesResult{}, err
 		}
 	}
+	deleted := slices.Clone(params.IDs)
+	slices.Sort(deleted)
 	return domain.DeleteIssuesResult{
+		// In ascending order, as the deletion role names them.
+		DeletedIDs:        deleted,
 		DeletedCount:      len(params.IDs),
 		DependenciesCount: len(params.IDs),
 		LabelsCount:       2 * len(params.IDs),
@@ -642,7 +652,9 @@ func useWispPurgeProxied(t *testing.T, n int) *wispPurgeProxiedProvider {
 	oldProvider, oldJSON, oldQuiet, oldActor := uowProvider, jsonOutput, quietFlag, actor
 	t.Cleanup(func() {
 		uowProvider, jsonOutput, quietFlag, actor = oldProvider, oldJSON, oldQuiet, oldActor
+		commandDeletedIssueIDs.reset()
 	})
+	commandDeletedIssueIDs.reset()
 	p := &wispPurgeProxiedProvider{closed: wispPurgeIDs(n), deleted: map[string]bool{}}
 	uowProvider, jsonOutput, quietFlag, actor = p, false, false, "test"
 	return p
