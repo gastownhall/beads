@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -132,9 +133,9 @@ func renderGraphVisual(out io.Writer, layout *GraphLayout, subgraph *TemplateSub
 func computeDAGNodeWidth(layout *GraphLayout) int {
 	maxW := 0
 	for _, node := range layout.Nodes {
-		titleLen := len([]rune(truncateTitle(node.Issue.Title, 22)))
-		contentW := titleLen + 3      // icon(1) + space(1) + trailing(1)
-		idW := len(node.Issue.ID) + 4 // space + ID + "  Pn"
+		titleWidth := ansi.StringWidth(truncateGraphTitle(node.Issue.Title, 22))
+		contentW := titleWidth + 3                 // icon(1) + space(1) + trailing(1)
+		idW := ansi.StringWidth(node.Issue.ID) + 4 // space + ID + "  Pn"
 		if idW > contentW {
 			contentW = idW
 		}
@@ -209,7 +210,7 @@ func dagNodeLine(node *GraphNode, nodeW, lineIdx int) string {
 
 	case 1: // status icon + title
 		icon := ui.RenderStatusIcon(string(node.Issue.Status))
-		title := truncateTitle(node.Issue.Title, nodeW-4) // room for icon + spaces
+		title := truncateGraphTitle(node.Issue.Title, nodeW-4) // room for icon + spaces
 		padded := padRight(title, nodeW-4)
 
 		status := string(node.Issue.Status)
