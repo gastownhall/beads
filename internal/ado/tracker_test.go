@@ -111,6 +111,42 @@ func TestTracker_InitFromConfig(t *testing.T) {
 	}
 }
 
+func TestTracker_InitSeverityMapConfig(t *testing.T) {
+	t.Setenv("AZURE_DEVOPS_PAT", "config-pat")
+	tr := &Tracker{}
+	store := newMockStore(map[string]string{
+		"ado.org":            "configorg",
+		"ado.project":        "configproject",
+		"ado.severity_map.0": "Critical",
+		"ado.severity_map.1": "Critical",
+		"ado.severity_map.2": "Major",
+		"ado.severity_map.3": "Minor",
+		"ado.severity_map.4": "Minor",
+	})
+	err := tr.Init(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Init() unexpected error: %v", err)
+	}
+
+	mapper, ok := tr.mapper.(*adoFieldMapper)
+	if !ok {
+		t.Fatalf("mapper is not *adoFieldMapper")
+	}
+
+	want := map[int]string{
+		0: "Critical",
+		1: "Critical",
+		2: "Major",
+		3: "Minor",
+		4: "Minor",
+	}
+	for p, sev := range want {
+		if got := mapper.SeverityForBug(p); got != sev {
+			t.Errorf("SeverityForBug(%d) = %q, want %q", p, got, sev)
+		}
+	}
+}
+
 func TestTracker_InitWithCustomURL(t *testing.T) {
 	setupEndpointTrustWorkspace(t)
 	// ado.pat is yaml-only (secret), so set it via env var.
@@ -665,7 +701,7 @@ func TestTracker_Registration(t *testing.T) {
 
 func TestTracker_FieldMapper(t *testing.T) {
 	tr := &Tracker{
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	fm := tr.FieldMapper()
 	if fm == nil {
@@ -766,7 +802,7 @@ func newTestTracker(t *testing.T, handler http.Handler) (*Tracker, *httptest.Ser
 
 	return &Tracker{
 		client:   client,
-		mapper:   NewFieldMapper(nil, nil),
+		mapper:   NewFieldMapper(nil, nil, nil),
 		baseURL:  server.URL,
 		org:      "testorg",
 		projects: []string{"testproject"},
@@ -948,7 +984,7 @@ func TestTracker_FetchIssue(t *testing.T) {
 func TestTracker_FetchIssue_InvalidID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.FetchIssue(context.Background(), "not-a-number")
 	if err == nil {
@@ -1163,7 +1199,7 @@ func TestTracker_UpdateIssue(t *testing.T) {
 func TestTracker_UpdateIssue_InvalidID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.UpdateIssue(context.Background(), "abc", &types.Issue{Title: "x"})
 	if err == nil {
@@ -1243,7 +1279,7 @@ func containsSubstr(s, substr string) bool {
 func TestTracker_FetchIssue_ZeroID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.FetchIssue(context.Background(), "0")
 	if err == nil {
@@ -1257,7 +1293,7 @@ func TestTracker_FetchIssue_ZeroID(t *testing.T) {
 func TestTracker_FetchIssue_NegativeID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.FetchIssue(context.Background(), "-5")
 	if err == nil {
@@ -1271,7 +1307,7 @@ func TestTracker_FetchIssue_NegativeID(t *testing.T) {
 func TestTracker_UpdateIssue_ZeroID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.UpdateIssue(context.Background(), "0", &types.Issue{Title: "x"})
 	if err == nil {
@@ -1285,7 +1321,7 @@ func TestTracker_UpdateIssue_ZeroID(t *testing.T) {
 func TestTracker_UpdateIssue_NegativeID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.UpdateIssue(context.Background(), "-1", &types.Issue{Title: "x"})
 	if err == nil {

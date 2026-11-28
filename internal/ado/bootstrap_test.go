@@ -11,7 +11,7 @@ import (
 func strPtr(s string) *string { return &s }
 
 func TestFindMatch_ExternalRef(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, false)
 
 	adoItem := &tracker.TrackerIssue{
@@ -37,7 +37,7 @@ func TestFindMatch_ExternalRef(t *testing.T) {
 }
 
 func TestFindMatch_SourceSystem(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, false)
 
 	adoItem := &tracker.TrackerIssue{
@@ -63,7 +63,7 @@ func TestFindMatch_SourceSystem(t *testing.T) {
 }
 
 func TestFindMatch_SourceSystemURL(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, false)
 
 	adoItem := &tracker.TrackerIssue{
@@ -88,7 +88,7 @@ func TestFindMatch_SourceSystemURL(t *testing.T) {
 }
 
 func TestFindMatch_HeuristicExactMatch(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, true)
 
 	now := time.Now()
@@ -119,7 +119,7 @@ func TestFindMatch_HeuristicExactMatch(t *testing.T) {
 }
 
 func TestFindMatch_HeuristicDisabled(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, false) // heuristic disabled
 
 	now := time.Now()
@@ -140,7 +140,7 @@ func TestFindMatch_HeuristicDisabled(t *testing.T) {
 }
 
 func TestFindMatch_HeuristicTitleMismatch(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, true)
 
 	now := time.Now()
@@ -161,7 +161,7 @@ func TestFindMatch_HeuristicTitleMismatch(t *testing.T) {
 }
 
 func TestFindMatch_HeuristicTypeMismatch(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, true)
 
 	now := time.Now()
@@ -182,7 +182,7 @@ func TestFindMatch_HeuristicTypeMismatch(t *testing.T) {
 }
 
 func TestFindMatch_HeuristicTimeOutsideWindow(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, true)
 
 	now := time.Now()
@@ -203,7 +203,7 @@ func TestFindMatch_HeuristicTimeOutsideWindow(t *testing.T) {
 }
 
 func TestFindMatch_HeuristicMultipleCandidates(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, true)
 
 	now := time.Now()
@@ -228,7 +228,7 @@ func TestFindMatch_HeuristicMultipleCandidates(t *testing.T) {
 }
 
 func TestFindMatch_NoMatch(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, true)
 
 	adoItem := &tracker.TrackerIssue{
@@ -249,7 +249,7 @@ func TestFindMatch_NoMatch(t *testing.T) {
 }
 
 func TestFindMatch_PriorityOrder(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, true)
 
 	now := time.Now()
@@ -281,7 +281,7 @@ func TestFindMatch_PriorityOrder(t *testing.T) {
 }
 
 func TestFindMatch_EmptyLocalIssues(t *testing.T) {
-	mapper := NewFieldMapper(nil, nil)
+	mapper := NewFieldMapper(nil, nil, nil)
 	m := NewBootstrapMatcher(mapper, true)
 
 	adoItem := &tracker.TrackerIssue{
