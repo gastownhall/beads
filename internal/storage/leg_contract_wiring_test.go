@@ -104,6 +104,7 @@ func init() {
 		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
 		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
 		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+		"RunImporterRecordsOneHistoryEntry":               importerOneAccessorWaiverReason,
 		"RunBootstrapperRecordsExactlyOneHistoryEntry":    bootstrapSplitWaiverReason,
 	})
 	registerContractLegWaivers("embeddeddolt", map[string]string{
@@ -111,6 +112,7 @@ func init() {
 		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
 		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
 		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+		"RunImporterRecordsOneHistoryEntry":               importerOneAccessorWaiverReason,
 		"RunBootstrapperRecordsExactlyOneHistoryEntry":    bootstrapSplitWaiverReason,
 	})
 	registerContractLegWaivers("uow", map[string]string{
@@ -151,6 +153,7 @@ func init() {
 		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
 		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
 		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+		"RunImporterRecordsOneHistoryEntry":               importerOneAccessorWaiverReason,
 
 		"RunACarriedAddressKeepsResolvingAcrossLaterBumps":             retentionEpochNoRoleWaiverReason,
 		"RunADestructiveOperationEnumeratesAffectedAddressesFirst":     retentionEpochNoRoleWaiverReason,
