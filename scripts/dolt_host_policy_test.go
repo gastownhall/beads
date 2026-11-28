@@ -66,7 +66,8 @@ var isLoopbackFiles = map[string]string{
 
 // hostListFiles may list loopback literals: they are not Dolt hosts.
 var hostListFiles = map[string]string{
-	"internal/ado/client.go": "Azure DevOps API URL plaintext check",
+	"internal/ado/client.go":   "Azure DevOps API URL plaintext check",
+	"internal/gitea/client.go": "Gitea/Forgejo API URL plaintext check",
 }
 
 // isLoopbackHostLiteral reports whether e is a string literal naming a

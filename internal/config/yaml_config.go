@@ -159,6 +159,8 @@ var YamlOnlyKeys = map[string]bool{
 	"linear.oauth_client_secret": true,
 	"jira.api_token":             true,
 	"gitlab.token":               true,
+	"gitea.token":                true,
+	"gitea.tls_ca":               true, // Machine-local TLS CA path; must never replicate via Dolt
 	"ado.pat":                    true,
 	"notion.token":               true,
 }
@@ -297,6 +299,7 @@ var secretKeyEnvVarHints = map[string]string{ //nolint:gosec // Values are envir
 	// can export MINIMAX_API_KEY instead (same resolution chain).
 	"ai.api_key":     "ANTHROPIC_API_KEY",
 	"github.token":   "GITHUB_TOKEN",
+	"gitea.token":    "GITEA_TOKEN",
 	"linear.api_key": "LINEAR_API_KEY",
 	"notion.token":   "NOTION_TOKEN",
 }
@@ -413,6 +416,7 @@ var userGlobalExactKeys = map[string]bool{
 	"mail.delegate":        true,
 	"dolt.remotesapi-port": true,
 	"node_id":              true,
+	"gitea.tls_ca":         true,
 }
 
 func IsUserGlobalKey(key string) bool {

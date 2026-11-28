@@ -37,6 +37,7 @@ var (
 		"ai":          {"ai.base_url", "BD_AI_BASE_URL", "https://api.anthropic.com:443"},
 		"github":      {"github.url", "GITHUB_API_URL", "https://api.github.com:443"},
 		"gitlab":      {"gitlab.url", "GITLAB_URL", "https://gitlab.com:443"},
+		"gitea":       {"gitea.url", "GITEA_URL", ""},
 		"ado":         {"ado.url", "AZURE_DEVOPS_URL", "https://dev.azure.com:443"},
 		"jira":        {"jira.url", "JIRA_URL", ""},
 		"linear":      {"linear.api_endpoint", "LINEAR_API_ENDPOINT", "https://api.linear.app:443/graphql"},

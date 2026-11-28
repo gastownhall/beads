@@ -313,7 +313,8 @@
           "integrations/mcp-server",
           "integrations/github-copilot",
           "integrations/copilot-cli",
-          "integrations/azure-devops"
+          "integrations/azure-devops",
+          "integrations/gitea"
         ]
       },
       {

@@ -415,3 +415,38 @@ func TestWorkspaceKeyPrefersDiscoveredWorkspaceAndIgnoresDotenvBeadsDir(t *testi
 		t.Fatalf("WorkspaceKey = %q, want the discovered workspace %q", got, want)
 	}
 }
+
+func TestCheckGiteaEmptyAndSharedFirstUse(t *testing.T) {
+	isolatePins(t)
+	key := filepath.Join(t.TempDir(), ".beads")
+
+	// Empty endpoint is a no-op because Gitea/Forgejo has no single vendor default origin.
+	if err := Check(key, "gitea", "", false); err != nil {
+		t.Fatalf("empty gitea endpoint: %v", err)
+	}
+
+	rawEndpoint := "https://forgejo.example/api/v1"
+	err := Check(key, "gitea", rawEndpoint, false)
+	var firstUse *FirstUseError
+	if !errors.As(err, &firstUse) {
+		t.Fatalf("shared gitea first use = %v, want FirstUseError", err)
+	}
+	if firstUse.Key != "gitea.url" || firstUse.Hint != "GITEA_URL" {
+		t.Fatalf("FirstUseError = %+v, want Key=gitea.url Hint=GITEA_URL", firstUse)
+	}
+
+	t.Setenv("GITEA_URL", "https://forgejo.example/api/v1/")
+	if !PrivateMatch("gitea.url", "GITEA_URL", rawEndpoint) {
+		t.Fatalf("PrivateMatch did not match %q against trailing-slash GITEA_URL", rawEndpoint)
+	}
+	if err := Check(key, "gitea", rawEndpoint, true); err != nil {
+		t.Fatalf("private gitea confirmation: %v", err)
+	}
+	stored, err := readPins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stored.Workspaces[key]["gitea"], "https://forgejo.example:443/api/v1"; got != want {
+		t.Fatalf("gitea pin = %q, want %q", got, want)
+	}
+}

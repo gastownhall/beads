@@ -170,6 +170,7 @@ func TestYamlOnlySecretKeysAreTheWholeClass(t *testing.T) {
 		"notion.token",
 		"github.token",
 		"gitlab.token",
+		"gitea.token",
 		"jira.api_token",
 		"linear.api_key",
 		"linear.oauth_client_secret",

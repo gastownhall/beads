@@ -55,11 +55,14 @@ func TestIsYamlOnlyKey(t *testing.T) {
 
 		// Secret keys (stored in yaml to avoid leaking via Dolt push)
 		{"github.token", true},
+		{"gitea.token", true},
+		{"gitea.tls_ca", true},
 		{"linear.api_key", true},
 		{"notion.token", true}, // GH#6676
 
 		// Non-yaml keys (should return false)
 		{"jira.url", false},
+		{"gitea.url", false},
 		{"jira.project", false},
 		{"github.org", false},
 		{"custom.setting", false},
@@ -80,6 +83,12 @@ func TestIsYamlOnlyKey(t *testing.T) {
 func TestMailDelegateUsesUserConfig(t *testing.T) {
 	if !IsYamlOnlyKey("mail.delegate") || !IsUserGlobalKey("mail.delegate") {
 		t.Fatal("mail.delegate must be routed to user YAML, not the database or project YAML")
+	}
+}
+
+func TestGiteaTLSCAUsesUserConfig(t *testing.T) {
+	if !IsYamlOnlyKey("gitea.tls_ca") || !IsUserGlobalKey("gitea.tls_ca") {
+		t.Fatal("gitea.tls_ca must be routed to user-global YAML, not the database or project YAML")
 	}
 }
 
@@ -1178,6 +1187,7 @@ func TestSecretKeyEnvVarHint(t *testing.T) {
 	}{
 		{"linear.api_key", "LINEAR_API_KEY"},
 		{"github.token", "GITHUB_TOKEN"},
+		{"gitea.token", "GITEA_TOKEN"},
 		{"notion.token", "NOTION_TOKEN"},
 		{"ai.api_key", "ANTHROPIC_API_KEY"},
 		{"custom.secret-token", "BD_CUSTOM_SECRET_TOKEN"},

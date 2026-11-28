@@ -124,6 +124,7 @@ Additional Commands:
   cook              Compile a formula into a proto (ephemeral by default)
   defer             Defer one or more issues for later
   formula           Manage workflow formulas
+  gitea             Gitea/Forgejo integration commands
   github            GitHub integration commands
   gitlab            GitLab integration commands
   help              Help about any command

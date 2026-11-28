@@ -104,7 +104,7 @@ The full namespaces routed to YAML are:
 
 Plus these individual keys:
 
-`json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `hooks.manage`, `gitignore.manage`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `prime.disabled`, `memories.budget-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
+`json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `hooks.manage`, `gitignore.manage`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `prime.disabled`, `memories.budget-chars`, `gitea.tls_ca` (user-global), and the secret keys `github.token`, `gitlab.token`, `gitea.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
 
 `no-db` is obsolete: the JSONL-only mode it selected is gone, and issues always live in the Dolt database. `bd config set no-db` is refused; an old `no-db: true` in any `config.yaml` or `config.local.yaml` (or `BD_NO_DB=true`) is ignored with a warning on stderr. `bd config unset no-db` removes it from the workspace's own `config.yaml`; delete an entry in a user-level `config.yaml` or in `config.local.yaml` (see [Configuration Locations](#configuration-locations)) by hand.
 
@@ -409,6 +409,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `linear.*` | Linear integration (team_id(s), priority_map, state_map, label_type_map, relation_map) |
 | `github.*` | GitHub integration (org, repo, label_map) |
 | `gitlab.*` | GitLab integration |
+| `gitea.*` | Gitea / Forgejo integration (url, repo, state/label/CA settings) |
 | `ado.*` | Azure DevOps integration (org, project(s), state_map, type_map) |
 | `notion.*` | Notion integration |
 | `custom.*` | User-defined / custom integrations |
@@ -556,7 +557,7 @@ federation:
 
 ## Integration Configuration
 
-Tracker settings are project-level config under the tracker's namespace; secrets (`jira.api_token`, `linear.api_key`, `github.token`, `gitlab.token`, `ado.pat`, `notion.token`) are YAML-routed and better supplied as environment variables. Every tracker records `<tracker>.last_sync` automatically after a sync, enabling incremental syncs.
+Tracker settings are project-level config under the tracker's namespace; secrets (`jira.api_token`, `linear.api_key`, `github.token`, `gitlab.token`, `gitea.token`, `ado.pat`, `notion.token`) are YAML-routed and better supplied as environment variables. Every tracker records `<tracker>.last_sync` automatically after a sync, enabling incremental syncs.
 
 ### Jira
 
@@ -616,6 +617,10 @@ See [bd github](/cli-reference/github).
 
 Connection keys (`ado.pat`, `ado.org`, `ado.project`, `ado.projects`, `ado.url`) each have an `AZURE_DEVOPS_*` environment variable equivalent; config keys take priority over env vars. When `ado.projects` is set, `bd ado sync` fetches work items from all listed projects in a single query. State maps default to the Agile process template (override with `ado.state_map.*` / `ado.type_map.*` for Scrum or CMMI), and priority mapping (ADO 1–4 ↔ beads 0–4, with backlog collapsing to low) is automatic and not configurable. Full setup, mapping tables, and sync commands: [Azure DevOps integration](/integrations/azure-devops) and [bd ado](/cli-reference/ado).
 
+### Gitea / Forgejo
+
+Connection keys (`gitea.url`, `gitea.token`, `gitea.repo`, `gitea.owner`, `gitea.project`, `gitea.tls_ca`) fall back to `GITEA_URL`, `GITEA_TOKEN`, `GITEA_REPO`, `GITEA_OWNER`, `GITEA_PROJECT`, and `GITEA_TLS_CA` environment variables; `gitea.token` is YAML-only and never written to the database, and `gitea.tls_ca` is a private per-user setting read only from `~/.config/bd/config.yaml` or a private `GITEA_TLS_CA` shell environment variable. Supports Gitea, Forgejo, Codeberg, and self-hosted instances. Full setup, mapping tables, and sync commands: [Gitea & Forgejo integration](/integrations/gitea).
+
 ## Environment Variables
 
 The Viper env prefix is `BD_`. Config keys map to env vars by upper-casing and replacing `.` and `-` with `_` (e.g. `dolt.auto-commit` → `BD_DOLT_AUTO_COMMIT`, `validation.on-create` → `BD_VALIDATION_ON_CREATE`).
@@ -651,7 +656,7 @@ Selected commonly-used variables:
 | `BEADS_DOLT_SERVER_DATABASE` | Dolt database name, overriding `metadata.json`. In an embedded workspace without `metadata.json` it must name a database the workspace already holds (see [Missing `metadata.json`](#missing-metadatajson)) |
 | `BEADS_DOLT_BIN` | Pin the exact external `dolt` CLI binary managed proxied-server mode spawns, overriding PATH lookup (highest precedence; an explicit path that fails validation is an error, not a silent fallback to PATH). On Windows the executable extension may be omitted — `C:\tools\dolt` finds `C:\tools\dolt.exe` via PATHEXT, though a file at the exact spelled path wins if both exist. The binary must be dolt 2.6.0 or newer; an older one is refused |
 
-Integration secrets follow tracker-specific conventions: `LINEAR_API_KEY`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `JIRA_API_TOKEN`, `AZURE_DEVOPS_PAT`, `ANTHROPIC_API_KEY`. These are preferred over storing the value in `config.yaml` for git-tracked projects.
+Integration secrets follow tracker-specific conventions: `LINEAR_API_KEY`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `GITEA_TOKEN`, `JIRA_API_TOKEN`, `AZURE_DEVOPS_PAT`, `ANTHROPIC_API_KEY`. These are preferred over storing the value in `config.yaml` for git-tracked projects.
 
 `bd config show` will display the source of every effective key, making overrides explicit.
 
