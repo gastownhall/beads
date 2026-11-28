@@ -14,6 +14,9 @@ func TestIsRecognizedConfigKey(t *testing.T) {
 		"status.custom", "types.custom", "types.infra", "ai.model",
 		"backup.enabled", "import.path", "dolt.local-only", "agent.profile",
 		"claim.pools",
+		// Routed to config.yaml and defaulted, so `bd config set` must not
+		// warn about them (GH#6184).
+		"audit.enabled", "list.limit",
 		// Tracker namespaces are derived from the registry (GH#4427); cover
 		// ado (the original bug) plus the others removed from the static list.
 		"ado.org", "ado.project", "github.token", "linear.api-key",
