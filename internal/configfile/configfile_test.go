@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1420,6 +1421,121 @@ func TestPortImpliesServerMode(t *testing.T) {
 			if got := tt.cfg.PortImpliesServerMode(); got != tt.want {
 				t.Errorf("PortImpliesServerMode() = %v, want %v (dolt_mode=%q SERVER_PORT=%q PORT=%q)",
 					got, tt.want, tt.cfg.DoltMode, tt.serverPort, tt.legacyPort)
+			}
+		})
+	}
+}
+
+// dirEntryNames lists the names directly under dir, for asserting that a load
+// added or removed no file (metadata.json, metadata.json.tmp-*, config.json).
+func dirEntryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// TestLoadMigratesOnlyBeadsLegacyConfig pins GH#7034: Load migrates a legacy
+// config.json into metadata.json only when the file sets a beads field. A
+// config.json that sets none (another program's settings, found when
+// BEADS_DIR names a project root) is read in place: Load returns the same
+// zero *Config LoadForDiscovery returns and writes or removes nothing.
+func TestLoadMigratesOnlyBeadsLegacyConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		file    string // file written into an otherwise empty directory
+		body    string
+		migrate bool    // Load turns config.json into metadata.json
+		want    *Config // what both loaders return
+		wantErr string  // Load fails with this text and writes nothing
+	}{
+		{name: "beads-written legacy config", file: LegacyConfigFileName, body: `{"database":"beads.db","version":"0.20.1","jsonl_export":"issues.jsonl"}`, migrate: true, want: &Config{Database: "beads.db"}},
+		{name: "backend only", file: LegacyConfigFileName, body: `{"backend":"dolt"}`, migrate: true, want: &Config{Backend: "dolt"}},
+		{name: "project id only", file: LegacyConfigFileName, body: `{"project_id":"p-1"}`, migrate: true, want: &Config{ProjectID: "p-1"}},
+		{name: "another program's settings", file: LegacyConfigFileName, body: `{"port": 8080, "debug": true}`, want: &Config{}},
+		{name: "empty object", file: LegacyConfigFileName, body: `{}`, want: &Config{}},
+		{name: "null", file: LegacyConfigFileName, body: `null`, want: &Config{}},
+		{name: "empty database", file: LegacyConfigFileName, body: `{"database": ""}`, want: &Config{}},
+		{name: "wrong-typed beads key", file: LegacyConfigFileName, body: `{"database": 123}`, wantErr: "parsing legacy config"},
+		{name: "empty metadata.json", file: ConfigFileName, body: `{}`, want: &Config{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, tc.file)
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := dirEntryNames(t, dir)
+
+			if tc.wantErr != "" {
+				cfg, err := Load(dir)
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Load = %+v, %v, want error containing %q", cfg, err, tc.wantErr)
+				}
+				if got := dirEntryNames(t, dir); !slices.Equal(got, before) {
+					t.Fatalf("failed Load changed the directory: before %v, after %v", before, got)
+				}
+				return
+			}
+
+			if tc.migrate {
+				cfg, err := Load(dir)
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				if cfg == nil || *cfg != *tc.want {
+					t.Fatalf("Load = %+v, want %+v", cfg, tc.want)
+				}
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Errorf("Load left the legacy config.json in place: %v", err)
+				}
+				var saved Config
+				data, err := os.ReadFile(ConfigPath(dir))
+				if err != nil {
+					t.Fatalf("Load wrote no metadata.json: %v", err)
+				}
+				if err := json.Unmarshal(data, &saved); err != nil {
+					t.Fatal(err)
+				}
+				if saved != *tc.want {
+					t.Errorf("metadata.json holds %+v, want %+v", saved, tc.want)
+				}
+				disc, err := LoadForDiscovery(dir)
+				if err != nil || disc == nil || *disc != *tc.want {
+					t.Errorf("LoadForDiscovery after migration = %+v, %v, want %+v", disc, err, tc.want)
+				}
+				return
+			}
+
+			disc, err := LoadForDiscovery(dir)
+			if err != nil || disc == nil || *disc != *tc.want {
+				t.Fatalf("LoadForDiscovery = %+v, %v, want %+v", disc, err, tc.want)
+			}
+			for call := 1; call <= 2; call++ {
+				cfg, err := Load(dir)
+				if err != nil {
+					t.Fatalf("Load call %d: %v", call, err)
+				}
+				if cfg == nil || *cfg != *tc.want || *cfg != *disc {
+					t.Fatalf("Load call %d = %+v, want %+v (LoadForDiscovery's %+v)", call, cfg, tc.want, disc)
+				}
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("Load call %d removed %s: %v", call, tc.file, err)
+				}
+				if string(got) != tc.body {
+					t.Fatalf("Load call %d rewrote %s: got %q, want %q", call, tc.file, got, tc.body)
+				}
+				if after := dirEntryNames(t, dir); !slices.Equal(after, before) {
+					t.Fatalf("Load call %d changed the directory: before %v, after %v", call, before, after)
+				}
 			}
 		})
 	}

@@ -80,13 +80,15 @@ func ConfigPath(beadsDir string) string {
 }
 
 // LegacyConfigFileName is the pre-metadata.json name of a workspace's
-// metadata file. Load migrates it into metadata.json; LoadForDiscovery reads
-// it in place.
+// metadata file. Load migrates it into metadata.json when it sets a beads
+// field and reads it in place otherwise; LoadForDiscovery always reads it in
+// place.
 const LegacyConfigFileName = "config.json"
 
 // MetadataFilePath returns the path of the file beadsDir's metadata is read
 // from: the legacy config.json when metadata.json is absent and config.json
-// exists (the file LoadForDiscovery reads, and Load would migrate), and
+// exists (the file LoadForDiscovery reads, and Load migrates when it sets a
+// beads field and reads in place otherwise), and
 // ConfigPath otherwise. Messages that name the file holding a setting use it,
 // so a refusal made before any migration names the file the user must edit.
 // It only stats; an empty beadsDir returns ConfigPath("").
@@ -105,6 +107,14 @@ func MetadataFilePath(beadsDir string) string {
 	return path
 }
 
+// Load reads beadsDir's metadata.json. When that file is absent it falls back
+// to the legacy config.json: a config.json that sets at least one beads field
+// is migrated (saved as metadata.json, then removed); one that sets none is
+// read in place and returned as a zero *Config, as LoadForDiscovery returns
+// it, without writing or removing anything. Such a file carries no beads
+// settings and may belong to another program (GH#7034: BEADS_DIR naming a
+// project root that holds its own config.json). Load returns (nil, nil) when
+// neither file exists.
 func Load(beadsDir string) (*Config, error) {
 	configPath := ConfigPath(beadsDir)
 
@@ -124,6 +134,14 @@ func Load(beadsDir string) (*Config, error) {
 		var cfg Config
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parsing legacy config: %w", err)
+		}
+
+		// A config.json that sets no beads field carries no beads settings and
+		// may belong to another program (GH#7034: BEADS_DIR naming a project
+		// root). Read it in place, as LoadForDiscovery does, instead of
+		// migrating it.
+		if cfg == (Config{}) {
+			return &cfg, nil
 		}
 
 		// Save to new location
