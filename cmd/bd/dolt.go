@@ -2726,6 +2726,15 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 		return HandleError("saving config: %v", err)
 	}
 
+	// Update config.yaml before JSON output so config_yaml_updated reflects
+	// whether the write actually happened (GH#8593).
+	yamlUpdated := false
+	var yamlErr error
+	if updateConfig && yamlKey != "" {
+		yamlErr = config.SetYamlConfig(yamlKey, value)
+		yamlUpdated = yamlErr == nil
+	}
+
 	if jsonOutput {
 		result := map[string]interface{}{
 			"key":      key,
@@ -2733,7 +2742,7 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 			"location": "metadata.json",
 		}
 		if updateConfig {
-			result["config_yaml_updated"] = true
+			result["config_yaml_updated"] = yamlUpdated
 		}
 		if err := outputJSON(result); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -2743,10 +2752,9 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 
 	fmt.Printf("Set %s = %s (in metadata.json)\n", key, value)
 
-	// Also update config.yaml if requested
 	if updateConfig && yamlKey != "" {
-		if err := config.SetYamlConfig(yamlKey, value); err != nil {
-			fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to update config.yaml: %v", err)))
+		if yamlErr != nil {
+			fmt.Printf("%s\n", ui.RenderWarn(fmt.Sprintf("Warning: failed to update config.yaml: %v", yamlErr)))
 		} else {
 			fmt.Printf("Set %s = %s (in config.yaml)\n", yamlKey, value)
 		}
