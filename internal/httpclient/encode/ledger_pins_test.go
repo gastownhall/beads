@@ -49,6 +49,7 @@ type crossPackagePin struct {
 // entry must be cited by at least one row, and its File must be in
 // encode_test's data.
 var crossPackagePins = []crossPackagePin{
+	{Test: "TestLeaseTTLIsRefusedOnTheRemoteBackendRoute", File: "cmd/bd/lease_ttl_flag_test.go"},
 	{Test: "TestOnlyOneShotCommandsMemoizeRemoteReads", File: "cmd/bd/serve_test.go"},
 	{Test: "TestDeleteCascadeRefusesAServerWithoutContainmentCascade", File: "internal/httpclient/bulk_roles_test.go"},
 	{Test: "TestSweepRefusesTheS4MembersWhenTheServerLacksTheCapability", File: "internal/httpclient/bulk_roles_test.go"},

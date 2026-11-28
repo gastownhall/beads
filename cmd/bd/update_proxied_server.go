@@ -137,6 +137,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		expectedStatus:   expectedStatus,
 		expectedVersion:  in.ifRevision,
 		provenance:       fmt.Sprintf("bd: update %s", id),
+		leaseTTL:         in.leaseTTL,
 	})
 	if err != nil {
 		// Cancellation is not a verdict on this issue — SIGINT cancels bd's
@@ -170,6 +171,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	// them for the same reason.
 	updated.Dependencies = nil
 	if in.claim {
+		warnLeaseTTLNotApplied(updated.ID, before, currentActor(), in.leaseTTL)
 		// A CLAIM answers an already-published surface, and that surface is the
 		// bare row: issueops.ClaimResult omits labels, dependency records and
 		// comments, but routing this path through Lifecycle hydrates labels.

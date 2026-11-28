@@ -982,6 +982,13 @@ commands:
       - id: heartbeat
         class: works
         args: [heartbeat, e2e-theartbeat, '--json']
+      - id: heartbeat-ttl
+        class: refuses
+        ledger: [F-heartbeat-ttl]
+        note: 'the lease length rides a context value that does not cross the wire, so the flag is refused before the request; without --ttl the same heartbeat is served (the case above)'
+        args: [heartbeat, e2e-theartbeat, '--ttl', 2h, '--json']
+        exit: 1
+        words: '--ttl is not supported on the remote bd serve route: its heartbeat request carries no lease length'
   - command: bd help
     class: local-only
     reason: prints help; never opens the issue store
@@ -1626,6 +1633,14 @@ commands:
         ledger: [F-ready-mol]
         ledger_drift: F-ready-mol says the flag refuses; it answers like an embedded workspace
         args: [ready, '--mol', e2e-fdmol, '--json']
+      - id: ready-claim-ttl
+        class: refuses
+        ledger: [F-ready-ttl]
+        note: 'refused before the claim-next request, so nothing is claimed; the embedded oracle would claim whichever row is first in its ready set, a row other cases'' oracle runs rely on'
+        args: [ready, '--claim', '--ttl', 2h, '--json']
+        exit: 1
+        words: '--ttl is not supported on the remote bd serve route: its claim-next request carries no lease length'
+        skip_embedded: true
   - command: bd recall
     cases:
       - id: recall
@@ -1962,6 +1977,13 @@ commands:
         note: 'D7 changes the request (claimIssue for PATCH updateIssue), not the answer; G2(b)''s corpus transcripts pin requests'
         args: [update, e2e-tclaim, '--claim', '--json']
         verify: [[show, e2e-tclaim, '--json']]
+      - id: update-claim-ttl
+        class: refuses
+        ledger: [F-update-ttl]
+        note: 'refused before the claim request, so the row stays unclaimed for update-claim above; the oracle claims it with a 2h lease'
+        args: [update, e2e-tclaim, '--claim', '--ttl', 2h, '--json']
+        exit: 1
+        words: '--ttl is not supported on the remote bd serve route: its claim request carries no lease length'
   - command: bd upgrade ack
     class: local-only
     reason: 'opens the store (the context handshake), then reads or writes the bd version this workspace last acknowledged, kept in the local metadata.json; no issue-store state'

@@ -62,6 +62,14 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if err := briefModeConflictFromFlags(cmd); err != nil {
 			return err
 		}
+		// --ttl too is decided here, above the dispatch and above the
+		// --gated/--mol/--explain branches, so no route or mode accepts it
+		// without a claim to apply it to. gatherReadyInput reads the
+		// validated value back for the claim on either route.
+		leaseTTL, err := leaseTTLFromFlags(cmd, "--claim", claimReady)
+		if err != nil {
+			return err
+		}
 
 		if usesProxiedServer() {
 			// The proxied ready role cannot enforce a row cap, including on
@@ -151,11 +159,14 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			// that feeds --json all share one transaction. The listing below
 			// is not on a role and still builds the filter, for the reasons
 			// issueops.Reader's doc comment gives.
+			if err := leaseTTLRemoteRefusal(activeStore, leaseTTL, "claim-next"); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			claimer, err := activeStore.ReadyClaimer()
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
-			res, err := claimer.ClaimNext(ctx, claimNextRequest(in))
+			res, err := claimer.ClaimNext(withLeaseTTL(ctx, in.leaseTTL), claimNextRequest(in))
 			if err != nil {
 				// No handleMaxRowsError here, unlike the listing below: the
 				// request carries no cap, so ErrTooManyRows cannot come back.
@@ -180,6 +191,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			// claimed post-state, not a transition (GH#6146).
 			audit.LogClaimed(claimed.ID, currentActor(), string(claimed.Status), claimed.Assignee)
 			SetLastTouchedID(claimed.ID)
+			warnLeaseTTLNotAppliedToReadyClaim(claimed.Issue, in.leaseTTL)
 			if jsonOutput {
 				return outputJSON([]*types.IssueWithCounts{claimed})
 			}
@@ -864,6 +876,7 @@ func init() {
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")
 	readyCmd.Flags().Bool("claim", false, "Atomically claim the first ready issue matching the filters")
+	addLeaseTTLFlag(readyCmd, claimLeaseTTLUsage)
 	// Projection toggle, the same one `bd list --brief` sets. Refused with
 	// --claim, which returns one whole row by contract; see gatherReadyInput.
 	readyCmd.Flags().Bool("brief", false,
