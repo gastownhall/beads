@@ -209,11 +209,13 @@ func RunReleaserRefusesAForeignClaimUntilForced(t *testing.T, ctx context.Contex
 // caller need not be the holder. An implementation that ran the fence anyway
 // would answer ErrNotOwner here and pass every other case in this file.
 //
-// THE LAST TWO LIMBS PIN WHAT "MATCH" MEANS, which nothing at this tier pinned
-// before (ga-2ltro.14) — and it is not string equality. The comparison is
-// SEPARATOR-INSENSITIVE AND NOTHING ELSE (canonicalActor, ga-5ksp5): a run of
-// ".", "_" or "-" matches any other such run, so an expectation spelled under
-// one layer's separator convention releases a claim stored under another's.
+// THE LAST THREE LIMBS PIN WHAT "MATCH" MEANS, which nothing at this tier
+// pinned before (ga-2ltro.14) — and it is not string equality. The comparison
+// is SEPARATOR- AND CASE-INSENSITIVE AND NOTHING ELSE (canonicalActor,
+// ga-5ksp5, GH#8628): a run of ".", "_" or "-" matches any other such run, so
+// an expectation spelled under one layer's separator convention releases a
+// claim stored under another's, and letter case is not part of an identity, so
+// "RELEASER-HOLDER" releases a claim held by "releaser-holder".
 // The one exception is an exact "--" run: it is gascity's encoding of a
 // rig-qualified agent's "/" and decodes to "/", so "a--b" matches "a/b" and
 // not "a__b" (ga-2vy9p2). This tier does not pin that limb — the respelling
@@ -272,8 +274,23 @@ func RunReleaserReleasesOnlyTheExpectedHolder(t *testing.T, ctx context.Context,
 	}
 	releaserAssertRow(t, ctx, fixture, "issues", separatorSpelled, "", types.StatusOpen)
 
-	// The other half of the same predicate: separators are all that is
-	// forgiven. A padded expectation is a different string and refuses, and the
+	// releaserHolder in another letter case: case is not part of an
+	// identity (GH#8628), so the release lands.
+	upper := strings.ToUpper(releaserHolder)
+	if upper == releaserHolder {
+		t.Fatalf("releaserHolder %q carries no letter to recase — this limb would assert nothing", releaserHolder)
+	}
+	caseSpelled := releaserSeedClaimed(t, ctx, fixture, "expect", "recased", false)
+	if _, err := fixture.Releaser.Release(ctx, publicops.ReleaseRequest{
+		Actor: "releaser-supervisor", IssueID: caseSpelled, ExpectedAssignee: &upper,
+	}); err != nil {
+		t.Fatalf("Release() expecting %q against a claim held by %q error = %v, want the release to land — the comparison is case-insensitive",
+			upper, releaserHolder, err)
+	}
+	releaserAssertRow(t, ctx, fixture, "issues", caseSpelled, "", types.StatusOpen)
+
+	// The other half of the same predicate: separators and letter case are
+	// all that is forgiven. A padded expectation is a different string and refuses, and the
 	// claim it named is still there afterwards.
 	padded := " " + releaserHolder
 	untouched := releaserSeedClaimed(t, ctx, fixture, "expect", "padded", false)

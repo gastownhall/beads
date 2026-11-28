@@ -3,6 +3,7 @@ package validation
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -162,10 +163,27 @@ func TestCanonicalActor(t *testing.T) {
 		{name: "exact double-hyphen separator decodes to the rig-qualified slash (ga-2vy9p2)", in: "gastown--mayor", want: "gastown/mayor"},
 		{name: "raw slash passes through unchanged", in: "gastown/mayor", want: "gastown/mayor"},
 		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor", want: "gastown_mayor"},
+		// GH#8628: letter case is not part of an identity. The fold is
+		// strings.ToLower on valid UTF-8 (what Dolt's LOWER() runs on
+		// utf8mb4), so the gates agree with the --assignee listings.
+		{name: "ASCII upper case folds to lower (GH#8628)", in: "Hierophant", want: "hierophant"},
+		{name: "case folds alongside the separator collapse", in: "Gastown.Mayor", want: "gastown_mayor"},
+		{name: "case folds alongside the double-hyphen slash decode", in: "Gastown--Mayor", want: "gastown/mayor"},
+		{name: "Kelvin sign lowers to ASCII k, as strings.ToLower does", in: "\u212A", want: "k"},
+		{name: "dotted capital I lowers to ASCII i, as strings.ToLower does", in: "\u0130", want: "i"},
+		{name: "long s has no lower-case mapping and stays itself", in: "\u017F", want: "\u017F"},
+		{name: "non-ASCII upper case folds", in: "JOS\u00C9", want: "jos\u00E9"},
+		{name: "an invalid byte is copied unchanged, not turned into U+FFFD", in: "\xff", want: "\xff"},
+		{name: "an invalid byte beside letters keeps its byte while the letters fold", in: "A\xfeB", want: "a\xfeb"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// On valid UTF-8 the fold is strings.ToLower: canonicalizing
+			// the lowered input lands on the same value.
+			if utf8.ValidString(tt.in) && CanonicalActor(tt.in) != CanonicalActor(strings.ToLower(tt.in)) {
+				t.Errorf("CanonicalActor(%q) = %q, but CanonicalActor(strings.ToLower(%q)) = %q", tt.in, CanonicalActor(tt.in), tt.in, CanonicalActor(strings.ToLower(tt.in)))
+			}
 			if got := CanonicalActor(tt.in); got != tt.want {
 				t.Errorf("CanonicalActor(%q) = %q, want %q", tt.in, got, tt.want)
 			}
@@ -188,6 +206,20 @@ func TestActorMatches(t *testing.T) {
 		{name: "double-hyphen and double-underscore spellings no longer widen to the same identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown__mayor", want: false},
 		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor", want: true},
 		{name: "raw slash and raw dot stay genuinely distinct identities", assignee: "gastown/mayor", actor: "gastown.mayor", want: false},
+		// GH#8628: case variants are one identity.
+		{name: "case variants of one identity match (GH#8628)", assignee: "hierophant", actor: "Hierophant", want: true},
+		{name: "case plus separator variants match", assignee: "gastown.mayor", actor: "GASTOWN__MAYOR", want: true},
+		{name: "Kelvin sign matches ASCII k", assignee: "k", actor: "\u212A", want: true},
+		{name: "dotted capital I matches ASCII i", assignee: "i", actor: "\u0130", want: true},
+		{name: "accented upper case matches its lower case", assignee: "jos\u00E9", actor: "JOS\u00C9", want: true},
+		{name: "an accented name does not match its unaccented spelling", assignee: "jos\u00E9", actor: "jose", want: false},
+		{name: "a case fold never widens to a different name", assignee: "hierophant", actor: "Hierophant2", want: false},
+		{name: "long s is not s: strings.ToLower keeps them apart", assignee: "s", actor: "\u017F", want: false},
+		{name: "two distinct invalid bytes stay distinct", assignee: "\xff", actor: "\xfe", want: false},
+		{name: "an invalid byte does not match U+FFFD", assignee: "\xff", actor: "\uFFFD", want: false},
+		{name: "case does not erase the double-hyphen vs double-underscore distinction", assignee: "Gastown--Mayor", actor: "gastown__mayor", want: false},
+		{name: "empty assignee never matches a non-empty actor after the fold", assignee: "", actor: "X", want: false},
+		{name: "a padded spelling never matches", assignee: "hierophant", actor: " Hierophant", want: false},
 	}
 
 	for _, tt := range tests {
@@ -271,6 +303,21 @@ func TestAssigneeMatches(t *testing.T) {
 			issue:   &types.Issue{ID: "bd-test", Assignee: "gastown.mayor"},
 			actor:   "gastown_mayor",
 			wantErr: false,
+		},
+		// GH#8628: the reporter's case — an issue assigned "hierophant" is
+		// closed by actor "Hierophant" without --force.
+		{
+			name:    "same identity under another letter case passes (GH#8628)",
+			issue:   &types.Issue{ID: "bd-test", Assignee: "hierophant"},
+			actor:   "Hierophant",
+			wantErr: false,
+		},
+		{
+			name:        "a case fold never widens to a different name",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "hierophant"},
+			actor:       "hierophant2",
+			wantErr:     true,
+			wantErrFrag: "assignee is",
 		},
 		// The control that keeps the guard from becoming a no-op: a genuinely
 		// DIFFERENT agent must still be refused, even though its own name also
@@ -407,6 +454,46 @@ func TestAssigneeNotStolen(t *testing.T) {
 			issue:       inProgress("gastown.mayor"),
 			actor:       "alice",
 			newAssignee: "gastown__mayor",
+			wantErr:     false,
+		},
+		// GH#8628: letter case is not part of an identity.
+		{
+			name:        "holder under another letter case moves its own claim",
+			issue:       inProgress("hierophant"),
+			actor:       "Hierophant",
+			newAssignee: "carol",
+			wantErr:     false,
+		},
+		{
+			name:        "idempotent re-assert of the holder under another letter case passes",
+			issue:       inProgress("hierophant"),
+			actor:       "bob",
+			newAssignee: "Hierophant",
+			wantErr:     false,
+		},
+		{
+			name:        "a stranger moving a case-held claim to a third name is still refused",
+			issue:       inProgress("hierophant"),
+			actor:       "bob",
+			newAssignee: "carol",
+			wantErr:     true,
+		},
+		{
+			name:        "a case variant of a claim.pools alias is not the alias",
+			issue:       inProgress("Fable-Crew"),
+			actor:       "alice",
+			newAssignee: "alice",
+			pools:       pools,
+			wantErr:     true,
+		},
+		// GH#8628: letter case is the same class of drift — the unclaim arm
+		// (an empty newAssignee) must not fence the holder who spells its own
+		// identity differently from the stored assignee.
+		{
+			name:        "actor unassigning its own live claim passes under a case variant",
+			issue:       inProgress("hierophant"),
+			actor:       "Hierophant",
+			newAssignee: "",
 			wantErr:     false,
 		},
 		{

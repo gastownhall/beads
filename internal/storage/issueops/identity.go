@@ -1,6 +1,10 @@
 package issueops
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 // canonicalActor normalizes an identity string so two spellings of the same
 // Gas Town identity compare equal. The same identity arrives at bd in more
@@ -32,10 +36,23 @@ import "strings"
 // "gastown.mayor"; treating them as the same actor was wrong regardless of
 // whether either happens to be held by the same principal today.
 //
+// Letter case is not part of an identity either (GH#8628): "hierophant" and
+// "Hierophant" are one actor, so the scan also lowers every letter. On valid
+// UTF-8 the lowering is exactly strings.ToLower (unicode.ToLower per rune),
+// which is the function Dolt's LOWER() runs on utf8mb4 — the --assignee
+// listings compare LOWER(assignee), so the gates and the listings agree on
+// letter case, and only on letter case: the listings do not fold
+// separators, so a listing is no pre-filter for a gate decision. An invalid
+// byte is copied unchanged rather than decoded to U+FFFD, so two different
+// invalid bytes never merge.
+// The separator fold and the case fold compose: separators are case-neutral
+// ASCII and no rune lowers to '.', '_' or '-'.
+//
 // Byte-scanned rather than rune-scanned so a 2-byte lookahead can detect an
 // exact "--" run: safe because '.', '_', '-' are single-byte ASCII that never
 // appear as a continuation byte of a multi-byte UTF-8 rune, so slicing on
-// them cannot split one.
+// them cannot split one. A byte at or above utf8.RuneSelf starts a rune that
+// is decoded whole for the case fold.
 //
 // Empty stays empty: an actual absence of an actor must never canonicalize
 // to the same value as a non-empty one, or a caller comparing against an
@@ -45,7 +62,8 @@ import "strings"
 // canonicalActor (ga-wzl83): issueops sits below validation in the layering
 // (storage depending on a higher-level validation package would invert it),
 // so the two copies stay independent rather than sharing an import. Keep
-// them in sync if the separator set or normalization rule ever changes
+// them in sync if the separator set, the case fold or any other
+// normalization rule ever changes (identity_parity_test.go pins it)
 // (ga-5ksp5).
 func canonicalActor(s string) string {
 	if s == "" {
@@ -69,15 +87,30 @@ func canonicalActor(s string) string {
 			i = j
 			continue
 		}
-		b.WriteByte(c)
-		i++
+		if c < utf8.RuneSelf {
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+		i += size
 	}
 	return b.String()
 }
 
 // actorMatches reports whether a and b denote the same identity: either
 // they're byte-identical, or they canonicalize to the same string (see
-// canonicalActor). The byte-identical check is not redundant — it avoids
+// canonicalActor) — so two spellings that differ only in separators or in
+// letter case match, and nothing else does. The byte-identical check is not redundant — it avoids
 // paying canonicalization on the overwhelmingly common exact-match path.
 func actorMatches(a, b string) bool {
 	return a == b || canonicalActor(a) == canonicalActor(b)

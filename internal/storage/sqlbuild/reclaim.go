@@ -60,8 +60,16 @@ func BuildReclaimScopeClauses(filter types.ReclaimFilter, tables FilterTables, a
 	case degenerate(filter.Assignees, assignees):
 		clauses = append(clauses, "1=0")
 	case len(assignees) > 0:
-		ph, aArgs := InPlaceholders(assignees)
-		clauses = append(clauses, fmt.Sprintf("%s IN (%s)", col("assignee"), ph))
+		// Letter case is not part of an identity (GH#8628): the scope folds
+		// case as every --assignee listing does (AssigneeFilterClause), so
+		// --assignee hierophant also reclaims a stale claim stored as
+		// "Hierophant". Like the listings, it matches separators exactly.
+		folded := make([]string, len(assignees))
+		for i, a := range assignees {
+			folded[i] = AssigneeFilterArg(a)
+		}
+		ph, aArgs := InPlaceholders(folded)
+		clauses = append(clauses, fmt.Sprintf("LOWER(%s) IN (%s)", col("assignee"), ph))
 		args = append(args, aArgs...)
 	}
 

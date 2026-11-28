@@ -235,4 +235,85 @@ func TestCreateIssuesRejectStaleUpserts(t *testing.T) {
 			t.Fatalf("title = %q, want unguarded upsert to overwrite", got)
 		}
 	})
+
+	t.Run("existing_row_upsert_stores_every_column", func(t *testing.T) {
+		// An upsert onto an existing row must store each incoming value in
+		// its own column, on both planes and in both ON DUPLICATE KEY UPDATE
+		// forms. Dolt 2.6.0, bd's embedded engine and its minimum server,
+		// reads each VALUES(col) from the next column over on a table with a
+		// VIRTUAL generated column, and a functional index adds a hidden one
+		// (GH#8628 review: a LOWER(assignee) index). The guarded form then
+		// compares closed_at, NULL on an open row, and silently keeps the
+		// stored row; the plain form writes issue_type into priority and
+		// fails.
+		te := newTestEnv(t, "rsh")
+		ctx := t.Context()
+		minutes := func(n int) *int { return &n }
+		ref := func(s string) *string { return &s }
+		type row struct {
+			title, description, design, acceptance, notes string
+			status, issueType, assignee, externalRef      string
+			priority, estimatedMinutes                    int
+			updatedAt                                     string
+			closed                                        bool
+		}
+		for _, tc := range []struct {
+			name, id, table        string
+			ephemeral, rejectStale bool
+		}{
+			{"issue_stale_guarded", "rsh-1", "issues", false, true},
+			{"issue_plain", "rsh-2", "issues", false, false},
+			{"wisp_stale_guarded", "rsh-3", "wisps", true, true},
+			{"wisp_plain", "rsh-4", "wisps", true, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				write := func(issue *types.Issue, rejectStale bool) {
+					t.Helper()
+					err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{issue}, "tester", storage.BatchCreateOptions{
+						SkipPrefixValidation: true,
+						RejectStaleUpserts:   rejectStale,
+					})
+					if err != nil {
+						t.Fatalf("write %s: %v", issue.ID, err)
+					}
+				}
+				write(&types.Issue{
+					ID: tc.id, Title: "old title", Description: "old description",
+					Design: "old design", AcceptanceCriteria: "old acceptance", Notes: "old notes",
+					Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+					Assignee: "old-assignee", EstimatedMinutes: minutes(10), ExternalRef: ref("old-" + tc.id),
+					Ephemeral: tc.ephemeral, CreatedAt: base, UpdatedAt: base.Add(time.Hour),
+				}, false)
+				write(&types.Issue{
+					ID: tc.id, Title: "new title", Description: "new description",
+					Design: "new design", AcceptanceCriteria: "new acceptance", Notes: "new notes",
+					Status: types.StatusOpen, Priority: 0, IssueType: types.TypeBug,
+					Assignee: "new-assignee", EstimatedMinutes: minutes(20), ExternalRef: ref("new-" + tc.id),
+					Ephemeral: tc.ephemeral, CreatedAt: base, UpdatedAt: base.Add(2 * time.Hour),
+				}, tc.rejectStale)
+
+				var got row
+				var updatedAt time.Time
+				te.queryScalar(t, ctx, `SELECT title, description, design, acceptance_criteria, notes,
+					status, issue_type, COALESCE(assignee, ''), COALESCE(external_ref, ''),
+					priority, COALESCE(estimated_minutes, -1), updated_at, closed_at IS NOT NULL
+					FROM `+tc.table+` WHERE id = ?`, []any{tc.id},
+					&got.title, &got.description, &got.design, &got.acceptance, &got.notes,
+					&got.status, &got.issueType, &got.assignee, &got.externalRef,
+					&got.priority, &got.estimatedMinutes, &updatedAt, &got.closed)
+				got.updatedAt = updatedAt.UTC().Format(time.RFC3339)
+				want := row{
+					title: "new title", description: "new description", design: "new design",
+					acceptance: "new acceptance", notes: "new notes",
+					status: string(types.StatusOpen), issueType: string(types.TypeBug),
+					assignee: "new-assignee", externalRef: "new-" + tc.id,
+					priority: 0, estimatedMinutes: 20,
+					updatedAt: base.Add(2 * time.Hour).Format(time.RFC3339),
+				}
+				if got != want {
+					t.Fatalf("%s %s after the upsert:\n got %+v\nwant %+v", tc.table, tc.id, got, want)
+				}
+			})
+		}
+	})
 }

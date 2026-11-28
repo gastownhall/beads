@@ -174,12 +174,20 @@ func (s *testSuite) readyFilterByAssignee() {
 	theirs.Assignee = "bob"
 	s.Require().NoError(r.Insert(s.Ctx(), theirs, "tester", domain.InsertIssueOpts{}))
 
-	alice := "alice"
-	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{Assignee: &alice})
-	s.Require().NoError(err)
-	got := issueIDsFrom(out)
-	s.Contains(got, "bd-rdy-as-mine")
-	s.NotContains(got, "bd-rdy-as-theirs")
+	mineUpper := newTestIssue("bd-rdy-as-mine-upper", "mine, other case")
+	mineUpper.Assignee = "Alice"
+	s.Require().NoError(r.Insert(s.Ctx(), mineUpper, "tester", domain.InsertIssueOpts{}))
+
+	// GH#8628: letter case is not part of an identity, so every case variant
+	// of the filter selects both spellings of alice, and never bob.
+	for _, asked := range []string{"alice", "Alice", "ALICE"} {
+		out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{Assignee: &asked})
+		s.Require().NoError(err)
+		got := issueIDsFrom(out)
+		s.Contains(got, "bd-rdy-as-mine", "filter %q", asked)
+		s.Contains(got, "bd-rdy-as-mine-upper", "filter %q", asked)
+		s.NotContains(got, "bd-rdy-as-theirs", "filter %q", asked)
+	}
 }
 
 func (s *testSuite) readyFilterByType() {

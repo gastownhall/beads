@@ -1579,6 +1579,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry points now replay the rolled-back delete, as create, update, close,
   claim and sweep already do.
 
+- **Letter case is no longer part of an identity** ([#8628](https://github.com/gastownhall/beads/issues/8628)).
+  An issue assigned `hierophant` can now be closed, re-claimed, unclaimed and
+  re-spelled by actor `Hierophant` without `--force`, and `--assignee` on
+  `bd list`, `bd count`, `bd search`, `bd ready`, `bd query` and
+  `bd reclaim` covers every case variant of the name, so
+  `--assignee hierophant` and `--assignee Hierophant` select the same issues.
+  Re-spelling the holder of an in_progress claim, by case or by separator,
+  keeps its lease, so `bd reclaim` still recovers the claim if the holder
+  dies. bd keeps and prints the spelling it was given; no stored value is
+  rewritten. The ownership gates still treat any `.`/`_`/`-` run as one
+  separator, while `--assignee` folds letter case only, and `claim.pools`
+  aliases still match exactly. The case-folded match cannot use the
+  assignee index, so these listings cost more on a large database:
+  `bd ready --assignee` reads every unblocked issue and
+  `bd list --status in_progress --assignee` every in-progress one. On a
+  63,000-issue database the `bd ready --assignee` query took about 250 ms
+  instead of 9 ms. An index on `LOWER(assignee)` would restore the lookup,
+  but on Dolt 2.6.0 it breaks `bd import` and `bd repo sync` for issues
+  that already exist, so it waits for a Dolt fix. Reported by murdarch.
+
 - **Refusals before a schema migration no longer promise that reads keep
   working** ([#8571](https://github.com/gastownhall/beads/pull/8571)). Coming
   from bd 1.3.x, every issue read needs `arrival_seq` (migration 0073), so

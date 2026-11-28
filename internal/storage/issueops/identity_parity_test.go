@@ -1,7 +1,9 @@
 package issueops
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/validation"
 )
@@ -39,6 +41,15 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "exact double-hyphen separator decodes to the rig-qualified slash (ga-2vy9p2)", in: "gastown--mayor"},
 		{name: "raw slash passes through unchanged", in: "gastown/mayor"},
 		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor"},
+		{name: "ASCII upper case folds to lower (GH#8628)", in: "Hierophant"},
+		{name: "case folds alongside the separator collapse", in: "Gastown.Mayor"},
+		{name: "case folds alongside the double-hyphen slash decode", in: "Gastown--Mayor"},
+		{name: "Kelvin sign", in: "\u212A"},
+		{name: "dotted capital I", in: "\u0130"},
+		{name: "long s", in: "\u017F"},
+		{name: "non-ASCII upper case", in: "JOS\u00C9"},
+		{name: "invalid byte", in: "\xff"},
+		{name: "invalid byte beside letters", in: "A\xfeB"},
 	}
 	for _, tc := range canonicalCases {
 		t.Run("CanonicalActor/"+tc.name, func(t *testing.T) {
@@ -48,21 +59,37 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 				t.Errorf("issueops.canonicalActor(%q) = %q, internal/validation.CanonicalActor(%q) = %q — the two copies have drifted apart",
 					tc.in, local, tc.in, shared)
 			}
+			// Both copies must also equal strings.ToLower of their own
+			// output on valid UTF-8 — the function Dolt's LOWER() runs —
+			// so the gates fold case exactly as the --assignee listings do.
+			if utf8.ValidString(tc.in) && local != strings.ToLower(local) {
+				t.Errorf("issueops.canonicalActor(%q) = %q still holds letters strings.ToLower would fold", tc.in, local)
+			}
 		})
 	}
 
 	matchCases := []struct {
 		name            string
 		assignee, actor string
+		want            bool
 	}{
-		{name: "byte-identical matches", assignee: "alice", actor: "alice"},
-		{name: "different spellings of the same identity match (ga-wzl83)", assignee: "gastown.mayor", actor: "gastown__mayor"},
+		{name: "byte-identical matches", assignee: "alice", actor: "alice", want: true},
+		{name: "different spellings of the same identity match (ga-wzl83)", assignee: "gastown.mayor", actor: "gastown__mayor", want: true},
 		{name: "genuinely different identities do not match", assignee: "gastown.mayor", actor: "gastown.dog-3"},
-		{name: "both empty match", assignee: "", actor: ""},
+		{name: "both empty match", assignee: "", actor: "", want: true},
 		{name: "empty assignee never matches a non-empty actor", assignee: "", actor: "mayor"},
 		{name: "double-hyphen and double-underscore spellings no longer widen to the same identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown__mayor"},
-		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor"},
+		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor", want: true},
 		{name: "raw slash and raw dot stay genuinely distinct identities", assignee: "gastown/mayor", actor: "gastown.mayor"},
+		{name: "case variants of one identity match (GH#8628)", assignee: "hierophant", actor: "Hierophant", want: true},
+		{name: "case plus separator variants match", assignee: "gastown.mayor", actor: "GASTOWN__MAYOR", want: true},
+		{name: "Kelvin sign matches ASCII k", assignee: "k", actor: "\u212A", want: true},
+		{name: "dotted capital I matches ASCII i", assignee: "i", actor: "\u0130", want: true},
+		{name: "a case fold never widens to a different name", assignee: "hierophant", actor: "Hierophant2"},
+		{name: "long s is not s", assignee: "s", actor: "\u017F"},
+		{name: "two distinct invalid bytes stay distinct", assignee: "\xff", actor: "\xfe"},
+		{name: "an invalid byte does not match U+FFFD", assignee: "\xff", actor: "\uFFFD"},
+		{name: "case does not erase the double-hyphen vs double-underscore distinction", assignee: "Gastown--Mayor", actor: "gastown__mayor"},
 	}
 	for _, tc := range matchCases {
 		t.Run("ActorMatches/"+tc.name, func(t *testing.T) {
@@ -71,6 +98,9 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 			if local != shared {
 				t.Errorf("issueops.actorMatches(%q, %q) = %v, internal/validation.ActorMatches(%q, %q) = %v — the two copies have drifted apart",
 					tc.assignee, tc.actor, local, tc.assignee, tc.actor, shared)
+			}
+			if local != tc.want {
+				t.Errorf("actorMatches(%q, %q) = %v, want %v", tc.assignee, tc.actor, local, tc.want)
 			}
 		})
 	}

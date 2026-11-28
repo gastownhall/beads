@@ -1,6 +1,8 @@
 package sqlbuild
 
 import (
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,5 +113,83 @@ func TestKeysetCursorBindsTheUTCInstant(t *testing.T) {
 				t.Errorf("%s: arg %d = %v (%T), want the time.Time %v", tc.name, i, args[i], args[i], want)
 			}
 		}
+	}
+}
+
+// TestAssigneeFilterFoldsLetterCase pins GH#8628 on the listing plane:
+// letter case is not part of an identity, so every --assignee filter renders
+// LOWER(assignee) = ? bound to the lowered value — LOWER() on Dolt's utf8mb4
+// is strings.ToLower, the same fold AssigneeFilterMatches runs in Go — and the
+// unassigned predicates stay byte for byte what they were.
+func TestAssigneeFilterFoldsLetterCase(t *testing.T) {
+	t.Parallel()
+	asked := "HieroPhant"
+	const wantClause = "LOWER(assignee) = ?"
+
+	clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{Assignee: &asked}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("BuildIssueFilterClauses: %v", err)
+	}
+	if !slices.Contains(clauses, wantClause) || slices.Contains(clauses, "assignee = ?") {
+		t.Errorf("issue filter clauses = %q, want %q and no verbatim assignee = ?", clauses, wantClause)
+	}
+	if !slices.Contains(args, any("hierophant")) || slices.Contains(args, any(asked)) {
+		t.Errorf("issue filter args = %v, want the lowered %q bound, not %q", args, "hierophant", asked)
+	}
+
+	for _, tables := range []FilterTables{IssuesFilterTables, WispsFilterTables} {
+		where, args, err := BuildReadyWorkWhere(types.WorkFilter{Assignee: &asked}, tables, ReadyWorkWhereInputs{})
+		if err != nil {
+			t.Fatalf("BuildReadyWorkWhere: %v", err)
+		}
+		if !strings.Contains(where, wantClause) {
+			t.Errorf("ready where = %s, want %q", where, wantClause)
+		}
+		if !slices.Contains(args, any("hierophant")) || slices.Contains(args, any(asked)) {
+			t.Errorf("ready args = %v, want the lowered %q bound, not %q", args, "hierophant", asked)
+		}
+	}
+
+	const unassigned = "(assignee IS NULL OR assignee = '')"
+	clauses, _, err = BuildIssueFilterClauses("", types.IssueFilter{NoAssignee: true}, IssuesFilterTables)
+	if err != nil || !slices.Contains(clauses, unassigned) {
+		t.Errorf("NoAssignee clauses = %q (err %v), want %q unchanged", clauses, err, unassigned)
+	}
+	where, _, err := BuildReadyWorkWhere(types.WorkFilter{Unassigned: true, Assignee: &asked}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil || !strings.Contains(where, unassigned) || strings.Contains(where, wantClause) {
+		t.Errorf("Unassigned ready where = %s (err %v), want %q alone", where, err, unassigned)
+	}
+}
+
+// TestAssigneeFilterMatches pins the Go copy of the listing predicate: it is
+// strings.ToLower on both sides, so it admits exactly what LOWER(assignee) = ?
+// admits — case variants, including the Unicode ones ToLower folds, and
+// nothing ToLower keeps apart (U+017F long s is not s, which EqualFold would
+// merge).
+func TestAssigneeFilterMatches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		stored, asked string
+		want          bool
+	}{
+		{"hierophant", "hierophant", true},
+		{"hierophant", "HIEROPHANT", true},
+		{"Hierophant", "hierophant", true},
+		{"k", "K", true},
+		{"josé", "JOSÉ", true},
+		{"josé", "jose", false},
+		{"s", "ſ", false},
+		{"hierophant", "hierophant2", false},
+		{"hierophant", " hierophant", false},
+		{"gastown.mayor", "gastown_mayor", false}, // the listing folds case only
+		{"bob", "hierophant", false},
+	}
+	for _, tc := range cases {
+		if got := AssigneeFilterMatches(tc.stored, tc.asked); got != tc.want {
+			t.Errorf("AssigneeFilterMatches(%q, %q) = %v, want %v", tc.stored, tc.asked, got, tc.want)
+		}
+	}
+	if got := AssigneeFilterArg("HieroPhant"); got != "hierophant" {
+		t.Errorf("AssigneeFilterArg(%q) = %q, want %q", "HieroPhant", got, "hierophant")
 	}
 }

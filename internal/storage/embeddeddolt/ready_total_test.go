@@ -419,14 +419,16 @@ func readyWorkPageTotalFilterMatrix(t *testing.T, prefix string, undated bool) {
 			}
 		}
 	}
-	for _, issue := range []string{"r2", "w1"} {
-		if err := te.store.UpdateIssue(ctx, id(issue), map[string]interface{}{"assignee": "alice"}, "tester"); err != nil {
+	// GH#8628: the wisp is assigned under another letter case, so every
+	// assignee row below proves both planes and the page total fold case.
+	for issue, assignee := range map[string]string{"r2": "alice", "w1": "Alice"} {
+		if err := te.store.UpdateIssue(ctx, id(issue), map[string]interface{}{"assignee": assignee}, "tester"); err != nil {
 			t.Fatalf("assign %s: %v", issue, err)
 		}
 	}
 
 	all := []string{"blocker", "r0", "r1", "r2", "r3", "r4", "w0", "w1", "w2"}
-	alice, zero := "alice", 0
+	alice, aliceUpper, zero := "alice", "ALICE", 0
 	parent := id("dparent")
 	// IncludeDeferred lifts the deferral exclusions, not the ready status
 	// filter: a dated parent is open and listed, an undated one is deferred
@@ -448,6 +450,7 @@ func readyWorkPageTotalFilterMatrix(t *testing.T, prefix string, undated bool) {
 		{"labels_all", types.WorkFilter{Labels: []string{"a", "b"}}, []string{"r0"}},
 		{"labels_any", types.WorkFilter{LabelsAny: []string{"a", "b"}}, []string{"blocker", "r0", "r1", "w0"}},
 		{"assignee", types.WorkFilter{Assignee: &alice}, []string{"r2", "w1"}},
+		{"assignee_case", types.WorkFilter{Assignee: &aliceUpper}, []string{"r2", "w1"}},
 		{"unassigned", types.WorkFilter{Unassigned: true}, []string{"blocker", "r0", "r1", "r3", "r4", "w0", "w2"}},
 		{"priority_0", types.WorkFilter{Priority: &zero}, []string{"r0", "r3"}},
 		{"exclude_ids", types.WorkFilter{ExcludeIDs: []string{id("r1"), id("w2")}}, []string{"blocker", "r0", "r2", "r3", "r4", "w0", "w1"}},

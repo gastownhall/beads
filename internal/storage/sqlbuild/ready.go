@@ -266,8 +266,8 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	if filter.Unassigned {
 		whereClauses = append(whereClauses, "(assignee IS NULL OR assignee = '')")
 	} else if filter.Assignee != nil {
-		whereClauses = append(whereClauses, "assignee = ?")
-		args = append(args, *filter.Assignee)
+		whereClauses = append(whereClauses, AssigneeFilterClause)
+		args = append(args, AssigneeFilterArg(*filter.Assignee))
 	}
 
 	if !filter.IncludeDeferred {
