@@ -1562,6 +1562,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A clone no longer clears `is_blocked` on issues that are blocked by a
+  wisp it does not have.** Dependencies replicate and wisps do not, so a clone
+  holds the edge without the wisp. The recompute read the missing wisp as a
+  closed blocker (and a missing `waits-for` spawner as one with no children),
+  cleared the flag, and committed that to the versioned `issues` table, where
+  it replicated back and the two databases traded the same rows on every
+  sync. `bd recompute-blocked`, `bd doctor --fix` and the recompute that
+  follows a pull now leave such a row's flag as they find it, whoever set it.
+  So they do for the children of a blocked epic that depends on such a wisp
+  and has no blocker outside its own children otherwise, because the clone
+  cannot tell whether that wisp lies inside the epic. A blocker the clone can
+  see still marks the row, and a closed or pinned row is still cleared. A flag
+  a local blocker set therefore stays set after that blocker closes, until a
+  pull brings the other database's value or the dependency on the missing
+  wisp is removed. `bd doctor` names how many rows it left alone on its
+  Blocked State line; on a database with no such row the line is unchanged.
+  Builds on [#8597](https://github.com/gastownhall/beads/pull/8597) by Bee.
 - **`bd show` no longer prints `Lease: expires expired` for a lapsed lease.**
   An in_progress issue keeps its lease row after the lease runs out, until
   `bd reclaim` sweeps it, and the lease line then printed the verb twice and

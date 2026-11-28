@@ -41,9 +41,53 @@ package issueops
 // bypasses the local write paths, so blocked state after a merge is settled by
 // a scoped recompute that follows the merge rather than by the merge itself. If
 // that recompute is skipped or fails, stale values persist until the next pull
-// widens its window or an operator runs the full repair. This is the ONE clause
-// under which a stale column is admissible, and no role method can produce that
-// state.
+// widens its window or an operator runs the full repair. This and the
+// partial-view clause below are the only clauses under which the column may
+// differ from the predicate read over this database's rows, and no role method
+// can produce a stale value under this one.
+//
+// THE PARTIAL-VIEW CLAUSE — what a database cannot see, it leaves as found.
+// Wisps live only in the database that created them, while the edges onto them
+// replicate, so a database can hold a dependency on a wisp it has no row for:
+// every clone of a database that blocks issues on wisps does. Such an edge is
+// UNKNOWN, neither a reason nor the absence of one, because the wisp may be
+// open where it lives. A row is UNDECIDED when its value hangs on one:
+//
+//   - it holds such an edge, of a kind the predicate reads a wisp for (blocks,
+//     conditional-blocks, parent-child, waits-for); a waits-for edge onto an
+//     absent spawner is unknown even beside a visible open child of that
+//     spawner; or
+//   - it is the parent-child child of a blocked parent that holds one and has
+//     no reason the database can see placing its blockedness outside its own
+//     subtree, or of a blocked parent with a blocking reason of its own below
+//     such a parent, with nothing plainly exogenous between them. Such a
+//     parent darkens no child by inheritance, and brightens none either.
+//
+// The hold reaches no further down. A parent with no blocking reason of its
+// own is never such a parent, even while it is undecided itself: its flag is
+// inherited, and every database passes it to the parent's children
+// unchanged. So its children are decided from the flag it holds, which while
+// it is undecided is the value the database that has the wisp gave it, and
+// from which that database derives the same value for them. A parent stored
+// at 0 is not blocked, so it holds nothing below it either: its children are
+// decided as under any parent that is not blocked.
+//
+// An undecided row that is closed or pinned is still never blocked. Otherwise
+// it is blocked when the predicate, read over what the database can see after
+// every decided row has settled, finds a reason for it, and else it KEEPS THE
+// VALUE IT HAD, whoever set it: the last merge, or a local blocker that has
+// since closed. It stays so until a merge brings the value of the database
+// that has the wisp, or the edge is removed. Settling never clears an
+// undecided row on a guess, and never marks one on a value it would itself
+// have cleared. A database that holds every wisp its edges name has no
+// undecided row, and the predicate decides every row exactly as above.
+//
+// Three partial views leave no edge to see, and still decide rows from what is
+// here: a waits-for gate on a durable spawner whose children are wisps (their
+// edges live in the wisp plane); a close gate whose target hangs below the epic
+// through an absent wisp (the walk up stops at the wisp, so the reason reads as
+// outside the epic); and an any-children gate on a durable spawner whose
+// closed child is an absent wisp.
 //
 // THE NON-PERTURBATION CLAUSES. Settling blocked state is not a user edit: it
 // never bumps a row's updated_at, so a flip does not make a synced row look

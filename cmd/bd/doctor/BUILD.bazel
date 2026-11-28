@@ -101,6 +101,8 @@ go_test(
         "agent_test.go",
         "artifacts_test.go",
         "bare_parent_fallback_test.go",
+        "blocked_db_test.go",
+        "blocked_test.go",
         "claude_test.go",
         "config_values_test.go",
         "cursor_test.go",

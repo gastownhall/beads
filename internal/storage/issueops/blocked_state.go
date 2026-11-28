@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -247,20 +248,39 @@ func recomputeIsBlockedInTxWithResult(
 	for pass := 0; ; pass++ {
 		var changed int64
 
-		n, err := runRecomputePassInTx(ctx, tx, issuePlan, pass == 0)
+		n, issueHeld, err := runRecomputePassInTx(ctx, tx, issuePlan, pass == 0)
 		if err != nil {
 			return result, err
 		}
 		changed += n
 		result.IssueRowsChanged = result.IssueRowsChanged || n > 0
 
-		n, err = runRecomputePassInTx(ctx, tx, wispPlan, pass == 0)
+		n, wispHeld, err := runRecomputePassInTx(ctx, tx, wispPlan, pass == 0)
 		if err != nil {
 			return result, err
 		}
 		changed += n
 		result.WispRowsChanged = result.WispRowsChanged || n > 0
 
+		if changed == 0 {
+			// Every decided row has converged, so the reads of this pass
+			// describe the graph as it now stands: settle the undecided rows
+			// the pass held out (undecidedRows) on them. The first chunk that
+			// marks one ends the pass, so no later chunk marks on a stale read.
+			n, err := markHeldRowsInTx(ctx, tx, issuesBlockedSpec, issueHeld)
+			if err != nil {
+				return result, err
+			}
+			if n == 0 {
+				if n, err = markHeldRowsInTx(ctx, tx, wispsBlockedSpec, wispHeld); err != nil {
+					return result, err
+				}
+				result.WispRowsChanged = result.WispRowsChanged || n > 0
+			} else {
+				result.IssueRowsChanged = true
+			}
+			changed = n
+		}
 		if changed == 0 {
 			return result, recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs, actor)
 		}
@@ -355,7 +375,9 @@ func markIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) 
 // The batch IN-list therefore appears more than once per statement — the
 // outer row filter and one per union leg (six occurrences today) — and the
 // exogeneity ids appear as already-rendered ? placeholders inside two of those
-// legs. expandBatchTemplate binds both groups in TEXT order.
+// legs. A chunk with undecided rows (undecidedRows) adds a third group: the
+// ids it holds out of both statements, as one more already-rendered IN-list
+// after the union. expandBatchTemplate binds every group in TEXT order.
 
 // batchScopeSQL is the per-leg predicate that confines the should-be-blocked
 // union to the batch (see shouldBeBlockedIDsUnionScopedPrecomputedSQL); its %s
@@ -376,52 +398,70 @@ var (
 )
 
 func markBlockedTemplateForIssues(explained subtreeExplainedParents) string {
-	return markBlockedTemplate(issuesBlockedSpec, explained)
+	return markBlockedTemplate(issuesBlockedSpec, explained, 0)
 }
 
 func unmarkBlockedTemplateForIssues(explained subtreeExplainedParents) string {
-	return unmarkBlockedTemplate(issuesBlockedSpec, explained)
+	return unmarkBlockedTemplate(issuesBlockedSpec, explained, 0)
 }
 
 func markBlockedTemplateForWisps(explained subtreeExplainedParents) string {
-	return markBlockedTemplate(wispsBlockedSpec, explained)
+	return markBlockedTemplate(wispsBlockedSpec, explained, 0)
 }
 
 func unmarkBlockedTemplateForWisps(explained subtreeExplainedParents) string {
-	return unmarkBlockedTemplate(wispsBlockedSpec, explained)
+	return unmarkBlockedTemplate(wispsBlockedSpec, explained, 0)
+}
+
+// heldOutSQL is the conjunct that keeps a batched statement off the held
+// undecided rows of its chunk: held already-rendered placeholders, bound after
+// the union's ids, or "" for none, which leaves the statement as it was.
+func heldOutSQL(alias string, held int) string {
+	if held == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n\t\t  AND %s.id NOT IN (%s)", alias, strings.TrimSuffix(strings.Repeat("?,", held), ","))
 }
 
 // markBlockedTemplate is the batched mark statement for one table: the
 // batch-scoped analog of markAllBlockedSQL. The union is confined to the
 // batch's own dependency rows, so `<alias>.id IN (union)` is exactly the
-// old correlated disjunction for every id in the batch.
+// old correlated disjunction for every id in the batch. It marks none of the
+// held ids (heldOutSQL).
 //
 //nolint:gosec // G201: the spec's fields are constants from the four callers above.
-func markBlockedTemplate(spec blockedTableSpec, explained subtreeExplainedParents) string {
+func markBlockedTemplate(spec blockedTableSpec, explained subtreeExplainedParents, held int) string {
 	return fmt.Sprintf(`
 		UPDATE %[1]s %[2]s SET %[2]s.is_blocked = 1, %[2]s.updated_at = %[2]s.updated_at
 		WHERE %[2]s.id IN (%%s)
 		  AND %[2]s.is_blocked = 0
 		  AND %[2]s.status <> 'closed' AND %[2]s.status <> 'pinned'
-		  AND %[2]s.id IN (%[3]s)
+		  AND %[2]s.id IN (%[3]s)%[4]s
 	`, spec.table, spec.alias,
-		shouldBeBlockedIDsUnionScopedPrecomputedSQL(spec.depTable, batchScopeSQL, explained))
+		shouldBeBlockedIDsUnionScopedPrecomputedSQL(spec.depTable, batchScopeSQL, explained),
+		heldOutSQL(spec.alias, held))
 }
 
 // unmarkBlockedTemplate is the batched unmark statement for one table: the
 // batch-scoped analog of unmarkAllBlockedSQL. NOT IN is null-hostile; the
 // union's d.issue_id IS NOT NULL guards keep it total.
 //
+// Like the unbatched form it clears a held undecided row only when the row is
+// closed or pinned (heldOutSQL). This is the statement the post-pull recompute
+// runs, so it is where a clone without the wisps would otherwise clear the
+// flags it has just merged.
+//
 //nolint:gosec // G201: the spec's fields are constants from the four callers above.
-func unmarkBlockedTemplate(spec blockedTableSpec, explained subtreeExplainedParents) string {
+func unmarkBlockedTemplate(spec blockedTableSpec, explained subtreeExplainedParents, held int) string {
 	return fmt.Sprintf(`
 		UPDATE %[1]s %[2]s SET %[2]s.is_blocked = 0, %[2]s.updated_at = %[2]s.updated_at
 		WHERE %[2]s.id IN (%%s)
 		  AND %[2]s.is_blocked = 1
 		  AND ( %[2]s.status = 'closed' OR %[2]s.status = 'pinned'
-		        OR %[2]s.id NOT IN (%[3]s) )
+		        OR ( %[2]s.id NOT IN (%[3]s)%[4]s ) )
 	`, spec.table, spec.alias,
-		shouldBeBlockedIDsUnionScopedPrecomputedSQL(spec.depTable, batchScopeSQL, explained))
+		shouldBeBlockedIDsUnionScopedPrecomputedSQL(spec.depTable, batchScopeSQL, explained),
+		heldOutSQL(spec.alias, held))
 }
 
 // expandBatchTemplate finishes a batched template: every %s takes the batch's
@@ -478,7 +518,9 @@ func markIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (
 }
 
 // batchExogeneity reads the batch-scoped exogeneity set for one chunk of ids:
-// ONE read for the chunk, shared by the chunk's mark and its unmark.
+// ONE read for the chunk, shared by the chunk's mark and its unmark. holders
+// reports whether a row of the chunk holds a dangling wisp edge
+// (scopedExplainedParentsInTx).
 //
 // It is read before the mark, so the unmark sees the set as it was at the top
 // of the chunk. That is the same staleness the unbatched full repair accepts
@@ -490,55 +532,136 @@ func markIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (
 // extra pass, never a wrong fixpoint.
 func batchExogeneity(
 	ctx context.Context, tx DBTX, spec blockedTableSpec, placeholders string, args []interface{},
-) (subtreeExplainedParents, error) {
+) (subtreeExplainedParents, bool, error) {
 	return scopedExplainedParentsInTx(ctx, tx, spec.depTable,
 		fmt.Sprintf(batchScopeSQL, placeholders), args)
 }
 
-func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string) (int64, error) {
+// heldChunk is one chunk's undecided rows (undecidedRows) that a pass held out
+// of its mark and unmark, with the exogeneity read the pass derived them
+// from. A pass that changed nothing read every chunk against the state it
+// ended in, so markHeldRowsInTx can settle the rows on that same read.
+type heldChunk struct {
+	ids  []string
+	read subtreeExplainedParents
+}
+
+// runMarkUnmarkBatchedInTx runs one mark and one unmark over ids, a chunk of
+// queryBatchSize at a time, and returns the rows changed and the undecided
+// rows each chunk held out of both statements (undecidedRows), which the
+// caller settles once the fixpoint has converged (markHeldRowsInTx).
+func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids []string) (int64, []heldChunk, error) {
 	var changed int64
+	var held []heldChunk
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
 		if end > len(ids) {
 			end = len(ids)
 		}
 		placeholders, args := buildSQLInClause(ids[start:end])
-		explained, err := batchExogeneity(ctx, tx, spec, placeholders, args)
+		explained, holders, err := batchExogeneity(ctx, tx, spec, placeholders, args)
 		if err != nil {
-			return changed, fmt.Errorf("recompute is_blocked (exogeneity): %w", err)
+			return changed, held, fmt.Errorf("recompute is_blocked (exogeneity): %w", err)
+		}
+		var heldIDs []string
+		if left := explained.undecidedRowsFor(holders); !left.empty() {
+			heldIDs, err = undecidedRowsAmongInTx(ctx, tx, spec, placeholders, args, left)
+			if err != nil {
+				return changed, held, fmt.Errorf("recompute is_blocked (undecided rows): %w", err)
+			}
+			if len(heldIDs) > 0 {
+				held = append(held, heldChunk{ids: heldIDs, read: explained})
+			}
+		}
+		bound := explained.args()
+		for _, id := range heldIDs {
+			bound = append(bound, id)
 		}
 
 		stmt, stmtArgs, err := expandBatchTemplate(
-			markBlockedTemplate(spec, explained), placeholders, args, explained.args())
+			markBlockedTemplate(spec, explained, len(heldIDs)), placeholders, args, bound)
 		if err != nil {
-			return changed, fmt.Errorf("recompute is_blocked (mark): %w", err)
+			return changed, held, fmt.Errorf("recompute is_blocked (mark): %w", err)
 		}
 		res, err := tx.ExecContext(ctx, stmt, stmtArgs...)
 		if err != nil {
-			return changed, fmt.Errorf("recompute is_blocked (mark): %w", err)
+			return changed, held, fmt.Errorf("recompute is_blocked (mark): %w", err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return changed, fmt.Errorf("recompute is_blocked (mark rows affected): %w", err)
+			return changed, held, fmt.Errorf("recompute is_blocked (mark rows affected): %w", err)
 		}
 		changed += n
 
 		stmt, stmtArgs, err = expandBatchTemplate(
-			unmarkBlockedTemplate(spec, explained), placeholders, args, explained.args())
+			unmarkBlockedTemplate(spec, explained, len(heldIDs)), placeholders, args, bound)
 		if err != nil {
-			return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
+			return changed, held, fmt.Errorf("recompute is_blocked (unmark): %w", err)
 		}
 		res, err = tx.ExecContext(ctx, stmt, stmtArgs...)
 		if err != nil {
-			return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
+			return changed, held, fmt.Errorf("recompute is_blocked (unmark): %w", err)
 		}
 		n, err = res.RowsAffected()
 		if err != nil {
-			return changed, fmt.Errorf("recompute is_blocked (unmark rows affected): %w", err)
+			return changed, held, fmt.Errorf("recompute is_blocked (unmark rows affected): %w", err)
 		}
 		changed += n
 	}
-	return changed, nil
+	return changed, held, nil
+}
+
+// undecidedRowsAmongInTx lists the rows of one chunk that are in left
+// (undecidedRows): one read, left's select confined to the chunk, so it costs a
+// probe per wisp edge and per parent-child row of the chunk. It runs only for
+// a chunk the exogeneity read found holders or undecided parents for, so a
+// database that holds every wisp its edges name never pays it.
+func undecidedRowsAmongInTx(
+	ctx context.Context, tx DBTX, spec blockedTableSpec, placeholders string, args []interface{}, left undecidedRows,
+) ([]string, error) {
+	ids, err := queryIDs(ctx, tx, left.selectSQL(spec.depTable, fmt.Sprintf(batchScopeSQL, placeholders)),
+		left.selectArgs(args)...)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(ids))
+	out := ids[:0]
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+// markHeldRowsInTx is the closing mark of the batched fixpoint: for each chunk
+// the last pass held undecided rows out of, it marks those the converged graph
+// gives a blocker this database can see, with the mark template scoped to
+// them and the read the pass took. It stops at the first chunk that marks a
+// row and returns the count, because a later chunk's read no longer
+// describes the graph; the caller runs another pass.
+func markHeldRowsInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, held []heldChunk) (int64, error) {
+	for _, chunk := range held {
+		placeholders, args := buildSQLInClause(chunk.ids)
+		stmt, stmtArgs, err := expandBatchTemplate(
+			withPresentSpawnerGate(markBlockedTemplate(spec, chunk.read, 0)), placeholders, args, chunk.read.args())
+		if err != nil {
+			return 0, fmt.Errorf("recompute is_blocked (mark undecided): %w", err)
+		}
+		res, err := tx.ExecContext(ctx, stmt, stmtArgs...)
+		if err != nil {
+			return 0, fmt.Errorf("recompute is_blocked (mark undecided): %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("recompute is_blocked (mark undecided rows affected): %w", err)
+		}
+		if n > 0 {
+			return n, nil
+		}
+	}
+	return 0, nil
 }
 
 // recomputeSplitMinChunk is the chunk size from which planRecomputeInTx
@@ -658,21 +781,26 @@ func settledInChunkOrder(chunk, withEdges []string) []string {
 // only through an edgeless settled row that is neither closed nor pinned,
 // carries a stale 1 and has a child in the same chunk. createbatchequiv's
 // settled scenario drives no such row, so none of its steps pins the order
-// any more.
+// any more. A settled row is never held out as undecided: an edgeless row
+// holds no edge and is no one's child, and a closed or pinned one is cleared
+// whatever it holds. The pass returns the undecided rows the chunks did hold
+// out (runMarkUnmarkBatchedInTx), for the caller's closing mark.
 //
 // It is a function rather than a method on recomputePlan because the
 // structural write guards follow bare-identifier calls only: as a method, the
 // mark/unmark DML it reaches would be invisible from the exported recompute
 // entry points, and their versionExemptions entries would read as stale
 // (TestEveryBeadMutatorMintsOrIsExempt).
-func runRecomputePassInTx(ctx context.Context, tx DBTX, p recomputePlan, firstPass bool) (int64, error) {
+func runRecomputePassInTx(ctx context.Context, tx DBTX, p recomputePlan, firstPass bool) (int64, []heldChunk, error) {
 	var changed int64
+	var held []heldChunk
 	for _, chunk := range p.chunks {
 		if len(chunk.withEdges) > 0 {
-			n, err := runMarkUnmarkBatchedInTx(ctx, tx, p.spec, chunk.withEdges)
+			n, h, err := runMarkUnmarkBatchedInTx(ctx, tx, p.spec, chunk.withEdges)
 			changed += n
+			held = append(held, h...)
 			if err != nil {
-				return changed, err
+				return changed, held, err
 			}
 		}
 		if !firstPass || len(chunk.settled) == 0 {
@@ -685,15 +813,15 @@ func runRecomputePassInTx(ctx context.Context, tx DBTX, p recomputePlan, firstPa
 			WHERE t.id IN (%[2]s) AND t.is_blocked = 1
 		`, p.spec.table, placeholders), args...)
 		if err != nil {
-			return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
+			return changed, held, fmt.Errorf("recompute is_blocked (unmark): %w", err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return changed, fmt.Errorf("recompute is_blocked (unmark rows affected): %w", err)
+			return changed, held, fmt.Errorf("recompute is_blocked (unmark rows affected): %w", err)
 		}
 		changed += n
 	}
-	return changed, nil
+	return changed, held, nil
 }
 
 // splitByOwnDependencyRowsInTx partitions ids by whether depTable holds at
@@ -738,13 +866,24 @@ func runMarkBatchedInTx(ctx context.Context, tx DBTX, spec blockedTableSpec, ids
 			end = len(ids)
 		}
 		placeholders, args := buildSQLInClause(ids[start:end])
-		explained, err := batchExogeneity(ctx, tx, spec, placeholders, args)
+		// The monotonic mark holds nothing out, so it must mark an undecided
+		// row (undecidedRows) only on a reason this database can see: no
+		// recompute clears an open row while it is undecided, so a mark made
+		// on a guess would stick. Legs 3 and 4 already skip undecided parents.
+		// The waits-for leg is gated the way the closing marks gate it
+		// (withPresentSpawnerGate) whenever the chunk holds a dangling edge,
+		// because an absent spawner's visible open child is not a reason. A
+		// chunk with no dangling edge runs the statement unchanged.
+		explained, holders, err := batchExogeneity(ctx, tx, spec, placeholders, args)
 		if err != nil {
 			return changed, fmt.Errorf("mark is_blocked (exogeneity): %w", err)
 		}
 
-		stmt, stmtArgs, err := expandBatchTemplate(
-			markBlockedTemplate(spec, explained), placeholders, args, explained.args())
+		tmpl := markBlockedTemplate(spec, explained, 0)
+		if holders {
+			tmpl = withPresentSpawnerGate(tmpl)
+		}
+		stmt, stmtArgs, err := expandBatchTemplate(tmpl, placeholders, args, explained.args())
 		if err != nil {
 			return changed, fmt.Errorf("mark is_blocked: %w", err)
 		}

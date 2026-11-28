@@ -62,6 +62,7 @@ go_test(
     srcs = [
         "artifact_plan_test.go",
         "artifacts_test.go",
+        "blocked_dangling_test.go",
         "clone_local_fks_cgo_test.go",
         "common_test.go",
         "database_config_test.go",
