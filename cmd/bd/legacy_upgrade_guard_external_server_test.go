@@ -139,3 +139,147 @@ func TestExternalServerWorkspaceRecoversMissingWitness(t *testing.T) {
 	}
 	assertCurrentVersionWitness(t, beadsDir)
 }
+
+// explicitServerWorkspace builds the provisioner shape from GH#5682
+// (bd-xaq3hv): an existing explicit BEADS_DIR whose config.yaml selects server
+// mode, with no witness and no local Dolt root yet. It returns the repo, the
+// real .beads directory, and an alias of the repo reached through a symlinked
+// parent, so a data directory spelled through the alias names the physical
+// <beadsDir>/dolt while init's textual layout comparison (useLocalBeads) sees
+// a different parent.
+func explicitServerWorkspace(t *testing.T) (repoDir, beadsDir, aliasRepoDir string) {
+	t.Helper()
+	repoDir = t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(repoDir); err == nil {
+		repoDir = resolved
+	}
+	initGitRepo(t, repoDir)
+	beadsDir = filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(beadsDir, "config.yaml"), []byte("dolt.mode: server\n"))
+	aliasRepoDir = filepath.Join(t.TempDir(), "repo-alias")
+	if err := os.Symlink(repoDir, aliasRepoDir); err != nil {
+		t.Skipf("symlinks unsupported here, alias coverage not exercised: %v", err)
+	}
+	return repoDir, beadsDir, aliasRepoDir
+}
+
+// TestExternalServerInitWritesWitnessWhenDataDirSpelledOutsideBeadsDir pins
+// the writer/guard contract (GH#5682, bd-xaq3hv): a successful
+// `bd init --server --external` into an existing explicit BEADS_DIR records the
+// current-era witness even when the data directory is spelled outside that
+// BEADS_DIR, so the later-populated local Dolt root is not refused as legacy.
+func TestExternalServerInitWritesWitnessWhenDataDirSpelledOutsideBeadsDir(t *testing.T) {
+	skipIfNoDolt(t)
+
+	initAliased := func(t *testing.T) (repoDir, beadsDir string, env []string, database string) {
+		t.Helper()
+		repoDir, beadsDir, aliasRepoDir := explicitServerWorkspace(t)
+		env = append(externalServerTestEnv(t),
+			"BEADS_DIR="+beadsDir,
+			"BEADS_DOLT_DATA_DIR="+filepath.Join(aliasRepoDir, ".beads", "dolt"))
+		database = uniqueTestDBName(t)
+		t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+		out, err := runExternalServerBD(t, repoDir, env, externalServerInitArgs(database)...)
+		if err != nil {
+			t.Fatalf("bd init --server --external with an aliased data dir failed: %v\n%s", err, out)
+		}
+		if info, statErr := os.Stat(filepath.Join(beadsDir, "dolt")); statErr != nil || !info.IsDir() {
+			t.Fatalf("precondition: expected init to create the physical %s root: %v", filepath.Join(beadsDir, "dolt"), statErr)
+		}
+		return repoDir, beadsDir, env, database
+	}
+
+	t.Run("witness", func(t *testing.T) {
+		_, beadsDir, _, _ := initAliased(t)
+		assertCurrentVersionWitness(t, beadsDir)
+		if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); !os.IsNotExist(err) {
+			t.Fatalf("init must leave the provisioner-owned layout alone; metadata.json stat err = %v", err)
+		}
+	})
+
+	t.Run("reopen_after_root_populated", func(t *testing.T) {
+		repoDir, beadsDir, env, database := initAliased(t)
+		writeFile(t, filepath.Join(beadsDir, "dolt", "server-owned-entry"), []byte("x\n"))
+
+		listEnv := append(env,
+			"BEADS_DOLT_SERVER_HOST=127.0.0.1",
+			fmt.Sprintf("BEADS_DOLT_SERVER_PORT=%d", testDoltServerPort),
+			"BEADS_DOLT_SERVER_DATABASE="+database)
+		out, err := runExternalServerBD(t, repoDir, listEnv, "list", "--json", "--all")
+		if strings.Contains(out, "explicit migration is required") {
+			t.Fatalf("bd list refused the workspace bd init just admitted:\n%s", out)
+		}
+		if err != nil {
+			t.Fatalf("bd list after init failed: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("sibling_data_dir", func(t *testing.T) {
+		repoDir, beadsDir, _ := explicitServerWorkspace(t)
+		env := append(externalServerTestEnv(t),
+			"BEADS_DIR="+beadsDir,
+			"BEADS_DOLT_DATA_DIR="+filepath.Join(t.TempDir(), "dolt-data"))
+		database := uniqueTestDBName(t)
+		t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+		out, err := runExternalServerBD(t, repoDir, env, externalServerInitArgs(database)...)
+		if err != nil {
+			t.Fatalf("bd init --server --external with a sibling data dir failed: %v\n%s", err, out)
+		}
+		assertCurrentVersionWitness(t, beadsDir)
+	})
+}
+
+// TestExternalServerInitRefusesPopulatedRootWithoutWitnessOutsideLayout keeps
+// the guard's protection: widening the witness writer must not let init stamp
+// an ambiguous, already-populated server root it never admitted.
+func TestExternalServerInitRefusesPopulatedRootWithoutWitnessOutsideLayout(t *testing.T) {
+	skipIfNoDolt(t)
+	repoDir, beadsDir, aliasRepoDir := explicitServerWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", "legacydb", ".dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := append(externalServerTestEnv(t),
+		"BEADS_DIR="+beadsDir,
+		"BEADS_DOLT_DATA_DIR="+filepath.Join(aliasRepoDir, ".beads", "dolt"))
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	out, err := runExternalServerBD(t, repoDir, env, externalServerInitArgs(database)...)
+	if err == nil {
+		t.Fatalf("bd init over a populated witness-less server root succeeded; want explicit-migration refusal:\n%s", out)
+	}
+	if !strings.Contains(out, "explicit migration is required") {
+		t.Fatalf("bd init failed without the explicit-migration refusal: %v\n%s", err, out)
+	}
+	if _, statErr := os.Stat(filepath.Join(beadsDir, localVersionFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("refused init must leave %s absent; stat err = %v", localVersionFile, statErr)
+	}
+}
+
+// TestExternalServerInitLeavesAbsentBeadsDirUntouched: init records a witness
+// only in an explicit workspace that already exists; it never creates a
+// provisioner-owned BEADS_DIR solely to hold one.
+func TestExternalServerInitLeavesAbsentBeadsDirUntouched(t *testing.T) {
+	skipIfNoDolt(t)
+	repoDir := t.TempDir()
+	initGitRepo(t, repoDir)
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	env := append(externalServerTestEnv(t),
+		"BEADS_DIR="+beadsDir,
+		"BEADS_DOLT_DATA_DIR="+filepath.Join(t.TempDir(), "dolt-data"))
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	out, err := runExternalServerBD(t, repoDir, env, externalServerInitArgs(database)...)
+	if err != nil {
+		t.Fatalf("bd init --server --external with an absent explicit BEADS_DIR failed: %v\n%s", err, out)
+	}
+	if _, statErr := os.Stat(beadsDir); !os.IsNotExist(statErr) {
+		t.Fatalf("init created the absent explicit BEADS_DIR %s; stat err = %v", beadsDir, statErr)
+	}
+}
