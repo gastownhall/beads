@@ -636,6 +636,17 @@ func isPathInSafeBoundary(path string) bool {
 		return resolvedPathWithinRoot(absPath, "/var/tmp")
 	}
 
+	// Allow a service account's own home below /var/lib (GH#6323): accounts
+	// such as /var/lib/<service> keep their workspace there, which the /var
+	// entry below would otherwise reject. Only the current account's home
+	// qualifies; anything that does not falls through to the blocklist. Only
+	// paths under the service root pay for the account lookup.
+	if serviceHomeCandidate(absPath, serviceHomeRoot) {
+		if home, euid := serviceHomeAccount(); inOwnServiceHome(absPath, serviceHomeRoot, home, euid) {
+			return true
+		}
+	}
+
 	for _, prefix := range unsafePrefixes {
 		if strings.HasPrefix(absPath, prefix+"/") || absPath == prefix {
 			return false
@@ -677,6 +688,66 @@ func isPathInSafeBoundary(path string) bool {
 		}
 	}
 	return true
+}
+
+// serviceHomeRoot is the blocked directory under which isPathInSafeBoundary
+// admits the current account's own home (inOwnServiceHome). A package var only
+// so tests can point it at a temporary fixture.
+var serviceHomeRoot = "/var/lib"
+
+// serviceHomeAccount reports the current account's home directory and
+// effective uid for the service-home exception. A package var only so tests
+// can inject a fixture account.
+var serviceHomeAccount = func() (home string, euid int) {
+	return userHomeDir(), os.Geteuid()
+}
+
+// inOwnServiceHome reports whether path lies inside home, an account home
+// strictly below root (production: /var/lib) that is a directory owned by
+// euid, a non-root effective uid. Both home and path are compared
+// after symlink resolution, so a link out of the home or the root never
+// qualifies, while a path that does not exist yet still can. The request must
+// also be spelled under root, lexically or physically.
+func inOwnServiceHome(path, root, home string, euid int) bool {
+	if euid <= 0 || home == "" || !filepath.IsAbs(home) {
+		// Root never qualifies, a negative uid means none is known, and only
+		// an absolute home names a directory.
+		return false
+	}
+	physRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	physHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return false
+	}
+	// Location alone is not enough: the account database lookup falls back to
+	// $HOME, so require the home to be a directory the effective uid owns.
+	if !pathBelow(physHome, physRoot) || !dirOwnedBy(physHome, euid) {
+		return false
+	}
+	// The request itself must be spelled under the root (either spelling), so
+	// a link elsewhere in a blocked directory cannot borrow the home's
+	// admission by resolving into it.
+	if !serviceHomeCandidate(path, root) {
+		return false
+	}
+	return resolvedPathWithinRoot(path, physHome)
+}
+
+// serviceHomeCandidate reports whether path is spelled strictly below root,
+// in its lexical or its physical (symlink-resolved) form, as the temp-dir
+// carve-out accepts both spellings of its root.
+func serviceHomeCandidate(path, root string) bool {
+	root = filepath.Clean(root)
+	return pathBelow(path, root) || pathBelow(path, resolveLongestExistingAncestor(root))
+}
+
+// pathBelow reports whether path lies strictly below dir, comparing on a
+// separator boundary so /var/libx is not below /var/lib.
+func pathBelow(path, dir string) bool {
+	return strings.HasPrefix(filepath.Clean(path), dir+string(filepath.Separator))
 }
 
 // resolveLongestExistingAncestor canonicalizes path by resolving symlinks on its
