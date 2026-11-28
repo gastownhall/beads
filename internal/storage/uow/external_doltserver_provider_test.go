@@ -579,3 +579,80 @@ func TestExternalDoltServerOpenRefusesForwardDrift(t *testing.T) {
 	openWithOverride(t)
 	require.True(t, tempPatternSeeded(t), "the overridden locked-path open did not run MigrateUp")
 }
+
+// TestOpenAndInitSchemaDiscardsSessionOfFailedAttempt is the real-server
+// regression for gastownhall/beads#6504. On the fast path (the database
+// already exists) openAndInitSchema hands the pool that ran initSchema's
+// migrations to the provider for live queries. An attempt that dies mid-script
+// — here, at the last main-track step, after clearing FOREIGN_KEY_CHECKS the
+// way six shipped migrations do, with a retryable 1205 — must not return its
+// session to that pool: the retry and every live query after it would inherit
+// the unfinished session state. The test proves the failed session's identity
+// is gone from the returned pool, and every retained session enforces foreign
+// keys.
+func TestOpenAndInitSchemaDiscardsSessionOfFailedAttempt(t *testing.T) {
+	server := testutil.StartIsolatedDoltContainerHandle(t)
+	port, err := strconv.Atoi(server.Port)
+	require.NoError(t, err)
+	ep := proxy.Endpoint{Host: "127.0.0.1", Port: port}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	// Pre-create the database so the open takes the fast path, whose pool is
+	// the one handed out.
+	const database = "failed_attempt_session"
+	admin, err := sql.Open("mysql", buildDSN("tcp", ep, "", "root", "", ""))
+	require.NoError(t, err)
+	defer admin.Close()
+	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+database)
+	require.NoError(t, err)
+
+	var (
+		fired    bool
+		failedID int64
+	)
+	restore := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if fired || version != schema.LatestVersion() {
+			return nil
+		}
+		fired = true
+		if err := db.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&failedID); err != nil {
+			return fmt.Errorf("record the failing session: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+			return fmt.Errorf("clear FOREIGN_KEY_CHECKS: %w", err)
+		}
+		return &mysql.MySQLError{Number: 1205, Message: "test-injected lock wait timeout (mid-script)"}
+	})
+	t.Cleanup(restore)
+
+	opened, err := openAndInitSchema(ctx, "tcp", ep, "", database, "root", "", "", false, "", providerOptions{}, nil)
+	require.NoError(t, err, "initialization must retry past the injected 1205 and open")
+	t.Cleanup(func() { _ = opened.Close(context.Background()) })
+	require.True(t, fired, "fault hook never fired; the test no longer exercises a failed attempt")
+	require.NotZero(t, failedID)
+
+	provider, ok := opened.(*doltSQLProvider)
+	require.True(t, ok, "expected *doltSQLProvider, got %T", opened)
+	idle := provider.db.Stats().Idle
+	require.Positive(t, idle, "the fast path must hand out the pool that ran initSchema, with its session")
+
+	// Pin every retained session at once, so each one is inspected rather
+	// than the same idle session sampled repeatedly.
+	conns := make([]*sql.Conn, 0, idle)
+	t.Cleanup(func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	for i := 0; i < idle; i++ {
+		c, err := provider.db.Conn(ctx)
+		require.NoError(t, err)
+		conns = append(conns, c)
+		var id int64
+		var fkChecks int
+		require.NoError(t, c.QueryRowContext(ctx, "SELECT CONNECTION_ID(), @@FOREIGN_KEY_CHECKS").Scan(&id, &fkChecks))
+		assert.NotEqual(t, failedID, id, "the failed attempt's session %d is still in the pool handed to live queries", failedID)
+		assert.Equal(t, 1, fkChecks, "session %d serves live queries with FOREIGN_KEY_CHECKS cleared", id)
+	}
+}

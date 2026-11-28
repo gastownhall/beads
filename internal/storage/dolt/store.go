@@ -3544,19 +3544,40 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) (int, error) {
 	return initSchemaOnDBWithBootstrapHeal(ctx, db, nil, "")
 }
 
+// migrateUpWithLock is schema.MigrateUpWithLock, declared as a variable so a
+// test can stand in for a whole migration pass (its applied count, its error)
+// without scripting schema-private SQL. Same seam as uow.migrateUpWithLock.
+var migrateUpWithLock = schema.MigrateUpWithLock
+
 // initSchemaOnDBWithBootstrapHeal threads one-shot, incarnation-bound reset
 // authority into the migration lock. A nil capability always fails closed.
+//
+// A failed attempt discards its pinned session instead of returning it to the
+// pool (gastownhall/beads#6504): the failure may have left it mid-script (a
+// migration that died between `SET FOREIGN_KEY_CHECKS = 0` and its restore)
+// or pinned to its pre-statement catalog snapshot (be-bv7x), and
+// initSchemaOnDBWithRetryAndGateBootstrapHeal retries on this same pool.
+// database/sql drops a driver connection only on driver.ErrBadConn, reported
+// here through conn.Raw. A successful attempt keeps its session.
 func initSchemaOnDBWithBootstrapHeal(
 	ctx context.Context,
 	db *sql.DB,
 	bootstrapHeal *schema.FreshBootstrapHealCapability,
 	endpoint string,
-) (int, error) {
+) (applied int, err error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("schema: pin connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if err != nil {
+			// Cleanup results never replace the attempt's error or count; a
+			// session the lock release already discarded answers
+			// sql.ErrConnDone here, which changes nothing.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
 
 	var dbName string
 	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&dbName); err != nil {
@@ -3567,7 +3588,7 @@ func initSchemaOnDBWithBootstrapHeal(
 	if bootstrapHeal != nil {
 		opts = append(opts, schema.WithFreshBootstrapHeal(bootstrapHeal, endpoint))
 	}
-	applied, err := schema.MigrateUpWithLock(ctx, conn, dbName, opts...)
+	applied, err = migrateUpWithLock(ctx, conn, dbName, opts...)
 	if err != nil {
 		return applied, fmt.Errorf("schema migration: %w", err)
 	}
