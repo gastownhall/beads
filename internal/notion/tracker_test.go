@@ -2,6 +2,8 @@ package notion
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +30,46 @@ func (f *fakeAPI) GetCurrentUser(context.Context) (*User, error) { return f.user
 func (f *fakeAPI) RetrieveDataSource(context.Context, string) (*DataSource, error) {
 	return f.dataSource, nil
 }
-func (f *fakeAPI) QueryDataSource(context.Context, string) ([]Page, error) {
+
+// QueryDataSource serves f.pages as the rows of the queried source, applying
+// the timestamp and Beads ID filters the tracker sends.
+func (f *fakeAPI) QueryDataSource(_ context.Context, _ string, filter map[string]interface{}) ([]Page, error) {
 	f.queryCalls++
-	return append([]Page(nil), f.pages...), nil
+	var pages []Page
+	for _, page := range f.pages {
+		if fakeFilterMatches(page, filter) {
+			pages = append(pages, page)
+		}
+	}
+	return pages, nil
+}
+
+// RetrievePage serves f.pages by ID. They are rows of the configured source,
+// so a fixture without a parent is given that source as its parent.
+func (f *fakeAPI) RetrievePage(_ context.Context, pageID string) (*Page, error) {
+	for _, page := range f.pages {
+		if ExtractNotionIdentifier(page.ID) == ExtractNotionIdentifier(pageID) {
+			if page.Parent == nil {
+				page.Parent = &PageParent{Type: "data_source_id", DataSourceID: "ds_123"}
+			}
+			return &page, nil
+		}
+	}
+	return nil, &APIError{StatusCode: http.StatusNotFound, Code: "object_not_found", Message: "Could not find page"}
+}
+
+func fakeFilterMatches(page Page, filter map[string]interface{}) bool {
+	if filter == nil {
+		return true
+	}
+	if cond, ok := filter["last_edited_time"].(map[string]interface{}); ok {
+		cutoff, err := time.Parse(time.RFC3339, fmt.Sprint(cond["on_or_after"]))
+		return err == nil && !page.LastEditedTime.Before(cutoff)
+	}
+	if cond, ok := filter["rich_text"].(map[string]interface{}); ok && filter["property"] == PropertyBeadsID {
+		return DataSourceTitle(page.Properties[PropertyBeadsID].RichText) == cond["equals"]
+	}
+	return false
 }
 func (f *fakeAPI) ArchivePage(context.Context, string, bool) (*Page, error) {
 	return f.archivePage, nil
@@ -110,7 +149,7 @@ func TestTrackerFetchIssuesFiltersArchivedAndState(t *testing.T) {
 	}
 }
 
-func TestTrackerFetchIssuesBackfillStillHonorsClosedState(t *testing.T) {
+func TestTrackerFetchIssuesIncrementalHonorsClosedState(t *testing.T) {
 	t.Parallel()
 
 	api := &fakeAPI{
@@ -119,7 +158,7 @@ func TestTrackerFetchIssuesBackfillStillHonorsClosedState(t *testing.T) {
 				ID:             "01234567-89ab-cdef-0123-456789abcdef",
 				URL:            "https://www.notion.so/Open-0123456789abcdef0123456789abcdef",
 				CreatedTime:    time.Now().UTC().Add(-2 * time.Hour),
-				LastEditedTime: time.Now().UTC().Add(-2 * time.Hour),
+				LastEditedTime: time.Now().UTC().Add(-10 * time.Minute),
 				Properties: map[string]PageProperty{
 					PropertyTitle:    {Title: []RichText{{PlainText: "Open"}}},
 					PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-open"}}},
@@ -132,7 +171,7 @@ func TestTrackerFetchIssuesBackfillStillHonorsClosedState(t *testing.T) {
 				ID:             "fedcba98-7654-3210-fedc-ba9876543210",
 				URL:            "https://www.notion.so/Closed-fedcba9876543210fedcba9876543210",
 				CreatedTime:    time.Now().UTC().Add(-2 * time.Hour),
-				LastEditedTime: time.Now().UTC().Add(-2 * time.Hour),
+				LastEditedTime: time.Now().UTC().Add(-10 * time.Minute),
 				Properties: map[string]PageProperty{
 					PropertyTitle:    {Title: []RichText{{PlainText: "Closed"}}},
 					PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-closed"}}},
@@ -197,7 +236,9 @@ func TestTrackerFetchIssuesExcludesEqualLastSyncBoundary(t *testing.T) {
 	}
 	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
 
-	boundary = boundary.Add(23 * time.Second)
+	// Later in the same minute as both edits: the minute-truncated cutoff
+	// still admits them.
+	boundary = boundary.Add(5 * time.Second)
 	issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{Since: &boundary})
 	if err != nil {
 		t.Fatalf("FetchIssues returned error: %v", err)

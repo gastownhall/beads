@@ -216,7 +216,17 @@ type Page struct {
 	Archived       bool                    `json:"archived,omitempty"`
 	CreatedTime    time.Time               `json:"created_time,omitempty"`
 	LastEditedTime time.Time               `json:"last_edited_time,omitempty"`
+	Parent         *PageParent             `json:"parent,omitempty"`
 	Properties     map[string]PageProperty `json:"properties,omitempty"`
+}
+
+// PageParent is what a page belongs to. A row of a data source has type
+// "data_source_id" and names both the data source and its database; they are
+// different scopes, since one database can hold several data sources.
+type PageParent struct {
+	Type         string `json:"type,omitempty"`
+	DataSourceID string `json:"data_source_id,omitempty"`
+	DatabaseID   string `json:"database_id,omitempty"`
 }
 
 type PageProperty struct {
