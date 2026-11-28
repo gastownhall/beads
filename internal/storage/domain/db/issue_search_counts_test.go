@@ -351,8 +351,10 @@ func (s *testSuite) searchCountsWispPredicateIDFilterParity() {
 // searchAcrossIssuesAndWispsWithCounts — never by the filter's id fields:
 //
 //   - SkipWisps, Ephemeral-only, or an empty/missing wisps plane each take one
-//     plane through runFilterSearchQuery, which renders the PREDICATE form
-//     (ids nil, whereSQL bounding a derived driver subquery).
+//     plane through searchTableWithCounts, which renders the PREDICATE form
+//     (ids nil, whereSQL bounding a derived driver subquery) for an unbounded
+//     read like this one; only a window of at most one by-IDs batch goes
+//     ids-first there (countsWindowGoesIDsFirst).
 //   - anything else unions the two planes and hydrates the resulting page
 //     through fetchCountsByIDs, which renders the BY-IDS form (whereSQL empty,
 //     an id predicate at the outer level).
