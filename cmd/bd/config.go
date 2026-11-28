@@ -216,7 +216,14 @@ var configSetCmd = &cobra.Command{
 				setErr = config.SetUserYamlConfig(key, value)
 				location = config.UserConfigYamlDisplayPath()
 			} else {
-				setErr = config.SetYamlConfig(key, value)
+				// The CLI owns the routing decision; the library writers keep
+				// writing exactly where they are told (bd-zj95 / #6125).
+				if config.IsMachineLocalKey(key) {
+					location = config.LocalConfigFileName
+					setErr = config.SetMachineLocalYamlConfig(key, value)
+				} else {
+					setErr = config.SetYamlConfig(key, value)
+				}
 			}
 			if setErr != nil {
 				return HandleError("setting config: %v", setErr)
@@ -693,6 +700,9 @@ func runConfigGetBackupEnabled() error {
 		sourceDesc = "env var"
 	case config.SourceConfigFile:
 		sourceDesc = "config.yaml"
+		if _, ok := config.MachineLocalYamlValue(key); ok {
+			sourceDesc = config.LocalConfigFileName
+		}
 	default: // SourceDefault — value came from auto-detection
 		switch {
 		case usesSQLServer():
@@ -858,6 +868,25 @@ func runConfigUnsetYamlOnly(key string) error {
 	if config.IsUserGlobalKey(key) {
 		changed, unsetErr = config.UnsetUserYamlConfig(key)
 		file = config.UserConfigYamlDisplayPath()
+	} else if config.IsMachineLocalKey(key) {
+		// The CLI owns the routing decision; the library writers keep writing
+		// exactly where they are told, which is what keeps #6574's round-trip
+		// suite honest (bd-zj95). The unset clears the key from both files, so
+		// the location names each one that carried it, in the same
+		// comma-joined form the database-backed arm uses.
+		var inSidecar, inTracked bool
+		inSidecar, inTracked, unsetErr = config.UnsetMachineLocalYamlConfig(key)
+		changed = inSidecar || inTracked
+		switch {
+		case inSidecar && inTracked:
+			file = config.LocalConfigFileName + ", config.yaml"
+		case inSidecar:
+			file = config.LocalConfigFileName
+		case inTracked:
+			file = "config.yaml"
+		default:
+			file = config.LocalConfigFileName + " or config.yaml"
+		}
 	} else {
 		changed, unsetErr = config.UnsetYamlConfig(key)
 	}
