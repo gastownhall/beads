@@ -71,6 +71,58 @@ func TestInitConfigForTestNeutralizesLeakedRepoBeadsDir(t *testing.T) {
 	}
 }
 
+// Agent hosts export BD_ROUTING_MODE and BEADS_ROUTING_MODE. Viper binds
+// BD_ROUTING_MODE above any config file, and config.GetValueSource and
+// config.EnvVarName report either spelling as an env override. Those two use
+// os.LookupEnv, so a variable that is merely set to the empty string still counts.
+// A test that wants the routing.mode it wrote itself (DB or YAML) therefore needs the
+// variables absent, not blanked. initConfigForTest has to remove them and, when the
+// test ends, give them back with the same value or the same absence.
+func TestInitConfigForTestClearsRoutingModeEnv(t *testing.T) {
+	names := []string{"BD_ROUTING_MODE", "BEADS_ROUTING_MODE"}
+
+	for _, tc := range []struct {
+		name    string
+		value   string
+		present bool
+	}{
+		{name: "absent"},
+		{name: "empty", present: true},
+		{name: "inherited", value: "off", present: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, name := range names {
+				t.Setenv(name, tc.value)
+				if !tc.present {
+					if err := os.Unsetenv(name); err != nil {
+						t.Fatalf("unset %s: %v", name, err)
+					}
+				}
+			}
+
+			t.Run("helper", func(t *testing.T) {
+				initConfigForTest(t)
+
+				for _, name := range names {
+					if got, present := os.LookupEnv(name); present {
+						t.Fatalf("%s = %q after initConfigForTest, want it unset", name, got)
+					}
+				}
+				if got := config.EnvVarName("routing.mode"); got != "" {
+					t.Fatalf("config.EnvVarName(routing.mode) = %q after initConfigForTest, want empty", got)
+				}
+			})
+
+			for _, name := range names {
+				if got, present := os.LookupEnv(name); got != tc.value || present != tc.present {
+					t.Fatalf("after helper cleanup %s = (%q, %v), want (%q, %v)",
+						name, got, present, tc.value, tc.present)
+				}
+			}
+		})
+	}
+}
+
 // The other half of ga-e6h6i: running real command dispatch must not leave the
 // package-global viper holding the dispatched workspace's issue-prefix for every
 // later test that does not call initConfigForTest.
